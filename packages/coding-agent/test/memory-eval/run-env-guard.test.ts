@@ -2,18 +2,19 @@ import { afterAll, beforeAll, expect, it, setDefaultTimeout } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const RUN = path.join(import.meta.dir, "../../bench/memory-eval/run.ts");
 // Each case spawns the CLI, which loads the harness and Mnemopi; on a loaded machine that exceeds bun's 5 s default.
 setDefaultTimeout(30_000);
 
-// An empty HOME: if the guard regressed, the run would find no datasets instead of ingesting the real cache.
+// An explicitly empty cache: a broken guard must fail loading this, not ingest the user's real data.
 let home: string;
 beforeAll(async () => {
 	home = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-env-guard-"));
 });
 afterAll(async () => {
-	await fs.rm(home, { recursive: true, force: true });
+	await removeWithRetries(home);
 });
 
 /** Runs `run --engine mnemopi` with `extra` added to an environment that has no MNEMOPI_* variables. */
@@ -21,8 +22,20 @@ async function runMnemopi(extra: Record<string, string>): Promise<{ stderr: stri
 	// The engine is created before the dataset is loaded, so no dataset is needed.
 	const env = Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.startsWith("MNEMOPI_")));
 	const proc = Bun.spawn(
-		[process.execPath, RUN, "run", "--dataset", "beam-100k", "--engine", "mnemopi", "--protocol", "standard"],
-		{ env: { ...env, HOME: home, ...extra }, stdout: "pipe", stderr: "pipe" },
+		[
+			process.execPath,
+			RUN,
+			"run",
+			"--dataset",
+			"beam-100k",
+			"--engine",
+			"mnemopi",
+			"--protocol",
+			"standard",
+			"--cache-root",
+			home,
+		],
+		{ env: { ...env, ...extra }, stdout: "pipe", stderr: "pipe" },
 	);
 	const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
 	return { stderr, code };
