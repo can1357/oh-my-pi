@@ -1806,6 +1806,21 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("keeps the restore failure when the settings default is also stale on interactive resume", async () => {
+		const { session, modelFallbackMessage } = await createAgentSession({
+			...buildResumeOptions(),
+			hasUI: true,
+			settings: Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-9-9" } }),
+		});
+		try {
+			expect(session.model).toBeDefined();
+			expect(modelFallbackMessage).toContain("Could not restore model missing-provider/missing-model");
+			expect(modelFallbackMessage).toContain("Default model anthropic/claude-sonnet-9-9 not found");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test.each(["model", "modelPattern"] as const)(
 		"honors an explicit %s instead of the unavailable saved model",
 		async selection => {

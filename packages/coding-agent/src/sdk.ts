@@ -3419,9 +3419,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							settings,
 							matchPreferences: modelMatchPreferences,
 						}).model;
-						modelFallbackMessage = inCatalog
+						const defaultReason = inCatalog
 							? `Default model ${configuredDefault} is unavailable (no credentials, or not in enabledModels)`
 							: `Default model ${configuredDefault} not found`;
+						// Keep an earlier diagnostic (a saved session model that could not be restored).
+						modelFallbackMessage = modelFallbackMessage
+							? `${modelFallbackMessage}. ${defaultReason}`
+							: defaultReason;
 					}
 				}
 			}

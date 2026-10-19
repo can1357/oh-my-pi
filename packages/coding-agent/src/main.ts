@@ -2645,9 +2645,16 @@ export async function runRootCommand(
 				if (parsedArgs.model && availableModels.length > 0) {
 					// Credentials work; the requested selector is what failed. Point at
 					// the nearest usable models instead of an API-key checklist.
-					// A provider-qualified miss already carries that provider's near ids
-					// in `modelFallbackMessage`; the cross-provider list is for bare ones.
-					const suggestions = modelFallbackMessage?.includes("Did you mean")
+					// A provider-qualified request names an exact id: its message carries
+					// that provider's near ids, if any. The cross-provider list is for bare ones.
+					const slashIndex = parsedArgs.model.indexOf("/");
+					const namedProvider =
+						slashIndex === -1 ? undefined : parsedArgs.model.slice(0, slashIndex).toLowerCase();
+					const qualified =
+						Boolean(parsedArgs.provider) ||
+						(namedProvider !== undefined &&
+							modelRegistry.getAll().some(model => model.provider.toLowerCase() === namedProvider));
+					const suggestions = qualified
 						? []
 						: fuzzyFilter(
 								availableModels.map(model => `${model.provider}/${model.id}`),

@@ -62,3 +62,50 @@ describe("--provider with a model the startup catalog lacks", () => {
 		);
 	});
 });
+
+describe("print-mode suggestions for a provider-qualified miss", () => {
+	test("never lists other providers' models", async () => {
+		const home = path.join(os.tmpdir(), `pi-cli-qualified-hint-${Snowflake.next()}`);
+		fs.mkdirSync(home, { recursive: true });
+		try {
+			const proc = Bun.spawn(
+				[
+					process.execPath,
+					path.resolve(import.meta.dir, "../src/cli.ts"),
+					"--no-title",
+					"--no-lsp",
+					"--no-extensions",
+					"--no-tools",
+					"--no-session",
+					"-p",
+					"--provider",
+					"anthropic",
+					"--model",
+					"gpt-4o",
+					"hi",
+				],
+				{
+					cwd: home,
+					env: {
+						PATH: process.env.PATH,
+						HOME: home,
+						USERPROFILE: home,
+						TMPDIR: process.env.TMPDIR,
+						NO_COLOR: "1",
+						ANTHROPIC_API_KEY: "test-key",
+						OPENAI_API_KEY: "test-key",
+					},
+					stdin: "ignore",
+					stdout: "pipe",
+					stderr: "pipe",
+				},
+			);
+			const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+			expect(exitCode).toBe(1);
+			expect(stderr).toContain('Model "anthropic/gpt-4o" not found');
+			expect(stderr).not.toContain("openai/");
+		} finally {
+			removeSyncWithRetries(home);
+		}
+	}, 60_000);
+});

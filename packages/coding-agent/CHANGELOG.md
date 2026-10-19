@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `provider/model` selectors in `--model`, settings, roles and task agents now need the exact id or alias: retired or renamed ids (`openai-codex/gpt-5.5`), dated ids written without their date, and `-latest` shorthands (`openai/gpt-5-latest` for `gpt-5-chat-latest`) no longer match a sibling; use the id `omp models <provider>` lists, or drop the provider prefix to keep fuzzy matching. An id written without its `@revision` (`google-vertex/claude-opus-4-8`) still resolves while the provider has a single revision of it ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Added
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
@@ -32,6 +36,7 @@
 - Fixed reading `proc://<id>/kill` or `proc://<id>/mode` answering only "writable only", so agents often moved on with the job still running; the error now names the `write` call that cancels the job or sets the mode, with the real id ([#16580](https://github.com/can1357/oh-my-pi/pull/16580) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `history://<id>` failing with "has no transcript: session is gone" for a worker that is still running but has not created its session or transcript file yet; it now answers "No transcript has been written yet". ([#16645](https://github.com/can1357/oh-my-pi/pull/16645) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a `provider/model` selector for a model that provider doesn't have silently running a similarly named model (`anthropic/claude-haiku-5-5` ran `claude-haiku-4-5`); it now fails with `Model "…" not found` and suggests up to three close ids from that provider, a configured default (without a retry fallback chain) or dictation model that no longer resolves now warns with the model used instead, and bare selectors such as `opus` still fuzzy-match ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.6] - 2026-10-21
 
@@ -196,13 +201,6 @@
 - Fixed sessions whose first reply starts with a todo plan getting a title without its icon and code: the plan's title refresh no longer replaces the card title that is still being generated
 - Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
-### Breaking Changes
-
-- `provider/model` selectors in `--model`, settings, roles and task agents now need the exact id or alias: retired or renamed ids (`openai-codex/gpt-5.5`), dated ids written without their date, and `-latest` shorthands (`openai/gpt-5-latest` for `gpt-5-chat-latest`) no longer match a sibling; use the id `omp models <provider>` lists, or drop the provider prefix to keep fuzzy matching. An id written without its `@revision` (`google-vertex/claude-opus-4-8`) still resolves while the provider has a single revision of it ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Fixed a `provider/model` selector for a model that provider doesn't have silently running a similarly named model (`anthropic/claude-haiku-5-5` ran `claude-haiku-4-5`); it now fails with `Model "…" not found` and suggests up to three close ids from that provider, a configured default or dictation model that no longer resolves now warns with the model used instead, and bare selectors such as `opus` still fuzzy-match ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.2] - 2026-10-18
 
