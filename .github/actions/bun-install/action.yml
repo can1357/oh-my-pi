@@ -37,8 +37,14 @@ runs:
            ok=false
            if [ -n "$have" ]; then
              if [ "$install" = latest ]; then
-               # floor satisfied when the floor sorts first (or equal) under sort -V
-               [ "$(printf '%s\n%s\n' "$floor" "$have" | sort -V | head -n1)" = "$floor" ] && ok=true
+               # The repo's floor guard (scripts/check-bun-floor.ts) compares with
+               # Bun's own semver ordering, where a prerelease of the floor sorts
+               # below it. GNU `sort -V` orders "1.4.3" before "1.4.3-canary.1",
+               # so it would keep a canary the guard then rejects; reuse the
+               # guard's ordering so the runner and the gate agree.
+               if bun -e 'const { satisfiesBunFloor } = await import("./scripts/check-bun-floor.ts"); process.exit(satisfiesBunFloor(process.argv[1], "bun@" + process.argv[2]) ? 0 : 1)' "$have" "$floor"; then
+                 ok=true
+               fi
              elif [ "$have" = "$want" ]; then
                ok=true
              fi
