@@ -43,6 +43,7 @@ it.skipIf(pythonPath === undefined)(
 
 		// Cache byproducts the runtime never loads, such as the healer's quarantined download, are not the model.
 		await Bun.write(path.join(plain, "model_optimized.onnx.corrupt-1700000000000"), "broken-download");
+		await Bun.write(path.join(plain, "model.onnx"), "an-alternate-export-this-model-never-loads");
 		await Bun.write(path.join(plain, ".lock"), "");
 		expect(await modelDirDigest(plain)).toBe(digest);
 		expect(await pythonDigest(plain)).toBe(digest);

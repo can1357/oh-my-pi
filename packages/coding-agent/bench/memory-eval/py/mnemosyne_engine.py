@@ -83,14 +83,14 @@ class Engine:
 		self.beam = BeamMemory(session_id="eval", db_path=params["storePath"])
 
 	def op_remember(self, params):
-		ids = [
+		# upstream-compat has no warmup, so the first remember would load the model mid-batch; load and fingerprint it
+		# first, so the digest describes the model every vector in the batch came from. The warmup stores nothing.
+		if self.warm_digest is None:
+			self.op_warmup(None)
+		return [
 			self.beam.remember(item["content"], source=item["source"], importance=item["importance"])
 			for item in params["items"]
 		]
-		# upstream-compat skips warmup, so the first remember is where the model loads; record what it loaded.
-		if self.warm_digest is None:
-			self.warm_digest = self.model_digest()
-		return ids
 
 	def op_vector_count(self, _params):
 		return self.beam.conn.execute("SELECT COUNT(*) FROM memory_embeddings").fetchone()[0]
