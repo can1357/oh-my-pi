@@ -84,6 +84,23 @@ export class FigureMarkdown extends Container {
 		return streamingMarkdownSource(first.text);
 	}
 
+	/** Whether {@link leadingProse} ends inside a locked table that is still streaming. */
+	get leadingProseEndsInOpenTable(): boolean {
+		const first = this.#parts[0];
+		return (
+			first?.kind === "markdown" &&
+			this.#transient &&
+			this.#parts.length === 1 &&
+			first.md.lastRenderStableTextEndsInOpenTable()
+		);
+	}
+
+	/** Lock a table streaming at the tail of the leading prose; see {@link Markdown.lockOpenTable}. */
+	lockOpenTable(): void {
+		const first = this.#parts[0];
+		if (first?.kind === "markdown" && this.#transient && this.#parts.length === 1) first.md.lockOpenTable();
+	}
+
 	/** Whether a figure's final source still waits for its raster, or a chart for its pick or raster. */
 	get pending(): boolean {
 		return this.#parts.some(part => part.kind !== "markdown" && part.figure.pending);

@@ -441,6 +441,47 @@ describe("composer inline shrink (#11007)", () => {
 		h.composer.stop();
 	});
 
+	it("with completeScrollback, sends a streaming table taller than the screen to scrollback row by row", async () => {
+		const h = makeHarness(COLUMNS, 20, 3);
+		h.composer.setPreferences({ completeScrollback: true });
+		await h.scheduler.settle(h.terminal);
+		const message = new AssistantMessageComponent();
+		h.transcript.addChild(message);
+		// Later rows have longer cells, which would widen the columns of an
+		// unlocked table and rewrap every row above them.
+		const rows = Array.from(
+			{ length: 24 },
+			(_, r) => `| R${String(r).padStart(2, "0")} | ${"cell ".repeat(2 + (r % 7)).trim()} |`,
+		);
+		const head = "| Key | Value |\n|---|---|";
+		const tokens = (lines: readonly string[]): Set<string> =>
+			new Set(lines.flatMap(row => Bun.stripANSI(row).match(/\bR\d\d\b/g) ?? []));
+		const seen = new Set<string>();
+		for (let n = 1; n <= rows.length; n++) {
+			// Half of the next row is already arriving, as a stream delivers it.
+			const next = rows[n]?.slice(0, 8) ?? "";
+			message.updateContent(reply([head, ...rows.slice(0, n), next].join("\n")), { transient: true });
+			h.composer.ui.requestRender();
+			await h.scheduler.settle(h.terminal);
+			const now = tokens(h.terminal.getScrollBuffer());
+			// A row once on screen stays on screen or in scrollback.
+			expect([...seen].filter(r => !now.has(r))).toEqual([]);
+			for (const r of now) seen.add(r);
+		}
+		message.updateContent(reply([head, ...rows].join("\n")));
+		message.markTranscriptBlockFinalized();
+		h.composer.ui.requestRender();
+		await h.scheduler.settle(h.terminal);
+		const table = h.terminal
+			.getScrollBuffer()
+			.map(row => Bun.stripANSI(row).trimEnd())
+			.filter(row => /^\s*[│├┌└]/.test(row));
+		// Every row arrives once, and the part sent mid-stream lines up with the rest.
+		expect([...tokens(table)]).toEqual(rows.map((_, r) => `R${String(r).padStart(2, "0")}`));
+		expect(new Set(table.map(row => row.length)).size).toBe(1);
+		h.composer.stop();
+	});
+
 	it("keeps the below-chrome baseline across a height resize while inline chrome is expanded", async () => {
 		const shorter = ROWS - 10;
 		const h = makeHarness();

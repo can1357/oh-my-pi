@@ -87,6 +87,8 @@ interface StableSnapshot {
 	// Earlier parts are immutable; only the final part needs a historical offset.
 	readonly partCount: number;
 	readonly lastTextLength: number;
+	/** The final part ends inside a locked table that kept streaming (see Markdown.openTableTail). */
+	readonly openTable: boolean;
 }
 
 /**
@@ -370,6 +372,8 @@ export class AssistantMessageComponent extends Container {
 	#lastTokenTime = 0;
 	/** Published width-independent stable prefixes; grows only, never retracts. */
 	#stableSnapshots: StableSnapshot[] = [];
+	// Locked table layouts, shared by every Markdown this message renders.
+	readonly #tableLocks = new Map<string, Map<number, readonly number[]>>();
 	#stableParts: readonly StablePart[] = [];
 	#nextStableRowId = 0;
 	#transcriptStableRows: TranscriptStableRow[] = [];
@@ -1292,6 +1296,7 @@ export class AssistantMessageComponent extends Container {
 				snapshot.lastTextLength,
 				width,
 				"replay",
+				snapshot.openTable,
 			);
 			if (this.#recordStableRows(index, width, rows)) return rows;
 		}
@@ -1310,18 +1315,25 @@ export class AssistantMessageComponent extends Container {
 	#publishStableSnapshot(rendered: readonly string[], width: number): void {
 		// Extension text renderers may rewrite text they already drew, and published rows never retract.
 		if (!this.#midStreamPublication || this.#textRendering) return;
-		const parts = this.#currentStableSnapshot();
-		if (!parts) return;
+		const current = this.#currentStableSnapshot();
+		if (!current) return;
+		const { parts, openTable } = current;
 		const last = parts.at(-1);
 		if (!last || last.kind === "spacer") return;
-		const snapshot = { partCount: parts.length, lastTextLength: last.text.length };
+		const snapshot: StableSnapshot = { partCount: parts.length, lastTextLength: last.text.length, openTable };
 		const previous = this.#stableSnapshots.at(-1);
 		// An unmoved boundary publishes nothing whether or not it still extends
 		// the last snapshot, so most frames skip the whole-document comparison.
-		if (previous?.partCount === snapshot.partCount && previous.lastTextLength === snapshot.lastTextLength) return;
+		if (
+			previous?.partCount === snapshot.partCount &&
+			previous.lastTextLength === snapshot.lastTextLength &&
+			previous.openTable === snapshot.openTable
+		) {
+			return;
+		}
 		if (previous && !isSnapshotExtension(this.#stableParts, parts)) return;
 		this.#syncStableRenderInputs();
-		const currentRows = this.#renderStableParts(parts, parts.length, last.text.length, width, "head");
+		const currentRows = this.#renderStableParts(parts, parts.length, last.text.length, width, "head", openTable);
 		// The container verifies stable rows against the blank-trimmed render.
 		if (!isRowPrefix(currentRows, trimBlankEdges(rendered))) return;
 		const previousRows = previous
@@ -1343,12 +1355,13 @@ export class AssistantMessageComponent extends Container {
 	 * (finalized or non-transient renders, marker rows, extension components,
 	 * hidden thinking, or no frozen prefix yet).
 	 */
-	#currentStableSnapshot(): readonly StablePart[] | undefined {
+	#currentStableSnapshot(): { parts: readonly StablePart[]; openTable: boolean } | undefined {
 		if (this.#transcriptBlockFinalized || !this.#lastUpdateTransient) return undefined;
 		if (this.#markerSlot.children.length > 0) return undefined;
 		const items = this.#fastPathItems;
 		if (!items || items.length === 0) return undefined;
 		const parts: StablePart[] = [];
+		let openTable = false;
 		let itemIndex = 0;
 		for (const child of this.#contentContainer.children) {
 			const item = items[itemIndex];
@@ -1356,7 +1369,10 @@ export class AssistantMessageComponent extends Container {
 				const md = item.md;
 				if (md instanceof FigureMarkdown) {
 					// Plain Markdown reproduces only the prose ahead of the first figure.
-					if (md.leadingProse) parts.push({ kind: item.blockType, text: md.leadingProse });
+					if (md.leadingProse) {
+						parts.push({ kind: item.blockType, text: md.leadingProse });
+						openTable = md.leadingProseEndsInOpenTable;
+					}
 					break;
 				}
 				if (itemIndex === items.length - 1) {
@@ -1373,6 +1389,7 @@ export class AssistantMessageComponent extends Container {
 					if (item.blockType === "thinking") past = past.replace(UNSETTLED_THINKING_TAIL, "");
 					if (frozen.length > 0 && /\S/.test(past)) {
 						parts.push({ kind: item.blockType, text: frozen });
+						openTable = md.lastRenderStableTextEndsInOpenTable();
 					}
 					break;
 				}
@@ -1392,7 +1409,7 @@ export class AssistantMessageComponent extends Container {
 		}
 		while (parts.at(-1)?.kind === "spacer") parts.pop();
 		if (parts.length === 0) return undefined;
-		return parts;
+		return { parts, openTable };
 	}
 
 	/**
@@ -1408,6 +1425,7 @@ export class AssistantMessageComponent extends Container {
 		lastLength: number,
 		width: number,
 		role: "head" | "replay",
+		openTable: boolean,
 	): readonly string[] {
 		const ledger = this.#stableLedger(width);
 		const rows: string[] = [];
@@ -1425,7 +1443,14 @@ export class AssistantMessageComponent extends Container {
 			if (cached?.kind === part.kind && cached.text === text) {
 				partRows = cached.rows;
 			} else {
-				partRows = this.#renderStablePart(index, part.kind, text, width, closed ? undefined : role);
+				partRows = this.#renderStablePart(
+					index,
+					part.kind,
+					text,
+					width,
+					closed ? undefined : role,
+					!closed && openTable,
+				);
 				if (closed) ledger.parts[index] = { kind: part.kind, text, rows: partRows };
 			}
 			for (const row of partRows) rows.push(row);
@@ -1444,19 +1469,26 @@ export class AssistantMessageComponent extends Container {
 		text: string,
 		width: number,
 		role: "head" | "replay" | undefined,
+		openTable: boolean,
 	): readonly string[] {
 		// Trim like the live children, dropping the trailing blank line a frozen
 		// prefix still carries.
 		const trimmed = text.trim();
-		if (this.#transcriptBlockFinalized) return this.#createMarkdown(kind, trimmed).render(width);
+		if (this.#transcriptBlockFinalized) {
+			const md = this.#createMarkdown(kind, trimmed);
+			md.openTableTail = openTable;
+			return md.render(width);
+		}
 		const head = this.#stableHeadRenderer;
 		const replay = this.#stableReplayRenderer;
 		const renderer = role === "head" ? head : role === "replay" ? replay : head?.index === index ? head : replay;
 		if (renderer?.index === index && renderer.kind === kind) {
 			renderer.md.setText(trimmed);
+			renderer.md.openTableTail = openTable;
 			return trimFabricatedCloser(renderer.md.render(width), trimmed);
 		}
 		const md = this.#createMarkdown(kind, trimmed);
+		md.openTableTail = openTable;
 		if (role === "head") this.#stableHeadRenderer = { index, kind, md };
 		else if (role === "replay") this.#stableReplayRenderer = { index, kind, md };
 		return trimFabricatedCloser(md.render(width), trimmed);
@@ -1464,12 +1496,27 @@ export class AssistantMessageComponent extends Container {
 
 	/** Markdown for a text or thinking block; live children and stable-row renders share it so stable rows prefix the block render. */
 	#createMarkdown(kind: StablePartKind, text: string): Markdown {
-		return kind === "text"
-			? new Markdown(text, 1, 0, this.#getProseTheme(), this.#getProseTextStyle(), 0)
-			: new Markdown(text, 1, 0, getMarkdownTheme(), {
-					color: (value: string) => theme.fg("thinkingText", value),
-					italic: true,
-				});
+		const md =
+			kind === "text"
+				? new Markdown(text, 1, 0, this.#getProseTheme(), this.#getProseTextStyle(), 0)
+				: new Markdown(text, 1, 0, getMarkdownTheme(), {
+						color: (value: string) => theme.fg("thinkingText", value),
+						italic: true,
+					});
+		md.tableLocks = this.#tableLocks;
+		return md;
+	}
+
+	/**
+	 * Lock the column widths of a table streaming at the end of this message,
+	 * so its finished rows can leave the screen for scrollback. The transcript
+	 * calls this when rows of this block no longer fit and none of them is
+	 * stable yet.
+	 */
+	lockStreamingLayout(): void {
+		const items = this.#fastPathItems;
+		const md = items?.at(-1)?.md;
+		if (md instanceof FigureMarkdown || md instanceof Markdown) md.lockOpenTable();
 	}
 
 	/**

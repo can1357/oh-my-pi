@@ -19,6 +19,12 @@ export interface AnimationFrame {
 /** Lets an active block adapt its presentation to its allocated viewport rows. */
 export interface TranscriptPresentationTarget {
 	setTranscriptAllocation?(rows: number, frame: AnimationFrame): void;
+	/**
+	 * Rows of this streaming block no longer fit on screen and none of them is
+	 * stable yet: freeze whatever layout keeps its finished rows changing (a
+	 * table's column widths) so they can go to scrollback.
+	 */
+	lockStreamingLayout?(): void;
 }
 
 /** Presentation declaration captured permanently when a block is added. */
@@ -1041,6 +1047,7 @@ export class TranscriptContainer extends Container {
 			const { rows, emittedEnd } =
 				this.#measuredAppendBatch(appendHead, width, overflow) ??
 				this.#renderedAppendBatch(appendHead, width, overflow);
+			if (this.completeScrollback && rows.length < overflow) this.#lockStreamingLayout(appendHead);
 			if (emittedEnd > appendHead.emitted) {
 				const batch: HistoryBatch = {
 					id: this.#nextBatchId++,
@@ -1086,7 +1093,10 @@ export class TranscriptContainer extends Container {
 		while (end < limit && end < this.#entries.length && this.#entries[end]!.state === "settled") end++;
 		if (split !== undefined && end !== split.index) split = undefined;
 		if (end === this.#frontier && split === undefined) {
-			if (policy === "pressure") this.#notePinnedFrontier();
+			if (policy === "pressure") {
+				this.#notePinnedFrontier();
+				if (this.completeScrollback && keep > 0) this.#lockStreamingLayout(live[keep - 1]!.entry);
+			}
 			return undefined;
 		}
 		this.#pinnedFrontier = undefined;
@@ -1138,6 +1148,7 @@ export class TranscriptContainer extends Container {
 						this.#measuredAppendBatch(entry, width, overflow) ??
 						this.#renderedAppendBatch(entry, width, overflow);
 					if (batch.emittedEnd > entry.emitted) streamingHead = batch;
+					if (batch.rows.length < overflow) this.#lockStreamingLayout(entry);
 				}
 			}
 		}
@@ -1854,6 +1865,12 @@ export class TranscriptContainer extends Container {
 		const visibleOutput = output.slice(0, rows);
 		this.#commitViewportSpans(owners, visibleOutput.length);
 		return visibleOutput;
+	}
+
+	/** A streaming block that overflows with too few stable rows to cover it. */
+	#lockStreamingLayout(entry: TranscriptEntry): void {
+		if (entry.state === "settled") return;
+		(entry.component as Component & TranscriptPresentationTarget).lockStreamingLayout?.();
 	}
 
 	#setAllocation(component: Component, rows: number, frame: AnimationFrame): void {
