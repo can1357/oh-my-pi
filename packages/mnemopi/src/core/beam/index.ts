@@ -20,7 +20,7 @@ import {
 	sleep,
 	sleepAllSessions,
 } from "./consolidate";
-import { factRecall, formatContext, recall, recallEnhanced } from "./recall";
+import { factRecall, formatContext, recall, recallEnhanced, warmRecallCache } from "./recall";
 import { clearCachedEmbeddings } from "./embedding-cache";
 import { initBeam } from "./schema";
 import {
@@ -132,6 +132,7 @@ export class BeamMemory implements BeamMemoryState {
 	readonly config: BeamConfig;
 	readonly pendingExtractions: Set<Promise<void>> = new Set();
 	#closed = false;
+	#warmAbort?: AbortController;
 
 	constructor(options?: BeamMemoryOptions);
 	constructor(
@@ -205,6 +206,8 @@ export class BeamMemory implements BeamMemoryState {
 			return;
 		}
 		this.#closed = true;
+		// An in-flight warmup must stop before the connection closes, so it never queries a closed database.
+		this.#warmAbort?.abort();
 		// A closed BeamMemory may stay referenced; its decoded vectors must not outlive the connection.
 		clearCachedEmbeddings(this.db);
 		closeQuietly(this.db);
@@ -287,6 +290,17 @@ export class BeamMemory implements BeamMemoryState {
 
 	recallEnhanced(query: string, topK = 40, options: RecallEnhancedOptions = {}): Promise<RecallResult[]> {
 		return recallEnhanced(this, query, topK, options);
+	}
+
+	/**
+	 * Decodes this bank's recall vectors ahead of time. Resolves early, without error, once `signal` aborts or this
+	 * instance closes; a warmup started after close does nothing.
+	 */
+	async warmRecallCache(options: RecallOptions = {}, signal?: AbortSignal): Promise<void> {
+		if (this.#closed) return;
+		this.#warmAbort ??= new AbortController();
+		const stop = signal ? AbortSignal.any([this.#warmAbort.signal, signal]) : this.#warmAbort.signal;
+		await warmRecallCache(this, options, stop);
 	}
 
 	formatContext(results: readonly RecallResult[], format = "bullet"): string {

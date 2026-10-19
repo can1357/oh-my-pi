@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Computer-use window input with `takeover` omitted now stays in the background after `computer.control.acquire`, so an acquired grant no longer activates the target app or moves the user's pointer; pass `takeover: true` for foreground input ([#15173](https://github.com/can1357/oh-my-pi/pull/15173) by [@will-bogusz](https://github.com/will-bogusz))
+- Mnemopi decodes each recall bank's memory embeddings in the background at session start, so the first recall finds them cached; it is skipped when embeddings are disabled or auto-recall is off ([#15729](https://github.com/can1357/oh-my-pi/pull/15729) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
