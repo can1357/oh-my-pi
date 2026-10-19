@@ -203,13 +203,13 @@ export interface AgentOptions {
 	/**
 	 * Called when GPT-5 Harmony protocol leakage is detected and mitigated.
 	 */
+	onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 	/**
 	 * Notified once after the live transcript or the steering/follow-up queues are
 	 * replaced wholesale (`replaceMessages`, `replaceQueues`). Queue-local updates
 	 * (enqueue, dequeue-on-delivery, live-steering adoption) never reach it.
 	 */
 	onHistoryReplaced?: () => void;
-	onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 	/**
 	 * Custom token budgets for thinking levels (token-based providers only).
 	 */
