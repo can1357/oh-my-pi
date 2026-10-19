@@ -2318,28 +2318,41 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		expect(reads).toBe(1);
 	});
 
-	it("holds the user's app for windows two browsers open at once, one hold each", async () => {
-		const { holds, frontApp } = frontAppRecorder();
+	it("reads no front app while a hold runs, so a window opened after it never holds the browser in front", async () => {
+		let reads = 0;
+		const holds: number[] = [];
+		const ends: Array<() => void> = [];
 		const bridge = new RelayBridge();
-		bridge.keepFrontAppWith(frontApp);
-		const chrome = new FakeExtSocket();
-		const edge = new FakeExtSocket();
-		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1 })]);
-		connectInstance(bridge, edge, "edge", [tab({ tabId: 2 })]);
+		bridge.keepFrontAppWith(() => {
+			const app = ++reads;
+			return {
+				keepInFront: () => {
+					holds.push(app);
+					const { promise, resolve } = Promise.withResolvers<number>();
+					ends.push(() => resolve(1));
+					return promise;
+				},
+			};
+		});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
-		const inChrome = await attachPage(bridge, chrome, cdp, connId, 1, "chrome");
-		const inEdge = await attachPage(bridge, edge, cdp, connId, 2, "edge");
-		// Reads 1 and 2 in Chrome, then 3 and 4 in Edge.
-		await sendInput(bridge, chrome, connId, inChrome);
-		await sendInput(bridge, edge, connId, inEdge);
-		windowOpen(bridge, chrome, 1);
-		windowOpen(bridge, edge, 2);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		await sendInput(bridge, ext, connId, sessionId);
+		windowOpen(bridge, ext, 1);
 		await flush();
-		expect(holds).toEqual([
-			{ app: 2, ms: 500 },
-			{ app: 4, ms: 500 },
-		]);
+		expect(holds).toEqual([2]);
+		// The browser is in front while the hold runs; omp clicks again, and that click's window comes during the
+		// hold and once more after it.
+		await sendInput(bridge, ext, connId, sessionId);
+		windowOpen(bridge, ext, 1);
+		for (const end of ends) end();
+		await flush();
+		windowOpen(bridge, ext, 1);
+		await flush();
+		expect(reads).toBe(2);
+		expect(holds).toEqual([2]);
 	});
 });
 
