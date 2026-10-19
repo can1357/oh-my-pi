@@ -63,7 +63,7 @@
 - Gemma 4 models on Google AI Studio (`google/gemma-4-31b-it`, `google/gemma-4-26b-a4b-it`, …) no longer fail every request with `Thinking budget is not supported for this model`; thinking is now toggled with `thinkingLevel` (on = `high`, off = `minimal`) ([#16350](https://github.com/can1357/oh-my-pi/issues/16350))
 ### Fixed
 
-- Removed `cerebras/zai-glm` from the `smol` role defaults and `openai-codex/gpt-5.5` from the `slow` ones: no bundled model has either id, and `cerebras/zai-glm-4.6` and `openai-codex/gpt-5.6-sol` already come earlier in those lists ([#12884](https://github.com/can1357/oh-my-pi/issues/12884))
+- Removed `cerebras/zai-glm` from the `smol` role defaults and `openai-codex/gpt-5.5` from the `slow` ones: no bundled model has either id, and `cerebras/zai-glm-4.6` and `openai-codex/gpt-5.6-sol` already come earlier in those lists ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.2] - 2026-10-18
 

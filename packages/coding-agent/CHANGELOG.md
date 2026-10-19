@@ -198,11 +198,11 @@
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
 ### Breaking Changes
 
-- `provider/model` selectors in `--model`, settings, roles and task agents now need the exact id or alias: retired or renamed ids (`openai-codex/gpt-5.5`), dated ids written without their date, `-latest` shorthands (`openai/gpt-5-latest` for `gpt-5-chat-latest`), and Vertex ids without `@default` (`google-vertex/claude-opus-4-8`) no longer match a sibling; use the id `omp models <provider>` lists, or drop the provider prefix to keep fuzzy matching ([#12884](https://github.com/can1357/oh-my-pi/issues/12884))
+- `provider/model` selectors in `--model`, settings, roles and task agents now need the exact id or alias: retired or renamed ids (`openai-codex/gpt-5.5`), dated ids written without their date, `-latest` shorthands (`openai/gpt-5-latest` for `gpt-5-chat-latest`), and Vertex ids without `@default` (`google-vertex/claude-opus-4-8`) no longer match a sibling; use the id `omp models <provider>` lists, or drop the provider prefix to keep fuzzy matching ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
-- Fixed a `provider/model` selector for a model that provider doesn't have silently running a similarly named model (`anthropic/claude-haiku-5-5` ran `claude-haiku-4-5`); it now fails with `Model "…" not found` and suggests up to three close ids from that provider, a configured default or dictation model that no longer resolves now warns with the model used instead, and bare selectors such as `opus` still fuzzy-match ([#12884](https://github.com/can1357/oh-my-pi/issues/12884))
+- Fixed a `provider/model` selector for a model that provider doesn't have silently running a similarly named model (`anthropic/claude-haiku-5-5` ran `claude-haiku-4-5`); it now fails with `Model "…" not found` and suggests up to three close ids from that provider, a configured default or dictation model that no longer resolves now warns with the model used instead, and bare selectors such as `opus` still fuzzy-match ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.2] - 2026-10-18
 
