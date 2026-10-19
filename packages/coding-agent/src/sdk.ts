@@ -68,6 +68,13 @@ import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
+	DISABLED_MODELS_NOTICE_SOURCE,
+	type DisabledModelSelection,
+	disabledModelRule,
+	disabledSelectorRule,
+	formatDisabledModelError,
+} from "./config/disabled-models";
+import {
 	disabledProviderIds,
 	formatModelString,
 	formatModelStringWithRouting,
@@ -1179,13 +1186,17 @@ export async function resolvePrewalkTarget(
 	{
 		deferUnregistered = false,
 		beforeRefresh,
-	}: { deferUnregistered?: boolean; beforeRefresh?: () => Promise<void> } = {},
-): Promise<{ prewalk?: Prewalk; warnings: string[]; deferred: boolean }> {
+		settings,
+	}: { deferUnregistered?: boolean; beforeRefresh?: () => Promise<void>; settings?: Settings } = {},
+): Promise<{ prewalk?: Prewalk; warnings: string[]; deferred: boolean; disabledModel?: DisabledModelSelection }> {
 	let refreshedProviders: Set<string> | undefined;
-	const resolveCandidate = (pattern: string) => resolveCliModel({ cliModel: pattern, modelRegistry, preferences });
+	// The session's `disabledModels` refuses a denied target here, at startup, rather than at the first handoff.
+	const resolveCandidate = (pattern: string) =>
+		resolveCliModel({ cliModel: pattern, modelRegistry, preferences, settings });
 	let authenticated: ResolveCliModelResult | undefined;
 	let firstUnauthenticated: ResolveCliModelResult | undefined;
 	let lastResolution: ResolveCliModelResult | undefined;
+	let firstDenied: ResolveCliModelResult | undefined;
 	let deferred = false;
 	let disabledProvider: string | undefined;
 
@@ -1195,6 +1206,11 @@ export async function resolvePrewalkTarget(
 		disabledProvider = undefined;
 		let candidate = resolveCandidate(pattern);
 		lastResolution = candidate;
+		// A denied target is final for this pattern: never defer it as a pending registration.
+		if (candidate.disabledModel) {
+			firstDenied ??= candidate;
+			continue;
+		}
 		if (candidate.model && disabledProviders.has(candidate.model.provider)) {
 			disabledProvider = candidate.model.provider;
 			continue;
@@ -1229,6 +1245,10 @@ export async function resolvePrewalkTarget(
 		await modelRegistry.refreshDiscoverableProviders([provider], "online-if-uncached");
 		candidate = resolveCandidate(pattern);
 		lastResolution = candidate;
+		if (candidate.disabledModel) {
+			firstDenied ??= candidate;
+			continue;
+		}
 		if (candidate.model && disabledProviders.has(candidate.model.provider)) {
 			disabledProvider = candidate.model.provider;
 			continue;
@@ -1241,7 +1261,8 @@ export async function resolvePrewalkTarget(
 	}
 
 	if (deferred) return { warnings: [], deferred: true };
-	const resolved = authenticated ?? firstUnauthenticated ?? lastResolution ?? resolveCandidate(patterns[0] ?? target);
+	const resolved =
+		authenticated ?? firstUnauthenticated ?? firstDenied ?? lastResolution ?? resolveCandidate(patterns[0] ?? target);
 	const warnings = resolved.warning ? [resolved.warning] : [];
 	if (resolved.error || !resolved.model) {
 		warnings.push(
@@ -1256,7 +1277,7 @@ export async function resolvePrewalkTarget(
 	} else {
 		return { prewalk: { target: resolved.model, thinkingLevel: resolved.thinkingLevel }, warnings, deferred: false };
 	}
-	return { warnings, deferred: false };
+	return { warnings, deferred: false, ...(resolved.disabledModel ? { disabledModel: resolved.disabledModel } : {}) };
 }
 
 /**
@@ -2025,6 +2046,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
 	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
 
+	if (options.model) {
+		const deniedRule = disabledModelRule(options.model, settings);
+		if (deniedRule) throw new Error(formatDisabledModelError(options.model, deniedRule));
+	}
+
 	const deferredModelPatterns = Array.isArray(options.modelPattern)
 		? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
 		: options.modelPattern?.trim()
@@ -2080,11 +2106,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: [];
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
+	const sessionRestoreFailureMessage = (sessionModelStr: string): string => {
+		const denied = disabledSelectorRule(sessionModelStr, settings);
+		return denied
+			? `Could not restore model ${sessionModelStr}: ${formatDisabledModelError(denied.label, denied.rule)}`
+			: `Could not restore model ${sessionModelStr}`;
+	};
 	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
 		logger.time("restoreSessionModel", () => {
 			let failedSessionModel: string | undefined;
 			for (let i = 0; i < sessionModelStrings.length; i++) {
 				const sessionModelStr = sessionModelStrings[i];
+				// A denied session model is never restored, even when it is available.
+				if (disabledSelectorRule(sessionModelStr, settings)) {
+					failedSessionModel ??= sessionModelStr;
+					continue;
+				}
 				const restored = resolveSessionModelSelector(modelRegistry, sessionModelStr);
 				if (restored) {
 					model = restored.model;
@@ -2095,7 +2132,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				failedSessionModel ??= sessionModelStr;
 			}
 			if (failedSessionModel) {
-				modelFallbackMessage = `Could not restore model ${failedSessionModel}`;
+				modelFallbackMessage = sessionRestoreFailureMessage(failedSessionModel);
 			}
 		});
 	}
@@ -2899,6 +2936,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (!hasExplicitModel && sessionRetryLimit > 0) {
 			const restoreSessionModel = (): boolean => {
 				for (let i = 0; i < sessionRetryLimit; i++) {
+					if (disabledSelectorRule(sessionModelStrings[i], settings)) continue;
 					const restored = resolveSessionModelSelector(modelRegistry, sessionModelStrings[i]);
 					if (restored) {
 						const restoredModel = restored.model;
@@ -2947,7 +2985,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			restoredSessionModelIndex < 0 &&
 			(!options.hasUI || options.allowSessionModelFallback === false || !cfgRetryModelFallback.get(settings))
 		) {
-			throw new Error(`Could not restore model ${sessionModelStrings[0]}`);
+			throw new Error(sessionRestoreFailureMessage(sessionModelStrings[0]));
 		}
 		// Resolve deferred --model/subagent patterns now that extension models are
 		// registered. Use the same CLI resolver as the immediate path so bare role
@@ -2969,6 +3007,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			await logger.time("resolveModelDiscoveryDeferredRetry", startRuntimeDiscovery);
 			const matchPreferences = getModelMatchPreferences(settings);
 			const disabledProviders = new Set(cfgDisabledProviders.get(settings));
+			const isDeniedModel = (candidate: Model): boolean => disabledModelRule(candidate, settings) !== undefined;
 			const runtimeResolved = deferredModelPatterns.some(pattern =>
 				pattern.split(",").some(selector => {
 					const trimmedSelector = selector.trim();
@@ -2988,7 +3027,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// is unreachable, so a match on one likewise must not count: otherwise
 					// a disabled first selector suppresses the discovery refresh an enabled
 					// later selector still needs.
-					return resolved.model !== undefined && !disabledProviders.has(resolved.model.provider);
+					return (
+						resolved.model !== undefined &&
+						!disabledProviders.has(resolved.model.provider) &&
+						!isDeniedModel(resolved.model)
+					);
 				}),
 			);
 			if (!runtimeResolved && modelRegistry.getDiscoverableProviders().length > 0) {
@@ -2996,14 +3039,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					modelRegistry.refresh("online-if-uncached"),
 				);
 			}
-			const allEnabledModels =
-				disabledProviders.size === 0
-					? modelRegistry.getAll()
-					: modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider));
-			const availableModels =
-				disabledProviders.size === 0
-					? modelRegistry.getAvailable()
-					: modelRegistry.getAvailable().filter(candidate => !disabledProviders.has(candidate.provider));
+			const isUnreachable = (candidate: Model): boolean =>
+				disabledProviders.has(candidate.provider) || isDeniedModel(candidate);
+			// A denied explicit pin is refused, not substituted: remember the rule so
+			// the failure names it instead of reporting "not found".
+			let deniedDeferred: DisabledModelSelection | undefined;
+			const allEnabledModels = modelRegistry.getAll().filter(candidate => !isUnreachable(candidate));
+			const availableModels = modelRegistry.getAvailable().filter(candidate => !isUnreachable(candidate));
 			const expandedModelPatterns = deferredModelPatterns.flatMap(pattern =>
 				pattern.split(",").flatMap(selector => {
 					const trimmedSelector = selector.trim();
@@ -3014,6 +3056,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						settings,
 						preferences: matchPreferences,
 					});
+					if (resolved.disabledModel) {
+						// Never re-expand a denied selector: fuzzy matching or a synthetic
+						// clone could otherwise substitute for the refused model.
+						deniedDeferred ??= resolved.disabledModel;
+						return [];
+					}
 					if (resolved.configuredPatterns && resolved.configuredPatterns.length > 0) {
 						const primaryPatterns: Array<{
 							pattern: string;
@@ -3253,7 +3301,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					deferredModelPatterns.length === 1
 						? `"${deferredModelPatterns[0]}"`
 						: `one of ${deferredModelPatterns.map(pattern => `"${pattern}"`).join(", ")}`;
-				modelFallbackMessage = `Model ${requested} not found`;
+				modelFallbackMessage = deniedDeferred
+					? formatDisabledModelError(deniedDeferred.label, deniedDeferred.rule)
+					: `Model ${requested} not found`;
 			}
 		}
 
@@ -3272,6 +3322,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// user's configured default with a bundled provider's default whenever
 			// a stray `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` is in the environment.
 			// (issues #3569, #6162)
+			let deniedDefaultRole: DisabledModelSelection | undefined = defaultRoleSpec.model
+				? undefined
+				: defaultRoleSpec.disabledModel;
 			const tryResolveDefaultRole = async (): Promise<boolean> => {
 				if (hasExplicitModel) return false;
 				// Re-resolve the allowed set: extension factories and discovery
@@ -3281,6 +3334,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					settings,
 					matchPreferences: modelMatchPreferences,
 				});
+				deniedDefaultRole = reResolvedRoleSpec.model ? undefined : reResolvedRoleSpec.disabledModel;
 				if (!reResolvedRoleSpec.model) return false;
 				defaultRoleSpec = reResolvedRoleSpec;
 				const resolvedDefaultModel = reResolvedRoleSpec.model;
@@ -3346,6 +3400,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					originalModel,
 					{ allowMissingPrimary: true },
 				)) {
+					// A denied target is skipped, never fuzzy-matched to an allowed sibling.
+					const denied = disabledSelectorRule(candidate.raw, settings, fallbackCandidates);
+					if (denied) {
+						logger.warn("Startup fallback target skipped", {
+							reason: formatDisabledModelError(denied.label, denied.rule),
+						});
+						continue;
+					}
 					let resolved = parseModelPattern(candidate.raw, fallbackCandidates, modelMatchPreferences);
 					if (!resolved.model && !scopedByEnabledModels && !disabledProviders?.includes(candidate.provider)) {
 						resolved = parseModelPattern(
@@ -3354,7 +3416,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							modelMatchPreferences,
 						);
 					}
-					if (!resolved.model || !hasModelAuth(resolved.model)) continue;
+					// `getProviderModels` is the raw catalog, so a denied match is skipped here.
+					if (!resolved.model || disabledModelRule(resolved.model, settings) || !hasModelAuth(resolved.model)) {
+						continue;
+					}
 					model = resolved.model;
 					initialRetryFallback = retryFallback;
 					modelFallbackMessage = undefined;
@@ -3393,7 +3458,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					modelRegistry.getDiscoverableProviders().length > 0
 				) {
 					await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
-					if (!(await tryResolveDefaultRole()) && !model) {
+					if (!(await tryResolveDefaultRole()) && !model && !deniedDefaultRole) {
 						fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
 						pick = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth), provider =>
 							modelRegistry.hasConcreteAuth(provider),
@@ -3401,7 +3466,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				}
 
-				if (!model && !tryResolveDefaultRoleFallback(fallbackCandidates) && pick) {
+				if (!model && !deniedDefaultRole && !tryResolveDefaultRoleFallback(fallbackCandidates) && pick) {
 					model = pick;
 					adoptThinkingForModel(pick);
 				}
@@ -3410,6 +3475,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (modelFallbackMessage) {
 					modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
 				}
+			} else if (deniedDefaultRole) {
+				// A configured default that names a denied model is an explicit
+				// choice: surface the diagnostic instead of picking a substitute.
+				modelFallbackMessage = formatDisabledModelError(deniedDefaultRole.label, deniedDefaultRole.rule);
 			} else {
 				const patterns = cfgEnabledModels.get(settings);
 				modelFallbackMessage =
@@ -3428,7 +3497,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				modelRegistry,
 				modelMatchPreferences,
 				disabledProviderIds(settings),
-				{ beforeRefresh: discoveryInFlight ? () => discoveryInFlight : undefined },
+				{ beforeRefresh: discoveryInFlight ? () => discoveryInFlight : undefined, settings },
 			);
 			prewalk = selection.prewalk;
 			deferredPrewalk = undefined;
@@ -4469,12 +4538,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const settingsBoundStreamFn = wrapStreamFnWithBlobUrlFallback(
 			wrapStreamFnWithProviderConcurrency(
 				settings,
-				createSettingsAwareStreamFn(settings, undefined, {
-					canAutoAccept: streamModel =>
-						anthropicSlowModeHasNoSiblingHeadroom(modelRegistry.authStorage, streamModel, session?.sessionId),
-					notify: (level, message) => session?.emitNotice(level, message, "anthropic-slow-mode"),
-					onLane: lane => session?.noteAnthropicSlowModeLane(lane),
-				}),
+				createSettingsAwareStreamFn(
+					settings,
+					undefined,
+					{
+						canAutoAccept: streamModel =>
+							anthropicSlowModeHasNoSiblingHeadroom(modelRegistry.authStorage, streamModel, session?.sessionId),
+						notify: (level, message) => session?.emitNotice(level, message, "anthropic-slow-mode"),
+						onLane: lane => session?.noteAnthropicSlowModeLane(lane),
+					},
+					message => session?.emitNotice("warning", message, DISABLED_MODELS_NOTICE_SOURCE),
+				),
 			),
 			() => blobBroker.current,
 		);

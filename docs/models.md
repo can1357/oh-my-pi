@@ -8,7 +8,7 @@ Primary implementation files:
 
 - `packages/coding-agent/src/config/model-registry.ts` — loads built-in + custom models, provider overrides, runtime discovery, auth integration
 - `packages/coding-agent/src/config/model-resolver.ts` — parses model patterns and selects initial/smol/slow models
-- `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `enabledProviders`/`disabledProviders`, `modelProviderOrder`, `cycleOrder`)
+- `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `disabledModels`, `enabledProviders`/`disabledProviders`, `modelProviderOrder`, `cycleOrder`)
 - `packages/coding-agent/src/session/settings.ts` — provider transport preferences (`providers.*`)
 - `packages/coding-agent/src/config/models-config.ts` and `models-config-schema-bundle.ts` — custom provider/model validation
 - `packages/coding-agent/src/session/auth-storage.ts` — re-exports `AuthStorage` from `@oh-my-pi/pi-ai`; credential precedence is implemented in `packages/ai/src/auth/cascade.ts`
@@ -741,6 +741,7 @@ Related settings:
 
 - `modelRoles` (record)
 - `enabledModels` (scoped pattern list)
+- `disabledModels` (scoped list of exact `provider/modelId` rules or globs; deny wins over `enabledModels`)
 - `modelProviderOrder` (provider precedence when equivalent concrete choices share an id)
 - `providers.kimiApiFormat` (`auto|openai|anthropic`; `auto` follows server-declared model metadata)
 - `providers.openaiWebsockets` (`auto|off|on` websocket preference for OpenAI Codex transport)
@@ -751,7 +752,7 @@ accept exact selectors, globs, and fuzzy matches. The resulting scope restricts 
 (Ctrl+P cycling, the startup model, chat roles in `/model`); judge, search, image, and speech
 models stay available for their roles, so entries naming them are accepted but have no effect.
 
-`enabledModels`, `enabledProviders`, and `disabledProviders` entries may also be scoped to a path prefix:
+`enabledModels`, `disabledModels`, `enabledProviders`, and `disabledProviders` entries may also be scoped to a path prefix:
 
 ```yaml
 enabledModels:
@@ -766,7 +767,41 @@ disabledProviders:
       - anthropic
 ```
 
-String entries apply everywhere. Scoped entries apply when the current working directory is the configured path or one of its subdirectories. Use `path`, `paths`, `pathPrefix`, or `pathPrefixes`; use `models` for `enabledModels`, `providers` for either provider setting, or `values` for any of them.
+String entries apply everywhere. Scoped entries apply when the current working directory is the configured path or one of its subdirectories. Use `path`, `paths`, `pathPrefix`, or `pathPrefixes`; use `models` for `enabledModels` and `disabledModels`, `providers` for either provider setting, or `values` for any of them.
+
+### `disabledModels`
+
+`disabledModels` hides specific models while keeping their provider enabled. It sits beside `enabledModels` and accepts the same path-scoped entries (use `models` or `values`):
+
+```yaml
+disabledModels:
+  - opencode-zen/claude-*
+  - path: ~/work
+    models:
+      - google-gemini-cli/gemini-2.0-flash
+```
+
+Rules:
+
+- A rule names a catalog model: an exact `provider/modelId` or an explicit glob. A glob matches `provider/id` and the bare id, like `enabledModels` globs. There are no fuzzy, substring, bare-id, or role-alias rules.
+- A trailing `:thinkingLevel` on a rule is ignored. A base-model rule also covers the `:level`, `@upstream`, and OpenRouter routing-variant (`:floor`, `:nitro`, …) forms of that model. A rule for one routing variant (`openrouter/<id>:floor`) blocks only that variant, including when `providers.openrouterVariant` adds it.
+- A rule that contains `@upstream` is matched literally. Denying a single upstream is not supported.
+- Provider-internal wire ids are not matched on their own: effort routes, `requestModelId`, and the Fireworks, firepass, and cline-pass id transforms are not catalog models. Deny the catalog model to block every route to it.
+- Precedence: `effective = (enabledModels ∩ available) − disabledModels`. A deny always wins over an allow.
+
+Behavior when a model is denied:
+
+- An explicit `--model`, or a role or default that resolves directly to a denied model, fails with `Model "<provider/id>" is disabled by disabledModels rule "<rule>". Remove or narrow that rule to use it.` A bare `--model <id>` is refused the same way when no allowed provider carries that exact id; it never falls back to a similar model.
+- A role value with several comma-separated patterns skips a denied pattern and uses the next one.
+- A configured role (for example `modelRoles.default`) that resolves only to denied models is refused: its fallback chain does not stand in for it, and the log names the rule. An unconfigured role keeps its normal defaults.
+- Automatic retry fallback skips a denied target, shows a warning notice that names the rule, and continues with the next target.
+- Anthropic server-side fallback targets (`providers.anthropic.serverSideFallback`) that are denied are dropped from the request with the same warning; the request carries no fallbacks when none remain.
+- A request whose model is denied is refused before it is sent; it is not retried on that model, and automatic fallback moves on to the next target.
+- The auth gateway omits denied models from `/v1/models` and answers a request for one as an unknown model (HTTP 404); it never serves another model with the same bare id. Provider usage and credential rows stay.
+- Stored roles, fallback chains, and `enabledModels` are never rewritten.
+- Like `disabledProviders`, the rules come from the settings the model registry was built with. A program that embeds OMP and passes a registry built with other settings gets that registry's rules in background helpers; the session's own rules still refuse explicit picks and every request the session sends.
+- As with `disabledProviders`, a background feature that tries several roles or a built-in default (commit summaries, title generation, skill descriptions, speech, dictation, image generation) moves on to its next allowed model when its configured role is denied, instead of failing.
+- As with `disabledProviders`, a model that was already active can become active again by restore (for example when plan mode exits) after it is denied; every request on it is then refused.
 
 ## `/model` and `omp models`
 

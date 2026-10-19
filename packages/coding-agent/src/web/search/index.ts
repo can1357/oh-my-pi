@@ -11,6 +11,7 @@ import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatAge, formatCount, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../config/model-registry";
+import { disabledModelRule } from "../../config/disabled-models";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../../config/model-resolver";
 import { roleCandidatePool } from "../../config/model-roles";
 import { settings } from "../../config/settings";
@@ -146,8 +147,10 @@ function expandHostedCandidate(
 ): RoleChainCandidate[] {
 	if (!isHostedPlaceholder(candidate.model) || !sessionModel) return [candidate];
 	const swap = resolveConfiguredModelTarget(sessionModel.webSearchModel, sessionModel, pool);
+	// The session model is not drawn from the filtered pool, so disabledModels may deny it.
 	const models = [swap, sessionModel].filter(
-		(model, index, all): model is Model<Api> => !!model?.webSearch && all.indexOf(model) === index,
+		(model, index, all): model is Model<Api> =>
+			!!model?.webSearch && all.indexOf(model) === index && disabledModelRule(model, settings) === undefined,
 	);
 	if (models.length === 0) return [candidate];
 	return models.map(model => ({ ...candidate, model }));

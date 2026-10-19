@@ -525,4 +525,61 @@ describe("createSettingsAwareStreamFn", () => {
 			}
 		});
 	});
+	describe("disabledModels guard", () => {
+		const fable = { api: "anthropic-messages", provider: "anthropic", id: "claude-fable-5" } as unknown as Model;
+		const denialFor = (label: string, rule: string) =>
+			`Model "${label}" is disabled by disabledModels rule "${rule}". Remove or narrow that rule to use it.`;
+
+		it("adds nothing and changes no option when disabledModels is empty", () => {
+			const base = captureBase();
+			const guarded = captureBase();
+			const options = { apiKey: "k", fallbacks: [{ model: "claude-opus-5" }] };
+			// A non-Anthropic model: Anthropic requests carry fresh slow-mode hook closures per call.
+			const model = getBundledModel("openrouter", "openai/gpt-4o") as Model;
+			createSettingsAwareStreamFn(Settings.isolated({}), base.fn)(model, stubContext, options);
+			createSettingsAwareStreamFn(Settings.isolated({ disabledModels: [] }), guarded.fn)(
+				model,
+				stubContext,
+				options,
+			);
+			expect(guarded.calls[0]?.options).toEqual(base.calls[0]?.options);
+		});
+
+		it("refuses a request whose OpenRouter routing variant makes it a denied model", () => {
+			const model = getBundledModel("openrouter", "openai/gpt-4o") as Model;
+			const settings = Settings.isolated({
+				"providers.openrouterVariant": "floor",
+				disabledModels: ["openrouter/openai/gpt-4o:floor"],
+			});
+			const { fn, calls } = captureBase();
+			expect(() => createSettingsAwareStreamFn(settings, fn)(model, stubContext, { apiKey: "k" })).toThrow(
+				denialFor("openrouter/openai/gpt-4o:floor", "openrouter/openai/gpt-4o:floor"),
+			);
+			expect(calls).toHaveLength(0);
+			// Without the variant the base model stays allowed.
+			const plain = Settings.isolated({ disabledModels: ["openrouter/openai/gpt-4o:floor"] });
+			createSettingsAwareStreamFn(plain, fn)(model, stubContext, { apiKey: "k" });
+			expect(calls).toHaveLength(1);
+		});
+
+		it("drops denied server-side fallback targets with a notice and omits the key when none remain", () => {
+			const notices: string[] = [];
+			const settings = Settings.isolated({
+				"providers.anthropic.serverSideFallback": true,
+				disabledModels: ["anthropic/claude-opus-5"],
+			});
+			const { fn, calls } = captureBase();
+			const wrapped = createSettingsAwareStreamFn(settings, fn, undefined, message => notices.push(message));
+
+			wrapped(fable, stubContext, { apiKey: "k" });
+			expect(calls[0]?.options).not.toHaveProperty("fallbacks");
+			expect(notices).toEqual([denialFor("anthropic/claude-opus-5", "anthropic/claude-opus-5")]);
+
+			wrapped(fable, stubContext, {
+				apiKey: "k",
+				fallbacks: [{ model: "claude-opus-5" }, { model: "claude-opus-4-8" }],
+			});
+			expect(calls[1]?.options?.fallbacks).toEqual([{ model: "claude-opus-4-8" }]);
+		});
+	});
 });

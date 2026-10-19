@@ -87,6 +87,31 @@ describe("prewalk startup degradation", () => {
 		expect(options.prewalk?.target.id).toBe(enabled.id);
 	});
 
+	test("refuses a bare denied --prewalk-into target instead of deferring it as a pending registration", async () => {
+		const settings = Settings.isolated({ disabledModels: ["openai/gpt-4o-mini"] });
+		authStorage.keys.setRuntime("openai", "test-key");
+
+		await expect(
+			buildSessionOptions(
+				parseArgs(["--prewalk-into", "gpt-4o-mini"]),
+				[],
+				SessionManager.inMemory(),
+				modelRegistry,
+				settings,
+			),
+		).rejects.toThrow('disabledModels rule "openai/gpt-4o-mini"');
+
+		// A later pattern that resolves still arms prewalk.
+		const options = await buildSessionOptions(
+			parseArgs(["--prewalk-into", "gpt-4o-mini,openai/gpt-4o"]),
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+		expect(options.prewalk?.target.id).toBe("gpt-4o");
+	});
+
 	test("does not implicitly re-arm configured prewalk while restoring a session", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("expected claude-sonnet-4-5 to be bundled");

@@ -14,6 +14,12 @@ import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
+import {
+	deniedWireIdentity,
+	disabledModelMatcher,
+	formatDisabledModelError,
+	NO_DISABLED_MODELS,
+} from "../config/disabled-models";
 import type { Settings } from "../config/settings";
 import { type AnthropicSlowModeLanes, anthropicSlowModeLanes } from "./anthropic-slow-mode";
 
@@ -75,6 +81,7 @@ export function createSettingsAwareStreamFn(
 	settings: Settings,
 	base: StreamFn = streamSimple,
 	slowModeContext?: SettingsStreamSlowModeContext,
+	onDisabledFallback?: (message: string) => void,
 ): StreamFn {
 	// One tokenizer per reading model and native-history replay state, so
 	// per-message counts are reused across requests: its prices (images,
@@ -110,9 +117,36 @@ export function createSettingsAwareStreamFn(
 			streamOptions?.fallbacks === undefined && cfgProvidersAnthropicServerSideFallback.get(settings)
 				? serverSideFallbackModels(model)
 				: [];
-		const fallbacks =
+		let fallbacks =
 			streamOptions?.fallbacks ??
 			(serverSideFallbackChain.length > 0 ? serverSideFallbackChain.map(id => ({ model: id })) : undefined);
+		// `disabledModels` guard on the request as it goes on the wire. Every session
+		// request (main, side and advisor turns) passes through here, so this is the
+		// chokepoint for routing rewrites and server-side fallbacks that happen after
+		// model selection. No work when no rules are configured.
+		const isDisabled = disabledModelMatcher(settings);
+		if (isDisabled !== NO_DISABLED_MODELS) {
+			const denied = deniedWireIdentity(
+				model,
+				{ ...streamOptions, openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant },
+				isDisabled,
+			);
+			if (denied !== undefined) {
+				// A policy refusal, not a transient failure: thrown before any request is built.
+				throw new Error(formatDisabledModelError(denied.label, denied.rule));
+			}
+			if (fallbacks !== undefined) {
+				const allowed = fallbacks.filter(fallback => {
+					const fallbackRule = isDisabled({ provider: model.provider, id: fallback.model });
+					if (fallbackRule === undefined) return true;
+					onDisabledFallback?.(
+						formatDisabledModelError({ provider: model.provider, id: fallback.model }, fallbackRule),
+					);
+					return false;
+				});
+				fallbacks = allowed.length > 0 ? allowed : undefined;
+			}
+		}
 		// Anthropic usage-limit stages: the provider consults these hooks only for
 		// first-party OAuth requests, so attaching them per anthropic call is safe.
 		// Wrap-up tracking runs for everyone; the setting (`/slow`) gates only the
@@ -150,8 +184,9 @@ export function createSettingsAwareStreamFn(
 			tokenizers.set(tokenizerKey, tokenizer);
 		}
 		const maxTokens = fitOutputTokensToContextWindow(model, context, streamOptions?.maxTokens, tokenizer);
+		const { fallbacks: _callerFallbacks, ...callerOptions } = streamOptions ?? {};
 		const merged: SimpleStreamOptions = {
-			...streamOptions,
+			...callerOptions,
 			maxTokens,
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
 			antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,

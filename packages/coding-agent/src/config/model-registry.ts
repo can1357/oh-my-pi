@@ -140,6 +140,12 @@ import { type Settings, settings } from "./settings";
 
 import { cfgDisabledProviders } from "./model-settings";
 import {
+	type DisabledModelMatcher,
+	disabledModelMatcher,
+	formatDisabledModelError,
+	NO_DISABLED_MODELS,
+} from "./disabled-models";
+import {
 	cfgCompactionModelThresholds,
 	cfgCompactionModelThresholdsEnabled,
 	cfgExtendedContext,
@@ -3039,34 +3045,55 @@ export class ModelRegistry {
 	 * unrelated cached catalogs. Startup role resolution uses this before the
 	 * full model picker is needed. The default excludes role-specific runners;
 	 * pass `"all"` when the caller is intentionally selecting across kinds.
+	 *
+	 * Models matching `disabledModels` are excluded, so every listing and
+	 * availability-based resolution skips them (see `config/disabled-models.ts`).
 	 */
 	getAvailableForProviders(providers: ReadonlySet<string>, kind: ModelKind | "all" = "chat"): Model<Api>[] {
 		const requested = new Set([...providers].map(provider => provider.trim().toLowerCase()).filter(Boolean));
 		const isProviderAvailable = this.#createProviderAvailabilityCheck();
+		let models: Model<Api>[];
 		if (this.#hasFullSnapshot) {
-			return this.#models.filter(
+			models = this.#models.filter(
 				model =>
 					requested.has(model.provider.toLowerCase()) &&
 					isProviderAvailable(model.provider) &&
 					(kind === "all" || modelKind(model) === kind),
 			);
+		} else {
+			const availableProviders = new Set(
+				this.#knownStaticProviders().filter(
+					provider => requested.has(provider.toLowerCase()) && isProviderAvailable(provider),
+				),
+			);
+			const composed = this.#composeStaticModels(availableProviders);
+			models = kind === "all" ? composed : composed.filter(model => modelKind(model) === kind);
 		}
-		const availableProviders = new Set(
-			this.#knownStaticProviders().filter(
-				provider => requested.has(provider.toLowerCase()) && isProviderAvailable(provider),
-			),
-		);
-		const models = this.#composeStaticModels(availableProviders);
-		return kind === "all" ? models : models.filter(model => modelKind(model) === kind);
+		const isDisabled = this.#disabledModelMatcher();
+		return isDisabled === NO_DISABLED_MODELS ? models : models.filter(model => isDisabled(model) === undefined);
 	}
 
 	/**
 	 * Get available models of one catalog kind.
 	 * This is a fast auth check that doesn't refresh OAuth tokens. The default
 	 * is chat-only; pass `"all"` to include authenticated and keyless runners.
+	 * `disabledModels` matches are excluded.
 	 */
 	getAvailable(kind: ModelKind | "all" = "chat"): Model<Api>[] {
 		return this.getAvailableForProviders(new Set(this.#knownStaticProviders()), kind);
+	}
+
+	/** The `disabledModels` rule denying `model`, or undefined when it is allowed. */
+	getDisabledModelRule(model: Pick<Model<Api>, "provider" | "id">): string | undefined {
+		return this.#disabledModelMatcher()(model);
+	}
+
+	#disabledModelMatcher(): DisabledModelMatcher {
+		try {
+			return disabledModelMatcher(this.#settings ?? settings);
+		} catch {
+			return NO_DISABLED_MODELS;
+		}
 	}
 
 	/**
@@ -3199,7 +3226,8 @@ export class ModelRegistry {
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		return resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
+		const model = resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
+		return model && this.getDisabledModelRule(model) === undefined ? model : undefined;
 	}
 
 	/** Whether settings disable `provider` (`disabledProviders`). */
@@ -3272,6 +3300,7 @@ export class ModelRegistry {
 		// A disabled provider gets no credential, so no request reaches it however
 		// its model was obtained.
 		if (this.#isProviderDisabled(model.provider)) return undefined;
+		if (this.getDisabledModelRule(model)) return undefined;
 		if (this.#isKeylessProvider(model.provider)) {
 			return kNoAuth;
 		}
@@ -3333,6 +3362,11 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
+		// A model denied by `disabledModels` gets no credential; provider-wide lookups
+		// (usage, accounts, credential health) pass no modelId and stay unaffected.
+		if (options?.modelId !== undefined && this.getDisabledModelRule({ provider, id: options.modelId })) {
+			return undefined;
+		}
 		if (options?.forceRefresh) this.#invalidateProviderCommandConfigs(provider);
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
@@ -3362,11 +3396,18 @@ export class ModelRegistry {
 		if (typeof target === "string") {
 			return createApiKeyResolver(this, target, options);
 		}
-		return createApiKeyResolver(this, target.provider, {
+		const inner = createApiKeyResolver(this, target.provider, {
 			...options,
 			baseUrl: target.baseUrl,
 			modelId: target.id,
 		});
+		// A denied model must be refused, not resolved without a key: providers that allow
+		// a missing key would otherwise still dispatch the request.
+		return (...args) => {
+			const rule = this.getDisabledModelRule(target);
+			if (rule !== undefined) throw new Error(formatDisabledModelError(target, rule));
+			return inner(...args);
+		};
 	}
 
 	async #peekApiKeyForProvider(provider: string, options?: AuthPeekOptions): Promise<string | undefined> {

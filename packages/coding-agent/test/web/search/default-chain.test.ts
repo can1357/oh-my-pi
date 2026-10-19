@@ -91,6 +91,19 @@ describe("default web chain", () => {
 		expect(attempted).toEqual(["anthropic/claude-sonnet-4-5"]);
 	});
 
+	it("never searches through a session model that disabledModels denies after the session started", async () => {
+		const active = sessionModel("anthropic", "claude-sonnet-4-5");
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, overrides: { disabledModels: ["anthropic/claude-sonnet-4-5"] } });
+
+		await runSearchQuery(
+			{ query: "anything", model: "web/hosted" },
+			{ authStorage, modelRegistry, sessionModel: active },
+		);
+
+		expect(attempted).toEqual(["anthropic/claude-haiku-4-5"]);
+	});
+
 	it("skips web/hosted when the session model has no search grounding", async () => {
 		const realtime = sessionModel("openai", "gpt-realtime-2.1");
 		expect(realtime.webSearch).toBeUndefined();
