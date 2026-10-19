@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getDocsCacheDir, logger } from "@oh-my-pi/pi-utils";
-import { resolveContainedPath, resolveContainedPathSync } from "../discovery/contained-path";
+import { realpathIfExists, resolveContainedPath, resolveContainedPathSync } from "../discovery/contained-path";
 import ompDoc from "../prompts/internal-urls/omp.md" with { type: "text" };
 import { getDocFilenames, getDocsDiskRoot, getEmbeddedDoc } from "./docs-index";
 import { ompDocFilename, ompDocRel, ompDocsScopeEntries } from "./omp-scope";
@@ -170,13 +170,20 @@ export class OmpProtocolHandler implements ProtocolHandler {
  */
 async function materializeOmpDoc(docPath: string, content: string): Promise<string | null> {
 	const root = getDocsCacheDir();
+	// The cache root can sit behind a symlink (`/var` → `/private/var`, a
+	// symlinked `XDG_CACHE_HOME` or home directory). Containment is proven
+	// against the filesystem-resolved root, so the target is joined to that
+	// root as well: a target under the unresolved root resolves outside the
+	// resolved one, which would drop every cache hit and make the link vanish
+	// on the second render.
+	const realRoot = (await realpathIfExists(root)) ?? root;
 	const digest = createHash("sha256").update(content).digest("hex").slice(0, 16);
-	const target = path.resolve(root, digest, docPath);
+	const target = path.resolve(realRoot, digest, docPath);
 	// The doc path is joined into the cache root, so containment is proven
 	// before the write: a URL escaping the root (an absolute or `..` path)
 	// degrades to a plain-text link instead of writing outside the cache.
 	// `missing` is the ordinary cache miss, which the write below fills.
-	if ((await resolveContainedPath(root, target)).status === "outside") return null;
+	if ((await resolveContainedPath(realRoot, target)).status === "outside") return null;
 	try {
 		await fs.access(target);
 		return target;

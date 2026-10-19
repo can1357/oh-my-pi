@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { getDocsDiskRoot, getEmbeddedDoc } from "@oh-my-pi/pi-coding-agent/internal-urls/docs-index";
+import { getDocsDiskRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/docs-index";
 
 describe("OmpProtocolHandler", () => {
 	// `locate` materializes docs into the docs cache, so point it at a throwaway
@@ -70,6 +70,33 @@ describe("OmpProtocolHandler", () => {
 		await fs.symlink(outside, path.dirname(located!));
 
 		expect(await InternalUrlRouter.instance().locate("omp://tui.md")).toBeNull();
+	});
+
+	it("keeps the link when the docs cache root is a symlink", async () => {
+		// A cache root behind a symlink (`/var` → `/private/var`, a symlinked
+		// `XDG_CACHE_HOME` or home) makes the resolved cache file live outside
+		// the configured root. The link must survive the cache hit, not only
+		// the first materialization.
+		const realRoot = path.join(root, "real-cache");
+		const linkedRoot = path.join(root, "linked-cache");
+		await fs.mkdir(realRoot, { recursive: true });
+		await fs.symlink(realRoot, linkedRoot);
+
+		const previousCacheDir = process.env.OMP_DOCS_CACHE_DIR;
+		process.env.OMP_DOCS_CACHE_DIR = linkedRoot;
+		try {
+			const router = InternalUrlRouter.instance();
+			const first = await router.locate("omp://tui.md");
+			expect(first).toBeString();
+			// Second render is a cache hit: the file exists, so containment is
+			// checked against the resolved path.
+			const second = await router.locate("omp://tui.md");
+			expect(second).toBeString();
+			expect(second).toBe(first);
+		} finally {
+			if (previousCacheDir === undefined) delete process.env.OMP_DOCS_CACHE_DIR;
+			else process.env.OMP_DOCS_CACHE_DIR = previousCacheDir;
+		}
 	});
 
 	it("never locates a URL that names no doc on disk", async () => {
