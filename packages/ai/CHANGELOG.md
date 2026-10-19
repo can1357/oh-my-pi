@@ -193,6 +193,11 @@
 - Added image support for native OpenAI Decisions and Workers AI judgments, prompted vision chat, and auth-gateway System One requests; images exceeding a judgment API's documented caps (e.g. Clef's 4 images, 4 MiB each) are rejected locally ([#15471](https://github.com/can1357/oh-my-pi/pull/15471) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - `isSurvivingAssistant` in `providers/transform-messages`: whether an assistant turn reaches a replay, malformed tool calls dropped first, so callers outside `transformMessages` pick the same latest turn ([#15791](https://github.com/can1357/oh-my-pi/pull/15791) by [@will-bogusz](https://github.com/will-bogusz))
 - Broker account-pool files (`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE`) can hide whole providers and API keys: `"*": false` makes the file an allow-list, and an entry can be `true`, `false`, or `{ "accounts": [...], "apiKeys": false }` ([#14235](https://github.com/can1357/oh-my-pi/pull/14235) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed the Gemini over-planning guard missing a run of reasoning-summary titles when a title line is longer than the streamed-chunk buffer, so long Gemini header runs are detected and the tool-call reminder fires regardless of how the response is chunked ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Reduced the work done while a response streamed, so long streaming replies no longer stutter as chunks arrive ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed the Gemini over-planning guard judging the same reasoning-summary title differently depending on where a streamed chunk boundary fell, so a bold title padded past its buffer is still detected and a bare bold marker no longer counts as a header ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
@@ -262,13 +267,6 @@
 - GitHub Copilot requests (chat completions, Responses, and Claude messages) now send zstd-compressed bodies, cutting upload size by roughly 60–75% on long conversations; set `PI_REQUEST_COMPRESSION=0` to disable it ([#16086](https://github.com/can1357/oh-my-pi/pull/16086) by [@H4vC](https://github.com/H4vC))
 - A rejected request-body encoding now only disables compression for that host, and only after the uncompressed resend succeeds, so a genuine 400 no longer turns compression off ([#16086](https://github.com/can1357/oh-my-pi/pull/16086) by [@H4vC](https://github.com/H4vC))
 - Connection warm-up now covers every catalog provider, not only the official Anthropic API: it re-warms the origin a model's requests actually reach (Copilot plan hosts, `MOONSHOT_BASE_URL`, regional hosts), throttled per host; custom providers, built-in provider ids routed to a gateway, local hosts, and Anthropic gateways are never probed ([#16086](https://github.com/can1357/oh-my-pi/pull/16086) by [@H4vC](https://github.com/H4vC))
-- Anthropic requests to the official API now gzip the request body, so long conversations reach the model sooner on slow uplinks; set `PI_ANTHROPIC_GZIP=0` to disable it ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
-
-### Fixed
-
-- Fixed the Gemini over-planning guard missing a run of reasoning-summary titles when a title line is longer than the streamed-chunk buffer, so long Gemini header runs are detected and the tool-call reminder fires regardless of how the response is chunked ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Reduced the work done while a response streamed, so long streaming replies no longer stutter as chunks arrive ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed the Gemini over-planning guard judging the same reasoning-summary title differently depending on where a streamed chunk boundary fell, so a bold title padded past its buffer is still detected and a bare bold marker no longer counts as a header ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
