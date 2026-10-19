@@ -4298,14 +4298,27 @@ describe("lsp regressions", () => {
 						throw new Error("EPIPE");
 					});
 				});
+				// A checkout lookup ends by resolving the home directory; the second one is the
+				// third checkout's. Everything that follows it in the same turn (the add being
+				// requested) has run by the next macrotask.
+				const home = path.join(tempDir.path(), "home");
+				await fsp.mkdir(home);
+				vi.spyOn(os, "homedir").mockReturnValue(home);
+				const thirdFound = Promise.withResolvers<void>();
+				let homeLookups = 0;
+				const realpath = fs.promises.realpath;
+				vi.spyOn(fs.promises, "realpath").mockImplementation((async (target: string) => {
+					const resolved = await realpath(target);
+					if (target === home && ++homeLookups === 2) setImmediate(thirdFound.resolve);
+					return resolved;
+				}) as typeof fs.promises.realpath);
 
 				const failed = rejectionOf(
 					lspClient.ensureWorkspaceFolder(client, path.join(siblingRoot, "src", "target.py")),
 				);
 				await siblingWritten.promise;
 				const delivered = lspClient.ensureWorkspaceFolder(client, path.join(thirdRoot, "src", "target.py"));
-				// Finding the third checkout is real filesystem I/O; let it reach its delivery.
-				await Bun.sleep(50);
+				await thirdFound.promise;
 				failSibling.resolve();
 				expect(String(await failed)).toContain("EPIPE");
 				await delivered;
