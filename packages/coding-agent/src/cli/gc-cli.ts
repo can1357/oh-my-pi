@@ -1059,9 +1059,9 @@ function sqliteNumber(value: number | bigint | null | undefined): number {
 	return 0;
 }
 
-// One-off reads use `prepare` (no caching); field-cached reads use `db.query`.
-// An unfinalized `prepare` statement keeps the SQLite connection (and its db/-wal/-shm
-// files) open after close() until GC, and Windows refuses to delete or replace an open file.
+// Every statement below is scoped with `using`: an unfinalized statement keeps the SQLite
+// connection (and its db/-wal/-shm files) open after close() until GC, and Windows refuses
+// to delete or replace a file that is still open.
 function tableExists(db: Database, table: string): boolean {
 	using stmt = db.prepare<{ present: number }, [string]>(
 		"SELECT 1 AS present FROM sqlite_master WHERE type IN ('table','view') AND name = ?",

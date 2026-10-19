@@ -219,11 +219,16 @@ export class AgentStorage {
 		// Create AuthCredentialStore with our open database
 		this.#authStore = new SqliteAuthCredentialStore(this.#db);
 
-		this.#listSettingsStmt = this.#db.query<SettingsRow, []>("SELECT key, value FROM settings");
+		// Field-cached statements use `prepare()`, not `db.query()`: Bun memoizes one
+		// Statement per SQL string on the connection, so this store and the auth store
+		// sharing `#db` would receive the SAME object and closing either one would
+		// finalize it out from under the sibling. `prepare()` hands out a per-instance
+		// statement, so every finalize() in close() stays owned by this store.
+		this.#listSettingsStmt = this.#db.prepare<SettingsRow, []>("SELECT key, value FROM settings");
 		this.#upsertModelUsageStmt = this.#db.prepare(
 			`INSERT INTO model_usage (model_key, last_used_at) VALUES (?, ${SQLITE_NOW_EPOCH}) ON CONFLICT(model_key) DO UPDATE SET last_used_at = ${SQLITE_NOW_EPOCH}`,
 		);
-		this.#listModelUsageStmt = this.#db.query<ModelUsageRow, []>(
+		this.#listModelUsageStmt = this.#db.prepare<ModelUsageRow, []>(
 			"SELECT model_key FROM model_usage ORDER BY last_used_at DESC",
 		);
 		// Recency-weighted upsert: past MODEL_PERF_DECAY_AT samples, every new
@@ -241,7 +246,7 @@ ON CONFLICT(model_key) DO UPDATE SET
 		);
 		// `model_key TEXT PRIMARY KEY` admits NULL (SQLite rowid-table quirk); a NULL
 		// key would break every consumer that treats perf keys as selectors.
-		this.#listModelPerfStmt = this.#db.query<ModelPerfRow, []>(
+		this.#listModelPerfStmt = this.#db.prepare<ModelPerfRow, []>(
 			"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf WHERE model_key IS NOT NULL",
 		);
 		this.#usageStmts = {
@@ -257,7 +262,7 @@ ON CONFLICT(model_key) DO UPDATE SET
 				`INSERT INTO ${table} (name, count, last_used_at) VALUES (?, 1, ${SQLITE_NOW_EPOCH})
 ON CONFLICT(name) DO UPDATE SET count = ${table}.count + 1, last_used_at = ${SQLITE_NOW_EPOCH}`,
 			),
-			list: this.#db.query<UsageCountRow, []>(`SELECT name, count FROM ${table}`),
+			list: this.#db.prepare<UsageCountRow, []>(`SELECT name, count FROM ${table}`),
 		};
 	}
 
@@ -305,8 +310,8 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
 `);
 
-		// One-off reads use `prepare` (no caching); field-cached reads use `db.query`.
-		// An unfinalized `prepare` statement keeps the SQLite connection open after close().
+		// One-off statements are scoped with `using`: an unfinalized statement keeps the SQLite
+		// connection (and agent.db) open after close() until GC collects it.
 		using settingsInfoStmt = this.#db.prepare<{ name: string }, []>("PRAGMA table_info(settings)");
 		const settingsInfo = settingsInfoStmt.all();
 		const hasSettingsTable = settingsInfo.length > 0;
@@ -726,8 +731,8 @@ FROM model_usage_legacy
 				`SELECT rowid, timestamp, provider, model, output_tokens, duration, ttft${hasTier ? ", service_tier" : ""}
 FROM messages
 WHERE (timestamp < ?1 OR (timestamp = ?1 AND rowid < ?2))
-AND timestamp >= ?3
-AND duration > 0 AND output_tokens > 0 AND stop_reason != 'error'
+	AND timestamp >= ?3
+	AND duration > 0 AND output_tokens > 0 AND stop_reason != 'error'
 ORDER BY timestamp DESC, rowid DESC
 LIMIT ?4`,
 			);

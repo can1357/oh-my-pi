@@ -510,30 +510,35 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	constructor(db: Database) {
 		this.#db = db;
 		this.#initializeSchema();
-		this.#dataVersionStmt = this.#db.query<{ data_version: number }, []>("PRAGMA data_version");
-		this.#authRevisionStmt = this.#db.query<{ revision: number }, []>(
+		// Field-cached statements use `prepare()`, not `db.query()`: Bun memoizes one
+		// Statement per SQL string on the connection, so two stores sharing a borrowed
+		// connection would receive the SAME object and closing either store would
+		// finalize it out from under the sibling. `prepare()` hands out a per-instance
+		// statement, so every finalize() in close() stays owned by this store.
+		this.#dataVersionStmt = this.#db.prepare<{ data_version: number }, []>("PRAGMA data_version");
+		this.#authRevisionStmt = this.#db.prepare<{ revision: number }, []>(
 			"SELECT revision FROM auth_change_revision WHERE id = 1",
 		);
-		this.#localAuthRevisionStmt = this.#db.query<{ revision: number }, []>(
+		this.#localAuthRevisionStmt = this.#db.prepare<{ revision: number }, []>(
 			"SELECT revision FROM auth_local_change_revision WHERE id = 1",
 		);
 		this.#dataVersion = this.#readDataVersion();
 		this.#authRevision = this.#readAuthRevision();
 		this.#localAuthRevision = this.#readLocalAuthRevision();
 
-		this.#listActiveStmt = this.#db.query<AuthRow, []>(
+		this.#listActiveStmt = this.#db.prepare<AuthRow, []>(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE disabled_cause IS NULL ORDER BY id ASC",
 		);
-		this.#listActiveByProviderStmt = this.#db.query<AuthRow, [string]>(
+		this.#listActiveByProviderStmt = this.#db.prepare<AuthRow, [string]>(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL ORDER BY id ASC",
 		);
-		this.#listDisabledStmt = this.#db.query<DisabledAuthRow, []>(
+		this.#listDisabledStmt = this.#db.prepare<DisabledAuthRow, []>(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key, updated_at FROM auth_credentials WHERE disabled_cause IS NOT NULL ORDER BY id ASC",
 		);
-		this.#listDisabledByProviderStmt = this.#db.query<DisabledAuthRow, [string]>(
+		this.#listDisabledByProviderStmt = this.#db.prepare<DisabledAuthRow, [string]>(
 			"SELECT id, provider, credential_type, data, disabled_cause, identity_key, updated_at FROM auth_credentials WHERE provider = ? AND disabled_cause IS NOT NULL ORDER BY id ASC",
 		);
-		this.#insertStmt = this.#db.query<InsertedAuthIdRow, [string, string, string, string | null]>(
+		this.#insertStmt = this.#db.prepare<InsertedAuthIdRow, [string, string, string, string | null]>(
 			`INSERT INTO auth_credentials (provider, credential_type, data, identity_key, created_at, updated_at) VALUES (?, ?, ?, ?, ${SQLITE_NOW_EPOCH}, ${SQLITE_NOW_EPOCH}) RETURNING id`,
 		);
 		this.#updateStmt = this.#db.prepare(
@@ -570,10 +575,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			`UPDATE auth_credentials SET disabled_cause = ?, updated_at = ${SQLITE_NOW_EPOCH} WHERE provider = ? AND disabled_cause IS NULL`,
 		);
 		this.#hardDeleteStmt = this.#db.prepare("DELETE FROM auth_credentials WHERE id = ?");
-		this.#getCacheStmt = this.#db.query<CacheValueRow, [string]>(
+		this.#getCacheStmt = this.#db.prepare<CacheValueRow, [string]>(
 			`SELECT value FROM cache WHERE key = ? AND expires_at > ${SQLITE_NOW_EPOCH}`,
 		);
-		this.#getCacheIncludingExpiredStmt = this.#db.query<CacheValueRow, [string]>(
+		this.#getCacheIncludingExpiredStmt = this.#db.prepare<CacheValueRow, [string]>(
 			"SELECT value FROM cache WHERE key = ?",
 		);
 		this.#upsertCacheStmt = this.#db.prepare(
@@ -581,15 +586,15 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		);
 		this.#deleteCachePrefixStmt = this.#db.prepare("DELETE FROM cache WHERE substr(key, 1, ?) = ?");
 		this.#deleteExpiredCacheStmt = this.#db.prepare(`DELETE FROM cache WHERE expires_at <= ${SQLITE_NOW_EPOCH}`);
-		this.#getCredentialBlockStmt = this.#db.query<CredentialBlockStateRow, [number, string, string, number]>(
+		this.#getCredentialBlockStmt = this.#db.prepare<CredentialBlockStateRow, [number, string, string, number]>(
 			"SELECT blocked_until_ms, updated_at FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ? AND blocked_until_ms > ?",
 		);
-		this.#listCredentialBlockScopesStmt = this.#db.query<CredentialBlockScopeRow, [number, string, number]>(
+		this.#listCredentialBlockScopesStmt = this.#db.prepare<CredentialBlockScopeRow, [number, string, number]>(
 			"SELECT block_scope, blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND blocked_until_ms > ?",
 		);
 		// One statement for any number of ids: `json_each` keeps the caller's id
 		// order (`ids.key`) and the per-credential provider/scope order.
-		this.#listCredentialBlocksStmt = this.#db.query<CredentialBlockRow, [string, number, string, string]>(
+		this.#listCredentialBlocksStmt = this.#db.prepare<CredentialBlockRow, [string, number, string, string]>(
 			`SELECT b.credential_id, b.provider_key, b.block_scope, b.blocked_until_ms, b.updated_at
 			FROM json_each(?) AS ids
 			JOIN auth_credential_blocks AS b ON b.credential_id = ids.value
@@ -620,7 +625,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				updated_at = excluded.updated_at
 			WHERE auth_credential_refresh_leases.expires_at_ms <= ?`,
 		);
-		this.#getCredentialRefreshLeaseStmt = this.#db.query<RefreshLeaseRow, [number]>(
+		this.#getCredentialRefreshLeaseStmt = this.#db.prepare<RefreshLeaseRow, [number]>(
 			"SELECT expires_at_ms FROM auth_credential_refresh_leases WHERE credential_id = ?",
 		);
 		this.#renewCredentialRefreshLeaseStmt = this.#db.prepare(
@@ -629,7 +634,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#releaseCredentialRefreshLeaseStmt = this.#db.prepare(
 			"DELETE FROM auth_credential_refresh_leases WHERE credential_id = ? AND owner = ?",
 		);
-		this.#getCredentialStateStmt = this.#db.query<CredentialStateRow, [number]>(
+		this.#getCredentialStateStmt = this.#db.prepare<CredentialStateRow, [number]>(
 			"SELECT provider, credential_type, data, identity_key, disabled_cause FROM auth_credentials WHERE id = ?",
 		);
 		this.#holdsCredentialRefreshLeaseStmt = this.#db.prepare(
@@ -638,13 +643,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#insertUsageHistoryStmt = this.#db.prepare(
 			"INSERT INTO usage_history (recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		);
-		this.#lastUsageHistoryStmt = this.#db.query<UsageHistoryKeyRow, [string, string, string]>(
+		this.#lastUsageHistoryStmt = this.#db.prepare<UsageHistoryKeyRow, [string, string, string]>(
 			"SELECT id, recorded_at FROM usage_history WHERE provider = ? AND account_key = ? AND limit_id = ? ORDER BY recorded_at DESC LIMIT 1",
 		);
 		this.#updateUsageHistoryStmt = this.#db.prepare(
 			"UPDATE usage_history SET recorded_at = ?, email = ?, account_id = ?, label = ?, window_label = ?, used_fraction = ?, status = ?, resets_at = ? WHERE id = ?",
 		);
-		this.#listUsageHistoryStmt = this.#db.query<UsageHistoryRow, [number, string | null, string | null]>(
+		this.#listUsageHistoryStmt = this.#db.prepare<UsageHistoryRow, [number, string | null, string | null]>(
 			"SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at FROM usage_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) ORDER BY recorded_at ASC",
 		);
 	}
