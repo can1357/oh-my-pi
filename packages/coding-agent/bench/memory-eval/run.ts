@@ -172,16 +172,25 @@ async function runCommand(argv: string[]): Promise<void> {
 			let excluded: ExcludedQuestion[] = [];
 			const datasetRevision = await cachedRevision(dataset, dataDir);
 			const datasetDigest = await datasetSha256(dataset, dataDir);
+			// The loaders reopen the file: a replacement in between would leave the cases and the digest apart.
+			const sameSnapshot = async () => {
+				if ((await datasetSha256(dataset, dataDir)) !== datasetDigest) {
+					throw new Error("the prepared dataset file changed while it was loaded; result not written");
+				}
+			};
 			if (protocol === "upstream-compat") {
 				if (dataset !== "beam-100k" || !hasCompatOps(engine)) {
 					throw new Error("upstream-compat runs only with --engine mnemosyne --dataset beam-100k");
 				}
 				const count = cases ?? UPSTREAM_COMPAT_CONVERSATIONS;
-				const questions = await runUpstreamCompat(engine, await loadBeamUpstreamCompat(dataDir, count));
+				const conversations = await loadBeamUpstreamCompat(dataDir, count);
+				await sameSnapshot();
+				const questions = await runUpstreamCompat(engine, conversations);
 				// No warmup runs here.
 				run = { questions, warmupMs: 0, unstoredMessages: [] };
 			} else {
 				const loaded = await loadDataset(dataset, dataDir);
+				await sameSnapshot();
 				excluded = loaded.excluded;
 				const selected = cases === undefined ? loaded.cases : loaded.cases.slice(0, cases);
 				run = await runCases(engine, selected, protocol, k, storeRoot);
