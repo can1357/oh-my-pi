@@ -556,6 +556,8 @@ export class ExtensionRunner {
 	#suspendedExtensions = new Set<Extension>();
 	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
 	#suspensionListeners = new Set<() => void>();
+	/** Main runner whose suspensions this runner's drawing follows; see {@link followSuspension}. */
+	#suspensionParent: ExtensionRunner | undefined;
 	/**
 	 * Buffer for `credential_disabled` events received via {@link emitCredentialDisabled}
 	 * before {@link initialize} has run. Drained through {@link emit} once initialize sets
@@ -1366,17 +1368,39 @@ export class ExtensionRunner {
 		return this.extensions.flatMap(ext => ext.assistantThinkingRenderers);
 	}
 
+	/**
+	 * Draw with what `parent` (the main session's runner) leaves active: a subagent's runner loads
+	 * its own copies of the extensions, and a live `disabledExtensions` edit suspends only the main
+	 * copies. While this runner's transcript is on screen, its renderers, link schemes and link
+	 * clicks skip every extension `parent` has suspended. `undefined` draws with all of its own.
+	 */
+	followSuspension(parent: ExtensionRunner | undefined): void {
+		this.#suspensionParent = parent === this ? undefined : parent;
+	}
+
+	/** Whether the extension loaded from `resolvedPath` is loaded here and suspended. */
+	isExtensionSuspended(resolvedPath: string): boolean {
+		for (const extension of this.#suspendedExtensions) if (extension.resolvedPath === resolvedPath) return true;
+		return false;
+	}
+
+	/** Active extensions that draw: those {@link followSuspension}'s parent has not suspended. */
+	#drawingExtensions(): Extension[] {
+		const parent = this.#suspensionParent;
+		return parent ? this.extensions.filter(ext => !parent.isExtensionSuspended(ext.resolvedPath)) : this.extensions;
+	}
+
 	/** Registered assistant text renderers; none while `extensionRenderers.assistantText` is off. */
 	getAssistantTextRenderers(): AssistantTextRenderer[] {
 		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return [];
-		return this.extensions.flatMap(ext => ext.assistantTextRenderers);
+		return this.#drawingExtensions().flatMap(ext => ext.assistantTextRenderers);
 	}
 
 	/** Link schemes claimed with `registerLinkScheme`; none while `extensionRenderers.assistantText` is off. */
 	getLinkSchemes(): string[] {
 		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return [];
 		const owners = new Map<string, Extension>();
-		for (const ext of this.extensions) {
+		for (const ext of this.#drawingExtensions()) {
 			for (const scheme of ext.linkSchemes) {
 				const owner = owners.get(scheme);
 				if (!owner) owners.set(scheme, ext);
@@ -1409,7 +1433,7 @@ export class ExtensionRunner {
 		const colon = url.indexOf(":");
 		if (colon <= 0) return false;
 		const scheme = url.slice(0, colon).toLowerCase();
-		const owner = this.extensions.find(ext => ext.linkSchemes.includes(scheme));
+		const owner = this.#drawingExtensions().find(ext => ext.linkSchemes.includes(scheme));
 		if (!owner) return false;
 		const handlers = owner.handlers.get("link_activate");
 		if (!handlers || handlers.length === 0) return true;

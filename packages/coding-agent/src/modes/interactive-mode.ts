@@ -3880,10 +3880,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	/** Push the extension link schemes to the markdown renderer; returns whether that changed. */
+	/**
+	 * Push the viewed session's extension link schemes to the markdown renderer; returns whether that
+	 * changed. A focused subagent's runner draws with what the main runner leaves active.
+	 */
 	#applyExtensionLinks(): boolean {
 		const before = extensionLinksVersion();
-		setExtensionLinks(this.viewSession.extensionRunner?.getLinkSchemes() ?? []);
+		const viewed = this.viewSession.extensionRunner;
+		viewed?.followSuspension(this.session.extensionRunner);
+		setExtensionLinks(viewed?.getLinkSchemes() ?? []);
 		onExtensionLinkDrawn(this.#showLinkKeyHint);
 		setExtensionLinkPicking(this.#linkPickable);
 		return extensionLinksVersion() !== before;

@@ -12,8 +12,6 @@ let schemes: ReadonlySet<string> = new Set();
 let version = 0;
 let drawnListener: (() => void) | undefined;
 let pickingProvider: (() => boolean) | undefined;
-/** Numbers each drawn link's marker, so two adjacent labels of one URL stay apart. */
-let drawnLinks = 0;
 // Tern's native view routes its own link clicks, so markers are drawn only for a plain terminal.
 onNativeRenderingChange(() => {
 	version++;
@@ -24,8 +22,9 @@ const OSC8_PATTERN = /\x1b\]8;([^;\x07\x1b]*);([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 
 /**
  * The OSC 8 params tagging omp's own markers, so they are stripped from terminal output even after
- * their scheme is no longer registered. Each drawn link gets its own `-<n>` suffix; a label wrapped
- * across rows repeats its marker, suffix included, on every row.
+ * their scheme is no longer registered. Each drawn link gets its own `-<n>` suffix, derived from the
+ * link itself so every render of the same text draws the same bytes; a label wrapped across rows
+ * repeats its marker, suffix included, on every row.
  */
 const MARKER_ID = "id=omp-extension-link";
 const MARKER_PARAMS_PATTERN = /^id=omp-extension-link(?:-\d+)?$/;
@@ -91,14 +90,16 @@ export function extensionLinkScheme(href: string): string | undefined {
 
 /**
  * Draw an extension link's label: wrapped in the OSC 8 marker {@link extensionLinkLabels} reads back
- * in a plain terminal, plain in Tern's native view. Never followed by a ` (url)` suffix.
+ * in a plain terminal, plain in Tern's native view. Never followed by a ` (url)` suffix. `key` tells
+ * apart links of one URL drawn near each other (e.g. the label and its position in the paragraph);
+ * it must not change between renders of the same text, or rows rendered twice stop matching.
  */
-export function formatExtensionLink(label: string, href: string): string {
+export function formatExtensionLink(label: string, href: string, key: string): string {
 	if (isNativeRendering()) return label;
 	const safe = href.replaceAll("\x1b", "").replaceAll("\x07", "");
 	if (!safe) return label;
 	drawnListener?.();
-	return `${MARKER_OPEN}-${++drawnLinks};${safe}\x07${label}\x1b]8;;\x07`;
+	return `${MARKER_OPEN}-${Bun.hash.crc32(`${safe}\0${key}`)};${safe}\x07${label}\x1b]8;;\x07`;
 }
 
 /** Hint tag letters, home row first. */

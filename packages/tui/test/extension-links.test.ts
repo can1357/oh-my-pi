@@ -1,6 +1,8 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { type Component, TUI } from "@oh-my-pi/pi-tui";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { Markdown } from "@oh-my-pi/pi-tui/components/markdown";
 import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import {
@@ -157,6 +159,38 @@ describe("extension-owned links", () => {
 			tui.stop();
 			setTerminalImageProtocol(originalProtocol);
 		}
+	});
+
+	it("lets a streaming reply with extension links retire settled rows to scrollback", () => {
+		setExtensionLinks(["demo"]);
+		const paragraphs = Array.from(
+			{ length: 6 },
+			(_, index) => `Paragraph ${index} has [a link](demo:open/${index}) and has settled.`,
+		).join("\n\n");
+		const reply = new AssistantMessageComponent();
+		for (let end = 30; end <= paragraphs.length; end += 30) {
+			const message: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: paragraphs.slice(0, end) }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				stopReason: "stop",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: 1,
+			};
+			reply.updateContent(message, { transient: true });
+			reply.render(80);
+		}
+		// Settled rows are published only when re-rendering them draws the same bytes, markers included.
+		expect(reply.getTranscriptStableRows().length).toBeGreaterThan(0);
 	});
 });
 

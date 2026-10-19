@@ -612,6 +612,13 @@ describe("inline click-to-focus geometry", () => {
 		await handled.promise;
 		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("OPENED")));
 		expect(plainRows(term.getViewport()).some(row => row.includes("Open OPENED now."))).toBe(true);
+
+		// Disabling the extension live suspends only the main copy; the subagent's copy stops drawing too.
+		mainRunner.setSuspendedExtensions(() => true);
+		await Promise.resolve();
+		const chat = plainRows(mode.chatContainer.render(120)).join("\n");
+		expect(chat).toContain("Open the details (demo:toggle) now.");
+		expect(await childRunner.emitLinkActivate("demo:toggle")).toBe(false);
 	});
 
 	it("re-runs assistant text renderers when Tern's native view takes the screen and hands it back", async () => {

@@ -4085,6 +4085,9 @@ export class Markdown implements Component {
 		const markHtmlItemWhenContent = (text: string): void => {
 			markCurrentHtmlItemContent(htmlState, text);
 		};
+		// Numbers extension links within this run, so same-URL neighbours draw distinct markers that
+		// stay identical across renders of the same text.
+		let extensionLinkIndex = 0;
 
 		for (const token of collapseInlineHtml(tokens)) {
 			const lineStart: boolean = trimLeadingWhitespace;
@@ -4146,7 +4149,8 @@ export class Markdown implements Component {
 					const href = typeof token.href === "string" ? token.href : "";
 					// An extension owns this link: no suffix, and no hyperlink the terminal could open.
 					if (href && extensionLinkScheme(href)) {
-						result += formatExtensionLink(styledLinkText, href) + stylePrefix;
+						const key = `${token.text}\0${extensionLinkIndex++}`;
+						result += formatExtensionLink(styledLinkText, href, key) + stylePrefix;
 						break;
 					}
 					const target = (href && this.#theme.resolveLink?.(href)) || href;
