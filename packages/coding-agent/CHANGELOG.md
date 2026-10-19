@@ -8,6 +8,9 @@
 - Added `/forget-approvals` to forget every file and folder approval Ask and remember has recorded ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
 - Extension `ui.approve()` hosts can render the new `prompt.grants` choices and answer `{ grant, always }`; hosts that ignore them keep answering `once`/`session`/`deny` ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
 - Extension and custom tools can declare `approvalCacheTargets` to take part in Ask and remember grants ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
+- Added agent persona cycling: agents with `mode: "primary"` in their frontmatter join a `Tab` / `Ctrl+Tab` cycle in the main chat editor (while the editor is empty), `--agent <name>` picks the starting persona, and the `model` and `order` frontmatter fields set the model a persona loads with and its place in the cycle ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Added an `agent_persona` status-line segment showing the active persona, and `activePersonaName` on `ExtensionContext` for extensions ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Added persona restore on `/resume` and `--resume`: saved messages now record the active persona, and a resumed session reselects the last one, falling back to the first primary agent ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
 
 ### Fixed
 
@@ -25,6 +28,8 @@
 - Fixed an edit after a restart replacing a line that `read` or `grep` had shown cut at the column cap and silently dropping the rest of that line; such edits now ask for a full `:raw` read of the line first, while edits to lines within the cap still apply ([#16171](https://github.com/can1357/oh-my-pi/issues/16171))
 - Fixed Enter on an unknown slash command such as `/not-a-command` running a command whose description happened to match it (e.g. `/loop`, which then resent every later prompt after each turn); Enter now sends what you typed, including as the deny-and-steer message for a pending tool approval, unless you select a suggestion first ([#16265](https://github.com/can1357/oh-my-pi/issues/16265))
 - Fixed `read` of web pages dropping collapsed sections such as accordion and expander panels (e.g. a product page's "Item details" table); content in `<template>`, `<noscript>` and scripts stays out ([#16246](https://github.com/can1357/oh-my-pi/issues/16246))
+- Fixed the startup persona overriding an explicit `--model` or thinking level with its own; explicit startup options now win ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Fixed the active persona's instructions being dropped from the system prompt by any later rebuild, such as a tool-set or model change or the rebuild before each turn ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
 - Fixed `/mcp reauth` and `/mcp add` opening an unrelated origin-root authorization server's login page when the authorization server an MCP server advertises in its protected-resource metadata has invalid metadata; discovery now uses only the advertised servers and reports the issuer mismatch naming the server ([#16339](https://github.com/can1357/oh-my-pi/issues/16339))
 
 ## [18.12.2] - 2026-10-18

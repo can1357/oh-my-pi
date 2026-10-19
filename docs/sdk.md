@@ -229,6 +229,7 @@ const unsubscribe = session.subscribe((event) => {
 - `retry_fallback_applied` / `retry_fallback_succeeded`
 - `model_changed`
 - `thinking_level_changed`
+- `persona_changed` (`personaName: string | null`; optional `source`: `"bundled" | "user" | "project"`)
 - `ttsr_triggered`
 - `todo_reminder` / `todo_auto_clear`
 - `irc_message`

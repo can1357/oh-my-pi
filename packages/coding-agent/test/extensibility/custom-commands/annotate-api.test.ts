@@ -441,6 +441,7 @@ new file mode 100644
 			undefined,
 			undefined,
 			undefined,
+			undefined,
 			createAnnotationsAPI,
 		);
 		const scopedCustom = vi.fn(async () => undefined);

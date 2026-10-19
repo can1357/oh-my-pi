@@ -22,6 +22,7 @@ export interface ActiveRepoContext {
 
 export interface StatusLineSession {
 	state: { model?: Model; thinkingLevel?: ThinkingLevel; messages: readonly AgentMessage[] };
+	activePersonaName: string | null;
 	model?: Model;
 	messages?: readonly AgentMessage[];
 	sessionFile?: string;
