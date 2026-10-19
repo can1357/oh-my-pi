@@ -6,8 +6,14 @@ Usage (venv-lme python, numpy<2 because the official code uses np.asfarray):
 """
 
 import json
+import os
 import sys
 from pathlib import Path
+
+# Before any non-stdlib import, pinned_source included: an override tree could shadow it or NumPy for eval_utils.
+for name in ("PYTHONPATH", "PYTHONHOME"):
+	if os.environ.get(name):
+		sys.exit(f"lme_official_check.py: refusing to run with {name} set; unset it so venv-lme's packages are imported")
 
 from pinned_source import require_pinned
 
