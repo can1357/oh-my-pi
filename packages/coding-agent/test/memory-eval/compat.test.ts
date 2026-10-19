@@ -34,6 +34,7 @@ function fakeEngine(): Fake {
 		vectorCount: async () => contents.length,
 		vectorCoverage: async ids => ids.length,
 		sleep: async () => {},
+		unembeddedSummaries: async () => 0,
 		recall: async () => [],
 		close: async () => {},
 		dispose: async () => {},

@@ -90,6 +90,10 @@ class Engine:
 					break
 		return covered
 
+	def op_unembedded_summaries(self, _params):
+		ids = [row[0] for row in self.beam.conn.execute("SELECT id FROM episodic_memory")]
+		return len(ids) - self.op_vector_coverage({"ids": ids})
+
 	def op_sleep(self, _params):
 		self.beam.sleep(force=True)
 

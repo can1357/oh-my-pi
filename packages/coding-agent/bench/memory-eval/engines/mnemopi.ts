@@ -159,6 +159,18 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 				b.sleep(false);
 				await b.flushExtractions();
 			}),
+		unembeddedSummaries: () =>
+			scoped(async () => {
+				const b = open();
+				await b.flushExtractions();
+				return (
+					b.db
+						.query<{ n: number }, []>(
+							"SELECT COUNT(*) AS n FROM episodic_memory e WHERE NOT EXISTS (SELECT 1 FROM memory_embeddings m WHERE m.memory_id = e.id)",
+						)
+						.get()?.n ?? 0
+				);
+			}),
 		recall: (question, k) =>
 			scoped(async () => {
 				const b = open();
