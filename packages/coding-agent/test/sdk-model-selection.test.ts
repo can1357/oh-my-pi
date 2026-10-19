@@ -10,6 +10,7 @@ import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-model
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -17,7 +18,7 @@ import {
 	rebuildScopedModels,
 	resolveScopedModels,
 } from "@oh-my-pi/pi-coding-agent/main";
-import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
+import { createAgentSession, type ExtensionFactory, resolvePrewalkTarget } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
@@ -414,6 +415,169 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		} finally {
 			await session.dispose();
 		}
+	});
+
+	test("refuses a modelRoles.default that names a denied model instead of auto-picking another", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+		authStorage.keys.setRuntime("openai", "openai-test-key");
+		const settings = Settings.isolated({
+			enabledModels: ["openai/*"],
+			disabledModels: ["openai/gpt-4o-*"],
+			modelRoles: { default: "openai/gpt-4o-mini" },
+		});
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "denied-default-models.yml"), {
+			settings,
+		});
+
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+
+		try {
+			expect(session.model).toBeUndefined();
+			expect(modelFallbackMessage).toBe(
+				'Model "openai/gpt-4o-mini" is disabled by disabledModels rule "openai/gpt-4o-*". Remove or narrow that rule to use it.',
+			);
+			// The stored role is never rewritten because it is denied.
+			expect(settings.getModelRole("default")).toBe("openai/gpt-4o-mini");
+			expect(cfgEnabledModels.get(settings)).toEqual(["openai/*"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	function deniedModelOptions(sessionManager = SessionManager.inMemory()) {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("openai", "openai-test-key");
+		const settings = Settings.isolated({ disabledModels: ["openai/gpt-4o-mini"] });
+		return {
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "denied-models.yml"), { settings }),
+			settings,
+			sessionManager,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		};
+	}
+	const deniedMiniMessage =
+		'Model "openai/gpt-4o-mini" is disabled by disabledModels rule "openai/gpt-4o-mini". Remove or narrow that rule to use it.';
+
+	test("refuses an explicit SDK model the session denies, naming the rule", async () => {
+		const mini = getBundledModel("openai", "gpt-4o-mini");
+		if (!mini) throw new Error("missing bundled model");
+		await expect(createAgentSession({ ...deniedModelOptions(), model: mini })).rejects.toThrow(deniedMiniMessage);
+	});
+
+	test("never restores a denied session model and names the rule in the resume failure", async () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendModelChange("openai/gpt-4o-mini");
+		await expect(createAgentSession(deniedModelOptions(sessionManager))).rejects.toThrow(
+			`Could not restore model openai/gpt-4o-mini: ${deniedMiniMessage}`,
+		);
+	});
+
+	test("skips a denied startup fallback target for the next one, never a fuzzy sibling", async () => {
+		const options = deniedModelOptions();
+		// The configured default has no credential, so startup walks its fallback chain.
+		const settings = Settings.isolated({
+			disabledModels: ["openai/gpt-4o"],
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+			"retry.fallbackChains": { default: ["openai/gpt-4o", "openai/gpt-4.1"] },
+		});
+		const { session } = await createAgentSession({
+			...options,
+			settings,
+			modelRegistry: new ModelRegistry(options.authStorage, path.join(tempDir, "denied-fallback.yml"), { settings }),
+		});
+		try {
+			expect(session.model?.id).toBe("gpt-4.1");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("skips a denied deferred model pattern for the next one, and names the rule when none remains", async () => {
+		const next = await createAgentSession({
+			...deniedModelOptions(),
+			modelPattern: ["openai/gpt-4o-mini", "openai/gpt-4o"],
+		});
+		try {
+			expect(next.session.model?.id).toBe("gpt-4o");
+		} finally {
+			await next.session.dispose();
+		}
+
+		const none = await createAgentSession({ ...deniedModelOptions(), modelPattern: "openai/gpt-4o-mini" });
+		try {
+			expect(none.modelFallbackMessage).toContain(deniedMiniMessage);
+		} finally {
+			await none.session.dispose();
+		}
+	});
+
+	test("refuses a prewalk target the session denies even when the registry's settings allow it", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("openai", "openai-test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "prewalk-models.yml"), {
+			settings: Settings.isolated({}),
+		});
+		const settings = Settings.isolated({ disabledModels: ["openai/gpt-4o-mini"] });
+		const preferences = getModelMatchPreferences(settings);
+
+		const denied = await resolvePrewalkTarget(
+			["openai/gpt-4o-mini"],
+			"openai/gpt-4o-mini",
+			modelRegistry,
+			preferences,
+			new Set(),
+			{ settings },
+		);
+		expect(denied.prewalk).toBeUndefined();
+		expect(denied.disabledModel?.rule).toBe("openai/gpt-4o-mini");
+		expect(denied.warnings.join("\n")).toContain('disabledModels rule "openai/gpt-4o-mini"');
+
+		const allowed = await resolvePrewalkTarget(
+			["openai/gpt-4o"],
+			"openai/gpt-4o",
+			modelRegistry,
+			preferences,
+			new Set(),
+			{
+				settings,
+			},
+		);
+		expect(allowed.prewalk?.target.id).toBe("gpt-4o");
 	});
 
 	test("defers online runtime discovery until the UI starts it after first paint", async () => {
