@@ -15,11 +15,11 @@ for name in ("PYTHONPATH", "PYTHONHOME"):
 	if os.environ.get(name):
 		sys.exit(f"lme_official_check.py: refusing to run with {name} set; unset it so venv-lme's packages are imported")
 
-from pinned_source import require_pinned
+from pinned_source import pinned_snapshot
 
 LME_REPO = Path.home() / ".cache" / "omp-memory-eval" / "src" / "LongMemEval"
-require_pinned(LME_REPO, "9e0b455f4ef0e2ab8f2e582289761153549043fc")
-sys.path.insert(0, str(LME_REPO / "src" / "retrieval"))
+LME_SOURCE = pinned_snapshot(LME_REPO, "9e0b455f4ef0e2ab8f2e582289761153549043fc")
+sys.path.insert(0, str(LME_SOURCE / "src" / "retrieval"))
 from eval_utils import evaluate_retrieval, evaluate_retrieval_turn2session  # noqa: E402
 
 TOL = 1e-12

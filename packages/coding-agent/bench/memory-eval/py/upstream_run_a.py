@@ -3,7 +3,8 @@
 Run with venv-engine's python: upstream_run_a.py --out <dump.json>
 
 Run B is the harness's `upstream-compat` protocol (run.ts); `run.ts calibration-check` pairs the two dumps. Nothing under
-the upstream checkout is modified: the module is imported as is, with four wrappers installed first:
+the upstream checkout is modified: the module is imported as is, from a private copy of the pinned commit (see
+pinned_source.py), with four wrappers installed first:
 setrlimit (clamped to the hard limit), load_dataset (pinned BEAM revision, harness cache dir), BeamMemory.recall and
 BeamMemory.consolidate_to_episodic (recorded, because upstream swallows their exceptions).
 """
@@ -28,12 +29,11 @@ except ImportError:
 	# Upstream's benchmark imports it unconditionally, so Run A cannot run where CPython lacks it (native Windows).
 	sys.exit("upstream_run_a.py: upstream's benchmark needs the Unix-only `resource` module; run calibration on Linux, macOS or WSL")
 
-from pinned_source import require_pinned
+from pinned_source import pinned_snapshot
 
 CACHE = Path.home() / ".cache" / "omp-memory-eval"
 UPSTREAM_REPO = CACHE / "src" / "mnemosyne"
 UPSTREAM_COMMIT = "e871f39480b9b9156faa4396162f7ec1f3b11525"
-UPSTREAM_TESTS = UPSTREAM_REPO / "tests"
 BEAM_REVISION = "3205395e897e7318c7b094ef4e6047b9b82dbb03"
 TOP_K = 10
 
@@ -120,8 +120,8 @@ def recording_consolidate(self, *args, **kwargs):
 
 BeamMemory.consolidate_to_episodic = recording_consolidate
 
-require_pinned(UPSTREAM_REPO, UPSTREAM_COMMIT)
-sys.path.insert(0, str(UPSTREAM_TESTS))
+# Upstream's benchmark, imported from a private copy of the pinned commit rather than the mutable clone.
+sys.path.insert(0, str(pinned_snapshot(UPSTREAM_REPO, UPSTREAM_COMMIT) / "tests"))
 import benchmark_vs_vectordbs as up  # noqa: E402
 
 conversations = up.load_beam_data(["100K"], max_convs=3)["100K"]

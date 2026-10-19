@@ -21,9 +21,9 @@ git clone https://github.com/mnemosyne-oss/mnemosyne && git -C mnemosyne checkou
 git clone https://github.com/xiaowu0162/LongMemEval && git -C LongMemEval checkout 9e0b455f4ef0e2ab8f2e582289761153549043fc
 ```
 
-Check: `$C/venv-engine/bin/python -c "import mnemosyne, fastembed; print(mnemosyne.__version__)"` prints `4.0.0b4`. Results record the `fastembed` and `onnxruntime` versions that produced the vectors (Mnemosyne, and Mnemopi with `--embedder python`), since another numerical runtime can reorder near-ties. `upstream_run_a.py` and `lme_official_check.py` refuse a source clone that is not at its pinned commit or has local changes.
+Check: `$C/venv-engine/bin/python -c "import mnemosyne, fastembed; print(mnemosyne.__version__)"` prints `4.0.0b4`. Results record the `fastembed` and `onnxruntime` versions that produced the vectors (Mnemosyne, and Mnemopi with `--embedder python`), since another numerical runtime can reorder near-ties.
 
-The source-pin check does not trust Git's view of the working tree, which settings inside the clone can change (status options, `assume-unchanged`/`skip-worktree`, clean filters, `core.worktree`, ignore rules). It reads the pinned commit's file list from the object store, with replace refs and global/system config disabled. It hashes every tracked file on disk itself and refuses any mismatch, and any other file in the checkout outside `.git` and `__pycache__`. Once the checkout passes, the script compiles bytecode into a fresh private cache directory, so an existing `__pycache__` in the checkout is never read. CPython would trust such a cache by source timestamp and size alone.
+`upstream_run_a.py` and `lme_official_check.py` never import from these clones' working trees. Those can be edited during a run, hold CRLF line endings on Windows, or hide edits from `git status` through settings in the clone (index flags, filters, `core.worktree`, ignore rules). Each script copies its pinned commit's files out of the clone's object store into a private temporary directory, with replace refs and global/system Git config disabled. It checks every blob against its id and imports from that copy. A clone that lacks the pinned commit, or whose object for a pinned file does not match its id, is refused.
 
 ## Datasets
 
