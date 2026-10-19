@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { type BeamMemoryState, initBeam } from "@oh-my-pi/pi-mnemopi/core/beam";
+import { recall } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { PolyphonicRecallEngine, polyphonicRecall } from "@oh-my-pi/pi-mnemopi/core/polyphonic-recall";
 import { closeQuietly, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
 import { currentLoopPhase } from "@oh-my-pi/pi-utils";
@@ -49,6 +50,21 @@ function insertWorking(
 		[id, content, timestamp, sessionId, importance, scope, timestamp],
 	);
 }
+function setVeracity(beam: BeamMemoryState, id: string, veracity: string): void {
+	beam.db.run("UPDATE working_memory SET veracity = ? WHERE id = ?", [veracity, id]);
+}
+function insertEpisodic(beam: BeamMemoryState, id: string, content: string, tier: number): void {
+	beam.db.run(
+		"INSERT INTO episodic_memory (id, content, source, timestamp, session_id, importance, veracity, tier) VALUES (?, ?, 'test', ?, ?, 0.5, 'stated', ?)",
+		[id, content, new Date().toISOString(), beam.sessionId, tier],
+	);
+}
+function embed(beam: BeamMemoryState, id: string, vector: readonly number[]): void {
+	beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+		id,
+		JSON.stringify(vector),
+	]);
+}
 function seedPolyphonicFixture(beam: BeamMemoryState): PolyphonicRecallEngine {
 	const engine = new PolyphonicRecallEngine({ db: beam.db, sessionId: beam.sessionId, channelId: beam.channelId });
 	const old = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
@@ -82,11 +98,21 @@ function seedPolyphonicFixture(beam: BeamMemoryState): PolyphonicRecallEngine {
 	return engine;
 }
 
+const ORIGINAL_TRUST_ENV = {
+	MNEMOPI_TOOL_WEIGHT: process.env.MNEMOPI_TOOL_WEIGHT,
+	MNEMOPI_TIER3_WEIGHT: process.env.MNEMOPI_TIER3_WEIGHT,
+};
+
 afterEach(() => {
 	delete process.env.MNEMOPI_VOICE_VECTOR;
 	delete process.env.MNEMOPI_VOICE_GRAPH;
 	delete process.env.MNEMOPI_VOICE_FACT;
 	delete process.env.MNEMOPI_VOICE_TEMPORAL;
+	for (const key in ORIGINAL_TRUST_ENV) {
+		const value = ORIGINAL_TRUST_ENV[key as keyof typeof ORIGINAL_TRUST_ENV];
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
 });
 
 describe("PolyphonicRecallEngine", () => {
@@ -274,6 +300,132 @@ describe("PolyphonicRecallEngine", () => {
 			const results = engine.recall("Alice", null, 5);
 
 			expect(results.map(result => result.id)).toEqual(["wm-global-fact"]);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("omits a false-veracity memory however it was reached, with or without a linear baseline", async () => {
+		// m1 arrives via vector+fact, m2 via vector+graph, m3 via vector+temporal: each voice route is covered.
+		for (const target of ["m1", "m2", "m3"]) {
+			const beam = makeBeam();
+			try {
+				const engine = seedPolyphonicFixture(beam);
+				const linear = await recall(beam, "Alice recent", 10, { queryEmbedding: null });
+				expect(linear.map(row => row.id)).toContain(target);
+				expect(
+					engine
+						.recall("Alice recent", [1, 0], 10)
+						.map(result => result.id)
+						.toSorted(),
+				).toEqual(["m1", "m2", "m3"]);
+
+				setVeracity(beam, target, "false");
+				// A baseline ranked before the row was relabelled still carries the row, now stored as false.
+				const staleBaseline = linear.map(row => (row.id === target ? { ...row, veracity: "stated" } : row));
+				const eligible = ["m1", "m2", "m3"].filter(id => id !== target);
+				for (const options of [{}, { baseline: staleBaseline }]) {
+					const ids = engine.recall("Alice recent", [1, 0], 10, 4000, options).map(result => result.id);
+					expect(ids).not.toContain(target);
+					expect(ids.toSorted()).toEqual(eligible);
+				}
+			} finally {
+				closeQuietly(beam.db);
+			}
+		}
+	});
+
+	it("omits zero-weight facts supplied in a caller's hybrid baseline", () => {
+		const beam = makeBeam();
+		try {
+			const engine = new PolyphonicRecallEngine({ db: beam.db, sessionId: beam.sessionId });
+			const results = engine.recall("opaque fact lookup", null, 5, 4000, {
+				includeFacts: true,
+				baseline: [
+					{ id: "bad-fact", content: "untrusted claim", score: 1, tier_label: "fact", veracity: "false" },
+					{ id: "good-fact", content: "eligible claim", score: 0.5, tier_label: "fact", veracity: "stated" },
+				],
+			});
+			expect(results.map(result => result.id)).toEqual(["good-fact"]);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("omits a memory whose veracity weight override is 0 without reweighting nonzero fusion", () => {
+		const beam = makeBeam();
+		try {
+			const engine = seedPolyphonicFixture(beam);
+			setVeracity(beam, "m1", "tool");
+			// Default tool weight is nonzero: the row stays and fusion order is the unweighted RRF order.
+			expect(engine.recall("Alice recent", [1, 0], 10).map(result => result.id)).toEqual(["m2", "m1", "m3"]);
+
+			process.env.MNEMOPI_TOOL_WEIGHT = "0";
+			expect(engine.recall("Alice recent", [1, 0], 10).map(result => result.id)).toEqual(["m2", "m3"]);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("omits an episodic memory whose degradation tier weight is 0", () => {
+		const beam = makeBeam();
+		try {
+			insertEpisodic(beam, "ep-t1", "harbor crane manifest alpha", 1);
+			insertEpisodic(beam, "ep-t3", "harbor crane manifest bravo", 3);
+			embed(beam, "ep-t1", [1, 0]);
+			embed(beam, "ep-t3", [1, 0]);
+			const engine = new PolyphonicRecallEngine({ db: beam.db, sessionId: beam.sessionId });
+			expect(engine.recall("harbor crane", [1, 0], 10).map(result => result.id)).toEqual(["ep-t1", "ep-t3"]);
+
+			process.env.MNEMOPI_TIER3_WEIGHT = "0";
+			expect(engine.recall("harbor crane", [1, 0], 10).map(result => result.id)).toEqual(["ep-t1"]);
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("keeps distinct memories whose content differs by one hostname or is identical", () => {
+		const beam = makeBeam();
+		try {
+			const hostPair = (host: string): string =>
+				`Rotate the production database credentials on host ${host}.example.com before the quarterly audit window closes, then alert owners and confirm the rollback checklist with security review`;
+			const candidate = (letter: string): string =>
+				`Release candidate ${letter} passes the full regression suite on staging with zero flaky failures across every shard today`;
+			const same = "Identical preview content shared by two distinct memories that must both stay recallable";
+			const rows: [string, string][] = [
+				["host-1", hostPair("db1")],
+				["host-2", hostPair("db2")],
+				["cand-a", candidate("A")],
+				["cand-b", candidate("B")],
+				["same-1", same],
+				["same-2", same],
+			];
+			for (const [id, content] of rows) {
+				insertWorking(beam, id, content);
+				embed(beam, id, [1, 0]);
+			}
+			process.env.MNEMOPI_VOICE_GRAPH = "0";
+			process.env.MNEMOPI_VOICE_FACT = "0";
+			process.env.MNEMOPI_VOICE_TEMPORAL = "0";
+
+			const results = polyphonicRecall(beam, "database credentials", 10, { queryEmbedding: [1, 0] });
+
+			expect(results.map(result => result.id).toSorted()).toEqual(rows.map(([id]) => id).toSorted());
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("returns one result for a memory repeated across voices and baseline entries", async () => {
+		const beam = makeBeam();
+		try {
+			const engine = seedPolyphonicFixture(beam);
+			const linear = await recall(beam, "Alice recent", 10, { queryEmbedding: null });
+			const baseline = [...linear, ...linear];
+
+			const ids = engine.recall("Alice recent", [1, 0], 10, 4000, { baseline }).map(result => result.id);
+
+			expect(ids.toSorted()).toEqual(["m1", "m2", "m3"]);
 		} finally {
 			closeQuietly(beam.db);
 		}

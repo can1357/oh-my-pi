@@ -4,6 +4,7 @@ import { DENSE_CANDIDATE_LIMIT, type Env, envDisabled, polyphonicRecallEnabled }
 import { closeQuietly, type DatabasePath, openDatabase } from "../db";
 import { backfillConsolidatedFacts, ensureVeracityConsolidator } from "./beam/consolidate";
 import { cachedEmbeddings } from "./beam/embedding-cache";
+import { recallTrustWeight, resolveTrustWeights, type TrustWeights } from "./beam/recall-trust";
 import type { BeamMemoryState, JsonValue, Metadata, RecallResult, RecallTierLabel } from "./beam/types";
 import { EpisodicGraph, extractProperNouns } from "./episodic-graph";
 import { STOP_WORDS } from "./synonyms";
@@ -116,7 +117,6 @@ export const POLYPHONIC_MAX_COMBINED_SCORE = POLYPHONIC_VOICES.length / (POLYPHO
 const TEMPORAL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 /** Whole words only: `blast` or `Chicago` must not read as a time reference. */
 const TEMPORAL_QUERY = /\b(?:yesterday|today|recent(?:ly)?|last|latest|this (?:week|month)|ago|before)\b/i;
-const NEAR_DUPLICATE_JACCARD = 0.8;
 /**
  * Cosine a memory needs to count as a vector-voice hit: the bar linear recall applies
  * to candidates with no keyword match. Without it the voice's nearest neighbours pad
@@ -227,19 +227,6 @@ function factSubjectCandidates(query: string): string[] {
 	return [...seen];
 }
 
-function contentTokens(text: string): Set<string> {
-	const out = new Set<string>();
-	for (const token of queryTokens(text)) if (token.length >= 2) out.add(token);
-	return out;
-}
-
-function tokenJaccard(left: ReadonlySet<string>, right: ReadonlySet<string>): number {
-	if (left.size === 0 || right.size === 0) return 0;
-	let intersection = 0;
-	for (const token of left) if (right.has(token)) intersection++;
-	return intersection / (left.size + right.size - intersection);
-}
-
 /** Milliseconds for the temporal voice anchor; `null` means "now, open-ended". */
 function anchorTime(queryTime: string | Date | null | undefined): number | null {
 	if (queryTime === null || queryTime === undefined) return null;
@@ -291,8 +278,9 @@ export class PolyphonicRecallEngine {
 		const combined = this.combineVoices(...voices, this.temporalVoice(query, surfaced, options));
 		const baselineById = new Map<string, RecallResult>();
 		for (const result of baseline) if (!baselineById.has(result.id)) baselineById.set(result.id, result);
+		const trust = resolveTrustWeights();
 		const reranked = this.diversityRerank(combined, topK, candidate =>
-			this.#hydrate(candidate, baselineById, options),
+			this.#hydrate(candidate, baselineById, options, trust),
 		);
 		return this.assembleContext(reranked, contextBudget);
 	}
@@ -553,8 +541,8 @@ export class PolyphonicRecallEngine {
 	}
 	/**
 	 * Walk fused candidates best-first, hydrating each and skipping rows that are not
-	 * visible or whose content near-duplicates an already selected row, until `topK`
-	 * rows are selected.
+	 * visible or are weighted 0, until `topK` rows are selected. Distinct memory ids are
+	 * never merged, whatever their content: the id is the identity.
 	 */
 	diversityRerank(
 		results: ReadonlyMap<string, PolyphonicResult>,
@@ -565,16 +553,11 @@ export class PolyphonicRecallEngine {
 			(a, b) => b.combinedScore - a.combinedScore || a.memoryId.localeCompare(b.memoryId),
 		);
 		const selected: PolyphonicMemoryResult[] = [];
-		const selectedTokens: Set<string>[] = [];
 		const limit = Math.max(0, Math.trunc(topK));
 		for (const candidate of sorted) {
 			if (selected.length >= limit) break;
 			const hydrated = hydrate(candidate);
-			if (hydrated === null) continue;
-			const tokens = contentTokens(hydrated.content);
-			if (selectedTokens.some(prior => tokenJaccard(tokens, prior) > NEAR_DUPLICATE_JACCARD)) continue;
-			selected.push(hydrated);
-			selectedTokens.push(tokens);
+			if (hydrated !== null) selected.push(hydrated);
 		}
 		return selected;
 	}
@@ -627,12 +610,24 @@ export class PolyphonicRecallEngine {
 		candidate: PolyphonicResult,
 		baselineById: ReadonlyMap<string, RecallResult>,
 		options: PolyphonicCallOptions,
+		trust: TrustWeights,
 	): PolyphonicMemoryResult | null {
 		const voiceScores = sortedVoiceScores(candidate.voiceScores);
 		const baseline = baselineById.get(candidate.memoryId);
 		if (baseline !== undefined) {
 			const tier = baseline.tier_label ?? baseline.tier ?? "working";
-			if (options.includeFacts !== true && tier === "fact") return null;
+			if (tier === "fact") {
+				// `factRecall` already weighed the fact's source row and put its label on the fact.
+				if (options.includeFacts !== true || recallTrustWeight(trust, baseline.veracity) === 0) return null;
+			} else {
+				// The stored row, not the label the baseline claims, decides whether it may surface. A row the
+				// engine's visibility cannot see (or that is gone) falls back to the label the baseline carries.
+				const stored = this.#lookupMemory(candidate.memoryId, options.channelId);
+				const episodic = stored !== null ? stored.tier_name === "episodic" : tier === "episodic";
+				const degradation = stored !== null ? stored.tier : baseline.degradation_tier;
+				const veracity = stored?.veracity ?? baseline.veracity;
+				if (recallTrustWeight(trust, veracity, episodic ? (degradation ?? 1) : undefined) === 0) return null;
+			}
 			return {
 				...baseline,
 				metadata: {
@@ -648,6 +643,9 @@ export class PolyphonicRecallEngine {
 		}
 		const row = this.#lookupMemory(candidate.memoryId, options.channelId);
 		if (row === null) return null;
+		if (recallTrustWeight(trust, row.veracity, row.tier_name === "episodic" ? (row.tier ?? 1) : undefined) === 0) {
+			return null;
+		}
 		return {
 			...row,
 			metadata: { ...parseMetadata(row.metadata_json), polyphonic: candidate.metadata },

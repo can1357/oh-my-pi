@@ -426,7 +426,8 @@ export class MnemopiSessionState {
 				const source = result.source ? ` [${result.source}]` : "";
 				const date = result.timestamp ? ` (${result.timestamp.slice(0, 10)})` : "";
 				const score = result.score ?? result.importance;
-				const confidence = typeof score === "number" ? ` c:${score.toFixed(1)}` : "";
+				const confidence =
+					typeof result.combined_score !== "number" && typeof score === "number" ? ` c:${score.toFixed(1)}` : "";
 				return `- ${result.content}${id}${source}${date}${confidence}`;
 			});
 			return lines.join("\n\n");
@@ -434,9 +435,7 @@ export class MnemopiSessionState {
 	}
 
 	async collectScopedRecallResults(query: string): Promise<RecallResult[]> {
-		const merged: RecallResult[] = [];
-		const byId = new Map<string, number>();
-		const byContent = new Map<string, number>();
+		const rankings: RecallResult[][] = [];
 		const failures: Array<{ bank: string; error: Error }> = [];
 		let successfulTargets = 0;
 		const sharedFallbackQuery = deriveSharedRecallFallbackQuery(
@@ -448,6 +447,7 @@ export class MnemopiSessionState {
 			const queries =
 				target.bank === this.scoped.global?.bank && sharedFallbackQuery ? [query, sharedFallbackQuery] : [query];
 			let targetSucceeded = false;
+			const bankResults: RecallResult[] = [];
 			try {
 				for (const recallQuery of queries) {
 					const results = await target.memory.recallEnhanced(recallQuery, this.config.recallLimit, {
@@ -455,11 +455,7 @@ export class MnemopiSessionState {
 						channelId: target.bank,
 					});
 					targetSucceeded = true;
-					withLoopPhase("mnemopi.recall", () => {
-						for (const result of results) {
-							mergeRecallResult(merged, byId, byContent, result);
-						}
-					});
+					withLoopPhase("mnemopi.recall", () => bankResults.push(...results));
 				}
 			} catch (error) {
 				const failure = toError(error);
@@ -469,7 +465,10 @@ export class MnemopiSessionState {
 					error: failure.message,
 				});
 			}
-			if (targetSucceeded) successfulTargets++;
+			if (targetSucceeded) {
+				successfulTargets++;
+				rankings.push(bankResults);
+			}
 		}
 		return withLoopPhase("mnemopi.recall", () => {
 			if (successfulTargets === 0 && failures.length > 0) {
@@ -480,9 +479,7 @@ export class MnemopiSessionState {
 					`Mnemopi recall failed for all scoped targets (${details})`,
 				);
 			}
-			merged.sort(compareRecallResults);
-			if (merged.length > this.config.recallLimit) merged.length = this.config.recallLimit;
-			return merged;
+			return mergeRecallRankings(rankings, this.config.recallLimit);
 		});
 	}
 
@@ -1172,26 +1169,47 @@ function resolveBankDbPath(config: MnemopiBackendConfig, bank: string): string {
 	return new BankManager(dirname(config.dbPath)).getBankDbPath(bank);
 }
 
-function mergeRecallResult(
-	merged: RecallResult[],
-	byId: Map<string, number>,
-	byContent: Map<string, number>,
-	result: RecallResult,
-): void {
-	const id = result.id ?? "";
-	const existingIndex = (id.length > 0 ? byId.get(id) : undefined) ?? byContent.get(result.content);
-	if (existingIndex === undefined) {
-		const index = merged.push(result) - 1;
-		if (id.length > 0) byId.set(id, index);
-		byContent.set(result.content, index);
-		return;
+/**
+ * RRF scores describe agreement within one bank, not calibrated relevance across banks. Interleave each bank's
+ * ordered hits when fusion is present; keep the previous relevance-score ordering for purely linear results.
+ */
+function mergeRecallRankings(rankings: readonly (readonly RecallResult[])[], limit: number): RecallResult[] {
+	const merged: RecallResult[] = [];
+	const ids = new Set<string>();
+	const contents = new Set<string>();
+	const append = (result: RecallResult): boolean => {
+		// Equal clipped previews can hide different hostnames or other significant suffixes.
+		const fullContent = result.truncated !== true;
+		const duplicate = (result.id.length > 0 && ids.has(result.id)) || (fullContent && contents.has(result.content));
+		if (result.id.length > 0) ids.add(result.id);
+		if (fullContent) contents.add(result.content);
+		if (duplicate) return false;
+		merged.push(result);
+		return true;
+	};
+	if (rankings.some(rows => rows.some(row => typeof row.combined_score === "number"))) {
+		const next = rankings.map(() => 0);
+		let progressed = true;
+		while (merged.length < limit && progressed) {
+			progressed = false;
+			for (const [bank, rows] of rankings.entries()) {
+				let index = next[bank] ?? 0;
+				while (index < rows.length) {
+					progressed = true;
+					const row = rows[index++];
+					if (row && append(row)) break;
+				}
+				next[bank] = index;
+				if (merged.length >= limit) break;
+			}
+		}
+	} else {
+		for (const result of rankings.flat().sort(compareRecallResults)) {
+			append(result);
+			if (merged.length >= limit) break;
+		}
 	}
-	const current = merged[existingIndex];
-	if (compareRecallResults(result, current) < 0) {
-		merged[existingIndex] = result;
-	}
-	if (id.length > 0) byId.set(id, existingIndex);
-	byContent.set(result.content, existingIndex);
+	return merged;
 }
 
 function compareRecallResults(left: RecallResult, right: RecallResult): number {

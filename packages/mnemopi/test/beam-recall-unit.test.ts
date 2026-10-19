@@ -412,6 +412,33 @@ describe("beam recall free functions", () => {
 		expect(json.supporting_context[0]).toContain("supporting fact");
 	});
 
+	it.each([false, true])("formats fused bank rankings without turning them into confidence (fusion=%s)", fused => {
+		const beam = makeBeam();
+		const rows = [
+			{ id: "p1", content: "project first", score: 0.2 },
+			{ id: "g1", content: "shared first", score: 0.4 },
+			{ id: "p2", content: "project second", score: 0.1968 },
+			{ id: "g2", content: "shared second", score: 0.3935 },
+		].map(row => ({ ...row, ...(fused ? { combined_score: row.score / 10 } : {}) }));
+		const bullet = formatContext(beam, rows);
+		const json = JSON.parse(formatContext(beam, rows, "json")) as {
+			top_facts: string[];
+			supporting_context: string[];
+		};
+		const expected = fused
+			? ["project first", "shared first", "project second", "shared second"]
+			: ["shared first", "shared second", "project first", "project second"];
+		const rendered = [...json.top_facts, ...json.supporting_context];
+		expect(rendered).toHaveLength(4);
+		for (const [index, content] of expected.entries()) expect(rendered[index]).toContain(content);
+		if (fused) {
+			expect(bullet).not.toContain(" c:");
+			expect(JSON.stringify(json)).not.toContain(" c:");
+		} else {
+			expect(bullet).toContain(" c:");
+		}
+	});
+
 	it("recalls structured facts via FTS and LIKE fallback shape", () => {
 		const beam = makeBeam();
 		beam.db.run(

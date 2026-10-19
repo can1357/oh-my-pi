@@ -34,6 +34,7 @@
 ### Breaking Changes
 
 - `PolyphonicRecallEngine.temporalVoice()` now takes the ids of the memories the other voices surfaced as its second argument and only scores those ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
+- Recall omits zero-weight memories even when an explicit `veracity` filter selects them, and derived facts now obey that filter using their source memory's label; use `get(id)` for raw inspection of known-false or otherwise excluded rows ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
 
 ### Changed
 
@@ -44,9 +45,12 @@
 
 - Fixed recall missing older memories that match a query by meaning but share no words with it, once a bank holds more than 500 newer memories ([#15729](https://github.com/can1357/oh-my-pi/pull/15729) by [@andrebrait](https://github.com/andrebrait))
 - Fixed recall ranking a memory that only repeats a query's words above one that answers it by meaning ([#15729](https://github.com/can1357/oh-my-pi/pull/15729) by [@andrebrait](https://github.com/andrebrait))
-- Fixed polyphonic recall reading and parsing up to 50,000 stored embeddings on every recall: its vector voice now scores the newest 10,000 visible memories per tier, the same window as standard recall, through the shared embedding cache, so a warm recall over 10,000 memories at 768 dimensions takes about 80 ms instead of 600 ms ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
+- Fixed polyphonic recall reading and parsing up to 50,000 stored embeddings on every recall: its vector voice now scores the newest 10,000 visible memories per tier, the same window as standard recall, through the shared embedding cache ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
 - Fixed polyphonic recall filling results with unrelated recent memories whenever a query contained a time word such as `before` or `last`, even inside another word such as `blast`: the temporal voice now matches whole words only and reorders memories the other voices found instead of adding the newest ones ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
 - Fixed `MNEMOPI_POLYPHONIC_RECALL`, `MNEMOPI_ENHANCED_RECALL` and `MNEMOPI_PROACTIVE_LINKING` turning their feature off when set to `true`, `yes` or `on`: they now read `1`, `true`, `yes` and `on` as on and `0`, `false`, `no` and `off` as off, in any case, and ignore any other value ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
+- Recall now excludes false and zero-weight memories and their derived facts across linear and polyphonic paths; facts with missing source memories follow the `unknown` policy ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
+- Polyphonic recall no longer merges distinct memory IDs by token overlap, preserving differences such as hostnames and one-character identifiers ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
+- Reduced first polyphonic-recall stalls on banks with many extracted facts ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.11.2] - 2026-10-16
 
