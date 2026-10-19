@@ -31,7 +31,8 @@ function fakeEngine(): Fake {
 				return `w${contents.length - 1}`;
 			});
 		},
-		vectorCount: async () => 1,
+		vectorCount: async () => contents.length,
+		vectorCoverage: async ids => ids.length,
 		sleep: async () => {},
 		recall: async () => [],
 		close: async () => {},
@@ -61,11 +62,21 @@ const conversations: UpstreamCompatConversation[] = [
 ];
 
 describe("runUpstreamCompat", () => {
-	it("aborts when no vectors exist after ingest", async () => {
+	it("aborts when any remembered row has no vector, before consolidating", async () => {
 		const fake = fakeEngine();
-		fake.engine.vectorCount = async () => 0;
-		await expect(runUpstreamCompat(fake.engine, conversations)).rejects.toThrow("embeddings unavailable");
+		fake.engine.vectorCoverage = async ids => ids.length - 1;
+		await expect(runUpstreamCompat(fake.engine, conversations)).rejects.toThrow(
+			"embeddings unavailable for mnemosyne: 1 of 5 remembered rows have no vector",
+		);
 		expect(fake.consolidated).toEqual([]);
+	});
+
+	it("aborts when the consolidated summary has no vector", async () => {
+		const fake = fakeEngine();
+		fake.engine.vectorCoverage = async ids => (ids.includes("e0") ? 0 : ids.length);
+		await expect(runUpstreamCompat(fake.engine, conversations)).rejects.toThrow(
+			"embeddings unavailable for mnemosyne: the consolidated summary e0 has no vector",
+		);
 	});
 
 	it("ingests like upstream: one store, non-blank messages, global ids, source bench", async () => {

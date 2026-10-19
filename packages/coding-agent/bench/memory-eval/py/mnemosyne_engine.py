@@ -72,6 +72,24 @@ class Engine:
 	def op_vector_count(self, _params):
 		return self.beam.conn.execute("SELECT COUNT(*) FROM memory_embeddings").fetchone()[0]
 
+	def op_vector_coverage(self, params):
+		# Upstream stores a vector in memory_embeddings (JSON) or, with sqlite-vec, in vec_working/vec_episodes by rowid.
+		conn = self.beam.conn
+		tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+		covered = 0
+		for memory_id in params["ids"]:
+			if conn.execute("SELECT 1 FROM memory_embeddings WHERE memory_id = ?", (memory_id,)).fetchone():
+				covered += 1
+				continue
+			for rows, vectors in (("working_memory", "vec_working"), ("episodic_memory", "vec_episodes")):
+				if vectors not in tables:
+					continue
+				row = conn.execute(f"SELECT rowid FROM {rows} WHERE id = ?", (memory_id,)).fetchone()
+				if row and conn.execute(f"SELECT 1 FROM {vectors} WHERE rowid = ?", (row[0],)).fetchone():
+					covered += 1
+					break
+		return covered
+
 	def op_sleep(self, _params):
 		self.beam.sleep(force=True)
 

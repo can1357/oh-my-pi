@@ -9,6 +9,7 @@ it.skipIf(pythonPath === undefined).each([
 	["untracked code hidden by global status config", "global", "has local changes"],
 	["a tracked edit hidden by assume-unchanged", "--assume-unchanged", "index flags hide changes to ['evaluator.py']"],
 	["a tracked edit hidden by skip-worktree", "--skip-worktree", "index flags hide changes to ['evaluator.py']"],
+	["an edit hidden by core.worktree pointing at another clean tree", "core.worktree", "work tree is"],
 ])("rejects %s, but accepts the clean pin", async (_name, mode, refusal) => {
 	const proc = Bun.spawn(
 		[
@@ -43,13 +44,17 @@ with tempfile.TemporaryDirectory(prefix="memory-eval-pin-") as tmp:
     require_pinned(repo, commit)
     print("clean pin accepted", flush=True)
     mode = sys.argv[2]
-    if mode.startswith("--"):
+    if mode == "core.worktree":
+        other = home / "other"
+        other.mkdir()
+        (other / "evaluator.py").write_text("PINNED = True\\n")
+        git("config", "core.worktree", str(other))
+        (repo / "evaluator.py").write_text("raise RuntimeError('edited evaluator code')\\n")
+    elif mode.startswith("--"):
         git("update-index", mode, "evaluator.py")
-    else:
-        git("config", "--" + mode, "status.showUntrackedFiles", "no")
-    if mode.startswith("--"):
         (repo / "evaluator.py").write_text("raise RuntimeError('edited evaluator code')\\n")
     else:
+        git("config", "--" + mode, "status.showUntrackedFiles", "no")
         (repo / "shadow_module.py").write_text("raise RuntimeError('untracked evaluator code')\\n")
     require_pinned(repo, commit)
 `,
