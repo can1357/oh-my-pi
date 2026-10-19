@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
-import { parseModelPattern, suggestProviderModels } from "../src/config/model-resolver";
+import { parseModelPattern, providerModelHint } from "../src/config/model-resolver";
 
 describe("built-in role defaults", () => {
 	// Provider-qualified selectors resolve exactly or not at all. A qualified
@@ -17,8 +17,8 @@ describe("built-in role defaults", () => {
 				const slash = pattern.indexOf("/");
 				const provider = pattern.slice(0, slash);
 				if (slash === -1 || !providers.has(provider) || parseModelPattern(pattern, models).model) return [];
-				const suggestions = suggestProviderModels(provider, pattern.slice(slash + 1), models);
-				return suggestions.length > 0 ? [`${role}: ${pattern} (near ${suggestions.join(", ")})`] : [];
+				const hint = providerModelHint(pattern, models);
+				return hint ? [`${role}: ${pattern}${hint}`] : [];
 			}),
 		);
 		expect(nearMisses).toEqual([]);

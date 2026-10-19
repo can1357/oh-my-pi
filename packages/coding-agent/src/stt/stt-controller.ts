@@ -219,10 +219,14 @@ export class STTController {
 
 	async #startWith(editor: SttTarget, options: SttCallbacks, signal: AbortSignal): Promise<void> {
 		const first = this.#resolveCandidate();
+		const configured = this.#settings.getModelRole("dictation")?.trim();
 		if (first?.replaces) {
 			options.showWarning(
 				`Dictation model ${first.replaces} not found; using ${first.model.provider}/${first.model.id}`,
 			);
+		} else if (!first && this.#registry && configured?.includes("/")) {
+			// Empty chain: nothing replaced the configured selector, so the built-in local model runs.
+			options.showWarning(`Dictation model ${configured} not found; using the built-in local model`);
 		}
 		let model = first?.model;
 		if (model?.api === "openai-transcriptions") {

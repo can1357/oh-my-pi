@@ -198,7 +198,7 @@
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
 ### Breaking Changes
 
-- `provider/model` selectors in `--model`, settings, roles and task agents now need the exact id or alias: retired or renamed ids (`openai-codex/gpt-5.5`), dated ids written without their date, `-latest` shorthands (`openai/gpt-5-latest` for `gpt-5-chat-latest`), and Vertex ids without `@default` (`google-vertex/claude-opus-4-8`) no longer match a sibling; use the id `omp models <provider>` lists, or drop the provider prefix to keep fuzzy matching ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
+- `provider/model` selectors in `--model`, settings, roles and task agents now need the exact id or alias: retired or renamed ids (`openai-codex/gpt-5.5`), dated ids written without their date, and `-latest` shorthands (`openai/gpt-5-latest` for `gpt-5-chat-latest`) no longer match a sibling; use the id `omp models <provider>` lists, or drop the provider prefix to keep fuzzy matching. An id written without its `@revision` (`google-vertex/claude-opus-4-8`) still resolves while the provider has a single revision of it ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 

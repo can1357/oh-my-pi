@@ -36,9 +36,9 @@ import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking"
 import { type GeneratedProvider, getBundledModels, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
+import { fuzzyMatch } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { fuzzyMatch } from "@oh-my-pi/pi-tui";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -486,6 +486,18 @@ export function resolveProviderModelReference(
 		return spelled;
 	}
 
+	// Revision-pinned ids (Vertex `claude-opus-4-8@default`) are also named without
+	// their `@revision`; that is an alias only while the provider carries a single
+	// revision of the id, so the selector still resolves exactly or not at all.
+	if (!normalizedModelId.includes("@")) {
+		const revisionPrefix = `${normalizedModelId}@`;
+		const revisions = availableModels.filter(
+			model =>
+				model.provider.toLowerCase() === normalizedProvider && model.id.toLowerCase().startsWith(revisionPrefix),
+		);
+		if (revisions.length === 1) return revisions[0];
+	}
+
 	if (normalizedProvider !== "openrouter") {
 		return undefined;
 	}
@@ -748,8 +760,8 @@ function matchModel(
 		return exactRefMatch;
 	}
 
-	// Exact ID match (case-insensitive) — this must happen before provider-scoped
-	// fuzzy matching so raw IDs that contain slashes (for example OpenRouter model
+	// Exact ID match (case-insensitive) — this must happen before the
+	// provider-qualified cut-off below so raw IDs that contain slashes (for example OpenRouter model
 	// IDs like "openai/gpt-4o:extended") still resolve as IDs instead of being
 	// misread as a provider-qualified selector. A provider-qualified pattern
 	// whose named provider carries the id stays locked to that provider when its
@@ -836,24 +848,24 @@ function matchModel(
 }
 
 /**
- * Up to `limit` `provider/id` selectors from `provider` whose ids fuzzy-match
- * `modelId`, best first. Provider-qualified selectors never resolve to these;
- * they only feed the not-found hint.
+ * The not-found hint for a `provider/id` selector: ` Did you mean a, b, c?` naming up
+ * to three ids of that provider that fuzzy-match the id (thinking suffix ignored),
+ * or `""` when the selector names no known provider or nothing is close.
+ * Provider-qualified selectors never resolve to these; they only feed the message.
  */
-export function suggestProviderModels(
-	provider: string,
-	modelId: string,
-	models: readonly Model<Api>[],
-	limit = 3,
-): string[] {
-	const lowerProvider = provider.toLowerCase();
-	return models
+export function providerModelHint(selector: string, models: readonly Model<Api>[]): string {
+	const slashIndex = selector.indexOf("/");
+	if (slashIndex === -1) return "";
+	const lowerProvider = selector.slice(0, slashIndex).toLowerCase();
+	const modelId = splitThinkingSuffix(selector.slice(slashIndex + 1), -1, MAX_THINKING_SUFFIX_OPTIONS).base;
+	const nearMatches = models
 		.filter(model => model.provider.toLowerCase() === lowerProvider)
 		.map(model => ({ model, match: fuzzyMatch(modelId, model.id) }))
 		.filter(entry => entry.match.matches)
 		.sort((a, b) => a.match.score - b.match.score)
-		.slice(0, limit)
+		.slice(0, 3)
 		.map(entry => formatModelString(entry.model));
+	return nearMatches.length > 0 ? ` Did you mean ${nearMatches.join(", ")}?` : "";
 }
 
 /**
@@ -2313,14 +2325,7 @@ function resolveCliModelInScope(
 
 	if (!model) {
 		const display = provider ? `${provider}/${pattern}` : cliModel;
-		const nearMatches = provider
-			? suggestProviderModels(
-					provider,
-					splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS).base,
-					candidates,
-				)
-			: [];
-		const hint = nearMatches.length > 0 ? ` Did you mean ${nearMatches.join(", ")}?` : "";
+		const hint = provider ? providerModelHint(display, candidates) : "";
 		return {
 			model: undefined,
 			configuredPatterns,

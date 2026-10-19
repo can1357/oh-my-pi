@@ -667,6 +667,20 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("names the provider's near ids when a deferred provider-qualified pattern stays unresolved", async () => {
+		const { session, modelFallbackMessage } = await createAgentSession(
+			buildSessionOptions("runtime-provider/runtime-modl"),
+		);
+
+		try {
+			expect(session.model).toBeUndefined();
+			expect(modelFallbackMessage).toContain('Model "runtime-provider/runtime-modl" not found');
+			expect(modelFallbackMessage).toContain("Did you mean runtime-provider/runtime-model");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("does not resolve a disabled provider through deferred subagent model selection", async () => {
 		const settings = Settings.isolated({ disabledProviders: ["runtime-provider"] });
 		const { session, modelFallbackMessage } = await createAgentSession({
@@ -1536,45 +1550,53 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("names a configured default that no longer resolves instead of switching silently", async () => {
-		const authStorage = createInMemoryAuthStorage();
-		authStorage.keys.setRuntime("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-		const settings = Settings.isolated();
-		settings.setModelRole("default", "anthropic/claude-sonnet-9-9");
-
-		try {
-			const { session, modelFallbackMessage } = await createAgentSession({
-				cwd: tempDir,
-				agentDir: tempDir,
-				authStorage,
-				modelRegistry,
-				settings,
-				sessionManager: SessionManager.inMemory(),
-				disableExtensionDiscovery: true,
-				skills: [],
-				contextFiles: [],
-				promptTemplates: [],
-				slashCommands: [],
-				enableMCP: false,
-				enableLsp: false,
-				skipPythonPreflight: true,
-				rules: [],
-				preloadedCustomToolPaths: [],
-				toolNames: ["read"],
-			});
+	test.each([
+		// Not in the catalog at all.
+		["anthropic/claude-sonnet-9-9", "not found"],
+		// In the catalog, but its provider has no credentials here.
+		["google/gemini-2.5-pro", "is unavailable (no credentials, or not in enabledModels)"],
+	] as const)(
+		"names a configured default %s that does not resolve instead of switching silently",
+		async (configured, reason) => {
+			const authStorage = createInMemoryAuthStorage();
+			authStorage.keys.setRuntime("anthropic", "test-key");
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const settings = Settings.isolated();
+			settings.setModelRole("default", configured);
 
 			try {
-				expect(session.model).toBeDefined();
-				expect(modelFallbackMessage).toContain("anthropic/claude-sonnet-9-9");
-				expect(modelFallbackMessage).toContain(`${session.model?.provider}/${session.model?.id}`);
+				const { session, modelFallbackMessage } = await createAgentSession({
+					cwd: tempDir,
+					agentDir: tempDir,
+					authStorage,
+					modelRegistry,
+					settings,
+					sessionManager: SessionManager.inMemory(),
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					slashCommands: [],
+					enableMCP: false,
+					enableLsp: false,
+					skipPythonPreflight: true,
+					rules: [],
+					preloadedCustomToolPaths: [],
+					toolNames: ["read"],
+				});
+
+				try {
+					expect(session.model).toBeDefined();
+					expect(modelFallbackMessage).toContain(`Default model ${configured} ${reason}`);
+					expect(modelFallbackMessage).toContain(`${session.model?.provider}/${session.model?.id}`);
+				} finally {
+					await session.dispose();
+				}
 			} finally {
-				await session.dispose();
+				authStorage.close();
 			}
-		} finally {
-			authStorage.close();
-		}
-	});
+		},
+	);
 
 	test("refreshes cached llama.cpp vision metadata for the startup default model", async () => {
 		const authStorage = createInMemoryAuthStorage();

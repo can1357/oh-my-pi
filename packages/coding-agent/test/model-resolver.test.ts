@@ -1461,6 +1461,8 @@ describe("resolveModelOverride", () => {
 	});
 });
 describe("resolveCliModel", () => {
+	const allModelsRegistry = { getAll: () => allModels, getAvailable: () => allModels };
+
 	test("resolves --model provider/id without --provider", () => {
 		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
 			typeof resolveCliModel
@@ -1804,31 +1806,27 @@ describe("resolveCliModel", () => {
 	});
 
 	test("rejects a near miss within an explicit --provider and suggests the sibling", () => {
-		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
-			typeof resolveCliModel
-		>[0]["modelRegistry"];
-
 		const result = resolveCliModel({
 			cliProvider: "openai",
 			cliModel: "4o",
-			modelRegistry: registry,
+			modelRegistry: allModelsRegistry,
 		});
 
 		expect(result.model).toBeUndefined();
 		expect(result.error).toContain("not found");
 		expect(result.error).toContain("Did you mean openai/gpt-4o");
-		expect(resolveCliModel({ cliModel: "openai/4o", modelRegistry: registry }).error).toContain("openai/gpt-4o");
-		expect(resolveCliModel({ cliModel: "openai/4o:high", modelRegistry: registry }).error).toContain(
+		expect(resolveCliModel({ cliModel: "openai/4o", modelRegistry: allModelsRegistry }).error).toContain(
+			"openai/gpt-4o",
+		);
+		expect(resolveCliModel({ cliModel: "openai/4o:high", modelRegistry: allModelsRegistry }).error).toContain(
 			"Did you mean openai/gpt-4o",
 		);
 	});
 
 	test("offers no suggestion when nothing in the provider is close", () => {
-		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
-			typeof resolveCliModel
-		>[0]["modelRegistry"];
-
-		expect(resolveCliModel({ cliModel: "openai/zzzz", modelRegistry: registry }).error).not.toContain("Did you mean");
+		expect(resolveCliModel({ cliModel: "openai/zzzz", modelRegistry: allModelsRegistry }).error).not.toContain(
+			"Did you mean",
+		);
 	});
 
 	test("supports --model <pattern>:<thinking> (without explicit --thinking)", () => {
@@ -1983,28 +1981,20 @@ describe("resolveCliModel", () => {
 	});
 
 	test("rejects a provider-prefixed near miss instead of fuzzy-matching a sibling", () => {
-		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
-			typeof resolveCliModel
-		>[0]["modelRegistry"];
-
 		for (const cliModel of ["openrouter/qwen", "anthropic/claude-sonnet-5", "openai-codex/gpt-5.3-spark"]) {
-			const result = resolveCliModel({ cliModel, modelRegistry: registry });
+			const result = resolveCliModel({ cliModel, modelRegistry: allModelsRegistry });
 			expect(result.model).toBeUndefined();
 			expect(result.error).toContain("not found");
 		}
 	});
 
 	test("provider-prefixed exact ids resolve while bare selectors keep fuzzy matching", () => {
-		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
-			typeof resolveCliModel
-		>[0]["modelRegistry"];
-
-		const exact = resolveCliModel({ cliModel: "openai-codex/gpt-5.3-codex-spark", modelRegistry: registry });
+		const exact = resolveCliModel({ cliModel: "openai-codex/gpt-5.3-codex-spark", modelRegistry: allModelsRegistry });
 		expect(exact.error).toBeUndefined();
 		expect(exact.model?.provider).toBe("openai-codex");
 		expect(exact.model?.id).toBe("gpt-5.3-codex-spark");
 
-		const bare = resolveCliModel({ cliModel: "spark", modelRegistry: registry });
+		const bare = resolveCliModel({ cliModel: "spark", modelRegistry: allModelsRegistry });
 		expect(bare.error).toBeUndefined();
 		expect(bare.model?.id).toBe("gpt-5.3-codex-spark");
 	});
@@ -2572,6 +2562,27 @@ describe("provider routing selector (@upstream)", () => {
 		expect(result.model?.id).toBe("claude-opus-4-8@default");
 		expect(result.upstream).toBeUndefined();
 		expect(openRouterOnly(result.model)).toBeUndefined();
+	});
+
+	test("resolves a Vertex id written without its only @revision, and fails when revisions are ambiguous", () => {
+		const vertexModel = (id: string): Model<Api> =>
+			buildModel({
+				id,
+				name: "Claude Opus 4.8",
+				api: "anthropic-messages",
+				provider: "google-vertex",
+				baseUrl: "https://us-aiplatform.googleapis.com",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+				contextWindow: 200000,
+				maxTokens: 32000,
+			});
+		const single = [vertexModel("claude-opus-4-8@default")];
+		expect(parseModelPattern("google-vertex/claude-opus-4-8", single).model?.id).toBe("claude-opus-4-8@default");
+
+		const both = [...single, vertexModel("claude-opus-4-8@20260101")];
+		expect(parseModelPattern("google-vertex/claude-opus-4-8", both).model).toBeUndefined();
 	});
 
 	test("ignores @slug on a non-aggregator model (no silent routing)", () => {
