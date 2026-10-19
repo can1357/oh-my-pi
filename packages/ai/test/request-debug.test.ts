@@ -6,6 +6,7 @@ import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai/api-registry
 import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { createRequestDebugSession } from "@oh-my-pi/pi-ai/utils/request-debug";
 import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { removeWithRetries } from "../../utils/src/temp";
@@ -156,13 +157,59 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 			url: "https://provider.test/v1/messages",
 			body: { model: "debug-model", messages: [{ role: "user", content: "hi" }] },
 		});
-		expect(request.headers).toMatchObject({ authorization: "Bearer test-token", "content-type": "application/json" });
+		expect(request.headers).toMatchObject({ authorization: "[redacted]", "content-type": "application/json" });
 
 		const log = splitResponseLog(await fs.readFile(responsePath));
 		expect(log.headers).toContain("HTTP 201 Created");
 		expect(log.headers).toContain("content-type: text/plain");
 		expect(log.headers).toContain("x-request-id: resp-1");
 		expect(log.body).toEqual(responseBody);
+	});
+
+	it("redacts credential headers in the request dump and the response log", async () => {
+		Bun.env.PI_REQ_DEBUG = "1";
+		const fetchImpl: FetchImpl = async () =>
+			new Response("ok", { headers: { "set-cookie": "session=cookie-secret", "x-request-id": "resp-2" } });
+		const response = await transportFetch(debugModel(), fetchImpl)("https://provider.test/v1/messages", {
+			method: "POST",
+			headers: { authorization: "Bearer request-secret", "x-goog-api-key": "goog-secret" },
+			body: "{}",
+		});
+		await response.text();
+
+		const { requestPath, responsePath } = await findDebugFiles();
+		const dump = (await fs.readFile(requestPath, "utf8")) + (await fs.readFile(responsePath, "utf8"));
+		for (const secret of ["request-secret", "goog-secret", "cookie-secret"]) expect(dump).not.toContain(secret);
+		expect(JSON.parse(await fs.readFile(requestPath, "utf8")).headers).toMatchObject({
+			authorization: "[redacted]",
+			"x-goog-api-key": "[redacted]",
+		});
+		const log = splitResponseLog(await fs.readFile(responsePath));
+		expect(log.headers).toContain("set-cookie: [redacted]");
+		expect(log.headers).toContain("x-request-id: resp-2");
+	});
+
+	it("redacts credential headers given as a record, as socket transports pass them", async () => {
+		const session = await createRequestDebugSession({
+			protocol: "websocket",
+			method: "POST",
+			url: "wss://provider.test/v1/responses",
+			headers: { Authorization: "Bearer request-secret", "OpenAI-Beta": "responses=v1" },
+		});
+		const log = await session.openResponseLog("WebSocket 101 Switching Protocols", {
+			"Set-Cookie": ["a=cookie-secret", "b=cookie-secret"],
+			"x-request-id": "resp-3",
+		});
+		await log.close();
+
+		const dump = (await fs.readFile(session.requestPath, "utf8")) + (await fs.readFile(session.responsePath, "utf8"));
+		expect(dump).not.toContain("request-secret");
+		expect(dump).not.toContain("cookie-secret");
+		expect(JSON.parse(await fs.readFile(session.requestPath, "utf8")).headers).toEqual({
+			Authorization: "[redacted]",
+			"OpenAI-Beta": "responses=v1",
+		});
+		expect(splitResponseLog(await fs.readFile(session.responsePath)).headers).toContain("Set-Cookie: [redacted]");
 	});
 
 	it("keeps the partial response log when the response body is cancelled", async () => {

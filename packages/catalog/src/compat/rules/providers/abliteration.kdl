@@ -37,4 +37,11 @@ provider "abliteration" {
 
 	include-encrypted-reasoning #false
 	stream-idle-timeout-ms 0
+	// Abliterated weights classify as the GLM revision they derive from, but
+	// they are modified weights: their reasoning is not carried to or from GLM.
+	class "glm" {
+		revision ">=5" {
+			portable-reasoning #false
+		}
+	}
 }

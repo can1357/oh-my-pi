@@ -6,6 +6,7 @@ import { SPINNER_ADVANCE_MS, TERMINAL } from "../index";
 import {
 	formatDuration,
 	formatNumber,
+	getActiveProfile,
 	getProjectDir,
 	normalizePathForComparison,
 	relativePathWithinNormalizedRoot,
@@ -191,7 +192,9 @@ function getProjectDirDisplay(projectDir: string): ProjectDirDisplay {
 		}
 	}
 	if (!scratch) {
-		displayRoots ??= [path.join(homeDir, "Projects"), "/work"].map(normalizePathForComparison);
+		displayRoots ??= [path.join(homeDir, "Projects"), path.join(homeDir, "repos"), "/work"].map(
+			normalizePathForComparison,
+		);
 		for (const root of displayRoots) {
 			const relative = relativePathWithinNormalizedRoot(root, normalizedProjectDir);
 			if (relative) {
@@ -221,24 +224,34 @@ const piSegment: StatusLineSegment = {
 		// Brand fg fades between dim gray (idle) and the accent (working) across
 		// turn edges; the component samples the tween into `brandFgAnsi`.
 		const fgAnsi = ctx.brandFgAnsi ?? theme.getFgAnsi("dim");
+		const profile = ctx.options.pi?.showProfile === false ? undefined : getActiveProfile();
 		// While a turn runs the brand icon becomes a braille spinner plus a
 		// whole-unit turn timer (port of rust omp's status-band active brand).
 		// No trailing pad: the group renderer owns inter-segment spacing, so a
 		// trailing space here would double the gap at the first separator (#11103).
 		const content =
 			ctx.turnElapsedMs != null
-				? `${brandSpinnerFrame(ctx.now?.getTime())} ${brandTimer(ctx.turnElapsedMs)}`
-				: theme.icon.omp
-					? theme.icon.omp
-					: "";
+				? `${brandMark(brandSpinnerFrame(ctx.now?.getTime()), profile)} ${brandTimer(ctx.turnElapsedMs)}`
+				: brandMark(theme.icon.omp, profile);
 		return { content: `${fgAnsi}${content}\x1b[39m`, visible: true };
 	},
 	describe(ctx) {
 		if (ctx.focusedAgentId) return segView([span(ctx.focusedAgentId, "warning")], "ghost", "warning");
 		// The dock's working row owns activity natively: the brand stays still.
-		return segView([], "omp", "muted");
+		const profile = ctx.options.pi?.showProfile === false ? undefined : getActiveProfile();
+		return segView(profile ? [span(profile, "muted")] : [], "omp", "muted");
 	},
 };
+/**
+ * Brand glyph tagged with the active named profile (`π-work`) so sessions from
+ * different profiles are distinguishable at a glance; the bare glyph for the
+ * default profile or with `segmentOptions.pi.showProfile: false`. The tag
+ * stays put while the glyph slot animates.
+ */
+function brandMark(glyph: string, profile: string | undefined): string {
+	if (!profile) return glyph;
+	return glyph ? `${glyph}-${profile}` : profile;
+}
 /** Current braille-spinner glyph on the shared clock, at the Loader's 80ms cadence. */
 function brandSpinnerFrame(nowMs = Date.now()): string {
 	const frames = theme.getSpinnerFrames("activity");
@@ -684,19 +697,15 @@ const gitSegment: StatusLineSegment = {
 		const showBranch = opts.showBranch !== false;
 		const spans: TspSpan[] = [];
 		if (showBranch && branch) spans.push(span(branch, colorName));
-		const indicators: TspSpan[] = [];
 		if (status) {
-			if (opts.showUnstaged !== false && status.unstaged > 0) {
-				indicators.push(span(`*${status.unstaged}`, "statusLineDirty"));
-			}
-			if (opts.showStaged !== false && status.staged > 0) {
-				indicators.push(span(`+${status.staged}`, "statusLineStaged"));
-			}
-			if (opts.showUntracked !== false && status.untracked > 0) {
-				indicators.push(span(`?${status.untracked}`, "statusLineUntracked"));
-			}
+			// Spans join as one text: each count after the branch or a previous count leads with a space.
+			const push = (text: string, token: string): void => {
+				spans.push(span(spans.length > 0 ? ` ${text}` : text, token));
+			};
+			if (opts.showUnstaged !== false && status.unstaged > 0) push(`*${status.unstaged}`, "statusLineDirty");
+			if (opts.showStaged !== false && status.staged > 0) push(`+${status.staged}`, "statusLineStaged");
+			if (opts.showUntracked !== false && status.untracked > 0) push(`?${status.untracked}`, "statusLineUntracked");
 		}
-		spans.push(...indicators);
 		if (spans.length === 0) return null;
 		return segView(spans, showBranch && branch ? "branch" : "git", isDirty ? "warning" : undefined);
 	},
@@ -975,16 +984,19 @@ const sessionSegment: StatusLineSegment = {
 	},
 };
 
+/** Short (first-label) machine hostname; resolved once — `os.hostname()` is a syscall per call. */
+let shortHostname: string | undefined;
+
 const hostnameSegment: StatusLineSegment = {
 	id: "hostname",
 	render(ctx) {
-		const name = ctx.hostname ?? os.hostname().split(".")[0];
+		const name = ctx.hostname ?? (shortHostname ??= os.hostname().split(".")[0]);
 		const content = withIcon(theme.icon.host, name);
 		const ansi = sessionAccentAnsi(ctx);
 		return { content: ansi ? `${ansi}${content}\x1b[39m` : content, visible: true };
 	},
 	describe(ctx) {
-		const name = ctx.hostname ?? os.hostname().split(".")[0];
+		const name = ctx.hostname ?? (shortHostname ??= os.hostname().split(".")[0]);
 		return segView([span(name, sessionAccentAnsi(ctx) ? "accent" : undefined)], "host");
 	},
 };
@@ -1088,6 +1100,7 @@ const VIM_MODE_LABELS: Record<NonNullable<SegmentContext["vim"]>["mode"], string
 	normal: "NORMAL",
 	visual: "VISUAL",
 	"visual-line": "V-LINE",
+	replace: "REPLACE",
 };
 
 /**
@@ -1100,6 +1113,7 @@ const VIM_MODE_ICON_KEYS: Record<NonNullable<SegmentContext["vim"]>["mode"], Sym
 	normal: "icon.vimNormal",
 	visual: "icon.vimVisual",
 	"visual-line": "icon.vimVisualLine",
+	replace: "icon.vimReplace",
 };
 
 const VIM_MODE_COLORS: Record<NonNullable<SegmentContext["vim"]>["mode"], ThemeColor> = {
@@ -1107,6 +1121,7 @@ const VIM_MODE_COLORS: Record<NonNullable<SegmentContext["vim"]>["mode"], ThemeC
 	normal: "accent",
 	visual: "warning",
 	"visual-line": "warning",
+	replace: "accent",
 };
 
 const vimSegment: StatusLineSegment = {
@@ -1217,6 +1232,12 @@ function formatUsageReset(value: number, unit: "m" | "h", compact = false): stri
 	return hours > 0 ? `${days}d${gap}${hours}h` : `${days}d`;
 }
 
+/** Expiring saved resets outrank the usable/unusable color: red within 24 hours, yellow within 7 days. */
+function resetCreditsColor(resets: NonNullable<NonNullable<SegmentContext["usage"]>["resetCredits"]>): ThemeColor {
+	if (resets.expiring) return resets.expiring.tier === "imminent" ? "error" : "warning";
+	return resets.redeemableCount > 0 ? "success" : "warning";
+}
+
 const usageSegment: StatusLineSegment = {
 	id: "usage",
 	render(ctx) {
@@ -1224,22 +1245,24 @@ const usageSegment: StatusLineSegment = {
 		if (!u || (!u.fiveHour && !u.daily && !u.sevenDay && !u.monthly && !u.resetCredits)) {
 			return { content: "", visible: false };
 		}
+		const opts = ctx.options.usage ?? {};
 		const parts: string[] = [];
 		if (u.tier) {
 			const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
 			if (tier) parts.push(accentFg(ctx, "accent", tier));
 		}
-		for (const pieces of quotaWindows(u, ctx.options.usage ?? {})) {
+		for (const pieces of quotaWindows(u, opts)) {
 			parts.push(pieces.map(([text, color]) => (color ? theme.fg(color, text) : text)).join(""));
 		}
-		if (u.resetCredits) {
+		if (u.resetCredits && opts.showResetCredits !== false) {
 			const resets = u.resetCredits;
 			let resetText = `✦ ${resets.bankedCount}`;
 			if (resets.redeemableCount !== resets.bankedCount) {
 				resetText += ` (${resets.redeemableCount} usable)`;
 			}
 			if (resets.expiryHours !== undefined) {
-				resetText += ` exp ${formatUsageReset(resets.expiryHours, "h")}`;
+				const expiring = resets.expiring ? `▲ ${resets.expiring.count} ` : "";
+				resetText += ` ${expiring}exp ${formatUsageReset(resets.expiryHours, "h")}`;
 			} else if (resets.expired) {
 				resetText += " expired";
 			}
@@ -1247,7 +1270,7 @@ const usageSegment: StatusLineSegment = {
 				const reason = truncateToWidth(sanitizeStatusText(resets.unavailableReason), TRUNCATE_LENGTHS.SHORT);
 				if (reason) resetText += ` ${reason}`;
 			}
-			parts.push(theme.fg(resets.redeemableCount > 0 ? "success" : "warning", resetText));
+			parts.push(theme.fg(resetCreditsColor(resets), resetText));
 		}
 		if (parts.length === 0) return { content: "", visible: false };
 		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
@@ -1256,25 +1279,28 @@ const usageSegment: StatusLineSegment = {
 	describe(ctx) {
 		const u = ctx.usage;
 		if (!u || (!u.fiveHour && !u.daily && !u.sevenDay && !u.monthly && !u.resetCredits)) return null;
+		const opts = ctx.options.usage ?? {};
 		const parts: TspSpan[][] = [];
 		if (u.tier) {
 			const tier = sanitizeStatusText(u.tier);
 			if (tier) parts.push([span(tier, accentToken(ctx, "accent"))]);
 		}
-		for (const pieces of quotaWindows(u, ctx.options.usage ?? {})) {
+		for (const pieces of quotaWindows(u, opts)) {
 			parts.push(pieces.map(([text, color]) => span(text, color)));
 		}
-		if (u.resetCredits) {
+		if (u.resetCredits && opts.showResetCredits !== false) {
 			const resets = u.resetCredits;
 			let resetText = `✦ ${resets.bankedCount}`;
 			if (resets.redeemableCount !== resets.bankedCount) resetText += ` (${resets.redeemableCount} usable)`;
-			if (resets.expiryHours !== undefined) resetText += ` exp ${formatUsageReset(resets.expiryHours, "h")}`;
-			else if (resets.expired) resetText += " expired";
+			if (resets.expiryHours !== undefined) {
+				const expiring = resets.expiring ? `▲ ${resets.expiring.count} ` : "";
+				resetText += ` ${expiring}exp ${formatUsageReset(resets.expiryHours, "h")}`;
+			} else if (resets.expired) resetText += " expired";
 			if (resets.redeemableCount === 0 && resets.unavailableReason) {
 				const reason = sanitizeStatusText(resets.unavailableReason);
 				if (reason) resetText += ` ${reason}`;
 			}
-			parts.push([span(resetText, resets.redeemableCount > 0 ? "success" : "warning")]);
+			parts.push([span(resetText, resetCreditsColor(resets))]);
 		}
 		if (parts.length === 0) return null;
 		const spans: TspSpan[] = [];

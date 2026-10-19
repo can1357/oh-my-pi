@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdirSync } from "node:fs";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { computeMnemopiBankScope, extendRecallWithLegacyBanks } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
@@ -32,7 +32,7 @@ afterAll(async () => {
 function createBankFixture(bank: string, metadataRows: readonly Record<string, unknown>[]): void {
 	const bankDir = path.join(banksDir, bank);
 	const dbPath = path.join(bankDir, "mnemopi.db");
-	mkdirSync(bankDir, { recursive: true });
+	fsSync.mkdirSync(bankDir, { recursive: true });
 	const db = new Database(dbPath, { create: true });
 	try {
 		db.exec(`
@@ -42,7 +42,7 @@ function createBankFixture(bank: string, metadataRows: readonly Record<string, u
 				metadata_json TEXT
 			)
 		`);
-		const insert = db.prepare("INSERT INTO working_memory (id, content, metadata_json) VALUES (?, ?, ?)");
+		using insert = db.prepare("INSERT INTO working_memory (id, content, metadata_json) VALUES (?, ?, ?)");
 		for (const [index, meta] of metadataRows.entries()) {
 			insert.run(`row-${bank}-${index}`, "content", JSON.stringify(meta));
 		}
@@ -145,5 +145,37 @@ describe("extendRecallWithLegacyBanks edge cases", () => {
 		const out = extendRecallWithLegacyBanks(["active"], mainDbPath, path.join(rootDir.path(), "some", "cwd"));
 		expect(out).toContain("active");
 		expect(out).not.toContain("corrupt-C");
+	});
+
+	// An unfinalized prepared statement makes close() fail silently (the probe swallows
+	// it), leaving the bank database open until GC; on Windows that blocks deleting it.
+	const canObserveOpenFiles = process.platform === "win32" || fsSync.existsSync("/proc/self/fd");
+	it.skipIf(!canObserveOpenFiles)("closes every legacy bank database it probes", () => {
+		const cwd = path.join(rootDir.path(), "projects", "fd-leak");
+		createBankFixture("fd-leak-A", [{ cwd }]);
+		createBankFixture("fd-leak-B", [{ cwd }]);
+		// Legacy banks follow readdir order, which is filesystem-dependent.
+		expect([...extendRecallWithLegacyBanks(["active"], mainDbPath, cwd)].sort()).toEqual([
+			"active",
+			"fd-leak-A",
+			"fd-leak-B",
+		]);
+		const probed = ["fd-leak-A", "fd-leak-B"].map(bank => path.join(banksDir, bank, "mnemopi.db"));
+		if (process.platform === "win32") {
+			// Windows refuses to delete a file another handle still holds open.
+			for (const dbPath of probed) fsSync.rmSync(dbPath);
+			return;
+		}
+		const open = fsSync
+			.readdirSync("/proc/self/fd")
+			.map(fd => {
+				try {
+					return fsSync.readlinkSync(`/proc/self/fd/${fd}`);
+				} catch {
+					return "";
+				}
+			})
+			.filter(target => probed.includes(target));
+		expect(open).toEqual([]);
 	});
 });

@@ -13,11 +13,15 @@ export interface CellAttributes {
 	bg: number;
 }
 
-/** A mutable terminal grid cell. */
+/**
+ * A terminal grid cell. Cells written by the terminal are frozen and may be
+ * shared between grid positions (blank cells, repeated ASCII glyphs), so the
+ * type is readonly: replace a cell instead of mutating it.
+ */
 export interface CellData {
-	chars: string;
-	width: number;
-	attrs: CellAttributes;
+	readonly chars: string;
+	readonly width: number;
+	readonly attrs: Readonly<CellAttributes>;
 }
 
 /** Creates the default rendition. */
@@ -37,18 +41,33 @@ export function defaultAttributes(): CellAttributes {
 	};
 }
 
-function cloneAttributes(attrs: CellAttributes): CellAttributes {
-	return { ...attrs };
-}
+/** Frozen default rendition shared by every unstyled cell. */
+export const DEFAULT_CELL_ATTRIBUTES: Readonly<CellAttributes> = Object.freeze(defaultAttributes());
 
 /** Creates an empty cell with the supplied rendition. */
 export function blankCell(attrs: CellAttributes = defaultAttributes()): CellData {
-	return { chars: "", width: 1, attrs: cloneAttributes(attrs) };
+	return { chars: "", width: 1, attrs: { ...attrs } };
+}
+
+const sharedBlankCells = new WeakMap<Readonly<CellAttributes>, CellData>();
+
+/**
+ * Returns the frozen empty cell shared by every blank position with `attrs`.
+ * Frozen renditions are interned; a mutable one is snapshotted first.
+ */
+export function sharedBlankCell(attrs: Readonly<CellAttributes> = DEFAULT_CELL_ATTRIBUTES): CellData {
+	if (!Object.isFrozen(attrs)) return Object.freeze({ chars: "", width: 1, attrs: Object.freeze({ ...attrs }) });
+	let cell = sharedBlankCells.get(attrs);
+	if (!cell) {
+		cell = Object.freeze({ chars: "", width: 1, attrs });
+		sharedBlankCells.set(attrs, cell);
+	}
+	return cell;
 }
 
 /** Proposed xterm-compatible cell readback object. */
 export class BufferCell {
-	#cell: CellData = blankCell();
+	#cell: CellData = sharedBlankCell();
 
 	/** Reuses this object for another grid cell. */
 	setFrom(cell: CellData): this {
@@ -137,8 +156,9 @@ export class BufferLine {
 	cells: CellData[];
 	isWrapped = false;
 
-	constructor(columns: number, attrs: CellAttributes = defaultAttributes()) {
-		this.cells = Array.from({ length: columns }, () => blankCell(attrs));
+	constructor(columns: number, attrs: Readonly<CellAttributes> = DEFAULT_CELL_ATTRIBUTES) {
+		const blank = sharedBlankCell(attrs);
+		this.cells = Array.from({ length: columns }, () => blank);
 	}
 
 	/** Number of grid columns in the line. */

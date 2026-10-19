@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { generateId as generateTimedId, sha256Hex16, stableMemoryId } from "../../util/ids";
 import { cjkFtsTerms, containsSpacelessCjk, ftsQueryTerms, hasCjk, isCjkChar, recallTokens } from "../../util/regex";
 import { currentEmbeddingModel, embed } from "../embeddings";
@@ -727,29 +727,33 @@ async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]):
 	try {
 		const matrix = await embed(items.map(item => item.content));
 		if (matrix === null) return;
-		const model = currentEmbeddingModel();
-		using insertEmbedding = beam.db.prepare(
-			"INSERT OR REPLACE INTO memory_embeddings(memory_id, embedding_json, model) VALUES (?, ?, ?)",
-		);
-		let committed = 0;
-		const insertMany = beam.db.transaction((rows: readonly EmbedItem[]) => {
-			for (let i = 0; i < rows.length; i += 1) {
-				const vector = matrix[i];
-				const item = rows[i];
-				if (vector === undefined || item === undefined) continue;
-				insertEmbedding.run(item.memoryId, JSON.stringify(Array.from(vector)), model);
-				committed += 1;
-			}
+		// Persisting the vectors runs synchronously on the caller's event loop; label it so a
+		// stall is attributable. The embedding itself is awaited above, outside the label.
+		withLoopPhase("mnemopi.embed-persist", () => {
+			const model = currentEmbeddingModel();
+			using insertEmbedding = beam.db.prepare(
+				"INSERT OR REPLACE INTO memory_embeddings(memory_id, embedding_json, model) VALUES (?, ?, ?)",
+			);
+			let committed = 0;
+			const insertMany = beam.db.transaction((rows: readonly EmbedItem[]) => {
+				for (let i = 0; i < rows.length; i += 1) {
+					const vector = matrix[i];
+					const item = rows[i];
+					if (vector === undefined || item === undefined) continue;
+					insertEmbedding.run(item.memoryId, JSON.stringify(Array.from(vector)), model);
+					committed += 1;
+				}
+			});
+			insertMany(items);
+			// A recall taken while these vectors were still generating cached an FTS-only ranking, and
+			// committing vectors changes what recall returns -- so that cache must be dropped, or the
+			// pre-embedding order keeps being served for the whole cache TTL. Gated on `committed`: a
+			// batch whose provider returned a short or empty matrix inserts nothing, changes no ranking,
+			// and invalidating there would only discard a still-valid cache. Only the query cache is
+			// affected; the polyphonic subject dictionary is built from facts/gists, which an embedding
+			// batch never touches.
+			if (committed > 0) beam.caches.queryCache?.invalidate();
 		});
-		insertMany(items);
-		// A recall taken while these vectors were still generating cached an FTS-only ranking, and
-		// committing vectors changes what recall returns -- so that cache must be dropped, or the
-		// pre-embedding order keeps being served for the whole cache TTL. Gated on `committed`: a
-		// batch whose provider returned a short or empty matrix inserts nothing, changes no ranking,
-		// and invalidating there would only discard a still-valid cache. Only the query cache is
-		// affected; the polyphonic subject dictionary is built from facts/gists, which an embedding
-		// batch never touches.
-		if (committed > 0) beam.caches.queryCache?.invalidate();
 	} catch (error) {
 		// Background embedding generation is best-effort: a failing provider, a closed DB
 		// during shutdown, or a transient API error must never disrupt the synchronous

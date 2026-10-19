@@ -27,6 +27,27 @@ const XML_BLOCK = /<([a-zA-Z][\w-]*)(?:\s[^>]*)?>[\s\S]*?<\/\1>/g;
 const LONG_HEX_RUN = /\b[0-9a-fA-F]{12,}\b/g;
 /** Short-hash prefix length kept after truncating a long hex run. */
 const SHORT_HASH_CHARS = 7;
+/**
+ * Raw characters kept from each end of an oversized message before any cleanup.
+ * Fenced-block stripping is linear, so this cap is generous: it only bounds total
+ * work on pathological pastes while letting prose between large code blocks survive.
+ */
+const RAW_SCAN_EDGE_CHARS = 262_144;
+/**
+ * Characters kept from each end of the fence-stripped message before paired-tag
+ * stripping. The paired-tag regex is quadratic on unclosed `<Tag>`s (TS generics,
+ * JSX); output is bounded to {@link MAX_TINY_MESSAGE_CHARS} anyway, so the
+ * dropped middle is never emitted.
+ */
+const CLEAN_WINDOW_EDGE_CHARS = 16_384;
+/** Joins the head and tail windows of an oversized message. */
+const WINDOW_SEPARATOR = "\n…\n";
+
+/** Keep `edgeChars` from each end of `message` when it exceeds twice that. */
+function windowEdges(message: string, edgeChars: number): string {
+	if (message.length <= edgeChars * 2) return message;
+	return `${message.slice(0, edgeChars)}${WINDOW_SEPARATOR}${message.slice(-edgeChars)}`;
+}
 
 /** Drop SGR ANSI escape sequences. */
 export function stripAnsi(message: string): string {
@@ -84,17 +105,28 @@ export function truncateTinyMessage(message: string): string {
  * (a message that is essentially just a code block).
  */
 export function stripCodeBlocks(message: string): string {
-	const cleaned = message
-		.replace(FENCED_CODE_BLOCK, " ")
-		.replace(/[ \t]+/g, " ")
-		.replace(/\n{3,}/g, "\n\n")
-		.trim();
+	const cleaned = collapseWhitespace(message.replace(FENCED_CODE_BLOCK, " "));
 	return cleaned.length >= MIN_STRIPPED_TITLE_CHARS ? cleaned : message;
 }
 
-/** Clean noise from message content without applying the length bound. */
+/** Collapse horizontal whitespace runs and excess blank lines, then trim. */
+function collapseWhitespace(message: string): string {
+	return message
+		.replace(/[ \t]+/g, " ")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
+/**
+ * Clean noise from message content without applying the length bound.
+ * The raw input is capped at {@link RAW_SCAN_EDGE_CHARS} per end, fenced blocks
+ * are stripped, and only then is the remainder windowed to
+ * {@link CLEAN_WINDOW_EDGE_CHARS} per end before paired-tag stripping, so prose
+ * between large code blocks is preserved.
+ */
 export function cleanTinyMessage(message: string): string {
-	return stripCodeBlocks(shortenHashes(stripXmlBlocks(stripAnsi(message))));
+	const fenceStripped = stripCodeBlocks(stripAnsi(windowEdges(message, RAW_SCAN_EDGE_CHARS)));
+	return collapseWhitespace(shortenHashes(stripXmlBlocks(windowEdges(fenceStripped, CLEAN_WINDOW_EDGE_CHARS))));
 }
 
 /** Apply the shared tiny-model cleanup and middle-truncation policy. */

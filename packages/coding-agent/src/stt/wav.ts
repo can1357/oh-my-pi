@@ -1,5 +1,17 @@
-/** Encode 16 kHz mono float PCM chunks as a 16-bit little-endian WAV file. */
-export function encodePcm16Wav(chunks: readonly Float32Array[], sampleRate = 16_000): Uint8Array {
+/** Convert float PCM (`[-1, 1]`) to 16-bit PCM samples, clamping out-of-range input. */
+export function floatToPcm16(samples: Float32Array, target = new Int16Array(samples.length)): Int16Array {
+	for (let index = 0; index < samples.length; index++) {
+		const clamped = Math.max(-1, Math.min(1, samples[index]!));
+		target[index] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+	}
+	return target;
+}
+
+/**
+ * Encode 16 kHz mono PCM chunks as a 16-bit little-endian WAV file. Float chunks are
+ * converted with {@link floatToPcm16}; `Int16Array` chunks are copied as-is.
+ */
+export function encodePcm16Wav(chunks: readonly (Float32Array | Int16Array)[], sampleRate = 16_000): Uint8Array {
 	let sampleCount = 0;
 	for (const chunk of chunks) sampleCount += chunk.length;
 
@@ -23,13 +35,13 @@ export function encodePcm16Wav(chunks: readonly Float32Array[], sampleRate = 16_
 	writeAscii(wav, 36, "data");
 	view.setUint32(40, dataBytes, true);
 
-	let offset = 44;
+	// Every supported host is little-endian, so the Int16 view writes WAV byte order directly.
+	const pcm = new Int16Array(wav.buffer, wav.byteOffset + 44, sampleCount);
+	let offset = 0;
 	for (const chunk of chunks) {
-		for (const sample of chunk) {
-			const clamped = Math.max(-1, Math.min(1, sample));
-			view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
-			offset += bytesPerSample;
-		}
+		if (chunk instanceof Int16Array) pcm.set(chunk, offset);
+		else floatToPcm16(chunk, pcm.subarray(offset, offset + chunk.length));
+		offset += chunk.length;
 	}
 	return wav;
 }

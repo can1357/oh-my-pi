@@ -6,10 +6,15 @@ use std::{collections::VecDeque, fmt::Display, time::Duration};
 use std::os::windows::io::OwnedHandle;
 
 use futures::FutureExt;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::{ExecutionResult, error, processes, sys, trace_categories, traps};
 
-pub(crate) type JobJoinHandle = tokio::task::JoinHandle<Result<ExecutionResult, error::Error>>;
+/// Handle to a shell-internal job task. Dropping it aborts the task, as
+/// dropping a [`processes::ChildProcess`] kills its process: a job that leaves
+/// its shell's job table (a subshell exiting, the shell dropping) must not keep
+/// running where no `kill` or `wait` can reach it.
+pub(crate) type JobJoinHandle = AbortOnDropHandle<Result<ExecutionResult, error::Error>>;
 pub(crate) type JobResult = (Job, Result<ExecutionResult, error::Error>);
 
 const WAIT_NEXT_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -617,6 +622,13 @@ impl Job {
 			.representative_pid()
 			.map_or_else(|| self.id.to_string(), |pid| pid.to_string())
 	}
+
+	/// Returns whether part of the job runs inside the shell process (a builtin,
+	/// function, or compound command) rather than as an external process.
+	pub fn has_internal_tasks(&self) -> bool {
+		self.tasks.iter().any(|task| !task.is_external())
+	}
+
 	/// Returns the number of external processes retained by this job.
 	pub fn external_process_count(&self) -> usize {
 		self.tasks.iter().filter(|task| task.is_external()).count()

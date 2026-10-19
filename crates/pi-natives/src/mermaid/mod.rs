@@ -256,6 +256,14 @@ mod tests {
 		assert!(!art.contains("┬┬"), "shared exits must attach at the same border column:\n{art}");
 	}
 
+	#[test]
+	fn zero_width_entities_do_not_shift_node_borders() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art = render("flowchart TD\nA[\"a&ZeroWidthSpace;b#8203;c\"]", &options).unwrap();
+		assert!(art.lines().any(|line| line.contains("│ abc │")), "{art}");
+		assert!(!art.contains('\u{200b}'), "{art}");
+	}
+
 	/// One case of `fixtures/mermaid.json`: the exact output (or error
 	/// message) for a source and option set. Originally captured from the
 	/// TypeScript renderer; flowchart layouts have since been re-baselined

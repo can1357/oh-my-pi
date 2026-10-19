@@ -37,15 +37,3 @@ export const cfgGoalContinuationModes = register({
 		description: 'Run modes where active goals may auto-continue between turns ("interactive", "rpc")',
 	},
 });
-
-export const cfgTitleRefreshOnReplan = register({
-	id: "title.refreshOnReplan",
-	type: "boolean",
-	default: true,
-	ui: {
-		tab: "tasks",
-		group: "Modes",
-		label: "Refresh Title on Replan",
-		description: "Refresh generated session titles after todo init replans unless the title was set by the user",
-	},
-});

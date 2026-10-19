@@ -85,16 +85,21 @@ function errorCode(error: unknown): string | number | undefined {
 }
 
 function sanitizeDiagnosticText(value: string, maxChars: number): string {
-	return value
-		.replace(FETCH_VERBOSE_ADVICE, "")
-		.replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, "$1 [redacted]")
-		.replace(/([?&](?:access[-_]?token|api[-_]?key|key|token|secret|password)=)[^&#\s]+/gi, "$1[redacted]")
-		.replace(
-			/((?:authorization|api[-_]?key|private[-_]?key|access[-_]?key|token|secret|passw(?:or)?d|pwd|credential)\s*[:=]\s*)[^\s,;}]+/gi,
-			"$1[redacted]",
-		)
-		.slice(0, maxChars)
-		.trim();
+	return (
+		value
+			.replace(FETCH_VERBOSE_ADVICE, "")
+			// A credential is token68 and never contains `"`; `Bearer name="…"` is a
+			// WWW-Authenticate challenge whose params (resource_metadata, scope, error)
+			// drive OAuth discovery, so leave it intact.
+			.replace(/\b(Bearer|Basic)\s+(?![\w.~+/-]+\s*=\s*")[^\s,;]+/gi, "$1 [redacted]")
+			.replace(/([?&](?:access[-_]?token|api[-_]?key|key|token|secret|password)=)[^&#\s]+/gi, "$1[redacted]")
+			.replace(
+				/((?:authorization|api[-_]?key|private[-_]?key|access[-_]?key|token|secret|passw(?:or)?d|pwd|credential)\s*[:=]\s*)[^\s,;}]+/gi,
+				"$1[redacted]",
+			)
+			.slice(0, maxChars)
+			.trim()
+	);
 }
 
 function sanitizeData(value: unknown, depth: number, seen: WeakSet<object>): unknown {

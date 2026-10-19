@@ -62,6 +62,7 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 		if (keys.length > 0) return { keys: keys.map(formatKeyHint), ids: keys, action };
 		return { keys: [bindings.keybindings.getDisplayString(action) || "Disabled"], ids: [], action };
 	};
+	const pushToTalkKeys = bindings.keybindings.getKeys("app.stt.pushToTalk");
 	// CustomEditor tests the chord that was actually pressed, so exit keys split by role: a key
 	// that also carries tui.editor.deleteCharForward (the readline `^D` overlap) forward-deletes
 	// while the prompt holds a draft, any other exit key quits immediately. Mixed bindings such as
@@ -134,13 +135,21 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 				{ keys: [act("app.history.search")], action: "Search prompt history" },
 				{ keys: [act("app.tools.expand")], action: "Toggle tool output expansion" },
 				{ keys: [act("app.tools.toggleVisibility")], action: "Toggle tool activity visibility" },
+				{ keys: [act("app.ask.hide")], action: "Hide/show a pending ask question" },
+				{ keys: [act("app.approval.approve")], action: "Approve a pending tool call" },
 				{ keys: [act("app.thinking.toggle")], action: "Toggle thinking block visibility" },
 				{ keys: [act("app.editor.external")], action: "Edit message in external editor" },
 				{ keys: [act("app.retry")], action: "Retry last failed assistant turn" },
 				{ keys: [act("app.clipboard.pasteImage")], action: "Paste image or text from clipboard" },
 				{
-					keys: [{ text: "Hold " }, hints(["space"])],
-					action: "Speech-to-text (push-to-talk): hold to record, release to transcribe",
+					keys:
+						pushToTalkKeys.length > 0
+							? [{ text: "Hold " }, act("app.stt.pushToTalk")]
+							: [act("app.stt.pushToTalk")],
+					action:
+						pushToTalkKeys.length > 0
+							? "Speech-to-text (push-to-talk): hold to record, release to transcribe"
+							: "Speech-to-text (push-to-talk) (disabled)",
 				},
 				{ keys: [act("app.live.toggle")], action: "Start/stop live voice mode (/live)" },
 				{

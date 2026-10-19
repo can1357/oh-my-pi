@@ -25,7 +25,7 @@ import type {
 	Usage,
 } from "../types";
 import { shouldSendServiceTier } from "../types";
-import { normalizeSystemPrompts } from "../utils";
+import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
@@ -155,28 +155,73 @@ function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: str
 	return isSameProviderAndModel && isValidThoughtSignature(signature) ? signature : undefined;
 }
 
+/** Sort the items whose key is known into key order within the slots they occupy; others stay put. */
+function sortKnownInPlace<T>(items: T[], keyOf: (item: T) => number | undefined): void {
+	const known: Array<{ position: number; key: number; item: T }> = [];
+	items.forEach((item, position) => {
+		const key = keyOf(item);
+		if (key !== undefined) known.push({ position, key, item });
+	});
+	if (known.length < 2) return;
+	const inOrder = [...known].sort((a, b) => a.key - b.key);
+	known.forEach(({ position }, index) => {
+		items[position] = inOrder[index].item;
+	});
+}
+
+/**
+ * Gemini pairs id-less function responses with calls by position. The agent loop stores
+ * parallel results in call order, but histories can still arrive out of call order (sessions
+ * saved by older versions, contexts built through the SDK), so the converters guard the wire:
+ * record each call as it is emitted and each response with its call, then {@link apply} sorts
+ * every turn's matched responses back into call order within the slots they already occupy.
+ */
+export class FunctionCallOrder {
+	#ordinals = new Map<string, number>();
+	#responses = new Map<Part, number>();
+	#next = 0;
+
+	call(id: string): void {
+		this.#ordinals.set(id, this.#next++);
+	}
+
+	/** The call ordinal of `id`, if that call was recorded. */
+	ordinal(id: string): number | undefined {
+		return this.#ordinals.get(id);
+	}
+
+	response(part: Part, callId: string): void {
+		const ordinal = this.#ordinals.get(callId);
+		if (ordinal !== undefined) this.#responses.set(part, ordinal);
+	}
+
+	apply(contents: readonly { parts?: Part[] }[]): void {
+		for (const content of contents) {
+			if (content.parts) sortKnownInPlace(content.parts, part => this.#responses.get(part));
+		}
+	}
+}
+
 /**
  * Convert internal messages to Gemini Content[] format.
  */
 export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
 	const contents: Content[] = [];
 	const emittedToolCallNames = new Map<string, string>();
+	const callOrder = new FunctionCallOrder();
 
-	const normalizeToolCallId = (id: string): string => {
-		return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
-	};
-
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
+	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id));
 
 	// Gemini < 3 image tool results go in a separate user turn, but parallel tool results must
 	// stay a single contiguous functionResponse turn ("number of function response parts is not
 	// equal to number of function call parts"). Buffer image turns and flush them only after the
-	// merged functionResponse turn is complete.
-	let pendingToolImageParts: Part[] = [];
+	// merged functionResponse turn is complete, each result's images in its call's order.
+	let pendingToolImages: Array<{ ordinal: number | undefined; parts: Part[] }> = [];
 	const flushPendingToolImages = () => {
-		if (pendingToolImageParts.length === 0) return;
-		contents.push({ role: "user", parts: pendingToolImageParts });
-		pendingToolImageParts = [];
+		if (pendingToolImages.length === 0) return;
+		sortKnownInPlace(pendingToolImages, group => group.ordinal);
+		contents.push({ role: "user", parts: pendingToolImages.flatMap(group => group.parts) });
+		pendingToolImages = [];
 	};
 
 	for (const msg of transformedMessages) {
@@ -230,15 +275,18 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						...(thoughtSignature && { thoughtSignature }),
 					});
 				} else if (block.type === "thinking") {
-					// Skip empty thinking blocks
-					if (!block.thinking || block.thinking.trim() === "") continue;
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
+					// Skip empty thinking unless it carries the signature of a signature-only thought part
+					if ((!block.thinking || block.thinking.trim() === "") && !thoughtSignature) continue;
 					if (dropsUnsignedThinking && !thoughtSignature) continue;
-					if (thoughtSignature) {
+					if (isSameProviderAndModel) {
+						// The model's own thinking replays in the thought slot even unsigned: Gemini
+						// signs the part after a thought summary, not the summary, and replayed as
+						// visible text the summary's fence leaks into later answers.
 						parts.push({
 							thought: true,
 							text: block.thinking.toWellFormed(),
-							thoughtSignature,
+							...(thoughtSignature && { thoughtSignature }),
 						});
 					} else {
 						parts.push({
@@ -247,6 +295,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					}
 				} else if (block.type === "toolCall") {
 					emittedToolCallNames.set(block.id, block.name);
+					callOrder.call(block.id);
 					// Gemini 3 requires a thought signature on function calls it makes. The
 					// public API requires the bypass sentinel on every unsigned call. Cloud
 					// Code Assist requires it only when the first call itself is unsigned;
@@ -315,6 +364,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					...(includeId ? { id: msg.toolCallId } : {}),
 				},
 			};
+			callOrder.response(functionResponsePart, msg.toolCallId);
 
 			// Cloud Code Assist API requires all function responses to be in a single user turn.
 			// Check if the last content is already a user turn with function responses and merge.
@@ -330,11 +380,15 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 
 			// For Gemini < 3, buffer images for a separate user message after the functionResponse turn
 			if (hasImages && !modelSupportsMultimodalFunctionResponse) {
-				pendingToolImageParts.push({ text: "Tool result image:" }, ...imageParts);
+				pendingToolImages.push({
+					ordinal: callOrder.ordinal(msg.toolCallId),
+					parts: [{ text: "Tool result image:" }, ...imageParts],
+				});
 			}
 		}
 	}
 	flushPendingToolImages();
+	callOrder.apply(contents);
 
 	return contents;
 }
@@ -552,6 +606,103 @@ export function pushToolCallEvents(
 	stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
 }
 
+/** How {@link GoogleTextBlocks} keeps thought text: healed of leaked fence delimiters (#8719), or as received. */
+export type GoogleThoughtText = "healed" | "verbatim";
+
+/**
+ * Folds streamed generateContent text and thought parts into text and thinking
+ * blocks, opening a new block whenever the part kind changes. A part's
+ * `thoughtSignature` stays on the block it belongs to; the empty text part
+ * Gemini sends after a reply's last chunk signs the open block.
+ */
+export class GoogleTextBlocks {
+	readonly #output: AssistantMessage;
+	readonly #stream: AssistantMessageEventStream;
+	readonly #thoughtText: GoogleThoughtText;
+	#block: TextContent | ThinkingContent | null = null;
+	#contentIndex = -1;
+	// Heals a leaked reasoning-fence opener (```thinking / ``````thinking) that some
+	// Gemini thought summaries emit as a between-summary delimiter (#8719). One
+	// stripper per thinking block; created lazily on first thinking delta.
+	#thinkingStripper: ThinkingFenceStripper | null = null;
+
+	constructor(output: AssistantMessage, stream: AssistantMessageEventStream, thoughtText: GoogleThoughtText) {
+		this.#output = output;
+		this.#stream = stream;
+		this.#thoughtText = thoughtText;
+	}
+
+	/** Folds one response part; parts without text are ignored. */
+	push(part: Part): void {
+		const { text, thoughtSignature } = part;
+		if (text === undefined) return;
+		const isThinking = isThinkingPart(part);
+		if (text === "") {
+			// A signature-only part: an unmarked one signs the open block (Gemini's
+			// trailing part after a reply), a thought part signs thinking of its own.
+			if (!thoughtSignature || part.functionCall) return;
+			const signed = isThinking && this.#block?.type !== "thinking" ? this.#open(true) : this.#block;
+			if (signed) this.#sign(signed, thoughtSignature);
+			return;
+		}
+		const block =
+			this.#block && (this.#block.type === "thinking") === isThinking ? this.#block : this.#open(isThinking);
+		this.#sign(block, thoughtSignature);
+		if (block.type === "thinking") {
+			if (this.#thoughtText === "healed") this.#thinkingStripper ??= new ThinkingFenceStripper();
+			const delta = this.#thinkingStripper ? this.#thinkingStripper.push(text) : text;
+			if (!delta) return;
+			block.thinking += delta;
+			this.#stream.push({ type: "thinking_delta", contentIndex: this.#contentIndex, delta, partial: this.#output });
+		} else {
+			block.text += text;
+			this.#stream.push({
+				type: "text_delta",
+				contentIndex: this.#contentIndex,
+				delta: text,
+				partial: this.#output,
+			});
+		}
+	}
+
+	/** Ends the open block, releasing thinking text the fence stripper held back. */
+	close(): void {
+		const block = this.#block;
+		if (!block) return;
+		if (block.type === "thinking" && this.#thinkingStripper) {
+			const tail = this.#thinkingStripper.flush();
+			if (tail) {
+				block.thinking += tail;
+				this.#stream.push({
+					type: "thinking_delta",
+					contentIndex: this.#contentIndex,
+					delta: tail,
+					partial: this.#output,
+				});
+			}
+		}
+		this.#thinkingStripper = null;
+		this.#block = null;
+		pushBlockEndEvent(block, this.#contentIndex, this.#output, this.#stream);
+	}
+
+	#open(isThinking: boolean): TextContent | ThinkingContent {
+		this.close();
+		const block = startTextOrThinkingBlock(isThinking, this.#output, this.#stream);
+		this.#block = block;
+		this.#contentIndex = this.#output.content.length - 1;
+		return block;
+	}
+
+	/** Keeps the newest non-empty signature a block's parts carried; an unsigned block gets no signature key. */
+	#sign(block: TextContent | ThinkingContent, signature: string | undefined): void {
+		if (!signature) return;
+		if (block.type === "thinking")
+			block.thinkingSignature = retainThoughtSignature(block.thinkingSignature, signature);
+		else block.textSignature = retainThoughtSignature(block.textSignature, signature);
+	}
+}
+
 /**
  * Append a new text- or thinking-block to `output.content` and push the matching
  * `text_start` / `thinking_start` event. `onBeforeStartEvent` lets the SSE consumer
@@ -581,8 +732,9 @@ export function startTextOrThinkingBlock(
 	stream: AssistantMessageEventStream,
 	onBeforeStartEvent?: () => void,
 ): TextContent | ThinkingContent {
+	// Gemini returns thought summaries, never the raw thoughts.
 	const block: TextContent | ThinkingContent = isThinking
-		? { type: "thinking", thinking: "", thinkingSignature: undefined }
+		? { type: "thinking", thinking: "", thinkingSignature: undefined, summary: true }
 		: { type: "text", text: "" };
 	output.content.push(block);
 	onBeforeStartEvent?.();
@@ -596,6 +748,23 @@ export function startTextOrThinkingBlock(
 }
 
 /**
+ * Error for an in-band `error` frame in a 200 generateContent stream. Keeps the
+ * RPC status alongside the message: an in-band quota failure is classified
+ * from this text, and `RESOURCE_EXHAUSTED` is the only account-exhaustion
+ * signal some of these chunks carry (#13090).
+ */
+export function googleStreamChunkError(error: NonNullable<GenerateContentResponse["error"]>, provider: string): Error {
+	const detail =
+		error.message && error.status
+			? `${error.message} (${error.status})`
+			: error.message || error.status || "unknown error";
+	const message = `Google API stream error: ${detail}`;
+	return typeof error.code === "number" && error.code >= 400
+		? new AIError.GoogleApiError(message, error.code)
+		: new AIError.ProviderResponseError(message, { provider, kind: "output" });
+}
+
+/**
  * Drives the chunked `generateContentStream` iterator into an `AssistantMessage` and
  * the corresponding `AssistantMessageEventStream`. Shared between `streamGoogle` and
  * `streamGoogleVertex` — every observable event order and stop-reason rule is preserved.
@@ -605,7 +774,7 @@ export function startTextOrThinkingBlock(
  * pushing `start`/`done`/`error` events, and the surrounding try/catch that translates
  * thrown errors into `output.stopReason`/`errorMessage`.
  *
- * This helper handles: the chunk loop, currentBlock flush transitions, usage metadata
+ * This helper handles: the chunk loop, text/thinking blocks ({@link GoogleTextBlocks}), usage metadata
  * decoding (`calculateCost` included), tool-call id collision avoidance, finish-reason
  * mapping, and the abort/stop-reason post-checks that re-throw to bubble into the
  * caller's catch.
@@ -616,48 +785,17 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 	stream: AssistantMessageEventStream;
 	model: Model<T>;
 	options: { signal?: AbortSignal } | undefined;
-	/** Vertex preserves `textSignature` on streamed text deltas; google-generative-ai does not. */
-	retainTextSignature?: boolean;
 	onFirstToken?: () => void;
 }): Promise<void> {
-	const { googleStream, output, stream, model, options, retainTextSignature, onFirstToken } = args;
+	const { googleStream, output, stream, model, options, onFirstToken } = args;
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
-	let currentBlock: TextContent | ThinkingContent | null = null;
-	// Heals a leaked reasoning-fence opener (```thinking / ``````thinking) that some
-	// Gemini thought summaries emit as a between-summary delimiter (#8719). One
-	// stripper per thinking block; created lazily on first thinking delta.
-	let thinkingStripper: ThinkingFenceStripper | null = null;
+	const textBlocks = new GoogleTextBlocks(output, stream, "healed");
 	let firstTokenSeen = false;
 	let sawFinishReason = false;
 
-	const flushCurrent = () => {
-		if (!currentBlock) return;
-		if (currentBlock.type === "thinking" && thinkingStripper) {
-			const tail = thinkingStripper.flush();
-			if (tail) {
-				currentBlock.thinking += tail;
-				stream.push({ type: "thinking_delta", contentIndex: blockIndex(), delta: tail, partial: output });
-			}
-		}
-		thinkingStripper = null;
-		pushBlockEndEvent(currentBlock, blockIndex(), output, stream);
-	};
-
 	for await (const chunk of googleStream) {
-		if (chunk.error) {
-			// Keep the RPC status alongside the message: an in-band quota failure
-			// is classified from this text, and `RESOURCE_EXHAUSTED` is the only
-			// account-exhaustion signal some of these chunks carry (#13090).
-			const detail =
-				chunk.error.message && chunk.error.status
-					? `${chunk.error.message} (${chunk.error.status})`
-					: chunk.error.message || chunk.error.status || "unknown error";
-			const message = `Google API stream error: ${detail}`;
-			throw typeof chunk.error.code === "number" && chunk.error.code >= 400
-				? new AIError.GoogleApiError(message, chunk.error.code)
-				: new AIError.ProviderResponseError(message, { provider: model.provider, kind: "output" });
-		}
+		if (chunk.error) throw googleStreamChunkError(chunk.error, model.provider);
 		if (!chunk.candidates?.length && chunk.promptFeedback?.blockReason) {
 			const detail = chunk.promptFeedback.blockReasonMessage;
 			throw new AIError.ProviderResponseError(
@@ -668,70 +806,14 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 		const candidate = chunk.candidates?.[0];
 		if (candidate?.content?.parts) {
 			for (const part of candidate.content.parts) {
-				if (part.text !== undefined && part.text !== "") {
-					if (!firstTokenSeen) {
-						firstTokenSeen = true;
-						onFirstToken?.();
-					}
-					const isThinking = isThinkingPart(part);
-					if (
-						!currentBlock ||
-						(isThinking && currentBlock.type !== "thinking") ||
-						(!isThinking && currentBlock.type !== "text")
-					) {
-						flushCurrent();
-						currentBlock = startTextOrThinkingBlock(isThinking, output, stream);
-					}
-					if (currentBlock.type === "thinking") {
-						thinkingStripper ??= new ThinkingFenceStripper();
-						const cleaned = thinkingStripper.push(part.text);
-						currentBlock.thinking += cleaned;
-						currentBlock.thinkingSignature = retainThoughtSignature(
-							currentBlock.thinkingSignature,
-							part.thoughtSignature,
-						);
-						if (cleaned) {
-							stream.push({
-								type: "thinking_delta",
-								contentIndex: blockIndex(),
-								delta: cleaned,
-								partial: output,
-							});
-						}
-					} else {
-						currentBlock.text += part.text;
-						if (retainTextSignature) {
-							currentBlock.textSignature = retainThoughtSignature(
-								currentBlock.textSignature,
-								part.thoughtSignature,
-							);
-						}
-						stream.push({
-							type: "text_delta",
-							contentIndex: blockIndex(),
-							delta: part.text,
-							partial: output,
-						});
-					}
-				} else if (part.text === "" && part.thoughtSignature && currentBlock && !part.functionCall) {
-					if (currentBlock.type === "thinking") {
-						currentBlock.thinkingSignature = retainThoughtSignature(
-							currentBlock.thinkingSignature,
-							part.thoughtSignature,
-						);
-					} else if (retainTextSignature) {
-						currentBlock.textSignature = retainThoughtSignature(
-							currentBlock.textSignature,
-							part.thoughtSignature,
-						);
-					}
+				if (part.text && !firstTokenSeen) {
+					firstTokenSeen = true;
+					onFirstToken?.();
 				}
+				textBlocks.push(part);
 
 				if (part.functionCall) {
-					if (currentBlock) {
-						flushCurrent();
-						currentBlock = null;
-					}
+					textBlocks.close();
 
 					// Generate unique ID if not provided or if it's a duplicate
 					const providedId = part.functionCall.id;
@@ -773,7 +855,7 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 		}
 	}
 
-	flushCurrent();
+	textBlocks.close();
 
 	if (options?.signal?.aborted) {
 		throw new AIError.AbortError();
@@ -931,10 +1013,9 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 	model: Model<T>;
 	options: GoogleSharedStreamOptions | undefined;
 	api: T;
-	retainTextSignature?: boolean;
 	prepare: () => GoogleGenAIRequestPlan | Promise<GoogleGenAIRequestPlan>;
 }): AssistantMessageEventStream {
-	const { model, options, api, retainTextSignature, prepare } = args;
+	const { model, options, api, prepare } = args;
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
@@ -1037,7 +1118,6 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					stream,
 					model,
 					options,
-					retainTextSignature,
 					onFirstToken: () => {
 						firstTokenTime = performance.now();
 					},

@@ -2,10 +2,11 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as configValue from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPServerConnection, MCPStdioServerConfig, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, withTimeout } from "@oh-my-pi/pi-utils";
 import { TOOL_NAME as DELAYED_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
 
 const CONFIG: MCPStdioServerConfig = {
@@ -18,14 +19,35 @@ class FakeTransport implements MCPTransport {
 	closeCalls = 0;
 	onClose?: () => void;
 	#closeGate?: Promise<void>;
+	/** `resources/list` answers so far; undefined makes any request fail. */
+	resourceLists?: number;
+	/** Make `resources/templates/list` fail with an error other than "method not found". */
+	templatesError?: Error;
+	/** Hold `resources/templates/list` until this settles. */
+	templatesGate?: Promise<void>;
+	/** `resources/templates/list` requests so far; `onTemplatesRequest` fires on each. */
+	templateLists = 0;
+	onTemplatesRequest?: () => void;
 
 	/** Make `close()` hang on the given gate to simulate a slow HTTP session DELETE. */
 	gateClose(gate: Promise<void>): void {
 		this.#closeGate = gate;
 	}
 
-	request<T>(): Promise<T> {
-		throw new Error("Unexpected transport request");
+	async request<T>(method: string): Promise<T> {
+		if (this.resourceLists === undefined) throw new Error("Unexpected transport request");
+		if (method === "resources/list") {
+			this.resourceLists += 1;
+			return { resources: [{ uri: "test://doc", name: "doc" }] } as T;
+		}
+		if (method === "resources/templates/list") {
+			this.templateLists += 1;
+			this.onTemplatesRequest?.();
+			if (this.templatesError) throw this.templatesError;
+			if (this.templatesGate) await this.templatesGate;
+			return { resourceTemplates: [{ uriTemplate: "test://{id}", name: "by-id" }] } as T;
+		}
+		throw new Error(`Unexpected transport request: ${method}`);
 	}
 
 	async notify(): Promise<void> {}
@@ -211,5 +233,244 @@ describe("MCPManager initial connection ownership", () => {
 		expect(connectSpy).toHaveBeenCalledTimes(2);
 
 		stuckClose.resolve();
+	});
+
+	it("aborts a handshake still in flight on disconnectAll instead of leaving it to its timeout", async () => {
+		const manager = new MCPManager(process.cwd());
+		const hangFixture = path.join(import.meta.dir, "fixtures", "hang-during-init-mcp.ts");
+		const connect = mcpClient.connectToServer;
+		const handshakes: Promise<unknown>[] = [];
+		vi.spyOn(mcpClient, "connectToServer").mockImplementation((...args) => {
+			const handshake = connect(...args);
+			handshakes.push(
+				handshake.then(
+					() => "connected",
+					error => error,
+				),
+			);
+			return handshake;
+		});
+
+		try {
+			// The server never answers `initialize`; the startup window leaves it in flight.
+			await manager.connectServers(
+				{ hang: { type: "stdio", command: process.execPath, args: [hangFixture] } },
+				{},
+				undefined,
+				200,
+			);
+			expect(handshakes).toHaveLength(1);
+			await manager.disconnectAll();
+			// The default connect timeout is far longer than this; only the abort can settle it.
+			const outcome = await withTimeout(handshakes[0], 2_000, "handshake outlived disconnectAll");
+			expect(outcome).toMatchObject({ name: "AbortError" });
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 10_000);
+
+	it("reports only handshakes that failed before disconnectAll, not the ones it aborted", async () => {
+		const manager = new MCPManager(process.cwd());
+		const hangFixture = path.join(import.meta.dir, "fixtures", "hang-during-init-mcp.ts");
+		const deadFailed = Promise.withResolvers<void>();
+
+		try {
+			const loading = manager.connectServers(
+				{
+					hang: { type: "stdio", command: process.execPath, args: [hangFixture] },
+					dead: { type: "stdio", command: process.execPath, args: ["-e", "process.exit(1)"] },
+				},
+				{},
+				event => {
+					if (event.type === "failed" && event.serverName === "dead") deadFailed.resolve();
+				},
+				5_000,
+			);
+			await deadFailed.promise;
+			await manager.disconnectAll();
+			const result = await withTimeout(loading, 2_000, "startup window outlived disconnectAll");
+			expect([...result.errors.keys()]).toEqual(["dead"]);
+			expect(result.connectedServers).toEqual([]);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 10_000);
+
+	it("stops a reconnect still resolving its credentials on disconnectAll without starting its handshake", async () => {
+		const manager = new MCPManager(process.cwd());
+		const hangFixture = path.join(import.meta.dir, "fixtures", "hang-during-init-mcp.ts");
+		const connectSpy = vi.spyOn(mcpClient, "connectToServer");
+		const config: MCPStdioServerConfig = {
+			type: "stdio",
+			command: process.execPath,
+			args: [hangFixture],
+			env: { PROBE: "!echo probe" },
+		};
+
+		try {
+			await manager.connectServers({ hang: config }, {}, undefined, 200);
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+			// The reconnect is still resolving its `!command` credential when teardown runs.
+			const credential = Promise.withResolvers<string | undefined>();
+			vi.spyOn(configValue, "resolveConfigValue").mockImplementation(() => credential.promise);
+			const reconnect = manager.reconnectServer("hang", { manual: true });
+			await manager.disconnectAll();
+			// Settles on the teardown alone: the credential never resolves and no handshake starts.
+			expect(await withTimeout(reconnect, 2_000, "reconnect outlived disconnectAll")).toBeNull();
+			expect(connectSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 10_000);
+
+	it("settles an initial connect still resolving its credentials on disconnectAll", async () => {
+		const manager = new MCPManager(process.cwd());
+		const connectSpy = vi.spyOn(mcpClient, "connectToServer");
+		const credential = Promise.withResolvers<string | undefined>();
+		const resolving = Promise.withResolvers<void>();
+		vi.spyOn(configValue, "resolveConfigValue").mockImplementation(() => {
+			resolving.resolve();
+			return credential.promise;
+		});
+
+		try {
+			// A zero startup window waits for every initial load; only the teardown can end this one.
+			const loading = manager.connectServers(
+				{ server: { ...CONFIG, env: { PROBE: "!echo probe" } } },
+				{},
+				undefined,
+				0,
+			);
+			await resolving.promise;
+			await manager.disconnectAll();
+			const result = await withTimeout(loading, 2_000, "connectServers outlived disconnectAll");
+			expect(result.errors.size).toBe(0);
+			expect(connectSpy).not.toHaveBeenCalled();
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	it("joins a catalog refresh whose resources landed while its templates are still listing", async () => {
+		const manager = new MCPManager(process.cwd());
+		const fresh = fakeConnection("server");
+		fresh.connection.capabilities = { tools: {}, resources: {} };
+		fresh.transport.resourceLists = 0;
+		const templates = Promise.withResolvers<void>();
+		const templatesRequested = Promise.withResolvers<void>();
+		fresh.transport.templatesGate = templates.promise;
+		fresh.transport.onTemplatesRequest = templatesRequested.resolve;
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(fresh.connection);
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+
+		try {
+			await manager.connectServers({ server: CONFIG }, {});
+			await manager.waitForStartup(0);
+			await templatesRequested.promise;
+			// `resources/list` has answered; `resources/templates/list` is held open.
+			expect(fresh.connection.resources).toBeDefined();
+			let settled = false;
+			const ensured = manager.ensureServerResources("server").then(() => {
+				settled = true;
+			});
+			await Promise.resolve();
+			expect(settled).toBe(false);
+
+			templates.resolve();
+			await ensured;
+			expect(manager.getServerResources("server")?.templates.map(t => t.uriTemplate)).toEqual(["test://{id}"]);
+			// Joined the in-flight listing rather than issuing its own.
+			expect(fresh.transport.templateLists).toBe(1);
+			expect(fresh.transport.resourceLists).toBe(1);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	it("retries only the templates of a catalog whose template listing failed transiently", async () => {
+		const manager = new MCPManager(process.cwd());
+		const fresh = fakeConnection("server");
+		fresh.connection.capabilities = { tools: {}, resources: {} };
+		fresh.transport.resourceLists = 0;
+		fresh.transport.templatesError = new Error("HTTP 500: templates unavailable");
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(fresh.connection);
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+
+		try {
+			await manager.connectServers({ server: CONFIG }, {});
+			await manager.waitForStartup(0);
+			await manager.ensureServerResources("server");
+			expect(manager.getServerResources("server")?.templates).toEqual([]);
+			// Startup listing plus one retry so far.
+			expect(fresh.transport.templateLists).toBe(2);
+
+			fresh.transport.templatesError = undefined;
+			// Concurrent misses share one template retry.
+			await Promise.all([manager.ensureServerResources("server"), manager.ensureServerResources("server")]);
+			expect(fresh.transport.templateLists).toBe(3);
+			expect(manager.getServerResources("server")).toEqual({
+				resources: [{ uri: "test://doc", name: "doc" }],
+				templates: [{ uriTemplate: "test://{id}", name: "by-id" }],
+			});
+			expect(fresh.transport.resourceLists).toBe(1);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	it("keeps a catalog whose template listing failed instead of listing its resources again", async () => {
+		const manager = new MCPManager(process.cwd());
+		const fresh = fakeConnection("server");
+		fresh.connection.capabilities = { tools: {}, resources: {} };
+		fresh.transport.resourceLists = 0;
+		fresh.transport.templatesError = new Error("HTTP 500: templates unavailable");
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(fresh.connection);
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+		const toolsHandled = Promise.withResolvers<void>();
+		manager.setOnToolsChanged(() => toolsHandled.promise);
+
+		try {
+			await manager.connectServers({ server: CONFIG }, {});
+			await manager.ensureServerResources("server");
+			expect(manager.getServerResources("server")).toEqual({
+				resources: [{ uri: "test://doc", name: "doc" }],
+				templates: [],
+			});
+
+			// Neither a later read nor the post-handshake load may blank the loaded resources.
+			await manager.ensureServerResources("server");
+			toolsHandled.resolve();
+			await manager.waitForStartup(0);
+			expect(fresh.transport.resourceLists).toBe(1);
+			expect(manager.getServerResources("server")?.resources.map(r => r.uri)).toEqual(["test://doc"]);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
+
+	it("keeps a catalog a read loaded before the post-handshake load instead of listing it again", async () => {
+		const manager = new MCPManager(process.cwd());
+		const fresh = fakeConnection("server");
+		fresh.connection.capabilities = { tools: {}, resources: {} };
+		fresh.transport.resourceLists = 0;
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(fresh.connection);
+		vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+		// The startup continuation awaits the owner's tools-changed handler before it loads the
+		// catalog; a resource read that arrives in that window loads it first.
+		const toolsHandled = Promise.withResolvers<void>();
+		manager.setOnToolsChanged(() => toolsHandled.promise);
+
+		try {
+			await manager.connectServers({ server: CONFIG }, {});
+			await manager.ensureServerResources("server");
+			expect(manager.getServerResources("server")?.resources.map(r => r.uri)).toEqual(["test://doc"]);
+
+			toolsHandled.resolve();
+			await manager.waitForStartup(0);
+			expect(fresh.transport.resourceLists).toBe(1);
+			expect(manager.getServerResources("server")?.resources.map(r => r.uri)).toEqual(["test://doc"]);
+		} finally {
+			await manager.disconnectAll();
+		}
 	});
 });

@@ -6,6 +6,10 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	AgentClientMessageSchema,
 	AgentServerMessageSchema,
+	ConversationStateStructureSchema,
+	CursorError,
+	CustomErrorDetailsSchema,
+	ErrorDetailsSchema,
 	InteractionUpdateSchema,
 	TextDeltaUpdateSchema,
 	TurnEndedUpdateSchema,
@@ -51,6 +55,48 @@ function turnEndedFrame(): Buffer {
 	return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
 }
 
+/**
+ * Mid-turn checkpoint echoing the request's prompt with `callId` still pending,
+ * followed by the zero-token Cursor PROVIDER_ERROR end-stream seen live (#15830).
+ */
+function checkpointThenProviderErrorFrames(rootPromptMessagesJson: Uint8Array[], callId: string): Buffer {
+	const checkpoint = create(AgentServerMessageSchema, {
+		message: {
+			case: "conversationCheckpointUpdate",
+			value: create(ConversationStateStructureSchema, { rootPromptMessagesJson, pendingToolCalls: [callId] }),
+		},
+	});
+	const details = create(ErrorDetailsSchema, {
+		error: CursorError.ERROR_PROVIDER_ERROR,
+		details: create(CustomErrorDetailsSchema, {
+			title: "Provider Error",
+			detail:
+				"We're having trouble connecting to the model provider. This might be temporary - please try again in a moment.",
+			isRetryable: false,
+		}),
+		isExpected: true,
+	});
+	const endStream = Buffer.from(
+		JSON.stringify({
+			error: {
+				code: "resource_exhausted",
+				message: "Error",
+				details: [
+					{
+						type: "aiserver.v1.ErrorDetails",
+						value: Buffer.from(toBinary(ErrorDetailsSchema, details)).toString("base64"),
+					},
+				],
+			},
+		}),
+		"utf8",
+	);
+	return Buffer.concat([
+		frameConnectMessage(toBinary(AgentServerMessageSchema, checkpoint)),
+		frameConnectMessage(endStream, 0b00000010),
+	]);
+}
+
 /** Decode the wire conversationId from the first client frame of a request. */
 function decodeConversationId(chunk: Buffer): string | undefined {
 	const msg = fromBinary(AgentClientMessageSchema, chunk.subarray(5));
@@ -62,6 +108,7 @@ type WireRequest = {
 	conversationId?: string;
 	action?: string;
 	pendingToolCalls: number;
+	rootPromptMessagesJson: Uint8Array[];
 };
 
 function decodeRunRequest(chunk: Buffer): WireRequest | undefined {
@@ -72,6 +119,7 @@ function decodeRunRequest(chunk: Buffer): WireRequest | undefined {
 		conversationId: req.conversationId,
 		action: req.action?.action.case,
 		pendingToolCalls: req.conversationState?.pendingToolCalls?.length ?? 0,
+		rootPromptMessagesJson: req.conversationState?.rootPromptMessagesJson ?? [],
 	};
 }
 
@@ -149,7 +197,7 @@ async function startServer(seenConversationIds: string[]): Promise<string> {
 /** Scripted fixture: each entry is a clean turn, rejection, or turn followed by a rejecting trailer. */
 async function startScriptedServer(
 	seen: WireRequest[],
-	script: Array<"reject" | "ok" | "turnEndedReject">,
+	script: Array<"reject" | "ok" | "turnEndedReject" | "checkpointProviderError">,
 ): Promise<string> {
 	server = http2.createServer();
 	server.on("session", session => {
@@ -163,7 +211,11 @@ async function startScriptedServer(
 			if (decoded !== undefined) seen.push(decoded);
 			requestCount++;
 			const decision = script[Math.min(requestCount - 1, script.length - 1)] ?? "reject";
-			if (decision === "reject") {
+			if (decision === "checkpointProviderError") {
+				stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+				stream.write(checkpointThenProviderErrorFrames(decoded?.rootPromptMessagesJson ?? [], "call-read"));
+				stream.end();
+			} else if (decision === "reject") {
 				stream.respond({ ":status": 200, "content-type": "application/connect+proto" }, { waitForTrailers: true });
 				stream.once("wantTrailers", () => {
 					stream.sendTrailers({ "grpc-status": "8", "grpc-message": "resource_exhausted" });
@@ -375,5 +427,23 @@ describe("Cursor conversationId rotation (issue #8345)", () => {
 		expect(seen[0]?.conversationId).toBe("sess-failed-rotation");
 		expect(seen[1]?.conversationId).not.toBe(seen[0]?.conversationId);
 		expect(seen[2]?.conversationId).toBe(seen[1]?.conversationId);
+	});
+
+	it("rotates after a zero-token PROVIDER_ERROR on a conversation cut mid-turn (#15830)", async () => {
+		// The cut turn leaves a checkpoint with a pending call; the continuation
+		// over the placeholder result must not resume that state on the same id.
+		const seen: WireRequest[] = [];
+		const baseUrl = await startScriptedServer(seen, ["checkpointProviderError", "ok"]);
+
+		const first = await runToEnd(baseUrl, "sess-provider-error");
+		expect(first.type).toBe("error");
+		expect(first.message).toContain("PROVIDER_ERROR");
+		expect((await runToEnd(baseUrl, "sess-provider-error", resumeContext())).type).toBe("done");
+
+		expect(seen).toHaveLength(2);
+		expect(seen[0]?.conversationId).toBe("sess-provider-error");
+		expect(seen[1]?.conversationId).not.toBe("sess-provider-error");
+		expect(seen[1]?.action).toBe("resumeAction");
+		expect(seen[1]?.pendingToolCalls).toBe(0);
 	});
 });

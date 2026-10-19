@@ -36,6 +36,14 @@ export interface MessageStats {
 	/** Which agent produced this message (main agent, task subagent, advisor) */
 	agentType: AgentType;
 	/**
+	 * Service tier the provider reported serving this turn, or `null` when the
+	 * provider reported none. Lets consumers separate a fast serving path's
+	 * throughput and premium traffic from standard-tier traffic. Always written by
+	 * `rowToMessageStats`; optional only because session fixtures that stand in
+	 * for ingest input are typed as `MessageStats` too.
+	 */
+	serviceTier?: ServiceTier | null;
+	/**
 	 * Ingest refused to price this request: a scheduled (time-based) card with no
 	 * recoverable request timestamp, so `usage.cost.total` of 0 is unknown spend
 	 * rather than a free request. Always written by `rowToMessageStats`; optional

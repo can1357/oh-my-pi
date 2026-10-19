@@ -4,15 +4,21 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { exportFromFile } from "../src/export/html";
+import type { SessionHeader } from "../src/session/session-entries";
 import { collectSubSessions } from "../src/session/sub-sessions";
 
 /**
  * Contract: a session at `<dir>/<name>.jsonl` embeds subagent transcripts from
  * `<dir>/<name>/<AgentId>.jsonl` (recursively) under slash-joined keys, with
- * parent links and last-entry leaf ids. Corrupt/empty/backup files are skipped.
+ * parent links and replayed leaf ids. Corrupt/empty/backup files are skipped.
  */
 
-function sessionJsonl(id: string, entryIds: string[], previousSessionFiles?: string[]): string {
+function sessionJsonl(
+	id: string,
+	entryIds: string[],
+	previousSessionFiles?: string[],
+	cacheKeys?: Pick<SessionHeader, "providerPromptCacheKey" | "taskPromptCacheKey">,
+): string {
 	const lines = [
 		JSON.stringify({
 			type: "session",
@@ -21,6 +27,7 @@ function sessionJsonl(id: string, entryIds: string[], previousSessionFiles?: str
 			timestamp: "2026-06-12T00:00:00.000Z",
 			cwd: "/tmp",
 			previousSessionFiles,
+			...cacheKeys,
 		}),
 	];
 	let parent: string | null = null;
@@ -68,11 +75,33 @@ describe("collectSubSessions", () => {
 		expect(subs.Beta).toMatchObject({ agentId: "Beta", parent: null, leafId: "b1" });
 	});
 
-	test("omits internal move history from standalone HTML", async () => {
+	test("selects the leaf a late completion-probe usage entry restored", async () => {
+		const lateUsage = JSON.stringify({
+			type: "model_usage",
+			id: "probe",
+			parentId: "a1",
+			timestamp: "2026-06-12T00:00:02.000Z",
+			activeLeafId: "a2",
+			purpose: "task-completion-probe",
+			usage: { cost: { total: 0.01 } },
+		});
+		await Bun.write(path.join(root, "main/Alpha.jsonl"), `${sessionJsonl("alpha", ["a1", "a2"])}${lateUsage}\n`);
+
+		const subs = await collectSubSessions(mainFile);
+
+		expect(subs.Alpha.leafId).toBe("a2");
+	});
+
+	test("omits internal routing and move history from standalone HTML and nested sessions", async () => {
 		const mainPreviousPath = "/Users/private/main.jsonl";
 		const subPreviousPath = "/Users/private/Alpha.jsonl";
-		await Bun.write(mainFile, sessionJsonl("main", ["m1"], [mainPreviousPath]));
-		await Bun.write(path.join(root, "main/Alpha.jsonl"), sessionJsonl("alpha", ["a1"], [subPreviousPath]));
+		const mainKeys = { providerPromptCacheKey: "private-main-cache", taskPromptCacheKey: "private-parent:reviewer" };
+		const subKeys = { providerPromptCacheKey: "private-sub-cache", taskPromptCacheKey: "private-parent:scout" };
+		const mainJsonl = sessionJsonl("main", ["m1"], [mainPreviousPath], mainKeys);
+		const subJsonl = sessionJsonl("alpha", ["a1"], [subPreviousPath], subKeys);
+		const subFile = path.join(root, "main/Alpha.jsonl");
+		await Bun.write(mainFile, mainJsonl);
+		await Bun.write(subFile, subJsonl);
 		const outputPath = path.join(root, "export.html");
 
 		await exportFromFile(mainFile, { outputPath });
@@ -81,11 +110,21 @@ describe("collectSubSessions", () => {
 		const encoded = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/)?.[1];
 		expect(encoded).toBeDefined();
 		const data = JSON.parse(Buffer.from(encoded!, "base64").toString("utf8")) as {
-			header: { previousSessionFiles?: string[] };
-			subSessions: Record<string, { header: { previousSessionFiles?: string[] } }>;
+			header: SessionHeader;
+			subSessions: Record<string, { header: SessionHeader }>;
 		};
 		expect(data.header.previousSessionFiles).toBeUndefined();
 		expect(data.subSessions.Alpha.header.previousSessionFiles).toBeUndefined();
+		for (const header of [data.header, data.subSessions.Alpha.header]) {
+			expect(header.providerPromptCacheKey).toBeUndefined();
+			expect(header.taskPromptCacheKey).toBeUndefined();
+		}
+		expect(JSON.stringify(data)).not.toContain("private-");
+		expect(data.header.id).toBe("main");
+		expect(data.subSessions.Alpha.header.id).toBe("alpha");
+		expect(await Bun.file(mainFile).text()).toBe(mainJsonl);
+		expect(await Bun.file(subFile).text()).toBe(subJsonl);
+		expect((await collectSubSessions(mainFile)).Alpha.header).toMatchObject(subKeys);
 		expect(html).not.toContain(mainPreviousPath);
 		expect(html).not.toContain(subPreviousPath);
 	});

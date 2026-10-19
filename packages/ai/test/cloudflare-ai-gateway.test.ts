@@ -6,11 +6,8 @@ import type { OAuthController } from "@oh-my-pi/pi-ai/oauth/types";
 import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import {
-	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
-	parseCloudflareAiGatewayCredential,
-	serializeCloudflareAiGatewayCredential,
-} from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
+import { parseCloudflareCredential, serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
+import { CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import { withEnv } from "./helpers";
 
 const ANTHROPIC_MODEL = buildModel({
@@ -41,6 +38,12 @@ const WORKERS_MODEL = buildModel({
 });
 
 const CONTEXT = { messages: [{ role: "user" as const, content: "Say hello", timestamp: 0 }] };
+
+const GATEWAY_CREDENTIAL = serializeCloudflareCredential({
+	token: "gateway-token",
+	accountId: "account-id",
+	gatewayId: "my-gateway",
+});
 
 function registeredLogin(options: OAuthController) {
 	const login = getProviderDefinition("cloudflare-ai-gateway")?.login;
@@ -95,7 +98,7 @@ describe("Cloudflare AI Gateway", () => {
 			"Enter your Cloudflare account ID",
 			"Enter your Cloudflare AI Gateway ID",
 		]);
-		expect(parseCloudflareAiGatewayCredential(result)).toEqual({
+		expect(parseCloudflareCredential(result)).toEqual({
 			token: "cf-gateway-token",
 			accountId: "account-id",
 			gatewayId: "default",
@@ -104,7 +107,7 @@ describe("Cloudflare AI Gateway", () => {
 
 	test("stored login metadata materializes the gateway endpoint", () => {
 		const model = ANTHROPIC_MODEL;
-		const credential = serializeCloudflareAiGatewayCredential("gateway-token", "account-id", "my-gateway");
+		const credential = GATEWAY_CREDENTIAL;
 		const prepared = prepareGatewayRequest(model, credential);
 		expect(prepared?.model.baseUrl).toBe("https://gateway.ai.cloudflare.com/v1/account-id/my-gateway/anthropic");
 		expect(prepared?.model.requestModelId).toBe("claude-sonnet-4-5");
@@ -112,7 +115,7 @@ describe("Cloudflare AI Gateway", () => {
 	});
 
 	test("uses gateway authorization without leaking it as OpenAI bearer auth", () => {
-		const credential = serializeCloudflareAiGatewayCredential("gateway-token", "account-id", "my-gateway");
+		const credential = GATEWAY_CREDENTIAL;
 		const prepared = prepareGatewayRequest(
 			{
 				...OPENAI_MODEL,
@@ -132,7 +135,7 @@ describe("Cloudflare AI Gateway", () => {
 
 	test("keeps the Workers AI provider namespace for streamed compatibility requests", async () => {
 		const captured: CapturedRequest = {};
-		const credential = serializeCloudflareAiGatewayCredential("gateway-token", "account-id", "my-gateway");
+		const credential = GATEWAY_CREDENTIAL;
 		await stream(WORKERS_MODEL, CONTEXT, {
 			apiKey: credential,
 			fetch: captureRequest(captured),
@@ -146,7 +149,7 @@ describe("Cloudflare AI Gateway", () => {
 
 	test("sends OpenAI-format models through the gateway without upstream bearer auth", async () => {
 		const captured: CapturedRequest = {};
-		const credential = serializeCloudflareAiGatewayCredential("gateway-token", "account-id", "my-gateway");
+		const credential = GATEWAY_CREDENTIAL;
 		await stream(OPENAI_MODEL, CONTEXT, {
 			apiKey: credential,
 			fetch: captureRequest(captured),
@@ -168,7 +171,7 @@ describe("Cloudflare AI Gateway", () => {
 				onPrompt: async () => prompts.shift() ?? "",
 			});
 
-			expect(parseCloudflareAiGatewayCredential(store.getApiKey("cloudflare-ai-gateway") ?? "")).toEqual({
+			expect(parseCloudflareCredential(store.getApiKey("cloudflare-ai-gateway") ?? "")).toEqual({
 				token: "persisted-token",
 				accountId: "persisted-account",
 				gatewayId: "persisted-gateway",
@@ -201,7 +204,7 @@ describe("Cloudflare AI Gateway", () => {
 			expect(credentials).toHaveLength(1);
 			const stored = credentials[0]?.credential;
 			expect(stored?.type).toBe("api_key");
-			expect(parseCloudflareAiGatewayCredential(stored?.type === "api_key" ? stored.key : "")).toEqual({
+			expect(parseCloudflareCredential(stored?.type === "api_key" ? stored.key : "")).toEqual({
 				token: "persisted-token",
 				accountId: "new-account",
 				gatewayId: "new-gateway",
@@ -237,5 +240,66 @@ describe("Cloudflare AI Gateway", () => {
 		expect(prepared?.model.baseUrl).toBe(model.baseUrl);
 		expect(prepared?.model.requestModelId).toBe("claude-sonnet-4-5");
 		expect(prepared?.options.apiKey).toBe("legacy-token");
+	});
+
+	test("rebuilds the OpenAI-compat route when the source model's fields are replaced", () => {
+		const provider = getProviderDefinition("cloudflare-ai-gateway");
+		const model: Model = { ...WORKERS_MODEL, headers: { "x-test": "old" } };
+		const first = provider?.prepareModel?.(model);
+		expect(first?.api).toBe("openai-completions");
+		expect(first?.headers).toEqual({ "x-test": "old" });
+		expect(provider?.prepareModel?.(model)).toBe(first);
+
+		model.headers = { "x-test": "new" };
+		const second = provider?.prepareModel?.(model);
+		expect(second).not.toBe(first);
+		expect(second?.headers).toEqual({ "x-test": "new" });
+	});
+});
+
+describe("Cloudflare Workers AI login", () => {
+	test("collects the API token and account ID into the shared Cloudflare credential", async () => {
+		const prompts = [" cf-api-token ", " account-id "];
+		const promptMessages: string[] = [];
+		const login = getProviderDefinition("cloudflare-workers-ai")?.login;
+		if (!login) throw new Error("Cloudflare Workers AI login is not registered");
+		const result = await login({
+			onAuth: () => {},
+			onPrompt: async prompt => {
+				promptMessages.push(prompt.message);
+				return prompts.shift() ?? "";
+			},
+		});
+
+		expect(promptMessages).toEqual(["Paste your Cloudflare API token", "Enter your Cloudflare account ID"]);
+		expect(result).toBe(JSON.stringify({ token: "cf-api-token", accountId: "account-id" }));
+		expect(parseCloudflareCredential(typeof result === "string" ? result : "")).toEqual({
+			token: "cf-api-token",
+			accountId: "account-id",
+		});
+	});
+
+	test("re-login replaces the account ID for the same token", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const authStorage = new AuthStorage(store);
+		const prompts = ["workers-token", "old-account", "workers-token", "new-account"];
+		try {
+			const controller = {
+				onAuth: () => {},
+				onPrompt: async () => prompts.shift() ?? "",
+			};
+			await authStorage.oauth.login("cloudflare-workers-ai", controller);
+			await authStorage.oauth.login("cloudflare-workers-ai", controller);
+
+			const credentials = store.listAuthCredentials("cloudflare-workers-ai");
+			expect(credentials).toHaveLength(1);
+			const stored = credentials[0]?.credential;
+			expect(parseCloudflareCredential(stored?.type === "api_key" ? stored.key : "")).toEqual({
+				token: "workers-token",
+				accountId: "new-account",
+			});
+		} finally {
+			store.close();
+		}
 	});
 });

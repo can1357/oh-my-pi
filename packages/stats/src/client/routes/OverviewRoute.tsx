@@ -62,8 +62,8 @@ const TOKEN_MIX = [
 ] as const;
 
 export function OverviewRoute({ active, range, onRequestClick }: OverviewRouteProps) {
-	const overview = useQuery(["overview", range], () => getOverviewStats(range), { enabled: active });
-	const recent = useQuery(["recent-requests"], () => getRecentRequests(12), { enabled: active });
+	const overview = useQuery(["overview", range], ({ signal }) => getOverviewStats(range, signal), { enabled: active });
+	const recent = useQuery(["recent-requests"], ({ signal }) => getRecentRequests(12, signal), { enabled: active });
 	const [metric, setMetric] = useState<ActivityMetric>("requests");
 	const meta = rangeMeta(range);
 

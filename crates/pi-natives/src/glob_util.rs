@@ -87,6 +87,23 @@ pub fn walk_depth_bound(pattern: &str) -> usize {
 		.max(1)
 }
 
+/// Walk-glob patterns for a file search scoped by `pattern`: files it matches
+/// plus every file under a directory it matches.
+///
+/// Grep and ast-grep walk files only, so a path glob whose alternatives name
+/// directories (`{src,test}`, `sr?`) would otherwise match nothing; this makes
+/// a matched directory search like a literal directory path. `dir/*.ts` stays
+/// limited to `dir`'s direct children unless a directory itself is named
+/// `*.ts`.
+pub fn search_scope_patterns(pattern: String) -> Vec<String> {
+	let base = pattern.trim_end_matches('/');
+	if base == "**" || base.ends_with("/**") {
+		return vec![pattern];
+	}
+	let descendants = format!("{base}/**");
+	vec![pattern, descendants]
+}
+
 /// Compile a glob pattern string into a [`CompiledGlob`].
 ///
 /// When `recursive` is true, simple patterns (no path separators, no leading

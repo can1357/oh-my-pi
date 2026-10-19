@@ -30,11 +30,20 @@ import { OverlayPanel } from "../chrome/overlay-box";
 import { FormField } from "../components/form";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { boundKeys, editorKey, interruptKey } from "../chrome/keybinding-hints";
-import { node, span } from "../native/describe";
-import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
-import { hintsRow, type NativeHint, overlayCard } from "../native/overlay";
+import { formatTooltipKey, type KeyName } from "../key-hint-format";
+import { col, node, span } from "../native/describe";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { actionBar, actionButton } from "../native/overlay";
 import { plainText } from "../native/spans";
 import { sanitizeCarriageReturns } from "../render/render-utils";
+
+/** Root role of the native sheet. */
+const ROLE = "omp.overlay.hook-editor";
+/**
+ * Role prefix of its parts (`.head`, `.title`, `.detail`, `.eyebrow`, `.field`/`.line`); outside
+ * `omp.overlay.*`, which Tern draws as a sheet of its own.
+ */
+const PART = "omp.hook-editor";
 
 /** Most title rows the terminal prompt shows, so a long question cannot push the input row off-screen. */
 const MAX_PROMPT_TITLE_ROWS = 3;
@@ -109,7 +118,7 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#pendingPastes: { settled: boolean; text: string | undefined }[] = [];
 	#submitQueued = false;
 	#disposed = false;
-	/** Detail lines, hints and the editor under the title; every part is fixed, so it is built once. */
+	/** Head, field and action bar; every part but the editor (which describes itself) is fixed, so it is built once. */
 	#nativeRoot: NativeNode;
 	/** Focus state mirrored to the nested editor during rendering. */
 	focused = false;
@@ -128,7 +137,7 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		const question = options?.question;
 		const terminalTitle = question === undefined ? title : boundPromptTitle(`${title}: `, question);
 		const [titleLine = "", ...detailLines] = terminalTitle.split("\n");
-		super(titleLine, "omp.overlay.hook-editor");
+		super(titleLine, ROLE);
 
 		this.#tui = tui;
 		this.#onSubmitCallback = onSubmit;
@@ -175,24 +184,24 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		this.addChild(this.#field);
 		this.addChild(new Spacer(1));
 
-		const externalHint: NativeHint = {
-			keys: boundKeys("app.editor.external", ["ctrl+g"]).slice(0, 1),
-			label: "external editor",
-		};
-		const nativeHints: NativeHint[] = this.#promptStyle
-			? [
-					{ keys: ["enter", primaryFollowUpKey], label: "submit" },
-					{ keys: ["escape"], label: "cancel" },
-					externalHint,
-				]
-			: [
-					{ keys: followUpKeys, label: "submit" },
-					{ keys: boundKeys("app.interrupt", ["escape"]).slice(0, 1), label: "cancel" },
-					externalHint,
-				];
-		const nativeChildren: NativeChild[] = [];
+		// Native: the field drops its terminal frame for the sheet's, and says what to type while empty.
+		const fieldRole = this.#promptStyle ? `${PART}.line` : `${PART}.field`;
+		this.#editor.describeLayout = input => ({ role: fieldRole, children: [input], caret: "input" });
+		const placeholder = [span(this.#promptStyle ? "Type your answer" : "Type here")];
+		this.#editor.describePlaceholder = () => placeholder;
+
+		const head: NativeChild[] = [];
 		if (question !== undefined) {
-			nativeChildren.push(
+			// The question is the heading, as on the ask sheet; the prompt's own title names the answer above it.
+			head.push(
+				node(
+					"text",
+					{ spans: [span(plainText(title))], role: `${PART}.eyebrow`, wrap: "none", truncate: "end" },
+					undefined,
+					"eyebrow",
+				),
+			);
+			head.push(
 				node(
 					"md",
 					{ text: replaceTabs(sanitizeCarriageReturns(question)), role: "omp.ask.question" },
@@ -200,28 +209,77 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 					"question",
 				),
 			);
-		} else if (detailLines.length > 0) {
-			nativeChildren.push(
+		} else {
+			head.push(
 				node(
 					"text",
-					{ spans: [span(plainText(detailLines.join("\n")), "accent")], wrap: "word" },
+					{ spans: [span(plainText(titleLine))], role: `${PART}.title`, wrap: "word" },
 					undefined,
-					"detail",
+					"title",
 				),
 			);
+			if (detailLines.length > 0) {
+				head.push(
+					node(
+						"text",
+						{ spans: [span(plainText(detailLines.join("\n")))], wrap: "word", role: `${PART}.detail` },
+						undefined,
+						"detail",
+					),
+				);
+			}
 		}
-		nativeChildren.push(this.#editor, hintsRow(nativeHints));
-		this.#nativeRoot = overlayCard(
-			this.nativeRole,
-			plainText(question === undefined ? titleLine : title),
-			nativeChildren,
+
+		// Buttons say what they do; their keys live in the tooltips.
+		const tip = (clauses: readonly (readonly [string, KeyName | undefined])[]): string =>
+			clauses.map(([label, key]) => (key ? `${label}  ${formatTooltipKey(key)}` : label)).join(" · ");
+		const submitKey: KeyName = this.#promptStyle ? "enter" : primaryFollowUpKey;
+		const newlineKey: KeyName = this.#promptStyle ? "shift+enter" : "enter";
+		const cancelKey = this.#promptStyle ? "escape" : (boundKeys("app.interrupt", ["escape"])[0] ?? "escape");
+		const buttons: (NativeNode | null)[] = [];
+		if (this.#externalEditor) {
+			const [externalKey] = boundKeys("app.editor.external", ["ctrl+g"]);
+			buttons.push(
+				actionButton("Open in editor", "external", {
+					...(externalKey ? { keys: externalKey } : {}),
+					title: tip([["Edit in your external editor", externalKey]]),
+				}),
+			);
+		}
+		buttons.push(
+			null,
+			actionButton("Cancel", "cancel", { keys: cancelKey, title: tip([["Cancel", cancelKey]]) }),
+			actionButton("Submit", "submit", {
+				keys: submitKey,
+				tone: "accent",
+				title: tip([
+					["Submit", submitKey],
+					["New line", newlineKey],
+				]),
+			}),
+		);
+
+		this.#nativeRoot = col(
+			[node("col", { role: `${PART}.head`, gap: "xs" }, head, "head"), this.#editor, actionBar(buttons)],
+			{ role: ROLE },
 		);
 	}
 
-	/** The editor (which describes itself) under the title and detail lines, with the key hints below. */
+	/**
+	 * A sheet in the composer's place: the title (or, answering a question, the question under the
+	 * prompt's name) over a hairline, the editor, and Open in editor · Cancel · Submit.
+	 */
 	override describe(_cx: DescribeContext): NativeNode {
 		this.#field.focused = this.focused;
 		return this.#nativeRoot;
+	}
+
+	/** The action bar's buttons run what their keys run. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (this.#disposed || event.type !== "action") return;
+		if (event.act === "submit") this.#submitCurrentText();
+		else if (event.act === "cancel") this.#cancel();
+		else if (event.act === "external") void this.#openExternalEditor();
 	}
 
 	/** Keep the nested editor's software/hardware cursor mode aligned with the dialog focus target. */

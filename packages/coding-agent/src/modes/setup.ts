@@ -1,3 +1,4 @@
+import { getOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
 import { runProviderSetupWizard as runProviderWizard } from "@oh-my-pi/pi-tui/setup/lazy";
 import type { SetupHost, SetupScene } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import {
@@ -30,7 +31,7 @@ export { runStartupSplash } from "@oh-my-pi/pi-tui/setup/startup-splash";
 
 /** Bind application preferences and runtime effects to the setup presentation. */
 export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
-	const modelSource = createModelBrowserSource(ctx.settings);
+	const modelSource = createModelBrowserSource(ctx.settings, model => ctx.session.effectiveServiceTier(model));
 	return {
 		ui: ctx.ui,
 		get statusLine() {
@@ -53,8 +54,8 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		},
 		modelSource,
 		getModels: () => ({
-			available: ctx.session.modelRegistry.getAvailable(),
-			all: ctx.session.modelRegistry.getAll(),
+			available: ctx.session.modelRegistry.getAvailable("all"),
+			all: ctx.session.modelRegistry.getAll("all"),
 			current: ctx.session.model,
 		}),
 		refreshModels: () => ctx.session.modelRegistry.refresh("online-if-uncached"),
@@ -64,7 +65,11 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 			if (projectScope) ctx.settings.setProjectModelRole("default", selector);
 			await ctx.settings.flush();
 		},
-		refreshProvider: provider => ctx.session.modelRegistry.refreshProvider(provider, "online"),
+		refreshProvider: async provider => {
+			// An OAuth alias (`openai-codex-device`) stores its credential under the base provider.
+			await ctx.session.modelRegistry.refreshProvider(getOAuthCredentialProvider(provider), "online");
+			await ctx.refreshScopedModelsAfterLogin?.();
+		},
 		saveComposerShape: async shape => {
 			cfgComposerShape.set(ctx.settings, shape);
 			await ctx.settings.flush();

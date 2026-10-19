@@ -83,6 +83,7 @@ export interface RewindSelectorDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	expandThinkingBlocks?: () => boolean;
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
 	/** Sibling branch paths of `entryId`'s turn (excluding the turn itself). */
@@ -156,6 +157,14 @@ const STRIP_GAP = 2;
 /** Duration of the branch-swap camera slide. */
 const SLIDE_MS = 160;
 
+/** Same length and identical elements (or both undefined). */
+function sameElements<T>(a: readonly T[] | undefined, b: readonly T[] | undefined): boolean {
+	if (a === b) return true;
+	if (a === undefined || b === undefined || a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+	return true;
+}
+
 export class RewindSelectorComponent implements Component {
 	#builder: ChatTranscriptBuilder;
 	#browser: TranscriptBrowser;
@@ -194,6 +203,24 @@ export class RewindSelectorComponent implements Component {
 	#rowText = new WeakMap<readonly string[], string>();
 	/** Native filter haystack: lowercased turn text per main target (no rendered rows under TSP). */
 	#nativeTexts: { targets: OutlineTarget[]; texts: string[] } | undefined;
+	/** Compiled word patterns of the last filter query. */
+	#filterPatterns: { query: string; patterns: RegExp[] } | undefined;
+	/**
+	 * Last {@link #filterMatches} result and its inputs. Frames hand back fresh
+	 * outer `mainRows`/`mainVisible` arrays over cached per-child rows, so those
+	 * compare element-wise.
+	 */
+	#filterMemo:
+		| {
+				query: string;
+				targets: OutlineTarget[];
+				expanded: boolean;
+				native: boolean;
+				mainRows: readonly (readonly string[])[];
+				mainVisible: readonly boolean[] | undefined;
+				matches: readonly number[];
+		  }
+		| undefined;
 	/** Last described bar and the state it was built from. */
 	#bar: { memo: string; targets: OutlineTarget[]; node: NativeNode } | undefined;
 
@@ -226,6 +253,7 @@ export class RewindSelectorComponent implements Component {
 			cwd: this.deps.cwd,
 			hideThinkingBlock: this.deps.hideThinkingBlock,
 			proseOnlyThinking: this.deps.proseOnlyThinking,
+			expandThinkingBlocks: this.deps.expandThinkingBlocks,
 			linkTargets: this.deps.linkTargets,
 			requestRender: this.deps.requestRender,
 		});
@@ -526,14 +554,25 @@ export class RewindSelectorComponent implements Component {
 	 * Matching the rendered rows keeps results honest: collapsed tool output
 	 * only matches once Ctrl+O expands it.
 	 */
-	#filterMatches(): number[] {
-		const words = (this.#filter ?? "").toLowerCase().split(/\s+/).filter(Boolean);
-		const patterns = words.map(word =>
-			/^[\p{Script=Latin}\p{N}_]+$/u.test(word)
-				? new RegExp(`(?<![\\p{L}\\p{N}_])${RegExp.escape(word)}(?![\\p{L}\\p{N}_])`, "u")
-				: new RegExp(RegExp.escape(word), "u"),
-		);
-		if (isNativeRendering() && this.#nativeTexts?.targets !== this.#targets) {
+	#filterMatches(): readonly number[] {
+		const query = this.#filter ?? "";
+		const native = isNativeRendering();
+		const memo = this.#filterMemo;
+		if (
+			memo &&
+			memo.query === query &&
+			memo.targets === this.#targets &&
+			memo.expanded === this.#expanded &&
+			memo.native === native &&
+			sameElements(memo.mainVisible, this.#mainVisible) &&
+			(native || sameElements(memo.mainRows, this.#mainRows))
+		) {
+			memo.mainRows = this.#mainRows;
+			memo.mainVisible = this.#mainVisible;
+			return memo.matches;
+		}
+		const patterns = this.#compileFilter(query);
+		if (native && this.#nativeTexts?.targets !== this.#targets) {
 			this.#nativeTexts = {
 				targets: this.#targets,
 				// Turn text plus its commands and tool output, like the expanded rendered rows.
@@ -548,19 +587,51 @@ export class RewindSelectorComponent implements Component {
 		for (let index = 0; index < this.#targets.length; index++) {
 			if (!this.#isMainSelectable(index)) continue;
 			const target = this.#targets[index]!;
-			const texts = isNativeRendering()
-				? [this.#nativeTexts?.texts[index] ?? ""]
-				: this.#mainRows.slice(target.start, target.end).map(rows => {
-						let text = this.#rowText.get(rows);
-						if (text === undefined) {
-							text = Bun.stripANSI(rows.join("\n")).toLowerCase();
-							this.#rowText.set(rows, text);
+			const matched = native
+				? patterns.every(pattern => pattern.test(this.#nativeTexts?.texts[index] ?? ""))
+				: patterns.every(pattern => {
+						for (let child = target.start; child < target.end; child++) {
+							const rows = this.#mainRows[child];
+							if (rows !== undefined && pattern.test(this.#plainRowText(rows))) return true;
 						}
-						return text;
+						return false;
 					});
-			if (patterns.every(pattern => texts.some(text => pattern.test(text)))) matches.push(index);
+			if (matched) matches.push(index);
 		}
+		this.#filterMemo = {
+			query,
+			targets: this.#targets,
+			expanded: this.#expanded,
+			native,
+			mainRows: this.#mainRows,
+			mainVisible: this.#mainVisible,
+			matches,
+		};
 		return matches;
+	}
+
+	/** Word patterns of `query`, compiled once per distinct query. */
+	#compileFilter(query: string): RegExp[] {
+		const cached = this.#filterPatterns;
+		if (cached?.query === query) return cached.patterns;
+		const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+		const patterns = words.map(word =>
+			/^[\p{Script=Latin}\p{N}_]+$/u.test(word)
+				? new RegExp(`(?<![\\p{L}\\p{N}_])${RegExp.escape(word)}(?![\\p{L}\\p{N}_])`, "u")
+				: new RegExp(RegExp.escape(word), "u"),
+		);
+		this.#filterPatterns = { query, patterns };
+		return patterns;
+	}
+
+	/** Lowercased plain text of one rendered child row array, cached by array identity. */
+	#plainRowText(rows: readonly string[]): string {
+		let text = this.#rowText.get(rows);
+		if (text === undefined) {
+			text = Bun.stripANSI(rows.join("\n")).toLowerCase();
+			this.#rowText.set(rows, text);
+		}
+		return text;
 	}
 
 	/** Up/Down: step within the active column; leaving a sibling column's top exits the strip. */

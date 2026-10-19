@@ -11,8 +11,8 @@ import {
 	type ToolResultWithAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
 import { type BlockState, handleServerMessage, type ToolCallState } from "@oh-my-pi/pi-ai/providers/cursor";
-import { piTruncation } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
+import { buildPiReadResult, piTruncation } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
+import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import {
 	AgentClientMessageSchema,
@@ -26,6 +26,7 @@ import {
 import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
+import { registerArtifactsDir } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import {
 	bridgeToolMap,
 	createBridgeEditTool,
@@ -39,7 +40,9 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { BUILTIN_TOOLS, GrepTool, ReadTool, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import type { TruncationMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { AdviseTool } from "../src/advisor/advise-tool";
 
@@ -800,14 +803,15 @@ describe("legacy shell timeout unit (issue #13082)", () => {
 		await removeWithRetries(cwd);
 	});
 
-	it("converts a millisecond ShellArgs budget into bash seconds", async () => {
-		// Legacy `ShellArgs.timeout` is milliseconds (`ShellTimeout` echoes it as
-		// `timeout_ms`), so a model asking for 15s sends 15000. Forwarded as
+	it("converts a millisecond hard_timeout into the bash deadline", async () => {
+		// Cursor states shell budgets in milliseconds (`ShellTimeout` echoes them
+		// as `timeout_ms`), so a 15s hard timeout arrives as 15000. Forwarded as
 		// seconds it exceeded the bash ceiling and ran clamped to 3600s.
 		const result = await handlers.shell({
 			command: "echo hi",
 			workingDirectory: "",
-			timeout: 15_000,
+			timeout: 5_000,
+			hardTimeout: 15_000,
 			toolCallId: "s1",
 		} as never);
 		// BashTool records its resolved deadline here; shape known from `bash.ts`.
@@ -815,13 +819,39 @@ describe("legacy shell timeout unit (issue #13082)", () => {
 		expect(details.timeoutSeconds).toBe(15);
 	});
 
-	it("rounds a sub-second budget up and leaves an unset budget on the default", async () => {
+	it("does not kill a command at a short block_until_ms wait", async () => {
+		// `ShellArgs.timeout` is the model's `block_until_ms`: how long to wait
+		// before backgrounding. As the deadline it killed `make bootstrap-local`
+		// at 5s; it now leaves the bash default in place.
+		const result = await handlers.shell({
+			command: "echo hi",
+			workingDirectory: "",
+			timeout: 5_000,
+			toolCallId: "s1b",
+		} as never);
+		const details = result.details as { timeoutSeconds?: number };
+		expect(details.timeoutSeconds).toBe(300);
+	});
+
+	it("keeps a block_until_ms wait longer than the default as the deadline", async () => {
+		const result = await handlers.shell({
+			command: "echo hi",
+			workingDirectory: "",
+			timeout: 1_200_000,
+			toolCallId: "s1c",
+		} as never);
+		const details = result.details as { timeoutSeconds?: number };
+		expect(details.timeoutSeconds).toBe(1200);
+	});
+
+	it("rounds a sub-second hard timeout up and leaves an unset budget on the default", async () => {
 		// Truncating 400ms to 0 would read as `bash`'s "no deadline" instead of
 		// the shortest deadline it can honor.
 		const subSecond = await handlers.shell({
 			command: "echo hi",
 			workingDirectory: "",
-			timeout: 400,
+			timeout: 0,
+			hardTimeout: 400,
 			toolCallId: "s2",
 		} as never);
 		const subSecondDetails = subSecond.details as { timeoutDisabled?: boolean; timeoutSeconds?: number };
@@ -943,7 +973,8 @@ describe("CursorExecHandlers error results", () => {
 				command: "pwd",
 				workingDirectory: "/tmp",
 				// Milliseconds on the wire; the bridge forwards bash seconds.
-				timeout: 12_000,
+				timeout: 5_000,
+				hardTimeout: 12_000,
 			}),
 			{ onStdout: () => {}, onStderr: () => {} },
 		);
@@ -952,6 +983,115 @@ describe("CursorExecHandlers error results", () => {
 		if (keepStart?.type !== "tool_execution_start") throw new Error("expected tool_execution_start");
 		expect(keepStart.args).toEqual({ command: "pwd", cwd: "/tmp", timeout: 12 });
 		expect(executeArgs[0]).toEqual({ command: "pwd", cwd: "/tmp", timeout: 12 });
+	});
+});
+
+describe("CursorExecHandlers argument validation", () => {
+	function recordingBridge(parameters: AgentTool["parameters"]) {
+		const calls: unknown[] = [];
+		const tool: AgentTool = {
+			name: "bash",
+			label: "Bash",
+			description: "Records validated command arguments",
+			parameters,
+			async execute(_id, args) {
+				calls.push(args);
+				return { content: [{ type: "text", text: "executed" }] };
+			},
+		};
+		return { handlers: new CursorExecHandlers({ cwd: ".", tools: new Map([[tool.name, tool]]) }), calls };
+	}
+
+	function mcp(
+		handlers: CursorExecHandlers,
+		toolName: string,
+		args: Record<string, unknown>,
+	): Promise<ToolResultMessage> {
+		return handlers.mcp({
+			name: toolName,
+			providerIdentifier: "pi-agent",
+			toolName,
+			toolCallId: "validation",
+			args,
+			rawArgs: {},
+		});
+	}
+
+	function todoBridge() {
+		let phases: TodoPhase[] = [];
+		const tool = new TodoTool(
+			createTestSession(".", {
+				getTodoPhases: () => phases,
+				setTodoPhases: value => {
+					phases = value;
+				},
+			}),
+		);
+		return {
+			handlers: new CursorExecHandlers({ cwd: ".", tools: new Map([["todo", tool as AgentTool]]) }),
+			phases: () => phases,
+		};
+	}
+
+	it("returns missing-command validation errors without executing a Cursor MCP tool", async () => {
+		const { handlers, calls } = recordingBridge(new BashTool(createTestSession(".")).parameters);
+		const result = await mcp(handlers, "bash", {});
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([
+			expect.objectContaining({ text: expect.stringContaining('Validation failed for tool "bash"') }),
+		]);
+		expect(calls).toEqual([]);
+	});
+
+	it("refuses unsupported enum arguments before dispatching a Cursor MCP tool", async () => {
+		const { handlers, calls } = recordingBridge(type({ op: "'read' | 'write'" }));
+		const result = await mcp(handlers, "bash", { op: "erase" });
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([
+			expect.objectContaining({ text: expect.stringContaining('Validation failed for tool "bash"') }),
+		]);
+		expect(calls).toEqual([]);
+	});
+
+	it("passes schema-normalized scalar and optional values to Cursor MCP tools", async () => {
+		const { handlers, calls } = recordingBridge(new BashTool(createTestSession(".")).parameters);
+		const result = await mcp(handlers, "bash", { command: 42, cwd: null, timeout: null });
+		expect(result.isError).toBe(false);
+		expect(calls).toEqual([{ command: "42" }]);
+	});
+
+	it("preserves a lenient todo tool's omitted-operation repair", async () => {
+		const { handlers, phases } = todoBridge();
+		const result = await mcp(handlers, "todo", {
+			list: [{ phase: "Recovered", items: ["From Cursor"] }],
+			__rawJson: "metadata",
+		});
+		expect(result.isError).toBe(false);
+		expect(phases()).toEqual([{ name: "Recovered", tasks: [{ content: "From Cursor", status: "in_progress" }] }]);
+	});
+
+	it("refuses parse-error metadata instead of executing even a lenient Cursor tool", async () => {
+		const { handlers, phases } = todoBridge();
+		const result = await mcp(handlers, "todo", {
+			list: [{ phase: "Rejected", items: ["Must not execute"] }],
+			__parseError: "Unexpected token",
+			__rawJson: "{broken",
+		});
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([
+			expect.objectContaining({ text: expect.stringContaining("Tool call arguments are not valid JSON") }),
+		]);
+		expect(phases()).toEqual([]);
+	});
+
+	it("applies the same validation before native shell-stream execution", async () => {
+		const { handlers, calls } = recordingBridge(type({ command: "'safe-command'" }));
+		const result = await handlers.shellStream(
+			create(ShellArgsSchema, { toolCallId: "invalid-stream", command: "unsafe-command" }),
+			{ onStdout: () => {}, onStderr: () => {} },
+		);
+		expect(result.isError).toBe(true);
+		expect(calls).toEqual([]);
 	});
 });
 
@@ -2072,6 +2212,110 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		const result = answer.message.value.message.value.result;
 		if (result.case !== "success" || result.value.output.case !== "content") throw new Error("expected read content");
 		expect(result.value.output.value.trimEnd()).toBe("line997\nline998\nline999\nline1000");
+	});
+
+	it("reads an image file as an image through both read frames instead of its bytes as text", async () => {
+		// Both frames compose `:raw`, which bypasses `read`'s image routing: the PNG
+		// reached Cursor as UTF-8 mojibake and every later request failed (#15630).
+		const seed = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+			"base64",
+		);
+		const target = path.join(cwd, "shot.png");
+		await Bun.write(target, await new Bun.Image(seed).resize(24, 24).png().bytes());
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["read", new ReadTool(createTestSession(cwd))]]),
+			getToolContext: () => yoloToolContext(),
+		});
+		const results: ToolResultMessage[] = [];
+		const written: Buffer[] = [];
+		const h2Request = {
+			write(chunk: Buffer) {
+				written.push(chunk);
+				return true;
+			},
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "execServerMessage",
+					value: create(ExecServerMessageSchema, {
+						id: 8,
+						execId: "image-read",
+						message: {
+							case: "readArgs",
+							value: create(ReadArgsSchema, { path: target, toolCallId: "image-read" }),
+						},
+					}),
+				},
+			}),
+			cursorAssistantMessage(),
+			new AssistantMessageEventStream(),
+			newBlockState(),
+			new Map(),
+			h2Request,
+			handlers,
+			result => {
+				results.push(result);
+			},
+			{ sawTokenDelta: false },
+			[],
+		);
+		const frame = written[0];
+		if (!frame) throw new Error("expected read response");
+		const answer = fromBinary(AgentClientMessageSchema, frame.subarray(5, 5 + frame.readUInt32BE(1)));
+		if (answer.message.case !== "execClientMessage" || answer.message.value.message.case !== "readResult") {
+			throw new Error("expected read result");
+		}
+		const legacy = answer.message.value.message.value.result;
+		if (legacy.case !== "success" || legacy.value.output.case !== "content") throw new Error("expected read content");
+
+		const modern = await handlers.piRead({ toolCallId: "pi-image-read", args: { path: "shot.png" } } as never);
+		const ranged = await handlers.piRead({
+			toolCallId: "pi-image-range",
+			args: { path: "shot.png", offset: 1, limit: 20 },
+		} as never);
+		// A `;` list splits into nested reads; the image part must keep the flag.
+		await Bun.write(path.join(cwd, "notes.txt"), "notes\n");
+		const split = await handlers.piRead({
+			toolCallId: "pi-image-split",
+			args: { path: "notes.txt;shot.png" },
+		} as never);
+		const piFrame = buildPiReadResult(modern);
+		if (piFrame.result.case !== "success") throw new Error("expected pi_read success");
+
+		for (const output of [legacy.value.output.value, piFrame.result.value.output]) {
+			expect(output).not.toContain("IHDR");
+			expect(output).toMatch(/\[image\/\w+ image\]/);
+		}
+		for (const result of [results[0], modern, ranged, split]) {
+			expect(result?.isError).toBe(false);
+			expect(result?.content.some(part => part.type === "image")).toBe(true);
+		}
+		const splitText = split.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
+		expect(splitText).not.toContain("IHDR");
+	});
+
+	it("routes internal artifact reads through both Cursor frames", async () => {
+		const artifacts = path.join(cwd, "artifacts");
+		await fs.mkdir(artifacts);
+		await Bun.write(path.join(artifacts, "0.read.log"), "cursor-artifact-content\n");
+		const unregister = registerArtifactsDir(artifacts);
+		try {
+			const handlers = new CursorExecHandlers({
+				cwd,
+				tools: new Map<string, Tool>([["read", new ReadTool(createTestSession(cwd))]]),
+			});
+			const legacy = await handlers.read(create(ReadArgsSchema, { path: "artifact://0:raw" }));
+			const modern = await handlers.piRead({ toolCallId: "artifact-read", args: { path: "artifact://0" } });
+			for (const result of [legacy, modern]) {
+				expect(result.isError).toBe(false);
+				expect(result.content).toEqual([{ type: "text", text: "cursor-artifact-content\n" }]);
+			}
+		} finally {
+			unregister();
+		}
 	});
 
 	it("escapes pi_grep's pattern when the frame asks for a literal search", async () => {

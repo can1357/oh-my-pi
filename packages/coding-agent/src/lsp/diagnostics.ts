@@ -32,14 +32,6 @@ import {
 
 const DIAGNOSTIC_MESSAGE_LIMIT = 50;
 export const SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS = 3000;
-/**
- * Single-file diagnostics wait budget for project-aware servers (Roslyn, tsserver, …).
- * Their first pull-diagnostic response computes analysis on demand and routinely
- * takes several seconds, overrunning {@link SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS};
- * an explicit `lsp diagnostics` request can afford to wait, so give it more room
- * (still capped by the tool-level timeout).
- */
-export const PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS = 10_000;
 export const BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS = 400;
 const DIAGNOSTICS_POLL_MS = 100;
 const DIAGNOSTICS_SETTLE_MS = 250;
@@ -70,6 +62,16 @@ export const DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS = 12_000;
  * and the edit returns.
  */
 export const DIAGNOSTICS_PIPELINE_GRACE_MS = 10_000;
+
+/**
+ * Per-server wait budget (ms) for late post-edit diagnostics: at least
+ * {@link DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS}, raised to `lsp.requestTimeout`
+ * so a server still loading its project on a cold start delivers late instead of
+ * being dropped.
+ */
+export function deferredDiagnosticsWaitMs(requestTimeoutSec: number | undefined): number {
+	return Math.max(DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS, (requestTimeoutSec ?? 0) * 1000);
+}
 export const MAX_GLOB_DIAGNOSTIC_TARGETS = 20;
 export const WORKSPACE_SYMBOL_LIMIT = 200;
 export const PROJECT_INDEXED_ACTIONS: ReadonlySet<string> = new Set([

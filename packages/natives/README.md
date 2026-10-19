@@ -10,7 +10,9 @@ Native Rust functionality via N-API.
 - **Audio**: Cross-platform low-latency microphone capture and gapless speaker playback
 - **WebRTC**: Native Opus media, SDP offer/answer negotiation, and data-channel events for live sessions
 - **File locking**: Process-owned cross-process locks with in-memory kernel names on Linux/Windows and `flock(2)` sidecars on other Unix platforms
+- **Local IPC**: `IpcServer`/`IpcConnection` over Unix sockets and Windows named pipes — owner-only access, single-instance binding with stale-endpoint takeover, newline or raw framing; `ipcEndpoint(dir, name)` names endpoints per platform
 - **PDF**: In-memory PDF-to-Markdown extraction with OCR-page classification via `pdf-inspector`
+- **Binary patches**: `applyBinaryPatch(oldPath, patchPath, outPath)` applies an HDiffPatch single-stream patch (HDIFFSF20, zstd or uncompressed), streaming from files; callers verify digests
 
 General-purpose image processing (decode/resize/encode for files and buffers)
 lives in [`Bun.Image`](https://bun.com/docs/runtime/image) on the JS side; this
@@ -20,7 +22,7 @@ that terminal protocol.
 ## Usage
 
 ```typescript
-import { encodeSixel, grep, pdfToMarkdown } from "@oh-my-pi/pi-natives";
+import { encodeSixelAsync, grep, pdfToMarkdown } from "@oh-my-pi/pi-natives";
 
 // Grep for a pattern
 const results = await grep({
@@ -37,13 +39,31 @@ const files = await find({
 	fileType: "file",
 });
 
-// SIXEL encode for a terminal cell box (px)
-const sequence = encodeSixel(pngBytes, widthPx, heightPx);
+// SIXEL encode for a terminal cell box (px), off the JS thread
+// (`encodeSixel` is the synchronous form)
+const backgroundRgb = 0x202040; // Actual terminal background, packed 0xRRGGBB
+const sequence = await encodeSixelAsync(pngBytes, widthPx, heightPx, backgroundRgb);
 
 // Extract PDF text and identify pages that still need OCR
 const pdf = await pdfToMarkdown(pdfBytes);
 console.log(pdf.markdown, pdf.pagesNeedingOcr);
 ```
+
+Both SIXEL encoder forms require the terminal background as a fourth argument,
+packed as a 24-bit `0xRRGGBB` number. When resizing images with alpha, RGB is
+premultiplied before Lanczos filtering so transparent pixels cannot darken or
+discolor visible edges. After resizing, the terminal background is composited
+without applying alpha twice. Fully transparent pixels remain transparent;
+unscaled images retain their existing blending path. Re-encode when the terminal
+background RGB changes.
+
+### PTY dimensions
+
+`normalizePtyDimensions(cols, rows)` returns `{ cols, rows }` with fractional
+values truncated toward zero and dimensions clamped to 20–400 columns and
+5–200 rows. It shares the native bounds used by `PtySession.start`,
+`startArgv`, and `resize`. Use the returned dimensions when sizing a screen
+emulator so its viewport matches the native PTY.
 
 ### Lazy Windows path helpers
 
@@ -76,7 +96,7 @@ crates/pi-natives/       # Rust source (workspace member)
 native/                  # Core loader files and local/CI native build outputs
   index.js               # Public native export surface
   loader-state.js        # Platform, ISA variant, and addon resolution
-  embedded-addon.js      # Standalone binary embed stub/generated metadata
+  embedded-addon.js      # Null embed stub; binary builds replace it in memory
   pi_natives.<platform>-<arch>-modern.node   # x64 modern ISA (local/CI artifact)
   pi_natives.<platform>-<arch>-baseline.node # x64 baseline ISA (local/CI artifact)
   pi_natives.<platform>-<arch>.node          # non-x64 build artifact

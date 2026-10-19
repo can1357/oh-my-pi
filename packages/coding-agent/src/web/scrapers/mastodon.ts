@@ -1,6 +1,7 @@
-import { tryParseJson } from "@oh-my-pi/pi-utils";
-import type { RenderResult, SpecialHandler } from "./types";
+import { tryParseJson, untilAborted } from "@oh-my-pi/pi-utils";
+import type { LoadPageResult, RenderResult, SpecialHandler } from "./types";
 import { buildResult, formatNumber, htmlToBasicMarkdown, loadPage } from "./types";
+import { isConclusiveProbeStatus, PlatformProbeCache } from "./utils";
 
 interface MastodonAccount {
 	id: string;
@@ -49,23 +50,36 @@ interface MastodonStatus {
 	};
 }
 
+const mastodonProbes = new PlatformProbeCache();
+
+/** Shared probe deadline (seconds); fixed so no single caller's budget decides the verdict for all. */
+const MASTODON_PROBE_TIMEOUT_S = 5;
+
 /**
- * Check if a domain is a Mastodon instance by probing the API
+ * Check if a domain is a Mastodon instance by probing the API. Conclusive
+ * verdicts are memoized per host. Concurrent callers share one probe that
+ * carries no caller's signal or timeout; each caller's abort or deadline ends
+ * only its own wait.
  */
-async function isMastodonInstance(hostname: string, timeout: number, signal?: AbortSignal): Promise<boolean> {
-	try {
-		const result = await loadPage(`https://${hostname}/api/v1/instance`, {
-			timeout: Math.min(timeout, 5),
-			headers: { Accept: "application/json" },
-			signal,
-		});
-		if (!result.ok) return false;
-		const data = JSON.parse(result.content);
-		// Mastodon instances return uri/domain field
-		return !!(data.uri || data.domain || data.title);
-	} catch {
-		return false;
-	}
+function isMastodonInstance(hostname: string, timeout: number, signal?: AbortSignal): Promise<boolean> {
+	const deadline = AbortSignal.timeout(Math.min(timeout, MASTODON_PROBE_TIMEOUT_S) * 1000);
+	return untilAborted(signal ? AbortSignal.any([signal, deadline]) : deadline, () =>
+		mastodonProbes.resolve(hostname, async () => {
+			let result: LoadPageResult;
+			try {
+				result = await loadPage(`https://${hostname}/api/v1/instance`, {
+					timeout: MASTODON_PROBE_TIMEOUT_S,
+					headers: { Accept: "application/json" },
+				});
+			} catch {
+				return undefined;
+			}
+			if (!result.ok) return isConclusiveProbeStatus(result.status) ? false : undefined;
+			// Mastodon instances return uri/domain field
+			const data = tryParseJson<{ uri?: unknown; domain?: unknown; title?: unknown }>(result.content);
+			return !!(data?.uri || data?.domain || data?.title);
+		}),
+	);
 }
 
 /**

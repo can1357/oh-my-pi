@@ -35,11 +35,13 @@ _ADDONS = {
     for target, (platform, out) in _ADDONS.items()
 ]
 
-# Every addon buildable from a linux-x64 host (the omp-kata pods): all linux
-# targets plus the msvc cross build. darwin addons build on mac hosts.
+# Every shipped addon. Linux hosts (the omp-kata pods) build all of them: the
+# zig, msvc and darwin cross toolchains all run there.
 filegroup(
-    name = "natives-linux-all",
+    name = "natives-all",
     srcs = [
+        ":natives-darwin-arm64",
+        ":natives-darwin-x64-baseline",
         ":natives-linux-arm64",
         ":natives-linux-musl-arm64",
         ":natives-linux-musl-x64-baseline",

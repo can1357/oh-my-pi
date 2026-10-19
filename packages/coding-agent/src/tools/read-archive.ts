@@ -1,11 +1,13 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { TextContent } from "@oh-my-pi/pi-ai";
 import {
+	type ArchiveFormat,
 	type ArchiveReader,
 	formatArchiveEntryLines,
 	openArchive,
 	parseArchivePathCandidates,
 } from "@oh-my-pi/pi-utils/ar";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { ToolSession } from "../sdk";
 import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
@@ -34,6 +36,69 @@ interface ResolvedArchiveReadPath {
 	absolutePath: string;
 	archiveSubPath: string;
 	suffixResolution?: { from: string; to: string };
+}
+
+/**
+ * Formats whose reader retains only the member index: payloads are ranged
+ * reads from disk. Stream containers buffer the whole archive and RAR/7z keep
+ * decoded solid blocks, so caching those would pin up to their in-memory limit.
+ */
+const CACHEABLE_ARCHIVE_FORMATS: Partial<Record<ArchiveFormat, true>> = { zip: true, asar: true, iso: true };
+
+interface CachedArchiveReader {
+	reader: ArchiveReader;
+	ino: number;
+	mtimeMs: number;
+	/** Change time: moves on every write and permission change and cannot be set back, unlike mtime. */
+	ctimeMs: number;
+	size: number;
+	entryCount: number;
+}
+
+/**
+ * Recently opened archives, so paging through members does not re-read and
+ * re-index the archive per read. Bounded by count and by total indexed entries;
+ * an entry is reused only while the file's identity (inode, mtime, ctime, size)
+ * holds, so a rewrite or a permission change reopens the archive.
+ */
+const archiveReaderCache = new LRUCache<string, CachedArchiveReader>({
+	max: 4,
+	maxSize: 200_000,
+	sizeCalculation: cached => Math.max(1, cached.entryCount),
+});
+
+async function openArchiveCached(absolutePath: string): Promise<ArchiveReader> {
+	// A vanished or unreadable archive is reported by the opener, as it always has been.
+	const stat = await Bun.file(absolutePath)
+		.stat()
+		.catch(() => null);
+	if (!stat) return openArchive(absolutePath);
+	const cached = archiveReaderCache.get(absolutePath);
+	if (
+		cached &&
+		cached.ino === stat.ino &&
+		cached.mtimeMs === stat.mtimeMs &&
+		cached.ctimeMs === stat.ctimeMs &&
+		cached.size === stat.size
+	) {
+		return cached.reader;
+	}
+	const reader = await openArchive(absolutePath);
+	if (!CACHEABLE_ARCHIVE_FORMATS[reader.format]) {
+		archiveReaderCache.delete(absolutePath);
+		return reader;
+	}
+	let entryCount = 0;
+	for (const _entry of reader.indexEntries()) entryCount++;
+	archiveReaderCache.set(absolutePath, {
+		reader,
+		ino: stat.ino,
+		mtimeMs: stat.mtimeMs,
+		ctimeMs: stat.ctimeMs,
+		size: stat.size,
+		entryCount,
+	});
+	return reader;
 }
 export async function resolveArchiveReadPath(
 	session: ToolSession,
@@ -127,7 +192,7 @@ export async function readArchive(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<ReadToolDetails>> {
 	throwIfAborted(signal);
-	const archive = await openArchive(resolvedArchivePath.absolutePath);
+	const archive = await openArchiveCached(resolvedArchivePath.absolutePath);
 	throwIfAborted(signal);
 
 	const details: ReadToolDetails = markMarkdownContentType(
@@ -181,7 +246,7 @@ export async function readArchive(
 	// Archive members are immutable: there is no edit path for bytes inside
 	// an archive, and a hashline tag keyed to the archive file would invite
 	// (and fail) edits while clobbering sibling members' snapshots.
-	const result = buildInMemorySelectorResult(session, text, sel, {
+	const result = await buildInMemorySelectorResult(session, text, sel, {
 		details,
 		sourcePath: resolvedArchivePath.absolutePath,
 		entityLabel: "archive entry",

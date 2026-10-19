@@ -48,9 +48,19 @@ export class QueueModeSelectorComponent extends OverlayPanel {
 		this.addChild(this.#selectList);
 		this.#sheet = new SelectListSheet(this.#selectList, {
 			title: "Queue mode",
+			subtitle: "How messages you send while omp works are delivered",
 			icon: "list",
 			noun: "modes",
 			current: [currentMode],
+			// The terminal list shows the setting's values; the sheet names them for people.
+			decorate: item =>
+				item.value === "one-at-a-time"
+					? {
+							label: "One at a time",
+							detail: "Each queued message gets its own turn",
+							badges: [{ text: "recommended" }],
+						}
+					: { label: "All at once", detail: "Queued messages are sent together in one turn" },
 		});
 	}
 

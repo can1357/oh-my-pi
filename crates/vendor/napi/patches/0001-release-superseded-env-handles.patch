@@ -1,6 +1,6 @@
 --- a/src/bindgen_runtime/module_register.rs
 +++ b/src/bindgen_runtime/module_register.rs
-@@ -197,6 +197,70 @@
+@@ -196,6 +196,70 @@
    })
  }
  
@@ -71,7 +71,7 @@
  type RegisteredClasses = PersistedPerInstanceHashMap<
    /* export name */ String,
    /* constructor */ sys::napi_ref,
-@@ -857,6 +921,9 @@
+@@ -897,6 +961,9 @@
    // use-after-free this change exists to prevent. `create_custom_gc` only needs a
    // valid `env` (it creates a dummy function + the per-env TSFN and never reads
    // `exports`), so running it this early is safe.

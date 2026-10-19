@@ -3,7 +3,7 @@ import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { __resetVertexTokenCache, getVertexAccessToken } from "../../src/providers/google-auth";
+import { __resetVertexTokenCache, getVertexAccessToken, userAdcPath } from "../../src/providers/google-auth";
 import type { FetchImpl } from "../../src/types";
 
 const CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
@@ -141,4 +141,79 @@ describe("getVertexAccessToken impersonated_service_account ADC", () => {
 			lifetime: "3600s",
 		});
 	});
+});
+
+describe("gcloud user ADC location", () => {
+	const ENV_KEYS = [
+		"APPDATA",
+		"GOOGLE_APPLICATION_CREDENTIALS",
+		"GOOGLE_CLOUD_ACCESS_TOKEN",
+		"CLOUDSDK_AUTH_ACCESS_TOKEN",
+	];
+	let tmpDir: string;
+	let originalEnv: Record<string, string | undefined>;
+
+	beforeEach(async () => {
+		__resetVertexTokenCache();
+		originalEnv = Object.fromEntries(ENV_KEYS.map(key => [key, Bun.env[key]]));
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-vertex-user-adc-"));
+	});
+
+	afterEach(async () => {
+		__resetVertexTokenCache();
+		for (const key of ENV_KEYS) {
+			const original = originalEnv[key];
+			if (original === undefined) delete Bun.env[key];
+			else Bun.env[key] = original;
+		}
+		await fs.rm(tmpDir, { recursive: true, force: true });
+	});
+
+	it("resolves under %APPDATA%\\gcloud on win32", () => {
+		expect(userAdcPath("win32", "C:\\Users\\me\\AppData\\Roaming")).toBe(
+			path.join("C:\\Users\\me\\AppData\\Roaming", "gcloud", "application_default_credentials.json"),
+		);
+	});
+
+	it("resolves under ~/.config/gcloud off Windows", () => {
+		expect(userAdcPath("linux", "C:\\ignored")).toBe(
+			path.join(os.homedir(), ".config", "gcloud", "application_default_credentials.json"),
+		);
+	});
+
+	it.skipIf(process.platform !== "win32")(
+		"exchanges the refresh token from %APPDATA% gcloud ADC on Windows",
+		async () => {
+			Bun.env.APPDATA = tmpDir;
+			delete Bun.env.GOOGLE_APPLICATION_CREDENTIALS;
+			delete Bun.env.GOOGLE_CLOUD_ACCESS_TOKEN;
+			delete Bun.env.CLOUDSDK_AUTH_ACCESS_TOKEN;
+			await Bun.write(
+				path.join(tmpDir, "gcloud", "application_default_credentials.json"),
+				JSON.stringify({
+					type: "authorized_user",
+					client_id: "client-id",
+					client_secret: "client-secret",
+					refresh_token: "refresh-token",
+				}),
+			);
+
+			const calls: { url: string; init?: RequestInit }[] = [];
+			const fetchImpl: FetchImpl = async (input, init) => {
+				const url = urlOf(input);
+				calls.push({ url, init });
+				if (url === "https://oauth2.googleapis.com/token") {
+					return new Response(JSON.stringify({ access_token: "user-adc-token", expires_in: 3600 }));
+				}
+				return new Response("not found", { status: 404 });
+			};
+
+			expect(await getVertexAccessToken({ fetch: fetchImpl })).toBe("user-adc-token");
+			const tokenCalls = calls.filter(call => call.url === "https://oauth2.googleapis.com/token");
+			expect(tokenCalls).toHaveLength(1);
+			const body = new URLSearchParams(String(tokenCalls[0].init?.body));
+			expect(body.get("grant_type")).toBe("refresh_token");
+			expect(body.get("refresh_token")).toBe("refresh-token");
+		},
+	);
 });

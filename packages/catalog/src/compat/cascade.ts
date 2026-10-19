@@ -288,7 +288,12 @@ function collect(winners: WinnerTable, pick: (rule: CompiledRule) => Record<stri
 	return out;
 }
 
-const resolveCache = new LRUCache<string, ResolvedAxes>({ max: 512 });
+/**
+ * Sized above the bundled catalog (~5.6k targets) plus discovered rows so a
+ * catalog-wide buildModel pass (discovery, then merge rebuilding the same ids)
+ * hits instead of thrashing. Entries share rule values: a few hundred bytes each.
+ */
+const resolveCache = new LRUCache<string, ResolvedAxes>({ max: 16384 });
 
 function keyPart(value: string | undefined): string {
 	return value === undefined ? "-1:" : `${value.length}:${value}`;
@@ -404,13 +409,16 @@ function resolveOverIndex(index: RuleIndex, target: ResolveTarget): ResolvedAxes
 			reasoning = true;
 		}
 	}
+	// Unclassified targets get their provider's ladder too: it is offered as
+	// unverified thinking (`resolveThinkingPolicy`), never as reasoning capability.
+	const offersThinking = reasoning || target.class === "unknown";
 	const wire: WinnerTable = {};
 	const thinking: WinnerTable = {};
 	const catalog: WinnerTable = {};
 	for (const { rule, rank } of ranked) {
 		contest(wire, rule.compiled.wire, rank, rule, target);
 		contest(catalog, rule.compiled.catalog, rank, rule, target);
-		if (reasoning) contest(thinking, rule.compiled.thinking, rank, rule, target);
+		if (offersThinking) contest(thinking, rule.compiled.thinking, rank, rule, target);
 	}
 	return {
 		wire: collect(wire, rule => rule.wire),

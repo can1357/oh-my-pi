@@ -103,6 +103,15 @@ describe("LocalProtocolHandler", () => {
 		);
 	});
 
+	it("keeps the fallback root inside its own session dir under omp-local", () => {
+		for (const sessionId of ["..", "."]) {
+			const getSessionId = () => sessionId;
+			expect(resolveLocalRoot({ getSessionId, getArtifactsDir: () => null })).toBe(
+				path.join(os.tmpdir(), "omp-local", "session"),
+			);
+		}
+	});
+
 	it("uses a stable short temp root for long Windows artifact paths", async () => {
 		const longArtifactsDir = path.join(os.tmpdir(), "a".repeat(220), "artifacts");
 		const expectedRoot = path.join(os.tmpdir(), "omp-local", "session_long");

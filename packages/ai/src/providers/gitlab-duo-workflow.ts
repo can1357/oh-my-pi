@@ -2310,8 +2310,11 @@ function emitGitLabDuoWorkflowCheckpoint(
 		const contentByKey = state.checkpointAgentContentByKey ?? {};
 		const contentSignatures = state.checkpointAgentContentSignatures ?? {};
 		const previousContent = contentByKey[entry.messageKey];
-		const contentSignature = `${turnIndex}\u0000${entry.kind}\u0000${entry.content}`;
-		const contentOnlySignature = `${turnIndex}\u0000content\u0000${entry.content}`;
+		// Keyed by a content hash: every frame is a full snapshot, so keying on the
+		// text itself kept two copies of each message prefix seen per stream.
+		const contentHash = Bun.hash(entry.content).toString(36);
+		const contentSignature = `${turnIndex}\u0000${entry.kind}\u0000${contentHash}`;
+		const contentOnlySignature = `${turnIndex}\u0000content\u0000${contentHash}`;
 		const duplicateContent =
 			previousContent === undefined &&
 			(contentSignatures[contentSignature] === true || contentSignatures[contentOnlySignature] === true);

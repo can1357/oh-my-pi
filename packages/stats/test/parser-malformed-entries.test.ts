@@ -405,7 +405,7 @@ describe("legacy entries without a recorded price", () => {
 			"user_messages_v9",
 			"tool_calls_v1",
 			"user_message_links_v1",
-			"premium_requests_priority_v1",
+			"premium_requests_priority_v2",
 			"messages_cost_reingest_v1",
 		];
 		for (const key of spent) {

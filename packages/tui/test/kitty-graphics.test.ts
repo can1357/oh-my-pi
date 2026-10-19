@@ -130,6 +130,9 @@ describe("detectKittyUnicodePlaceholdersSupport", () => {
 		const paneOnly = env({ HERDR_PANE_ID: "p1", GHOSTTY_RESOURCES_DIR: "/usr/share/ghostty" });
 		expect(detectKittyUnicodePlaceholdersSupport("ghostty", paneOnly)).toBe(false);
 		expect(detectKittyUnicodePlaceholdersSupport("ghostty", { ...paneOnly, PI_KITTY_PLACEHOLDERS: "1" })).toBe(true);
+		// tmux inside the pane does not restore the automatic path that tmux alone allows.
+		const nested = env({ HERDR_PANE_ID: "p1", TMUX: "/tmp/tmux-1000/default,1,0" });
+		expect(detectKittyUnicodePlaceholdersSupport("ghostty", nested)).toBe(false);
 	});
 
 	it("honors PI_NO_KITTY_PLACEHOLDERS=1 as a hard off override on supporting terminals", () => {

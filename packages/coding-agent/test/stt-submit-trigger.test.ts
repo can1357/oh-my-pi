@@ -198,7 +198,7 @@ describe("STTController submit trigger integration", () => {
 		};
 	}
 
-	async function transcribeStream(transcript: string, trigger: SttSubmitTrigger) {
+	async function transcribeStream(transcript: string, trigger: SttSubmitTrigger, manualSubmit?: boolean) {
 		cfgSttSubmitTrigger.set(settings, trigger);
 		vi.spyOn(asrClient.sttClient, "startStream").mockReturnValue({
 			pushAudio: vi.fn(),
@@ -206,7 +206,7 @@ describe("STTController submit trigger integration", () => {
 			cancel: vi.fn(),
 		});
 		const editor = makeEditor();
-		const options = makeOptions();
+		const options = { ...makeOptions(), manualSubmit };
 		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry });
 
 		await controller.toggle(editor, options);
@@ -253,5 +253,13 @@ describe("STTController submit trigger integration", () => {
 		expect(editor.commitVolatileText).toHaveBeenCalledWith("please review this submit.");
 		expect(editor.deleteBeforeCursor).toHaveBeenCalledWith(8);
 		expect(editor.submit).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps manually submitted streaming dictation intact despite the say-submit trigger", async () => {
+		const { editor } = await transcribeStream("please review this submit.", "say-submit", true);
+
+		expect(editor.commitVolatileText).toHaveBeenCalledWith("please review this submit.");
+		expect(editor.deleteBeforeCursor).not.toHaveBeenCalled();
+		expect(editor.submit).not.toHaveBeenCalled();
 	});
 });

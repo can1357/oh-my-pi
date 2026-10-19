@@ -21,6 +21,12 @@ export interface IrcMessage {
 	 * ping-pong forever.
 	 */
 	wakeRelay?: boolean;
+	/**
+	 * One leg of an `all` broadcast. Like relays, broadcasts never draw an
+	 * automatic wake-turn reply: every woken idle peer would otherwise answer
+	 * the broadcaster, mostly to say the message was not for it.
+	 */
+	broadcast?: boolean;
 }
 
 /** Delivery outcome for one peer recipient. */

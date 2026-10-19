@@ -4,7 +4,11 @@
 
 use brush_core::{ShellExtensions, builtins::Registration};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::{
+	host::{Host, Utility, format_usage, matches_parser, util},
+	locale::shell_locale,
+	time_zone::shell_time_zone,
+};
 
 mod format_modifiers {
 	//! GNU date format modifier support
@@ -1323,25 +1327,9 @@ impl Utility for Date {
 		}
 	}
 }
-fn shell_time_zone(host: &Host) -> TimeZone {
-	let Some(value) = host.var("TZ") else {
-		return TimeZone::system();
-	};
-	let value = value.strip_prefix(':').unwrap_or(value);
-	if value.is_empty() {
-		return TimeZone::UTC;
-	}
-	TimeZone::get(value)
-		.or_else(|_| TimeZone::posix(value))
-		.unwrap_or(TimeZone::UTC)
-}
-fn shell_locale(host: &Host) -> String {
-	let locale = host
-		.var("LC_ALL")
-		.filter(|value| !value.is_empty())
-		.or_else(|| host.var("LC_TIME").filter(|value| !value.is_empty()))
-		.or_else(|| host.var("LANG").filter(|value| !value.is_empty()))
-		.unwrap_or("C");
+/// The default output format of the shell's `LC_TIME` locale.
+fn default_format(host: &Host) -> String {
+	let locale = shell_locale(host, "LC_TIME").unwrap_or("C");
 	locale_default_format(locale).unwrap_or_else(|| "%a %b %e %X %Z %Y".to_string())
 }
 
@@ -1532,7 +1520,7 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 		return set_system_datetime(date);
 	}
 
-	let default_format = shell_locale(host);
+	let default_format = default_format(host);
 
 	let settings = Settings { utc, format, date_source, debug: debug_mode, default_format };
 

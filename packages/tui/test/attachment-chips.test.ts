@@ -6,6 +6,7 @@ import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import { ImageBudget } from "@oh-my-pi/pi-tui";
 import { setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import { getCellDimensions, ImageProtocol, setCellDimensions, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { getAvailableSymbolPresets, SYMBOL_PRESETS } from "@oh-my-pi/pi-tui/theme/symbols";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
 // 2x2 red PNG — real header so the band's dimension probe decodes 2x2.
@@ -157,6 +158,27 @@ describe("AttachmentChipsBand — Kitty placeholder thumbnails", () => {
 			mutable.imageProtocol = originalProtocol;
 			setKittyGraphics({ unicodePlaceholders: false });
 			setCellDimensions(originalCellDims);
+		}
+	});
+});
+
+describe("composer token glyphs", () => {
+	// Chip glyphs sit inside the editable buffer, so the hardware caret column is computed from
+	// their measured width. A text-presentation pictograph (e.g. 🖼 U+1F5BC) measures 1 cell while
+	// emoji-rendering terminals draw it 2, leaving the caret one cell behind per chip (#16270).
+	it("measure the same width whether or not the terminal renders pictographs as emoji", () => {
+		const keys = ["chip.image", "chip.video", "chip.paste", "icon.extensionSkill", "icon.model"] as const;
+		for (const preset of getAvailableSymbolPresets()) {
+			const symbols = SYMBOL_PRESETS[preset];
+			for (const key of keys) {
+				const glyph = symbols[key];
+				const asEmoji = glyph.replace(/\p{Extended_Pictographic}(?!\uFE0F)/gu, "$&\uFE0F");
+				expect({ preset, key, width: visibleWidth(glyph) }).toEqual({
+					preset,
+					key,
+					width: visibleWidth(asEmoji),
+				});
+			}
 		}
 	});
 });

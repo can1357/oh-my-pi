@@ -577,6 +577,65 @@ describe("Cursor history encoding", () => {
 		]);
 	});
 
+	it("replays a call recorded twice by a re-dispatched exec frame once, with its re-run result", () => {
+		// Issue #15749: Cursor re-sent `readArgs` for a call once a parallel shell
+		// created the file. Transcripts recorded before the fix carry the call
+		// twice and both results; replaying either duplicate makes Cursor reject
+		// every rebuilt request with PROVIDER_ERROR. Both the round that closes the
+		// message (results in message order) and an earlier round (results replayed
+		// under the round) must collapse the pair.
+		const result = (id: string, name: string, text: string): ToolResultMessage => ({
+			role: "toolResult",
+			toolCallId: id,
+			toolName: name,
+			content: [{ type: "text", text }],
+			isError: text === "not found",
+			timestamp: 3,
+		});
+		for (const trailing of [[], [{ type: "text", text: "Done." }]] as const) {
+			const messages: Context["messages"] = [
+				{ role: "user", content: "Write the file and read it in parallel.", timestamp: 1 },
+				cursorAssistant(
+					"claude-haiku-5-5",
+					[
+						{ type: "toolCall", id: "call-bash", name: "bash", arguments: { command: "echo hello > f" } },
+						{ type: "toolCall", id: "call-read", name: "read", arguments: { path: "f" } },
+						{ type: "toolCall", id: "call-read", name: "read", arguments: { path: "f" } },
+						...trailing,
+					],
+					2,
+				),
+				result("call-read", "read", "not found"),
+				result("call-bash", "bash", ""),
+				result("call-read", "read", "hello"),
+				{ role: "user", content: "follow-up", timestamp: 4 },
+			];
+
+			const history = buildCursorHistoryForTest(messages, undefined, "claude-opus-5-5");
+			const shape = history.rootPromptMessagesJson.map(entry => {
+				const { role, content } = entry as {
+					role: string;
+					content: { type: string; toolCallId?: string; result?: string }[];
+				};
+				return `${role}:${content.map(part => [part.toolCallId ?? part.type, part.result].filter(Boolean).join("=")).join(",")}`;
+			});
+			expect(shape).toEqual([
+				"user:text",
+				"assistant:call-bash,call-read",
+				"tool:call-read=hello",
+				"tool:call-bash",
+				...(trailing.length > 0 ? ["assistant:text"] : []),
+			]);
+
+			const steps = history.turnStepMessagesJson[0] as {
+				toolCall?: { toolCallId: string; mcpToolCall: { result?: unknown } };
+			}[];
+			const calls = steps.flatMap(step => (step.toolCall ? [step.toolCall] : []));
+			expect(calls.map(call => call.toolCallId)).toEqual(["call-bash", "call-read"]);
+			expect(calls[1].mcpToolCall.result).toEqual({ success: { content: [{ text: { text: "hello" } }] } });
+		}
+	});
+
 	it("keeps an empty tool result paired with its structured call", () => {
 		const messages: Context["messages"] = [
 			{ role: "user", content: "Read the empty window.", timestamp: 1 },
@@ -1806,11 +1865,12 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 	});
 
 	it.each(["shellArgs", "shellStreamArgs", "miniSweAgentBashArgs"] as const)(
-		"records a %s display block's millisecond timeout in bash-tool seconds",
+		"records a %s display block's millisecond hard timeout in bash-tool seconds",
 		async frameCase => {
 			// Cursor states shell budgets in milliseconds; the bridge converts them
 			// before running bash, and the transcript block must match what ran
-			// rather than showing a 15 s budget as 15000.
+			// rather than showing a 15 s budget as 15000. `timeout` is the
+			// `block_until_ms` wait, not the deadline.
 			const output = cursorAssistantMessage();
 			const stream = new AssistantMessageEventStream();
 			const state = newBlockState();
@@ -1827,7 +1887,8 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 								value: create(ShellArgsSchema, {
 									command: "sleep 1",
 									workingDirectory: "/tmp",
-									timeout: 15000,
+									timeout: 5000,
+									hardTimeout: 15000,
 									toolCallId: `call-${frameCase}`,
 								}),
 							},

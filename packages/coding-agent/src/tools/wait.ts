@@ -76,7 +76,14 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		// Refreshes owned-service tracking only; jobs are in-process, so a hung
 		// broker must not turn every wait into an error.
 		if (cfgLaunchEnabled.get(this.session.settings)) {
-			await listServicesTolerant(this.session, signal);
+			try {
+				await listServicesTolerant(this.session, signal);
+			} catch (error) {
+				// An interrupt landing during the refresh (most often the notice
+				// of the job this wait is for) ends the wait as one landing just
+				// after it does: the checks below and the aborted wake path.
+				if (signal?.reason !== TOOL_INTERRUPT_ABORT_REASON) throw error;
+			}
 			const queued = takeQueuedMessage(messaging);
 			if (queued && messaging) return messageResult(messaging.senderId, queued);
 		}

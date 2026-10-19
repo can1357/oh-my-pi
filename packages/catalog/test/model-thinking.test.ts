@@ -598,6 +598,34 @@ describe("model thinking derivation", () => {
 		expect(getSupportedEfforts(resellerFlash37)).toContain(Effort.Minimal);
 	});
 
+	it("drives Gemini 4 with thinkingLevel low/medium/high on the direct Google transports", () => {
+		// Google documents LOW/MEDIUM/HIGH for Argon and Argon Cyber Permissive:
+		// `thinkingBudget` and THINKING_LEVEL_MINIMAL both return 400.
+		// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-argon
+		for (const id of ["gemini-4-argon", "gemini-4-argon-cyber-permissive"]) {
+			for (const [provider, api] of [
+				["google-vertex", "google-vertex"],
+				["google", "google-generative-ai"],
+			] as const) {
+				// `reasoning: false` mirrors Gemini API discovery, which has no bundled
+				// Argon reference and infers non-reasoning from the id.
+				for (const reasoning of [true, false]) {
+					const argon = createModel({ id, api, provider, reasoning });
+					expect(argon.reasoning).toBe(true);
+					expect(argon.thinking?.mode).toBe("google-level");
+					expect(getSupportedEfforts(argon)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+					expect(mapEffortToGoogleThinkingLevel(Effort.Medium, argon)).toBe("MEDIUM");
+				}
+			}
+		}
+
+		// The Argon ladder must not leak onto other Gemini 4 lines. No Gemini 4 Pro
+		// ships yet; a future one must keep the Pro low/high ladder (and must not tie with it).
+		const vertexPro4 = createModel({ id: "gemini-4-pro", api: "google-vertex", provider: "google-vertex" });
+		expect(vertexPro4.thinking?.mode).toBe("google-level");
+		expect(getSupportedEfforts(vertexPro4)).toEqual([Effort.Low, Effort.High]);
+	});
+
 	it("bakes requiresEffort for Gemini 3.x on any provider and backfills explicit metadata", () => {
 		// Derivation: aggregator-hosted Gemini 3.5 gets the flag, 2.5 does not.
 		const openRouterFlash = createModel({
@@ -835,6 +863,7 @@ describe("model thinking derivation", () => {
 		expect(vertex.thinking?.prefixBinding).toBe(true);
 		expect(bedrock.thinking?.prefixBinding).toBe(true);
 		expect(direct.compat.supportsThinkingBindingControls).toBe(true);
+		expect(bedrock.compat.supportsThinkingBindingControls).toBe(true);
 		expect(direct.compat.supportsMidConversationToolChanges).toBe(true);
 		expect(direct.compat.supportsPerMessageEffort).toBe(true);
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
@@ -852,6 +881,45 @@ describe("model thinking derivation", () => {
 		expect(direct.compat.supportsPerMessageEffort).toBe(true);
 		expect(vertex.compat.supportsThinkingBindingControls).toBe(false);
 		expect(vertex.compat.supportsPerMessageEffort).toBe(false);
+	});
+
+	it("materializes a bare /v1/models Haiku 5.5 row as adaptive and priced, unlike Haiku 4.5", () => {
+		// Anthropic's /v1/models carries no capability metadata for a new id.
+		const discovered = (id: string) =>
+			buildModel({
+				id,
+				name: id,
+				api: "anthropic-messages",
+				provider: "anthropic",
+				baseUrl: "https://api.anthropic.com/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: null,
+				maxTokens: null,
+			});
+		const haiku55 = discovered("claude-haiku-5-5");
+
+		expect(haiku55.reasoning).toBe(true);
+		expect(haiku55.thinking?.mode).toBe("anthropic-adaptive");
+		expect(getSupportedEfforts(haiku55)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+		expect(mapEffortToAnthropicAdaptiveEffort(haiku55, Effort.Max)).toBe("max");
+		expect(haiku55.thinking?.prefixBinding).toBe(true);
+		expect(haiku55.compat.supportsSamplingParams).toBe(false);
+		expect(haiku55.compat.supportsForcedToolChoice).toBe(true);
+		expect(haiku55.compat.supportsBetweenToolsThinking).toBe(false);
+		expect(haiku55.input).toEqual(["text", "image"]);
+		expect(haiku55.contextWindow).toBe(1_000_000);
+		expect(haiku55.maxTokens).toBe(128_000);
+		expect(haiku55.cost).toMatchObject({
+			input: 0.1,
+			output: 0.5,
+			longContext: { inputThreshold: 100_000, input: 0.5, output: 2.5 },
+		});
+
+		const haiku45 = createModel({ id: "claude-haiku-4-5", api: "anthropic-messages", provider: "anthropic" });
+		expect(haiku45.thinking?.mode).toBe("budget");
+		expect(haiku45.compat.supportsSamplingParams).toBe(true);
 	});
 
 	it("keeps per-message effort off every Vertex Claude line that takes it on the Claude API", () => {

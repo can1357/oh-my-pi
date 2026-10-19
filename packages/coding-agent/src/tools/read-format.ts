@@ -18,7 +18,13 @@ import {
 	truncateHead,
 	truncateHeadBytes,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { buildLineEntriesWithBlockContext, type LineEntry, lineEntriesToPlainText } from "../utils/block-context";
+import {
+	buildLineEntriesWithBlockContext,
+	type LineEntry,
+	lineEntriesToPlainText,
+	spansCoverEveryLine,
+	warmBlockContext,
+} from "../utils/block-context";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { formatPathRelativeToCwd } from "./path-utils";
 import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
@@ -142,11 +148,15 @@ export function countTextLines(text: string): number {
 	return text.length === 0 ? 0 : countNewlines(text) + 1;
 }
 
-/** `(raw ? text.split("\n") : splitAddressableFileLines(text)).length` without splitting. */
-function countSplitLines(text: string, raw: boolean): number {
-	if (raw) return countNewlines(text) + 1;
+/** Count addressable lines without splitting; a terminal LF closes the last line. */
+function countSplitLines(text: string): number {
 	if (text.length === 0) return 0;
 	return countNewlines(text) + (text.endsWith("\n") ? 0 : 1);
+}
+
+/** Raw reads retain the addressable empty line of an empty source, as disk reads do. */
+function countRawLines(text: string): number {
+	return text.length === 0 ? 1 : countSplitLines(text);
 }
 
 /** `lines.slice(start, end).join("\n")` as a substring of the `text` that `lines` was split from. */
@@ -156,6 +166,21 @@ function sliceLineRange(text: string, lines: readonly string[], start: number, e
 	let to = from;
 	for (let i = start; i < end; i++) to += lines[i].length + 1;
 	return text.slice(from, Math.max(from, to - 1));
+}
+
+/**
+ * Slice a raw range without splitting the whole text. Open-ended reads retain
+ * the terminal newline when it closes the last addressable line.
+ */
+function sliceRawLineRange(text: string, start: number, end: number, includeFinalNewline: boolean): string {
+	let from = 0;
+	for (let i = 0; i < start; i++) from = text.indexOf("\n", from) + 1;
+	let to = from;
+	for (let i = start; i < end; i++) {
+		const newlineAt = text.indexOf("\n", to);
+		to = newlineAt === -1 ? text.length + 1 : newlineAt + 1;
+	}
+	return text.slice(from, Math.max(from, to - (includeFinalNewline ? 0 : 1)));
 }
 
 export function contiguousLineNumbers(startLine: number, count: number): number[] {
@@ -266,19 +291,18 @@ export interface InMemoryTextOptions {
 
 /**
  * Render any read selector against in-memory text. Pins `:-N` tails to the
- * text's own line count (raw mode addresses `\n` segments verbatim; otherwise
- * the hashline-addressable split), then dispatches multi-range selectors to
+ * text's addressable line count, then dispatches multi-range selectors to
  * {@link buildInMemoryMultiRangeResult} and everything else to
  * {@link buildInMemoryTextResult}. Raw mode is derived from the selector.
  */
-export function buildInMemorySelectorResult(
+export async function buildInMemorySelectorResult(
 	session: ToolSession,
 	text: string,
 	parsed: ParsedSelector,
 	options: Omit<InMemoryTextOptions, "raw">,
-): AgentToolResult<ReadToolDetails> {
+): Promise<AgentToolResult<ReadToolDetails>> {
 	const raw = isRawSelector(parsed);
-	const totalLines = countSplitLines(text, raw);
+	const totalLines = raw ? countRawLines(text) : countSplitLines(text);
 	const sel = resolveTailSelector(parsed, totalLines);
 	if (sel.kind === "lines" && sel.ranges.length > 1) {
 		return buildInMemoryMultiRangeResult(session, text, sel.ranges, { ...options, raw });
@@ -287,33 +311,35 @@ export function buildInMemorySelectorResult(
 	return buildInMemoryTextResult(session, text, offset, limit, { ...options, raw });
 }
 
-export function buildInMemoryTextResult(
+export async function buildInMemoryTextResult(
 	session: ToolSession,
 	text: string,
 	offset: number | undefined,
 	limit: number | undefined,
 	options: InMemoryTextOptions,
-): AgentToolResult<ReadToolDetails> {
+): Promise<AgentToolResult<ReadToolDetails>> {
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};
-	const allLines = options.raw === true ? text.split("\n") : splitAddressableFileLines(text);
-	const totalLines = allLines.length;
+	const rawDisplay = options.raw === true;
+	// Raw mode addresses verbatim `\n` segments and shows no block context, so it
+	// slices the window straight out of `text`; only addressable reads need every line.
+	const allLines = rawDisplay ? undefined : splitAddressableFileLines(text);
+	const totalLines = allLines ? allLines.length : countRawLines(text);
 	details.totalLines = totalLines;
 	// User-requested 0-indexed range start. Lines BEFORE this are leading
 	// context (added below if offset is explicit).
 	const requestedStart = offset ? Math.max(0, offset - 1) : 0;
 	const ignoreResultLimits = options.ignoreResultLimits ?? false;
-	const requestedEnd = limit !== undefined ? Math.min(requestedStart + limit, allLines.length) : allLines.length;
+	const requestedEnd = limit !== undefined ? Math.min(requestedStart + limit, totalLines) : totalLines;
 	// Expand only on sides the user actually constrained: leading context
 	// when offset>1, trailing context when a finite limit was set. Raw mode
 	// never expands — without line numbers the padding is indistinguishable
 	// from requested content, so `raw:31-31` must return line 31 and nothing
 	// else (verbatim-extraction contract).
-	const rawDisplay = options.raw === true;
 	const expanded = expandRangeWithContext(
 		requestedStart,
 		requestedEnd,
-		allLines.length,
+		totalLines,
 		!rawDisplay && offset !== undefined && offset > 1,
 		!rawDisplay && limit !== undefined,
 	);
@@ -332,14 +358,14 @@ export function buildInMemoryTextResult(
 		resultBuilder.sourceInternal(options.sourceInternal);
 	}
 
-	if (requestedStart >= allLines.length) {
+	if (requestedStart >= totalLines) {
 		const suggestion =
-			allLines.length === 0
+			totalLines === 0
 				? `The ${options.entityLabel} is empty.`
-				: `Use :1 to read from the start, or :${allLines.length} to read the last line.`;
+				: `Use :1 to read from the start, or :${totalLines} to read the last line.`;
 		return resultBuilder
 			.text(
-				`Line ${requestedStart + 1} is beyond end of ${options.entityLabel} (${allLines.length} lines total). ${suggestion}`,
+				`Line ${requestedStart + 1} is beyond end of ${options.entityLabel} (${totalLines} lines total). ${suggestion}`,
 			)
 			.done();
 	}
@@ -348,13 +374,31 @@ export function buildInMemoryTextResult(
 	// Measure the range as a substring of `text` (equal to joining it) so a large range isn't
 	// copied only for `truncateHead` to keep its head. Branches that emit the whole range
 	// re-join it so the result never pins `text` through a substring.
-	const selectedRange = sliceLineRange(text, allLines, startLine, endLine);
-	const joinSelectedLines = (): string => allLines.slice(startLine, endLine).join("\n");
+	const selectedRange = allLines
+		? sliceLineRange(text, allLines, startLine, endLine)
+		: sliceRawLineRange(
+				text,
+				startLine,
+				endLine,
+				limit === undefined && endLine === totalLines && text.endsWith("\n"),
+			);
+	const joinSelectedLines = (): string =>
+		(allLines ? allLines.slice(startLine, endLine) : selectedRange.split("\n")).join("\n");
 	const userLimitedLines = limit !== undefined ? endLine - startLine : undefined;
 	const truncation = ignoreResultLimits ? noTruncResult(selectedRange) : truncateHead(selectedRange);
+	// Any display short of the whole text shows block context around it.
+	if (
+		!rawDisplay &&
+		options.sourcePath &&
+		!truncation.firstLineExceedsLimit &&
+		(startLine > 0 || endLine < totalLines || truncation.truncated)
+	) {
+		await warmBlockContext({ path: options.sourcePath, text });
+	}
 
 	const shouldAddHashLines = displayMode.hashLines;
 	const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
+	details.rowPrefixes = shouldAddHashLines || shouldAddLineNumbers;
 	const hashContext =
 		shouldAddHashLines && options.sourcePath
 			? recordFullHashlineContext(
@@ -393,8 +437,8 @@ export function buildInMemoryTextResult(
 		emittedHashlineHeader = true;
 		return prependHashlineHeader(formatted, hashContext);
 	};
-	const buildLineEntries = (endLineDisplay: number): LineEntry[] =>
-		buildLineEntriesWithBlockContext(allLines, [{ startLine: startLineDisplay, endLine: endLineDisplay }], {
+	const buildLineEntries = (lines: readonly string[], endLineDisplay: number): LineEntry[] =>
+		buildLineEntriesWithBlockContext(lines, [{ startLine: startLineDisplay, endLine: endLineDisplay }], {
 			path: options.sourcePath,
 			text,
 		});
@@ -405,7 +449,7 @@ export function buildInMemoryTextResult(
 		| undefined;
 
 	if (truncation.firstLineExceedsLimit) {
-		const firstLine = allLines[startLine] ?? "";
+		const firstLine = allLines ? (allLines[startLine] ?? "") : selectedRange.split("\n", 1)[0];
 		const firstLineBytes = Buffer.byteLength(firstLine, "utf-8");
 		const snippet = truncateHeadBytes(firstLine, DEFAULT_MAX_BYTES);
 
@@ -431,34 +475,34 @@ export function buildInMemoryTextResult(
 	} else if (truncation.truncated) {
 		const outputLines = truncation.outputLines ?? countTextLines(truncation.content);
 		const endLineDisplay = startLineDisplay + Math.max(0, outputLines - 1);
-		if (options.raw === true) {
+		if (!allLines) {
 			rawSeenLines = contiguousLineNumbers(startLineDisplay, outputLines);
 			outputText = formatText(truncation.content, startLineDisplay);
 		} else {
-			outputText = formatLineEntries(buildLineEntries(endLineDisplay), startLineDisplay);
+			outputText = formatLineEntries(buildLineEntries(allLines, endLineDisplay), startLineDisplay);
 		}
 		details.truncation = toReadTruncationStats(truncation);
 		truncationInfo = {
 			result: truncation,
 			options: { direction: "head", startLine: startLineDisplay, totalFileLines: totalLines },
 		};
-	} else if (userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length) {
-		const remaining = allLines.length - (startLine + userLimitedLines);
+	} else if (!rawDisplay && userLimitedLines !== undefined && startLine + userLimitedLines < totalLines) {
+		const remaining = totalLines - (startLine + userLimitedLines);
 		const nextOffset = startLine + userLimitedLines + 1;
 
-		if (options.raw === true) {
+		if (!allLines) {
 			rawSeenLines = contiguousLineNumbers(startLineDisplay, userLimitedLines);
 			outputText = formatText(joinSelectedLines(), startLineDisplay);
 		} else {
-			outputText = formatLineEntries(buildLineEntries(endLine), startLineDisplay);
+			outputText = formatLineEntries(buildLineEntries(allLines, endLine), startLineDisplay);
 		}
 		outputText += `\n\n[${remaining} more lines in ${options.entityLabel}. Use :${nextOffset} to continue]`;
 	} else {
-		if (options.raw === true) {
+		if (!allLines) {
 			rawSeenLines = contiguousLineNumbers(startLineDisplay, endLine - startLine);
 			outputText = formatText(joinSelectedLines(), startLineDisplay);
 		} else {
-			outputText = formatLineEntries(buildLineEntries(endLine), startLineDisplay);
+			outputText = formatLineEntries(buildLineEntries(allLines, endLine), startLineDisplay);
 		}
 	}
 
@@ -482,19 +526,21 @@ export function buildInMemoryTextResult(
  * so the model can correct the next call. No leading/trailing context is
  * added — multi-range callers always specify exact bounds.
  */
-export function buildInMemoryMultiRangeResult(
+export async function buildInMemoryMultiRangeResult(
 	session: ToolSession,
 	text: string,
 	ranges: readonly LineRange[],
 	options: Omit<InMemoryTextOptions, "ignoreResultLimits">,
-): AgentToolResult<ReadToolDetails> {
+): Promise<AgentToolResult<ReadToolDetails>> {
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};
-	const allLines = options.raw === true ? text.split("\n") : splitAddressableFileLines(text);
-	const totalLines = allLines.length;
+	// Raw mode only emits the requested windows, so it never splits the whole text.
+	const allLines = options.raw === true ? undefined : splitAddressableFileLines(text);
+	const totalLines = allLines ? allLines.length : countRawLines(text);
 	details.totalLines = totalLines;
 	const shouldAddHashLines = displayMode.hashLines;
 	const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
+	details.rowPrefixes = shouldAddHashLines || shouldAddLineNumbers;
 	const hashContext =
 		shouldAddHashLines && options.sourcePath
 			? recordFullHashlineContext(
@@ -522,15 +568,28 @@ export function buildInMemoryMultiRangeResult(
 		}
 		const effectiveEnd = Math.min(range.endLine ?? totalLines, totalLines);
 		visibleSpans.push({ startLine: range.startLine, endLine: effectiveEnd });
-		if (options.raw === true) {
-			rawParts.push(allLines.slice(range.startLine - 1, effectiveEnd).join("\n"));
+		if (!allLines) {
+			// Re-join (as the split path did) so the part never pins `text` through a substring.
+			rawParts.push(
+				sliceRawLineRange(
+					text,
+					range.startLine - 1,
+					effectiveEnd,
+					range.endLine === undefined && effectiveEnd === totalLines && text.endsWith("\n"),
+				)
+					.split("\n")
+					.join("\n"),
+			);
 		}
 	}
 
 	let outputText = "";
-	if (options.raw === true) {
+	if (!allLines) {
 		outputText = rawParts.length > 0 ? rawParts.join("\n\n…\n\n") : "";
 	} else if (visibleSpans.length > 0) {
+		if (options.sourcePath && !spansCoverEveryLine(visibleSpans, totalLines)) {
+			await warmBlockContext({ path: options.sourcePath, text });
+		}
 		const entries = buildLineEntriesWithBlockContext(allLines, visibleSpans, { path: options.sourcePath, text });
 		if (shouldAddHashLines) seenLines = lineNumbersFromEntries(entries);
 		const firstLine = entries.find(entry => entry.kind === "line");

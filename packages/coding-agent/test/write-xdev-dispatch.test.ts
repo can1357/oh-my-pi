@@ -814,6 +814,77 @@ describe("device-only write transport for explicit lists omitting write", () => 
 		}
 	});
 
+	// #14308: a read-only subagent is handed `write` purely as the xd:// device
+	// transport (createTools grants it when the explicit list has `read` but not
+	// `write`), so a parent briefing that names a file path lands on this
+	// rejection. The message is correct but not actionable: it never names the
+	// channel that does work. `yield` arrives through the real tool plan
+	// (`requireYieldTool`), and the assertions read it back through the
+	// session's own `isToolActive` predicate and the returned tool list — the
+	// exact signals write.ts reads.
+	it("names the yield fallback for a device-only session that can yield (#14308)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-yield-fallback-"));
+		try {
+			const activeNames = new Set(["read", "grep"]);
+			const session = xdevSession(tempDir, {
+				requireYieldTool: true,
+				isToolActive: name => activeNames.has(name),
+				setActiveToolNames: names => {
+					for (const name of names) activeNames.add(name);
+				},
+			});
+			const tools = await createTools(session, ["read", "grep"]);
+
+			// The device-only grant still happens: the fallback is additive.
+			const write = tools.find(entry => entry.name === "write");
+			expect(write).toBeDefined();
+			expect(session.deviceOnlyWrite).toBe(true);
+			expect(tools.some(entry => entry.name === "yield")).toBe(true);
+			expect(session.isToolActive?.("yield")).toBe(true);
+
+			await expect(
+				write!.execute("write-device-only-yield", { path: path.join(tempDir, "findings.md"), content: "x" }),
+			).rejects.toThrow("return the content in `yield` instead");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	// Negative branch. Without `yield` the suggestion would not work, so the
+	// rejection must still refuse the filesystem write without naming a
+	// channel the session does not have.
+	it("leaves the device-only rejection unchanged when yield is unavailable (#14308)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-no-yield-"));
+		try {
+			const activeNames = new Set(["read", "grep"]);
+			const session = xdevSession(tempDir, {
+				isToolActive: name => activeNames.has(name),
+				setActiveToolNames: names => {
+					for (const name of names) activeNames.add(name);
+				},
+			});
+			const tools = await createTools(session, ["read", "grep"]);
+
+			const write = tools.find(entry => entry.name === "write");
+			expect(write).toBeDefined();
+			expect(session.deviceOnlyWrite).toBe(true);
+			expect(session.isToolActive?.("yield")).toBe(false);
+
+			const err = await write!
+				.execute("write-device-only-no-yield", { path: path.join(tempDir, "findings.md"), content: "x" })
+				.then(
+					() => null,
+					(caught: unknown) => caught,
+				);
+			expect(err).toBeInstanceOf(Error);
+			const message = err instanceof Error ? err.message : String(err);
+			expect(message).toContain("xd://");
+			expect(message).not.toContain("yield");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("previews the full-write description without relaxing device-only execution", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-pending-full-"));
 		try {
@@ -837,17 +908,16 @@ describe("device-only write transport for explicit lists omitting write", () => 
 		}
 	});
 
-	it("allows only the local sandbox while plan mode is active", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-plan-guard-"));
+	it("allows the local sandbox outside plan mode while other targets stay rejected", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-local-sandbox-"));
 		try {
 			const getArtifactsDir = () => path.join(tempDir, "artifacts");
-			const getSessionId = () => "device-only-plan";
+			const getSessionId = () => "device-only-local";
 			const session = xdevSession(tempDir, {
 				enableLsp: false,
 				getArtifactsDir,
 				getSessionId,
 				localProtocolOptions: { getArtifactsDir, getSessionId },
-				getPlanModeState: () => ({ enabled: true, planFilePath: "local://review-plan.md" }),
 			});
 			const tools = await createTools(session, ["read"]);
 			const read = tools.find(entry => entry.name === "read");
@@ -855,20 +925,24 @@ describe("device-only write transport for explicit lists omitting write", () => 
 			expect(read).toBeDefined();
 			expect(write).toBeDefined();
 
-			const planWrite = await write!.execute("write-device-only-plan-local", {
-				path: "local://review-plan.md",
-				content: "plan draft\n",
+			const reportWrite = await write!.execute("write-device-only-local", {
+				path: "local://report.md",
+				content: "report draft\n",
 			});
-			expect(planWrite.isError).toBeUndefined();
-			const planRead = await read!.execute("read-device-only-plan-local", {
-				path: "local://review-plan.md",
+			expect(reportWrite.isError).toBeUndefined();
+			const reportRead = await read!.execute("read-device-only-local", {
+				path: "local://report.md",
 			});
-			expect(planRead.content.find(entry => entry.type === "text")?.text).toContain("plan draft");
+			expect(reportRead.content.find(entry => entry.type === "text")?.text).toContain("report draft");
+
+			await expect(
+				write!.execute("write-device-only-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
+			).rejects.toThrow("Filesystem writes are not available");
 
 			// conflict:// resolves to a recorded working-tree file. Device-only
 			// access must reject it before the conflict resolver can mutate it.
 			await expect(
-				write!.execute("write-device-only-plan-conflict", {
+				write!.execute("write-device-only-conflict", {
 					path: "conflict://1",
 					content: "@ours",
 				}),

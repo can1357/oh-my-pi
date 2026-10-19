@@ -36,7 +36,7 @@
 | `query` | string | No | Workspace symbol query, code-action selector/filter, or LSP method name for `action=request`. |
 | `new_name` | string | No | Required for `rename` and `rename_file`. |
 | `apply` | boolean | No | For `rename`/`rename_file`, apply unless explicitly `false`. For `code_actions`, list unless explicitly `true`. |
-| `timeout` | number | No | Seconds, default `20`; the schema accepts `5..300`. `clampTimeout("lsp", ...)` applies the positive `tools.maxTimeout` cap first, then the tool's `5..300` range (so the 5-second floor still wins over a lower global cap). |
+| `timeout` | number | No | Seconds; the schema accepts `5..300`. Sets both the call deadline and the project-aware diagnostics wait, raising or lowering the defaults (call `max(20, lsp.requestTimeout)`, wait `lsp.requestTimeout`). `resolveLspTimeouts()` applies the positive `tools.maxTimeout` cap first, then the tool's `5..300` range (so the 5-second floor still wins over a lower global cap). |
 | `payload` | string | No | JSON string for `action=request`; overrides auto-built params. |
 
 ## Outputs
@@ -49,13 +49,13 @@
 
 ## Flow
 1. `packages/coding-agent/src/tools/index.ts` registers `lsp: LspTool.createIf`. The tool is present only when both `session.enableLsp !== false` and `lsp.enabled` (default `true`) allow it. A session with `lspReadOnly` rejects every action outside `LSP_READONLY_ACTIONS`; restricted sessions default both to LSP disabled and read-only if it is explicitly re-enabled.
-2. `LspTool.execute()` in `packages/coding-agent/src/lsp/tool.ts` clamps `timeout` with `clampTimeout("lsp", ...)`, including the optional global `tools.maxTimeout` ceiling, builds an `AbortSignal.timeout(...)`, and combines it with the caller signal.
+2. `LspTool.execute()` in `packages/coding-agent/src/lsp/tool.ts` resolves `timeout` and the `lsp.requestTimeout` setting with `resolveLspTimeouts()`, including the optional global `tools.maxTimeout` ceiling, builds an `AbortSignal.timeout(...)` for the call deadline, and combines it with the caller signal.
 3. `getConfig()` loads and caches `LspConfig` per cwd and reuses the cached config on later calls. Workspace `reload` is the explicit exception: it clears and rebuilds that cwd's config cache before reloading the newly selected servers.
 4. Config loading in `packages/coding-agent/src/lsp/config.ts` merges `defaults.json` with JSON/YAML overrides from project, project config dirs, user config dirs, plugin roots/marketplace metadata, and home. In every case, it filters disabled servers and requires matching root markers plus a resolvable local/PATH executable, then selects one TypeScript server. See [LSP configuration](../lsp-config.md) for filenames, precedence, and server fields.
 5. Server routing uses `getServersForFile()` / `getServerForFile()` from `config.ts`: extension or basename match, then sort primary servers before linters. Helpers in `servers.ts` filter custom `createClient` adapters out of navigation/refactor paths with `getLspServersForFile()` / `getLspServerForFile()`.
 6. `getOrCreateClient()` caches by resolved spawn command, cwd, arguments, initialization options, settings, and language id. With `lsp.shared` (default `true` in SDK sessions), it first asks the broker-managed project mux for a shared transport; failure falls back to a private `ptree.spawn()`. An external `lspmux` wrapper takes precedence over broker sharing. Toggling `lsp.shared` mid-session applies to servers cold-started afterwards; already-running clients keep their transport. The client starts its message reader, sends `initialize`, stores capabilities, and sends `initialized`.
 7. The message reader in `client.ts` parses LSP frames, resolves pending requests, caches `publishDiagnostics`, tracks `$/progress` tokens for project-load completion, answers `workspace/configuration`, handles dynamic capability registration, and applies `workspace/applyEdit` through `applyWorkspaceEditWithLsp()`.
-8. Semantic single-file actions and concrete-file raw requests call `reconcileFileFromDisk()` before querying: unopened files are opened; externally changed files send `didChange` and discard stale diagnostics. An in-flight OMP write is not reconciled back to its older disk contents. Column resolution uses `resolveSymbolColumn()` from `utils.ts` on the target line and honors `#N` occurrence selectors.
+8. Semantic single-file actions and concrete-file raw requests call `reconcileFileFromDisk()` before querying: unopened files are opened; externally changed files send `didChange` and discard stale diagnostics. Opening, reconciling and refreshing documents, and resolving symbol columns, refuse non-regular files (FIFOs, devices, sockets) instead of reading them; a non-regular file among returned locations is listed without context lines, like a missing file. An in-flight OMP write is not reconciled back to its older disk contents. Column resolution uses `resolveSymbolColumn()` from `utils.ts` on the target line and honors `#N` occurrence selectors.
 9. Actions dispatch in `LspTool.execute()` through dedicated branches in `tool.ts`: workspace and multi-server branches (`status`, `diagnostics`, `rename_file`, workspace `symbols`, workspace `reload`, `capabilities`, `request`) run before the single-file switch; other actions share one client lookup.
 10. Requests go through `sendRequest()` in `client.ts`, which allocates an incrementing JSON-RPC id, installs abort and timeout handling, sends `$/cancelRequest` on abort, and rejects on timeout or process exit.
 11. Returned edits preview with `formatWorkspaceEdit()` or apply through `applyWorkspaceEditWithLsp()`, which updates affected live LSP documents. `rename_file` uses `applyEditsThenRename()` for reference edits and the filesystem move, then sends `workspace/didRenameFiles`.
@@ -252,7 +252,7 @@ Uses the same location normalization and output shape as `definition`, but sends
 
 ## Side Effects
 - Filesystem
-  - Reads config files, target files, and root markers.
+  - Reads config files, target files, and root markers. Non-regular files (FIFOs, devices, sockets) are never read: opening, reconciling, refreshing, symbol-column reads and text-edit application refuse them, and location context skips them.
   - `rename` and `code_actions` may edit/create/delete/rename files via `applyWorkspaceEdit()`.
   - `rename_file` always renames the source path on disk in apply mode.
   - Server-initiated `workspace/applyEdit` requests also mutate files through `applyWorkspaceEdit()`.
@@ -260,7 +260,7 @@ Uses the same location normalization and output shape as `definition`, but sends
   - With `lsp.shared=true` (the default), SDK sessions try a local Unix socket or Windows named pipe to the broker-managed per-project LSP mux. If the mux cannot be reached or started, the client silently falls back to a private subprocess.
   - Private and externally multiplexed servers communicate over local stdio JSON-RPC; the tool itself does not make remote network requests.
 - Subprocesses / native bindings
-  - Private fallback spawns language servers with `ptree.spawn()`; shared mode asks the broker to maintain one server per project.
+  - Private fallback spawns language servers with `ptree.spawn()`; shared mode asks the broker-managed project mux for a server, one per connection. A released server stays warm for up to 5 minutes (`SERVER_LINGER_MS` in `lsp/mux/server.ts`) while the mux runs; the mux is a non-persistent broker daemon, so it stops shortly after the project's last omp process exits.
   - Workspace diagnostics spawns `cargo`, `npx`, `go`, or `pyright`.
   - `BiomeClient` and `SwiftLintClient` spawn CLI tools.
   - Optional external `lspmux` detection spawns `lspmux status`; supported servers may be wrapped through `lspmux client`.
@@ -275,13 +275,14 @@ Uses the same location normalization and output shape as `definition`, but sends
   - Background message readers persist for each live client until process exit/shutdown.
 
 ## Limits & Caps
-- Tool timeout clamp: default `20`, min `5`, max `300` seconds — `TOOL_TIMEOUTS.lsp` in `packages/coding-agent/src/tools/tool-timeouts.ts`.
+- Tool timeout clamp: default `20` (raised to `lsp.requestTimeout` when that is higher), min `5`, max `300` seconds — `TOOL_TIMEOUTS.lsp` / `resolveLspTimeouts()` in `packages/coding-agent/src/tools/tool-timeouts.ts`.
 - `sendRequest()` uses an explicitly supplied request timeout first; otherwise a provided abort signal owns the deadline. Only calls with neither use `30_000ms` (`DEFAULT_REQUEST_TIMEOUT_MS` in `client.ts`), so the tool's `timeout` is not silently shortened to 30 seconds.
 - Warmup initialize timeout default: `5_000ms` — `WARMUP_TIMEOUT_MS` in `packages/coding-agent/src/lsp/client.ts`.
 - Project-load wait fallback: `15_000ms` — `PROJECT_LOAD_TIMEOUT_MS` in `packages/coding-agent/src/lsp/client.ts`.
 - Idle-client sweep interval when enabled: `60_000ms` — `IDLE_CHECK_INTERVAL_MS` in `packages/coding-agent/src/lsp/client.ts`.
 - Failed initialization backoff: `3 * 60 * 1000ms` — `INIT_FAILURE_BACKOFF_MS`; a matching single-file or workspace `reload` clears this negative cache so retry is immediate.
-- Single-file diagnostics wait: `3_000ms` normally, `10_000ms` for project-aware servers — `SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS` / `PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS` in `diagnostics.ts`, bounded by the tool timeout.
+- Single-file diagnostics wait: `3_000ms` normally (`SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS` in `diagnostics.ts`); for project-aware servers the `lsp.requestTimeout` setting (default `10` seconds) or the call's `timeout`. Both are bounded by the tool timeout.
+- Late post-edit diagnostics (edit/write writethrough, delivered after the tool result): per-server wait `max(12_000ms, lsp.requestTimeout)` — `deferredDiagnosticsWaitMs()` in `diagnostics.ts`.
 - Batch/glob diagnostics wait per file: `400ms` — `BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS`.
 - Glob diagnostic target cap: first `20` matches — `MAX_GLOB_DIAGNOSTIC_TARGETS`.
 - Workspace symbol cap: first `200` entries — `WORKSPACE_SYMBOL_LIMIT`.
@@ -301,6 +302,7 @@ Uses the same location normalization and output shape as `definition`, but sends
 - `sendRequest()` rejects on timeout with `LSP request <method> timed out after <ms>ms`.
 - Client process exit rejects all pending requests with an exit-code/stderr error assembled in `getOrCreateClient()`.
 - Ordinary single-file action failures inside the main `try` become `LSP error: <message>`; `ToolError` is rethrown.
+- A non-regular target refused while opening, reconciling or refreshing a document, or resolving a symbol column, fails with `Cannot open '<path>': it is a <kind>, not a regular file or directory.` It surfaces like other read errors: single-file actions return `LSP error: Cannot open …` with `details.success: false`; `request` uses its own envelope, or throws when `line` is given (as other `resolveSymbolColumn()` errors do); `reload` reports `Failed to reload <server>: Cannot open …`; diagnostics records the server as failed; background watched-file refreshes log it and continue.
 - `request` has its own error envelope: `LSP error from <server> on <method>: <message>`.
 - Some server failures are intentionally softened:
   - diagnostics continue when one server fails

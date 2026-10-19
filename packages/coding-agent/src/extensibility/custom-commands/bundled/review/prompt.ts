@@ -1,8 +1,8 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import annotationsTemplate from "./prompts/annotations.md" with { type: "text" };
 import reviewRequestTemplate from "../../../../prompts/review-request.md" with { type: "text" };
-import type { CodeReviewAnnotation, ReviewDiffFile } from "@oh-my-pi/pi-tui/overlays/annotation-types";
-import { getRecommendedReviewAgentCount, getReviewDiffPreview } from "./diff";
+import type { CodeReviewAnnotation } from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import { getRecommendedReviewAgentCount, getReviewDiffPreview, type ReviewDiffSnapshot } from "./diff";
 import type { ResolvedReviewTarget } from "./target";
 
 const LARGE_DIFF_CHARACTER_LIMIT = 50_000;
@@ -21,6 +21,8 @@ type RenderedAnnotation = CodeReviewAnnotation & {
 
 interface ReviewPromptFile {
 	path: string;
+	diffIndex: number;
+	diffUrl?: string;
 	linesAdded: number;
 	linesRemoved: number;
 	ext: string;
@@ -40,9 +42,15 @@ function formatLineLabel(annotation: Extract<CodeReviewAnnotation, { scope: "lin
 	return "hunk";
 }
 
-function renderReviewPromptFile(file: ReviewDiffFile, previewLines: number): ReviewPromptFile {
+function renderReviewPromptFile(
+	file: ReviewDiffSnapshot["files"][number],
+	previewLines: number,
+	prDiffUrl?: string,
+): ReviewPromptFile {
 	return {
 		path: file.path,
+		diffIndex: file.diffIndex,
+		diffUrl: prDiffUrl ? `${prDiffUrl}/${file.diffIndex}` : undefined,
 		linesAdded: file.linesAdded,
 		linesRemoved: file.linesRemoved,
 		ext: file.path.match(/\.([^.]+)$/)?.[1] ?? "",
@@ -78,12 +86,39 @@ export function formatCodeReviewAnnotations(
 	});
 }
 
+/** Build pasteable notes or a full review request from a frozen diff. */
+export function buildCodeReviewFeedback(
+	target: ResolvedReviewTarget,
+	annotations: readonly CodeReviewAnnotation[],
+	review: boolean,
+	focus: string | undefined,
+): string | undefined {
+	const formatted = formatCodeReviewAnnotations(annotations, {
+		forReviewer: review,
+		supplementalInstructions: focus,
+	});
+	return review ? buildReviewPrompt(target, formatted) : formatted;
+}
+
+function exceedsInlineDiffLimit(target: ResolvedReviewTarget): boolean {
+	return target.rawDiff.length > LARGE_DIFF_CHARACTER_LIMIT || target.snapshot.files.length > LARGE_DIFF_FILE_LIMIT;
+}
+
+/** Throws when a supplied patch is too large to embed in a review request; other targets pass. */
+export function assertReviewablePatchSize(target: ResolvedReviewTarget): void {
+	if (target.kind === "patch" && exceedsInlineDiffLimit(target)) {
+		throw new Error(
+			`Supplied diff exceeds the review limit (${LARGE_DIFF_CHARACTER_LIMIT} characters or ${LARGE_DIFF_FILE_LIMIT} files); split it into smaller patches.`,
+		);
+	}
+}
+
 /** Renders a review request from one frozen target snapshot. */
 export function buildReviewPrompt(target: ResolvedReviewTarget, additionalInstructions?: string): string {
-	const skipDiff =
-		target.rawDiff.length > LARGE_DIFF_CHARACTER_LIMIT || target.snapshot.files.length > LARGE_DIFF_FILE_LIMIT;
+	assertReviewablePatchSize(target);
+	const skipDiff = exceedsInlineDiffLimit(target);
 	const linesPerFile = skipDiff ? Math.max(5, Math.floor(100 / target.snapshot.files.length)) : 0;
-	const files = target.snapshot.files.map(file => renderReviewPromptFile(file, linesPerFile));
+	const files = target.snapshot.files.map(file => renderReviewPromptFile(file, linesPerFile, target.prDiffUrl));
 	const agentCount = getRecommendedReviewAgentCount(target.snapshot);
 	return prompt.render(reviewRequestTemplate, {
 		mode: target.mode,
@@ -98,6 +133,8 @@ export function buildReviewPrompt(target: ResolvedReviewTarget, additionalInstru
 		rawDiff: target.rawDiff.trim(),
 		diffInstruction: target.diffInstruction,
 		contextInstruction: target.contextInstruction,
+		suppliedPatch: target.kind === "patch",
+		prDiffUrl: target.prDiffUrl,
 		additionalInstructions: additionalInstructions?.trim(),
 	});
 }

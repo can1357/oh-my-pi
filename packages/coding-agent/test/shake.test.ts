@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
+import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, RESCUE_SHAKE_CONFIG, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -235,6 +237,44 @@ describe("AgentSession shake", () => {
 			expect(mixedResult.content.some(block => block.type === "image")).toBe(false);
 		});
 
+		it("saves the tokens it elides from an assistant turn with the turn", async () => {
+			const fence = `\`\`\`ts\n${"const value = compute(a, b, c, d, e);\n".repeat(200)}\`\`\``;
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "write it" }],
+				timestamp: Date.now() - 2,
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: `Here it is:\n${fence}\nDone.` }],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now() - 1,
+			});
+			appendRecentProtectedTail();
+
+			const result = await session.shake("elide");
+
+			expect(result.blocksDropped).toBe(1);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted shake session");
+			const persisted = await SessionManager.open(sessionFile, tempDir.path());
+			try {
+				const turn = persisted
+					.getBranch()
+					.find(entry => entry.type === "message" && entry.message.role === "assistant");
+				expect(
+					turn?.type === "message" && turn.message.role === "assistant"
+						? turn.message.elidedOutputTokens
+						: undefined,
+				).toBe(result.tokensFreed);
+			} finally {
+				await persisted.close();
+			}
+		});
+
 		it("updates provider-anchored context usage immediately after rewriting prompt history", async () => {
 			seedHeavyToolResult("X".repeat(20_000));
 			sessionManager.appendMessage({
@@ -382,6 +422,95 @@ describe("AgentSession shake", () => {
 			const userMsg = branch.find(e => e.type === "message" && (e.message as { role?: string }).role === "user");
 			const content = (userMsg as { message: { content: unknown } }).message.content as Array<{ type: string }>;
 			expect(content.some(b => b.type === "image")).toBe(false);
+		});
+
+		it("credits the removed image tokens against the provider-anchored context meter", async () => {
+			const png: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
+			const withImage: UserMessage = {
+				role: "user",
+				content: [{ type: "text", text: "look" }, png],
+				timestamp: Date.now() - 1,
+			};
+			sessionManager.appendMessage(withImage);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+
+			// What the image block alone costs: the same message with and without it.
+			const tokenizer = session.agent.tokenizer;
+			const imageTokens =
+				tokenizer.countMessage(withImage) -
+				tokenizer.countMessage({ ...withImage, content: [{ type: "text", text: "look" }] });
+			expect(imageTokens).toBeGreaterThan(0);
+
+			const result = await session.shake("images");
+
+			expect(result.imagesDropped).toBe(1);
+			expect(result.tokensFreed).toBe(imageTokens);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 - imageTokens);
+		});
+
+		it("does not subtract post-anchor image tokens from the provider-anchored meter", async () => {
+			const png: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now() - 1,
+			});
+			const withImage: UserMessage = {
+				role: "user",
+				content: [{ type: "text", text: "look" }, png],
+				timestamp: Date.now(),
+			};
+			sessionManager.appendMessage(withImage);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const tokenizer = session.agent.tokenizer;
+			const imageTokens =
+				tokenizer.countMessage(withImage) -
+				tokenizer.countMessage({ ...withImage, content: [{ type: "text", text: "look" }] });
+			expect(imageTokens).toBeGreaterThan(0);
+			const before = session.getContextUsage()?.tokens ?? 0;
+			expect(before).toBeGreaterThan(20_000);
+
+			const result = await session.shake("images");
+
+			expect(result.imagesDropped).toBe(1);
+			expect(result.tokensFreed).toBe(imageTokens);
+			expect(session.getContextUsage()?.tokens).toBe(before - imageTokens);
+			const anchor = sessionManager
+				.getBranch()
+				.findLast(entry => entry.type === "message" && entry.message.role === "assistant");
+			expect(
+				anchor?.type === "message" && anchor.message.role === "assistant"
+					? anchor.message.contextSnapshot?.historyRewriteTokensRemoved
+					: undefined,
+			).toBeUndefined();
+		});
+
+		it("drops images from custom messages through the projected message", async () => {
+			const png: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
+			sessionManager.appendCustomMessageEntry("test-note", [{ type: "text", text: "note" }, png], true);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const result = await session.shake("images");
+
+			expect(result.imagesDropped).toBe(1);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			const branch = sessionManager.getBranch();
+			const custom = branch.find(e => e.type === "custom_message");
+			const parts = (custom as { content: Array<{ type: string }> }).content;
+			expect(parts.some(part => part.type === "image")).toBe(false);
 		});
 	});
 
@@ -1001,5 +1130,91 @@ describe("AgentSession shake", () => {
 			);
 			expect(fullStart).toBeDefined();
 		});
+	});
+
+	it("keeps the in-flight tool call and lowers context usage when shaking mid-turn", async () => {
+		seedHeavyToolResult("X".repeat(20_000));
+		appendRecentProtectedTail();
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+		const toolEntered = Promise.withResolvers<void>();
+		const releaseTool = Promise.withResolvers<void>();
+		session.agent.setTools([
+			{
+				name: "block",
+				label: "Block",
+				description: "Blocks until released",
+				parameters: type({}),
+				async execute() {
+					toolEntered.resolve();
+					await releaseTool.promise;
+					return { content: [{ type: "text", text: "released" }] };
+				},
+			},
+		]);
+		session.agent.streamFn = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", id: "call_block", name: "block", arguments: {} }],
+					stopReason: "toolUse",
+					usage: { cacheRead: 50_000 },
+				},
+				{ content: ["done"], stopReason: "stop", usage: { cacheRead: 1_000 } },
+			],
+		}).stream;
+
+		const run = session.prompt("continue");
+		await toolEntered.promise;
+		expect(session.getContextUsage()?.tokens).toBe(50_000);
+		const result = await session.shake("elide");
+		expect(result.tokensFreed).toBeGreaterThan(0);
+		expect(session.getContextUsage()?.tokens).toBe(50_000 - result.tokensFreed);
+		releaseTool.resolve();
+		await run;
+
+		const messages = session.agent.state.messages;
+		const blockCall = messages.findIndex(
+			m => m.role === "assistant" && m.content.some(b => b.type === "toolCall" && b.id === "call_block"),
+		);
+		expect(blockCall).toBeGreaterThan(-1);
+		expect(messages[blockCall + 1]).toMatchObject({ role: "toolResult", toolCallId: "call_block" });
+	});
+
+	it("drops an earlier turn's unpaired tool call from a rebuild while the next turn streams", async () => {
+		const staleUser: UserMessage = {
+			role: "user",
+			content: [{ type: "text", text: "start" }],
+			timestamp: Date.now() - 2,
+		};
+		const staleAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_stale", name: "bash", arguments: { command: "ls" } }],
+			...apiInfo,
+			stopReason: "toolUse",
+			usage,
+			timestamp: Date.now() - 1,
+		};
+		sessionManager.appendMessage(staleUser);
+		sessionManager.appendMessage(staleAssistant);
+		session.agent.replaceMessages([staleUser, staleAssistant]);
+		const promptRecorded = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "user") promptRecorded.resolve();
+		});
+		session.agent.streamFn = createMockModel({
+			responses: [{ content: ["done"], stopReason: "stop", delayMs: 5_000 }],
+		}).stream;
+
+		const run = session.prompt("continue");
+		await promptRecorded.promise;
+		expect(session.agent.state.isStreaming).toBe(true);
+		const rebuilt = session.buildDisplaySessionContext().messages;
+		await session.abort();
+		await run.catch(() => undefined);
+
+		expect(
+			rebuilt.some(
+				m => m.role === "assistant" && m.content.some(b => b.type === "toolCall" && b.id === "call_stale"),
+			),
+		).toBe(false);
 	});
 });

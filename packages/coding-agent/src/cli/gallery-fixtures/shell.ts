@@ -1,6 +1,14 @@
 /** Gallery fixtures for shell and supervised-service tools. */
 import type { GalleryFixture } from "./types";
 
+const GALLERY_DEPS = {
+	"@ai-sdk/anthropic": "^1.2.0",
+	"@oh-my-pi/pi-ai": "workspace:*",
+	"@oh-my-pi/pi-tui": "workspace:*",
+};
+const GALLERY_DEPS_TEXT =
+	"{'@ai-sdk/anthropic': '^1.2.0', '@oh-my-pi/pi-ai': 'workspace:*', '@oh-my-pi/pi-tui': 'workspace:*'}";
+
 export const shellFixtures: Record<string, GalleryFixture> = {
 	bash: {
 		label: "Bash",
@@ -96,20 +104,19 @@ export const shellFixtures: Record<string, GalleryFixture> = {
 				'deps = data.get("dependencies", {})',
 				'print(f"{data[\\"name\\"]} v{data[\\"version\\"]}")',
 				'print(f"{len(deps)} dependencies")',
-				"display(sorted(deps)[:3])",
+				"print({k: deps[k] for k in sorted(deps)[:3]})",
 			].join("\n"),
 		},
 		result: {
 			content: [
 				{
 					type: "text",
-					text: ["@oh-my-pi/coding-agent v0.42.0", "37 dependencies"].join("\n"),
+					text: ["@oh-my-pi/coding-agent v0.42.0", "37 dependencies", GALLERY_DEPS_TEXT].join("\n"),
 				},
 			],
 			details: {
 				language: "python",
 				languages: ["python"],
-				jsonOutputs: [["@ai-sdk/anthropic", "@oh-my-pi/pi-ai", "@oh-my-pi/pi-tui"]],
 				cells: [
 					{
 						index: 0,
@@ -123,9 +130,10 @@ export const shellFixtures: Record<string, GalleryFixture> = {
 							'deps = data.get("dependencies", {})',
 							'print(f"{data[\\"name\\"]} v{data[\\"version\\"]}")',
 							'print(f"{len(deps)} dependencies")',
-							"display(sorted(deps)[:3])",
+							"print({k: deps[k] for k in sorted(deps)[:3]})",
 						].join("\n"),
-						output: ["@oh-my-pi/coding-agent v0.42.0", "37 dependencies"].join("\n"),
+						output: ["@oh-my-pi/coding-agent v0.42.0", "37 dependencies", GALLERY_DEPS_TEXT].join("\n"),
+						views: [{ text: GALLERY_DEPS_TEXT, view: { kind: "json", value: GALLERY_DEPS } }],
 						status: "complete",
 						durationMs: 64,
 						exitCode: 0,

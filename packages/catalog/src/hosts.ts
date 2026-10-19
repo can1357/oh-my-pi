@@ -25,6 +25,8 @@ interface HostClassSpec {
 
 export const KNOWN_HOSTS = {
 	openai: { providers: ["openai"], urlMarkers: ["api.openai.com"] },
+	/** URL-only: a Codex provider rerouted through a proxy does not imply the subscription backend's capabilities. */
+	openaiCodex: { urlMarkers: ["chatgpt.com/backend-api", "chat.openai.com/backend-api"] },
 	azureOpenAI: {
 		providers: ["azure"],
 		urlMarkers: [".openai.azure.com", "azure.com/openai", "models.inference.ai.azure.com"],

@@ -26,6 +26,7 @@ const POLICY = {
 	agentName: "scout",
 	agent: AGENT,
 	effectiveAgent: AGENT,
+	structured: true,
 	schema: { schema: undefined, source: "none", mode: "permissive", outputSchemaOverridesAgent: false },
 	planMode: false,
 	isIsolated: false,
@@ -210,6 +211,50 @@ describe("WorkPool dispatch", () => {
 		follow.resolve();
 		await finishPool(session, workpool);
 	});
+	it("marks only the submitted error item failed after a mixed-result batch", async () => {
+		const session = makeSession([], 1);
+		const first = Promise.withResolvers<void>();
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			await first.promise;
+			const id = request.identity?.id ?? "missing";
+			markIdle(id);
+			return execution(id);
+		});
+		vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
+			markIdle(options.id);
+			return {
+				...singleResult(
+					options.id,
+					JSON.stringify({
+						"mixed#2": { error: "review unavailable" },
+						"mixed#3": { ok: true },
+					}),
+				),
+				extractedToolData: {
+					yield: [
+						{
+							status: "success",
+							type: ["mixed#2"],
+							error: "review unavailable",
+							data: { error: "review unavailable" },
+						},
+						{ status: "success", type: ["mixed#3"], data: { ok: true }, complete: true },
+					],
+				},
+			};
+		});
+		const workpool = pool(session, "mixed");
+		workpool.push(["warmup"]);
+		await until(() => workpool.agents[0]?.state === "running");
+		workpool.push(["failed review", "independent review"]);
+		await until(() => workpool.agents[0]?.queue.length === 2);
+		first.resolve();
+		await finishPool(session, workpool);
+		expect(workpool.batches[1]?.status).toBe("completed");
+		expect(workpool.items.map(item => item.status)).toEqual(["completed", "failed", "completed"]);
+		expect(workpool.batches[1]?.output).toContain("review unavailable");
+	});
+
 	it("tombstones the worker session when clearing the yield contract fails", async () => {
 		const session = makeSession([], 1);
 		let workerId = "";
@@ -410,53 +455,5 @@ describe("WorkPool dispatch", () => {
 		first.resolve();
 		await finishPool(session, workpool);
 		expect(workpool.peek().pending).toBe(0);
-	});
-});
-
-describe("WorkPool model selection", () => {
-	it("selects each worker on the first turn and reuses its session on subsequent turns", async () => {
-		const session = makeSession([], 1);
-		const first = Promise.withResolvers<void>();
-		const selected = ["@reviewer:high", "p/alternative"];
-		const initial = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
-			await first.promise;
-			const id = request.identity?.id ?? "missing";
-			markIdle(id);
-			return execution(id);
-		});
-		const follow = vi.spyOn(executor, "runSubagentFollowUpTurn").mockImplementation(async options => {
-			markIdle(options.id);
-			return singleResult(options.id);
-		});
-		const workpool = new WorkPool(session, { name: "models", policy: POLICY, model: selected });
-		workpool.push(["one", "two"]);
-		await until(() => workpool.agents[0]?.queue.length === 1);
-		first.resolve();
-		await finishPool(session, workpool);
-		expect(initial.mock.calls).toHaveLength(1);
-		expect(initial.mock.calls[0]?.[0].model).toEqual(selected);
-		expect(follow.mock.calls).toHaveLength(1);
-		const workerId = initial.mock.calls[0]?.[0].identity?.id;
-		if (!workerId) throw new Error("First turn did not receive a worker id");
-		expect(follow.mock.calls[0]?.[0].id).toBe(workerId);
-		expect(follow.mock.calls[0]?.[0]).not.toHaveProperty("model");
-	});
-
-	it("keeps independent selections for separate pools", async () => {
-		const session = makeSession();
-		const selections = new Map<string, string | string[] | undefined>();
-		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
-			const id = request.identity?.id ?? "missing";
-			selections.set(id, request.model);
-			markIdle(id);
-			return execution(id);
-		});
-		const first = new WorkPool(session, { name: "first", policy: POLICY, model: "p/first" });
-		const second = new WorkPool(session, { name: "second", policy: POLICY, model: ["p/second", "p/third"] });
-		first.push(["one"]);
-		second.push(["two"]);
-		await Promise.all([finishPool(session, first), finishPool(session, second)]);
-		expect(selections.get(first.agents[0]!.id)).toBe("p/first");
-		expect(selections.get(second.agents[0]!.id)).toEqual(["p/second", "p/third"]);
 	});
 });

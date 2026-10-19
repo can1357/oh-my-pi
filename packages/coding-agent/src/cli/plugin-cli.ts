@@ -9,6 +9,7 @@ import { APP_NAME, getPluginsNodeModules, getProjectDir } from "@oh-my-pi/pi-uti
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { resolveOrDefaultProjectRegistryPath } from "../discovery/helpers";
 import { PluginManager, parseSettingValue, validateSetting } from "../extensibility/plugins";
+import { setInstalledPluginEnabled } from "../extensibility/plugins/toggle";
 import {
 	getInstalledPluginsRegistryPath,
 	getMarketplacesCacheDir,
@@ -1081,23 +1082,14 @@ async function handleSetEnabled(
 	const installedPlugins = new Set((await mktMgr.listInstalledPlugins()).map(p => p.id));
 
 	for (const name of plugins) {
-		if (installedPlugins.has(name)) {
-			try {
-				await mktMgr.setPluginEnabled(name, enabled, flags.scope);
-				if (flags.json) {
-					console.log(JSON.stringify({ [jsonKey]: name }));
-				} else {
-					console.log(chalk.green(`${theme.status.success} ${pastTense} ${name}`));
-				}
-			} catch (err) {
-				console.error(chalk.red(`${theme.status.error} Failed to ${action} ${name}: ${err}`));
-				process.exit(1);
-			}
-			continue;
-		}
-
 		try {
-			await manager.setEnabled(name, enabled);
+			await setInstalledPluginEnabled(name, {
+				enabled,
+				scope: flags.scope,
+				marketplaceIds: installedPlugins,
+				marketplace: mktMgr,
+				npm: manager,
+			});
 			if (flags.json) {
 				console.log(JSON.stringify({ [jsonKey]: name }));
 			} else {

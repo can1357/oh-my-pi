@@ -55,8 +55,8 @@ On first XDG registry resolution, an existing config-root `marketplaces.json` is
 | `/marketplace installed`                                                  | List installed marketplace plugins                 |
 | `/marketplace upgrade [--scope user\|project] [name@marketplace]`         | Upgrade one or all plugins                         |
 | `/plugins list`                                                           | List npm/link and marketplace plugins              |
-| `/plugins enable [--scope user\|project] name@marketplace`                | Enable a marketplace plugin                        |
-| `/plugins disable [--scope user\|project] name@marketplace`               | Disable a marketplace plugin                       |
+| `/plugins enable [--scope user\|project] <plugin>`                         | Enable an npm/link or marketplace plugin           |
+| `/plugins disable [--scope user\|project] <plugin>`                        | Disable an npm/link or marketplace plugin          |
 
 ### CLI equivalents
 
@@ -77,7 +77,7 @@ omp plugin list
 
 ```
 
-TUI marketplace mutations (explicit commands and the selector) update disk state and invalidate discovery caches but do not refresh the active session. Run `/reload-plugins` to refresh task agents, skills, slash commands, and MCP servers; restart the session for newly installed non-MCP tools, hooks, or extension modules. ACP/RPC marketplace handlers refresh skills and slash commands automatically; ACP also refreshes task-agent discovery. Neither remote handler reconnects MCP servers or rebuilds every initialized capability set.
+TUI `/plugins enable` and `/plugins disable` refresh the active session's skills, slash commands, task agents, and MCP servers immediately; `--scope` selects a marketplace install when needed and npm/link toggles are global. Other TUI marketplace mutations (explicit commands and the selector) update disk state and invalidate discovery caches but do not refresh the active session. Run `/reload-plugins` after those mutations to refresh task agents, skills, slash commands, and MCP servers; restart the session for newly installed non-MCP tools, hooks, or extension modules. ACP/RPC marketplace handlers refresh skills and slash commands automatically; ACP also refreshes task-agent discovery. Neither remote handler reconnects MCP servers or rebuilds every initialized capability set.
 
 CLI `--dry-run` install validates the cached catalog, scope, existing install, and locally checkable source constraints without fetching plugin repositories or writing plugin state. Uninstall previews retain installed-scope ambiguity checks without removing anything. TUI/ACP/RPC slash commands do not accept `--dry-run`.
 

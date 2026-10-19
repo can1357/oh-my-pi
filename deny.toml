@@ -45,15 +45,6 @@ exceptions = [
     { allow = ["MPL-2.0"], crate = "uluru@3.1.0" },
 ]
 
-# tree-sitter-graphql 0.1.0 has no SPDX expression in Cargo.toml. Its packaged
-# LICENSE is MIT; cargo-about pins the exact license-file checksum.
-[[licenses.clarify]]
-crate = "tree-sitter-graphql@0.1.0"
-expression = "MIT"
-license-files = [
-    { path = "LICENSE", hash = 0xda88ff2a },
-]
-
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

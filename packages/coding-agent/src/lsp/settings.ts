@@ -39,7 +39,7 @@ export const cfgLspShared = register({
 		group: "LSP",
 		label: "Shared Language Servers",
 		description:
-			"Share one language server per project across omp instances via the daemon broker (falls back to private servers when unavailable)",
+			"Start language servers through the per-project daemon broker. Each connection gets its own server. While another omp instance in the project is running, a released server stays warm and the next connection reuses it instead of cold-starting (falls back to private servers when unavailable)",
 	},
 });
 
@@ -88,5 +88,26 @@ export const cfgLspDiagnosticsDeduplicate = register({
 		group: "LSP",
 		label: "Deduplicate Diagnostics",
 		description: "Suppress post-edit LSP diagnostics already shown for a file; only surface new or changed ones",
+	},
+});
+
+export const cfgLspRequestTimeout = register({
+	id: "lsp.requestTimeout",
+	type: "number",
+	default: 10,
+	ui: {
+		tab: "files",
+		group: "LSP",
+		label: "Request Timeout",
+		description:
+			"Seconds to wait for a language server's diagnostics, hover and other answers when the agent sets no timeout; late post-edit diagnostics wait at least this long. Raise it for servers that are slow on a cold start. The lsp tool's timeout argument can still raise or lower it per call",
+		options: [
+			{ value: "10", label: "10 seconds", description: "Default" },
+			{ value: "20", label: "20 seconds" },
+			{ value: "30", label: "30 seconds" },
+			{ value: "60", label: "1 minute" },
+			{ value: "120", label: "2 minutes" },
+			{ value: "300", label: "5 minutes" },
+		],
 	},
 });

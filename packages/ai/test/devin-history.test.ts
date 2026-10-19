@@ -1,9 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { gunzipSync } from "node:zlib";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
-import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, Model, StreamOptions } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { GetChatMessageRequestSchema, GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
+import {
+	type GetChatMessageRequest,
+	GetChatMessageRequestSchema,
+	GetUserJwtResponseSchema,
+} from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 const devinModel: Model<"devin-agent"> = buildModel({
@@ -42,7 +46,7 @@ function assistant(overrides: Partial<AssistantMessage>): AssistantMessage {
 	};
 }
 
-async function captureRequest(context: Context) {
+async function captureRequest(context: Context, onPayload?: StreamOptions["onPayload"]) {
 	const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
 	let requestPayload: Uint8Array | undefined;
 	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -51,7 +55,7 @@ async function captureRequest(context: Context) {
 		return new Response(new Uint8Array());
 	}) as typeof fetch;
 
-	await streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
+	await streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl, onPayload }).result();
 	if (!requestPayload) throw new Error("Devin chat request was not captured");
 	const length = new DataView(requestPayload.buffer, requestPayload.byteOffset, requestPayload.byteLength).getUint32(
 		1,
@@ -98,7 +102,8 @@ describe("streamDevin history handoff", () => {
 
 		expect(request.chatMessagePrompts).toHaveLength(6);
 		expect(foreign?.messageId).not.toBe("resp_foreign");
-		expect(foreign?.messageId).toMatch(/^bot-[0-9a-f-]{36}$/);
+		// Replayed assistant rows use bare UUIDs, as the native CLI sends them.
+		expect(foreign?.messageId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 		expect(foreign?.prompt).toContain("foreign reasoning");
 		expect(foreign?.prompt).toContain("foreign answer");
 		expect(foreign?.thinking).toBe("");
@@ -108,6 +113,72 @@ describe("streamDevin history handoff", () => {
 		expect(native?.signature).toBe("native-signature");
 	});
 
+	it.each([`call_${"a".repeat(32)}`, `call_${"a".repeat(80)}`])(
+		"replays foreign Responses composite tool-call ids as capped call ids paired with their results: %s",
+		async callId => {
+			const compositeId = `${callId}|fc_${"b".repeat(50)}`;
+			const request = await captureRequest({
+				messages: [
+					{ role: "user", content: "start", timestamp: 1 },
+					assistant({
+						api: "openai-codex-responses",
+						provider: "openai-codex",
+						model: "gpt-5.6-sol",
+						stopReason: "toolUse",
+						content: [{ type: "toolCall", id: compositeId, name: "read", arguments: { path: "a.ts" } }],
+					}),
+					{
+						role: "toolResult",
+						toolCallId: compositeId,
+						toolName: "read",
+						content: [{ type: "text", text: "contents" }],
+						isError: false,
+						timestamp: 2,
+					},
+					{ role: "user", content: "continue", timestamp: 3 },
+				],
+			});
+
+			const [, call, result] = request.chatMessagePrompts;
+			expect(call?.toolCalls.map(toolCall => toolCall.id)).toEqual([callId.slice(0, 40)]);
+			expect(result?.toolCallId).toBe(callId.slice(0, 40));
+		},
+	);
+
+	it("keeps distinct opaque pipe-bearing ids from non-Responses sources paired with their own results", async () => {
+		const request = await captureRequest({
+			messages: [
+				{ role: "user", content: "start", timestamp: 1 },
+				assistant({
+					api: "openai-completions",
+					provider: "openrouter",
+					model: "some-model",
+					stopReason: "toolUse",
+					content: [
+						{ type: "toolCall", id: "call_A|first", name: "read", arguments: { path: "a.ts" } },
+						{ type: "toolCall", id: "call_A|second", name: "read", arguments: { path: "b.ts" } },
+					],
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "call_A|second",
+					toolName: "read",
+					content: [{ type: "text", text: "second contents" }],
+					isError: false,
+					timestamp: 2,
+				},
+				{ role: "user", content: "continue", timestamp: 3 },
+			],
+		});
+
+		const call = request.chatMessagePrompts[1];
+		const results = request.chatMessagePrompts.filter(prompt => prompt.toolCallId);
+		const [firstId, secondId] = call?.toolCalls.map(toolCall => toolCall.id) ?? [];
+		expect(firstId).not.toBe(secondId);
+		expect(results.find(result => result.toolCallId === secondId)?.prompt).toBe("second contents");
+		expect(results.find(result => result.toolCallId === firstId)?.prompt).not.toBe("second contents");
+	});
+
 	it("accepts a bare-string system prompt", async () => {
 		const request = await captureRequest({
 			systemPrompt: "You are a test." as unknown as string[],
@@ -115,5 +186,17 @@ describe("streamDevin history handoff", () => {
 		});
 
 		expect(request.prompt).toBe("You are a test.");
+	});
+
+	it("passes the chat request through onPayload and sends its replacement", async () => {
+		let seenPrompt: string | undefined;
+		const request = await captureRequest({ messages: [{ role: "user", content: "hi", timestamp: 0 }] }, payload => {
+			const original = payload as GetChatMessageRequest;
+			seenPrompt = original.chatMessagePrompts.at(-1)?.prompt;
+			return create(GetChatMessageRequestSchema, { ...original, prompt: "replaced" });
+		});
+
+		expect(seenPrompt).toBe("hi");
+		expect(request.prompt).toBe("replaced");
 	});
 });

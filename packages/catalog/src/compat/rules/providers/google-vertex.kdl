@@ -3,6 +3,7 @@
 provider "google-vertex" {
 	default-model "gemini-3.1-pro-preview"
 	allow-unauthenticated #true
+	image-count-budget 200
 
 	// Replaces google-shared.ts stripping functionCall/functionResponse ids for Vertex.
 	supports-function-part-id #false
@@ -27,6 +28,10 @@ provider "google-vertex" {
 		}
 	}
 	class "anthropic" {
+		// Vertex rawPredict honors `cache_control.ttl: "1h"` (writes bill to
+		// `ephemeral_1h_input_tokens`, entries outlive 5m) without any beta; the
+		// `extended-cache-ttl-2025-04-11` beta is rejected in `anthropic_beta`.
+		supports-long-cache-retention #true
 		revision ">=4.5 <4.6" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 		}

@@ -50,8 +50,9 @@ mod imp {
 		borrow::Cow,
 		cell::OnceCell,
 		ffi::{OsStr, OsString},
-		io::Write,
+		io::{self, Write},
 		path::Path,
+		time::SystemTime,
 	};
 
 	use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
@@ -59,19 +60,22 @@ mod imp {
 	use thiserror::Error;
 	use uucore::{
 		display::Quotable,
+		fs::display_permissions_unix,
+		fsext::MetadataTimeField,
 		time::{FormatSystemTimeFallback, format_system_time, system_time_to_sec},
 	};
 	#[cfg(unix)]
 	use uucore::{
 		entries,
 		fs::{major, minor},
-		fsext::{MetadataTimeField, pretty_filetype, pretty_fstype, read_fs_list},
+		fsext::{pretty_filetype, pretty_fstype, read_fs_list},
 		libc::mode_t,
 	};
 
-	#[cfg(unix)]
-	use crate::fsmeta::{display_permissions, metadata_get_time};
-	use crate::host::{self, Host, Utility, matches_parser, strip_errno};
+	use crate::{
+		fsmeta::metadata_get_time,
+		host::{self, Host, Utility, matches_parser, strip_errno},
+	};
 
 	const ABOUT: &str = "Display file or file system status.";
 	const USAGE: &str = "stat [OPTION]... FILE...";
@@ -404,7 +408,6 @@ for details about the options it supports.";
 		#[cfg_attr(not(unix), allow(dead_code))]
 		mount_list_needed:  bool,
 		default_tokens:     Vec<Token>,
-		#[cfg_attr(not(unix), allow(dead_code))]
 		default_dev_tokens: Vec<Token>,
 	}
 
@@ -584,7 +587,7 @@ for details about the options it supports.";
 		file_type: FileType,
 		from_user: bool,
 		host: &mut Host,
-	) -> Result<String, i32> {
+	) -> io::Result<String> {
 		let quoting_style = host.var("QUOTING_STYLE")
 			.and_then(|style| style.parse().ok())
 			.unwrap_or_default();
@@ -596,10 +599,7 @@ for details about the options it supports.";
 					let quoted_dst = quote_file_name(&dst.to_string_lossy(), &quoting_style);
 					Ok(format!("{quoted_display_name} -> {quoted_dst}"))
 				},
-				Err(e) => {
-					host.error(e, 1);
-					Err(1)
-				},
+				Err(e) => Err(e),
 			}
 		} else {
 			let style = if from_user {
@@ -1171,12 +1171,15 @@ for details about the options it supports.";
 				.find(|root| path.starts_with(root))
 		}
 
-		#[cfg(unix)]
 		fn exec(&self, host: &mut Host) -> i32 {
-			let mut stdin_is_fifo = false;
-			if let Ok(md) = host.fs().metadata(host.resolve("/dev/stdin")) {
-				stdin_is_fifo = md.file_type().is_fifo();
-			}
+			// Only Unix reads `-` as standard input; on Windows it names a file.
+			#[cfg(unix)]
+			let stdin_is_fifo = host
+				.fs()
+				.metadata(host.resolve("/dev/stdin"))
+				.is_ok_and(|md| md.file_type().is_fifo());
+			#[cfg(windows)]
+			let stdin_is_fifo = false;
 
 			let mut ret = 0;
 			for f in &self.files {
@@ -1185,7 +1188,6 @@ for details about the options it supports.";
 			ret
 		}
 
-		#[cfg(unix)]
 		fn process_token_files(
 			&self,
 			t: &Token,
@@ -1199,21 +1201,22 @@ for details about the options it supports.";
 			file_type: FileType,
 			from_user: bool,
 			host: &mut Host,
-		) -> Result<(), i32> {
+			out: &mut Vec<u8>,
+		) -> io::Result<()> {
 			match *t {
-				Token::Byte(byte) => write_raw_byte(&mut host.stdout, byte),
+				Token::Byte(byte) => write_raw_byte(out, byte),
 				Token::Char(c) => {
-					let _ = write!(host.stdout, "{c}");
+					let _ = write!(out, "{c}");
 				},
 
 				Token::Directive { flag, width, precision, format } => {
 					let output = match format {
 						// access rights in octal
-						'a' => OutputType::UnsignedOct(0o7777 & meta.mode()),
+						'a' => OutputType::UnsignedOct(0o7777 & file_mode(meta)),
 						// access rights in human readable form
-						'A' => OutputType::Str(display_permissions(meta, true)),
+						'A' => OutputType::Str(display_permissions_unix(file_mode(meta), true)),
 						// number of blocks allocated (see %B)
-						'b' => unsigned(meta.blocks()),
+						'b' => unsigned(allocated_blocks(meta, resolved, host.fs())),
 
 						// the size in bytes of each block reported by %b
 						// FIXME: blocksize differs on various platform
@@ -1223,35 +1226,52 @@ for details about the options it supports.";
 						// upstream's non-SELinux fallback string.
 						'C' => OutputType::Str("unsupported for this operating system".to_string()),
 						// device number in decimal
+						#[cfg(unix)]
 						'd' if flag.major => unsigned(meta.dev().map(|dev| major(dev as _) as u64)),
+						#[cfg(unix)]
 						'd' if flag.minor => unsigned(meta.dev().map(|dev| minor(dev as _) as u64)),
+						// a Windows volume serial has no major/minor split
+						#[cfg(windows)]
+						'd' if flag.major || flag.minor => OutputType::Unknown,
 						'd' => unsigned(meta.dev()),
 						// device number in hex
 						'D' => unsigned_hex(meta.dev()),
 						// raw mode in hex
-						'f' => OutputType::UnsignedHex(meta.mode() as u64),
+						'f' => OutputType::UnsignedHex(u64::from(file_mode(meta))),
 						// file type
-						'F' => OutputType::Str(pretty_filetype(meta.mode() as mode_t, meta.len())),
+						#[cfg(unix)]
+						'F' => OutputType::Str(pretty_filetype(file_mode(meta) as mode_t, meta.len())),
+						#[cfg(windows)]
+						'F' => OutputType::Str(windows_filetype(file_mode(meta), meta.len())),
 						// group ID of owner
 						'g' => unsigned(meta.gid().map(u64::from)),
 						// group name of owner
+						#[cfg(unix)]
 						'G' => match meta.gid() {
 							Some(gid) => OutputType::Str(
 								entries::gid2grp(gid).unwrap_or_else(|_| "UNKNOWN".to_owned()),
 							),
 							None => OutputType::Unknown,
 						},
+						// no group database on Windows
+						#[cfg(windows)]
+						'G' => OutputType::Str("UNKNOWN".to_string()),
 						// number of hard links
 						'h' => unsigned(meta.nlink()),
 						// inode number
 						'i' => unsigned(meta.ino()),
 						// mount point: the host mount table says nothing about paths
 						// served by another filesystem, so those print GNU's `?`.
+						#[cfg(unix)]
 						'm' if !host.fs().is_native_local(resolved) => OutputType::Unknown,
+						#[cfg(unix)]
 						'm' => match self.find_mount_point(resolved, host) {
 							Some(s) => OutputType::OsStr(s),
 							None => OutputType::Str(String::new()),
 						},
+						// Windows mount points are not resolved
+						#[cfg(windows)]
+						'm' => OutputType::Str(String::new()),
 						// file name
 						'n' => OutputType::Str(display_name.to_string()),
 						// quoted file name with dereference if symbolic link
@@ -1266,19 +1286,28 @@ for details about the options it supports.";
 						's' => OutputType::Integer(meta.len() as i64),
 						// major device type in hex, for character/block device special
 						// files
+						#[cfg(unix)]
 						't' => unsigned_hex(meta.rdev().map(|rdev| major(rdev as _) as u64)),
 						// minor device type in hex, for character/block device special
 						// files
+						#[cfg(unix)]
 						'T' => unsigned_hex(meta.rdev().map(|rdev| minor(rdev as _) as u64)),
+						// no `dev_t` major/minor split on Windows
+						#[cfg(windows)]
+						't' | 'T' => OutputType::Unknown,
 						// user ID of owner
 						'u' => unsigned(meta.uid().map(u64::from)),
 						// user name of owner
+						#[cfg(unix)]
 						'U' => match meta.uid() {
 							Some(uid) => OutputType::Str(
 								entries::uid2usr(uid).unwrap_or_else(|_| "UNKNOWN".to_owned()),
 							),
 							None => OutputType::Unknown,
 						},
+						// no user database on Windows
+						#[cfg(windows)]
+						'U' => OutputType::Str("UNKNOWN".to_string()),
 
 						// time of file birth, human-readable; - if unknown
 						'w' => OutputType::Str(pretty_time(meta, MetadataTimeField::Birth, self.time_fmt())),
@@ -1297,47 +1326,60 @@ for details about the options it supports.";
 						// time of last status change, seconds since Epoch
 						'Z' => epoch_time(meta, MetadataTimeField::Change),
 						'R' => unsigned_hex(meta.rdev()),
+						#[cfg(unix)]
 						'r' if flag.major => unsigned(meta.rdev().map(|rdev| major(rdev as _) as u64)),
+						#[cfg(unix)]
 						'r' if flag.minor => unsigned(meta.rdev().map(|rdev| minor(rdev as _) as u64)),
 						'r' => unsigned(meta.rdev()),
 						_ => OutputType::Unknown,
 					};
-					print_it(&mut host.stdout, &output, flag, width, precision);
+					print_it(out, &output, flag, width, precision);
 				},
 			}
 			Ok(())
 		}
 
-		#[cfg(unix)]
 		fn do_stat(&self, file: &OsStr, stdin_is_fifo: bool, host: &mut Host) -> i32 {
 			let display_name = file.to_string_lossy();
-			let file = if display_name == "-" {
+			// directory for every syscall below; `display_name` keeps the
+			// operand as typed for `%n` and error messages.
+			#[cfg(unix)]
+			let resolved = if display_name == "-" {
 				if self.show_fs {
 					// write.
 					let _ =
 						writeln!(&mut host.stderr, "stat: {}", StatError::StdinFilesystemMode);
 					return 1;
 				}
-				if let Ok(p) = host.fs().canonicalize(host.resolve("/dev/stdin")) {
-					p.into_os_string()
-				} else {
-					OsString::from("/dev/stdin")
+				match host.fs().canonicalize(host.resolve("/dev/stdin")) {
+					Ok(p) => host.resolve(p),
+					Err(_) => host.resolve("/dev/stdin"),
 				}
 			} else {
-				OsString::from(file)
+				host.resolve(file)
 			};
-			// directory for every syscall below; `display_name` keeps the
-			// operand as typed for `%n` and error messages.
-			let resolved = host.resolve(&file);
+			#[cfg(windows)]
+			let resolved = host.resolve(file);
 			if self.show_fs {
-				match host.fs().stat_fs(&resolved) {
+				// Windows volume queries succeed for missing paths; stat the
+				// file first so those report the file's own error.
+				#[cfg(windows)]
+				let result = host
+					.fs()
+					.metadata(&resolved)
+					.and_then(|_| host.fs().stat_fs(&resolved));
+				#[cfg(unix)]
+				let result = host.fs().stat_fs(&resolved);
+				match result {
 					Ok(meta) => {
 						let tokens = &self.default_tokens;
 
 						// Usage
+						let mut out = Vec::with_capacity(256);
 						for t in tokens {
-							process_token_filesystem(&mut host.stdout, t, &meta, &display_name);
+							process_token_filesystem(&mut out, t, &meta, &display_name);
 						}
+						let _ = host.stdout.write_all(&out);
 					},
 					Err(error) => {
 						// context-stderr write.
@@ -1370,8 +1412,11 @@ for details about the options it supports.";
 							&self.default_dev_tokens
 						};
 
-						for t in tokens {
-							if let Err(code) = self.process_token_files(
+						// One write per file: the raw stdout would otherwise take a
+						// write per literal character and padding fill.
+						let mut out = Vec::with_capacity(256);
+						let rendered = tokens.iter().try_for_each(|t| {
+							self.process_token_files(
 								t,
 								&meta,
 								&display_name,
@@ -1379,9 +1424,15 @@ for details about the options it supports.";
 								file_type,
 								self.from_user,
 								host,
-							) {
-								return code;
-							}
+								&mut out,
+							)
+						});
+						// What rendered before a failing `%N` still precedes its
+						// error.
+						let _ = host.stdout.write_all(&out);
+						if let Err(error) = rendered {
+							host.error(error, 1);
+							return 1;
 						}
 					},
 					Err(e) => {
@@ -1823,8 +1874,7 @@ for details about the options it supports.";
 		value.map_or_else(|| "?".to_string(), |value| value.to_string())
 	}
 
-	#[cfg(unix)]
-	fn bsd_shell_line(meta: &Metadata, _resolved: &Path, _fs: &BlockingFs) -> String {
+	fn bsd_shell_line(meta: &Metadata, resolved: &Path, fs: &BlockingFs) -> String {
 		// BSD file flags exist only on native macOS metadata.
 		#[cfg(target_os = "macos")]
 		let flags = shell_field(
@@ -1833,52 +1883,37 @@ for details about the options it supports.";
 		);
 		#[cfg(not(target_os = "macos"))]
 		let flags = 0u32;
-		let birth = metadata_get_time(meta, MetadataTimeField::Birth)
-			.map_or(0, |t| system_time_to_sec(t).0);
+		// Host Unix metadata carries the raw `st_*` seconds; Windows derives
+		// them from the timestamps, including the change-time fallback.
+		#[cfg(unix)]
+		let (atime, mtime, ctime) = (meta.atime(), meta.mtime(), meta.ctime());
+		#[cfg(windows)]
+		let (atime, mtime, ctime) = {
+			let sec = |field| file_time(meta, field).map(|t| system_time_to_sec(t).0);
+			(
+				sec(MetadataTimeField::Access),
+				sec(MetadataTimeField::Modification),
+				sec(MetadataTimeField::Change),
+			)
+		};
+		let birth = file_time(meta, MetadataTimeField::Birth).map_or(0, |t| system_time_to_sec(t).0);
 		format!(
 			"st_dev={} st_ino={} st_mode=0{:o} st_nlink={} st_uid={} st_gid={} st_rdev={} \
 			 st_size={} st_atime={} st_mtime={} st_ctime={} st_birthtime={birth} st_blksize={} \
 			 st_blocks={} st_flags={flags}",
 			shell_field(meta.dev()),
 			shell_field(meta.ino()),
-			meta.mode(),
+			file_mode(meta),
 			shell_field(meta.nlink()),
 			shell_field(meta.uid()),
 			shell_field(meta.gid()),
 			shell_field(meta.rdev()),
 			meta.len(),
-			shell_field(meta.atime()),
-			shell_field(meta.mtime()),
-			shell_field(meta.ctime()),
+			shell_field(atime),
+			shell_field(mtime),
+			shell_field(ctime),
 			shell_field(meta.blksize()),
-			shell_field(meta.blocks()),
-		)
-	}
-
-	#[cfg(windows)]
-	fn bsd_shell_line(meta: &Metadata, resolved: &Path, fs: &BlockingFs) -> String {
-		let follow = !meta.file_type().is_symlink();
-		let id = fs.file_id(resolved, follow).ok();
-		let nlink = fs.link_count(resolved, follow).ok();
-		let sec = |field| win::md_time(meta, field).map(|t| system_time_to_sec(t).0);
-		format!(
-			"st_dev={} st_ino={} st_mode=0{:o} st_nlink={} st_uid={} st_gid={} st_rdev={} \
-			 st_size={} st_atime={} st_mtime={} st_ctime={} st_birthtime={} st_blksize={} \
-			 st_blocks={} st_flags=0",
-			shell_field(id.map(|id| id.dev())),
-			shell_field(id.map(|id| id.ino())),
-			win::synth_mode(meta),
-			shell_field(nlink),
-			shell_field(meta.uid()),
-			shell_field(meta.gid()),
-			shell_field(meta.rdev()),
-			meta.len(),
-			shell_field(sec(win::TimeField::Access)),
-			shell_field(sec(win::TimeField::Modification)),
-			shell_field(sec(win::TimeField::Change)),
-			sec(win::TimeField::Birth).unwrap_or(0),
-			shell_field(meta.blksize()),
-			shell_field(fs.allocated_size(resolved).ok().map(|size| size.div_ceil(512))),
+			shell_field(allocated_blocks(meta, resolved, fs)),
 		)
 	}
 
@@ -2039,9 +2074,8 @@ for details about the options it supports.";
 
 	/// Seconds since the Epoch for `%W`/`%X`/`%Y`/`%Z`. An unknown birth time
 	/// is GNU's `0`; other unknown times print `?`.
-	#[cfg(unix)]
 	fn epoch_time(meta: &Metadata, md_time_field: MetadataTimeField) -> OutputType<'static> {
-		match metadata_get_time(meta, md_time_field) {
+		match file_time(meta, md_time_field) {
 			Some(time) => {
 				let (sec, nsec) = system_time_to_sec(time);
 				OutputType::Timestamp { sec, nsec }
@@ -2053,9 +2087,8 @@ for details about the options it supports.";
 		}
 	}
 
-	#[cfg(unix)]
 	fn pretty_time(meta: &Metadata, md_time_field: MetadataTimeField, fmt: &str) -> String {
-		if let Some(time) = metadata_get_time(meta, md_time_field) {
+		if let Some(time) = file_time(meta, md_time_field) {
 			let mut tmp = Vec::new();
 			if format_system_time(
 				&mut tmp,
@@ -2069,6 +2102,82 @@ for details about the options it supports.";
 			}
 		}
 		"-".to_string()
+	}
+
+	/// Timestamp behind a time directive. Windows has no POSIX status-change
+	/// time, so `%z`/`%Z` fall back to the last write time, as Cygwin's
+	/// `stat` does.
+	fn file_time(meta: &Metadata, field: MetadataTimeField) -> Option<SystemTime> {
+		#[cfg(windows)]
+		if matches!(field, MetadataTimeField::Change) {
+			return meta.changed().or_else(|_| meta.modified()).ok();
+		}
+		metadata_get_time(meta, field)
+	}
+
+	/// POSIX `st_mode` for `%a`/`%A`/`%f`/`%F` and `stat -s`.
+	#[cfg(unix)]
+	fn file_mode(meta: &Metadata) -> u32 {
+		meta.mode()
+	}
+
+	/// POSIX `st_mode` for `%a`/`%A`/`%f`/`%F` and `stat -s`. Host files
+	/// synthesize it from Windows attributes: the file type bits plus a
+	/// best-effort permission mask (read-only files/dirs drop their write
+	/// bits; directories and symlinks are traversable). Providers without
+	/// Windows attributes report their own mode.
+	#[cfg(windows)]
+	fn file_mode(meta: &Metadata) -> u32 {
+		/// `FILE_ATTRIBUTE_READONLY`.
+		const READONLY: u32 = 0x0000_0001;
+		let Some(attributes) = meta.file_attributes() else {
+			return meta.mode();
+		};
+		let readonly = attributes & READONLY != 0;
+		let ft = meta.file_type();
+		if ft.is_symlink() {
+			S_IFLNK | 0o777
+		} else if ft.is_dir() {
+			S_IFDIR | if readonly { 0o555 } else { 0o755 }
+		} else {
+			S_IFREG | if readonly { 0o444 } else { 0o644 }
+		}
+	}
+
+	// POSIX `st_mode` type bits of the synthesized Windows mode.
+	#[cfg(windows)]
+	const S_IFDIR: u32 = 0o040000;
+	#[cfg(windows)]
+	const S_IFREG: u32 = 0o100000;
+	#[cfg(windows)]
+	const S_IFLNK: u32 = 0o120000;
+
+	/// `%F` for the types a synthesized Windows mode carries, mirroring
+	/// uucore's Unix-only `pretty_filetype`.
+	#[cfg(windows)]
+	fn windows_filetype(mode: u32, size: u64) -> String {
+		match mode & 0o170000 {
+			S_IFDIR => "directory",
+			S_IFLNK => "symbolic link",
+			_ if size == 0 => "regular empty file",
+			_ => "regular file",
+		}
+		.to_string()
+	}
+
+	/// 512-byte blocks for `%b` and `stat -s`.
+	#[cfg(unix)]
+	fn allocated_blocks(meta: &Metadata, _resolved: &Path, _fs: &BlockingFs) -> Option<u64> {
+		meta.blocks()
+	}
+
+	/// 512-byte blocks for `%b` and `stat -s`. Windows host metadata has no
+	/// `st_blocks`, so the filesystem reports the allocated size.
+	#[cfg(windows)]
+	fn allocated_blocks(_meta: &Metadata, resolved: &Path, fs: &BlockingFs) -> Option<u64> {
+		fs.allocated_size(resolved)
+			.ok()
+			.map(|size| size.div_ceil(512))
 	}
 
 	/// Upstream format-parser unit tests, kept because the token parser is the
@@ -2171,313 +2280,6 @@ for details about the options it supports.";
 				timestamp_string(1712345678, 123_456_789, Precision::Number(11)),
 				"1712345678.12345678900"
 			);
-		}
-	}
-	/// Windows `stat`: the upstream file-status path is Unix-only, so this
-	/// reimplements the GNU directives on top of the injected filesystem's
-	/// metadata, file identity, link count, allocation, and volume queries.
-	#[cfg(windows)]
-	mod win {
-		use std::time::SystemTime;
-
-		use pi_vfs::Metadata;
-
-		/// `FILE_ATTRIBUTE_READONLY`.
-		const READONLY: u32 = 0x0000_0001;
-
-		// POSIX `st_mode` type bits, synthesized for `%f`/`%F`/`%A`/`%a`.
-		const S_IFDIR: u32 = 0o040000;
-		const S_IFREG: u32 = 0o100000;
-		const S_IFLNK: u32 = 0o120000;
-
-		/// Which timestamp a directive refers to. Windows exposes creation,
-		/// access, and write times; it has no POSIX "status change" time, so
-		/// `%z`/`%Z` reuse the write time (last data modification), matching
-		/// how ports such as Cygwin's `stat` behave.
-		#[derive(Clone, Copy)]
-		pub enum TimeField {
-			Access,
-			Modification,
-			Change,
-			Birth,
-		}
-
-		/// Resolve a [`TimeField`] to the corresponding [`SystemTime`], or
-		/// `None` when the filesystem cannot supply it.
-		pub fn md_time(md: &Metadata, field: TimeField) -> Option<SystemTime> {
-			match field {
-				TimeField::Access => md.accessed().ok(),
-				TimeField::Modification | TimeField::Change => md.modified().ok(),
-				TimeField::Birth => md.created().ok(),
-			}
-		}
-
-		/// POSIX-style `st_mode`. Host files synthesize it from Windows
-		/// attributes: the file type bits plus a best-effort permission mask
-		/// (read-only files/dirs drop their write bits; directories and
-		/// symlinks are traversable). Providers without Windows attributes
-		/// report their own mode.
-		pub fn synth_mode(md: &Metadata) -> u32 {
-			let Some(attributes) = md.file_attributes() else {
-				return md.mode();
-			};
-			let readonly = attributes & READONLY != 0;
-			let ft = md.file_type();
-			if ft.is_symlink() {
-				S_IFLNK | 0o777
-			} else if ft.is_dir() {
-				S_IFDIR | if readonly { 0o555 } else { 0o755 }
-			} else {
-				S_IFREG | if readonly { 0o444 } else { 0o644 }
-			}
-		}
-
-		/// Human-readable file type for `%F`, mirroring uucore's
-		/// `pretty_filetype` for the types reachable on Windows.
-		pub fn file_type_str(mode: u32, size: u64) -> String {
-			match mode & 0o170000 {
-				S_IFDIR => "directory",
-				S_IFLNK => "symbolic link",
-				_ if size == 0 => "regular empty file",
-				_ => "regular file",
-			}
-			.to_string()
-		}
-
-		/// `ls -l`-style permission string for `%A` derived from the synthetic
-		/// mode (e.g. `drwxr-xr-x`).
-		pub fn perms_string(mode: u32) -> String {
-			let mut s = String::with_capacity(10);
-			s.push(match mode & 0o170000 {
-				S_IFDIR => 'd',
-				S_IFLNK => 'l',
-				_ => '-',
-			});
-			for shift in [6u32, 3, 0] {
-				let bits = (mode >> shift) & 0o7;
-				s.push(if bits & 0o4 != 0 { 'r' } else { '-' });
-				s.push(if bits & 0o2 != 0 { 'w' } else { '-' });
-				s.push(if bits & 0o1 != 0 { 'x' } else { '-' });
-			}
-			s
-		}
-	}
-
-	/// Metadata timestamp through the shared datetime format.
-	#[cfg(windows)]
-	fn pretty_time(meta: &Metadata, field: win::TimeField, fmt: &str) -> String {
-		if let Some(time) = win::md_time(meta, field) {
-			let mut tmp = Vec::new();
-			if format_system_time(
-				&mut tmp,
-				time,
-				fmt,
-				FormatSystemTimeFallback::Float,
-			)
-			.is_ok()
-			{
-				return String::from_utf8(tmp).unwrap();
-			}
-		}
-		"-".to_string()
-	}
-
-	#[cfg(windows)]
-	impl Stater {
-		fn exec(&self, host: &mut Host) -> i32 {
-			let mut ret = 0;
-			for f in &self.files {
-				ret |= self.do_stat(f, host);
-			}
-			ret
-		}
-
-		fn process_token_files(
-			&self,
-			t: &Token,
-			meta: &Metadata,
-			display_name: &str,
-			resolved: &Path,
-			file_type: FileType,
-			from_user: bool,
-			host: &mut Host,
-		) -> Result<(), i32> {
-			match *t {
-				Token::Byte(byte) => write_raw_byte(&mut host.stdout, byte),
-				Token::Char(c) => {
-					let _ = write!(host.stdout, "{c}");
-				},
-				Token::Directive { flag, width, precision, format } => {
-					let mode = win::synth_mode(meta);
-					let follow = !meta.file_type().is_symlink();
-					// `%d`/`%D`/`%i` need a fresh identity query (volume serial and
-					// NTFS file index for host files); skip it for every other
-					// directive.
-					let id = matches!(format, 'd' | 'D' | 'i')
-						.then(|| host.fs().file_id(resolved, follow).ok())
-						.flatten();
-					let output = match format {
-						// access rights in octal
-						'a' => OutputType::UnsignedOct(0o7777 & mode),
-						// access rights in human readable form
-						'A' => OutputType::Str(win::perms_string(mode)),
-						// number of blocks allocated (512-byte units, see %B)
-						'b' => unsigned(
-							host.fs()
-								.allocated_size(resolved)
-								.ok()
-								.map(|size| size.div_ceil(512)),
-						),
-						// the size in bytes of each block reported by %b
-						'B' => OutputType::Unsigned(512),
-						// SELinux security context string (unsupported)
-						'C' => OutputType::Str("unsupported for this operating system".to_string()),
-						// device number: a volume serial has no major/minor split
-						'd' if flag.major || flag.minor => OutputType::Unknown,
-						'd' => unsigned(id.map(|id| id.dev())),
-						// device number in hex
-						'D' => unsigned_hex(id.map(|id| id.dev())),
-						// raw mode in hex
-						'f' => OutputType::UnsignedHex(u64::from(mode)),
-						// file type
-						'F' => OutputType::Str(win::file_type_str(mode, meta.len())),
-						// group ID of owner
-						'g' => unsigned(meta.gid().map(u64::from)),
-						// group name of owner (no group database on Windows)
-						'G' => OutputType::Str("UNKNOWN".to_string()),
-						// number of hard links
-						'h' => unsigned(host.fs().link_count(resolved, follow).ok()),
-						// inode number (NTFS file index)
-						'i' => unsigned(id.map(|id| id.ino())),
-						// mount point (not resolved on Windows)
-						'm' => OutputType::Str(String::new()),
-						// file name
-						'n' => OutputType::Str(display_name.to_string()),
-						// quoted file name with dereference if symbolic link
-						'N' => OutputType::Str(get_quoted_file_name(
-							display_name,
-							resolved,
-							file_type,
-							from_user,
-							host,
-						)?),
-						// optimal I/O transfer size hint
-						'o' => unsigned(meta.blksize()),
-						// total size, in bytes
-						's' => OutputType::Integer(meta.len() as i64),
-						// device major/minor: no `dev_t` split on Windows
-						't' | 'T' => OutputType::Unknown,
-						// user ID of owner
-						'u' => unsigned(meta.uid().map(u64::from)),
-						// user name of owner (no user database on Windows)
-						'U' => OutputType::Str("UNKNOWN".to_string()),
-						// time of file birth, human-readable; - if unknown
-						'w' => OutputType::Str(pretty_time(meta, win::TimeField::Birth, self.time_fmt())),
-						// time of file birth, seconds since Epoch; 0 if unknown
-						'W' => {
-							let (sec, nsec) = win::md_time(meta, win::TimeField::Birth)
-								.map_or((0, 0), system_time_to_sec);
-							OutputType::Timestamp { sec, nsec }
-						},
-						// time of last access, human-readable
-						'x' => OutputType::Str(pretty_time(meta, win::TimeField::Access, self.time_fmt())),
-						// time of last access, seconds since Epoch
-						'X' => {
-							let (sec, nsec) = win::md_time(meta, win::TimeField::Access)
-								.map_or((0, 0), system_time_to_sec);
-							OutputType::Timestamp { sec, nsec }
-						},
-						// time of last data modification, human-readable
-						'y' => OutputType::Str(pretty_time(meta, win::TimeField::Modification, self.time_fmt())),
-						// time of last data modification, seconds since Epoch
-						'Y' => {
-							let (sec, nsec) = win::md_time(meta, win::TimeField::Modification)
-								.map_or((0, 0), system_time_to_sec);
-							OutputType::Timestamp { sec, nsec }
-						},
-						// time of last status change, human-readable (write time)
-						'z' => OutputType::Str(pretty_time(meta, win::TimeField::Change, self.time_fmt())),
-						// time of last status change, seconds since Epoch
-						'Z' => {
-							let (sec, nsec) = win::md_time(meta, win::TimeField::Change)
-								.map_or((0, 0), system_time_to_sec);
-							OutputType::Timestamp { sec, nsec }
-						},
-						'R' => unsigned_hex(meta.rdev()),
-						'r' => unsigned(meta.rdev()),
-						_ => OutputType::Unknown,
-					};
-					print_it(&mut host.stdout, &output, flag, width, precision);
-				},
-			}
-			Ok(())
-		}
-
-		fn do_stat(&self, file: &OsStr, host: &mut Host) -> i32 {
-			let display_name = file.to_string_lossy();
-			// directory; `display_name` keeps the operand as typed for `%n`
-			// and error messages.
-			let resolved = host.resolve(file);
-			if self.show_fs {
-				// Volume queries succeed for missing paths; stat the file first so
-				// those report the file's own error.
-				let result = host
-					.fs()
-					.metadata(&resolved)
-					.and_then(|_| host.fs().stat_fs(&resolved));
-				match result {
-					Ok(meta) => {
-						for t in &self.default_tokens {
-							process_token_filesystem(&mut host.stdout, t, &meta, &display_name);
-						}
-					},
-					Err(error) => {
-						let _ = writeln!(
-							&mut host.stderr,
-							"stat: {}",
-							StatError::CannotReadFilesystemInfo {
-								file:  display_name.quote().to_string(),
-								error: strip_errno(&error),
-							}
-						);
-						return 1;
-					},
-				}
-			} else {
-				let result = if self.follow {
-					host.fs().metadata(&resolved)
-				} else {
-					host.fs().symlink_metadata(&resolved)
-				};
-				match result {
-					Ok(meta) => {
-						let file_type = meta.file_type();
-						// Windows has no character/block special files, so the
-						// device-type default format is never selected.
-						for t in &self.default_tokens {
-							if let Err(code) = self.process_token_files(
-								t,
-								&meta,
-								&display_name,
-								&resolved,
-								file_type,
-								self.from_user,
-								host,
-							) {
-								return code;
-							}
-						}
-					},
-					Err(e) => {
-						let _ = writeln!(&mut host.stderr, "stat: {}", StatError::CannotStat {
-							file:  display_name.quote().to_string(),
-							error: e.to_string(),
-						});
-						return 1;
-					},
-				}
-			}
-			0
 		}
 	}
 }

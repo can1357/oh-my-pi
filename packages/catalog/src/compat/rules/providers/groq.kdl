@@ -4,8 +4,29 @@ provider "groq" {
 	default-model "openai/gpt-oss-120b"
 	env "GROQ_API_KEY"
 
+	// Groq validates assistant message properties and refuses `reasoning_content`
+	// (400 "property 'reasoning_content' is unsupported"), so the Kimi lineage's
+	// tool-call replay field, real or the "." placeholder, is never sent here.
+	requires-reasoning-content-for-tool-calls #false
 	thinking-mode "effort"
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// Groq accepts OpenAI `reasoning_effort` for Qwen, with `none` as its off
+	// value, not Qwen-native `enable_thinking` (400 "property 'enable_thinking'
+	// is unsupported"). Its documented Qwen ladder (Qwen 3.8) is low/medium/high;
+	// `minimal` answers 400 "invalid Qwen3.8 reasoning_effort".
+	class "qwen" {
+		thinking-format "openai"
+		reasoning-disable-mode "none-effort"
+		thinking-efforts "low" "medium" "high"
+	}
+	// Qwen 3.6 only takes `default` (thinking) or `none` (off), per its Groq
+	// model card.
+	models "qwen/qwen3.6-27b" {
+		thinking-efforts "high"
+		thinking-effort-map {
+			high "default"
+		}
 	}
 }

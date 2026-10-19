@@ -43,10 +43,14 @@ impl GitRepo {
 			options.binary,
 			options.max_bytes,
 		)?;
-		// Size the joined patch once: growing it by doubling would hold up to
-		// twice the output during the copy, on top of the per-change strings
-		// that are released as they are consumed.
-		let mut text = String::with_capacity(rendered.iter().map(|item| item.text.len()).sum());
+		// Reuse the first patch's allocation; single-file requests need no
+		// joining copy. Reserve the remaining bytes once for multi-file patches.
+		let mut rendered = rendered.into_iter();
+		let Some(first) = rendered.next() else {
+			return Ok(String::new());
+		};
+		let mut text = first.text;
+		text.reserve_exact(rendered.as_slice().iter().map(|item| item.text.len()).sum());
 		for item in rendered {
 			text.push_str(&item.text);
 		}
@@ -310,6 +314,7 @@ fn tree_changes(
 			out.push(item);
 		}
 	}
+	pair_gitlink_renames(&mut out);
 	sort_changes(&mut out);
 	Ok(out)
 }
@@ -341,8 +346,46 @@ fn index_changes(
 			},
 		)
 		.map_err(|err| Error::backend("git diff --cached", err))?;
+	pair_gitlink_renames(&mut out);
 	sort_changes(&mut out);
 	Ok(out)
+}
+
+/// gix's rename tracker only considers blobs, but git pairs a deleted and an
+/// added gitlink with the same commit id as a 100% rename. Changed-id gitlinks
+/// have no content to score, so git (and this) leaves them as delete + add.
+fn pair_gitlink_renames(changes: &mut Vec<FileChange>) {
+	let is_gitlink = |mode: Option<gix::objs::tree::EntryMode>| {
+		mode.is_some_and(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
+	};
+	let mut index = 0;
+	while index < changes.len() {
+		let deletion = &changes[index];
+		if !(deletion.new_mode.is_none() && is_gitlink(deletion.old_mode)) {
+			index += 1;
+			continue;
+		}
+		let old_id = deletion.old_id;
+		let Some(addition) = changes.iter().position(|change| {
+			change.old_mode.is_none() && is_gitlink(change.new_mode) && change.new_id == old_id
+		}) else {
+			index += 1;
+			continue;
+		};
+		let added = changes.swap_remove(addition);
+		// `swap_remove` may have moved the deletion into `addition`'s slot.
+		let index_now = if index == changes.len() {
+			addition
+		} else {
+			index
+		};
+		let deletion = &mut changes[index_now];
+		deletion.new_path = added.new_path;
+		deletion.new_id = added.new_id;
+		deletion.new_mode = added.new_mode;
+		deletion.similarity = Some(100);
+		index = 0;
+	}
 }
 
 fn base_worktree_changes(
@@ -649,6 +692,14 @@ fn render_change(
 	binary_patch: bool,
 	budget: Option<RenderBudget>,
 ) -> Result<Rendered> {
+	if change
+		.old_mode
+		.iter()
+		.chain(change.new_mode.iter())
+		.all(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
+	{
+		return Ok(render_gitlink(change));
+	}
 	let old_kind = change
 		.old_mode
 		.or(change.new_mode)
@@ -736,7 +787,7 @@ fn render_change(
 				push_new_path(&mut text, change);
 				text.push('\n');
 				let old_data = prepared.old.data.as_slice().unwrap_or_default();
-				let sink = GitHunks { out: &mut text, old_data, budget };
+				let sink = GitHunks::new(&mut text, old_data, budget);
 				gix::diff::blob::UnifiedDiff::new(
 					&diff,
 					&input,
@@ -752,6 +803,39 @@ fn render_change(
 			Err(Error::backend("git diff", "external diff drivers cannot be rendered in-process"))
 		},
 	}
+}
+
+fn render_gitlink(change: &FileChange) -> Rendered {
+	let mut text = format!("diff --git a/{} b/{}\n", change.old_path, change.new_path);
+	// Gitlinks have no content to score, so only an exact-id rename carries a
+	// meaningful similarity; the "compute later" sentinel has nothing to
+	// compute.
+	let similarity = change
+		.similarity
+		.filter(|&similarity| similarity != u8::MAX);
+	append_metadata(&mut text, change, similarity, false);
+	if change.old_id == change.new_id {
+		// Pure rename: git emits only the rename header and counts 0/0.
+		return Rendered { text, added: Some(0), removed: Some(0) };
+	}
+	text.push_str("--- ");
+	push_old_path(&mut text, change);
+	text.push_str("\n+++ ");
+	push_new_path(&mut text, change);
+	text.push('\n');
+	match (change.old_mode, change.new_mode) {
+		(Some(_), Some(_)) => text.push_str("@@ -1 +1 @@\n"),
+		(None, Some(_)) => text.push_str("@@ -0,0 +1 @@\n"),
+		(Some(_), None) => text.push_str("@@ -1 +0,0 @@\n"),
+		(None, None) => unreachable!("a change has at least one mode"),
+	}
+	if change.old_mode.is_some() {
+		let _ = writeln!(text, "-Subproject commit {}", change.old_id);
+	}
+	if change.new_mode.is_some() {
+		let _ = writeln!(text, "+Subproject commit {}", change.new_id);
+	}
+	Rendered { text, added: change.new_mode.map(|_| 1), removed: change.old_mode.map(|_| 1) }
 }
 
 fn append_metadata(out: &mut String, change: &FileChange, similarity: Option<u8>, full_ids: bool) {
@@ -823,6 +907,65 @@ struct GitHunks<'a> {
 	/// Remaining-budget check threaded from `render_change`; `None` when the
 	/// caller set no `max_bytes`.
 	budget:   Option<RenderBudget>,
+	context:  FunctionContext<'a>,
+}
+
+impl<'a> GitHunks<'a> {
+	fn new(out: &'a mut String, old_data: &'a [u8], budget: Option<RenderBudget>) -> Self {
+		Self { out, old_data, budget, context: FunctionContext::default() }
+	}
+}
+
+/// Funcname scan state for hunk headers. Hunks arrive in ascending order, so
+/// each lookup resumes where the previous one stopped and keeps the last
+/// match, like git's xemit, instead of rescanning from the top per hunk.
+#[derive(Default)]
+struct FunctionContext<'a> {
+	/// Lines of `old_data` scanned so far.
+	lines:  usize,
+	/// Byte offset of the next unscanned line; past the end once exhausted.
+	offset: usize,
+	last:   Option<&'a [u8]>,
+}
+
+impl<'a> FunctionContext<'a> {
+	/// The funcname for a hunk starting at 1-based line `hunk_start`: the last
+	/// earlier line accepted by git's default rule.
+	fn before(&mut self, data: &'a [u8], hunk_start: u32) -> Option<&'a [u8]> {
+		let wanted = usize::try_from(hunk_start.saturating_sub(1)).ok()?;
+		if wanted < self.lines {
+			*self = Self::default();
+		}
+		while self.lines < wanted && self.offset <= data.len() {
+			let rest = &data[self.offset..];
+			let len = rest
+				.iter()
+				.position(|&byte| byte == b'\n')
+				.unwrap_or(rest.len());
+			if let Some(name) = git_funcname(&rest[..len]) {
+				self.last = Some(name);
+			}
+			self.offset += len + 1;
+			self.lines += 1;
+		}
+		self.last
+	}
+}
+
+/// git's default funcname rule (xemit's `def_ff`): the line starts with an
+/// ASCII letter, `_` or `$`; it is cut to 80 bytes, then trailing whitespace
+/// is trimmed.
+fn git_funcname(line: &[u8]) -> Option<&[u8]> {
+	let first = *line.first()?;
+	if !(first.is_ascii_alphabetic() || first == b'_' || first == b'$') {
+		return None;
+	}
+	let line = &line[..line.len().min(80)];
+	let end = line
+		.iter()
+		.rposition(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r'))
+		.map_or(0, |index| index + 1);
+	Some(&line[..end])
 }
 
 /// Conservative worst-case byte length `bytes` will occupy in `self.out`
@@ -885,13 +1028,8 @@ impl gix::diff::blob::unified_diff::ConsumeHunk for GitHunks<'_> {
 		self.out.push_str(" +");
 		push_range(self.out, new_start, header.after_hunk_len);
 		self.out.push_str(" @@");
-		if let Some(function) = function_context(self.old_data, header.before_hunk_start) {
+		if let Some(function) = self.context.before(self.old_data, header.before_hunk_start) {
 			self.out.push(' ');
-			// `function_context` returns the complete preceding
-			// non-whitespace/non-`}` line from `old_data`, independent of the
-			// hunk's own line lengths: a pathological invalid-UTF-8 line here
-			// must be bounded the same way an ordinary hunk line is below,
-			// before the lossy conversion runs.
 			self.check_budget_for(function)?;
 			self.out.push_str(&String::from_utf8_lossy(function));
 		}
@@ -1400,21 +1538,6 @@ fn display_id(id: gix::ObjectId, full: bool) -> String {
 	}
 }
 
-fn function_context(data: &[u8], hunk_start: u32) -> Option<&[u8]> {
-	let before = usize::try_from(hunk_start.saturating_sub(1)).ok()?;
-	let mut candidate = None;
-	for line in data.split(|&byte| byte == b'\n').take(before) {
-		let line = line.strip_suffix(b"\r").unwrap_or(line);
-		if line
-			.first()
-			.is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b'}')
-		{
-			candidate = Some(line);
-		}
-	}
-	candidate
-}
-
 const fn zero_start(start: u32, len: u32) -> u32 {
 	if len == 0 {
 		start.saturating_sub(1)
@@ -1465,6 +1588,7 @@ mod tests {
 	use tempfile::TempDir;
 
 	use super::*;
+	use crate::types::ApplyOptions;
 
 	// Diff oracles pass `--no-ext-diff`: a developer's `diff.external` (e.g.
 	// difftastic) would otherwise replace git's patch with its own output.
@@ -1477,6 +1601,7 @@ mod tests {
 		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
 		String::from_utf8(output.stdout).expect("git output is UTF-8")
 	}
+	#[cfg(unix)]
 	fn git_diff(dir: &Path, args: &[&str]) -> String {
 		let output = Command::new("git")
 			.args(args)
@@ -1623,6 +1748,61 @@ mod tests {
 	}
 
 	#[test]
+	fn gitlink_patch_matches_git_and_preserves_commit_ids() {
+		let dir = fixture();
+		let old = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_owned();
+		let new = "b".repeat(40); // Valid gitlink, absent from the root object database.
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{old},module")]);
+		git(dir.path(), &["commit", "-qm", "add gitlink"]);
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{new},module")]);
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let patch = git(dir.path(), &["diff", "--no-ext-diff", "--cached"]);
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions { cached: true, ..DiffOptions::default() })
+				.expect("staged gitlink"),
+			patch
+		);
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{old},module")]);
+		repo
+			.apply_patch(&patch, &ApplyOptions { cached: true, ..ApplyOptions::default() })
+			.expect("apply gitlink without its commit object in the root repo");
+		assert!(git(dir.path(), &["ls-files", "--stage", "module"]).contains(&new));
+		git(dir.path(), &["commit", "-qm", "update gitlink"]);
+		assert_eq!(
+			repo
+				.diff_tree("HEAD^", "HEAD", true)
+				.expect("committed gitlink"),
+			git(dir.path(), &["diff-tree", "-r", "-p", "HEAD^", "HEAD"])
+		);
+	}
+
+	#[test]
+	fn gitlink_pure_rename_matches_git_without_synthetic_hunk() {
+		let dir = fixture();
+		let head = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_owned();
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{head},module")]);
+		git(dir.path(), &["commit", "-qm", "add gitlink"]);
+		git(dir.path(), &["update-index", "--force-remove", "module"]);
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{head},moved")]);
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let options = DiffOptions { cached: true, ..DiffOptions::default() };
+		assert_eq!(
+			repo.diff_text(&options).expect("renamed gitlink"),
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached", "-M"])
+		);
+		assert_eq!(repo.numstat(&options).expect("numstat"), vec![NumstatEntry {
+			path:    "moved".to_owned(),
+			added:   Some(0),
+			removed: Some(0),
+		}]);
+	}
+
+	#[test]
 	fn context_and_two_revision_tree_diff_match_git() {
 		let dir = fixture();
 		fs::write(dir.path().join("file.txt"), "one\ntwo\nthree\nchanged\nfive\nsix\nseven\n")
@@ -1659,6 +1839,55 @@ mod tests {
 			repo.diff_text(&base_only).expect("base diff"),
 			git(dir.path(), &["diff", "--no-ext-diff", "HEAD^"])
 		);
+	}
+
+	#[test]
+	fn hunk_function_context_matches_git() {
+		// One hunk per section: git names each with the last earlier line that
+		// starts with a letter, `_` or `$`, cut to 80 bytes with trailing
+		// whitespace trimmed. `#`, `{`, `//`, `}` and indented lines never
+		// qualify, and a hunk with no new candidate reuses the previous one.
+		let dir = fixture();
+		let long = format!("long_{}()", "x".repeat(90));
+		let headers = [
+			long.as_str(),
+			"#include <stdio.h>",
+			"{",
+			"// comment",
+			"$dollar \t",
+			"_under",
+			"}",
+			"  indented",
+		];
+		let section = |index: usize, header: &str, changed: bool| {
+			let mut text = format!("{header}\n");
+			for row in 0..10 {
+				let body = if changed && row == 5 {
+					"edited"
+				} else {
+					"body"
+				};
+				writeln!(text, "    {body} {index} {row}").expect("write to String");
+			}
+			text
+		};
+		let render = |changed: bool| -> String {
+			headers
+				.iter()
+				.enumerate()
+				.map(|(index, header)| section(index, header, changed))
+				.collect()
+		};
+		fs::write(dir.path().join("funcs.txt"), render(false)).expect("write");
+		git(dir.path(), &["add", "funcs.txt"]);
+		git(dir.path(), &["commit", "-qm", "funcs"]);
+		fs::write(dir.path().join("funcs.txt"), render(true)).expect("modify");
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let expected = git(dir.path(), &["diff", "--no-ext-diff"]);
+		assert!(expected.contains(" @@ $dollar\n"), "{expected}");
+		assert_eq!(repo.diff_text(&DiffOptions::default()).expect("diff"), expected);
 	}
 
 	#[test]
@@ -1706,11 +1935,12 @@ mod tests {
 		);
 	}
 
-	// Regression: an isolated-task baseline once rendered the whole index-vs-HEAD
-	// patch before anyone looked at its size; on a 15-way jj conflict exported to
-	// git that was ~1.7M blobs and grew the process to 141 GB. A cap one byte
-	// under the patch must surface as `OutputTooLarge`; a cap equal to it must
-	// return the same bytes as an uncapped render.
+	// Regression: an isolated-task baseline once rendered the whole
+	// index-vs-HEAD patch before anyone looked at its size; on a 15-way jj
+	// conflict exported to git that was ~1.7M blobs and grew the process to
+	// 141 GB. A cap one byte under the patch must surface as
+	// `OutputTooLarge`; a cap equal to it must return the same bytes as an
+	// uncapped render.
 	#[test]
 	fn max_bytes_rejects_oversized_patch_and_passes_one_within_cap() {
 		let dir = fixture();
@@ -1773,7 +2003,7 @@ mod tests {
 			.collect();
 		let full_len: usize = lines.iter().map(|(_, content)| content.len()).sum();
 		let budget = Some(RenderBudget { limit: 100, already: 0 });
-		let mut sink = GitHunks { out: &mut out, old_data: b"", budget };
+		let mut sink = GitHunks::new(&mut out, b"", budget);
 		let header = HunkHeader {
 			before_hunk_start: 1,
 			before_hunk_len:   0,
@@ -1811,7 +2041,7 @@ mod tests {
 		let invalid_line = vec![0x80_u8; 1_000_000];
 		let lines: Vec<(DiffLineKind, &[u8])> = vec![(DiffLineKind::Add, invalid_line.as_slice())];
 		let budget = Some(RenderBudget { limit: 100, already: 0 });
-		let mut sink = GitHunks { out: &mut out, old_data: b"", budget };
+		let mut sink = GitHunks::new(&mut out, b"", budget);
 		let header = HunkHeader {
 			before_hunk_start: 1,
 			before_hunk_len:   0,
@@ -1833,50 +2063,46 @@ mod tests {
 		);
 	}
 
-	// Regression for the round-2 reviewer finding: `function_context` returns
-	// the complete preceding non-whitespace/non-`}` line from `old_data`,
-	// independent of the hunk's own line lengths. `consume_hunk` used to
-	// lossy-convert and append that slice before any budget check ran (the
-	// first `check_budget()` call comes after the header line, but only once
-	// the function-context text has already been pushed onto `out`), so a
-	// pathological function-context line could still balloon `out` up to 3x
-	// its size before the error surfaced. It must be bounded the same way an
-	// ordinary hunk line already is.
+	// The function-context line is lossy-converted onto the header, so a tight
+	// `max_bytes` must refuse it before converting. git's 80-byte funcname cap
+	// bounds the conversion itself; the line still needs a qualifying (ASCII
+	// letter) first byte to be picked at all.
 	#[test]
 	fn hunk_writer_bounds_the_function_context_line_before_converting_it() {
 		use gix::diff::blob::unified_diff::{ConsumeHunk, DiffLineKind, HunkHeader};
 
-		let mut out = String::new();
-		// Every byte is its own maximal invalid subsequence, so lossy
-		// conversion expands this 3x: 1,000,000 bytes -> 3,000,000 bytes.
-		let invalid_context_line = vec![0x80_u8; 1_000_000];
-		let mut old_data = invalid_context_line.clone();
-		old_data.push(b'\n');
-		old_data.extend_from_slice(b"unchanged\n");
+		let mut old_data = vec![b'A'];
+		old_data.extend(std::iter::repeat_n(0x80_u8, 1_000_000));
+		old_data.extend_from_slice(b"\nunchanged\n");
 		let lines: Vec<(DiffLineKind, &[u8])> = vec![(DiffLineKind::Add, b"x\n".as_slice())];
-		let budget = Some(RenderBudget { limit: 100, already: 0 });
-		let mut sink = GitHunks { out: &mut out, old_data: &old_data, budget };
-		// `before_hunk_start: 2` makes `function_context` scan exactly the
-		// first line of `old_data` — the pathological one — and return it.
+		// `before_hunk_start: 2` makes the function context the first line of
+		// `old_data`: `A` followed by 79 invalid bytes after the cap, 240 bytes
+		// once each becomes U+FFFD.
 		let header = HunkHeader {
 			before_hunk_start: 2,
 			before_hunk_len:   0,
 			after_hunk_start:  1,
 			after_hunk_len:    1,
 		};
+
+		let mut out = String::new();
+		let mut sink =
+			GitHunks::new(&mut out, &old_data, Some(RenderBudget { limit: 100, already: 0 }));
 		let err = sink.consume_hunk(header, &lines).unwrap_err();
 		assert!(
 			err.get_ref()
 				.is_some_and(|inner| inner.downcast_ref::<BudgetExceeded>().is_some()),
 			"{err:?}"
 		);
-		assert!(
-			out.len() < invalid_context_line.len() / 10,
-			"hunk writer converted the oversized function-context line before checking the budget: \
-			 wrote {} bytes for a {}-byte context line",
-			out.len(),
-			invalid_context_line.len()
-		);
+		assert!(out.len() <= 100, "wrote {} bytes past a 100-byte budget: {out:?}", out.len());
+
+		let mut out = String::new();
+		let mut sink =
+			GitHunks::new(&mut out, &old_data, Some(RenderBudget { limit: 1_000, already: 0 }));
+		sink
+			.consume_hunk(header, &lines)
+			.expect("capped context fits");
+		assert_eq!(out, format!("@@ -1,0 +1 @@ A{}\n+x\n", "\u{FFFD}".repeat(79)));
 	}
 
 	// Regression for the P1 gap: base85-encoding a binary body can expand well

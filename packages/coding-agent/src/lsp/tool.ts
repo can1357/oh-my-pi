@@ -16,7 +16,7 @@ import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
 import { replaceTabs, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { clampTimeout } from "../tools/tool-timeouts";
+import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-timeouts";
 import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
@@ -41,7 +41,6 @@ import {
 	isOnlyQueriedDeclaration,
 	MAX_GLOB_DIAGNOSTIC_TARGETS,
 	normalizeLocationResult,
-	PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	PROJECT_INDEXED_ACTIONS,
 	REFERENCE_CONTEXT_LIMIT,
 	REFERENCES_RETRY_COUNT,
@@ -107,6 +106,7 @@ import { formatGroupedDiagnosticMessages } from "@oh-my-pi/pi-tui/tools/output-m
 import { runWorkspaceDiagnostics } from "./workspace-diagnostics";
 
 import { cfgToolsMaxTimeout } from "../tools/settings";
+import { cfgLspRequestTimeout } from "./settings";
 
 const MAX_RENAME_PAIRS = 1000;
 
@@ -186,12 +186,19 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 	readonly label = "LSP";
 	readonly loadMode = "discoverable";
 	readonly summary = "Query LSP (language server) for diagnostics, hover info, and references";
-	readonly description: string;
 	readonly parameters = lspSchema;
 	readonly strict = true;
 
-	constructor(private readonly session: ToolSession) {
-		this.description = prompt.render(lspDescription);
+	constructor(private readonly session: ToolSession) {}
+
+	get description(): string {
+		const maxTimeout = cfgToolsMaxTimeout.get(this.session.settings);
+		const defaults = resolveLspTimeouts(undefined, cfgLspRequestTimeout.get(this.session.settings), maxTimeout);
+		return prompt.render(lspDescription, {
+			defaultTimeoutSec: defaults.call,
+			defaultWaitSec: defaults.wait,
+			maxTimeoutSec: clampTimeout("lsp", TOOL_TIMEOUTS.lsp.max, maxTimeout),
+		});
 	}
 
 	static createIf(session: ToolSession): LspTool | null {
@@ -209,7 +216,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (this.session.lspReadOnly && !LSP_READONLY_ACTIONS.has(action)) {
 			throw new ToolError(`LSP action ${action} is disabled in this read-only session`);
 		}
-		const timeoutSec = clampTimeout("lsp", timeout, cfgToolsMaxTimeout.get(this.session.settings));
+		const budget = resolveLspTimeouts(
+			timeout,
+			cfgLspRequestTimeout.get(this.session.settings),
+			cfgToolsMaxTimeout.get(this.session.settings),
+		);
+		const timeoutSec = budget.call;
+		const waitMs = budget.wait * 1000;
 		const timeoutSignal = AbortSignal.timeout(timeoutSec * 1000);
 		const callerSignal = signal;
 		signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
@@ -356,11 +369,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						// Project-aware servers (Roslyn, tsserver, …) compute pull diagnostics
 						// on demand; their first response routinely overruns the 3s single-file
 						// budget, which would otherwise surface as a false "OK". An explicit
-						// diagnostics request can afford to wait, bounded by the tool timeout.
+						// diagnostics request can afford to wait: `lsp.requestTimeout`, or the
+						// call's `timeout`, bounded by the tool timeout.
 						const waitCapMs = detailed
 							? BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS
 							: isProjectAwareLspServer(serverConfig)
-								? PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS
+								? waitMs
 								: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
 						const diagnostics = await waitForDiagnostics(client, uri, {
 							timeoutMs: Math.min(waitCapMs, timeoutSec * 1000),
@@ -1361,9 +1375,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						try {
 							diagnostics = await waitForDiagnostics(client, uri, {
 								timeoutMs: Math.min(
-									isProjectAwareLspServer(serverConfig)
-										? PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS
-										: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+									isProjectAwareLspServer(serverConfig) ? waitMs : SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 									timeoutSec * 1000,
 								),
 								signal,

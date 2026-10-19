@@ -91,7 +91,7 @@ describe("AgentSession persistence-keys cache", () => {
 	});
 
 	it("caches missing-key checks across a growing branch", async () => {
-		const getBranch = spyOn(sessionManager, "getBranch");
+		const getBranch = spyOn(sessionManager, "getBranchView");
 
 		try {
 			for (let i = 0; i < 25; i++) {

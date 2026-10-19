@@ -1,11 +1,10 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
 import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
-import type { AccountPolicies } from "./policy";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import { hasRefreshLeases, type AuthCredentialStore } from "./store";
 import {
@@ -91,8 +90,8 @@ export function mergeRefreshedCredential<T extends OAuthCredential>(current: T, 
 export interface OAuthRefresherDeps {
 	store: AuthCredentialStore;
 	pool: CredentialPool;
-	policies: AccountPolicies;
 	override?: AuthStorageOptions["refreshOAuthCredential"];
+	overrideMints?: AuthStorageOptions["refreshOAuthCredentialMints"];
 }
 
 /** Single-flighted, lease-guarded OAuth refresh with compare-and-set persistence. */
@@ -102,6 +101,9 @@ export class OAuthRefresher {
 	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
 	/** Access token this process last minted per credential id. */
 	#recentMints = new Map<number, { provider: string; access: string; at: number }>();
+	#pendingRefreshes = new Set<Promise<unknown>>();
+	#cancelRefreshCleanup?: () => void;
+	#shuttingDown = false;
 
 	constructor(deps: OAuthRefresherDeps) {
 		this.#deps = deps;
@@ -139,10 +141,43 @@ export class OAuthRefresher {
 		this.#recentMints.set(id, { provider, access: credential.access, at: now });
 	}
 
+	/** Whether refreshes run the provider token exchange in this process rather than delegating it. */
+	#mintsLocally(): boolean {
+		return this.#deps.override
+			? this.#deps.overrideMints === true
+			: this.#deps.store.refreshOAuthCredential === undefined;
+	}
+
 	/**
 	 * Refresh one stored OAuth credential under durable row ownership.
 	 */
-	async refreshStored<T extends OAuthCredential = OAuthCredential>(
+	refreshStored<T extends OAuthCredential = OAuthCredential>(
+		provider: string,
+		options: StoredOAuthRefreshOptions<T>,
+	): Promise<StoredOAuthRefreshResult<T>> {
+		if (this.#shuttingDown) return Promise.reject(new AIError.AbortError("OAuth refresh stopped during shutdown"));
+		this.#cancelRefreshCleanup ??= postmortem.register("oauth-refresh", () => this.#drainRefreshes(), {
+			exitOnly: true,
+		});
+		const pending = this.#refreshStored(provider, options);
+		this.#pendingRefreshes.add(pending);
+		const settled = () => {
+			this.#pendingRefreshes.delete(pending);
+			if (this.#pendingRefreshes.size === 0 && !this.#shuttingDown) {
+				this.#cancelRefreshCleanup?.();
+				this.#cancelRefreshCleanup = undefined;
+			}
+		};
+		void pending.then(settled, settled);
+		return pending;
+	}
+
+	async #drainRefreshes(): Promise<void> {
+		this.#shuttingDown = true;
+		await Promise.allSettled(this.#pendingRefreshes);
+	}
+
+	async #refreshStored<T extends OAuthCredential = OAuthCredential>(
 		provider: string,
 		options: StoredOAuthRefreshOptions<T>,
 	): Promise<StoredOAuthRefreshResult<T>> {
@@ -152,6 +187,7 @@ export class OAuthRefresher {
 		let leasedCredentialId: number | undefined;
 
 		while (leaseStore) {
+			if (this.#shuttingDown) throw new AIError.AbortError("OAuth refresh stopped during shutdown");
 			if (options.signal?.aborted) throw new AIError.AbortError("OAuth refresh ownership aborted by caller");
 			const rows = this.#deps.store.listAuthCredentials(provider);
 			this.#deps.pool.replace(
@@ -233,6 +269,9 @@ export class OAuthRefresher {
 			}
 			if (options.canRefresh && !options.canRefresh(current)) {
 				return { credential: current, refreshed: false, removed: false };
+			}
+			if (this.#shuttingDown || options.signal?.aborted) {
+				throw new AIError.AbortError("OAuth refresh stopped before token exchange");
 			}
 			const serialized = serializeCredential(provider, current);
 			if (!serialized) return { credential: current, refreshed: false, removed: false };
@@ -345,7 +384,7 @@ export class OAuthRefresher {
 			} else {
 				this.#deps.store.updateAuthCredential(row.id, merged);
 			}
-			if (this.#deps.override === undefined && this.#deps.store.refreshOAuthCredential === undefined) {
+			if (this.#mintsLocally()) {
 				this.#rememberMint(provider, row.id, merged);
 			}
 			this.#deps.pool.replace(
@@ -422,7 +461,6 @@ export class OAuthRefresher {
 			await this.#deps.pool.reload();
 			return "cas-lost";
 		}
-		this.#deps.policies.validateFor(provider, this.#deps.pool.credentials(provider));
 		return "disabled";
 	}
 
@@ -462,11 +500,7 @@ export class OAuthRefresher {
 			.then(refreshed => {
 				// A delegated refresh may have returned a broker-cached token rather
 				// than minting one. Only direct local requests can establish mint time.
-				if (
-					!hasRefreshLeases(this.#deps.store) &&
-					this.#deps.override === undefined &&
-					this.#deps.store.refreshOAuthCredential === undefined
-				) {
+				if (!hasRefreshLeases(this.#deps.store) && this.#mintsLocally()) {
 					this.#rememberMint(provider, credentialId, refreshed);
 				}
 				return refreshed;
@@ -494,13 +528,7 @@ export class OAuthRefresher {
 				forceRefresh,
 				signal,
 				refresh: (current, refreshSignal) =>
-					this.#requestOAuthCredentialRefresh(
-						provider,
-						current,
-						credentialId,
-						signal && refreshSignal ? AbortSignal.any([signal, refreshSignal]) : (signal ?? refreshSignal),
-						reason,
-					),
+					this.#requestOAuthCredentialRefresh(provider, current, credentialId, refreshSignal, reason),
 				isDefinitiveFailure: error => AIError.isDefinitiveOAuthFailure(String(error)),
 				disabledCause: error => `oauth refresh failed: ${String(error)}`,
 			});
@@ -563,9 +591,9 @@ export class OAuthRefresher {
 				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential, signal);
 			}
 		}
-		// Bound the refresh so a slow/hanging token endpoint cannot stall credential selection.
-		// Caller-driven abort jumps the gun on the timeout — the agent's ESC must
-		// take priority over the floor timeout.
+		// The caller may stop awaiting a refresh, but the leased token exchange
+		// must finish and persist any rotated token. Only the operation timeout
+		// aborts the exchange itself.
 		const cancellation = Promise.withResolvers<never>();
 		let onAbort: (() => void) | undefined;
 		const timeout = setTimeout(
@@ -613,7 +641,7 @@ export class OAuthRefresher {
 		const promise = (async () => {
 			this.#deps.pool.bump("credential-refresh-start");
 			try {
-				return await this.#forceRefreshCredentialByIdUnshared(id, signal);
+				return await this.#forceRefreshCredentialByIdUnshared(id, signal, options?.reason);
 			} catch (error) {
 				this.#deps.pool.bump("credential-refresh-failure");
 				throw error;
@@ -625,7 +653,11 @@ export class OAuthRefresher {
 		return raceSignal(promise, signal, "credential refresh aborted");
 	}
 
-	async #forceRefreshCredentialByIdUnshared(id: number, signal?: AbortSignal): Promise<AuthCredentialSnapshotEntry> {
+	async #forceRefreshCredentialByIdUnshared(
+		id: number,
+		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
+	): Promise<AuthCredentialSnapshotEntry> {
 		for (const provider of this.#deps.pool.providers()) {
 			const entries = this.#deps.pool.entries(provider);
 			const index = entries.findIndex(entry => entry.id === id);
@@ -645,7 +677,7 @@ export class OAuthRefresher {
 			const stale: OAuthCredential = { ...attempted, expires: 0 };
 			let refreshed: OAuthCredentials;
 			try {
-				refreshed = await this.#refreshSingleFlight(provider as Provider, stale, id, signal);
+				refreshed = await this.#refreshSingleFlight(provider as Provider, stale, id, signal, reason);
 			} catch (error) {
 				// A definitively-dead grant tears the row down here, where the
 				// attempted credential is known. CAS on the persisted credential so a

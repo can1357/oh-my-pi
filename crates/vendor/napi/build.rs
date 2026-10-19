@@ -12,6 +12,10 @@ fn main() {
   // therefore comes from the exact cargo TARGET, emitted here as a
   // first-party cfg.
   println!("cargo::rustc-check-cfg=cfg(napi_wasi_threads)");
+  // Set by the user (`--cfg napi_wasi_no_heap_sync` in the target rustflags), never here: it
+  // leaves out `src/wasi_heap_sync.rs`, and napi-build leaves out the matching `--wrap` link
+  // arguments.
+  println!("cargo::rustc-check-cfg=cfg(napi_wasi_no_heap_sync)");
   if std::env::var("TARGET").as_deref() == Ok("wasm32-wasip1-threads") {
     println!("cargo::rustc-cfg=napi_wasi_threads");
   }

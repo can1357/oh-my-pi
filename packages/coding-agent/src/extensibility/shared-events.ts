@@ -207,11 +207,17 @@ export interface AgentEndEvent {
 	type: "agent_end";
 	messages: AgentMessage[];
 	/**
-	 * When true, the session has already scheduled an automatic continuation
-	 * (auto-retry, empty/unexpected-stop retry, etc.). Subscribers must not
-	 * treat this as a user-visible terminal settle.
+	 * When true, this is not a terminal settle: an automatic continuation is
+	 * scheduled, or background work may resume the session. See
+	 * `awaitingAsyncWork` to distinguish the latter.
 	 */
 	willContinue?: boolean;
+	/**
+	 * True when this settle is awaiting background work rather than an
+	 * agent-owned continuation. Prompt unwinding may still be in progress,
+	 * and a background result may already be queued.
+	 */
+	awaitingAsyncWork?: boolean;
 }
 
 /** Fired at the start of each turn */

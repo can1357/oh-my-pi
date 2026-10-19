@@ -71,6 +71,7 @@ function createCloneStub(overrides?: {
 		setTodoPhases: vi.fn(),
 		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
 		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
+		setActiveToolPresentation: vi.fn(async () => {}),
 		subscribe: vi.fn((l: (event: TanSessionEvent) => void) => {
 			listener = l;
 			return () => {
@@ -132,6 +133,7 @@ function createContext(overrides?: {
 		systemPrompt: ["system prompt"],
 		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
 		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
+		getMountedXdevToolNames: vi.fn(() => []),
 		modelRegistry: { authStorage: { marker: "auth" } },
 		preparedExtensions: overrides?.preparedExtensions,
 		effectiveExtensionRoots: overrides?.effectiveExtensionRoots,
@@ -145,6 +147,7 @@ function createContext(overrides?: {
 	const getArtifactsDir = vi.fn(() => parentArtifactsDir);
 	const getSessionId = vi.fn(() => "parent-local-session");
 	const sessionManager = {
+		getHeader: vi.fn(() => undefined),
 		getSessionFile: vi.fn(() => parentFile),
 		getCwd: vi.fn(() => tempDir.path()),
 		getSessionDir: vi.fn(() => tempDir.path()),
@@ -564,7 +567,7 @@ describe("TanCommandController", () => {
 
 		expect(result).toBe("done");
 		expect(appendSessionInit).toHaveBeenCalledWith({
-			systemPrompt: "system prompt",
+			systemPrompt: ["system prompt"],
 			task: "park me",
 			tools: ["read", "bash"],
 		});

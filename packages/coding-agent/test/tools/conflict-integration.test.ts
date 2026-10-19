@@ -503,6 +503,92 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
 	});
 
+	it("rejects a per-id block whose every value is literal instead of pasting it into each block", async () => {
+		const filePath = path.join(tempDir, "directives-all-literal.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-all-literal", { path: "directives-all-literal.ts" });
+		// No line is `<id>: @side`, but every line names a registered id. Hashline
+		// stripping used to eat the `1:`/`2:` heads as line numbers and write
+		// `foo\nbar` into both blocks.
+		const promise = write.execute("write-directives-all-literal", {
+			path: "conflict://*",
+			content: "1: foo\n2: bar",
+		});
+		await expect(promise).rejects.toThrow(/only accepts the tokens @ours\/@theirs\/@base\/@both/);
+		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
+		expect(session.conflictHistory?.get(1)).toBeDefined();
+		expect(session.conflictHistory?.get(2)).toBeDefined();
+	});
+
+	it("rejects an all-literal per-id block without hashline mode too", async () => {
+		const filePath = path.join(tempDir, "directives-all-literal-plain.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir, { hasEditTool: false });
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-all-literal-plain", { path: "directives-all-literal-plain.ts" });
+		const promise = write.execute("write-directives-all-literal-plain", {
+			path: "conflict://*",
+			content: "1: foo\n2: bar",
+		});
+		await expect(promise).rejects.toThrow(/Malformed `conflict:\/\/\*` per-id block/);
+		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
+	});
+
+	it("rejects a per-id block whose literal value runs over several lines", async () => {
+		const filePath = path.join(tempDir, "directives-multiline.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-multiline", { path: "directives-multiline.ts" });
+		const promise = write.execute("write-directives-multiline", {
+			path: "conflict://*",
+			content: "1: const x = 1;\n   const y = 2;\n2: bar",
+		});
+		await expect(promise).rejects.toThrow(/Malformed `conflict:\/\/\*` per-id block/);
+		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
+	});
+
+	it("still strips copied line numbers from a uniform bulk write when they name no conflict", async () => {
+		const filePath = path.join(tempDir, "directives-numbered.ts");
+		await Bun.write(filePath, TWO_WAY);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-numbered", { path: "directives-numbered.ts" });
+		const result = await write.execute("write-directives-numbered", {
+			path: "conflict://*",
+			content: "42:cleanline\n",
+		});
+		expect(getText(result)).toContain("Resolved 1 conflict");
+		expect(await Bun.file(filePath).text()).toBe("line 1\ncleanline\nline N\n");
+	});
+
+	it("still strips copied hashline rows that run past the registered ids", async () => {
+		const filePath = path.join(tempDir, "directives-rows.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-directives-rows", { path: "directives-rows.ts" });
+		// #1 and #2 are registered, but row 3 shows these are copied `LINE:` prefixes.
+		const result = await write.execute("write-directives-rows", {
+			path: "conflict://*",
+			content: "1:a\n2:b\n3:c",
+		});
+		expect(getText(result)).toContain("Resolved 2 conflicts");
+		expect(await Bun.file(filePath).text()).toBe("a\nb\nc\nmiddle\na\nb\nc\ntail\n");
+	});
+
 	it("still treats pure-literal content as a uniform bulk write (no false directive rejection)", async () => {
 		const filePath = path.join(tempDir, "directives-literal.ts");
 		await Bun.write(filePath, TWO_WAY);

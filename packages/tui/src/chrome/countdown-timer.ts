@@ -49,15 +49,15 @@ export class CountdownTimer {
 
 	/**
 	 * The remaining time as a terminal-clocked `elapsed` node: its age is the
-	 * negative remaining time (the start lies in the future), so it counts up
-	 * toward zero and freezes there at expiry. The age is taken on the first
+	 * negative remaining time (the start lies in the future), so it counts down
+	 * to zero and holds there at expiry (no `stopped`: that would freeze it at
+	 * zero from the start). The age is taken on the first
 	 * call after a (re)start, when the node is first written, and the node is
 	 * reused until {@link reset}.
 	 */
 	describe(): NativeNode {
 		this.#node ??= node("elapsed", {
 			age: Math.min(0, Date.now() - this.#deadlineMs),
-			stopped: 0,
 			format: "short",
 		});
 		return this.#node;

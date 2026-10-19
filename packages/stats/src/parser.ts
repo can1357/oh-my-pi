@@ -4,7 +4,8 @@ import * as path from "node:path";
 import {
 	type AssistantMessage,
 	coerceServiceTierByFamily,
-	getPriorityPremiumRequests,
+	getPremiumServiceTierRequests,
+	parseServiceTier,
 	resolveModelServiceTier,
 	type ServiceTierByFamily,
 	type ToolCall,
@@ -236,20 +237,26 @@ function extractStats(
 	const rawUsage = msg.usage as Partial<Usage> | undefined;
 	if (!rawUsage || typeof rawUsage !== "object") return null;
 
-	// Backfill: when the session recorded `priority` as the active service tier
-	// at this point but the AI usage payload was captured before priority
-	// requests were folded into `premiumRequests`, derive the count here so the
-	// "Premium Reqs" stat aggregates priority traffic on re-sync. Trust any
-	// non-zero value already in `usage.premiumRequests` (Copilot multipliers or
-	// the new AI code path) and only synthesise when the field is missing/zero.
+	// Backfill: when the session recorded a premium tier (`priority`/`ultrafast`)
+	// as the active service tier at this point but the AI usage payload was
+	// captured before premium requests were folded into `premiumRequests`, derive
+	// the count here so the "Premium Reqs" stat aggregates premium traffic on
+	// re-sync. The tier the provider reported serving the turn (`msg.serviceTier`)
+	// is authoritative — it is proof the tier reached the wire, so the
+	// discovery-metadata gate is skipped; the session's live setting is only a
+	// fallback for turns recorded before that field existed. Trust any non-zero
+	// value already in `usage.premiumRequests` (Copilot multipliers or the new AI
+	// code path) and only synthesise when the field is missing/zero.
 	const recorded = rawUsage.premiumRequests ?? 0;
 	const model = {
 		provider: msg.provider,
 		api: msg.api,
 		identity: classifyModel(msg.provider, msg.model, { lenient: true }),
 	};
-	const tier = resolveModelServiceTier(currentServiceTier, model);
-	const derived = recorded > 0 ? recorded : getPriorityPremiumRequests(tier, model);
+	const servedTier = parseServiceTier(msg.serviceTier);
+	const tier = servedTier ?? resolveModelServiceTier(currentServiceTier, model);
+	const derived =
+		recorded > 0 ? recorded : getPremiumServiceTierRequests(tier, model, { served: servedTier !== undefined });
 	const wellFormed =
 		isFiniteCount(rawUsage.input) &&
 		isFiniteCount(rawUsage.output) &&
@@ -291,6 +298,7 @@ function extractStats(
 		errorMessage: msg.errorMessage ?? null,
 		usage,
 		agentType,
+		serviceTier: servedTier ?? null,
 	};
 }
 
@@ -664,12 +672,33 @@ export async function listSessionFolders(): Promise<string[]> {
 }
 
 /**
- * List all session files in a folder.
+ * Name prefix of the scratch directories `omp gc --compress` creates beside
+ * the files it copies on APFS. Their `.jsonl` files are transient copies of
+ * transcripts, never transcripts of their own; a killed run can leave one
+ * behind until the next `omp gc --compress --apply` removes it.
+ */
+export const COMPRESS_SCRATCH_PREFIX = ".omp-gc-compress-";
+
+/** Whether `relativePath` (from any ancestor directory) lies inside a compress scratch directory. */
+export function isCompressScratchPath(relativePath: string): boolean {
+	return relativePath.split(/[\\/]/).some(part => part.startsWith(COMPRESS_SCRATCH_PREFIX));
+}
+
+/**
+ * List all session files in a folder, excluding copies inside
+ * `omp gc --compress` scratch directories.
  */
 export async function listSessionFiles(folderPath: string): Promise<string[]> {
 	try {
 		const entries = await fs.readdir(folderPath, { recursive: true, withFileTypes: true });
-		return entries.filter(e => e.isFile() && e.name.endsWith(".jsonl")).map(e => path.join(e.parentPath, e.name));
+		return entries
+			.filter(
+				e =>
+					e.isFile() &&
+					e.name.endsWith(".jsonl") &&
+					!isCompressScratchPath(path.relative(folderPath, e.parentPath)),
+			)
+			.map(e => path.join(e.parentPath, e.name));
 	} catch {
 		return [];
 	}
@@ -680,14 +709,7 @@ export async function listSessionFiles(folderPath: string): Promise<string[]> {
  */
 export async function listAllSessionFiles(): Promise<string[]> {
 	const folders = await listSessionFolders();
-	const allFiles: string[] = [];
-
-	for (const folder of folders) {
-		const files = await listSessionFiles(folder);
-		allFiles.push(...files);
-	}
-
-	return allFiles;
+	return (await Promise.all(folders.map(listSessionFiles))).flat();
 }
 
 /**

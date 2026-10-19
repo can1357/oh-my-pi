@@ -12,6 +12,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import artifactDoc from "../prompts/internal-urls/artifact.md" with { type: "text" };
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type {
@@ -24,6 +25,45 @@ import type {
 } from "./types";
 
 const MAX_INLINE_ARTIFACT_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Sorted artifact ids for `complete()`, keyed by the scanned dir set.
+ * Completion runs per keystroke; a short reuse window avoids re-reading every
+ * artifacts dir on each key.
+ */
+const completionIds = new LRUCache<string, Promise<string[]>>({ max: 8, ttl: 2000 });
+
+async function scanArtifactIds(dirs: string[]): Promise<string[]> {
+	const listings = await Promise.all(
+		dirs.map(async dir => {
+			try {
+				return await fs.readdir(dir);
+			} catch (err) {
+				if (isEnoent(err)) return [];
+				throw err;
+			}
+		}),
+	);
+	const ids = new Set<string>();
+	for (const files of listings) {
+		for (const f of files) {
+			const m = f.match(/^(\d+)\./);
+			if (m) ids.add(m[1]!);
+		}
+	}
+	return [...ids].sort((a, b) => Number(a) - Number(b));
+}
+
+function artifactIdsForCompletion(): Promise<string[]> {
+	const dirs = artifactsDirsFromRegistry();
+	const key = dirs.join("\0");
+	const cached = completionIds.get(key);
+	if (cached) return cached;
+	const ids = scanArtifactIds(dirs);
+	completionIds.set(key, ids);
+	ids.catch(() => completionIds.delete(key));
+	return ids;
+}
 
 /** Filesystem location for a session artifact, resolved without materializing its content. */
 interface ResolvedArtifactFile {
@@ -53,9 +93,13 @@ async function resolveArtifactFile(url: InternalUrl, context?: ResolveContext): 
 	// Artifact ids are per-session counters; in multi-session hosts the same
 	// id exists in several dirs. Pin resolution to the calling session's
 	// artifacts dir first so `artifact://3` means *this* session's #3.
-	const dirs = artifactsDirsFromRegistry();
 	const pinnedDir = context?.localProtocolOptions?.getArtifactsDir?.() ?? null;
-	if (pinnedDir) {
+	// A seance reads only its own artifacts plus the consulted source's, in
+	// place; its own ids are allocated past the source's, so neither shadows.
+	const seanceDir = context?.session?.seanceSourceArtifactsDir;
+	const dirs = seanceDir ? [] : artifactsDirsFromRegistry();
+	if (seanceDir) dirs.push(...(pinnedDir ? [pinnedDir] : []), seanceDir);
+	else if (pinnedDir) {
 		const pinnedIndex = dirs.indexOf(pinnedDir);
 		if (pinnedIndex >= 0) dirs.splice(pinnedIndex, 1);
 		dirs.unshift(pinnedDir);
@@ -152,20 +196,6 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 	}
 
 	async complete(): Promise<UrlCompletion[]> {
-		const ids = new Set<string>();
-		for (const dir of artifactsDirsFromRegistry()) {
-			let files: string[];
-			try {
-				files = await fs.readdir(dir);
-			} catch (err) {
-				if (isEnoent(err)) continue;
-				throw err;
-			}
-			for (const f of files) {
-				const m = f.match(/^(\d+)\./);
-				if (m) ids.add(m[1]!);
-			}
-		}
-		return [...ids].sort((a, b) => Number(a) - Number(b)).map(value => ({ value }));
+		return (await artifactIdsForCompletion()).map(value => ({ value }));
 	}
 }

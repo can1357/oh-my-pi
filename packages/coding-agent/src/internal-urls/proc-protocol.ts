@@ -1,6 +1,6 @@
 import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
-import { logger } from "@oh-my-pi/pi-utils";
+import { formatBytes, logger, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
 import type { AsyncJob } from "../async";
 import {
 	agentStaleNote,
@@ -35,14 +35,26 @@ import type {
 
 import { cfgLaunchEnabled } from "../tools/settings";
 
-function target(url: InternalUrl): { id: string; action: "stdin" | "mode" | "kill" } {
+type ProcTarget =
+	| { id: string; action: "stdin" | "mode" | "kill" }
+	/** `proc://<id>/streams` lists a bash job's pipe streams; `/streams/<n>` reads one. */
+	| { id: string; action: "streams"; stream?: number };
+
+const STREAMS_PATH = /^\/streams(?:\/(\d+))?\/?$/;
+
+function target(url: InternalUrl): ProcTarget {
 	const path = url.rawPathname ?? url.pathname;
-	if (url.search || url.hash || (path !== "" && path !== "/" && path !== "/mode" && path !== "/kill"))
+	const streams = STREAMS_PATH.exec(path);
+	if (url.search || url.hash || (!streams && path !== "" && path !== "/" && path !== "/mode" && path !== "/kill"))
 		throw new Error(
-			`Invalid proc:// URL: ${url.rawHref ?? url.href}. Use proc://, proc://<id>, proc://<id>/kill, or proc://<id>/mode.`,
+			`Invalid proc:// URL: ${url.rawHref ?? url.href}. Use proc://, proc://<id>, proc://<id>/streams[/<n>], proc://<id>/kill, or proc://<id>/mode.`,
 		);
 	const id = url.rawHost;
 	if (id.includes("/") || id === "." || id === "..") throw new Error(`Invalid process id: ${id}`);
+	if (streams) {
+		if (!id) throw new Error("proc://<id>/streams needs a job id, e.g. proc://bg_3/streams");
+		return { id, action: "streams", stream: streams[1] === undefined ? undefined : Number(streams[1]) };
+	}
 	return { id, action: path === "/mode" ? "mode" : path === "/kill" ? "kill" : "stdin" };
 }
 
@@ -71,6 +83,34 @@ function textResource(
 		...(sourcePath ? { sourcePath } : {}),
 		...(isDirectory ? { isDirectory } : {}),
 	};
+}
+
+/**
+ * `proc://<id>/streams[/<n>]`: the bytes crossing a bash job's pipes, which a
+ * later stage (`| tail`, `| grep`) may still be holding back from the job's own
+ * output. A stream read is decoded, carriage-return progress becomes lines,
+ * and control sequences are stripped, as for the job's output.
+ */
+function streamsResource(url: InternalUrl, session: ToolSession, id: string, stream?: number): InternalResource {
+	const job = ownerJobs(session).find(item => item.id === id);
+	if (!job) throw new Error(`Background job not found: ${id}`);
+	const streams = job.process?.streams;
+	if (!streams) throw new Error(`proc://${id} has no pipe streams: only bash jobs record them.`);
+	if (stream === undefined) {
+		const rows = streams.list().map(info => {
+			// Stage source spans lines (`for …; do …; done`); a row shows each on one line.
+			const [producer, consumer] = [info.producer, info.consumer].map(stage =>
+				truncate(stage.replace(/\s+/g, " ").trim(), 80),
+			);
+			return `proc://${id}/streams/${info.id} ${info.open ? "open" : "closed"} ${formatBytes(info.total)} — ${producer} → ${consumer}`;
+		});
+		return textResource(url, rows.join("\n") || `${id} has not piped anything yet.`, undefined, true);
+	}
+	const chunk = streams.read(stream);
+	if (!chunk)
+		throw new Error(`Stream not found: proc://${id}/streams/${stream}. List them with proc://${id}/streams.`);
+	const text = sanitizeText(new TextDecoder().decode(chunk.data).replace(/\r\n?/g, "\n"));
+	return textResource(url, chunk.start > 0 ? `[first ${formatBytes(chunk.start)} no longer kept]\n${text}` : text);
 }
 
 /** Caller-visible background jobs and project services. Reads never acknowledge delivery. */
@@ -112,7 +152,9 @@ export class ProcProtocolHandler implements ProtocolHandler {
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const session = context?.session;
 		if (!session) throw new Error("proc:// requires a tool session");
-		const { id, action } = target(url);
+		const procTarget = target(url);
+		const { id, action } = procTarget;
+		if (procTarget.action === "streams") return streamsResource(url, session, id, procTarget.stream);
 		if (action !== "stdin") throw new Error(`proc://<id>/${action} is writable only`);
 		const jobs = ownerJobs(session);
 		// Jobs and agents are in-process; a hung broker must not hide them.
@@ -191,6 +233,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		const session = context?.session;
 		if (!session) throw new Error("proc:// requires a tool session");
 		const { id, action } = target(url);
+		if (action === "streams") throw new Error(`proc://${id}/streams is read-only`);
 		if (!id) throw new Error("Write requires proc://<id>, proc://<id>/kill, or proc://<id>/mode");
 		const ownerId = session.getAgentId?.() ?? undefined;
 		const job = ownerJobs(session).find(item => item.id === id);

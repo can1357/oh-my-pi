@@ -359,6 +359,9 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 * pre-existing global scan untouched.
 	 */
 	async #outputDirs(context: ResolveContext | undefined): Promise<string[]> {
+		// A seance reads the consulted source's agent outputs in place, nothing else.
+		const seanceDir = context?.session?.seanceSourceArtifactsDir;
+		if (seanceDir) return [seanceDir];
 		const rootSessionFile = context?.sessionFile
 			? await ensurePersistedRoster(AgentRegistry.global(), context.sessionFile)
 			: undefined;

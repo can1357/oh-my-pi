@@ -340,4 +340,28 @@ describe("StatusLineComponent hook statuses", () => {
 
 		expect(component.render(8)).toEqual(["Ponytail", "$0.04 (…"]);
 	});
+
+	it("keeps SGR styling from extension statuses", () => {
+		const component = makeComponent({ showHookStatus: true });
+		component.setHookStatus("demo", "\x1b[32mgreen\x1b[39m \x1b[31mred\x1b[39m");
+
+		expect(component.render(80)).toEqual(["\x1b[32mgreen\x1b[39m \x1b[31mred\x1b[39m\x1b[0m"]);
+	});
+
+	it("truncates styled statuses without bleeding style", () => {
+		const component = makeComponent({ showHookStatus: true });
+		component.setHookStatus("demo", "\x1b[32mgreen\x1b[39m \x1b[31mred\x1b[39m");
+
+		const [line] = component.render(6);
+		expect(visibleWidth(line)).toBeLessThanOrEqual(6);
+		expect(stripVTControlCharacters(line)).toBe("green…");
+		expect(line.endsWith("\x1b[0m…")).toBe(true);
+	});
+
+	it("strips OSC links from styled statuses under the bar", () => {
+		const component = makeComponent({ showHookStatus: true });
+		component.setHookStatus("link", "\x1b[1m\x1b]8;;https://example.com\x07docs\x1b]8;;\x07\x1b[22m");
+
+		expect(component.render(80)).toEqual(["\x1b[1mdocs\x1b[22m\x1b[0m"]);
+	});
 });

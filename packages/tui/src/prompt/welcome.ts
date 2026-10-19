@@ -5,20 +5,31 @@ import { editorKey } from "../chrome/keybinding-hints";
 import { getKeybindings, type Keybinding } from "../keybindings";
 import { card, col, keyed, node, row, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
-import { plainLine } from "../native/spans";
+import { compactText, plainText } from "../native/spans";
 import { isNativeRendering } from "../native/state";
+import { isHyperlinkEnabled, urlHyperlink, urlLinkSpan } from "../render/hyperlink";
 import { TERMINAL } from "../terminal-capabilities";
 import { theme } from "../theme/theme";
 import type { Component } from "../tui";
 import { padding, replaceTabs, visibleWidth, wrapTextWithAnsi } from "../utils";
 import tipsText from "./tips.txt" with { type: "text" };
 
-/** Tips embedded at build time, one per line; blanks dropped. Key placeholders
+/** Leading marker for a tip that pitches Tern: shown only while no TSP surface
+ *  is live, since a live one means the user is already in Tern. */
+const NO_TERN_TIP_MARKER = /^\[NO-TERN\]\s*/;
+
+/** tips.txt lines embedded at build time; blanks dropped. Key placeholders
  *  (see {@link expandTipKeys}) stay raw until render time. */
-const TIPS: readonly string[] = tipsText
+const TIP_LINES: readonly string[] = tipsText
 	.split("\n")
 	.map(line => line.trim())
 	.filter(line => line.length > 0);
+
+/** Tips for the classic renderer: every tip, {@link NO_TERN_TIP_MARKER} stripped. */
+const TIPS: readonly string[] = TIP_LINES.map(line => line.replace(NO_TERN_TIP_MARKER, ""));
+
+/** Tips for a live TSP surface: those marked {@link NO_TERN_TIP_MARKER} dropped. */
+const TSP_TIPS: readonly string[] = TIP_LINES.filter(line => !NO_TERN_TIP_MARKER.test(line));
 
 /** Trailing marker that flags a tip as a "what's new" callout. Stripped before
  *  wrapping (with any preceding whitespace) and replaced by {@link NEW_TAG_TEXT}
@@ -107,6 +118,31 @@ function expandTipKeys(tip: string): string {
 	});
 }
 
+/** Markdown-style links in tips.txt: `[Tern](https://scl.so/tern)` shows the label, linked to the URL. */
+const TIP_LINK = /\[([^\]]+)\]\(([^\s)]+)\)/g;
+
+/** Tip links as underlined OSC 8 labels, or `label (url)` where the terminal cannot link. */
+function linkTipText(tip: string): string {
+	const linkable = isHyperlinkEnabled();
+	return tip.replace(TIP_LINK, (_link, label: string, url: string) =>
+		linkable ? urlHyperlink(url, theme.underline(label)) : `${label} (${url})`,
+	);
+}
+
+/** The tip as native text: escapes dropped, links as `href` spans. */
+function tipSpans(tip: string): TspSpan[] {
+	const spans: TspSpan[] = [];
+	let cursor = 0;
+	for (const match of tip.matchAll(TIP_LINK)) {
+		const [link, label, url] = match;
+		if (match.index > cursor) spans.push(span(plainText(tip.slice(cursor, match.index))));
+		spans.push(urlLinkSpan(url, label));
+		cursor = match.index + link.length;
+	}
+	if (cursor < tip.length) spans.push(span(plainText(tip.slice(cursor))));
+	return spans;
+}
+
 /**
  * The welcome tip as lines of at most `width` columns: `Tip:` and the body
  * wrapped together, with no indent, so the banner can center each line.
@@ -117,7 +153,7 @@ export function renderWelcomeTip(tip: string, width: number, phase = 0): string[
 	if (width - visibleWidth(label) < 8) return [];
 
 	const isNew = NEW_TIP_MARKER.test(tip);
-	const body = expandTipKeys(isNew ? tip.replace(NEW_TIP_MARKER, "") : tip);
+	const body = linkTipText(expandTipKeys(isNew ? tip.replace(NEW_TIP_MARKER, "") : tip));
 
 	// Trailing spaces left by the wrap would count toward the width the banner centers.
 	const wrapped = wrapTextWithAnsi(replaceTabs(`${label}${body}`), width).map(line => line.trimEnd());
@@ -164,9 +200,10 @@ export class WelcomeComponent implements Component {
 	#animTimer: Timer | null = null;
 	#requestRender: (() => void) | null = null;
 	// Tip randomness is latched once so the tip is stable across renders, but
-	// the nerdfont-nag gate re-reads the live preset: the startup prepaint can
-	// run under the default "unicode" preset before settings resolve the real
-	// one, and a memoized nag would survive the switch to "nerd".
+	// the nerdfont-nag gate re-reads the live preset and the pool re-reads the
+	// live TSP state: the startup prepaint can run under the default "unicode"
+	// preset before settings resolve the real one, and an optimistic Tern start
+	// falls back to the classic renderer when `hello` never confirms.
 	#nagRoll: number | undefined;
 	#tipRoll: number | undefined;
 	// Render cache: the welcome box is the first transcript-area component, so
@@ -183,7 +220,7 @@ export class WelcomeComponent implements Component {
 		if (theme.getSymbolPreset() === "unicode" && this.#nagRoll < 0.1) {
 			return "Please use nerdfont 😭.";
 		}
-		return pickWeightedTip(TIPS, this.#tipRoll) || undefined;
+		return pickWeightedTip(isNativeRendering() ? TSP_TIPS : TIPS, this.#tipRoll) || undefined;
 	}
 
 	invalidate(): void {
@@ -237,7 +274,7 @@ export class WelcomeComponent implements Component {
 		const body: NativeChild[] = [lockupRow];
 		if (tip) {
 			const isNew = NEW_TIP_MARKER.test(tip);
-			const tipText = plainLine(expandTipKeys(isNew ? tip.replace(NEW_TIP_MARKER, "") : tip));
+			const tipText = compactText(tipSpans(expandTipKeys(isNew ? tip.replace(NEW_TIP_MARKER, "") : tip)));
 			const tipRow: NativeChild[] = [
 				node("icon", { name: "lightbulb", role: "omp.welcome.tip-icon" }),
 				text(tipText, { wrap: "word", role: "omp.welcome.tip-text" }),

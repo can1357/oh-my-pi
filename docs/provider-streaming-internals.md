@@ -220,7 +220,7 @@ Current design favors responsiveness and simple ordering over bounded-buffer flo
 
 `AgentSession` then consumes those events for session-level behaviors:
 
-- TTSR watches `message_update.assistantMessageEvent` for `text_delta`, `thinking_delta`, and `toolcall_delta`
+- TTSR watches `message_update.assistantMessageEvent` for `text_delta`, `thinking_delta`, and `toolcall_delta`, and runs a final whole-buffer check on `text_end`, `thinking_end`, and `toolcall_end`
 - tool argument streams consume `toolcall_*` events and emit `tool_stream_update`; the streaming edit guard aborts on an `edit` final preview (`streaming: false`) with a real file error, not a no-change diagnostic
 - persistence writes finalized messages at `message_end`
 - auto-retry classifies assistant failures through structured `errorId` / AI error predicates, with message classification as a fallback

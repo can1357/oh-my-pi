@@ -763,12 +763,12 @@ describe("ExtensionRunner", () => {
 		});
 
 		it("returns completed rewrites without awaiting or accepting a handler after abort", async () => {
-			const startedPath = path.join(tempDir.path(), "assistant-message-started.txt");
-			const skippedPath = path.join(tempDir.path(), "assistant-message-skipped.txt");
+			const signals = { started: Promise.withResolvers<void>(), skippedRan: false };
+			const globalState = globalThis as typeof globalThis & { __assistantMessageAbort?: typeof signals };
+			globalState.__assistantMessageAbort = signals;
 			fs.writeFileSync(
 				path.join(extensionsDir, "assistant-message-abort.ts"),
 				`
-				import * as fs from "node:fs";
 				export default function(pi) {
 					pi.on("assistant_message", event => ({
 						content: event.message.content.map(block =>
@@ -776,11 +776,11 @@ describe("ExtensionRunner", () => {
 						),
 					}));
 					pi.on("assistant_message", async () => {
-						fs.writeFileSync(${JSON.stringify(startedPath)}, "started");
+						globalThis.__assistantMessageAbort.started.resolve();
 						await Promise.withResolvers().promise;
 					});
 					pi.on("assistant_message", () => {
-						fs.writeFileSync(${JSON.stringify(skippedPath)}, "ran");
+						globalThis.__assistantMessageAbort.skippedRan = true;
 					});
 				}
 				`,
@@ -795,19 +795,12 @@ describe("ExtensionRunner", () => {
 			);
 			const controller = new AbortController();
 			const message = createAssistantMessage("original");
-			const started = new Promise<void>(resolve => {
-				const watcher = fs.watch(tempDir.path(), (_eventType, filename) => {
-					if (filename?.toString() !== path.basename(startedPath)) return;
-					watcher.close();
-					resolve();
-				});
-			});
 			const emission = runner.emitAssistantMessage(message, controller.signal);
-			await started;
-			expect(await Bun.file(startedPath).text()).toBe("started");
+			await signals.started.promise;
 			controller.abort(new Error("cancelled"));
 			await expect(emission).resolves.toEqual([{ type: "text", text: "accepted" }]);
-			expect(await Bun.file(skippedPath).exists()).toBe(false);
+			expect(signals.skippedRan).toBe(false);
+			delete globalState.__assistantMessageAbort;
 		});
 
 		it("rejects attempts to change tool calls", async () => {
@@ -2561,6 +2554,7 @@ describe("ExtensionRunner", () => {
 					editor: async () => undefined,
 					addAutocompleteProvider: () => {},
 					setEditorComponent: () => {},
+					getEditorComponent: () => undefined,
 					get theme() {
 						return {} as never;
 					},
@@ -2630,9 +2624,49 @@ describe("ExtensionRunner", () => {
 			]);
 			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
 				"Approve",
+				"Approve dangerous_tool for this session",
 				"Deny",
 			]);
 			delete globalState.__approvalEvents;
+		});
+
+		it("approving for this session skips later mode prompts of that tool and tier, until the session changes", async () => {
+			const runner = new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry);
+			const select = vi.fn(async (_title: string, options: string[]) => options[1]);
+			initializeRunner(runner, select);
+			const context = () => ({
+				sessionManager,
+				modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+			});
+			const run = (tool: typeof approvalTool | AgentTool, id: string) =>
+				(new ExtensionToolWrapper(tool, runner) as ExtensionToolWrapper<any>).execute(
+					id,
+					{},
+					undefined,
+					undefined,
+					context(),
+				);
+			await run(approvalTool, "call-grant");
+			await run(approvalTool, "call-granted");
+			expect(select).toHaveBeenCalledTimes(1);
+			// The grant covers that tool at that tier only: its write-tier calls and other tools still ask.
+			await run({ ...approvalTool, approval: "write" as const }, "call-write-tier");
+			await run({ ...approvalTool, name: "other_tool" }, "call-other");
+			expect(select).toHaveBeenCalledTimes(3);
+			// A critical override asks every time and never offers the session choice.
+			const critical = { ...approvalTool, approval: () => ({ tier: "exec" as const, override: true }) };
+			select.mockImplementationOnce(async () => "Approve");
+			await run(critical, "call-critical");
+			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"]);
+			// A new session starts without the grant.
+			await sessionManager.newSession();
+			await run(approvalTool, "call-new-session");
+			expect(select).toHaveBeenCalledTimes(5);
 		});
 		it("runs bridged preflight before approval and cancels denied state", async () => {
 			const runner = new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry);

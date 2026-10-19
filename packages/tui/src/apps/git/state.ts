@@ -66,11 +66,23 @@ export interface TextFileContents {
 	readonly streamResult: DiffStreamResult;
 }
 
+/** Where one side of a change lives, so a host viewer (Tern's TSP `media` node) can load it by path. */
+export interface MediaRef {
+	/** Absolute path of the file (repository root joined with its repository path). */
+	readonly path: string;
+	/** Git revision holding this side (`HEAD`, a sha, `:0` for the index); absent for the worktree file. */
+	readonly rev?: string;
+}
+
 /** Non-text sides rendered as previews or explicit placeholders. */
 export interface AssetFileContents {
 	readonly kind: "asset";
 	readonly old: FileAssetSide;
 	readonly new: FileAssetSide;
+	/** Source of {@link old}; absent when that side is empty. */
+	readonly oldRef?: MediaRef;
+	/** Source of {@link new}; absent when that side is empty. */
+	readonly newRef?: MediaRef;
 }
 
 /** Loaded file content selected for text diffing or asset preview. */

@@ -6,8 +6,10 @@
  */
 
 import type { Api, ApiKey, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { prompt } from "@oh-my-pi/pi-utils";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
 import { Tokenizer } from "../tokenizer";
 import type { AgentMessage } from "../types";
@@ -208,7 +210,16 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	}
 }
 
+/**
+ * Tokens `message` adds to the summarizer's input, which is the branch
+ * serialized as plain text: tool results truncated as serialization truncates
+ * them, assistants without their native replay items or opaque reasoning
+ * payloads, which the text never carries.
+ */
 function estimateBranchSummaryTokens(message: AgentMessage, tokenizer: Tokenizer): number {
+	if (message.role === "assistant") {
+		return tokenizer.countMessage({ ...message, providerPayload: undefined }, { excludeEncryptedReasoning: true });
+	}
 	if (message.role !== "toolResult") return tokenizer.countMessage(message);
 	const text = message.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -317,16 +328,30 @@ export async function generateBranchSummary(
 	const tokenBudget = contextWindow - reserveTokens;
 	const tokenizer = new Tokenizer(model);
 
-	const { messages, fileOps } = prepareBranchEntries(entries, tokenizer, tokenBudget);
+	const { messages: branchMessages, fileOps } = prepareBranchEntries(entries, tokenizer, tokenBudget);
 
-	if (messages.length === 0) {
+	if (branchMessages.length === 0) {
 		return { summary: "No content to summarize" };
 	}
+
+	// A snapcompact summary rendered for another model may carry reasoning
+	// sections and their legend, which Claude refuses (issue #6093).
+	const messages = snapcompact.readerIncludesThinking(model)
+		? branchMessages
+		: branchMessages.map(message =>
+				message.role === "compactionSummary"
+					? { ...message, summary: snapcompact.textWithoutThinking(message.summary) }
+					: message,
+			);
 
 	// Transform to LLM-compatible messages, then serialize to text
 	// Serialization prevents the model from treating it as a conversation to continue
 	const llmMessages = (options.convertToLlm ?? defaultConvertToLlm)(messages);
-	const conversationText = serializeConversationForSummary(llmMessages, preferredDialect(model.id));
+	const conversationText = serializeConversationForSummary(
+		llmMessages,
+		preferredDialect(model.id),
+		resolveCatalogPolicy(model).classifierCotExtraction === true,
+	);
 
 	// Build prompt
 	const instructions = customInstructions || BRANCH_SUMMARY_PROMPT;

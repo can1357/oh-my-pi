@@ -3,11 +3,10 @@
 //! Samples are continuously collected into a fixed-size circular buffer.
 //! Call `get_work_profile()` to retrieve the last N seconds of profiling data.
 
-use std::{cell::RefCell, cmp::Reverse, collections::HashMap, sync::LazyLock, time::Instant};
+use std::{cmp::Reverse, collections::HashMap, sync::LazyLock, time::Instant};
 
 use napi_derive::napi;
 use parking_lot::Mutex;
-use smallvec::SmallVec;
 
 /// Maximum samples to keep (roughly 60s at high activity).
 const MAX_SAMPLES: usize = 10_000;
@@ -19,16 +18,11 @@ static PROCESS_START: LazyLock<Instant> = LazyLock::new(Instant::now);
 static PROFILE_BUFFER: LazyLock<Mutex<CircularBuffer>> =
 	LazyLock::new(|| Mutex::new(CircularBuffer::new(MAX_SAMPLES)));
 
-thread_local! {
-	/// Thread-local stack of active regions.
-	static REGION_STACK: RefCell<SmallVec<[&'static str; 4]>> = const { RefCell::new(SmallVec::new_const()) };
-}
-
 /// A single profiling sample with timing data.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct ProfileSample {
-	/// Stack of region names (from root to leaf).
-	stack:        SmallVec<[&'static str; 4]>,
+	/// Region the time was spent in.
+	region:       &'static str,
 	/// Duration in microseconds.
 	duration_us:  u64,
 	/// Timestamp (microseconds since process start).
@@ -40,12 +34,11 @@ struct CircularBuffer {
 	samples:   Vec<ProfileSample>,
 	capacity:  usize,
 	write_pos: usize,
-	count:     usize,
 }
 
 impl CircularBuffer {
 	fn new(capacity: usize) -> Self {
-		Self { samples: Vec::with_capacity(capacity), capacity, write_pos: 0, count: 0 }
+		Self { samples: Vec::with_capacity(capacity), capacity, write_pos: 0 }
 	}
 
 	fn push(&mut self, sample: ProfileSample) {
@@ -55,7 +48,6 @@ impl CircularBuffer {
 			self.samples[self.write_pos] = sample;
 		}
 		self.write_pos = (self.write_pos + 1) % self.capacity;
-		self.count = self.count.saturating_add(1);
 	}
 
 	fn get_since(&self, cutoff_us: u64) -> Vec<ProfileSample> {
@@ -63,49 +55,34 @@ impl CircularBuffer {
 			.samples
 			.iter()
 			.filter(|s| s.timestamp_us >= cutoff_us)
-			.cloned()
+			.copied()
 			.collect()
 	}
 }
 
-/// RAII guard that records timing when dropped.
+/// RAII guard that records the time spent in its region when dropped.
+///
+/// It keeps no per-thread state, so an async task may hold it across
+/// `.await` and drop it on another worker thread.
 pub struct ProfileGuard {
 	region: &'static str,
 	start:  Instant,
 }
 
-impl ProfileGuard {
-	#[inline]
-	fn new(region: &'static str) -> Self {
-		REGION_STACK.with(|stack| stack.borrow_mut().push(region));
-		Self { region, start: Instant::now() }
-	}
-}
-
 impl Drop for ProfileGuard {
 	fn drop(&mut self) {
-		let duration = self.start.elapsed();
-		let duration_us = duration.as_micros() as u64;
+		let duration_us = self.start.elapsed().as_micros() as u64;
 		let timestamp_us = PROCESS_START.elapsed().as_micros() as u64;
-
-		REGION_STACK.with(|stack| {
-			let mut stack = stack.borrow_mut();
-			let sample =
-				ProfileSample { stack: stack.iter().copied().collect(), duration_us, timestamp_us };
-
-			if stack.last() == Some(&self.region) {
-				stack.pop();
-			}
-
-			PROFILE_BUFFER.lock().push(sample);
-		});
+		PROFILE_BUFFER
+			.lock()
+			.push(ProfileSample { region: self.region, duration_us, timestamp_us });
 	}
 }
 
 /// Start a profiling region. Returns a guard that records timing on drop.
 #[inline]
 pub fn profile_region(region: &'static str) -> ProfileGuard {
-	ProfileGuard::new(region)
+	ProfileGuard { region, start: Instant::now() }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -129,22 +106,18 @@ pub struct WorkProfile {
 }
 
 fn generate_folded(samples: &[ProfileSample]) -> String {
-	let mut aggregated: HashMap<String, u64> = HashMap::new();
+	let mut aggregated: HashMap<&'static str, u64> = HashMap::new();
 
 	for sample in samples {
-		if sample.stack.is_empty() {
-			continue;
-		}
-		let key = sample.stack.join(";");
-		*aggregated.entry(key).or_insert(0) += sample.duration_us;
+		*aggregated.entry(sample.region).or_insert(0) += sample.duration_us;
 	}
 
 	let mut sorted: Vec<_> = aggregated.into_iter().collect();
 	sorted.sort_by_key(|x| Reverse(x.1));
 
 	let mut output = String::new();
-	for (stack, count) in sorted {
-		output.push_str(&stack);
+	for (region, count) in sorted {
+		output.push_str(region);
 		output.push(' ');
 		output.push_str(&count.to_string());
 		output.push('\n');
@@ -157,11 +130,9 @@ fn generate_summary(samples: &[ProfileSample], window_ms: f64) -> String {
 	let mut by_region: HashMap<&'static str, (u64, usize)> = HashMap::new();
 
 	for sample in samples {
-		if let Some(&region) = sample.stack.last() {
-			let entry = by_region.entry(region).or_insert((0, 0));
-			entry.0 += sample.duration_us;
-			entry.1 += 1;
-		}
+		let entry = by_region.entry(sample.region).or_insert((0, 0));
+		entry.0 += sample.duration_us;
+		entry.1 += 1;
 	}
 
 	let mut sorted: Vec<_> = by_region.into_iter().collect();
@@ -239,4 +210,25 @@ pub fn get_work_profile(last_seconds: f64) -> WorkProfile {
 
 	let total_ms = samples.iter().map(|s| (s.duration_us as f64) * 0.001).sum();
 	WorkProfile { folded, summary, svg, total_ms, sample_count: samples.len() as u32 }
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Async tasks hold a guard across `.await`, so it can drop on another
+	/// worker thread; the sample must still count toward its region.
+	#[test]
+	fn guard_dropped_on_another_thread_records_its_region() {
+		let guard = profile_region("prof-test-moved");
+		std::thread::spawn(move || drop(guard)).join().unwrap();
+		let samples = PROFILE_BUFFER.lock().get_since(0);
+		let folded = generate_folded(&samples);
+		assert!(
+			folded
+				.lines()
+				.any(|line| line.starts_with("prof-test-moved ")),
+			"{folded}"
+		);
+	}
 }

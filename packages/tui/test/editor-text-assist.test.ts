@@ -282,3 +282,58 @@ describe("Editor text assistance", () => {
 		expect(editor.render(40).join("\n")).toContain("received");
 	});
 });
+
+describe("Editor prediction", () => {
+	it("shows the prediction instead of the placeholder and inserts it on Tab without submitting", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const submitted: string[] = [];
+		editor.onSubmit = text => {
+			submitted.push(text);
+		};
+		editor.placeholder = () => "Ask anything";
+		editor.prediction = () => "run the tests";
+
+		const frame = editor.render(60).join("\n");
+		expect(frame).toContain("run the tests");
+		expect(frame).not.toContain("Ask anything");
+
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe("run the tests");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 13 });
+		expect(submitted).toEqual([]);
+	});
+
+	it("offers the untyped rest while the draft is a prefix and drops it once the draft diverges", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.prediction = () => "run the tests";
+		for (const char of "run") editor.handleInput(char);
+
+		expect(editor.render(60).join("\n")).toContain(" the tests");
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("run the tests");
+
+		const diverged = new Editor(defaultEditorTheme);
+		diverged.prediction = () => "run the tests";
+		for (const char of "rx") diverged.handleInput(char);
+
+		expect(diverged.render(60).join("\n")).not.toContain("the tests");
+		diverged.handleInput("\t");
+		expect(diverged.getText()).toBe("rx");
+	});
+
+	it("accepts the prediction with Right at line end and keeps Right as cursor motion mid-line", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.prediction = () => "run the tests";
+		for (const char of "run") editor.handleInput(char);
+
+		editor.handleInput("\x1b[D");
+		editor.handleInput("\x1b[C");
+		expect(editor.getText()).toBe("run");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 3 });
+
+		editor.handleInput("\x1b[C");
+		expect(editor.getText()).toBe("run the tests");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 13 });
+	});
+});

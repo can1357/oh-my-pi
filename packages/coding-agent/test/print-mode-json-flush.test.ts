@@ -52,9 +52,11 @@ function createFlushHarness(): FlushHarness {
 			await promptReleased;
 			return true;
 		},
+		disableStopTimeTodoReminders: () => {},
 		prepareForHeadlessAdvisorDrain: () => {
 			advisorDrainPrepared = true;
 		},
+		waitForIdle: async () => {},
 		waitForAdvisorCatchup: async () => {
 			if (!advisorDrainPrepared) throw new Error("advisor catch-up started before headless delivery was armed");
 		},

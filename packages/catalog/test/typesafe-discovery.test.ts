@@ -99,8 +99,14 @@ describe("TypeSafe model discovery", () => {
 		expect(options.providerId).toBe("typesafe");
 		expect(options.dynamicModelsAuthoritative).toBe(true);
 		expect(options.staticModels?.map(model => ({ id: model.id, baseUrl: model.baseUrl }))).toEqual([
+			{ id: "jev-1.14.0", baseUrl: "https://typesafe.internal" },
 			{ id: "jev-latest", baseUrl: "https://typesafe.internal" },
 		]);
-		expect((await options.fetchDynamicModels?.())?.map(model => model.id)).toEqual(["jev-enterprise"]);
+		// The listing names aliases only; versioned seeds stay routable beside it.
+		expect((await options.fetchDynamicModels?.())?.map(model => model.id)).toEqual([
+			"jev-enterprise",
+			"jev-1.14.0",
+			"jev-latest",
+		]);
 	});
 });

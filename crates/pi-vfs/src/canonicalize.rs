@@ -105,9 +105,7 @@ pub(crate) async fn canonicalize<R: Resolver>(
 				if followed < SYMLINKS_BEFORE_LOOP_CHECK {
 					followed += 1;
 				} else {
-					let dir = parent_path(&current)
-						.map(Path::to_path_buf)
-						.unwrap_or_default();
+					let dir = parent_path(&current).map_or_default(Path::to_path_buf);
 					if !visited.insert((dir, remaining_path(&pending))) {
 						return Err(symlink_loop());
 					}

@@ -332,9 +332,8 @@ impl SmolLm {
 	) -> anyhow::Result<Self> {
 		let tokenizer = Tokenizer::load(&model_dir.join("tokenizer.json"))?;
 		let vocab = decoder.vocab_size();
-		let texts = (0..vocab as u32)
-			.map(|id| tokenizer.token_text(id).map(Box::from))
-			.collect();
+		let index =
+			TokenIndex::new(tokenizer.token_bytes(), vocab, |id| tokenizer.token_text(id).is_some());
 		let mut memory = Memory::default();
 		match std::fs::read(state_dir.join(STATE_FILE)) {
 			Ok(bytes) => {
@@ -355,7 +354,7 @@ impl SmolLm {
 		memory.dirty = true;
 		Ok(Self {
 			tokenizer,
-			index: TokenIndex::new(texts),
+			index,
 			session: Session::new(decoder),
 			bos,
 			memory,

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Effort, type Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildMemoryToolDeveloperInstructions,
@@ -196,6 +197,55 @@ describe("memories runtime", () => {
 		await flushAsync();
 		expect(stage1Spy).not.toHaveBeenCalled();
 	});
+
+	for (const provider of ["openai", "synthetic", "kimi-code"]) {
+		test(`persistent 429 defers ${provider} stage1 after one bounded HTTP retry budget`, async () => {
+			const fx = await createFixture();
+			const model = buildModel({
+				id: `memory-429-${provider}`,
+				name: "Memory 429",
+				api: "openai-completions",
+				provider,
+				baseUrl: "https://api.openai.test/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 32_000,
+				maxTokens: 4096,
+				...(provider === "kimi-code" ? { compat: { kimiApiFormat: "openai" } } : {}),
+			});
+			fx.session.model = model;
+			fx.modelRegistry.getAll = vi.fn(() => [model]);
+			await fs.writeFile(
+				path.join(fx.sessionDir, "thread-429.jsonl"),
+				`${JSON.stringify({ type: "session", id: "thread-429", cwd: fx.agentDir })}\n${JSON.stringify({ type: "message", message: { role: "user", content: "remember this" } })}\n`,
+			);
+			const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+				Object.assign(
+					async () =>
+						new Response(JSON.stringify({ error: { message: "rate limited", type: "rate_limit_error" } }), {
+							status: 429,
+							headers: { "retry-after": "0" },
+						}),
+					{ preconnect: fetch.preconnect },
+				),
+			);
+
+			startMemoryStartupTask({
+				session: fx.session,
+				settings: fx.settings,
+				modelRegistry: fx.modelRegistry,
+				agentDir: fx.agentDir,
+				taskDepth: 0,
+			});
+			await settle(fx.whenSettled, "rate-limited memory extraction");
+
+			expect(fetchSpy).toHaveBeenCalledTimes(3);
+			expect(await Bun.file(path.join(getMemoryRoot(fx.agentDir, fx.agentDir), "raw_memories.md")).exists()).toBe(
+				false,
+			);
+		});
+	}
 
 	test("runs phase1 to phase2 and writes consolidated outputs", async () => {
 		const fx = await createFixture();
@@ -451,12 +501,12 @@ describe("buildMemoryToolDeveloperInstructions", () => {
 		const agentDir = await makeTempDir("memories-runtime-instructions");
 		const settings = Settings.isolated({ "memory.backend": "local" });
 
-		expect(await buildMemoryToolDeveloperInstructions(agentDir, settings)).toBeUndefined();
+		expect(await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings)).toBeUndefined();
 
 		const memoryRoot = getMemoryRoot(agentDir, settings.getCwd());
 		await fs.mkdir(memoryRoot, { recursive: true });
 		await fs.writeFile(path.join(memoryRoot, "memory_summary.md"), "   \n\t\n");
-		expect(await buildMemoryToolDeveloperInstructions(agentDir, settings)).toBeUndefined();
+		expect(await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings)).toBeUndefined();
 	});
 
 	test("renders payload with truncation for non-empty summary", async () => {
@@ -472,7 +522,7 @@ describe("buildMemoryToolDeveloperInstructions", () => {
 			`${"A".repeat(120)}\n${"B".repeat(120)}\n${"C".repeat(120)}`,
 		);
 
-		const payload = await buildMemoryToolDeveloperInstructions(agentDir, settings);
+		const payload = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings);
 		expect(payload).toBeDefined();
 		expect(payload).toContain("memory://root/memory_summary.md");
 		expect(payload).not.toContain(memoryRoot);

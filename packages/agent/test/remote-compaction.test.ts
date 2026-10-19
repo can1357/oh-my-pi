@@ -3,6 +3,7 @@ import { ThinkingLevel, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionPreparation,
 	compact,
+	createCustomMessage,
 	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 	NativeCompactionError,
@@ -13,6 +14,7 @@ import {
 	buildCompactionV2Request,
 	buildOpenAiNativeHistory,
 	CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE,
+	countResponsesHistoryTokens,
 	getCompactionV2PreserveData,
 	requestCompactionV2Streaming,
 	requestOpenAiRemoteCompaction,
@@ -838,6 +840,20 @@ describe("remote compaction input forwarding", () => {
 		expect(result.estimatedTokensAfter).toBeLessThanOrEqual(15_000);
 	});
 
+	test("counts retained replacement-history images by estimate instead of base64 size", () => {
+		const image = { type: "input_image", detail: "auto", image_url: `data:image/png;base64,${"a".repeat(320_000)}` };
+		const withImage = [{ role: "user", content: [{ type: "input_text", text: "see screenshot" }, image] }];
+		const withoutImage = [{ role: "user", content: [{ type: "input_text", text: "see screenshot" }] }];
+		const tokenizer = new Tokenizer();
+
+		const imageTokens =
+			countResponsesHistoryTokens(withImage, tokenizer) - countResponsesHistoryTokens(withoutImage, tokenizer);
+
+		// The serialized base64 alone tokenizes to ~80K; the flat estimate stays within one vision budget.
+		expect(imageTokens).toBeGreaterThan(0);
+		expect(imageTokens).toBeLessThan(20_000);
+	});
+
 	test("excludes opaque encrypted reasoning and compaction state from the fit estimate (#13611)", () => {
 		// Base64 ciphertext tokenizes far above what the provider bills for it;
 		// counting it refused Codex histories that the server accepts.
@@ -874,6 +890,24 @@ describe("remote compaction input forwarding", () => {
 		expect(result.rewrittenOutputs).toBe(1);
 		expect(result.input[0].output).toBe(CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE);
 		expect(result.estimatedTokensAfter).toBeLessThanOrEqual(3_000);
+	});
+
+	test("counts tool output as the model reads it, not as escaped JSON", () => {
+		// Disassembly-style output: quotes, backslashes, tabs and newlines each
+		// grow on JSON serialization, which used to refuse requests that fit.
+		const output = '\tmov\trax, qword ptr [rip+0x1f]\t; "C:\\\\Windows\\\\System32"\n'.repeat(2_000);
+		const input = [{ type: "function_call_output", call_id: "call_1", output }];
+		const tokenizer = new Tokenizer();
+		const contextWindow = tokenizer.countTokens(output, "strict") + 1_000;
+		expect(tokenizer.countTokens(JSON.stringify({ instructions: "compact", input }), "strict")).toBeGreaterThan(
+			contextWindow,
+		);
+
+		const result = trimRemoteCompactionInputToContextWindow(input, tokenizer, contextWindow, "compact");
+
+		expect(result.fits).toBe(true);
+		expect(result.rewrittenOutputs).toBe(0);
+		expect(result.input[0].output).toBe(output);
 	});
 
 	test("scans past a synthetic tool-image attachment to rewrite its output", () => {
@@ -1028,6 +1062,31 @@ describe("requestCompactionV2Streaming", () => {
 		expect(result.usedTokens).toBe(123);
 		expect(result.usage?.cachedInputTokens).toBe(7);
 		expect(result.usage?.reasoningOutputTokens).toBe(1);
+	});
+	test("keeps the LiteLLM conversation session header on the compaction request", async () => {
+		const model = makeOpenAiModel({
+			provider: "litellm",
+			baseUrl: "https://litellm.example/v1",
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
+		const request = buildCompactionV2Request(model, [userItem], "instructions", { sessionId: "session-1" });
+		const sessionHeaders: (string | null)[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			sessionHeaders.push(new Headers(init?.headers).get("x-litellm-session-id"));
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc" },
+				},
+				{ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
+			]);
+		};
+
+		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
+
+		expect(sessionHeaders).toEqual(["session-1"]);
 	});
 	test.each(["The socket connection was closed unexpectedly", "socket connection closed unexpectedly"] as const)(
 		"retries a transient socket closure: %s",
@@ -1954,6 +2013,28 @@ test("uses configured OpenAI-compatible compaction for custom providers", async 
 	expect(requestBody).toMatchObject({ model: "gpt-5.5" });
 });
 
+test("keeps the LiteLLM conversation session header on V1 compaction unless configured", async () => {
+	const sessionHeaders: (string | null)[] = [];
+	const fetchMock: FetchImpl = async (_input, init) => {
+		sessionHeaders.push(new Headers(init?.headers).get("x-litellm-session-id"));
+		return Response.json({ output: [{ type: "compaction_summary", summary: "compacted" }] });
+	};
+	const input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }];
+	for (const headers of [undefined, { "X-LiteLLM-Session-Id": "run-42" }]) {
+		const model = makeOpenAiModel({
+			provider: "litellm",
+			baseUrl: "https://litellm.example/v1",
+			headers,
+			remoteCompaction: { enabled: true },
+		});
+		await requestOpenAiRemoteCompaction(model, "test-key", input, "instructions", undefined, {
+			fetch: fetchMock,
+			sessionId: "session-1",
+		});
+	}
+	expect(sessionHeaders).toEqual(["session-1", "run-42"]);
+});
+
 test("uses Azure request shape for Azure Responses remote compaction", async () => {
 	const previousDeploymentMap = Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP;
 	Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP = "gpt-5-compact=azure-gpt-5-compact";
@@ -2174,6 +2255,52 @@ describe("compact() remote compaction failure handling", () => {
 		};
 	}
 
+	test("V1 compact drops mixed-provider Anthropic state and keeps unrelated preserve data", async () => {
+		const compactionItem = { type: "compaction", encrypted_content: "enc-current-v1" };
+		const compactPaths: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(req) {
+				const url = new URL(req.url);
+				compactPaths.push(`${req.method} ${url.pathname}`);
+				if (req.method === "POST" && url.pathname.endsWith("/responses/compact")) {
+					return Response.json({ output: [compactionItem] });
+				}
+				return new Response("unexpected", { status: 404 });
+			},
+		});
+		try {
+			const preparation = makePreparation();
+			preparation.previousPreserveData = {
+				anthropicCompaction: { provider: "anthropic", content: "prior anthropic summary" },
+				openaiRemoteCompaction: {
+					provider: "openai",
+					replacementHistory: [{ type: "compaction", encrypted_content: "stale-enc" }],
+					compactionItem: { type: "compaction", encrypted_content: "stale-enc" },
+				},
+				sessionHint: "keep-me",
+			};
+			const model = makeOpenAiModel({
+				baseUrl: `http://127.0.0.1:${server.port}/v1`,
+				remoteCompaction: { enabled: true, v2StreamingEnabled: false },
+			});
+
+			const result = await compact(preparation, model, "test-key");
+
+			expect(compactPaths).toEqual(["POST /v1/responses/compact"]);
+			expect(result.preserveData?.anthropicCompaction).toBeUndefined();
+			expect(result.preserveData?.sessionHint).toBe("keep-me");
+			expect(result.preserveData?.openaiRemoteCompaction).toEqual({
+				provider: "openai",
+				replacementHistory: [compactionItem],
+				compactionItem,
+			});
+		} finally {
+			server.stop(true);
+		}
+	});
+
 	test.each(["v1", "v2", "codex-v2"])(
 		"preserves local summary history when entering native replay (%s)",
 		async protocol => {
@@ -2253,6 +2380,42 @@ describe("compact() remote compaction failure handling", () => {
 		const id = AIError.classify(error.cause);
 		expect(AIError.is(id, AIError.Flag.ContextOverflow)).toBe(true);
 		expect(AIError.retriable(id)).toBe(false);
+	});
+
+	test.each([
+		{ provider: "openai", fallsBackToV1: true },
+		{ provider: "openai-codex", fallsBackToV1: false },
+	])("claims a V1 fallback only when V1 runs ($provider)", async ({ provider, fallsBackToV1 }) => {
+		const warn = vi.spyOn(piUtils.logger, "warn");
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		const baseModel = makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: true } });
+		const model: Model =
+			provider === "openai-codex"
+				? {
+						...baseModel,
+						api: "openai-codex-responses",
+						provider: "openai-codex",
+						baseUrl: "https://chatgpt.example/backend-api",
+						preferWebsockets: false,
+						remoteCompaction: { enabled: true, api: "openai-codex-responses", v2StreamingEnabled: true },
+					}
+				: baseModel;
+		const requestedUrls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			requestedUrls.push(url);
+			return url.endsWith("/responses/compact")
+				? Response.json({ output: [{ type: "compaction", encrypted_content: "enc-v1" }] })
+				: new Response("V2 unavailable", { status: 400, statusText: "Bad Request" });
+		};
+
+		await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock }).catch(() => undefined);
+
+		const ranV1 = requestedUrls.some(url => url.endsWith("/responses/compact"));
+		const claimedV1 = warn.mock.calls.some(([message]) => message.includes("falling back to V1"));
+		expect(ranV1).toBe(fallsBackToV1);
+		expect(claimedV1).toBe(ranV1);
 	});
 
 	test("streams V2 compaction before V1 when both settings and model opt in", async () => {
@@ -2360,6 +2523,115 @@ describe("compact() remote compaction failure handling", () => {
 		expect(completeSpy).not.toHaveBeenCalled();
 	});
 
+	test.each(["v2", "codex-v2"])(
+		"retains only user-written turns, as serialized, in V2 replacement history (%s)",
+		async protocol => {
+			const compactionItem = { type: "compaction", encrypted_content: "enc_v2" };
+			const quotedLeadIn = "Previous snapcompact archive source text:\n\nPlease rename this heading in our UI.";
+			const imageData = Buffer.from("screenshot").toString("base64");
+			const preparation = makePreparation();
+			preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+			preparation.previousSummary = "Archived decision: use port 4242.";
+			preparation.messagesToSummarize = [
+				{ role: "user", content: "first user request", timestamp: 1 },
+				{ role: "developer", content: "harness developer note", timestamp: 2 },
+				createCustomMessage("hook", "extension hook note", false, undefined, new Date(3).toISOString()),
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: quotedLeadIn },
+						{ type: "image", data: imageData, mimeType: "image/png" },
+					],
+					timestamp: 4,
+				},
+			];
+			const baseModel = makeOpenAiModel({
+				input: ["text", "image"],
+				remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+			});
+			const model: Model =
+				protocol === "codex-v2"
+					? {
+							...baseModel,
+							api: "openai-codex-responses",
+							provider: "openai-codex",
+							baseUrl: "https://chatgpt.example/backend-api",
+							preferWebsockets: false,
+							remoteCompaction: { enabled: true, api: "openai-codex-responses", v2StreamingEnabled: true },
+						}
+					: baseModel;
+			let requestInput: Array<Record<string, unknown>> = [];
+			const fetchMock: FetchImpl = async (_url, init) => {
+				const body: unknown = JSON.parse(String(init?.body));
+				requestInput = isRecord(body) && Array.isArray(body.input) ? body.input.filter(isRecord) : [];
+				return sseResponse([
+					{ type: "response.output_item.done", output_index: 0, item: compactionItem },
+					{
+						type: "response.completed",
+						response: { usage: { input_tokens: 55, output_tokens: 3, total_tokens: 58 } },
+					},
+				]);
+			};
+
+			const result = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+
+			const textOf = (item: Record<string, unknown>) =>
+				Array.isArray(item.content)
+					? item.content.filter(isRecord).map(part => (typeof part.text === "string" ? part.text : ""))
+					: [];
+			const wireUsers = requestInput.filter(item => item.role === "user");
+			// The serializer sends user turns without `type`; the summary is a user-role turn on
+			// both transports, and OpenAI also sends developer and hook messages as user-role turns.
+			expect(wireUsers.every(item => item.type === undefined)).toBe(true);
+			expect(JSON.stringify(wireUsers)).toContain("Archived decision: use port 4242.");
+			if (protocol === "v2") expect(JSON.stringify(wireUsers)).toContain("extension hook note");
+
+			const remote = getCompactionV2PreserveData(result.preserveData);
+			const retained = remote?.replacementHistory.slice(0, -1) ?? [];
+			expect(remote?.replacementHistory.at(-1)).toEqual(compactionItem);
+			expect(retained.map(item => textOf(item)[0])).toEqual(["first user request", quotedLeadIn, "recent"]);
+			for (const item of retained) expect(wireUsers).toContainEqual(item);
+			expect(result.preserveData?.openaiRemoteCompaction).toMatchObject({ retainedImageCount: 1 });
+		},
+	);
+
+	test("retains custom turns the host marks as user-written in V2 replacement history", async () => {
+		const compactionItem = { type: "compaction", encrypted_content: "enc_v2" };
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		preparation.messagesToSummarize = [
+			{ role: "user", content: "older plain request", timestamp: 1 },
+			createCustomMessage(
+				"skill-prompt",
+				"run the release skill",
+				true,
+				undefined,
+				new Date(2).toISOString(),
+				"user",
+			),
+			createCustomMessage("notice", "attached file note", false, undefined, new Date(3).toISOString(), "user"),
+		];
+		const model = makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: true } });
+		const fetchMock: FetchImpl = async () =>
+			sseResponse([
+				{ type: "response.output_item.done", output_index: 0, item: compactionItem },
+				{ type: "response.completed", response: { usage: { input_tokens: 5, output_tokens: 1, total_tokens: 6 } } },
+			]);
+
+		const result = await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			isUserAuthored: message =>
+				message.role === "user" || (message.role === "custom" && message.customType === "skill-prompt"),
+		});
+
+		const retained = JSON.stringify(
+			getCompactionV2PreserveData(result.preserveData)?.replacementHistory.slice(0, -1),
+		);
+		expect(retained).toContain("older plain request");
+		expect(retained).toContain("run the release skill");
+		expect(retained).not.toContain("attached file note");
+	});
+
 	test("rewrites an oversized trailing tool output before V2 streaming compaction", async () => {
 		const preparation = makePreparation();
 		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
@@ -2422,6 +2694,120 @@ describe("compact() remote compaction failure handling", () => {
 			CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE,
 		);
 		expect(requestInput.at(-1)).toEqual({ type: "compaction_trigger" });
+	});
+
+	test("compacts the history before the kept tail when a final response pushes it over the window", async () => {
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		preparation.lastSummarizedEntryId = "summarized-last";
+		const tailText = "final answer paragraph ".repeat(8_000);
+		preparation.recentMessages = [
+			{ role: "user", content: "recent", timestamp: 2 },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: tailText }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "gpt-5",
+				usage: ZERO_USAGE,
+				stopReason: "stop",
+				timestamp: 3,
+			},
+		];
+		const model = makeOpenAiModel({
+			contextWindow: 20_000,
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		const requestInputs: string[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const body: unknown = JSON.parse(String(init?.body));
+			if (!isRecord(body) || !Array.isArray(body.input)) throw new Error("expected V2 compaction input");
+			requestInputs.push(JSON.stringify(body.input));
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc_prefix" },
+				},
+				{
+					type: "response.completed",
+					response: { usage: { input_tokens: 100, output_tokens: 2, total_tokens: 102 } },
+				},
+			]);
+		};
+
+		const result = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+
+		expect(requestInputs).toHaveLength(1);
+		expect(requestInputs[0]).toContain("long history");
+		expect(requestInputs[0]).not.toContain("final answer paragraph");
+		expect(requestInputs[0]).not.toContain('"recent"');
+		expect(result.providerReplayThroughEntryId).toBe("summarized-last");
+		expect(result.preserveData?.openaiRemoteCompaction).toBeDefined();
+	});
+
+	test("replays an oversized kept tool result instead of rewriting it when the prefix fits", async () => {
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		preparation.lastSummarizedEntryId = "summarized-last";
+		preparation.recentMessages = [
+			{ role: "user", content: "read the large file", timestamp: 2 },
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call_kept|fc_kept", name: "read", arguments: { path: "/tmp/x" } }],
+				timestamp: 3,
+				provider: "openai",
+				model: "gpt-5",
+				api: "openai-responses",
+				usage: ZERO_USAGE,
+				stopReason: "toolUse",
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call_kept|fc_kept",
+				toolName: "read",
+				content: [{ type: "text", text: "kept tool output ".repeat(8_000) }],
+				isError: false,
+				timestamp: 4,
+			},
+		];
+		const model = makeOpenAiModel({
+			contextWindow: 20_000,
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		const requestInputs: string[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const body: unknown = JSON.parse(String(init?.body));
+			if (!isRecord(body) || !Array.isArray(body.input)) throw new Error("expected V2 compaction input");
+			requestInputs.push(JSON.stringify(body.input));
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc_prefix" },
+				},
+				{
+					type: "response.completed",
+					response: { usage: { input_tokens: 100, output_tokens: 2, total_tokens: 102 } },
+				},
+			]);
+		};
+
+		const result = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+
+		expect(requestInputs).toHaveLength(1);
+		expect(requestInputs[0]).toContain("long history");
+		expect(requestInputs[0]).not.toContain("call_kept");
+		expect(requestInputs[0]).not.toContain(CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE);
+		expect(result.providerReplayThroughEntryId).toBe("summarized-last");
 	});
 
 	test("re-expands native history for local preparation when new native compaction is disabled", async () => {

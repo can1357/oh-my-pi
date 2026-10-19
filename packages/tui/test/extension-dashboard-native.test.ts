@@ -109,4 +109,40 @@ describe("ExtensionDashboard native", () => {
 		expect(fx.disabled).toEqual(["skill:alpha"]);
 		harness.stop();
 	});
+
+	test("a row switched off stays activatable so a second activation switches it back on", async () => {
+		for (const kinds of [undefined, TSP_KINDS.filter(kind => kind !== "picker")]) {
+			const fx = fixture();
+			const harness = await open(fx, kinds);
+			const sf = harness.terminal.surface!;
+			const alphaRow = (): { owner: TspNode; id: string; off: boolean; disabled: unknown } => {
+				const picker = harness.find(node => node.k === "picker");
+				if (picker?.k === "picker" && picker.p) {
+					const item = picker.p.items?.find(entry => entry.label === "alpha");
+					return { owner: picker, id: item!.id, off: item!.tone === "muted", disabled: item!.disabled };
+				}
+				const list = harness.find(node => node.k === "list")!;
+				const row = list.c!.find(r => r.k === "item" && JSON.stringify(r.p?.label).includes('"alpha"'))!;
+				if (row.k !== "item") throw new Error("alpha row is not a list item");
+				return {
+					owner: list,
+					id: row.id,
+					off: JSON.stringify(row.p?.label).includes('"dim"'),
+					disabled: row.p && "disabled" in row.p ? row.p.disabled : undefined,
+				};
+			};
+
+			const first = alphaRow();
+			harness.event({ ev: "activate", sf, id: first.owner.id, item: first.id });
+			expect(fx.disabled).toEqual(["skill:alpha"]);
+			// The dashboard refreshes its list asynchronously after a toggle.
+			await harness.until(() => alphaRow().off);
+
+			const off = alphaRow();
+			expect(off.disabled === undefined || off.disabled === false).toBe(true);
+			harness.event({ ev: "activate", sf, id: off.owner.id, item: off.id });
+			expect(fx.disabled).toEqual([]);
+			harness.stop();
+		}
+	});
 });

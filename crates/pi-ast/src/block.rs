@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Point, TreeCursor};
 
 use crate::{
-	parse_cache::parse_cached,
+	parse_cache::{MAX_ENTRY_SOURCE_BYTES, parse_cached},
 	summary::{node_content_end_line, node_start_line, resolve_language},
 };
 
@@ -70,7 +70,7 @@ pub fn block_range_at(options: BlockRangeOptions) -> Result<Option<BlockRange>> 
 		return Ok(None);
 	};
 
-	let Some(tree) = parse_cached(&code, language)? else {
+	let Some(tree) = parse_cached(&code, language, path.as_deref())? else {
 		return Ok(None);
 	};
 	let root = tree.root_node();
@@ -314,7 +314,7 @@ pub fn enclosing_block_boundaries(options: EnclosingBoundaryOptions) -> Result<O
 	let Some(language) = resolve_language(lang.as_deref(), path.as_deref()) else {
 		return Ok(None);
 	};
-	let Some(tree) = parse_cached(&code, language)? else {
+	let Some(tree) = parse_cached(&code, language, path.as_deref())? else {
 		return Ok(None);
 	};
 	let root = tree.root_node();
@@ -338,6 +338,23 @@ pub struct NodeSpan {
 	pub end_line:   u32,
 	/// Tree-sitter grammar node kind (e.g. `attribute_item`, `function_item`).
 	pub kind:       String,
+}
+
+/// Parse `code` into the shared tree cache.
+///
+/// The next block query over the same source and language is then a cache
+/// hit. Does nothing for empty source or an unrecognized language, where the
+/// queries never parse either, nor for a source over
+/// [`MAX_ENTRY_SOURCE_BYTES`], where a typical tree would not fit the cache's
+/// memory budget (it would be discarded and parsed again by the query).
+pub fn warm_parse(code: &str, lang: Option<&str>, path: Option<&str>) -> Result<()> {
+	if !code.is_empty()
+		&& code.len() <= MAX_ENTRY_SOURCE_BYTES
+		&& let Some(language) = resolve_language(lang, path)
+	{
+		parse_cached(code, language, path)?;
+	}
+	Ok(())
 }
 
 /// Named-node chain containing `options.line`, innermost-first, excluding the
@@ -367,7 +384,7 @@ pub fn node_chain_at(options: BlockRangeOptions) -> Result<Option<Vec<NodeSpan>>
 	let Some(col) = first_content_column(&code, row) else {
 		return Ok(None);
 	};
-	let Some(tree) = parse_cached(&code, language)? else {
+	let Some(tree) = parse_cached(&code, language, path.as_deref())? else {
 		return Ok(None);
 	};
 	let root = tree.root_node();
@@ -1065,7 +1082,7 @@ mod tests {
 			return Some(Vec::new());
 		}
 		let language = resolve_language(None, Some(path))?;
-		let tree = parse_cached(code, language).expect("grammar loads")?;
+		let tree = parse_cached(code, language, None).expect("grammar loads")?;
 		let root = tree.root_node();
 		if root.has_error() {
 			return None;
@@ -1289,7 +1306,7 @@ mod tests {
 	/// i.e. nodes ending immediately after a newline.
 	fn nodes_with_content_end_before_raw_end(code: &str, path: &str) -> usize {
 		let language = resolve_language(None, Some(path)).expect("known language");
-		let tree = parse_cached(code, language)
+		let tree = parse_cached(code, language, None)
 			.expect("grammar loads")
 			.expect("tree");
 		let mut count = 0;

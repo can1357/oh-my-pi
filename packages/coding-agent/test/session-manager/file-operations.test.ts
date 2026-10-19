@@ -158,6 +158,23 @@ describe("resolveResumableSession", () => {
 		expect(match?.scope).toBe("local");
 		expect(match?.session.path).toBe(path.join(sessionDir, "2025-01-01_moved.jsonl"));
 	});
+
+	it("matches sessions staged into the dir as symlinks", async () => {
+		const id = "sym1234";
+		const stagedDir = path.join(tempDir, "staged");
+		fs.mkdirSync(stagedDir);
+		fs.writeFileSync(
+			path.join(stagedDir, `${id}.jsonl`),
+			JSON.stringify({ type: "session", id, timestamp: "2025-01-01T00:00:00Z", cwd: "/tmp/project" }),
+		);
+		fs.symlinkSync(path.join(stagedDir, `${id}.jsonl`), path.join(sessionDir, `2025-01-01_${id}.jsonl`));
+		fs.symlinkSync(path.join(stagedDir, "missing.jsonl"), path.join(sessionDir, "dangling.jsonl"));
+
+		const match = await resolveResumableSession("sym", "/tmp/project", sessionDir);
+
+		expect(match?.scope).toBe("local");
+		expect(match?.session.id).toBe(id);
+	});
 });
 
 describe("SessionManager temp cwd session dirs", () => {

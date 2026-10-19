@@ -12,7 +12,8 @@ use std::{
 
 use super::{
 	parse::{
-		edit_header, has_marker_lines, missing_unmarked_lines, operation_payload, parse_operations,
+		decode_literal_markers, edit_header, has_marker_lines, missing_unmarked_lines,
+		operation_payload, parse_section,
 	},
 	types::{
 		ATOMICITY_NOTICE, Candidate, CandidateResult, EdgeGaps, LiteralFallback, MAX_CANDIDATES,
@@ -22,7 +23,10 @@ use super::{
 	},
 };
 use crate::{
-	error::EditError, fuzzy::levenshtein_distance, store::EditStore, text::normalize_unicode,
+	error::EditError,
+	fuzzy::{PatternDistance, levenshtein_within},
+	store::{EditStore, payload_hash},
+	text::normalize_unicode,
 };
 
 /// State shared by every operation in one file section.
@@ -31,6 +35,9 @@ pub struct ApplyContext<'a> {
 	pub notes:     &'a mut Vec<String>,
 	pub store:     &'a EditStore,
 	pub canonical: &'a Path,
+	/// The payload is still streaming: a trailing `*** Find` without its
+	/// `*** Replace` is dropped instead of run through the recovery ladder.
+	pub streaming: bool,
 }
 
 /// Normalize matching text while retaining source byte boundaries.
@@ -429,10 +436,18 @@ fn fuzzy_occurrences(content: &str, pattern: &str, allow_punctuation: bool) -> V
 	if starts.is_empty() && content.len() <= 10_000 {
 		starts.extend(content.char_indices().map(|(index, _)| index));
 	}
+	let pattern_chars: Vec<char> = pattern.chars().collect();
+	let mut candidate_chars = Vec::new();
 	let mut raw = Vec::new();
 	for start in starts {
 		let mut best: Option<Occurrence> = None;
 		for length in pattern.len().saturating_sub(limit).max(1)..=pattern.len() + limit {
+			// Only a distance within `limit` that beats the best so far counts.
+			let max = match best {
+				Some(current) if current.distance == 0 => break,
+				Some(current) => limit.min(current.distance - 1),
+				None => limit,
+			};
 			let end = start + length;
 			if end > content.len() || !content.is_char_boundary(end) {
 				continue;
@@ -446,10 +461,11 @@ fn fuzzy_occurrences(content: &str, pattern: &str, allow_punctuation: bool) -> V
 			{
 				continue;
 			}
-			let distance = levenshtein_distance(pattern, candidate);
-			if distance > limit || best.is_some_and(|current| distance >= current.distance) {
+			candidate_chars.clear();
+			candidate_chars.extend(candidate.chars());
+			let Some(distance) = levenshtein_within(&pattern_chars, &candidate_chars, max) else {
 				continue;
-			}
+			};
 			best = Some(Occurrence { start, end, distance, punctuation_edits });
 		}
 		if let Some(best) = best {
@@ -969,13 +985,18 @@ fn no_match_error(
 }
 
 fn closest_fragment(content: &str, pattern: &str) -> (String, usize, f64) {
+	let pattern_chars: Vec<char> = pattern.chars().collect();
+	let pattern_distance = PatternDistance::new(&pattern_chars);
+	let mut candidate_chars = Vec::new();
 	let mut ranked = Vec::new();
 	let mut offset = 0;
 	for line in content.split('\n') {
 		let normalized = normalize_text(line);
 		if !normalized.text.is_empty() {
 			let denominator = pattern.len().max(normalized.text.len()).max(1);
-			let score = levenshtein_distance(pattern, &normalized.text) as f64 / denominator as f64;
+			candidate_chars.clear();
+			candidate_chars.extend(normalized.text.chars());
+			let score = pattern_distance.distance(&candidate_chars) as f64 / denominator as f64;
 			ranked.push((line, offset, normalized, score));
 			ranked.sort_by(|left, right| left.3.total_cmp(&right.3));
 			ranked.truncate(3);
@@ -1006,8 +1027,10 @@ fn closest_fragment(content: &str, pattern: &str) -> (String, usize, f64) {
 					continue;
 				}
 				let candidate = &normalized.text[start..end];
-				let score = levenshtein_distance(pattern, candidate) as f64
-					/ pattern.len().max(candidate.len()).max(1) as f64;
+				let denominator = pattern.len().max(candidate.len()).max(1);
+				candidate_chars.clear();
+				candidate_chars.extend(candidate.chars());
+				let score = pattern_distance.distance(&candidate_chars) as f64 / denominator as f64;
 				if score >= best.2 {
 					continue;
 				}
@@ -1249,13 +1272,25 @@ pub(crate) fn closest_desired_block(content: &str, stated_text: &str) -> Option<
 	if lines.len() < count {
 		return None;
 	}
+	// normalize_text drops the joining newlines, so a window's normalized text
+	// is its lines' normalized texts back to back: normalize every line once
+	// and slice windows out of the result.
+	let mut normalized = String::with_capacity(content.len());
+	let mut line_starts = Vec::with_capacity(lines.len() + 1);
+	for line in &lines {
+		line_starts.push(normalized.len());
+		normalized.push_str(&normalize_text(line).text);
+	}
+	line_starts.push(normalized.len());
+	let stated_distance = PatternDistance::new(&stated.chars().collect::<Vec<_>>());
+	let mut current_chars = Vec::new();
 	let mut scores = Vec::new();
 	for index in 0..=lines.len() - count {
-		let current = normalize_text(&lines[index..index + count].join("\n")).text;
+		let current = &normalized[line_starts[index]..line_starts[index + count]];
 		let max = stated.len().max(current.len()).max(1);
-		let affix = stated.starts_with(&current)
+		let affix = stated.starts_with(current)
 			|| current.starts_with(&stated)
-			|| stated.ends_with(&current)
+			|| stated.ends_with(current)
 			|| current.ends_with(&stated);
 		let score = if current.is_empty()
 			|| affix
@@ -1263,7 +1298,9 @@ pub(crate) fn closest_desired_block(content: &str, stated_text: &str) -> Option<
 		{
 			1.0
 		} else {
-			levenshtein_distance(&stated, &current) as f64 / max as f64
+			current_chars.clear();
+			current_chars.extend(current.chars());
+			stated_distance.distance(&current_chars) as f64 / max as f64
 		};
 		scores.push((index, score));
 	}
@@ -1393,13 +1430,6 @@ pub(crate) fn diff_shaped_candidates(pattern_text: &str) -> Vec<String> {
 	}
 }
 
-fn decode_literal_markers(text: String) -> String {
-	text
-		.replace("\0V8LITOPEN\0", SELECT_OPEN)
-		.replace("\0V8LITCLOSE\0", SELECT_CLOSE)
-		.replace("\0V8LITDIV\0", SELECT_DIVIDER)
-}
-
 /// Drop the `*** Replace` ellipses that re-emit `*** Find`'s open edges. An
 /// edge gap captured nothing, so re-emitting it writes nothing; a whole-line
 /// edge `…` takes the newline joining it to the rest of the rewrite with it.
@@ -1521,7 +1551,7 @@ fn render_rewrite(
 		rendered.push(character);
 		index += character.len_utf8();
 	}
-	Ok(decode_literal_markers(rendered))
+	Ok(decode_literal_markers(&rendered))
 }
 
 fn align_boundary_echoes(content: &str, candidate: &Candidate, replacement: &str) -> String {
@@ -2196,15 +2226,6 @@ fn resolve_references(rewrite: &str, removed: &[Option<String>]) -> Result<Strin
 	Ok(lines.join("\n"))
 }
 
-fn fnv_payload(input: &str) -> u64 {
-	let mut hash = 2_166_136_261_u32;
-	for unit in input.encode_utf16() {
-		hash ^= u32::from(unit);
-		hash = hash.wrapping_mul(16_777_619);
-	}
-	u64::from(hash)
-}
-
 fn no_op_error(
 	context: &ApplyContext<'_>,
 	payload: u64,
@@ -2290,8 +2311,8 @@ fn apply_operations(
 	input: &str,
 	context: &mut ApplyContext<'_>,
 ) -> Result<String, EditError> {
-	let payload = fnv_payload(input);
-	let operations = parse_operations(input, content, context.path)?;
+	let payload = payload_hash(input);
+	let operations = parse_section(input, content, context.path, context.streaming)?;
 	let mut removed = vec![None; operations.len()];
 	let mut planned = Vec::new();
 	let mut recovery_notes = Vec::new();

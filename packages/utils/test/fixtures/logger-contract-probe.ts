@@ -58,6 +58,9 @@ switch (scenario) {
 		error.code = "E_FIXTURE";
 		error.detail = { retry: false };
 		logger.error("error-matrix", { error });
+		const wrappedError = new Error("wrapped");
+		wrappedError.stack = "WRAPPED_STACK";
+		logger.error("tojson-error", { wrapped: { toJSON: () => ({ err: wrappedError }) } });
 		disableTransports();
 		break;
 	}

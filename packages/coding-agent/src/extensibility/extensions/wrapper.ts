@@ -10,15 +10,19 @@ import {
 	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import nativeDelegationTemplate from "../../prompts/tools/native-delegation.md" with { type: "text" };
 import {
 	denyError,
-	formatApprovalPrompt,
+	recordApprovalGrant,
+	requestApproval,
 	resolveApproval,
 	resolveApprovalFromContext,
+	sessionApprovalScope,
 	truncateForPrompt,
 } from "../../tools/approval";
+import { getApprovalGrants } from "../../tools/approval-cache";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
@@ -61,7 +65,13 @@ function renderOptionsWithTheme<T extends object>(options: T, theme: Theme): T &
  */
 export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 	declare name: string;
-	declare description: string;
+	get description(): string {
+		const description = this.registeredTool.definition.description;
+		const guidance = this.runner.getNativeDelegationGuidance(this.name);
+		return guidance
+			? prompt.render(nativeDelegationTemplate, { description, name: this.name, guidance })
+			: description;
+	}
 	declare parameters: any;
 	declare label: string;
 	declare strict: boolean;
@@ -247,7 +257,22 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const { approvalMode, userPolicies } = resolveApprovalFromContext(
 			context ?? (this.runner.sessionSettings ? { settings: this.runner.sessionSettings } : undefined),
 		);
-		const preResolved = resolveApproval(this.tool, approvalArgs(params, context), approvalMode, userPolicies);
+		// `always-ask-cached` grants for this conversation, shared by the pre-check, the full gate,
+		// and the record after an approval.
+		const approvalGrants =
+			approvalMode === "always-ask-cached"
+				? getApprovalGrants(
+						(context?.settings ?? this.runner.sessionSettings)?.getAgentDir(),
+						this.runner.sessionId,
+					)
+				: undefined;
+		const preResolved = resolveApproval(
+			this.tool,
+			approvalArgs(params, context),
+			approvalMode,
+			userPolicies,
+			approvalGrants,
+		);
 		if (preResolved.policy === "deny") {
 			throw denyError(preResolved, this.tool.name);
 		}
@@ -319,7 +344,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// input that newly resolves to `deny` is caught here even though the original passed the
 		// short-circuit above.
 		const resolvedArgs = approvalArgs(effectiveParams, context);
-		const resolved = resolveApproval(this.tool, resolvedArgs, approvalMode, userPolicies);
+		const resolved = resolveApproval(this.tool, resolvedArgs, approvalMode, userPolicies, approvalGrants);
 		context?.xdevTierResolved?.(resolved.tier);
 		if (resolved.policy === "deny") {
 			cancelPreflight();
@@ -337,10 +362,23 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			context !== undefined &&
 			Object.hasOwn(context, "acpApprovedArgs") &&
 			Bun.deepEquals(effectiveParams, context.acpApprovedArgs);
+		// Only a prompt `always-ask-cached` itself raised can be remembered by target; provider safety
+		// checks are per-call, so they never offer a grant of any kind.
+		const grantable =
+			approvalGrants !== undefined &&
+			resolved.policy === "prompt" &&
+			resolved.source === "mode" &&
+			pendingSafetyChecks.length === 0;
+		const cacheTargets = grantable ? (this.tool.approvalCacheTargets?.(resolvedArgs)?.length ?? 0) > 0 : false;
+		// A prompt the approval mode raised can be approved for the rest of the session — unless the call
+		// can be remembered by target instead, which keeps the grant to what it touches.
+		const sessionScope =
+			pendingSafetyChecks.length === 0 && !cacheTargets ? sessionApprovalScope(resolved, this.tool.name) : undefined;
+		const sessionApproved = sessionScope !== undefined && this.runner.hasSessionApproval(sessionScope.key);
 		const approvalCheck = {
 			required:
 				pendingSafetyChecks.length > 0 ||
-				(resolved.policy === "prompt" && !acpBypass && (explicitPrompt || !xdevBypass)),
+				(resolved.policy === "prompt" && !acpBypass && !sessionApproved && (explicitPrompt || !xdevBypass)),
 			reason: resolved.reason,
 		};
 
@@ -400,20 +438,26 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 
 			const uiContext = this.runner.getUIContext();
-			const basePrompt = formatApprovalPrompt(this.tool, resolvedArgs, approvalCheck.reason);
-			const safetyPrompt =
-				pendingSafetyChecks.length > 0
-					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
-					: basePrompt;
-			let choice: string | undefined;
+			const safetyAppendix =
+				pendingSafetyChecks.length > 0 ? ["Provider safety checks:", ...safetyCheckLines(pendingSafetyChecks)] : [];
+			let approved: boolean;
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				const answer = await requestApproval(uiContext, this.tool, resolvedArgs, {
+					reason: approvalCheck.reason,
+					appendix: safetyAppendix,
+					sessionSubject: sessionScope?.subject,
+					grants: cacheTargets,
+				});
+				approved = answer !== "deny";
+				if (answer === "session" && sessionScope) this.runner.grantSessionApproval(sessionScope.key);
+				if (typeof answer === "object" && approvalGrants) {
+					recordApprovalGrant(this.tool, resolvedArgs, approvalGrants, resolved.tier, answer);
+				}
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				cancelPreflight();
 				throw err;
 			}
-			const approved = choice === "Approve";
 			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
 			if (!approved) {
 				cancelPreflight();

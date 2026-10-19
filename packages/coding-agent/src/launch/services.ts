@@ -11,6 +11,7 @@ import type { DaemonOperation, DaemonRpcResult } from "./protocol";
 import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
+import { isSharedBrowserDaemonName } from "../tools/browser/shared-daemon";
 
 import { cfgLaunchEnabled } from "../tools/settings";
 
@@ -199,14 +200,22 @@ export async function serviceLogs(session: ToolSession, name: string, signal?: A
 	return (await serviceLogsWithRows(session, name, signal)).text;
 }
 
+/**
+ * Start a session-owned daemon and wait for its requested readiness condition.
+ * `readyInterrupt` ends only the readiness wait, after the broker acknowledged
+ * the launch: the call then resolves `readyInterrupted` with the launched
+ * snapshot while the service keeps starting. Validation, connection, and launch
+ * failures still reject.
+ */
 export async function startService(
 	session: ToolSession,
 	params: ServiceStart,
 	signal?: AbortSignal,
+	readyInterrupt?: AbortSignal,
 ): Promise<{
 	daemon: DaemonSnapshot;
 	readyTimedOut: boolean;
-	log: string;
+	readyInterrupted: boolean;
 }> {
 	if (!cfgLaunchEnabled.get(session.settings)) throw new ToolError("Service launch is disabled in this session.");
 	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(params.name))
@@ -244,15 +253,46 @@ export async function startService(
 	};
 	const result = await request(
 		session,
-		{ op: "start", spec, owner: serviceOwner(session) ?? undefined, replace: true },
+		{
+			op: "start",
+			spec,
+			owner: serviceOwner(session) ?? undefined,
+			replace: true,
+			awaitReady: readyInterrupt === undefined,
+		},
 		signal,
 	);
 	if (result.op !== "start") throw new Error("Unexpected daemon start response");
-	return {
-		daemon: result.daemon,
-		readyTimedOut: result.readyTimedOut,
-		log: await serviceLogs(session, params.name, signal),
-	};
+	const launched = result.daemon;
+	// A legacy broker ignores `awaitReady` and already waited: its result is
+	// ready, terminal, or timed out, so the wait phase is skipped.
+	if (
+		!readyInterrupt ||
+		!spec.ready ||
+		result.readyTimedOut ||
+		launched.readyAt !== undefined ||
+		TERMINAL_STATES[launched.state]
+	)
+		return { daemon: launched, readyTimedOut: result.readyTimedOut, readyInterrupted: false };
+	const timeoutMs = Math.max(0, spec.ready.timeoutMs - (Date.now() - launched.startedAt));
+	try {
+		const waited = await request(
+			session,
+			{ op: "wait", name: params.name, for: "ready", timeoutMs },
+			signal ? AbortSignal.any([signal, readyInterrupt]) : readyInterrupt,
+		);
+		if (waited.op !== "wait") throw new Error("Unexpected daemon wait response");
+		// A pre-ready exit is reported by its terminal state, not as a timeout.
+		return {
+			daemon: waited.daemon,
+			readyTimedOut: waited.timedOut && !TERMINAL_STATES[waited.daemon.state],
+			readyInterrupted: false,
+		};
+	} catch (error) {
+		if (readyInterrupt.aborted && !signal?.aborted)
+			return { daemon: launched, readyTimedOut: false, readyInterrupted: true };
+		throw error;
+	}
 }
 
 export async function sendService(
@@ -279,6 +319,10 @@ export async function modeService(
 	mode: "persist" | "session" | "detached",
 	signal?: AbortSignal,
 ): Promise<DaemonSnapshot> {
+	// The broker detaches a service by relaunching it, which would start the
+	// shared Chrome on an unprepared profile and reopen its previous pages.
+	if (mode === "detached" && isSharedBrowserDaemonName(name))
+		throw new Error(`${name} is omp's project-shared browser and cannot be detached`);
 	const result = await request(session, { op: "mode", name, mode }, signal);
 	if (result.op !== "mode") throw new Error("Unexpected daemon mode response");
 	return result.daemon;

@@ -1,1 +1,0 @@
-The state describes how open-ended a coding subagent's problem is; the work itself is not shown. Choose the reasoning effort it needs. Volume of work and coordination with other agents never raise it. If torn between levels, choose the lower one{{#if withMax}}, except between xhigh and max: a problem meeting the max conditions takes max{{/if}}.

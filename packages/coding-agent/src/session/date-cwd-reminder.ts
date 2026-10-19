@@ -32,6 +32,14 @@ function injectReminder(message: UserMessage, reminder: string): UserMessage {
 	return { ...message, content };
 }
 
+/** Developer turns the injector inserted; every other output message maps to an input one. */
+const reminderControls = new WeakSet<Message>();
+
+/** Whether `message` is a developer turn a {@link DateCwdReminderInjector} inserted. */
+export function isDateCwdReminderControl(message: Message): boolean {
+	return reminderControls.has(message);
+}
+
 /**
  * Keeps volatile date/cwd reminders append-only across provider requests.
  *
@@ -58,12 +66,18 @@ export class DateCwdReminderInjector {
 		const firstUser = messages.find((message): message is UserMessage => message.role === "user");
 		if (!firstUser) return messages;
 		if (this.#root !== firstUser) {
+			// A new first user turn: a compaction summary or a different conversation.
+			// Turns kept from the earlier history must keep the reminders they were
+			// sent with, or their bytes change under signed thinking; reminders on
+			// turns that are gone are dropped. The new root gets the current reminder.
+			const present = new Set<Message>(messages);
+			for (const message of this.#injections.keys()) {
+				if (!present.has(message)) this.#injections.delete(message);
+			}
+			this.#controls = this.#controls.filter(control => present.has(control.anchor));
 			this.#root = firstUser;
 			this.#currentReminder = reminder;
-			this.#injections.clear();
-			this.#controls = [];
-			this.#seen = new WeakSet();
-			if (!messageStartsWithReminder(firstUser, reminder)) {
+			if (!this.#injections.has(firstUser) && !messageStartsWithReminder(firstUser, reminder)) {
 				this.#injections.set(firstUser, injectReminder(firstUser, reminder));
 			}
 		} else if (this.#currentReminder !== reminder) {
@@ -79,15 +93,14 @@ export class DateCwdReminderInjector {
 				this.#injections.set(newUser, injectReminder(newUser, reminder));
 			} else {
 				const anchor = messages.at(-1)!;
-				this.#controls.push({
-					anchor,
-					message: {
-						role: "developer",
-						content: reminder,
-						synthetic: true,
-						timestamp: Date.now(),
-					},
-				});
+				const control: Message = {
+					role: "developer",
+					content: reminder,
+					synthetic: true,
+					timestamp: Date.now(),
+				};
+				reminderControls.add(control);
+				this.#controls.push({ anchor, message: control });
 			}
 			this.#currentReminder = reminder;
 		}

@@ -143,26 +143,4 @@ describe("InteractiveMode tiny-title prewarm", () => {
 
 		expect(prewarm).not.toHaveBeenCalled();
 	});
-
-	it("paints the pending user row before starting title generation", async () => {
-		await mode.init();
-
-		const order: string[] = [];
-		vi.spyOn(mode, "startPendingSubmission").mockImplementation(input => {
-			order.push("pending-row");
-			return { text: input.text, cancelled: false, started: false };
-		});
-		const generateTitle = vi.spyOn(session, "generateTitle").mockImplementation(async () => {
-			order.push("title-gen");
-			return null;
-		});
-		const onInput = vi.fn();
-		mode.onInputCallback = onInput;
-
-		await mode.editor.onSubmit?.("investigate the failing title worker");
-
-		expect(order).toEqual(["pending-row", "title-gen"]);
-		expect(generateTitle).toHaveBeenCalledWith("investigate the failing title worker");
-		expect(onInput).toHaveBeenCalledTimes(1);
-	});
 });

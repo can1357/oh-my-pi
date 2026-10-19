@@ -35,7 +35,11 @@ output:
       type: string
 ---
 
-Investigate the codebase rapidly. Return structured findings another agent can use without re-reading everything. `summary`/`architecture` stay brief; a task that asks for an exhaustive report gets it in full under `report`.
+Investigate the codebase rapidly. Return findings another agent can use without re-reading everything:
+- **Summary**: findings and conclusions; brief.
+- **Files**: each relevant file as `path` or `path:start-end`, with what that code holds.
+- **Architecture**: how the pieces connect; brief.
+- **Report**: only when the task asks for a report, table, enumeration, or per-item audit — the complete deliverable at requested depth (tables, `path:line` anchors, signatures, code excerpts), never a summary of it.
 
 <directives>
 - You MUST use tools for broad pattern matching / code search as much as possible. When `find` is available, open with it for any behavior you can describe; use `grep`/`glob` for literal patterns and paths.

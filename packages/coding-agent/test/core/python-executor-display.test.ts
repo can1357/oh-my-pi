@@ -1,12 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { executePythonWithKernel } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
-import type { KernelDisplayOutput } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
+import type { EvalDisplayOutput } from "@oh-my-pi/pi-coding-agent/eval/types";
 import { FakeKernel } from "./helpers";
 
 describe("executePythonWithKernel display outputs", () => {
 	it("aggregates display outputs in order", async () => {
-		const outputs: KernelDisplayOutput[] = [
-			{ type: "json", data: { foo: "bar" } },
+		const outputs: EvalDisplayOutput[] = [
+			{ type: "view", text: "{'foo': 'bar'}", view: { kind: "json", value: { foo: "bar" } } },
 			{ type: "image", data: "abc", mimeType: "image/png" },
 		];
 

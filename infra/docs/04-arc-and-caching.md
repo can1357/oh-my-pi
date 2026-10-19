@@ -388,7 +388,7 @@ One endpoint, one auth model — **reads are unauthenticated, writes require the
 | Client | Endpoint | Writes |
 | --- | --- | --- |
 | omp-kata runner pods (trusted `push`/main + release) | `grpcs://bazel-remote.bazel-cache.svc.cluster.local:9092` | yes - `ci` credentials injected via the `bazel-remote-ci` secret |
-| GitHub-hosted runners (PRs, macOS, release) | — never touch this infrastructure; they persist a local `--disk_cache`/`--repository_cache` via `actions/cache` (`.github/actions/bazel-cache`) | n/a |
+| GitHub-hosted runners (PRs, release packaging and smoke tests) | — never touch this infrastructure, and run no Bazel builds | n/a |
 
 - **TLS.** The server certificate is signed by a self-signed CA committed at
   [`infra/bazel-remote/ca.crt`](../bazel-remote/ca.crt); every client passes
@@ -419,20 +419,17 @@ bazel build \
   --remote_cache=grpcs://bazel-remote.bazel-cache.svc.cluster.local:9092 \
   --tls_certificate=infra/bazel-remote/ca.crt \
   --remote_header="authorization=Basic $(printf %s "$BAZEL_REMOTE_USER:$BAZEL_REMOTE_PASSWORD" | base64 -w0)" \
-  //:natives-linux-all
+  //:natives-all
 ```
 
 On omp-kata the credentials come from the injected pod env
 (`bazel-remote-ci` secret) and `.github/actions/bazel-cache` composes the rc
-fragment. GitHub-hosted jobs get the disk-cache branch of the same action —
-no remote endpoint, no credentials, no infrastructure knowledge. The bridge
-between the two worlds is the **disk-cache export**: main-push rust jobs
-write a bazel disk cache alongside the remote cache and save it to the
-GitHub Actions cache (once per lockfile change, `linux` scope). GitHub only
-shares caches from the default branch across pull requests, so this export
-is what keeps PR builds warm; kata jobs otherwise skip artifact downloads
-entirely (`--remote_download_toplevel`), and the xwin MSVC splat persists on
-the runner-cache PVC (`OMP_XWIN_CACHE_DIR`).
+fragment. Every Bazel job runs there, every addon included (the darwin and
+win32 ones cross-compile on the pods). GitHub-hosted PR jobs build nothing:
+`native_addons` restores main's linux-x64 pair from the GitHub Actions cache
+(which GitHub shares from the default branch across pull requests). Kata
+jobs skip artifact downloads entirely (`--remote_download_toplevel`), and the
+xwin MSVC splat persists on the runner-cache PVC (`OMP_XWIN_CACHE_DIR`).
 
 **(b) Cargo registry cache** - the scale-set pod template mounts only the
 immutable download cache and sparse index at
@@ -463,8 +460,7 @@ credentials. The primary defense is to keep untrusted code away from them:
   (`runs-on` resolves to `omp-kata` only for `push`/main, manual dispatch, and
   release). That expression lives in the base workflow, which GitHub uses
   verbatim for `pull_request` events, so a fork cannot override it. PR jobs
-  never talk to the cluster at all — they build against a local
-  `actions/cache`-backed disk cache — and fork code never sees
+  never talk to the cluster at all — they run no Bazel builds — and fork code never sees
   `bazel-remote-ci` (the cache has no publicly reachable endpoint to attack).
 - As defense in depth, set the repo's **Settings -> Actions -> Fork pull request
   workflows** policy to *Require approval for all outside collaborators* (or all

@@ -1,4 +1,5 @@
 import { runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
+import { clearApprovalGrants } from "../tools/approval-cache";
 import { clearSubmittedText } from "./helpers/draft";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
@@ -80,6 +81,16 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
 			await runPauseScreen(runtime.ctx);
+		},
+	},
+	{
+		name: "forget-approvals",
+		icon: "trash",
+		description: "Forget every file and folder approval Ask and remember has recorded",
+		handle: async (_command, runtime) => {
+			clearApprovalGrants(runtime.settings.getAgentDir());
+			await runtime.output("Remembered approvals forgotten; the next read or write asks again.");
+			return commandConsumed();
 		},
 	},
 	{

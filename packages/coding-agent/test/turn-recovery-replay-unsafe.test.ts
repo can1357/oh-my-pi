@@ -15,6 +15,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createProviderErrorMessage } from "../../ai/src/providers/error-message";
+import { streamFactoryDroidGemini } from "../../ai/src/providers/factory-droid/gemini";
+import { captureFetch, gemini as factoryGemini } from "../../ai/test/helpers/factory-droid";
 
 const USAGE: Usage = {
 	input: 0,
@@ -48,9 +50,11 @@ function createHost(
 		messages?: readonly AgentMessage[];
 		lastModelChangeRole?: string;
 		modelRoles?: Record<string, string>;
+		shakeSucceeds?: boolean;
 	} = {},
 ): TurnRecoveryHost {
 	const settings = Settings.isolated({
+		"retry.baseDelayMs": 1,
 		...(options.fallbackChains ? { "retry.fallbackChains": options.fallbackChains } : {}),
 		...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
 	});
@@ -69,6 +73,9 @@ function createHost(
 		} as never,
 		sessionManager: {
 			getLastModelChangeRole: () => options.lastModelChangeRole,
+			getBranch: () => [],
+			getBranchView: () => [],
+			getSessionId: () => "test-session",
 		} as never,
 		persistedAssistantEntryId: () => undefined,
 		settings,
@@ -100,7 +107,7 @@ function createHost(
 		resetCurrentResponsesProviderSession: () => {},
 		maybeAutoRedeemReset: async () => ({ restored: false }),
 		runAutoCompaction: async () => ({ continuationScheduled: false }) as RecoveryCompactionResult,
-		shakeForRequestBodyReadTimeout: async () => false,
+		shakeForRequestBodyReadTimeout: async () => options.shakeSucceeds === true,
 		withBashBranchTransition: <T>(operation: () => T): T => operation(),
 	};
 }
@@ -319,6 +326,43 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		};
 		const recovery = new TurnRecovery(createHost(model, modelRegistry, { messages: [message] }));
 		expect(await recovery.handleResponsesRequestBodyReadTimeout(message)).toBe("not-applicable");
+	});
+
+	describe("full-replay timeout one-shot lifecycle", () => {
+		const timeoutTurn = (): AssistantMessage => ({
+			...makeMessage([], model),
+			api: "openai-responses" as const,
+			errorStatus: 408,
+			errorMessage: "Timed out reading request body.",
+			requestBodyReadTimeoutFullReplay: true,
+		});
+		const settledTurn = (content: AssistantMessage["content"]): AssistantMessage => ({
+			...makeMessage(content, model),
+			stopReason: "stop" as const,
+			errorMessage: undefined,
+		});
+
+		it("re-arms the recovery after an intervening turn that produced output", async () => {
+			const recovery = new TurnRecovery(createHost(model, modelRegistry, { shakeSucceeds: true }));
+			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-retry");
+			await recovery.onAssistantSettledSuccessfully(
+				settledTurn([{ type: "toolCall", id: "call-progress", name: "bash", arguments: { command: "pwd" } }]),
+			);
+			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-retry");
+		});
+
+		it("stays bound to one changed retry while the same prompt makes no progress", async () => {
+			const recovery = new TurnRecovery(createHost(model, modelRegistry, { shakeSucceeds: true }));
+			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-retry");
+			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-terminal");
+		});
+
+		it("does not re-arm on a settled turn that produced no output", async () => {
+			const recovery = new TurnRecovery(createHost(model, modelRegistry, { shakeSucceeds: true }));
+			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-retry");
+			await recovery.onAssistantSettledSuccessfully(settledTurn([]));
+			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-terminal");
+		});
 	});
 
 	it("does not replay a long OpenCode Go usage limit after committed text", () => {
@@ -1217,6 +1261,24 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			}
 		});
 
+		it("resumes a Factory Droid Gemini text stream that ends without a finish reason", async () => {
+			const truncated = JSON.stringify({
+				candidates: [{ content: { role: "model", parts: [{ text: "Here is the first half" }] } }],
+			});
+			const message = await streamFactoryDroidGemini(
+				factoryGemini(),
+				{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+				{
+					baseUrl: "https://api.factory.ai/api/llm/g/v1",
+					headers: { "x-api-provider": "google" },
+					fetch: captureFetch([], [truncated]),
+				},
+			).result();
+			const { host, continues } = continuationHost(message);
+			expect(new TurnRecovery(host).handleCommittedTextStreamStall(message)).toBe(true);
+			expect(continues).toEqual(["stream-stall-continue"]);
+		});
+
 		it("stops continuing past the per-prompt cap and resets on a new prompt", () => {
 			const message = stalledTextTurn();
 			const { host, continues } = continuationHost(message);
@@ -1230,6 +1292,34 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 
 			recovery.resetForNewPrompt();
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+		});
+
+		it("continues a Codex turn the native lane dropped over omp's steer after committed text", () => {
+			// The steer rejection drops the response mid-stream like a transport
+			// failure; committed text vetoes the replay retry, so without a
+			// continuation the session stopped on a pinned "Request failed".
+			const codex = getBundledModel("openai-codex", "gpt-6-astra");
+			if (!codex) throw new Error("Expected bundled Codex model");
+			const message = makeMessage(
+				[{ type: "text", text: "RoboOMP's attribution is already in. I'll squash" }],
+				codex,
+			);
+			message.errorMessage =
+				"Codex error event: The experimental native turn lane cannot accept stateful WebSocket messages while a native turn is running. Start a new independent response.create turn instead. (code=unsupported_native_inflight_message)";
+			const messages: AgentMessage[] = [message];
+			const continues: string[] = [];
+			const host = createHost(codex, modelRegistry, { messages, textOutputCommitted: true });
+			host.agent = {
+				state: { messages },
+				appendMessage: (appended: AgentMessage) => messages.push(appended),
+			} as never;
+			host.scheduleAgentContinue = options => continues.push(options.source);
+			const recovery = new TurnRecovery(host);
+
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			expect(messages[0]).toBe(message);
+			expect(continues).toEqual(["stream-stall-continue"]);
 		});
 
 		it("leaves uncommitted text, tool turns, other errors, and disabled retry to the error path", () => {
@@ -1258,6 +1348,32 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			recovery.setAutoRetryEnabled(false);
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(false);
 			expect(continues).toEqual([]);
+		});
+	});
+
+	describe("reasonless abort carrying only a fallback boundary", () => {
+		// A mid-turn server-side fallback persists a `fallback` boundary block
+		// before the fallback model emits anything. An abort right there leaves
+		// `[fallback]`: bookkeeping, no output, so the turn is as replay-safe to
+		// retry as an empty one.
+		function abortedTurn(content: AssistantMessage["content"]): AssistantMessage {
+			const message = makeMessage(content, model);
+			message.stopReason = "aborted";
+			message.errorMessage = "Request was aborted";
+			return message;
+		}
+
+		it("retries a boundary-only abort and still settles one carrying output", () => {
+			const boundary = abortedTurn([
+				{ type: "fallback", from: { model: "claude-opus-5-5" }, to: { model: "claude-opus-4-8" } },
+			]);
+			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(boundary)).toBe(true);
+
+			const withOutput = abortedTurn([
+				{ type: "fallback", from: { model: "claude-opus-5-5" }, to: { model: "claude-opus-4-8" } },
+				{ type: "text", text: "Partial answer" },
+			]);
+			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(withOutput)).toBe(false);
 		});
 	});
 });

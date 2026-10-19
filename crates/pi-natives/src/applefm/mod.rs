@@ -128,7 +128,8 @@ mod platform {
 			return Err(runtime(format!("failed to load the Foundation Models bridge: {detail}")));
 		}
 		let symbol = |name: &CStr| {
-			// SAFETY: `handle` is a live dlopen handle and `name` is NUL-terminated.
+			// SAFETY: `handle` is a live dlopen handle and `name` is
+			// NUL-terminated.
 			let pointer = unsafe { libc::dlsym(handle, name.as_ptr()) };
 			if pointer.is_null() {
 				Err(runtime(format!("Foundation Models bridge lacks {}", name.to_string_lossy())))

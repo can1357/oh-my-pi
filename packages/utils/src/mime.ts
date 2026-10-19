@@ -143,6 +143,50 @@ export function parseImageMetadata(header: Uint8Array): ImageMetadata | null {
 	);
 }
 
+/** Why base64 image data is unusable; `undefined` when it is canonical and non-empty. */
+export type Base64ImageDataFailure = "invalid base64 image data" | "empty image data";
+
+/**
+ * Non-empty decoded bytes on success, or a validation failure reason, never both.
+ * Check `reason` before using `bytes`; successful base64 decoding does not establish
+ * that the bytes represent a supported or decodable image.
+ */
+export type Base64ImageDecodeResult =
+	| { bytes: Buffer; reason?: never }
+	| { bytes?: never; reason: Base64ImageDataFailure };
+
+const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/**
+ * Validate standard base64 image data without decoding it. Padding may be omitted, but
+ * present padding must be canonical, the trailing bits must be zero, and the data non-empty.
+ */
+export function base64ImageDataFailureReason(data: string): Base64ImageDataFailure | undefined {
+	if (data.length === 0) return "empty image data";
+
+	const match = /^([A-Za-z0-9+/]+)(={0,2})$/.exec(data);
+	if (!match) return "invalid base64 image data";
+	const encoded = match[1];
+	const paddingLength = match[2].length;
+	const remainder = encoded.length % 4;
+	if (remainder === 1 || (paddingLength === 1 && remainder !== 3) || (paddingLength === 2 && remainder !== 2)) {
+		return "invalid base64 image data";
+	}
+
+	const lastSextet = BASE64_ALPHABET.indexOf(encoded[encoded.length - 1]);
+	if ((remainder === 2 && (lastSextet & 0b1111) !== 0) || (remainder === 3 && (lastSextet & 0b11) !== 0)) {
+		return "invalid base64 image data";
+	}
+	return undefined;
+}
+
+/** Decode standard base64 image data under the {@link base64ImageDataFailureReason} rules. */
+export function decodeBase64ImageData(data: string): Base64ImageDecodeResult {
+	const reason = base64ImageDataFailureReason(data);
+	if (reason) return { reason };
+	return { bytes: Buffer.from(data, "base64") };
+}
+
 export function readImageMetadataSync(filePath: string, maxBytes = IMAGE_METADATA_HEADER_BYTES): ImageMetadata | null {
 	return peekFileSync(filePath, maxBytes, parseImageMetadata);
 }

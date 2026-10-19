@@ -503,10 +503,6 @@ impl TypeFilter {
 			|| self.block
 			|| self.character
 	}
-
-	const fn is_empty(&self) -> bool {
-		!self.has_kind() && !self.executable && !self.empty
-	}
 }
 
 #[derive(Clone, Copy)]
@@ -670,6 +666,7 @@ fn search(
 		prune: cli.prune,
 	};
 
+	let heartbeat = host.cancel_heartbeat();
 	if let Some(state) = try_search_fast(
 		&cli,
 		&search_paths,
@@ -678,6 +675,7 @@ fn search(
 		&mut host.stdout,
 		&mut host.stderr,
 		cancelled,
+		&heartbeat,
 	)? {
 		return Ok(state);
 	}
@@ -698,7 +696,7 @@ fn search(
 			use_gitignore,
 			cli.one_file_system,
 		);
-		let outcome = match request.collect_with_heartbeat(cancel_heartbeat(cancelled)) {
+		let outcome = match request.collect_with_heartbeat(&heartbeat) {
 			Ok(outcome) => outcome,
 			Err(pi_walker::WalkError::Interrupted(_)) if cancelled.load(Ordering::Relaxed) => break,
 			Err(err) => return Err(walker_collect_error_to_io(err)),
@@ -759,6 +757,7 @@ fn try_search_fast(
 	stdout: &mut impl Write,
 	stderr: &mut impl Write,
 	cancelled: &AtomicBool,
+	heartbeat: &(impl Fn() -> io::Result<()> + Sync),
 ) -> io::Result<Option<SearchState>> {
 	if !can_use_fast_search(cli, config) {
 		return Ok(None);
@@ -775,7 +774,7 @@ fn try_search_fast(
 		let mut had_error = state.had_error;
 		let request = fd_walk_request(&config.fs, &search_path.resolved, cli, false, false);
 		let status = request.for_each_entry_with_heartbeat(
-			cancel_heartbeat(cancelled),
+			heartbeat,
 			|entry| {
 				if cancelled.load(Ordering::Relaxed) || max_results.is_some_and(|max| matches >= max) {
 					return Ok(pi_walker::WalkDecision::Stop);
@@ -862,12 +861,7 @@ fn process_walker_entry<W: Write>(
 		}
 	}
 
-	let metadata = config.fs.symlink_metadata(path).ok();
-	if !matches_walker_filters(config, path, file_type, metadata.as_ref()) {
-		return Ok(pi_walker::WalkDecision::Skip);
-	}
-	let target = match_target(path, &config.base_dir, config.full_path);
-	if !config.matcher.matches(&target) {
+	if !matches_entry(config, path, file_type) {
 		return Ok(pi_walker::WalkDecision::Skip);
 	}
 
@@ -890,16 +884,42 @@ fn process_walker_entry<W: Write>(
 	Ok(pi_walker::WalkDecision::Include)
 }
 
-fn matches_walker_filters(
-	config: &SearchConfig,
-	path: &Path,
-	file_type: pi_walker::FileType,
-	metadata: Option<&Metadata>,
-) -> bool {
-	if !matches_walker_type_filter(&config.fs, &config.types, path, file_type, metadata) {
+/// Whether an entry passes every filter: the ones the listing answers (kind,
+/// extension, the pattern) first, then, only if the command asked for one,
+/// those that need the entry's metadata, so a plain `fd foo` stats nothing.
+fn matches_entry(config: &SearchConfig, path: &Path, file_type: pi_walker::FileType) -> bool {
+	let filter = &config.types;
+	if filter.has_kind()
+		&& !((filter.regular && file_type == pi_walker::FileType::File)
+			|| (filter.directory && file_type == pi_walker::FileType::Dir)
+			|| (filter.symlink && file_type == pi_walker::FileType::Symlink))
+	{
 		return false;
 	}
 	if !config.extensions.is_empty() && !matches_extension(path, &config.extensions) {
+		return false;
+	}
+	if !config
+		.matcher
+		.matches(&match_target(path, &config.base_dir, config.full_path))
+	{
+		return false;
+	}
+	let needs_metadata = filter.executable
+		|| filter.empty
+		|| !config.sizes.is_empty()
+		|| config.changed_after.is_some()
+		|| config.changed_before.is_some()
+		|| !config.owners.is_empty();
+	if !needs_metadata {
+		return true;
+	}
+	let metadata = config.fs.symlink_metadata(path).ok();
+	let metadata = metadata.as_ref();
+	if filter.executable && !is_executable(metadata) {
+		return false;
+	}
+	if filter.empty && !is_empty_entry(&config.fs, path, metadata, filter) {
 		return false;
 	}
 	if !config.sizes.is_empty() && !matches_size_filters(&config.sizes, metadata) {
@@ -914,57 +934,6 @@ fn matches_walker_filters(
 		return false;
 	}
 	true
-}
-
-fn matches_walker_type_filter(
-	fs: &BlockingFs,
-	filter: &TypeFilter,
-	path: &Path,
-	file_type: pi_walker::FileType,
-	metadata: Option<&Metadata>,
-) -> bool {
-	if filter.is_empty() {
-		return true;
-	}
-	let kind_matches = if filter.has_kind() {
-		(filter.regular && file_type == pi_walker::FileType::File)
-			|| (filter.directory && file_type == pi_walker::FileType::Dir)
-			|| (filter.symlink && file_type == pi_walker::FileType::Symlink)
-	} else {
-		true
-	};
-	if !kind_matches {
-		return false;
-	}
-	if filter.executable && !is_executable(metadata) {
-		return false;
-	}
-	if filter.empty && !is_empty_entry(fs, path, metadata, filter) {
-		return false;
-	}
-	true
-}
-
-/// Builds a walker heartbeat closure that observes the host cancel flag.
-///
-/// The shared utility adapter flips `cancelled` when the shell cancellation
-/// token fires, then awaits the blocking task. Without this closure,
-/// `pi_walker`'s per-entry heartbeat never checks the flag and a cancelled walk
-/// keeps traversing until the whole tree is collected.
-/// Returning [`io::ErrorKind::Interrupted`] surfaces as
-/// [`pi_walker::WalkError::Interrupted`], which the callers translate to a
-/// silent break — the shared adapter owns the user-visible exit code (130), so
-/// no `fd:` diagnostic is emitted.
-///
-/// Regression cover for #3949 (fd) and #3933 (grep/rg — same class of defect).
-fn cancel_heartbeat(cancelled: &AtomicBool) -> impl Fn() -> io::Result<()> + Sync + '_ {
-	move || {
-		if cancelled.load(Ordering::Relaxed) {
-			Err(io::Error::from(io::ErrorKind::Interrupted))
-		} else {
-			Ok(())
-		}
-	}
 }
 
 fn walker_error_to_io(err: pi_walker::WalkError<io::Error>) -> io::Error {
@@ -1031,12 +1000,7 @@ fn process_collected_entry<W: Write>(
 		}
 	}
 
-	let metadata = config.fs.symlink_metadata(&path).ok();
-	if !matches_walker_filters(config, &path, entry.file_type, metadata.as_ref()) {
-		return Ok(());
-	}
-	let target = match_target(&path, &config.base_dir, config.full_path);
-	if !config.matcher.matches(&target) {
+	if !matches_entry(config, &path, entry.file_type) {
 		return Ok(());
 	}
 
@@ -1584,15 +1548,12 @@ fn remove_extension(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-	use std::{
-		fs,
-		sync::atomic::AtomicBool,
-	};
+	use std::fs;
 
 	use tempfile::{Builder, TempDir};
 
-	use super::{FdCli, cancel_heartbeat};
-	use crate::host::run_util;
+	use super::FdCli;
+	use crate::host::{Host, run_util};
 
 	/// Build a fresh temp directory containing a single matchable file plus a
 	/// filler file, so the walker has more than one entry to iterate. Both the
@@ -1621,27 +1582,34 @@ mod tests {
 			.emit_root(true)
 	}
 
+	/// A host whose cancellation has already fired.
+	fn cancelled_host(tree: &std::path::Path) -> Host {
+		let (host, _) = Host::for_test("fd", "", tree);
+		host.cancel_for_test();
+		host
+	}
+
 	// Regression note (#3949): both call sites in this file feed the walker
-	// `cancel_heartbeat(cancelled)` — one via `collect_with_heartbeat` in the
+	// `Host::cancel_heartbeat` — one via `collect_with_heartbeat` in the
 	// gitignore-respecting fallback path, one via `for_each_entry_with_heartbeat`
 	// in the fast path. `search`/`try_search_fast` also carry an outer
 	// pre-loop `if cancelled { break }` guard that fires when the flag is
 	// already set before search runs, so a pre-set-flag test at the `search()`
 	// level never reaches the walker (the outer guard short-circuits first) and
 	// therefore does not protect the regression. The tests below drive both
-	// walker APIs directly with `cancel_heartbeat` so a revert to the pre-fix
-	// no-op heartbeat fails immediately.
+	// walker APIs directly with the host heartbeat so a revert to a no-op
+	// heartbeat fails immediately.
 
 	#[test]
 	fn cancel_heartbeat_aborts_collect_with_heartbeat() {
-		// Covers the fallback path's walker call: without `cancel_heartbeat`,
+		// Covers the fallback path's walker call: without the cancel heartbeat,
 		// `collect_with_heartbeat` returns `Ok(outcome)` even after
 		// cancellation and the fd builtin drains the whole tree before
 		// observing the flag — the exact bug #3949 reports.
 		let tree = seeded_tree("collect");
-		let cancelled = AtomicBool::new(true);
+		let host = cancelled_host(tree.path());
 		let err = walk_request(tree.path())
-			.collect_with_heartbeat(cancel_heartbeat(&cancelled))
+			.collect_with_heartbeat(host.cancel_heartbeat())
 			.expect_err("walker must surface the cancel flag as an error");
 		assert!(
 			matches!(err, pi_walker::WalkError::Interrupted(_)),
@@ -1656,10 +1624,10 @@ mod tests {
 		// must never see any entry (proving the abort happened at the
 		// heartbeat, not after entries were already delivered).
 		let tree = seeded_tree("stream");
-		let cancelled = AtomicBool::new(true);
+		let host = cancelled_host(tree.path());
 		let visited = std::cell::Cell::new(0_usize);
 		let result = walk_request(tree.path()).for_each_entry_with_heartbeat(
-			cancel_heartbeat(&cancelled),
+			host.cancel_heartbeat(),
 			|_entry| {
 				visited.set(visited.get() + 1);
 				Ok::<_, std::io::Error>(pi_walker::WalkDecision::Include)

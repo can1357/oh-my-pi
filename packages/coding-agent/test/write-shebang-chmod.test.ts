@@ -93,6 +93,22 @@ describe("write tool shebang chmod", () => {
 		expect(details(result).madeExecutable).toBeUndefined();
 	});
 
+	posixIt("preserves mode for Rust inner attributes without an executable notice", async () => {
+		const filePath = path.join(tmpDir, "lib.rs");
+		await fs.writeFile(filePath, "fn main() {}\n");
+		await fs.chmod(filePath, 0o644);
+
+		const tool = new WriteTool(createSession(tmpDir));
+		const result = await tool.execute("call-rust", {
+			path: filePath,
+			content: "#![allow(dead_code)]\nfn main() {}\n",
+		});
+
+		expect((await fs.stat(filePath)).mode & 0o777).toBe(0o644);
+		expect(details(result).madeExecutable).toBeUndefined();
+		expect(resultText(result)).not.toContain("[Notice: Made executable via chmod +x]");
+	});
+
 	posixIt("does not re-flag when file is already executable", async () => {
 		const filePath = path.join(tmpDir, "preexec.sh");
 		await fs.writeFile(filePath, "#!/bin/sh\nold\n");

@@ -8,7 +8,19 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../../coding-agent/src/prompts/tools/task-summary.md" with { type: "text" };
-import { waitToolRenderer } from "@oh-my-pi/pi-tui/tools/wait";
+import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
+import { type CoordinationDetails, waitToolRenderer } from "@oh-my-pi/pi-tui/tools/wait";
+import { decodeBench } from "./fixtures/job-widget-views";
+
+/** Every described node under `children`, depth first. */
+function flatten(children: readonly NativeChild[] | undefined): NativeNode[] {
+	return (children ?? []).flatMap(child => ("k" in child ? [child, ...flatten(child.c)] : []));
+}
+
+/** The first node under `root` with `role`. */
+function byRole(root: NativeChild | undefined, role: string): NativeNode | undefined {
+	return flatten(root ? [root] : []).find(node => node.p && Reflect.get(node.p, "role") === role);
+}
 
 function renderLines(resultText: string): string {
 	const result = {
@@ -212,10 +224,11 @@ describe("job renderer task-result preview", () => {
 			};
 			const view = waitToolRenderer.describeResult!(result, { expanded: true, isPartial: false });
 			expect(view?.head).toEqual(expect.arrayContaining([expect.objectContaining({ t: "waiting on 1 job" })]));
-			expect(JSON.stringify(view?.body)).toContain("Job1 running");
+			// A subagent's tile goes by the subagent's name.
+			expect(JSON.stringify(view?.body)).toContain('{"t":"Job1"}');
 		});
 
-		it.each([true, false])("animates running native rows only while the poll is live (%s)", isPartial => {
+		it.each([true, false])("animates running native tiles only while the poll is live (%s)", isPartial => {
 			const result = {
 				content: [{ type: "text" as const, text: "Still Running" }],
 				details: {
@@ -225,30 +238,58 @@ describe("job renderer task-result preview", () => {
 				},
 			};
 			const view = waitToolRenderer.describeResult!(result, { expanded: true, isPartial });
-			const rows = view!.body!;
-			expect(rows[0]).toMatchObject({
-				c: [
-					{
-						c: [
-							{ k: "badge" },
-							{ k: "text", p: { spans: [isPartial ? { fx: "shimmer" } : { t: "Job1" }, expect.any(Object)] } },
-							{ k: "elapsed", p: isPartial ? { age: 1200 } : { age: 1200, stopped: 1200 } },
-						],
-					},
-				],
+			const [strip, agent] = view!.body!;
+			expect(strip).toMatchObject({ k: "row", p: { role: "omp.job.tiles" } });
+			const [running] = (strip as NativeNode).c ?? [];
+			expect(byRole(running, "omp.job.tile.dot")?.p).toMatchObject({
+				spans: [isPartial ? { t: "●", fx: "pulse" } : { t: "●" }],
 			});
-			expect(rows[2]).toMatchObject({
+			expect(flatten(byRole(running, "omp.job.tile.head")?.c).find(node => node.k === "elapsed")).toMatchObject({
+				p: isPartial ? { age: 1200 } : { age: 1200, stopped: 1200 },
+			});
+			expect(agent).toMatchObject({
 				c: [
 					expect.any(Object),
 					expect.any(Object),
 					{ k: "elapsed", p: isPartial ? { age: 1000 } : { age: 1000, stopped: 1000 } },
 				],
 			});
-			if (!isPartial) expect(JSON.stringify(view)).not.toContain('"fx":"shimmer"');
+			if (!isPartial) expect(JSON.stringify(view)).not.toContain('"fx":"pulse"');
 			else {
-				expect(JSON.stringify(rows[0])).not.toContain('"stopped"');
-				expect(JSON.stringify(rows[2])).not.toContain('"stopped"');
+				expect(JSON.stringify(running)).not.toContain('"stopped"');
+				expect(JSON.stringify(agent)).not.toContain('"stopped"');
 			}
+		});
+
+		it("keeps a settled native job to its tile: output and errors fill the call's own card", () => {
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: {
+					op: "wait" as const,
+					jobs: [
+						{
+							id: "bg_2",
+							type: "bash" as const,
+							status: "failed" as const,
+							label: "hyperfine --runs 30 bench",
+							durationMs: 61_000,
+							exitCode: 1,
+							resultText: "Benchmark 1: calc_ir",
+							errorText: "Command exited with code 1",
+							meta: { artifactError: "write" as const },
+						},
+					],
+				},
+			};
+			const view = waitToolRenderer.describeResult!(result, { expanded: true, isPartial: false });
+			const tile = byRole(view!.body![0], "omp.job.tile");
+			expect(tile).toMatchObject({ k: "col", p: { tone: "error" } });
+			expect(byRole(tile, "omp.job.tile.lead")?.p).toMatchObject({ spans: [{ t: "exit 1", s: "error" }] });
+			const json = JSON.stringify(view);
+			expect(json).toContain("hyperfine --runs 30 bench");
+			expect(json).not.toContain("Benchmark 1");
+			expect(json).not.toContain("exited with code 1");
+			expect(json).not.toContain("artifact write failed");
 		});
 
 		it("renders agent rows for running agents outside job control", () => {
@@ -286,6 +327,75 @@ describe("job renderer task-result preview", () => {
 			// A ref claiming `running` with no turn in flight is flagged, not shown
 			// as live work.
 			expect(output).toContain("no turn");
+		});
+	});
+
+	describe("job widgets", () => {
+		const widgetResult = (stage?: string) => ({
+			content: [{ type: "text" as const, text: "" }],
+			details: {
+				op: "wait" as const,
+				jobs: [
+					{
+						id: "bg_3",
+						type: "bash" as const,
+						status: "running" as const,
+						label: "bun run bench:decode",
+						durationMs: 42_000,
+						widget: decodeBench,
+					},
+					{
+						id: "Bencher",
+						type: "task" as const,
+						status: "running" as const,
+						label: "Bencher",
+						durationMs: 60_000,
+						...(stage ? { stage } : {}),
+					},
+				],
+			} satisfies CoordinationDetails,
+		});
+		it("draws every job as a tile of one strip: the widget inside its job's tile, a task's stage in its own", () => {
+			const view = waitToolRenderer.describeResult!(widgetResult("profiling the decode loop"), {
+				expanded: true,
+				isPartial: true,
+			});
+			const [strip] = view!.body! as NativeNode[];
+			const tiles = (strip!.c ?? []) as NativeNode[];
+			expect(tiles.map(tile => byRole(tile, "omp.job.tile.title")?.p)).toMatchObject([
+				{ spans: [{ t: "Bencher" }] },
+				{ spans: [{ t: "verb-bench · decode throughput" }] },
+			]);
+			const bench = tiles[1]!;
+			expect(byRole(bench, "omp.job.tile.chart")).toBeDefined();
+			expect(JSON.stringify(tiles[0])).toContain("profiling the decode loop");
+		});
+
+		it("re-describes a memoized result when a widget's data moves", () => {
+			const result = widgetResult();
+			const first = waitToolRenderer.describeResult!(result, { expanded: true, isPartial: true });
+			expect(waitToolRenderer.describeResult!(result, { expanded: true, isPartial: true })).toBe(first);
+			result.details.jobs[0]!.widget = {
+				...decodeBench,
+				updatedAt: decodeBench.updatedAt + 1_000,
+				headline: { text: "191 tok/s" },
+			};
+			const next = waitToolRenderer.describeResult!(result, { expanded: true, isPartial: true });
+			expect(next).not.toBe(first);
+			expect(JSON.stringify(next)).toContain('{"t":"191"}');
+		});
+
+		it("draws a widget job's ANSI row as its tile and keeps it on a sealed card", () => {
+			for (const isPartial of [true, false]) {
+				const component = waitToolRenderer.renderResult(widgetResult(), { expanded: false, isPartial }, theme);
+				const lines = (component.render(100) as readonly string[]).map(line => Bun.stripANSI(line));
+				const row = lines.findIndex(line => line.includes("bg_3"));
+				expect(row).toBeGreaterThan(0);
+				expect(lines[row]).toContain("verb-bench · decode throughput bg_3");
+				expect(lines[row]).toMatch(/decode 186 tok\/s ▲ 15% {2}42\.0s$/);
+				expect(lines[row + 1]).toMatch(/[▁▂▃▄▅▆▇█]+ {2}186 tok\/s {2}┄ target 200 tok\/s/);
+				for (const line of lines) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(100);
+			}
 		});
 	});
 });

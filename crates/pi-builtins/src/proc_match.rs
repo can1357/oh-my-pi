@@ -23,7 +23,12 @@ use brush_core::{ExecutionContext, ExecutionExitCode, ExecutionResult};
 use brush_core::openfiles::OpenFiles;
 use tokio_util::sync::CancellationToken;
 
-use crate::{host::ShellPaths, kill::signal_number, proc_snapshot};
+use crate::{
+	host::ShellPaths,
+	kill::signal_number,
+	proc_select::{parse_group_list, parse_i32_list, parse_terminal_list, parse_user_list},
+	proc_snapshot,
+};
 
 /// What a process-matching command does with the processes it selects.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -242,32 +247,99 @@ pub(crate) fn run<SE: brush_core::ShellExtensions>(
 							)?;
 						}
 					}
-					loop {
-						if processes
-							.iter()
-							.all(|process| process.status() == proc_snapshot::ProcessStatus::Exited)
-						{
-							break;
+					// `biased` keeps the old precedence: processes that are already gone
+					// report success even if cancellation is also pending.
+					if let Some(cancel_token) = context.cancel_token() {
+						tokio::select! {
+							biased;
+							() = wait_for_exits(&processes) => {},
+							() = cancel_token.cancelled() => {
+								return Ok(ExecutionExitCode::Interrupted.into());
+							},
 						}
-						if context.is_cancelled() {
-							return Ok(ExecutionExitCode::Interrupted.into());
-						}
-						if let Some(cancel_token) = context.cancel_token() {
-							tokio::select! {
-								() = tokio::time::sleep(Duration::from_millis(50)) => {},
-								() = cancel_token.cancelled() => {
-									return Ok(ExecutionExitCode::Interrupted.into());
-								},
-							}
-						} else {
-							tokio::time::sleep(Duration::from_millis(50)).await;
-						}
+					} else {
+						wait_for_exits(&processes).await;
 					}
 				},
 			}
 			Ok(ExecutionResult::success())
 		}
 	}
+}
+
+/// Resolves once every process in `processes` has exited.
+///
+/// Processes are awaited on kernel exit notifications where the platform has
+/// them (pidfds on Linux, process handles on Windows); only the ones that
+/// cannot be watched that way fall back to a 50 ms status poll.
+async fn wait_for_exits(processes: &[proc_snapshot::ProcInfo]) {
+	let polled = wait_for_watchable_exits(processes).await;
+	while polled
+		.iter()
+		.any(|process| process.status() != proc_snapshot::ProcessStatus::Exited)
+	{
+		tokio::time::sleep(Duration::from_millis(50)).await;
+	}
+}
+
+/// Waits on a pidfd per process and returns the processes that need polling.
+#[cfg(target_os = "linux")]
+async fn wait_for_watchable_exits(
+	processes: &[proc_snapshot::ProcInfo],
+) -> Vec<&proc_snapshot::ProcInfo> {
+	use tokio::io::{Interest, unix::AsyncFd};
+
+	let mut polled = Vec::new();
+	let mut watched = Vec::new();
+	for process in processes {
+		let Some(fd) = proc_snapshot::sys::open_pidfd(process.pid()) else {
+			polled.push(process);
+			continue;
+		};
+		// The pidfd names whoever owns the pid now. It is the selected process
+		// only if that process (matched by start time) is still alive after the
+		// open; otherwise it already exited and the pid may have been reused.
+		if process.status() == proc_snapshot::ProcessStatus::Exited {
+			continue;
+		}
+		match AsyncFd::with_interest(fd, Interest::READABLE) {
+			Ok(fd) => watched.push((process, fd)),
+			Err(_) => polled.push(process),
+		}
+	}
+	// A pidfd turns readable once its process has exited; readiness is never
+	// cleared, so awaiting them one after another is the same as awaiting all.
+	for (process, fd) in &watched {
+		if fd.readable().await.is_err() {
+			polled.push(process);
+		}
+	}
+	polled
+}
+
+/// Waits on each process's snapshot handle and returns the processes whose
+/// wait could not be registered, which need polling.
+#[cfg(windows)]
+async fn wait_for_watchable_exits(
+	processes: &[proc_snapshot::ProcInfo],
+) -> Vec<&proc_snapshot::ProcInfo> {
+	let mut polled = Vec::new();
+	// A process handle stays signalled once its process has exited, so
+	// awaiting them one after another is the same as awaiting all.
+	for process in processes {
+		if process.exited().await.is_err() {
+			polled.push(process);
+		}
+	}
+	polled
+}
+
+/// No exit notification primitive is wired up here; every process is polled.
+#[cfg(not(any(target_os = "linux", windows)))]
+async fn wait_for_watchable_exits(
+	processes: &[proc_snapshot::ProcInfo],
+) -> Vec<&proc_snapshot::ProcInfo> {
+	processes.iter().collect()
 }
 
 #[cfg(unix)]
@@ -752,136 +824,6 @@ fn select_processes(
 		selected.truncate(1);
 	}
 	Ok((selected, host))
-}
-
-fn parse_i32_list(value: &str, target: &mut Vec<i32>) -> std::result::Result<(), (u8, String)> {
-	for item in value.split(',') {
-		let parsed = item
-			.parse::<i32>()
-			.map_err(|_| (2, format!("invalid numeric selector '{item}'")))?;
-		target.push(parsed);
-	}
-	Ok(())
-}
-
-fn parse_user_list(value: &str, target: &mut Vec<u32>) -> std::result::Result<(), (u8, String)> {
-	for item in value.split(',') {
-		target.push(resolve_user(item).ok_or_else(|| (2, format!("unknown user '{item}'")))?);
-	}
-	Ok(())
-}
-
-fn parse_group_list(value: &str, target: &mut Vec<u32>) -> std::result::Result<(), (u8, String)> {
-	for item in value.split(',') {
-		target.push(resolve_group(item).ok_or_else(|| (2, format!("unknown group '{item}'")))?);
-	}
-	Ok(())
-}
-
-#[cfg(unix)]
-fn resolve_user(value: &str) -> Option<u32> {
-	use std::ffi::CString;
-	if let Ok(id) = value.parse() {
-		return Some(id);
-	}
-	let name = CString::new(value).ok()?;
-	let mut record = std::mem::MaybeUninit::<libc::passwd>::zeroed();
-	let mut result = std::ptr::null_mut();
-	let mut buffer = vec![0u8; 16 * 1024];
-	// SAFETY: all pointers refer to live, writable storage for this call.
-	let status = unsafe {
-		libc::getpwnam_r(
-			name.as_ptr(),
-			record.as_mut_ptr(),
-			buffer.as_mut_ptr().cast(),
-			buffer.len(),
-			&raw mut result,
-		)
-	};
-	if status != 0 || result.is_null() {
-		return None;
-	}
-	// SAFETY: a successful getpwnam_r call initialized `record`.
-	Some(unsafe { record.assume_init() }.pw_uid)
-}
-
-#[cfg(not(unix))]
-fn resolve_user(value: &str) -> Option<u32> {
-	value.parse().ok()
-}
-
-#[cfg(unix)]
-fn resolve_group(value: &str) -> Option<u32> {
-	use std::ffi::CString;
-	if let Ok(id) = value.parse() {
-		return Some(id);
-	}
-	let name = CString::new(value).ok()?;
-	let mut record = std::mem::MaybeUninit::<libc::group>::zeroed();
-	let mut result = std::ptr::null_mut();
-	let mut buffer = vec![0u8; 16 * 1024];
-	// SAFETY: all pointers refer to live, writable storage for this call.
-	let status = unsafe {
-		libc::getgrnam_r(
-			name.as_ptr(),
-			record.as_mut_ptr(),
-			buffer.as_mut_ptr().cast(),
-			buffer.len(),
-			&raw mut result,
-		)
-	};
-	if status != 0 || result.is_null() {
-		return None;
-	}
-	// SAFETY: a successful getgrnam_r call initialized `record`.
-	Some(unsafe { record.assume_init() }.gr_gid)
-}
-
-#[cfg(not(unix))]
-fn resolve_group(value: &str) -> Option<u32> {
-	value.parse().ok()
-}
-
-fn parse_terminal_list(
-	value: &str,
-	target: &mut Vec<Option<u64>>,
-	paths: &ShellPaths,
-) -> std::result::Result<(), (u8, String)> {
-	for item in value.split(',') {
-		if matches!(item, "?" | "-") {
-			target.push(None);
-		} else if let Some(id) = resolve_terminal(item, paths) {
-			target.push(Some(id));
-		} else if let Ok(id) = item.parse() {
-			target.push(Some(id));
-		} else {
-			return Err((2, format!("unknown terminal '{item}'")));
-		}
-	}
-	Ok(())
-}
-
-#[cfg(unix)]
-fn resolve_terminal(value: &str, paths: &ShellPaths) -> Option<u64> {
-	use std::path::{Path, PathBuf};
-	let virtual_path = pi_vfs::is_virtual_path(Path::new(value));
-	let primary = if value.starts_with('/') || virtual_path {
-		PathBuf::from(value)
-	} else {
-		Path::new("/dev").join(value)
-	};
-	let metadata = paths.fs().metadata(&primary);
-	let metadata = if virtual_path {
-		metadata
-	} else {
-		metadata.or_else(|_| paths.fs().metadata(Path::new("/dev").join(format!("tty{value}"))))
-	};
-	metadata.ok().and_then(|metadata| metadata.rdev())
-}
-
-#[cfg(not(unix))]
-fn resolve_terminal(_value: &str, _paths: &ShellPaths) -> Option<u64> {
-	None
 }
 
 fn parse_states(value: &str, target: &mut HashSet<char>) -> std::result::Result<(), (u8, String)> {

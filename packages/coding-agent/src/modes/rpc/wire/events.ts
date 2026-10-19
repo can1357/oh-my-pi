@@ -15,7 +15,13 @@ export const eventDefs = {
 	CacheWarmingOutcome: "'hit' | 'miss' | 'error' | 'aborted'",
 	NotifyType: "'info' | 'warning' | 'error'",
 
-	AgentStartEvent: { type: "'agent_start'" },
+	AgentStartEvent: {
+		type: "'agent_start'",
+		"resumedToolCallIds?": doc(
+			"string[]",
+			"Calls of an unpaired assistant tail a continued run executes before its first model request.",
+		),
+	},
 	AgentEndEvent: {
 		type: "'agent_end'",
 		messages: doc(
@@ -153,7 +159,18 @@ export const eventDefs = {
 		"Goal mode changed, by a host `goal` command or the agent's `goal` tool.",
 	),
 	QueueUpdateEvent: doc(
-		{ type: "'queue_update'", steering: "string[]", followUp: "string[]" },
+		{
+			type: "'queue_update'",
+			steering: "string[]",
+			followUp: "string[]",
+			liveSteered: absentAs(
+				doc(
+					"number.integer",
+					"Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.",
+				),
+				0,
+			),
+		},
 		"Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.",
 	),
 

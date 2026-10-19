@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import { resolveSessionLeafId } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("SessionManager usage statistics", () => {
 	const modelUsage = {
@@ -22,7 +25,13 @@ describe("SessionManager usage statistics", () => {
 	it("counts non-transcript model calls without adding conversation messages", () => {
 		const session = SessionManager.inMemory();
 
-		session.appendModelUsage(modelUsage, { sessionId: session.getSessionId(), parentId: session.getLeafId() });
+		const usageId = session.appendModelUsage(modelUsage, {
+			sessionId: session.getSessionId(),
+			parentId: session.getLeafId(),
+		});
+
+		if (usageId === undefined) throw new Error("Expected usage from the current owner to be recorded");
+		expect(session.getLeafId()).toBe(usageId);
 
 		expect(session.getUsageStatistics()).toMatchObject({
 			input: 11,
@@ -48,6 +57,148 @@ describe("SessionManager usage statistics", () => {
 		expect(session.getLeafId()).toBe(activeLeaf);
 		expect(session.getBranch().some(entry => entry.id === usageId)).toBe(false);
 		expect(session.getBranch(usageId).at(-1)).toMatchObject({ type: "model_usage", parentId: ownerParent });
+		expect(session.getEntry(usageId!)).toMatchObject({ type: "model_usage", activeLeafId: activeLeaf });
+		expect(resolveSessionLeafId(session.getEntries())).toBe(activeLeaf);
+	});
+
+	it("uses late usage metadata for default context replay", () => {
+		const session = SessionManager.inMemory();
+		const ownerParent = session.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		session.appendMessage({ role: "user", content: "successor", timestamp: 2 });
+
+		session.appendModelUsage(modelUsage, {
+			sessionId: session.getSessionId(),
+			parentId: ownerParent,
+		});
+
+		const context = buildSessionContext(session.getEntries());
+		expect(context.messages.map(message => message.role)).toEqual(["user", "user"]);
+		expect(context.messages.at(-1)).toMatchObject({ role: "user", content: "successor" });
+	});
+
+	it("uses a later session-exit entry after a late usage marker", () => {
+		const session = SessionManager.inMemory();
+		const ownerParent = session.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		session.appendMessage({ role: "user", content: "successor", timestamp: 2 });
+		session.appendModelUsage(modelUsage, {
+			sessionId: session.getSessionId(),
+			parentId: ownerParent,
+		});
+
+		const exitId = session.appendCustomEntry("session_exit", { reason: "dispose" });
+
+		expect(resolveSessionLeafId(session.getEntries())).toBe(exitId);
+		expect(buildSessionContext(session.getEntries()).messages.at(-1)).toMatchObject({
+			role: "user",
+			content: "successor",
+		});
+	});
+
+	it("keeps ordinary current-owner usage as the last active entry", () => {
+		const session = SessionManager.inMemory();
+		const ownerParent = session.appendMessage({ role: "user", content: "current owner", timestamp: 1 });
+
+		const usageId = session.appendModelUsage(modelUsage, {
+			sessionId: session.getSessionId(),
+			parentId: ownerParent,
+		});
+
+		if (usageId === undefined) throw new Error("Expected usage from the current owner to be recorded");
+		expect(session.getLeafId()).toBe(usageId);
+		expect(session.getBranch().at(-1)?.id).toBe(usageId);
+		expect(resolveSessionLeafId(session.getEntries())).toBe(usageId);
+	});
+
+	it("persists a cleared active leaf on late usage as explicit null", () => {
+		const session = SessionManager.inMemory();
+		const ownerParent = session.appendMessage({ role: "user", content: "owner", timestamp: 1 });
+		session.appendMessage({ role: "user", content: "successor", timestamp: 2 });
+		session.resetLeaf();
+
+		const usageId = session.appendModelUsage(modelUsage, {
+			sessionId: session.getSessionId(),
+			parentId: ownerParent,
+		});
+
+		expect(session.getEntry(usageId!)).toMatchObject({ type: "model_usage", activeLeafId: null });
+		expect(session.getLeafId()).toBeNull();
+		expect(session.getBranch()).toEqual([]);
+		expect(buildSessionContext(session.getEntries()).messages).toEqual([]);
+		expect(resolveSessionLeafId(session.getEntries())).toBeNull();
+	});
+
+	it("keeps the warm branch view on the restored leaf for replicated late usage", () => {
+		const session = SessionManager.inMemory();
+		const ownerParent = session.appendMessage({ role: "user", content: "owner", timestamp: 1 });
+		const successor = session.appendMessage({ role: "user", content: "successor", timestamp: 2 });
+		session.branch(ownerParent);
+		session.getBranch();
+
+		session.ingestReplicatedEntry({
+			type: "model_usage",
+			id: "replicated-usage",
+			parentId: ownerParent,
+			timestamp: "2026-10-13T10:00:00.000Z",
+			...modelUsage,
+			activeLeafId: successor,
+		});
+
+		expect(session.getLeafId()).toBe(successor);
+		expect(session.getBranch().map(entry => entry.id)).toEqual([ownerParent, successor]);
+	});
+
+	it("replays a dangling late-usage leaf to the newest real entry", async () => {
+		using tempDir = TempDir.createSync("@omp-dangling-usage-leaf-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		const ownerParent = session.appendMessage({ role: "user", content: "owner", timestamp: 1 });
+		const successor = session.appendMessage({ role: "user", content: "successor", timestamp: 2 });
+		session.ingestReplicatedEntry({
+			type: "model_usage",
+			id: "dangling-usage",
+			parentId: ownerParent,
+			timestamp: "2026-10-13T10:00:00.000Z",
+			...modelUsage,
+			activeLeafId: "removed-entry",
+		});
+		const entries = session.getEntries();
+		expect(resolveSessionLeafId(entries)).toBe(successor);
+		expect(buildSessionContext(entries).messages.at(-1)).toMatchObject({ content: "successor" });
+		expect(buildSessionContext(entries, "missing-entry").messages.at(-1)).toMatchObject({ content: "successor" });
+		await session.ensureOnDisk();
+		await session.flush();
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected the flushed session file");
+		await session.close();
+
+		const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
+			initialCwd: tempDir.path(),
+			suppressBreadcrumb: true,
+		});
+		try {
+			expect(reopened.getLeafId()).toBe(successor);
+			const next = reopened.appendMessage({ role: "user", content: "next", timestamp: 3 });
+			expect(reopened.getEntry(next)?.parentId).toBe(successor);
+		} finally {
+			await reopened.close();
+		}
+	});
+
+	it("forks from a late usage entry onto that entry, not its captured leaf", () => {
+		const session = SessionManager.inMemory();
+		const ownerParent = session.appendMessage({ role: "user", content: "owner", timestamp: 1 });
+		session.appendMessage({ role: "user", content: "successor", timestamp: 2 });
+		const usageId = session.appendModelUsage(modelUsage, {
+			sessionId: session.getSessionId(),
+			parentId: ownerParent,
+		});
+		if (!usageId) throw new Error("Expected late usage to be recorded");
+
+		session.createBranchedSession(usageId);
+
+		expect(session.getLeafId()).toBe(usageId);
+		expect(session.getBranch().map(entry => entry.id)).toEqual([ownerParent, usageId]);
+		const next = session.appendMessage({ role: "user", content: "next", timestamp: 3 });
+		expect(session.getEntry(next)?.parentId).toBe(usageId);
 	});
 
 	it("accumulates premium requests from assistant messages and task tool results", () => {

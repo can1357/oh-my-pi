@@ -3,7 +3,7 @@
  * (`rules/runtime/behavior.kdl`): provider/model heuristics that run before
  * or outside exact bundled-model lookup — responses routing, API routing,
  * quota tiers, plan requirements, model limits, roster and discovery-mode
- * exclusions, hosted defaults, and pricing peers.
+ * exclusions, hosted defaults, pricing peers, and per-role default models.
  */
 import { globMatch } from "./cascade";
 import rules from "./rules.json";
@@ -224,4 +224,12 @@ export function pricingPeerFor(
 	if (!rule) return undefined;
 	const alias = rule.aliases.find(candidate => candidate.model === model);
 	return { peers: rule.peers, peerId: alias?.peerId ?? model };
+}
+
+/**
+ * Built-in default model selector chains per agent role (`smol`, `slow`,
+ * `image`, …), most preferred first, in declaration order.
+ */
+export function roleDefaultModels(): Readonly<Record<string, readonly string[]>> {
+	return behavior.roleDefaults;
 }

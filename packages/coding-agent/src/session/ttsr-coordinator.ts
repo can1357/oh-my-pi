@@ -17,7 +17,13 @@ import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
 import { logger, prompt, relativePathWithinRoot, withTimeout } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
 import type { Settings } from "../config/settings";
-import { judgeRules, type TtsrManager, type TtsrMatchContext, type TtsrOutput } from "../export/ttsr";
+import {
+	judgeRules,
+	type TtsrCheckOptions,
+	type TtsrManager,
+	type TtsrMatchContext,
+	type TtsrOutput,
+} from "../export/ttsr";
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import ttsrWarningTemplate from "../prompts/system/ttsr-warning.md" with { type: "text" };
@@ -34,6 +40,9 @@ type TtsrContinueSkipReason =
 
 /** How long a finishing run waits for in-flight judgments; later verdicts still arrive as asides. */
 const JUDGED_SETTLE_TIMEOUT_MS = 5_000;
+/** Mid-stream checks may defer conditions that can span lines; the stream's end settles them. */
+const PARTIAL_CHECK: TtsrCheckOptions = { final: false };
+const FINAL_CHECK: TtsrCheckOptions = { final: true };
 
 interface TtsrContinueOptions {
 	source: string;
@@ -138,6 +147,7 @@ export class TtsrCoordinator {
 		let matchContext: TtsrMatchContext | undefined;
 		let streamingToolCall: ToolCall | undefined;
 		let delta: string | undefined;
+		let isFinal = false;
 		if (assistantEvent.type === "text_delta") {
 			matchContext = { source: "text" };
 			delta = assistantEvent.delta;
@@ -152,10 +162,20 @@ export class TtsrCoordinator {
 			streamingToolCall = assistantEvent.toolCall;
 			matchContext = this.#inspector.matchContext(streamingToolCall, assistantEvent.contentIndex);
 			delta = "";
+			isFinal = true;
+		} else if (
+			(assistantEvent.type === "text_end" || assistantEvent.type === "thinking_end") &&
+			// An empty block streamed nothing; a pending TTSR abort already discards this response.
+			assistantEvent.content.length > 0 &&
+			!this.#abortPending
+		) {
+			matchContext = { source: assistantEvent.type === "text_end" ? "text" : "thinking" };
+			delta = "";
+			isFinal = true;
 		}
 		if (!matchContext || delta === undefined) return false;
 		const targetMessageTimestamp = event.message.role === "assistant" ? event.message.timestamp : undefined;
-		const matches = this.#checkStream(delta, matchContext, streamingToolCall, assistantEvent.type === "toolcall_end");
+		const matches = this.#checkStream(delta, matchContext, streamingToolCall, isFinal);
 		if (matches.length > 0 && this.#handleMatches(matches, matchContext, targetMessageTimestamp)) return true;
 		return false;
 	}
@@ -584,18 +604,23 @@ export class TtsrCoordinator {
 		isFinal = false,
 	): Rule[] {
 		if (!this.#manager) return [];
+		const options = isFinal ? FINAL_CHECK : PARTIAL_CHECK;
 		const entries = this.#inspector.entries(toolCall);
 		if (entries) {
 			const matches: Rule[] = [];
 			for (const entry of entries) {
 				matches.push(
-					...this.#manager.checkSnapshot(entry.digest, this.#inspector.perFileContext(matchContext, entry.path)),
+					...this.#manager.checkSnapshot(
+						entry.digest,
+						this.#inspector.perFileContext(matchContext, entry.path),
+						options,
+					),
 				);
 			}
 			return matches;
 		}
 		const digest = this.#inspector.digest(toolCall);
-		if (digest !== undefined) return this.#manager.checkSnapshot(digest, matchContext);
+		if (digest !== undefined) return this.#manager.checkSnapshot(digest, matchContext, options);
 		// Tools without matcher hooks accumulate raw argument deltas. Providers
 		// that emit toolcall_start -> toolcall_end with no intermediate deltas
 		// (Cursor exec synthesis, OpenAI lossy-proxy fallback) leave that buffer
@@ -605,7 +630,7 @@ export class TtsrCoordinator {
 			const snapshot = typeof finalArgs === "string" ? finalArgs : JSON.stringify(finalArgs);
 			return this.#manager.checkSnapshot(snapshot, matchContext);
 		}
-		return this.#manager.checkDelta(delta, matchContext);
+		return this.#manager.checkDelta(delta, matchContext, options);
 	}
 
 	async #checkAstStream(matchContext: TtsrMatchContext, toolCall: ToolCall | undefined): Promise<Rule[]> {

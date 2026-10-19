@@ -27,7 +27,7 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 Task agents normalize into `AgentDefinition` (`src/task/types.ts`):
 
 - required `name`, `description`, and `systemPrompt`
-- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`
+- optional `tools`, `spawns`, prioritized `model` list, `thinkingLevel`, `output`, `blocking`, `structured`, `autoloadSkills`, `readSummarize`, `prewalk`, `advisor`
 - `source`: `"bundled" | "user" | "project"` (extension agents are tagged with their extension root's project/user level)
 - optional `filePath`
 
@@ -35,7 +35,7 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 
 - missing/non-string `name` or `description` => invalid (`null`), caller treats as parse failure
 - `main` and `sub` are reserved names (checked after trimming and lowercasing); definitions using them are invalid
-- `tools` accepts CSV or array; legacy tool aliases are normalized and `yield` is auto-added. An explicit `tools: []` therefore grants `yield`, not the default toolset.
+- `tools` accepts CSV or array; legacy tool aliases are normalized and mixed arrays retain their string entries. Omitted or YAML-null `tools` selects the default built-in toolset. Any other declaration with no tool names (including `tools: []`, empty CSV, or malformed scalar/array values) selects no built-ins. Structured children still receive the required `yield` tool; MCP, extension, and custom tools remain additive.
 - `spawns` accepts `*`, CSV, or array
 - backward-compat behavior: if `spawns` missing but `tools` includes `task`, `spawns` becomes `*`
 - `output` is passed through as opaque schema data
@@ -43,6 +43,7 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 - `model` accepts one selector, CSV, or an array. Entries are tried in order after role aliases are expanded.
 - `thinking-level` / `thinking` selects the agent's configured effort. When `task.enableEffort` (default `false`) exposes it, a task item's coarse `effort` (`lo`, `med`, `hi`) takes precedence at launch. OMP maps that hint to the selected model's lowest, middle, or highest supported effort, then clamps it to `task.maxEffort` (default `max`). The ceiling is carried across retry-fallback model switches. If the selected model has no supported effort at or below the ceiling, the spawn fails; models without a controllable effort surface instead fall back to their normal selector.
 - `blocking: true` makes the parent wait for that agent even when async task execution is enabled
+- `structured: true` keeps structured results for that agent while `task.structured` (default `false`) is off: its task spawns get the `yield` tool and resolve their output schema exactly as with `task.structured: true` (see [structured-output precedence](#model-and-structured-output-precedence)). With `task.structured` on, the field changes nothing; `false` or absent follows the setting. The caller-side `outputSchema`/`schemaMode` task parameters stay hidden while the setting is off. The decision is made from the resolved agent in `resolveEffectiveSubagentPolicy()`, so plan-mode spawns keep it, and cold revival restores `yield` from the child's persisted tool list.
 - `autoloadSkills` names skills from the parent session to inject before the first child prompt; unknown names are ignored
 - `prewalk: true` starts the subagent on its resolved model and hands off to the default prewalk target (the `smol` role) at its first edit/write, exactly like the session-level `--prewalk`; a string value (e.g. `prewalk: "@smol"` or `prewalk: "openai/gpt-5-mini"`) picks a custom target. The `task.agentPrewalk` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its prewalk strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`). An unavailable target is skipped instead of failing the spawn. A resolved target is skipped only when both its model identity and its effective thinking mode/level match the starting selection after model clamping; a same-model effort downgrade is a real hand-off and still arms and switches at the first edit/write.
 - `advisor: true` pairs spawned sessions of the agent with an advisor running the model resolved for the `advisor` role; a string value (e.g. `advisor: "deepseek/deepseek-v4-flash"` or `advisor: "@smol:high"`) sets an explicit advisor model pattern (optional `:level` suffix), applied as the spawned session's `modelRoles.advisor`. The `task.agentAdvisor` settings record (agent name → `"on"` / `"off"` / pattern, configured per agent from the `/agents` hub via its advisor strip) overrides the frontmatter. Resolution happens in `runSubprocess` (`src/task/executor.ts`); subagents default to no advisor, and the effective opt-in is persisted in `session_init` so cold revival restores it.
@@ -222,18 +223,11 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 For task dispatch, model precedence is:
 
-1. the call's own `model` selector (task item / flat call, or eval `agent(model=…)`)
-2. `task.agentModelOverrides[agentName]`
-3. the agent frontmatter's prioritized `model` list
-4. the parent's active model, then its configured/default model fallback
+1. `task.agentModelOverrides[agentName]`
+2. the agent frontmatter's prioritized `model` list
+3. the parent's active model, then its configured/default model fallback
 
-Role aliases in any of the first three sources are expanded through `modelRoles`, except `@default`
-(equivalently `*`), which names step 4 itself: it resolves to the parent's active model rather than
-to `modelRoles.default`, so a child asked for `@default` runs whatever its parent switched to. A
-per-call `model` is validated before dispatch: the ambiguous literals `default`/`inherit` are
-rejected in favor of an explicit `@default`, and a selector that expands to nothing or matches no
-available model fails the spawn naming the selector rather than silently falling through to a
-lower-precedence source.
+Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
 
 After policy resolution, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block the spawn or replace the resolved model patterns; a routing note is carried into progress metadata.
 
@@ -243,6 +237,12 @@ Compaction triggers are separate from model and service-tier selection: an exact
 `task.agentCompactionThresholdOverrides[agentName]` entry (`90000` or `"80%"`) replaces the
 `compaction.threshold*` settings for that agent only; agents without an entry, including agents it
 spawns, use the main session's thresholds. See [Settings](./settings.md#context-compaction-and-memory).
+
+Request budgets follow the same exact-name pattern: a `task.agentSoftRequestBudget[agentName]` entry
+(a non-negative integer) is that agent's soft request budget, replacing both `task.softRequestBudget`
+and the bundled scout/sonic ceiling, so it can raise a budget the global setting can only lower; `0`
+disables that agent's guard, and `null` clears an entry from a lower settings layer. Agents without an
+entry keep the global setting capped by their bundled ceiling. See [task](./tools/task.md#limits--caps).
 
 Service-tier precedence is independent of model selection: an exact, case-sensitive
 `task.agentServiceTierOverrides[agentName]` entry overrides `tier.subagent`; an absent entry preserves
@@ -257,6 +257,25 @@ parked agent revived after a restart keeps its per-agent tier instead of re-deri
 the same executor keep `tier.subagent`. Service tiers are configuration-only; agent frontmatter and
 the task/eval wire formats do not expose a tier field or automatic Fast policy.
 
+Account selection is independent of model and service-tier selection: an exact, case-sensitive
+`task.agentAccountPools[agentName]` entry maps provider ids to OAuth identity keys (the `identityKey`
+values broker [client account pools](./auth-broker-gateway.md#client-account-pools-routing-not-authorization)
+use, such as `email:<address>|org:<id>` for Anthropic; [`omp usage accounts`](./cli-reference.md)
+lists them). For each listed provider the child authenticates
+only with those accounts: ranking, the parent's copied account affinity, restored pins, fallback
+passes, credential rotation, and saved-reset restores stay inside the pool, and runtime,
+environment, and stored API keys
+are not used; a `models.yml` `apiKey` for the provider fails the request instead of sending a pooled
+token to that endpoint. When no pooled account can serve, the request fails with `No API key for
+provider: … restricted to its OAuth account pool` instead of borrowing another account; an empty
+list allows no account. Saved resets about to expire are still salvaged on every account, because
+salvage serves the account that holds the reset. Pools do not pick models, so model and retry-fallback policy still decide
+which provider the child calls. The pool covers every key lookup the agent makes, whatever provider
+session id it carries: fresh or reset sessions, advisors, title generation, skill compression, and
+subagents it spawns without their own entry (an entry of their own replaces it). Vibe workers take
+the pool from their first turn, and a parked agent revived in the same process or after a restart
+takes the live entry for its agent name. A custom SDK `getApiKey` resolver bypasses pools.
+
 Runtime output schema precedence is:
 
 1. the task item's explicit `outputSchema`
@@ -264,6 +283,8 @@ Runtime output schema precedence is:
 3. parent session `outputSchema`
 
 The task item's optional `schemaMode` overrides the parent session mode; the default is `permissive`.
+
+These schemas apply only to structured runs. With `task.structured` off (the default), task spawns get no output schema and no `yield` tool and return their final assistant message, except for agents whose definition sets `structured: true`; those resolve the agent `output`, then the parent session schema, because the task item's `outputSchema` is not exposed. Eval `agent()` and workpool spawns are always structured.
 
 Explicit caller schemas are validated during preflight in both modes. Agent/session schemas are preflight-validated when the effective mode is `strict`. Invalid schemas fail before child execution.
 

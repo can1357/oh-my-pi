@@ -10,6 +10,26 @@ import {
 import goldens from "./fixtures/marked/goldens.json";
 
 describe("marked compatibility", () => {
+	test("treats backtick-containing info strings as prose without interrupting a paragraph", () => {
+		const source = "lead\n``` `literal`\nprose\n";
+		const tokens = Lexer.lex(source);
+		expect(tokens.map(token => token.type)).toEqual(["paragraph"]);
+		expect(tokens[0].raw).toBe(source);
+		expect(Lexer.lex("~~~ `literal`\ncode\n~~~\n")[0]).toMatchObject({
+			type: "code",
+			lang: "`literal`",
+			text: "code",
+		});
+	});
+
+	test("accepts Unicode separators inside a fence info string", () => {
+		expect(Lexer.lex("```lang\u2028suffix\ncode\n```\n")[0]).toMatchObject({
+			type: "code",
+			lang: "lang\u2028suffix",
+			text: "code",
+		});
+	});
+
 	for (const golden of goldens) {
 		test(`matches marked tokens and HTML for ${golden.name}`, () => {
 			expect([...Lexer.lex(golden.source)]).toEqual(golden.tokens);

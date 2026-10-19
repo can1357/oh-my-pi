@@ -28,7 +28,7 @@ import {
 import * as AIError from "../error";
 import { AuthBrokerClient, AuthBrokerError } from "./client";
 import { type AuthBrokerAccountPool, RemoteAuthCredentialStore } from "./remote-store";
-import { readAuthBrokerSnapshotCache, writeAuthBrokerSnapshotCache } from "./snapshot-cache";
+import { readAuthBrokerSnapshotCache, scheduleAuthBrokerSnapshotCacheWrite } from "./snapshot-cache";
 import { DEFAULT_SNAPSHOT_CACHE_TTL_MS, type SnapshotResponse } from "./types";
 
 export interface AuthBrokerClientConfig {
@@ -396,16 +396,17 @@ export async function openAuthCredentialStore(
 		const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
 		const cachePath = options.cachePath ?? getAuthBrokerSnapshotCachePath();
 		const ttlMs = resolveSnapshotTtlMs();
+		// Coalesced fire-and-forget: the first snapshot lands immediately (so a
+		// fresh boot seeds the cache), bursts collapse into one trailing write,
+		// and anything pending is flushed on shutdown.
 		const persist =
 			ttlMs > 0
 				? (snapshot: SnapshotResponse): void => {
-						void writeAuthBrokerSnapshotCache({
+						scheduleAuthBrokerSnapshotCacheWrite({
 							path: cachePath,
 							token: brokerConfig.token,
 							url: brokerConfig.url,
 							snapshot,
-						}).catch(error => {
-							logger.debug("auth-broker snapshot cache write failed", { error: String(error) });
 						});
 					}
 				: undefined;

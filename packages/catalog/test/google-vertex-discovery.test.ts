@@ -167,7 +167,7 @@ describe("google-vertex model catalog", () => {
 		// Flash/Pro siblings accept 65536 on the same endpoint. The clamp is
 		// owned by the google-vertex limits-patch rule, so the contract is
 		// proven on representative specs through buildModel instead of the
-		// bundled snapshot.
+		// bundled snapshot, which drops the line once upstream retires it.
 		const vertexLite = buildModel(geminiSpec("google-vertex", "google-vertex", "gemini-2.5-flash-lite"));
 		expect(vertexLite.maxTokens).toBe(65_535);
 		expect(buildModel(geminiSpec("google-vertex", "google-vertex", "gemini-2.5-flash")).maxTokens).toBe(65_536);
@@ -178,15 +178,12 @@ describe("google-vertex model catalog", () => {
 		// Rows cached before the clamp must not resurrect the rejected 65536.
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-google-lite25-cap-"));
 		try {
-			const bundled = getBundledModels("google-vertex");
-			const lite = bundled.find(model => model.id === "gemini-2.5-flash-lite");
-			if (!lite) throw new Error("google-vertex Gemini 2.5 Flash Lite missing from bundled catalog");
-			const stale = { ...lite, maxTokens: 65_536 };
+			const stale = { ...vertexLite, maxTokens: 65_536 };
 			const cacheDbPath = path.join(tempDir, "google-vertex.db");
 			writeModelCache("google-vertex", Date.now(), [stale], true, "merge-v3:pre-lite25-cap", cacheDbPath);
 
 			const result = await resolveProviderModels(
-				{ ...googleVertexModelManagerOptions(), staticModels: bundled, cacheDbPath },
+				{ ...googleVertexModelManagerOptions(), staticModels: [vertexLite], cacheDbPath },
 				"offline",
 			);
 			expect(result.models.find(model => model.id === "gemini-2.5-flash-lite")?.maxTokens).toBe(65_535);

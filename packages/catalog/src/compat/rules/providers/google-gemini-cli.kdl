@@ -2,6 +2,7 @@
 
 provider "google-gemini-cli" {
 	default-model "gemini-3.1-pro-preview"
+	image-count-budget 200
 
 	class "gemini" {
 		// Cloud Code Assist rejects an unsigned first function call; the bypass

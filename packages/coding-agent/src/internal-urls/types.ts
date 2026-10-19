@@ -68,7 +68,7 @@ export type SchemeSelectors = "lines" | "none" | "opaque";
 /**
  * Mutation class of a writable scheme; drives plan-mode and device-only `write` gates.
  * - `workspace`: mutates user/external state; blocked in plan mode and device-only sessions.
- * - `sandbox`: session scratch space (local://); allowed in plan mode, and in device-only sessions while plan mode is active.
+ * - `sandbox`: session scratch space (local://); allowed in plan mode and device-only sessions.
  * - `coordination`: peer messaging (agent://); always allowed. {@link SchemeWritePolicy.cancels} grants the same per URL.
  * - `device`: tool-device dispatch (xd://); always allowed, the device enforces its own policy.
  */
@@ -139,6 +139,8 @@ export interface LocateOptions {
 	directory?: boolean;
 	/** Return the path even when the entry does not exist yet (write/bash targets). Never creates anything. */
 	create?: boolean;
+	/** The caller needs a local file (`%load`, plan-mode write checks): report a miss now instead of deferring it to a remote resolve. */
+	localOnly?: boolean;
 }
 
 /**
@@ -196,6 +198,8 @@ export interface InternalResource {
 	 * resources. Mutable resources (e.g. local://) behave like editable files.
 	 */
 	immutable?: boolean;
+	/** Overrides {@link SchemeSpec.unbounded} for this resource (an MCP resource read through `skill://`). */
+	unbounded?: boolean;
 	/**
 	 * True when the resource is a directory listing rather than file content.
 	 * `search` refuses to grep such a resource when it has no `sourcePath` — a
@@ -268,6 +272,12 @@ export interface ResolveContext {
 	 * as a second exact identity alongside {@link sessionFile}.
 	 */
 	sessionId?: string;
+	/**
+	 * Source artifacts dir of a seance caller (editor completion binding).
+	 * History completions may use this scalar without constructing a tool
+	 * session; tool resolution reads {@link session}.seanceSourceArtifactsDir.
+	 */
+	seanceSourceArtifactsDir?: string;
 	/** Registry that owns the calling session; defaults to the process-wide registry. */
 	agentRegistry?: AgentRegistry;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */

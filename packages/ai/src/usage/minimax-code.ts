@@ -201,7 +201,14 @@ async function fetchMiniMaxCodeUsage(params: UsageFetchParams, ctx: UsageFetchCo
 
 	try {
 		const configuredBaseUrl = params.baseUrl?.trim();
-		const baseUrl = configuredBaseUrl ? configuredBaseUrl.replace(/\/+$/, "").replace(/\/v1$/, "") : INTL_BASE_URL;
+		// Token Plan base URLs may point at the OpenAI (`/v1`) or Anthropic (`/anthropic`, `/anthropic/v1`)
+		// route; the quota endpoint lives at the host root.
+		const baseUrl = configuredBaseUrl
+			? configuredBaseUrl
+					.replace(/\/+$/, "")
+					.replace(/\/v1$/, "")
+					.replace(/\/anthropic$/, "")
+			: INTL_BASE_URL;
 		const response = await ctx.fetch(`${baseUrl}${REMAINS_PATH}`, {
 			headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
 			signal: params.signal,

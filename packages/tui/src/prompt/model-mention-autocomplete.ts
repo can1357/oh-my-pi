@@ -5,9 +5,7 @@ import { modelMentionDisplayName } from "./model-mention-syntax";
 import type {
 	buildSearchAffinity as BuildSearchAffinity,
 	ModelBrowserItem,
-	rankModelItems as RankModelItems,
-	SearchAffinity,
-	SessionModelScope,
+	ModelItemRanker as ModelItemRankerClass,
 	SessionModelScopeCache as SessionModelScopeCacheClass,
 } from "../overlays/model-browser";
 import { theme } from "../theme/theme";
@@ -21,7 +19,7 @@ export type ModelMentionCandidateSource = (query: string) => ReadonlyArray<Model
 interface ModelBrowserModules {
 	SessionModelScopeCache: typeof SessionModelScopeCacheClass;
 	buildSearchAffinity: typeof BuildSearchAffinity;
-	rankModelItems: typeof RankModelItems;
+	ModelItemRanker: typeof ModelItemRankerClass;
 }
 
 /** Synchronous first-use boundary for the interactive model browser implementation. */
@@ -80,7 +78,7 @@ export function applyModelMentionCompletion(
 
 /**
  * Create a session-scoped model candidate lookup using picker ordering. The
- * scope and search affinity are reused across queries until their inputs change.
+ * scope and its prepared ranker are reused across queries until their inputs change.
  */
 export function createModelMentionSource(host: {
 	source: ModelBrowserSource;
@@ -88,20 +86,22 @@ export function createModelMentionSource(host: {
 	scopedModels: () => ReadonlyArray<Model>;
 }): ModelMentionCandidateSource {
 	let scopeCache: SessionModelScopeCacheClass | undefined;
-	let affinityScope: SessionModelScope | undefined;
-	let affinityProviderOrder: readonly string[] | undefined;
-	let affinity: SearchAffinity | undefined;
+	let ranker: ModelItemRankerClass | undefined;
+	let rankerProviderOrder: readonly string[] | undefined;
 	return query => {
-		const { SessionModelScopeCache, buildSearchAffinity, rankModelItems } = loadModelBrowser();
+		const { SessionModelScopeCache, buildSearchAffinity, ModelItemRanker } = loadModelBrowser();
 		scopeCache ??= new SessionModelScopeCache(host.source, host.registry);
 		const scope = scopeCache.get(host.scopedModels());
 		if (!query.trim()) return scope.items;
 		const providerOrder = host.source.modelProviderOrder;
-		if (!affinity || affinityScope !== scope || affinityProviderOrder !== providerOrder) {
-			affinity = buildSearchAffinity(providerOrder, scope.roles, scope.mruOrder);
-			affinityScope = scope;
-			affinityProviderOrder = providerOrder;
+		if (ranker?.items !== scope.items || rankerProviderOrder !== providerOrder) {
+			ranker = new ModelItemRanker(scope.items, {
+				roles: scope.roles,
+				mruOrder: scope.mruOrder,
+				affinity: buildSearchAffinity(providerOrder, scope.roles, scope.mruOrder),
+			});
+			rankerProviderOrder = providerOrder;
 		}
-		return rankModelItems(query, scope.items, { roles: scope.roles, mruOrder: scope.mruOrder, affinity });
+		return ranker.rank(query);
 	};
 }

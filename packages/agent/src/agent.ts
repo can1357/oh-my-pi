@@ -23,6 +23,7 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -40,7 +41,7 @@ import {
 import type { AppendOnlyContextManager } from "./append-only-context";
 import { isProviderRefusalMessage } from "./replay-policy";
 import { SentToolDefinitions } from "./sent-tool-definitions";
-import { Tokenizer, tokenizerEncodingForModel } from "./tokenizer";
+import { Tokenizer } from "./tokenizer";
 import {
 	createAdditionalContextMessage,
 	joinAdditionalContext,
@@ -59,6 +60,7 @@ import type {
 	AgentTurnEndContext,
 	AsideMessage,
 	PrepareQueuedMessages,
+	QueuedMessageQueue,
 	SpeculativeToolExecutionConfig,
 	StreamFn,
 	ToolCallContext,
@@ -384,7 +386,12 @@ interface CursorToolResultEntry {
 	additionalContext?: string;
 }
 
-type QueuedMessageQueue = "steering" | "followUp";
+interface LiveSteeredEntry {
+	message: AgentMessage;
+	controller: AbortController | undefined;
+	/** Context preparation committed for the batch, carried by its last adopted entry. Never requeued. */
+	additional?: readonly AgentMessage[];
+}
 
 interface QueuedMessageClaim {
 	messages: AgentMessage[];
@@ -420,16 +427,20 @@ export class Agent {
 	 * transcript has not recorded yet, whether or not the provider accepted it. Kept apart from
 	 * {@link #queuedMessageDeliveries}: the loop drops it on abort instead of recording it, so queue
 	 * replacement must not drop it too; the run's end requeues whatever it did not record, and
-	 * {@link withdrawLiveSteering} takes it back ahead of an abort.
+	 * {@link withdrawUndeliveredQueuedMessages} takes it back ahead of an abort.
 	 */
-	#liveSteered: { message: AgentMessage; controller: AbortController | undefined }[] = [];
-	/** Dequeued originals remain recoverable until their transcript events arrive. */
+	#liveSteered: LiveSteeredEntry[] = [];
+	/** Dequeued originals remain recoverable until their transcript events arrive. `additional` is
+	 *  the context preparation appended after them, which the transcript records with them. */
 	#queuedMessageDeliveries = new Set<{
 		queue: QueuedMessageQueue;
 		controller: AbortController | undefined;
 		messages: AgentMessage[];
 		next: number;
+		additional: readonly AgentMessage[];
 	}>();
+	/** Messages {@link withdrawUndeliveredQueuedMessages} took back, keyed to the run that must not record them. */
+	#withdrawnMessages = new WeakMap<AgentMessage, AbortController>();
 	#steeringWaiters = new Set<() => void>();
 	#queuedMessageGrouping?: (previous: AgentMessage, next: AgentMessage) => boolean;
 
@@ -441,6 +452,7 @@ export class Agent {
 	#promptCacheKey?: string;
 	#metadata?: Record<string, unknown>;
 	#metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
+	#modelResolver?: (model: Model) => Model;
 	#providerSessionState?: Map<string, ProviderSessionState>;
 	#thinkingBudgets?: ThinkingBudgets;
 	#temperature?: number;
@@ -484,13 +496,14 @@ export class Agent {
 	#onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 	#onBeforeYield?: () => Promise<void> | void;
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
+	#onModelCallSystemPrompt?: (systemPrompt: string[]) => void;
 	#beforeModelCall?: AgentBeforeModelCall;
 	#additionalBeforeModelCalls = new Set<AgentBeforeModelCall>();
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
 	#beforeQueuedMessageDequeueHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
-	#beforeModelCallHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
+	#beforeModelCallHooks = new Set<(signal: AbortSignal | undefined, context: AgentContext) => Promise<void> | void>();
 
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
 	#cursorToolResultBuffer: CursorToolResultEntry[] = [];
@@ -526,6 +539,11 @@ export class Agent {
 	 * are queued for the next boundary.
 	 */
 	hasBackgroundCompletions?: AgentLoopConfig["hasBackgroundCompletions"];
+	/**
+	 * Hook that peeks whether a passive aside is queued for the next boundary;
+	 * ends an interruptible wait without interrupting other tools.
+	 */
+	hasQueuedAsides?: AgentLoopConfig["hasQueuedAsides"];
 
 	constructor(opts: AgentOptions = {}) {
 		this.#state = { ...this.#state, ...opts.initialState };
@@ -831,21 +849,32 @@ export class Agent {
 
 	/**
 	 * Tokenizer for the active model. The instance is replaced whenever the
-	 * active model's encoding changes (see {@link setModel}), so callers must
-	 * not cache it across model switches.
+	 * active model's encoding, image or thinking-replay pricing, or
+	 * replayed-reasoning reader changes (see {@link setModel}), or its Responses
+	 * session turns cold or warm, so callers must not cache it across model
+	 * switches or requests.
 	 */
 	get tokenizer(): Tokenizer {
+		// The provider warms or closes a session inside a request, so the replay
+		// state is read here rather than only on model switches.
+		const model = this.#state.model;
+		if (
+			openAIResponsesReplaysNativeHistory(model, this.#providerSessionState) !== this.#tokenizer.nativeHistoryReplay
+		) {
+			this.#syncTokenizer(model);
+		}
 		return this.#tokenizer;
 	}
 
 	/**
-	 * Swap the tokenizer only when the encoding actually changes, so the warm
-	 * per-message memo survives same-encoding model switches.
+	 * Swap the tokenizer only when the encoding, image or thinking-replay
+	 * pricing, replayed-reasoning reader or native-history replay state
+	 * actually changes, so the warm
+	 * per-message memo survives same-pricing model switches.
 	 */
 	#syncTokenizer(model: Model | null | undefined): void {
-		if (tokenizerEncodingForModel(model) !== this.#tokenizer.encoding) {
-			this.#tokenizer = new Tokenizer(model);
-		}
+		const options = { nativeHistoryReplay: openAIResponsesReplaysNativeHistory(model, this.#providerSessionState) };
+		if (!this.#tokenizer.countsAlike(model, options)) this.#tokenizer = new Tokenizer(model, options);
 	}
 
 	get appendOnlyContext(): AppendOnlyContextManager | undefined {
@@ -917,7 +946,8 @@ export class Agent {
 	}
 
 	/** Register a listener notified after any steering/follow-up queue mutator
-	 *  (enqueue, dequeue-on-delivery, clear, restore) runs. Internal-only signal —
+	 *  (enqueue, dequeue-on-delivery, clear, restore, live-steering adoption,
+	 *  withdrawal, and landing in the transcript) runs. Internal-only signal —
 	 *  the queue itself has no concept of display filtering — so listeners
 	 *  recompute their own snapshot from `peekSteeringQueue()`/`peekFollowUpQueue()`
 	 *  (or a higher-level view) on notification. */
@@ -933,15 +963,18 @@ export class Agent {
 		return () => this.#beforeQueuedMessageDequeueHooks.delete(registration);
 	}
 
-	/** Register an independently removable hook that runs immediately before each model call. */
-	addBeforeModelCallHook(hook: (signal?: AbortSignal) => Promise<void> | void): () => void {
-		const registration = (signal?: AbortSignal) => hook(signal);
+	/** Register an independently removable hook that runs immediately before each model call, with the
+	 *  loop's live context (mutating `context.messages` changes what this and later calls send). */
+	addBeforeModelCallHook(
+		hook: (signal: AbortSignal | undefined, context: AgentContext) => Promise<void> | void,
+	): () => void {
+		const registration = (signal: AbortSignal | undefined, context: AgentContext) => hook(signal, context);
 		this.#beforeModelCallHooks.add(registration);
 		return () => this.#beforeModelCallHooks.delete(registration);
 	}
 
-	async #runBeforeModelCallHooks(signal?: AbortSignal): Promise<void> {
-		for (const hook of this.#beforeModelCallHooks) await hook(signal);
+	async #runBeforeModelCallHooks(signal: AbortSignal | undefined, context: AgentContext): Promise<void> {
+		for (const hook of this.#beforeModelCallHooks) await hook(signal, context);
 	}
 
 	async #runBeforeQueuedMessageDequeueHooks(signal?: AbortSignal): Promise<void> {
@@ -967,7 +1000,7 @@ export class Agent {
 		if (messages.length === 0) return messages;
 		const runController = this.#abortController;
 		if (!prepare) {
-			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0 });
+			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0, additional: [] });
 			return messages;
 		}
 
@@ -975,7 +1008,7 @@ export class Agent {
 		this.#queuedMessageClaims[queue] = claim;
 		const preparationSignal = AbortSignal.any([signal, claim.controller.signal]);
 		try {
-			const preparation = await prepare(messages, preparationSignal);
+			const preparation = await prepare(messages, preparationSignal, queue);
 			signal.throwIfAborted();
 			if (preparationSignal.aborted || this.#queuedMessageClaims[queue] !== claim) return [];
 			const additional = preparation?.commit();
@@ -986,7 +1019,13 @@ export class Agent {
 				throw new DOMException("Queued message preparation cancelled", "AbortError");
 			}
 			delete this.#queuedMessageClaims[queue];
-			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0 });
+			this.#queuedMessageDeliveries.add({
+				queue,
+				controller: runController,
+				messages,
+				next: 0,
+				additional: additional ?? [],
+			});
 			return additional?.length ? [...messages, ...additional] : messages;
 		} catch (error) {
 			if (signal.aborted) throw error;
@@ -1044,30 +1083,61 @@ export class Agent {
 
 	/** Move steering live steering took out of the queue-delivery records into {@link #liveSteered}. */
 	#adoptLiveSteering(taken: readonly AgentMessage[]): void {
+		let adopted = false;
 		for (const delivery of this.#queuedMessageDeliveries) {
 			const pending = delivery.messages.slice(delivery.next);
 			const kept = pending.filter(message => !taken.includes(message));
 			if (kept.length === pending.length) continue;
+			let last: LiveSteeredEntry | undefined;
+			adopted = true;
 			for (const message of pending) {
-				if (taken.includes(message)) this.#liveSteered.push({ message, controller: delivery.controller });
+				if (!taken.includes(message)) continue;
+				last = { message, controller: delivery.controller };
+				this.#liveSteered.push(last);
 			}
 			if (kept.length === 0) {
+				// The delivery record goes away; keep its context withdrawable with the adopted batch.
+				if (last && delivery.additional.length > 0) last.additional = delivery.additional;
 				this.#queuedMessageDeliveries.delete(delivery);
 			} else {
 				delivery.messages = kept;
 				delivery.next = 0;
 			}
 		}
+		// The adopted messages move into #liveSteered, which queue snapshots
+		// (peekLiveSteeredMessages) count as still pending; listeners must hear
+		// about the swap or their queue view goes stale for the rest of the turn.
+		if (adopted) this.#emitQueueChanged();
 	}
 
 	/**
-	 * Take back live-steered messages ahead of an abort (Esc restores them to the editor):
-	 * the aborted run then neither records nor requeues them.
+	 * Take back dequeued input the transcript has not recorded yet, ahead of an abort (Esc restores
+	 * it to the editor): steering live steering took for the in-flight response, then each batch
+	 * dequeued for the next model call, oldest first. The aborted run then neither records it (or
+	 * the context prepared for it) nor requeues it.
 	 */
-	withdrawLiveSteering(): AgentMessage[] {
-		const messages = this.peekLiveSteeredMessages();
+	withdrawUndeliveredQueuedMessages(): { steering: AgentMessage[]; followUp: AgentMessage[] } {
+		const withdrawn: Record<QueuedMessageQueue, AgentMessage[]> = { steering: [], followUp: [] };
+		const suppress = (message: AgentMessage, controller: AbortController | undefined) => {
+			if (controller) this.#withdrawnMessages.set(message, controller);
+		};
+		for (const { message, controller, additional } of this.#liveSteered) {
+			withdrawn.steering.push(message);
+			suppress(message, controller);
+			for (const context of additional ?? []) suppress(context, controller);
+		}
+		// Every snapshot counts live-steered messages as pending, so clearing
+		// them is a queue change even when the caller re-queues them right after.
+		const hadLiveSteered = this.#liveSteered.length > 0;
 		this.#liveSteered = [];
-		return messages;
+		for (const delivery of this.#queuedMessageDeliveries) {
+			const pending = delivery.messages.slice(delivery.next);
+			withdrawn[delivery.queue].push(...pending);
+			for (const message of [...pending, ...delivery.additional]) suppress(message, delivery.controller);
+		}
+		this.#queuedMessageDeliveries.clear();
+		if (hadLiveSteered) this.#emitQueueChanged();
+		return withdrawn;
 	}
 
 	/** Steering live steering took for the streaming response; the transcript records it once
@@ -1101,6 +1171,11 @@ export class Agent {
 		this.#onTurnEnd = fn;
 	}
 
+	/** Called with the exact system prompt each model call is built from, after before-model-call hooks. */
+	setOnModelCallSystemPrompt(fn: ((systemPrompt: string[]) => void) | undefined): void {
+		this.#onModelCallSystemPrompt = fn;
+	}
+
 	/**
 	 * Install or replace the host pre-model-call gate; pass `undefined` to
 	 * remove it. Gates are sampled when a run starts: installing the first
@@ -1126,7 +1201,8 @@ export class Agent {
 	/**
 	 * Provide a source of non-interrupting "aside" messages (e.g. background-job
 	 * completions, late LSP diagnostics) drained at each step boundary. Never
-	 * aborts in-flight tools. See `AgentLoopConfig.getAsideMessages`.
+	 * aborts foreground tools; an interruptible `wait` may end early through the
+	 * peek hooks. See `AgentLoopConfig.getAsideMessages`.
 	 */
 	setAsideMessageProvider(fn: (() => AsideMessage[] | Promise<AsideMessage[]>) | undefined): void {
 		this.#asideMessageProvider = fn;
@@ -1159,8 +1235,20 @@ export class Agent {
 	}
 
 	setModel(model: Model) {
-		this.#state.model = model;
-		this.#syncTokenizer(model);
+		// Sessions may start with no model selected (`initialState.model: undefined`).
+		const resolved = this.#modelResolver && model ? this.#modelResolver(model) : model;
+		this.#state.model = resolved;
+		this.#syncTokenizer(resolved);
+	}
+
+	/**
+	 * Route every model this agent adopts through `resolver` (e.g. to fit a
+	 * shared catalog row to this agent's own settings), starting with the
+	 * current one; `undefined` adopts models as given from now on.
+	 */
+	setModelResolver(resolver: ((model: Model) => Model) | undefined): void {
+		this.#modelResolver = resolver;
+		if (resolver && this.#state.model) this.setModel(this.#state.model);
 	}
 
 	setThinkingLevel(l: Effort | undefined) {
@@ -1271,6 +1359,9 @@ export class Agent {
 		const live = this.#liveSteered.findIndex(entry => entry.message === m);
 		if (live >= 0) {
 			this.#liveSteered.splice(live, 1);
+			// The message landed in the transcript, so it stops counting as
+			// queued pending input; snapshots shrink and listeners must hear it.
+			this.#emitQueueChanged();
 			return;
 		}
 		for (const delivery of this.#queuedMessageDeliveries) {
@@ -1295,6 +1386,20 @@ export class Agent {
 	steer(m: AgentMessage) {
 		this.#steeringQueue.push(m);
 		this.#notifySteeringWaiters();
+		this.#emitQueueChanged();
+	}
+
+	/**
+	 * Move the given pending steering messages (by identity) ahead of the rest,
+	 * keeping both groups' relative order, so one-at-a-time delivery takes them
+	 * first. Messages no longer pending, including a claimed batch already
+	 * being delivered, are ignored.
+	 */
+	prioritizeSteering(messages: readonly AgentMessage[]): void {
+		const wanted = new Set(messages);
+		const front = this.#steeringQueue.filter(message => wanted.has(message));
+		if (front.every((message, index) => this.#steeringQueue[index] === message)) return;
+		this.#steeringQueue = [...front, ...this.#steeringQueue.filter(message => !wanted.has(message))];
 		this.#emitQueueChanged();
 	}
 
@@ -1716,10 +1821,19 @@ export class Agent {
 			// that, a transformer resolving after the swap would patch a detached
 			// object while the persisted result kept the original payload — the
 			// rewrite silently lost.
+			//
+			// A result for a call already buffered is the server re-dispatching
+			// that call; the provider keeps one block for it, so the re-run's
+			// result replaces the first rather than pairing a second result with
+			// the same id (issue #15749).
 			const entry: CursorToolResultEntry = {
 				toolResult: message,
 				additionalContext: (message as ToolResultWithAdditionalContext)[TOOL_RESULT_ADDITIONAL_CONTEXT],
 			};
+			const superseded = this.#cursorToolResultBuffer.findIndex(
+				({ toolResult }) => toolResult.toolCallId === message.toolCallId,
+			);
+			if (superseded >= 0) this.#cursorToolResultBuffer.splice(superseded, 1);
 			this.#cursorToolResultBuffer.push(entry);
 			const transform = this.#cursorOnToolResult;
 			if (transform) {
@@ -1795,11 +1909,12 @@ export class Agent {
 			getApiKey: this.getApiKey,
 			getToolContext: this.#getToolContext,
 			syncContextBeforeModelCall: async (context, signal) => {
-				await this.#runBeforeModelCallHooks(signal);
+				await this.#runBeforeModelCallHooks(signal, context);
 				if (this.#listeners.size > 0) {
 					await Bun.sleep(0);
 				}
 				context.systemPrompt = this.#state.systemPrompt;
+				this.#onModelCallSystemPrompt?.(context.systemPrompt);
 				context.tools = this.#toolsForModel(this.#state.model ?? model);
 			},
 			beforeModelCall:
@@ -1864,9 +1979,11 @@ export class Agent {
 			onLiveSteeringTaken: messages => this.#adoptLiveSteering(messages),
 			hasIrcInterrupts: this.hasIrcInterrupts,
 			hasBackgroundCompletions: this.hasBackgroundCompletions,
+			hasQueuedAsides: this.hasQueuedAsides,
 			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal ?? loopSignal),
 			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),
+			onDetachedToolUpdate: event => this.emitExternalEvent(event),
 			telemetry: this.#telemetry,
 		};
 
@@ -1879,8 +1996,19 @@ export class Agent {
 				? agentLoop(messages, context, config, loopSignal, this.streamFn)
 				: agentLoopContinue(context, config, loopSignal, this.streamFn);
 
-			for await (const event of stream) {
+			for await (let event of stream) {
 				if (this.#abortController !== loopAbortController) return;
+				// Withdrawn input the loop already holds for this run never reaches the transcript.
+				if (
+					(event.type === "message_start" || event.type === "message_end") &&
+					this.#withdrawnMessages.get(event.message) === loopAbortController
+				) {
+					continue;
+				}
+				if (event.type === "agent_end") {
+					const messages = event.messages.filter(m => this.#withdrawnMessages.get(m) !== loopAbortController);
+					if (messages.length < event.messages.length) event = { ...event, messages };
+				}
 				if (event.type === "turn_start") turnOpen = true;
 				if (event.type === "turn_end") turnOpen = false;
 				// Update internal state based on events
@@ -2058,8 +2186,19 @@ export class Agent {
 				turnOpen = false;
 				this.#emit({ type: "agent_end", messages: agentEndMessages });
 			} else {
+				// Context hooks can reject on abort before provider streaming starts.
+				// Publish the boundary just like a streaming abort so subscribers can
+				// persist it and recover the interrupted turn after a reload.
+				if (!turnOpen) this.#emit({ type: "turn_start" });
+				if (!hadAssistantStart) {
+					this.#state.streamMessage = errorMsg;
+					this.#emit({ type: "message_start", message: errorMsg });
+				}
+				this.#state.streamMessage = null;
 				this.appendMessage(errorMsg);
 				this.#state.error = errorMessage;
+				this.#emit({ type: "message_end", message: errorMsg });
+				this.#emit({ type: "turn_end", message: errorMsg, toolResults: [] });
 				this.#emit({ type: "agent_end", messages: [errorMsg] });
 			}
 		} finally {

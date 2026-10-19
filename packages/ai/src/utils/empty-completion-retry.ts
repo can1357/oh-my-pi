@@ -13,10 +13,10 @@
  * valid provider result. Transient-error retries use the shared provider error
  * classifier and are separately bounded by the caller's policy.
  */
-import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
+import { waitForRetry } from "./retry-wait";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
 export const EMPTY_COMPLETION_BASE_DELAY_MS = 500;
@@ -169,8 +169,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 
 			if (delayMs !== undefined && !signal?.aborted) {
 				try {
-					if (options?.providerRetryWait) await options.providerRetryWait(delayMs, signal);
-					else await scheduler.wait(delayMs, { signal });
+					await waitForRetry(options?.providerRetryWait, delayMs, signal);
 				} catch (waitError) {
 					flush();
 					if (signal?.aborted) {

@@ -48,6 +48,7 @@ function createContext(
 		isCompacting?: boolean;
 		isStreaming?: boolean;
 		runIdleCompaction?: AgentSession["runIdleCompaction"];
+		promptCacheEntry?: AgentSession["promptCacheEntry"];
 		runEphemeralTurn?: AgentSession["runEphemeralTurn"];
 		present?: InteractiveModeContext["present"];
 		sessionName?: string;
@@ -80,6 +81,7 @@ function createContext(
 			isCompacting: options.isCompacting ?? false,
 			isStreaming: options.isStreaming ?? false,
 			runIdleCompaction,
+			promptCacheEntry: options.promptCacheEntry,
 			runEphemeralTurn,
 			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
 			messages: [createAssistantMessage()],
@@ -140,6 +142,80 @@ describe("EventController idle compaction teardown", () => {
 		controller.refreshIdleCompactionTimer();
 		vi.advanceTimersByTime(60_000);
 
+		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
+		controller.dispose();
+	});
+
+	it("waits for the prompt cache lifetime instead of the fallback delay when it is known", async () => {
+		const runIdleCompaction = vi.fn(async () => {});
+		const context = createContext({
+			runIdleCompaction,
+			promptCacheEntry: { touchedAt: Date.now(), tier: "long", ttlMs: 3_600_000 },
+		});
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+
+		// The 60s fallback would have fired long ago; the 1h entry is refreshed at 54 min.
+		vi.advanceTimersByTime(54 * 60_000 - 5_001);
+		expect(runIdleCompaction).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
+		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
+		controller.dispose();
+	});
+
+	it("compacts right away when the turn settles past the refresh point but before expiry", async () => {
+		const runIdleCompaction = vi.fn(async () => {});
+		const context = createContext({
+			runIdleCompaction,
+			promptCacheEntry: { touchedAt: Date.now() - 59 * 60_000, tier: "long", ttlMs: 3_600_000 },
+		});
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+
+		// The entry expires in one minute; the 60s fallback would land after it.
+		vi.advanceTimersByTime(1);
+		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
+		controller.dispose();
+	});
+
+	it("falls back to the configured delay once the cache entry has lapsed", async () => {
+		const runIdleCompaction = vi.fn(async () => {});
+		const context = createContext({
+			runIdleCompaction,
+			promptCacheEntry: { touchedAt: Date.now() - 2 * 3_600_000, tier: "long", ttlMs: 3_600_000 },
+		});
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+
+		vi.advanceTimersByTime(59_999);
+		expect(runIdleCompaction).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
+		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
+		controller.dispose();
+	});
+
+	it("ignores a live 5-minute cache entry and keeps the configured delay", async () => {
+		resetSettingsForTest();
+		await Settings.init({
+			inMemory: true,
+			overrides: {
+				"compaction.idleEnabled": true,
+				"compaction.idleThresholdTokens": 100,
+				"compaction.idleTimeoutSeconds": 600,
+			},
+		});
+		const runIdleCompaction = vi.fn(async () => {});
+		const context = createContext({
+			runIdleCompaction,
+			promptCacheEntry: { touchedAt: Date.now(), tier: "short", ttlMs: 300_000 },
+		});
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+
+		// Cache timing would compact at ~4.4 min; the configured 10 min wins.
+		vi.advanceTimersByTime(600_000 - 1);
+		expect(runIdleCompaction).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
 		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
 		controller.dispose();
 	});

@@ -7,3 +7,13 @@ export function enoent(p: string): NodeJS.ErrnoException {
 	err.syscall = "open";
 	return err;
 }
+
+/** Node-shaped `ENOTDIR` error for a regular file where a directory component is required. */
+export function enotdir(p: string): NodeJS.ErrnoException {
+	const err = new Error(`ENOTDIR: not a directory, open '${p}'`) as NodeJS.ErrnoException;
+	err.code = "ENOTDIR";
+	err.errno = -20;
+	err.path = p;
+	err.syscall = "open";
+	return err;
+}

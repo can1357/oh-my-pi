@@ -95,10 +95,16 @@ impl ScanCache {
 		self.entries.insert(key, entry);
 	}
 
-	fn invalidate(&mut self, target: Option<&Path>) {
+	/// Drops entries under `target` (all when `None`) and, in the same pass,
+	/// every TTL-expired entry: invalidation runs after each agent write, so
+	/// this releases stale snapshots (up to the byte cap) without waiting for
+	/// the next cache lookup.
+	fn invalidate(&mut self, target: Option<&Path>, now: Instant) {
 		self.generation = self.generation.wrapping_add(1);
 		self.entries.retain(|key, entry| {
-			if target.is_none_or(|target| target.starts_with(&key.root)) {
+			if target.is_none_or(|target| target.starts_with(&key.root))
+				|| now.saturating_duration_since(entry.created_at) >= self.ttl
+			{
 				self.bytes -= entry.bytes;
 				false
 			} else {
@@ -423,18 +429,32 @@ where
 	Ok(scan)
 }
 
+/// Entries a scan produced, shared with the scan cache rather than copied out
+/// of it.
+pub(crate) struct SharedEntries {
+	pub(crate) entries:      Arc<Vec<CollectedEntry>>,
+	/// Age of the cache entry in milliseconds; zero means freshly scanned.
+	pub(crate) cache_age_ms: u64,
+}
+
+impl From<CollectedEntries> for SharedEntries {
+	fn from(scan: CollectedEntries) -> Self {
+		Self { entries: Arc::new(scan.entries), cache_age_ms: scan.cache_age_ms }
+	}
+}
+
 fn get_or_scan<H, E>(
 	fs: &BlockingFs,
 	root: &Path,
 	options: WalkOptions,
 	heartbeat: &H,
-) -> Result<CollectedEntries, WalkError<String>>
+) -> Result<SharedEntries, WalkError<String>>
 where
 	H: Fn() -> std::result::Result<(), E> + Sync,
 	E: fmt::Display,
 {
 	if *CACHE_TTL_MS == 0 || *MAX_CACHE_ENTRIES == 0 || *MAX_CACHE_BYTES == 0 {
-		return collect_entries_uncached(fs, root, options, heartbeat);
+		return collect_entries_uncached(fs, root, options, heartbeat).map(SharedEntries::from);
 	}
 
 	heartbeat().map_err(|err| WalkError::Interrupted(err.to_string()))?;
@@ -445,10 +465,8 @@ where
 		(cache.get(&key, now), cache.generation)
 	};
 	if let Some(entry) = cached {
-		let entries = entry.entries.as_ref().clone();
-		heartbeat().map_err(|err| WalkError::Interrupted(err.to_string()))?;
-		return Ok(CollectedEntries {
-			entries,
+		return Ok(SharedEntries {
+			entries:      entry.entries,
 			cache_age_ms: now.saturating_duration_since(entry.created_at).as_millis() as u64,
 		});
 	}
@@ -456,7 +474,7 @@ where
 	let scan = collect_entries_uncached(fs, root, options, heartbeat)?;
 	let bytes = entry_bytes(&scan.entries, scan.entries.capacity());
 	if bytes > *MAX_CACHE_BYTES {
-		return Ok(scan);
+		return Ok(scan.into());
 	}
 	let entries = Arc::new(scan.entries);
 	SCAN_CACHE.lock().insert(
@@ -465,9 +483,7 @@ where
 		generation,
 		Instant::now(),
 	);
-	let entries = Arc::unwrap_or_clone(entries);
-	heartbeat().map_err(|err| WalkError::Interrupted(err.to_string()))?;
-	Ok(CollectedEntries { entries, cache_age_ms: 0 })
+	Ok(SharedEntries { entries, cache_age_ms: 0 })
 }
 
 /// Return whether a scan of `root` through `fs` may use the shared cache.
@@ -493,16 +509,38 @@ where
 	H: Fn() -> std::result::Result<(), E> + Sync,
 	E: fmt::Display,
 {
+	let shared = collect_shared_entries_in(fs, root, options, &heartbeat)?;
+	let entries = Arc::try_unwrap(shared.entries).or_else(|cached| {
+		// Copying a large cached snapshot takes a while; honor a cancellation
+		// that arrived meanwhile.
+		let entries = cached.as_ref().clone();
+		heartbeat().map_err(|err| WalkError::Interrupted(err.to_string()))?;
+		Ok(entries)
+	})?;
+	Ok(CollectedEntries { entries, cache_age_ms: shared.cache_age_ms })
+}
+
+/// [`collect_entries_in`] without copying a cached scan out of the cache.
+pub(crate) fn collect_shared_entries_in<H, E>(
+	fs: &BlockingFs,
+	root: &Path,
+	options: WalkOptions,
+	heartbeat: &H,
+) -> Result<SharedEntries, WalkError<String>>
+where
+	H: Fn() -> std::result::Result<(), E> + Sync,
+	E: fmt::Display,
+{
 	if options.cache && shares_scan_cache(fs, root) {
-		get_or_scan(fs, root, options, &heartbeat)
+		get_or_scan(fs, root, options, heartbeat)
 	} else {
-		collect_entries_uncached(fs, root, options, &heartbeat)
+		collect_entries_uncached(fs, root, options, heartbeat).map(SharedEntries::from)
 	}
 }
 
 /// Invalidate cache entries whose root contains `target`.
 pub fn invalidate_path(target: &Path) {
-	SCAN_CACHE.lock().invalidate(Some(target));
+	SCAN_CACHE.lock().invalidate(Some(target), Instant::now());
 }
 
 /// Resolve a possibly relative path and invalidate matching cache roots.
@@ -529,7 +567,7 @@ pub fn invalidate_path_string(path: &str) {
 
 /// Clear the entire scan cache.
 pub fn invalidate_all() {
-	SCAN_CACHE.lock().invalidate(None);
+	SCAN_CACHE.lock().invalidate(None, Instant::now());
 }
 
 #[cfg(test)]
@@ -558,9 +596,10 @@ mod tests {
 				.expect("system time is after UNIX_EPOCH")
 				.as_nanos();
 			let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-			// nextest runs each test in its own process, so the counter restarts at 0
-			// and macOS clocks tick in microseconds: without the pid, two tests
-			// starting together share a directory and one's Drop deletes the other's.
+			// nextest runs each test in its own process, so the counter restarts
+			// at 0 and macOS clocks tick in microseconds: without the
+			// pid, two tests starting together share a directory and
+			// one's Drop deletes the other's.
 			let pid = std::process::id();
 			let path =
 				std::env::temp_dir().join(format!("pi-fs-cache-test-{pid}-{timestamp}-{counter}"));
@@ -696,11 +735,28 @@ mod tests {
 	}
 
 	#[test]
+	fn invalidation_releases_expired_payloads_outside_the_target() {
+		let now = std::time::Instant::now();
+		let ttl = Duration::from_millis(10);
+		let mut cache = super::ScanCache::new(ttl, 16, 4096);
+		let expired = cached_entry("expired", 0, now);
+		let weak = std::sync::Arc::downgrade(&expired.entries);
+		cache.insert(key("expired"), expired, 0, now);
+		let fresh = cached_entry("fresh", 0, now + Duration::from_millis(1));
+		let fresh_bytes = fresh.bytes;
+		cache.insert(key("fresh"), fresh, 0, now + Duration::from_millis(1));
+		cache.invalidate(Some(Path::new("elsewhere/file")), now + ttl);
+		assert!(weak.upgrade().is_none(), "expired snapshot must be freed at invalidation");
+		assert_eq!(cache.entries.len(), 1);
+		assert_eq!(cache.bytes, fresh_bytes);
+	}
+
+	#[test]
 	fn cache_rejects_inserts_carrying_a_pre_invalidation_generation() {
 		let now = std::time::Instant::now();
 		let mut cache = super::ScanCache::new(Duration::from_secs(60), 16, 4096);
 		let generation = cache.generation;
-		cache.invalidate(Some(Path::new("root/changed")));
+		cache.invalidate(Some(Path::new("root/changed")), now);
 		cache.insert(key("root"), cached_entry("stale", 0, now), generation, now);
 		assert!(cache.get(&key("root"), now).is_none());
 		let generation = cache.generation;
@@ -786,7 +842,7 @@ mod tests {
 			worker.join().unwrap();
 		}
 		let mut cache = cache.lock();
-		cache.invalidate(None);
+		cache.invalidate(None, std::time::Instant::now());
 		assert_eq!(cache.bytes, 0);
 		assert!(cache.entries.is_empty());
 	}

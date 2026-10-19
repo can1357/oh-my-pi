@@ -143,8 +143,8 @@ describe("AgentSession interrupted thinking persistence", () => {
 		}
 	});
 
-	// Mechanism tests default to a non-anthropic model: anthropic-dialect targets
-	// skip the hidden continuity quote entirely (reasoning_extraction refusal).
+	// Mechanism tests default to a non-anthropic model: Claude's classifier
+	// refuses quoted reasoning, so it skips the hidden continuity quote entirely.
 	function createSession(
 		extensionRunner?: ExtensionRunner,
 		providerModel: [GeneratedProvider, string] = ["openai", "gpt-5.2"],
@@ -238,7 +238,7 @@ describe("AgentSession interrupted thinking persistence", () => {
 		const developerLlm = llm.filter(entry => entry.role === "developer");
 		expect(developerLlm.some(entry => JSON.stringify(entry.content).includes(REASONING_TEXT))).toBe(true);
 	});
-	it("skips hidden continuity for anthropic-dialect targets — reasoning never replays as text", async () => {
+	it("skips hidden continuity for a Claude target — reasoning never replays as text", async () => {
 		const harness = createSession(undefined, ["anthropic", "claude-sonnet-4-5"]);
 		await emitAssistantEnd(
 			harness.session,

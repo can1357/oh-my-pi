@@ -109,7 +109,8 @@ const ASCII: ChartChars = ChartChars {
 	corner_br: '+',
 };
 
-type HexCanvas = Grid<Option<String>>;
+// Series colors outlive drawing and serialization; cells only borrow them.
+type HexCanvas<'a> = Grid<Option<&'a str>>;
 
 /// Render Mermaid `xychart-beta` source as an ASCII or Unicode chart.
 pub fn render(text: &str, config: &AsciiConfig, mode: ColorMode, theme: &Theme) -> String {
@@ -541,10 +542,10 @@ fn render_horizontal(chart: &XyChart, chars: ChartChars, mode: ColorMode, theme:
 	clippy::too_many_arguments,
 	reason = "coordinate transforms and drawing contexts are kept unpacked for locality"
 )]
-fn draw_staircase_line(
+fn draw_staircase_line<'a>(
 	canvas: &mut Canvas,
 	roles: &mut RoleCanvas,
-	hex_canvas: &mut HexCanvas,
+	hex_canvas: &mut HexCanvas<'a>,
 	data: &[f64],
 	band_center: &impl Fn(i32) -> i32,
 	value_to_row: &impl Fn(f64) -> i32,
@@ -553,7 +554,7 @@ fn draw_staircase_line(
 	plot_left: i32,
 	plot_width: i32,
 	chars: ChartChars,
-	color: &str,
+	color: &'a str,
 ) {
 	let points: Vec<_> = data
 		.iter()
@@ -636,10 +637,10 @@ fn draw_staircase_line(
 	clippy::too_many_arguments,
 	reason = "coordinate transforms and drawing contexts are kept unpacked for locality"
 )]
-fn draw_horizontal_staircase_line(
+fn draw_horizontal_staircase_line<'a>(
 	canvas: &mut Canvas,
 	roles: &mut RoleCanvas,
-	hex_canvas: &mut HexCanvas,
+	hex_canvas: &mut HexCanvas<'a>,
 	data: &[f64],
 	band_middle: &impl Fn(i32) -> i32,
 	value_to_column: &impl Fn(f64) -> i32,
@@ -648,7 +649,7 @@ fn draw_horizontal_staircase_line(
 	plot_left: i32,
 	plot_width: i32,
 	chars: ChartChars,
-	color: &str,
+	color: &'a str,
 ) {
 	let points: Vec<_> = data
 		.iter()
@@ -707,15 +708,15 @@ fn draw_horizontal_staircase_line(
 	}
 }
 
-fn draw_legend(
+fn draw_legend<'a>(
 	canvas: &mut Canvas,
 	roles: &mut RoleCanvas,
-	hex_canvas: &mut HexCanvas,
+	hex_canvas: &mut HexCanvas<'a>,
 	chart: &XyChart,
 	row: i32,
 	total_width: i32,
 	chars: ChartChars,
-	colors: &[String],
+	colors: &'a [String],
 ) {
 	let mut bar_index = 0;
 	let mut line_index = 0;
@@ -762,21 +763,21 @@ fn draw_legend(
 	}
 }
 
-fn set(
+fn set<'a>(
 	canvas: &mut Canvas,
 	roles: &mut RoleCanvas,
 	row: i32,
 	column: i32,
 	character: char,
 	role: CharRole,
-	hex_canvas: Option<&mut HexCanvas>,
-	hex: Option<&str>,
+	hex_canvas: Option<&mut HexCanvas<'a>>,
+	hex: Option<&'a str>,
 ) {
 	if canvas.in_bounds(column, row) {
 		canvas.set(column, row, Cell::from(character));
 		roles.set(column, row, Some(role));
 		if let (Some(hex_canvas), Some(hex)) = (hex_canvas, hex) {
-			hex_canvas.set(column, row, Some(hex.to_owned()));
+			hex_canvas.set(column, row, Some(hex));
 		}
 	}
 }
@@ -818,7 +819,7 @@ fn write_text(
 fn canvas_to_string(
 	canvas: &Canvas,
 	roles: &RoleCanvas,
-	hex_canvas: &HexCanvas,
+	hex_canvas: &HexCanvas<'_>,
 	mode: ColorMode,
 	theme: &Theme,
 ) -> String {
@@ -838,7 +839,7 @@ fn canvas_to_string(
 			cells.push((
 				cell.as_str(),
 				roles.get(column, row).copied().flatten(),
-				hex_canvas.get(column, row).and_then(Option::as_deref),
+				hex_canvas.get(column, row).copied().flatten(),
 			));
 		}
 		while cells.last().is_some_and(|(text, ..)| *text == " ") {
@@ -959,7 +960,13 @@ fn nice_tick_values(minimum: f64, maximum: f64) -> Vec<f64> {
 	let mut ticks = Vec::new();
 	while value <= maximum + interval * 0.001 {
 		ticks.push((value * 1e10).round() / 1e10);
-		value += interval;
+		// Past 2^53 an interval below the value's ULP no longer moves it; the
+		// loop would grow `ticks` until memory ran out.
+		let next = value + interval;
+		if next <= value {
+			break;
+		}
+		value = next;
 	}
 	ticks
 }
@@ -1115,6 +1122,32 @@ mod tests {
 		}
 	}
 
+	/// Coincident series keep distinct legend colors, but the last line owns
+	/// every overlapping plot cell in either orientation.
+	#[test]
+	fn overlapping_lines_keep_legend_colors_and_last_series_color() {
+		let theme = Theme {
+			accent: Some("#123456".to_owned()),
+			bg: Some("#171717".to_owned()),
+			..Theme::default()
+		};
+		let colors = series_colors(2, &theme);
+		let first_style = format!("color:{}", colors[0]);
+		let last_style = format!("color:{}", colors[1]);
+		for orientation in ["", " horizontal"] {
+			let source = format!(
+				"xychart-beta{orientation}\nx-axis [A, B, C]\ny-axis 0 --> 100\nline [20, 80, \
+				 40]\nline [20, 80, 40]"
+			);
+			let output = render(&source, &config(false), ColorMode::Html, &theme);
+			let (legend, plot) = output.split_once('\n').unwrap();
+			assert!(legend.contains(&colorize_text("─", &colors[0], ColorMode::Html)), "{legend}");
+			assert!(legend.contains(&colorize_text("─", &colors[1], ColorMode::Html)), "{legend}");
+			assert!(!plot.contains(&first_style), "{plot}");
+			assert!(plot.contains(&last_style), "{plot}");
+		}
+	}
+
 	#[test]
 	fn parses_every_statement_kind() {
 		let chart = parse_xy_chart(
@@ -1151,6 +1184,20 @@ mod tests {
 		assert_eq!(js_to_fixed(1.005, 2), "1.00");
 		assert_eq!(js_to_fixed(0.15, 1), "0.1");
 		assert_eq!(js_number_to_string(-0.0), "0");
+	}
+
+	/// An axis whose span is below the spacing of representable values must
+	/// still render: a tick step that no longer advances ends the tick list.
+	#[test]
+	fn axis_finer_than_float_spacing_renders() {
+		assert_eq!(nice_tick_values(1e17, 1e17 + 16.0).len(), 1);
+		let output = render(
+			"xychart-beta\nx-axis [a]\ny-axis 100000000000000000 --> 100000000000000016",
+			&config(true),
+			ColorMode::None,
+			&Theme::default(),
+		);
+		assert!(output.contains("100000000000000000"), "{output}");
 	}
 
 	#[test]

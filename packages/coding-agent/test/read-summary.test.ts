@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,7 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { trySummarize } from "@oh-my-pi/pi-coding-agent/tools/read-summary";
+import * as readSummary from "@oh-my-pi/pi-coding-agent/tools/read-summary";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 let artifactCounter = 0;
@@ -81,6 +81,41 @@ describe("read summary", () => {
 		expect(text).toContain("export function beta(): number { … }");
 		expect(text).not.toContain("const clean = value.trim()");
 		expect(result.details?.summary?.elidedSpans).toBe(2);
+	});
+
+	it("records whether a summary's rows carry line prefixes, so snapcompact can tell prefixes from content", async () => {
+		const fixture = path.join(tmpDir, "src", "fixture.ts");
+		await fs.mkdir(path.dirname(fixture), { recursive: true });
+		const source = "export function alpha() {\n\tconst one = 1;\n\treturn one;\n}\n";
+		await fs.writeFile(fixture, source);
+		// The summarizer is a native addon; its output shape is all this contract needs.
+		const summarize = spyOn(readSummary, "trySummarize").mockResolvedValue({
+			language: "typescript",
+			parsed: true,
+			elided: true,
+			totalLines: 4,
+			segments: [
+				{ kind: "kept", startLine: 1, endLine: 1, text: "export function alpha() {" },
+				{ kind: "elided", startLine: 2, endLine: 3 },
+				{ kind: "kept", startLine: 4, endLine: 4, text: "}" },
+			],
+		});
+		try {
+			const rowPrefixes = async (overrides: Record<string, unknown>) => {
+				const result = await new ReadTool(createSession(tmpDir, overrides)).execute("read-summary-prefixes", {
+					path: fixture,
+				});
+				expect(result.details?.summary?.elidedSpans).toBe(1);
+				return result.details?.rowPrefixes;
+			};
+
+			expect(await rowPrefixes({})).toBe(true);
+			expect(await rowPrefixes({ "edit.mode": "replace", readLineNumbers: true })).toBe(true);
+			// No hashlines, no line numbers: a leading `N:` in the text would be file content.
+			expect(await rowPrefixes({ "edit.mode": "replace", readLineNumbers: false })).toBe(false);
+		} finally {
+			summarize.mockRestore();
+		}
 	});
 
 	it("uses the resolved path in elision recovery selectors after suffix matching", async () => {
@@ -366,9 +401,16 @@ describe("read summary", () => {
 		// Same bytes requested as TypeScript, then as Python (e.g. a symlink
 		// read through a `.py` lexical path): the second call must not reuse
 		// the cached TypeScript summary.
-		const first = await trySummarize(session, fixture, size, undefined, code, fixture);
+		const first = await readSummary.trySummarize(session, fixture, size, undefined, code, fixture);
 		expect(first?.parsed && first?.elided).toBe(true);
-		const second = await trySummarize(session, fixture, size, undefined, code, path.join(tmpDir, "mod.py"));
+		const second = await readSummary.trySummarize(
+			session,
+			fixture,
+			size,
+			undefined,
+			code,
+			path.join(tmpDir, "mod.py"),
+		);
 		expect(second).not.toBe(first);
 	});
 });

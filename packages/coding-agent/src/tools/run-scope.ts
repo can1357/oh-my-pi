@@ -37,6 +37,9 @@ interface ObservedPromiseState {
 }
 
 const observedBrowserPromises = new WeakMap<Promise<unknown>, ObservedPromiseState>();
+// Thenable facade handles (`desktop.ref("e5")`) settle through an observed promise once awaited;
+// combinators treat them as observed inputs, like the promises themselves.
+const observedBrowserThenables = new WeakSet<object>();
 const observedPromiseConstructor = { [Symbol.species]: Promise };
 
 type PromiseCombinatorName = "all" | "race" | "allSettled" | "any";
@@ -135,7 +138,12 @@ function* tapObservedBrowserPromises(
 	onObserved: () => void,
 ): Generator<unknown, void, undefined> {
 	for (const value of values) {
-		if (observedBrowserPromises.has(value as Promise<unknown>)) onObserved();
+		if (
+			observedBrowserPromises.has(value as Promise<unknown>) ||
+			(typeof value === "object" && value !== null && observedBrowserThenables.has(value))
+		) {
+			onObserved();
+		}
 		yield value;
 	}
 }
@@ -387,14 +395,33 @@ export function bindRunFacade<T extends object>(
 					if (result && typeof result === "object") {
 						const then = Reflect.get(result, "then");
 						if (typeof then === "function") {
-							return trackBrowserRunPromise(
-								Promise.resolve(result).then(resolved => {
-									throwIfAborted(signal);
-									return resolved;
-								}),
-								rejectionOwner,
-								onFloatingRejection,
-							);
+							let settled: Promise<unknown> | undefined;
+							const settle = (): Promise<unknown> => {
+								settled ??= trackBrowserRunPromise(
+									Promise.resolve(result).then(resolved => {
+										throwIfAborted(signal);
+										return resolved;
+									}),
+									rejectionOwner,
+									onFloatingRejection,
+								);
+								return settled;
+							};
+							if (result instanceof NativePromise) return settle();
+							// A handle that is also thenable (`desktop.ref("e5")`) keeps its gated methods,
+							// and awaiting it settles through the same tracked, abort-checked promise.
+							const handle = bindRunFacade(result, signal, rejectionOwner, onFloatingRejection);
+							const tracked = new Proxy(handle, {
+								get(target, key) {
+									if (key === "then" || key === "catch" || key === "finally") {
+										const promise = settle();
+										return Reflect.get(promise, key, promise).bind(promise);
+									}
+									return Reflect.get(target, key);
+								},
+							});
+							if (rejectionOwner && onFloatingRejection) observedBrowserThenables.add(tracked);
+							return tracked;
 						}
 					}
 					throwIfAborted(signal);

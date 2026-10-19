@@ -26,7 +26,7 @@ describe("loadSessionFile sourceSize", () => {
 	});
 
 	it("stays null when the path does not exist", async () => {
-		const dir = TempDir.createSync("loader-source-size");
+		const dir = TempDir.createSync("@loader-source-size-");
 		try {
 			const storage = new FileSessionStorage();
 			const loaded = await loadSessionFile(`${dir.path()}/missing.jsonl`, storage);

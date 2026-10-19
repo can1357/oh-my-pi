@@ -204,6 +204,8 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 	m.push(("basename", basename::basename_builtin::<SE>()));
 	#[cfg(feature = "util.cat")]
 	m.push(("cat", cat::cat_builtin::<SE>()));
+	#[cfg(all(feature = "util.chmod", unix))]
+	m.push(("chmod", chmod::chmod_builtin::<SE>()));
 	#[cfg(feature = "util.cksum")]
 	m.push(("cksum", cksum::cksum_builtin::<SE>()));
 	#[cfg(feature = "util.cmp")]
@@ -218,16 +220,26 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 	m.push(("cut", cut::cut_builtin::<SE>()));
 	#[cfg(feature = "util.date")]
 	m.push(("date", date::date_builtin::<SE>()));
+	#[cfg(feature = "util.dd")]
+	m.push(("dd", dd::dd_builtin::<SE>()));
+	#[cfg(feature = "util.df")]
+	m.push(("df", df::df_builtin::<SE>()));
 	#[cfg(feature = "util.diff")]
 	m.push(("diff", diff::diff_builtin::<SE>()));
 	#[cfg(feature = "util.dirname")]
 	m.push(("dirname", dirname::dirname_builtin::<SE>()));
+	#[cfg(feature = "util.du")]
+	m.push(("du", du::du_builtin::<SE>()));
+	#[cfg(feature = "util.env")]
+	m.push(("env", env::env_builtin::<SE>()));
 	#[cfg(all(feature = "util.errno", unix))]
 	m.push(("errno", errno::errno_builtin::<SE>()));
 	#[cfg(feature = "util.fd")]
 	m.push(("fd", fd::fd_builtin::<SE>()));
 	#[cfg(feature = "util.find")]
 	m.push(("find", find::find_builtin::<SE>()));
+	#[cfg(feature = "util.fold")]
+	m.push(("fold", fold::fold_builtin::<SE>()));
 	#[cfg(feature = "util.grep")]
 	m.push(("grep", grep::grep_builtin::<SE>()));
 	#[cfg(feature = "util.rg")]
@@ -236,6 +248,8 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 	m.push(("head", head::head_builtin::<SE>()));
 	#[cfg(feature = "util.hostname")]
 	m.push(("hostname", hostname::hostname_builtin::<SE>()));
+	#[cfg(all(feature = "util.id", unix))]
+	m.push(("id", id::id_builtin::<SE>()));
 	#[cfg(feature = "util.ifne")]
 	m.push(("ifne", ifne::ifne_builtin::<SE>()));
 	#[cfg(feature = "util.isutf8")]
@@ -254,8 +268,12 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 	m.push(("mktemp", mktemp::mktemp_builtin::<SE>()));
 	#[cfg(feature = "util.mv")]
 	m.push(("mv", mv::mv_builtin::<SE>()));
+	#[cfg(feature = "util.nl")]
+	m.push(("nl", nl::nl_builtin::<SE>()));
 	#[cfg(feature = "util.nproc")]
 	m.push(("nproc", nproc::nproc_builtin::<SE>()));
+	#[cfg(feature = "util.od")]
+	m.push(("od", od::od_builtin::<SE>()));
 	#[cfg(feature = "util.paste")]
 	m.push(("paste", paste::paste_builtin::<SE>()));
 	#[cfg(feature = "util.printenv")]
@@ -266,6 +284,8 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 	m.push(("realpath", realpath::realpath_builtin::<SE>()));
 	#[cfg(feature = "util.rm")]
 	m.push(("rm", rm::rm_builtin::<SE>()));
+	#[cfg(feature = "util.rmdir")]
+	m.push(("rmdir", rmdir::rmdir_builtin::<SE>()));
 	#[cfg(feature = "util.sed")]
 	m.push(("sed", sed::sed_builtin::<SE>()));
 	#[cfg(feature = "util.seq")]
@@ -304,6 +324,8 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 	m.push(("uname", uname::uname_builtin::<SE>()));
 	#[cfg(feature = "util.uniq")]
 	m.push(("uniq", uniq::uniq_builtin::<SE>()));
+	#[cfg(feature = "util.uptime")]
+	m.push(("uptime", uptime::uptime_builtin::<SE>()));
 	#[cfg(feature = "util.wc")]
 	m.push(("wc", wc::wc_builtin::<SE>()));
 	#[cfg(feature = "util.which")]

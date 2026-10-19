@@ -57,6 +57,79 @@ async function runCommand(command: string[], cwd: string): Promise<string> {
 	return stdout.trim();
 }
 
+const cliEntry = path.join(import.meta.dir, "..", "src", "cli.ts");
+
+/** A `@test/pi-package` git repo served over dumb HTTP from `root`, for real `bun install` runs. */
+interface LocalGitRemote {
+	/** Install spec pointing at the served repo's `main` branch. */
+	readonly spec: string;
+	/** Commits `version` into package.json and pushes it to the served remote. */
+	publish(version: string): Promise<void>;
+	stop(): Promise<void>;
+}
+
+async function serveLocalGitPackage(root: string): Promise<LocalGitRemote> {
+	const sourceDir = path.join(root, "source");
+	const httpRoot = path.join(root, "http");
+	const remoteDir = path.join(httpRoot, "testuser", "remote.git");
+	await fs.mkdir(sourceDir, { recursive: true });
+	await fs.mkdir(path.dirname(remoteDir), { recursive: true });
+	await runCommand(["git", "init", "-b", "main"], sourceDir);
+	const commit = async (version: string) => {
+		await Bun.write(
+			path.join(sourceDir, "package.json"),
+			JSON.stringify({ name: "@test/pi-package", version }, null, 2),
+		);
+		await runCommand(["git", "add", "package.json"], sourceDir);
+		await runCommand(
+			[
+				"git",
+				"-c",
+				"user.name=Plugin test",
+				"-c",
+				"user.email=plugin-test@example.com",
+				"commit",
+				"-m",
+				`version ${version}`,
+			],
+			sourceDir,
+		);
+	};
+	await commit("1.0.0");
+	await runCommand(["git", "clone", "--bare", sourceDir, remoteDir], root);
+	await runCommand(["git", "update-server-info"], remoteDir);
+
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			const url = new URL(request.url);
+			const relativePath = decodeURIComponent(url.pathname).replace(/^\/+/, "");
+			const filePath = path.resolve(httpRoot, relativePath);
+			if (!filePath.startsWith(`${httpRoot}${path.sep}`)) {
+				return new Response("Not found", { status: 404 });
+			}
+			try {
+				return new Response(await Bun.file(filePath).arrayBuffer(), {
+					headers: { "Content-Type": "application/octet-stream" },
+				});
+			} catch {
+				return new Response("Not found", { status: 404 });
+			}
+		},
+	});
+
+	return {
+		spec: `git+http://127.0.0.1:${server.port}/testuser/remote.git#main`,
+		async publish(version) {
+			await commit(version);
+			await runCommand(["git", "push", remoteDir, "main"], sourceDir);
+			await runCommand(["git", "update-server-info"], remoteDir);
+		},
+		stop: () => server.stop(true),
+	};
+}
+
 describe("PluginManager.install with git sources", () => {
 	let tmpRoot: string;
 	let pluginsDir: string;
@@ -93,7 +166,7 @@ describe("PluginManager.install with git sources", () => {
 
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
 			// Verify the manager forwards the spec verbatim to bun install.
-			expect(cmd[0]).toBe("bun");
+			expect(cmd[0]).toBe(process.execPath);
 			expect(cmd[1]).toBe("install");
 			expect(cmd[2]).toBe("github:foo/bar");
 
@@ -145,9 +218,9 @@ describe("PluginManager.install with git sources", () => {
 		);
 
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd[0]).toBe("bun");
+			expect(cmd[0]).toBe(process.execPath);
 			expect(cmd[1]).toBe("install");
-			expect(cmd[2]).toBe("https://gitlab.com/group/sub/project#v1.0.0");
+			expect(cmd[2]).toBe("git+https://gitlab.com/group/sub/project#v1.0.0");
 
 			const prepare = (async () => {
 				await Bun.write(
@@ -184,6 +257,260 @@ describe("PluginManager.install with git sources", () => {
 		const result = await mgr.install("gitlab:group/sub/project#v1.0.0");
 
 		expect(result.name).toBe("gitlab-plugin");
+		expect(result.version).toBe("1.0.0");
+	});
+
+	test("prefixes raw non-GitHub https URLs with git+ before invoking bun install", async () => {
+		await Bun.write(
+			pluginsPkgJson,
+			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2),
+		);
+
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd[0]).toBe(process.execPath);
+			expect(cmd[1]).toBe("install");
+			// The headline scenario for this fix: a bare `https://` spec for a
+			// non-GitHub host (bun only auto-detects git for GitHub URLs) must
+			// reach bun install with an explicit `git+` prefix, otherwise bun
+			// misreads it as an npm tarball and fails with ZlibError.
+			expect(cmd[2]).toBe("git+https://git.example.com/group/repo.git");
+
+			const prepare = (async () => {
+				// Simulate bun's on-disk effects: the dep is keyed by the
+				// package's real name and persists the spec it resolved.
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify(
+						{
+							name: "omp-plugins",
+							private: true,
+							dependencies: {
+								"example-plugin": "git+https://git.example.com/group/repo.git",
+							},
+						},
+						null,
+						2,
+					),
+				);
+				const installedDir = path.join(pluginsNodeModules, "example-plugin");
+				await fs.mkdir(installedDir, { recursive: true });
+				await Bun.write(
+					path.join(installedDir, "package.json"),
+					JSON.stringify({ name: "example-plugin", version: "1.0.0" }, null, 2),
+				);
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const mgr = new PluginManager(tmpRoot);
+		const result = await mgr.install("https://git.example.com/group/repo.git");
+
+		expect(result.name).toBe("example-plugin");
+		expect(result.version).toBe("1.0.0");
+	});
+
+	test("strips inline userinfo credentials before invoking bun install", async () => {
+		await Bun.write(
+			pluginsPkgJson,
+			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2),
+		);
+
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd[0]).toBe(process.execPath);
+			expect(cmd[1]).toBe("install");
+			// Inline credentials must not reach bun: `bun install` persists the
+			// spec into package.json/bun.lock, and a long-lived token must not
+			// land in those user files. Private repos authenticate via SSH,
+			// a credential helper, or .netrc instead.
+			expect(cmd[2]).toBe("git+https://git.example.com/group/repo.git#v1.0.0");
+
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify(
+						{
+							name: "omp-plugins",
+							private: true,
+							dependencies: {
+								"cred-plugin": "git+https://git.example.com/group/repo.git#v1.0.0",
+							},
+						},
+						null,
+						2,
+					),
+				);
+				const installedDir = path.join(pluginsNodeModules, "cred-plugin");
+				await fs.mkdir(installedDir, { recursive: true });
+				await Bun.write(
+					path.join(installedDir, "package.json"),
+					JSON.stringify({ name: "cred-plugin", version: "1.0.0" }, null, 2),
+				);
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const mgr = new PluginManager(tmpRoot);
+		const result = await mgr.install("https://token@git.example.com/group/repo.git#v1.0.0");
+
+		expect(result.name).toBe("cred-plugin");
+		expect(result.version).toBe("1.0.0");
+	});
+
+	test("does not double the git+ prefix when the spec already carries one", async () => {
+		await Bun.write(
+			pluginsPkgJson,
+			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2),
+		);
+
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd[0]).toBe(process.execPath);
+			expect(cmd[1]).toBe("install");
+			// The accepted input form may already carry `git+`: the prefix must
+			// not be doubled. Inline credentials are still stripped — they must
+			// not reach bun's persisted spec.
+			expect(cmd[2]).toBe("git+https://git.example.com/group/repo.git#v1.0.0");
+
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify(
+						{
+							name: "omp-plugins",
+							private: true,
+							dependencies: {
+								"prefix-cred-plugin": "git+https://git.example.com/group/repo.git#v1.0.0",
+							},
+						},
+						null,
+						2,
+					),
+				);
+				const installedDir = path.join(pluginsNodeModules, "prefix-cred-plugin");
+				await fs.mkdir(installedDir, { recursive: true });
+				await Bun.write(
+					path.join(installedDir, "package.json"),
+					JSON.stringify({ name: "prefix-cred-plugin", version: "1.0.0" }, null, 2),
+				);
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const mgr = new PluginManager(tmpRoot);
+		const result = await mgr.install("git+https://token@git.example.com/group/repo.git#v1.0.0");
+
+		expect(result.name).toBe("prefix-cred-plugin");
+		expect(result.version).toBe("1.0.0");
+	});
+
+	test("normalizes an @ref path suffix to #ref exactly once", async () => {
+		await Bun.write(
+			pluginsPkgJson,
+			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2),
+		);
+
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd[0]).toBe(process.execPath);
+			expect(cmd[1]).toBe("install");
+			// `@ref` path-suffix input: ref re-appended once as `#ref` (no
+			// doubled suffix).
+			expect(cmd[2]).toBe("git+https://git.example.com/group/repo.git#v1");
+
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify(
+						{
+							name: "omp-plugins",
+							private: true,
+							dependencies: {
+								"atref-plugin": "git+https://git.example.com/group/repo.git#v1",
+							},
+						},
+						null,
+						2,
+					),
+				);
+				const installedDir = path.join(pluginsNodeModules, "atref-plugin");
+				await fs.mkdir(installedDir, { recursive: true });
+				await Bun.write(
+					path.join(installedDir, "package.json"),
+					JSON.stringify({ name: "atref-plugin", version: "1.0.0" }, null, 2),
+				);
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const mgr = new PluginManager(tmpRoot);
+		const result = await mgr.install("https://git.example.com/group/repo.git@v1");
+
+		expect(result.name).toBe("atref-plugin");
+		expect(result.version).toBe("1.0.0");
+	});
+
+	test("forwards GitHub URLs verbatim, including inline credentials", async () => {
+		await Bun.write(
+			pluginsPkgJson,
+			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2),
+		);
+
+		const spec = "https://token@github.com/foo/private-plugin#v1.0.0";
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd[0]).toBe(process.execPath);
+			expect(cmd[1]).toBe("install");
+			// bun resolves GitHub URLs natively (inline credentials go through
+			// git clone), so neither a `git+` prefix nor credential stripping
+			// may alter the spec.
+			expect(cmd[2]).toBe(spec);
+
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify({ name: "omp-plugins", private: true, dependencies: { "gh-plugin": spec } }, null, 2),
+				);
+				const installedDir = path.join(pluginsNodeModules, "gh-plugin");
+				await fs.mkdir(installedDir, { recursive: true });
+				await Bun.write(
+					path.join(installedDir, "package.json"),
+					JSON.stringify({ name: "gh-plugin", version: "1.0.0" }, null, 2),
+				);
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const mgr = new PluginManager(tmpRoot);
+		const result = await mgr.install(spec);
+
+		expect(result.name).toBe("gh-plugin");
 		expect(result.version).toBe("1.0.0");
 	});
 
@@ -241,7 +568,7 @@ describe("PluginManager.install with git sources", () => {
 			// The follow-up call: simulate bun resolving the upstream HEAD to a
 			// newer commit and bumping the on-disk version. The manager should
 			// read the new version from package.json after this step returns.
-			expect(cmd).toEqual(["bun", "update", "stale-plugin"]);
+			expect(cmd).toEqual([process.execPath, "update", "stale-plugin"]);
 			const prepare = (async () => {
 				await Bun.write(
 					path.join(seedDir, "package.json"),
@@ -261,9 +588,9 @@ describe("PluginManager.install with git sources", () => {
 
 		expect(result.version).toBe("0.1.6");
 		expect(spawnedCommands).toEqual([
-			["bun", "install", "github:foo/bar"],
-			["bun", "pm", "cache"],
-			["bun", "update", "stale-plugin"],
+			[process.execPath, "install", "github:foo/bar"],
+			[process.execPath, "pm", "cache"],
+			[process.execPath, "update", "stale-plugin"],
 		]);
 	});
 
@@ -291,7 +618,7 @@ describe("PluginManager.install with git sources", () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
 			spawnedCommands.push([...cmd]);
 			if (cmd[1] === "install") {
-				expect(cmd).toEqual(["bun", "install", "github:foo/bar"]);
+				expect(cmd).toEqual([process.execPath, "install", "github:foo/bar"]);
 				const prepare = (async () => {
 					const packageJson = await Bun.file(pluginsPkgJson).json();
 					expect(packageJson.dependencies?.["replaced-plugin"]).toBeUndefined();
@@ -322,7 +649,7 @@ describe("PluginManager.install with git sources", () => {
 			}
 
 			if (cmd[1] === "pm") {
-				expect(cmd).toEqual(["bun", "pm", "cache"]);
+				expect(cmd).toEqual([process.execPath, "pm", "cache"]);
 				return {
 					pid: 3,
 					stdout: textStream(path.join(tmpRoot, "no-such-bun-cache")),
@@ -331,7 +658,7 @@ describe("PluginManager.install with git sources", () => {
 				} as Subprocess;
 			}
 
-			expect(cmd).toEqual(["bun", "update", "replaced-plugin"]);
+			expect(cmd).toEqual([process.execPath, "update", "replaced-plugin"]);
 			return {
 				pid: 2,
 				stdout: emptyStream(),
@@ -345,7 +672,7 @@ describe("PluginManager.install with git sources", () => {
 
 		expect(result.name).toBe("replaced-plugin");
 		expect(result.version).toBe("1.1.0");
-		expect(spawnedCommands[0]).toEqual(["bun", "install", "github:foo/bar"]);
+		expect(spawnedCommands[0]).toEqual([process.execPath, "install", "github:foo/bar"]);
 		const packageJson = await Bun.file(pluginsPkgJson).json();
 		expect(packageJson.dependencies).toEqual({ "replaced-plugin": "github:foo/bar" });
 	});
@@ -391,7 +718,7 @@ describe("PluginManager.install with git sources", () => {
 		const mgr = new PluginManager(tmpRoot);
 		await mgr.install("github:foo/bar");
 
-		expect(spawnedCommands).toEqual([["bun", "install", "github:foo/bar"]]);
+		expect(spawnedCommands).toEqual([[process.execPath, "install", "github:foo/bar"]]);
 	});
 
 	test("drains stdout/stderr concurrently with proc.exited (pipe-buffer deadlock, #4230)", async () => {
@@ -416,7 +743,7 @@ describe("PluginManager.install with git sources", () => {
 		};
 
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd).toEqual(["bun", "install", "github:foo/bar"]);
+			expect(cmd).toEqual([process.execPath, "install", "github:foo/bar"]);
 			const { stream: stdout, drained: stdoutDrained } = makeGatedStream("progress\n");
 			const { stream: stderr, drained: stderrDrained } = makeGatedStream("");
 			const exited = Promise.all([stdoutDrained, stderrDrained]).then(async () => {
@@ -449,91 +776,81 @@ describe("PluginManager.install with git sources", () => {
 	}, 2000);
 
 	test("refreshes Bun's cached git clone before updating an existing plugin (#5401)", async () => {
-		const sourceDir = path.join(tmpRoot, "source");
-		const httpRoot = path.join(tmpRoot, "http");
-		const remoteDir = path.join(httpRoot, "testuser", "remote.git");
-		const cacheDir = path.join(tmpRoot, "bun-cache");
-		await fs.mkdir(sourceDir, { recursive: true });
-		await fs.mkdir(path.dirname(remoteDir), { recursive: true });
-		await runCommand(["git", "init", "-b", "main"], sourceDir);
-		await Bun.write(
-			path.join(sourceDir, "package.json"),
-			JSON.stringify({ name: "@test/pi-package", version: "1.0.0" }, null, 2),
-		);
-		await runCommand(["git", "add", "package.json"], sourceDir);
-		await runCommand(
-			[
-				"git",
-				"-c",
-				"user.name=Plugin test",
-				"-c",
-				"user.email=plugin-test@example.com",
-				"commit",
-				"-m",
-				"version A",
-			],
-			sourceDir,
-		);
-		await runCommand(["git", "clone", "--bare", sourceDir, remoteDir], tmpRoot);
-		await runCommand(["git", "update-server-info"], remoteDir);
-
-		const server = Bun.serve({
-			hostname: "127.0.0.1",
-			port: 0,
-			async fetch(request) {
-				const url = new URL(request.url);
-				const relativePath = decodeURIComponent(url.pathname).replace(/^\/+/, "");
-				const filePath = path.resolve(httpRoot, relativePath);
-				if (!filePath.startsWith(`${httpRoot}${path.sep}`)) {
-					return new Response("Not found", { status: 404 });
-				}
-				try {
-					return new Response(await Bun.file(filePath).arrayBuffer(), {
-						headers: { "Content-Type": "application/octet-stream" },
-					});
-				} catch {
-					return new Response("Not found", { status: 404 });
-				}
-			},
-		});
-
+		const remote = await serveLocalGitPackage(tmpRoot);
 		try {
 			await Bun.write(
 				pluginsPkgJson,
 				JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2),
 			);
+			const cacheDir = path.join(tmpRoot, "bun-cache");
 			await Bun.write(path.join(pluginsDir, "bunfig.toml"), `[install.cache]\ndir = ${JSON.stringify(cacheDir)}\n`);
-			const spec = `git+http://127.0.0.1:${server.port}/testuser/remote.git#main`;
 			const mgr = new PluginManager(tmpRoot);
-			expect((await mgr.install(spec)).version).toBe("1.0.0");
+			expect((await mgr.install(remote.spec)).version).toBe("1.0.0");
 
-			await Bun.write(
-				path.join(sourceDir, "package.json"),
-				JSON.stringify({ name: "@test/pi-package", version: "2.0.0" }, null, 2),
-			);
-			await runCommand(["git", "add", "package.json"], sourceDir);
-			await runCommand(
-				[
-					"git",
-					"-c",
-					"user.name=Plugin test",
-					"-c",
-					"user.email=plugin-test@example.com",
-					"commit",
-					"-m",
-					"version B",
-				],
-				sourceDir,
-			);
-			await runCommand(["git", "push", remoteDir, "main"], sourceDir);
-			await runCommand(["git", "update-server-info"], remoteDir);
-
-			const reinstalled = await mgr.install(spec);
+			await remote.publish("2.0.0");
+			const reinstalled = await mgr.install(remote.spec);
 			expect(reinstalled.version).toBe("2.0.0");
 		} finally {
-			await server.stop(true);
+			await remote.stop();
 		}
 	});
+
+	// Runs the real CLI because Bun.spawn resolves bare names against the
+	// PATH the process started with, so only a fresh process sees a bun-less PATH.
+	test.skipIf(process.platform === "win32")(
+		"`omp install`/`uninstall` work without a bun executable on PATH (#15480)",
+		async () => {
+			const remote = await serveLocalGitPackage(tmpRoot);
+			// The standalone binary targets machines without Bun: PATH offers git
+			// (needed for the clone) and nothing else.
+			const home = path.join(tmpRoot, "home");
+			const gitOnlyBin = path.join(tmpRoot, "git-only-bin");
+			const git = Bun.which("git");
+			if (!git) throw new Error("git is required for this test");
+			await fs.mkdir(gitOnlyBin, { recursive: true });
+			await fs.mkdir(home, { recursive: true });
+			await fs.symlink(git, path.join(gitOnlyBin, "git"));
+			const omp = async (...args: string[]) => {
+				const proc = Bun.spawn([process.execPath, cliEntry, ...args], {
+					cwd: home,
+					env: { HOME: home, PATH: gitOnlyBin, NO_COLOR: "1" },
+					stdin: "ignore",
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				const [exitCode, stdout, stderr] = await Promise.all([
+					proc.exited,
+					new Response(proc.stdout).text(),
+					new Response(proc.stderr).text(),
+				]);
+				expect({ exitCode, output: stdout + stderr }).toMatchObject({ exitCode: 0 });
+			};
+			const installedManifest = path.join(
+				home,
+				".omp",
+				"plugins",
+				"node_modules",
+				"@test",
+				"pi-package",
+				"package.json",
+			);
+			try {
+				await omp("install", remote.spec);
+				expect((await Bun.file(installedManifest).json()).version).toBe("1.0.0");
+
+				// Re-install of an existing git plugin goes through `bun pm cache` + `bun update`.
+				await remote.publish("2.0.0");
+				await omp("install", remote.spec);
+				expect((await Bun.file(installedManifest).json()).version).toBe("2.0.0");
+
+				await omp("plugin", "uninstall", "@test/pi-package");
+				expect(await Bun.file(installedManifest).exists()).toBe(false);
+			} finally {
+				await remote.stop();
+			}
+		},
+		60_000,
+	);
 
 	test("rejects git specs containing shell metacharacters", async () => {
 		const mgr = new PluginManager(tmpRoot);
@@ -584,9 +901,9 @@ describe("PluginManager.install with git sources", () => {
 		expect(plugin.version).toBe("2.0.0");
 		expect(changed).toBe(true);
 		expect(spawnedCommands).toEqual([
-			["bun", "install", "github:HexRaysSA/ida-mcp#latest"],
-			["bun", "pm", "cache"],
-			["bun", "update", "ida-mcp"],
+			[process.execPath, "install", "github:HexRaysSA/ida-mcp#latest"],
+			[process.execPath, "pm", "cache"],
+			[process.execPath, "update", "ida-mcp"],
 		]);
 		const lock = await Bun.file(path.join(tmpRoot, "omp-plugins.lock.json")).json();
 		expect(lock.plugins["ida-mcp"]).toEqual({ version: "2.0.0", enabledFeatures: null, enabled: false });

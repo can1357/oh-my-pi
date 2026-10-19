@@ -5,6 +5,7 @@ import type { Terminal, TerminalAppearance } from "../terminal";
 import { colorLuma } from "@oh-my-pi/pi-utils/color";
 import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { isTerminalBackgroundQueryTrusted } from "../terminal-multiplexer";
 import { setActiveSymbolTheme } from "./active-symbols";
 import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
 import {
@@ -34,6 +35,7 @@ export {
 	createHighlightStream,
 	getEditorTheme,
 	getMarkdownTheme,
+	getMarkdownThemeWithLinkTargets,
 	getSelectListTheme,
 	getSettingsListTheme,
 	getSymbolTheme,
@@ -48,16 +50,28 @@ var terminalReportedAppearance: "dark" | "light" | undefined;
 /** Appearance reported by the macOS fallback observer, or undefined if not yet available. */
 var macOSReportedAppearance: "dark" | "light" | undefined;
 
-function shouldUseMacOSAppearanceFallback(): boolean {
-	// Zellij currently breaks OSC 11 passthrough on macOS, so terminal-derived
-	// appearance cannot be trusted there. Fall back to host macOS appearance
-	// without letting it override valid terminal signals elsewhere.
-	return process.platform === "darwin" && !!Bun.env.ZELLIJ;
+const backgroundFallbackListeners = new Set<() => void>();
+
+/**
+ * Subscribe to native fallback appearance changes independently of theme changes.
+ * Consumers must re-check the effective background: COLORFGBG can override it.
+ */
+export function onTerminalBackgroundFallbackChange(callback: () => void): () => void {
+	backgroundFallbackListeners.add(callback);
+	return () => {
+		backgroundFallbackListeners.delete(callback);
+	};
 }
 
-function detectTerminalBackground(): "dark" | "light" {
+/**
+ * Detect appearance from trusted OSC 11 reports, then COLORFGBG, then native
+ * macOS appearance only on known-broken multiplexer background-query paths.
+ * Defaults to dark when none of those signals is available.
+ */
+export function detectTerminalBackground(): "dark" | "light" {
+	const backgroundQueryTrusted = isTerminalBackgroundQueryTrusted();
 	// Tier 1: terminal-reported appearance from OSC 11 luminance.
-	if (!shouldUseMacOSAppearanceFallback() && terminalReportedAppearance) {
+	if (backgroundQueryTrusted && terminalReportedAppearance) {
 		return terminalReportedAppearance;
 	}
 
@@ -72,7 +86,7 @@ function detectTerminalBackground(): "dark" | "light" {
 	}
 
 	// Tier 3: host macOS appearance for known-broken terminal paths only.
-	if (shouldUseMacOSAppearanceFallback()) {
+	if (!backgroundQueryTrusted) {
 		const macAppearance = macOSReportedAppearance ?? detectMacOSAppearance();
 		if (macAppearance) return macAppearance;
 	}
@@ -210,14 +224,14 @@ export async function initTheme(
 		assignTheme(await loadTheme(name, getCurrentThemeOptions()));
 		if (enableWatcher) {
 			await startThemeWatcher();
-			startSigwinchListener();
 		}
 	} catch (err) {
 		logger.debug("Theme loading failed, falling back to dark theme", { error: String(err) });
 		currentThemeName = "dark";
 		assignTheme(await loadTheme("dark", getCurrentThemeOptions()));
-		// Don't start watcher for fallback theme
+		// Skip file watching for the fallback theme, not appearance tracking.
 	}
+	if (enableWatcher) startSigwinchListener();
 }
 
 export async function setTheme(
@@ -235,6 +249,14 @@ export async function setTheme(
 		assignTheme(loadedTheme);
 		if (enableWatcher) {
 			await startThemeWatcher();
+			// startThemeWatcher() calls stopThemeWatcher(), which tears down
+			// the SIGWINCH handler and the macOS appearance observer that
+			// feeds the SIXEL background fallback. Restart it like initTheme()
+			// does so a runtime theme change does not silence fallback
+			// background repaints. Without this, `setTheme(name, true)` after
+			// startup would leave the SIXEL repaint path dead until the next
+			// process restart.
+			startSigwinchListener();
 		}
 		notifyThemeChange();
 		return { success: true };
@@ -663,12 +685,26 @@ var macObserver: { stop(): void } | undefined;
 
 function startMacAppearanceObserver(): void {
 	stopMacAppearanceObserver();
-	if (!shouldUseMacOSAppearanceFallback()) return;
+	if (isTerminalBackgroundQueryTrusted()) return;
 	try {
 		macOSReportedAppearance = detectMacOSAppearance() ?? undefined;
 		macObserver = MacAppearanceObserver.start((err, appearance) => {
 			if (!err && (appearance === "dark" || appearance === "light")) {
+				const changed = appearance !== macOSReportedAppearance;
 				macOSReportedAppearance = appearance;
+				if (changed) {
+					// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may unsubscribe while reporting
+					for (const listener of [...backgroundFallbackListeners]) {
+						try {
+							listener();
+						} catch (err) {
+							// Debug-level: a listener failure must not break sibling
+							// listeners or the appearance observer. Visible only in
+							// local debug logs, never in normal runs.
+							logger.debug("macOS appearance fallback listener failed", { err });
+						}
+					}
+				}
 				reevaluateAutoThemeForAppearance("macOS fallback");
 			}
 		});

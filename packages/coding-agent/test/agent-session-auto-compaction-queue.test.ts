@@ -16,6 +16,7 @@ import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/une
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { activateTodoTool } from "./helpers/agent-session-setup";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 import {
@@ -1934,6 +1935,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 	it("forwards todo reminder lifecycle signals to extensions", async () => {
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		activateTodoTool(session, tempDir.path());
 
 		session.setTodoPhases([
 			{

@@ -5,8 +5,11 @@ pub mod parser;
 use crate::mermaid::{
 	ansi::{CharRole, ColorMode, Theme},
 	canvas::{Canvas, Cell, RoleCanvas, to_cells},
-	flowchart::{AsciiConfig, draw::draw_multi_box},
-	text::{display_width, split_lines},
+	flowchart::{
+		AsciiConfig,
+		draw::{multi_box_size, set_cell, stamp_multi_box},
+	},
+	text::split_lines,
 };
 
 /// Parsed entity-relationship diagram.
@@ -105,7 +108,6 @@ pub struct ErRelationship {
 #[derive(Clone, Debug)]
 struct PlacedEntity {
 	entity_index: usize,
-	sections:     Vec<Vec<String>>,
 	x:            i32,
 	y:            i32,
 	width:        i32,
@@ -123,19 +125,7 @@ pub fn render(text: &str, config: &AsciiConfig, mode: ColorMode, theme: &Theme) 
 		diagram.entities.iter().map(build_entity_sections).collect();
 	let dimensions: Vec<(i32, i32)> = entity_sections
 		.iter()
-		.map(|sections| {
-			let max_text_width = sections
-				.iter()
-				.flatten()
-				.map(|line| display_width(line) as i32)
-				.max()
-				.unwrap_or(0);
-			let total_lines: i32 = sections
-				.iter()
-				.map(|section| section.len().max(1) as i32)
-				.sum();
-			(max_text_width + 4, total_lines + sections.len() as i32 - 1 + 2)
-		})
+		.map(|sections| multi_box_size(sections))
 		.collect();
 
 	let components = connected_components(&diagram);
@@ -159,14 +149,7 @@ pub fn render(text: &str, config: &AsciiConfig, mode: ColorMode, theme: &Theme) 
 				max_row_height = 0;
 				column_count = 0;
 			}
-			placed.push(PlacedEntity {
-				entity_index,
-				sections: entity_sections[entity_index].clone(),
-				x: current_x,
-				y: current_y,
-				width,
-				height,
-			});
+			placed.push(PlacedEntity { entity_index, x: current_x, y: current_y, width, height });
 			current_x += width + 6;
 			max_row_height = max_row_height.max(height);
 			column_count += 1;
@@ -190,24 +173,14 @@ pub fn render(text: &str, config: &AsciiConfig, mode: ColorMode, theme: &Theme) 
 	let mut roles = RoleCanvas::new(total_width, total_height);
 
 	for entity in &placed {
-		let box_canvas = draw_multi_box(&entity.sections, config.use_ascii, 1);
-		for x in 0..box_canvas.width() {
-			for y in 0..box_canvas.height() {
-				let Some(cell) = box_canvas.get(x, y) else {
-					continue;
-				};
-				if !cell.is_space() {
-					set_cell(
-						&mut canvas,
-						&mut roles,
-						entity.x + x,
-						entity.y + y,
-						cell.clone(),
-						classify_box_cell(cell),
-					);
-				}
-			}
-		}
+		stamp_multi_box(
+			&mut canvas,
+			&mut roles,
+			&entity_sections[entity.entity_index],
+			entity.x,
+			entity.y,
+			config.use_ascii,
+		);
 	}
 
 	draw_relationships(&diagram, &placed, config.use_ascii, &mut canvas, &mut roles);
@@ -237,16 +210,6 @@ fn build_entity_sections(entity: &ErEntity) -> Vec<Vec<String>> {
 		vec![header]
 	} else {
 		vec![header, attributes]
-	}
-}
-
-fn classify_box_cell(cell: &Cell) -> CharRole {
-	match cell.as_char() {
-		Some(
-			'┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | '│' | '─' | '╭' | '╮' | '╰' | '╯'
-			| '+' | '-' | '|',
-		) => CharRole::Border,
-		_ => CharRole::Text,
 	}
 }
 
@@ -321,20 +284,6 @@ fn placed_entity<'a>(
 ) -> Option<&'a PlacedEntity> {
 	let index = entity_index(diagram, id)?;
 	placed.iter().find(|entity| entity.entity_index == index)
-}
-
-fn set_cell(
-	canvas: &mut Canvas,
-	roles: &mut RoleCanvas,
-	x: i32,
-	y: i32,
-	cell: Cell,
-	role: CharRole,
-) {
-	if canvas.in_bounds(x, y) {
-		canvas.set(x, y, cell);
-		roles.set_role(x, y, role);
-	}
 }
 
 fn draw_relationships(
@@ -487,13 +436,18 @@ fn draw_relationships(
 				if y < 0 {
 					continue;
 				}
+				// Every cell at x >= 0 needs columns through x + 1 and rows
+				// through y + 1; the last cell sets the extent.
+				let last_x = label_x + cells.len() as i32 - 1;
+				if !cells.is_empty() && last_x >= 0 {
+					canvas.ensure_size(last_x + 2, y + 2);
+					roles.ensure_size(last_x + 2, y + 2);
+				}
 				for (index, cell) in cells.into_iter().enumerate() {
 					let x = label_x + index as i32;
 					if x < 0 {
 						continue;
 					}
-					canvas.ensure_size(x + 2, y + 2);
-					roles.ensure_size(x + 2, y + 2);
 					set_cell(canvas, roles, x, y, cell, CharRole::Text);
 				}
 			}

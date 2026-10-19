@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type {
@@ -33,6 +33,7 @@ import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import type { ToolSession } from "../tools";
 import { routeWriteThroughBridge } from "../tools/acp-bridge";
+import { approvalTargetKey } from "../tools/approval-targets";
 import { strictestApproval, truncateForPrompt } from "../tools/approval";
 import {
 	deleteFileWithFallback,
@@ -45,8 +46,9 @@ import {
 	invalidateFsScanAfterRename,
 	invalidateFsScanAfterWrite,
 } from "../tools/fs-cache-invalidation";
-import { outputMeta } from "../tools/output-meta";
+import { outputMeta, resolveOutputMaxColumns } from "../tools/output-meta";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { DEFAULT_MAX_COLUMN } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { resolveEditMode } from "../utils/edit-mode";
 import { attemptEditAutoRepair, type EditAutoRepairOutcome } from "./auto-repair";
@@ -75,7 +77,12 @@ import {
 	cfgEditFuzzyMatch,
 	cfgEditFuzzyThreshold,
 } from "./settings";
-import { cfgLspDiagnosticsDeduplicate, cfgLspDiagnosticsOnEdit, cfgLspFormatOnWrite } from "../lsp/settings";
+import {
+	cfgLspDiagnosticsDeduplicate,
+	cfgLspDiagnosticsOnEdit,
+	cfgLspFormatOnWrite,
+	cfgLspRequestTimeout,
+} from "../lsp/settings";
 
 export type {
 	EditRenderContext,
@@ -179,12 +186,22 @@ function createEditWritethrough(session: ToolSession): WritethroughCallback {
 				transformDiagnostics: deduplicate
 					? (filePath, result) => getDiagnosticsLedger(session).reduce(filePath, result)
 					: undefined,
+				requestTimeoutSec: cfgLspRequestTimeout.get(session.settings),
 			})
 		: writethroughNoop;
 }
 
 function operationFromNative(op: string): Operation | undefined {
 	return op === "create" || op === "delete" || op === "update" ? op : undefined;
+}
+
+/**
+ * Narrowest per-line cap, in UTF-8 bytes, at which any tool may have cut a line it displayed: grep's
+ * fixed byte cap or read's `tools.outputMaxColumns` (UTF-16 units, which never exceed UTF-8 bytes).
+ */
+function displayMaxColumns(settings: ToolSession["settings"]): number {
+	const readMaxColumns = resolveOutputMaxColumns(settings);
+	return readMaxColumns > 0 ? Math.min(readMaxColumns, DEFAULT_MAX_COLUMN) : DEFAULT_MAX_COLUMN;
 }
 
 function parseDiagnostics(json: string | undefined): FileDiagnosticsResult | undefined {
@@ -294,9 +311,37 @@ function capPerFileSnapshots(entries: EditToolPerFileResult[]): EditToolPerFileR
 
 async function mkdirAllowingFallback(directory: string): Promise<void> {
 	try {
-		await mkdir(directory, { recursive: true });
+		await fs.mkdir(directory, { recursive: true });
 	} catch (error) {
 		if (!hasFileWriteFallback() || !isPermissionDeniedError(error)) throw error;
+	}
+}
+
+/**
+ * Permission bits a move carries to its destination, or undefined where they cannot be read:
+ * Windows has no POSIX mode, and a source the process may not stat is moved by the
+ * privileged fallback writer, which keeps the destination's own mode.
+ */
+async function movedFileMode(filePath: string): Promise<number | undefined> {
+	if (process.platform === "win32") return undefined;
+	try {
+		return (await fs.stat(filePath)).mode & 0o7777;
+	} catch (error) {
+		if (isPermissionDeniedError(error)) return undefined;
+		throw error;
+	}
+}
+
+/**
+ * Give a moved file its source's mode. The content is already at the destination, possibly
+ * written by a privileged fallback writer, so a destination that denies mode changes keeps
+ * its own mode instead of failing the move halfway with both files left behind.
+ */
+async function chmodMovedFile(filePath: string, mode: number): Promise<void> {
+	try {
+		await fs.chmod(filePath, mode);
+	} catch (error) {
+		if (!isPermissionDeniedError(error)) throw error;
 	}
 }
 
@@ -314,11 +359,8 @@ interface OpenEditSession {
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-	if (left.byteLength !== right.byteLength) return false;
-	for (let index = 0; index < left.byteLength; index++) {
-		if (left[index] !== right[index]) return false;
-	}
-	return true;
+	// Zero-copy Buffer view: `equals` is a native memcmp.
+	return Buffer.from(left.buffer, left.byteOffset, left.byteLength).equals(right);
 }
 
 export class EditTool implements AgentTool<TInput> {
@@ -401,6 +443,22 @@ export class EditTool implements AgentTool<TInput> {
 			}
 		}
 		return lines.length === 0 ? ["File: (unknown)"] : lines;
+	};
+
+	/**
+	 * `always-ask-cached` keys: every file the payload writes — section targets
+	 * plus move/rename destinations, mirroring {@link approval}.
+	 */
+	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
+		const { paths, fileOps } = this.#inspect(args);
+		const targets = [...paths];
+		for (const op of fileOps) if (op.kind === "move" && op.to !== undefined) targets.push(op.to);
+		const keys: string[] = [];
+		for (const target of targets) {
+			const key = approvalTargetKey(this.session.cwd, target);
+			if (key !== undefined) keys.push(key);
+		}
+		return keys.length > 0 ? keys : undefined;
 	};
 
 	matcherDigest(args: unknown): string | undefined {
@@ -605,6 +663,7 @@ export class EditTool implements AgentTool<TInput> {
 			allowFuzzy: cfgEditFuzzyMatch.get(this.session.settings),
 			fuzzyThreshold: cfgEditFuzzyThreshold.get(this.session.settings),
 			enforceSeenLines: cfgEditEnforceSeenLines.get(this.session.settings),
+			maxColumns: displayMaxColumns(this.session.settings),
 			blockAutoGenerated: cfgEditBlockAutoGenerated.get(this.session.settings),
 			planActive: this.session.getPlanModeState?.()?.enabled ?? false,
 			urlSchemes: [...specs.keys()],
@@ -670,8 +729,10 @@ export class EditTool implements AgentTool<TInput> {
 			if (!request.moveTo) {
 				throw new ToolError("Native edit move request omitted destination", { path: request.path });
 			}
+			const mode = await movedFileMode(request.path);
 			await mkdirAllowingFallback(path.dirname(request.moveTo));
 			await writeFileWithFallback(request.moveTo, request.content);
+			if (mode !== undefined) await chmodMovedFile(request.moveTo, mode);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
@@ -705,6 +766,8 @@ export class EditTool implements AgentTool<TInput> {
 		);
 		if (bridge) return { written: bridge.text };
 
+		// The pre-image is the only way to tell "the write never landed" from
+		// "something else rewrote the file"; a stat cannot (coarse mtimes).
 		let preWriteBytes: Uint8Array | undefined;
 		if (request.op === "update") {
 			try {
@@ -716,35 +779,47 @@ export class EditTool implements AgentTool<TInput> {
 			await mkdirAllowingFallback(path.dirname(request.path));
 		}
 
+		// `begin()` claims this mutation's version; only bump when the writethrough
+		// never began a deferred fetch for the path (LSP off, unflushed batch).
+		let began = false;
 		const diagnostics = await createEditWritethrough(this.session)(
 			request.path,
 			request.content,
 			signal,
 			Bun.file(request.path),
 			request.lspBatchId ? { id: request.lspBatchId, flush: request.flushLsp } : undefined,
-			destination => (destination === request.path ? this.#deferredDiagnostics.begin(request.path) : undefined),
+			destination => {
+				if (destination !== request.path) return undefined;
+				began = true;
+				return this.#deferredDiagnostics.begin(request.path);
+			},
 		);
 
 		if (preWriteBytes !== undefined) {
-			const requestedBytes = new TextEncoder().encode(request.content);
-			if (!bytesEqual(requestedBytes, preWriteBytes)) {
-				let postWriteBytes: Uint8Array | undefined;
-				try {
-					postWriteBytes = await Bun.file(request.path).bytes();
-				} catch (error) {
-					if (!isEnoent(error)) throw error;
-				}
-				if (postWriteBytes !== undefined && bytesEqual(postWriteBytes, preWriteBytes)) {
-					throw new ToolError(
-						`edit appeared successful but file content did not change on disk: ${request.displayPath}`,
-						{ path: request.path },
-					);
-				}
+			// Fail when a content-changing write left disk at the pre-image. Compare
+			// post vs pre first (native memcmp, usually a length mismatch) so the
+			// requested content is only encoded when disk really is unchanged.
+			let postWriteBytes: Uint8Array | undefined;
+			try {
+				postWriteBytes = await Bun.file(request.path).bytes();
+			} catch (error) {
+				if (!isEnoent(error)) throw error;
+			}
+			if (
+				postWriteBytes !== undefined &&
+				bytesEqual(postWriteBytes, preWriteBytes) &&
+				(Buffer.byteLength(request.content, "utf8") !== preWriteBytes.byteLength ||
+					!bytesEqual(Buffer.from(request.content, "utf8"), preWriteBytes))
+			) {
+				throw new ToolError(
+					`edit appeared successful but file content did not change on disk: ${request.displayPath}`,
+					{ path: request.path },
+				);
 			}
 		}
 
 		invalidateFsScanAfterWrite(request.path);
-		this.session.bumpFileMutationVersion?.(request.path);
+		if (!began) this.session.bumpFileMutationVersion?.(request.path);
 		return {
 			written: diagnostics.finalContent,
 			diagnosticsJson: diagnostics.diagnostics ? JSON.stringify(diagnostics.diagnostics) : undefined,

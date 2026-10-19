@@ -1,9 +1,10 @@
-import { parseJsonWithRepair, parseStreamingJson } from "@oh-my-pi/pi-utils";
+import { parseJsonWithRepair } from "@oh-my-pi/pi-utils";
 import type { Message, ToolCall } from "../types";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
-import { asRecord, mintToolCallId, partialSuffixOverlapAny } from "./coercion";
+import { asRecord, mintToolCallId, parseCompleteToolName, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./hermes.md" with { type: "text" };
 import { renderChatMlTranscript, renderDelimitedThinking, renderToolResponseResults, stringifyJson } from "./rendering";
+import { TerminatorWait } from "./terminator-wait";
 import type {
 	DialectDefinition,
 	DialectRenderOptions,
@@ -28,6 +29,7 @@ export class HermesInbandScanner implements InbandScanner {
 	#parseThinking: boolean;
 	#inThinking = false;
 	#thinking = "";
+	readonly #closeWait = new TerminatorWait();
 
 	constructor(options: InbandScannerOptions = {}) {
 		this.#parseThinking = options.parseThinking === true;
@@ -35,11 +37,15 @@ export class HermesInbandScanner implements InbandScanner {
 
 	feed(text: string): InbandScanEvent[] {
 		if (text.length === 0) return [];
-		this.#buffer += text;
-		return this.#consume(false);
+		if (this.#closeWait.absorb(text)) return [];
+		this.#buffer = this.#closeWait.release(this.#buffer) + text;
+		const events = this.#consume(false);
+		if (this.#inside && this.#started && !this.#inThinking) this.#closeWait.arm(TOOL_CLOSE, this.#buffer);
+		return events;
 	}
 
 	flush(): InbandScanEvent[] {
+		this.#buffer = this.#closeWait.release(this.#buffer);
 		return this.#consume(true);
 	}
 
@@ -131,15 +137,11 @@ export class HermesInbandScanner implements InbandScanner {
 	}
 
 	#tryStart(body: string, events: InbandScanEvent[]): void {
-		try {
-			const partial = parseStreamingJson<{ name?: unknown }>(body);
-			if (typeof partial.name !== "string" || partial.name.length === 0) return;
-			this.#name = partial.name;
-			this.#started = true;
-			events.push({ type: "toolStart", id: this.#id, name: this.#name });
-		} catch {
-			// Partial JSON is allowed until the closing tag arrives.
-		}
+		const name = parseCompleteToolName(body);
+		if (!name) return;
+		this.#name = name;
+		this.#started = true;
+		events.push({ type: "toolStart", id: this.#id, name: this.#name });
 	}
 
 	#parseCall(body: string): { name: string; arguments: Record<string, unknown> } | undefined {

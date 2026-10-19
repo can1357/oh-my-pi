@@ -65,13 +65,36 @@ impl IsolationBackend for BtrfsBackend {
 mod imp {
 	use std::{
 		fs,
-		path::{Path, PathBuf},
+		os::unix::fs::MetadataExt,
+		path::Path,
 		process::{Command, Stdio},
+		sync::atomic::{AtomicBool, Ordering},
 	};
 
-	use crate::{IsoError, IsoResult, ProbeResult};
+	use crate::{IsoError, IsoResult, ProbeResult, statfs_magic, tree};
+
+	/// `statfs` magic of a btrfs filesystem.
+	const BTRFS_SUPER_MAGIC: u32 = 0x9123_683e;
+	/// Inode number of every btrfs subvolume's root directory.
+	const SUBVOLUME_ROOT_INO: u64 = 256;
+
+	/// Set once the btrfs CLI has run; a host that has it keeps it, so later
+	/// probes skip the spawn. A failure is not cached: the CLI can be installed
+	/// while a long-running session is up, so the next probe spawns again.
+	static CLI_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
 	pub fn probe() -> ProbeResult {
+		if CLI_AVAILABLE.load(Ordering::Relaxed) {
+			return ProbeResult::available();
+		}
+		let probe = probe_cli();
+		if probe.available {
+			CLI_AVAILABLE.store(true, Ordering::Relaxed);
+		}
+		probe
+	}
+
+	fn probe_cli() -> ProbeResult {
 		match Command::new("btrfs")
 			.arg("version")
 			.stdin(Stdio::null())
@@ -92,7 +115,19 @@ mod imp {
 	}
 
 	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
-		let lower = canonical_existing_dir(lower)?;
+		let lower = tree::canonical_existing_dir(lower, "btrfs snapshot source", IsoError::other)?;
+		// `btrfs subvolume snapshot` only snapshots a subvolume root; answer
+		// that from `stat`/`statfs` instead of spawning it to find out.
+		let is_subvolume_root = fs::metadata(&lower)
+			.is_ok_and(|meta| meta.ino() == SUBVOLUME_ROOT_INO)
+			&& statfs_magic(&lower) == Some(BTRFS_SUPER_MAGIC);
+		if !is_subvolume_root {
+			return Err(IsoError::unavailable(format!(
+				"btrfs snapshot unsupported for {} -> {}: not a btrfs subvolume",
+				lower.display(),
+				merged.display()
+			)));
+		}
 		prepare_destination(merged)?;
 
 		let output = Command::new("btrfs")
@@ -134,24 +169,6 @@ mod imp {
 
 	pub fn stop(merged: &Path) -> IsoResult<()> {
 		delete_subvolume_or_tree(merged)
-	}
-
-	fn canonical_existing_dir(path: &Path) -> IsoResult<PathBuf> {
-		let resolved = if path.is_absolute() {
-			path.to_path_buf()
-		} else {
-			std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-		};
-		let meta = fs::metadata(&resolved).map_err(|err| {
-			IsoError::other(format!("invalid btrfs snapshot source {}: {err}", resolved.display()))
-		})?;
-		if !meta.is_dir() {
-			return Err(IsoError::other(format!(
-				"btrfs snapshot source {} is not a directory",
-				resolved.display()
-			)));
-		}
-		Ok(fs::canonicalize(&resolved).unwrap_or(resolved))
 	}
 
 	fn prepare_destination(merged: &Path) -> IsoResult<()> {

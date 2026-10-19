@@ -1,7 +1,8 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as natives from "@oh-my-pi/pi-natives";
 import { DiffSide, DiffStream } from "@oh-my-pi/pi-natives";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
@@ -11,11 +12,17 @@ import {
 	type DiffBuildOptions,
 	DiffPane,
 } from "@oh-my-pi/pi-tui/apps/git/diff-pane";
+import type { ChangedFile } from "@oh-my-pi/pi-tui/apps/git/state";
 import { GitModel } from "../src/cli/git-tui/state";
+import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const RED_PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+	"base64",
+);
+const GRAY_PNG = Buffer.from(
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
 	"base64",
 );
 const LFS_POINTER_VERSION = "version https://git-lfs.github.com/spec/v1";
@@ -189,6 +196,49 @@ describe("git TUI asset previews", () => {
 		});
 	});
 
+	test("records the path and revision each media side was read from", async () => {
+		await withReviewRepo(async repo => {
+			const logo = path.join(repo, "logo.png");
+			const gone = path.join(repo, "gone.png");
+			await Bun.write(logo, RED_PNG);
+			await Bun.write(gone, RED_PNG);
+			await $`git add logo.png gone.png`.cwd(repo).quiet();
+			await $`git commit -m add`.cwd(repo).quiet();
+			const added = (await $`git rev-parse HEAD`.cwd(repo).quiet().text()).trim();
+			await Bun.write(logo, GRAY_PNG);
+			await $`git commit -am gray`.cwd(repo).quiet();
+			const gray = (await $`git rev-parse HEAD`.cwd(repo).quiet().text()).trim();
+			// logo.png: staged (gray → red) and unstaged (red → raw bytes); gone.png deleted; fresh.png untracked.
+			await Bun.write(logo, RED_PNG);
+			await $`git add logo.png`.cwd(repo).quiet();
+			await Bun.write(logo, new Uint8Array([0xff, 0xfe, 0xfd, 0xfc]));
+			await fs.rm(gone);
+			await Bun.write(path.join(repo, "fresh.png"), RED_PNG);
+
+			const model = new GitModel(repo);
+			await model.refresh();
+			const refs = async (file: ChangedFile | undefined) => {
+				if (!file) throw new Error("changed file was not discovered");
+				const contents = await model.streamContents(file, () => {});
+				if (contents.kind !== "asset") throw new Error(`${file.path} was not loaded as an asset`);
+				return [contents.oldRef, contents.newRef];
+			};
+			const unstaged = (filePath: string) => model.unstaged.find(file => file.path === filePath);
+
+			expect(await refs(model.staged.find(file => file.path === "logo.png"))).toEqual([
+				{ path: logo, rev: "HEAD" },
+				{ path: logo, rev: ":0" },
+			]);
+			expect(await refs(unstaged("logo.png"))).toEqual([{ path: logo, rev: ":0" }, { path: logo }]);
+			expect(await refs(unstaged("gone.png"))).toEqual([{ path: gone, rev: ":0" }, undefined]);
+			expect(await refs(unstaged("fresh.png"))).toEqual([undefined, { path: path.join(repo, "fresh.png") }]);
+			expect(await refs({ path: "logo.png", kind: "modified", area: "commit" })).toEqual([
+				{ path: logo, rev: added },
+				{ path: logo, rev: gray },
+			]);
+		});
+	});
+
 	test("rasterizes SVG Git objects for terminal preview", async () => {
 		await withReviewRepo(async repo => {
 			const svg =
@@ -207,6 +257,42 @@ describe("git TUI asset previews", () => {
 			pane.setAsset(file.path, contents.old, contents.new);
 			expect(sanitizeText(pane.render(80, 12).join("\n"))).toContain("After · SVG");
 		});
+	});
+
+	test("encodes a SIXEL image preview once across renders", async () => {
+		const terminal = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
+		const originalProtocol = terminal.imageProtocol;
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const encodeSixel = spyOn(natives, "encodeSixelAsync");
+		try {
+			const pane = new DiffPane();
+			pane.setAsset(
+				"image.png",
+				{ kind: "empty" },
+				{
+					kind: "image",
+					image: {
+						data: RED_PNG.toString("base64"),
+						mimeType: "image/png",
+						sourceMimeType: "image/png",
+						widthPx: 1,
+						heightPx: 1,
+						byteLength: RED_PNG.byteLength,
+						key: "red",
+					},
+				},
+			);
+			pane.render(80, 12);
+			await encodeSixel.mock.results[0]?.value;
+			pane.render(80, 12);
+			pane.render(80, 12);
+			// A fresh Image per render would start a new encode every frame and
+			// never show the one that landed.
+			expect(encodeSixel).toHaveBeenCalledTimes(1);
+		} finally {
+			encodeSixel.mockRestore();
+			terminal.imageProtocol = originalProtocol;
+		}
 	});
 
 	test("resolves staged Git LFS pointers from local object storage", async () => {

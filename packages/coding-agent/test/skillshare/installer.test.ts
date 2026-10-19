@@ -14,6 +14,7 @@ import {
 import {
 	getSkillStorePath,
 	getSkillshareStoreDir,
+	getProjectSkillsInstallPaths,
 	readSkillsLock,
 	readSkillsManifest,
 	type SkillsLock,
@@ -118,7 +119,17 @@ describe("skills manifest and lock", () => {
 		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skillshare-manifest-"));
 	});
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await removeWithRetries(dir);
+	});
+
+	it("rejects a temporary ceiling as a project root without identifying it as home", async () => {
+		vi.spyOn(os, "tmpdir").mockReturnValue(dir);
+		vi.spyOn(os, "homedir").mockReturnValue(path.join(dir, "home"));
+
+		await expect(getProjectSkillsInstallPaths(dir)).rejects.toThrow(
+			"This directory is not a project root; pass --global to install for your user.",
+		);
 	});
 
 	it("round-trips entries with sorted keys", async () => {

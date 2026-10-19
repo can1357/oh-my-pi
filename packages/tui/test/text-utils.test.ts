@@ -161,4 +161,11 @@ describe("text utils", () => {
 		expect(result.afterWidth).toBe(1);
 		expect(result.after.includes("\x1b]66")).toBe(false);
 	});
+
+	it("truncates OSC 66 spans by their metadata width, not UTF-16 length", () => {
+		const encoded = encodeTextSized("a", { widthCells: 99 });
+		const truncated = truncateToWidth(encoded, 40);
+		expect(truncated).not.toBe(encoded);
+		expect(visibleWidth(truncated)).toBeLessThanOrEqual(40);
+	});
 });

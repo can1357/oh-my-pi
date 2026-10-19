@@ -34,6 +34,9 @@ const UNLIKELY_ROLES = new Set(["menu", "menubar", "complementary", "navigation"
 const ARTICLE_TYPES =
 	/^(?:Article|AdvertiserContentArticle|NewsArticle|AnalysisNewsArticle|OpinionNewsArticle|ReportageNewsArticle|ReviewNewsArticle|Report|ScholarlyArticle|MedicalScholarlyArticle|SocialMediaPosting|BlogPosting|LiveBlogPosting|DiscussionForumPosting|TechArticle|APIReference)$/;
 const NORMALIZE = /\s{2,}/g;
+const ELEMENT_NODE = 1;
+const TEXT_NODE = 3;
+const CDATA_SECTION_NODE = 4;
 
 type Metadata = {
 	title?: string;
@@ -119,6 +122,273 @@ function linkDensity(node: ReadabilityElement): number {
 	return linked / total;
 }
 
+/** Whether a UTF-16 code unit is whitespace to `String#trim` and `\s`. */
+function isSpace(code: number): boolean {
+	if (code <= 0x20) return code === 0x20 || (code >= 0x09 && code <= 0x0d);
+	if (code < 0xa0) return false;
+	return (
+		code === 0xa0 ||
+		code === 0x1680 ||
+		(code >= 0x2000 && code <= 0x200a) ||
+		code === 0x2028 ||
+		code === 0x2029 ||
+		code === 0x202f ||
+		code === 0x205f ||
+		code === 0x3000 ||
+		code === 0xfeff
+	);
+}
+
+/** Separators `#scoreParagraph` counts clauses by. */
+function isSeparator(code: number): boolean {
+	return (
+		code === 0x2c ||
+		code === 0x060c ||
+		code === 0xfe50 ||
+		code === 0xfe10 ||
+		code === 0xfe11 ||
+		code === 0x2e41 ||
+		code === 0x2e34 ||
+		code === 0x2e32 ||
+		code === 0xff0c
+	);
+}
+
+const SEPARATORS = /[\u002c\u060c\ufe50\ufe10\ufe11\u2e41\u2e34\u2e32\uff0c]/;
+
+/** {@link TextRun} flags: no non-whitespace text; starts with whitespace; ends with whitespace. */
+const BLANK = 1;
+const LEADING_SPACE = 2;
+const TRAILING_SPACE = 4;
+
+/** Measures `text()` of concatenated pieces without building the string. */
+class TextRun {
+	length = 0;
+	/** A blank run that contains whitespace carries both space flags. */
+	flags = BLANK;
+	commas = 0;
+	separators = 0;
+
+	reset(): void {
+		this.length = 0;
+		this.flags = BLANK;
+		this.commas = 0;
+		this.separators = 0;
+	}
+
+	/** Append a run measured earlier. */
+	append(length: number, flags: number, commas: number, separators: number): void {
+		this.commas += commas;
+		this.separators += separators;
+		if (flags & BLANK) {
+			if (flags & LEADING_SPACE) this.flags |= this.flags & BLANK ? LEADING_SPACE | TRAILING_SPACE : TRAILING_SPACE;
+			return;
+		}
+		if (this.flags & BLANK) {
+			this.length = length;
+			this.flags = (this.flags & LEADING_SPACE) | flags;
+			return;
+		}
+		// Whitespace between two non-blank runs collapses to a single character.
+		if (this.flags & TRAILING_SPACE || flags & LEADING_SPACE) this.length++;
+		this.length += length;
+		this.flags = (this.flags & LEADING_SPACE) | (flags & TRAILING_SPACE);
+	}
+
+	appendText(value: string): void {
+		if (!value) return;
+		let length = 0;
+		let commas = 0;
+		let separators = 0;
+		let seen = false;
+		let gap = false;
+		for (let index = 0; index < value.length; index++) {
+			const code = value.charCodeAt(index);
+			if (isSpace(code)) {
+				if (seen) gap = true;
+				continue;
+			}
+			if (gap) {
+				length++;
+				gap = false;
+			}
+			length++;
+			seen = true;
+			if (isSeparator(code)) {
+				separators++;
+				if (code === 0x2c) commas++;
+			}
+		}
+		const flags = seen
+			? (isSpace(value.charCodeAt(0)) ? LEADING_SPACE : 0) | (gap ? TRAILING_SPACE : 0)
+			: BLANK | LEADING_SPACE | TRAILING_SPACE;
+		this.append(length, flags, commas, separators);
+	}
+}
+
+function isTag(node: ReadabilityElement, upper: string, lower: string): boolean {
+	return node.tagName === upper || node.tagName === lower;
+}
+
+/**
+ * `text()` lengths, comma counts, descendant tag counts and link density of every element in a tree, from one
+ * bottom-up pass over the whole tree holding the first element asked about. Answers describe the tree as
+ * measured, so only ask about elements whose subtree has not changed since.
+ */
+class SubtreeStats {
+	readonly #countsAsText: (node: ReadabilityNode) => boolean;
+	readonly #index = new Map<ReadabilityNode, number>();
+	readonly #length: number[] = [];
+	readonly #flags: number[] = [];
+	readonly #commas: number[] = [];
+	readonly #separators: number[] = [];
+	readonly #paragraphs: number[] = [];
+	readonly #images: number[] = [];
+	readonly #inputs: number[] = [];
+	/** Range of an element's descendant anchors in {@link #links}. */
+	readonly #linkStart: number[] = [];
+	readonly #linkEnd: number[] = [];
+	/** `linkDensity` term of each anchor, in document order. */
+	readonly #links: number[] = [];
+
+	/** `countsAsText` tells whether a non-element child's `textContent` is part of its parent's. */
+	constructor(countsAsText: (node: ReadabilityNode) => boolean) {
+		this.#countsAsText = countsAsText;
+	}
+
+	/** `text(node).length`. */
+	length(node: ReadabilityElement): number {
+		const index = this.#at(node);
+		return index < 0 ? text(node).length : this.#length[index];
+	}
+
+	/** `!text(node)`. */
+	blank(node: ReadabilityElement): boolean {
+		const index = this.#at(node);
+		return index < 0 ? !text(node) : (this.#flags[index] & BLANK) !== 0;
+	}
+
+	/** `text(node).split(",").length - 1`. */
+	commas(node: ReadabilityElement): number {
+		const index = this.#at(node);
+		return index < 0 ? text(node).split(",").length - 1 : this.#commas[index];
+	}
+
+	/** `text(node).split(SEPARATORS).length - 1`. */
+	separators(node: ReadabilityElement): number {
+		const index = this.#at(node);
+		return index < 0 ? text(node).split(SEPARATORS).length - 1 : this.#separators[index];
+	}
+
+	/** `node.getElementsByTagName("p").length`. */
+	paragraphs(node: ReadabilityElement): number {
+		const index = this.#at(node);
+		return index < 0 ? node.getElementsByTagName("p").length : this.#paragraphs[index];
+	}
+
+	/** `node.getElementsByTagName("img").length`. */
+	images(node: ReadabilityElement): number {
+		const index = this.#at(node);
+		return index < 0 ? node.getElementsByTagName("img").length : this.#images[index];
+	}
+
+	/** `node.getElementsByTagName("input").length`. */
+	inputs(node: ReadabilityElement): number {
+		const index = this.#at(node);
+		return index < 0 ? node.getElementsByTagName("input").length : this.#inputs[index];
+	}
+
+	/** `linkDensity(node)`, summed in the same order so the result is bit-identical. */
+	linkDensity(node: ReadabilityElement): number {
+		const index = this.#at(node);
+		if (index < 0) return linkDensity(node);
+		const total = this.#length[index];
+		if (!total) return 0;
+		let linked = 0;
+		for (let link = this.#linkStart[index]; link < this.#linkEnd[index]; link++) linked += this.#links[link];
+		return linked / total;
+	}
+
+	#at(node: ReadabilityElement): number {
+		const index = this.#index.get(node);
+		if (index !== undefined) return index;
+		if (node.nodeType !== ELEMENT_NODE) return -1;
+		let root: ReadabilityNode = node;
+		while (root.parentNode?.nodeType === ELEMENT_NODE) root = root.parentNode;
+		this.#measure(root as ReadabilityElement);
+		return this.#index.get(node) ?? -1;
+	}
+
+	#measure(root: ReadabilityElement): void {
+		const first = this.#length.length;
+		const order: ReadabilityElement[] = [];
+		const anchors: ReadabilityElement[] = [];
+		const pending = [root];
+		while (pending.length) {
+			const node = pending.pop();
+			if (!node) continue;
+			this.#index.set(node, first + order.length);
+			order.push(node);
+			// An anchor counts for its ancestors only, so its own range starts after it.
+			if (isTag(node, "A", "a")) anchors.push(node);
+			this.#linkStart.push(this.#links.length + anchors.length);
+			this.#linkEnd.push(0);
+			this.#length.push(0);
+			this.#flags.push(0);
+			this.#commas.push(0);
+			this.#separators.push(0);
+			this.#paragraphs.push(0);
+			this.#images.push(0);
+			this.#inputs.push(0);
+			const children = node.childNodes;
+			for (let child = children.length - 1; child >= 0; child--) {
+				if (children[child].nodeType === ELEMENT_NODE) pending.push(children[child] as ReadabilityElement);
+			}
+		}
+		const run = new TextRun();
+		// Reverse document order reaches every element after all of its descendants.
+		for (let offset = order.length - 1; offset >= 0; offset--) {
+			const node = order[offset];
+			const index = first + offset;
+			const children = node.childNodes;
+			// A template's parsed children are not part of its text in every DOM; ask it directly.
+			const leaf = !children.length || isTag(node, "TEMPLATE", "template");
+			run.reset();
+			if (leaf) run.appendText(node.textContent ?? "");
+			let paragraphs = 0;
+			let images = 0;
+			let inputs = 0;
+			let linkEnd = this.#linkStart[index];
+			for (let child = 0; child < children.length; child++) {
+				const childNode = children[child];
+				if (childNode.nodeType !== ELEMENT_NODE) {
+					if (!leaf && this.#countsAsText(childNode)) run.appendText(childNode.textContent ?? "");
+					continue;
+				}
+				const element = childNode as ReadabilityElement;
+				const at = this.#index.get(element) ?? -1;
+				if (!leaf) run.append(this.#length[at], this.#flags[at], this.#commas[at], this.#separators[at]);
+				paragraphs += this.#paragraphs[at] + (isTag(element, "P", "p") ? 1 : 0);
+				images += this.#images[at] + (isTag(element, "IMG", "img") ? 1 : 0);
+				inputs += this.#inputs[at] + (isTag(element, "INPUT", "input") ? 1 : 0);
+				linkEnd = this.#linkEnd[at];
+			}
+			this.#length[index] = run.length;
+			this.#flags[index] = run.flags;
+			this.#commas[index] = run.commas;
+			this.#separators[index] = run.separators;
+			this.#paragraphs[index] = paragraphs;
+			this.#images[index] = images;
+			this.#inputs[index] = inputs;
+			this.#linkEnd[index] = linkEnd;
+		}
+		for (const anchor of anchors) {
+			const length = this.#length[this.#index.get(anchor) ?? -1];
+			this.#links.push(length * ((anchor.getAttribute("href") ?? "").startsWith("#") ? 0.3 : 1));
+		}
+	}
+}
+
 function visible(node: ReadabilityElement): boolean {
 	const style = node.getAttribute("style")?.toLowerCase() ?? "";
 	return (
@@ -133,6 +403,24 @@ function removeAll(root: ReadabilityNode, tags: readonly string[]): void {
 	for (const tag of tags) {
 		for (const node of elements(container.getElementsByTagName(tag))) node.remove();
 	}
+}
+
+/** Replace `parent`'s children, detaching the old ones in one step where the DOM supports it. */
+function replaceChildren(parent: ReadabilityNode, children: readonly ReadabilityNode[]): void {
+	if (parent.replaceChildren) parent.replaceChildren();
+	else while (parent.firstChild) parent.firstChild.remove();
+	for (const child of children) parent.appendChild(child);
+}
+
+/** Move all of `from`'s children to the end of `to` without detaching them one by one. */
+function moveChildren(from: ReadabilityNode, to: ReadabilityNode): void {
+	if (!from.replaceChildren) {
+		while (from.firstChild) to.appendChild(from.firstChild);
+		return;
+	}
+	const children = Array.from(from.childNodes);
+	from.replaceChildren();
+	for (const child of children) to.appendChild(child);
 }
 
 function entityDecode(value: string | undefined | null): string | undefined | null {
@@ -283,6 +571,8 @@ export class Readability<T = string> {
 	readonly #scores = new Map<ReadabilityElement, number>();
 	#byline: string | undefined;
 	#lang: string | null = null;
+	/** Per non-text node type, whether this DOM counts its `textContent` in a parent's. */
+	readonly #textByNodeType = new Map<number, boolean>();
 
 	constructor(document: ReadabilityDocument, options: ReadabilityOptions<T> = {}) {
 		this.#document = document;
@@ -303,10 +593,11 @@ export class Readability<T = string> {
 		removeAll(this.#document, ["script", "style"]);
 		const body = this.#document.body;
 		if (!body) return null;
-		const source = body.innerHTML;
+		// Retries start from the body as it was before the first attempt rearranged it.
+		const pristine = Array.from(body.childNodes, node => node.cloneNode(true));
 		const attempts: Attempt[] = [];
 		for (const mode of [0, 1, 2, 3]) {
-			if (mode) body.innerHTML = source;
+			if (mode) replaceChildren(body, mode === 3 ? pristine : pristine.map(node => node.cloneNode(true)));
 			this.#scores.clear();
 			this.#byline = undefined;
 			const attempt = this.#extract(body, documentElement, metadata.title ?? "", mode);
@@ -356,10 +647,13 @@ export class Readability<T = string> {
 				node.remove();
 				continue;
 			}
-			if (!this.#byline && this.#isByline(node, label)) {
-				this.#byline = text(node);
-				node.remove();
-				continue;
+			if (!this.#byline) {
+				const byline = this.#bylineText(node, label);
+				if (byline) {
+					this.#byline = byline;
+					node.remove();
+					continue;
+				}
 			}
 			if (!titleRemoved && /^(?:H1|H2)$/.test(node.tagName) && this.#similar(articleTitle, text(node)) > 0.75) {
 				titleRemoved = true;
@@ -375,12 +669,14 @@ export class Readability<T = string> {
 			}
 			if (SCORE_TAGS.has(node.tagName)) scored.push(node);
 		}
-		for (const paragraph of scored) this.#scoreParagraph(paragraph, weightClasses);
+		// Scoring and sibling selection below only read the tree, so one measurement serves them all.
+		const stats = new SubtreeStats(this.#countsAsText);
+		for (const paragraph of scored) this.#scoreParagraph(paragraph, weightClasses, stats);
 		let top: ReadabilityElement | undefined;
 		let topScore = Number.NEGATIVE_INFINITY;
 		for (const [candidate, raw] of this.#scores) {
 			if (candidate.tagName === "BODY" || candidate.tagName === "HTML") continue;
-			const score = raw * (1 - linkDensity(candidate));
+			const score = raw * (1 - stats.linkDensity(candidate));
 			this.#scores.set(candidate, score);
 			if (score > topScore) {
 				top = candidate;
@@ -399,18 +695,19 @@ export class Readability<T = string> {
 		const siblings = parent ? elements(parent.children) : [top];
 		const threshold = Math.max(10, (this.#scores.get(top) ?? topScore) * 0.2);
 		for (const sibling of siblings) {
-			const siblingText = text(sibling);
+			// Moving earlier siblings into the article leaves this sibling's subtree, and so its stats, intact.
+			const siblingLength = stats.length(sibling);
 			const sameClassBonus =
 				sibling.className && sibling.className === top.className ? (this.#scores.get(top) ?? 0) * 0.2 : 0;
 			const include =
 				sibling === top ||
 				(this.#scores.get(sibling) ?? 0) + sameClassBonus >= threshold ||
 				(sibling.tagName === "P" &&
-					((siblingText.length > 80 && linkDensity(sibling) < 0.25) ||
-						(siblingText.length > 0 &&
-							siblingText.length < 80 &&
-							linkDensity(sibling) === 0 &&
-							/\.(?: |$)/.test(siblingText))));
+					((siblingLength > 80 && stats.linkDensity(sibling) < 0.25) ||
+						(siblingLength > 0 &&
+							siblingLength < 80 &&
+							stats.linkDensity(sibling) === 0 &&
+							/\.(?: |$)/.test(text(sibling)))));
 			if (!include) continue;
 			if (["DIV", "ARTICLE", "SECTION", "P", "OL", "UL"].includes(sibling.tagName)) {
 				article.appendChild(sibling);
@@ -419,14 +716,14 @@ export class Readability<T = string> {
 			const replacement = this.#document.createElement("DIV");
 			for (const attribute of Array.from(sibling.attributes))
 				replacement.setAttribute(attribute.name, attribute.value);
-			while (sibling.firstChild) replacement.appendChild(sibling.firstChild);
+			moveChildren(sibling, replacement);
 			article.appendChild(replacement);
 		}
 		this.#clean(article, mode < 3);
 		const page = this.#document.createElement("DIV");
 		page.id = "readability-page-1";
 		page.className = "page";
-		while (article.firstChild) page.appendChild(article.firstChild);
+		moveChildren(article, page);
 		article.appendChild(page);
 		const content = text(article);
 		let dir: string | null | undefined;
@@ -441,13 +738,10 @@ export class Readability<T = string> {
 		return { element: article, length: content.length, dir };
 	}
 
-	#scoreParagraph(node: ReadabilityElement, weightClasses: boolean): void {
-		const content = text(node);
-		if (content.length < 25) return;
-		const score =
-			1 +
-			content.split(/[\u002c\u060c\ufe50\ufe10\ufe11\u2e41\u2e34\u2e32\uff0c]/).length +
-			Math.min(Math.floor(content.length / 100), 3);
+	#scoreParagraph(node: ReadabilityElement, weightClasses: boolean, stats: SubtreeStats): void {
+		const length = stats.length(node);
+		if (length < 25) return;
+		const score = 1 + (stats.separators(node) + 1) + Math.min(Math.floor(length / 100), 3);
 		let ancestor = node.parentNode;
 		for (let level = 0; ancestor && level < 5; level++, ancestor = ancestor.parentNode) {
 			const element = ancestor as ReadabilityElement;
@@ -465,19 +759,19 @@ export class Readability<T = string> {
 			if (classWeight(heading) < 0 || linkDensity(heading) > 0.33) heading.remove();
 		}
 		if (conditional) {
+			// Nodes come in document order, so removing one only changes ancestors that were already judged.
+			const stats = new SubtreeStats(this.#countsAsText);
 			for (const node of elements(root.querySelectorAll("table, ul, div"))) {
 				if (node === root) continue;
-				const nodeText = text(node);
-				const paragraphs = node.getElementsByTagName("p").length;
-				const images = node.getElementsByTagName("img").length;
-				const inputs = node.getElementsByTagName("input").length;
+				const paragraphs = stats.paragraphs(node);
+				const images = stats.images(node);
 				if (
 					classWeight(node) < 0 ||
-					(!nodeText && !images) ||
-					(nodeText.split(",").length < 10 &&
+					(stats.blank(node) && !images) ||
+					(stats.commas(node) + 1 < 10 &&
 						((images > paragraphs && paragraphs > 0) ||
-							inputs > Math.floor(paragraphs / 3) ||
-							linkDensity(node) > 0.5))
+							stats.inputs(node) > Math.floor(paragraphs / 3) ||
+							stats.linkDensity(node) > 0.5))
 				)
 					node.remove();
 			}
@@ -512,16 +806,32 @@ export class Readability<T = string> {
 		}
 	}
 
-	#isByline(node: ReadabilityElement, label: string): boolean {
+	/** Byline text when `node` is marked as one; the attribute checks run first so most nodes never build text. */
+	#bylineText(node: ReadabilityElement, label: string): string | undefined {
+		if (
+			node.getAttribute("rel") !== "author" &&
+			!(node.getAttribute("itemprop") ?? "").includes("author") &&
+			!BYLINE.test(label)
+		)
+			return undefined;
 		const value = text(node);
-		return (
-			value.length > 0 &&
-			value.length < 100 &&
-			(node.getAttribute("rel") === "author" ||
-				(node.getAttribute("itemprop") ?? "").includes("author") ||
-				BYLINE.test(label))
-		);
+		return value.length > 0 && value.length < 100 ? value : undefined;
 	}
+
+	/** Whether a non-element child's `textContent` is part of its parent's (text is; comments are in some DOMs). */
+	readonly #countsAsText = (node: ReadabilityNode): boolean => {
+		if (node.nodeType === TEXT_NODE || node.nodeType === CDATA_SECTION_NODE) return true;
+		const value = node.textContent;
+		if (!value) return false;
+		let counts = this.#textByNodeType.get(node.nodeType);
+		if (counts === undefined) {
+			const probe = this.#document.createElement("DIV");
+			probe.appendChild(node.cloneNode(false));
+			counts = probe.textContent === value;
+			this.#textByNodeType.set(node.nodeType, counts);
+		}
+		return counts;
+	};
 
 	#similar(left: string, right: string): number {
 		const leftTokens = left.toLowerCase().split(/\W+/).filter(Boolean);

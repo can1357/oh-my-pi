@@ -7,7 +7,7 @@
  * id parsing, no host matching, no compat detection per request.
  */
 import { Effort, THINKING_EFFORTS } from "./effort";
-import type { Api, Model, ModelSpec } from "./types";
+import type { Api, Model, ModelSpec, ThinkingConfig } from "./types";
 
 /**
  * Runtime helpers read baked metadata only, so they accept both pre-build
@@ -25,6 +25,18 @@ export function getSupportedEfforts<TApi extends Api>(model: ApiModel<TApi>): re
 		return [];
 	}
 	return model.thinking?.efforts ?? [];
+}
+
+/**
+ * Neutral view of a model whose thinking ladder is unverified: `reasoning: false`
+ * and no ladder. Re-entering policy resolution starts from it (the ladder is
+ * derived output, not authored input), and requests without an effort send it so
+ * no reasoning or disable fields reach an upstream that may reject them.
+ */
+export function withoutUnverifiedThinking<T extends { reasoning: boolean; thinking?: ThinkingConfig }>(model: T): T {
+	if (!model.thinking?.unverified) return model;
+	const { thinking: _derived, ...rest } = model;
+	return { ...rest, reasoning: false } as T;
 }
 
 /**

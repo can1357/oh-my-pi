@@ -26,7 +26,8 @@ export type RelayRpcRequest =
 	| { op: "attach"; tabId: number }
 	| { op: "detach"; tabId: number }
 	| { op: "send"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
-	| { op: "createTab"; url: string }
+	/** `active: false` opens the tab without selecting it; absent keeps Chrome's default (selected). */
+	| { op: "createTab"; url: string; active?: boolean }
 	| { op: "removeTab"; tabId: number }
 	| { op: "activateTab"; tabId: number }
 	/** Add tabs to the per-window omp group (created/reused by title), remembering prior membership. */
@@ -60,6 +61,11 @@ export type ExtToRelayMessage =
 			 * latest-wins socket replacement.
 			 */
 			instanceId?: string;
+			/**
+			 * Identity of this browser run (`chrome.storage.session`), new after a browser restart, when Chrome
+			 * reuses tab ids: target ids embed it, so an old target id never names a new tab. Absent on older extensions.
+			 */
+			browserSession?: string;
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
 	| { t: "detached"; tabId: number; reason: string; relayInitiated?: boolean }

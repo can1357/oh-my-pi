@@ -5,6 +5,9 @@ pub enum ErrorCode {
 	PermissionDenied,
 	CaptureFailed,
 	InputFailed,
+	InputBusy,
+	Cancelled,
+	UserIntervened,
 	BackgroundUnavailable,
 	WindowNotFound,
 	InvalidTarget,
@@ -13,6 +16,10 @@ pub enum ErrorCode {
 	StaleRef,
 	AxUnsupported,
 	AxFailed,
+	AxUnconfirmed,
+	Unsupported,
+	SpaceUnsupported,
+	SpaceMoveDenied,
 	Timeout,
 	Closed,
 	Internal,
@@ -24,6 +31,9 @@ impl ErrorCode {
 			Self::PermissionDenied => "PermissionDenied",
 			Self::CaptureFailed => "CaptureFailed",
 			Self::InputFailed => "InputFailed",
+			Self::InputBusy => "InputBusy",
+			Self::Cancelled => "Cancelled",
+			Self::UserIntervened => "UserIntervened",
 			Self::BackgroundUnavailable => "BackgroundUnavailable",
 			Self::WindowNotFound => "WindowNotFound",
 			Self::InvalidTarget => "InvalidTarget",
@@ -32,6 +42,10 @@ impl ErrorCode {
 			Self::StaleRef => "StaleRef",
 			Self::AxUnsupported => "AxUnsupported",
 			Self::AxFailed => "AxFailed",
+			Self::AxUnconfirmed => "AxUnconfirmed",
+			Self::Unsupported => "Unsupported",
+			Self::SpaceUnsupported => "SpaceUnsupported",
+			Self::SpaceMoveDenied => "SpaceMoveDenied",
 			Self::Timeout => "Timeout",
 			Self::Closed => "Closed",
 			Self::Internal => "Internal",
@@ -60,6 +74,19 @@ impl DesktopError {
 
 	pub(crate) fn input_failed(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::InputFailed, message)
+	}
+
+	pub(crate) fn input_busy(message: impl Into<String>) -> Self {
+		Self::new(ErrorCode::InputBusy, message)
+	}
+
+	#[cfg(target_os = "macos")]
+	pub(crate) fn user_intervened(message: impl Into<String>) -> Self {
+		Self::new(ErrorCode::UserIntervened, message)
+	}
+
+	pub(crate) fn cancelled(message: impl Into<String>) -> Self {
+		Self::new(ErrorCode::Cancelled, message)
 	}
 
 	pub(crate) fn background_unavailable(message: impl Into<String>) -> Self {
@@ -92,6 +119,16 @@ impl DesktopError {
 
 	pub(crate) fn ax_failed(message: impl Into<String>) -> Self {
 		Self::new(ErrorCode::AxFailed, message)
+	}
+
+	#[cfg(target_os = "macos")]
+	pub(crate) fn ax_unconfirmed(message: impl Into<String>) -> Self {
+		Self::new(ErrorCode::AxUnconfirmed, message)
+	}
+
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
+	pub(crate) fn unsupported(message: impl Into<String>) -> Self {
+		Self::new(ErrorCode::Unsupported, message)
 	}
 
 	pub(crate) fn timeout(message: impl Into<String>) -> Self {

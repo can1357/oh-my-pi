@@ -4,9 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	AstMatchStrictness,
-	astEdit,
 	astMatch,
-	blockRangeAt,
 	countTokens,
 	Encoding,
 	executeShell,
@@ -195,20 +193,6 @@ describe("pi-natives", () => {
 			expect(python.segments.at(-1)?.text).toContain("return");
 		});
 
-		it("summarizes Emacs Lisp function bodies through native inference", () => {
-			for (const path of ["fixture.el", ".emacs"]) {
-				const result = summarizeCode({
-					path,
-					code: '(defun greet (name)\n  "Doc."\n  (let ((message (format "Hello %s" name)))\n    (message "%s" message)\n    message)\n)\n',
-				});
-
-				expect(result.parsed).toBe(true);
-				expect(result.elided).toBe(true);
-				expect(result.language).toBe("emacs-lisp");
-				expect(result.segments.map(segment => segment.kind)).toEqual(["kept", "elided", "kept"]);
-			}
-		});
-
 		it("summarizes multiline literals and block comments", () => {
 			const result = summarizeCode({
 				path: "fixture.ts",
@@ -238,28 +222,6 @@ describe("pi-natives", () => {
 			const code = "function small() {\n\treturn 1;\n}\n";
 			expect(summarizeCode({ path: "fixture.ts", code }).elided).toBe(false);
 			expect(summarizeCode({ path: "fixture.ts", code, minBodyLines: 3 }).elided).toBe(true);
-		});
-	});
-
-	describe("blockRangeAt", () => {
-		it("resolves Emacs Lisp macro-style top-level forms", () => {
-			const range = blockRangeAt({
-				path: "init.el",
-				code: '(ert-deftest ogent-zen-test ()\n  "Doc."\n  (should t))\n',
-				line: 1,
-			});
-
-			expect(range).toEqual({ startLine: 1, endLine: 3 });
-		});
-
-		it("does not resolve a bare Emacs Lisp closing paren as a block", () => {
-			const range = blockRangeAt({
-				path: "init.el",
-				code: '(defun greet (name)\n  "Doc."\n  (message "Hello %s" name)\n)\n',
-				line: 4,
-			});
-
-			expect(range).toBeNull();
 		});
 	});
 
@@ -510,6 +472,31 @@ try {
 				expect(result.totalMatches).toBe(2);
 				expect(result.filesWithMatches).toBe(2);
 				expect(result.matches.map(match => path.basename(match.path)).sort()).toEqual(["one.ts", "two.ts"]);
+			} finally {
+				await fs.rm(scopedDir, { recursive: true, force: true });
+			}
+		});
+
+		it("caps matches at maxCountPerFile when the path is a single file", async () => {
+			// Regression: the cap reached only the directory walks, so naming one
+			// explicit file dropped it and a hot file returned the whole global
+			// budget.
+			const scopedDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-grep-cap-"));
+			try {
+				const hot = path.join(scopedDir, "hot.txt");
+				await fs.writeFile(hot, Array.from({ length: 50 }, (_, i) => `needle ${i}`).join("\n"));
+
+				const result = await grep({
+					pattern: "needle",
+					path: hot,
+					mode: GrepOutputMode.Content,
+					maxCount: 40,
+					maxCountPerFile: 5,
+				});
+
+				expect(result.matches).toHaveLength(5);
+				expect(result.limitReached).toBe(true);
+				expect(result.filesWithMatches).toBe(1);
 			} finally {
 				await fs.rm(scopedDir, { recursive: true, force: true });
 			}
@@ -1139,6 +1126,27 @@ try {
 			// Navigation/footer may or may not be removed depending on preprocessing
 		});
 
+		it("keeps collapsed sections only with hiddenContent reachable, never template content", async () => {
+			const html = `<main>
+<h2>Product information</h2>
+<button aria-expanded="false">Item details</button>
+<div style="display:none"><p>Country of Origin: India</p></div>
+<template><p>Template-only claim</p></template>
+</main>`;
+
+			const dropped = await htmlToMarkdown(html);
+			const reachable = await htmlToMarkdown(html, { hiddenContent: "reachable" });
+
+			expect(dropped).toContain("Product information");
+			expect(dropped).not.toContain("Country of Origin: India");
+			expect(reachable).toContain("Country of Origin: India");
+			expect(reachable).not.toContain("Template-only claim");
+		});
+
+		it("rejects an unknown hiddenContent value", async () => {
+			expect(() => htmlToMarkdown("<p>text</p>", { hiddenContent: "visible" })).toThrow(/hiddenContent/);
+		});
+
 		it("should reject depth-truncated HTML", async () => {
 			const html = `${"<div>".repeat(90)}<p>deep-content</p>${"</div>".repeat(90)}`;
 
@@ -1285,38 +1293,6 @@ console.log("ok");
 			});
 			expect(same.totalMatches).toBe(1);
 			expect(diff.totalMatches).toBe(0);
-		});
-
-		it("matches Emacs Lisp patterns with public aliases and metavariables", async () => {
-			const match = await astMatch({
-				source: ["(defun greet (name)", '  (message "Hello %s" name)', ")"].join("\n"),
-				lang: "emacs-lisp",
-				patterns: ["(defun $NAME $$$BODY)"],
-				includeMeta: true,
-			});
-
-			expect(match.parseErrors).toBeUndefined();
-			expect(match.totalMatches).toBe(1);
-			expect(match.matches[0]?.metaVariables?.NAME).toBe("greet");
-		});
-
-		it("rewrites Emacs Lisp source with astEdit aliases", async () => {
-			const filePath = path.join(testDir, "emacs-ast-edit.el");
-			await fs.writeFile(filePath, '(defun greet (name)\n  (message "Hello %s" name))\n');
-
-			const result = await astEdit({
-				path: filePath,
-				lang: "elisp",
-				rewrites: {
-					"(message $FORMAT $ARG)": "(format-message $FORMAT $ARG)",
-				},
-				dryRun: false,
-			});
-
-			expect(result.applied).toBe(true);
-			expect(result.parseErrors).toBeUndefined();
-			expect(result.totalReplacements).toBe(1);
-			expect(await Bun.file(filePath).text()).toBe('(defun greet (name)\n  (format-message "Hello %s" name))\n');
 		});
 
 		it("reports parse errors for incomplete source without throwing", async () => {

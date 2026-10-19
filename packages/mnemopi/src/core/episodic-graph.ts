@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { closeQuietly, type DatabasePath, openDatabase } from "../db";
+import { closeQuietly, type DatabasePath, openDatabase, transaction } from "../db";
 
 export interface Gist {
 	readonly id: string;
@@ -98,12 +98,25 @@ interface EdgeRow {
 	readonly timestamp: string | null;
 }
 
+interface MemoryLivenessRow {
+	readonly id: string;
+	readonly live: number;
+}
+
 const EXTRACT_FACTS_MAX_CONTENT_LEN = 4096;
 const MAX_FACTS_PER_MEMORY = 5;
 const DEFAULT_LINK_THRESHOLD = 0.35;
+const LIVE_MEMORY_SQL = "superseded_by IS NULL AND (valid_until IS NULL OR valid_until > ?)";
 
 function nowIso(): string {
 	return new Date().toISOString();
+}
+
+function partitionByLiveness(rows: readonly MemoryLivenessRow[], live: Set<string>, retired: Set<string>): void {
+	for (const row of rows) {
+		if (row.live === 1) live.add(row.id);
+		else retired.add(row.id);
+	}
 }
 
 function unique(values: Iterable<string>, limit = Number.MAX_SAFE_INTEGER): string[] {
@@ -493,83 +506,87 @@ export class EpisodicGraph {
 		const extractEntities = options.extractEntities ?? true;
 		const gist = this.extractGist(content, memoryId);
 		const facts = extractEntities ? this.extractFacts(content, memoryId) : [];
-		const edges: GraphEdge[] = [];
-		const timestamp = nowIso();
+		// One transaction for every gist/fact/edge write: autocommitted, each
+		// `addEdge` paid its own WAL commit (an fsync), so linking a memory
+		// against a large bank blocked the caller's event loop for seconds (#14998).
+		return transaction(this.db, () => {
+			const edges: GraphEdge[] = [];
+			const timestamp = nowIso();
 
-		const previousMemoryIds = linkExisting ? this.knownMemoryIds(memoryId) : [];
-		this.storeGist(gist, memoryId);
-		const gistEdge = { source: memoryId, target: gist.id, edgeType: "ctx", weight: 1, timestamp };
-		this.addEdge(gistEdge);
-		edges.push(gistEdge);
+			const previousMemoryIds = linkExisting ? this.knownMemoryIds(memoryId) : [];
+			this.storeGist(gist, memoryId);
+			const gistEdge = { source: memoryId, target: gist.id, edgeType: "ctx", weight: 1, timestamp };
+			this.addEdge(gistEdge);
+			edges.push(gistEdge);
 
-		for (const fact of facts) {
-			this.storeFact(fact, memoryId, sessionId);
-			const edge = {
-				source: gist.id,
-				target: fact.id,
-				edgeType: "rel",
-				weight: fact.confidence,
-				timestamp,
-			};
-			this.addEdge(edge);
-			edges.push(edge);
-		}
+			for (const fact of facts) {
+				this.storeFact(fact, memoryId, sessionId);
+				const edge = {
+					source: gist.id,
+					target: fact.id,
+					edgeType: "rel",
+					weight: fact.confidence,
+					timestamp,
+				};
+				this.addEdge(edge);
+				edges.push(edge);
+			}
 
-		if (linkExisting) {
-			const sourceTokens = contentTokenSet(content);
-			for (const otherId of previousMemoryIds) {
-				const otherContent = this.memoryContent(otherId);
-				const lexicalScore = Math.round(jaccard(sourceTokens, contentTokenSet(otherContent)) * 1000) / 1000;
-				let wroteCtxEdge = false;
-				if (lexicalScore >= minLinkScore) {
-					const edge = {
-						source: memoryId,
-						target: otherId,
-						edgeType: "related_to",
-						weight: lexicalScore,
-						timestamp,
-					};
-					this.addEdge(edge);
-					edges.push(edge);
-					const ctxEdge = {
-						source: memoryId,
-						target: otherId,
-						edgeType: "ctx",
-						weight: lexicalScore,
-						timestamp,
-					};
-					this.addEdge(ctxEdge);
-					edges.push(ctxEdge);
-					wroteCtxEdge = true;
-				}
-				const entityScore = this.entityOverlapScore(memoryId, otherId);
-				if (entityScore > 0) {
-					const edge = {
-						source: memoryId,
-						target: otherId,
-						edgeType: "references",
-						weight: entityScore,
-						timestamp,
-					};
-					this.addEdge(edge);
-					edges.push(edge);
-				}
-				const contextualScore = Math.max(lexicalScore, entityScore, this.temporalContextScore(memoryId, otherId));
-				if (!wroteCtxEdge && contextualScore >= minLinkScore) {
-					const ctxEdge = {
-						source: memoryId,
-						target: otherId,
-						edgeType: "ctx",
-						weight: contextualScore,
-						timestamp,
-					};
-					this.addEdge(ctxEdge);
-					edges.push(ctxEdge);
+			if (linkExisting) {
+				const sourceTokens = contentTokenSet(content);
+				for (const otherId of previousMemoryIds) {
+					const otherContent = this.memoryContent(otherId, timestamp);
+					const lexicalScore = Math.round(jaccard(sourceTokens, contentTokenSet(otherContent)) * 1000) / 1000;
+					let wroteCtxEdge = false;
+					if (lexicalScore >= minLinkScore) {
+						const edge = {
+							source: memoryId,
+							target: otherId,
+							edgeType: "related_to",
+							weight: lexicalScore,
+							timestamp,
+						};
+						this.addEdge(edge);
+						edges.push(edge);
+						const ctxEdge = {
+							source: memoryId,
+							target: otherId,
+							edgeType: "ctx",
+							weight: lexicalScore,
+							timestamp,
+						};
+						this.addEdge(ctxEdge);
+						edges.push(ctxEdge);
+						wroteCtxEdge = true;
+					}
+					const entityScore = this.entityOverlapScore(memoryId, otherId);
+					if (entityScore > 0) {
+						const edge = {
+							source: memoryId,
+							target: otherId,
+							edgeType: "references",
+							weight: entityScore,
+							timestamp,
+						};
+						this.addEdge(edge);
+						edges.push(edge);
+					}
+					if (!wroteCtxEdge && entityScore >= minLinkScore) {
+						const ctxEdge = {
+							source: memoryId,
+							target: otherId,
+							edgeType: "ctx",
+							weight: entityScore,
+							timestamp,
+						};
+						this.addEdge(ctxEdge);
+						edges.push(ctxEdge);
+					}
 				}
 			}
-		}
 
-		return { memoryId, gist, facts, edges };
+			return { memoryId, gist, facts, edges };
+		});
 	}
 	getStats(): GraphStats {
 		const gists = this.count("gists");
@@ -646,33 +663,40 @@ export class EpisodicGraph {
 	}
 
 	private knownMemoryIds(exclude: string): string[] {
+		const now = nowIso();
 		const ids = new Set<string>();
+		const live = new Set<string>();
+		const retired = new Set<string>();
 		const gistRows = this.db
 			.query("SELECT DISTINCT memory_id FROM gists WHERE memory_id IS NOT NULL AND memory_id != ?")
 			.all(exclude) as { memory_id: string }[];
 		for (const row of gistRows) ids.add(row.memory_id);
 		try {
-			const workingRows = this.db.query("SELECT id FROM working_memory WHERE id != ?").all(exclude) as {
-				id: string;
-			}[];
-			for (const row of workingRows) ids.add(row.id);
+			const workingRows = this.db
+				.query(`SELECT id, ${LIVE_MEMORY_SQL} AS live FROM working_memory WHERE id != ?`)
+				.all(now, exclude) as MemoryLivenessRow[];
+			partitionByLiveness(workingRows, live, retired);
 		} catch {
 			// Standalone graph stores do not have Beam memory tables.
 		}
 		try {
-			const episodicRows = this.db.query("SELECT id FROM episodic_memory WHERE id != ?").all(exclude) as {
-				id: string;
-			}[];
-			for (const row of episodicRows) ids.add(row.id);
+			const episodicRows = this.db
+				.query(`SELECT id, ${LIVE_MEMORY_SQL} AS live FROM episodic_memory WHERE id != ?`)
+				.all(now, exclude) as MemoryLivenessRow[];
+			partitionByLiveness(episodicRows, live, retired);
 		} catch {
 			// Standalone graph stores do not have Beam memory tables.
 		}
+		for (const id of live) ids.add(id);
+		for (const id of retired) if (!live.has(id)) ids.delete(id);
 		return [...ids];
 	}
 
-	private memoryContent(memoryId: string): string {
+	private memoryContent(memoryId: string, now: string): string {
 		try {
-			const working = this.db.query("SELECT content FROM working_memory WHERE id = ?").get(memoryId) as {
+			const working = this.db
+				.query(`SELECT content FROM working_memory WHERE id = ? AND ${LIVE_MEMORY_SQL}`)
+				.get(memoryId, now) as {
 				content: string;
 			} | null;
 			if (working !== null) return working.content;
@@ -680,7 +704,9 @@ export class EpisodicGraph {
 			// Standalone EpisodicGraph users may not have Beam tables.
 		}
 		try {
-			const episodic = this.db.query("SELECT content FROM episodic_memory WHERE id = ?").get(memoryId) as {
+			const episodic = this.db
+				.query(`SELECT content FROM episodic_memory WHERE id = ? AND ${LIVE_MEMORY_SQL}`)
+				.get(memoryId, now) as {
 				content: string;
 			} | null;
 			if (episodic !== null) return episodic.content;
@@ -703,18 +729,6 @@ export class EpisodicGraph {
 		const left = lowerSet(leftRows.flatMap(row => [row.subject, row.object]));
 		const right = lowerSet(rightRows.flatMap(row => [row.subject, row.object]));
 		return Math.round(overlapScore(left, right) * 1000) / 1000;
-	}
-
-	private temporalContextScore(sourceMemoryId: string, targetMemoryId: string): number {
-		const left = this.db.query("SELECT time_scope FROM gists WHERE memory_id = ?").get(sourceMemoryId) as {
-			time_scope: string | null;
-		} | null;
-		if (left?.time_scope === null || left?.time_scope === undefined) return 0;
-		const right = this.db.query("SELECT time_scope FROM gists WHERE memory_id = ?").get(targetMemoryId) as {
-			time_scope: string | null;
-		} | null;
-		if (right?.time_scope === null || right?.time_scope === undefined) return 0;
-		return left.time_scope === right.time_scope ? DEFAULT_LINK_THRESHOLD : 0;
 	}
 
 	private memoryFeatures(memoryId: string): Set<string> {

@@ -226,9 +226,10 @@ export function escapeSummaryBoundaryTags(text: string): string {
 
 /**
  * Serialize LLM messages as plain summary input without provider control tokens.
+ * `dropThinking` is the summarizer's resolved `classifier-cot-extraction` policy.
  */
-export function serializeConversationForSummary(messages: Message[], dialect?: Dialect): string {
-	const conversation = serializeConversation(messages, dialect);
+export function serializeConversationForSummary(messages: Message[], dialect?: Dialect, dropThinking = false): string {
+	const conversation = serializeConversation(messages, dialect, dropThinking);
 	const escaped = dialect === "harmony" ? escapeHarmonyControlTokens(conversation) : conversation;
 	return escapeSummaryBoundaryTags(escaped);
 }
@@ -236,8 +237,12 @@ export function serializeConversationForSummary(messages: Message[], dialect?: D
 /**
  * Serialize LLM messages to transcript text.
  * Call convertToLlm() first to handle custom message types.
+ * `dropThinking` omits assistant reasoning from dialect transcripts: set it from
+ * the reader's resolved `classifier-cot-extraction` catalog policy (Claude's
+ * classifier refuses inputs that reproduce the model's own reasoning as text,
+ * "reasoning_extraction"). Reasoning is ephemeral and low-signal for a summary.
  */
-export function serializeConversation(messages: Message[], dialect?: Dialect): string {
+export function serializeConversation(messages: Message[], dialect?: Dialect, dropThinking = false): string {
 	// Tool results flagged contextually useless (and their paired calls) are
 	// dropped from the serialized text: the source region is discarded after
 	// summarization anyway, so excluding them costs nothing and keeps garbage
@@ -249,13 +254,6 @@ export function serializeConversation(messages: Message[], dialect?: Dialect): s
 		}
 	}
 	if (dialect) {
-		// Claude's classifier refuses inputs that reproduce the model's own
-		// reasoning as text ("reasoning_extraction"), and the anthropic dialect
-		// otherwise renders thinking verbatim inside <thinking> tags. Reasoning is
-		// ephemeral and low-signal for a summary, so drop it from Anthropic-target
-		// summary input. Other dialects (e.g. Harmony) carry reasoning natively in
-		// their transcript format and keep it.
-		const dropThinking = dialect === "anthropic";
 		const processed: Message[] = [];
 		for (const msg of messages) {
 			if (msg.role === "assistant") {

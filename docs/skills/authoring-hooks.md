@@ -64,7 +64,7 @@ export default function myExtension(pi: ExtensionAPI): void {
 |---|---|---|
 | `before_agent_start` | Before agent starts a turn | `{ message?: { customType; content; display; details; attribution? } }` |
 | `agent_start` | Agent loop starts | — |
-| `agent_end` | Agent loop ends (`willContinue` signals an already-scheduled automatic continuation) | — |
+| `agent_end` | Agent loop ends (`willContinue` signals the loop is not settled; `awaitingAsyncWork` marks a wait on background jobs rather than an already-scheduled automatic continuation) | — |
 | `turn_start` | Start of an assistant-response/tool-result iteration within the loop | — |
 | `turn_end` | End of that iteration; carries the message and tool results | — |
 | `context` | Before each LLM API call | `{ messages?: Message[] }` |

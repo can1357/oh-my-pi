@@ -57,6 +57,26 @@ class BackpressuredWebSocket {
 		this.onmessage?.({ data: JSON.stringify({ t: "peer-joined", peer: 1 }) } as MessageEvent);
 	}
 
+	/** Pong listeners; a scripted relay answers pings only when a test pongs. */
+	pongListeners: Array<() => void> = [];
+	pings = 0;
+
+	addEventListener(type: string, listener: () => void): void {
+		if (type === "pong") this.pongListeners.push(listener);
+	}
+
+	ping(): void {
+		this.pings++;
+	}
+
+	pong(): void {
+		for (const listener of this.pongListeners) listener();
+	}
+
+	terminate(): void {
+		this.readyState = BackpressuredWebSocket.CLOSED;
+	}
+
 	close(): void {
 		if (this.readyState === BackpressuredWebSocket.CLOSED) return;
 		this.readyState = BackpressuredWebSocket.CLOSED;

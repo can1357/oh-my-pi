@@ -16,6 +16,14 @@ const EMPTY_USAGE: TrialUsage = {
 	turns: 0,
 };
 
+/**
+ * omp's daemon broker stops the services the agent started (bash `name` + `ready`) once its last
+ * client has been gone for `OMP_DAEMON_IDLE_GRACE_MS` (default 3 s). The verifier runs after omp
+ * exits, in the same guest, and grades those services, so keep them alive until the guest is
+ * removed. An explicit `--env` value wins.
+ */
+const SERVICE_GRACE_ENV: Record<string, string> = { OMP_DAEMON_IDLE_GRACE_MS: String(24 * 60 * 60 * 1_000) };
+
 function elapsedMs(startedAt: number): number {
 	return Math.round(performance.now() - startedAt);
 }
@@ -122,7 +130,10 @@ export async function runTrial(opts: {
 
 		const { provider, model } = modelParts(opts.model);
 		client = new RpcClient({
-			spawn: vm.rpcTransport(entrypoint, opts.task.agentTimeoutSec + 30, opts.agent.env),
+			spawn: vm.rpcTransport(entrypoint, opts.task.agentTimeoutSec + 30, {
+				...SERVICE_GRACE_ENV,
+				...opts.agent.env,
+			}),
 			provider,
 			model,
 			args: ["--no-session", "--auto-approve", "--tools", opts.agent.tools.join(",")],

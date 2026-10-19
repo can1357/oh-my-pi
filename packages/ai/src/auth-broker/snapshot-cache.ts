@@ -8,7 +8,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { asStrict } from "../providers/aws-sigv4";
 import type { SnapshotResponse } from "./types";
 
@@ -22,6 +22,16 @@ const AES_ALGORITHM = "AES-GCM";
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder();
 const HEX = "0123456789abcdef";
+/** Trailing window that collapses a burst of scheduled writes into one write of the newest snapshot. */
+const WRITE_COALESCE_MS = 2_000;
+/**
+ * A scheduled snapshot matching the last write (same generation and credential
+ * content) is skipped unless that write is this much older, so the cache's
+ * `generatedAt` — its TTL clock — never lags the newest confirmation by more.
+ */
+const UNCHANGED_REWRITE_MS = 60_000;
+/** Cache paths whose abandoned temp siblings this process already swept. */
+const sweptCachePaths = new Set<string>();
 
 export interface ReadAuthBrokerSnapshotCacheOptions {
 	path: string;
@@ -80,7 +90,16 @@ export async function readAuthBrokerSnapshotCache(
 		}
 		const snapshot = parsed;
 		const now = opts.now?.() ?? Date.now();
-		if (now - snapshot.generatedAt > opts.ttlMs) return null;
+		const ageMs = now - snapshot.generatedAt;
+		if (ageMs > opts.ttlMs) return null;
+		// `rotatesInMs` counts from `generatedAt`, and unchanged snapshots skip
+		// rewrites, so the file can be up to UNCHANGED_REWRITE_MS old: rebase the
+		// countdowns onto now so a restarted reader doesn't push rotations back.
+		if (ageMs > 0) {
+			for (const entry of snapshot.credentials) {
+				if (entry.rotatesInMs !== null) entry.rotatesInMs = Math.max(0, entry.rotatesInMs - ageMs);
+			}
+		}
 		return snapshot;
 	} catch (error) {
 		logger.debug("auth-broker snapshot cache read failed", { path: opts.path, error: String(error) });
@@ -107,8 +126,129 @@ export async function writeAuthBrokerSnapshotCache(opts: WriteAuthBrokerSnapshot
 	} finally {
 		if (removeTemp) await fs.rm(tmpPath, { force: true }).catch(() => {});
 	}
+	// Debris only comes from processes that died mid-write; one sweep per path
+	// per process catches it without a directory scan on every write.
+	if (sweptCachePaths.has(opts.path)) return;
+	sweptCachePaths.add(opts.path);
 	await sweepStaleTempFiles(opts.path);
 }
+
+/** Per-path state behind {@link scheduleAuthBrokerSnapshotCacheWrite}. */
+interface CacheWriteQueue {
+	/** Newest scheduled snapshot not yet written; replaced by later schedules. */
+	pending?: WriteAuthBrokerSnapshotCacheOptions;
+	/** Identity of the last snapshot written (or being written); see {@link cacheWriteSignature}. */
+	writtenSignature?: number | bigint;
+	writtenGeneratedAt: number;
+	lastWriteStartedAt: number;
+	inFlight?: Promise<void>;
+	timer?: Timer;
+}
+
+const writeQueues = new Map<string, CacheWriteQueue>();
+let shutdownFlushArmed = false;
+
+/**
+ * Fire-and-forget cache write for snapshot callbacks. The first snapshot after
+ * a quiet period is written immediately; later ones within
+ * {@link WRITE_COALESCE_MS} collapse into a single trailing write of the
+ * newest. A snapshot whose generation and credential content match the last
+ * write is skipped (see {@link UNCHANGED_REWRITE_MS}). Pending writes are
+ * flushed on process shutdown and by {@link flushAuthBrokerSnapshotCacheWrites};
+ * failures are logged, never thrown.
+ */
+export function scheduleAuthBrokerSnapshotCacheWrite(opts: WriteAuthBrokerSnapshotCacheOptions): void {
+	let queue = writeQueues.get(opts.path);
+	if (!queue) {
+		queue = { writtenGeneratedAt: 0, lastWriteStartedAt: 0 };
+		writeQueues.set(opts.path, queue);
+		armShutdownFlush();
+	}
+	queue.pending = opts;
+	pumpCacheWrite(opts.path, queue, false);
+}
+
+/** Write every pending scheduled snapshot now and wait for in-flight writes to settle. */
+export async function flushAuthBrokerSnapshotCacheWrites(): Promise<void> {
+	for (const [cachePath, queue] of writeQueues) {
+		while (queue.inFlight || queue.pending) {
+			pumpCacheWrite(cachePath, queue, true);
+			if (queue.inFlight) await queue.inFlight;
+		}
+	}
+}
+
+/**
+ * Flush pending writes when the process shuts down: postmortem cleanup covers
+ * signals and `postmortem.quit`, `beforeExit` covers a drained event loop
+ * (the coalescing timer is unref'd so it never holds the process open).
+ */
+function armShutdownFlush(): void {
+	if (shutdownFlushArmed) return;
+	shutdownFlushArmed = true;
+	postmortem.register("auth-broker-snapshot-cache", () => flushAuthBrokerSnapshotCacheWrites());
+	process.on("beforeExit", () => {
+		for (const queue of writeQueues.values()) {
+			if (!queue.pending) continue;
+			void flushAuthBrokerSnapshotCacheWrites();
+			return;
+		}
+	});
+}
+
+function pumpCacheWrite(cachePath: string, queue: CacheWriteQueue, force: boolean): void {
+	if (queue.inFlight || !queue.pending) return;
+	const waitMs = queue.lastWriteStartedAt + WRITE_COALESCE_MS - Date.now();
+	if (!force && waitMs > 0) {
+		if (!queue.timer) {
+			queue.timer = setTimeout(() => {
+				queue.timer = undefined;
+				pumpCacheWrite(cachePath, queue, false);
+			}, waitMs);
+			queue.timer.unref?.();
+		}
+		return;
+	}
+	if (queue.timer) {
+		clearTimeout(queue.timer);
+		queue.timer = undefined;
+	}
+	const opts = queue.pending;
+	queue.pending = undefined;
+	const signature = cacheWriteSignature(opts);
+	if (
+		signature === queue.writtenSignature &&
+		opts.snapshot.generatedAt - queue.writtenGeneratedAt < UNCHANGED_REWRITE_MS
+	) {
+		return;
+	}
+	queue.writtenSignature = signature;
+	queue.writtenGeneratedAt = opts.snapshot.generatedAt;
+	queue.lastWriteStartedAt = Date.now();
+	queue.inFlight = writeAuthBrokerSnapshotCache(opts)
+		.catch(error => {
+			// Let the next identical snapshot retry instead of being skipped.
+			if (queue.writtenSignature === signature) queue.writtenSignature = undefined;
+			logger.debug("auth-broker snapshot cache write failed", { path: cachePath, error: String(error) });
+		})
+		.finally(() => {
+			queue.inFlight = undefined;
+			pumpCacheWrite(cachePath, queue, false);
+		});
+}
+
+/**
+ * Identity of a scheduled write for unchanged-skip: broker binding, generation,
+ * and credential rows minus `rotatesInMs`, which is relative to `serverNowMs`
+ * and shifts on every broker response even when nothing changed. A skipped
+ * write leaves the file's `rotatesInMs` pinned to its own `generatedAt`, which
+ * {@link readAuthBrokerSnapshotCache} rebases onto the read time.
+ */
+function cacheWriteSignature(opts: WriteAuthBrokerSnapshotCacheOptions): number | bigint {
+	const rows = opts.snapshot.credentials.map(({ rotatesInMs: _rotatesInMs, ...entry }) => entry);
+	return Bun.hash(`${opts.token}\u0000${opts.url}\u0000${opts.snapshot.generation}\u0000${JSON.stringify(rows)}`);
+}
+
 /** Temp files older than this are debris from a killed process, never a live write. */
 const STALE_TMP_MAX_AGE_MS = 60 * 60_000;
 

@@ -286,7 +286,10 @@ export function isUserTurnInitiator(message: CustomMessage): boolean {
 	);
 }
 
-export type AdvisorSeverity = "nit" | "concern" | "blocker";
+/** Advisor note severities, weakest first; ranks severity thresholds such as `advisor.continueSeverity`. */
+export const ADVISOR_SEVERITIES = ["nit", "concern", "blocker"] as const;
+
+export type AdvisorSeverity = (typeof ADVISOR_SEVERITIES)[number];
 
 /** One queued advice note. */
 export interface AdvisorNote {

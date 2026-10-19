@@ -9,6 +9,7 @@ import { formatContent, INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS } from "@oh-my-pi/pi-
 import type { Diagnostic, LinterClient, LspClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { EquivalentUriMap, fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import type { DeferredDiagnosticsEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { type ptree, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -53,7 +54,6 @@ function createClient(cwd: string, config: ServerConfig): LspClient {
 		diagnosticsVersion: 0,
 		openFiles: new Map(),
 		pendingRequests: new Map(),
-		messageBuffer: new Uint8Array(),
 		isReading: false,
 		status: "ready",
 		lastActivity: Date.now(),
@@ -785,6 +785,60 @@ describe("LSP diagnostics freshness", () => {
 		expect(late.errored).toBe(true);
 		expect(late.messages.some(message => message.includes("write tool deferred error"))).toBe(true);
 		expect(await Bun.file(filePath).text()).toBe("export const value: number = 'x';\n");
+	});
+
+	it("queues fresh late diagnostics for a slow server after an edit", async () => {
+		const filePath = path.join(tempDir.path(), "edit-tool.ts");
+		const uri = fileToUri(filePath);
+		await Bun.write(filePath, "export const value = 1;\n");
+		const client = createClient(tempDir.path(), TEST_SERVER);
+		const clock = new VirtualClock(Date.now());
+		installVirtualTime(clock);
+
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", TEST_SERVER]]);
+		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+		vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
+			mockClient.openFiles.set(fileToUri(syncedFilePath), { version: 1, languageId: "typescript" });
+		});
+		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
+			clock.in(2000, () => {
+				publishDiagnostics(mockClient, uri, [createDiagnostic("edit tool deferred error")], null);
+			});
+		});
+
+		const queued = Promise.withResolvers<DeferredDiagnosticsEntry>();
+		const mutationVersions = new Map<string, number>();
+		const session: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated({
+				"lsp.formatOnWrite": false,
+				"lsp.diagnosticsOnEdit": true,
+				"lsp.diagnosticsDeduplicate": true,
+			}),
+			enableLsp: true,
+			queueDeferredDiagnostics: entry => queued.resolve(entry),
+			bumpFileMutationVersion: target => {
+				const version = (mutationVersions.get(target) ?? 0) + 1;
+				mutationVersions.set(target, version);
+				return version;
+			},
+			getFileMutationVersion: target => mutationVersions.get(target) ?? 0,
+		};
+
+		const result = await new EditTool(session, "replace").execute("edit-deferred", {
+			path: filePath,
+			old_string: "export const value = 1;",
+			new_string: "export const value: number = 'x';",
+		});
+
+		expect(result.isError).not.toBe(true);
+		const late = await queued.promise;
+		expect(late.isStale()).toBe(false);
+		expect(late.messages.some(message => message.includes("edit tool deferred error"))).toBe(true);
 	});
 
 	it("suppresses TypeScript project diagnostics for orphan files but keeps syntax errors", async () => {

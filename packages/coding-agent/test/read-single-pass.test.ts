@@ -99,20 +99,18 @@ describe("read tool single-pass file access", () => {
 		expect(text).not.toContain(formatBytes(lineBytes + strayBytes * 2));
 	});
 
-	it("counts the terminal newline as an addressable line only in raw mode", async () => {
+	it("counts the terminal newline as a line terminator in raw and non-raw reads", async () => {
 		const filePath = path.join(tmpDir, "trailing.txt");
 		await fs.writeFile(filePath, "alpha\nbeta\n");
 		const tool = new ReadTool(createSession(tmpDir));
 
-		// Non-raw: the trailing LF closes line 2 rather than opening line 3.
-		expect(textOutput(await tool.execute("beyond", { path: `${filePath}:3` }))).toBe(
-			"Line 3 is beyond end of file (2 lines total). Use :1 to read from the start, or :2 to read the last line.",
-		);
-		// Raw: the sentinel is addressable, so line 3 exists and is empty.
-		expect(textOutput(await tool.execute("raw-sentinel", { path: `${filePath}:raw:3` }))).toBe("");
-		expect(textOutput(await tool.execute("raw-beyond", { path: `${filePath}:raw:4` }))).toContain(
-			"beyond end of file (3 lines total)",
-		);
+		// The trailing LF closes line 2 rather than opening an addressable line 3 (#15810).
+		const beyond =
+			"Line 3 is beyond end of file (2 lines total). Use :1 to read from the start, or :2 to read the last line.";
+		expect(textOutput(await tool.execute("beyond", { path: `${filePath}:3` }))).toBe(beyond);
+		expect(textOutput(await tool.execute("raw-beyond", { path: `${filePath}:raw:3` }))).toBe(beyond);
+		// An open raw range reaching EOF still returns the terminal newline verbatim.
+		expect(textOutput(await tool.execute("raw-tail", { path: `${filePath}:raw:2-` }))).toBe("beta\n");
 	});
 
 	it("does not re-read a file it already materialized", async () => {

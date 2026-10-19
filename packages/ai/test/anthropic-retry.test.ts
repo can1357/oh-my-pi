@@ -18,6 +18,18 @@ describe("isProviderRetryableError", () => {
 		expect(
 			isProviderRetryableError(new Error("Anthropic stream envelope error: stream ended before message_start")),
 		).toBe(true);
+		expect(
+			isProviderRetryableError(new Error("Anthropic stream envelope error: stream ended before message_delta")),
+		).toBe(true);
+	});
+
+	it("retries gateway stream drops before message_delta", () => {
+		expect(
+			isProviderRetryableError(new Error("Claude upstream stream ended before message_delta, reason=scanner_error")),
+		).toBe(true);
+		expect(
+			isProviderRetryableError(new Error("Claude upstream stream ended before message_start, reason=scanner_error")),
+		).toBe(true);
 	});
 
 	it("does not classify post-content envelope failures as provider-retryable", () => {

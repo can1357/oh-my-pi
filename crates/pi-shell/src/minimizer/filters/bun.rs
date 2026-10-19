@@ -73,7 +73,7 @@ fn is_test_invocation(program: &str, subcommand: Option<&str>, command: &str) ->
 		("bun", Some("test")) | ("bunx", Some("jest" | "vitest" | "playwright"))
 	) || is_exec_package_subcommand(program, subcommand)
 		&& command_invoked_word(command).is_some_and(|token| {
-			["jest", "vitest", "playwright"].contains(&token) || is_test_script_token(token)
+			["jest", "vitest", "playwright"].contains(&token) || super::is_test_script_token(token)
 		})
 }
 
@@ -114,11 +114,6 @@ fn bun_wrapper_option_takes_value(token: &str) -> bool {
 	matches!(token, "--filter" | "--cwd" | "--env-file" | "--preload" | "-F" | "-C" | "-r")
 }
 
-fn is_test_script_token(token: &str) -> bool {
-	let token = trim_command_token(token);
-	matches!(token, "test" | "t" | "e2e" | "spec") || token.starts_with("test:")
-}
-
 fn is_exec_package_subcommand(program: &str, subcommand: Option<&str>) -> bool {
 	matches!((program, subcommand), ("bun", Some("run" | "exec")))
 }
@@ -132,19 +127,11 @@ fn is_check_script_token(token: &str) -> bool {
 	matches!(token, "check") || token.starts_with("check:")
 }
 
-fn is_lint_script_token(token: &str) -> bool {
-	let token = trim_command_token(token);
-	matches!(token, "lint" | "typecheck" | "type-check")
-		|| token.starts_with("lint:")
-		|| token.starts_with("typecheck:")
-		|| token.starts_with("type-check:")
-}
-
 fn is_lint_invocation(program: &str, subcommand: Option<&str>, command: &str) -> bool {
 	matches!((program, subcommand), ("bun" | "bunx", Some("tsc" | "eslint" | "biome")))
 		|| is_exec_package_subcommand(program, subcommand)
 			&& command_invoked_word(command).is_some_and(|token| {
-				["tsc", "eslint", "biome"].contains(&token) || is_lint_script_token(token)
+				["tsc", "eslint", "biome"].contains(&token) || super::is_lint_script_token(token)
 			})
 }
 

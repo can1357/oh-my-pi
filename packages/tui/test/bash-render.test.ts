@@ -139,6 +139,26 @@ describe("bashToolRenderer", () => {
 		expect(rendered).not.toContain("Wall time: 1.23 seconds");
 	});
 
+	it("strips only the generated subsecond footer from older results with identical stdout", () => {
+		const result = {
+			content: [{ type: "text", text: "Wall time: 0.02 seconds\n\nWall time: 0.02 seconds" }],
+			details: { wallTimeMs: 20 },
+		};
+		for (const expanded of [false, true]) {
+			const options = { expanded, isPartial: false };
+			const args = { command: "benchmark" };
+			const component = bashToolRenderer.renderResult(result, options, uiTheme, args);
+			const rendered = sanitizeText(component.render(120).join("\n"));
+			expect(rendered.match(/Wall time: 0\.02 seconds/gu)).toHaveLength(1);
+			expect(rendered).toContain("Wall: 0.02s");
+			const view = bashToolRenderer.describeResult(result, options, args);
+			const output = (view.body ?? [])
+				.flatMap(node => ("k" in node ? (node.c ?? []) : []))
+				.find(node => "k" in node && node.k === "ansi");
+			expect(output).toMatchObject({ p: { role: "omp.tool.bash.output", text: "Wall time: 0.02 seconds" } });
+		}
+	});
+
 	it("shows a supervised service's readiness and output without a command timeout", async () => {
 		const component = bashToolRenderer.renderResult(
 			{

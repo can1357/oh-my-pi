@@ -196,6 +196,11 @@ export function urlLinkSpan(target: string, displayText: string, s = "link"): Ts
 	}
 }
 
+/** Whether native link spans and nodes may carry an `href`: everything but an explicit `off` policy. */
+export function isNativeLinkEnabled(): boolean {
+	return hyperlinkMode !== "off";
+}
+
 /**
  * A native link span to a filesystem path as a plain `file://` URI (the
  * terminal opens it through the system; the location stays in the visible

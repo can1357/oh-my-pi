@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import {
 	type AgentCompactionThresholdOverride,
 	validateAgentCompactionThresholdOverrides,
@@ -9,12 +10,14 @@ import {
 import { effect, register } from "../config/registry";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, AgentCompactionThresholdOverride> = {};
+const EMPTY_AGENT_ACCOUNT_POOLS: Record<string, OAuthAccountPools> = {};
+const EMPTY_AGENT_SOFT_REQUEST_BUDGET: Record<string, number | null> = {};
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
 
@@ -28,8 +31,8 @@ export const cfgTaskIsolationEnabled = register({
 	ui: {
 		tab: "tasks",
 		group: "Isolation",
-		label: "Isolate Subagents",
-		description: "Run subagents in an isolated copy of the checkout and integrate their changes afterwards",
+		label: "Allow Isolated Subagents",
+		description: "Allow per-task isolation with `isolated: true`; tasks without it run in the shared checkout",
 	},
 });
 
@@ -95,6 +98,49 @@ export const cfgWorktreeCleanSource = register({
 		label: "Clean Source Checkout on /wt",
 		description:
 			"When creating a worktree with `/wt`, reset tracked changes and remove untracked files from the original checkout after carrying them over",
+	},
+});
+
+export const cfgWorktreeOnStart = register({
+	id: "worktree.onStart",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["off", "ask", "create"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "Worktree on Start",
+		description: "Whether fresh interactive sessions start in a new linked worktree",
+		options: [
+			{ value: "off", label: "Off", description: "Start in the current checkout" },
+			{ value: "ask", label: "Ask", description: "Ask at session start" },
+			{ value: "create", label: "Create", description: "Always start in a new worktree on a `wt/*` branch" },
+		],
+	},
+});
+
+export const cfgWorktreeOnExit = register({
+	id: "worktree.onExit",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["keep", "ask", "remove"] as const,
+	default: "keep",
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "Worktree on Exit",
+		description: "What to do on exit with worktrees created since omp started (on start or with `/wt`)",
+		options: [
+			{ value: "keep", label: "Keep", description: "Leave worktrees in place" },
+			{ value: "ask", label: "Ask", description: "Ask on exit" },
+			{
+				value: "remove",
+				label: "Remove",
+				description:
+					"Remove clean worktrees; ask when they have uncommitted changes or new commits. Gitignored files (e.g. `.env`) are deleted too",
+			},
+		],
 	},
 });
 
@@ -203,6 +249,19 @@ export const cfgTaskBatch = register({
 		label: "Batch Task Calls",
 		description:
 			"Switch the task tool to its batch shape: one call carries { context, tasks[] } — one subagent per item, with an optional per-item agent (defaulting to the session spawn-policy agent), per-item isolation, and a required shared context prepended to every assignment. With async.enabled=true, each spawn runs as an independent background agent with the normal idle/parked lifecycle; otherwise the call blocks for merged results. Disable to restore the flat single-spawn schema.",
+	},
+});
+
+export const cfgTaskStructured = register({
+	id: "task.structured",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Structured Task Results",
+		description:
+			"Expose outputSchema/schemaMode on the task tool and return subagent results through the yield tool, validated against caller or agent output schemas. Off: task subagents have no yield tool and return their final message as plain text, except agents whose definition sets structured: true. Eval agent()/workpool spawns always keep structured results.",
 	},
 });
 
@@ -343,7 +402,7 @@ export const cfgTaskSoftRequestBudget = register({
 		group: "Subagents",
 		label: "Soft Subagent Request Budget",
 		description:
-			"Soft per-subagent request budget (assistant requests per run). Crossing it injects a wrap-up steering notice (see task.softRequestBudgetNotice); at 1.5x the budget the run is force-stopped and the agent must yield its partial findings. 0 disables the guard. Bundled scout/sonic agents cap out at a lower built-in budget, so a value below that cap still applies to them.",
+			"Soft per-subagent request budget (assistant requests per run). Crossing it injects a wrap-up steering notice (see task.softRequestBudgetNotice); at 1.5x the budget the run is force-stopped and the agent must hand back its partial findings. 0 disables the guard. Bundled scout/sonic agents cap out at a lower built-in budget, so a value below that cap still applies to them. A task.agentSoftRequestBudget entry replaces this budget for the agent it names.",
 		options: [
 			{ value: "0", label: "Disabled" },
 			{ value: "90", label: "90 requests" },
@@ -351,6 +410,34 @@ export const cfgTaskSoftRequestBudget = register({
 			{ value: "200", label: "200 requests", description: "Default" },
 		],
 	},
+});
+
+/**
+ * Validates `task.agentSoftRequestBudget`: exact agent name → request budget,
+ * a non-negative integer (0 disables that agent's guard). A `null` entry clears
+ * one inherited from a lower-priority settings layer.
+ */
+function validateAgentSoftRequestBudget(value: unknown): void {
+	if (value === undefined || value === null) return;
+	if (!isRecord(value)) {
+		const received = Array.isArray(value) ? "an array" : `a ${typeof value}`;
+		throw new Error(
+			`Invalid task.agentSoftRequestBudget: expected a map of agent name to request budget, got ${received}.`,
+		);
+	}
+	for (const [agentName, budget] of Object.entries(value)) {
+		if (budget === null || (typeof budget === "number" && Number.isSafeInteger(budget) && budget >= 0)) continue;
+		throw new Error(
+			`Invalid task.agentSoftRequestBudget.${agentName}: expected a non-negative integer request count (0 disables the guard), got ${Bun.inspect(budget)}.`,
+		);
+	}
+}
+
+export const cfgTaskAgentSoftRequestBudget = register({
+	id: "task.agentSoftRequestBudget",
+	type: "record",
+	default: EMPTY_AGENT_SOFT_REQUEST_BUDGET,
+	validate: validateAgentSoftRequestBudget,
 });
 
 export const cfgTaskSoftRequestBudgetNotice = register({
@@ -409,6 +496,14 @@ export const cfgTaskAgentCompactionThresholdOverrides = register({
 	type: "record",
 	default: EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES,
 	validate: validateAgentCompactionThresholdOverrides,
+});
+
+export const cfgTaskAgentAccountPools = register({
+	id: "task.agentAccountPools",
+	protocolDefault: ["rpc", "acp"],
+	type: "record",
+	default: EMPTY_AGENT_ACCOUNT_POOLS,
+	validate: validateAgentAccountPools,
 });
 
 export const cfgTaskAgentPrewalk = register({

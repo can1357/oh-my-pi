@@ -79,6 +79,9 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 
 export const cfgShellPath = register({ id: "shellPath", type: "string", default: undefined });
 
+/** Pi shell command prefix forwarded to legacy extensions; OMP's native shell does not apply it. */
+export const cfgLegacyShellCommandPrefix = register({ id: "shellCommandPrefix", type: "string", default: undefined });
+
 export const cfgBashEnabled = register({
 	id: "bash.enabled",
 	type: "boolean",
@@ -114,6 +117,19 @@ export const cfgBashAutoBackgroundEnabled = register({
 		group: "Bash",
 		label: "Bash Auto-Background",
 		description: "Automatically background long-running bash commands and deliver the result later",
+	},
+});
+
+export const cfgBashGitGuard = register({
+	id: "bash.gitGuard",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "shell",
+		group: "Bash",
+		label: "Git Guard",
+		description:
+			"Refuse git commands that discard or move shared work in the bash tool: stash, reset --hard or to another commit, and checkout/switch/restore outside a merge or rebase conflict",
 	},
 });
 

@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tree_sitter::Node;
+use tree_sitter::{Node, Tree};
 
 use crate::{language::SupportLang, parse_cache::parse_cached};
 
@@ -160,24 +160,45 @@ fn select_folded_spans(
 	folded.into_iter().map(|i| nodes[i].span).collect()
 }
 
+fn parse_clean_source(
+	source: &str,
+	lang: Option<&str>,
+	path: Option<&str>,
+) -> Result<Option<(SupportLang, Tree)>> {
+	if source.is_empty() {
+		return Ok(None);
+	}
+	let Some(language) = resolve_language(lang, path) else {
+		return Ok(None);
+	};
+	let Some(tree) = parse_cached(source, language, path)? else {
+		return Ok(None);
+	};
+	if tree.root_node().has_error() {
+		return Ok(None);
+	}
+	Ok(Some((language, tree)))
+}
+
+/// Return the language only when non-empty source parses without syntax errors.
+/// Uses the same cached parse and language precedence as [`summarize_code`].
+pub fn parse_code_status(
+	source: &str,
+	lang: Option<&str>,
+	path: Option<&str>,
+) -> Result<Option<SupportLang>> {
+	Ok(parse_clean_source(source, lang, path)?.map(|(language, _)| language))
+}
+
 pub fn summarize_code(options: SummaryOptions) -> Result<SummaryResult> {
 	let source = options.code;
 	let total_lines = count_lines(&source);
-	if source.is_empty() {
-		return Ok(unparsed_result(source, total_lines));
-	}
-
-	let Some(language) = resolve_language(options.lang.as_deref(), options.path.as_deref()) else {
-		return Ok(unparsed_result(source, total_lines));
-	};
-
-	let Some(tree) = parse_cached(&source, language)? else {
+	let Some((language, tree)) =
+		parse_clean_source(&source, options.lang.as_deref(), options.path.as_deref())?
+	else {
 		return Ok(unparsed_result(source, total_lines));
 	};
 	let root = tree.root_node();
-	if root.has_error() {
-		return Ok(unparsed_result(source, total_lines));
-	}
 
 	let min_body_lines = options
 		.min_body_lines
@@ -449,7 +470,8 @@ fn is_elidable_kind(language: SupportLang, kind: &str) -> bool {
 			kind,
 			"block"
 				| "dictionary"
-				| "list" | "set"
+				| "list"
+				| "set"
 				| "string"
 				| "tuple"
 				| "argument_list"
@@ -539,8 +561,10 @@ fn is_elidable_kind(language: SupportLang, kind: &str) -> bool {
 				| "method"
 				| "do_block"
 				| "array"
-				| "hash" | "block"
-				| "case" | "heredoc_body"
+				| "hash"
+				| "block"
+				| "case"
+				| "heredoc_body"
 		),
 		SupportLang::Php => matches!(
 			kind,
@@ -625,9 +649,12 @@ fn is_elidable_kind(language: SupportLang, kind: &str) -> bool {
 				| "class"
 				| "instance"
 				| "function"
-				| "do" | "case"
-				| "let" | "local_binds"
-				| "list" | "tuple"
+				| "do"
+				| "case"
+				| "let"
+				| "local_binds"
+				| "list"
+				| "tuple"
 		),
 		SupportLang::Ocaml => matches!(
 			kind,
@@ -649,7 +676,8 @@ fn is_elidable_kind(language: SupportLang, kind: &str) -> bool {
 				| "if_expr"
 				| "receive_expr"
 				| "record_decl"
-				| "list" | "map_expr"
+				| "list"
+				| "map_expr"
 				| "tuple"
 		),
 		SupportLang::EmacsLisp => matches!(
@@ -657,7 +685,8 @@ fn is_elidable_kind(language: SupportLang, kind: &str) -> bool {
 			"function_definition"
 				| "macro_definition"
 				| "special_form"
-				| "list" | "vector"
+				| "list"
+				| "vector"
 				| "hash_table"
 				| "bytecode"
 				| "string_text_properties"

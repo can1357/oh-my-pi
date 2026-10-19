@@ -52,7 +52,7 @@ describe("PluginManager.install npm idempotency", () => {
 	/** Mock `bun install` with real append (not replace) manifest semantics. */
 	function mockAppendingBunInstall() {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd[0]).toBe("bun");
+			expect(cmd[0]).toBe(process.execPath);
 			expect(cmd[1]).toBe("install");
 			const prepare = (async () => {
 				// Faithful `bun install` semantics: the new edge is appended,

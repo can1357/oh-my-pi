@@ -49,15 +49,16 @@ describe("AgentSession prompt admission racing abort", () => {
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
 			streamFn: mock.stream,
 		});
+		const modelRegistry = new ModelRegistry(authStorage);
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry,
 		});
 		const dropped: string[] = [];
 		session.setPromptDropped(prompt => dropped.push(prompt.text));
-		return { session, dropped };
+		return { session, dropped, modelRegistry };
 	}
 
 	/** Holds image normalization for image-bearing calls until released. */
@@ -142,8 +143,90 @@ describe("AgentSession prompt admission racing abort", () => {
 		await session.waitForIdle();
 		expect(admitted).toBe(false);
 		expect(dropped).toEqual(["queue while normalizing"]);
-		expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: [] });
+		expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: [], liveSteered: 0 });
 		expect(calls).toBe(1);
+	});
+
+	it("keeps the next prompt busy when an interrupted setup unwinds late", async () => {
+		const { session, modelRegistry } = await createSession([() => ({ content: ["done"] })]);
+		const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const release = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		const getApiKey = modelRegistry.getApiKey.bind(modelRegistry);
+		let calls = 0;
+		const spy = spyOn(modelRegistry, "getApiKey").mockImplementation(async (model, sessionId, options) => {
+			const index = calls++;
+			if (index < 2) {
+				entered[index].resolve();
+				await release[index].promise;
+			}
+			return getApiKey(model, sessionId, options);
+		});
+		restores.push(() => spy.mockRestore());
+
+		const first = session.prompt("first");
+		await withTimeout(entered[0].promise, 2_000, "First prompt did not reach setup");
+		await session.abort();
+
+		const second = session.prompt("second");
+		await withTimeout(entered[1].promise, 2_000, "Second prompt did not reach setup");
+		expect(session.isStreaming).toBe(true);
+
+		release[0].resolve();
+		await first;
+		expect(session.isStreaming).toBe(true);
+
+		release[1].resolve();
+		await second;
+		expect(session.isStreaming).toBe(false);
+	});
+
+	it("settles a turn begun while abort() was finishing, running a steer queued as it ends", async () => {
+		const turnStarted = Promise.withResolvers<void>();
+		const releaseTurn = Promise.withResolvers<void>();
+		const { session } = await createSession([
+			async () => {
+				turnStarted.resolve();
+				await releaseTurn.promise;
+				return { content: ["done"] };
+			},
+			() => ({ content: ["steered"] }),
+		]);
+		// Hold abort() at its last await, after the turn it interrupts is idle but before it resets the bracket.
+		const atAbortEnd = Promise.withResolvers<void>();
+		const releaseAbort = Promise.withResolvers<void>();
+		restores.push(() => {
+			releaseAbort.resolve();
+			releaseTurn.resolve();
+		});
+		const onTaskAborted = session.goalRuntime.onTaskAborted.bind(session.goalRuntime);
+		session.goalRuntime.onTaskAborted = async (...args) => {
+			await onTaskAborted(...args);
+			atAbortEnd.resolve();
+			await releaseAbort.promise;
+		};
+		// A steer that lands as the turn ends, after the agent loop's last look at its queue.
+		const steered = Promise.withResolvers<void>();
+		let agentEnds = 0;
+		session.subscribe(event => {
+			if (event.type !== "agent_end") return;
+			if (++agentEnds === 1) {
+				session.agent.steer({ role: "user", content: "tail steer", attribution: "user", timestamp: Date.now() });
+			} else {
+				steered.resolve();
+			}
+		});
+
+		const aborting = session.abort();
+		await withTimeout(atAbortEnd.promise, 2_000, "abort() never reached its last await");
+		const running = session.prompt("go");
+		await withTimeout(turnStarted.promise, 2_000, "The prompt's turn never started");
+		releaseAbort.resolve();
+		await aborting;
+		releaseTurn.resolve();
+		await running;
+
+		await withTimeout(steered.promise, 2_000, "The steer queued as the turn ended never ran");
+		expect({ agentEnds, queued: session.agent.hasQueuedMessages() }).toEqual({ agentEnds: 2, queued: false });
 	});
 
 	it("cancels an in-flight vision description on abort and drops the prompt", async () => {

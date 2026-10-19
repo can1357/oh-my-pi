@@ -478,7 +478,7 @@ impl DeclareCommand {
 		if let Some(value) = self.make_readonly.to_bool() {
 			filters.push(Box::new(move |(_, v)| v.is_readonly() == value));
 		}
-		if let Some(value) = self.make_readonly.to_bool() {
+		if let Some(value) = self.make_traced.to_bool() {
 			filters.push(Box::new(move |(_, v)| v.is_trace_enabled() == value));
 		}
 		if let Some(value) = self.uppercase_value_on_assignment.to_bool() {

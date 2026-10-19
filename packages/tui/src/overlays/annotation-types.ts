@@ -75,4 +75,6 @@ export type TextReviewAnnotation =
 export interface TextReviewOverlayResult {
 	action: "paste";
 	annotations: TextReviewAnnotation[];
+	/** Source text after an external-editor edit; absent when the source was not edited. */
+	editedText?: string;
 }

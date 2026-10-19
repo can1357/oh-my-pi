@@ -7,13 +7,15 @@
  * - skill://<name> - Reads SKILL.md
  * - skill://<name>/<path> - Reads relative path within skill's baseDir
  * - skill://<namespace>/<name>[/<path>] - Same, for a collision-namespaced skill
+ * - Any skill:// URI an MCP server advertises, when no loaded skill owns it - Reads that MCP resource
  */
 import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { resolveContainedPath } from "../discovery/contained-path";
 import { getActiveSkills, type Skill } from "../extensibility/skills";
+import { MCPManager } from "../mcp/manager";
 import skillDoc from "../prompts/internal-urls/skill.md" with { type: "text" };
 import {
 	buildDirectoryResource,
@@ -22,6 +24,7 @@ import {
 	UrlContainmentError,
 	validateRelativePath,
 } from "./filesystem-resource";
+import { readMcpResource } from "./mcp-protocol";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -32,6 +35,16 @@ import type {
 	SchemeSpec,
 	UrlCompletion,
 } from "./types";
+
+/** No loaded skill owns the URL's name; the only miss an MCP server may fill. */
+class UnknownSkillError extends Error {}
+
+/**
+ * Most an unknown `skill://` name waits for MCP (deferred startup included) to advertise it: long
+ * enough for a healthy handshake, short enough that a hung server or its reconnect ladder cannot
+ * hold a read of a typo'd or disabled skill name for the rest of the turn.
+ */
+const UNKNOWN_SKILL_MCP_WAIT_MS = 5_000;
 
 /**
  * Path a skill:// URL addresses, after traversal and plugin-root containment
@@ -66,7 +79,7 @@ async function skillTargetPath(
 	if (!skill) {
 		const available = skills.map(s => s.name);
 		const availableStr = available.length > 0 ? available.join(", ") : "none";
-		throw new Error(`Unknown skill: ${skillName}\nAvailable: ${availableStr}`);
+		throw new UnknownSkillError(`Unknown skill: ${skillName}\nAvailable: ${availableStr}`);
 	}
 
 	let resolvedPath: string;
@@ -119,7 +132,41 @@ export class SkillProtocolHandler implements ProtocolHandler {
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
-		const targetPath = await skillTargetPath(url, context?.skills ?? getActiveSkills(), false);
+		let targetPath: string;
+		try {
+			targetPath = await skillTargetPath(url, context?.skills ?? getActiveSkills(), false);
+		} catch (error) {
+			if (!(error instanceof UnknownSkillError)) throw error;
+			// Loaded skills always win; otherwise serve the resource an MCP server advertises under
+			// exactly this URI (Figma's `skill://figma/figma-use/SKILL.md`). Templates stay behind `mcp://`.
+			// A deferred MCP startup that fails cannot change the diagnosis: the skill is still unknown.
+			// Most such names are not MCP resources at all, so one budget caps deferred startup (which
+			// never returns while a handshake hangs and the startup window is 0) plus the catalog wait.
+			const deadline = Date.now() + UNKNOWN_SKILL_MCP_WAIT_MS;
+			let mcpManager: MCPManager | undefined;
+			try {
+				mcpManager = await withTimeout(
+					MCPManager.load(),
+					UNKNOWN_SKILL_MCP_WAIT_MS,
+					"MCP startup outlasted the unknown-skill wait",
+					context?.signal,
+				);
+			} catch (loadError) {
+				if (context?.signal?.aborted) throw loadError;
+				logger.debug("MCP startup failed while resolving an unknown skill", { url: url.href, error: loadError });
+				throw error;
+			}
+			const resource =
+				mcpManager &&
+				(await readMcpResource(mcpManager, url, {
+					exact: true,
+					waitMs: Math.max(0, deadline - Date.now()),
+					signal: context?.signal,
+				}));
+			if (!resource) throw error;
+			// The server, not a loaded skill, sizes this text: keep `read`'s normal result limits.
+			return { ...resource, unbounded: false };
+		}
 
 		let stats: fsTypes.Stats;
 		try {
@@ -151,11 +198,19 @@ export class SkillProtocolHandler implements ProtocolHandler {
 
 	/**
 	 * Skill file or directory; `options.directory` maps a bare `skill://<name>` to the skill base dir.
-	 * Null for a missing entry (or dangling symlink) without `create`, plugin skill or not.
+	 * Null for a missing entry (or dangling symlink) without `create`, plugin skill or not, and for a
+	 * name no loaded skill owns while MCP is available unless `options.localOnly`: an MCP server may
+	 * advertise the URL, which {@link resolve} settles (its servers may still be connecting).
 	 */
 	async locate(url: InternalUrl, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
 		const skills = context?.skills ?? getActiveSkills();
-		const targetPath = await skillTargetPath(url, skills, options?.directory === true, options?.create === true);
+		let targetPath: string;
+		try {
+			targetPath = await skillTargetPath(url, skills, options?.directory === true, options?.create === true);
+		} catch (error) {
+			if (error instanceof UnknownSkillError && !options?.localOnly && MCPManager.available()) return null;
+			throw error;
+		}
 		if (options?.create) return targetPath;
 		try {
 			await fs.stat(targetPath);

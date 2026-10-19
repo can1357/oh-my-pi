@@ -104,10 +104,14 @@ export async function loadBabelParser(): Promise<typeof BabelParser> {
 	return babelParser;
 }
 
-async function parseProgram(code: string): Promise<{ program: { body: ReadonlyArray<BabelProgramNode> } } | null> {
+type ParsedProgram = { program: { body: ReadonlyArray<BabelProgramNode> } };
+
+async function tryParseProgram(
+	code: string,
+): Promise<{ ast: ParsedProgram; recovered: readonly unknown[] } | { error: unknown }> {
 	const { parse } = await loadBabelParser();
 	try {
-		return parse(code, {
+		const file = parse(code, {
 			sourceType: "module",
 			allowAwaitOutsideFunction: true,
 			allowReturnOutsideFunction: true,
@@ -117,10 +121,79 @@ async function parseProgram(code: string): Promise<{ program: { body: ReadonlyAr
 			allowUndeclaredExports: true,
 			errorRecovery: true,
 			plugins: ["typescript"],
-		}) as unknown as { program: { body: ReadonlyArray<BabelProgramNode> } };
-	} catch {
-		return null;
+		});
+		return { ast: file as unknown as ParsedProgram, recovered: file.errors ?? [] };
+	} catch (error) {
+		return { error };
 	}
+}
+
+async function parseProgram(code: string): Promise<ParsedProgram | null> {
+	const result = await tryParseProgram(code);
+	return "ast" in result ? result.ast : null;
+}
+
+const FRAME_CONTEXT_LINES = 2;
+const FRAME_MAX_LINE_WIDTH = 120;
+
+/**
+ * Builds a `SyntaxError` for a Babel parse failure on the user's cell source. `line` is
+ * 1-based and `column` is shown 1-based (Babel reports it 0-based). The message carries the
+ * position plus a short code frame with a caret under the offending column.
+ */
+function buildCellSyntaxError(code: string, error: unknown): SyntaxError | undefined {
+	if (!(error instanceof Error) || !("loc" in error)) return undefined;
+	const { loc } = error;
+	if (typeof loc !== "object" || loc === null || !("line" in loc) || !("column" in loc)) return undefined;
+	const { line, column } = loc;
+	if (typeof line !== "number" || typeof column !== "number") return undefined;
+	const reason = error.message.replace(/ \(\d+:\d+\)$/, "");
+	const lines = code.split(/\r\n|[\n\r\u2028\u2029]/);
+	if (line < 1 || line > lines.length) return undefined;
+	const first = Math.max(1, line - FRAME_CONTEXT_LINES);
+	const gutterWidth = String(line).length;
+	const frame: string[] = [];
+	for (let n = first; n <= line; n++) {
+		let text = lines[n - 1];
+		let caretColumn = column;
+		if (n === line && text.length > FRAME_MAX_LINE_WIDTH) {
+			const start = Math.min(Math.max(0, column - FRAME_MAX_LINE_WIDTH / 2), text.length - FRAME_MAX_LINE_WIDTH);
+			const end = start + FRAME_MAX_LINE_WIDTH;
+			const cutAfter = end < text.length;
+			text = text.slice(start, end);
+			caretColumn = column - start;
+			if (start > 0) {
+				text = `…${text}`;
+				caretColumn += 1;
+			}
+			if (cutAfter) text += "…";
+		} else if (text.length > FRAME_MAX_LINE_WIDTH) {
+			text = `${text.slice(0, FRAME_MAX_LINE_WIDTH)}…`;
+		}
+		frame.push(`${String(n).padStart(gutterWidth)} | ${text}`);
+		if (n === line) {
+			// Keep tabs so the caret lines up with the source line above it.
+			let pad = "";
+			for (const char of text.slice(0, caretColumn)) {
+				pad += char === "\t" ? char : " ".repeat(Bun.stringWidth(char));
+			}
+			frame.push(`${" ".repeat(gutterWidth)} | ${pad}^`);
+		}
+	}
+	return new SyntaxError(`${reason} (line ${line}, column ${column + 1})\n${frame.join("\n")}`);
+}
+
+/**
+ * Re-parses the original cell source after the engine rejected it with a `SyntaxError`, and returns
+ * a position-carrying replacement when Babel also fails, whether it throws or recovers with
+ * reported errors. Returns `undefined` when Babel accepts the
+ * cell (the engine error is then the better signal). Runs only on the failure path.
+ */
+export async function diagnoseCellSyntaxError(code: string): Promise<SyntaxError | undefined> {
+	const parsed = await tryParseProgram(code);
+	if ("error" in parsed) return buildCellSyntaxError(code, parsed.error);
+	// Babel recovers from some errors (e.g. `break;` outside a loop) and reports them on the AST.
+	return buildCellSyntaxError(code, parsed.recovered[0]);
 }
 
 // Callee substituted for dynamic `import(...)` calls. Functions handed to puppeteer
@@ -523,25 +596,99 @@ function getLexicalBindingNames(node: BabelPublishableDecl): string[] {
 	return names;
 }
 
-function renderGlobalVariableDeclaration(code: string, node: BabelVariableDeclaration): string {
-	const statements: string[] = [];
+/** `var` declaration nested in top-level control flow, with the simple catch parameters enclosing it. */
+type NestedVarDeclaration = {
+	node: BabelVariableDeclaration;
+	parentType: string;
+	catchParams: ReadonlySet<string>;
+};
+
+function collectNestedVarDeclarations(
+	value: unknown,
+	targets: NestedVarDeclaration[],
+	parentType = "Program",
+	catchParams: ReadonlySet<string> = new Set(),
+): void {
+	if (!value || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const item of value) collectNestedVarDeclarations(item, targets, parentType, catchParams);
+		return;
+	}
+	const node = value as Record<string, unknown>;
+	if (
+		typeof node.type !== "string" ||
+		isExecutionBoundary(node.type) ||
+		node.type.startsWith("Class") ||
+		node.type === "StaticBlock"
+	)
+		return;
+	if (node.type === "VariableDeclaration") {
+		if (node.kind === "var") {
+			targets.push({ node: node as BabelVariableDeclaration, parentType, catchParams });
+		}
+		return;
+	}
+	if (node.type === "CatchClause") {
+		// Annex B lets `var e = v` redeclare a simple catch parameter `e`; the initializer
+		// assigns the catch binding while the function-scoped `e` stays undefined.
+		const param = node.param as BabelBindingPattern | null | undefined;
+		const bodyCatchParams =
+			param?.type === "Identifier" && typeof param.name === "string"
+				? new Set([...catchParams, param.name])
+				: catchParams;
+		collectNestedVarDeclarations(node.body, targets, node.type, bodyCatchParams);
+		return;
+	}
+	for (const key in node) {
+		if (key === "loc" || key === "extra" || key === "range") continue;
+		if (key === "leadingComments" || key === "trailingComments" || key === "innerComments") continue;
+		collectNestedVarDeclarations(node[key], targets, node.type, catchParams);
+	}
+}
+
+function renderNestedVarDeclaration(code: string, { node, parentType, catchParams }: NestedVarDeclaration): string {
+	if (parentType === "ForInStatement" || parentType === "ForOfStatement") {
+		const id = node.declarations?.[0]?.id;
+		return id ? code.slice(id.start, id.end) : "";
+	}
+	const inForInit = parentType === "ForStatement";
+	const statements = renderGlobalVariableDeclaration(code, node, { inForInit, catchParams });
+	if (inForInit) return statements;
+	if (!statements) return ";";
+	return (node.declarations?.filter(declaration => declaration.init).length ?? 0) > 1
+		? `{ ${statements} }`
+		: statements;
+}
+
+/**
+ * Renders a `var` declaration as assignments that publish its bindings on the worker global.
+ * Names in `catchParams` assign the enclosing catch binding instead, matching Annex B semantics.
+ */
+function renderGlobalVariableDeclaration(
+	code: string,
+	node: BabelVariableDeclaration,
+	options: { inForInit?: boolean; catchParams?: ReadonlySet<string> } = {},
+): string {
+	const assignments: string[] = [];
 	for (const declaration of node.declarations ?? []) {
 		if (!declaration.init) continue;
 		const target = code.slice(declaration.id.start, declaration.id.end);
 		const value = code.slice(declaration.init.start, declaration.init.end);
-		if (declaration.id.type === "Identifier" && typeof declaration.id.name === "string") {
-			statements.push(`this[${JSON.stringify(declaration.id.name)}] = (${value});`);
+		const name = declaration.id.type === "Identifier" ? declaration.id.name : undefined;
+		if (typeof name === "string" && !options.catchParams?.has(name)) {
+			assignments.push(`this[${JSON.stringify(name)}] = (${value})`);
 		} else {
-			statements.push(`(${target} = (${value}));`);
+			assignments.push(`(${target} = (${value}))`);
 		}
 	}
-	return statements.join("\n");
+	return options.inForInit ? assignments.join(", ") : assignments.map(assignment => `${assignment};`).join("\n");
 }
 
 function globalizeTopLevelDeclarations(
 	code: string,
 	ast: { program: { body: ReadonlyArray<BabelProgramNode> } },
 	targets: ReadonlyArray<{ node: BabelPublishableDecl }>,
+	nestedVars: readonly NestedVarDeclaration[],
 	bindingNames: readonly string[],
 ): string {
 	const prelude = bindingNames.map(
@@ -568,6 +715,13 @@ function globalizeTopLevelDeclarations(
 			start: node.start,
 			end: node.end,
 			replacement: `this[${JSON.stringify(node.id.name)}] = (${segment});`,
+		});
+	}
+	for (const nested of nestedVars) {
+		edits.push({
+			start: nested.node.start,
+			end: nested.node.end,
+			replacement: renderNestedVarDeclaration(code, nested),
 		});
 	}
 
@@ -843,8 +997,8 @@ function instrumentBindingAssignments(
  * preserve hoisting. Bare references — including references captured by persisted functions —
  * then resolve the same retained global binding that later cells update.
  *
- * Nested declarations (inside functions, blocks, classes) are left alone — they're
- * scoped to their enclosing function/block regardless of `var` vs `let`/`const`.
+ * `var` inside top-level control flow belongs to the cell's function scope and is
+ * published too; function-local variables and block-scoped `let`/`const` stay local.
  */
 async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: boolean } = {}): Promise<string> {
 	const publishGlobals = options.publishGlobals === true;
@@ -870,11 +1024,24 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 			if (decl.id) targets.push({ node: decl, demote: false });
 		}
 	}
-	if (targets.length === 0) return code;
-
-	const bindingNames = publishGlobals ? [...new Set(targets.flatMap(({ node }) => getLexicalBindingNames(node)))] : [];
+	const nestedVars: NestedVarDeclaration[] = [];
 	if (publishGlobals) {
-		const globalized = globalizeTopLevelDeclarations(code, ast, targets, bindingNames);
+		for (const node of ast.program.body) {
+			if (
+				node.type !== "VariableDeclaration" &&
+				node.type !== "FunctionDeclaration" &&
+				node.type !== "ClassDeclaration"
+			)
+				collectNestedVarDeclarations(node, nestedVars);
+		}
+	}
+	if (targets.length === 0 && nestedVars.length === 0) return code;
+
+	const bindingNames = publishGlobals
+		? [...new Set([...targets, ...nestedVars].flatMap(({ node }) => getLexicalBindingNames(node)))]
+		: [];
+	if (publishGlobals) {
+		const globalized = globalizeTopLevelDeclarations(code, ast, targets, nestedVars, bindingNames);
 		const globalizedAst = await parseProgram(globalized);
 		return globalizedAst ? instrumentBindingAssignments(globalized, globalizedAst, bindingNames) : globalized;
 	}

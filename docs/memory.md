@@ -8,7 +8,7 @@ omp supports five memory modes. Memory is disabled by default; select one backen
 | `local`          | Project-scoped summaries and lessons generated from persisted sessions | This page                                               |
 | `hindsight`      | Remote, bank-scoped Hindsight memory                                   | [Hindsight](#hindsight-remote-backend)                  |
 | `mnemopi`        | Local Mnemopi SQLite memory                                            | [Mnemopi memory backend](./mnemosyne-memory-backend.md) |
-| `sharpshooter`   | Friction-gated project decision files (architecture/product/style), consolidated in the background | —                           |
+| `sharpshooter`   | Friction-gated project decision files (architecture/product/style), consolidated in the background | [Sharpshooter](#sharpshooter-backend) |
 
 Enable the local summary pipeline:
 
@@ -151,9 +151,33 @@ Both project-scoped modes name the project the same way: take the repository's p
 
 The primary session recalls on its first model turn (`hindsight.autoRecall: true`) and automatically retains completed conversation turns every three user turns by default. `/memory enqueue` flushes queued tool retains and forces retention of the current session. At agent end, the primary state schedules cadence-based retention and flushes the retain queue; session disposal drains that queue before releasing the state. Request failures and configured timeouts are logged and leave the coding session usable. Subagents alias the parent's client, bank, and scope for explicit `recall`, `retain`, and `reflect` calls, but do not run their own automatic recall or retention.
 
-Recall is injected as background context, not instructions, and recalled memory is also available as extra context during compaction. Selecting Hindsight exposes `recall`, `retain`, and `reflect`; `memory_edit` is not available because upstream Hindsight memories are not edited through this backend.
+Recall is injected as background context, not instructions, and recalled memory is also available as extra context during compaction. The first-turn recall is stored in the session file, so resuming, switching to, or forking the session sends it unchanged instead of recalling again; a context reset, a different bank or tag filter, or a branch that edits the first prompt recalls afresh. Hindsight memories cannot be looked up by id, so changes to them since the recall are not reported. Mental models are still reloaded when a new process starts. Selecting Hindsight exposes `recall`, `retain`, and `reflect`; `memory_edit` is not available because upstream Hindsight memories are not edited through this backend.
 
 `/memory view`, `/memory stats`, `/memory diagnose`, and `/memory enqueue` operate through the active Hindsight state. `/memory clear` first drains pending retains, then clears only the local session state and recall cache. It **does not delete the server-side bank**; delete that bank with the Hindsight UI or API.
+
+## Sharpshooter backend
+
+Sharpshooter keeps three short project decision files — `architecture.md`, `product.md`, and `style.md` — and injects them into the system prompt. It needs no server; files live under `<agentDir>/memories/sharpshooter/<bank>/`, where the bank is derived from the working directory, so each project has its own decisions.
+
+```yaml
+memory:
+  backend: sharpshooter
+sharpshooter:
+  minPromptLength: 4
+  intervalMinutes: 5
+```
+
+**Extraction:** each user prompt in the main session (subagents are skipped) goes to the extraction model, which records durable decisions the user made — architecture, product, and style decisions, constraints, rejected approaches, and corrections — as deltas in a per-session queue. Slash commands and prompts shorter than `sharpshooter.minPromptLength` characters are not sent; a session runs one extraction at a time, and a prompt that arrives while one is running is not extracted. Short replies such as "opt 2" are resolved against the preceding assistant message, but at the default of 16 characters they are too short to be sent — lower `sharpshooter.minPromptLength` to capture them.
+
+**Consolidation:** a scheduler checks every minute and, once `sharpshooter.intervalMinutes` have passed since the last run, applies the queued deltas to the three files in one model pass and removes them from the queue. `/memory enqueue` consolidates immediately; `/memory queue` lists pending deltas and `/memory clear` deletes the project's files and queue.
+
+| Setting                            | Default    | Description                                                                                                                                                                                                                 |
+| ---------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory.backend`                   | `off`      | Set to `sharpshooter` to enable this backend                                                                                                                                                                                |
+| `sharpshooter.model`               | unset      | Model selector for extraction and consolidation; unset uses the `smol` role                                                                                                                                                 |
+| `sharpshooter.minPromptLength`     | `16`       | Prompts shorter than this many characters are not sent for extraction; values below `2` act as `2`. Characters are counted as displayed (one CJK character or emoji is one), the same in every language, so Chinese users may lower it to capture short replies such as "用方案二" |
+| `sharpshooter.intervalMinutes`     | `5`        | Minimum minutes between consolidation runs                                                                                                                                                                                  |
+| `sharpshooter.injectionTokenLimit` | `15000`    | Approximate token cap for the decision files injected into the system prompt                                                                                                                                                |
 
 ## Key files
 

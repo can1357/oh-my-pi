@@ -1,20 +1,21 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import * as vm from "node:vm";
-import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, ImageContent, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { AsyncJobManager } from "../../src/async";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
+import { EVAL_HANDLE_CONCURRENCY, evalRequestSlots } from "../../src/eval/completion-bridge";
+import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
+import { executeJs } from "../../src/eval/js/executor";
 import {
 	type JudgmentBatchItem,
 	type JudgmentBatchStatus,
 	releaseJudgmentBatches,
 	runEvalJudgmentBatch,
 } from "../../src/eval/judgment-batch-bridge";
-import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
 import {
 	isJudgmentBatchProgress,
 	JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL,
@@ -37,6 +38,21 @@ const SMOL: Model<Api> = {
 	contextWindow: 128000,
 	maxTokens: 4096,
 } as Model<Api>;
+const VISION: Model<Api> = {
+	...SMOL,
+	input: ["text", "image"],
+} as Model<Api>;
+
+const IMAGE_ONE: ImageContent = {
+	type: "image",
+	data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+	mimeType: "image/png",
+};
+const IMAGE_TWO: ImageContent = {
+	type: "image",
+	data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+	mimeType: "image/png",
+};
 
 const QUESTIONS = {
 	tests: { type: "bool", instructions: "Does the request mention tests?" },
@@ -49,7 +65,7 @@ interface BatchSession {
 	manager?: AsyncJobManager;
 }
 
-function makeSession(opts: { agentId?: string; jobs?: boolean } = {}): BatchSession {
+function makeSession(opts: { agentId?: string; jobs?: boolean; vision?: boolean; cwd?: string } = {}): BatchSession {
 	const settings = Settings.isolated({
 		"async.enabled": false,
 		"task.isolation.enabled": false,
@@ -58,8 +74,9 @@ function makeSession(opts: { agentId?: string; jobs?: boolean } = {}): BatchSess
 	const authStorage = createInMemoryAuthStorage();
 	authStorage.keys.setRuntime("p", "test-key");
 	const modelRegistry = new ModelRegistry(authStorage, "/nonexistent/judgment-batch-models.yml");
-	vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([SMOL]);
+	vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([opts.vision ? VISION : SMOL]);
 	const session: Record<string, unknown> = {
+		cwd: opts.cwd ?? process.cwd(),
 		settings,
 		modelRegistry,
 		getSessionId: () => "sess-1",
@@ -102,6 +119,14 @@ function reply(text: string): AssistantMessage {
 		stopReason: "stop",
 		timestamp: Date.now(),
 	};
+}
+
+async function expectUpscaledImage(images: unknown[] | undefined, original: ImageContent): Promise<void> {
+	expect(images).toHaveLength(1);
+	const image = images![0] as ImageContent;
+	expect(image.data).not.toBe(original.data);
+	const metadata = await new Bun.Image(Buffer.from(image.data, "base64")).metadata();
+	expect(Math.min(metadata.width, metadata.height)).toBeGreaterThanOrEqual(200);
 }
 
 /** Route each completion by the state text embedded in the prompt; gated states block until released. */
@@ -148,6 +173,10 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 });
 
+afterAll(async () => {
+	await disposeAllVmContexts();
+});
+
 describe("judge_batch bridge", () => {
 	it("publishes live progress between cells without a job manager or drain calls", async () => {
 		const gate = Promise.withResolvers<string>();
@@ -190,7 +219,7 @@ describe("judge_batch bridge", () => {
 	});
 	it("validates items and options before starting", async () => {
 		const { session } = makeSession();
-		const spy = vi.spyOn(ai, "completeSimple");
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(reply("tests: yes"));
 		await expect(
 			runEvalJudgmentBatch({ op: "create", items: [], questions: QUESTIONS }, { session }),
 		).rejects.toThrow("items must not be empty");
@@ -231,7 +260,205 @@ describe("judge_batch bridge", () => {
 		await expect(runEvalJudgmentBatch({ op: "drain", id: "jdgb-missing" }, { session })).rejects.toThrow(
 			'unknown judge_batch "jdgb-missing"',
 		);
+		const legacyImages = {
+			op: "create",
+			items: [{ key: "a", state: "x" }],
+			questions: QUESTIONS,
+			images: { unknown: [IMAGE_ONE] },
+		};
+		await expect(runEvalJudgmentBatch(legacyImages, { session })).rejects.toThrow(
+			"images must be provided on each item",
+		);
 		expect(spy).not.toHaveBeenCalled();
+	});
+
+	it("routes distinct image mappings to matching keyed batch items", async () => {
+		const completions: Array<{ prompt: string; images: unknown[] }> = [];
+		const complete = vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context, options) => {
+			const user = context.messages.find(message => message.role === "user");
+			const content = user?.content;
+			completions.push({
+				prompt: typeof content === "string" ? content : JSON.stringify(content),
+				images: Array.isArray(content) ? content.filter(block => block.type === "image") : [],
+			});
+			const message = reply("tests: yes");
+			options?.onAttempt?.(message);
+			return message;
+		});
+		const { session } = makeSession({ vision: true, jobs: false });
+		const created = (await runEvalJudgmentBatch(
+			{
+				op: "create",
+				items: [
+					{ key: 0, state: "state-zero", images: [IMAGE_ONE] },
+					{ key: 1, state: "state-one", images: [IMAGE_TWO] },
+				],
+				questions: QUESTIONS,
+				concurrency: 2,
+				retries: 0,
+			},
+			{ session },
+		)) as JudgmentBatchStatus;
+
+		const items = await drain(session, created.id, 5_000);
+		expect(items.find(item => item.key === 0)?.answers).toEqual({ tests: { type: "bool", bool: 1 } });
+		expect(items.find(item => item.key === 1)?.answers).toEqual({ tests: { type: "bool", bool: 1 } });
+		expect(complete).toHaveBeenCalledTimes(2);
+		for (const [state, original] of [
+			["state-zero", IMAGE_ONE],
+			["state-one", IMAGE_TWO],
+		] as const) {
+			await expectUpscaledImage(completions.find(item => item.prompt.includes(state))?.images, original);
+		}
+	});
+
+	it("keeps malformed images as per-item failures without dropping valid sibling judgments", async () => {
+		const tempDir = TempDir.createSync("@omp-eval-judge-batch-bad-image-");
+		try {
+			const brokenPath = path.join(tempDir.path(), "broken.png");
+			await Bun.write(brokenPath, "not an image");
+			const completions: Array<{ prompt: string; images: unknown[] }> = [];
+			const complete = vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context, options) => {
+				const user = context.messages.find(message => message.role === "user");
+				const content = user?.content;
+				completions.push({
+					prompt: typeof content === "string" ? content : JSON.stringify(content),
+					images: Array.isArray(content) ? content.filter(block => block.type === "image") : [],
+				});
+				const message = reply("tests: yes");
+				options?.onAttempt?.(message);
+				return message;
+			});
+			const { session } = makeSession({ vision: true, jobs: false });
+			const created = (await runEvalJudgmentBatch(
+				{
+					op: "create",
+					items: [
+						{ key: "valid", state: "state-valid", images: [IMAGE_ONE] },
+						{ key: "broken", state: "state-broken", images: [brokenPath] },
+					],
+					questions: QUESTIONS,
+					concurrency: 2,
+					retries: 0,
+				},
+				{ session },
+			)) as JudgmentBatchStatus;
+			const items = await drain(session, created.id, 5_000);
+
+			expect(items.find(item => item.key === "valid")?.answers).toEqual({ tests: { type: "bool", bool: 1 } });
+			expect(items.find(item => item.key === "broken")?.error).toContain("invalid judgment image source");
+			expect(complete).toHaveBeenCalledTimes(1);
+			expect(completions).toHaveLength(1);
+			expect(completions[0]?.prompt).toContain("state-valid");
+			await expectUpscaledImage(completions[0]?.images, IMAGE_ONE);
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("waits for shared admission before loading images and releases after loader failure", async () => {
+		let held = 0;
+		const { session } = makeSession({ jobs: false });
+		try {
+			while (held < EVAL_HANDLE_CONCURRENCY) {
+				await evalRequestSlots.acquire();
+				held++;
+			}
+			let loaderStarted = false;
+			const imageSources: unknown[] = [];
+			Object.defineProperty(imageSources, "0", {
+				get: () => {
+					loaderStarted = true;
+					return "";
+				},
+			});
+			const created = (await runEvalJudgmentBatch(
+				{
+					op: "create",
+					items: [{ key: "broken", state: "state-broken", images: imageSources }],
+					questions: QUESTIONS,
+					concurrency: 1,
+					retries: 0,
+				},
+				{ session },
+			)) as JudgmentBatchStatus;
+			expect(await status(session, created.id)).toMatchObject({ done: 0, running: true });
+			expect(await drain(session, created.id, 0)).toEqual([]);
+			expect(loaderStarted).toBe(false);
+
+			evalRequestSlots.release();
+			held--;
+			const [item] = await drain(session, created.id, 5_000);
+			expect(loaderStarted).toBe(true);
+			expect(item?.error).toContain("images[0] path must not be empty");
+
+			const controller = new AbortController();
+			const admission = evalRequestSlots.acquire(controller.signal).then(
+				() => true,
+				() => false,
+			);
+			controller.abort();
+			const acquired = await admission;
+			if (acquired) evalRequestSlots.release();
+			expect(acquired).toBe(true);
+		} finally {
+			while (held > 0) {
+				evalRequestSlots.release();
+				held--;
+			}
+		}
+	});
+
+	it("cancels a batch item waiting for shared admission before image loading", async () => {
+		let held = 0;
+		const { session } = makeSession({ jobs: false });
+		try {
+			while (held < EVAL_HANDLE_CONCURRENCY) {
+				await evalRequestSlots.acquire();
+				held++;
+			}
+			let loaderStarted = false;
+			const imageSources: unknown[] = [];
+			Object.defineProperty(imageSources, "0", {
+				get: () => {
+					loaderStarted = true;
+					return "";
+				},
+			});
+			const created = (await runEvalJudgmentBatch(
+				{
+					op: "create",
+					items: [{ key: "cancelled", state: "state-cancelled", images: imageSources }],
+					questions: QUESTIONS,
+					concurrency: 1,
+					retries: 0,
+				},
+				{ session },
+			)) as JudgmentBatchStatus;
+			expect(await status(session, created.id)).toMatchObject({ done: 0, running: true });
+			expect(await runEvalJudgmentBatch({ op: "cancel", id: created.id }, { session })).toEqual({
+				cancelled: true,
+			});
+			expect(await drain(session, created.id, 5_000)).toEqual([{ key: "cancelled", error: "cancelled" }]);
+			expect(loaderStarted).toBe(false);
+
+			evalRequestSlots.release();
+			held--;
+			const controller = new AbortController();
+			const admission = evalRequestSlots.acquire(controller.signal).then(
+				() => true,
+				() => false,
+			);
+			controller.abort();
+			const acquired = await admission;
+			if (acquired) evalRequestSlots.release();
+			expect(acquired).toBe(true);
+		} finally {
+			while (held > 0) {
+				evalRequestSlots.release();
+				held--;
+			}
+		}
 	});
 
 	it("drains settled items through a cursor, records failures per item, and settles the job", async () => {
@@ -296,18 +523,31 @@ describe("judge_batch bridge", () => {
 		expect(job?.resultText).toMatch(/^judged 3\/3 · 1 failed · \$0\.0050 · p\/smol · [\d.]+s$/);
 	});
 
-	it("retries an item once before recording its failure", async () => {
+	it("retries an image-backed item once and preserves its prepared image for the answer", async () => {
 		let attempts = 0;
-		vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
+		const imageAttempts: unknown[][] = [];
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
 			attempts++;
+			const user = context.messages.find(message => message.role === "user");
+			const content = user?.content;
+			imageAttempts.push(Array.isArray(content) ? content.filter(block => block.type === "image") : []);
 			return reply(attempts <= 3 ? "I cannot decide." : "tests: yes");
 		});
-		const { session } = makeSession();
-		const created = await create(session, ["state-a"]);
+		const { session } = makeSession({ vision: true });
+		const created = (await runEvalJudgmentBatch(
+			{
+				op: "create",
+				items: [{ key: "retry", state: "state-a", images: [IMAGE_ONE] }],
+				questions: QUESTIONS,
+			},
+			{ session },
+		)) as JudgmentBatchStatus;
 		const [item] = await drain(session, created.id, 5_000);
 		expect(item?.answers).toEqual({ tests: { type: "bool", bool: 1 } });
 		// Three off-format turns exhaust the first judgment; the retry answers on its first turn.
 		expect(attempts).toBe(4);
+		expect(imageAttempts).toHaveLength(4);
+		for (const images of imageAttempts) await expectUpscaledImage(images, IMAGE_ONE);
 	});
 
 	it("raises from drain only after the cursor is exhausted when min_ok is unmet", async () => {
@@ -377,70 +617,65 @@ describe("judge_batch bridge", () => {
 	});
 });
 
-describe("judgeBatch() JS prelude", () => {
-	it("maps states to keyed items and drainIter stops on an empty drain", async () => {
-		const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
-		const drains = [
-			{
-				items: [
-					{
-						key: "a",
-						answers: { ok: { type: "bool", bool: 1 } },
-						model: "p/smol",
-					},
-				],
-			},
-			{ items: [{ key: "b", error: "boom" }] },
-			{ items: [] },
-		];
-		const sandbox: Record<string, unknown> = {
-			__omp_call_tool__: async (name: string, args: Record<string, unknown>) => {
-				calls.push({ name, args });
-				if (name !== "__judge_batch__") throw new Error(`unexpected bridge call ${name}`);
-				if (args.op === "create") return { id: "jdgb-1", total: 2 };
-				if (args.op === "drain") return drains.shift();
-				if (args.op === "status") return { id: "jdgb-1", done: 2, total: 2, failed: 1, running: false };
-				throw new Error(`unexpected op ${String(args.op)}`);
-			},
-		};
-		vm.createContext(sandbox);
-		vm.runInContext(JAVASCRIPT_PRELUDE_SOURCE, sandbox);
-
-		const seen = await vm.runInContext(
-			`(async () => {
-				const b = await judgeBatch({ a: "first", b: "second" }, { ok: { type: "bool", instructions: "?" } }, { concurrency: 4 });
-				const out = [];
-				for await (const [key, item] of b.drainIter({ timeout: 30 })) out.push([key, item.ok, item.answers ?? item.error]);
-				return { id: b.id, total: b.total, out, status: await b.status() };
-			})()`,
-			sandbox,
-		);
-
-		expect(seen).toEqual({
-			id: "jdgb-1",
-			total: 2,
-			out: [
-				["a", true, { ok: { type: "bool", bool: 1 } }],
-				["b", false, "boom"],
-			],
-			status: { id: "jdgb-1", done: 2, total: 2, failed: 1, running: false },
-		});
-		expect(calls[0]?.args).toEqual({
-			op: "create",
-			items: [
-				{ key: "a", state: "first" },
-				{ key: "b", state: "second" },
-			],
-			questions: { ok: { type: "bool", instructions: "?" } },
-			concurrency: 4,
-		});
-		const drainCalls = calls.filter(call => call.args.op === "drain");
-		expect(drainCalls).toHaveLength(3);
-		expect(drainCalls[0]?.args.id).toBe("jdgb-1");
-		expect(drainCalls[0]?.args.timeoutMs).toBeLessThanOrEqual(30_000);
+describe("judgeBatch() JS runtime", () => {
+	it("routes mapped images and settles malformed attachments per item through the actual bridge", async () => {
+		const tempDir = TempDir.createSync("@omp-eval-judge-batch-js-");
+		try {
+			const completions: Array<{ prompt: string; images: unknown[] }> = [];
+			const complete = vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context, options) => {
+				const user = context.messages.find(message => message.role === "user");
+				const content = user?.content;
+				completions.push({
+					prompt: typeof content === "string" ? content : JSON.stringify(content),
+					images: Array.isArray(content) ? content.filter(block => block.type === "image") : [],
+				});
+				const message = reply("tests: yes");
+				options?.onAttempt?.(message);
+				return message;
+			});
+			const { session } = makeSession({ vision: true, jobs: false, cwd: tempDir.path() });
+			const cell = [
+				'const questions = { tests: { type: "bool", instructions: "Does the request mention tests?" } };',
+				'const batch = await judgeBatch(["state-zero", "state-malformed"], questions, { images: { 0: [__IMAGE_ONE__], 1: "not an image list" }, concurrency: 2, retries: 0 });',
+				"const items = [];",
+				"for await (const entry of batch.drainIter({ timeout: 30 })) items.push(entry);",
+				"await batch.close();",
+				"let unknownImageError;",
+				'try { await judgeBatch(["known"], questions, { images: { unknown: [__IMAGE_TWO__] } }); }',
+				"catch (error) { unknownImageError = error.message; }",
+				"return JSON.stringify({ items: items.map(([key, item]) => [key, item.ok, item.answers ?? item.error]), unknownImageError });",
+			]
+				.join("\n")
+				.replaceAll("__IMAGE_ONE__", JSON.stringify(IMAGE_ONE))
+				.replaceAll("__IMAGE_TWO__", JSON.stringify(IMAGE_TWO));
+			const result = await executeJs(cell, {
+				cwd: tempDir.path(),
+				sessionId: "js-judge-batch-integration",
+				session,
+				sessionFile: path.join(tempDir.path(), "session.jsonl"),
+			});
+			expect(result.exitCode).toBe(0);
+			const report = JSON.parse(result.output.trim()) as {
+				items: [JudgmentBatchItem["key"], boolean, JudgmentBatchItem["answers"] | JudgmentBatchItem["error"]][];
+				unknownImageError: string;
+			};
+			expect(report.items).toHaveLength(2);
+			expect(report.items.find(([key]) => key === 0)).toEqual([0, true, { tests: { type: "bool", bool: 1 } }]);
+			expect(report.items.find(([key]) => key === 1)?.[2]).toBe(
+				'images for input "1" must be an array of paths or image attachments',
+			);
+			expect(report.unknownImageError).toBe('images contains unknown input key "unknown"');
+			expect(complete).toHaveBeenCalledTimes(1);
+			expect(completions).toHaveLength(1);
+			expect(completions[0]?.prompt).toContain("state-zero");
+			await expectUpscaledImage(completions[0]?.images, IMAGE_ONE);
+		} finally {
+			// The JS worker holds the temp cwd open; Windows refuses to remove it until disposal.
+			await disposeAllVmContexts();
+			tempDir.removeSync();
+		}
 	});
 });
-
 async function runPythonJudgeBatchInSubprocess(tempDir: TempDir): Promise<PythonResult> {
 	const repoRoot = path.resolve(import.meta.dir, "../../..");
 	const scriptPath = path.join(tempDir.path(), "run-python-judge-batch.ts");
@@ -458,7 +693,17 @@ async function runPythonJudgeBatchInSubprocess(tempDir: TempDir): Promise<Python
 		"second = await b.drain(timeout=30)",
 		"items = sorted(first + second, key=lambda kv: kv[0])",
 		"single = await judge('write tests', Q)",
-		'print(json.dumps({"id": b.id, "total": b.total, "items": [[k, i.ok, i.answers or i.error] for k, i in items], "single": single}))',
+		`image_batch = judge_batch({1.0: "image-float-one", "1": "image-string-one", 1.25: "image-fractional", 2.5: "image-invalid"}, Q, images={1.0: [${JSON.stringify(IMAGE_ONE)}], "1": [${JSON.stringify(IMAGE_TWO)}], 1.25: [${JSON.stringify(IMAGE_TWO)}], 2.5: "not an image list"}, retries=0)`,
+		"image_items = [entry async for entry in image_batch.drain_iter(timeout=30)]",
+		"image_results = {repr(k): [i.ok, i.answers or i.error] for k, i in image_items}",
+		"image_batch.close()",
+		"try:",
+		'    judge_batch({"known": "state"}, Q, images={"unknown": []})',
+		"except ValueError as error:",
+		"    unknown_image_error = str(error)",
+		"else:",
+		'    raise AssertionError("unknown image key was accepted")',
+		'print(json.dumps({"id": b.id, "total": b.total, "items": [[k, i.ok, i.answers or i.error] for k, i in items], "single": single, "image_items": image_results, "unknown_image_error": unknown_image_error}))',
 	].join("\n");
 	const cellTwo = [
 		"import json",
@@ -472,30 +717,44 @@ async function runPythonJudgeBatchInSubprocess(tempDir: TempDir): Promise<Python
 		`
 import { vi } from "bun:test";
 import * as ai from ${JSON.stringify(aiPath)};
+import type { ImageContent } from ${JSON.stringify(aiPath)};
 import { executePython } from ${JSON.stringify(executorPath)};
 import { Settings } from ${JSON.stringify(settingsPath)};
 import { ModelRegistry } from ${JSON.stringify(registryPath)};
 import { createInMemoryAuthStorage } from ${JSON.stringify(setupPath)};
 
 const SMOL = ${JSON.stringify(SMOL)};
+const VISION = { ...SMOL, input: ["text", "image"] };
 const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false, modelRoles: { judge: "p/smol" } });
 const authStorage = createInMemoryAuthStorage();
 authStorage.keys.setRuntime("p", "test-key");
 const modelRegistry = new ModelRegistry(authStorage, "/nonexistent/judgment-batch-py-models.yml");
-vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([SMOL]);
-const session = { cwd: ${JSON.stringify(tempDir.path())}, settings, modelRegistry, getSessionId: () => "sess-py", getAgentId: () => "Main" };
+vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([VISION]);
+const observedImageBlocks: Array<{ prompt: string; images: ImageContent[] }> = [];
 vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
 	const user = context.messages.find(message => message.role === "user");
-	const prompt = typeof user?.content === "string" ? user.content : JSON.stringify(user?.content);
+	const prompt = (typeof user?.content === "string" ? user.content : JSON.stringify(user?.content)) ?? "";
+	const images = Array.isArray(user?.content)
+		? user.content.filter((block): block is ImageContent => block.type === "image")
+		: [];
+	if (images.length > 0) observedImageBlocks.push({ prompt, images });
 	return {
 		role: "assistant",
 		api: "openai-responses",
 		provider: "p",
 		model: "smol",
 		stopReason: "stop",
-		content: [{ type: "text", text: prompt.includes("tests") ? "tests: yes" : "tests: no" }],
+		content: [{ type: "text", text: prompt.includes("tests") || prompt.includes("image-") ? "tests: yes" : "tests: no" }],
 	};
 });
+const session = {
+	cwd: ${JSON.stringify(tempDir.path())},
+	hasUI: false,
+	getSessionFile: () => ${JSON.stringify(path.join(tempDir.path(), "session.jsonl"))},
+	getSessionSpawns: () => null,
+	settings,
+	modelRegistry,
+};
 const options = {
 	cwd: ${JSON.stringify(tempDir.path())},
 	sessionId: "py-judge-batch",
@@ -504,7 +763,8 @@ const options = {
 };
 const one = await executePython(${JSON.stringify(cellOne)}, options);
 const two = await executePython(${JSON.stringify(cellTwo)}, options);
-await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({ exitCode: one.exitCode || two.exitCode, output: one.output + "\\n" + two.output }));
+const imageReport = "\\n__IMAGE_BLOCKS__" + JSON.stringify(observedImageBlocks);
+await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({ exitCode: one.exitCode || two.exitCode, output: one.output + "\\n" + two.output + imageReport }));
 process.exit(0);
 `,
 	);
@@ -537,6 +797,29 @@ describe("judge_batch() Python prelude", () => {
 			});
 			expect(String(one.id)).toMatch(/^jdgb-/);
 			expect(two).toEqual({ rest: [], status: 2, results: ["a", "b"] });
+			expect(one.image_items).toEqual({
+				"1": [true, { tests: { type: "bool", bool: 1 } }],
+				"'1'": [true, { tests: { type: "bool", bool: 1 } }],
+				"1.25": [true, { tests: { type: "bool", bool: 1 } }],
+				"2.5": [false, 'images for input "2.5" must be an array of paths or image attachments'],
+			});
+			expect(one.unknown_image_error).toBe('images contains unknown input key "unknown"');
+			const imageReport = result.output.split("\n").find(line => line.startsWith("__IMAGE_BLOCKS__"));
+			expect(imageReport).toBeDefined();
+			const imageCaptures = JSON.parse(imageReport?.slice("__IMAGE_BLOCKS__".length) ?? "null") as Array<{
+				prompt: string;
+				images: unknown[];
+			}>;
+			expect(imageCaptures).toHaveLength(3);
+			for (const [prompt, original] of [
+				["image-float-one", IMAGE_ONE],
+				["image-string-one", IMAGE_TWO],
+				["image-fractional", IMAGE_TWO],
+			] as const) {
+				const capture = imageCaptures.find(item => item.prompt.includes(prompt));
+				expect(capture).toBeDefined();
+				await expectUpscaledImage(capture?.images, original);
+			}
 		} finally {
 			tempDir.removeSync();
 		}

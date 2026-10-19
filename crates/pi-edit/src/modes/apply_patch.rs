@@ -219,10 +219,11 @@ pub fn format_apply_codex_patch_summary(
 
 fn as_patch_input(entry: &ApplyPatchEntry) -> PatchInput<'_> {
 	PatchInput {
-		path:   &entry.path,
-		op:     entry.op,
-		rename: entry.rename.as_deref(),
-		diff:   entry.diff.as_deref(),
+		path:        &entry.path,
+		op:          entry.op,
+		rename:      entry.rename.as_deref(),
+		diff:        entry.diff.as_deref(),
+		first_match: true,
 	}
 }
 
@@ -279,7 +280,7 @@ fn stage_entries(
 		}
 		groups.entry(entry.path.clone()).or_default().push(entry);
 	}
-	let engine = PatchEngine { allow_fuzzy, fuzzy_threshold: threshold };
+	let engine = PatchEngine { allow_fuzzy, fuzzy_threshold: threshold, first_match: true };
 	let mut staged = Vec::with_capacity(groups.len());
 	for path in order {
 		let group = &groups[&path];
@@ -325,14 +326,6 @@ fn stage_entries(
 		}
 	}
 	Ok(staged)
-}
-
-fn extract_added_lines(text: &str) -> String {
-	text
-		.split('\n')
-		.filter_map(|line| line.strip_prefix('+').filter(|_| !line.starts_with("+++ ")))
-		.collect::<Vec<_>>()
-		.join("\n")
 }
 
 fn natural_order_previews(input: &str) -> Vec<PreviewFile> {
@@ -393,7 +386,7 @@ fn inspect_entries(input: &str) -> (Vec<String>, Vec<(String, String)>, Vec<File
 	let mut file_ops = Vec::new();
 	for entry in entries {
 		if let Some(diff) = &entry.diff {
-			let added = extract_added_lines(diff);
+			let added = super::added_lines(diff.split('\n')).unwrap_or_default();
 			if !added.is_empty() {
 				if !digests.contains_key(&entry.path) {
 					order.push(entry.path.clone());
@@ -475,6 +468,7 @@ impl ModeEngine for ApplyPatchEngine {
 					files,
 					self.allow_fuzzy,
 					self.fuzzy_threshold,
+					false,
 					false,
 				)
 			})

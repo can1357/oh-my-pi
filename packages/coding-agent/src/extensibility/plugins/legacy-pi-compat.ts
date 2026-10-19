@@ -2086,6 +2086,36 @@ const commonJsModuleCache = new Map<
 >();
 const commonJsTypeScriptTranspiler = new Bun.Transpiler({ loader: "ts" });
 
+/**
+ * Node-compatible `require.cache` for graph-owned CommonJS: Bun's process-wide
+ * cache without its ES module entries.
+ *
+ * Bun also lists ES modules there, and deleting one of those keys drops the
+ * module from the ES module registry: assigning the entry back does not restore
+ * it. Packages that clear the cache to load a fresh copy (`stealthy-require`,
+ * used by `request-promise`) then make the next dynamic import re-evaluate host
+ * modules, splitting singletons such as `settings` between two copies (#15799).
+ * Node's cache holds only CommonJS modules, so hiding the ES module entries
+ * keeps such packages working without unloading the host.
+ */
+let commonJsRequireCache: NodeJS.Dict<NodeJS.Module> | undefined;
+
+function getCommonJsRequireCache(cache: NodeJS.Dict<NodeJS.Module>): NodeJS.Dict<NodeJS.Module> {
+	if (commonJsRequireCache) return commonJsRequireCache;
+	// An ES module's cache entry exposes its namespace object as `exports`.
+	const hides = (key: string | symbol): boolean =>
+		typeof key === "string" && Object.prototype.toString.call(cache[key]?.exports) === "[object Module]";
+	commonJsRequireCache = new Proxy(cache, {
+		get: (target, key, receiver) => (hides(key) ? undefined : Reflect.get(target, key, receiver)),
+		has: (target, key) => !hides(key) && Reflect.has(target, key),
+		ownKeys: target => Reflect.ownKeys(target).filter(key => !hides(key)),
+		getOwnPropertyDescriptor: (target, key) =>
+			hides(key) ? undefined : Reflect.getOwnPropertyDescriptor(target, key),
+		deleteProperty: (target, key) => hides(key) || Reflect.deleteProperty(target, key),
+	});
+	return commonJsRequireCache;
+}
+
 function evaluateGraphCommonJs(modulePath: string): unknown {
 	const cached = commonJsModuleCache.get(modulePath);
 	if (cached) {
@@ -2133,7 +2163,7 @@ function evaluateGraphCommonJs(modulePath: string): unknown {
 		},
 		{
 			resolve: nativeRequire.resolve,
-			cache: nativeRequire.cache,
+			cache: getCommonJsRequireCache(nativeRequire.cache),
 			extensions: nativeRequire.extensions,
 			main: nativeRequire.main,
 		},

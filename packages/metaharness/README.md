@@ -189,3 +189,9 @@ known-correct fix for a failed task), `--concurrency` (default 8).
 - **`--install local` reflects local TS changes** (inlined into `dist/cli.js`),
   but **not** uncommitted Rust natives — rebuild `packages/natives` per target
   first (the version sentinel must match).
+- **Agent-started services outlive omp.** The verifier runs after omp exits,
+  in the same container or VM, so both runners set
+  `OMP_DAEMON_IDLE_GRACE_MS` to 24 h for the omp process: services the agent
+  started with the bash tool's `name` stay up until teardown instead of
+  stopping 3 s after omp exits. An explicit `--env OMP_DAEMON_IDLE_GRACE_MS=<ms>`
+  wins.

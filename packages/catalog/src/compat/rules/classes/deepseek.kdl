@@ -59,6 +59,10 @@ class "deepseek" {
 	on "alibaba-token-plan" "deepseek" {
 		supports-developer-role #false
 	}
+	// Replaces the provider-keyed leaked chat-template special-token strip.
+	on "nvidia" "deepseek" {
+		strip-deepseek-special-tokens #true
+	}
 	on "deepseek" "opencode-go" {
 		family "pro" {
 			max-tokens-field "max_tokens"
@@ -98,4 +102,10 @@ class "deepseek" {
 	// providers alike. On hosts that parse it the healer sees no markup.
 	stream-markup-healing-pattern "dsml"
 	thinking-loop-guard "deepseek"
+	// V4 reasoning reaches omp as its plaintext trace on every host, and the
+	// revision pins the weights (flash 4.0 / 4.1, pro 4.0). Earlier lineages
+	// classify too coarsely to carry: `r1` also matches the R1 distills.
+	revision ">=4" {
+		portable-reasoning #true
+	}
 }

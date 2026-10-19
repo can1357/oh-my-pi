@@ -1,36 +1,46 @@
 # macOS signing & notarization
 
-The compiled macOS `omp` binaries shipped on GitHub Releases can be signed with a
+The compiled macOS `omp` binaries (served by build.stencil.so and attached to
+GitHub Releases) can be signed with a
 **Developer ID Application** certificate and **notarized** by Apple. This makes
 them eligible for Gatekeeper acceptance when the notarization ticket is
 available. The repository also maintains a Homebrew tap; formula installs
 have different quarantine behavior from browser downloads (see below).
 
-Signing happens in CI in the Darwin legs of the `release_binary_hosted` matrix
-(`.github/workflows/ci.yml`), via `scripts/ci-macos-sign.sh`. The workflow step
-**auto-skips** unless all five `APPLE_*` repository secrets below are configured,
-so releases remain ad-hoc signed when credentials are absent. The script itself
-does not skip: invoking it without any required credential is an error.
+Like every other release build, the macOS binaries are built and signed on
+Linux: the Darwin legs of the `release_binary` matrix
+(`.github/workflows/ci.yml`) cross-compile them with bun and sign them with
+`scripts/ci-macos-sign.sh`, which drives
+[rcodesign](https://github.com/indygreg/apple-platform-rs) (the open-source
+implementation of `codesign` and `notarytool`, pinned and sha256-checked by the
+script). With all five `APPLE_*` repository secrets below configured, the
+script signs with the Developer ID and notarizes; with none, it signs ad hoc
+(same entitlements) so releases still run. A partial set is an error.
 
 ## How it works
 
-1. `ci:release:build-binaries` builds and **ad-hoc** signs the binary with the
-   required entitlements (so it can run on the build runner).
-2. `scripts/ci-macos-sign.sh` then:
-   - imports the Developer ID cert into a throwaway keychain;
-   - re-signs with `--options runtime --timestamp` (hardened runtime + secure
-     timestamp) and `--entitlements scripts/macos-entitlements.plist`;
-   - runs `--version` and `--smoke-test` under the new signature to fail fast;
+1. `ci:release:build-binaries` cross-compiles the binary on Linux. Bun's own
+   signature is not shippable: arm64 gets a bare linker signature, and x86_64
+   keeps the Bun runtime's Developer ID signature, which no longer matches the
+   appended payload.
+2. `scripts/ci-macos-sign.sh` replaces it. With credentials it:
+   - signs with the Developer ID certificate, the hardened runtime
+     (`--code-signature-flags runtime`), a secure timestamp
+     (`--for-notarization`), and `scripts/macos-entitlements.plist`, keeping
+     the file name (`omp-darwin-<arch>`) as the signing identifier;
    - packages the binary in a ZIP and submits it with
-     `notarytool submit --wait --timeout 30m`;
-   - requires an `Accepted` result; otherwise fetches the submission log when
-     available and fails. The temporary keychain and credential files are
-     removed on exit.
-3. `release_github_verify` re-downloads the published arm64 asset, runs
-   `codesign --verify --strict` and both launch checks, and—when signing secrets
-   are configured—also asserts that the signature is not ad-hoc.
-4. For non-canary releases, `release_brew` regenerates and pushes the tap formula
-   after published-binary verification. It skips when
+     `rcodesign notary-submit --wait`, retrying a failed submission up to three
+     times. Credential files are removed on exit.
+3. `release_smoke` runs each binary on its own hardware (`macos-15-intel`,
+   `macos-15`) before anything publishes: `codesign --verify --strict`,
+   then `--version` and `--smoke-test` under the final signature, which is the
+   hardened-runtime launch check. When signing secrets are configured it also
+   asserts that the signature is not ad-hoc. `release_github` and
+   `release_build` (build.stencil.so) publish these same artifacts, so nothing
+   re-verifies the published assets.
+4. For non-canary releases, `release_brew` regenerates and pushes the tap formula,
+   pointing at the build.stencil.so downloads, once `release_build` has
+   published them. It skips when
    `HOMEBREW_TAP_DEPLOY_KEY` is absent; that secret is separate from signing.
 
 ### Why the entitlements are mandatory
@@ -46,16 +56,17 @@ bridge, so the hardened runtime needs:
 | `com.apple.security.cs.disable-library-validation`       | omp extracts its native addon (`pi_natives.<triple>.node`) and other optional dylibs to a runtime cache and `dlopen()`s them. They do not share the main binary's Team ID, so without this the hardened runtime aborts with _"mapping process and mapped file have different Team IDs"_ — breaking effectively every command. |
 
 Without `disable-library-validation`, a signed+notarized binary signs and
-notarizes fine but **fails at first real use**. `scripts/ci-macos-sign.sh` runs
-`--smoke-test` after signing specifically to catch this before notarizing.
+notarizes fine but **fails at first real use**. `release_smoke` runs
+`--smoke-test` under the shipped signature specifically to catch this before
+anything publishes.
 
 ### Stapling limitation (important)
 
 A bare Mach-O executable **cannot be stapled** (`stapler` only supports
-`.app`/`.pkg`/`.dmg`). The binary is genuinely notarized — `notarytool` returns
-`Accepted` and the ticket exists on Apple's servers keyed to its cdhash — but
+`.app`/`.pkg`/`.dmg`). The binary is genuinely notarized — the notary service
+returns `Accepted` and the ticket exists on Apple's servers keyed to its cdhash — but
 the ticket must be fetched online rather than read from the executable.
-`release_github_verify` reports `spctl -a -t exec -vv` for visibility but does
+`release_smoke` reports `spctl -a -t exec -vv` for visibility but does
 not gate the release on it: an unstapled bare binary can produce a non-zero
 assessment when the online ticket is unavailable, which is not by itself a
 signing or credential failure.
@@ -69,7 +80,7 @@ What this means in practice:
 - Anything that **quarantines** the binary (a browser download, or a Homebrew
   **cask**) needs Apple's online ticket lookup. For an offline-distributable
   artifact, wrap the binary in a stapleable, notarized **`.pkg` or `.dmg`**
-  (`xcrun stapler staple` works on those). That is not required for the
+  (`rcodesign staple` works on those). That is not required for the
   `curl`/formula paths.
 
 ## Required GitHub secrets
@@ -131,13 +142,13 @@ security find-identity -v -p codesigning
 # e.g. "Developer ID Application: Your Name (TEAMID1234)"
 ```
 
-The script selects the first `Developer ID Application` identity automatically;
-you do not need to store the identity string or Team ID as a secret.
+The `.p12` carries a single identity, which rcodesign signs with; you do not
+need to store the identity string or Team ID as a secret.
 
 ## Local dry run
 
-You can exercise the full sign+notarize path locally (real cert + API key) by
-exporting the five env vars and running:
+You can exercise the full sign+notarize path on a Linux machine (real cert +
+API key) by exporting the five env vars and running:
 
 ```sh
 RELEASE_TARGETS=darwin-arm64 bun run ci:release:build-binaries
@@ -145,3 +156,5 @@ APPLE_CERTIFICATE_P12=… APPLE_CERTIFICATE_PASSWORD=… \
 APPLE_API_KEY_ID=… APPLE_API_ISSUER_ID=… APPLE_API_KEY=… \
   bash scripts/ci-macos-sign.sh packages/coding-agent/binaries/omp-darwin-arm64
 ```
+
+Without the env vars the same command signs ad hoc.

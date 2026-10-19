@@ -62,6 +62,23 @@ function latestAssistantEntry(branch: readonly SessionEntry[]): { id: string; te
 	return undefined;
 }
 
+/** The latest non-empty assistant reply on the active branch, or undefined when none exists. */
+export function latestAssistantTextReviewSource(
+	branch: readonly SessionEntry[],
+	sessionId: string,
+): TextReviewSource | undefined {
+	const latest = latestAssistantEntry(branch);
+	if (!latest) return undefined;
+	return {
+		id: `message:${latest.id}`,
+		kind: "message",
+		label: "Latest assistant reply",
+		text: latest.text,
+		provenance: { kind: "latest-assistant", entryId: latest.id },
+		sessionId,
+	};
+}
+
 function sourceKind(selection: SessionPick): TextReviewSource["kind"] {
 	if (selection.block?.kind) return selection.block.kind;
 	switch (transcriptEntryMessage(selection.entry)?.role) {
@@ -102,21 +119,12 @@ export async function selectSessionTextReviewSource(
 	options?: { autoSelect?: "latest-assistant" },
 ): Promise<TextReviewSource | undefined> {
 	const branch = ctx.sessionManager.getBranch();
-	const latest = latestAssistantEntry(branch);
 	if (options?.autoSelect === "latest-assistant") {
-		if (!latest) {
-			ctx.ui.notify("No non-empty assistant reply is available on the active session branch.", "warning");
-			return undefined;
-		}
-		return {
-			id: `message:${latest.id}`,
-			kind: "message",
-			label: "Latest assistant reply",
-			text: latest.text,
-			provenance: { kind: "latest-assistant", entryId: latest.id },
-			sessionId: ctx.sessionManager.getSessionId(),
-		};
+		const source = latestAssistantTextReviewSource(branch, ctx.sessionManager.getSessionId());
+		if (!source) ctx.ui.notify("No non-empty assistant reply is available on the active session branch.", "warning");
+		return source;
 	}
+	const latest = latestAssistantEntry(branch);
 
 	const entries = branch.filter(isTranscriptEntry);
 	if (entries.length === 0) {

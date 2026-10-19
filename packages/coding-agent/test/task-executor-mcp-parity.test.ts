@@ -84,7 +84,7 @@ describe("Skill URI reader capability", () => {
 		const definition = customToolToDefinition(SKILL_READER);
 		const adapter = wrapRegisteredTool(
 			{ definition, extensionPath: "<sdk>" } as RegisteredTool,
-			{ createContext: () => ({}) } as unknown as ExtensionRunner,
+			{ createContext: () => ({}), getNativeDelegationGuidance: () => "" } as unknown as ExtensionRunner,
 		);
 		const tools = projectSystemPromptToolMetadata(new Map([[definition.name, adapter]]), { mode: "full" });
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-custom-reader-bridge-"));

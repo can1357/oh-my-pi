@@ -1,8 +1,9 @@
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Tool, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+import type { JobWidgetEntry } from "../tools/job-widget";
 import type { CompactionBoundaries } from "./context-usage";
-import type { StatusLineSettings } from "./types";
+import type { StatusLineSettings, StatusResetExpiry } from "./types";
 
 export interface StatusAccountIdentity {
 	accountId?: string;
@@ -59,6 +60,8 @@ export interface StatusLineSession {
 	getAnthropicSlowModeLabel?(): string | undefined;
 	getPrewalkState?(): unknown;
 	getAsyncJobSnapshot(): { running: readonly { type: string; agentId?: string }[] } | null | undefined;
+	/** Widgets of the running background jobs, in job order; the jobs segment appends the freshest one's glance. */
+	getRunningJobWidgets?(): readonly JobWidgetEntry[];
 	getGoalModeState(): { goal?: { status: string; tokensUsed: number; tokenBudget?: number } } | undefined;
 	getAdvisorStatusOverview?(): { configured: boolean; advisors: readonly { status: string; yielded: boolean }[] };
 	getAdvisorCost?(): number;
@@ -71,7 +74,12 @@ export interface FooterSession {
 	autoResolvedThinkingLevel(): string | undefined;
 	getContextUsage: StatusLineSession["getContextUsage"];
 	modelRegistry: Pick<StatusLineSession["modelRegistry"], "isUsingOAuth">;
-	sessionManager: { getEntries(): readonly { type: string; message?: AgentMessage }[] };
+	/**
+	 * Cumulative session rollup. Unlike the active-window stats it spans every
+	 * entry in the session, so compaction does not reset the counters, and it
+	 * folds in usage carried by completed `task` tool results.
+	 */
+	sessionManager: { getUsageStatistics: StatusLineSession["sessionManager"]["getUsageStatistics"] };
 }
 
 /**
@@ -93,6 +101,9 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
 	lookupPullRequest(cwd: string): Promise<{ stdout: string; exitCode: number }>;
 	calculateTokensPerSecond(messages: readonly AgentMessage[], isStreaming: boolean): number | null;
 	limitMatchesActiveAccount(report: UsageReport, limit: UsageLimit, identity: StatusAccountIdentity): boolean;
+	classifyResetExpiry?(report: UsageReport, nowMs: number): StatusResetExpiry | undefined;
+	/** One-line warning for saved resets anywhere in the pool that expire within 24 hours. */
+	resetExpiryNotice?(reports: readonly UsageReport[], nowMs: number): string | undefined;
 	computeCompactionBoundaries(session: TSession, contextWindow: number, model?: Model): CompactionBoundaries | null;
 }
 

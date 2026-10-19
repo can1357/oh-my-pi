@@ -39,7 +39,7 @@ import { combine } from "./config/registry";
 import { cfgBashAutoBackgroundEnabled } from "./exec/settings";
 import { cfgEvalAutoBackgroundEnabled } from "./eval/settings";
 import { cfgTtsrBuiltinRules, cfgTtsrDisabledRules, cfgTtsrEnabled } from "./export/ttsr-settings";
-import { cfgTuiReactions, cfgTuiRenderMermaid } from "./modes/settings";
+import { cfgTuiAutoGraph, cfgTuiReactions, cfgTuiRenderMermaid, cfgTuiRenderSvg } from "./modes/settings";
 import { cfgSecretsEnabled } from "./secrets/settings";
 import { cfgToolsFormat } from "./session/context-settings";
 import {
@@ -74,6 +74,8 @@ export const cfgSystemPromptInputs = combine({
 	xdevInlineDevices: cfgToolsXdevInlineDevices,
 	vaultEnabled: cfgVaultEnabled,
 	renderMermaid: cfgTuiRenderMermaid,
+	renderSvg: cfgTuiRenderSvg,
+	autoGraph: cfgTuiAutoGraph,
 	reactions: cfgTuiReactions,
 	// Rendered into the bash/eval/task tool descriptions (inline catalog) or read by
 	// the prompt builder (eager/batch delegation).
@@ -496,13 +498,6 @@ export interface BuildSystemPromptOptions {
 	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
 	toolNames?: string[];
-	/**
-	 * Names actually exposed as provider-callable tools. Defaults to `toolNames`.
-	 * Code Mode passes its direct keep-set so the rendered tool inventory matches
-	 * the wire surface while capability and safety gates still see every
-	 * bridge-reachable tool in `toolNames`.
-	 */
-	directToolNames?: readonly string[];
 	/** Text to append to system prompt. */
 	appendSystemPrompt?: string;
 	/** Already-loaded append prompt text; bypasses path resolution. */
@@ -575,6 +570,10 @@ export interface BuildSystemPromptOptions {
 	includeWorkspaceTree?: boolean;
 	/** Whether Mermaid fenced blocks render as terminal ASCII diagrams. Default: true */
 	renderMermaid?: boolean;
+	/** Whether the reader's UI draws ```svg fences as themed images, so the prompt invites figures. Default: false */
+	renderSvg?: boolean;
+	/** Whether the reader's UI charts numeric Markdown tables, so the prompt routes data to tables and forbids duplicate charts. Default: false */
+	autoGraph?: boolean;
 	/** Whether the TUI lifts an opening emoji into a reaction badge on the user's message. Default: false */
 	reactions?: boolean;
 	/** Pre-resolved nested active repo context. Undefined resolves from cwd. */
@@ -643,7 +642,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		nativeTools = true,
 		skillsSettings,
 		toolNames: providedToolNames,
-		directToolNames,
 		cwd,
 		additionalWorkspaceRoots = [],
 		contextFiles: providedContextFiles,
@@ -669,6 +667,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		personality = "default",
 		includeWorkspaceTree = false,
 		renderMermaid = true,
+		renderSvg = false,
+		autoGraph = false,
 		reactions = false,
 		xdevTools = [],
 		xdevDocs = "",
@@ -895,14 +895,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const xdevToolNames = new Set(xdevTools.map(mounted => mounted.name));
 	// A direct custom tool can share a name with a retained built-in device.
 	// Presence in both toolNames and tools proves it still has a top-level definition.
-	// Bridge-only Code Mode tools stay out of the callable inventory: the eval
-	// description documents their `tool.*` access path instead.
-	const directSet = directToolNames === undefined ? undefined : new Set(directToolNames);
-	const directInventoryNames = directSet === undefined ? toolNames : toolNames.filter(name => directSet.has(name));
 	const inventoryToolNames =
-		xdevToolNames.size === 0
-			? directInventoryNames
-			: directInventoryNames.filter(name => tools?.has(name) || !xdevToolNames.has(name));
+		xdevToolNames.size === 0 ? toolNames : toolNames.filter(name => tools?.has(name) || !xdevToolNames.has(name));
 	const toolInfo = inventoryToolNames.map(name => ({
 		name: toolPromptNames.get(name) ?? name,
 		internalName: name,
@@ -997,6 +991,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		computerEnabled: evalPreludes.some(prelude => prelude.name === "computer"),
 		includeWorkspaceTree,
 		renderMermaid,
+		renderSvg,
+		autoGraph,
 		reactions,
 		xdevTools,
 		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),

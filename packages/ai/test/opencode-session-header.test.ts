@@ -56,6 +56,21 @@ function makeOpenAICompletionsModel(): Model<"openai-completions"> {
 	});
 }
 
+function makeLiteLLMCompletionsModel(): Model<"openai-completions"> {
+	return buildModel({
+		id: "proxy-model",
+		name: "Proxy Model",
+		api: "openai-completions",
+		provider: "litellm",
+		baseUrl: "https://litellm.example/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8192,
+	});
+}
+
 function makeOpenCodeGoGoogleModel(): Model<"google-generative-ai"> {
 	return buildModel({
 		id: "gemini-2.5-flash",
@@ -159,6 +174,53 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 		expect(setup.headers.session_id).toBe("session-1");
 		expect(setup.headers["x-client-request-id"]).toBe("session-1");
 		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBeUndefined();
+		expect(setup.headers["x-litellm-session-id"]).toBeUndefined();
+	});
+
+	it("sends x-litellm-session-id on LiteLLM requests even with prompt caching disabled", async () => {
+		const headersSeen: Headers[] = [];
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit) => {
+			headersSeen.push(new Headers(init?.headers));
+			return chatSse();
+		};
+
+		const response = await completeSimple(
+			makeLiteLLMCompletionsModel(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			{ apiKey: "key", sessionId: "session-1", cacheRetention: "none", fetch: fetchMock as typeof fetch },
+		);
+
+		expect(response.stopReason).toBe("stop");
+		expect(headersSeen[0]?.get("x-litellm-session-id")).toBe("session-1");
+		expect(headersSeen[0]?.get("session_id")).toBeNull();
+	});
+
+	it("keeps a configured x-litellm-session-id over the conversation session id", () => {
+		const setup = resolveOpenAIRequestSetup(makeLiteLLMCompletionsModel(), {
+			apiKey: "key",
+			messages: [],
+			extraHeaders: { "X-LiteLLM-Session-Id": "run-42" },
+			sessionId: "session-1",
+		});
+		expect(setup.headers["X-LiteLLM-Session-Id"]).toBe("run-42");
+		expect(setup.headers["x-litellm-session-id"]).toBeUndefined();
+	});
+
+	it("does not turn a shared prompt-cache key into a LiteLLM conversation", () => {
+		const model = makeLiteLLMCompletionsModel();
+		const cacheOnly = resolveOpenAIRequestSetup(model, {
+			apiKey: "key",
+			messages: [],
+			promptCacheSessionId: "shared-cache",
+		});
+		expect(cacheOnly.headers["x-litellm-session-id"]).toBeUndefined();
+		const conversation = resolveOpenAIRequestSetup(model, {
+			apiKey: "key",
+			messages: [],
+			promptCacheSessionId: "shared-cache",
+			sessionId: "conversation",
+		});
+		expect(conversation.headers["x-litellm-session-id"]).toBe("conversation");
 	});
 
 	it("applies omp's common User-Agent as the global inference default", async () => {

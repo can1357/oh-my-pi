@@ -45,18 +45,28 @@ pub struct DesktopWindow {
 
 #[napi(object)]
 pub struct DesktopCapture {
-	pub data:           Uint8Array,
-	pub width:          u32,
-	pub height:         u32,
+	pub data:              Uint8Array,
+	pub width:             u32,
+	pub height:            u32,
 	/// Pre-scaling capture width in native pixels; equals `width` when unscaled.
-	pub source_width:   u32,
+	pub source_width:      u32,
 	/// Pre-scaling capture height in native pixels; equals `height` when
 	/// unscaled.
-	pub source_height:  u32,
-	pub target:         String,
-	pub displays:       Vec<DesktopDisplay>,
-	pub backend:        String,
-	pub display_server: Option<String>,
+	pub source_height:     u32,
+	/// Dimensions of the full screenshot coordinate frame used by pointer input.
+	pub coordinate_width:  u32,
+	pub coordinate_height: u32,
+	/// Region in the full screenshot's coordinates; zoom pixels are not input
+	/// coordinates.
+	pub region:            Option<CaptureRegion>,
+	pub target:            String,
+	pub displays:          Vec<DesktopDisplay>,
+	pub backend:           String,
+	pub display_server:    Option<String>,
+	/// The user session was locked when this frame was taken: a display
+	/// capture shows the lock screen, and a window capture shows the window's
+	/// last frame behind it. Only macOS detects this; others report `false`.
+	pub screen_locked:     bool,
 }
 
 #[napi(object)]
@@ -71,10 +81,25 @@ pub struct DesktopCapabilities {
 	/// Whether window input accepts `takeover: true` (briefly activate the
 	/// target and post real input).
 	pub takeover: bool,
+	pub applications: bool,
+	pub menus: bool,
+	pub held_input: bool,
+	pub spaces: bool,
+	/// Native global Escape cancellation of takeover input (`takeover: true`,
+	/// held control, desktop/display-level input, raises, activating launches).
+	/// Without held control, background window input never watches the user's
+	/// keys; it and Wayland stop only through the host interrupt.
+	pub global_escape: bool,
 	pub capture_permission: String,
 	pub input_permission: String,
 	pub ax_permission: String,
 	pub display_count: u32,
+	/// The user session is locked (lock screen up). Only macOS detects this;
+	/// other backends report `false`.
+	pub screen_locked: bool,
+	/// The display is asleep, so nothing can be captured until it wakes. Only
+	/// macOS detects this; other backends report `false`.
+	pub display_asleep: bool,
 }
 
 impl DesktopCapabilities {
@@ -87,10 +112,40 @@ impl DesktopCapabilities {
 			ax: false,
 			background_window_input: false,
 			takeover: false,
+			applications: super::applications::supported(),
+			menus: false,
+			held_input: false,
+			spaces: false,
+			global_escape: false,
 			capture_permission: "unavailable".to_string(),
 			input_permission: "unavailable".to_string(),
 			ax_permission: "unavailable".to_string(),
 			display_count: 0,
+			screen_locked: false,
+			display_asleep: false,
+		}
+	}
+}
+
+/// Lock and display-sleep state of the user session, read live per call.
+/// Only macOS detects either; other platforms report both as `false`.
+#[napi(object, js_name = "DesktopScreenState")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScreenState {
+	#[napi(js_name = "screenLocked")]
+	pub locked:         bool,
+	pub display_asleep: bool,
+}
+
+impl ScreenState {
+	/// Sentence appended to a failure while the session is locked or the
+	/// display is asleep, so the model learns why instead of guessing.
+	pub(crate) const fn failure_note(self) -> Option<&'static str> {
+		match (self.locked, self.display_asleep) {
+			(true, true) => Some("the screen is locked and the display is asleep"),
+			(true, false) => Some("the screen is locked"),
+			(false, true) => Some("the display is asleep"),
+			(false, false) => None,
 		}
 	}
 }
@@ -98,7 +153,10 @@ impl DesktopCapabilities {
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct DesktopSessionOptions {
-	pub display: Option<String>,
+	pub display:         Option<String>,
+	/// Sessions created with the same key share one physical-Escape stop
+	/// count, which `desktopEscapeStops` reads after they close.
+	pub escape_stop_key: Option<String>,
 }
 
 #[napi(object)]
@@ -108,15 +166,83 @@ pub struct CaptureCaps {
 	pub max_height: Option<u32>,
 }
 
+/// Rectangle in pixels of the most recent full screenshot of the same target.
+#[napi(object)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CaptureRegion {
+	pub x:      f64,
+	pub y:      f64,
+	pub width:  f64,
+	pub height: f64,
+}
+
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct PointerOptions {
-	pub button:    Option<String>,
-	pub count:     Option<u32>,
-	pub modifiers: Option<Vec<String>>,
+	pub button:       Option<String>,
+	pub count:        Option<u32>,
+	pub modifiers:    Option<Vec<String>>,
+	/// Arbitrary keys held for the duration of a drag.
+	pub keys:         Option<Vec<String>>,
 	/// Briefly activate the target window and post real input instead of the
 	/// default background delivery.
-	pub takeover:  Option<bool>,
+	pub takeover:     Option<bool>,
+	/// With `takeover`, hand focus back to the user's app even if they typed
+	/// or clicked during the action; only a third app they switched to keeps
+	/// it. The host sets this when it reruns a refused background action.
+	pub return_focus: Option<bool>,
+	/// Item path to choose in the menu a click opens, matched like a menu-bar
+	/// path, e.g. a context menu's `["Add to", "Fonts"]`; the call opens the
+	/// menu, presses the item and returns with the menu closed.
+	pub menu:         Option<Vec<String>>,
+	/// Refuse a background left click that lands on a control that opens a
+	/// menu (on macOS a menu button or popup button), or a drag that starts on
+	/// one, with `BackgroundUnavailable` before anything is sent. The host sets
+	/// this when the user refuses foreground takeover: an open menu takes their
+	/// keyboard.
+	pub refuse_menu:  Option<bool>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct HoldOptions {
+	/// Duration in seconds, from zero through 100.
+	pub duration:     f64,
+	pub button:       Option<String>,
+	pub keys:         Option<Vec<String>>,
+	pub takeover:     Option<bool>,
+	/// With `takeover`, hand focus back to the user's app even after their
+	/// input during the hold; see `PointerOptions.returnFocus`.
+	pub return_focus: Option<bool>,
+	/// Refuse a background left hold that starts on a control that opens a
+	/// menu; see `PointerOptions.refuseMenu`.
+	pub refuse_menu:  Option<bool>,
+}
+
+/// Where focus ended after a takeover input call, as `WindowServer` reports
+/// it. Input calls resolve to it on macOS when they took over; other
+/// backends and background delivery resolve to `null`.
+#[napi(object)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopFocusReturn {
+	/// Whether the takeover handed focus back to the app front before it.
+	pub handed_back:  bool,
+	/// The process front before the takeover.
+	pub previous_pid: Option<u32>,
+	/// The process front once the takeover ended; absent when unreadable.
+	pub front_pid:    Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone, Copy)]
+pub struct DesktopControlState {
+	pub active: bool,
+}
+
+#[napi(object)]
+pub struct DesktopObservation {
+	pub capture:       DesktopCapture,
+	pub accessibility: AxSnapshot,
 }
 
 #[napi(object)]
@@ -171,9 +297,36 @@ pub struct AxQuery {
 	pub limit: Option<u32>,
 }
 
+/// Where `axSelectText` looks for its text and what it selects there.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct AxSelectTextOptions {
+	/// Text that must directly precede the match.
+	pub prefix: Option<String>,
+	/// Text that must directly follow the match.
+	pub suffix: Option<String>,
+	/// `text` (default) selects the match; `start` and `end` place a caret.
+	pub select: Option<String>,
+}
+
+/// The selection read back after `axSelectText`, in UTF-16 code units.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct AxTextSelection {
+	pub start:   u32,
+	pub length:  u32,
+	/// The selected text, empty for a caret.
+	pub text:    String,
+	/// Whether the element is focused in its app: typing and AX insertion
+	/// act on the focused element.
+	pub focused: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
 	Desktop,
+	/// Canonical target key, including the reserved `display:` prefix.
+	Display(String),
 	Window(String),
 }
 
@@ -181,6 +334,16 @@ impl Target {
 	pub(crate) fn parse(value: &str) -> Self {
 		if value.eq_ignore_ascii_case("desktop") {
 			Self::Desktop
+		} else if let Some(selector) = value.strip_prefix("display:") {
+			let selector = selector.trim();
+			let selector = if selector.eq_ignore_ascii_case("active") || selector.is_empty() {
+				"active"
+			} else if selector.eq_ignore_ascii_case("all") {
+				"all"
+			} else {
+				selector
+			};
+			Self::Display(format!("display:{selector}"))
 		} else {
 			Self::Window(value.to_string())
 		}
@@ -189,22 +352,170 @@ impl Target {
 	pub(crate) fn key(&self) -> &str {
 		match self {
 			Self::Desktop => "desktop",
-			Self::Window(id) => id,
+			Self::Window(id) | Self::Display(id) => id,
+		}
+	}
+
+	pub(crate) fn display_selector(&self) -> Option<DisplaySelector> {
+		match self {
+			Self::Display(key) => {
+				Some(DisplaySelector::parse(Some(key["display:".len()..].to_string())))
+			},
+			_ => None,
 		}
 	}
 }
 
 #[derive(Debug, Clone)]
 pub enum DisplaySelector {
+	Active,
 	All,
 	Id(String),
 }
 
 impl DisplaySelector {
 	pub(crate) fn parse(display: Option<String>) -> Self {
-		match display {
-			Some(id) if !id.trim().is_empty() && !id.eq_ignore_ascii_case("all") => Self::Id(id),
-			_ => Self::All,
+		match display.as_deref().map(str::trim) {
+			None | Some("") => Self::Active,
+			Some(value) if value.eq_ignore_ascii_case("active") => Self::Active,
+			Some(value) if value.eq_ignore_ascii_case("all") => Self::All,
+			Some(id) => Self::Id(id.to_string()),
 		}
+	}
+
+	pub(crate) fn select(
+		&self,
+		mut displays: Vec<DesktopDisplay>,
+		focused: Option<&DesktopWindow>,
+	) -> super::error::CoreResult<Vec<DesktopDisplay>> {
+		match self {
+			Self::All => {},
+			Self::Id(id) => displays.retain(|display| display.id == *id),
+			Self::Active => {
+				let selected = focused
+					.and_then(|window| {
+						displays
+							.iter()
+							.enumerate()
+							.map(|(index, display)| {
+								let left = i64::from(window.x).max(i64::from(display.x));
+								let top = i64::from(window.y).max(i64::from(display.y));
+								let right = (i64::from(window.x) + i64::from(window.width))
+									.min(i64::from(display.x) + i64::from(display.width));
+								let bottom = (i64::from(window.y) + i64::from(window.height))
+									.min(i64::from(display.y) + i64::from(display.height));
+								let area = (right - left).max(0) as u64 * (bottom - top).max(0) as u64;
+								(index, area, display.is_primary)
+							})
+							.filter(|(_, area, _)| *area > 0)
+							.max_by_key(|(_, area, primary)| (*area, *primary))
+							.map(|(index, ..)| index)
+					})
+					.or_else(|| displays.iter().position(|display| display.is_primary))
+					.or_else(|| (!displays.is_empty()).then_some(0));
+				if let Some(index) = selected {
+					let display = displays.swap_remove(index);
+					displays.clear();
+					displays.push(display);
+				}
+			},
+		}
+		if displays.is_empty() {
+			return Err(match self {
+				Self::Id(id) => super::error::DesktopError::invalid_target(format!(
+					"selected display id '{id}' is not active"
+				)),
+				Self::Active | Self::All => {
+					super::error::DesktopError::capture_failed("no active displays were found")
+				},
+			});
+		}
+		Ok(displays)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn display(id: &str, x: i32, primary: bool) -> DesktopDisplay {
+		DesktopDisplay {
+			id: id.to_string(),
+			name: id.to_string(),
+			x,
+			y: 0,
+			width: 100,
+			height: 100,
+			scale: 1.0,
+			pixel_x: 0,
+			pixel_y: 0,
+			pixel_width: 100,
+			pixel_height: 100,
+			is_primary: primary,
+		}
+	}
+
+	#[test]
+	fn display_keys_never_alias_windows_or_the_root_desktop() {
+		assert!(matches!(Target::parse("display:active"), Target::Display(_)));
+		assert_eq!(Target::parse("display:ACTIVE").key(), "display:active");
+		assert_eq!(Target::parse("display:all").key(), "display:all");
+		assert_eq!(Target::parse("display:screen-1").key(), "display:screen-1");
+		assert_eq!(Target::parse("screen-1").key(), "screen-1");
+		assert!(matches!(Target::parse("screen-1"), Target::Window(_)));
+		assert_ne!(Target::parse("display:active"), Target::parse("desktop"));
+	}
+
+	#[test]
+	fn active_default_selects_largest_focused_window_intersection_with_primary_fallback() {
+		assert!(matches!(DisplaySelector::parse(None), DisplaySelector::Active));
+		assert!(matches!(DisplaySelector::parse(Some("active".into())), DisplaySelector::Active));
+		let displays = vec![display("left", -100, true), display("right", 0, false)];
+		let window = DesktopWindow {
+			id:      "window".into(),
+			title:   String::new(),
+			app:     String::new(),
+			pid:     None,
+			x:       -10,
+			y:       10,
+			width:   70,
+			height:  50,
+			focused: true,
+		};
+		let selected = DisplaySelector::Active
+			.select(displays.clone(), Some(&window))
+			.unwrap();
+		assert_eq!(selected[0].id, "right");
+		let selected = DisplaySelector::Active
+			.select(displays.clone(), None)
+			.unwrap();
+		assert_eq!(selected[0].id, "left");
+		let offscreen = DesktopWindow { x: 1000, ..window };
+		assert_eq!(
+			DisplaySelector::Active
+				.select(displays.clone(), Some(&offscreen))
+				.unwrap()[0]
+				.id,
+			"left"
+		);
+		assert_eq!(
+			DisplaySelector::parse(Some("all".into()))
+				.select(displays.clone(), None)
+				.unwrap()
+				.len(),
+			2
+		);
+		assert_eq!(
+			DisplaySelector::parse(Some("right".into()))
+				.select(displays.clone(), None)
+				.unwrap()[0]
+				.id,
+			"right"
+		);
+		assert!(
+			DisplaySelector::Id("missing".into())
+				.select(displays, None)
+				.is_err()
+		);
 	}
 }

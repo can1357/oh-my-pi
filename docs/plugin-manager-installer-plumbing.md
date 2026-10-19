@@ -81,6 +81,8 @@ Marketplace installs add registry and cache state alongside those runtime entrie
 
 `PluginManager.install` also accepts git sources (validated by `validateGitSpec` instead of the npm regex): namespaced shorthands `github:user/repo[#ref]`, `gitlab:`, `bitbucket:`, `codeberg:`, `sourcehut:`/`srht:`, and full git URLs (`https://github.com/user/repo`, `git@github.com:user/repo`, `ssh://…`, `git+https://…`). Git specs do not encode the package name, so install diffs `plugins/package.json#dependencies` before/after `bun install` to resolve it.
 
+Non-GitHub `https://`/`ssh://` specs are passed to bun with a `git+` prefix (bun only auto-detects git for GitHub-hosted URLs, so without it the spec is misread as an npm tarball); GitHub specs are forwarded unchanged. Inline userinfo credentials (`https://user:token@host/group/repo.git`) are stripped from those `git+` specs: `bun install` persists the spec verbatim into `plugins/package.json` and `bun.lock`, and a long-lived repository token must not land in those user files. Private repositories authenticate via SSH, a git credential helper, or `.netrc` instead — bun honors all of them natively.
+
 `extractPackageName` strips an optional `npm:` prefix and version suffix for on-disk path lookup after install.
 
 ## Manifest source and required fields
@@ -101,6 +103,8 @@ Implications:
 Malformed `package.json` JSON is a hard failure at read time; malformed manifest shape may fail later only when specific fields are consumed.
 
 ## Install/update flow (`PluginManager.install`)
+
+Every Bun package-manager call below (`install`, `update`, `uninstall`, `pm cache`) goes through `runBunCli` (`src/extensibility/plugins/bun-cli.ts`), which re-runs the current executable with `BUN_BE_BUN=1` rather than looking up `bun` on `PATH`. The standalone `omp` binary embeds Bun, so npm/Git plugin installs need no separately installed Bun; Git sources still need `git` on `PATH`.
 
 1. Parse feature bracket syntax from install spec.
 2. Validate the spec: git specs via `validateGitSpec`; npm specs against the package-name regex + shell-metacharacter denylist.
@@ -268,7 +272,7 @@ Operationally, `doctor --fix` can repair some drift (`bun install`, orphaned con
   - install/list: tolerated (minimal manifest)
   - runtime enabled-plugin discovery: skipped as non-plugin
 - Unknown feature referenced by install spec or feature mutation: hard error with available feature list when the manifest declares a feature map; without a map, names can be retained without validation
-- Invalid `plugin-overrides.json`: ignored with fallback to `{}` in both manager and loader paths
+- Invalid or unreadable `plugin-overrides.json`: logged with its path and error, then ignored with fallback to the next project config path or `{}`. Missing files remain silent.
 - Missing tool/hook/command file paths referenced by manifest: silently ignored during resolver expansion; flagged as errors only by `doctor`
 
 ## Mode differences and precedence

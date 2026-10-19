@@ -595,3 +595,28 @@ describe("readSseEvents", () => {
 		expect(elapsed).toBeLessThan(2000);
 	});
 });
+
+describe("ConcatSink capacity", () => {
+	const LARGE = 4 * 1024 * 1024;
+
+	it("releases an oversized buffer once its bytes are consumed", () => {
+		const sink = new ConcatSink();
+		sink.append(new Uint8Array(LARGE).fill(0x61));
+		sink.consume(LARGE - 8);
+		const rest = sink.flush();
+		expect(rest?.length).toBe(8);
+		expect(rest!.buffer.byteLength).toBeLessThan(LARGE);
+	});
+
+	it("drops an oversized buffer on clear and reuses a right-sized one on reset", () => {
+		const sink = new ConcatSink();
+		sink.append(new Uint8Array(LARGE));
+		sink.clear();
+		sink.append(new Uint8Array(16));
+		expect(sink.flush()!.buffer.byteLength).toBeLessThan(LARGE);
+
+		sink.append(new Uint8Array(LARGE));
+		sink.reset(new Uint8Array(16));
+		expect(sink.flush()!.buffer.byteLength).toBeLessThan(LARGE);
+	});
+});

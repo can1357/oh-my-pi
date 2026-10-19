@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
@@ -55,6 +57,33 @@ const DECISIONS_PAYLOAD = {
 		{
 			id: "~typesafe/jev-latest",
 			name: "TypeSafe: Jev Latest",
+			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
+			context_length: 32000,
+			pricing: { prompt: "0.000000042", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 32000, max_completion_tokens: 28800 },
+		},
+		{
+			id: "typesafe/jev-1.13",
+			name: "TypeSafe: Jev 1.13",
+			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
+			context_length: 32000,
+			pricing: { prompt: "0.000000042", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 32000, max_completion_tokens: 28800 },
+		},
+		{
+			id: "typesafe/jev-1.14",
+			name: "TypeSafe: Jev 1.14",
+			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
+			context_length: 32000,
+			pricing: { prompt: "0.000000042", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 32000, max_completion_tokens: 28800 },
+		},
+		{
+			id: "typesafe/jev-unverified",
+			name: "TypeSafe: Jev Unverified",
 			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
 			context_length: 32000,
 			pricing: { prompt: "0.000000042", completion: "0" },
@@ -148,6 +177,24 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 				maxTokens: 28800,
 			}),
 		);
+		const bundledJev = seedModels("openrouter").find(model => model.id === "~typesafe/jev-latest");
+		if (!bundledJev) throw new Error("OpenRouter bundled Jev alias is missing");
+		expect(bundledJev.input).toEqual(["text"]);
+		expect(buildModel(bundledJev).input).toEqual(["text", "image"]);
+
+		const discoveredJev = models?.filter(model =>
+			["typesafe/jev-1.13", "typesafe/jev-1.14", "typesafe/jev-unverified"].includes(model.id),
+		);
+		expect(discoveredJev?.map(model => [model.id, model.input])).toEqual([
+			["typesafe/jev-1.13", ["text"]],
+			["typesafe/jev-1.14", ["text"]],
+			["typesafe/jev-unverified", ["text"]],
+		]);
+		expect(discoveredJev?.map(model => [model.id, buildModel(model).input])).toEqual([
+			["typesafe/jev-1.13", ["text", "image"]],
+			["typesafe/jev-1.14", ["text", "image"]],
+			["typesafe/jev-unverified", ["text"]],
+		]);
 		expect(models?.find(model => model.id === "cohere/rerank-v3.5")).toMatchObject({
 			api: "openrouter-rerank",
 			kind: "rerank",

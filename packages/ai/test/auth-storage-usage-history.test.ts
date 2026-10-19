@@ -378,4 +378,51 @@ describe("OpenCode Go usage via the upstream endpoint", () => {
 			partialStorage.close();
 		}
 	});
+
+	it("stops serving the last-good report 24h after its last successful fetch, however often it fails", async () => {
+		// Each failed probe re-stores the fallback; that must not extend retention,
+		// or a persistently failing account shows its old quota as live forever.
+		let respondWith: "success" | "unavailable" = "success";
+		const failingStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: provider =>
+				provider === "opencode-go"
+					? { ...opencodeGoUsage.opencodeGoUsageProvider, failureBackoffMs: 5 * 60_000 }
+					: undefined,
+			usageFetch: (async () =>
+				respondWith === "success"
+					? new Response(
+							JSON.stringify({
+								usage: {
+									rolling: { status: "ok", percent: 12, resetsAt: "2026-08-12T15:09:04.847Z" },
+									weekly: { status: "ok", percent: 8, resetsAt: "2026-08-17T00:00:00.847Z" },
+									monthly: { status: "ok", percent: 10, resetsAt: "2026-08-19T00:31:53.847Z" },
+								},
+							}),
+							{ status: 200, headers: { "content-type": "application/json" } },
+						)
+					: new Response("unavailable", { status: 503 })) as unknown as typeof fetch,
+		});
+		try {
+			await failingStorage.credentials.reload();
+			await failingStorage.credentials.set("opencode-go", { type: "api_key", key: "opencode-go-key" });
+
+			const nowMs = Date.now();
+			setSystemTime(new Date(nowMs));
+			const fresh = await failingStorage.usage.reports();
+			expect(fresh?.some(candidate => candidate.provider === "opencode-go")).toBe(true);
+
+			respondWith = "unavailable";
+			for (const elapsed of [10 * 60_000, 12 * HOUR, 23 * HOUR, 24 * HOUR - 60_000]) {
+				setSystemTime(new Date(nowMs + elapsed));
+				const served = await failingStorage.usage.reports();
+				expect(served?.some(candidate => candidate.provider === "opencode-go")).toBe(true);
+			}
+
+			setSystemTime(new Date(nowMs + 24 * HOUR + 1_000));
+			const expired = await failingStorage.usage.reports();
+			expect(expired?.some(candidate => candidate.provider === "opencode-go")).toBe(false);
+		} finally {
+			failingStorage.close();
+		}
+	});
 });

@@ -23,7 +23,7 @@ import {
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 const OPENCODE_ZEN_BASE = "https://opencode.ai/zen/v1";
-const OPENCODE_GO_BASE = "https://opencode.ai/zen/go/v1";
+const OPENCODE_GO_BASE = "https://opencode.ai/inference/go/v1";
 
 describe("opencode-zen/-go resolver routes MiniMax M3 to openai-completions (issue #1617)", () => {
 	const zenDescriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(d => d.providerId === "opencode-zen");
@@ -33,8 +33,8 @@ describe("opencode-zen/-go resolver routes MiniMax M3 to openai-completions (iss
 	// https://stencil.so/api.json["opencode"].models and
 	// https://stencil.so/api.json["opencode-go"].models), the affected ids
 	// carry `provider.npm = "@ai-sdk/anthropic"`. The naive @ai-sdk/anthropic
-	// rule would route them to /v1/messages on opencode.ai/zen[/go] which
-	// 404s. Per-id overrides must win.
+	// rule would route them to /v1/messages, which the gateway rejects.
+	// Per-id overrides must win.
 	const npmAnthropic: ModelsDevModel = { provider: { npm: "@ai-sdk/anthropic" }, tool_call: true };
 
 	describe("opencode-zen", () => {
@@ -112,8 +112,8 @@ describe("opencode-zen/-go resolver routes MiniMax M3 to openai-completions (iss
 		const models = await options.fetchDynamicModels?.();
 		const m3 = models?.find(model => model.id === "minimax-m3");
 
-		expect(requestedUrl).toBe("https://opencode.ai/zen/go/v1/models");
+		expect(requestedUrl).toBe(`${OPENCODE_GO_BASE}/models`);
 		expect(m3?.api).toBe("openai-completions");
-		expect(m3?.baseUrl).toBe("https://opencode.ai/zen/go/v1");
+		expect(m3?.baseUrl).toBe(OPENCODE_GO_BASE);
 	});
 });

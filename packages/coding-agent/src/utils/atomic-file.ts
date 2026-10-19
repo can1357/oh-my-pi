@@ -97,3 +97,28 @@ export async function moveFileAcrossDevices(source: string, destination: string)
 		});
 	}
 }
+
+/**
+ * Move a finished file across devices, replacing a same-named destination. The copy is staged beside the destination
+ * and published in one rename, so a failure before publication leaves the destination as it was. Once published, a
+ * source that cannot be removed is logged rather than failing the move.
+ */
+export async function replaceFileAcrossDevices(source: string, destination: string): Promise<void> {
+	const staging = `${destination}.${process.pid}.${crypto.randomUUID()}.move`;
+	try {
+		await fs.promises.copyFile(source, staging);
+		const fd = fs.openSync(staging, "r+");
+		try {
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+		await replaceFileAtomically(staging, destination);
+	} catch (error) {
+		await fs.promises.rm(staging, { force: true });
+		throw error;
+	}
+	await fs.promises.unlink(source).catch(error => {
+		logger.warn("Failed to remove moved file's source", { source, error: toError(error).message });
+	});
+}

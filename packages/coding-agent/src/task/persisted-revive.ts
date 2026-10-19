@@ -2,7 +2,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
+import { validateAgentAccountPools } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
+import { resolveAgentAdvisorRolePattern } from "../config/model-resolver";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
@@ -13,15 +15,25 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import { installRetryFallbackRole } from "../session/retry-fallback-chains";
 import type { AuthStorage } from "../session/auth-storage";
-import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
+import {
+	extractSessionInit,
+	hasConversationalHistory,
+	type PersistedSessionInit,
+	SessionManager,
+} from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
 import {
 	attachIrcWakeTurnMonitor,
 	compactionThresholdSettings,
 	createMCPProxyTools,
 	createSubagentSettings,
+	followMCPTools,
 	subagentRetryFallbackRole,
 } from "./executor";
+import { isCompletionProbeEnabled } from "./completion-probe";
+import { cfgTaskAgentAccountPools } from "./settings";
+import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
+import { seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -45,6 +57,20 @@ export interface PersistedSubagentReviveContext {
 	eventBus?: EventBus;
 	/** Root-scoped observability bus the revived run's frames also publish to. */
 	subagentEventBus?: EventBus;
+}
+
+/**
+ * The agent definition a cold-revived subagent's monitored turns report (IRC wakes,
+ * `omp --restore`): persisted files predate an agent-source field, so frames carry
+ * the runtime-neutral `user` source; the name is the registry ref's.
+ */
+export function persistedAgentDefinition(displayName: string, init: PersistedSessionInit): AgentDefinition {
+	return {
+		name: displayName,
+		description: "",
+		systemPrompt: init.systemPrompt.join("\n\n"),
+		source: "user",
+	};
 }
 
 /**
@@ -75,6 +101,24 @@ export function createPersistedSubagentReviverFactory(
 		// is gone (isolated/merged worktree, moved dir): leave it transcript-only
 		// (history://) rather than resurrect a wrong or broken session.
 		if (!peek?.init) return undefined;
+		let restoredSeance: RestoredSeanceSession | undefined;
+		if (peek.seanceSource !== undefined) {
+			try {
+				restoredSeance = await restoreSeanceSession({
+					init: peek.init,
+					cwd: peek.cwd,
+					modelRegistry: ctx.modelRegistry,
+				});
+			} catch (error) {
+				logger.warn("Unable to restore persisted seance session", {
+					sessionFile,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return undefined;
+			}
+			if (!restoredSeance) return undefined;
+		}
+		const seanceOptions = restoredSeance ? seanceIsolationOptions(restoredSeance.cwd) : {};
 		// Isolated runs are never resumable: their worktree is merged + cleaned,
 		// and the parent was told messaging is impossible. A retained workspace
 		// (capture/persist failure) still exists on disk and would pass the cwd
@@ -83,7 +127,7 @@ export function createPersistedSubagentReviverFactory(
 		// parent cwd, contradicting the delivery notice.
 		if (peek.init.isolated) return undefined;
 		try {
-			await fs.stat(peek.cwd);
+			await fs.stat(restoredSeance?.cwd ?? peek.cwd);
 		} catch {
 			return undefined;
 		}
@@ -120,8 +164,11 @@ export function createPersistedSubagentReviverFactory(
 				);
 			}
 			// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
-			// advisor-role model, anything else = the explicit pattern stamped onto
-			// this session's `modelRoles.advisor`. Absent = unadvised (the
+			// advisor-role model, anything else = the pattern stamped onto this
+			// session's `modelRoles.advisor`. Spawn persists it already expanded
+			// against the spawning owner's roles (a parent subagent may override
+			// them); expanding again is a no-op for those and only resolves aliases
+			// in files written before that. Absent = unadvised (the
 			// createSubagentSettings default).
 			const subagentSettings = createSubagentSettings(ctx.settings, {
 				...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
@@ -129,7 +176,12 @@ export function createPersistedSubagentReviverFactory(
 					? {
 							"advisor.enabled": true,
 							...(init.advisor !== "on"
-								? { modelRoles: { ...ctx.settings.getModelRoles(), advisor: init.advisor } }
+								? {
+										modelRoles: {
+											...ctx.settings.getModelRoles(),
+											advisor: resolveAgentAdvisorRolePattern(init.advisor, ctx.settings),
+										},
+									}
 								: undefined),
 						}
 					: undefined),
@@ -141,90 +193,116 @@ export function createPersistedSubagentReviverFactory(
 			if (init.retryFallback) {
 				installRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(ref.id), init.retryFallback);
 			}
-			const persistedModelPattern =
-				init.modelRole && init.modelRole !== "default"
+			// Account pools are owner policy, like the extension roots below: take the
+			// live exact-name `task.agentAccountPools` entry, never a transcript copy.
+			const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(ctx.settings));
+			const oauthAccountPools =
+				init.agent && Object.hasOwn(agentAccountPools, init.agent) ? agentAccountPools[init.agent] : undefined;
+			const persistedModelPattern = restoredSeance
+				? restoredSeance.modelPattern
+				: init.modelRole && init.modelRole !== "default"
 					? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
 					: init.resolvedModel;
 			// Older session files persisted the synthetic xd:// write transport in the
 			// enabled set. A read-only agent definition could never grant full write,
 			// so remove that transport name before replaying tools as explicit grants.
-			const revivedToolNames =
-				init.readOnly === true && init.tools.includes("write")
+			const revivedToolNames = restoredSeance
+				? restoredSeance.toolNames
+				: init.readOnly === true && init.tools.includes("write")
 					? init.tools.filter(name => name !== "write")
 					: init.tools;
 			const artifactManager = ctx.session.sessionManager.getArtifactManager();
-			if (artifactManager) reopened.adoptArtifactManager(artifactManager);
+			if (artifactManager && !restoredSeance) reopened.adoptArtifactManager(artifactManager);
 			// A restricted persisted contract must not consult process-global MCP
 			// state: same-name MCP tools are untrusted capability sources.
-			const restrictToolNames = init.restrictToolNames === true;
+			const restrictToolNames = restoredSeance !== undefined || init.restrictToolNames === true;
+			// The spawn's result contract: a session persisted without `yield` returned its final message.
+			const structured = revivedToolNames.includes("yield");
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
+			// Subscribe before minting proxies so a manager change during startup is replayed on bind.
+			const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
-			const { session } = await createAgentSession({
-				cwd: ctx.session.sessionManager.getCwd(),
-				authStorage: ctx.authStorage,
-				// Revived agents join the root session tree, so their observability
-				// frames ride the same bus the RPC/collab surfaces subscribed to.
-				subagentEventBus: ctx.subagentEventBus,
-				modelRegistry: ctx.modelRegistry,
-				...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
-				modelPatternAuthFallback: init.resolvedModel,
-				settings: subagentSettings,
-				sessionManager: reopened,
-				agentId: ref.id,
-				agentDisplayName: ref.displayName,
-				// `agents` rule scoping keys on the durable definition name (`scout`,
-				// `reviewer`, …), not the registry display label — cold-revived refs
-				// register with `displayName: id` (registry/persisted-agents.ts), so a
-				// generated task id would silently drop every agent-scoped rule.
-				// `init.agent` carries the real name; only files predating that field
-				// fall back to the display label. A parked transcript may also predate
-				// the `main`/`sub` definition-name reservation (discovery/helpers.ts): a
-				// persisted `init.agent` of either sentinel value from such a legacy
-				// custom agent must not masquerade as that sentinel here, so it falls
-				// back to the display label too, keeping it scoped as an ordinary
-				// subagent under its generated id instead of `main` or the shared `sub`
-				// bucket.
-				agentName:
-					init.agent &&
-					init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
-					init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
-						? init.agent
-						: ref.displayName,
-				parentTaskPrefix: ref.id,
-				parentAgentId: ref.parentId,
-				expectedAgentRef: expectedRef,
-				taskDepth,
-				toolNames: revivedToolNames,
-				outputSchema: init.outputSchema,
-				outputSchemaMode: init.outputSchemaMode,
-				restrictToolNames: restrictToolNames || undefined,
-				requireYieldTool: true,
-				systemPrompt: () => [init.systemPrompt],
-				// Inherit current owner policy, never extension authority from a transcript.
-				extensionRoots: () => ctx.session.effectiveExtensionRoots,
-				preloadedPreparedExtensions: ctx.session.preparedExtensions,
-				// Old files predate persisted spawns: deny re-spawning rather than let
-				// createAgentSession default to wildcard ("*").
-				spawns: init.spawns ?? "",
-				hasUI: false,
-				enableLsp: restrictToolNames ? false : ctx.enableLsp,
-				...(restrictToolNames
-					? {
-							enableIrc: false,
-							enableMCP: false,
-							preloadedExtensionPaths: [],
-							preloadedCustomToolPaths: [],
-						}
-					: {
-							enableMCP: !mcpManager,
-							mcpManager,
-							customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
-						}),
-			});
+
+			let session: AgentSession;
+			try {
+				({ session } = await createAgentSession({
+					cwd: restoredSeance?.cwd ?? ctx.session.sessionManager.getCwd(),
+					authStorage: ctx.authStorage,
+					// Revived agents join the root session tree, so their observability
+					// frames ride the same bus the RPC/collab surfaces subscribed to.
+					subagentEventBus: ctx.subagentEventBus,
+					modelRegistry: ctx.modelRegistry,
+					...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
+					modelPatternAuthFallback: restoredSeance ? undefined : init.resolvedModel,
+					settings: subagentSettings,
+					sessionManager: reopened,
+					agentId: ref.id,
+					agentDisplayName: ref.displayName,
+					// `agents` rule scoping keys on the durable definition name (`scout`,
+					// `reviewer`, …), not the registry display label — cold-revived refs
+					// register with `displayName: id` (registry/persisted-agents.ts), so a
+					// generated task id would silently drop every agent-scoped rule.
+					// `init.agent` carries the real name; only files predating that field
+					// fall back to the display label. A parked transcript may also predate
+					// the `main`/`sub` definition-name reservation (discovery/helpers.ts): a
+					// persisted `init.agent` of either sentinel value from such a legacy
+					// custom agent must not masquerade as that sentinel here, so it falls
+					// back to the display label too, keeping it scoped as an ordinary
+					// subagent under its generated id instead of `main` or the shared `sub`
+					// bucket.
+					agentName:
+						init.agent &&
+						init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
+						init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
+							? init.agent
+							: ref.displayName,
+					parentTaskPrefix: ref.id,
+					asyncJobManager: ctx.session.asyncJobManager,
+					parentAgentId: ref.parentId,
+					oauthAccountPools,
+					expectedAgentRef: expectedRef,
+					taskDepth,
+					toolNames: revivedToolNames,
+					outputSchema: init.outputSchema,
+					outputSchemaMode: init.outputSchemaMode,
+					restrictToolNames: restrictToolNames || undefined,
+					requireYieldTool: structured,
+					systemPrompt: () => [...init.systemPrompt],
+					// Inherit current owner policy, never extension authority from a transcript.
+					extensionRoots: () => ctx.session.effectiveExtensionRoots,
+					preloadedPreparedExtensions: ctx.session.preparedExtensions,
+					// Old files predate persisted spawns: deny re-spawning rather than let
+					// createAgentSession default to wildcard ("*").
+					spawns: init.spawns ?? "",
+					hasUI: false,
+					enableLsp: restrictToolNames ? false : ctx.enableLsp,
+					...(restrictToolNames
+						? {
+								enableIrc: false,
+								enableMCP: false,
+								preloadedExtensionPaths: [],
+								preloadedCustomToolPaths: [],
+							}
+						: {
+								enableMCP: !mcpManager,
+								mcpManager,
+								mcpTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+							}),
+					...seanceOptions,
+				}));
+			} catch (error) {
+				mcpFollower?.dispose();
+				throw error;
+			}
+			mcpFollower?.bind(session);
 			// Clamp the active set to the persisted list: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
 			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
+			await session.setActiveToolsByName(
+				restoredSeance ? revivedToolNames : [...revivedToolNames, ...session.getMountedXdevToolNames()],
+			);
+			// The yield tool's schema carries the last batch's items; the replayed prefix must match it.
+			if (init.workPoolYieldItems) await session.setWorkPoolYieldItems(init.workPoolYieldItems);
 			// Wire the extension runtime exactly as the live executor does. Without
 			// this the runner stays pre-init, every action method throws
 			// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that
@@ -241,20 +319,14 @@ export function createPersistedSubagentReviverFactory(
 			// The internal run-state signal precedes deferrable public `agent_end`,
 			// keeping idle-TTL ownership synchronized even while prompts unwind.
 			registry.syncSessionStatus(ref.id, session);
-			// Persisted files predate an agent-source field, so cold-revived frames
-			// report the runtime-neutral `user` source; name comes from the ref.
-			const wakeAgent: AgentDefinition = {
-				name: ref.displayName,
-				description: "",
-				systemPrompt: init.systemPrompt,
-				source: "user",
-			};
 			attachIrcWakeTurnMonitor(session, {
 				id: ref.id,
-				agent: wakeAgent,
+				agent: persistedAgentDefinition(ref.displayName, init),
+				completionProbe: isCompletionProbeEnabled(ctx.settings, taskDepth - 1),
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
 				sessionFile,
+				structured,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				// Anchor artifacts to the revived ref's own dir (its parent's children

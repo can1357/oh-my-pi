@@ -3,7 +3,7 @@ import { ptree, TempDir } from "@oh-my-pi/pi-utils";
 
 describe("bundled extension modules", () => {
 	it("observes active host theme changes and native default/named exports", async () => {
-		using dir = TempDir.createSync("omp-bundled-extension-");
+		using dir = TempDir.createSync("@omp-bundled-extension-");
 		const entry = dir.join("extension.ts");
 		await Bun.write(
 			entry,

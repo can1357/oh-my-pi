@@ -8,7 +8,7 @@ exec hosts. Replaces cargo-xwin.
 
 | Piece | Where | Why separate |
 | --- | --- | --- |
-| `@llvm_msvc_tools` | `llvm.bzl` | LLVM 20.1.7 release archive for the fetching host, pruned to clang-cl/lld-link/llvm-lib/llvm-rc/llvm-mt + `lib/clang/*/include`. Downloads (~2 GiB) are sha256-pinned → Bazel repository cache. |
+| `@llvm_msvc_tools` | `//bazel/toolchains:llvm.bzl` (shared with the darwin toolchain) | LLVM 20.1.7 release archive for the fetching host, pruned to clang-cl/lld-link/llvm-lib/llvm-rc/llvm-mt + `lib/clang/*/include`. Downloads (~2 GiB) are sha256-pinned → Bazel repository cache. |
 | `@xwin_sysroot` | `sysroot.bzl` | xwin 0.6.5 (pinned per-host sha256) runs `splat` in the repo rule. The ~1 GiB CRT/SDK payload comes from the Microsoft CDN via xwin itself and is **not** in Bazel's repo cache — a cold output base re-downloads it. Keep `sysroot.bzl` stable. |
 | `@msvc_cc` | `cc.bzl` | Wrapper scripts + `cc_toolchain` + MSVC feature config (copied from the resolved rules_cc, like `@local_config_cc`). Cheap to regenerate — iterate flags here. |
 | `toolchain()`s | `//bazel/toolchains` (`msvc-cc-from-*`) | One per exec host (linux-x64/arm64, darwin-arm64/x64), all pointing at `@msvc_cc//:cc_toolchain`; only the local host's variant can resolve. `target_compatible_with = [windows, x86_64]` ⇒ can never shadow zig on linux. |
@@ -124,7 +124,7 @@ exec hosts. Replaces cargo-xwin.
 
 ## Knobs
 
-- LLVM version/sha256s: `llvm.bzl` (`_LLVM_VERSION`, `_LLVM_DISTS`). 20.1.7 is
+- LLVM version/sha256s: `//bazel/toolchains:llvm.bzl` (`llvm_msvc_tools_repository`). 20.1.7 is
   the newest release with archives for all four host tuples.
 - xwin version + manifest channel: `sysroot.bzl` (`_XWIN_VERSION` 0.6.5 — last
   release with darwin binaries; `_XWIN_MANIFEST_VERSION` "17").

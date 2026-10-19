@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { findPersistedRecall, persistRecall } from "../memory-backend/recall-entry";
 import type { MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
 import { type BankScope, ensureBankExists } from "./bank";
@@ -18,7 +19,7 @@ import {
 	resolveSeedsForScope,
 	tryLoadMentalModelsBlock,
 } from "./mental-models";
-import { extractMessages } from "./transcript";
+import { countUserTurns, extractMessages } from "./transcript";
 
 const RETAIN_FLUSH_BATCH_SIZE = 16;
 const RETAIN_FLUSH_INTERVAL_MS = 5_000;
@@ -188,10 +189,12 @@ export class HindsightRetainQueue {
 	}
 }
 
-/** Rolling hash of messages[0, count) for retention-cache validation (see #lastRetainedPrefixKey). */
-function retentionPrefixKey(messages: HindsightMessage[], count: number): string {
-	let key = "";
-	for (let i = 0; i < count; i++) {
+/**
+ * Rolling hash of messages[0, to) for retention-cache validation (see #lastRetainedPrefixKey),
+ * continued from `key` = the rolling hash of messages[0, from).
+ */
+function extendRetentionPrefixKey(key: string, messages: HindsightMessage[], from: number, to: number): string {
+	for (let i = from; i < to; i++) {
 		const m = messages[i];
 		if (m === undefined) break;
 		key = Bun.hash(`${key}\u0000${m.role}\u0000${m.content}\u0000${m.timestamp ?? ""}`).toString(36);
@@ -330,16 +333,21 @@ export class HindsightSessionState {
 		let documentId: string;
 		let transcript: string;
 		let nextCachedTranscript: string | undefined;
+		let prefixKey = "";
+		let hashedThrough = 0;
 
 		if (retainFullWindow) {
 			documentId = this.sessionId;
 			const boundary = this.#lastRetainedMessageIndex;
-			if (boundary > messages.length || retentionPrefixKey(messages, boundary) !== this.#lastRetainedPrefixKey) {
+			if (boundary <= messages.length) prefixKey = extendRetentionPrefixKey("", messages, 0, boundary);
+			if (boundary > messages.length || prefixKey !== this.#lastRetainedPrefixKey) {
 				this.#lastRetainedMessageIndex = 0;
 				this.#cachedTranscript = "";
 				this.#lastRetainedPrefixKey = "";
+				prefixKey = "";
 			}
-			const newMessages = messages.slice(this.#lastRetainedMessageIndex);
+			hashedThrough = this.#lastRetainedMessageIndex;
+			const newMessages = messages.slice(hashedThrough);
 			const { transcript: newPart } = prepareRetentionTranscript(newMessages, true, { includeTimestamps: true });
 			if (!newPart) return;
 			nextCachedTranscript = this.#cachedTranscript ? `${this.#cachedTranscript}\n\n${newPart}` : newPart;
@@ -367,17 +375,19 @@ export class HindsightSessionState {
 		});
 		if (nextCachedTranscript !== undefined) {
 			this.#cachedTranscript = nextCachedTranscript;
+			// prefixKey hashes [0, hashedThrough) of this same snapshot; extend it instead of rehashing from 0.
+			this.#lastRetainedPrefixKey = extendRetentionPrefixKey(prefixKey, messages, hashedThrough, messages.length);
 			this.#lastRetainedMessageIndex = messages.length;
-			this.#lastRetainedPrefixKey = retentionPrefixKey(messages, messages.length);
 		}
 	}
 
 	async maybeRetainOnAgentEnd(): Promise<void> {
 		if (!this.config.autoRetain) return;
+		// Cheap gate first: most agent_end events are not retain turns, so skip text extraction.
+		const userTurns = countUserTurns(this.session.sessionManager);
+		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
-		const userTurns = messages.filter(m => m.role === "user").length;
-		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
 
 		try {
 			await this.retainSession(messages);
@@ -435,6 +445,15 @@ export class HindsightSessionState {
 		const latestPrompt = promptText.trim();
 		if (!latestPrompt) return undefined;
 		const generation = ++this.#recallGeneration;
+		// Reuse this transcript's recall so a resumed session sends the same prompt. Hindsight
+		// memories cannot be looked up by id, so changes since are not reported.
+		const persisted = findPersistedRecall(this.session.sessionManager, this.#recallScope());
+		if (persisted !== undefined) {
+			return {
+				context: persisted.text || undefined,
+				commit: () => this.#commitRecall(generation, persisted.text, false),
+			};
+		}
 
 		const history = extractMessages(this.session.sessionManager);
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
@@ -445,13 +464,32 @@ export class HindsightSessionState {
 
 		return {
 			context: context ?? undefined,
-			commit: () => {
-				if (this.#recallGeneration !== generation) return false;
-				this.hasRecalledForFirstTurn = true;
-				if (context) this.lastRecallSnippet = context;
-				return true;
-			},
+			commit: () => this.#commitRecall(generation, context ?? "", true),
 		};
+	}
+
+	/** Adopts a first-turn recall unless a newer turn or reset superseded it; `""` means it found nothing. */
+	#commitRecall(generation: number, context: string, persist: boolean): boolean {
+		if (this.#recallGeneration !== generation) return false;
+		this.hasRecalledForFirstTurn = true;
+		if (context) this.lastRecallSnippet = context;
+		if (persist) persistRecall(this.session.sessionManager, this.#recallScope(), { text: context, memories: [] });
+		return true;
+	}
+
+	/**
+	 * Identifies the server, account, bank and tag filter a recall reads, so a persisted
+	 * recall is only reused for the same ones. The account is a hash of the API token.
+	 */
+	#recallScope(): string {
+		return JSON.stringify([
+			"hindsight",
+			this.config.hindsightApiUrl,
+			Bun.hash(this.config.hindsightApiToken ?? "").toString(16),
+			this.bankId,
+			this.recallTags ?? [],
+			this.recallTagsMatch ?? null,
+		]);
 	}
 
 	async recallForCompaction(messages: HindsightMessage[]): Promise<string | undefined> {

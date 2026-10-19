@@ -12,6 +12,7 @@
  * the library's `noul` name stays internal.
  */
 import type {
+	ImageContent,
 	Answer,
 	ChoiceQuestion,
 	JudgmentResult,
@@ -23,6 +24,9 @@ import type {
 	ScoreQuestion,
 } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { isEmbeddedImageContent } from "@oh-my-pi/pi-ai/images/shared";
+import type { LoadedImageInput } from "../utils/image-loading";
+import { loadImageAttachmentInput, loadImageInput, loadSvgImageInput } from "../utils/image-loading";
 import {
 	type ChainJudge,
 	type JudgmentUsage,
@@ -44,6 +48,66 @@ export type CellAnswer = Answer | { type: "bool"; bool: number };
 export interface EvalJudgmentResult {
 	answers: Record<string, CellAnswer>;
 	model: string;
+}
+
+function invalidImage(detail: string): ToolError {
+	return new ToolError(`invalid judgment image source: ${detail}`);
+}
+
+/** Load paths and embedded image attachments into validated inline model images. */
+export async function loadEvalJudgmentImages(value: unknown, cwd: string): Promise<ImageContent[] | undefined> {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) throw invalidImage("images must be an array of paths or image attachments");
+
+	const images: ImageContent[] = [];
+	for (let index = 0; index < value.length; index++) {
+		const source = value[index];
+		let loaded: LoadedImageInput | null | undefined;
+		let detail: ImageContent["detail"];
+		if (typeof source === "string") {
+			if (source.length === 0) throw invalidImage(`images[${index}] path must not be empty`);
+			try {
+				loaded =
+					(await loadSvgImageInput({ path: source, cwd, autoResize: false })) ??
+					(await loadImageInput({ path: source, cwd, autoResize: false }));
+			} catch (error) {
+				throw invalidImage(
+					`images[${index}] path ${JSON.stringify(source)} could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			if (!loaded) throw invalidImage(`images[${index}] path ${JSON.stringify(source)} is not a supported image`);
+		} else {
+			if (!isEmbeddedImageContent(source)) {
+				throw invalidImage(
+					`images[${index}] must be a local path or { type: "image", data, mimeType, detail? } with valid base64 data, an image MIME type, and detail auto, low, high, or original`,
+				);
+			}
+			detail = source.detail;
+			try {
+				loaded = await loadImageAttachmentInput({
+					image: { type: "image", data: source.data, mimeType: source.mimeType },
+					label: `eval-${index}`,
+					uri: "eval image attachment",
+					autoResize: false,
+				});
+			} catch (error) {
+				throw invalidImage(
+					`images[${index}] attachment could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			if (!loaded)
+				throw invalidImage(
+					`images[${index}] attachment has unsupported MIME type ${JSON.stringify(source.mimeType)}`,
+				);
+		}
+		images.push({
+			type: "image",
+			data: loaded.data,
+			mimeType: loaded.mimeType,
+			...(detail === undefined ? {} : { detail }),
+		});
+	}
+	return images.length > 0 ? images : undefined;
 }
 
 function invalid(detail: string): ToolError {
@@ -210,7 +274,12 @@ export async function runEvalJudgment(
 	return withBridgeTimeoutPause(options.emitStatus, async () => {
 		await evalRequestSlots.acquire(signal);
 		try {
-			return toEvalJudgmentResult(await judge.judge({ state, questions }, { signal }));
+			signal?.throwIfAborted();
+			const images = await loadEvalJudgmentImages(args.images, options.session.cwd);
+			signal?.throwIfAborted();
+			return toEvalJudgmentResult(
+				await judge.judge({ state, questions, ...(images === undefined ? {} : { images }) }, { signal }),
+			);
 		} finally {
 			evalRequestSlots.release();
 		}

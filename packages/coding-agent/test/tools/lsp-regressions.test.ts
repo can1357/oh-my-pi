@@ -48,6 +48,7 @@ import {
 	fileToUri,
 	filterWorkspaceSymbols,
 	hasGlobPattern,
+	readLocationContext,
 	resolveDiagnosticTargets,
 	resolveSymbolColumn,
 	uriToFile,
@@ -68,6 +69,53 @@ const lspTestSettings = Settings.isolated();
 /** Minimal LSP tool session: production always supplies `settings`; these tests only need cwd + a default settings stub. */
 function makeLspSession(cwd: string): ToolSession {
 	return { cwd, settings: lspTestSettings } as ToolSession;
+}
+
+/**
+ * Race an async read of a FIFO that has no writer. Real kernel FIFO I/O can't be driven by fake
+ * timers; if the read is still pending at the bound, a non-blocking writer releases it so the
+ * test never leaks a blocked reader.
+ */
+async function raceFifoRead(operation: Promise<unknown>, fifo: string): Promise<unknown> {
+	const settled = operation.then(
+		value => value,
+		error => error,
+	);
+	const outcome = await Promise.race([settled, Bun.sleep(1_500).then(() => "HUNG" as const)]);
+	if (outcome === "HUNG") {
+		try {
+			fs.closeSync(fs.openSync(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK));
+		} catch (error) {
+			if (!piUtils.hasFsCode(error, "ENXIO")) throw error;
+		}
+		await settled;
+	}
+	return outcome;
+}
+
+function fifoRefusal(fifo: string): string {
+	return `Cannot open '${fifo}': it is a FIFO, not a regular file or directory.`;
+}
+
+/** Open a regular document through a fake server, then swap it for a FIFO on disk. */
+async function withOpenDocumentSwappedForFifo(
+	run: (client: LspClient, filePath: string) => Promise<void>,
+): Promise<void> {
+	const tempDir = TempDir.createSync("@omp-lsp-special-refresh-");
+	const filePath = path.join(tempDir.path(), "input.ts");
+	try {
+		await Bun.write(filePath, "export const value = 1;\n");
+		installHandshakeLsp();
+		const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+		const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+		await lspClient.ensureFileOpen(client, filePath);
+		await fs.promises.unlink(filePath);
+		expect(Bun.spawnSync(["mkfifo", filePath]).exitCode).toBe(0);
+		await run(client, filePath);
+	} finally {
+		await lspClient.shutdownAll();
+		tempDir.removeSync();
+	}
 }
 
 interface RpcMessage {
@@ -364,7 +412,7 @@ describe("lsp regressions", () => {
 		expect(arkToWireSchema(lspSchema)).toMatchObject({
 			properties: {
 				timeout: {
-					description: "Timeout in seconds (default 20; range 5–300).",
+					description: "Timeout in seconds; raises or lowers the default (range 5–300).",
 					maximum: 300,
 					minimum: 5,
 				},
@@ -487,6 +535,83 @@ describe("lsp regressions", () => {
 			tempDir.removeSync();
 		}
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"rejects a FIFO before an LSP document open can block",
+		async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-special-file-");
+			const fifo = path.join(tempDir.path(), "input.ts");
+			try {
+				expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+				installHandshakeLsp();
+				const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+				const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+				const outcome = await raceFifoRead(lspClient.ensureFileOpen(client, fifo), fifo);
+				expect(outcome).toBeInstanceOf(Error);
+				expect(outcome).toHaveProperty("message", fifoRefusal(fifo));
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rejects a FIFO during LSP symbol resolution",
+		async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-special-read-");
+			const fifo = path.join(tempDir.path(), "input.ts");
+			try {
+				expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+				const outcome = await raceFifoRead(resolveSymbolColumn(fifo, 1), fifo);
+				expect(outcome).toBeInstanceOf(Error);
+				expect(outcome).toHaveProperty("message", fifoRefusal(fifo));
+			} finally {
+				tempDir.removeSync();
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"keeps a FIFO location as a header without reading its context",
+		async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-special-context-");
+			const fifo = path.join(tempDir.path(), "input.ts");
+			try {
+				expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+				expect(await raceFifoRead(readLocationContext(fifo, 1), fifo)).toEqual([]);
+			} finally {
+				tempDir.removeSync();
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rejects an open document swapped for a FIFO when reconciling from disk",
+		async () => {
+			await withOpenDocumentSwappedForFifo(async (client, filePath) => {
+				const outcome = await raceFifoRead(lspClient.reconcileFileFromDisk(client, filePath), filePath);
+				expect(outcome).toBeInstanceOf(Error);
+				expect(outcome).toHaveProperty("message", fifoRefusal(filePath));
+			});
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rejects an open document swapped for a FIFO when refreshing it",
+		async () => {
+			await withOpenDocumentSwappedForFifo(async (client, filePath) => {
+				const outcome = await raceFifoRead(lspClient.refreshFile(client, filePath), filePath);
+				expect(outcome).toBeInstanceOf(Error);
+				expect(outcome).toHaveProperty("message", fifoRefusal(filePath));
+			});
+		},
+		10_000,
+	);
 
 	it("sends the LSP exit notification and releases the idle checker after shutdown", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-shutdown-");
@@ -1678,19 +1803,27 @@ describe("lsp regressions", () => {
 		expect(resultText.replace(/\s+/g, " ")).toContain("too many arguments in call");
 	});
 
-	it("sanitizes expanded generic error output (#7041)", async () => {
+	it("hang-wraps expanded generic output without tabs or lost text (#7041, #15824)", async () => {
 		const theme = await getThemeByName("dark");
+		const note =
+			"note: 'configured, not started' means the binary resolves on PATH but no request has spawned it yet";
 		const result = renderLocalResult(
 			{
-				content: [{ type: "text", text: `Error:\nserver\tstderr ${"x".repeat(200)}` }],
+				content: [{ type: "text", text: `Error:\nserver\tstderr ${"x".repeat(200)}\n  ${note}` }],
 			},
 			{ expanded: true, isPartial: false },
 			theme!,
 		);
 
-		const lines = sanitizeText(result.render(300).join("\n")).split("\n");
-		expect(lines.join("\n")).not.toContain("\t");
-		expect(lines.join("\n")).not.toContain("x".repeat(100));
+		const width = 80;
+		const lines = sanitizeText(result.render(width).join("\n")).split("\n");
+		const text = lines.join("\n");
+		expect(text).not.toContain("\t");
+		expect(lines.every(line => Bun.stringWidth(line) <= width)).toBe(true);
+		expect(text.match(/x/g)?.length).toBe(200);
+		expect(text).not.toContain("…");
+		const rowContents = lines.map(line => line.replace(/^│\s+[├└│]?─?\s*/, "").replace(/\s*│$/, ""));
+		expect(rowContents.join(" ").replace(/\s+/g, " ")).toContain(note);
 	});
 
 	for (const dynamicRegistration of [false, true]) {
@@ -2113,7 +2246,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 1,
 				openFiles: new Map([[targetUri, { version: 1, languageId: "typescript" }]]),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -2715,7 +2847,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -2824,7 +2955,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -2907,7 +3037,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -2980,7 +3109,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -3041,7 +3169,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -3102,7 +3229,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -3172,7 +3298,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -3242,7 +3367,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -3300,7 +3424,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -3603,7 +3726,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -4416,7 +4538,6 @@ describe("lsp regressions", () => {
 			diagnosticsVersion: 0,
 			openFiles: new Map(),
 			pendingRequests: new Map(),
-			messageBuffer: new Uint8Array(),
 			isReading: false,
 			status: "ready",
 			lastActivity: Date.now(),
@@ -4446,7 +4567,6 @@ describe("lsp regressions", () => {
 			diagnosticsVersion: 0,
 			openFiles: new Map(),
 			pendingRequests: new Map(),
-			messageBuffer: new Uint8Array(),
 			isReading: false,
 			status: "ready",
 			lastActivity: Date.now(),
@@ -5500,7 +5620,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(0),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),
@@ -5552,7 +5671,6 @@ describe("lsp regressions", () => {
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
-				messageBuffer: new Uint8Array(0),
 				isReading: false,
 				status: "ready",
 				lastActivity: Date.now(),

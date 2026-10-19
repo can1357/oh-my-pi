@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import {
 	formatDoubleTap,
 	formatKeyHint,
+	formatTooltipKey,
 	getDefaultPasteImageKeys,
 	KeybindingsManager,
 	setKeyHintPlatform,
@@ -85,6 +86,15 @@ describe("formatKeyHint with keycap glyphs", () => {
 		await setSymbolPreset("nerd");
 		expect(formatKeyHint("shift+tab")).toBe("\u{f0636} \u{f0312}");
 		expect(formatKeyHint("ctrl+shift+c")).toBe("\u{f0634} \u{f0636} C");
+		await setSymbolPreset("unicode");
+	});
+
+	it("keeps tooltip keys as abutting keycap glyphs under the nerd preset, Escape as esc", async () => {
+		setKeyHintPlatform("darwin");
+		await setSymbolPreset("nerd");
+		expect(formatTooltipKey("shift+tab")).toBe("⇧⇥");
+		expect(formatTooltipKey("ctrl+shift+c")).toBe("⌃⇧C");
+		expect(formatTooltipKey("escape")).toBe("esc");
 		await setSymbolPreset("unicode");
 	});
 });

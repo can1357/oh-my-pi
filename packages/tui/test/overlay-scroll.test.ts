@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { type Component, CURSOR_MARKER, type Focusable, type OverlayFocusOwner, TUI } from "@oh-my-pi/pi-tui";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { VirtualTerminal } from "./virtual-terminal";
@@ -145,32 +145,6 @@ async function settleResize(term: VirtualTerminal): Promise<void> {
 withoutTerminalMultiplexer();
 
 describe("TUI overlays", () => {
-	let savedTerminalEnv: Record<string, string | undefined> = {};
-	beforeEach(() => {
-		// A resize on Warp takes the in-place path (no ED3), so neutralize the
-		// ambient terminal identity to keep the direct-terminal resize/scrollback
-		// assertions below deterministic on any dev machine.
-		for (const key of [
-			"TERM_PROGRAM",
-			"PI_TUI_RESIZE_IN_PLACE",
-			"HERDR_ENV",
-			"HERDR_PANE_ID",
-			"HERDR_TAB_ID",
-			"HERDR_WORKSPACE_ID",
-		]) {
-			savedTerminalEnv[key] = Bun.env[key];
-			delete Bun.env[key];
-		}
-	});
-	afterEach(() => {
-		for (const key in savedTerminalEnv) {
-			const value = savedTerminalEnv[key];
-			if (value === undefined) delete Bun.env[key];
-			else Bun.env[key] = value;
-		}
-		savedTerminalEnv = {};
-	});
-
 	it("does not scroll the terminal when an overlay is shown with a large historical working area", async () => {
 		const term = new VirtualTerminal(80, 24);
 		const tui = new TUI(term);

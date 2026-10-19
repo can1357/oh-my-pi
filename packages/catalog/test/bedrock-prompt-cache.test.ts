@@ -147,6 +147,7 @@ describe("Bedrock prompt-cache compat", () => {
 				promptCacheMinimumTokens: minimumTokens,
 				promptCacheMaximumCheckpoints: minimumTokens === 0 ? 0 : 4,
 				supportsForcedToolChoice: true,
+				supportsThinkingBindingControls: true,
 				// bedrockSpec is reasoning:true → keepalive-free idle floor applies
 				// (900s for the adaptive-thinking family, 600s otherwise).
 				streamIdleTimeoutMs: expectsAdaptiveDisplay(id) ? 900_000 : 600_000,
@@ -247,6 +248,7 @@ describe("Bedrock prompt-cache compat", () => {
 			promptCacheMinimumTokens: 1024,
 			promptCacheMaximumCheckpoints: 4,
 			supportsForcedToolChoice: true,
+			supportsThinkingBindingControls: true,
 			streamRevision: "possible",
 		} as const;
 

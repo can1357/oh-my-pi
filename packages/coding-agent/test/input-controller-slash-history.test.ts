@@ -53,7 +53,6 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 		sessionManager,
 		session: {
 			messages,
-			maybeStartTitleGeneration: vi.fn(),
 			isStreaming,
 			isCompacting: false,
 			queuedMessageCount: 0,

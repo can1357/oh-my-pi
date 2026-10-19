@@ -1,9 +1,9 @@
 //! Shared POSIX basic-regular-expression translation.
 //!
-//! `grep` and `sed` both accept BREs but compile them with different engines
-//! (`grep-regex` and `fancy-regex` respectively), neither of which implements
-//! BRE syntax. This module converts a BRE into the ERE-compatible form those
-//! engines accept, so the dialect is defined in exactly one place.
+//! `grep`, `sed`, and `nl` accept BREs but compile them with different engines
+//! (`grep-regex` for `grep`, `fancy-regex` for the others), neither of which
+//! implements BRE syntax. This module converts a BRE into the ERE-compatible
+//! form those engines accept, so the dialect is defined in exactly one place.
 
 /// Whether the target engine supports back-references.
 ///

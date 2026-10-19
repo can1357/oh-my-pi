@@ -317,7 +317,7 @@ export class InternalUrlRouter {
 		context?: ResolveContext,
 		options?: LocateOptions,
 	): Promise<string> {
-		const located = await this.locate(input, context, options);
+		const located = await this.locate(input, context, { ...options, localOnly: true });
 		if (located !== null) return located;
 		const registered = this.#registered(input);
 		const spec = registered?.handler.spec;

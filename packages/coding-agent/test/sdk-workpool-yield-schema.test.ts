@@ -349,6 +349,7 @@ describe("SDK workpool yield schema", () => {
 						planReference: "",
 						planReferencePath: "",
 						worktree: "",
+						structured: true,
 						outputSchema: undefined,
 						outputSchemaOverridesAgent: false,
 						workPoolYieldItems: live?.getWorkPoolYieldItems() ?? [],

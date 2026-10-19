@@ -70,7 +70,7 @@ test("queued /new starts a new session before the next prompt", async () => {
 		{ text: "work in the new session", mode: "steer" },
 	]);
 	let sessionId = "previous";
-	ctx.handleClearCommand = async () => {
+	ctx.handleNewCommand = async () => {
 		sessionId = "new";
 	};
 	const requests: Array<{ sessionId: string; text: string }> = [];
@@ -89,7 +89,7 @@ test("queued /new starts a new session before the next prompt", async () => {
 test("a queued builtin without a following prompt runs locally", async () => {
 	const { ctx, helpers } = makeBuiltinCtx([{ text: "/new", mode: "followUp" }]);
 	let sessionId = "previous";
-	ctx.handleClearCommand = async () => {
+	ctx.handleNewCommand = async () => {
 		sessionId = "new";
 	};
 	const prompt = mock(async () => true);

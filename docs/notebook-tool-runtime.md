@@ -36,14 +36,14 @@ No kernel lifecycle exists in this path:
 - no kernel session ID
 - no code execution
 - no stream chunks from Python
-- no rich display capture
+- no image or view capture
 - no output artifact pipeline from execution
 
 ## Kernel-backed execution path (`src/tools/eval.ts` + `src/eval/py/*`)
 
-When the agent needs to run cell-style Python code with persistent state and rich displays, that goes through one **`eval` tool** call per cell with `language: "py"`, not through notebook file handling.
+When the agent needs to run cell-style Python code with persistent state and rich output (images, table/JSON/Markdown views), that goes through one **`eval` tool** call per cell with `language: "py"`, not through notebook file handling.
 
-That path is where Python subprocess lifecycle, reset/cancel behavior, chunk streaming, rich displays, and output artifact truncation live.
+That path is where Python subprocess lifecycle, reset/cancel behavior, chunk streaming, rich print, and output artifact truncation live.
 
 ## 2) Notebook cell handling semantics
 
@@ -126,26 +126,17 @@ Kernel startup and per-execution environment patching can receive:
 
 The runner applies the requested cwd and managed environment patch before each cell, with cwd placed first on `sys.path`. A `%cd` or `os.chdir()` inside a cell does not override the host session cwd for the next eval call. Managed entries omitted from the patch are removed from `os.environ`.
 
-## 5) Streaming/chunk and display handling (kernel-backed path)
+## 5) Streaming/chunk and rich output handling (kernel-backed path)
 
-The Python backend uses an NDJSON subprocess runner. The host processes frames per execution:
+The Python backend uses an NDJSON subprocess runner. There is no `display()`: `print` and the trailing-expression echo write plain text, and the runner adds frames for images, data frames, Markdown objects and large structures (see [Python backend: rich print](./python-repl.md#rich-print)). The host processes frames per execution:
 
-- `stdout` / `stderr` -> text chunks to `onChunk`
-- `display` / `result` -> MIME bundle rendering
+- `stdout` / `stderr` -> text chunks to `onChunk`; this text is all the model sees
+- `view` -> `onDisplay({type: "view", text, view})`, a table/JSON/Markdown rendering of text already streamed through `stdout`, shown to the user in place of that text
+- `image` -> `onDisplay` image output (with `detail` / `url` / `providerFile` metadata) for the model and the user
+- `status` -> `onDisplay({type: "status", event})` for the TUI status renderer
+- `reply` -> tool-request envelope, returned as `KernelExecuteResult.reply`
 - `error` -> traceback text and structured error metadata
 - `done` -> final status, execution count, cancellation state
-
-Display text MIME precedence:
-
-1. `text/markdown`
-2. `text/plain`
-3. converted `text/html`
-
-Structured outputs captured separately include:
-
-- `application/json` -> JSON display output
-- `image/png` / `image/jpeg` -> image output
-- `application/x-omp-status` -> status event
 
 Cancellation/timeout:
 

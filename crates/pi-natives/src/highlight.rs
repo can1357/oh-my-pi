@@ -5,15 +5,17 @@
 //! - comment, keyword, function, variable, string, number, type, operator,
 //!   punctuation, inserted, deleted
 
-use std::{cell::RefCell, collections::HashMap, sync::OnceLock};
+use std::{
+	cell::RefCell,
+	collections::{HashMap, HashSet},
+	sync::OnceLock,
+};
 
 use napi::{JsString, Result};
 use napi_derive::napi;
 use pi_shell::rayon_global_pool_available;
 use rayon::prelude::*;
-use syntect::parsing::{
-	ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxDefinition, SyntaxReference, SyntaxSet,
-};
+use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet};
 
 use crate::{
 	js::{self, InlineStr},
@@ -36,33 +38,11 @@ thread_local! {
 	static SCOPE_COLOR_CACHE: RefCell<HashMap<Scope, usize>> = RefCell::new(HashMap::with_capacity(256));
 }
 
-/// Syntaxes bundled in addition to syntect's defaults: syntect ships none of
-/// these, so we vendor their `.sublime-syntax` sources and fold them into the
-/// set.
-const EXTRA_SYNTAXES: &[&str] = &[
-	include_str!("syntaxes/Julia.sublime-syntax"),
-	include_str!("syntaxes/Nix.sublime-syntax"),
-	include_str!("syntaxes/Mermaid.sublime-syntax"),
-	include_str!("syntaxes/TypeScript.sublime-syntax"),
-	include_str!("syntaxes/TypeScriptReact.sublime-syntax"),
-	include_str!("syntaxes/Astro.sublime-syntax"),
-];
-
 fn get_syntax_set() -> &'static SyntaxSet {
-	SYNTAX_SET.get_or_init(build_syntax_set)
-}
-
-/// Load syntect's newline-aware defaults and add the vendored extra syntaxes.
-/// A vendored syntax that fails to parse is skipped rather than breaking all
-/// highlighting; the bundled-language tests guard against silent absence.
-fn build_syntax_set() -> SyntaxSet {
-	let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
-	for src in EXTRA_SYNTAXES {
-		if let Ok(def) = SyntaxDefinition::load_from_str(src, true, None) {
-			builder.add(def);
-		}
-	}
-	builder.build()
+	SYNTAX_SET.get_or_init(|| {
+		syntect::dumps::from_uncompressed_data(include_bytes!(env!("OMP_SYNTAX_SET")))
+			.expect("bundled syntax set should match the syntect build")
+	})
 }
 
 /// Pre-compiled scope patterns for fast matching.
@@ -70,10 +50,11 @@ struct ScopeMatchers {
 	// Comment (index 0)
 	comment: Scope,
 
-	// String (index 4)
+	// String (index 4). Not `meta.string`: it spans a whole string,
+	// interpolations included, and grammars clear only `string.*` inside
+	// `{x}`, `#{x}` or `$(x)`.
 	string:             Scope,
 	constant_character: Scope,
-	meta_string:        Scope,
 
 	// Number (index 5)
 	constant_numeric: Scope,
@@ -126,7 +107,6 @@ impl ScopeMatchers {
 			comment:               Scope::new("comment").unwrap(),
 			string:                Scope::new("string").unwrap(),
 			constant_character:    Scope::new("constant.character").unwrap(),
-			meta_string:           Scope::new("meta.string").unwrap(),
 			constant_numeric:      Scope::new("constant.numeric").unwrap(),
 			constant_integer:      Scope::new("constant.integer").unwrap(),
 			constant:              Scope::new("constant").unwrap(),
@@ -217,20 +197,22 @@ const LANG_ALIASES: &[(&[&str], &str)] = &[
 	(&["rs", "rust"], "Rust"),
 	(&["go", "golang"], "Go"),
 	(&["java"], "Java"),
-	(&["kt", "kotlin"], "Java"),
-	(&["swift"], "Objective-C"),
-	(&["c", "h"], "C"),
+	(&["kt", "kts", "kotlin"], "Kotlin"),
+	(&["swift"], "Swift"),
+	(&["c"], "C"),
 	(&["cpp", "cc", "cxx", "c++", "hpp", "hxx", "hh"], "C++"),
 	(&["cs", "csharp"], "C#"),
 	(&["php"], "PHP"),
 	(&["sh", "bash", "zsh", "shell"], "Bash"),
-	(&["ps1", "powershell"], "PowerShell"),
+	(&["ps1", "powershell", "pwsh"], "PowerShell"),
 	(&["html", "htm", "vue", "svelte"], "HTML"),
 	(&["astro"], "Astro"),
 	(&["css"], "CSS"),
 	(&["scss"], "SCSS"),
 	(&["sass"], "Sass"),
-	(&["less"], "LESS"),
+	// No licensed Less grammar loads in syntect (the maintained one uses
+	// `extends`); SCSS shares its nesting, `//` comments and most syntax.
+	(&["less"], "SCSS"),
 	(&["json"], "JSON"),
 	(&["yaml", "yml"], "YAML"),
 	(&["toml"], "TOML"),
@@ -242,18 +224,18 @@ const LANG_ALIASES: &[(&[&str], &str)] = &[
 	(&["scala"], "Scala"),
 	(&["clj", "clojure"], "Clojure"),
 	(&["el", "elisp", "emacs-lisp", "emacslisp"], "Lisp"),
-	(&["ex", "exs", "elixir"], "Ruby"),
+	(&["ex", "exs", "elixir"], "Elixir"),
 	(&["erl", "erlang"], "Erlang"),
 	(&["hs", "haskell"], "Haskell"),
 	(&["ml", "ocaml"], "OCaml"),
 	(&["vim"], "VimL"),
 	(&["graphql", "gql"], "GraphQL"),
-	(&["proto", "protobuf"], "Protocol Buffers"),
+	(&["proto", "protobuf"], "Protocol Buffer"),
 	(&["tf", "hcl", "terraform"], "Terraform"),
 	(&["dockerfile", "docker", "containerfile"], "Dockerfile"),
 	(&["makefile", "make", "just", "justfile"], "Makefile"),
 	(&["cmake", "cmakelists"], "CMake"),
-	(&["ini", "cfg", "conf", "config", "properties"], "INI"),
+	(&["ini", "cfg", "conf", "config"], "INI"),
 	(&["diff", "patch"], "Diff"),
 	(&["gitignore", "gitattributes", "gitmodules"], "Git Ignore"),
 ];
@@ -265,14 +247,6 @@ fn find_alias(lang: &str) -> Option<&'static str> {
 		.iter()
 		.find(|(aliases, _)| aliases.iter().any(|a| lang.eq_ignore_ascii_case(a)))
 		.map(|(_, target)| *target)
-}
-
-/// Check if language is in the alias table.
-#[inline]
-fn is_known_alias(lang: &str) -> bool {
-	LANG_ALIASES
-		.iter()
-		.any(|(aliases, _)| aliases.iter().any(|a| lang.eq_ignore_ascii_case(a)))
 }
 
 /// Compute the color index for a single scope (uncached).
@@ -301,10 +275,7 @@ fn compute_scope_color(s: Scope) -> usize {
 	}
 
 	// String (index 4)
-	if m.string.is_prefix_of(s)
-		|| m.constant_character.is_prefix_of(s)
-		|| m.meta_string.is_prefix_of(s)
-	{
+	if m.string.is_prefix_of(s) || m.constant_character.is_prefix_of(s) {
 		return 4;
 	}
 
@@ -497,18 +468,11 @@ fn highlight_into(
 			}
 			prev_end = offset;
 
-			// Now apply scope operation for NEXT segment
-			match op {
-				ScopeStackOp::Push(scope) => {
-					scope_stack.push(scope);
-				},
-				ScopeStackOp::Pop(count) => {
-					for _ in 0..count {
-						scope_stack.pop();
-					}
-				},
-				ScopeStackOp::Restore | ScopeStackOp::Clear(_) | ScopeStackOp::Noop => {},
-			}
+			// Apply the operation for the NEXT segment, `Clear`/`Restore`
+			// included: a grammar's `clear_scopes` (string interpolation)
+			// hides the enclosing string from the code inside. A malformed op
+			// sequence only loses styling.
+			let _ = scope_stack.apply(&op);
 		}
 
 		// Output remaining text with current scope
@@ -728,33 +692,89 @@ impl HighlightStream {
 	}
 }
 
-/// Check if a language is supported for highlighting.
-/// Returns true if the language has either direct support or a fallback
-/// mapping.
+/// Check if a language resolves to a grammar (by name, extension or alias),
+/// i.e. whether `highlightCode` colors it rather than echoing it.
 #[napi]
 pub fn supports_language(lang: JsString) -> Result<bool> {
 	Ok(supports_language_impl(&js::utf8(lang)?))
 }
 
 fn supports_language_impl(lang: &str) -> bool {
-	if is_known_alias(lang) {
-		return true;
-	}
-
-	// Fall back to direct syntax lookup
-	let ss = get_syntax_set();
-	find_syntax(ss, lang).is_some()
+	find_syntax(get_syntax_set(), lang).is_some()
 }
+
 /// Get list of supported languages.
 #[napi]
 pub fn get_supported_languages() -> Vec<String> {
 	let ss = get_syntax_set();
-	ss.syntaxes().iter().map(|s| s.name.clone()).collect()
+	let mut seen = HashSet::new();
+	ss.syntaxes()
+		.iter()
+		.filter(|syntax| seen.insert(syntax.name.as_str()))
+		.map(|syntax| syntax.name.clone())
+		.collect()
 }
 
 #[cfg(test)]
+#[path = "syntaxes/builder.rs"]
+mod builder;
+
+#[cfg(test)]
 mod tests {
+	use std::{collections::BTreeSet, sync::LazyLock};
+
 	use super::*;
+
+	/// The syntax set `build.rs` serializes, rebuilt from source.
+	static SOURCE_SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(builder::build_syntax_set);
+
+	#[test]
+	fn generated_syntax_set_preserves_unique_supported_languages() {
+		let expected: BTreeSet<String> = SOURCE_SYNTAX_SET
+			.syntaxes()
+			.iter()
+			.map(|syntax| syntax.name.clone())
+			.collect();
+		let actual = get_supported_languages();
+		let distinct: BTreeSet<String> = actual.iter().cloned().collect();
+		assert_eq!(actual.len(), distinct.len(), "supported language list contains duplicates");
+		assert_eq!(distinct, expected);
+	}
+
+	#[test]
+	fn generated_syntax_set_preserves_highlighting() {
+		let colors = test_colors();
+		let ss = &*SOURCE_SYNTAX_SET;
+		let extra_snippets = [
+			("julia", "function greet(name)\n  # Unicode\n  println(\"héllo $name\")\nend\n"),
+			("nix", "let name = \"world\"; in { message = ''héllo ${name}''; }\n"),
+			("mermaid", "graph TD\n  A[\"Start\"] --> B\n  %% note\n"),
+			(
+				"astro",
+				"---\nimport { Menu } from '@lucide/astro';\nconst name: string = \
+				 'world';\n---\n<style>a { color: red; }</style>\n<a>{name}</a>\n",
+			),
+		];
+		for &(language, code) in WARM_SNIPPETS.iter().chain(extra_snippets.iter()) {
+			let syntax = find_syntax(ss, language).unwrap();
+			let mut parse_state = ParseState::new(syntax);
+			let mut scope_stack = ScopeStack::new();
+			let mut expected = String::new();
+			highlight_into(
+				code,
+				ss,
+				&mut parse_state,
+				&mut scope_stack,
+				&palette(&colors),
+				&mut expected,
+			);
+			assert_eq!(
+				highlight_code_impl(code, Some(language), &colors),
+				expected,
+				"generated grammar changed {language} highlighting"
+			);
+		}
+	}
 
 	fn test_colors() -> HighlightColors {
 		HighlightColors {
@@ -783,6 +803,74 @@ mod tests {
 		}
 	}
 
+	/// Every alias must reach its own target grammar: a target syntect lacks
+	/// renders the language plain while `supportsLanguage` used to report it
+	/// supported (TOML, PowerShell, SCSS, …), and a syntax name or extension
+	/// claimed by an earlier lookup step must not shadow it (`sass` resolved to
+	/// Ruby Haml).
+	#[test]
+	fn every_alias_resolves_to_its_target() {
+		let ss = get_syntax_set();
+		let wrong: Vec<_> = LANG_ALIASES
+			.iter()
+			.flat_map(|(aliases, target)| aliases.iter().map(move |alias| (*alias, *target)))
+			.filter_map(|(alias, target)| {
+				let want = ss
+					.find_syntax_by_name(target)
+					.or_else(|| ss.find_syntax_by_token(target))
+					.map(|syntax| syntax.name.as_str());
+				let found = find_syntax(ss, alias).map(|syntax| syntax.name.as_str());
+				(want.is_none() || found != want).then_some((alias, target, found))
+			})
+			.collect();
+		assert!(wrong.is_empty(), "aliases missing their target (alias, target, found): {wrong:?}");
+		assert!(!supports_language_impl("no-such-lang"));
+	}
+
+	/// Every vendored grammar parses a representative line: an unresolved
+	/// cross-grammar include (SCSS → Sass, `CMake` → its command table, Elixir →
+	/// its regex syntax, Protobuf → its text format) fails the parse, and a
+	/// failed line renders unhighlighted.
+	#[test]
+	fn vendored_grammars_parse() {
+		let ss = get_syntax_set();
+		for (lang, code) in [
+			("toml", "[a.b]\nk = \"v\" # c\n"),
+			("dockerfile", "FROM rust:1 AS build\nRUN cargo build\n"),
+			("tf", "resource \"x\" \"y\" { count = 2 }\n"),
+			("graphql", "query Q($id: ID!) { user(id: $id) { name } }\n"),
+			("ps1", "$x = Get-Item -Path 'a' # c\n"),
+			("proto", "syntax = \"proto3\";\nmessage M { int32 a = 1; }\noption (o) = { a: 1 };\n"),
+			("cmake", "cmake_minimum_required(VERSION 3.10)\nstring(REGEX MATCH \"a+\" out \"aa\")\n"),
+			("ini", "[s]\nk=v ; c\n"),
+			("gitignore", "# c\n!/target/*.rs\n"),
+			("scss", "$c: #fff; a { b { color: $c; } }\n"),
+			("sass", "a\n  color: red\n"),
+			("vim", "let g:x = 1 \" c\n"),
+			("kt", "fun main() { val s = \"x$y\" }\n"),
+			("swift", "func f() -> Int { return \"\\(1)\".count }\n"),
+			("ex", "defmodule M do\n  def f(x), do: ~r/a+/\nend\n"),
+		] {
+			let syntax = find_syntax(ss, lang).unwrap_or_else(|| panic!("{lang}"));
+			let mut parse_state = ParseState::new(syntax);
+			for line in syntect::util::LinesWithEndings::from(code) {
+				assert!(parse_state.parse_line(line, ss).is_ok(), "{lang}: {line:?}");
+			}
+		}
+	}
+
+	/// Regression: code inside a Python f-string's `{…}` painted as string.
+	/// The grammar clears the `string` scope there (a `Clear` op, which was
+	/// dropped) and keeps `meta.string` around the whole literal (which counted
+	/// as string); either alone repaints `{b}`.
+	#[test]
+	fn interpolated_code_is_not_string() {
+		let out = highlight_code_impl("s = f\"a {b} c {d!r}\"\n", Some("python"), &test_colors());
+		assert!(out.contains("<s>a "), "the string lost its color: {out}");
+		assert!(!out.contains("<s>b"), "interpolated expression painted as string: {out}");
+		assert!(!out.contains("<s>d"), "interpolated name painted as string: {out}");
+	}
+
 	#[test]
 	fn stream_chunks_match_whole_text() {
 		let colors = test_colors();
@@ -799,6 +887,39 @@ mod tests {
 			highlight_into(chunk, ss, &mut parse_state, &mut scope_stack, &pal, &mut chunked);
 		}
 		assert_eq!(chunked, whole);
+	}
+
+	/// Regression (#15008): `pwsh` fences resolve to PowerShell and keep their
+	/// colors across lines: a command continued after `|` is not painted as a
+	/// string, text after a `{0:N2}` placeholder stays string, and a
+	/// C#-looking here-string body still parses (an unresolved embedded
+	/// grammar fails the line, which renders uncolored).
+	#[test]
+	fn highlights_multiline_pwsh_fences() {
+		let code = "Get-ChildItem |\n  Where-Object { $_.Length -gt 1 }\n\"{0:N2} total\" -f \
+		            $x\nAdd-Type @'\nusing System;\n'@\nWrite-Host \"done\" # tail\n";
+		let out = highlight_code_impl(code, Some("pwsh"), &test_colors());
+		let lines: Vec<&str> = out.lines().collect();
+		assert!(
+			!lines[1].contains("<s>Where-Object"),
+			"piped command painted as string: {}",
+			lines[1]
+		);
+		assert!(
+			lines[2].contains("<s>") && lines[2].contains("total"),
+			"format string lost color: {}",
+			lines[2]
+		);
+		assert!(
+			lines[4].contains("<s>using System;"),
+			"here-string body lost string color: {}",
+			lines[4]
+		);
+		assert!(
+			lines[6].contains("<s>done") && lines[6].contains("<c>"),
+			"trailing line lost colors: {}",
+			lines[6]
+		);
 	}
 
 	#[test]
@@ -833,6 +954,28 @@ mod tests {
 		assert!(out.contains("<k>-->"));
 		assert!(out.contains("<c> note"));
 	}
+
+	/// A Markdown table header must stay recognisable however long its first
+	/// row is — many inline code spans, or many backslash escapes — so the
+	/// row separator keeps its punctuation colour. syntect's built-in grammar
+	/// abandons the table lookahead on these rows, so this also pins the
+	/// vendored grammar as the one resolved for `markdown`.
+	#[test]
+	fn markdown_recognises_table_headers_after_many_inline_spans() {
+		let colors = test_colors();
+		let spans = ["`a`"; 16].join(" ");
+		let escapes = "\\*".repeat(20);
+		for (case, first_row) in [("inline code spans", &spans), ("escaped asterisks", &escapes)] {
+			let out =
+				highlight_code_impl(&format!("{first_row} | x\n---|---\n"), Some("markdown"), &colors);
+			let first = out.lines().next().unwrap();
+			assert!(
+				first.contains("<p>|"),
+				"{case}: table separator lost punctuation highlighting: {first}"
+			);
+		}
+	}
+
 	/// Regression: with the JavaScript grammar, TS type annotations
 	/// (generic return types, arrow-type params) corrupted parser state, and a
 	/// later template literal left an unterminated string scope that painted

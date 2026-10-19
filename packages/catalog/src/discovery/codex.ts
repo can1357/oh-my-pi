@@ -69,7 +69,6 @@ const codexModelEntrySchema = type({
 	"priority?": "unknown",
 	"prefer_websockets?": "unknown",
 	"use_responses_lite?": "unknown",
-	"tool_mode?": "unknown",
 	"available_access_programs?": "unknown",
 	"service_tiers?": "unknown",
 });
@@ -302,7 +301,6 @@ interface ParsedCodexModelEntry {
 	input: ("text" | "image")[];
 	preferWebsockets: boolean;
 	useResponsesLite: boolean;
-	toolMode: boolean;
 	priority: number;
 	/** Advertised tier ids; `undefined` when the entry has no `service_tiers` array. */
 	serviceTiers: string[] | undefined;
@@ -356,7 +354,6 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 		input: normalizeInputModalities(payload.input_modalities),
 		preferWebsockets: toBoolean(payload.prefer_websockets) === true,
 		useResponsesLite: toBoolean(payload.use_responses_lite) === true,
-		toolMode: payload.tool_mode === "code_mode_only",
 		priority: toFiniteNumber(payload.priority) ?? Number.MAX_SAFE_INTEGER,
 		serviceTiers,
 	};
@@ -422,7 +419,6 @@ function buildNormalizedCodexModel(
 			maxTokens,
 			...(parsed.preferWebsockets ? { preferWebsockets: true } : {}),
 			...(parsed.useResponsesLite ? { useResponsesLite: true } : {}),
-			...(parsed.toolMode ? { toolMode: "code_mode_only" as const } : {}),
 			...(parsed.serviceTiers !== undefined ? { serviceTiers: parsed.serviceTiers } : {}),
 			...(parsed.priority !== Number.MAX_SAFE_INTEGER ? { priority: parsed.priority } : {}),
 		},

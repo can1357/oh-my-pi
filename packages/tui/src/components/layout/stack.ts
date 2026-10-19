@@ -140,6 +140,13 @@ export class Stack implements Component, MouseRoutable {
 		}
 	}
 
+	releaseRenderCaches(): void {
+		this.#memo = undefined;
+		for (const child of uniqueLayoutComponents(this.#children.map(item => item.content))) {
+			child.releaseRenderCaches?.();
+		}
+	}
+
 	dispose(): void {
 		for (const child of uniqueLayoutComponents(this.#children.map(item => item.content))) {
 			child.dispose?.();

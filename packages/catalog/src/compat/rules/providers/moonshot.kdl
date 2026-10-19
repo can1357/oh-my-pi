@@ -6,6 +6,8 @@ provider "moonshot" {
 	// as a fallback so China users need not learn MOONSHOT_API_KEY. (#2883)
 	env "MOONSHOT_API_KEY" "KIMI_API_KEY"
 	discovery label="Moonshot"
+	// Moonshot's China platform, selected with MOONSHOT_BASE_URL (#2883).
+	endpoint-hosts "api.moonshot.cn"
 
 	class "kimi" {
 		// Replaces the Moonshot Kimi thinking-format branch.
@@ -29,6 +31,17 @@ provider "moonshot" {
 		}
 		family "k3" {
 			input-modalities "text" "image"
+		}
+	}
+	// stencil.so reports a $3 K3 cache write; Moonshot bills only cache hits
+	// ($0.30) and misses (the $3 input rate), with no cache-write charge.
+	// https://platform.moonshot.ai/docs/pricing/chat-k3
+	models "kimi-k3" {
+		cost-patch {
+			input 3.0
+			output 15.0
+			cache-read 0.3
+			cache-write 0.0
 		}
 	}
 	// The /models roster carries no modality metadata for the named vision/vl

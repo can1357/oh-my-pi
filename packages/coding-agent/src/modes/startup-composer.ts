@@ -118,6 +118,7 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 		showHardwareCursor: update.showHardwareCursor,
 		maxInlineImages: update.maxInlineImages,
 		resizeScrollback: update.resizeScrollback,
+		completeScrollback: update.completeScrollback,
 		imeSafeCursor: update.imeSafeCursor,
 		autocompleteMaxVisible: update.autocompleteMaxVisible,
 		spellingTypoDetection: update.spellingTypoDetection,

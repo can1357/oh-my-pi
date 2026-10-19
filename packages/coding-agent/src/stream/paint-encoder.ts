@@ -25,22 +25,32 @@ export const STREAM_FLUSH_INTERVAL_MS = 50;
  */
 export function normalizeStreamRow(row: string): string {
 	if (row.includes(IMAGE_PLACEHOLDER)) return "[image]";
+	// Kept text is appended a run at a time: `runStart` opens the current run
+	// of printable code units, flushed whenever a dropped unit or escape ends it.
 	let output = "";
+	let runStart = 0;
 	let image = false;
 	for (let index = 0; index < row.length;) {
-		if (row.charCodeAt(index) !== 0x1b) {
-			const code = row.charCodeAt(index);
-			if ((code >= 0x20 && (code < 0x7f || code > 0x9f)) || code === 0x09) output += row[index];
+		const code = row.charCodeAt(index);
+		if (code !== 0x1b) {
+			if (!((code >= 0x20 && (code < 0x7f || code > 0x9f)) || code === 0x09)) {
+				if (runStart < index) output += row.slice(runStart, index);
+				runStart = index + 1;
+			}
 			index++;
 			continue;
 		}
+		if (runStart < index) output += row.slice(runStart, index);
 		const kind = row[index + 1];
 		if (kind === "[") {
 			let end = index + 2;
 			while (end < row.length && (row.charCodeAt(end) < 0x40 || row.charCodeAt(end) > 0x7e)) end++;
-			if (end >= row.length) break;
+			if (end >= row.length) {
+				runStart = row.length;
+				break;
+			}
 			if (row[end] === "m") output += row.slice(index, end + 1);
-			index = end + 1;
+			index = runStart = end + 1;
 			continue;
 		}
 		if (kind === "]" || kind === "_" || kind === "P") {
@@ -75,16 +85,19 @@ export function normalizeStreamRow(row: string): string {
 				if (nested === "[image]") image = true;
 				else output += nested;
 			}
-			index = sequenceEnd;
+			index = runStart = sequenceEnd;
 			continue;
 		}
 		// ESC controls are paint mechanics rather than row content. Consume any
 		// intermediate bytes as well as the final byte (for example ESC ( 0).
 		let end = index + 1;
 		while (end < row.length && row.charCodeAt(end) >= 0x20 && row.charCodeAt(end) <= 0x2f) end++;
-		index = Math.min(row.length, end + 1);
+		index = runStart = Math.min(row.length, end + 1);
 	}
-	return image ? "[image]" : output;
+	if (image) return "[image]";
+	if (runStart === 0) return row;
+	if (runStart < row.length) output += row.slice(runStart);
+	return output;
 }
 
 /**
@@ -94,8 +107,12 @@ export function normalizeStreamRow(row: string): string {
  */
 export class StreamPaintEncoder {
 	#redactor: StreamRedactor;
+	/** Raw rows of the latest paint; normalized and redacted only when drained. */
+	#pendingRawViewport: readonly string[] | undefined;
+	/** Already-encoded viewport awaiting (re)send; set only by {@link resync}. */
 	#pendingViewport: StreamRow[] | undefined;
-	#pendingHistory: StreamRow[] = [];
+	/** Raw history rows; normalized and redacted only when drained. */
+	#pendingHistory: string[] = [];
 	#pendingHistorySkipped = 0;
 	#pendingReset = false;
 	#pendingForceFull = false;
@@ -106,7 +123,7 @@ export class StreamPaintEncoder {
 	#lastViewport: StreamRow[] | undefined;
 	#lastAlt: boolean | undefined;
 	#pendingAlt = false;
-	/** Raw → normalized+redacted rows of the previous paint; most rows repeat frame to frame. */
+	/** Raw → normalized+redacted rows of the last drained viewport; most rows repeat frame to frame. */
 	#rowCache = new Map<string, StreamRow>();
 
 	/** `size` is the terminal geometry the consumer already announced (e.g. in `hello`). */
@@ -122,6 +139,7 @@ export class StreamPaintEncoder {
 			this.#pendingReset ||
 			this.#pendingHistory.length > 0 ||
 			this.#pendingHistorySkipped > 0 ||
+			this.#pendingRawViewport !== undefined ||
 			this.#pendingViewport !== undefined
 		);
 	}
@@ -134,11 +152,12 @@ export class StreamPaintEncoder {
 			this.#pendingHistorySkipped = 0;
 		}
 		if (paint.history.length > 0) {
-			this.#pendingHistory.push(...paint.history.map(row => this.#redactor.redactRow(normalizeStreamRow(row))));
+			for (const row of paint.history) this.#pendingHistory.push(row);
 			const capacity = this.#pendingHistorySkipped > 0 ? STREAM_HISTORY_LIMIT - 1 : STREAM_HISTORY_LIMIT;
 			if (this.#pendingHistory.length > capacity) {
-				this.#pendingHistorySkipped += this.#pendingHistory.length - (STREAM_HISTORY_LIMIT - 1);
-				this.#pendingHistory = this.#pendingHistory.slice(-(STREAM_HISTORY_LIMIT - 1));
+				const excess = this.#pendingHistory.length - (STREAM_HISTORY_LIMIT - 1);
+				this.#pendingHistorySkipped += excess;
+				this.#pendingHistory.splice(0, excess);
 			}
 		}
 		if (paint.columns !== this.#pendingColumns || paint.rows !== this.#pendingRows) this.#pendingForceFull = true;
@@ -148,10 +167,11 @@ export class StreamPaintEncoder {
 		this.#pendingAlt = paint.alt;
 		this.#pendingColumns = paint.columns;
 		this.#pendingRows = paint.rows;
-		this.#pendingViewport = this.#normalizeViewport(paint.viewport);
+		this.#pendingRawViewport = paint.viewport;
+		this.#pendingViewport = undefined;
 	}
 
-	/** Redact rows pushed from now on with `redactor`; cached rows are dropped so the next paint re-redacts. */
+	/** Redact rows drained from now on with `redactor`; cached rows are dropped so the next drain re-redacts. */
 	setRedactor(redactor: StreamRedactor): void {
 		this.#redactor = redactor;
 		this.#rowCache.clear();
@@ -160,7 +180,7 @@ export class StreamPaintEncoder {
 	/** Make the next drain emit a full viewport snapshot, re-sending the last one when nothing is pending. */
 	resync(): void {
 		this.#pendingForceFull = true;
-		this.#pendingViewport ??= this.#lastViewport;
+		if (this.#pendingRawViewport === undefined) this.#pendingViewport ??= this.#lastViewport;
 	}
 
 	/**
@@ -172,10 +192,10 @@ export class StreamPaintEncoder {
 		const frames: StreamScreenFrame[] = [];
 		if (this.#pendingReset) frames.push({ t: "reset" });
 		if (this.#pendingHistory.length > 0 || this.#pendingHistorySkipped > 0) {
+			// History rows usually just scrolled out of the cached viewport.
+			const history = this.#encodeRows(this.#pendingHistory, new Map());
 			const rows =
-				this.#pendingHistorySkipped > 0
-					? [`… (${this.#pendingHistorySkipped} rows skipped)`, ...this.#pendingHistory]
-					: this.#pendingHistory;
+				this.#pendingHistorySkipped > 0 ? [`… (${this.#pendingHistorySkipped} rows skipped)`, ...history] : history;
 			frames.push({ t: "history", rows });
 		}
 		const resized = this.#pendingColumns !== this.#lastColumns || this.#pendingRows !== this.#lastRows;
@@ -185,18 +205,27 @@ export class StreamPaintEncoder {
 			this.#lastRows = this.#pendingRows;
 		}
 
-		const viewport = this.#pendingViewport;
+		const raw = this.#pendingRawViewport;
+		const pendingViewport = this.#pendingViewport;
 		const forceFull = this.#pendingForceFull || this.#pendingReset || resized || this.#pendingAlt;
 		this.#pendingReset = false;
 		this.#pendingHistory = [];
 		this.#pendingHistorySkipped = 0;
 		this.#pendingForceFull = false;
-		this.#pendingViewport = undefined;
-		if (!viewport) return frames;
+		if (raw === undefined && pendingViewport === undefined) return frames;
 		if (options?.screen === false) {
-			this.#pendingViewport = viewport;
 			this.#pendingForceFull = true;
 			return frames;
+		}
+		this.#pendingRawViewport = undefined;
+		this.#pendingViewport = undefined;
+		let viewport: StreamRow[];
+		if (raw === undefined) {
+			viewport = pendingViewport!;
+		} else {
+			const cache = new Map<string, StreamRow>();
+			viewport = this.#encodeRows(raw, cache);
+			this.#rowCache = cache;
 		}
 
 		const last = this.#lastViewport;
@@ -217,15 +246,13 @@ export class StreamPaintEncoder {
 		return frames;
 	}
 
-	#normalizeViewport(rows: readonly string[]): StreamRow[] {
-		const cache = new Map<string, StreamRow>();
-		const out = rows.map(row => {
+	/** Normalize and redact rows, reusing the last viewport's results; fills `cache` with this call's results. */
+	#encodeRows(rows: readonly string[], cache: Map<string, StreamRow>): StreamRow[] {
+		return rows.map(row => {
 			let normalized = cache.get(row) ?? this.#rowCache.get(row);
 			if (normalized === undefined) normalized = this.#redactor.redactRow(normalizeStreamRow(row));
 			cache.set(row, normalized);
 			return normalized;
 		});
-		this.#rowCache = cache;
-		return out;
 	}
 }

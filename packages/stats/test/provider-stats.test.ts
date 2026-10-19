@@ -231,6 +231,71 @@ describe("computeUsageWindowStats", () => {
 			"Usage (Google) · Weekly",
 		]);
 	});
+
+	// Codex ids name a report slot: Team reports 5h as `primary` and 7d as
+	// `secondary`, while weekly-only ProLite reports 7d as `primary` (#15664).
+	const codex = (accountKey: string, slot: string, window: string | null, usedFraction: number) =>
+		snapshot({
+			recordedAt: T0,
+			provider: "openai-codex",
+			accountKey,
+			limitId: `openai-codex:${slot}`,
+			label: window ?? "7 days",
+			windowLabel: window,
+			usedFraction,
+		});
+	const inOrder = (rows: UsageSnapshotRow[]) => rows.map((row, i) => ({ ...row, recordedAt: T0 + i * MINUTE }));
+
+	for (const lastReporter of ["team", "prolite"]) {
+		it(`groups Codex slots by recorded window across plans when ${lastReporter} reports last`, () => {
+			const team = [
+				codex("team", "primary", "5 hours", 0.2),
+				codex("team", "secondary", "7 days", 0.1),
+				codex("team", "primary", "5 hours", 0.5),
+				codex("team", "secondary", "7 days", 0.2),
+			];
+			const prolite = [codex("prolite", "primary", "7 days", 0.3), codex("prolite", "primary", "7 days", 0.6)];
+			const rows = inOrder(lastReporter === "team" ? [...prolite, ...team] : [...team, ...prolite]);
+			const { usageSeries, windowInsights } = computeUsageWindowStats(rows, new Map());
+
+			const summary = windowInsights
+				.map(i => ({ label: i.windowLabel, accounts: i.accounts, consumed: i.fractionConsumed }))
+				.sort((a, b) => a.label.localeCompare(b.label));
+			expect(summary).toEqual([
+				{ label: "5 hours", accounts: 1, consumed: expect.closeTo(0.3, 10) },
+				{ label: "7 days", accounts: 2, consumed: expect.closeTo(0.4, 10) },
+			]);
+			expect(usageSeries.map(s => `${s.accountKey} ${s.windowLabel}`).sort()).toEqual([
+				"prolite 7 days",
+				"team 5 hours",
+				"team 7 days",
+			]);
+		});
+	}
+
+	it("keeps same-duration Codex meters and windows of unknown duration apart", () => {
+		const rows = inOrder([
+			codex("team", "secondary", "7 days", 0.1),
+			codex("prolite", "primary", "7 days", 0.2),
+			snapshot({
+				recordedAt: T0,
+				provider: "openai-codex",
+				limitId: "openai-codex:spark:secondary",
+				label: "7 days (Spark)",
+				windowLabel: "7 days",
+			}),
+			// Duration unreported, or a row predating window labels: never guess the window from the slot.
+			codex("team", "primary", "Primary window", 0.3),
+			codex("legacy", "primary", null, 0.4),
+		]);
+		const { windowInsights } = computeUsageWindowStats(rows, new Map());
+		expect(windowInsights.map(i => `${i.windowLabel} ×${i.accounts}`).sort()).toEqual([
+			"7 days (Spark) ×1",
+			"7 days ×1",
+			"7 days ×2",
+			"Primary window ×1",
+		]);
+	});
 });
 
 describe("sumFleetTokens", () => {

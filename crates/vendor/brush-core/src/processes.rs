@@ -112,7 +112,7 @@ impl ChildProcess {
 
 	/// Waits for the process to exit.
 	///
-	/// If a cancellation token is provided and triggered, the process will be killed.
+	/// Cancellation gives the process a bounded TERM grace before killing it.
 	pub async fn wait(
 		&mut self,
 		cancel_token: Option<CancellationToken>,
@@ -150,6 +150,18 @@ impl ChildProcess {
 					break Ok(ProcessWaitResult::Completed(output))
 				},
 				_ = &mut cancelled => {
+					// The embedding host terminates the process group/tree. Allow
+					// its TERM wave to finish without sending a duplicate TERM or
+					// racing it with an immediate hard kill.
+					#[cfg(unix)]
+					{
+						if let Ok(Ok(_)) = tokio::time::timeout(
+							std::time::Duration::from_secs(1),
+							&mut self.exec_future,
+						).await {
+							self.reaped = true;
+						}
+					}
 					self.kill();
 					self.write_completion_marker(130);
 					break Ok(ProcessWaitResult::Cancelled)
@@ -341,4 +353,39 @@ pub enum ProcessWaitResult {
 	Stopped,
 	/// The process was killed due to cancellation.
 	Cancelled,
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+	use std::{io::{Read, Seek, SeekFrom}, time::Duration};
+
+	use super::*;
+
+	#[tokio::test]
+	async fn cancellation_writes_marker_even_when_wait_fails_during_grace() {
+		let mut marker = tempfile::tempfile().expect("marker file");
+		let mut child = ChildProcess {
+			exec_future: Box::pin(async {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+				Err(std::io::Error::other("wait failed during cancellation"))
+			}),
+			reaped: false,
+			pid: None,
+			pgid: None,
+			stop_pids: None,
+			completion_marker: None,
+		};
+		child.set_completion_marker(
+			OpenFile::from(marker.try_clone().expect("marker writer")),
+			"<exit>".into(),
+			"</exit>".into(),
+		);
+		let cancel = CancellationToken::new();
+		cancel.cancel();
+		assert!(matches!(child.wait(Some(cancel)).await, Ok(ProcessWaitResult::Cancelled)));
+		marker.seek(SeekFrom::Start(0)).expect("rewind marker");
+		let mut output = String::new();
+		marker.read_to_string(&mut output).expect("read marker");
+		assert_eq!(output, "<exit>130</exit>");
+	}
 }

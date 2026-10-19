@@ -21,6 +21,11 @@ function sessionOver(manager: SessionManager): { session: RpcOpenSessionSession;
 		get messages(): AgentMessage[] {
 			return manager.getEntries().flatMap(entry => (entry.type === "message" ? [entry.message] : []));
 		},
+		model: undefined,
+		async setModel() {
+			transitions.push("setModel");
+			return { switched: true };
+		},
 		async newSession(options) {
 			transitions.push("new");
 			await manager.newSession(options);

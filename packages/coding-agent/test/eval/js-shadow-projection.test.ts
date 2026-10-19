@@ -34,7 +34,7 @@ describe("projectJavaScriptShadowPlan", () => {
 const source = await tool.read({ path: "src/path.txt" });
 const path = \`src/${interpolation}\`;
 const target = await tool.read({ path });
-display(target);
+print(target);
 `);
 		expect(plan.barrier).toBeUndefined();
 		expect(plan.operations).toHaveLength(2);

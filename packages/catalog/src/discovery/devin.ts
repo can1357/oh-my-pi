@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, slugify } from "@oh-my-pi/pi-utils";
 import { collapseVariants, type EffortVariantFamily } from "../compat/collapse";
 import { Effort, THINKING_EFFORTS } from "../effort";
 import type { DevinCompat, FetchImpl, ModelCost, ModelSpec } from "../types";
@@ -9,6 +9,7 @@ import {
 	type ClientModelConfig,
 	DisplayOption,
 	GetCliModelConfigsRequestSchema,
+	type GetCliModelConfigsResponse,
 	GetCliModelConfigsResponseSchema,
 	type Metadata,
 	MetadataSchema,
@@ -105,8 +106,8 @@ function devinCostDenominatorTokens(denominator: string): number {
 /**
  * Per-million-token rates from the config's cost dimensions. `COST_FUZZY` marks
  * an estimated rate, not a different unit, so both kinds are read. `cacheWrite`
- * has no Cascade dimension — Devin bills cache writes at the input rate — and
- * stays 0.
+ * has no Cascade dimension and stays 0; the provider's `cache-write-rate` rules
+ * supply Devin's published rate.
  *
  * Composite configs (`fusion`) flatten their own rate card plus every
  * dispatched component's card into one `modelDimensions` list. A `Sidekick`
@@ -228,10 +229,7 @@ function collectDevinFamilyLane(lanes: Map<string, DevinFamilyLane>, config: Cli
 	if (thinking === false) effort = "off";
 
 	// Family label as an OMP id: "GPT-5.6 Sol" -> "gpt-5-6-sol".
-	const baseId = label
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
+	const baseId = slugify(label);
 	if (!baseId) return;
 	const laneId = `${baseId}${oneMillionContext ? "-1m" : ""}${fast ? "-fast" : ""}`;
 	let lane = lanes.get(laneId);
@@ -346,7 +344,7 @@ export async function fetchDevinModels(
 				GetCliModelConfigsResponseSchema,
 				new Uint8Array(await response.arrayBuffer()),
 			);
-			return decoded ? normalizeDevinModels(decoded.clientModelConfigs, options.baseUrl) : null;
+			return decoded ? normalizeDevinModels(decoded, options.baseUrl) : null;
 		} catch {
 			return null;
 		}
@@ -477,7 +475,9 @@ function devinFusionLeadUid(uid: string, liveUids: ReadonlyMap<string, unknown>)
 /**
  * Point a Fusion pairing at its lead. omp runs only the lead (the sidekick is
  * paired by the native client), so the limits and pricing a caller budgets
- * against are the lead's, not the composite card's.
+ * against are the lead's, not the composite card's. The composite uid names no
+ * model, so `buildModel` resolves the row under its `requestModelId` and the
+ * lead's catalog rules (cache-write rate, long-context tier) apply there.
  */
 function routeDevinFusionLead(spec: ModelSpec<"devin-agent">, lead: ModelSpec<"devin-agent">): void {
 	spec.requestModelId = lead.id;
@@ -497,9 +497,12 @@ function routeDevinFusionLead(spec: ModelSpec<"devin-agent">, lead: ModelSpec<"d
 }
 
 function normalizeDevinModels(
-	configs: readonly ClientModelConfig[],
+	response: GetCliModelConfigsResponse,
 	baseUrlOverride: string | undefined,
 ): ModelSpec<"devin-agent">[] {
+	const configs = response.clientModelConfigs;
+	// The model the native client starts this account on (plan-dependent).
+	const accountDefaultUid = response.defaultOverrideModelConfig?.modelUid.trim();
 	const baseUrl = baseUrlOverride ?? DEVIN_DEFAULT_BASE_URL;
 	const specs: ModelSpec<"devin-agent">[] = [];
 	const seen = new Set<string>();
@@ -539,6 +542,7 @@ function normalizeDevinModels(
 		if (lead === null) continue;
 		const spec = devinModelSpec(config, uid, baseUrl, isAssignModelRouter);
 		if (lead !== undefined) routeDevinFusionLead(spec, devinModelSpec(liveConfigs.get(lead)!, lead, baseUrl, false));
+		if (uid === accountDefaultUid) spec.isProviderDefault = true;
 		specs.push(spec);
 		// A router is a server-side dispatcher, not an effort tier: it stays a
 		// standalone model even when upstream files it under a family.
@@ -554,5 +558,18 @@ function normalizeDevinModels(
 	const families = devinDynamicFamilies(lanes.values());
 	const dynamic = families.length > 0 ? collapseVariants(specs, { table: { families } }) : specs;
 	const collapsed = collapseVariants(dynamic);
+	// The account default outranks its family's own default lane when an effort
+	// routes to it, from server metadata or the static table: the family starts
+	// on that wire uid and effort. Other lanes (a no-thinking `off` default) keep
+	// the family's own default.
+	const accountFamily = collapsed.find(spec => spec.isProviderDefault && spec.thinking?.effortRouting);
+	const accountEffort = THINKING_EFFORTS.find(
+		effort => accountFamily?.thinking?.effortRouting?.[effort] === accountDefaultUid,
+	);
+	if (accountFamily?.thinking && accountEffort !== undefined) {
+		accountFamily.thinking = { ...accountFamily.thinking, defaultLevel: accountEffort };
+		if (accountFamily.id === accountDefaultUid) delete accountFamily.requestModelId;
+		else accountFamily.requestModelId = accountDefaultUid;
+	}
 	return collapsed.sort((a, b) => a.id.localeCompare(b.id));
 }

@@ -41,18 +41,14 @@ import { hasWaitTool } from "../tools/wait";
 import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
-import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
+import { isScoutSpawnable, type ResolvedSpawnPolicy, resolveSpawnPolicy } from "./spawn-policy";
+import { isBundledSeance, seanceTaskGuidance, seanceTaskSchemaFields, validateSeanceParams } from "./seance";
+import { SEANCE_AGENT_NAME } from "./seance-policy";
 import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
-import {
-	type AgentProgress,
-	type SingleResult,
-	type TaskItem,
-	type TaskParams,
-	type TaskToolDetails,
-} from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { AsyncJobError, type AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
-import { AgentRegistry } from "../registry/agent-registry";
+import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { generateTaskName } from "./name-generator";
@@ -61,13 +57,16 @@ import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import {
-	invalidModelSelectorReason,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
 	StructuredSubagentError,
+	type StructuredSubagentRequest,
 } from "./structured-subagent";
 import { SpawnRun, type SpawnPermit } from "./spawn-run";
 import { type TaskLauncher, TaskLaunchSession } from "./speculative-launch";
+import type { TextTap } from "../job-widgets/text-tap";
+import type { SubagentToolResult } from "./executor";
+import { appendToolResult, createTaskWidgetInputs } from "./widget-inputs";
 
 import { cfgAsyncEnabled } from "../tools/settings";
 import {
@@ -81,6 +80,7 @@ import {
 	cfgTaskMaxRecursionDepth,
 	cfgTaskMaxRuntimeMs,
 	cfgTaskSpeculativeLaunch,
+	cfgTaskStructured,
 } from "./settings";
 
 function renderSubagentUserPrompt(assignment: string): string {
@@ -153,9 +153,18 @@ interface TaskDescriptionOptions {
 	batchEnabled: boolean;
 	effortEnabled: boolean;
 	evalToolsEnabled: boolean;
+	structured: boolean;
 	asyncEnabled: boolean;
 	ircEnabled: boolean;
+	planMode: boolean;
+	asyncGuidance: string;
 	parentSpawns: string;
+}
+
+/** Plan mode hides seance; a `spawns` list led by it defaults to the next permitted agent. */
+function defaultAgentFor(spawnPolicy: ResolvedSpawnPolicy, planMode: boolean): string {
+	if (!planMode || spawnPolicy.defaultAgent !== SEANCE_AGENT_NAME) return spawnPolicy.defaultAgent;
+	return spawnPolicy.allowedAgents?.find(agent => agent !== SEANCE_AGENT_NAME) ?? spawnPolicy.defaultAgent;
 }
 
 /** Render the tool description from a cached agent list and current settings. */
@@ -171,34 +180,43 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		const allowed = new Set(spawnPolicy.allowedAgents);
 		filteredAgents = filteredAgents.filter(agent => allowed.has(agent.name));
 	}
+	if (options.planMode) {
+		filteredAgents = filteredAgents.filter(agent => !isBundledSeance(agent));
+	}
 	const renderedAgents = filteredAgents.map(agent => ({
 		name: agent.name,
 		description: agent.description,
 		readOnly: isReadOnlyAgent(agent),
 		blocking: agent.blocking === true,
+		// Marked only while `task.structured` is off; with it on, every agent's result is structured.
+		structured: !options.structured && agent.structured === true,
 	}));
+	const seanceAgent = filteredAgents.find(agent => agent.name === SEANCE_AGENT_NAME);
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
 	return prompt.render(taskDescriptionTemplate, {
 		agents: renderedAgents,
 		scoutAvailable,
 		spawningDisabled,
-		defaultAgent: spawnPolicy.defaultAgent,
+		defaultAgent: defaultAgentFor(spawnPolicy, options.planMode),
 		isolationEnabled: options.isolationEnabled,
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
 		evalToolsEnabled: options.evalToolsEnabled,
+		structured: options.structured,
 		asyncEnabled: options.asyncEnabled,
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
+		hasStructuredAgents: renderedAgents.some(agent => agent.structured),
 		hasModelMentions: options.sessionAgents.length > 0,
+		seanceGuidance: seanceAgent && isBundledSeance(seanceAgent) ? seanceTaskGuidance : "",
 		ircEnabled: options.ircEnabled,
+		asyncGuidance: options.asyncGuidance,
 	});
 }
-
 function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
 	return {
-		isError: true,
 		content: [{ type: "text", text }],
+		isError: true,
 		details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
 	};
 }
@@ -209,10 +227,6 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
  * `schema` remains an eval-only alias and is rejected.
  */
 function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
-	if (params.tasks !== undefined && Object.hasOwn(params, "model")) {
-		return "Put each model selector on its tasks[] item, not on the batch container.";
-	}
-
 	if (Object.hasOwn(params, "schema")) {
 		return "The task tool uses `outputSchema`; rename the stale `schema` field.";
 	}
@@ -257,11 +271,8 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			if (!item || typeof item.task !== "string" || item.task.trim() === "") {
 				return `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""} is missing \`task\`. Every task needs complete, self-contained instructions.`;
 			}
-			const label = `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`;
-			const effortError = validateEffort(item.effort, label);
+			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
 			if (effortError) return effortError;
-			const modelError = invalidModelSelectorReason(item.model, label);
-			if (modelError) return modelError;
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
@@ -284,7 +295,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
 			: "Missing `task`. Provide complete, self-contained instructions for the agent.";
 	}
-	return validateEffort(params.effort, "The call") ?? invalidModelSelectorReason(params.model, "The call");
+	return validateEffort(params.effort, "The call");
 }
 
 /**
@@ -303,8 +314,9 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
 	if ("effort" in params) item.effort = params.effort;
-	if ("model" in params) item.model = params.model;
 	if ("isolated" in params) item.isolated = params.isolated;
+	if ("sourceSession" in params) item.sourceSession = params.sourceSession;
+	if ("model" in params) item.model = params.model;
 	return [item];
 }
 
@@ -327,6 +339,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
+	if ("sourceSession" in item) spawn.sourceSession = item.sourceSession;
 	if ("model" in item) spawn.model = item.model;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
@@ -348,9 +361,17 @@ interface SpawnPlan {
  * validation error the call reports instead when the shape is rejected. Shared
  * by dispatch and the speculative launcher so both derive identical spawns.
  */
-function planSpawns(rawParams: unknown, batchEnabled: boolean, defaultAgent: string): SpawnPlan | string {
+function planSpawns(
+	rawParams: unknown,
+	batchEnabled: boolean,
+	defaultAgent: string,
+	seanceAdvertised: boolean,
+): SpawnPlan | string {
 	const params = repairTaskParams(rawParams as TaskParams);
-	const error = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled);
+	const error =
+		validateShapeParams(batchEnabled, params) ??
+		validateSpawnParams(params, batchEnabled) ??
+		validateSeanceParams({ params, batchEnabled, defaultAgent, seanceAdvertised });
 	if (error) return error;
 	const items = resolveSpawnItems(params);
 	return { params, items, spawns: items.map(item => spawnParamsFor(params, item, defaultAgent)) };
@@ -650,7 +671,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
 	readonly #launcher: TaskLauncher = {
 		spawns: args => {
-			const plan = planSpawns(args, this.#isBatchEnabled(), this.#defaultAgent());
+			const plan = planSpawns(
+				args,
+				this.#isBatchEnabled(),
+				this.#defaultAgent(),
+				this.#seanceSchemaFields() !== undefined,
+			);
 			return typeof plan === "string" ? undefined : plan.spawns;
 		},
 		start: (toolCallId, spawn, index, signal) => this.#startSpeculative(toolCallId, spawn, index, signal),
@@ -688,7 +714,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
+			structured: this.#isStructured(),
 			defaultAgent: this.#defaultAgent(),
+			seanceFields: this.#seanceSchemaFields(),
 		});
 	}
 
@@ -696,24 +724,38 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return renderTaskCall(repairTaskParams(args as TaskParams), options, theme);
 	}
 
+	/** Background-job lifecycle contract; inherited by extension replacements that delegate to Task. */
+	get delegationGuidance(): string {
+		if (!cfgAsyncEnabled.get(this.session.settings)) return "";
+		return prompt.render(taskAsyncContractTemplate, {
+			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			waitTool: hasWaitTool(this.session),
+		});
+	}
+
 	/** Dynamic description that reflects current task settings. */
 	get description(): string {
 		const disabledAgents = cfgTaskDisabledAgents.get(this.session.settings);
+		const agents =
+			discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
+			this.#discoveredAgents;
+		const sessionAgents = this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [];
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
 		return renderDescription({
-			agents:
-				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
-				this.#discoveredAgents,
-			sessionAgents: this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [],
+			agents,
+			sessionAgents,
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
+			structured: this.#isStructured(),
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			planMode,
+			asyncGuidance: this.delegationGuidance,
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
 		});
 	}
@@ -729,8 +771,49 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return cfgTaskBatch.get(this.session.settings);
 	}
 
+	#isStructured(): boolean {
+		return cfgTaskStructured.get(this.session.settings);
+	}
+
+	/**
+	 * Result contract for a spawn: with `task.structured` the caller's
+	 * `outputSchema`/`schemaMode` pass through; without it the child gets no
+	 * schema or `yield` tool and returns its final message, unless its agent
+	 * declares `structured: true` (resolved in the shared subagent policy).
+	 */
+	#resultParams(params: TaskParams): Pick<StructuredSubagentRequest, "outputSchema" | "schemaMode" | "structured"> {
+		if (!this.#isStructured()) return { structured: false };
+		return {
+			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
+			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
+		};
+	}
+
+	#seanceSchemaFields() {
+		const spawnPolicy = resolveSpawnPolicy(this.session.getSessionSpawns());
+		const planMode = this.session.getPlanModeState?.()?.enabled === true;
+		const disabledAgents = cfgTaskDisabledAgents.get(this.session.settings);
+		if (
+			planMode ||
+			!spawnPolicy.enabled ||
+			disabledAgents.includes(SEANCE_AGENT_NAME) ||
+			(spawnPolicy.allowedAgents !== null && !spawnPolicy.allowedAgents.includes(SEANCE_AGENT_NAME))
+		) {
+			return undefined;
+		}
+		const agents =
+			discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
+			this.#discoveredAgents;
+		const sessionAgents = this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [];
+		const seanceAgent = [...agents, ...sessionAgents].find(agent => agent.name === SEANCE_AGENT_NAME);
+		return seanceAgent && isBundledSeance(seanceAgent) ? seanceTaskSchemaFields : undefined;
+	}
+
 	#defaultAgent(): string {
-		return resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+		return defaultAgentFor(
+			resolveSpawnPolicy(this.session.getSessionSpawns()),
+			this.session.getPlanModeState?.()?.enabled === true,
+		);
 	}
 
 	/** Session-retained id allocator; async ids are claimed before job registration. */
@@ -764,6 +847,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					spawn.detached,
 					run.timing,
 					spawn.detached ? run.onArtifactsRetained : undefined,
+					run.tools,
 				),
 			{ agentId: spawn.agentId, detached: spawn.detached },
 		);
@@ -821,10 +905,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			assignment: (params.task ?? "").trim(),
 			context: this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined,
 			agent: params.agent,
-			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
-			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
+			sourceSession: params.sourceSession,
+			model: params.model,
+			...this.#resultParams(params),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
-			...(params.model !== undefined ? { model: params.model } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
@@ -869,7 +953,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// item's agent type against the session's actual default agent.
 		const defaultAgent = this.#defaultAgent();
 		const batchEnabled = this.#isBatchEnabled();
-		const plan = planSpawns(rawParams, batchEnabled, defaultAgent);
+		const plan = planSpawns(rawParams, batchEnabled, defaultAgent, this.#seanceSchemaFields() !== undefined);
 		if (typeof plan === "string") {
 			return createTaskModeError(plan);
 		}
@@ -1136,9 +1220,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			failedSchedules.length > 0
 				? ` Failed to schedule ${failedSchedules.length} spawn${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}.`
 				: "";
-		const guidance = prompt
-			.render(taskAsyncContractTemplate, { ircEnabled, waitTool: hasWaitTool(this.session) })
-			.trim();
 		const renderSpawnFeedback = (mixed: boolean): string =>
 			prompt
 				.render(taskSpawnFeedbackTemplate, {
@@ -1152,7 +1233,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					agentLabel,
 					started,
 					scheduleFailureSummary,
-					guidance,
 				})
 				.trim();
 
@@ -1290,6 +1370,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			onUpdate,
 			onSettled,
 		} = options;
+		// A queued job launches (or adopts) its run when it starts; until then
+		// its widget has no tool tap to read.
+		let spawnRun: SpawnRun | undefined = run;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			// Isolated runs are parked without a reviver once the run ends
 			// (`finalizeSubagentLifecycle`), so "message it" would point the
@@ -1303,7 +1386,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				aborted,
 				isolated,
 				ircEnabled,
-				resumable: !isolated && (ref?.status === "idle" || ref?.status === "parked"),
+				resumable: !isolated && isResumable(ref),
 				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
 			})}`;
 		};
@@ -1329,6 +1412,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 							: undefined;
 						progress.advisor = nextProgress.advisor ?? progress.advisor;
 						progress.completionPercent = nextProgress.completionPercent ?? progress.completionPercent;
+						progress.stage = nextProgress.stage ?? progress.stage;
+						progress.watch = nextProgress.watch ?? progress.watch;
 						progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
 						progress.tokens = nextProgress.tokens;
 						progress.requests = nextProgress.requests;
@@ -1351,9 +1436,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;
 					await reportProgress(updateText, buildDetails() as unknown as Record<string, unknown>);
 				};
-				const spawnRun =
-					run ?? this.#launch({ toolCallId, params: spawnParams, index: progress.index, agentId, detached: true });
-				spawnRun.attach({
+				const activeRun = (spawnRun ??= this.#launch({
+					toolCallId,
+					params: spawnParams,
+					index: progress.index,
+					agentId,
+					detached: true,
+				}));
+				activeRun.attach({
 					signal: runSignal,
 					onUpdate: forwardSyncProgress,
 					onArtifactsRetained: cleanup => {
@@ -1373,7 +1463,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				// path: progress + onSettled have to fire even when the spawn
 				// never reached the executor, otherwise the batch aggregate state
 				// stays "running" forever.
-				const permitHeld = await spawnRun.started.then(
+				const permitHeld = await activeRun.started.then(
 					() => true,
 					() => false,
 				);
@@ -1389,7 +1479,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						`Running background task ${agentId}...`,
 						buildDetails() as unknown as Record<string, unknown>,
 					);
-					const result = await spawnRun.result;
+					const result = await activeRun.result;
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
 					// A missing result means the sync path failed at the tool level
@@ -1460,6 +1550,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				agentId,
 				queued: true,
 				ownerId: this.session.getAgentId?.() ?? undefined,
+				widgetInputs: createTaskWidgetInputs({
+					manager,
+					agentId,
+					tools: () => spawnRun?.tools,
+					progress,
+					intent: this.session.getToolCallIntent?.(toolCallId),
+				}),
 				onProgress: text => {
 					onUpdate?.({ content: [{ type: "text", text }], details: buildDetails() });
 				},
@@ -1622,6 +1719,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		detached = false,
 		launchTiming?: { invokedAt: number; acquiredAt: number },
 		onArtifactsRetained?: (cleanup: () => Promise<void>) => void,
+		tools?: TextTap,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const assignment = (params.task ?? "").trim();
@@ -1634,11 +1732,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				assignment,
 				context,
 				agent: params.agent,
-				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
-				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
+				sourceSession: params.sourceSession,
+				model: params.model,
+				...this.#resultParams(params),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
 				solutionSpace: params.solutionSpace,
-				...(params.model !== undefined ? { model: params.model } : {}),
 				...(params.tools?.length
 					? {
 							customTools: createEvalCustomTools(
@@ -1668,6 +1766,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 				maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 				signal,
+				...(tools ? { onToolResult: (result: SubagentToolResult) => appendToolResult(tools, result) } : {}),
 				onProgress: progress => {
 					latestProgress = { ...progress, recentTools: progress.recentTools.slice() };
 					onUpdate?.({
@@ -1720,7 +1819,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		mergeSummary: string,
 	): AgentToolResult<TaskToolDetails> {
 		const summary = formatTaskResultSummary(result, { totalDurationMs, mergeSummary });
-
 		return {
 			content: [{ type: "text", text: summary }],
 			details: {

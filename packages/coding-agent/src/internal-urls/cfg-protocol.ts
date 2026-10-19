@@ -103,8 +103,8 @@ export type CfgApproval = "once" | "session" | "deny" | "timeout";
 
 /** Host UI that approves `cfg://` writes, plus the disk-backed settings `/save` persists to. */
 export interface CfgApprovalHost {
-	/** Asks the user; dismissing the prompt must resolve `deny`. */
-	approve(request: CfgChangeRequest): Promise<CfgApproval>;
+	/** Asks the user; dismissing the prompt must resolve `deny`. Aborts on `options.signal`. */
+	approve(request: CfgChangeRequest, options?: { signal?: AbortSignal }): Promise<CfgApproval>;
 	/**
 	 * Called once per settings instance whose value changed, so the host can apply
 	 * side effects reserved for the user's in-process choices (a `defaultThinkingLevel`
@@ -136,10 +136,11 @@ async function decide(
 	host: CfgApprovalHost,
 	request: CfgChangeRequest,
 	sessionId: string | undefined,
+	signal?: AbortSignal,
 ): Promise<CfgApproval> {
 	const grant = sessionId !== undefined && sessionGrant?.sessionId === sessionId ? sessionGrant : undefined;
 	if (grant && (grant.save || !request.save)) return "once";
-	const answer = await host.approve(request);
+	const answer = await host.approve(request, { signal });
 	if (answer === "session" && sessionId !== undefined) {
 		sessionGrant = { sessionId, save: request.save || (grant?.save ?? false) };
 	}
@@ -429,7 +430,7 @@ export class CfgProtocolHandler implements ProtocolHandler {
 			}
 		}
 		const sessionId = callerSession(context).getSessionId?.() ?? undefined;
-		const decision = approvalQueue.then(() => decide(host, request, sessionId));
+		const decision = approvalQueue.then(() => decide(host, request, sessionId, context?.signal));
 		approvalQueue = decision.catch(() => undefined);
 		const answer = await decision;
 		if (answer === "timeout") {

@@ -38,6 +38,42 @@ tui.addChild(editor);
 tui.start();
 ```
 
+## SIXEL transparency and terminal backgrounds
+
+SIXEL has binary transparency, not fractional alpha. omp blends partially
+transparent image pixels against the terminal's reported OSC 11 background
+before quantization, preserving antialiased text and translucent details.
+Images with alpha are resized in premultiplied form before background compositing
+to prevent dark fringes and hidden-color bleed along scaled transparent edges.
+Fully transparent pixels stay transparent. Kitty and iTerm2 retain their
+existing image paths.
+
+When a new OSC 11 report changes the background RGB, SIXEL images are
+re-encoded even if the terminal stays dark or stays light. Terminals supporting
+Mode 2031 trigger this automatically. Otherwise, press Ctrl+L to refresh the
+background after changing it. This introduces no periodic polling.
+Direct terminals replay transcript history using the existing theme-change
+repaint policy; multiplexers repaint the viewport without clearing their native
+scrollback.
+
+Cached RGB is cleared when terminal ownership starts or ends, so a restarted
+session without an OSC 11 response cannot inherit the previous terminal's RGB.
+If the terminal cannot report its RGB, or an active multiplexer marks background
+queries as unreliable on the current platform, omp approximates the background
+with black for detected dark appearance or white for light. Untrusted reports
+do not override the existing appearance fallback. Exact edge-color matching is
+not guaranteed with that fallback, transparent terminal windows, or graphics
+overlapping a differently colored background.
+
+On known-broken background-query paths, such as macOS inside Zellij, native
+appearance changes also repaint SIXEL images when using a fixed theme or
+identical light/dark theme mappings. `COLORFGBG` still takes precedence over the
+native fallback; reports that leave the effective background unchanged do not
+trigger a repaint.
+
+If native TSP negotiation fails, the row renderer resumes these SIXEL refreshes.
+Expecting native support alone does not disable repainting after the failure.
+
 ## Core API
 
 ### TUI
@@ -66,14 +102,16 @@ interface Component {
 	render(width: number): readonly string[];
 	handleInput?(data: string): void;
 	invalidate?(): void;
+	releaseRenderCaches?(): void;
 }
 ```
 
-| Method               | Description                                                                                                                                                        |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `render(width)`      | Returns an array of strings, one per line. Each line **must not exceed `width`** or the TUI will error. Use `truncateToWidth()` or manual wrapping to ensure this. The result is component-owned and immutable to callers; return the same array reference when unchanged (enables renderer memoization) and a new array when content changed. |
-| `handleInput?(data)` | Called when the component has focus and receives keyboard input. The `data` string contains raw terminal input (may include ANSI escape sequences).                |
-| `invalidate?()`      | Called to clear any cached render state. Components should re-render from scratch on the next `render()` call.                                                     |
+| Method                   | Description                                                                                                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `render(width)`          | Returns an array of strings, one per line. Each line **must not exceed `width`** or the TUI will error. Use `truncateToWidth()` or manual wrapping to ensure this. The result is component-owned and immutable to callers; return the same array reference when unchanged (enables renderer memoization) and a new array when content changed. |
+| `handleInput?(data)`     | Called when the component has focus and receives keyboard input. The `data` string contains raw terminal input (may include ANSI escape sequences).                |
+| `invalidate?()`          | Called to clear any cached render state. Components should re-render from scratch on the next `render()` call.                                                     |
+| `releaseRenderCaches?()` | Drops only derived render caches. The next `render()` must return the same rows without eager rebuilds, renderer callbacks, image conversions, or child replacement. |
 
 ## Built-in Components
 
@@ -455,7 +493,7 @@ const spacer = new Spacer(2); // 2 empty lines (default: 1)
 
 ### Image
 
-Renders images inline for terminals that support the Kitty graphics protocol (Kitty, Ghostty, WezTerm, and Warp on macOS/Linux) or iTerm2 inline images. Falls back to a text placeholder on unsupported terminals.
+Renders images inline for terminals that support the Kitty graphics protocol (Kitty, Ghostty, WezTerm, and Warp on macOS/Linux), iTerm2 inline images or SIXEL. Falls back to a text placeholder on unsupported terminals.
 
 ```typescript
 interface ImageTheme {
@@ -466,16 +504,20 @@ interface ImageOptions {
 	maxWidthCells?: number;
 	maxHeightCells?: number;
 	filename?: string;
+	budget?: ImageBudget; // usually tui.imageBudget
+	requestRender?: () => void; // repaint once a SIXEL encode lands; defaults to the budget's
 }
 
 const image = new Image(
 	base64Data, // base64-encoded image data
 	"image/png", // MIME type
 	theme, // ImageTheme
-	options, // optional ImageOptions
+	{ ...options, budget: tui.imageBudget }, // optional ImageOptions
 );
 tui.addChild(image);
 ```
+
+SIXEL images encode off the JavaScript thread: the first render reserves the image's rows and the image appears on the repaint `budget` or `requestRender` triggers once the encode lands. Without either, it waits for an unrelated repaint.
 
 Supported formats: PNG, JPEG, GIF, WebP. Dimensions are parsed from the image headers automatically.
 

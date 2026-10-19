@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { withoutTerminalMultiplexer } from "./terminal-multiplexer-environment";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import {
 	type Component,
 	CURSOR_MARKER,
@@ -504,6 +504,41 @@ describe("terminal frame plans", () => {
 		expect(resized).toContain("history-one@20");
 		expect(resized).toContain("history-one@30");
 		expect(resized.slice(-2)).toEqual(["history-two@30", "editor@30"]);
+		tui.stop();
+	});
+
+	it("keeps provider history through an empty append replay and drops it on a destructive reset", async () => {
+		const terminal = new VirtualTerminal(20, 3);
+		let id = 1;
+		let pending: readonly string[] | undefined = ["history"];
+		// Commits one batch, then has nothing to replay at any width.
+		const provider: TerminalFrameProvider = {
+			renderFrame: () => ({ history: pending && { id, rows: pending }, viewport: ["editor"] }),
+			acknowledgeHistory: accepted => {
+				if (accepted !== id) return;
+				pending = undefined;
+				id++;
+			},
+			beginHistoryReplay: () => {},
+		};
+		const renderScheduler = new VirtualRenderScheduler();
+		const tui = new TUI(terminal, undefined, { renderScheduler });
+		tui.setResizeScrollback("append");
+		tui.setFrameProvider(provider);
+		tui.start();
+		await renderScheduler.settle(terminal);
+		expect(tui.hasProviderHistory()).toBe(true);
+
+		// An append-mode width replay leaves the committed rows in scrollback.
+		terminal.resize(30, 3);
+		await renderScheduler.advance(terminal, 160);
+		expect(plainBuffer(terminal)).toContain("history");
+		expect(tui.hasProviderHistory()).toBe(true);
+
+		// A destructive reset erases them, and the empty replay writes none back.
+		tui.resetDisplay();
+		await renderScheduler.settle(terminal);
+		expect(tui.hasProviderHistory()).toBe(false);
 		tui.stop();
 	});
 

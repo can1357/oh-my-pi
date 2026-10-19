@@ -196,4 +196,38 @@ describe("AuthBrokerRefresher", () => {
 			expect(rows[0].credential.refresh).toBe("fresh-refresh-from-peer");
 		}
 	});
+
+	test("a sweep whose credential reload fails resolves and the next sweep retries", async () => {
+		const now = 1_700_000_000_000;
+		await store!.saveOAuth("anthropic", {
+			access: "old",
+			refresh: "old-refresh",
+			expires: now + 60_000,
+			accountId: "a",
+		});
+		const refreshSpy = vi.spyOn(oauthUtils, "refreshOAuthToken").mockResolvedValue({
+			access: "fresh",
+			refresh: "fresh-refresh",
+			expires: now + 2 * 60 * 60_000,
+			accountId: "a",
+		});
+		storage = new AuthStorage(store!);
+		await storage.credentials.reload();
+		// The sweep runs unawaited from a timer; a rejection here is process-fatal.
+		vi.spyOn(store!, "listAuthCredentials").mockImplementationOnce(() => {
+			throw new Error("database disk image is malformed");
+		});
+		const refresher = new AuthBrokerRefresher({
+			storage,
+			refreshSkewMs: 5 * 60_000,
+			now: () => now,
+		});
+
+		await expect(refresher.tick()).resolves.toBeUndefined();
+		expect(refreshSpy).not.toHaveBeenCalled();
+
+		await refresher.tick();
+		expect(refreshSpy).toHaveBeenCalledTimes(1);
+		expect(store!.getOAuth("anthropic")?.access).toBe("fresh");
+	});
 });

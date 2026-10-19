@@ -2,7 +2,14 @@
 
 pub mod vfs;
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+	collections::HashMap,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
+	time::Duration,
+};
 
 use napi::{
 	Env, Result,
@@ -11,7 +18,7 @@ use napi::{
 };
 use napi_derive::napi;
 use pi_shell::{
-	MinimizerResult as CoreMinimizerResult, Shell as CoreShell,
+	MinimizerResult as CoreMinimizerResult, PipeTaps, Shell as CoreShell,
 	ShellExecuteOptions as CoreShellExecuteOptions, ShellOptions as CoreShellOptions,
 	ShellRunOptions as CoreShellRunOptions, ShellRunResult as CoreShellRunResult,
 	execute_shell as core_execute_shell, minimizer,
@@ -119,10 +126,7 @@ impl From<ShellOptions> for CoreShellOptions {
 			session_env:   value.session_env,
 			snapshot_path: value.snapshot_path,
 			minimizer:     value.minimizer.map(Into::into),
-			filesystem:    value
-				.filesystem
-				.map(ShellFilesystem::into_fs)
-				.unwrap_or_default(),
+			filesystem:    value.filesystem.map_or_default(ShellFilesystem::into_fs),
 		}
 	}
 }
@@ -143,6 +147,89 @@ pub struct ShellRunOptions<'env> {
 	/// Filesystem for this run only, replacing the session's; the session's
 	/// filesystem applies again to later runs.
 	pub filesystem: Option<ShellFilesystem>,
+	/// Receives a copy of every byte crossing the run's pipeline pipes.
+	pub streams:    Option<ClassInstance<'env, PipeStreams>>,
+}
+
+/// The bytes crossing one shell run's pipeline pipes, during and after the run.
+///
+/// For `cargo build 2>&1 | tail -5`, stream 1 holds what `cargo` has written
+/// so far while `tail` still holds it back. Create one per run and pass it as
+/// [`ShellRunOptions::streams`]. Streams are numbered from 1 in the order the
+/// run opened its pipes; each keeps its most recent 1 MiB, and a run keeps its
+/// 4 newest finished streams.
+#[derive(Default)]
+#[napi]
+pub struct PipeStreams {
+	taps: Arc<PipeTaps>,
+}
+
+/// A tapped pipe of a run.
+#[napi(object)]
+pub struct PipeStreamInfo {
+	/// Stream number, from 1.
+	pub id:       u32,
+	/// Source text of the stage writing into the pipe.
+	pub producer: String,
+	/// Source text of the stage reading from it.
+	pub consumer: String,
+	/// Bytes written so far, including those no longer retained.
+	pub total:    f64,
+	/// Whether bytes may still arrive.
+	pub open:     bool,
+}
+
+/// Retained bytes of a stream, as stream offsets `start..end`.
+#[napi(object)]
+pub struct PipeStreamChunk {
+	/// Stream offset of `data`'s first byte; past 0 once older bytes were
+	/// dropped.
+	pub start: f64,
+	/// Stream offset just past `data`: the next read's `from`.
+	pub end:   f64,
+	/// The bytes `start..end`.
+	pub data:  Buffer,
+	/// Whether bytes may still arrive.
+	pub open:  bool,
+}
+
+#[napi]
+impl PipeStreams {
+	#[napi(constructor)]
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// The run's retained streams, oldest first.
+	#[napi]
+	pub fn list(&self) -> Vec<PipeStreamInfo> {
+		self
+			.taps
+			.list()
+			.into_iter()
+			.map(|stream| PipeStreamInfo {
+				id:       stream.id,
+				producer: stream.producer,
+				consumer: stream.consumer,
+				total:    stream.total as f64,
+				open:     stream.open,
+			})
+			.collect()
+	}
+
+	/// Retained bytes of stream `id` from stream offset `from` on (all of them
+	/// without it), or `null` for a stream the run never opened or no longer
+	/// keeps.
+	#[napi]
+	pub fn read(&self, id: u32, from: Option<f64>) -> Option<PipeStreamChunk> {
+		let from = from.map(|from| from.max(0.0) as u64);
+		self.taps.read(id, from).map(|read| PipeStreamChunk {
+			start: read.start as f64,
+			end:   read.end as f64,
+			data:  read.data.into(),
+			open:  read.open,
+		})
+	}
 }
 
 /// Options for executing a shell command via brush-core.
@@ -272,6 +359,7 @@ impl Shell {
 			env:        options.env,
 			timeout_ms: options.timeout_ms,
 			filesystem: options.filesystem.map(ShellFilesystem::into_fs),
+			pipe_taps:  options.streams.map(|streams| Arc::clone(&streams.taps)),
 		};
 		task::future(env, "shell.run", async move {
 			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -336,10 +424,7 @@ pub fn execute_shell<'env>(
 		timeout_ms:    options.timeout_ms,
 		snapshot_path: options.snapshot_path,
 		minimizer:     options.minimizer.map(Into::into),
-		filesystem:    options
-			.filesystem
-			.map(ShellFilesystem::into_fs)
-			.unwrap_or_default(),
+		filesystem:    options.filesystem.map_or_default(ShellFilesystem::into_fs),
 	};
 	task::future(env, "shell.execute", async move {
 		let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -352,13 +437,13 @@ pub fn execute_shell<'env>(
 	})
 }
 
-/// Capacity (in chunks) of the queue between the pipe readers and the JS
-/// forwarding pump. One queued chunk is at most one pipe read (≤64 KiB), so
-/// the Rust side of the bridge holds ~4 MiB worst case before the readers'
-/// `send_async` parks — which in turn parks the child on its stdout/stderr
-/// pipe (ordinary pipe backpressure) instead of buffering the surplus in
-/// process memory (#4078).
-const BRIDGE_QUEUE_CHUNKS: usize = 64;
+/// Capacity (in chunks) of the queue between the output readers (pipe or PTY)
+/// and the JS forwarding pump. One queued chunk is at most one read (≤64 KiB),
+/// so the Rust side of the bridge holds ~4 MiB worst case before the readers'
+/// sends park — which in turn parks the child on its stdout/stderr pipe or PTY
+/// (ordinary backpressure) instead of buffering the surplus in process memory
+/// (#4078).
+pub(crate) const BRIDGE_QUEUE_CHUNKS: usize = 64;
 
 /// Maximum time a single chunk-forwarding `call_async` may take before the
 /// pump treats the JS consumer as wedged and disconnects the bridge.
@@ -371,7 +456,7 @@ const BRIDGE_QUEUE_CHUNKS: usize = 64;
 /// `write(2)` so it never exits and the run never settles (#12657). 30s is far
 /// beyond any legitimate per-callback latency while still recovering a stranded
 /// background job in bounded time.
-const FORWARD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const FORWARD_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn bridge_chunks(
 	on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
@@ -380,27 +465,50 @@ fn bridge_chunks(
 		return (None, None);
 	};
 	let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
-	let handle =
-		napi::tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, async move |payload: String| {
+	let handle = napi::tokio::spawn(pump_chunks(
+		rx,
+		FORWARD_STALL_TIMEOUT,
+		None,
+		async move |payload: String| {
 			// `call_async` resolves only after the JS callback ran, so at most
 			// one batch sits in the napi queue at a time and the JS event loop's
 			// actual consumption rate backpressures the whole pipeline. An error
 			// means the JS side is gone (env teardown) — stop forwarding.
 			on_chunk.call_async(Ok(payload)).await.is_ok()
-		}));
+		},
+	));
 	(Some(tx), Some(handle))
+}
+
+/// One item on a reader→JS bridge queue.
+pub(crate) trait BridgeItem {
+	/// The output text, or `None` for an explicit end-of-output marker. The
+	/// marker ends the pump even while a sender clone is still alive (the PTY
+	/// keeps one to inspect queue depth).
+	fn into_text(self) -> Option<String>;
+}
+
+impl BridgeItem for String {
+	fn into_text(self) -> Option<String> {
+		Some(self)
+	}
 }
 
 /// Drain `rx`, greedily coalescing queued chunks into ≤64 KiB batches, and
 /// feed each batch to `forward`, awaiting its completion before pulling more.
-/// Returns when `rx` disconnects (all senders dropped), when `forward` reports
-/// the consumer is gone, or when a single `forward` stalls past `stall_timeout`
-/// (a wedged JS consumer). In every case dropping `rx` disconnects the channel
-/// so parked/future senders fail fast and the pipe readers keep draining the
-/// child instead of wedging it (#12657).
-async fn pump_chunks(
-	rx: flume::Receiver<String>,
+/// Returns when `rx` disconnects (all senders dropped), on an end-of-output
+/// item, when `forward` reports the consumer is gone, or when a single
+/// `forward` stalls past `stall_timeout` (a wedged JS consumer). In every case
+/// dropping `rx` disconnects the channel so parked/future senders fail fast and
+/// the readers keep draining the child instead of wedging it (#12657).
+///
+/// `busy` is held from the moment a chunk is taken until its batch has been
+/// forwarded, so an empty queue with `busy` clear really means no output is
+/// in transit (the PTY's stuck-open-slave check).
+pub(crate) async fn pump_chunks<T: BridgeItem + Send>(
+	rx: flume::Receiver<T>,
 	stall_timeout: Duration,
+	busy: Option<&AtomicBool>,
 	mut forward: impl AsyncFnMut(String) -> bool,
 ) {
 	// Hard cap on one coalesced batch so the JS main thread never sees a
@@ -410,8 +518,18 @@ async fn pump_chunks(
 	// Initial capacity sized for typical bursty pipe output. Re-allocated
 	// each batch because `String` ownership is moved into the napi call.
 	const INITIAL_BATCH_CAP: usize = 8 * 1024;
+	let set_busy = |value: bool| {
+		if let Some(busy) = busy {
+			busy.store(value, Ordering::Release);
+		}
+	};
 	let mut batch = String::with_capacity(INITIAL_BATCH_CAP);
-	while let Ok(first) = rx.recv_async().await {
+	let mut ended = false;
+	while !ended
+		&& let Ok(first) = rx.recv_async().await
+		&& let Some(first) = first.into_text()
+	{
+		set_busy(true);
 		batch.push_str(&first);
 		// Greedily drain everything already queued. Child processes that
 		// write byte-at-a-time (printf-style progress, llama-cli token
@@ -419,22 +537,27 @@ async fn pump_chunks(
 		// saturating the JS main thread (~200% CPU observed) and leaving
 		// the queue draining long after the child exits.
 		while batch.len() < MAX_BATCH_BYTES {
-			match rx.try_recv() {
-				Ok(more) => batch.push_str(&more),
+			match rx.try_recv().map(BridgeItem::into_text) {
+				Ok(Some(more)) => batch.push_str(&more),
+				Ok(None) => {
+					ended = true;
+					break;
+				},
 				Err(_) => break,
 			}
 		}
 		let payload = std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
 		// A single napi `call_async` that never returns (a wedged JS consumer)
 		// must not park the pump forever: that keeps the bridge queue full, the
-		// pipe reader parked on `send_async`, and the child blocked in `write(2)`
-		// so it never exits and the run never settles (#12657). Bound each
-		// forward; on a stall, return so `rx` drops and the bridge disconnects,
+		// reader parked on its send, and the child blocked in `write(2)` so it
+		// never exits and the run never settles (#12657). Bound each forward;
+		// on a stall, return so `rx` drops and the bridge disconnects,
 		// unblocking the reader and child. The deadline resets per forward, so a
 		// slow-but-progressing consumer still drains losslessly.
-		match napi::tokio::time::timeout(stall_timeout, forward(payload)).await {
-			Ok(true) => {},
-			Ok(false) | Err(_) => return,
+		let forwarded = napi::tokio::time::timeout(stall_timeout, forward(payload)).await;
+		set_busy(false);
+		if !matches!(forwarded, Ok(true)) {
+			return;
 		}
 	}
 }
@@ -524,7 +647,7 @@ mod tests {
 		let mut received = String::with_capacity(CHUNKS * CHUNK_BYTES);
 		time::timeout(
 			Duration::from_secs(30),
-			pump_chunks(rx, FORWARD_STALL_TIMEOUT, async |payload: String| {
+			pump_chunks(rx, FORWARD_STALL_TIMEOUT, None, async |payload: String| {
 				received.push_str(&payload);
 				// Emulate a busy JS event loop: each napi callback takes a while.
 				time::sleep(Duration::from_micros(500)).await;
@@ -551,7 +674,7 @@ mod tests {
 	async fn bridge_pump_death_disconnects_channel_without_blocking_senders() {
 		let (tx, rx) = flume::bounded::<String>(4);
 		let pump =
-			tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, async |_payload: String| false));
+			tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, None, async |_payload: String| false));
 		let producer = tokio::spawn(async move {
 			let mut disconnected = 0usize;
 			for _ in 0..64 {
@@ -583,6 +706,7 @@ mod tests {
 		let handle = napi::tokio::spawn(pump_chunks(
 			rx,
 			FORWARD_STALL_TIMEOUT,
+			None,
 			async move |_payload: String| {
 				time::sleep(INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT + Duration::from_millis(100)).await;
 				observed.store(true, Ordering::Release);
@@ -621,8 +745,12 @@ mod tests {
 	async fn await_drain_returns_when_a_reader_orphans_a_sender_after_timeout() {
 		let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
 		let orphan = tx.clone();
-		let handle =
-			napi::tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, async |_payload: String| true));
+		let handle = napi::tokio::spawn(pump_chunks(
+			rx,
+			FORWARD_STALL_TIMEOUT,
+			None,
+			async |_payload: String| true,
+		));
 		drop(tx);
 		let result = Ok(ShellRunResult {
 			exit_code:   None,
@@ -663,7 +791,7 @@ mod tests {
 		// Prime one chunk so the pump enters `forward`, which then wedges.
 		tx.send("first".to_string()).expect("send primes the pump");
 		let started = time::Instant::now();
-		let pump = napi::tokio::spawn(pump_chunks(rx, STALL, async |_payload: String| {
+		let pump = napi::tokio::spawn(pump_chunks(rx, STALL, None, async |_payload: String| {
 			std::future::pending::<bool>().await
 		}));
 		time::timeout(STALL + Duration::from_secs(5), pump)
@@ -738,6 +866,7 @@ mod tests {
 						env:        None,
 						timeout_ms: None,
 						filesystem: None,
+						pipe_taps:  None,
 					},
 					Some(tx),
 					CancelToken::default(),
@@ -786,6 +915,7 @@ mod tests {
 						env:        None,
 						timeout_ms: None,
 						filesystem: None,
+						pipe_taps:  None,
 					},
 					None,
 					cancel,
@@ -825,6 +955,7 @@ mod tests {
 						env:        None,
 						timeout_ms: None,
 						filesystem: None,
+						pipe_taps:  None,
 					},
 					Some(tx),
 					cancel,

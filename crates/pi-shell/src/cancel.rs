@@ -93,7 +93,7 @@ impl CancelToken {
 			return Err(Error::msg(format!("Aborted: {reason:?}")));
 		}
 		if let Some(deadline) = self.deadline
-			&& deadline < Instant::now()
+			&& deadline <= Instant::now()
 		{
 			return Err(Error::msg("Aborted: Timeout"));
 		}
@@ -151,7 +151,7 @@ impl CancelToken {
 			return true;
 		}
 		if let Some(deadline) = self.deadline
-			&& deadline < Instant::now()
+			&& deadline <= Instant::now()
 		{
 			return true;
 		}

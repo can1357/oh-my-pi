@@ -23,6 +23,7 @@ interface CloseDocumentParams {
 
 let initializeCount = 0;
 let processId: number | null = null;
+let initializationOptions: unknown = null;
 const didOpen: Record<string, number> = {};
 const didChange: Record<string, number[]> = {};
 const didClose: string[] = [];
@@ -81,8 +82,9 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 	switch (message.method) {
 		case "initialize": {
 			initializeCount++;
-			const params = message.params as { processId?: number | null } | undefined;
+			const params = message.params as { processId?: number | null; initializationOptions?: unknown } | undefined;
 			processId = params?.processId ?? null;
+			initializationOptions = params?.initializationOptions ?? null;
 			respond(id, {
 				capabilities: {},
 				serverInfo: { name: "fake-lsp", version: String(process.pid) },
@@ -95,6 +97,7 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 			respond(id, {
 				initializeCount,
 				processId,
+				initializationOptions,
 				didOpen: { ...didOpen },
 				didChange: didChangeSnapshot,
 				didClose: [...didClose],

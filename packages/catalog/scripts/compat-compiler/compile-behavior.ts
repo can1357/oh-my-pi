@@ -5,7 +5,7 @@
  * model-operations, cursor-effort, cursor-model-parameter, quota-tiers,
  * hosted-default) and adds the pi-only nodes: api-routes, model-limits,
  * exclude-discovery-modes, exclude-models, plan-requirement, pricing-peer,
- * and retry-reset-timezone.
+ * retry-reset-timezone, and role-defaults.
  * Every node kind is optional; per-node shapes are strict.
  */
 import type {
@@ -295,6 +295,24 @@ function parsePricingPeer(node: KdlNodeView): CompiledPricingPeer {
 	return rule;
 }
 
+/** `role-defaults "<role>" { model "<selector>" … }` → the role's ordered selector chain. */
+function parseRoleDefaults(node: KdlNodeView): { role: string; models: string[] } {
+	validateProps(node, []);
+	const roles = positionalStrings(node);
+	if (roles.length !== 1 || !roles[0] || !node.children) malformed(node);
+	const children = node.children;
+	const models: string[] = [];
+	for (const child of children) {
+		if (child.name !== "model") unexpected(child, "role-defaults");
+		ensureLeaf(child, []);
+		const values = positionalStrings(child);
+		if (values.length !== 1 || !values[0] || models.includes(values[0])) malformed(child);
+		models.push(values[0]);
+	}
+	if (models.length === 0) malformed(node);
+	return { role: roles[0], models };
+}
+
 /** Compiles the runtime behavior source (may be absent → empty vocabulary). */
 export function compileBehavior(source: { file: string; text: string } | undefined): CompiledBehavior {
 	const behavior: CompiledBehavior = {
@@ -311,6 +329,7 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 		planRequirements: [],
 		retryResetTimezones: [],
 		pricingPeers: [],
+		roleDefaults: {},
 	};
 	if (!source) return behavior;
 	const nodes = parseKdl(source.file, source.text);
@@ -394,6 +413,12 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				const values = positionalStrings(node);
 				if (values.length === 0 || values.some(value => !value)) malformed(node);
 				behavior.referenceIsolatedProviders.push(...values);
+				break;
+			}
+			case "role-defaults": {
+				const { role, models } = parseRoleDefaults(node);
+				if (Object.hasOwn(behavior.roleDefaults, role)) malformed(node);
+				behavior.roleDefaults[role] = models;
 				break;
 			}
 			default:

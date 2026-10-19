@@ -9,13 +9,14 @@
  * and binary files are staged whole.
  */
 import * as path from "node:path";
-import type { ChoiceQuestion, ScoreQuestion } from "@oh-my-pi/pi-ai";
+import { judgeQuestions } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { VcsHunkSelection } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { parseFileDiffs, parseFileHunks } from "../../commit/git/diff";
 import { openStandaloneJudge } from "../../judgment/standalone";
+import questionFile from "../../prompts/judge/git-stage.json" with { type: "json" };
 import { mapWithConcurrencyLimitAllSettled } from "../../task/parallel";
 import type { ChangedFile } from "@oh-my-pi/pi-tui/apps/git/state";
 import type { AiStageOutcome } from "@oh-my-pi/pi-tui/apps/git/git-tui";
@@ -33,23 +34,16 @@ const UNIT_CHARS = 2400;
 const STAGE_THRESHOLD = 0.6;
 
 /**
+ * `belongs` scores one unit; `pick` verifies the strongest candidates.
+ *
  * Each unit is judged with the whole changed-path list as contrast. Without
  * it, an isolated yes/no lets anything sharing vocabulary with the instruction
  * drift to 0.55–0.8 (measured on a 278-hunk tree: 105 accepted for a
  * 23-hunk feature); with the tree and an explicit "tangential" level, the same
  * tree yields zero false positives and 16 of the feature's hunks.
  */
-const UNIT_QUESTION: ScoreQuestion = {
-	type: "score",
-	instructions:
-		"The user is staging a git commit out of a working tree with many unrelated changes and described which changes they want. `all_changed_files` lists every changed path for contrast; the state then shows one unit of change: its `path`, its `kind` (`hunk`: the added + and removed − lines of one hunk of a modified file; `deleted file`: the head of the removed − lines of a file being deleted; `new file`: the head of an untracked file; `binary`: path only), and `change`. How much does this unit belong to what the user described?",
-	criteria: [
-		"Unrelated: different work that happens to be in the same tree.",
-		"Tangential: same file, area, or vocabulary, but the user's words do not actually describe this particular change.",
-		"Part of it: the user's words describe this particular change (its content, its kind of edit, or this file by name).",
-	],
-};
-/** Index of the "part of it" level in {@link UNIT_QUESTION}. */
+const QUESTIONS = judgeQuestions(questionFile);
+/** Index of the "part of it" level in the `belongs` question. */
 const PART_OF_IT = "2";
 
 /** Highest-scoring accepted units shown together in the verification pick. */
@@ -66,10 +60,6 @@ const VERIFY_CHARS = 600;
 const NONE_THRESHOLD = 0.5;
 /** Choice key for "the instruction describes none of the candidates". */
 const NONE = "none";
-const VERIFY_INSTRUCTIONS =
-	"The user is staging a git commit and described which changes they want. `candidates` are the changed units in the tree that scored highest for that description, each with its path, kind, and changed lines. Which candidate is most clearly the change the user described — or is none of them actually it?";
-const VERIFY_NONE_CRITERION =
-	"None of the candidates is the change the user described; they only share an area or vocabulary with it.";
 
 /** Options for {@link aiStage}. */
 export interface AiStageOptions {
@@ -165,7 +155,7 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 							kind: unit.kind,
 							...(unit.change === undefined ? {} : { change: unit.change }),
 						},
-						questions: { belongs: UNIT_QUESTION },
+						questions: { belongs: QUESTIONS.belongs },
 					},
 					{ signal: workerSignal },
 				);
@@ -189,7 +179,7 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 			.slice(0, VERIFY_CANDIDATES);
 		if (ranked.length > 0) {
 			onProgress?.("Verifying…");
-			const criteria: Record<string, string | null> = { [NONE]: VERIFY_NONE_CRITERION };
+			const criteria: Record<string, string | null> = { ...QUESTIONS.pick.criteria };
 			const candidates = ranked.map(({ unit }, index) => {
 				criteria[`c${index}`] = null;
 				return {
@@ -199,9 +189,8 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 					...(unit.change === undefined ? {} : { change: bound(unit.change, VERIFY_CHARS) }),
 				};
 			});
-			const question: ChoiceQuestion = { type: "choice", instructions: VERIFY_INSTRUCTIONS, criteria };
 			const { answers } = await judge.judge(
-				{ state: { instruction, candidates }, questions: { pick: question } },
+				{ state: { instruction, candidates }, questions: { pick: { ...QUESTIONS.pick, criteria } } },
 				{ signal },
 			);
 			if (answers.pick.probabilities[NONE] >= NONE_THRESHOLD) {

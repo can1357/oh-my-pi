@@ -1,7 +1,7 @@
 /**
  * A fake Tern daemon for browser-backend tests: a Unix socket that speaks
  * Tern's JSON script protocol (`u32` LE length-prefixed JSON objects), records
- * the script's hellos and answers browser ops through a handler.
+ * the script's hellos and answers browser ops (and fork requests) through handlers.
  */
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
@@ -11,7 +11,7 @@ import * as path from "node:path";
 /** What a handler answers: `{ ok }`, `{ error }`, or `null` to never answer. */
 export type FakeAnswer = { ok: unknown } | { error: { kind: string; message: string } } | null;
 
-/** One browser request the fake daemon received. */
+/** One browser or fork request the fake daemon received. */
 export interface FakeRequest {
 	id: number;
 	op: Record<string, unknown>;
@@ -23,6 +23,8 @@ export interface FakeDaemon {
 	/** Every hello frame's raw payload, in order. */
 	hellos: Uint8Array[];
 	requests: FakeRequest[];
+	/** Every fork request, in order (`op` is its body). */
+	forks: FakeRequest[];
 	/** Answer request `id` later (for requests the handler left unanswered). */
 	answer(id: number, answer: FakeAnswer): void;
 	close(): Promise<void>;
@@ -43,16 +45,23 @@ export function jsonPayload(message: unknown): Uint8Array {
 
 /**
  * Start a fake daemon. `hangUp` makes it a Tern from before the JSON protocol:
- * it reads the hello and closes the connection without a word.
+ * it reads the hello and closes the connection without a word. `welcome` is
+ * the welcome's body; `fork` answers fork requests (without it they go
+ * unanswered, as an older Tern skips them).
  */
 export async function startFakeDaemon(
 	handler: (op: Record<string, unknown>, id: number) => FakeAnswer | Promise<FakeAnswer>,
-	opts: { hangUp?: boolean } = {},
+	opts: {
+		hangUp?: boolean;
+		welcome?: Record<string, unknown>;
+		fork?: (request: Record<string, unknown>, id: number) => FakeAnswer;
+	} = {},
 ): Promise<FakeDaemon> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tern-fake-"));
 	const socketPath = path.join(dir, "daemon.sock");
 	const hellos: Uint8Array[] = [];
 	const requests: FakeRequest[] = [];
+	const forks: FakeRequest[] = [];
 	const sockets = new Set<net.Socket>();
 	const owners = new Map<number, net.Socket>();
 	const send = (socket: net.Socket, payload: Uint8Array): void => {
@@ -61,7 +70,7 @@ export async function startFakeDaemon(
 	const answer = (id: number, value: FakeAnswer): void => {
 		const socket = owners.get(id);
 		if (!socket || value === null) return;
-		send(socket, jsonPayload({ id, browser: value }));
+		send(socket, jsonPayload({ id, [forks.some(fork => fork.id === id) ? "fork" : "browser"]: value }));
 	};
 	const server = net.createServer(socket => {
 		sockets.add(socket);
@@ -90,17 +99,23 @@ export async function startFakeDaemon(
 					hello?: unknown;
 					id?: number;
 					browser?: Record<string, unknown>;
+					fork?: Record<string, unknown>;
 				};
 				if (message.hello !== undefined) {
 					hellos.push(payload);
 					// A welcome with members omp does not know, then a message kind it does not know, to prove both are skipped.
-					send(socket, jsonPayload({ welcome: { version: 99 } }));
+					send(socket, jsonPayload({ welcome: opts.welcome ?? { version: 99 } }));
 					send(socket, jsonPayload({ id: 0, output: { pane: 7 } }));
 				} else if (message.browser !== undefined && message.id !== undefined) {
 					const { id, browser: op } = message;
 					requests.push({ id, op });
 					owners.set(id, socket);
 					answer(id, await handler(op, id));
+				} else if (message.fork !== undefined && message.id !== undefined) {
+					const { id, fork: request } = message;
+					forks.push({ id, op: request });
+					owners.set(id, socket);
+					if (opts.fork) answer(id, opts.fork(request, id));
 				}
 			}
 		});
@@ -113,6 +128,7 @@ export async function startFakeDaemon(
 		socketPath,
 		hellos,
 		requests,
+		forks,
 		answer,
 		close: async () => {
 			for (const socket of sockets) socket.destroy();

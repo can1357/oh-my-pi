@@ -65,6 +65,7 @@ async function cleanBundleOutputs(outDir: string): Promise<void> {
 					entry === "docs-index.generated.txt" ||
 					entry.endsWith(".node") ||
 					entry.endsWith(".js.map") ||
+					/\.json-[^/]+\.zst$/.test(entry) ||
 					(entry.startsWith("CHANGELOG-") && entry.endsWith(".md")) ||
 					htmlExportAssetPattern.test(entry),
 			)

@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Api } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { closeModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -40,6 +40,8 @@ afterEach(async () => {
 	}
 	__resetDirsFromEnvForTests();
 	if (agentDirRoot) {
+		// runRootCommand and writeModelCache opened <agentDir>/models.db; Windows cannot delete an open database.
+		closeModelCache();
 		await fsp.rm(agentDirRoot, { recursive: true, force: true });
 	}
 });

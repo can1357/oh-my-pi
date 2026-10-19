@@ -67,7 +67,7 @@ Single-shot result.
    - The replacement is written to a sibling temporary path and renamed over the destination. Existing archive symlinks are resolved first so the target is updated rather than replacing the symlink.
    - ZIP-format aliases remain ZIP. Tar gzip compression is selected for `.tar.gz`/`.tgz`, zstd for `.tar.zst`/`.tzst`; `.asar` containers are rewritten through the same boundary. Read-only formats (`.7z`, `.rar`, …) are rejected.
    - `invalidateFsScanAfterWrite()` runs on the archive file path.
-8. If not an archive, it tries SQLite candidates. Existing non-SQLite files suppress SQLite interpretation.
+8. If not an archive, it tries SQLite candidates. Existing non-SQLite files suppress SQLite interpretation; candidates that are neither regular files nor directories (FIFO, device, socket) are rejected before the SQLite header is read.
 9. SQLite writes call `enforcePlanModeWrite(..., { op: "update" })`, then `#writeSqliteRow()`.
    - The database must already exist.
    - It opens Bun SQLite with `{ create: false, strict: true }` and `PRAGMA busy_timeout = 3000`.
@@ -76,7 +76,7 @@ Single-shot result.
    - The scan cache is invalidated and the connection closes in `finally`.
 10. Otherwise it treats `path` as a plain filesystem file.
    - It rejects high-confidence mis-dispatched read targets: a missing selector-shaped filename with empty content, or a missing semicolon-joined list of selector paths. Existing literal paths win; non-empty content is the escape hatch for a single deliberate selector-shaped filename.
-   - Plan-mode policy and path resolution run before mutation. Existing files pass the generated-file guard.
+   - Plan-mode policy and path resolution run before mutation. An existing target that is neither a regular file nor a directory (including through a symlink) is refused; existing regular files then pass the generated-file guard, which opens and reads the file head on the main thread and could block forever on such a target.
    - If submitted content ends in an OMP read-truncation notice and covers less than the current source, the overwrite is refused. This also applies to text handler-owned resources; tool-device arguments are exempt.
    - ACP bridge `writeTextFile` is tried first when available; otherwise the session writethrough writes the content. LSP settings may format, synchronize, and diagnose the write.
    - A leading shebang may add execute bits. The filesystem scan cache is invalidated.
@@ -199,6 +199,7 @@ content: ""
 - Missing SQLite DBs surface as `SQLite database '<path>' not found`.
 - SQLite content errors include invalid JSON5, non-object payloads, unknown columns, non-scalar values, empty update objects, composite primary keys, and unavailable rowid fallbacks. Read-style `?where=` selectors are not a write workaround.
 - Existing plain files may be rejected by `assertEditableFile()` when they look generated.
+- Existing plain-file targets and SQLite database candidates that are neither regular files nor directories are refused with `Cannot write '<path>': it is a <kind>, not a regular file or directory.` Opening or reading them in-process can block forever (a FIFO with no writer, a terminal).
 - A file-backed URL write whose target is an existing directory fails with `<scheme>:// URL must resolve to a file: <url>`.
 - URI-like unknown targets and malformed/missing `xd://` devices fail rather than writing local files; mounted devices surface their own schema/tool errors.
 - Empty writes to missing selector-shaped targets and semicolon-joined selector lists are rejected as likely read/write mis-dispatches.

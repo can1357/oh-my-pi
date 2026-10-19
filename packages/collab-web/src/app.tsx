@@ -153,15 +153,20 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 	}, [title]);
 
 	const drawerAgent = selectedId != null ? snap.agents.find(a => a.id === selectedId) : undefined;
+	const toggleRail = useCallback(() => setRailOpen(open => !open), []);
+	const closeDrawer = useCallback(() => setSelectedId(null), []);
 
 	return (
 		<div className="sh-app">
 			<div className="sh-ambient" />
 			<HeaderBar
-				snapshot={snap}
+				header={snap.header}
+				state={snap.state}
+				phase={snap.phase}
+				readOnly={snap.readOnly}
 				subCount={subCount}
 				railOpen={railOpen}
-				onToggleRail={() => setRailOpen(open => !open)}
+				onToggleRail={toggleRail}
 				onLeave={onLeave}
 			/>
 			<main className="sh-main">
@@ -177,7 +182,14 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 							phase={snap.phase}
 						/>
 					</div>
-					<Composer client={client} snapshot={snap} />
+					<Composer
+						client={client}
+						phase={snap.phase}
+						readOnly={snap.readOnly}
+						uiRequest={snap.uiRequest}
+						working={snap.working}
+						queuedMessageCount={snap.state?.queuedMessageCount ?? 0}
+					/>
 				</section>
 				{railOpen && (
 					<>
@@ -196,14 +208,15 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 			</main>
 			{drawerAgent && (
 				<>
-					<div className="ag-drawer-backdrop" onClick={() => setSelectedId(null)} />
+					<div className="ag-drawer-backdrop" onClick={closeDrawer} />
 					<AgentDrawer
 						agent={drawerAgent}
 						progress={snap.progress.get(drawerAgent.id)}
+						lifecycle={snap.lifecycle.get(drawerAgent.id)}
 						client={client}
 						readOnly={snap.readOnly}
 						host={toolHost}
-						onClose={() => setSelectedId(null)}
+						onClose={closeDrawer}
 					/>
 				</>
 			)}

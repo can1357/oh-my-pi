@@ -11,12 +11,13 @@ import { getTinyModelsCacheDir, removeWithRetries, setAgentDir } from "@oh-my-pi
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 const WHISPER_BASE_REPO = "onnx-community/whisper-base";
-const PARAKEET_REPO = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
+const NEMOTRON_REPO = "csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25";
 const DICTATION_MODELS = [
 	getBundledModel("local", "whisper-base"),
 	getBundledModel("local", "whisper-small"),
 	getBundledModel("local", "whisper-large-v3-turbo"),
 	getBundledModel("local", "parakeet-tdt-0.6b-v3"),
+	getBundledModel("local", "nemotron-streaming-en-0.6b"),
 ];
 const registry: STTControllerDependencies["registry"] = {
 	getError: () => undefined,
@@ -58,16 +59,21 @@ describe("isSttModelCached completeness", () => {
 		expect(await downloader.isSttModelCached("whisper-base")).toBe(true);
 	});
 
-	it("requires every sherpa model file to be present", async () => {
-		const repoDir = path.join(cacheDir, PARAKEET_REPO);
-		await touch(path.join(repoDir, "encoder.int8.onnx"));
-		await touch(path.join(repoDir, "decoder.int8.onnx"));
-		await touch(path.join(repoDir, "joiner.int8.onnx"));
-		// tokens.txt still missing.
-		expect(await downloader.isSttModelCached("parakeet-tdt-0.6b-v3")).toBe(false);
+	it("requires complete online model weights rather than interrupted downloads", async () => {
+		const key = "nemotron-streaming-en-0.6b";
+		const repoDir = path.join(cacheDir, NEMOTRON_REPO);
+		const files = ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"];
+		for (const file of files) {
+			await touch(path.join(repoDir, file));
+		}
+		expect(await downloader.isSttModelCached(key)).toBe(true);
 
-		await touch(path.join(repoDir, "tokens.txt"));
-		expect(await downloader.isSttModelCached("parakeet-tdt-0.6b-v3")).toBe(true);
+		for (const file of files) {
+			const filePath = path.join(repoDir, file);
+			await fs.rename(filePath, `${filePath}.part`);
+			expect(await downloader.isSttModelCached(key)).toBe(false);
+			await fs.rename(`${filePath}.part`, filePath);
+		}
 	});
 });
 
@@ -130,6 +136,83 @@ describe("STTController preflight", () => {
 		expect(asrClient.sttClient.startStream).toHaveBeenCalledWith("whisper-base", expect.anything());
 		expect(download).toHaveBeenCalledTimes(1);
 		expect(options.showStatus).not.toHaveBeenCalled();
+	});
+
+	it("cached online model: opens the microphone only after the recognizer is ready", async () => {
+		settings.setModelRole("dictation", "local/nemotron-streaming-en-0.6b");
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		const called = Promise.withResolvers<void>();
+		const ready = Promise.withResolvers<void>();
+		vi.spyOn(downloader, "downloadSttModel").mockImplementation(() => {
+			called.resolve();
+			return ready.promise;
+		});
+		const startCapture = vi.fn(() => ({ stop: vi.fn() }));
+		controller = new STTController(startCapture, { settings, registry });
+
+		const toggling = controller.toggle(makeEditor(), makeOptions());
+		await called.promise;
+		expect(startCapture).not.toHaveBeenCalled();
+		expect(asrClient.sttClient.startStream).not.toHaveBeenCalled();
+
+		ready.resolve();
+		await toggling;
+		expect(startCapture).toHaveBeenCalledTimes(1);
+		expect(asrClient.sttClient.startStream).toHaveBeenCalledWith("nemotron-streaming-en-0.6b", expect.anything());
+		expect(controller.state).toBe("recording");
+	});
+
+	it("does not open the microphone when disposed during online recognizer warmup", async () => {
+		settings.setModelRole("dictation", "local/nemotron-streaming-en-0.6b");
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		const called = Promise.withResolvers<void>();
+		const ready = Promise.withResolvers<void>();
+		vi.spyOn(downloader, "downloadSttModel").mockImplementation(() => {
+			called.resolve();
+			return ready.promise;
+		});
+		const startCapture = vi.fn(() => ({ stop: vi.fn() }));
+		controller = new STTController(startCapture, { settings, registry });
+
+		const toggling = controller.toggle(makeEditor(), makeOptions());
+		await called.promise;
+		controller.dispose();
+		ready.resolve();
+		await toggling;
+
+		expect(startCapture).not.toHaveBeenCalled();
+		expect(asrClient.sttClient.startStream).not.toHaveBeenCalled();
+		expect(controller.state).toBe("idle");
+	});
+
+	it("cancels a start still waiting for its model without a warning, then preflights again", async () => {
+		settings.setModelRole("dictation", "local/nemotron-streaming-en-0.6b");
+		const called = Promise.withResolvers<void>();
+		// Like the worker host: an aborted wait ends as a failed download while the worker keeps loading.
+		const download = vi.spyOn(downloader, "downloadSttModel").mockImplementation((_key, _progress, options) => {
+			called.resolve();
+			const { promise, reject } = Promise.withResolvers<void>();
+			options?.signal?.addEventListener("abort", () => reject(new Error("Failed to download speech model")));
+			return promise;
+		});
+		const startCapture = vi.fn(() => ({ stop: vi.fn() }));
+		const options = makeOptions();
+		controller = new STTController(startCapture, { settings, registry });
+
+		const starting = controller.start(makeEditor(), options);
+		await called.promise;
+		await controller.stop();
+		await starting;
+
+		expect(controller.state).toBe("idle");
+		expect(startCapture).not.toHaveBeenCalled();
+		expect(asrClient.sttClient.startStream).not.toHaveBeenCalled();
+		expect(options.showWarning).not.toHaveBeenCalled();
+
+		download.mockResolvedValue();
+		await controller.start(makeEditor(), options);
+		expect(download).toHaveBeenCalledTimes(2);
+		expect(controller.state).toBe("recording");
 	});
 
 	it("uncached model: records only after the foreground download finishes", async () => {

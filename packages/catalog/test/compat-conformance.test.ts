@@ -31,6 +31,10 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// lanes), so no rows are frozen into models.json.
 	"singularityapi-dev",
 	"singularityapi-tech",
+	// Clef judges are a `bundle="always"` KDL seed that
+	// cloudflareWorkersAiModelManagerOptions serves at runtime; models.json
+	// gains the rows at the next regeneration.
+	"cloudflare-workers-ai",
 	// User-configured LiteLLM proxy (models.yml provider or litellm auth flow;
 	// PROXY_OPENAI_COMPAT_PROVIDERS) that forwards upstream chat templates.
 	"litellm",

@@ -5,7 +5,12 @@
  * exposes an immutable {@link GuestSnapshot} through a
  * `useSyncExternalStore`-compatible subscribe/getSnapshot pair. The snapshot
  * object (and every replaced collection inside it) gets a new reference per
- * applied frame, so React change detection is reference equality all the way.
+ * commit, so React change detection is reference equality all the way.
+ *
+ * High-rate frames (streaming `message_update`, `tool_execution_update`,
+ * subagent progress) are applied immediately but published at most once per
+ * animation frame; every other frame publishes synchronously, flushing any
+ * pending state with it, so the published end state is unchanged.
  */
 
 import type {
@@ -75,6 +80,25 @@ const TRANSCRIPT_TIMEOUT_MS = 10_000;
 const WELCOME_TIMEOUT_MS = 30_000;
 /** Mirrors the TUI guest's SNAPSHOT_PROGRESS_TIMEOUT_MS: every snapshot chunk must make progress. */
 const SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000;
+/** Commit delay when `requestAnimationFrame` is unavailable (tests, non-DOM hosts). */
+const FRAME_FALLBACK_MS = 16;
+
+/** Runs `callback` on the next animation frame; returns its cancel function. */
+function scheduleFrame(callback: () => void): () => void {
+	if (typeof requestAnimationFrame === "function") {
+		const id = requestAnimationFrame(callback);
+		return () => cancelAnimationFrame(id);
+	}
+	const timer = setTimeout(callback, FRAME_FALLBACK_MS);
+	return () => clearTimeout(timer);
+}
+
+/** High-rate frames whose publish is deferred to the next animation frame. */
+function isCoalescable(frame: HostFrame): boolean {
+	if (frame.t === "event")
+		return frame.event.type === "message_update" || frame.event.type === "tool_execution_update";
+	return frame.t === "bus" && frame.channel === "task:subagent:progress";
+}
 
 /**
  * One fetch-transcript round trip.
@@ -117,6 +141,12 @@ export class GuestClient {
 	#agents: readonly AgentSnapshot[] = [];
 	#progress: ReadonlyMap<string, SubagentProgressPayload> = new Map();
 	#lifecycle: ReadonlyMap<string, SubagentLifecyclePayload> = new Map();
+	/**
+	 * Bus-map keys absent from the latest `agents` frame. Progress can arrive
+	 * before its agent is listed, so such keys survive one `agents` frame and
+	 * are pruned only if the next one still omits them.
+	 */
+	#unlistedBusIds = new Set<string>();
 	#stream: AssistantMessage | null = null;
 	#streamDone = false;
 	#activeTools: ReadonlyMap<string, ActiveTool> = new Map();
@@ -134,6 +164,8 @@ export class GuestClient {
 	 * useSyncExternalStore) skip their O(n) scans per token.
 	 */
 	#publishedEntries: readonly SessionEntry[] = [];
+	/** Cancels the scheduled deferred commit; null when none is pending. */
+	#cancelFrameCommit: (() => void) | null = null;
 
 	/** @throws Error when the link does not parse. */
 	constructor(link: string, displayName: string) {
@@ -176,7 +208,7 @@ export class GuestClient {
 		};
 	}
 
-	/** Cached stable reference; replaced (with fresh collection refs) per applied frame. */
+	/** Cached stable reference; replaced per commit (at most once per animation frame for streaming frames). */
 	getSnapshot(): GuestSnapshot {
 		return this.#snapshot;
 	}
@@ -218,9 +250,14 @@ export class GuestClient {
 		return promise;
 	}
 
-	/** Test seam: apply a synthetic host frame through the real apply path. */
-	applyFrameForTest(frame: HostFrame): void {
+	/**
+	 * Test seam: apply a synthetic host frame through the real apply path. With
+	 * `flush` (default), a commit deferred to the next animation frame is
+	 * published now, so the snapshot reflects the frame on return.
+	 */
+	applyFrameForTest(frame: HostFrame, options: { flush?: boolean } = {}): void {
 		this.#applyFrameSafe(frame);
+		if ((options.flush ?? true) && this.#cancelFrameCommit !== null) this.#commit();
 	}
 
 	#handleOpen(): void {
@@ -318,6 +355,7 @@ export class GuestClient {
 				this.#activeTools = new Map();
 				this.#progress = new Map();
 				this.#lifecycle = new Map();
+				this.#unlistedBusIds.clear();
 				this.#working = frame.state.isStreaming;
 				this.#readOnly = frame.readOnly === true;
 				this.#clearUiRequests();
@@ -389,6 +427,7 @@ export class GuestClient {
 				break;
 			case "agents":
 				this.#agents = [...frame.agents];
+				this.#pruneBusMaps();
 				break;
 			case "bus":
 				if (frame.channel === "task:subagent:progress") {
@@ -438,7 +477,45 @@ export class GuestClient {
 				// unknown frame type from a newer host — ignore
 				break;
 		}
-		this.#commit();
+		if (isCoalescable(frame)) this.#scheduleCommit();
+		else this.#commit();
+	}
+
+	/**
+	 * Drops progress/lifecycle payloads of agents the host no longer lists.
+	 * A key missing from this `agents` frame is pruned when it was already
+	 * missing from the previous one; the one-frame grace covers progress that
+	 * outran its agent's registration.
+	 */
+	#pruneBusMaps(): void {
+		if (this.#progress.size === 0 && this.#lifecycle.size === 0) {
+			this.#unlistedBusIds.clear();
+			return;
+		}
+		const listed = new Set<string>();
+		for (const agent of this.#agents) listed.add(agent.id);
+		const previouslyUnlisted = this.#unlistedBusIds;
+		const unlisted = new Set<string>();
+		const prune = <V>(map: ReadonlyMap<string, V>): ReadonlyMap<string, V> => {
+			let kept: Map<string, V> | null = null;
+			for (const [id, value] of map) {
+				const drop = !listed.has(id) && previouslyUnlisted.has(id);
+				if (!listed.has(id) && !drop) unlisted.add(id);
+				if (drop && kept === null) {
+					kept = new Map();
+					for (const [keptId, keptValue] of map) {
+						if (keptId === id) break;
+						kept.set(keptId, keptValue);
+					}
+				} else if (!drop && kept !== null) {
+					kept.set(id, value);
+				}
+			}
+			return kept ?? map;
+		};
+		this.#progress = prune(this.#progress);
+		this.#lifecycle = prune(this.#lifecycle);
+		this.#unlistedBusIds = unlisted;
 	}
 
 	#applyEvent(event: Extract<HostFrame, { t: "event" }>["event"]): void {
@@ -569,7 +646,20 @@ export class GuestClient {
 		};
 	}
 
+	/** Publishes on the next animation frame; a synchronous commit before then supersedes it. */
+	#scheduleCommit(): void {
+		if (this.#cancelFrameCommit !== null) return;
+		this.#cancelFrameCommit = scheduleFrame(() => {
+			this.#cancelFrameCommit = null;
+			this.#commit();
+		});
+	}
+
 	#commit(): void {
+		if (this.#cancelFrameCommit !== null) {
+			this.#cancelFrameCommit();
+			this.#cancelFrameCommit = null;
+		}
 		this.#snapshot = this.#buildSnapshot();
 		for (const listener of this.#listeners) listener();
 	}

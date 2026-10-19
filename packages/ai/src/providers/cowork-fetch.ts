@@ -198,7 +198,11 @@ async function sendCoworkRequest(
 	};
 	const abort = (): void => {
 		const reason = signal?.reason;
-		request?.destroy(reason instanceof Error ? reason : new DOMException("The operation was aborted.", "AbortError"));
+		const error = reason instanceof Error ? reason : new DOMException("The operation was aborted.", "AbortError");
+		request?.destroy(error);
+		// Bun before 1.4 emits 'close' but not 'error' for destroy(error), so the
+		// 'error' listener below never settles a request still waiting for headers.
+		result.reject(error);
 	};
 	if (signal?.aborted) {
 		release();

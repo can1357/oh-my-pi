@@ -1,5 +1,6 @@
 import type { CapturedHttpErrorResponse } from "../utils/http-inspector";
 import { AbortError } from "./abort";
+import { networkFailureMessage } from "./network-cause";
 
 /** Prefix on errors raised when an Anthropic SSE stream envelope is malformed. */
 export const STREAM_ENVELOPE_ERROR_PREFIX = "Anthropic stream envelope error:";
@@ -202,8 +203,8 @@ export class AnthropicApiError extends ProviderHttpError {
 
 /** Network-level failure (DNS, TLS, socket reset) after retries were exhausted. */
 export class AnthropicConnectionError extends Error {
-	constructor(cause: unknown) {
-		super("Connection error.", { cause });
+	constructor(cause: unknown, requestUrl?: string) {
+		super(networkFailureMessage(cause, requestUrl) ?? "Connection error.", { cause });
 		this.name = "AnthropicConnectionError";
 	}
 }

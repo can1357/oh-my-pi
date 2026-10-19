@@ -74,6 +74,69 @@ describe("bash internal URLs through the shell filesystem", () => {
 		expect(await fs.readFile(path.join(localRoot, "work", "rel.txt"), "utf-8")).toBe("rel\n");
 	});
 
+	it("hands an external program the files that backed URL arguments alias", async () => {
+		const script = path.join(tempDir, "argv.js");
+		await fs.writeFile(script, "console.log(process.argv.slice(2).join('\\n'));\n");
+		await fs.mkdir(localRoot, { recursive: true });
+		await fs.writeFile(path.join(localRoot, "data.txt"), "payload\n");
+		await fs.mkdir(path.join(localRoot, "index"), { recursive: true });
+
+		const { text, isError } = await run(
+			`'${process.execPath}' '${script}' local://data.txt --index=local://index https://example.com/a.txt 'local://'`,
+		);
+
+		expect(isError).toBeUndefined();
+		expect(text).toContain(path.join(localRoot, "data.txt"));
+		expect(text).toContain(`--index=${path.join(localRoot, "index")}`);
+		expect(text).toContain("https://example.com/a.txt");
+		// A bare scheme root is search-pattern text far more often than a directory.
+		expect(text.split("\n")).toContain("local://");
+	});
+
+	it("runs a skill's script by URL but refuses the read-only skill directory as a working directory", async () => {
+		const skillDir = path.join(tempDir, "skills", "demo");
+		await fs.mkdir(skillDir, { recursive: true });
+		await fs.writeFile(path.join(skillDir, "SKILL.md"), "---\nname: demo\n---\n");
+		await fs.writeFile(path.join(skillDir, "tool.js"), "console.log('tool-ran');\n");
+		session = {
+			...session,
+			skills: [{ name: "demo", baseDir: skillDir, filePath: path.join(skillDir, "SKILL.md") }],
+		} as unknown as ToolSession;
+
+		const ran = await run(`'${process.execPath}' skill://demo/tool.js`);
+		expect(ran.isError).toBeUndefined();
+		expect(ran.text).toContain("tool-ran");
+
+		// The child could write anywhere under its working directory; skill:// refuses mutation.
+		const refused = await run(`'${process.execPath}' tool.js`, "skill://demo");
+		expect(refused.isError).toBe(true);
+		expect(refused.text).toContain("read-only working directory");
+	});
+
+	it("fails the command when a URL argument names nothing the provider knows", async () => {
+		const { text, isError } = await run(`'${process.execPath}' -e "console.log('ran')" skill://nope/tool.js`);
+
+		expect(isError).toBe(true);
+		expect(text).not.toContain("ran\n");
+		// Unix maps the provider's ENOENT to the native errno (its message is the
+		// OS's); other platforms keep the provider message. Both name the URL.
+		expect(text).toContain("cannot resolve skill://nope/tool.js");
+	});
+
+	it("starts an external program in the directory a URL working directory aliases", async () => {
+		const script = path.join(tempDir, "cwd.js");
+		await fs.writeFile(script, "console.log(process.cwd());\nconsole.log(process.env.PWD);\n");
+		await fs.mkdir(path.join(localRoot, "work"), { recursive: true });
+
+		const { text, isError } = await run(`'${process.execPath}' '${script}'`, "local://work");
+
+		const work = path.join(localRoot, "work");
+		expect(isError).toBeUndefined();
+		// `PWD` must agree with `getcwd()`: a program reading the variable
+		// directly cannot open the URL spelling.
+		expect(text).toContain(`${work}\n${work}`);
+	});
+
 	it("fails a redirection into a read-only scheme", async () => {
 		const { isError } = await run("printf 'x' > omp://README.md");
 

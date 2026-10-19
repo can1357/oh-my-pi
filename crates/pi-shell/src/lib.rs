@@ -4,6 +4,7 @@ pub mod minimizer;
 pub mod output_decode;
 pub mod process;
 pub mod shell;
+pub mod taps;
 
 #[cfg(windows)]
 pub mod windows;
@@ -20,3 +21,4 @@ pub use shell::{
 	MinimizerResult, Shell, ShellExecuteOptions, ShellExecuteResult, ShellOptions, ShellRunOptions,
 	ShellRunResult, StreamSinks, execute_shell, execute_shell_streams,
 };
+pub use taps::{PipeStreamInfo, PipeStreamRead, PipeTaps};

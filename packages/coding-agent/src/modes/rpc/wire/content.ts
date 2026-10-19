@@ -23,6 +23,10 @@ export const messageDefs = {
 		thinking: "string",
 		"thinkingSignature?": "string",
 		"itemId?": "string",
+		"narration?": doc(
+			"boolean",
+			"Prose the model addressed to the user, returned by the provider as thinking; present it as answer text.",
+		),
 	},
 	RedactedThinkingContent: { type: "'redactedThinking'", data: "string" },
 	ImageContent: doc(

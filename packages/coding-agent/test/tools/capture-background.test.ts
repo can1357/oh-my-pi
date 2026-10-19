@@ -131,7 +131,7 @@ describe("capture failure across background and cancellation boundaries", () => 
 			});
 			const result = await new EvalTool(sessionFor(temp.path(), manager)).execute("eval", {
 				language: "js",
-				code: "display('example')",
+				code: "print('example')",
 			});
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) throw new Error("Expected background eval");

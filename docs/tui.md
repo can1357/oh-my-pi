@@ -19,6 +19,33 @@ The runtime has two layers:
 
 If your extension/tool can run headless, guard with `ctx.hasUI` / `pi.hasUI`. RPC can expose `hasUI === true` for protocol-backed dialogs while still not supporting `custom()`; `hasUI` alone does not guarantee a component can be mounted.
 
+## Project-local TUI debug tool
+
+`.omp/tools/tui.ts` provides the repository's `tui` debug tool. `start` accepts
+either a TypeScript/JavaScript `file` (run with Bun) or an executable `bin` with
+separate `args`. Windows uses native ConPTY without requiring a POSIX shell;
+macOS/Linux use Bun's PTY.
+The debug connection uses a Windows named pipe or a POSIX Unix socket.
+On Windows, `start` and `resize` use the native `normalizePtyDimensions(cols, rows)`
+helper, which returns integer dimensions clamped to 20–400 columns and 5–200 rows.
+The PTY, emulated screen, and reported size use the same effective dimensions.
+
+`screen`, `send`, `resize`, and `stop` also work for programs without an
+`OMP_TUI_DEBUG` server. Renderer queries (`info`, `tree`, `values`, and `frame`)
+require an omp/pi-tui host.
+
+`send` accepts literal text and `\e`, `\r`, `\n`, `\t`, and `\xNN` escapes.
+On Windows, each payload must contain complete, valid UTF-8; invalid or truncated
+sequences are rejected before any input is written. Arbitrary non-UTF-8 bytes
+(such as `\x9b` 8-bit CSI) are not supported by the Windows PTY string API.
+Use the UTF-8-compatible `\e[` CSI sequence instead. macOS/Linux preserve raw bytes.
+
+Install the tool's dependencies with `bun install --cwd .omp/tools`.
+Native PTY API changes require rebuilding the addon with
+`bun --cwd=packages/natives run build` before running the tool.
+Run its real-PTY regressions with `bun test ./.omp/tests/tui.test.ts`. CI runs
+them on Linux only; the Windows-specific cases run only on a local Windows host.
+
 ## Core component contract (`@oh-my-pi/pi-tui`)
 
 `packages/tui/src/tui.ts` defines:
@@ -29,12 +56,15 @@ export interface Component {
   handleInput?(data: string): void;
   wantsKeyRelease?: boolean;
   invalidate?(): void;
+  releaseRenderCaches?(): void;
   setIgnoreTight?(ignore: boolean): any;
   dispose?(): void;
 }
 ```
 
 Render results are component-owned and immutable to callers. An unchanged component may (and should) return the **same array reference** it returned last time; it must return a new array whenever content changes. Reference equality enables container memoization and stable-prefix work avoidance. A component that mutates a previously returned array in place must also implement `RenderStablePrefix` and report how many leading rows survived unchanged.
+
+`releaseRenderCaches()` drops only derived rows, parsing, and formatting state. The next `render()` must reproduce the same rows from retained source state. Do not rebuild eagerly, invoke renderer callbacks, convert images, or replace or dispose children in this hook. The transcript calls it after retirement or replay batches are acknowledged, or immediately when replay has no rows to acknowledge. Semantic full renders and resized tails release committed caches after producing their rows. Tool cards can use `ToolCardOptions.onReleaseRenderCaches` to drop builder-owned memos, and `releaseRenderedStringCache()` clears a `RenderedStringCache` used for formatted strings.
 
 `Focusable` is separate:
 
@@ -46,6 +76,8 @@ export interface Focusable {
 ```
 
 Cursor behavior uses `CURSOR_MARKER` (not `getCursorPosition`). Focused components emit the marker in rendered text; `TUI` extracts it and positions the hardware cursor.
+
+Fullscreen overlays opt into the shared hardware cursor only when the user's hardware-cursor preference is enabled and the focused component implements `setUseTerminalCursor`. The focus target must be the top overlay itself or a child it owns via `OverlayFocusOwner.ownsOverlayFocusTarget`; wrappers must forward focus and cursor mode to their input. Emit `CURSOR_MARKER` at the caret without replacing the underlying glyph. With the preference disabled, keep the software cursor; losing focus or removing the marker hides the hardware cursor.
 
 ## Rendering constraints (terminal safety)
 

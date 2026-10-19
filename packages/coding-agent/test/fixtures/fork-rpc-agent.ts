@@ -9,7 +9,11 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
-// Real RPC dispatch over a session persisted under the test's temp cwd; only model replies are scripted.
+// Real RPC dispatch over a session persisted under the test's temp root; only model replies are scripted.
+// The root arrives as argv so storage can never land in an inherited cwd such as the repo checkout.
+const root = process.argv[2];
+if (!root || root.startsWith("-")) throw new Error("fork-rpc-agent: expected the temp root as the first argument");
+process.chdir(root);
 const cwd = process.cwd();
 const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
 authStorage.keys.setRuntime("anthropic", "test-key");

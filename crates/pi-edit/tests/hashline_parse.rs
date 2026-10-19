@@ -32,6 +32,19 @@ fn formats_hashline_v4_rows_and_headers() {
 }
 
 #[test]
+fn numbered_empty_text_keeps_its_display_row() {
+	assert_eq!(format_numbered_lines("", 0), "0:");
+}
+
+#[test]
+fn numbered_rows_preserve_payload_and_saturate_at_u32_max() {
+	assert_eq!(
+		format_numbered_lines("a\r\n\n\u{3bb}\0\n", u32::MAX - 1),
+		"4294967294:a\r\n4294967295:\n4294967295:\u{3bb}\0\n4294967295:"
+	);
+}
+
+#[test]
 fn tokenizer_recognizes_headers_ops_payloads_and_envelope() {
 	let mut tokenizer = Tokenizer::new();
 	let tokens = tokenizer

@@ -10,8 +10,8 @@ import {
 	shareSession,
 } from "../src/export/share";
 import { SecretObfuscator } from "../src/secrets/obfuscator";
-import type { SessionEntry } from "../src/session/session-entries";
-import type { SessionManager } from "../src/session/session-manager";
+import type { SessionEntry, SessionHeader } from "../src/session/session-entries";
+import { SessionManager } from "../src/session/session-manager";
 
 const IV_LENGTH = 12;
 const TEST_MAX_SEALED_BYTES = 4_000;
@@ -130,6 +130,33 @@ describe("buildShareSnapshot", () => {
 
 		const plain = buildShareSnapshot(sm, {});
 		expect(JSON.stringify(plain)).toContain("hunter2-XYZZY");
+	});
+
+	test("drops revival-only work-pool yield items from a subagent's session_init", () => {
+		const secret = "poolleak-QWERTY";
+		const entries: SessionEntry[] = [
+			{
+				type: "session_init",
+				id: "si",
+				parentId: null,
+				timestamp: "2026-10-04T00:00:00.000Z",
+				systemPrompt: ["base"],
+				task: "work",
+				tools: ["yield"],
+				workPoolYieldItems: [{ id: `pool-${secret}`, index: 0 }],
+			},
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "si",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+
+		const snapshot = buildShareSnapshot(sm, { obfuscator });
+
+		expect(JSON.stringify(snapshot)).not.toContain(secret);
+		expect(JSON.stringify(entries)).toContain(secret);
 	});
 
 	test("redacts header cwd, bookmark labels, and file-mention paths", () => {
@@ -554,6 +581,59 @@ describe("normalizeShareServerUrl", () => {
 });
 
 describe("shareSession", () => {
+	test("omits persisted cache-routing keys from sealed uploads regardless of secret redaction", async () => {
+		using tempDir = TempDir.createSync("@omp-share-cache-keys-");
+		const file = path.join(tempDir.path(), "session.jsonl");
+		const header: SessionHeader = {
+			type: "session",
+			version: 3,
+			id: "child-session",
+			timestamp: "2026-10-12T00:00:00.000Z",
+			cwd: tempDir.path(),
+			providerPromptCacheKey: "private-explicit-affinity",
+			taskPromptCacheKey: "private-parent-provider-session:reviewer",
+		};
+		await Bun.write(
+			file,
+			`${[header, messageEntry("e1", null, "share me")].map(entry => JSON.stringify(entry)).join("\n")}\n`,
+		);
+		const sm = await SessionManager.open(file);
+		const persisted = await Bun.file(file).text();
+		let uploaded: Uint8Array<ArrayBuffer> | undefined;
+		const server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				uploaded = new Uint8Array(await req.arrayBuffer());
+				return Response.json({ id: "cache-key-share" });
+			},
+		});
+		try {
+			for (const obfuscator of [new SecretObfuscator([{ type: "plain", content: "unrelated-secret" }]), undefined]) {
+				const result = await shareSession(sm, { serverUrl: `http://localhost:${server.port}`, obfuscator });
+				const key = await crypto.subtle.importKey(
+					"raw",
+					Buffer.from(result.url.split("#")[1], "base64url"),
+					"AES-GCM",
+					false,
+					["decrypt"],
+				);
+				if (!uploaded) throw new Error("Share server received no upload");
+				const opened = await open(key, uploaded);
+				expect(opened.header?.taskPromptCacheKey).toBeUndefined();
+				expect(opened.header?.providerPromptCacheKey).toBeUndefined();
+				expect(JSON.stringify(opened)).not.toContain("private-");
+				expect(opened.header?.id).toBe(header.id);
+				expect(opened.leafId).toBe("e1");
+				expect(opened.entries).toEqual(sm.getEntries());
+			}
+			expect(sm.getHeader()).toMatchObject(header);
+			expect(await Bun.file(file).text()).toBe(persisted);
+			expect((await SessionManager.open(file)).getHeader()).toMatchObject(header);
+		} finally {
+			server.stop(true);
+		}
+	});
+
 	test("default store seals the snapshot and uploads it to the share server", async () => {
 		const entries = [messageEntry("e1", null, "share me"), messageEntry("e2", "e1", "second")];
 		const sm = {

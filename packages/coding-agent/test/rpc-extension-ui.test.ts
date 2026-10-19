@@ -254,7 +254,7 @@ await runRpcMode(session, {
 		expect(pendingRequests.size).toBe(0);
 	});
 
-	it("rejects secret login input without emitting ordinary input while ordinary OAuth input works", async () => {
+	it("rejects secret login input, completes ordinary OAuth input, and logs the stored account out", async () => {
 		await using temp = await TempDir.create("@rpc-login-");
 		const extensionPath = temp.join("login.mjs");
 		await Bun.write(
@@ -262,8 +262,8 @@ await runRpcMode(session, {
 			`
 export default function(pi) {
   globalThis.fetch = async () => { throw new Error("Offline login fixture refuses network"); };
-  for (const secret of [true, false]) {
-    const id = secret ? "rpc-secret" : "rpc-ordinary";
+  // rpc-alias is a second login for rpc-ordinary's credentials, like openai-codex-device.
+  for (const [id, secret, storeCredentialsAs] of [["rpc-secret", true], ["rpc-ordinary", false], ["rpc-alias", false, "rpc-ordinary"]]) {
     pi.registerProvider(id, {
       baseUrl: "http://127.0.0.1:9/v1",
       api: "openai-completions",
@@ -278,6 +278,7 @@ export default function(pi) {
       }],
       oauth: {
         name: id,
+        storeCredentialsAs,
         login: async callbacks => {
           callbacks.onAuth({ url: "https://example.invalid/authorize" });
           return callbacks.onPrompt({ message: id, ...(secret ? { secret: true } : {}) });
@@ -325,7 +326,13 @@ export default function(pi) {
 		const inputTitles: string[] = [];
 		let secretResponse: unknown;
 		let ordinaryResponse: unknown;
+		let loggedInProvidersResponse: unknown;
+		let noProviderResponse: unknown;
+		let accountsResponse: unknown;
+		let logoutResponse: unknown;
+		let staleLogoutResponse: unknown;
 		let providersResponse: unknown;
+		let loggedOutCredentialId: unknown;
 		const send = async (frame: object) => {
 			child.stdin.write(`${JSON.stringify(frame)}\n`);
 			await child.stdin.flush();
@@ -346,6 +353,34 @@ export default function(pi) {
 					await send({ type: "login", providerId: "rpc-ordinary", id: "ordinary" });
 				} else if (frame.type === "response" && frame.id === "ordinary") {
 					ordinaryResponse = frame;
+					await send({ type: "get_login_providers", id: "loggedIn" });
+				} else if (frame.type === "response" && frame.id === "loggedIn") {
+					loggedInProvidersResponse = frame;
+					await send({ type: "get_logout_accounts", providerId: "rpc-alias", id: "accounts" });
+				} else if (frame.type === "response" && frame.id === "accounts") {
+					accountsResponse = frame;
+					const accounts = isRecord(frame.data) && Array.isArray(frame.data.accounts) ? frame.data.accounts : [];
+					loggedOutCredentialId = isRecord(accounts[0]) ? accounts[0].credentialId : undefined;
+					await send({
+						type: "logout",
+						providerId: "rpc-alias",
+						credentialId: loggedOutCredentialId,
+						id: "logout",
+					});
+				} else if (frame.type === "response" && frame.id === "logout") {
+					logoutResponse = frame;
+					await send({
+						type: "logout",
+						providerId: "rpc-ordinary",
+						credentialId: loggedOutCredentialId,
+						id: "stale",
+					});
+				} else if (frame.type === "response" && frame.id === "stale") {
+					staleLogoutResponse = frame;
+					// Without a provider the credential store would list every provider's accounts.
+					await send({ type: "get_logout_accounts", id: "noProvider" });
+				} else if (frame.type === "response" && frame.id === "noProvider") {
+					noProviderResponse = frame;
 					await send({ type: "get_login_providers", id: "providers" });
 				} else if (frame.type === "response" && frame.id === "providers") {
 					providersResponse = frame;
@@ -368,12 +403,33 @@ export default function(pi) {
 		});
 		expect(inputTitles).toEqual(["rpc-ordinary"]);
 		expect(ordinaryResponse).toMatchObject({ type: "response", command: "login", success: true });
+		expect(loggedInProvidersResponse).toMatchObject({
+			data: {
+				providers: expect.arrayContaining([
+					expect.objectContaining({ id: "rpc-ordinary", authenticated: true }),
+					// The alias stores under rpc-ordinary, so it is authenticated by the same credential.
+					expect.objectContaining({ id: "rpc-alias", authenticated: true }),
+				]),
+			},
+		});
+		expect(accountsResponse).toMatchObject({
+			success: true,
+			data: { accounts: [expect.objectContaining({ provider: "rpc-ordinary", active: true })] },
+		});
+		expect(logoutResponse).toEqual({ id: "logout", type: "response", command: "logout", success: true, data: {} });
+		expect(staleLogoutResponse).toMatchObject({
+			command: "logout",
+			success: false,
+			error: expect.stringContaining("is not stored for rpc-ordinary"),
+		});
+		expect(noProviderResponse).toMatchObject({ command: "get_logout_accounts", success: false });
 		expect(providersResponse).toMatchObject({
 			success: true,
 			data: {
 				providers: expect.arrayContaining([
 					expect.objectContaining({ id: "rpc-secret", authenticated: false }),
-					expect.objectContaining({ id: "rpc-ordinary", authenticated: true }),
+					expect.objectContaining({ id: "rpc-ordinary", authenticated: false }),
+					expect.objectContaining({ id: "rpc-alias", authenticated: false }),
 				]),
 			},
 		});

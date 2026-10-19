@@ -1,14 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { executeSend } from "@oh-my-pi/pi-coding-agent/irc/messaging";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { IrcBridge } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
+import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { attachIrcWakeTurnMonitor } from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { createSessionDefaults } from "../helpers/session-defaults";
+
+type IrcWakeObserver = (records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined;
+
+const wakeAgent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 
 interface FakeSession {
 	session: AgentSession;
@@ -130,7 +139,7 @@ describe("IRC", () => {
 			expect(main.relayed[0]?.details).toEqual({ from: "0-A", to: "0-B", body: "sibling note" });
 		});
 
-		it("send to an unknown or aborted agent fails", async () => {
+		it("send to an unknown agent or a killed one without a transcript fails", async () => {
 			const unknown = await bus.send({ from: "0-Main", to: "0-Ghost", body: "hello?" });
 			expect(unknown.outcome).toBe("failed");
 
@@ -139,6 +148,30 @@ describe("IRC", () => {
 			registry.setStatus("0-Dead", "aborted");
 			const aborted = await bus.send({ from: "0-Main", to: "0-Dead", body: "hello?" });
 			expect(aborted.outcome).toBe("failed");
+			expect(sub.delivered).toEqual([]);
+		});
+
+		it("send revives a killed recipient from its transcript", async () => {
+			const sub = makeFakeSession();
+			sub.setOutcome("woken");
+			registry.register({
+				id: "0-Killed",
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				sessionFile: "/tmp/0-Killed.jsonl",
+				status: "aborted",
+			});
+			AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
+				async () => async () => sub.session,
+				() => 0,
+			);
+
+			const receipt = await bus.send({ from: "0-Main", to: "0-Killed", body: "continue where you stopped" });
+
+			expect(receipt.outcome).toBe("revived");
+			expect(sub.delivered.map(msg => msg.body)).toEqual(["continue where you stopped"]);
+			expect(registry.get("0-Killed")?.status).toBe("idle");
 		});
 
 		it("send surfaces recipient delivery errors as failed", async () => {
@@ -488,6 +521,177 @@ describe("IRC", () => {
 			expect(receipt).toEqual({ to: "0-Parked", outcome: "failed", error: "revive exploded" });
 			// Failed revival never enqueues: the message is lost, not buffered.
 			expect(bus.take("0-Parked")).toBeUndefined();
+		});
+	});
+
+	describe("wake-turn replies to broadcasts", () => {
+		/**
+		 * An idle subagent wired like a real one: deliveries go through the real
+		 * IrcBridge, a wake runs the executor's wake-turn monitor, and every turn
+		 * ends with the stop text "Not for me." (after a `yield` when `yields`).
+		 * Children share their parent's job manager, as spawned subagents do.
+		 */
+		function registerIdleSubagent(
+			id: string,
+			opts: { parentId?: string; yields?: boolean; jobManager?: AsyncJobManager } = {},
+		) {
+			let observer: IrcWakeObserver | undefined;
+			const listeners: ((event: AgentSessionEvent) => void)[] = [];
+			const turns: Promise<void>[] = [];
+			const relays: Promise<void>[] = [];
+			const wake = (records: AgentMessage[]): void => {
+				const finish = observer?.(records);
+				if (opts.yields) {
+					const event = {
+						type: "tool_execution_end",
+						toolCallId: `yield-${turns.length}`,
+						toolName: "yield",
+						result: {
+							content: [{ type: "text", text: "Result submitted." }],
+							details: { status: "success", data: "Not for me." },
+						},
+						isError: false,
+					} as AgentSessionEvent;
+					for (const listener of listeners) listener(event);
+				}
+				turns.push(Promise.resolve(finish?.()));
+			};
+			const bridge = new IrcBridge({
+				isDisposed: () => false,
+				isStreaming: () => false,
+				planModeEnabled: () => false,
+				emitSessionEvent: async () => {},
+				wakeForIrc: wake,
+			} as unknown as IrcBridgeHost);
+			const session = {
+				...createSessionDefaults(),
+				subscribe: (listener: (event: AgentSessionEvent) => void) => {
+					listeners.push(listener);
+					return () => listeners.splice(listeners.indexOf(listener), 1);
+				},
+				setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
+					observer = next;
+				},
+				trackIrcReply: (pending: Promise<void>) => {
+					relays.push(pending);
+				},
+				getLastAssistantMessage: () => ({
+					role: "assistant",
+					content: [{ type: "text", text: "Not for me." }],
+					stopReason: "stop",
+				}),
+				deliverIrcMessage: (msg: IrcMessage) => bridge.deliver(msg),
+				asyncJobManager: opts.jobManager,
+			} as unknown as AgentSession;
+			registry.register({ id, displayName: "task", kind: "sub", status: "idle", session, parentId: opts.parentId });
+			attachIrcWakeTurnMonitor(session, { id, agent: wakeAgent });
+			return {
+				wake,
+				settled: async () => {
+					await Promise.all(turns);
+					await Promise.all(relays);
+					await opts.jobManager?.waitForAll();
+					await opts.jobManager?.drainDeliveries({ timeoutMs: 1000 });
+				},
+			};
+		}
+
+		const incoming = (id: string, from: string, extra: Record<string, unknown> = {}): CustomMessage => ({
+			role: "custom",
+			customType: "irc:incoming",
+			content: "status?",
+			display: true,
+			details: { id, from, message: "status?", ...extra },
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+
+		/** The parent's job manager plus every result text delivered to `Main`. */
+		function parentJobs() {
+			const jobManager = new AsyncJobManager({});
+			const delivered: string[] = [];
+			jobManager.registerDeliverySink("Main", (_jobId, text) => {
+				delivered.push(text);
+			});
+			return { jobManager, delivered };
+		}
+
+		it("does not relay woken peers' turns back to a subagent broadcaster", async () => {
+			const broadcaster = makeFakeSession();
+			registry.register({
+				id: "0-C",
+				displayName: "task",
+				kind: "sub",
+				status: "idle",
+				session: broadcaster.session,
+			});
+			const a = registerIdleSubagent("0-A");
+			const b = registerIdleSubagent("0-B");
+
+			const sent = await executeSend({ registry, senderId: "0-C" }, { to: "all", message: "fixers: rebase now" });
+			expect(sent.details?.receipts?.map(receipt => receipt.outcome)).toEqual(["woken", "woken"]);
+			await a.settled();
+			await b.settled();
+			expect(broadcaster.delivered).toEqual([]);
+
+			// A direct message still gets the woken peer's turn back.
+			await executeSend({ registry, senderId: "0-C" }, { to: "0-A", message: "status?" });
+			await a.settled();
+			expect(broadcaster.delivered).toMatchObject([
+				{ from: "0-A", to: "0-C", body: "Not for me.", wakeRelay: true },
+			]);
+		});
+
+		it("does not deliver woken children's turns to a main-agent broadcaster", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "Main", displayName: "main", kind: "main", status: "idle", session: main.session });
+			const { jobManager, delivered } = parentJobs();
+			const a = registerIdleSubagent("0-A", { parentId: "Main", jobManager });
+			const b = registerIdleSubagent("0-B", { parentId: "Main", jobManager });
+
+			await executeSend({ registry, senderId: "Main" }, { to: "all", message: "everyone: status" });
+			await a.settled();
+			await b.settled();
+			expect(main.delivered).toEqual([]);
+			expect(delivered).toEqual([]);
+
+			// The parent's direct message still delivers the woken turn to the parent.
+			await executeSend({ registry, senderId: "Main" }, { to: "0-A", message: "status?" });
+			await a.settled();
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toContain("Not for me.");
+			await jobManager.dispose();
+		});
+
+		it("still delivers a child's own yield from a broadcast-woken turn to its parent", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "Main", displayName: "main", kind: "main", status: "idle", session: main.session });
+			const { jobManager, delivered } = parentJobs();
+			const child = registerIdleSubagent("0-A", { parentId: "Main", yields: true, jobManager });
+
+			await executeSend({ registry, senderId: "Main" }, { to: "all", message: "everyone: status" });
+			await child.settled();
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toContain("Not for me.");
+			expect(main.delivered).toEqual([]);
+			await jobManager.dispose();
+		});
+
+		it("relays once to a sender whose direct message shares the wake with its broadcast", async () => {
+			const sender = makeFakeSession();
+			registry.register({ id: "0-C", displayName: "task", kind: "sub", status: "idle", session: sender.session });
+			// One peer per order: a second relay from the same peer within the same
+			// millisecond would be deduped by `sentSince`, not by the broadcast skip.
+			const first = registerIdleSubagent("0-A");
+			const second = registerIdleSubagent("0-B");
+			first.wake([incoming("b-1", "0-C", { broadcast: true }), incoming("d-1", "0-C")]);
+			second.wake([incoming("d-2", "0-C"), incoming("b-2", "0-C", { broadcast: true })]);
+			await first.settled();
+			await second.settled();
+			expect(sender.delivered.map(msg => [msg.from, msg.replyTo])).toEqual([
+				["0-A", "d-1"],
+				["0-B", "d-2"],
+			]);
 		});
 	});
 

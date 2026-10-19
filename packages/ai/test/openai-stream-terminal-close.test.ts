@@ -4,8 +4,9 @@
 // `iterator.next()` until the idle watchdog (120s) converted the
 // already-successful turn into a timeout error.
 //
-// 1. openai-completions: `finish_reason` + trailing usage chunk → break
-//    immediately, well before the post-finish grace window.
+// 1. openai-completions: `finish_reason` + trailing usage chunk → resolve
+//    immediately, well before the post-finish grace window, while the
+//    connection stays open long enough to receive a late `[DONE]`.
 // 2. openai-completions: `finish_reason` with no usage chunk ever → end
 //    cleanly when the grace window elapses instead of erroring.
 // 3. openai-responses: `response.completed` → `processResponsesStream`
@@ -86,6 +87,57 @@ describe("terminal frame without connection close", () => {
 		// Immediate break path: must finish well inside the 2.5s post-finish
 		// grace window (the pre-fix behavior was a 120s idle-watchdog error).
 		expect(Date.now() - startedAt).toBeLessThan(2_000);
+	}, 10_000);
+
+	it("openai-completions: resolves before a late [DONE] without cancelling the response", async () => {
+		// Gateways record a request as client-cancelled when the body is torn
+		// down before they relay `[DONE]`, even though the turn completed.
+		const encoder = new TextEncoder();
+		const frames = [
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: "Hello" } }] }),
+			completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }),
+			completionChunk({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }),
+		].map(event => encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+		const releaseDone = Promise.withResolvers<void>();
+		const outcome = Promise.withResolvers<"done" | "cancelled">();
+		let cancelled = false;
+		// highWaterMark 0: `pull` runs only on client read demand, so `[DONE]` is
+		// relayed only if the client keeps reading after the usage chunk.
+		const body = new ReadableStream<Uint8Array>(
+			{
+				async pull(controller) {
+					const frame = frames.shift();
+					if (frame) {
+						controller.enqueue(frame);
+						return;
+					}
+					await releaseDone.promise;
+					if (cancelled) return;
+					controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+					controller.close();
+					outcome.resolve("done");
+				},
+				cancel() {
+					cancelled = true;
+					outcome.resolve("cancelled");
+				},
+			},
+			{ highWaterMark: 0 },
+		);
+		async function mockFetch(_input: string | URL | Request, _init?: RequestInit): Promise<Response> {
+			return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+		}
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: mockFetch as typeof fetch,
+		}).result();
+		// The turn resolved on the usage chunk while `[DONE]` is still withheld.
+		expect(result.stopReason).toBe("stop");
+		expect(result.usage.input).toBe(10);
+
+		releaseDone.resolve();
+		expect(await outcome.promise).toBe("done");
 	}, 10_000);
 
 	it("openai-completions: ignores zero cache placeholder until trailing positive cache details arrive", async () => {

@@ -4,9 +4,9 @@ import { matchesSelectCancel } from "../keybinding-matchers";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 import { formatKeyHints } from "../app-keybindings";
 import { editorKey } from "../chrome/keybinding-hints";
-import type { TspProps, TspSpan } from "@oh-my-pi/pi-wire";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatNumber } from "@oh-my-pi/pi-utils";
-import { col, node, row, span, text } from "../native/describe";
+import { col, node, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
 import { plainText, styledSpans } from "../native/spans";
@@ -57,29 +57,50 @@ function joined(spans: readonly TspSpan[]): string {
 	return spans.map(part => part.t).join("");
 }
 
+/** A figure the stats grid can right-align: `182,440`, `0.4127`, `$1.20`, `21%`. */
+const NUMERIC = /^[$€£]?\d[\d,]*(?:\.\d+)?%?$/;
+
+/** A report key or heading in sentence case: `Tool Calls` → `Tool calls`; acronyms (`MCP`, `ACU`) stay. */
+function sentenceCase(label: string): string {
+	let first = true;
+	return label.replace(/[A-Za-z]+/g, word => {
+		if (first) {
+			first = false;
+			return word;
+		}
+		return /^[A-Z][a-z]+$/.test(word) ? word.toLowerCase() : word;
+	});
+}
+
 /**
- * A value with a copy button after it: a click anywhere on the line copies its
- * text (the terminal-local `copy` action takes the leaf text; the icon has none).
+ * One line of the identity block: a sans label, then the value. With `copy`
+ * (its tooltip) the value and a copy glyph after it are one target: a click
+ * copies the value (the terminal-local `copy` action takes the leaf text; the
+ * icon has none).
  */
-function copyLine(
-	spans: TspSpan[],
-	title: string,
-	key: string,
-	props: Omit<TspProps<"text">, "text" | "spans"> = {},
-): NativeNode {
+function identityField(label: string, value: TspSpan[], key: string, copy?: string): NativeNode {
+	const shown = text(value, { truncate: "middle", grow: 1, shrink: 1 });
 	return node(
 		"row",
-		{
-			gap: "sm",
-			align: "center",
-			grow: 1,
-			role: "omp.info.copy",
-			actions: { click: "copy" },
-			title,
-		},
+		{ gap: "md", align: "center", role: "omp.info.field" },
 		[
-			text(spans, { ...props, grow: 1, shrink: 1 }),
-			node("icon", { name: "copy", role: "omp.info.copy.ic", aria: title }),
+			text([span(label)], { role: "omp.info.label", wrap: "none", shrink: 0 }),
+			copy
+				? node(
+						"row",
+						{
+							gap: "sm",
+							align: "center",
+							grow: 1,
+							shrink: 1,
+							role: "omp.info.copy",
+							actions: { click: "copy" },
+							title: copy,
+						},
+						[shown, node("icon", { name: "copy", role: "omp.info.copy.ic", aria: copy })],
+						"value",
+					)
+				: shown,
 		],
 		key,
 	);
@@ -165,83 +186,183 @@ export class SessionInfoOverlay implements Component {
 	}
 
 	/**
-	 * The sheet body (the overlay is the frame): the session id in mono
-	 * (click copies), each report heading as a section of key/value rows, a
-	 * context meter after the leading block, and a Close button (Esc).
+	 * The sheet body (the overlay is the frame), in three tiers: who the session
+	 * is (the id and file as copyable mono fields), how full its context window
+	 * is (a meter under a right-aligned figure), then the report's sections as
+	 * headed groups. Groups of plain counts (Messages, Tokens, Cost) share a
+	 * two-column stats grid with right-aligned figures and their Total set off
+	 * last; the rest (Provider, servers) are key/value rows. A Close button (Esc)
+	 * ends it.
 	 */
 	describe(cx: DescribeContext): NativeNode {
 		const meter = cx.supports("meter");
 		if (this.#nativeNode?.meter === meter) return this.#nativeNode.node;
+		// The report prints the append-only context mode after the message counts;
+		// it is a provider setting, so it joins the Provider group when there is one.
+		const parsed = parseKvReport(this.#infoSource);
+		const hasProvider = parsed.some(section => section.head === "Provider");
+		const moved: KvReportEntry[] = [];
+		const sections = parsed.map(section => ({
+			head: section.head,
+			entries: section.entries.filter(entry => {
+				if (!hasProvider || section.head === "Provider" || !("k" in entry) || entry.k !== "Append-Only")
+					return true;
+				moved.push(entry);
+				return false;
+			}),
+		}));
+		sections.find(section => section.head === "Provider")?.entries.push(...moved);
 		const body: NativeChild[] = [];
-		for (const [index, section] of parseKvReport(this.#infoSource).entries()) {
-			const children: NativeChild[] = [];
-			let items: { k: string; v: TspSpan[] }[] = [];
-			const flush = (): void => {
-				if (items.length === 0) return;
-				children.push(node("kv", { items, layout: "grid", role: "omp.info.kv" }));
-				items = [];
-			};
-			for (const entry of section.entries) {
-				if (!("k" in entry)) {
-					flush();
-					children.push(text(entry.line, { wrap: "word" }));
-				} else if (section.head === undefined && entry.k === "ID") {
-					// The id leads the sheet, once, as a copyable mono line.
-					body.push(
-						copyLine([span(joined(entry.v), "mono muted")], "Copy session ID", "id", { truncate: "middle" }),
-					);
-				} else if (section.head === undefined && entry.k === "File") {
-					flush();
-					children.push(
-						row(
-							[
-								text([span("File", "muted")], { wrap: "none", shrink: 0 }),
-								copyLine([span(joined(entry.v), "mono")], "Copy file path", "path", { wrap: "char" }),
-							],
-							{
-								gap: "md",
-								align: "start",
-								role: "omp.info.file",
-							},
-						),
-					);
-				} else {
-					items.push({ k: entry.k, v: entry.v });
+		const stats: { head: string; key: string; items: { k: string; v: TspSpan[] }[] }[] = [];
+		const flushStats = (): void => {
+			if (stats.length > 0) body.push(this.#describeStats(stats.splice(0)));
+		};
+		for (const [index, { head, entries }] of sections.entries()) {
+			if (head === undefined) {
+				// The session's identity: its id, then its file (copyable when it is one).
+				const identity: NativeChild[] = [];
+				const rest: NativeChild[] = [];
+				for (const entry of entries) {
+					if (!("k" in entry)) rest.push(text(entry.line, { wrap: "word", role: "omp.info.note" }));
+					else if (entry.k === "ID")
+						identity.unshift(identityField("ID", [span(joined(entry.v), "mono")], "id", "Copy session ID"));
+					else if (entry.k === "File") {
+						const path = joined(entry.v);
+						identity.push(
+							path.includes("/")
+								? identityField("File", [span(path, "path")], "file", `Copy ${path}`)
+								: identityField("File", [span(path, "muted")], "file"),
+						);
+					} else rest.push(node("kv", { items: [{ k: entry.k, v: entry.v }], role: "omp.info.kv" }));
 				}
-			}
-			flush();
-			if (section.head === undefined) {
-				body.push(node("col", { gap: "sm" }, children, `s${index}`));
+				if (identity.length > 0) body.push(node("col", { role: "omp.info.identity" }, identity, "identity"));
+				body.push(...rest);
 				const context = this.#context;
 				if (context && context.contextWindow > 0) body.push(this.#describeContext(context, meter));
-			} else {
-				body.push(node("section", { head: section.head }, children, `s${index}`));
+				continue;
 			}
+			const pairs = entries.filter((entry): entry is { k: string; v: TspSpan[] } => "k" in entry);
+			if (
+				pairs.length > 0 &&
+				pairs.length === entries.length &&
+				pairs.every(p => NUMERIC.test(joined(p.v).trim()))
+			) {
+				const cost = head === "Cost";
+				stats.push({
+					head,
+					key: `s${index}`,
+					items: pairs.map(p => ({
+						k: sentenceCase(p.k),
+						v: [span(cost && p.k === "Total" ? `$${joined(p.v).trim()}` : joined(p.v).trim(), "mono")],
+					})),
+				});
+				continue;
+			}
+			flushStats();
+			body.push(
+				node(
+					"section",
+					{ head: sentenceCase(head), role: "omp.info.group" },
+					this.#describeEntries(entries, head === "Provider"),
+					`s${index}`,
+				),
+			);
 		}
+		flushStats();
 		body.push(actionBar([null, actionButton("Close", "close", { keys: "escape" })]));
 		const described = col(body, { gap: "md" });
 		this.#nativeNode = { meter, node: described };
 		return described;
 	}
 
-	#describeContext(context: ContextUsage, meter: boolean): NativeNode {
-		const value = Math.min(1, Math.max(0, context.percent / 100));
-		const figure = `${formatNumber(context.tokens)} / ${formatNumber(context.contextWindow).toLowerCase()} · ${Math.round(context.percent)}%`;
+	/**
+	 * Key/value rows, free lines as notes between them. The provider's values are
+	 * machine strings (`mono`); elsewhere (LSP, MCP servers) the keys are names
+	 * (role `omp.info.names`, keys in mono).
+	 */
+	#describeEntries(entries: readonly KvReportEntry[], mono: boolean): NativeChild[] {
+		const children: NativeChild[] = [];
+		let items: { k: string; v: TspSpan[] }[] = [];
+		const flush = (): void => {
+			if (items.length === 0) return;
+			children.push(node("kv", { items, layout: "grid", role: mono ? "omp.info.kv" : "omp.info.names" }));
+			items = [];
+		};
+		for (const entry of entries) {
+			if (!("k" in entry)) {
+				flush();
+				children.push(text(entry.line, { wrap: "word", role: "omp.info.note" }));
+				continue;
+			}
+			const v = mono ? entry.v.map(part => ({ ...part, s: part.s ? `${part.s} mono` : "mono" })) : entry.v;
+			items.push({ k: mono ? sentenceCase(entry.k) : entry.k, v });
+		}
+		flush();
+		return children;
+	}
+
+	/**
+	 * Count groups as a two-column grid that stacks when narrow: each group goes
+	 * to the shorter column (report order holds when stacked), its Total last
+	 * over a hairline.
+	 */
+	#describeStats(groups: readonly { head: string; key: string; items: { k: string; v: TspSpan[] }[] }[]): NativeNode {
+		const columns: { lines: number; children: NativeChild[] }[] = [
+			{ lines: 0, children: [] },
+			{ lines: 0, children: [] },
+		];
+		for (const g of groups) {
+			const total = g.items.length > 1 ? g.items.find(item => item.k === "Total") : undefined;
+			const items = total ? g.items.filter(item => item !== total) : g.items;
+			const children: NativeChild[] = [node("kv", { items, layout: "grid", role: "omp.info.nums" })];
+			if (total) children.push(node("kv", { items: [total], layout: "grid", role: "omp.info.total" }));
+			// Ties go right, so the stacked order (left, then right) stays the report's.
+			const column = columns[0].lines === 0 || columns[0].lines < columns[1].lines ? columns[0] : columns[1];
+			column.lines += g.items.length + 2;
+			column.children.push(node("section", { head: sentenceCase(g.head), role: "omp.info.group" }, children, g.key));
+		}
 		return node(
 			"row",
-			{ gap: "sm", align: "center" },
+			{ align: "start", wrap: true, role: "omp.info.stats" },
+			columns
+				.filter(column => column.children.length > 0)
+				.map((column, i) => node("col", { role: "omp.info.column" }, column.children, `c${i}`)),
+			"stats",
+		);
+	}
+
+	/** The context window: a head row (label, `41K / 200K`, the share) over a full-width meter. */
+	#describeContext(context: ContextUsage, meter: boolean): NativeNode {
+		const value = Math.min(1, Math.max(0, context.percent / 100));
+		const title = `${context.tokens.toLocaleString("en-US")} of ${context.contextWindow.toLocaleString("en-US")} tokens`;
+		return node(
+			"col",
+			{ role: "omp.info.context", title },
 			[
-				text([span("Context", "muted")]),
+				node(
+					"row",
+					{ align: "baseline", role: "omp.info.contextHead" },
+					[
+						text([span("Context window")], { grow: 1, shrink: 1, truncate: "end" }),
+						text(
+							[
+								span(`${formatNumber(context.tokens)} / ${formatNumber(context.contextWindow)}`, "mono muted"),
+								span("  "),
+								span(`${Math.round(context.percent)}%`, "mono strong"),
+							],
+							{ wrap: "none", shrink: 0 },
+						),
+					],
+					"head",
+				),
 				meter
-					? node("meter", {
-							value,
-							style: "bar",
-							size: "md",
-							thresholds: { warn: 0.7, bad: 0.9 },
-							grow: 1,
-						})
-					: node("progress", { value, grow: 1 }),
-				text([span(figure, "mono")]),
+					? node(
+							"meter",
+							{ value, style: "bar", size: "md", thresholds: { warn: 0.7, bad: 0.9 }, title },
+							undefined,
+							"meter",
+						)
+					: node("progress", { value }, undefined, "meter"),
 			],
 			"context",
 		);

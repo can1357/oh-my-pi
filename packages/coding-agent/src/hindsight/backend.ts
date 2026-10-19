@@ -76,7 +76,7 @@ export const hindsightBackend: MemoryBackend = {
 		await installPrimaryState(session, settings, new Set());
 	},
 
-	async buildDeveloperInstructions(_agentDir, settings, session): Promise<string | undefined> {
+	async buildDeveloperInstructions(_agentDir, _cwd, settings, session): Promise<string | undefined> {
 		const config = loadHindsightConfig(settings);
 		if (!isHindsightConfigured(config)) return undefined;
 

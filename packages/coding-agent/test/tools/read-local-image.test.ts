@@ -39,6 +39,10 @@ const TINY_PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
 	"base64",
 );
+const OTHER_TINY_PNG = Buffer.from(
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+	"base64",
+);
 const TINY_SVG =
 	'<svg xmlns="http://www.w3.org/2000/svg" width="12" height="7"><rect width="12" height="7" fill="red"/></svg>';
 
@@ -114,6 +118,25 @@ describe("read local:// images", () => {
 		// the replacement char; the fixed path must never emit it as text.
 		expect(joinText(result.content)).not.toContain("\uFFFDPNG");
 	});
+	it("resets the repeat-read hint when an image at the same path changes", async () => {
+		const file = path.join(localRoot, "regenerated.png");
+		const tool = new ReadTool(makeSession(testDir));
+		await Bun.write(file, TINY_PNG);
+		const first = await tool.execute("first", { path: file });
+		await Bun.write(file, OTHER_TINY_PNG);
+		const changed = await tool.execute("changed", { path: file });
+		await Bun.write(file, TINY_PNG);
+		const restored = await tool.execute("restored", { path: file });
+
+		expect(first.content[0]).toEqual(changed.content[0]);
+		expect(first.content[1]).not.toEqual(changed.content[1]);
+		expect(joinText(restored.content)).not.toContain("identical output");
+
+		await tool.execute("repeat", { path: file });
+		const repeated = await tool.execute("repeat-again", { path: file });
+		expect(joinText(repeated.content)).toContain("identical output 3 times");
+	});
+
 	it("rasterizes a local SVG into a PNG attachment when :img is selected", async () => {
 		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);
 		const tool = new ReadTool(makeSession(testDir));
@@ -124,7 +147,7 @@ describe("read local:// images", () => {
 		expect(image && "mimeType" in image ? image.mimeType : undefined).toBe("image/png");
 		const png = image?.type === "image" ? Buffer.from(image.data, "base64") : Buffer.alloc(0);
 		expect(png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-		expect(joinText(result.content)).toContain("Read SVG file [image/png]");
+		expect(joinText(result.content)).toContain("Read SVG file [image/svg+xml] (displayed as image/png)");
 	});
 	it("returns SVG metadata plus a question hint for text-only models", async () => {
 		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);

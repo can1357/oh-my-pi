@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,9 +7,12 @@ import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { type CustomTool, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import type { MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { type CustomTool, type ExtensionFactory, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 // Contract for B1 (interactive MCP deferral): when `hasUI` is true, MCP
@@ -108,4 +111,110 @@ describe("createAgentSession MCP deferral (B1)", () => {
 			await session.dispose();
 		}
 	});
+});
+
+// Contract: on the non-deferred (SDK/RPC) path, MCP tools that change while
+// extension factories load, before the session installs its catalog listener,
+// are adopted before `createAgentSession` returns.
+describe("createAgentSession MCP catalog handoff", () => {
+	const SERVER = "fund";
+	const INITIAL_TOOL: MCPToolDefinition = {
+		name: "probe",
+		description: "Initial fund tool",
+		inputSchema: { type: "object", properties: {} },
+	};
+	let tempDir: string;
+	let originalAgentDir: string;
+	let server: Bun.Server<undefined> | undefined;
+
+	beforeEach(() => {
+		tempDir = path.join(os.tmpdir(), `pi-sdk-mcp-handoff-${Snowflake.next()}`);
+		// Discovery also reads user-level MCP config; point it at an empty home so
+		// only the fixture server is ever contacted.
+		const home = path.join(tempDir, "home");
+		fs.mkdirSync(path.join(home, ".omp", "agent"), { recursive: true });
+		originalAgentDir = getAgentDir();
+		setAgentDir(path.join(home, ".omp", "agent"));
+		spyOn(os, "homedir").mockReturnValue(home);
+	});
+
+	afterEach(() => {
+		server?.stop(true);
+		MCPManager.resetForTests();
+		setAgentDir(originalAgentDir);
+		mock.restore();
+		removeSyncWithRetries(tempDir);
+	});
+
+	// Replacement keeps the catalog size, so only a per-tool comparison sees it;
+	// removal shrinks it, so only a size comparison sees it.
+	it.each<{ change: string; next: MCPToolDefinition[]; expected: string | undefined }>([
+		{
+			change: "replaced",
+			next: [{ ...INITIAL_TOOL, description: "Replacement fund tool" }],
+			expected: "Replacement fund tool",
+		},
+		{ change: "removed", next: [], expected: undefined },
+	])(
+		"exposes the tool list after the server $change a tool while extensions loaded",
+		async ({ next, expected }) => {
+			let tools: MCPToolDefinition[] = [INITIAL_TOOL];
+			server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				async fetch(request) {
+					if (request.method !== "POST") return new Response(null, { status: 405 });
+					const message = (await request.json()) as { id?: number | string; method: string };
+					if (message.id === undefined) return new Response(null, { status: 202 });
+					const result =
+						message.method === "initialize"
+							? {
+									protocolVersion: "2025-11-25",
+									capabilities: { tools: {} },
+									serverInfo: { name: "fund", version: "1" },
+								}
+							: { tools };
+					return Response.json({ jsonrpc: "2.0", id: message.id, result });
+				},
+			});
+			fs.writeFileSync(
+				path.join(tempDir, ".mcp.json"),
+				JSON.stringify({ mcpServers: { [SERVER]: { type: "http", url: `${server.url}mcp` } } }),
+			);
+			const changeToolsDuringLoad: ExtensionFactory = async () => {
+				tools = next;
+				await MCPManager.instance()?.refreshServerTools(SERVER);
+			};
+			const authStorage = createInMemoryAuthStorage();
+			const { session } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				// A zero startup window waits for the fixture to connect, so its change
+				// lands while extensions load, the window this contract covers.
+				settings: Settings.isolated({ "mcp.enableProjectConfig": true, "mcp.startupTimeoutMs": 0 }),
+				sessionManager: SessionManager.inMemory(tempDir),
+				hasUI: false,
+				enableMCP: true,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				disableExtensionDiscovery: true,
+				extensions: [changeToolsDuringLoad],
+				skills: [],
+				rules: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+			});
+			try {
+				expect(session.getToolByName("mcp__fund_probe")?.description).toBe(expected);
+			} finally {
+				await session.dispose();
+				authStorage.close();
+			}
+		},
+		20_000,
+	);
 });

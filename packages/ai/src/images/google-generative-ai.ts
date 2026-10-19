@@ -1,7 +1,7 @@
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
-import { errorMessage, ImageApiError, imageBaseUrl, modelHeaders, usageFromWire } from "./shared";
+import { errorMessage, ImageApiError, imageBaseUrl, modelHeaders, usageFromWire, validateImageInput } from "./shared";
 import type { GeneratedImage, ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
 interface GeminiPart {
@@ -20,7 +20,9 @@ export async function generateGoogleImage(
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
 	const fetchImpl = options.fetch ?? fetch;
-	const parts: Array<{ text?: string; inlineData?: GeneratedImage }> = (request.inputImages ?? []).map(image => ({
+	const inputImages = request.inputImages ?? [];
+	for (const image of inputImages) validateImageInput(image);
+	const parts: Array<{ text?: string; inlineData?: GeneratedImage }> = inputImages.map(image => ({
 		inlineData: image,
 	}));
 	parts.push({ text: request.prompt });

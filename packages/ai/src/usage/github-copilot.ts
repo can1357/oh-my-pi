@@ -9,6 +9,7 @@ import { COPILOT_GITHUB_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot
 import * as AIError from "../error";
 import type {
 	UsageAmount,
+	UsageUnit,
 	UsageFetchContext,
 	UsageFetchParams,
 	UsageLimit,
@@ -47,7 +48,7 @@ type BillingUsageItem = {
 	product: string;
 	sku: string;
 	model?: string;
-	unitType: string;
+	unitType?: string;
 	grossQuantity: number;
 	netQuantity: number;
 	limit?: number;
@@ -266,25 +267,45 @@ function normalizeQuotaSnapshots(
 	return { limits, window };
 }
 
+/**
+ * The unit GitHub's billing API metered one usage item in, plus the label
+ * that names it. Only AI credits is recognised: any other value keeps the
+ * legacy wording, since an unrecognised unit is not evidence about how the
+ * account is billed.
+ */
+function resolveBillingUnit(unitType: string | undefined): { unit: UsageUnit; label: string } {
+	if (typeof unitType !== "string") return { unit: "requests", label: "Premium Requests" };
+	// "AI_CREDITS", "ai-credits" and "Ai Credits" all name the same unit.
+	return unitType
+		.toUpperCase()
+		.replace(/[^A-Z]/g, "")
+		.includes("CREDIT")
+		? { unit: "credits", label: "AI Credits" }
+		: { unit: "requests", label: "Premium Requests" };
+}
+
 function normalizeBillingUsage(data: BillingUsageResponse): UsageLimit[] {
 	const limits: UsageLimit[] = [];
 	const periodLabel = data.timePeriod.month
 		? `${data.timePeriod.year}-${String(data.timePeriod.month).padStart(2, "0")}`
 		: `${data.timePeriod.year}`;
 	const window: UsageWindow = {
-		id: "billing-period",
+		id: "monthly",
 		label: periodLabel,
 	};
 
 	const premiumItems = data.usageItems.filter(
 		item => item.sku === "Copilot Premium Request" || item.sku.includes("Premium"),
 	);
+	// The allowance is metered in one unit, and the items name it. Take it from
+	// the first item that states a unit rather than assuming the legacy one.
+	const allowanceUnit = resolveBillingUnit(premiumItems.find(item => item.unitType !== undefined)?.unitType);
 	const totalUsed = premiumItems.reduce((sum, item) => sum + item.grossQuantity, 0);
 	const totalLimit = premiumItems.reduce((sum, item) => sum + (item.limit ?? 0), 0) || undefined;
-	const totalAmount = buildAmount(totalUsed, totalLimit, "requests");
+	const totalAmount = buildAmount(totalUsed, totalLimit, allowanceUnit.unit);
 	limits.push({
 		id: "copilot:premium",
-		label: "Premium Requests",
+		label: allowanceUnit.label,
 		scope: {
 			provider: "github-copilot",
 			accountId: data.user,
@@ -298,7 +319,8 @@ function normalizeBillingUsage(data: BillingUsageResponse): UsageLimit[] {
 	for (const item of data.usageItems) {
 		if (!item.model) continue;
 		if (item.grossQuantity <= 0) continue;
-		const amount = buildAmount(item.grossQuantity, item.limit, "requests");
+		// Each model row is metered in its own item's unit, not the legacy default.
+		const amount = buildAmount(item.grossQuantity, item.limit, resolveBillingUnit(item.unitType).unit);
 		limits.push({
 			id: `copilot:model:${item.model}`,
 			label: `Model ${item.model}`,

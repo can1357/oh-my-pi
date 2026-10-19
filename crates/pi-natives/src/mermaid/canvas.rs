@@ -7,7 +7,7 @@
 //! path keeps that pair atomic so serialized rows occupy exactly one terminal
 //! column per cell.
 
-use std::{fmt, rc::Rc};
+use std::{collections::BTreeMap, fmt, rc::Rc};
 
 use super::{
 	ansi::{CharRole, ColorMode, RoleCell, Theme, colorize_line},
@@ -212,6 +212,12 @@ impl<T: Clone + Default> Grid<T> {
 		if width == self.width && height == self.height {
 			return;
 		}
+		if height == self.height {
+			// Column-major: new columns append after the existing ones.
+			self.cells.resize((width * height) as usize, T::default());
+			self.width = width;
+			return;
+		}
 		let mut grown = Self::new(width, height);
 		for x in 0..self.width {
 			for y in 0..self.height {
@@ -238,18 +244,15 @@ impl<T: Clone + Default> Grid<T> {
 		}
 	}
 
-	/// Copy of `self` grown to fit every overlay at `offset`; cells of `self`
-	/// are preserved and overlays are not yet applied.
-	fn grown_for_overlays(&self, offset: DrawingCoord, overlays: &[&Self]) -> Self {
+	/// Grow to fit every overlay at `offset`; overlays are not yet applied.
+	fn grow_for_overlays(&mut self, offset: DrawingCoord, overlays: &[&Self]) {
 		let mut width = self.width;
 		let mut height = self.height;
 		for overlay in overlays {
 			width = width.max(overlay.width + offset.x);
 			height = height.max(overlay.height + offset.y);
 		}
-		let mut merged = self.clone();
-		merged.ensure_size(width, height);
-		merged
+		self.ensure_size(width, height);
 	}
 }
 
@@ -260,18 +263,17 @@ impl RoleCanvas {
 	}
 
 	/// Overlay role canvases at `offset`; `Some` roles overwrite the base.
-	pub fn merged(&self, offset: DrawingCoord, overlays: &[&Self]) -> Self {
-		let mut merged = self.grown_for_overlays(offset, overlays);
+	pub fn merge(&mut self, offset: DrawingCoord, overlays: &[&Self]) {
+		self.grow_for_overlays(offset, overlays);
 		for overlay in overlays {
 			for x in 0..overlay.width {
 				for y in 0..overlay.height {
 					if let Some(role) = overlay.get(x, y).copied().flatten() {
-						merged.set(x + offset.x, y + offset.y, Some(role));
+						self.set(x + offset.x, y + offset.y, Some(role));
 					}
 				}
 			}
 		}
-		merged
 	}
 }
 
@@ -280,12 +282,18 @@ pub const fn is_junction_char(c: char) -> bool {
 	matches!(
 		c,
 		'─' | '│'
-			| '┌' | '┐'
-			| '└' | '┘'
-			| '├' | '┤'
-			| '┬' | '┴'
-			| '┼' | '╴'
-			| '╵' | '╶'
+			| '┌'
+			| '┐'
+			| '└'
+			| '┘'
+			| '├'
+			| '┤'
+			| '┬'
+			| '┴'
+			| '┼'
+			| '╴'
+			| '╵'
+			| '╶'
 			| '╷'
 	)
 }
@@ -313,38 +321,161 @@ pub fn merge_junctions(existing: char, incoming: char) -> char {
 	}
 }
 
+/// Cell storage the drawing primitives write through: a dense [`Canvas`] or
+/// a sparse [`Layer`].
+pub trait CellSurface {
+	/// The cell at `(x, y)`; `None` outside the surface.
+	fn cell(&self, x: i32, y: i32) -> Option<&Cell>;
+	/// Write a cell; writes outside the surface are dropped.
+	fn put(&mut self, x: i32, y: i32, cell: Cell);
+	/// Grow to at least `width × height`, preserving content.
+	fn grow(&mut self, width: i32, height: i32);
+}
+
+impl CellSurface for Canvas {
+	#[inline]
+	fn cell(&self, x: i32, y: i32) -> Option<&Cell> {
+		self.get(x, y)
+	}
+
+	#[inline]
+	fn put(&mut self, x: i32, y: i32, cell: Cell) {
+		self.set(x, y, cell);
+	}
+
+	fn grow(&mut self, width: i32, height: i32) {
+		self.ensure_size(width, height);
+	}
+}
+
+/// [`Canvas::write_cell`] on any surface.
+fn write_cell_on(surface: &mut impl CellSurface, x: i32, y: i32, cell: Cell) {
+	let Some(current) = surface.cell(x, y) else {
+		return;
+	};
+	if current.is_wide_pad() && x > 0 && !cell.is_wide_pad() {
+		surface.put(x - 1, y, Cell::SPACE);
+	} else if !current.is_wide_pad()
+		&& surface.cell(x + 1, y).is_some_and(Cell::is_wide_pad)
+		&& cell != *current
+	{
+		surface.put(x + 1, y, Cell::SPACE);
+	}
+	surface.put(x, y, cell);
+}
+
+/// Whether `(x, y)` holds a plain space; outside the surface counts as
+/// occupied.
+fn is_space_on(surface: &impl CellSurface, x: i32, y: i32) -> bool {
+	surface.cell(x, y).is_some_and(Cell::is_space)
+}
+
+/// [`Canvas::draw_text`] on any surface.
+fn draw_text_on(surface: &mut impl CellSurface, start: DrawingCoord, text: &str, force: bool) {
+	let cells = to_cells(text);
+	surface.grow(start.x + cells.len() as i32 + 1, start.y + 1);
+	for (i, cell) in cells.iter().enumerate() {
+		if cell.is_wide_pad() {
+			continue;
+		}
+		let x = start.x + i as i32;
+		let y = start.y;
+		if cells.get(i + 1).is_some_and(Cell::is_wide_pad) {
+			let pair_free = is_space_on(surface, x, y) && is_space_on(surface, x + 1, y);
+			if force || pair_free {
+				write_cell_on(surface, x, y, cell.clone());
+				write_cell_on(surface, x + 1, y, Cell::WIDE_PAD);
+			}
+		} else if force || is_space_on(surface, x, y) {
+			write_cell_on(surface, x, y, cell.clone());
+		}
+	}
+}
+
+/// The cells one drawing step writes over a canvas, kept sparse.
+///
+/// Reads and writes follow [`Canvas`] semantics over the logical
+/// `width × height` extent, absent cells reading as spaces, so
+/// [`Canvas::overlay_layers`] composites a layer exactly as
+/// [`Canvas::merge`] composites the full canvas it stands in for, without
+/// allocating and scanning a canvas per edge and layer kind.
+#[derive(Debug)]
+pub struct Layer {
+	width:  i32,
+	height: i32,
+	/// Keyed `(x, y)`: iteration is column-major, the order
+	/// [`Canvas::merge`] visits cells in.
+	cells:  BTreeMap<(i32, i32), Cell>,
+	/// What absent cells read as.
+	blank:  Cell,
+}
+
+impl Layer {
+	/// An empty layer with the extent of `canvas`.
+	pub const fn over(canvas: &Canvas) -> Self {
+		Self {
+			width:  canvas.width,
+			height: canvas.height,
+			cells:  BTreeMap::new(),
+			blank:  Cell::SPACE,
+		}
+	}
+
+	/// Write a cell; writes outside the layer's extent are dropped.
+	pub fn set(&mut self, x: i32, y: i32, cell: Cell) {
+		if x >= 0 && y >= 0 && x < self.width && y < self.height {
+			self.cells.insert((x, y), cell);
+		}
+	}
+
+	/// Draw `text` as [`Canvas::draw_text`] does.
+	pub fn draw_text(&mut self, start: DrawingCoord, text: &str, force: bool) {
+		draw_text_on(self, start, text, force);
+	}
+
+	/// The written cells, in column-major order.
+	pub fn cells(&self) -> impl Iterator<Item = (i32, i32, &Cell)> {
+		self.cells.iter().map(|(&(x, y), cell)| (x, y, cell))
+	}
+}
+
+impl CellSurface for Layer {
+	fn cell(&self, x: i32, y: i32) -> Option<&Cell> {
+		(x >= 0 && y >= 0 && x < self.width && y < self.height)
+			.then(|| self.cells.get(&(x, y)).unwrap_or(&self.blank))
+	}
+
+	fn put(&mut self, x: i32, y: i32, cell: Cell) {
+		self.set(x, y, cell);
+	}
+
+	fn grow(&mut self, width: i32, height: i32) {
+		self.width = self.width.max(width);
+		self.height = self.height.max(height);
+	}
+}
+
 impl Canvas {
 	/// Write one cell, dissolving any wide-glyph pair the write would split:
 	/// overwriting a pad orphans its lead and overwriting a lead orphans its
 	/// pad, so the orphaned half becomes a space.
 	pub fn write_cell(&mut self, x: i32, y: i32, cell: Cell) {
-		let Some(current) = self.get(x, y) else {
-			return;
-		};
-		if current.is_wide_pad() && x > 0 && !cell.is_wide_pad() {
-			self.set(x - 1, y, Cell::SPACE);
-		} else if !current.is_wide_pad()
-			&& self.get(x + 1, y).is_some_and(Cell::is_wide_pad)
-			&& cell != *current
-		{
-			self.set(x + 1, y, Cell::SPACE);
-		}
-		self.set(x, y, cell);
+		write_cell_on(self, x, y, cell);
 	}
 
 	/// Whether the cell at `(x, y)` is a plain space (out of range counts as
 	/// occupied).
 	#[inline]
 	pub fn is_space_at(&self, x: i32, y: i32) -> bool {
-		self.get(x, y).is_some_and(Cell::is_space)
+		is_space_on(self, x, y)
 	}
 
-	/// Overlay canvases at `offset`. Spaces are transparent; overlapping
-	/// Unicode junction characters merge (unless `use_ascii`); label content
-	/// never overwrites existing label content (first label wins); wide
-	/// glyphs land or yield as a whole pair.
-	pub fn merged(&self, offset: DrawingCoord, use_ascii: bool, overlays: &[&Self]) -> Self {
-		let mut merged = self.grown_for_overlays(offset, overlays);
+	/// Overlay canvases at `offset`, growing to fit them. Spaces are
+	/// transparent; overlapping Unicode junction characters merge (unless
+	/// `use_ascii`); label content never overwrites existing label content
+	/// (first label wins); wide glyphs land or yield as a whole pair.
+	pub fn merge(&mut self, offset: DrawingCoord, use_ascii: bool, overlays: &[&Self]) {
+		self.grow_for_overlays(offset, overlays);
 		for overlay in overlays {
 			for x in 0..overlay.width {
 				for y in 0..overlay.height {
@@ -352,59 +483,64 @@ impl Canvas {
 					if cell.is_space() || cell.is_wide_pad() {
 						continue;
 					}
-					let mx = x + offset.x;
-					let my = y + offset.y;
-					let Some(current) = merged.get(mx, my) else {
-						continue;
-					};
 					let is_wide = overlay.get(x + 1, y).is_some_and(Cell::is_wide_pad);
-					let junction = match (use_ascii, current.as_char(), cell.as_char()) {
-						(false, Some(a), Some(b)) if is_junction_char(a) && is_junction_char(b) => {
-							Some((a, b))
-						},
-						_ => None,
-					};
-					if let Some((a, b)) = junction {
-						merged.set(mx, my, Cell::from(merge_junctions(a, b)));
-					} else if is_wide {
-						let next_is_label = merged.get(mx + 1, my).is_some_and(Cell::is_label);
-						if !current.is_label() && !next_is_label {
-							merged.write_cell(mx, my, cell.clone());
-							merged.write_cell(mx + 1, my, Cell::WIDE_PAD);
-						}
-					} else if current.is_label() && cell.is_label() {
-						// First label wins.
-					} else {
-						merged.write_cell(mx, my, cell.clone());
-					}
+					self.overlay_cell(x + offset.x, y + offset.y, cell, is_wide, use_ascii);
 				}
 			}
 		}
-		merged
+	}
+
+	/// Overlay `layers` in order at the origin, under the rules of
+	/// [`Canvas::merge`].
+	pub fn overlay_layers(&mut self, use_ascii: bool, layers: &[Layer]) {
+		let width = layers
+			.iter()
+			.fold(self.width, |width, layer| width.max(layer.width));
+		let height = layers
+			.iter()
+			.fold(self.height, |height, layer| height.max(layer.height));
+		self.ensure_size(width, height);
+		for layer in layers {
+			for (&(x, y), cell) in &layer.cells {
+				if cell.is_space() || cell.is_wide_pad() {
+					continue;
+				}
+				let is_wide = layer.cells.get(&(x + 1, y)).is_some_and(Cell::is_wide_pad);
+				self.overlay_cell(x, y, cell, is_wide, use_ascii);
+			}
+		}
+	}
+
+	/// Apply one non-space overlay cell at `(x, y)`; `is_wide` says the
+	/// overlay holds its wide-glyph pad next.
+	fn overlay_cell(&mut self, x: i32, y: i32, cell: &Cell, is_wide: bool, use_ascii: bool) {
+		let Some(current) = self.get(x, y) else {
+			return;
+		};
+		let junction = match (use_ascii, current.as_char(), cell.as_char()) {
+			(false, Some(a), Some(b)) if is_junction_char(a) && is_junction_char(b) => Some((a, b)),
+			_ => None,
+		};
+		if let Some((a, b)) = junction {
+			self.set(x, y, Cell::from(merge_junctions(a, b)));
+		} else if is_wide {
+			let next_is_label = self.get(x + 1, y).is_some_and(Cell::is_label);
+			if !current.is_label() && !next_is_label {
+				self.write_cell(x, y, cell.clone());
+				self.write_cell(x + 1, y, Cell::WIDE_PAD);
+			}
+		} else if current.is_label() && cell.is_label() {
+			// First label wins.
+		} else {
+			self.write_cell(x, y, cell.clone());
+		}
 	}
 
 	/// Draw `text` starting at `start`, growing the canvas to fit. Existing
 	/// non-space cells are preserved unless `force`; wide glyphs need both of
 	/// their cells free to land.
 	pub fn draw_text(&mut self, start: DrawingCoord, text: &str, force: bool) {
-		let cells = to_cells(text);
-		self.ensure_size(start.x + cells.len() as i32 + 1, start.y + 1);
-		for (i, cell) in cells.iter().enumerate() {
-			if cell.is_wide_pad() {
-				continue;
-			}
-			let x = start.x + i as i32;
-			let y = start.y;
-			if cells.get(i + 1).is_some_and(Cell::is_wide_pad) {
-				let pair_free = self.is_space_at(x, y) && self.is_space_at(x + 1, y);
-				if force || pair_free {
-					self.write_cell(x, y, cell.clone());
-					self.write_cell(x + 1, y, Cell::WIDE_PAD);
-				}
-			} else if force || self.is_space_at(x, y) {
-				self.write_cell(x, y, cell.clone());
-			}
-		}
+		draw_text_on(self, start, text, force);
 	}
 
 	/// Draw multi-line text centered on `(cx, cy)`: lines spread evenly
@@ -519,11 +655,12 @@ mod tests {
 		base.draw_text(DrawingCoord::new(0, 0), "─A─", true);
 		let mut overlay = Canvas::new(3, 1);
 		overlay.draw_text(DrawingCoord::new(0, 0), "│B ", true);
-		let merged = base.merged(DrawingCoord::new(0, 0), false, &[&overlay]);
+		let mut merged = base.clone();
+		merged.merge(DrawingCoord::new(0, 0), false, &[&overlay]);
 		// draw_text grows one column past the text, as the reference does.
 		assert_eq!(merged.to_plain_string(), "┼A─ ");
-		let ascii = base.merged(DrawingCoord::new(0, 0), true, &[&overlay]);
-		assert_eq!(ascii.to_plain_string(), "│A─ ");
+		base.merge(DrawingCoord::new(0, 0), true, &[&overlay]);
+		assert_eq!(base.to_plain_string(), "│A─ ");
 	}
 
 	#[test]

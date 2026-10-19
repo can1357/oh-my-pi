@@ -43,7 +43,9 @@ describe("print mode disposes the session before terminating", () => {
 			},
 			state: { messages: [errorMsg] },
 			getLastAssistantMessage: () => errorMsg,
+			disableStopTimeTodoReminders: () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
+			waitForIdle: async () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => {
 				order.push("catchup");
@@ -122,7 +124,9 @@ describe("print mode disposes the session before terminating", () => {
 				onPersistenceNotice: () => () => {},
 			},
 			getLastAssistantMessage: () => abortedMsg,
+			disableStopTimeTodoReminders: () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
+			waitForIdle: async () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,
 			// Mimic a real mid-turn signal: the postmortem teardown fires (which

@@ -83,6 +83,13 @@ provider "web" {
 			limits
 			supports-tools #false
 		}
+		model "deepseek" name="DeepSeek" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 		model "kimi" name="Kimi" {
 			reasoning #false
 			input "text"

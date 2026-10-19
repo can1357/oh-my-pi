@@ -1,7 +1,8 @@
 import { Buffer } from "node:buffer";
 import { planRequirementFor, quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
-import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { slugify, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { ProviderHttpError } from "../error";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
@@ -393,12 +394,7 @@ function additionalLimitSlug(args: { limitName?: string; meteredFeature?: string
 	const probe = `${args.limitName ?? ""} ${args.meteredFeature ?? ""}`.toLowerCase();
 	if (probe.includes("spark") || probe.includes("bengalfox")) return "spark";
 	const source = (args.meteredFeature ?? args.limitName ?? "extra").toLowerCase();
-	return (
-		source
-			.replace(/^codex[-_]/, "")
-			.replace(/[^a-z0-9]+/g, "-")
-			.replace(/^-+|-+$/g, "") || "extra"
-	);
+	return slugify(source.replace(/^codex[-_]/, "")) || "extra";
 }
 
 function additionalDisplayName(slug: string, limitName?: string): string {
@@ -542,11 +538,21 @@ export const openaiCodexUsageProvider: UsageProvider = {
 		try {
 			const response = await ctx.fetch(url, { headers, signal: params.signal });
 			if (!response.ok) {
+				// A rejected token must purge the cached report and fail the health
+				// check: only a thrown auth status does that, while `null` is the
+				// transient-failure path that keeps serving last-good quota.
+				if (response.status === 401 || response.status === 403) {
+					throw new ProviderHttpError(
+						`Codex usage endpoint returned ${response.status} ${response.statusText}`.trim(),
+						response.status,
+					);
+				}
 				ctx.logger?.warn("Codex usage request failed", { status: response.status, provider: params.provider });
 				return null;
 			}
 			payload = await response.json();
 		} catch (error) {
+			if (error instanceof ProviderHttpError) throw error;
 			ctx.logger?.warn("Codex usage request error", { provider: params.provider, error: String(error) });
 			return null;
 		}

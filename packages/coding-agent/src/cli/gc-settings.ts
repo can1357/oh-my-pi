@@ -23,3 +23,9 @@ export const cfgGcStale = register({ id: "gc.stale", type: "boolean", default: f
 export const cfgGcStaleRetainNewest = register({ id: "gc.staleRetainNewest", type: "number", default: 20 });
 
 export const cfgGcStaleRetainDays = register({ id: "gc.staleRetainDays", type: "number", default: 30 });
+
+// Opt-in: rewrites cold session files in place through the filesystem's
+// transparent compression (APFS, NTFS), so it needs an explicit request.
+export const cfgGcCompress = register({ id: "gc.compress", type: "boolean", default: false });
+
+export const cfgGcCompressAfterDays = register({ id: "gc.compressAfterDays", type: "number", default: 7 });

@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -6,10 +8,12 @@ import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
+import { InternalUrlRouter } from "../../internal-urls";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { readMediaPath } from "@oh-my-pi/pi-tui/native/blobs";
 import { createBackgroundTanDispatchBlock } from "@oh-my-pi/pi-tui/chat/background-tan-message";
 import { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { detectCacheInvalidation } from "@oh-my-pi/pi-tui/chat/cache-invalidation-marker";
@@ -37,15 +41,31 @@ import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
 import { imageContent, textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { ToolActivityContainer } from "@oh-my-pi/pi-tui/chrome/tool-activity";
-import { ToolExecutionComponent, type ToolExecutionHandle, toolRenderName } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import {
+	isSettledJobFrame,
+	parksAsBackground,
+	settleWithJobFrame,
+	ToolExecutionComponent,
+	type ToolExecutionHandle,
+	toolRenderName,
+} from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptBlock, TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
-import { materializeImageReferenceLinksSync } from "@oh-my-pi/pi-tui/prompt/image-references";
+import {
+	materializeImageReferenceLinks,
+	materializeImageReferenceLinksSync,
+} from "@oh-my-pi/pi-tui/prompt/image-references";
+import { normalizeBlobExtension } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { theme } from "@oh-my-pi/pi-tui/theme";
-import type { CompactionQueuedMessage, InteractiveModeContext, RenderSessionContextOptions } from "../../modes/types";
+import type {
+	CompactionQueuedMessage,
+	InteractiveModeContext,
+	RenderSessionContextOptions,
+	ShowStatusOptions,
+} from "../../modes/types";
 import { extractVisibleAssistantText } from "../rpc/rpc-live";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
 import {
@@ -115,47 +135,142 @@ function waitForImmediate(): Promise<void> {
 type QueuedMessages = {
 	steering: string[];
 	followUp: string[];
+	liveSteered: number;
 };
 type AddMessageOptions = {
 	imageLinks?: readonly (string | undefined)[];
 	reuseSettledComponent?: boolean;
 };
 
+type ImageChipSessionManager = Pick<
+	InteractiveModeContext["sessionManager"],
+	"putBlob" | "putBlobSync" | "getArtifactsDir" | "getSessionId"
+>;
+
+/** Where an image chip's bytes live: a file the chip opens directly, or the file behind an internal URL. */
+type ImageChipSource = { kind: "file"; path: string } | { kind: "internal"; path: string };
+
+/**
+ * Internal URLs (`local://`) stay on the image for the model but resolve against the
+ * session root, which `/move` relocates, so a chip cannot point at them. Their backing
+ * file holds the original pasted bytes (the payload may be auto-resized), so the chip
+ * opens a stable blob copy of that file. Undefined when no file backs the image.
+ */
+function imageChipSource(image: ImageContent, sessionManager: ImageChipSessionManager): ImageChipSource | undefined {
+	const sourcePath = imageAttachmentSource(image)?.path;
+	if (!sourcePath) return undefined;
+	const router = InternalUrlRouter.instance();
+	if (!router.canHandle(sourcePath)) return { kind: "file", path: sourcePath };
+	try {
+		const located = router.locateSync(sourcePath, {
+			localProtocolOptions: {
+				getArtifactsDir: () => sessionManager.getArtifactsDir(),
+				getSessionId: () => sessionManager.getSessionId(),
+			},
+		});
+		return located === undefined ? undefined : { kind: "internal", path: located };
+	} catch {
+		return undefined;
+	}
+}
+
+/** Chip targets for attached images: each file on disk, else a blob copy of the original bytes (or the payload). */
+export async function materializeImageChipLinks(
+	images: readonly ImageContent[],
+	sessionManager: ImageChipSessionManager,
+): Promise<(string | undefined)[]> {
+	const putBlob = sessionManager.putBlob.bind(sessionManager);
+	return Promise.all(
+		images.map(async image => {
+			const source = imageChipSource(image, sessionManager);
+			if (source?.kind === "file") return source.path;
+			if (source) {
+				try {
+					const bytes = await fs.promises.readFile(source.path);
+					return (await putBlob(bytes, { extension: normalizeBlobExtension(path.extname(source.path)) }))
+						.displayPath;
+				} catch (error) {
+					logger.warn("Failed to copy original image for its chip", {
+						path: source.path,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+			return (await materializeImageReferenceLinks([image], putBlob))?.[0];
+		}),
+	);
+}
+
+/** Synchronous {@link materializeImageChipLinks} for transcript rebuilds. */
 function imageLinksForMessage(
 	images: readonly ImageContent[],
-	putBlobSync: InteractiveModeContext["sessionManager"]["putBlobSync"],
+	sessionManager: ImageChipSessionManager,
 ): (string | undefined)[] | undefined {
 	if (images.length === 0) return undefined;
-	const materialized = materializeImageReferenceLinksSync(images, putBlobSync);
-	return images.map((image, index) => imageAttachmentSource(image)?.path ?? materialized?.[index]);
+	const putBlobSync = sessionManager.putBlobSync.bind(sessionManager);
+	return images.map(image => {
+		const source = imageChipSource(image, sessionManager);
+		if (source?.kind === "file") return source.path;
+		if (source) {
+			try {
+				const bytes = fs.readFileSync(source.path);
+				return putBlobSync(bytes, { extension: normalizeBlobExtension(path.extname(source.path)) }).displayPath;
+			} catch (error) {
+				logger.warn("Failed to copy original image for its chip", {
+					path: source.path,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		return materializeImageReferenceLinksSync([image], putBlobSync)?.[0];
+	});
 }
 
 export class UiHelpers {
+	/**
+	 * Tail of the transcript-replay chain. Replays swap `ctx.chatContainer` and the
+	 * live component maps for their whole duration, so two overlapping replays would
+	 * capture each other's staged state as "visible" and commit interleaved trees.
+	 */
+	#replayTail: Promise<void> = Promise.resolve();
+	/** Bumped by every replay request; a queued or in-flight replay is stale once it moves on. */
+	#replayGeneration = 0;
+	/** Requested replays that have not settled yet. */
+	#replaysInFlight = 0;
+	/** `initialChatRendered` to restore when the latest replay ends without committing. */
+	#chatRenderedBeforeReplay = false;
+
 	constructor(private ctx: InteractiveModeContext) {}
 
 	/**
 	 * Show a status message in the chat.
 	 *
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
-	 * we update the previous status line instead of appending new ones to avoid log spam.
+	 * we update the previous status line instead of appending new ones to avoid log spam. A repeat of the
+	 * exact same text replaces the line with a fresh notice: an in-place update with identical props sends
+	 * nothing to a native terminal, so its expired toast would never show again.
 	 */
-	showStatus(message: string, options?: { dim?: boolean }): void {
+	showStatus(message: string, options?: ShowStatusOptions): void {
 		const children = this.ctx.chatContainer.children;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const useDim = options?.dim ?? true;
 		// Resolve the dim color lazily so a later theme change re-shapes the line
 		// instead of leaving the palette that was active when it was presented.
 		const styleFn = useDim ? (t: string) => theme.fg("dim", t) : undefined;
+		const notice = { styleFn, toast: options?.toast };
 
 		if (last && last === this.ctx.lastStatus) {
-			this.ctx.lastStatus.setMessage(message, styleFn);
-			this.ctx.ui.requestRender();
-			return;
+			if (this.ctx.lastStatus.message !== message) {
+				this.ctx.lastStatus.setMessage(message, notice);
+				this.ctx.ui.requestRender();
+				return;
+			}
+			this.ctx.chatContainer.removeChild(last);
 		}
 
-		const notice = new StatusNotice(message, styleFn);
-		this.ctx.present([notice]);
-		this.ctx.lastStatus = notice;
+		const status = new StatusNotice(message, notice);
+		this.ctx.present([status]);
+		this.ctx.lastStatus = status;
 	}
 
 	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
@@ -292,11 +407,7 @@ export class UiHelpers {
 					} else {
 						const images = imageContent(message.content);
 						const imageLinks =
-							options?.imageLinks ??
-							imageLinksForMessage(
-								images,
-								this.ctx.viewSession.sessionManager.putBlobSync.bind(this.ctx.viewSession.sessionManager),
-							);
+							options?.imageLinks ?? imageLinksForMessage(images, this.ctx.viewSession.sessionManager);
 						userComponent = new UserMessageComponent(userText, {
 							synthetic: isSynthetic,
 							imageLinks,
@@ -471,9 +582,7 @@ export class UiHelpers {
 			}
 			if (previous.canBeDisplacedBy(nextToolName)) {
 				todoSnapshot = null;
-				if (this.ctx.chatContainer.canRemoveBlock(previous)) {
-					this.ctx.chatContainer.removeChild(previous);
-				}
+				this.ctx.chatContainer.removeChild(previous);
 				previous.seal();
 				return;
 			}
@@ -481,11 +590,11 @@ export class UiHelpers {
 			todoSnapshot = null;
 			previous.seal();
 		};
-		// Detached task calls persist their initial `async.state === "running"`
+		// Background job calls persist their initial `async.state === "running"`
 		// result, but the job keeps streaming progress afterwards. Parked here
 		// (not finalized) so replayed and live frames still route to the card;
 		// the ids are handed back to the controller after the loop (#10447).
-		const backgroundTaskCallIds = new Set<string>();
+		const backgroundCallIds = new Set<string>();
 		const messages = sessionContext.messages;
 		const count = messages.length;
 		for (let i = 0; i < count; i++) {
@@ -671,8 +780,11 @@ export class UiHelpers {
 					const images: ImageContent[] = message.content.filter(
 						(content): content is ImageContent => content.type === "image",
 					);
+					const mediaPath = readMediaPath(message.details);
+					if (mediaPath && images.length === 0)
+						assistantComponent?.setToolResultImages(message.toolCallId, [], mediaPath);
 					if (images.length > 0 && assistantComponent) {
-						assistantComponent.setToolResultImages(message.toolCallId, images);
+						assistantComponent.setToolResultImages(message.toolCallId, images, mediaPath);
 						const hasText = message.content.some(c => c.type === "text");
 						if (!hasText && cfgTerminalShowImages.get(settings)) {
 							if (pendingReadComponent) {
@@ -710,21 +822,29 @@ export class UiHelpers {
 				// Match tool results to pending tool components
 				const component = this.ctx.pendingTools.get(message.toolCallId);
 				if (component) {
-					const asyncDetails = (message.details as { async?: { state?: string; jobId?: string } } | undefined)
-						?.async;
-					const isBackgroundTask =
-						message.toolName === "task" &&
-						asyncDetails?.state === "running" &&
-						(activeToolExecutionUpdates.some(event => event.toolCallId === message.toolCallId) ||
-							runningAsyncJobs.some(job => job.id === asyncDetails.jobId));
-					// A detached task's persisted result is only its "still running"
-					// snapshot. Keep the card partial, parked, and in `pendingTools` so
-					// the snapshot replay and later live progress frames land on it
-					// instead of hitting the no-pending-component early return (#10447).
-					component.updateResult(message, isBackgroundTask, message.toolCallId);
-					if (isBackgroundTask) {
+					const jobId = (message.details as { async?: { jobId?: string } } | undefined)?.async?.jobId;
+					const frame = activeToolExecutionUpdates.find(
+						event => event.toolCallId === message.toolCallId,
+					)?.partialResult;
+					const isBackground =
+						parksAsBackground(message.toolName, message.details) &&
+						(frame !== undefined || runningAsyncJobs.some(job => job.id === jobId));
+					const settled = isBackground && isSettledJobFrame(frame?.details);
+					// A background job call's persisted result is only its "still running"
+					// snapshot; the job's latest frame supersedes it. Until that frame
+					// settles, keep the card partial, parked, and in `pendingTools` so
+					// later live progress frames land on it instead of hitting the
+					// no-pending-component early return (#10447).
+					if (settled) {
+						settleWithJobFrame(component, frame, message.toolCallId);
+					} else if (frame && isBackground) {
+						component.updateResult(frame, true, message.toolCallId);
+					} else {
+						component.updateResult(message, isBackground, message.toolCallId);
+					}
+					if (isBackground && !settled) {
 						component.parkAsBackground();
-						backgroundTaskCallIds.add(message.toolCallId);
+						backgroundCallIds.add(message.toolCallId);
 					} else {
 						this.ctx.pendingTools.delete(message.toolCallId);
 						if (
@@ -799,17 +919,17 @@ export class UiHelpers {
 		if (this.ctx.viewSession.isStreaming) {
 			this.ctx.eventController?.inheritTurnStart(turnStartedAt);
 		}
-		// Re-register parked background task cards with the controller: focus
-		// attach resets its `#backgroundTaskCallIds` before replaying, and unlike
+		// Re-register parked background cards with the controller: focus
+		// attach resets its `#backgroundCallIds` before replaying, and unlike
 		// the todo/turn handoffs this must run whether or not the session streams
-		// — a detached task keeps running while the main session sits idle
+		// — a background job keeps running while the main session sits idle
 		// (#10447). Membership is re-checked against `pendingTools`.
-		if (backgroundTaskCallIds.size > 0) {
-			this.ctx.eventController?.markBackgroundTaskCalls(backgroundTaskCallIds);
+		if (backgroundCallIds.size > 0) {
+			this.ctx.eventController?.markBackgroundCalls(backgroundCallIds);
 		}
 
 		// Entries still in `pendingTools` are toolCalls whose result never landed
-		// during the replay — with `keepDanglingToolCalls` these are exactly the
+		// during the replay — with `keepInFlightToolCalls` these are exactly the
 		// turn's in-flight calls (assistant turn persisted at message_end, tool
 		// still executing). While the viewed session streams, keep them tracked so
 		// the live event stream routes `tool_execution_update`/`_end` into the
@@ -829,10 +949,10 @@ export class UiHelpers {
 			}
 		} else {
 			for (const [toolCallId, component] of this.ctx.pendingTools) {
-				// A parked background task keeps running even while the main session
+				// A parked background job keeps running even while the main session
 				// is idle, so leave its card pending — sealing and clearing it would
 				// drop the replayed snapshot and every later job frame (#10447).
-				if (backgroundTaskCallIds.has(toolCallId)) {
+				if (backgroundCallIds.has(toolCallId)) {
 					component.setArgsComplete(toolCallId);
 					continue;
 				}
@@ -921,11 +1041,39 @@ export class UiHelpers {
 		return true;
 	}
 
-	async renderInitialMessages(options: RenderInitialMessagesOptions = {}): Promise<void> {
+	/**
+	 * Rebuild the transcript from the view session. Calls run one at a time; a call
+	 * superseded by a newer one before or during its replay rolls back without
+	 * committing or clearing terminal history, so only the latest request paints.
+	 */
+	renderInitialMessages(options: RenderInitialMessagesOptions = {}): Promise<void> {
+		const generation = ++this.#replayGeneration;
+		// Close the display gate at request time, not when the queued replay starts:
+		// a display message persisted in between must reach the chat only through
+		// the replay, never also live (issue #1955).
+		if (this.#replaysInFlight++ === 0) this.#chatRenderedBeforeReplay = this.ctx.initialChatRendered;
+		this.ctx.initialChatRendered = false;
+		const run = this.#replayTail
+			.then(() => this.#renderInitialMessages(options, generation))
+			.catch((error: unknown) => {
+				// A replay that throws before its rollback (building the transcript context)
+				// must not leave live display closed until some later replay.
+				if (generation === this.#replayGeneration) this.ctx.initialChatRendered = this.#chatRenderedBeforeReplay;
+				throw error;
+			})
+			.finally(() => {
+				this.#replaysInFlight--;
+			});
+		this.#replayTail = run.catch(() => {});
+		return run;
+	}
+
+	async #renderInitialMessages(options: RenderInitialMessagesOptions, generation: number): Promise<void> {
+		if (generation !== this.#replayGeneration) return;
 		// Collapsed replay keeps in-flight calls so pending tools remain routable during mid-turn rebuilds.
 		let context = this.ctx.viewSession.buildTranscriptSessionContext({
 			collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
-			keepDanglingToolCalls: this.ctx.viewSession.isStreaming,
+			keepInFlightToolCalls: this.ctx.viewSession.isStreaming,
 		});
 		let replayEntryCount = this.ctx.viewSession.sessionManager.getEntries().length;
 
@@ -942,19 +1090,18 @@ export class UiHelpers {
 		const previousPendingPythonComponents = this.ctx.pendingPythonComponents;
 		const previousLastAssistantUsage = this.ctx.lastAssistantUsage;
 		const previousServedModelTracker = this.ctx.servedModelTracker;
-		const chatWasAlreadyRendered = this.ctx.initialChatRendered;
 		const renderOptions = {
 			updateFooter: true,
 		};
 		let committed = false;
 		let replayAttempts = 0;
-		this.ctx.initialChatRendered = false;
 		try {
 			// Resolve before replacing live component maps: streaming events may arrive during filesystem I/O.
 			await refreshAssistantMessageLinkTargets(
 				this.ctx,
 				context.messages.filter((message): message is AssistantMessage => message.role === "assistant"),
 			);
+			if (generation !== this.#replayGeneration) return;
 
 			this.ctx.chatContainer = stagedChatContainer;
 			this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
@@ -973,6 +1120,7 @@ export class UiHelpers {
 				} else {
 					await this.ctx.renderSessionContextIncrementally(context, renderOptions);
 				}
+				if (generation !== this.#replayGeneration) return;
 				if (this.ctx.viewSession.sessionManager.getEntries().length === replayEntryCount) {
 					break;
 				}
@@ -994,13 +1142,14 @@ export class UiHelpers {
 				// more instead of letting a reentrant synchronous rebuild interleave.
 				context = this.ctx.viewSession.buildTranscriptSessionContext({
 					collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
-					keepDanglingToolCalls: this.ctx.viewSession.isStreaming,
+					keepInFlightToolCalls: this.ctx.viewSession.isStreaming,
 				});
 				replayEntryCount = this.ctx.viewSession.sessionManager.getEntries().length;
 				await refreshAssistantMessageLinkTargets(
 					this.ctx,
 					context.messages.filter((message): message is AssistantMessage => message.role === "assistant"),
 				);
+				if (generation !== this.#replayGeneration) return;
 				stagedChatContainer.disposeChildren();
 				this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 				this.ctx.pendingTools.clear();
@@ -1054,7 +1203,9 @@ export class UiHelpers {
 				this.ctx.servedModelTracker = previousServedModelTracker;
 				stagedChatContainer.disposeChildren();
 			}
-			this.ctx.initialChatRendered = committed ? true : chatWasAlreadyRendered;
+			// A superseded replay leaves the gate closed for the newer one still queued.
+			if (committed) this.#chatRenderedBeforeReplay = true;
+			this.ctx.initialChatRendered = generation === this.#replayGeneration && this.#chatRenderedBeforeReplay;
 		}
 	}
 
@@ -1096,13 +1247,12 @@ export class UiHelpers {
 		const queuedMessages = this.ctx.viewSession.getQueuedMessages() as QueuedMessages;
 
 		const steeringMessages = [...queuedMessages.steering];
-		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-			if (entry.mode === "steer") steeringMessages.push(entry.text);
-		}
-
 		const followUpMessages = [...queuedMessages.followUp];
-		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-			if (entry.mode === "followUp") followUpMessages.push(entry.text);
+		if (!this.ctx.focusedAgentId) {
+			for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
+				if (entry.mode === "steer") steeringMessages.push(entry.text);
+				else followUpMessages.push(entry.text);
+			}
 		}
 
 		const groups = [

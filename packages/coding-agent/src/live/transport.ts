@@ -1,4 +1,4 @@
-import { type AuthStorage, isAuthRetryableError, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import { type AuthStorage, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
 import { getProxyForUrl, wrapFetchForProxy } from "@oh-my-pi/pi-ai/utils/proxy";
 import {
 	CODEX_BASE_URL,
@@ -105,10 +105,6 @@ function boundedErrorBody(body: string, statusText: string): string {
 	return `${normalized.slice(0, MAX_ERROR_BODY_LENGTH)}…`;
 }
 
-function isAuthError(error: unknown): boolean {
-	return isAuthRetryableError(error);
-}
-
 function abortReason(signal: AbortSignal | undefined): Error {
 	if (signal?.reason instanceof Error) return signal.reason;
 	return new DOMException("Live connection aborted", "AbortError");
@@ -156,19 +152,19 @@ export class CodexLiveTransport {
 		const peer = new LiveWebRtcPeer(
 			(error, payload) => {
 				if (error) {
-					this.#handlePeerFailure(error.message);
+					this.#reportFailure(error.message);
 				} else {
 					this.#handleServerEvent(payload);
 				}
 			},
 			(error, level) => {
 				if (error) {
-					this.#handlePeerFailure(error.message);
+					this.#reportFailure(error.message);
 				} else {
 					this.#handleOutputLevel(level);
 				}
 			},
-			(error, message) => this.#handlePeerFailure(error?.message ?? message),
+			(error, message) => this.#reportFailure(error?.message ?? message),
 		);
 		this.#peer = peer;
 		const offer = await peer.createOffer();
@@ -192,7 +188,6 @@ export class CodexLiveTransport {
 			{
 				sessionId: this.#options.sessionId,
 				signal: this.#options.signal,
-				isAuthError,
 				missingAccessMessage: "No Codex OAuth credential is available for a live call.",
 			},
 		);
@@ -352,10 +347,6 @@ export class CodexLiveTransport {
 		try {
 			this.#options.callbacks.onOutputLevel(Math.min(1, Math.max(0, level)));
 		} catch {}
-	}
-
-	#handlePeerFailure(message: string): void {
-		this.#reportFailure(message);
 	}
 
 	#reportFailure(message: string): void {

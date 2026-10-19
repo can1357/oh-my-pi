@@ -1,6 +1,7 @@
 import type { AgentStorage } from "../../../session/agent-storage";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
 import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "../types";
+import { decodeBody, readBodyCapped } from "../../response-body";
 import { dateToAgeSeconds } from "../utils";
 
 /**
@@ -159,38 +160,10 @@ export async function readLimitedText(
 	maxBytes: number,
 	truncate = false,
 ): Promise<string> {
-	if (!response.body) return "";
-	const reader = response.body.getReader();
-	let buffer = new Uint8Array(Math.min(maxBytes, 64 * 1024));
-	let bytes = 0;
-
-	try {
-		for (;;) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			const accepted = Math.min(value.byteLength, maxBytes - bytes);
-			const nextBytes = bytes + accepted;
-			if (nextBytes > buffer.byteLength) {
-				const grown = new Uint8Array(Math.min(maxBytes, Math.max(nextBytes, buffer.byteLength * 2)));
-				grown.set(buffer.subarray(0, bytes));
-				buffer = grown;
-			}
-			buffer.set(value.subarray(0, accepted), bytes);
-			bytes = nextBytes;
-			if (accepted < value.byteLength) {
-				await reader.cancel().catch(() => undefined);
-				if (!truncate)
-					throw new SearchProviderError(
-						provider,
-						`${SEARCH_PROVIDER_LABELS[provider]} API response exceeded 2 MiB`,
-						500,
-					);
-				break;
-			}
-		}
-	} finally {
-		reader.releaseLock();
+	const body = await readBodyCapped(response, maxBytes);
+	if (!body) return "";
+	if (body.truncated && !truncate) {
+		throw new SearchProviderError(provider, `${SEARCH_PROVIDER_LABELS[provider]} API response exceeded 2 MiB`, 500);
 	}
-
-	return new TextDecoder().decode(buffer.subarray(0, bytes));
+	return decodeBody(body.bytes, response.headers.get("content-type") ?? "");
 }

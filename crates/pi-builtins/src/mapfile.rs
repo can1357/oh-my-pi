@@ -1,7 +1,9 @@
-use std::io::{Read, Write};
+use std::io::Write;
 
 use brush_core::{ErrorKind, ExecutionExitCode, ExecutionResult, builtins, env, escape, variables};
 use clap::Parser;
+
+use crate::line_input::{CTRL_C, CTRL_D, LineInput, ReadAhead, decode_line};
 
 /// Read lines from standard input into an indexed array variable.
 #[derive(Parser)]
@@ -59,6 +61,12 @@ impl builtins::Command for MapFileCommand {
 		}
 
 		if let Some((_, var)) = context.shell.env().get(&self.array_var_name) {
+			// Refused before any input is read, as in bash. Assigning an element
+			// does not check this itself (so -O wrote into a readonly array), and
+			// a failure mid-loop would lose input read ahead of a pipe.
+			if var.is_readonly() {
+				return Err(ErrorKind::ReadonlyVariable.into());
+			}
 			if matches!(
 				var.value(),
 				variables::ShellValue::AssociativeArray(_)
@@ -102,7 +110,7 @@ impl builtins::Command for MapFileCommand {
 impl MapFileCommand {
 	async fn read_entries<SE: brush_core::ShellExtensions>(
 		&self,
-		mut input_file: brush_core::openfiles::OpenFile,
+		input_file: brush_core::openfiles::OpenFile,
 		context: &mut brush_core::ExecutionContext<'_, SE>,
 	) -> Result<Option<ExecutionResult>, brush_core::Error> {
 		let _term_mode = setup_terminal_settings(&input_file)?;
@@ -117,27 +125,30 @@ impl MapFileCommand {
 			None => b'\n',
 		};
 
-		let mut buf = [0u8; 1];
+		let terminal = input_file.is_terminal();
+		// Without -n or -C every byte up to EOF is consumed before anything
+		// else reads the descriptor, so any input is read in blocks. -n may
+		// stop early, and a -C callback may read the descriptor itself or
+		// end the loop; then only a regular file, whose offset is given
+		// back, is (bash's mapfile reads a pipe unbuffered too).
+		let read_ahead =
+			if max_count == 0 && self.callback.is_none() { ReadAhead::ToEof } else { ReadAhead::Seekable };
+		let mut input = LineInput::new(input_file, read_ahead);
 
 		while max_count == 0 || entry_count < max_count {
 			let mut line = vec![];
 			let mut saw_delimiter = false;
 
-			loop {
-				match input_file.read(&mut buf) {
-					Ok(0) => break,                                         // End of input
-					Ok(1) if buf[0] == b'\x03' => break,                    // Ctrl+C
-					Ok(1) if buf[0] == b'\x04' && line.is_empty() => break, // Ctrl+D
-					Ok(1) => {
-						let byte = buf[0];
-						line.push(byte);
-						if byte == delimiter {
-							saw_delimiter = true;
-							break;
-						}
-					},
-					Ok(_) => unreachable!("input can only be 0, 1, or error"),
-					Err(e) => return Err(e.into()),
+			while let Some(byte) = input.next_byte()? {
+				// Interactive keys end input only on a terminal; in a file or
+				// pipe they are data.
+				if terminal && (byte == CTRL_C || byte == CTRL_D && line.is_empty()) {
+					break;
+				}
+				line.push(byte);
+				if byte == delimiter {
+					saw_delimiter = true;
+					break;
 				}
 			}
 
@@ -154,12 +165,13 @@ impl MapFileCommand {
 				line.pop();
 			}
 
-			let line_str = String::from_utf8_lossy(&line).to_string();
+			let line_str = decode_line(line);
 			let array_index = self.origin.unwrap_or(0) + i64::try_from(entry_count)?;
 
 			if let Some(callback) = &self.callback
 				&& (entry_count + 1).is_multiple_of(callback_group_size)
 			{
+				input.give_back();
 				let result = run_callback(callback, array_index, &line_str, context).await?;
 				if !result.is_normal_flow() {
 					return Ok(Some(result));
@@ -206,6 +218,11 @@ async fn run_callback<SE: brush_core::ShellExtensions>(
 fn setup_terminal_settings(
 	file: &brush_core::openfiles::OpenFile,
 ) -> Result<Option<brush_core::terminal::AutoModeGuard>, brush_core::Error> {
+	// The guard dups the descriptor and reads its terminal attributes; a
+	// pipe or file has none.
+	if !file.is_terminal() {
+		return Ok(None);
+	}
 	let mode = brush_core::terminal::AutoModeGuard::new(file.to_owned()).ok();
 	if let Some(mode) = &mode {
 		let config = brush_core::terminal::Settings::builder()

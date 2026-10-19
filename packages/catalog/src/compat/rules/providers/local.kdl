@@ -19,6 +19,13 @@ provider "local" {
 			limits
 			supports-tools #false
 		}
+		model "nemotron-streaming-en-0.6b" name="Nemotron Speech 0.6B (Streaming English)" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 		model "whisper-base" name="Whisper Base" {
 			reasoning #false
 			input "text"
@@ -101,7 +108,7 @@ provider "local" {
 	models "kokoro" {
 		kind "tts"
 	}
-	models "parakeet-tdt-0.6b-v3" "whisper-*" {
+	models "parakeet-tdt-0.6b-v3" "nemotron-streaming-en-0.6b" "whisper-*" {
 		kind "stt"
 	}
 	models "lfm*" "falcon-*" "qwen*" "llama3.2:3b" "gemma-3-1b" {

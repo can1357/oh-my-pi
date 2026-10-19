@@ -2,7 +2,12 @@ import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isSqliteCorruptionError, openSqliteDatabase, openSqliteDatabaseSync } from "../src/sqlite";
+import {
+	isSqliteCorruptionError,
+	openSqliteDatabase,
+	openSqliteDatabaseSync,
+	readSalvageableRows,
+} from "../src/sqlite";
 import { TempDir } from "../src/temp";
 
 async function corruptSchemaPages(dbPath: string): Promise<Buffer<ArrayBuffer>> {
@@ -265,4 +270,52 @@ test("a non-corruption init failure on a store that fails quick_check is preserv
 	const backups = (await backupNames(dir.path())).filter(name => !/-wal$|-shm$|-journal$/.test(name));
 	expect(backups).toHaveLength(1);
 	expect(await fs.promises.readFile(path.join(dir.path(), backups[0]!))).toEqual(damaged);
+});
+
+/** Seeds 200 rows spread over several leaf pages and returns each leaf's row ids in page order. */
+function seedLeaves(dbPath: string): { pageSize: number; leaves: Array<{ page: number; ids: number[] }> } {
+	const db = new Database(dbPath);
+	// Zero freed space so each row's marker appears only on the leaf that holds it.
+	db.run("PRAGMA secure_delete = ON");
+	db.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+	const insert = db.prepare("INSERT INTO entries (id, value) VALUES (?, ?)");
+	db.transaction(() => {
+		for (let id = 1; id <= 200; id++) insert.run(id, `row-${String(id).padStart(4, "0")}-${"x".repeat(180)}`);
+	})();
+	insert.finalize();
+	const pageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()!.page_size;
+	db.close();
+	const bytes = fs.readFileSync(dbPath);
+	const byPage = new Map<number, number[]>();
+	for (let id = 1; id <= 200; id++) {
+		const page = Math.floor(bytes.indexOf(`row-${String(id).padStart(4, "0")}-`) / pageSize);
+		byPage.set(page, [...(byPage.get(page) ?? []), id]);
+	}
+	const leaves = [...byPage].map(([page, ids]) => ({ page, ids })).sort((a, b) => a.ids[0]! - b.ids[0]!);
+	return { pageSize, leaves };
+}
+
+test.each([
+	["first", 0],
+	["middle", 3],
+	["second-to-last", -2],
+])("salvage keeps every readable row on both sides of a damaged %s leaf", async (_label, position) => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-");
+	const dbPath = dir.join("store.db");
+	const { pageSize, leaves } = seedLeaves(dbPath);
+	expect(leaves.length).toBeGreaterThan(5);
+	const damaged = leaves.at(position)!;
+	const fd = fs.openSync(dbPath, "r+");
+	fs.writeSync(fd, Buffer.alloc(pageSize, 0xff), 0, pageSize, damaged.page * pageSize);
+	fs.closeSync(fd);
+
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		expect(() => db.query("SELECT count(*) FROM entries").get()).toThrow();
+		const rows = readSalvageableRows<{ id: number }>(db, "entries", "id");
+		const expected = leaves.filter(leaf => leaf !== damaged).flatMap(leaf => leaf.ids);
+		expect(rows.map(row => row.id)).toEqual(expected);
+	} finally {
+		db.close();
+	}
 });

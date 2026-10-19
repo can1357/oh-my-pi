@@ -34,45 +34,18 @@ use std::{
 
 use napi::{Env, Error, Result, Status, Task, bindgen_prelude::*};
 use pi_shell::cancel as core_cancel;
+pub use pi_shell::cancel::{AbortReason, AbortToken};
 use pi_vfs::BlockingFs;
 use tokio_util::sync::CancellationToken;
 
-use crate::prof::profile_region;
+use crate::{
+	memory::{Settled, native_work},
+	prof::profile_region,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cancellation
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Reason for task abortion.
-#[derive(Debug, Clone, Copy)]
-pub enum AbortReason {
-	Unknown,
-	Timeout,
-	Signal,
-	User,
-}
-
-impl From<core_cancel::AbortReason> for AbortReason {
-	fn from(value: core_cancel::AbortReason) -> Self {
-		match value {
-			core_cancel::AbortReason::Unknown => Self::Unknown,
-			core_cancel::AbortReason::Timeout => Self::Timeout,
-			core_cancel::AbortReason::Signal => Self::Signal,
-			core_cancel::AbortReason::User => Self::User,
-		}
-	}
-}
-
-impl From<AbortReason> for core_cancel::AbortReason {
-	fn from(value: AbortReason) -> Self {
-		match value {
-			AbortReason::Unknown => Self::Unknown,
-			AbortReason::Timeout => Self::Timeout,
-			AbortReason::Signal => Self::Signal,
-			AbortReason::User => Self::User,
-		}
-	}
-}
 
 /// Token for cooperative cancellation of blocking work.
 ///
@@ -106,7 +79,8 @@ impl CancelToken {
 		let mut result = Self { core: core_cancel::CancelToken::new(timeout_ms) };
 		if let Some(raw_signal) = signal {
 			// `on_abort` only fires for a future JS `abort` event. Do not wrap an
-			// already-aborted signal: napi's wrapper replaces its `onabort` handler.
+			// already-aborted signal: napi's wrapper replaces its `onabort`
+			// handler.
 			if signal_aborted(&raw_signal) {
 				result.emplace_abort_token().abort(AbortReason::Signal);
 			} else if let Ok(signal) = AbortSignal::from_unknown(raw_signal) {
@@ -130,17 +104,17 @@ impl CancelToken {
 
 	/// Wait for the cancel token to be aborted.
 	pub async fn wait(&self) -> AbortReason {
-		self.core.wait().await.into()
+		self.core.wait().await
 	}
 
 	/// Get an abort token for external cancellation.
 	pub fn abort_token(&self) -> AbortToken {
-		AbortToken(self.core.abort_token())
+		self.core.abort_token()
 	}
 
 	/// Emplaces a cancel token if there is none, returns the abort token.
 	pub fn emplace_abort_token(&mut self) -> AbortToken {
-		AbortToken(self.core.emplace_abort_token())
+		self.core.emplace_abort_token()
 	}
 
 	/// Check if already aborted (non-blocking).
@@ -152,22 +126,11 @@ impl CancelToken {
 	/// as an abort. Result settlement can be delayed by a busy JS thread after
 	/// work already completed within its time budget.
 	pub fn abort_reason(&self) -> Option<AbortReason> {
-		self.core.abort_reason().map(Into::into)
+		self.core.abort_reason()
 	}
 
 	pub fn into_core(self) -> core_cancel::CancelToken {
 		self.core
-	}
-}
-
-/// Token for requesting cancellation from outside the task.
-#[derive(Clone, Default)]
-pub struct AbortToken(core_cancel::AbortToken);
-
-impl AbortToken {
-	/// Request cancellation of the associated task.
-	pub fn abort(&self, reason: AbortReason) {
-		self.0.abort(reason.into());
 	}
 }
 
@@ -208,10 +171,11 @@ where
 	T: ToNapiValue + Send + 'static + TypeName,
 {
 	type JsValue = T;
-	type Output = T;
+	type Output = Settled<T>;
 
 	fn compute(&mut self) -> Result<Self::Output> {
 		let _guard = profile_region(self.tag);
+		let _work = native_work();
 		let work = self
 			.work
 			.take()
@@ -220,14 +184,14 @@ where
 		let tag = self.tag;
 		// N-API's execute callback is not `extern "C-unwind"`; never let a
 		// worker panic escape into its FFI frame.
-		catch_worker_panic(tag, move || work(cancel_token))?
+		catch_worker_panic(tag, move || work(cancel_token))?.map(Settled::new)
 	}
 
 	fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
 		if let Some(reason) = self.cancel_token.abort_reason() {
 			return Err(abort_error(env, reason));
 		}
-		Ok(output)
+		Ok(output.into_inner())
 	}
 }
 
@@ -285,8 +249,9 @@ where
 	tag:          &'static str,
 	cancel_token: CancelToken,
 	work:         Option<MappedWork<T, E>>,
-	/// Domain error stashed by `compute` for `reject` to convert with `Env`.
-	error:        Option<E>,
+	/// Domain error stashed by `compute` for `reject` to convert with `Env`;
+	/// it can own large captured output, so it settles like a result.
+	error:        Option<Settled<E>>,
 	reject_hook:  fn(Env, E) -> Error,
 	cancel_hook:  fn(Env, AbortReason) -> Error,
 }
@@ -299,10 +264,11 @@ where
 	E: Send + 'static,
 {
 	type JsValue = T;
-	type Output = T;
+	type Output = Settled<T>;
 
 	fn compute(&mut self) -> Result<Self::Output> {
 		let _guard = profile_region(self.tag);
+		let _work = native_work();
 		let work = self
 			.work
 			.take()
@@ -310,11 +276,11 @@ where
 		let cancel_token = self.cancel_token.clone();
 		let tag = self.tag;
 		match catch_worker_panic(tag, move || work(cancel_token)) {
-			Ok(Ok(value)) => Ok(value),
+			Ok(Ok(value)) => Ok(Settled::new(value)),
 			Ok(Err(domain)) => {
 				// Stash the typed error; the placeholder reason is replaced in
 				// `reject`, which has the `Env` needed to build the rich error.
-				self.error = Some(domain);
+				self.error = Some(Settled::new(domain));
 				Err(Error::from_reason("BlockingMapped: pending domain error"))
 			},
 			Err(error) => Err(error),
@@ -323,7 +289,7 @@ where
 
 	fn reject(&mut self, env: Env, err: Error) -> Result<Self::JsValue> {
 		match self.error.take() {
-			Some(domain) => Err((self.reject_hook)(env, domain)),
+			Some(domain) => Err((self.reject_hook)(env, domain.into_inner())),
 			None => Err(err),
 		}
 	}
@@ -332,7 +298,7 @@ where
 		if let Some(reason) = self.cancel_token.abort_reason() {
 			return Err((self.cancel_hook)(env, reason));
 		}
-		Ok(output)
+		Ok(output.into_inner())
 	}
 }
 
@@ -416,7 +382,7 @@ where
 	T: ToNapiValue + Send + 'static,
 {
 	let settlement_token = cancel_token.clone();
-	env.spawn_future_with_callback(
+	let promise = env.spawn_future_with_callback(
 		async move { Ok(run_filesystem_worker(tag, cancel_token, fs, work).await) },
 		move |env, result| {
 			if let Some(reason) = settlement_token.abort_reason() {
@@ -429,7 +395,10 @@ where
 			// already cancelled, so the provider cannot hold up this Promise.
 			result.unwrap_or_else(|| Err(Error::from_reason("Aborted: Timeout")))
 		},
-	)
+	)?;
+	// `Settled` only adds settlement reporting; the Promise still resolves to
+	// `T`.
+	Ok(PromiseRaw::new(env.raw(), promise.raw()))
 }
 
 /// Stop waiting for a queued or running worker when its caller cancels.
@@ -438,7 +407,7 @@ async fn run_filesystem_worker<T, F>(
 	cancel_token: CancelToken,
 	fs: BlockingFs,
 	work: F,
-) -> Option<Result<T>>
+) -> Option<Result<Settled<T>>>
 where
 	F: FnOnce(BlockingFs, CancelToken) -> Result<T> + Send + 'static,
 	T: Send + 'static,
@@ -448,7 +417,8 @@ where
 	let worker_token = cancel_token.clone();
 	let mut worker = tokio::task::spawn_blocking(move || {
 		let _guard = profile_region(tag);
-		catch_worker_panic(tag, move || work(fs, worker_token))?
+		let _work = native_work();
+		catch_worker_panic(tag, move || work(fs, worker_token))?.map(Settled::new)
 	});
 	tokio::select! {
 		biased;
@@ -525,7 +495,7 @@ mod tests {
 	#[test]
 	fn compute_forwards_ok_result() {
 		let mut task = blocking_task("t_ok", |_| Ok(42_u32));
-		assert_eq!(task.compute().unwrap(), 42);
+		assert_eq!(task.compute().unwrap().into_inner(), 42);
 	}
 
 	#[test]
@@ -713,7 +683,7 @@ mod tests {
 	#[test]
 	fn compute_rejects_second_call() {
 		let mut task = blocking_task("t_double", |_| Ok(1_u32));
-		assert_eq!(task.compute().unwrap(), 1);
+		assert_eq!(task.compute().unwrap().into_inner(), 1);
 		let err = task.compute().unwrap_err();
 		assert!(err.reason.contains("work already consumed"), "reason = {}", err.reason);
 	}

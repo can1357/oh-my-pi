@@ -15,7 +15,7 @@ import * as path from "node:path";
 import type { Database } from "bun:sqlite";
 import { type PredictedWord, TextPredictor } from "@oh-my-pi/pi-natives";
 import { getHistoryDbPath, getPredictStateDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
-import { JsonLineServer } from "../tiny/worker-server";
+import { JsonLineServer } from "../subprocess/jsonl-server";
 import { openSqliteReadConnection } from "../tools/sqlite-reader";
 import { blendPredictions } from "./blend";
 import { readForeignPrompts } from "./foreign-history";
@@ -46,6 +46,8 @@ const PERSIST_MAX_DIRTY_MS = 15 * 60_000;
 const INGEST_BATCH = 1_000;
 /** After an engine fails to open, requests for it fail fast for this long before a retry. */
 const OPEN_RETRY_MS = 60_000;
+/** While SmolLM weights are missing (composer still fetching), recheck the marker at most this often. */
+const WEIGHTS_RECHECK_MS = 5_000;
 const CURSOR_FILE = "cursor.json";
 
 /** Persisted history cursor, or `undefined` when the engine has no persisted state yet. */
@@ -189,7 +191,7 @@ class Engine {
 		}
 		try {
 			const page = db.query<{ id: number; prompt: string }, [number, number]>(
-				"SELECT id, prompt FROM history WHERE id > ? ORDER BY id LIMIT ?",
+				"SELECT id, prompt FROM history WHERE id > ? AND typeof(prompt) = 'text' ORDER BY id LIMIT ?",
 			);
 			for (;;) {
 				const rows = page.all(this.cursor, INGEST_BATCH);
@@ -212,11 +214,12 @@ class TextPredictDaemon {
 	#historyDbPath: string;
 	#engines = new Map<TextPredictMethod, Promise<Engine>>();
 	#failedAt = new Map<TextPredictMethod, number>();
+	/** Engines whose weights were missing, keyed to when that was observed. */
+	#missingAt = new Map<TextPredictMethod, number>();
 	#persistCadence = new PersistCadence(PERSIST_DEBOUNCE_MS, PERSIST_MAX_DIRTY_MS, () => void this.#persistAll());
 	#server = new JsonLineServer<TextPredictRequest, TextPredictResponse>({
 		name: "text-predict",
 		cleanupLabel: "text-predict-daemon",
-		subject: "text-predict daemon",
 		idleMs: IDLE_EXIT_MS,
 		banner: textPredictReadyBanner,
 		onRequest: (request, reply) =>
@@ -300,9 +303,15 @@ class TextPredictDaemon {
 	}
 
 	#engine(method: TextPredictMethod): Promise<Engine> {
+		const now = Date.now();
 		const failedAt = this.#failedAt.get(method);
-		if (failedAt !== undefined && Date.now() - failedAt >= OPEN_RETRY_MS) {
+		if (failedAt !== undefined && now - failedAt >= OPEN_RETRY_MS) {
 			this.#failedAt.delete(method);
+			this.#engines.delete(method);
+		}
+		const missingAt = this.#missingAt.get(method);
+		if (missingAt !== undefined && now - missingAt >= WEIGHTS_RECHECK_MS) {
+			this.#missingAt.delete(method);
 			this.#engines.delete(method);
 		}
 		let pending = this.#engines.get(method);
@@ -311,8 +320,8 @@ class TextPredictDaemon {
 			this.#engines.set(method, pending);
 			pending.catch(error => {
 				if (error instanceof SmolLmWeightsMissingError) {
-					// Checked again on the next request: the composer is fetching them.
-					this.#engines.delete(method);
+					// Rechecked after WEIGHTS_RECHECK_MS: the composer is fetching them.
+					this.#missingAt.set(method, Date.now());
 					return;
 				}
 				this.#failedAt.set(method, Date.now());
@@ -323,13 +332,13 @@ class TextPredictDaemon {
 	}
 
 	async #open(method: TextPredictMethod): Promise<Engine> {
-		const stateDir = getPredictStateDir(this.#agentDir, method);
-		await fs.mkdir(stateDir, { recursive: true });
 		let modelDir: string | undefined;
 		if (method === "smollm") {
 			if (!(await smolLmWeightsReady())) throw new SmolLmWeightsMissingError();
 			modelDir = getSmolLmModelDir();
 		}
+		const stateDir = getPredictStateDir(this.#agentDir, method);
+		await fs.mkdir(stateDir, { recursive: true });
 		const startedAt = performance.now();
 		// SmolLM only serves the blend, which gates on its own score.
 		const showThreshold = method === "smollm" ? 0 : undefined;

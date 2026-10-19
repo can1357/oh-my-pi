@@ -7,7 +7,7 @@
  * component's root is a `card` whose `head` carries the title.
  */
 import type { TspProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
-import type { KeyName } from "../key-hint-format";
+import { formatTooltipKey, type KeyName } from "../key-hint-format";
 import { getKeybindings, type Keybinding } from "../keybindings";
 import { card, kbd, list, node, row, span, text } from "./describe";
 import type { NativeChild, NativeNode } from "./node";
@@ -86,10 +86,10 @@ export interface ActionButtonOptions {
 	/** Sibling identity key (defaults to the action id); `leafKey(event.key)` reports it back. */
 	readonly key?: string;
 	/** Key id of the keyboard path the button mirrors, drawn as a keycap inside it (`"r"`, `"ctrl+g"`). */
-	readonly keys?: string;
+	readonly keys?: KeyName;
 	/** `accent` = the view's hero action, `error` = destructive. */
 	readonly tone?: "accent" | "error";
-	/** Tooltip; defaults to the label plus the keycap (`"Refresh  r"`). */
+	/** Tooltip; defaults to the label plus the keycap (`"Refresh  r"`, see {@link formatTooltipKey}). */
 	readonly title?: string;
 	/** Target of an `open` action (URL or `file://` path). */
 	readonly href?: string;
@@ -110,12 +110,25 @@ export function actionButton(label: string, act: string, options: ActionButtonOp
 			gap: "xs",
 			align: "center",
 			actions: { click: act },
-			title: options.title ?? (options.keys ? `${label}  ${options.keys}` : label),
+			title: options.title ?? (options.keys ? `${label}  ${formatTooltipKey(options.keys)}` : label),
 			...(options.tone ? { tone: options.tone } : {}),
 			...(options.href ? { href: options.href } : {}),
 		},
 		children,
 		options.key ?? act,
+	);
+}
+
+/**
+ * A bare `esc` keycap button for a view's top-right corner: a click sends
+ * `act` (default `close`), which the component routes to its Esc path.
+ */
+export function escCloseButton(act = "close", key = "esc-close"): NativeNode {
+	return node(
+		"row",
+		{ role: "omp.btn", align: "center", actions: { click: act }, title: `Close  ${formatTooltipKey("escape")}` },
+		[kbd("escape")],
+		key,
 	);
 }
 

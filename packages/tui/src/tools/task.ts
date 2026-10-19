@@ -31,6 +31,8 @@ import {
 	isFeedModelBadgeEnabled,
 	pluralize,
 	previewLine,
+	clipCollapsed,
+	flattenLine,
 	previewWindowRows,
 	replaceTabs,
 	shortenEmbeddedPaths,
@@ -49,7 +51,7 @@ import { assembleYieldResult, type YieldSectionShapes } from "./task-yield-assem
 import type { TspAgentProps, TspTone } from "@oh-my-pi/pi-wire";
 import { compact, kv, md, node, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
-import { OwnerMemo } from "../native/memo";
+import { OwnerMemo, sameItems } from "../native/memo";
 import { plainText } from "../native/spans";
 import { errorText, noteText, resultText } from "./native-view";
 import { describeJsonTree } from "./json-tree";
@@ -246,6 +248,39 @@ function renderTypedYieldSections(value: unknown, continuePrefix: string, expand
 	return lines;
 }
 
+/**
+ * Per-frame memo for derived agent rows. Live task cards re-render at spinner
+ * cadence, while yield/recent-output arrays only change when the subagent
+ * reports. Entries are keyed by the source array (or object) and validated
+ * against a shallow snapshot of its elements plus the render deps, so in-place
+ * pushes/shifts invalidate correctly.
+ */
+interface SnapshotMemoEntry<T> {
+	items: unknown[];
+	deps: unknown[];
+	value: T;
+}
+
+function memoBySnapshot<T>(
+	cache: WeakMap<object, SnapshotMemoEntry<T>>,
+	source: unknown,
+	deps: unknown[],
+	compute: () => T,
+): T {
+	if (source === null || typeof source !== "object") return compute();
+	const items: unknown[] = Array.isArray(source) ? source.slice() : [source];
+	const entry = cache.get(source);
+	if (entry && sameItems(entry.items, items) && sameItems(entry.deps, deps)) return entry.value;
+	const value = compute();
+	cache.set(source, { items, deps, value });
+	return value;
+}
+
+const yieldSectionsMemo = new WeakMap<object, SnapshotMemoEntry<string[]>>();
+const completedReviewMemo = new WeakMap<object, SnapshotMemoEntry<string[] | null>>();
+const recentOutputMemo = new WeakMap<object, SnapshotMemoEntry<string[]>>();
+const agentResultMemo = new WeakMap<object, SnapshotMemoEntry<string[]>>();
+
 /** Formats sanitized task identifiers as hierarchy breadcrumbs. */
 export function formatTaskId(id: string): string {
 	// Ids are name-based (e.g. "Anna", "Anna-2"); a "." separates nesting levels
@@ -318,7 +353,7 @@ function renderOutputSection(
 		lines.push(
 			`${continuePrefix}  ${theme.fg("warning", theme.status.warning)} ${theme.fg(
 				"dim",
-				truncateToWidth(sanitizeText(warning), 80),
+				clipCollapsed(sanitizeText(warning), 80, expanded),
 			)}`,
 		);
 
@@ -362,7 +397,7 @@ function renderOutputSection(
 		const outputLines = trimmedOutput.split("\n");
 		const previewCount = expanded ? maxExpanded : maxCollapsed;
 		for (const line of outputLines.slice(0, previewCount)) {
-			lines.push(`${continuePrefix}  ${theme.fg("dim", truncateToWidth(replaceTabs(line), 70))}`);
+			lines.push(`${continuePrefix}  ${theme.fg("dim", clipCollapsed(replaceTabs(line), 70, expanded))}`);
 		}
 
 		if (outputLines.length > previewCount) {
@@ -415,7 +450,7 @@ function renderOutputSection(
 	const outputLines = trimmedOutput.split("\n");
 	const previewCount = expanded ? maxExpanded : maxCollapsed;
 	for (const line of outputLines.slice(0, previewCount)) {
-		lines.push(`${continuePrefix}  ${theme.fg("dim", truncateToWidth(replaceTabs(line), 70))}`);
+		lines.push(`${continuePrefix}  ${theme.fg("dim", clipCollapsed(replaceTabs(line), 70, expanded))}`);
 	}
 
 	if (outputLines.length > previewCount) {
@@ -439,7 +474,7 @@ function renderTaskSection(
 	lines.push(`${continuePrefix}${theme.fg("dim", "Task")}`);
 	const taskLines = trimmed.split("\n");
 	for (const line of taskLines.slice(0, maxExpanded)) {
-		lines.push(`${continuePrefix}  ${theme.fg("dim", truncateToWidth(replaceTabs(line), 70))}`);
+		lines.push(`${continuePrefix}  ${theme.fg("dim", replaceTabs(line))}`);
 	}
 	if (taskLines.length > maxExpanded) {
 		lines.push(`${continuePrefix}  ${theme.fg("dim", formatMoreItems(taskLines.length - maxExpanded, "line"))}`);
@@ -729,6 +764,15 @@ function renderAgentProgress(
 
 	// Current tool (if running) or most recent completed tool
 	if (progress.status === "running") {
+		if (progress.stage) {
+			lines.push(
+				truncateTaskRow(
+					`${continuePrefix}${theme.fg("muted", replaceTabs(sanitizeText(progress.stage)))}`,
+					maxWidth,
+					"",
+				),
+			);
+		}
 		if (progress.currentTool) {
 			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("muted", sanitizeText(progress.currentTool))}`;
 			const toolDetail = toolCallDetail(
@@ -780,27 +824,32 @@ function renderAgentProgress(
 		// For completed tasks, render review verdicts assembled from incremental
 		// yield sections.
 		if (progress.status === "completed") {
-			const completeData = normalizeYieldData(progress.extractedToolData.yield);
-			const incrementalReview = extractIncrementalReviewResult(completeData);
-			if (incrementalReview) {
-				lines.push(
-					...renderReviewResult(
-						incrementalReview.summary,
-						incrementalReview.findings,
-						continuePrefix,
-						expanded,
-						theme,
-					),
-				);
-				return lines; // Review result handles its own rendering
-			}
-			const reviewData = completeData
-				.map(c => c.data as SubmitReviewDetails)
-				.filter(d => d && typeof d === "object" && "overall_correctness" in d);
-			if (reviewData.length > 0) {
-				const summary = reviewData[reviewData.length - 1];
-				const findings: FindingDetails[] = [];
-				lines.push(...renderReviewResult(summary, findings, continuePrefix, expanded, theme));
+			const yieldValue = progress.extractedToolData.yield;
+			const reviewLines = memoBySnapshot(
+				completedReviewMemo,
+				yieldValue,
+				[continuePrefix, expanded, theme],
+				(): string[] | null => {
+					const completeData = normalizeYieldData(yieldValue);
+					const incrementalReview = extractIncrementalReviewResult(completeData);
+					if (incrementalReview) {
+						return renderReviewResult(
+							incrementalReview.summary,
+							incrementalReview.findings,
+							continuePrefix,
+							expanded,
+							theme,
+						);
+					}
+					const reviewData = completeData
+						.map(c => c.data as SubmitReviewDetails)
+						.filter(d => d && typeof d === "object" && "overall_correctness" in d);
+					if (reviewData.length === 0) return null;
+					return renderReviewResult(reviewData[reviewData.length - 1], [], continuePrefix, expanded, theme);
+				},
+			);
+			if (reviewLines) {
+				lines.push(...reviewLines);
 				return lines; // Review result handles its own rendering
 			}
 		}
@@ -808,7 +857,11 @@ function renderAgentProgress(
 		for (const toolName in progress.extractedToolData) {
 			const dataArray = progress.extractedToolData[toolName];
 			if (toolName === "yield") {
-				lines.push(...renderTypedYieldSections(dataArray, continuePrefix, expanded, theme));
+				lines.push(
+					...memoBySnapshot(yieldSectionsMemo, dataArray, [continuePrefix, expanded, theme], () =>
+						renderTypedYieldSections(dataArray, continuePrefix, expanded, theme),
+					),
+				);
 				continue;
 			}
 
@@ -866,15 +919,19 @@ function renderAgentProgress(
 	// Expanded view: recent output and tools
 	if (expanded && progress.status === "running") {
 		const previewRows = previewWindowRows();
-		const output = capPreviewLines(
-			sanitizeRecentOutput([...progress.recentOutput].reverse().join("\n")).split("\n"),
-			theme,
-			{
-				max: previewRows,
-				expandHint: false,
-			},
-		).join("\n");
-		lines.push(...renderOutputSection(output, continuePrefix, expanded, theme, 2, previewRows));
+		lines.push(
+			...memoBySnapshot(recentOutputMemo, progress.recentOutput, [continuePrefix, theme, previewRows], () => {
+				const output = capPreviewLines(
+					sanitizeRecentOutput([...progress.recentOutput].reverse().join("\n")).split("\n"),
+					theme,
+					{
+						max: previewRows,
+						expandHint: false,
+					},
+				).join("\n");
+				return renderOutputSection(output, continuePrefix, expanded, theme, 2, previewRows);
+			}),
+		);
 	}
 
 	return lines;
@@ -1077,7 +1134,7 @@ function renderAgentResult(
 		lines.push(
 			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg(
 				"dim",
-				previewLine(sanitizeText(result.abortReason), 80),
+				clipCollapsed(flattenLine(sanitizeText(result.abortReason)), 80, expanded),
 			)}`,
 		);
 	}
@@ -1169,7 +1226,7 @@ function renderAgentResult(
 		lines.push(
 			`${continuePrefix}${theme.fg("warning", theme.status.warning)} ${theme.fg(
 				"dim",
-				truncateToWidth(sanitizeText(missingCompleteWarning), 80),
+				clipCollapsed(sanitizeText(missingCompleteWarning), 80, expanded),
 			)}`,
 		);
 	}
@@ -1209,7 +1266,7 @@ function renderAgentResult(
 	// Error message
 	if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
 		lines.push(
-			`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", previewLine(sanitizeText(result.error), 70))}`,
+			`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", clipCollapsed(flattenLine(sanitizeText(result.error)), 70, expanded))}`,
 		);
 	}
 
@@ -1351,7 +1408,7 @@ export function renderResult(
 	const aborted = abortedCount > 0;
 	const failed = failCount > 0;
 	const mergeFailed = mergeFailedCount > 0;
-	const isError = result.isError === true || aborted || failed;
+	const isError = aborted || failed;
 	const agentCount = hasResults ? details.results.length : (details.progress?.length ?? 0);
 	const icon: ToolUIStatus = options.isPartial ? "running" : isError ? "error" : mergeFailed ? "warning" : "success";
 	// Header meta is the spawn count only; each row carries its own ⟨agent⟩
@@ -1376,6 +1433,25 @@ export function renderResult(
 		},
 		theme,
 	);
+
+	// Fallback text is fixed for this snapshot; derive its trailing notice rows
+	// once instead of re-splitting on every spinner frame.
+	const fallbackExtraLines: string[] = [];
+	if (fallbackText.trim()) {
+		const summaryLines = fallbackText.split("\n");
+		const markerIndex = summaryLines.findIndex(
+			line =>
+				line.includes("<system-notification>") ||
+				line.startsWith("Applied patches:") ||
+				line.startsWith("No changes to apply."),
+		);
+		if (markerIndex >= 0) {
+			for (let i = markerIndex; i < summaryLines.length; i++) {
+				const line = summaryLines[i];
+				if (line.trim()) fallbackExtraLines.push(theme.fg("dim", line));
+			}
+		}
+	}
 
 	return framedToolCard(theme, ({ width, contentWidth }) => {
 		const { expanded, isPartial, spinnerFrame } = options;
@@ -1418,7 +1494,11 @@ export function renderResult(
 			const ordered = orderResultsForDisplay(details.results);
 			const visible = expanded ? ordered : selectCollapsedResults(ordered);
 			for (const res of visible) {
-				lines.push(...renderAgentResult(res, "", "  ", expanded, theme, undefined, 0, contentWidth));
+				lines.push(
+					...memoBySnapshot(agentResultMemo, res, [expanded, theme, contentWidth, isFeedModelBadgeEnabled()], () =>
+						renderAgentResult(res, "", "  ", expanded, theme, undefined, 0, contentWidth),
+					),
+				);
 			}
 			if (visible.length < ordered.length) {
 				const hint = formatExpandHint(theme, false, true);
@@ -1431,11 +1511,14 @@ export function renderResult(
 			// (their payloads deliver through jobs) — keep their rows visible
 			// beside the finalized inline results, live while running and
 			// settled once their jobs finish.
-			const supplementalProgress = details.progress
-				? orderProgressForDisplay(
-						details.progress.filter(progress => !details.results.some(res => res.id === progress.id)),
-					)
-				: [];
+			let supplementalProgress: AgentProgress[] = [];
+			if (details.progress) {
+				const resultIds = new Set<string>();
+				for (const res of details.results) resultIds.add(res.id);
+				supplementalProgress = orderProgressForDisplay(
+					details.progress.filter(progress => !resultIds.has(progress.id)),
+				);
+			}
 			for (const progress of supplementalProgress) {
 				lines.push(
 					...renderAgentProgress(
@@ -1488,22 +1571,7 @@ export function renderResult(
 			};
 		}
 
-		if (fallbackText.trim()) {
-			const summaryLines = fallbackText.split("\n");
-			const markerIndex = summaryLines.findIndex(
-				line =>
-					line.includes("<system-notification>") ||
-					line.startsWith("Applied patches:") ||
-					line.startsWith("No changes to apply."),
-			);
-			if (markerIndex >= 0) {
-				const extra = summaryLines.slice(markerIndex);
-				for (const line of extra) {
-					if (!line.trim()) continue;
-					lines.push(theme.fg("dim", line));
-				}
-			}
-		}
+		for (const line of fallbackExtraLines) lines.push(line);
 
 		while (lines.length > 0 && lines[0].trim() === "") lines.shift();
 		return {
@@ -1814,6 +1882,9 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 					age: progress.currentToolStartMs ? Math.max(0, nowMs - progress.currentToolStartMs) : undefined,
 				}
 			: null;
+	const summary = taskSummary(progress.description || progress.assignment || progress.task);
+	// The agent's own stage line (from its completion probe) rides beside the task while it runs.
+	const stage = running && progress.stage ? plainText(progress.stage) : "";
 	const retry =
 		running && progress.retryState
 			? {
@@ -1828,7 +1899,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 		{
 			name: formatTaskId(progress.id),
 			agent: progress.agent || undefined,
-			task: taskSummary(progress.description || progress.assignment || progress.task) || undefined,
+			task: stage ? (summary ? [span(summary), span(` · ${stage}`, "muted")] : stage) : summary || undefined,
 			status,
 			model: progress.resolvedModelIdentity ?? progress.resolvedModel,
 			thinking: thinkingToken(progress.resolvedThinkingLevel),
@@ -2147,14 +2218,16 @@ export interface TaskItem {
 	name?: string;
 	/** Agent type to run this item (e.g. "scout"). Defaults to the spawn policy's default agent. */
 	agent?: string;
+	/** Historical source session selected by the bundled consult agent. */
+	sourceSession?: string;
+	/** Optional model selector override for the historical source session. */
+	model?: string | string[];
 	/** The work; required by the schema. */
 	task?: string;
 	/** How open-ended the work is; required by the schema and the child's sole `auto` thinking classification input. */
 	solutionSpace?: string;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
 	effort?: "lo" | "med" | "hi";
-	/** Per-spawn model selector or ordered selector array; overrides agent and settings preferences. */
-	model?: string | string[];
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
@@ -2176,14 +2249,16 @@ export interface TaskParams {
 	name?: string;
 	/** Agent type to spawn (flat form); omitted values resolve from the session spawn policy. */
 	agent?: string;
+	/** Historical source session selected by the bundled consult agent. */
+	sourceSession?: string;
+	/** Optional model selector override for the historical source session. */
+	model?: string | string[];
 	/** The work (flat form). */
 	task?: string;
 	/** How open-ended the work is (flat form); see {@link TaskItem.solutionSpace}. */
 	solutionSpace?: string;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
 	effort?: "lo" | "med" | "hi";
-	/** Per-spawn model selector or ordered selector array; overrides agent and settings preferences. */
-	model?: string | string[];
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
@@ -2320,6 +2395,18 @@ export interface AgentProgress {
 	advisor?: boolean;
 	/** The agent's latest self-estimate of task completion (0–100), from the periodic `task.completionProbe` side request. */
 	completionPercent?: number;
+	/**
+	 * The agent's current step in its own words (one line, ≤ 80 chars), from the
+	 * same probe reply as {@link completionPercent}. Running rows prefer it over
+	 * `lastIntent`; the job widget uses it as its stage line.
+	 */
+	stage?: string;
+	/**
+	 * What the agent says shows its progress live (one line, ≤ 200 chars), e.g.
+	 * "BENCH lines in bg_2 pipe:1, tok_s higher is better, target 70% of roofline";
+	 * from the probe reply. Feeds the job widget author's brief; never rendered.
+	 */
+	watch?: string;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**

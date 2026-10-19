@@ -14,7 +14,7 @@
 //! disabled for writes, ambient `GIT_DIR`-family vars stripped, bounded output
 //! capture, and deadline + SIGTERM→SIGKILL termination via tokio.
 
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{ffi::OsStr, path::Path, process::Stdio, time::Duration};
 
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
@@ -305,6 +305,25 @@ pub(crate) fn run_sync(cwd: &Path, args: &[String], timeout: Duration) -> Result
 	run_sync_capped(cwd, args, timeout, OUTPUT_LIMIT_BYTES)
 }
 
+/// Stdin and environment for a [`run_sync_write`] invocation.
+pub(crate) struct SyncWrite<'a> {
+	/// Bytes piped to the child's stdin, then closed.
+	pub stdin: &'a [u8],
+	/// Variables set after [`apply_env`], so they win over its contract.
+	pub env:   &'a [(&'a str, &'a OsStr)],
+}
+
+/// Synchronous runner for local write plumbing (fsmonitor/untracked-cache
+/// pinned off) that feeds `input.stdin` and sets `input.env` on the child.
+pub(crate) fn run_sync_write(
+	cwd: &Path,
+	args: &[String],
+	timeout: Duration,
+	input: &SyncWrite<'_>,
+) -> Result<CliOutput> {
+	run_sync_impl(cwd, args, timeout, OUTPUT_LIMIT_BYTES, Some(input))
+}
+
 /// [`run_sync`] with an explicit retention cap. The cap is a parameter rather
 /// than a constant read inside the reader threads so a test can exercise the
 /// truncation contract on one call without lowering the limit for every other
@@ -315,18 +334,72 @@ pub(crate) fn run_sync_capped(
 	timeout: Duration,
 	limit: usize,
 ) -> Result<CliOutput> {
-	let argv = hardened_args(args, true);
+	run_sync_impl(cwd, args, timeout, limit, None)
+}
+
+/// Shared synchronous runner: read-only when `write` is `None`.
+fn run_sync_impl(
+	cwd: &Path,
+	args: &[String],
+	timeout: Duration,
+	limit: usize,
+	write: Option<&SyncWrite<'_>>,
+) -> Result<CliOutput> {
+	let argv = hardened_args(args, write.is_none());
 	let mut cmd = std::process::Command::new("git");
 	cmd.args(&argv)
 		.current_dir(cwd)
-		.stdin(Stdio::null())
+		.stdin(if write.is_some() {
+			Stdio::piped()
+		} else {
+			Stdio::null()
+		})
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped());
 	apply_env(&mut cmd);
+	if let Some(write) = write {
+		for (key, value) in write.env {
+			cmd.env(key, value);
+		}
+	}
 	let mut child = cmd.spawn().map_err(|err| spawn_error(cwd, err))?;
 	let stdout = spawn_sync_reader("git-cli-stdout", child.stdout.take(), limit);
 	let stderr = spawn_sync_reader("git-cli-stderr", child.stderr.take(), limit);
+	std::thread::scope(|scope| {
+		// The writer runs beside the deadline loop: a child that stops reading
+		// must still be killed on time, and the kill closes the pipe, which
+		// unblocks the writer before the scope joins it.
+		if let Some(write) = write
+			&& let Some(mut pipe) = child.stdin.take()
+		{
+			let writer = std::thread::Builder::new()
+				.name("git-cli-stdin".into())
+				.spawn_scoped(scope, move || {
+					use std::io::Write;
+					// A child that exits early closes the pipe; its exit status
+					// is the answer, not this write error.
+					let _ = pipe.write_all(write.stdin);
+				});
+			if let Err(err) = writer {
+				// The dropped pipe reads as an empty input; the child must not
+				// act on it.
+				let _ = child.kill();
+				let _ = child.wait();
+				return Err(Error::backend("git spawn stdin writer", err));
+			}
+		}
+		wait_sync(&argv, child, stdout, stderr, timeout)
+	})
+}
 
+/// Deadline loop and output collection for [`run_sync_impl`].
+fn wait_sync(
+	argv: &[String],
+	mut child: std::process::Child,
+	stdout: Option<std::thread::JoinHandle<String>>,
+	stderr: Option<std::thread::JoinHandle<String>>,
+	timeout: Duration,
+) -> Result<CliOutput> {
 	let deadline = std::time::Instant::now() + timeout;
 	let status = loop {
 		match child.try_wait()? {

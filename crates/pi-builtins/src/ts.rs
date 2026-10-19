@@ -136,8 +136,11 @@ fn timestamp_lines(matches: &ArgMatches, host: &mut Host) -> io::Result<i32> {
 		return Ok(130);
 	}
 	let cancel = host.cancel_flag();
+	// Line-buffered on the live pipes `ts` usually feeds, so each stamped
+	// line leaves as one write as soon as it is complete; created before the
+	// reader, as it method-borrows `host`.
+	let mut out = host.stdout_writer();
 	let mut reader = BufReader::new(&mut host.stdin);
-	let out = &mut host.stdout;
 	let start_wall = Timestamp::now();
 	let start_mono = Instant::now();
 	let mut last_wall = start_wall;
@@ -158,7 +161,7 @@ fn timestamp_lines(matches: &ArgMatches, host: &mut Host) -> io::Result<i32> {
 
 		match mode {
 			Mode::Relative => {
-				write_relative_line(out, content, Timestamp::now(), &tz)?;
+				write_relative_line(&mut out, content, Timestamp::now(), &tz)?;
 			},
 			Mode::Absolute => {
 				let zoned = Timestamp::now().to_zoned(tz.clone());
@@ -188,9 +191,8 @@ fn timestamp_lines(matches: &ArgMatches, host: &mut Host) -> io::Result<i32> {
 		if had_newline {
 			out.write_all(b"\n")?;
 		}
-		// `ts` is commonly used on live pipes; make each line visible promptly.
-		out.flush()?;
 	}
+	out.flush()?;
 	Ok(0)
 }
 

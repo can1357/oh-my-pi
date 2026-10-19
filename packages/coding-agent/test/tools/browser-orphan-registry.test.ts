@@ -49,7 +49,8 @@ async function writeOwnershipFile(
 
 /** A pid that has been spawned and reaped, so `kill(pid, 0)` reports ESRCH. */
 async function deadPid(): Promise<number> {
-	const proc = Bun.spawn(["true"], { stdout: "ignore", stderr: "ignore" });
+	// Bun's own executable is the only binary guaranteed on every platform (`true` is absent on Windows).
+	const proc = Bun.spawn([process.execPath, "-e", ""], { stdout: "ignore", stderr: "ignore" });
 	await proc.exited;
 	return proc.pid;
 }

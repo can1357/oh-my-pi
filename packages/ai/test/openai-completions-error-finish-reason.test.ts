@@ -6,6 +6,7 @@
 // #isTransientTransportErrorMessage) so the turn is auto-retried instead of
 // stopping with a pinned error banner.
 import { describe, expect, it } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
@@ -293,6 +294,47 @@ describe("finish_reason: insufficient_system_resource", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toMatch(RETRYABLE_PATTERN);
+	}, 10_000);
+});
+
+describe("finish_reason: network_error and unknown", () => {
+	// OpenCode retries `network_error`/`network-error` finishes and continues past
+	// an unknown finish reason. Both must surface as retryable errors, but a
+	// recognised terminal reason with the same shape must not.
+	async function finishWith(finishReason: string) {
+		return streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: createSseFetch([
+				completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: finishReason }] }),
+				"[DONE]",
+			]),
+		}).result();
+	}
+
+	it.each(["network_error", "network-error", "NETWORK_ERROR"])(
+		"retries finish_reason %s",
+		async reason => {
+			const result = await finishWith(reason);
+			expect(result.stopReason).toBe("error");
+			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
+		},
+		10_000,
+	);
+
+	it.each(["unknown", "other", "unspecified", "FINISH_REASON_UNSPECIFIED"])(
+		"retries unknown finish_reason %s instead of pinning it",
+		async reason => {
+			const result = await finishWith(reason);
+			expect(result.stopReason).toBe("error");
+			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
+		},
+		10_000,
+	);
+
+	it("keeps an unrecognised vendor finish_reason terminal", async () => {
+		const result = await finishWith("recitation");
+		expect(result.stopReason).toBe("error");
+		expect(AIError.retriable(AIError.classifyMessage(result))).toBe(false);
 	}, 10_000);
 });
 

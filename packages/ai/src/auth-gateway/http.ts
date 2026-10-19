@@ -51,14 +51,6 @@ export function gatewayResponseHeaders(
 	return headers;
 }
 
-/** Use the socket peer unless the gateway explicitly trusts its reverse proxy. */
-export function resolvePeer(req: Request, socketAddress: string, trustProxyHeaders = false): string {
-	if (!trustProxyHeaders) return socketAddress;
-	const fwd = req.headers.get("x-forwarded-for");
-	if (fwd) return fwd.split(",")[0].trim();
-	return req.headers.get("x-real-ip") ?? socketAddress;
-}
-
 /**
  * Decode each run of percent-escapes on its own, so one malformed escape
  * elsewhere in the URL cannot hide an encoded token. A run that is not valid
@@ -121,13 +113,19 @@ export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 const TOKEN_ENCODER = new TextEncoder();
 
+/** The token of an `Authorization: Bearer <token>` header, trimmed; `undefined` without one. */
+export function readBearerToken(req: Request): string | undefined {
+	const header = req.headers.get("authorization");
+	if (!header) return undefined;
+	const match = header.match(/^Bearer\s+(.+)$/i);
+	return match ? match[1].trim() : undefined;
+}
+
 export function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean {
 	if (tokens.size === 0) return true;
-	const header = req.headers.get("authorization");
-	if (!header) return false;
-	const match = header.match(/^Bearer\s+(.+)$/i);
-	if (!match) return false;
-	const presented = TOKEN_ENCODER.encode(match[1].trim());
+	const token = readBearerToken(req);
+	if (token === undefined) return false;
+	const presented = TOKEN_ENCODER.encode(token);
 	// Iterate every allowed token regardless of early hits so the result
 	// timing reflects the full set, not the position of the match.
 	let ok = false;

@@ -112,22 +112,8 @@ function extractReviewPrRefsFromText(text: string): ReviewPrRef[] {
 	);
 }
 
-function buildPrLargeDiffInstruction(ref: ReviewPrRef): string {
-	const prDiffUrl = `pr://${ref.repo}/${ref.number}/diff`;
-	return `MUST read assigned PR file diffs from \`${prDiffUrl}/all\` or per-file \`${prDiffUrl}/<index>\`; NEVER use local \`git diff\`/\`git show\` for PR diff content`;
-}
-
-function buildPrContextInstruction(ref: ReviewPrRef): string {
-	const prDiffUrl = `pr://${ref.repo}/${ref.number}/diff`;
-	return `MUST NOT read local workspace files for PR file context; use the fetched PR diff and \`${prDiffUrl}/all\` or per-file \`${prDiffUrl}/<index>\` only`;
-}
-
-/** Fetch one PR patch and freeze it before any overlay or LLM prompt is built. */
-export async function resolvePrReviewTarget(
-	cwd: string,
-	ctx: HookCommandContext,
-	ref: ReviewPrRef,
-): Promise<ResolvedReviewTarget | undefined> {
+/** Fetch one PR patch and freeze it before any overlay or LLM prompt is built; throws on fetch failure. */
+export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promise<ResolvedReviewTarget> {
 	try {
 		const lookup = await gh.getOrFetchPrDiff({ cwd, repo: ref.repo, number: ref.number });
 		return createResolvedReviewTarget(
@@ -136,14 +122,27 @@ export async function resolvePrReviewTarget(
 			lookup.payload.unified,
 			`PR ${ref.repo}#${ref.number} has no diff content available`,
 			{
-				diffInstruction: buildPrLargeDiffInstruction(ref),
-				contextInstruction: buildPrContextInstruction(ref),
+				prDiffUrl: `pr://${ref.repo}/${ref.number}/diff`,
 			},
 		);
 	} catch (error) {
-		const failure = `Failed to fetch PR diff for ${ref.repo}#${ref.number}: ${error instanceof Error ? error.message : String(error)}`;
-		if (!ctx.hasUI) throw new Error(failure);
-		ctx.ui.notify(failure, "error");
+		throw new Error(
+			`Failed to fetch PR diff for ${ref.repo}#${ref.number}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
+/** Interactive wrapper: notifies instead of throwing when a UI is available. */
+export async function resolvePrReviewTarget(
+	cwd: string,
+	ctx: HookCommandContext,
+	ref: ReviewPrRef,
+): Promise<ResolvedReviewTarget | undefined> {
+	try {
+		return await fetchPrReviewTarget(cwd, ref);
+	} catch (error) {
+		if (!ctx.hasUI) throw error;
+		ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 		return undefined;
 	}
 }

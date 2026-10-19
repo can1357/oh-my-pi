@@ -60,7 +60,7 @@ async function createHarness(factory: ExtensionFactory) {
 		followUp: vi.fn(async (_text: string, _images?: ImageContent[]) => {}),
 		promptCustomMessage: vi.fn(async () => true),
 		abort: vi.fn(async () => {}),
-		maybeStartTitleGeneration: vi.fn(),
+		prewarmModelConnection: vi.fn(),
 	};
 	const ctx = {
 		editor,
@@ -452,7 +452,7 @@ describe("interactive native input ingress", () => {
 			throw new Error("new session rejected");
 		};
 		const commands = new CommandController(h.ctx);
-		h.ctx.handleClearCommand = () => commands.handleClearCommand();
+		h.ctx.handleNewCommand = () => commands.handleClearCommand();
 		h.draftWithImage("/new original [Image #1]");
 		const submitting = h.pressSubmit(FOLLOW_UP);
 		await entered.promise;

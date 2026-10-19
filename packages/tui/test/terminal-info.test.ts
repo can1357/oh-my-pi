@@ -5,6 +5,7 @@ import {
 	type TerminalStateInfo,
 } from "@oh-my-pi/pi-tui/apps/debug/terminal-info";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 
 const sample: TerminalStateInfo = {
 	detectedId: "kitty",
@@ -69,21 +70,7 @@ describe("formatTerminalState", () => {
 
 describe("collectTerminalState", () => {
 	it("reports herdr from pane identity vars, not client-only socket paths", () => {
-		const keys = [
-			"HERDR_ENV",
-			"HERDR_PANE_ID",
-			"HERDR_TAB_ID",
-			"HERDR_WORKSPACE_ID",
-			"HERDR_SOCKET_PATH",
-			"TMUX",
-			"STY",
-			"ZELLIJ",
-			"CMUX_WORKSPACE_ID",
-			"CMUX_SURFACE_ID",
-			"CMUX_REMOTE_TRANSPORT",
-			"WMUX",
-			"WMUX_SURFACE_ID",
-		] as const;
+		const keys = [...TERMINAL_MULTIPLEXER_ENV_KEYS, "HERDR_SOCKET_PATH"];
 		const previous = new Map<string, string | undefined>();
 		for (const key of keys) {
 			previous.set(key, Bun.env[key]);

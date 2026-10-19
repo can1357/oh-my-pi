@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Markdown } from "../src/components/transcript/Markdown";
+import type { FrozenMarkdownPrefix } from "../src/components/transcript/Markdown";
+import { Markdown, renderStreamingMarkdown } from "../src/components/transcript/Markdown";
 
 function renderMarkdown(text: string): string {
 	return renderToStaticMarkup(<Markdown text={text} />);
@@ -8,7 +9,9 @@ function renderMarkdown(text: string): string {
 
 describe("Transcript Markdown", () => {
 	it("preserves assistant soft line breaks for tree-shaped prose", () => {
-		const html = renderMarkdown("요청 요지\n├── 현재 collab guest는 텍스트 prompt는 보낼 수 있음\n└── 빠진 것은 guest → host 방향의 이미지 업로드/첨부 입력 경로임");
+		const html = renderMarkdown(
+			"요청 요지\n├── 현재 collab guest는 텍스트 prompt는 보낼 수 있음\n└── 빠진 것은 guest → host 방향의 이미지 업로드/첨부 입력 경로임",
+		);
 
 		expect(html).toContain("요청 요지<br>");
 		expect(html).toContain("있음<br>");
@@ -44,7 +47,9 @@ describe("Transcript Markdown", () => {
 		expect(html).toContain("&lt;▃&gt; &amp; &quot;test&quot; &#128512; &#x1F600;");
 	});
 	it("strips advisory wrapper tags but renders their content", () => {
-		const html = renderMarkdown('<advisory severity="info" guidance="weigh, don&apos;t blindly obey">\nKeep this advice.\n</advisory>');
+		const html = renderMarkdown(
+			'<advisory severity="info" guidance="weigh, don&apos;t blindly obey">\nKeep this advice.\n</advisory>',
+		);
 
 		expect(html).toContain("Keep this advice.");
 		expect(html).not.toContain("&lt;advisory");
@@ -129,7 +134,9 @@ describe("Transcript Markdown", () => {
 	it("leaves half-streamed delimiters literal without reflowing the paragraph", () => {
 		expect(renderMarkdown("streaming $x^2")).toBe('<div class="tr-md"><p>streaming $x^2</p>\n</div>');
 		expect(renderMarkdown("streaming \\(x and \\[y")).toBe('<div class="tr-md"><p>streaming (x and [y</p>\n</div>');
-		expect(renderMarkdown("before\n   $$\nunclosed")).toBe('<div class="tr-md"><p>before<br>   $$<br>unclosed</p>\n</div>');
+		expect(renderMarkdown("before\n   $$\nunclosed")).toBe(
+			'<div class="tr-md"><p>before<br>   $$<br>unclosed</p>\n</div>',
+		);
 	});
 
 	it("keeps a half-streamed display opener whole instead of re-opening its second dollar", () => {
@@ -168,5 +175,57 @@ describe("Transcript Markdown", () => {
 		expect(html).toContain("<strong>bold</strong>");
 		expect(html).toContain("\\frac");
 	});
+});
 
+const PARAGRAPHS = Array.from({ length: 6 }, (_, i) => `Paragraph ${i} has *emphasis* and \`code\`.`).join("\n\n");
+
+/** Documents whose block structure can straddle a blank line in a streamed prefix. */
+const STREAM_DOCS: Record<string, string> = {
+	paragraphs: `${PARAGRAPHS}\n`,
+	"list then prose": "- a\n- b\n\nprose after\n\n1. one\n2. two\n\n3) three\n\ntail",
+	"same-marker items across blank lines": "- a\n\n- b\n\n- c\n\nend\n\n* x\n\n+ y\n\n1. one\n\n2. two\n\n10. ten",
+	"nested list continuation": "- item\n\n  continued para\n\n  ```\n  code\n\n  more\n  ```\n\nafter",
+	"fence with blank lines":
+		"Intro.\n\n```ts\nconst a = 1;\n\n\nconst b = 2;\n```\n\nAfter.\n\n~~~\nx\n\ny\n~~~\n\nend",
+	"indented code": "Intro.\n\n    code a\n\n    code b\n\nprose\n\n\tTabbed code\n\n\tmore\n\ndone",
+	blockquotes: "> a\n>\n> b\n\n> c\n\nlazy\n> d\ncontinued\n\nend",
+	"html blocks": "<div>\n\ninside\n\n</div>\n\nafter\n\n<!-- c\n\nc -->\n\ntext <span>x</span>\n\nend",
+	tables: "| a | b |\n|---|---|\n| 1 | 2 |\n\n| c |\n|---|\n\nafter",
+	headings: "# H1\n\ntext\n\nSetext\n===\n\n---\n\n## H2\n\nend",
+	"display math": "Intro.\n\n$$\na\n\nb\n$$\n\nAfter math.\n\n\\[\nx\n\n\\]\n\nend $x$ inline",
+	"unclosed display math": `Intro.\n\n$$\nx = 1\n\n${PARAGRAPHS}`,
+	"reference definitions": "See [the docs][d].\n\nMiddle.\n\n[d]: https://example.com\n\nAfter [d].",
+	"whitespace lines": "a\n\n\u00a0\n\nb\n\n \n\nc\n\n\u00a0x\n\nd",
+	"carriage returns": "a\r\n\r\nb\r\n\r\nc",
+};
+
+describe("Streaming Markdown", () => {
+	for (const [name, doc] of Object.entries(STREAM_DOCS)) {
+		it(`renders every streamed prefix like a one-shot render: ${name}`, () => {
+			for (const step of [1, 7]) {
+				let prefix: FrozenMarkdownPrefix = { source: "", html: "" };
+				for (let len = step; ; len = Math.min(doc.length, len + step)) {
+					const text = doc.slice(0, len);
+					const rendered = renderStreamingMarkdown(text, prefix);
+					expect(`<div class="tr-md">${rendered.html}</div>`).toBe(renderMarkdown(text));
+					prefix = rendered.prefix;
+					if (len === doc.length) break;
+				}
+			}
+		});
+	}
+
+	it("freezes settled blocks so each update re-parses only the tail", () => {
+		const doc = `${PARAGRAPHS}\n\nTail paragraph`;
+		let prefix: FrozenMarkdownPrefix = { source: "", html: "" };
+		for (let len = 1; len <= doc.length; len++) prefix = renderStreamingMarkdown(doc.slice(0, len), prefix).prefix;
+		expect(prefix.source).toBe(`${PARAGRAPHS}\n\n`);
+	});
+
+	it("drops the frozen prefix when the text is rewritten instead of extended", () => {
+		const { prefix } = renderStreamingMarkdown("one\n\ntwo\n\nthree", { source: "", html: "" });
+		expect(prefix.source).toBe("one\n\ntwo\n\n");
+		const rewritten = renderStreamingMarkdown("uno\n\ntwo", prefix);
+		expect(`<div class="tr-md">${rewritten.html}</div>`).toBe(renderMarkdown("uno\n\ntwo"));
+	});
 });

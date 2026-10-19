@@ -11,7 +11,9 @@ use std::{
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, parser::ValuesRef};
-use pi_vfs::{BlockingFs, DirOptions, is_virtual_path, parent_path};
+#[cfg(target_os = "linux")]
+use pi_vfs::BlockingFs;
+use pi_vfs::{DirOptions, is_virtual_path, parent_path};
 use uucore::{display::Quotable, fs};
 #[cfg(not(windows))]
 use uucore::mode;
@@ -36,17 +38,17 @@ struct Config {
 }
 
 #[cfg(windows)]
-fn get_mode(_matches: &ArgMatches) -> Result<u32, String> {
+fn get_mode(_matches: &ArgMatches, _umask: u32) -> Result<u32, String> {
 	Ok(DEFAULT_PERM)
 }
 
 #[cfg(not(windows))]
-fn get_mode(matches: &ArgMatches) -> Result<u32, String> {
+fn get_mode(matches: &ArgMatches, umask: u32) -> Result<u32, String> {
 	if let Some(mode_arg) = matches.get_one::<String>(options::MODE) {
-		mode::parse_chmod(DEFAULT_PERM, mode_arg, true, mode::get_umask())
+		mode::parse_chmod(DEFAULT_PERM, mode_arg, true, umask)
 	} else {
 		// If no mode argument is specified, return the mode derived from umask.
-		Ok(!mode::get_umask() & DEFAULT_PERM)
+		Ok(!umask & DEFAULT_PERM)
 	}
 }
 
@@ -131,7 +133,7 @@ impl Utility for Mkdir {
 			.matches
 			.get_many::<OsString>(options::DIRS)
 			.unwrap_or_default();
-		let config = match get_mode(&self.matches) {
+		let config = match get_mode(&self.matches, host.umask()) {
 			Ok(mode) => Config {
 				recursive: self.matches.get_flag(options::PARENTS),
 				mode,
@@ -281,72 +283,57 @@ fn acl_default_perm_bits(filesystem: &BlockingFs, path: &Path) -> u32 {
 	})
 }
 
-// Uses an iterative approach instead of recursion to avoid stack overflow with
-// deep nesting.
+/// Creates `path`; with `-p`, also its missing ancestors.
 fn create_dir(
 	path: &Path,
 	is_parent: bool,
 	config: &Config,
 	host: &mut Host,
 ) -> Result<(), MkdirError> {
-	let path_exists = host.fs().exists(host.resolve(path));
-	if path_exists && !config.recursive {
-		return Err(MkdirError::Message(format!("{}: File exists", path.maybe_quote())));
-	}
-	if path == Path::new("") {
-		return Ok(());
-	}
-
-	if config.recursive {
-		let mut dirs_to_create = Vec::with_capacity(16);
-		let mut current = path;
-		while let Some(parent) = parent_path(current) {
-			if parent == Path::new("") {
-				break;
-			}
-			dirs_to_create.push(parent);
-			current = parent;
+	if !config.recursive {
+		if host.fs().exists(host.resolve(path)) {
+			return Err(MkdirError::Message(format!("{}: File exists", path.maybe_quote())));
 		}
+		return create_single_dir(path, is_parent, config, host);
+	}
 
-		for dir in dirs_to_create.iter().rev() {
-			if !host.fs().exists(host.resolve(dir)) {
-				create_single_dir(dir, true, config, host)?;
-			}
+	// A `..` component names a directory only once the one before it exists,
+	// and Windows folds it away before looking, so such a path is created
+	// ancestor by ancestor, as GNU does.
+	let has_parent_dir = path
+		.components()
+		.any(|component| matches!(component, std::path::Component::ParentDir));
+	if !has_parent_dir {
+		// `mkdir -p` of a directory that exists, the common case, takes one
+		// stat; GNU prints nothing for it, even with -v.
+		if path == Path::new("") || host.fs().is_dir(host.resolve(path)) {
+			return Ok(());
+		}
+		// The leaf is tried first; its ancestors are looked at only when it
+		// reports one missing.
+		match create_single_dir(path, is_parent, config, host) {
+			Err(MkdirError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {},
+			result => return result,
 		}
 	}
 
+	// Iterative rather than recursive, so deep nesting cannot overflow the
+	// stack.
+	let mut dirs_to_create = Vec::with_capacity(16);
+	let mut current = path;
+	while let Some(parent) = parent_path(current) {
+		if parent == Path::new("") {
+			break;
+		}
+		dirs_to_create.push(parent);
+		current = parent;
+	}
+	for dir in dirs_to_create.iter().rev() {
+		if !host.fs().exists(host.resolve(dir)) {
+			create_single_dir(dir, true, config, host)?;
+		}
+	}
 	create_single_dir(path, is_parent, config, host)
-}
-
-/// Restores the process umask when directory creation finishes or unwinds.
-#[cfg(unix)]
-struct UmaskGuard(rustix::fs::Mode);
-
-#[cfg(unix)]
-impl UmaskGuard {
-	fn set(new_mask: rustix::fs::Mode) -> Self {
-		let old_mask = rustix::process::umask(new_mask);
-		Self(old_mask)
-	}
-}
-
-#[cfg(unix)]
-impl Drop for UmaskGuard {
-	fn drop(&mut self) {
-		rustix::process::umask(self.0);
-	}
-}
-
-/// Creates `path` with exactly `mode`.
-///
-/// GNU mkdir creates native directories with the requested mode atomically by
-/// temporarily disabling the process umask; providers apply `mode` as given.
-fn create_dir_with_mode(filesystem: &BlockingFs, path: &Path, mode: u32) -> io::Result<()> {
-	#[cfg(unix)]
-	let _guard = filesystem
-		.is_native_local(path)
-		.then(|| UmaskGuard::set(rustix::fs::Mode::empty()));
-	filesystem.create_dir_with(path, &DirOptions::new().mode(mode))
 }
 
 fn create_single_dir(
@@ -357,28 +344,42 @@ fn create_single_dir(
 ) -> Result<(), MkdirError> {
 	let filesystem = host.fs().clone();
 	let fs_path = host.resolve(path);
-	#[cfg(all(unix, target_os = "linux"))]
-	let path_exists = filesystem.exists(&fs_path);
 
 	#[cfg(unix)]
 	let create_mode = if is_parent {
 		// Parents made by `-p` use the umask-derived mode with `u+wx` restored.
-		(!mode::get_umask() & 0o777) | 0o300
+		(!host.umask() & 0o777) | 0o300
 	} else {
 		config.mode
 	};
 	#[cfg(not(unix))]
 	let create_mode = config.mode;
 
-	match create_dir_with_mode(&filesystem, &fs_path, create_mode) {
+	match filesystem.create_dir_with(&fs_path, &DirOptions::new().mode(create_mode)) {
 		Ok(()) => {
+			// The effective umask (the shell's, which the filesystem applies,
+			// or else the host's, which the kernel applies) cleared bits that
+			// `-m` and `-p` parents must keep. The host umask is shared with
+			// every thread of the host, so it is never changed; the directory
+			// is `chmod`ed instead, as GNU mkdir does for `-m`. Providers apply
+			// the mode as given.
+			#[cfg(unix)]
+			if filesystem.is_native_local(&fs_path) && create_mode & host.umask() != 0 {
+				filesystem
+					.set_permissions(&fs_path, pi_vfs::Permissions::from_mode(create_mode))
+					.map_err(|source| MkdirError::Io {
+						context: Some(format!("cannot set permissions {}", path.quote())),
+						source,
+					})?;
+			}
+
 			if config.verbose {
 				writeln!(host.stdout, "mkdir: created directory {}", path.quote())
 					.map_err(MkdirError::io)?;
 			}
-
+			// Reaching here proves the directory is new.
 			#[cfg(all(unix, target_os = "linux"))]
-			if !path_exists {
+			{
 				let acl_perm_bits = acl_default_perm_bits(&filesystem, &fs_path);
 				if acl_perm_bits != 0 {
 					chmod(&filesystem, &fs_path, path, create_mode | acl_perm_bits)?;
@@ -387,7 +388,8 @@ fn create_single_dir(
 
 			Ok(())
 		},
-		Err(_) if filesystem.is_dir(&fs_path) => {
+		// A missing ancestor cannot leave `path` a directory; `-p` creates it.
+		Err(source) if source.kind() != io::ErrorKind::NotFound && filesystem.is_dir(&fs_path) => {
 			let ends_with_parent_dir =
 				matches!(path.components().next_back(), Some(std::path::Component::ParentDir));
 			if config.verbose && is_parent && config.recursive && !ends_with_parent_dir {

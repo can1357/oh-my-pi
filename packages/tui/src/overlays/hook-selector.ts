@@ -94,6 +94,10 @@ export interface HookSelectorOptions {
 	/** Number of leading options (original order) that receive a selection
 	 *  marker. Defaults to every option when {@link selectionMarker} is set. */
 	markableCount?: number;
+	/** Describe as a card in the dock (the composer slot) instead of a picker
+	 *  sheet, so dock content above it (e.g. a `/omfg` candidate rule) stays
+	 *  visible and the transcript stays scrollable on native surfaces. */
+	inline?: boolean;
 }
 
 export interface HookSelectorOption {
@@ -210,6 +214,7 @@ export class HookSelectorComponent extends OverlayPanel {
 	#sliderComponent: Text | undefined;
 	#lastRenderWidth: number | undefined;
 	readonly #detailLines: readonly string[];
+	readonly #inline: boolean;
 	readonly #helpText: string | undefined;
 	/** Described option rows by original index; `marker` is the radio state baked into the label. */
 	readonly #nativeItems = new Map<number, { marker: boolean; node: NativeNode }>();
@@ -264,6 +269,7 @@ export class HookSelectorComponent extends OverlayPanel {
 		this.#baseTitle = this.title;
 		this.#detailLines = title.split(/\r?\n/).slice(1);
 		this.#helpText = opts?.helpText;
+		this.#inline = opts?.inline ?? false;
 		this.#onLeftCallback = opts?.onLeft;
 		this.#onRightCallback = opts?.onRight;
 		this.#onExternalEditorCallback = opts?.onExternalEditor;
@@ -726,13 +732,14 @@ export class HookSelectorComponent extends OverlayPanel {
 	}
 
 	/**
-	 * A plain option list is a picker sheet. Otherwise a card headed by the
-	 * title (plus the countdown `elapsed` when a timeout runs), the extra title
-	 * lines, the slider as `tabs`, the options as a `list` keyed by original
-	 * option index, the search query while typing, and the key hints.
+	 * A plain option list is a picker sheet. Otherwise (inline, slider, or
+	 * countdown) a card headed by the title (plus the countdown `elapsed` when a
+	 * timeout runs), the extra title lines, the slider as `tabs`, the options as
+	 * a `list` keyed by original option index, the search query while typing,
+	 * and the key hints.
 	 */
 	override describe(cx: DescribeContext): NativeNode {
-		if (cx.supports("picker") && !this.#slider && !this.#countdown) return this.#describePicker();
+		if (cx.supports("picker") && !this.#inline && !this.#slider && !this.#countdown) return this.#describePicker();
 		const items = this.#menu.visibleItems;
 		const selected = this.#menu.selectedKey;
 		const query = this.#menu.query;

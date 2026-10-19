@@ -12,6 +12,11 @@ import {
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai/error/rate-limit";
 
+// MiniMax CN (minimax-code-cn) Token Plan exhaustion (2067): phrased 用量上限,
+// not 使用上限 like Zhipu.
+const MINIMAX_CN_TOKEN_PLAN_429 =
+	'{"type":"error","error":{"type":"rate_limit_error","message":"当前已达到 Token Plan 用量上限。为避免调用中断，请升级 Token Plan 套餐，或购买积分补充用量并开启积分自动消耗。 (2067)"}}';
+
 function googleRpc429(reason: string, retryDelay?: string, message = "Resource exhausted"): string {
 	const details: Array<Record<string, string>> = [
 		{
@@ -413,6 +418,7 @@ describe("isUsageLimit", () => {
 		expect(isUsageLimit("额度已用完，请充值")).toBe(true);
 		expect(isUsageLimit("配额已用尽")).toBe(true);
 		expect(isUsageLimit("账户余额不足")).toBe(true);
+		expect(isUsageLimit(new Error(MINIMAX_CN_TOKEN_PLAN_429))).toBe(true);
 	});
 
 	it("does not treat Simplified Chinese throttling as a usage limit", () => {
@@ -572,7 +578,7 @@ describe("isUsageLimitOutcome", () => {
 		).toBe(true);
 	});
 
-	it("rotates on Simplified Chinese quota exhaustion (Zhipu 429)", () => {
+	it("rotates on Simplified Chinese quota exhaustion (Zhipu, MiniMax CN 429)", () => {
 		const zhipu =
 			"429 已达到 5 小时的使用上限。您的限额将在 2026-08-06 20:06:00 重置。\n已达到 5 小时的使用上限。您的限额将在 2026-08-06 20:06:00 重置。 (type=1308)";
 		expect(isUsageLimitOutcome(429, zhipu)).toBe(true);
@@ -582,6 +588,7 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(429, "额度已用完，请充值")).toBe(true);
 		expect(isUsageLimitOutcome(429, "配额已用尽")).toBe(true);
 		expect(isUsageLimitOutcome(429, "账户余额不足")).toBe(true);
+		expect(isUsageLimitOutcome(429, MINIMAX_CN_TOKEN_PLAN_429)).toBe(true);
 	});
 
 	it("keeps Simplified Chinese throttling in the upstream-backoff lane", () => {
@@ -590,6 +597,8 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(429, "并发请求达到上限")).toBe(false);
 		expect(isUsageLimitOutcome(429, "每分钟使用次数已达上限")).toBe(false);
 		expect(isUsageLimitOutcome(429, "API 使用频率已达上限")).toBe(false);
+		expect(isUsageLimitOutcome(429, "用量速率已达上限，请稍后重试")).toBe(false);
+		expect(isUsageLimitOutcome(429, "用量并发已达上限")).toBe(false);
 	});
 
 	it("treats Simplified Chinese error bodies the classifier can read as informative", () => {

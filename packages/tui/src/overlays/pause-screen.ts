@@ -17,10 +17,10 @@ import { formatCoarseDuration } from "../chrome/format";
 import { centerLine } from "../utils";
 import { theme } from "../theme/theme";
 import { matchesAppInterrupt } from "../keybinding-matchers";
-import { formatKeyHint } from "../app-keybindings";
+import { formatKeyHint, formatTooltipKey } from "../app-keybindings";
 import { boundKeys, interruptKey } from "../chrome/keybinding-hints";
 import type { NativeNode, NativeUiEvent } from "../native/node";
-import { col, node, row, span, text } from "../native/describe";
+import { col, keyed, node, row, span, text } from "../native/describe";
 import { actionBar, actionButton } from "../native/overlay";
 import { isNativeRendering } from "../native/state";
 
@@ -55,6 +55,14 @@ const TITLE = "P A U S E D";
 const BODY_LINES = [
 	"Main agent, subagents, and advisor hold at their next step.",
 	"In-flight calls finish; nothing new starts until you resume.",
+] as const;
+
+/** What the hold means, one fact per row of the native sheet: icon, what, detail. */
+const HOLD_FACTS = [
+	["users", "Every agent holds", "Main agent, subagents and advisor stop at their next step."],
+	["activity", "Running calls finish", "A reply or tool already under way completes; nothing new starts."],
+	["message", "Queued messages wait", "Steering and follow-ups already queued send after you resume."],
+	["pen", "The repo is yours", "Edit files freely, then tell the agent what changed."],
 ] as const;
 
 /** Live hold clock, seconds-precise: `0:07`, `12:34`, `1:02:03`. */
@@ -176,33 +184,83 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 	/** A glass sheet titled "Paused" (not the whole pane: the transcript stays visible, frozen). */
 	readonly nativeOverlay = { role: "omp.overlay.pause", size: "md", anchor: "center", head: "Paused" } as const;
 
+	/**
+	 * The sheet: a hero (the pause glyph beside the live hold clock and the
+	 * session it holds), what the hold means as four facts, and a footer that
+	 * reassures and resumes. The resume keys live in the button's tooltip.
+	 */
 	describe(): NativeNode {
 		if (this.#native) return this.#native;
-		const children: NativeNode[] = [];
-		if (this.host.sessionName) children.push(text([span(this.host.sessionName, "strong")]));
 		const resumeKey = boundKeys("app.interrupt", ["escape"])[0] ?? "escape";
-		children.push(
-			text(
-				BODY_LINES.map((line, index) => span(index === 0 ? line : `\n${line}`, "muted")),
-				{ wrap: "word" },
-			),
-			row(
-				[
-					text([span("Paused for", "dim")]),
-					node("elapsed", { age: Date.now() - this.#startedAt, format: "clock" }),
-				],
-				{ gap: "xs", align: "baseline" },
-			),
-			actionBar([
-				null,
-				actionButton("Resume", "resume", {
-					keys: resumeKey,
-					tone: "accent",
-					title: `Resume  ${resumeKey} · enter · space`,
-				}),
-			]),
+		const hero = row(
+			[
+				node("icon", { name: "pause", role: "omp.pause.glyph" }, undefined, "glyph"),
+				col(
+					[
+						node(
+							"elapsed",
+							{
+								age: Date.now() - this.#startedAt,
+								format: "clock",
+								role: "omp.pause.clock",
+								title: "Paused for",
+							},
+							undefined,
+							"clock",
+						),
+						keyed(
+							text([span(this.host.sessionName ?? "Every agent in this session", "muted")], {
+								role: "omp.pause.session",
+								wrap: "none",
+								truncate: "end",
+							}),
+							"session",
+						),
+					],
+					{ gap: "none", grow: 1, shrink: 1 },
+				),
+			],
+			{ role: "omp.pause.hero", gap: "md", align: "center" },
 		);
-		this.#native = col(children, { gap: "md" });
+		const facts = col(
+			HOLD_FACTS.map(([icon, what, detail], index) =>
+				keyed(
+					row(
+						[
+							node("icon", { name: icon }),
+							col([text([span(what, "strong")]), text([span(detail, "muted")], { wrap: "word" })], {
+								gap: "none",
+								grow: 1,
+								shrink: 1,
+							}),
+						],
+						{ role: "omp.pause.fact", gap: "md", align: "start" },
+					),
+					`fact-${index}`,
+				),
+			),
+			{ role: "omp.pause.facts", gap: "md" },
+		);
+		this.#native = col(
+			[
+				keyed(hero, "hero"),
+				keyed(facts, "facts"),
+				actionBar([
+					keyed(
+						text([span("Each agent continues where it stopped.", "muted")], { role: "omp.pause.note" }),
+						"note",
+					),
+					null,
+					actionButton("Resume", "resume", {
+						keys: resumeKey,
+						tone: "accent",
+						// Each ` · ` clause ending in two spaces and a key is a keycap: `Resume [esc] · [⏎] · [space]`.
+						title: `Resume  ${formatTooltipKey(resumeKey)} ·   ${formatTooltipKey("enter")} ·   ${formatTooltipKey("space")}`,
+					}),
+				]),
+			],
+			{ gap: "md" },
+		);
 		return this.#native;
 	}
 

@@ -39,7 +39,7 @@ import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments"
 import { ToolAbortError } from "./tool-errors";
 
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
-import { cfgAskNotify, cfgAskTimeout } from "../modes/settings";
+import { cfgAskNotify, askTimeoutMs } from "../modes/settings";
 import { renderAttachmentSourceNotice } from "../session/attachment-source-notice";
 import { cfgSpeechEnabled } from "../tts/settings";
 import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
@@ -335,7 +335,8 @@ async function askSingleQuestion(
 		while (true) {
 			const opts: ExtensionUISelectItem[] = questionOptions.map(opt => toSelectOption(opt));
 
-			if (!navigation?.allowForward && selected.size > 0) {
+			// Arrow-key forward navigation is TUI-only; RPC clients need the Done row to advance.
+			if (selected.size > 0) {
 				opts.push(doneLabel);
 			}
 			opts.push(OTHER_OPTION);
@@ -479,16 +480,15 @@ async function askSingleQuestion(
 
 function formatQuestionResult(result: QuestionResult): string {
 	const noteSuffix = result.note ? ` (note: ${result.note})` : "";
-	if (result.customInput !== undefined) {
-		return `${result.id}: "${result.customInput}"${noteSuffix}`;
+	const custom = result.customInput === undefined ? undefined : `"${result.customInput}"`;
+	if (result.selectedOptions.length === 0) {
+		if (custom !== undefined) return `${result.id}: ${custom}${noteSuffix}`;
+		return result.multi ? `${result.id}: []${noteSuffix}` : `${result.id}: (cancelled)${noteSuffix}`;
 	}
-	if (result.selectedOptions.length > 0) {
-		const suffix = `${result.timedOut ? " (auto-selected after timeout)" : ""}${noteSuffix}`;
-		return result.multi
-			? `${result.id}: [${result.selectedOptions.join(", ")}]${suffix}`
-			: `${result.id}: ${result.selectedOptions[0]}${suffix}`;
-	}
-	return result.multi ? `${result.id}: []${noteSuffix}` : `${result.id}: (cancelled)${noteSuffix}`;
+	const picked = result.multi ? `[${result.selectedOptions.join(", ")}]` : result.selectedOptions[0];
+	const answer = custom === undefined ? picked : `${picked} + ${custom}`;
+	const timeoutSuffix = result.timedOut ? " (auto-selected after timeout)" : "";
+	return `${result.id}: ${answer}${timeoutSuffix}${noteSuffix}`;
 }
 
 function formatSingleQuestionResponse(result: {
@@ -578,7 +578,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	}
 
 	static createIf(session: ToolSession): AskTool | null {
-		return (session.canPromptUser ?? session.hasUI) ? new AskTool(session) : null;
+		return (session.canPromptUser ?? session.hasUI) || session.advertiseHeadlessAsk ? new AskTool(session) : null;
 	}
 
 	/** Send terminal notification when ask tool is waiting for input */
@@ -741,9 +741,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		// Determine timeout based on settings and plan mode
 		const planModeEnabled = this.session.getPlanModeState?.()?.enabled ?? false;
-		// `ask.timeout` is in seconds (0 = disabled); convert to ms
-		const timeoutSeconds = cfgAskTimeout.get(this.session.settings);
-		const settingsTimeout = timeoutSeconds === 0 ? null : timeoutSeconds * 1000;
+		const settingsTimeout = askTimeoutMs(this.session.settings) ?? null;
 		const timeout = planModeEnabled ? null : settingsTimeout;
 
 		// Send notification if waiting and not suppressed

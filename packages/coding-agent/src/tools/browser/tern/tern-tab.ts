@@ -93,6 +93,7 @@ import {
 	type ScreenshotChangeResult,
 	type ScreenshotHistory,
 	type ScreenshotOptions,
+	screenshotArea,
 	screenshotQuality,
 	screenshotScope,
 	screenshotThreshold,
@@ -125,6 +126,7 @@ import {
 } from "../storage-state";
 import { assertTabPressArgs } from "../tab-arguments";
 import type { Observation, ReadyInfo, SessionSnapshot } from "../tab-protocol";
+import { readFilePayloads } from "../upload-files";
 import {
 	installWebMcpPageHook,
 	uninstallWebMcpPageHook,
@@ -154,7 +156,8 @@ import {
 	type TernTargetAction,
 } from "./page-kit";
 import { parseTernSelector, type TernSelector } from "./selectors";
-import { TernBrowserError, type TernSocketClient } from "./wire";
+import type { TernBlockEntry } from "./blocks";
+import { TernError, type TernSocketClient } from "./wire";
 
 type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 type DragTarget = string | { readonly x: number; readonly y: number };
@@ -207,6 +210,14 @@ export interface TernOpenOptions {
 	ignoreHttpsErrors?: boolean;
 }
 
+/** Options of {@link TernTab.adopt}: like an open, but every page setting only when given. */
+export interface TernAdoptOptions extends Omit<TernOpenOptions, "pane" | "viewport"> {
+	/** The user's browser block to drive. */
+	block: TernBlockEntry;
+	/** Page layout size for an adopted PiP; a docked block's page keeps the block's size. */
+	viewport?: ViewportOptions;
+}
+
 /** A Tern event (one entry of the `events` op). */
 interface TernEvent {
 	seq: number;
@@ -245,7 +256,7 @@ function unsupported(name: string, reason: string): ToolError {
 }
 
 /** The message of a page-side exception answered by Tern (`js` errors), without Tern's prefix. */
-function pageErrorText(error: TernBrowserError): string {
+function pageErrorText(error: TernError): string {
 	return error.message.replace(/^Tern browser \w+ failed \(js\): /, "");
 }
 
@@ -271,7 +282,7 @@ export function userSourceFunction(source: string): string {
 }
 
 /** The first line of a page-side exception, without the `Error: ` prefix: agent-readable kit failures. */
-function kitErrorText(error: TernBrowserError): string {
+function kitErrorText(error: TernError): string {
 	return (pageErrorText(error).split("\n", 1)[0] ?? "").replace(/^Error: /, "");
 }
 
@@ -304,6 +315,16 @@ function withoutTrailingUndefined(args: unknown[]): unknown[] {
 	let end = args.length;
 	while (end > 0 && args[end - 1] === undefined) end--;
 	return end === args.length ? args : args.slice(0, end);
+}
+
+/** Whether `requested` is the address `current` already shows (`https://a.test` is `https://a.test/`). */
+function sameAddress(requested: string, current: string): boolean {
+	if (requested === current) return true;
+	try {
+		return new URL(requested).href === new URL(current).href;
+	} catch {
+		return false;
+	}
 }
 
 /** A Tern cookie as the tab API reports it. */
@@ -339,8 +360,11 @@ export class TernTab implements InProcessRunTab {
 	readonly block: number;
 	readonly #client: TernSocketClient;
 	readonly #name: string;
+	/** The user's block this tab adopted (released, never closed); undefined for omp's own PiP. */
+	readonly adopted: TernBlockEntry | undefined;
 	#url = "about:blank";
 	#title = "";
+	#shown: boolean | undefined;
 	#viewport: ViewportOptions;
 	#cursor = 0;
 	readonly #events: TernEvent[] = [];
@@ -380,21 +404,30 @@ export class TernTab implements InProcessRunTab {
 	readonly #recording = new RecordingController();
 	#webmcp: WebMcpController | undefined;
 
-	constructor(opts: { client: TernSocketClient; block: number; name: string; viewport: ViewportOptions }) {
+	constructor(opts: {
+		client: TernSocketClient;
+		block: number;
+		name: string;
+		viewport: ViewportOptions;
+		adopted?: TernBlockEntry;
+	}) {
 		this.#client = opts.client;
 		this.block = opts.block;
 		this.#name = opts.name;
 		this.#viewport = { ...opts.viewport };
+		this.adopted = opts.adopted;
 	}
 
 	/**
-	 * Open a PiP over pane `opts.pane` at `about:blank`, configure it (dialog
-	 * policy, allowlist, agent, TLS, downloads, scripts) and only then make the
-	 * first real navigation. The PiP closes again when configuration fails,
-	 * and when the open was abandoned (timeout/abort) but Tern answered late.
+	 * Open a PiP over pane `opts.pane` at `about:blank`, wait for that load to
+	 * report, configure the PiP (dialog policy, allowlist, agent, TLS, downloads,
+	 * scripts) and only then make the first real navigation. The PiP closes
+	 * again when configuration fails, and when the open was abandoned
+	 * (timeout/abort) but Tern answered late.
 	 */
 	static async open(client: TernSocketClient, opts: TernOpenOptions): Promise<TernTab> {
 		const startedAt = Date.now();
+		const remainingMs = (): number => Math.max(1, opts.timeoutMs - (Date.now() - startedAt));
 		const opened = await client.request(
 			{
 				op: "open",
@@ -417,10 +450,46 @@ export class TernTab implements InProcessRunTab {
 		}
 		const tab = new TernTab({ client, block: opened.block, name: opts.name, viewport: opts.viewport });
 		try {
-			await tab.#configure(opts);
+			await tab.#configure(opts, remainingMs());
+			// The PiP already shows about:blank, and a Tern web view never reloads an unchanged address.
+			if (opts.url && opts.url !== "about:blank") {
+				await tab.goto(opts.url, { waitUntil: opts.waitUntil ?? "load", timeoutMs: remainingMs() });
+			}
+		} catch (error) {
+			await tab.close({ timeoutMs: 5_000 }).catch(() => undefined);
+			throw error;
+		}
+		return tab;
+	}
+
+	/**
+	 * Drive the user's existing browser block `opts.block` (docked or PiP)
+	 * without opening anything: skip the events it reported before, apply only
+	 * the page settings the caller gave (plus omp's document-start scripts,
+	 * installed into the current document too), and navigate only when `url`
+	 * is given. A failure releases the block again; it is never closed.
+	 */
+	static async adopt(client: TernSocketClient, opts: TernAdoptOptions): Promise<TernTab> {
+		const startedAt = Date.now();
+		const remainingMs = (): number => Math.max(1, opts.timeoutMs - (Date.now() - startedAt));
+		const tab = new TernTab({
+			client,
+			block: opts.block.block,
+			name: opts.name,
+			viewport: opts.viewport ?? { width: 0, height: 0 },
+			adopted: opts.block,
+		});
+		try {
+			const answer = await tab.#op("events", { after: 0 }, remainingMs());
+			if (isRecord(answer) && typeof answer.next === "number") tab.#cursor = answer.next;
+			// The address the block shows: a `goto` to it must become a reload (see `gotoResponse`).
+			await tab.#refreshState();
+			if (opts.dialogs !== undefined) await tab.#op("dialogs", { policy: opts.dialogs });
+			await tab.#applySettings(opts);
+			if (opts.viewport && opts.block.owner !== null) await tab.setViewport(opts.viewport);
+			await tab.#applyCapture();
 			if (opts.url) {
-				const remainingMs = Math.max(1, opts.timeoutMs - (Date.now() - startedAt));
-				await tab.goto(opts.url, { waitUntil: opts.waitUntil ?? "load", timeoutMs: remainingMs });
+				await tab.goto(opts.url, { waitUntil: opts.waitUntil ?? "load", timeoutMs: remainingMs() });
 			}
 		} catch (error) {
 			await tab.close({ timeoutMs: 5_000 }).catch(() => undefined);
@@ -468,7 +537,21 @@ export class TernTab implements InProcessRunTab {
 		};
 	}
 
-	/** Close the PiP (its page goes). A PiP already gone is no error. */
+	/**
+	 * Whether the block was on screen at the last `state` (undefined before one,
+	 * or from a Tern that does not say). A PiP shows only while the tab holding
+	 * its owner pane is the one the user looks at.
+	 */
+	get shown(): boolean | undefined {
+		return this.#shown;
+	}
+
+	/**
+	 * Close omp's PiP (its page goes), or release an adopted block: Tern stops
+	 * driving it and resets what omp set, the user's page stays. A Tern without
+	 * `release` (answers `invalid`) only gets omp's scripts cleared, best-effort.
+	 * A block already gone is no error.
+	 */
 	async close(opts: { timeoutMs: number }): Promise<void> {
 		await this.#recording.close().catch(error => {
 			logger.warn("Failed to finalize a Tern browser recording during close", {
@@ -476,10 +559,16 @@ export class TernTab implements InProcessRunTab {
 			});
 		});
 		try {
-			await this.#client.request({ op: "close", block: this.block }, { timeoutMs: opts.timeoutMs });
+			await this.#client.request(
+				{ op: this.adopted ? "release" : "close", block: this.block },
+				{ timeoutMs: opts.timeoutMs },
+			);
 		} catch (error) {
-			if (error instanceof TernBrowserError && (error.kind === "not_found" || error.kind === "closed")) return;
-			throw error;
+			if (error instanceof TernError && (error.kind === "not_found" || error.kind === "closed")) return;
+			if (!(this.adopted && error instanceof TernError && error.kind === "invalid")) throw error;
+			await this.#client
+				.request({ op: "scripts", block: this.block, scripts: [] }, { timeoutMs: opts.timeoutMs })
+				.catch(() => undefined);
 		}
 	}
 
@@ -520,7 +609,7 @@ export class TernTab implements InProcessRunTab {
 			try {
 				result = await this.#eval(KIT_CALL, [method, args], "isolated", frame);
 			} catch (error) {
-				if (error instanceof TernBrowserError && error.kind === "js") throw new ToolError(kitErrorText(error));
+				if (error instanceof TernError && error.kind === "js") throw new ToolError(kitErrorText(error));
 				throw error;
 			}
 			if (isRecord(result) && result.missing === true) {
@@ -539,7 +628,7 @@ export class TernTab implements InProcessRunTab {
 			if (typeof fn !== "string") throw new ToolError(`${label} expects a function or a source string`);
 			return await this.#eval(userSourceFunction(fn), [], "page", frame);
 		} catch (error) {
-			if (error instanceof TernBrowserError && error.kind === "js") {
+			if (error instanceof TernError && error.kind === "js") {
 				throw new ToolError(`${label} threw a JavaScript exception:\n${pageErrorText(error)}`);
 			}
 			throw error;
@@ -748,6 +837,7 @@ export class TernTab implements InProcessRunTab {
 		if (!isRecord(state)) return {};
 		if (typeof state.url === "string") this.#url = state.url;
 		if (typeof state.title === "string") this.#title = state.title;
+		if (typeof state.shown === "boolean") this.#shown = state.shown;
 		if (typeof state.width === "number" && typeof state.height === "number") {
 			this.#viewport = { ...this.#viewport, width: state.width, height: state.height };
 		}
@@ -756,9 +846,22 @@ export class TernTab implements InProcessRunTab {
 
 	// ─── Configuration and scripts ────────────────────────────────────────
 
-	async #configure(opts: TernOpenOptions): Promise<void> {
-		await this.#pull();
+	async #configure(opts: TernOpenOptions, timeoutMs: number): Promise<void> {
+		// Tern answers `open` once the page takes calls, before its about:blank load reports. That load's
+		// late `committed`/`loaded` events would otherwise settle the first navigation before it loads.
+		await this.#poll(
+			"The Tern page's initial about:blank load",
+			timeoutMs,
+			() => (this.#events.some(event => event.type === "loaded" || event.type === "failed") ? true : undefined),
+			{ pull: true },
+		);
 		await this.#op("dialogs", { policy: opts.dialogs ?? "default" });
+		await this.#applySettings(opts);
+		await this.#syncScripts();
+	}
+
+	/** The page settings the caller gave: allowlist, agent, TLS, downloads, init scripts (sent with the next script sync). */
+	async #applySettings(opts: Omit<TernOpenOptions, "pane" | "viewport">): Promise<void> {
 		if (opts.allowedDomains?.length) {
 			this.#allowedDomains = normalizeAllowedDomains(opts.allowedDomains);
 			await this.#op("allow", { hosts: this.#allowedDomains });
@@ -772,7 +875,6 @@ export class TernTab implements InProcessRunTab {
 		for (const source of opts.initScripts ?? []) {
 			this.#initScripts.push({ id: `tern-init-${this.#nextInitScript++}`, source });
 		}
-		await this.#syncScripts();
 	}
 
 	/** Every document-start script this tab needs, in order. */
@@ -945,9 +1047,18 @@ export class TernTab implements InProcessRunTab {
 	/** {@link goto}, resolving the main document's response (null when none was reported). */
 	async gotoResponse(url: string, opts?: { waitUntil?: WaitUntil; timeoutMs?: number }): Promise<TernResponse | null> {
 		const timeoutMs = opts?.timeoutMs ?? resolveOpTimeouts(this.#cellMs).budgetBound;
+		// A Tern web view never reloads an unchanged address (Terns before the fix answer the
+		// `goto` and report no navigation, so the wait would never end). Reloading is what a goto
+		// to the shown address means anyway, and what Tern's own address field does: `nav reload`
+		// always reports a fresh load. Settling by `state` instead would race a Tern that does
+		// reload: `loading` can still read false before the reload starts. Decided after
+		// `#navigate`'s event pull, so the shown address is current.
 		const entry = await this.#navigate(
 			`tab.goto(${JSON.stringify(url)})`,
-			() => this.#op("goto", { url }, timeoutMs),
+			() =>
+				sameAddress(url, this.#url)
+					? this.#op("nav", { go: "reload" }, timeoutMs)
+					: this.#op("goto", { url }, timeoutMs),
 			opts?.waitUntil,
 			timeoutMs,
 		);
@@ -1156,9 +1267,11 @@ export class TernTab implements InProcessRunTab {
 		selector: string | TernSelector,
 		frame: FramePath,
 		count: number,
+		button: MouseButtonName = "left",
 	): Promise<void> {
+		const pressed = this.#button(button);
 		const box = await this.#target(label, selector, count === 2 ? "dblclick" : "click", frame);
-		await this.#clickAt(box, "left", count);
+		await this.#clickAt(box, pressed, count);
 	}
 
 	// ─── Interaction ──────────────────────────────────────────────────────
@@ -1168,9 +1281,14 @@ export class TernTab implements InProcessRunTab {
 		await this.clickIn(selector, null);
 	}
 
-	/** {@link click} inside `frame`. */
-	async clickIn(selector: string | TernSelector, frame: FramePath): Promise<void> {
-		await this.#clickSelector(`tab.click(${describe(selector)})`, selector, frame, 1);
+	/** {@link click} inside `frame`, optionally with another button or click count. */
+	async clickIn(
+		selector: string | TernSelector,
+		frame: FramePath,
+		options?: { button?: MouseButtonName; count?: number },
+	): Promise<void> {
+		const count = Math.max(1, Math.floor(options?.count ?? 1));
+		await this.#clickSelector(`tab.click(${describe(selector)})`, selector, frame, count, options?.button);
 	}
 
 	/** Double-click the element's centre. */
@@ -1421,16 +1539,7 @@ export class TernTab implements InProcessRunTab {
 			// No chooser asked for the preset: disarm it before dropping the files instead.
 			await this.#op("files", { paths: null });
 		}
-		const files = [];
-		for (const file of absolute) {
-			const handle = Bun.file(file);
-			files.push({
-				name: path.basename(file),
-				type: handle.type || "application/octet-stream",
-				data: Buffer.from(await fs.promises.readFile(file)).toString("base64"),
-			});
-		}
-		await this.#kit("setFiles", [spec, files]);
+		await this.#kit("setFiles", [spec, await readFilePayloads(absolute)]);
 	}
 
 	// ─── Queries ──────────────────────────────────────────────────────────
@@ -1444,13 +1553,13 @@ export class TernTab implements InProcessRunTab {
 		return await this.#kit<T | null>("read", [this.#spec(selector), prop, arg], frame);
 	}
 
-	/** The element's rendered text, or null. */
-	async text(selector: string | TernSelector, frame: FramePath = null): Promise<string | null> {
+	/** The element's rendered text (the page `<body>` without a selector), or null. */
+	async text(selector: string | TernSelector = "body", frame: FramePath = null): Promise<string | null> {
 		return await this.#read<string>(selector, "text", undefined, frame);
 	}
 
-	/** The element's inner HTML, or null. */
-	async html(selector: string | TernSelector, frame: FramePath = null): Promise<string | null> {
+	/** The element's inner HTML (the page `<body>` without a selector), or null. */
+	async html(selector: string | TernSelector = "body", frame: FramePath = null): Promise<string | null> {
 		return await this.#read<string>(selector, "html", undefined, frame);
 	}
 
@@ -1646,7 +1755,7 @@ export class TernTab implements InProcessRunTab {
 		try {
 			return await this.#eval(wrapper, [token, args], "page", frame);
 		} catch (error) {
-			if (error instanceof TernBrowserError && error.kind === "js") {
+			if (error instanceof TernError && error.kind === "js") {
 				throw new ToolError(`elementHandle.evaluate() threw a JavaScript exception:\n${pageErrorText(error)}`);
 			}
 			throw error;
@@ -1710,7 +1819,7 @@ export class TernTab implements InProcessRunTab {
 			null,
 			context.timeoutMs,
 		).catch(error => {
-			if (error instanceof TernBrowserError && error.kind === "js") {
+			if (error instanceof TernError && error.kind === "js") {
 				throw new ToolError(`tab.a11y() failed: ${kitErrorText(error)}`);
 			}
 			throw error;
@@ -1743,12 +1852,18 @@ export class TernTab implements InProcessRunTab {
 
 	// ─── Screenshots, PDF ─────────────────────────────────────────────────
 
-	/** Capture raw image bytes: viewport, full page, or an element (optionally in a frame). */
+	/** Capture raw image bytes: viewport, full page, or an element (optionally in a frame), at `scale` image pixels per CSS pixel (default: the viewport's). */
 	async captureBytes(
-		opts: { selector?: string | TernSelector; fullPage?: boolean; format: "png" | "jpeg"; quality?: number },
+		opts: {
+			selector?: string | TernSelector;
+			fullPage?: boolean;
+			format: "png" | "jpeg";
+			quality?: number;
+			scale?: number;
+		},
 		frame: FramePath = null,
 	): Promise<Buffer> {
-		const scale = this.#viewport.deviceScaleFactor ?? 1;
+		const scale = opts.scale ?? this.#viewport.deviceScaleFactor ?? 1;
 		const fields: Record<string, unknown> = { scale, format: opts.format };
 		if (opts.format === "jpeg") fields.quality = opts.quality ?? 80;
 		if (opts.selector !== undefined) {
@@ -1798,8 +1913,9 @@ export class TernTab implements InProcessRunTab {
 		}
 		let comparison: Buffer;
 		let buffer: Buffer;
+		const scale = this.#viewport.deviceScaleFactor ?? 1;
 		try {
-			const capture = { selector: opts.selector, fullPage: opts.fullPage };
+			const capture = { selector: opts.selector, fullPage: opts.fullPage, scale };
 			comparison = await this.captureBytes({ ...capture, format: "png" }, frame);
 			buffer =
 				format === "png"
@@ -1854,6 +1970,7 @@ export class TernTab implements InProcessRunTab {
 				savedByteLength: savedBuffer.length,
 				dest,
 				resized,
+				capture: { area: screenshotArea(opts), scale },
 			});
 			if (opts.annotate) lines.push(formatScreenshotLegend(legend));
 			context.output.push({ type: "text", text: lines.join("\n") });
@@ -1987,7 +2104,7 @@ export class TernTab implements InProcessRunTab {
 				...(opts.text !== undefined ? { text: opts.text } : {}),
 			});
 		} catch (error) {
-			if (error instanceof TernBrowserError && error.kind === "failed") {
+			if (error instanceof TernError && error.kind === "failed") {
 				throw new ToolError("tab.handleDialog() found no pending confirm or prompt");
 			}
 			throw error;
@@ -2653,8 +2770,7 @@ export class TernTab implements InProcessRunTab {
 							logger.debug("Tern recording frame capture failed", {
 								error: error instanceof Error ? error.message : String(error),
 							});
-							if (error instanceof TernBrowserError && (error.kind === "closed" || error.kind === "not_found"))
-								return;
+							if (error instanceof TernError && (error.kind === "closed" || error.kind === "not_found")) return;
 						}
 						await Bun.sleep(Math.max(0, intervalMs - (Date.now() - startedAt)));
 					}
@@ -2819,8 +2935,8 @@ export class TernElementHandle {
 	}
 
 	/** Trusted click at the element's centre. */
-	async click(): Promise<void> {
-		await this.#tab.clickIn(this.#spec, this.#frame);
+	async click(options?: { button?: MouseButtonName; count?: number }): Promise<void> {
+		await this.#tab.clickIn(this.#spec, this.#frame, options);
 	}
 
 	/** Trusted double click. */
@@ -2980,13 +3096,13 @@ export class TernFrame {
 		await this.#tab.pressIn(key, options, this.#path);
 	}
 
-	/** Element text. */
-	async text(selector: string): Promise<string> {
+	/** Element text; the frame's `<body>` without a selector. */
+	async text(selector = "body"): Promise<string> {
 		return (await this.#tab.text(selector, this.#path)) ?? "";
 	}
 
-	/** Element inner HTML. */
-	async html(selector: string): Promise<string> {
+	/** Element inner HTML; the frame's `<body>` without a selector. */
+	async html(selector = "body"): Promise<string> {
 		return (await this.#tab.html(selector, this.#path)) ?? "";
 	}
 

@@ -1,4 +1,5 @@
 import { type NarrowContext, type } from "@oh-my-pi/omptype";
+import { MODEL_KINDS, RUNNER_API_KINDS } from "@oh-my-pi/pi-catalog/types";
 import { once } from "@oh-my-pi/pi-utils";
 
 function validateMaxContextWindow(
@@ -12,6 +13,16 @@ function validateMaxContextWindow(
 			(value.contextWindow !== undefined && value.maxContextWindow < value.contextWindow))
 	) {
 		return ctx.mustBe("maxContextWindow a positive integer no smaller than contextWindow");
+	}
+	return true;
+}
+
+function validateImageCountBudget(value: { imageCountBudget?: number }, ctx: NarrowContext): boolean {
+	if (
+		value.imageCountBudget !== undefined &&
+		(!Number.isSafeInteger(value.imageCountBudget) || value.imageCountBudget <= 0)
+	) {
+		return ctx.mustBe("imageCountBudget a positive integer");
 	}
 	return true;
 }
@@ -70,6 +81,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsLongPromptCacheRetention?": "boolean",
 		"supportsReasoningParams?": "boolean",
 		"supportsReasoningSummary?": "boolean",
+		"statefulResponses?": "boolean",
 		"alwaysSendMaxTokens?": "boolean",
 		"strictResponsesPairing?": "boolean",
 		"supportsImageDetailOriginal?": "boolean",
@@ -97,6 +109,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsLongPromptCacheRetention?": "boolean",
 		"promptCacheMinimumTokens?": "number >= 0",
 		"promptCacheMaximumCheckpoints?": "number >= 0",
+		"supportsThinkingBindingControls?": "boolean",
 	});
 
 	// Provider-level overrides can target bundled models whose API is not repeated
@@ -104,8 +117,16 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
 
 	const ApiSchema = type(
-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "typesafe"',
+		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "workers-ai-systemone" | "typesafe"',
 	);
+
+	// Models may also name a runner API (web search is built in). `validateProviderConfiguration`
+	// checks that `kind` matches the api's kind. `search` is left out with `web-search`: no api
+	// a models.yml entry can name serves it.
+	const ModelApiSchema = ApiSchema.or(
+		type.enumerated(...Object.keys(RUNNER_API_KINDS).filter(api => api !== "web-search")),
+	);
+	const ModelKindSchema = type.enumerated(...MODEL_KINDS.filter(kind => kind !== "search"));
 
 	const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh" | "max"');
 
@@ -158,7 +179,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		});
 
 	const ModelTokenizerSchema = type(
-		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5"',
+		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5" | "o200k"',
 	);
 
 	const RemoteCompactionSchema = type({
@@ -192,12 +213,14 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ModelDefinitionSchema = type({
 		id: "string",
 		"name?": "string",
-		"api?": ApiSchema,
+		"api?": ModelApiSchema,
+		"kind?": ModelKindSchema,
 		"baseUrl?": "string",
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
 		"imageInputDecoder?": '"stb"',
+		"imageCountBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -246,15 +269,18 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return validateMaxContextWindow(value, ctx);
+		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
 	});
 
 	const ModelOverrideSchema = type({
 		"name?": "string",
+		"api?": ModelApiSchema,
+		"kind?": ModelKindSchema,
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
 		"imageInputDecoder?": '"stb"',
+		"imageCountBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -296,7 +322,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return validateMaxContextWindow(value, ctx);
+		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
 	});
 
 	const ProviderDiscoverySchema = type({
@@ -376,6 +402,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	});
 
 	return {
+		ApiCompatSchema,
 		OpenAICompatSchema,
 		ModelOverrideSchema,
 		ProviderDiscoverySchema,

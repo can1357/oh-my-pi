@@ -177,6 +177,17 @@ describe("classifyModel", () => {
 			});
 		}
 	});
+
+	test("bare Meta-Llama wire ids classify as meta without a namespace segment", () => {
+		// SambaNova serves `Meta-Llama-*` with no `meta-llama/` prefix, which
+		// `bounded "llama"` never sees (prefix-anchored) and
+		// `namespace "meta-llama"` cannot match, so it used to land in class
+		// unknown and skip Meta cascade rules.
+		expect(classifyModel("sambanova", "Meta-Llama-3.3-70B-Instruct")).toEqual({
+			class: "meta",
+			family: "llama",
+		});
+	});
 });
 
 describe("collapse and variant vocabulary", () => {

@@ -135,6 +135,27 @@ describe("usage status-line segment", () => {
 			expect(result.visible).toBe(false);
 			expect(describeSegment("usage", ctx)).toBeNull();
 		});
+
+		it("hides only the saved-reset badge when showResetCredits is false", () => {
+			const resetCredits = { bankedCount: 2, redeemableCount: 2, expiryHours: 293 };
+			const shown = { usage: { ...usage, resetCredits }, options: {} } as unknown as SegmentContext;
+			const hidden = {
+				usage: { ...usage, resetCredits },
+				options: { usage: { showResetCredits: false } },
+			} as unknown as SegmentContext;
+			const resetsOnly = {
+				usage: { resetCredits },
+				options: { usage: { showResetCredits: false } },
+			} as unknown as SegmentContext;
+
+			expect(stripVTControlCharacters(renderSegment("usage", shown).content)).toContain("✦ 2 exp 12d 5h");
+			const content = stripVTControlCharacters(renderSegment("usage", hidden).content);
+			expect(content).toContain("5h 24% (4h 47m) · 7d 8% (5d 21h)");
+			expect(content).not.toContain("✦");
+			expect(describeSegment("usage", hidden)?.spans.some(s => s.t.includes("✦"))).toBe(false);
+			expect(renderSegment("usage", resetsOnly).visible).toBe(false);
+			expect(describeSegment("usage", resetsOnly)).toBeNull();
+		});
 	});
 
 	it("renders tiered usage fetched from provider reports", async () => {

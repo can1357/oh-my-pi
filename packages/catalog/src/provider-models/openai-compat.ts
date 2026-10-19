@@ -39,8 +39,17 @@ import {
 	type OpenAICompat,
 	type Provider,
 	type ThinkingConfig,
+	type TokenCost,
 } from "../types";
-import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
+import {
+	discoveryFetch,
+	isAnthropicOAuthToken,
+	isRecord,
+	toBoolean,
+	toNumber,
+	toPositiveNumber,
+	toPositiveNumberOrNull,
+} from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
@@ -547,6 +556,40 @@ function mapWithBundledReference<TApi extends Api>(
 		baseUrl: defaults.baseUrl,
 		contextWindow: toPositiveNumber(entry.context_length, reference.contextWindow),
 		maxTokens: toPositiveNumber(entry.max_completion_tokens, reference.maxTokens),
+	};
+}
+
+/**
+ * Rates from an OpenRouter-shaped `pricing` object (USD per token, as decimal
+ * strings). Missing, zero, or negative legs (`-1` marks router-priced rows)
+ * map to 0, which the model manager fills from its reference sources.
+ */
+function perTokenPricingCost(pricing: unknown): TokenCost {
+	const rates = isRecord(pricing) ? pricing : {};
+	return {
+		input: toPositiveNumber(rates.prompt, 0) * 1_000_000,
+		output: toPositiveNumber(rates.completion, 0) * 1_000_000,
+		cacheRead: toPositiveNumber(rates.input_cache_read, 0) * 1_000_000,
+		cacheWrite: toPositiveNumber(rates.input_cache_write, 0) * 1_000_000,
+	};
+}
+
+/**
+ * Rates from NanoGPT's detailed roster: prompt and completion are USD per
+ * million tokens, the cache legs per thousand. Legs the row does not price
+ * keep `fallback`.
+ */
+function nanoGptPricingCost(pricing: unknown, fallback: TokenCost): TokenCost {
+	if (!isRecord(pricing) || pricing.unit !== "per_million_tokens") return fallback;
+	const perThousand = (value: unknown, fallbackRate: number): number => {
+		const rate = toPositiveNumber(value, 0);
+		return rate > 0 ? rate * 1_000 : fallbackRate;
+	};
+	return {
+		input: toPositiveNumber(pricing.prompt, fallback.input),
+		output: toPositiveNumber(pricing.completion, fallback.output),
+		cacheRead: perThousand(pricing.cacheReadInputPer1kTokens, fallback.cacheRead),
+		cacheWrite: perThousand(pricing.cacheWriteInputPer1kTokens, fallback.cacheWrite),
 	};
 }
 
@@ -1071,8 +1114,8 @@ export interface OpenAIModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
-export function openaiModelManagerOptions(config?: OpenAIModelManagerConfig): ModelManagerOptions<"openai-responses"> {
-	return createOpenAICompatibleModelManagerOptions({
+export function openaiModelManagerOptions(config?: OpenAIModelManagerConfig): ModelManagerOptions<Api> {
+	const options = createOpenAICompatibleModelManagerOptions({
 		api: "openai-responses",
 		providerId: "openai",
 		defaultBaseUrl: OPENAI_API_BASE_URL,
@@ -1081,6 +1124,30 @@ export function openaiModelManagerOptions(config?: OpenAIModelManagerConfig): Mo
 		filterModel: (_entry, model, references) => isLikelyOpenAIResponsesModelId(model.id, references),
 		mapModel: mapWithBundledReference,
 	});
+	const fetchDiscovered = options.fetchDynamicModels;
+	if (!fetchDiscovered) return options;
+	return {
+		...options,
+		fetchDynamicModels: async () => appendUnbundledSeedModels("openai", await fetchDiscovered()),
+	};
+}
+
+/**
+ * Append the authored seed rows that neither discovery nor the bundled catalog
+ * carries yet: a seed added since the last models.json regeneration (the
+ * Decisions judge row) reaches runtime through a successful discovery. Seeds
+ * already bundled keep resolving through the bundled slice, and the static
+ * catalog (and with it the cache fingerprint) stays the bundled one.
+ */
+function appendUnbundledSeedModels(
+	providerId: GeneratedProvider,
+	discovered: readonly ModelSpec<Api>[] | null,
+): readonly ModelSpec<Api>[] | null {
+	if (!discovered) return null;
+	const known = new Set(getBundledModels(providerId).map(model => model.id));
+	for (const model of discovered) known.add(model.id);
+	const seeds = seedModels(providerId).filter(seed => !known.has(seed.id));
+	return seeds.length === 0 ? discovered : [...discovered, ...seeds.map(seed => ({ ...seed }))];
 }
 
 /**
@@ -1239,6 +1306,87 @@ export function cerebrasModelManagerOptions(
 		requireApiKey: true,
 		mapModel: (entry, defaults, reference) => mapWithBundledReference(entry, defaults, reference),
 	});
+}
+
+// ---------------------------------------------------------------------------
+// 3.5 SambaNova
+// ---------------------------------------------------------------------------
+
+/** SambaNova discovery inputs: `apiKey` enables the live roster; `baseUrl` defaults to SambaNova Cloud. */
+export interface SambaNovaModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * One SambaNova per-token USD rate (a decimal string) as a per-million rate.
+ * `absent` is the value for a missing field; a present field that is not a
+ * nonnegative number yields `undefined`.
+ */
+function sambanovaRate(value: unknown, absent: number | undefined): number | undefined {
+	if (value === undefined || value === null) return absent;
+	const parsed = toNumber(value);
+	return parsed !== undefined && parsed >= 0 ? Math.round(parsed * 1e12) / 1e6 : undefined;
+}
+
+/**
+ * Map SambaNova's `pricing` block. Prompt and completion rates are required;
+ * cache rates default to 0 when absent. An unreadable card stays unpriced
+ * (`unknown`) instead of reading as free, and an all-zero card is a declared
+ * free tier.
+ */
+function sambanovaPricing(
+	pricing: unknown,
+	fallback: TokenCost,
+): Pick<ModelSpec<"openai-completions">, "cost" | "pricingStatus"> {
+	const rates = isRecord(pricing) ? pricing : {};
+	const input = sambanovaRate(rates.prompt, undefined);
+	const output = sambanovaRate(rates.completion, undefined);
+	const cacheRead = sambanovaRate(rates.input_cache_read, 0);
+	const cacheWrite = sambanovaRate(rates.input_cache_write, 0);
+	if (input === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined) {
+		return { cost: fallback, pricingStatus: "unknown" };
+	}
+	const cost = { input, output, cacheRead, cacheWrite };
+	return input + output + cacheRead + cacheWrite === 0 ? { cost, pricingStatus: "free" } : { cost };
+}
+
+/**
+ * SambaNova Cloud's model manager. `/v1/models` requires a key, so a keyless
+ * manager serves only the bundled seed; with a key the live roster replaces
+ * it. Rows carry pricing and limits but no capability metadata: reasoning,
+ * thinking wire format, and image input come from `providers/sambanova.kdl`.
+ */
+export function sambanovaModelManagerOptions(
+	config?: SambaNovaModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://api.sambanova.ai/v1";
+	return {
+		providerId: "sambanova",
+		dynamicModelsAuthoritative: true,
+		// The live `pricing` block is the tariff: an explicit `0` must not revert
+		// to the bundled seed's rate.
+		dynamicCostAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "sambanova",
+					baseUrl,
+					apiKey,
+					filterModel: (_entry, model) => !isExcludedModel("sambanova", model.id),
+					mapModel: (entry, defaults) => ({
+						...defaults,
+						...sambanovaPricing(entry.pricing, defaults.cost),
+						contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+						maxTokens: toPositiveNumber(entry.max_completion_tokens, defaults.maxTokens),
+					}),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -1617,7 +1765,168 @@ export function deepinfraModelManagerOptions(
 	return {
 		providerId: "deepinfra",
 		dynamicModelsAuthoritative: true,
+		// `vision`/`vlm` tags are the whole truth for modality on this host.
+		dynamicInputAuthoritative: true,
 		fetchDynamicModels: () => fetchDeepinfraModels({ baseUrl, apiKey, fetch: config?.fetch, references }),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// CoralBricks
+// ---------------------------------------------------------------------------
+
+export const CORALBRICKS_BASE_URL = "https://inference.coralbricks.ai/v1";
+
+/** CoralBricks OpenAI-compatible discovery configuration. */
+export interface CoralbricksModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * The CoralBricks-specific fields of a `GET /v1/models` row: per-million USD
+ * pricing and the capability flags Coral documents as authoritative
+ * (https://www.coralbricks.ai/docs.md).
+ */
+interface CoralbricksModelRecord extends OpenAICompatibleModelRecord {
+	context_length?: unknown;
+	pricing?: unknown;
+	supports_chat?: unknown;
+	supports_image_input?: unknown;
+	supports_tools?: unknown;
+	supports_reasoning?: unknown;
+	reasoning?: unknown;
+}
+
+/**
+ * Read one live per-million price; a missing or negative field falls back to
+ * the bundled reference. An explicit `0` is a real price: the manager keeps it
+ * because `coralbricksModelManagerOptions` declares `dynamicCostAuthoritative`.
+ */
+function coralRate(value: unknown, fallback: number): number {
+	const parsed = toNumber(value);
+	return parsed !== undefined && parsed >= 0 ? parsed : fallback;
+}
+
+/**
+ * Map one CoralBricks catalog row to a chat model spec; non-chat rows
+ * (`supports_chat: false`) are dropped. Pricing arrives in Coral's own
+ * per-million field names; `cached_input_per_m` is $0 on every model and a
+ * missing field falls back to the bundled reference.
+ * Live reasoning capabilities and controls override the bundled fallback.
+ * The endpoint publishes no output cap, so `maxTokens` keeps its reference
+ * value rather than being invented from the context window.
+ */
+function mapCoralbricksModel(
+	entry: CoralbricksModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> | null {
+	if (entry.supports_chat === false) {
+		return null;
+	}
+	const pricing = isRecord(entry.pricing) ? entry.pricing : {};
+	// A bundled reference may lend metadata, but its runner kind is not
+	// evidence the chat roster advertised it.
+	const { kind: _inheritedKind, ...chatReference } = reference ?? {};
+	const hasReasoningFlag = typeof entry.supports_reasoning === "boolean";
+	const reasoning = hasReasoningFlag
+		? entry.supports_reasoning === true
+		: (reference?.reasoning ?? defaults.reasoning);
+	const controls = isRecord(entry.reasoning) ? entry.reasoning : undefined;
+	const wireEfforts = controls?.supported_efforts;
+	let thinking = reasoning ? reference?.thinking : undefined;
+	let compat = reference?.compat;
+	if (reasoning && Array.isArray(wireEfforts)) {
+		const efforts = THINKING_EFFORTS.filter(effort => wireEfforts.includes(effort));
+		// `none` is the server's off default, not an Effort (nor `minimal`).
+		const defaultLevel = efforts.find(effort => effort === controls?.default_effort);
+		thinking =
+			efforts.length > 0
+				? {
+						mode: "effort",
+						efforts,
+						...(defaultLevel !== undefined && { defaultLevel }),
+						...(typeof controls?.mandatory === "boolean" && { requiresEffort: controls.mandatory }),
+					}
+				: undefined;
+	}
+	if (hasReasoningFlag || Array.isArray(wireEfforts)) {
+		// An explicit empty/unknown vocabulary must not regrow a guessed dial
+		// from identity or KDL. Missing legacy metadata still uses the reference.
+		compat = { ...compat, trustExplicitThinkingOnly: true };
+	}
+	if (reasoning && controls) {
+		if (controls.mandatory === true || controls.disable === null) {
+			compat = { ...compat, reasoningDisableMode: "lowest-effort" };
+		} else if (isRecord(controls.disable) && controls.disable.reasoning_effort === "none") {
+			compat = { ...compat, reasoningDisableMode: "none-effort" };
+		}
+	}
+	const input: ("text" | "image")[] =
+		entry.supports_image_input === true
+			? ["text", "image"]
+			: entry.supports_image_input === false
+				? ["text"]
+				: (reference?.input ?? defaults.input);
+	return {
+		...defaults,
+		...chatReference,
+		id: defaults.id,
+		name: reference?.name ?? defaults.name,
+		api: defaults.api,
+		provider: defaults.provider,
+		baseUrl: defaults.baseUrl,
+		reasoning,
+		thinking,
+		compat,
+		input,
+		...(typeof entry.supports_tools === "boolean" ? { supportsTools: entry.supports_tools } : {}),
+		cost: {
+			input: coralRate(pricing.input_per_m, reference?.cost.input ?? 0),
+			output: coralRate(pricing.output_per_m, reference?.cost.output ?? 0),
+			cacheRead: coralRate(pricing.cached_input_per_m, reference?.cost.cacheRead ?? 0),
+			cacheWrite: coralRate(pricing.cache_write_per_m, reference?.cost.cacheWrite ?? 0),
+		},
+		contextWindow: toPositiveNumber(entry.context_length, reference?.contextWindow ?? null),
+		maxTokens: reference?.maxTokens ?? null,
+	};
+}
+
+/**
+ * Builds CoralBricks' model-discovery manager. `/v1/models` is key-protected
+ * (401 without a bearer key), so a keyless config serves only the bundled
+ * reviewed seed rows; with a key, live rows are authoritative over the bundle.
+ */
+export function coralbricksModelManagerOptions(
+	config?: CoralbricksModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? CORALBRICKS_BASE_URL;
+	const references = createBundledReferenceMap<"openai-completions">("coralbricks");
+	return {
+		providerId: "coralbricks",
+		dynamicModelsAuthoritative: true,
+		dynamicReasoningAuthoritative: true,
+		// `supports_image_input` is the row's whole truth for modality (Coral
+		// answers unsupported content with `400 unsupported_content_type`).
+		dynamicInputAuthoritative: true,
+		// Coral's `pricing` block is the deployment tariff; an explicit live `0`
+		// (a free model or no cache-write charge) must not revert to the bundle.
+		dynamicCostAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "coralbricks",
+					baseUrl,
+					apiKey,
+					fetch: config?.fetch,
+					mapModel: (entry, defaults) =>
+						mapCoralbricksModel(entry as CoralbricksModelRecord, defaults, references.get(defaults.id)),
+				}),
+		}),
 	};
 }
 
@@ -2111,74 +2420,6 @@ export function zhipuCodingPlanModelManagerOptions(
 // ---------------------------------------------------------------------------
 
 /**
- * Fireworks-published cap for the Kimi K2 family. Fireworks' `/v1/models`
- * envelope generically reports `max_completion_tokens: 65536` for every Kimi
- * deployment, but Kimi K2 (instruct / thinking / turbo) on Fireworks is
- * documented to ship long reasoning traces that should be bounded — capping
- * at 32,768 prevents handing callers a budget the router cannot honor.
- * See https://github.com/can1357/oh-my-pi/issues/1849.
- */
-export const FIREWORKS_KIMI_MAX_TOKENS = 32_768;
-
-/**
- * Fireworks' output ceiling for Kimi K2.7-Code specifically. Its `/v1/models`
- * generic `max_completion_tokens` is 65,536 and Fireworks serves it in full —
- * verified with a single completion emitting 58,971 output tokens and
- * `max_tokens: 200000` accepted without error. Unlike the older K2.5/K2.6
- * family (see {@link FIREWORKS_KIMI_MAX_TOKENS}), K2.7-Code is not clamped to
- * 32,768; that ceiling only truncated it.
- */
-export const FIREWORKS_KIMI_K27_CODE_MAX_TOKENS = 65_536;
-
-/**
- * Returns true for the Kimi K2.5 / K2.6 family served by Fireworks-backed
- * providers (`fireworks` direct, `firepass` router) that share the 32,768
- * `maxTokens` ceiling. Matches both the public catalog id (`kimi-k2.5`,
- * `kimi-k2.6`, `kimi-k2.6-turbo`) and the canonical Fireworks wire id
- * (`accounts/fireworks/{models,routers}/kimi-k2…`).
- *
- * K2.7-Code (incl. `-fast` / `-highspeed`) is deliberately excluded: unlike the
- * earlier K2 family it serves its full context on Fireworks — verified with a
- * single completion emitting 58,971 output tokens and `max_tokens: 200000`
- * accepted without error — so the 32,768 cap would only truncate it. It inherits
- * Fireworks' reported `max_completion_tokens` (65,536) instead.
- */
-export function isFireworksKimiK2ModelId(modelId: string): boolean {
-	const identity = classifyModel("fireworks", modelId, { lenient: true });
-	if (identity.class !== "kimi" || identity.family === "k2.7-code") return false;
-	return identity.family?.startsWith("k2") === true;
-}
-
-/**
- * Clamp the Kimi K2 family's `maxTokens` to {@link FIREWORKS_KIMI_MAX_TOKENS}
- * on Fireworks-backed providers, leaving every other model untouched.
- */
-export function clampFireworksKimiMaxTokens(modelId: string, candidate: number): number;
-export function clampFireworksKimiMaxTokens(modelId: string, candidate: number | null): number | null;
-export function clampFireworksKimiMaxTokens(modelId: string, candidate: number | null): number | null {
-	if (candidate === null) return null;
-	return isFireworksKimiK2ModelId(modelId) ? Math.min(candidate, FIREWORKS_KIMI_MAX_TOKENS) : candidate;
-}
-
-/**
- * Kimi K2.7 Code's documented recommended output budget. Some provider
- * discovery rows report the context-sized `max_completion_tokens` instead.
- */
-export const KIMI_K27_CODE_RECOMMENDED_MAX_TOKENS = 32_768;
-
-export function isKimiK27CodeModelId(modelId: string): boolean {
-	const identity = classifyModel("fireworks", modelId, { lenient: true });
-	return identity.class === "kimi" && identity.family === "k2.7-code";
-}
-
-export function clampKimiK27CodeMaxTokens(modelId: string, candidate: number): number;
-export function clampKimiK27CodeMaxTokens(modelId: string, candidate: number | null): number | null;
-export function clampKimiK27CodeMaxTokens(modelId: string, candidate: number | null): number | null {
-	if (candidate === null) return null;
-	return isKimiK27CodeModelId(modelId) ? Math.min(candidate, KIMI_K27_CODE_RECOMMENDED_MAX_TOKENS) : candidate;
-}
-
-/**
  * Fireworks Fast variants we surface: the Fast table on
  * https://docs.fireworks.ai/serverless/serverless-modes, minus the US-only
  * router (it needs the `us.api.fireworks.ai` host). That table, not a request
@@ -2307,15 +2548,9 @@ function mapFireworksControlPlaneModel(
 	const supportsImage = toBoolean(record.supportsImageInput) === true;
 	const supportsTools = toBoolean(record.supportsTools);
 	const contextWindow = toPositiveNumber(record.contextLength, reference?.contextWindow ?? null);
-	// The control plane reports no max-output budget. Default K2.7-Code to its
-	// verified 65,536 ceiling, the older K2.5/K2.6 family to the clamped 32,768,
-	// everyone else to the discovery fallback, then clamp.
-	const fallbackMaxTokens = isKimiK27CodeModelId(publicModelId)
-		? FIREWORKS_KIMI_K27_CODE_MAX_TOKENS
-		: isFireworksKimiK2ModelId(publicModelId)
-			? FIREWORKS_KIMI_MAX_TOKENS
-			: null;
-	const maxTokens = clampFireworksKimiMaxTokens(publicModelId, reference?.maxTokens ?? fallbackMaxTokens);
+	// The control plane reports no max-output budget; Fireworks' per-model
+	// output caps and fallbacks are rule-owned (providers/fireworks.kdl).
+	const maxTokens = reference?.maxTokens ?? null;
 	const base: ModelSpec<"openai-completions"> = reference ?? {
 		id: publicModelId,
 		name,
@@ -2755,8 +2990,9 @@ function buildClinePassFreeModel(id: string, liveCatalog?: ClinePassLiveCatalog)
 		input: upstream?.input ?? live?.input ?? fallback.input,
 		contextWindow: upstream?.contextWindow ?? live?.contextWindow ?? fallback.contextWindow,
 		maxTokens: upstream?.maxTokens ?? live?.maxTokens ?? fallback.maxTokens,
-		// A non-reasoning reference must not carry the Cline effort ladder.
-		...(reasoning ? {} : { thinking: undefined }),
+		// No reasoning-effort control means no effort ladder: the cline-pass
+		// rules trust only explicit thinking, so a copied ladder would surface.
+		thinking: undefined,
 		compat: { supportsReasoningEffort: false, wireModelIdMode: "raw" },
 	};
 }
@@ -3029,12 +3265,18 @@ export interface OpenCodeModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+const OPENCODE_ZEN_BASE_PATH = "https://opencode.ai/zen";
+const OPENCODE_ZEN_GOOGLE_BASE_URL = "https://opencode.ai/inference/google/v1beta";
+
 function normalizeOpenCodeBasePath(baseUrl: string | undefined, fallbackBasePath: string): string {
 	const value = normalizeAnthropicBaseUrl(baseUrl, fallbackBasePath);
 	return value.endsWith("/v1") ? value.slice(0, -3) : value;
 }
 
 function openCodeBaseUrlForApi(api: Api, basePath: string): string {
+	if (api === "google-generative-ai" && basePath === OPENCODE_ZEN_BASE_PATH) {
+		return OPENCODE_ZEN_GOOGLE_BASE_URL;
+	}
 	return api === "anthropic-messages" ? basePath : `${basePath}/v1`;
 }
 
@@ -3048,7 +3290,12 @@ function openCodeBaseUrlForApi(api: Api, basePath: string): string {
 // rules (`runtime/behavior.kdl`; #887, #1617, #8957).
 // Runtime-discovered rows cached before model-identity corrections retain
 // stale capability metadata until the authoritative catalog TTL expires.
-const OPENCODE_CACHE_MIGRATION_MODEL_IDS = ["glm-5.3-flash", "longcat-2.5-preview-free", "space-bunny-free"] as const;
+const OPENCODE_CACHE_MIGRATION_MODEL_IDS = [
+	"deepseek-flash",
+	"glm-5.3-flash",
+	"longcat-2.5-preview-free",
+	"space-bunny-free",
+] as const;
 const OPENCODE_ZEN_CACHE_MIGRATION_MODEL_IDS = ["gemini-3.7-flash", "gemini-3.8-flash"] as const;
 
 // Billing-variant suffixes the OpenCode gateways append to a base model id
@@ -3083,7 +3330,10 @@ function openCodeModelManagerOptions(
 	const apiOverrides = (id: string): Api | undefined => {
 		// Route pins live in the `api-routes` behavior rules.
 		const route = apiRouteFor(providerId, id)?.api;
-		return route === "openai-completions" || route === "openai-responses" || route === "anthropic-messages"
+		return route === "openai-completions" ||
+			route === "openai-responses" ||
+			route === "anthropic-messages" ||
+			route === "google-generative-ai"
 			? route
 			: undefined;
 	};
@@ -3137,8 +3387,8 @@ function openCodeModelManagerOptions(
 			},
 		},
 		...(apiKey && {
-			fetchDynamicModels: () =>
-				fetchOpenAICompatibleModels<Api>({
+			fetchDynamicModels: async () => {
+				const discovered = await fetchOpenAICompatibleModels<Api>({
 					api: "openai-completions",
 					provider: providerId,
 					baseUrl: discoveryBaseUrl,
@@ -3196,7 +3446,12 @@ function openCodeModelManagerOptions(
 						};
 					},
 					fetch: config?.fetch,
-				}),
+				});
+				if (!discovered) return null;
+				const seeds = seedModels(providerId).map(seed => ({ ...seed, baseUrl: basePath }));
+				const seedIds = new Set(seeds.map(seed => seed.id));
+				return [...discovered.filter(model => !seedIds.has(model.id)), ...seeds];
+			},
 		}),
 	};
 }
@@ -3289,8 +3544,9 @@ export interface OpenRouterModelManagerConfig {
  * OpenRouter's Decisions API lives at `/api/alpha`, a sibling of the `/api/v1`
  * chat root; derive it so a custom gateway base URL keeps both aligned.
  */
-function openrouterDecisionsBaseUrl(chatBaseUrl: string): string {
-	return chatBaseUrl.endsWith("/v1") ? `${chatBaseUrl.slice(0, -"/v1".length)}/alpha` : `${chatBaseUrl}/alpha`;
+export function openrouterDecisionsBaseUrl(chatBaseUrl: string): string {
+	const base = chatBaseUrl.replace(/\/+$/g, "");
+	return base.endsWith("/v1") ? `${base.slice(0, -"/v1".length)}/alpha` : `${base}/alpha`;
 }
 
 function mapOpenRouterThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
@@ -3701,6 +3957,7 @@ export function kiloModelManagerOptions(config?: KiloModelManagerConfig): ModelM
 				provider: "kilo",
 				baseUrl,
 				apiKey,
+				mapModel: (entry, defaults) => ({ ...defaults, cost: perTokenPricingCost(entry.pricing) }),
 				fetch: config?.fetch,
 			}),
 	};
@@ -4263,6 +4520,7 @@ export function syntheticModelManagerOptions(
 	return {
 		providerId: "synthetic",
 		dynamicModelsAuthoritative: true,
+		dynamicReasoningAuthoritative: true,
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({
@@ -4377,11 +4635,7 @@ export function veniceModelManagerOptions(
 		config,
 		mapModel: (entry, defaults, reference) => {
 			const model = mapWithBundledReference(entry, defaults, reference);
-			return {
-				...model,
-				maxTokens: clampKimiK27CodeMaxTokens(defaults.id, model.maxTokens),
-				compat: { ...model.compat, supportsUsageInStreaming: false },
-			};
+			return { ...model, compat: { ...model.compat, supportsUsageInStreaming: false } };
 		},
 	});
 }
@@ -4534,7 +4788,9 @@ function museSparkLineageSpec(id: string): ModelSpec<"openai-responses"> | undef
 	let templateRevision: readonly [number, number, number] | undefined;
 	for (const model of seedModels<"openai-responses">("meta")) {
 		if ((billingVariantPlain(model.id) !== undefined) !== contributor) continue;
-		const candidate = parseRevision(classifyModel("meta", model.id, { lenient: true }).revision ?? "");
+		const seedIdentity = classifyModel("meta", model.id, { lenient: true });
+		if (seedIdentity.family !== "muse-spark") continue;
+		const candidate = parseRevision(seedIdentity.revision ?? "");
 		if (candidate === undefined) continue;
 		if (templateRevision === undefined || compareRevision(candidate, templateRevision) > 0) {
 			template = model;
@@ -6089,10 +6345,29 @@ export function nanoGptModelManagerOptions(
 					provider: "nanogpt",
 					baseUrl,
 					apiKey,
+					// Only the detailed roster carries per-model pricing, names, and limits.
+					query: { detailed: "true" },
 					mapModel: (entry, defaults) => {
 						const reference = resolveReference(defaults.id);
-						const mapped = mapWithBundledReference(entry, defaults, reference);
-						return { ...mapped, api: "openai-completions", provider: "nanogpt" };
+						// The detailed roster names its output cap `max_output_tokens`.
+						const maxOutputTokens = entry.max_output_tokens ?? entry.max_completion_tokens;
+						const mapped = mapWithBundledReference(
+							{ ...entry, max_completion_tokens: maxOutputTokens },
+							reference
+								? defaults
+								: {
+										...defaults,
+										contextWindow: toPositiveNumberOrNull(entry.context_length),
+										maxTokens: toPositiveNumberOrNull(maxOutputTokens),
+									},
+							reference,
+						);
+						return {
+							...mapped,
+							api: "openai-completions",
+							provider: "nanogpt",
+							cost: { ...mapped.cost, ...nanoGptPricingCost(entry.pricing, mapped.cost) },
+						};
 					},
 					filterModel: (_entry, model) => {
 						const match = NANO_GPT_THINKING_SUFFIX_RE.exec(model.id);
@@ -6186,7 +6461,7 @@ function parseCopilotTokenPriceTier(value: unknown): CopilotTokenPriceTier | und
 		return undefined;
 	}
 	return {
-		contextMax: toNumber(value.context_max),
+		contextMax: toNumber(value.max_prompt_tokens) ?? toNumber(value.context_max),
 		inputPrice: toNumber(value.input_price),
 		outputPrice: toNumber(value.output_price),
 		cachePrice: toNumber(value.cache_price),
@@ -6302,6 +6577,9 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 	return {
 		providerId: "github-copilot",
 		cacheProviderId: resolveModelCacheProviderId("github-copilot", { apiKey: rawApiKey, baseUrl }),
+		// Copilot discovery pre-applies the correct image fallback for omitted
+		// `supports.vision`; the live row's modality is authoritative.
+		dynamicInputAuthoritative: true,
 		dropCachedModelIdsOnStaticMismatch: COPILOT_CACHE_INVALIDATED_MODEL_IDS,
 		// COPILOT_API_HEADERS are compile-time wire identity constants, not
 		// credentials. The cache omits all request headers for
@@ -6372,12 +6650,12 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									? ["text"]
 									: (reference?.input ?? defaults.input);
 						// With COPILOT_API_HEADERS the served window is the long-context
-						// ceiling; the default tier ends at token_prices.default.context_max
-						// prompt tokens. Cap the base entry to the default tier — the long
-						// tier is the opt-in `-1m` sibling below. On tiered rows
-						// max_prompt_tokens is the default lane's prompt budget, and the
-						// billed default ceiling can overlap the long lane (#13912), so the
-						// tighter of the two bounds the base entry.
+						// ceiling; the default tier reports its prompt boundary in
+						// token_prices.default.max_prompt_tokens (or legacy context_max).
+						// Cap the base entry to the default tier — the long tier is
+						// the opt-in `-1m` sibling below. On tiered legacy rows the
+						// model-wide max_prompt_tokens may be tighter than the billed
+						// default ceiling (#13912), so use the smaller bound.
 						const tokenPrices = extractCopilotTokenPrices(entry);
 						const billedDefaultMax = tokenPrices.defaultTier?.contextMax;
 						const tieredPromptBudget =
@@ -6789,13 +7067,10 @@ function createOpenCodeApiResolution(
 	rules: ApiResolutionRule[];
 } {
 	const completionsBaseUrl = `${basePath}/v1`;
-	// Per-API base URLs on the OpenCode-style endpoint:
-	// - openai-completions / openai-responses / google-generative-ai → /v1
-	// - anthropic-messages → bare basePath (the Anthropic client appends /v1/messages)
-	const baseUrlForApi = (api: Api): string => (api === "anthropic-messages" ? basePath : completionsBaseUrl);
+	const baseUrlForApi = (api: Api): string => openCodeBaseUrlForApi(api, basePath);
 	// Per-id route pins live in the `api-routes` behavior rules.
 	const overrideRules: ApiResolutionRule[] = (
-		["openai-completions", "openai-responses", "anthropic-messages"] as const
+		["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const
 	).map(api => ({
 		matches: modelId => apiRouteFor(providerId, modelId)?.api === api,
 		resolved: { api, baseUrl: baseUrlForApi(api) },
@@ -6824,8 +7099,17 @@ function createOpenCodeApiResolution(
 
 // Resolver rules for the models.dev descriptor path; the per-id pins live in
 // the `api-routes` behavior rules, which also drive the live-discovery mapper.
-const OPENCODE_ZEN_API_RESOLUTION = createOpenCodeApiResolution("https://opencode.ai/zen", "opencode-zen");
-const OPENCODE_GO_API_RESOLUTION = createOpenCodeApiResolution("https://opencode.ai/zen/go", "opencode-go");
+const OPENCODE_ZEN_API_RESOLUTION = createOpenCodeApiResolution(OPENCODE_ZEN_BASE_PATH, "opencode-zen");
+const OPENCODE_GO_BASE_PATH = "https://opencode.ai/inference/go";
+const OPENCODE_GO_API_RESOLUTION = createOpenCodeApiResolution(OPENCODE_GO_BASE_PATH, "opencode-go");
+
+/**
+ * OpenCode Go endpoint for one request API. The model generator re-bases
+ * previous-snapshot rows with it so retained rows follow endpoint moves.
+ */
+export function openCodeGoBaseUrlForApi(api: Api): string {
+	return openCodeBaseUrlForApi(api, OPENCODE_GO_BASE_PATH);
+}
 
 const COPILOT_BASE_URL = "https://api.githubcopilot.com";
 
@@ -7147,23 +7431,12 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 			allowsSyntheticReasoningContentForToolCalls: false,
 		},
 	}),
-	// --- MiniMax Coding Plan ---
-	openAiCompletionsDescriptor("minimax-coding-plan", "minimax-code", "https://api.minimax.io/v1", {
-		compat: {
-			supportsStore: false,
-			supportsDeveloperRole: false,
-			supportsReasoningEffort: false,
-			reasoningContentField: "reasoning_content",
-		},
-	}),
-	openAiCompletionsDescriptor("minimax-cn-coding-plan", "minimax-code-cn", "https://api.minimaxi.com/v1", {
-		compat: {
-			supportsStore: false,
-			supportsDeveloperRole: false,
-			supportsReasoningEffort: false,
-			reasoningContentField: "reasoning_content",
-		},
-	}),
+	// --- MiniMax Token Plan ---
+	// MiniMax documents its Anthropic-compatible API as the recommended
+	// protocol: signed thinking blocks, `output_config.effort` depth control,
+	// and prompt-cache usage reporting.
+	anthropicMessagesDescriptor("minimax-coding-plan", "minimax-code", "https://api.minimax.io/anthropic"),
+	anthropicMessagesDescriptor("minimax-cn-coding-plan", "minimax-code-cn", "https://api.minimaxi.com/anthropic"),
 	// --- Alibaba Coding Plan ---
 	openAiCompletionsDescriptor(
 		"alibaba-coding-plan",
@@ -7214,7 +7487,7 @@ const OPENCODE_MODELS_DEV_DESCRIPTORS: readonly ModelsDevProviderDescriptor[] = 
 				OPENCODE_ZEN_API_RESOLUTION.defaultResolution,
 			),
 	}),
-	openAiCompletionsDescriptor("opencode-go", "opencode-go", "https://opencode.ai/zen/go/v1", {
+	openAiCompletionsDescriptor("opencode-go", "opencode-go", `${OPENCODE_GO_BASE_PATH}/v1`, {
 		filterModel: filterActiveToolCallModels,
 		resolveApi: (modelId, raw) =>
 			resolveApiByRules(
@@ -7295,12 +7568,7 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 	// --- Synthetic ---
 	openAiCompletionsDescriptor("synthetic", "synthetic", "https://api.synthetic.new/openai/v1"),
 	// --- Venice AI ---
-	openAiCompletionsDescriptor("venice", "venice", "https://api.venice.ai/api/v1", {
-		transformModel: model => {
-			const maxTokens = clampKimiK27CodeMaxTokens(model.id, model.maxTokens);
-			return maxTokens === model.maxTokens ? model : { ...model, maxTokens };
-		},
-	}),
+	openAiCompletionsDescriptor("venice", "venice", "https://api.venice.ai/api/v1"),
 	// --- Ollama Cloud ---
 	simpleModelsDevDescriptor("ollama-cloud", "ollama-cloud", "ollama-chat", "https://ollama.com"),
 	// --- Xiaomi Token Plan ---

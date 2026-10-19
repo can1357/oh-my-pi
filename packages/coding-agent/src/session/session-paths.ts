@@ -1,11 +1,13 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getTerminalId } from "@oh-my-pi/pi-tui/ttyid";
 import {
 	getCustomSessionFilesDir,
 	getSessionsDir,
 	getTerminalSessionsDir,
+	getWorktreesDir,
 	hashPath,
 	pathIsWithin,
 	resolveEquivalentPath,
@@ -78,6 +80,8 @@ function getDefaultSessionDirName(cwd: string): {
 	hashedDirName: string;
 	/** Home-relative name a temp-root cwd got while home was checked first; migrated forward. */
 	shadowedHomeDirName?: string;
+	/** Hashed home-scoped name from before temp-root precedence. */
+	shadowedHomeHashedDirName?: string;
 	resolvedCwd: string;
 } {
 	const resolvedCwd = path.resolve(cwd);
@@ -91,12 +95,16 @@ function getDefaultSessionDirName(cwd: string): {
 	const inHome = isRelativeWithin(homeRelative);
 	let encodedDirName: string;
 	let shadowedHomeDirName: string | undefined;
+	let shadowedHomeHashedDirName: string | undefined;
 	let scope: "home" | "tmp" | "abs";
 	// The temp root is checked first: it is the more specific root wherever it
 	// nests inside home (Windows' `%USERPROFILE%\AppData\Local\Temp`).
 	if (isRelativeWithin(tempRelative)) {
 		encodedDirName = encodeRelativeSessionDirName("-tmp", tempRelative);
-		if (inHome) shadowedHomeDirName = encodeRelativeSessionDirName("-", homeRelative);
+		if (inHome) {
+			shadowedHomeDirName = encodeRelativeSessionDirName("-", homeRelative);
+			shadowedHomeHashedDirName = encodeHashedSessionDirName(canonicalCwd, "home");
+		}
 		scope = "tmp";
 	} else if (inHome) {
 		encodedDirName = encodeRelativeSessionDirName("-", homeRelative);
@@ -109,6 +117,7 @@ function getDefaultSessionDirName(cwd: string): {
 		encodedDirName,
 		hashedDirName: encodeHashedSessionDirName(canonicalCwd, scope),
 		shadowedHomeDirName,
+		shadowedHomeHashedDirName,
 		resolvedCwd,
 	};
 }
@@ -215,6 +224,71 @@ export function sessionDirForCwd(cwd: string, sessionsRoot: string = getSessions
 }
 
 /**
+ * Session directories for `cwd`'s folder in the other worktrees of its git
+ * repository, under the sessions root holding `sessionDir`: every worktree git
+ * lists, plus agent-managed ones (`/wt`, PR checkouts) found by name, so a
+ * worktree removed since still counts. `/wt` moves a session into a linked
+ * worktree's directory; the session picker lists these so it stays resumable
+ * from the checkout it left, and vice versa.
+ *
+ * Empty outside git, when `cwd` sits outside its checkout, when `sessionDir`
+ * is not cwd-derived (a custom `--session-dir`), or when git metadata is
+ * unreadable.
+ */
+export async function worktreeSessionDirs(cwd: string, sessionDir: string): Promise<string[]> {
+	const sessionsRoot = resolveManagedSessionRoot(sessionDir, cwd);
+	if (!sessionsRoot) return [];
+	try {
+		const repo = vcs.git(cwd);
+		const prefix = repo?.prefixOf(cwd);
+		if (!repo || prefix == null) return [];
+		const dirs = new Set(managedWorktreeSessionDirs(repo.primaryRoot(), prefix, sessionsRoot));
+		for (const worktree of await repo.worktrees()) {
+			dirs.add(sessionDirForCwd(path.resolve(worktree.path, prefix), sessionsRoot));
+		}
+		dirs.delete(path.resolve(sessionDir));
+		return [...dirs];
+	} catch (error) {
+		logger.debug("Worktree session directory lookup failed", { cwd, error: String(error) });
+		return [];
+	}
+}
+
+/** Stand-in worktree name: encoding a path through it yields the name around any managed worktree's. */
+const WORKTREE_NAME_PROBE = "{worktree}";
+
+/**
+ * Session directories for the `prefix` folder of agent-managed worktrees of
+ * the repository at `primaryRoot`, matched by directory name. Those worktrees
+ * live at `<worktree base>/<slug>-<hashPath(primaryRoot)>[-<n>]` (see
+ * `createSessionWorktree` and `resolveAvailableWorktreePath`), so the match
+ * needs no git metadata and survives the worktree's removal.
+ */
+function managedWorktreeSessionDirs(primaryRoot: string, prefix: string, sessionsRoot: string): string[] {
+	// Encode against the canonical base: a live worktree's directory was named
+	// from its realpath, and the probe path does not exist to be resolved.
+	const probe = path.join(resolveEquivalentPath(getWorktreesDir()), WORKTREE_NAME_PROBE, prefix);
+	const [head, tail] = path.basename(sessionDirForCwd(probe, sessionsRoot)).split(WORKTREE_NAME_PROBE);
+	if (tail === undefined) return [];
+	// The name hashes the root as spelled when the worktree was made; a symlinked
+	// spelling (macOS `/tmp` vs `/private/tmp`) hashes differently, so accept both.
+	const hashes = new Set([hashPath(primaryRoot), hashPath(resolveEquivalentPath(primaryRoot))]);
+	const name = new RegExp(`^[\\w.-]+-(?:${[...hashes].join("|")})(?:-\\d+)?$`);
+	let entries: string[];
+	try {
+		entries = fs.readdirSync(sessionsRoot);
+	} catch {
+		return [];
+	}
+	const dirs: string[] = [];
+	for (const entry of entries) {
+		if (entry.length <= head.length + tail.length || !entry.startsWith(head) || !entry.endsWith(tail)) continue;
+		if (name.test(entry.slice(head.length, entry.length - tail.length))) dirs.push(path.join(sessionsRoot, entry));
+	}
+	return dirs;
+}
+
+/**
  * Compute the default session directory for a cwd.
  * Classifies cwd by canonical location so symlink/alias paths resolve to the
  * same home-relative or temp-root directory names as their real targets.
@@ -224,11 +298,13 @@ export function computeDefaultSessionDir(
 	storage: SessionStorage,
 	sessionsRoot: string = getSessionsDir(),
 ): string {
-	const { encodedDirName, hashedDirName, shadowedHomeDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
+	const { encodedDirName, hashedDirName, shadowedHomeDirName, shadowedHomeHashedDirName, resolvedCwd } =
+		getDefaultSessionDirName(cwd);
 	migrateHomeSessionDirs(sessionsRoot);
 	const sessionDir = path.join(sessionsRoot, encodedDirName);
 	migrateNamedSessionDir(encodeLegacyAbsoluteSessionDirName(resolvedCwd), sessionDir, sessionsRoot);
 	if (shadowedHomeDirName) migrateNamedSessionDir(shadowedHomeDirName, sessionDir, sessionsRoot);
+	if (shadowedHomeHashedDirName) migrateNamedSessionDir(shadowedHomeHashedDirName, sessionDir, sessionsRoot);
 	migrateHashedSessionDir(hashedDirName, sessionDir, sessionsRoot);
 	storage.ensureDirSync(sessionDir);
 	return sessionDir;

@@ -540,7 +540,7 @@ pub fn group_diagnostics(input: &str) -> String {
 		out.push_str(" diagnostics)\n");
 		for entry in entries.iter().take(12) {
 			out.push_str("  ");
-			out.push_str(&truncate_line(entry, 180));
+			out.push_str(&primitives::truncate_line(entry, 180));
 			out.push('\n');
 		}
 		if entries.len() > 12 {
@@ -625,15 +625,6 @@ fn format_code_summary(counts: &BTreeMap<String, usize>) -> String {
 		.map(|(code, count)| format!("{code} ({count}x)"))
 		.collect::<Vec<_>>()
 		.join(", ")
-}
-
-fn truncate_line(line: &str, max_chars: usize) -> String {
-	if line.chars().count() <= max_chars {
-		return line.to_string();
-	}
-	let mut out: String = line.chars().take(max_chars.saturating_sub(1)).collect();
-	out.push('…');
-	out
 }
 
 fn contains_diagnostic_signal(line: &str) -> bool {

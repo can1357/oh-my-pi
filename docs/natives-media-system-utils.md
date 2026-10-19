@@ -31,7 +31,8 @@ There is no native `PhotonImage` class or `image.rs` in the addon. General-purpo
 | `new AudioCapture(sampleRate, cb)`       | `AudioCapture`                 | `audio.rs`       |
 | `new AudioPlayback(sampleRate)`          | `AudioPlayback`                | `audio.rs`       |
 | `new LiveWebRtcPeer(...)`                | `LiveWebRtcPeer`               | `live.rs`        |
-| `encodeSixel(bytes, width, height)`      | `encode_sixel`                 | `sixel.rs`       |
+| `encodeSixel(bytes, width, height, backgroundRgb)` | `encode_sixel`              | `sixel.rs`       |
+| `encodeSixelAsync(bytes, width, height, backgroundRgb)` | `encode_sixel_async`    | `sixel.rs`       |
 | `decodeSixelToPng(bytes)`                | `decode_sixel_to_png`          | `sixel.rs`       |
 | `rasterizeSvg(bytes, maxWidth, maxHeight)` | `rasterize_svg`               | `svg.rs`         |
 | `pdfToMarkdown(bytes)`                   | `pdf_to_markdown`              | `pdf.rs`         |
@@ -58,12 +59,14 @@ There is no native `PhotonImage` class or `image.rs` in the addon. General-purpo
 
 ### SIXEL image encoding (`sixel`)
 
-- **JS input boundary**: `Uint8Array` containing encoded image bytes.
+- **JS input boundary**: `Uint8Array` containing encoded image bytes, target pixel dimensions, and a required terminal-background RGB number packed as `0xRRGGBB`.
+- **Validation boundary**: target width and height must be greater than zero; `backgroundRgb` must fit in 24 bits (`0x000000` through `0xffffff`).
 - **Rust decode boundary**: format is guessed with `ImageReader::with_guessed_format()`, then decoded to `DynamicImage`.
-- **Resize boundary**: image is resized with `resize_exact(..., FilterType::Lanczos3)` only when source dimensions differ from `targetWidthPx`/`targetHeightPx`.
-- **Output boundary**: `encodeSixel(...)` returns a SIXEL escape string synchronously.
+- **Resize boundary**: Lanczos3 resampling runs only when source dimensions differ from `targetWidthPx`/`targetHeightPx`. Alpha-bearing images are converted to RGBA8 and premultiplied in place before filtering; opaque formats retain their native-format resize path.
+- **Compositing boundary**: after resizing, premultiplied RGB is composited against `backgroundRgb` without applying alpha again. Unscaled images retain straight-alpha blending. Partially transparent output pixels become opaque before palette quantization; fully transparent pixels remain transparent.
+- **Output boundary**: `encodeSixel(...)` returns a SIXEL escape string synchronously. `encodeSixelAsync(...)` performs the same conversion on the native blocking pool and returns `Promise<string>`.
 
-The configured `image` features enable PNG, JPEG, WebP, GIF, and BMP decoding. Invalid target dimensions (`0` width or height) fail with `Target SIXEL dimensions must be greater than zero`.
+The configured `image` features enable PNG, JPEG, WebP, GIF, and BMP decoding. Invalid target dimensions (`0` width or height) fail with `Target SIXEL dimensions must be greater than zero`; an out-of-range RGB value fails with `SIXEL background must be a packed 24-bit RGB color`. Re-encode when the terminal background RGB changes.
 
 `decodeSixelToPng(bytes)` synchronously converts one SIXEL control string into PNG bytes. It preflights raster declarations, repeats, and row advances before decoding, then checks the decoded dimensions again. Limits are 20 MiB input/output, 8192 pixels per edge, and 4,194,304 decoded pixels; malformed or oversized input throws.
 
@@ -136,17 +139,21 @@ There is no current `packages/natives` TS wrapper that emits OSC52, handles Term
 
 ### SIXEL lifecycle
 
-1. `encodeSixel(bytes, targetWidthPx, targetHeightPx)` validates target dimensions.
+1. `encodeSixel(bytes, targetWidthPx, targetHeightPx, backgroundRgb)` validates target dimensions and the packed 24-bit background RGB.
 2. Rust guesses and decodes the encoded image.
-3. Image is resized exactly to the target dimensions when needed.
-4. Pixels are converted to RGBA8 and encoded with `icy_sixel::sixel_encode`.
-5. The SIXEL escape string is returned synchronously.
+3. When resizing an alpha-bearing image, RGB is premultiplied in place in an RGBA8 buffer, including clearing hidden colors in fully transparent pixels.
+4. Lanczos3 resizes the premultiplied image to the target dimensions. Opaque formats resize without premultiplication; unscaled images skip both steps.
+5. The terminal background is composited into partial-alpha pixels without multiplying coverage twice. Fully transparent pixels remain transparent.
+6. The composited pixels are encoded with `icy_sixel::sixel_encode`, and the SIXEL escape string is returned synchronously.
 
-Failure transitions:
+`encodeSixelAsync(bytes, targetWidthPx, targetHeightPx, backgroundRgb)` runs the same lifecycle on the native blocking pool and resolves with the escape string.
 
-- Format detection/decode failure throws.
-- Invalid target dimensions throw.
-- SIXEL encoding failure throws with `Failed to encode SIXEL: ...`.
+Failure transitions (the synchronous form throws; the asynchronous form rejects):
+
+- Format detection/decode failure fails the conversion.
+- Invalid target dimensions fail the conversion.
+- Out-of-range background RGB fails with `SIXEL background must be a packed 24-bit RGB color`.
+- SIXEL encoding failure fails with `Failed to encode SIXEL: ...`.
 
 ### HTML lifecycle
 
@@ -178,6 +185,7 @@ Failure transitions:
 
 - Unsupported or corrupted image input is a strict failure.
 - Invalid SIXEL target dimensions are a strict failure.
+- Invalid packed background RGB is a strict failure.
 - No JS fallback path is exposed by the natives package.
 
 ### HTML

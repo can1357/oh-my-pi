@@ -488,9 +488,9 @@ describe("totalTokens field", () => {
 
 	describe("Google Antigravity (OAuth)", () => {
 		it.skipIf(!antigravityToken)(
-			"gemini-3-flash - should return totalTokens equal to sum of components",
+			"gemini-3.8-flash - should return totalTokens equal to sum of components",
 			async () => {
-				const llm = getBundledModel("google-antigravity", "gemini-3-flash");
+				const llm = getBundledModel("google-antigravity", "gemini-3.8-flash");
 
 				console.log(`\nGoogle Antigravity / ${llm.id}:`);
 				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: antigravityToken });

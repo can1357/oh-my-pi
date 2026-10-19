@@ -267,6 +267,72 @@ describe("/mcp auth commands", () => {
 		});
 	});
 
+	test.each([
+		{ scope: undefined, expectedScope: null },
+		{ scope: "openid", expectedScope: "openid" },
+	])("reauth does not request realm-wide scopes with configured scope $scope", async ({ scope, expectedScope }) => {
+		const authStorage = freshAuthStorage();
+		await authStorage.credentials.reload();
+		await Bun.write(
+			configPath,
+			JSON.stringify({
+				mcpServers: {
+					envserver: {
+						type: "http",
+						url: RAW_SERVER_URL,
+						oauth: { clientId: "mcp-client", scope },
+					},
+				},
+			}),
+		);
+		const resourceMetadataUrl = "https://gateway.example.com/.well-known/oauth-protected-resource/mcp";
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(
+			new Error(`HTTP 401: WWW-Authenticate: Bearer resource_metadata="${resourceMetadataUrl}"`),
+		);
+		const fetchMock = Object.assign(
+			async (input: string | URL | Request): Promise<Response> => {
+				const url = String(input);
+				if (url === resourceMetadataUrl) {
+					return Response.json({
+						resource: EXPANDED_SERVER_URL,
+						authorization_servers: ["https://auth.example.com/realms/example"],
+					});
+				}
+				if (url === "https://auth.example.com/realms/example/.well-known/openid-configuration") {
+					return Response.json({
+						issuer: "https://auth.example.com/realms/example",
+						authorization_endpoint: "https://auth.example.com/realms/example/authorize",
+						token_endpoint: "https://auth.example.com/realms/example/token",
+						scopes_supported: ["openid", "offline_access", "other-client.admin"],
+					});
+				}
+				return new Response("not found", { status: 404 });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+		let authorizationUrl = "";
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrl = (await this.generateAuthUrl("test-state", "http://127.0.0.1:53192/callback")).url;
+				return {
+					access: "synthetic-access",
+					refresh: "synthetic-refresh",
+					expires: Date.now() + 3_600_000,
+				};
+			},
+		);
+		const { controller, showError } = createController(authStorage);
+
+		await controller.handle("/mcp reauth envserver");
+
+		expect(showError).not.toHaveBeenCalled();
+		const params = new URL(authorizationUrl).searchParams;
+		expect(params.get("scope")).toBe(expectedScope);
+		expect(params.get("client_id")).toBe("mcp-client");
+		expect(params.get("code_challenge_method")).toBe("S256");
+	});
+
 	test("uses tool challenge resource metadata and scopes during reauth", async () => {
 		const authStorage = freshAuthStorage();
 		await authStorage.credentials.reload();

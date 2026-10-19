@@ -4,6 +4,7 @@ import {
 	type AutocompleteItem,
 	type AutocompleteProvider,
 	atCompletionMatches,
+	extractAtFilePrefix,
 	findLeadingSlashCommandStart,
 	findTrailingSlashCommandStart,
 	isDirectoryCompletionValue,
@@ -14,7 +15,7 @@ import { BracketedPasteHandler, decodeReencodedPasteControls } from "../brackete
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
-import type { TspEditorDecoration, TspEditorProps, TspTone } from "@oh-my-pi/pi-wire";
+import type { TspEditorDecoration, TspEditorProps, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { col, node } from "../native/describe";
 import { sameItems, sameProps } from "../native/memo";
 import { plainText } from "../native/spans";
@@ -74,12 +75,16 @@ export interface NativeEditorLayout {
 	readonly caret: string;
 }
 
-/** Vim mode as the TSP `editor.mode` label. */
-const VIM_MODE_LABELS: Record<VimMode, string> = {
-	insert: "INSERT",
+/**
+ * Vim mode as the TSP `editor.mode` label. Insert carries none: Insert edits like a plain field,
+ * and a host such as Tern stops native editing (selection, ⌘A/⌘C/⌘X) for any labelled mode.
+ */
+const VIM_MODE_LABELS: Record<VimMode, string | undefined> = {
+	insert: undefined,
 	normal: "NORMAL",
 	visual: "VISUAL",
 	"visual-line": "VISUAL",
+	replace: "REPLACE",
 };
 
 const PASSTHROUGH_COLOR = (text: string): string => text;
@@ -95,7 +100,6 @@ function sameDecorations(a: readonly TspEditorDecoration[], b: readonly TspEdito
 	return true;
 }
 const MENTION_CONTEXT_RE = /(?:^|\s)\^[^\s]*$/;
-const AT_TOKEN_RE = /(?:^|\s)(@[^\s]*)$/;
 
 const AUTOCOMPLETE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	overflowSearch: false,
@@ -625,8 +629,11 @@ export class Editor implements Component, Focusable {
 	 * dialog's text field; only the prompt composer claims `omp.editor`).
 	 */
 	describeLayout: ((input: NativeNode, cx: DescribeContext) => NativeEditorLayout) | undefined;
-	/** TSP placeholder for the empty buffer; natively it replaces the rotating ANSI {@link placeholder} hints. */
-	describePlaceholder: (() => string) | undefined;
+	/**
+	 * TSP placeholder for the empty buffer; natively it replaces the rotating ANSI {@link placeholder} hints.
+	 * Return a stable value (the same spans array) while it is unchanged: the editor node is reused by identity.
+	 */
+	describePlaceholder: (() => TspText) | undefined;
 	#promptGutter: string | undefined;
 	/** Bumped by {@link invalidate}: host-side decoration inputs (spelling results, settings) changed. */
 	#nativeGeneration = 0;
@@ -666,7 +673,9 @@ export class Editor implements Component, Focusable {
 	// Emacs-style kill ring
 	#killRing = new KillRing();
 	/** Previous edit, for kill/yank chaining, undo coalescing, and the provisional space after a Tab word accept. */
-	#lastAction: "kill" | "yank" | "type-word" | "accept-word" | null = null;
+	#lastAction: "kill" | "yank" | "type-word" | "accept-word" | "replace" | null = null;
+	/** Graphemes overwritten in the current `R` session, so Backspace can restore them. */
+	#replaceLog: { line: number; col: number; removed: string; text: string }[] = [];
 
 	// Character jump mode
 	#jumpMode: "forward" | "backward" | null = null;
@@ -695,6 +704,8 @@ export class Editor implements Component, Focusable {
 		| { line: number; startCol: number; endCol: number; original: string; cursorOffset: number }
 		| undefined;
 	#autocompletePrefix: string = "";
+	/** False while the popup's untouched top row is a description-only slash hit ({@link AutocompleteItem.descriptionMatch}): Enter then submits the typed text. */
+	#enterAcceptsSelection = true;
 	#autocompleteRequestId: number = 0;
 	#autocompletePendingRequest: AutocompleteRequest | undefined;
 	#autocompleteRequestRunning = false;
@@ -713,6 +724,7 @@ export class Editor implements Component, Focusable {
 
 	// Host-registered atomic chip tokens: exact buffer label → expansion emitted on submit.
 	#atoms: Map<string, string> = new Map();
+	#atomsRevision = 0;
 
 	/** Optional pattern matching atomic placeholder tokens (e.g. `[Image #1, 800x600]` or
 	 *  `[Paste #2, +30 lines]`) that the editor treats as indivisible: a backspace or forward-delete
@@ -736,9 +748,6 @@ export class Editor implements Component, Focusable {
 	// Undo stack for editor state changes
 	#undoStack: EditorState[] = [];
 	#suspendUndo = false;
-
-	// Debounce timer for autocomplete updates
-	#autocompleteTimeout?: NodeJS.Timeout;
 
 	onSubmit?: (text: string) => void | Promise<void>;
 	onAltEnter?: (text: string) => void;
@@ -764,6 +773,12 @@ export class Editor implements Component, Focusable {
 	 *  cursor. The host styles it (ANSI allowed). Re-evaluated on every render, so hosts can derive
 	 *  it from live state. */
 	placeholder?: () => string | undefined;
+	/** Whole-message prediction for the next prompt, painted as ghost text after the cursor while
+	 *  the single-line buffer is a strict prefix of it, the cursor sits at its end, and no
+	 *  autocomplete is open. A shown prediction replaces the {@link placeholder}; Tab or Right inserts
+	 *  the rest without submitting. Must be a single line. Re-evaluated on every render, so hosts can
+	 *  derive it from live state. */
+	prediction?: () => string | undefined;
 
 	// Custom top border (for status line integration). Either an eager `content`
 	// (set once, reused every frame) or a `provider` that recomputes lazily just
@@ -1028,6 +1043,7 @@ export class Editor implements Component, Focusable {
 		this.#pastes.clear();
 		this.#pasteCounter = 0;
 		this.#atoms.clear();
+		this.#atomsRevision++;
 		this.#historyDraftActive = false;
 	}
 
@@ -1067,6 +1083,7 @@ export class Editor implements Component, Focusable {
 		if (entry?.draft || this.#historyDraftActive) {
 			this.#pastes = new Map(entry?.draft?.pastes);
 			this.#atoms = new Map(entry?.draft?.atoms);
+			this.#atomsRevision++;
 			this.#pasteCounter = entry?.draft?.pasteCounter ?? 0;
 			this.restoreHistoryState(entry?.draft?.restore);
 			this.#historyDraftActive = entry?.draft !== undefined;
@@ -1669,7 +1686,10 @@ export class Editor implements Component, Focusable {
 
 		const placeholder = this.#getPlaceholder();
 		const nativePlaceholder =
-			this.describePlaceholder !== undefined && !this.#autocompleteState && this.#isEditorEmpty()
+			this.describePlaceholder !== undefined &&
+			!this.#autocompleteState &&
+			this.#isEditorEmpty() &&
+			!this.#getPredictionSuffix()
 				? this.describePlaceholder()
 				: placeholder && plainText(placeholder).trim();
 		const atLineEnd = cursorCol >= (lines[cursorLine]?.length ?? 0);
@@ -1746,7 +1766,7 @@ export class Editor implements Component, Focusable {
 		let typed = this.#autocompletePrefix;
 		if (typed.startsWith("@")) {
 			const line = this.#state.lines[this.#state.cursorLine] ?? "";
-			typed = AT_TOKEN_RE.exec(line.slice(0, this.#state.cursorCol))?.[1] ?? typed;
+			typed = extractAtFilePrefix(line.slice(0, this.#state.cursorCol)) ?? typed;
 		}
 		typed = typed.replace(/^[/@:#$^]"?/, "");
 		return typed.slice(typed.lastIndexOf("/") + 1);
@@ -1898,6 +1918,7 @@ export class Editor implements Component, Focusable {
 						this.onAutocompleteUpdate?.();
 					} else {
 						this.#autocompleteList.handleInput(data);
+						this.#enterAcceptsSelection = true;
 						this.onAutocompleteUpdate?.();
 						return;
 					}
@@ -1907,7 +1928,7 @@ export class Editor implements Component, Focusable {
 				if (kb.matchesCanonical(canonical, "tui.input.tab") || rightArrowAccepts) {
 					const selected = this.#autocompleteList.getSelectedItem();
 					// Check for stale autocomplete state due to buffer edits since last refresh
-					// (destructive keys or paste can outrun the debounced update).
+					// (destructive keys or paste can outrun the async refresh).
 					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
 					const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 					if (!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
@@ -1917,7 +1938,7 @@ export class Editor implements Component, Focusable {
 					}
 					if (!selected) {
 						// An `@` popup whose narrowing filter matched nothing stays open with no
-						// candidate (see #debouncedUpdateAutocomplete). Nothing to accept: cancel the
+						// candidate (see #refreshAutocomplete). Nothing to accept: cancel the
 						// popup and fall through so Tab keeps its normal completion role and a right
 						// arrow at end of line moves the cursor.
 						this.#cancelAutocomplete();
@@ -1939,11 +1960,14 @@ export class Editor implements Component, Focusable {
 					!this.#selectedCompletionIsSkillNamespace()
 				) {
 					const selected = this.#autocompleteList.getSelectedItem();
-					// Check for stale autocomplete state due to debounce
+					// Check for stale autocomplete state while an async refresh is pending
 					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
 					const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
-					if (!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
-						// Autocomplete is stale - cancel and fall through to normal submission
+					if (
+						!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected) ||
+						!this.#enterAcceptsSelection
+					) {
+						// Stale, or a description-only hit the user never selected: submit the typed text.
 						this.#cancelAutocomplete();
 					} else {
 						if (selected && this.#autocompleteProvider) {
@@ -1975,10 +1999,12 @@ export class Editor implements Component, Focusable {
 					if (
 						!selected ||
 						!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected) ||
-						this.#selectedSlashArgumentIsAlreadyTyped(selected)
+						this.#selectedSlashArgumentIsAlreadyTyped(selected) ||
+						!this.#enterAcceptsSelection
 					) {
-						// Stale, or accepting would only append whitespace to an already fully
-						// typed slash-command argument (`/mcp list` + Enter): cancel and fall
+						// Stale, accepting would only append whitespace to an already fully
+						// typed slash-command argument (`/mcp list` + Enter), or the row is a
+						// description-only hit the user never selected: cancel and fall
 						// through to normal submission instead of swallowing the keypress.
 						this.#cancelAutocomplete();
 					} else {
@@ -2116,15 +2142,19 @@ export class Editor implements Component, Focusable {
 				const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 				if (
 					findLeadingSlashCommandStart(textBeforeCursor) !== null &&
+					textBeforeCursor.trim() !== "/" &&
 					this.#isInSubmittedSlashCommandContext() &&
 					this.#autocompleteProvider?.trySyncSlashCompletion
 				) {
 					const syncResult = this.#autocompleteProvider.trySyncSlashCompletion(textBeforeCursor);
-					if (syncResult && syncResult.items.length > 0) {
+					// The collapsed `/skill:` namespace row is not a runnable command; Enter submits
+					// immediately after applying, so only a real command may be completed here, and
+					// only one whose name matches: a description-only hit would run an unrelated command.
+					const selected = syncResult?.items.find(item => item.value !== SKILL_NAMESPACE);
+					if (syncResult && selected && !selected.descriptionMatch) {
 						// Invalidate any pending async autocomplete so its stale results are discarded
 						this.#autocompleteRequestId += 1;
 						// Apply the best match and submit the completed command
-						const selected = syncResult.items[0]!;
 						const result = this.#autocompleteProvider.applyCompletion(
 							this.#state.lines,
 							this.#state.cursorLine,
@@ -2199,8 +2229,8 @@ export class Editor implements Component, Focusable {
 				this.#moveCursor(1, 0); // Cursor movement (within text or history entry)
 			}
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorRight")) {
-			// Right walks over the ghost word completion as if it were typed: no trailing space.
-			if (this.#acceptWordCompletion({ space: false })) return;
+			// Right walks over the ghost prediction or word completion as if it were typed: no trailing space.
+			if (this.#acceptPrediction() || this.#acceptWordCompletion({ space: false })) return;
 			this.#moveCursor(0, 1);
 		} else if (kb.matchesCanonical(canonical, "tui.editor.cursorLeft")) {
 			// Left
@@ -2243,18 +2273,43 @@ export class Editor implements Component, Focusable {
 			return this.isShowingAutocomplete() ? false : this.#runVimKey("escape", vim);
 		}
 		if (vim.mode === "insert") return false;
+		if (vim.mode === "replace") {
+			if (canonical === "backspace" || matchesKey(data, "backspace") || matchesKey(data, "shift+backspace")) {
+				this.#replaceBackspace();
+				return true;
+			}
+			const replacing = extractPrintableText(data);
+			if (replacing) {
+				for (const seg of segmenter.segment(replacing)) this.#overwriteReplaceGrapheme(seg.segment);
+				return true;
+			}
+		}
 
+		// `f`/`t`/`r` are waiting for a character. Space is that character; arrows and other named
+		// keys cancel, instead of being rewritten to `h`/`l` and inserted or searched for.
+		const awaitingTarget = /[fFtTr]$/.test(vim.pendingText);
+		if (awaitingTarget && (canonical === "space" || data === " ")) return this.#runVimKey(" ", vim);
 		const mapped = canonical === undefined ? undefined : VIM_NAV_KEYS[canonical];
+		if (awaitingTarget && mapped !== undefined) return this.#runVimKey("escape", vim);
 		if (mapped !== undefined) return this.#runVimKey(mapped, vim);
 
-		// Control chords carry no printable text and stay with the host.
+		// Control chords, Enter, and Tab carry no printable text and stay with the host. A half-typed
+		// command (`r`, `f`, `d`) is cancelled first, like character-jump mode, so it cannot outlive a
+		// submit and swallow the first key of the next prompt.
 		const printable = extractPrintableText(data);
-		if (!printable) return false;
+		if (!printable) {
+			if (vim.pending) this.#runVimKey("escape", vim);
+			return false;
+		}
 
 		// Batched stdin can deliver several keystrokes at once, so replay the run one grapheme at a
-		// time. A command that drops out of Normal mode part-way (`iabc`) turns the rest of the run
-		// back into literal text rather than swallowing it.
+		// time. A command that drops out of Normal mode part-way (`iabc`, `Rxx`) turns the rest of
+		// the run into literal text or replace-mode overwrites rather than more Normal commands.
 		for (const seg of segmenter.segment(printable)) {
+			if (vim.mode === "replace") {
+				this.#overwriteReplaceGrapheme(seg.segment);
+				continue;
+			}
 			if (this.#runVimKey(seg.segment, vim)) continue;
 			this.#insertCharacter(printable.slice(seg.index));
 			return true;
@@ -2275,11 +2330,22 @@ export class Editor implements Component, Focusable {
 		if (vim.mode !== before || vim.pendingText !== pendingBefore || this.vimSelectedLines !== selectedLinesBefore) {
 			this.onVimModeChange?.(vim.mode);
 		}
+		if (before === "replace" && vim.mode !== "replace") this.#replaceLog.length = 0;
+		if (vim.mode === "replace" && before !== "replace") this.#replaceLog.length = 0;
 		return true;
 	}
 
 	#applyVimCommands(commands: readonly VimCommand[]): void {
 		for (const command of commands) {
+			// A delete or other edit in replace mode invalidates Backspace restores. Motions do not.
+			if (
+				this.#vim?.mode === "replace" &&
+				command.kind !== "move" &&
+				command.kind !== "mode" &&
+				command.kind !== "yank"
+			) {
+				this.#replaceLog.length = 0;
+			}
 			switch (command.kind) {
 				case "move":
 					this.#moveVimCursor(command.to);
@@ -2311,10 +2377,131 @@ export class Editor implements Component, Focusable {
 				case "undo":
 					this.#applyUndo();
 					break;
+				case "replace":
+					this.#replaceVimSpan(command.from, command.to, command.text);
+					break;
+				case "join":
+					this.#joinVimLines(command.fromLine, command.lines);
+					break;
+				case "indent":
+					this.#indentVimLines(command.fromLine, command.toLine, command.out);
+					break;
 			}
 		}
 		this.#clampVimCursor();
 		this.invalidate();
+	}
+
+	#replaceVimSpan(from: VimPosition, to: VimPosition, text: string): void {
+		const line = this.#state.lines[from.line] ?? "";
+		if (this.#spanCutsAtomicToken(line, from.col, to.col)) return;
+		this.#recordUndoState();
+		this.#lastAction = null;
+		this.#state.lines[from.line] = line.slice(0, from.col) + text + line.slice(to.col);
+		this.#state.cursorLine = from.line;
+		let last = from.col;
+		for (const seg of segmenter.segment(text)) last = from.col + seg.index;
+		this.#setCursorCol(last);
+		this.#afterVimEdit();
+	}
+
+	#overwriteReplaceGrapheme(grapheme: string): void {
+		const lineIdx = this.#state.cursorLine;
+		const line = this.#state.lines[lineIdx] ?? "";
+		const col = this.#state.cursorCol;
+		if (this.#atomicTokenAt(line, col)) return;
+		// Any other edit since the last overwrite (setText, `x`, paste) resets `#lastAction`, which
+		// makes the logged columns meaningless; start a fresh undo step and a fresh log.
+		if (this.#lastAction !== "replace") {
+			this.#recordUndoState();
+			this.#replaceLog.length = 0;
+		}
+		this.#lastAction = "replace";
+		// Editing a recalled prompt makes it a draft, so Up/Down at an edge move the cursor again
+		// instead of navigating history over the overwritten text (same as `#afterVimEdit`).
+		this.#historyIndex = -1;
+		const end = col >= line.length ? col : nextGraphemeStart(line, col);
+		const removed = line.slice(col, end);
+		this.#state.lines[lineIdx] = line.slice(0, col) + grapheme + line.slice(end);
+		this.#replaceLog.push({ line: lineIdx, col, removed, text: grapheme });
+		this.#setCursorCol(col + grapheme.length);
+		this.#notifyChange();
+	}
+
+	#replaceBackspace(): void {
+		if (this.#lastAction !== "replace") {
+			this.#replaceLog.length = 0;
+			return;
+		}
+		const entry = this.#replaceLog.pop();
+		if (!entry) return;
+		const line = this.#state.lines[entry.line] ?? "";
+		const stillThere = line.slice(entry.col, entry.col + entry.text.length) === entry.text;
+		const atCursor = this.#state.cursorLine === entry.line && this.#state.cursorCol === entry.col + entry.text.length;
+		if (!stillThere) return;
+		if (!atCursor) {
+			this.#replaceLog.push(entry);
+			return;
+		}
+		this.#state.lines[entry.line] =
+			line.slice(0, entry.col) + entry.removed + line.slice(entry.col + entry.text.length);
+		this.#setCursorCol(entry.col);
+		this.#notifyChange();
+	}
+
+	#joinVimLines(fromLine: number, span: number): void {
+		const start = Math.max(0, Math.min(fromLine, this.#state.lines.length - 1));
+		const last = Math.min(start + Math.max(span, 2) - 1, this.#state.lines.length - 1);
+		if (last <= start) return;
+		this.#recordUndoState();
+		let text = this.#state.lines[start] ?? "";
+		let cursor = text.length;
+		for (let i = start + 1; i <= last; i++) {
+			const raw = this.#state.lines[i] ?? "";
+			let trim = /^[ \t]*/.exec(raw)?.[0].length ?? 0;
+			const token = this.#atomicTokenAt(raw, 0);
+			if (token && token.start < trim) trim = token.start;
+			const next = raw.slice(trim);
+			const at = text.length;
+			if (i === start + 1) cursor = at;
+			// Vim join: no extra space after whitespace, before `)`, or for an empty line; two spaces after `.!?`.
+			const gap =
+				text.length === 0 || next.length === 0 || /[ \t]$/.test(text) || next.startsWith(")")
+					? ""
+					: /[.!?]$/.test(text)
+						? "  "
+						: " ";
+			text += gap + next;
+		}
+		this.#state.lines.splice(start, last - start + 1, text);
+		this.#state.cursorLine = start;
+		this.#setCursorCol(cursor);
+		this.#lastAction = null;
+		this.#afterVimEdit();
+	}
+
+	#indentVimLines(fromLine: number, toLine: number, out: boolean): void {
+		const first = Math.max(0, Math.min(fromLine, this.#state.lines.length - 1));
+		const last = Math.max(first, Math.min(toLine, this.#state.lines.length - 1));
+		// Two spaces, not Vim's shiftwidth of 8: a prompt draft should not jump a tab stop. A leading tab shifts by one tab so the line keeps its own indent style.
+		// Empty lines stay empty, as in Vim, so shifting a paragraph never leaves trailing blanks.
+		const next = this.#state.lines.slice(first, last + 1).map(line => {
+			const text = line ?? "";
+			if (!out) return text.length === 0 ? text : (text.startsWith("\t") ? "\t" : "  ") + text;
+			if (text.startsWith("\t")) return text.slice(1);
+			const spaces = /^ */.exec(text)?.[0].length ?? 0;
+			return text.slice(Math.min(2, spaces));
+		});
+		if (next.every((line, i) => line === (this.#state.lines[first + i] ?? ""))) return;
+		this.#recordUndoState();
+		for (let i = first; i <= last; i++) this.#state.lines[i] = next[i - first] ?? "";
+		this.#state.cursorLine = first;
+		const landed = this.#state.lines[first] ?? "";
+		let col = 0;
+		while (col < landed.length && /\s/.test(landed.charAt(col))) col++;
+		this.#setCursorCol(col);
+		this.#lastAction = null;
+		this.#afterVimEdit();
 	}
 
 	#moveVimCursor(to: VimPosition): void {
@@ -2661,6 +2848,11 @@ export class Editor implements Component, Focusable {
 		return this.#textRevision;
 	}
 
+	/** Monotonic atom-table revision for render caches: advances whenever {@link atoms} is mutated or replaced. */
+	get atomsRevision(): number {
+		return this.#atomsRevision;
+	}
+
 	#notifyChange(text?: string): void {
 		this.#textRevision++;
 		this.onChange?.(text ?? this.getText());
@@ -2699,6 +2891,7 @@ export class Editor implements Component, Focusable {
 	 *  it — for hosts that re-collapse restored draft text via {@link setText}. */
 	registerAtom(label: string, expansion: string): void {
 		this.#atoms.set(label, expansion);
+		this.#atomsRevision++;
 	}
 
 	/** Insert `label` (plus a trailing space) at the cursor and register it as an atom expanding
@@ -2735,6 +2928,7 @@ export class Editor implements Component, Focusable {
 	/** Drop every registered atom expansion (draft cleared or replaced by the host). */
 	clearAtoms(): void {
 		this.#atoms.clear();
+		this.#atomsRevision++;
 	}
 
 	/**
@@ -2774,7 +2968,7 @@ export class Editor implements Component, Focusable {
 	 *  Mirrors the transient state the key dispatch tears down before this action so the two
 	 *  cannot diverge: a pending character jump is cancelled by any other key, and an open
 	 *  spelling-assist popup is dismissed by anything that is not one of its accept keys (its
-	 *  debounced refresh skips assist mode, so a surviving list would hang around forever).
+	 *  refresh skips assist mode, so a surviving list would hang around forever).
 	 *  While Vim owns the buffer (Normal or Visual) the operation is Vim's `x` — deleting the
 	 *  selection and returning to Normal in Visual mode, the grapheme under the cursor
 	 *  otherwise. Only Insert mode and Vim-off editors delete straight through. */
@@ -3042,6 +3236,20 @@ export class Editor implements Component, Focusable {
 		return true;
 	}
 
+	/** Whether a character-jump hotkey is waiting for its target character. */
+	get isJumpPending(): boolean {
+		return this.#jumpMode !== null;
+	}
+
+	/** Type literal text through the character-editing pipeline without keybinding dispatch. */
+	typeCharacter(text: string): void {
+		// Same as #handleInputChunk: typed input wins over a stale in-flight provider lookup.
+		if (this.#autocompleteRequestRunning && this.#autocompleteState === null) {
+			this.#invalidateAutocompleteRequests();
+		}
+		this.#insertCharacter(text);
+	}
+
 	#insertCharacter(char: string): void {
 		this.#exitHistoryForEditing();
 		// Undo coalescing: consecutive word typing collapses into one undo unit
@@ -3149,7 +3357,7 @@ export class Editor implements Component, Focusable {
 					this.#tryTriggerAutocomplete();
 				}
 				// Check if we're in an @ file reference context
-				else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+				else if (extractAtFilePrefix(textBeforeCursor)) {
 					this.#tryTriggerAutocomplete();
 				}
 				// Check if we're in a model mention context
@@ -3170,7 +3378,7 @@ export class Editor implements Component, Focusable {
 				}
 			}
 		} else {
-			this.#debouncedUpdateAutocomplete();
+			this.#refreshAutocomplete();
 		}
 	}
 
@@ -3266,14 +3474,14 @@ export class Editor implements Component, Focusable {
 	/** Re-evaluate autocomplete triggers for the text ending at the cursor (used after bulk edits). */
 	#retriggerAutocompleteAtCursor(): void {
 		if (this.#autocompleteState) {
-			this.#debouncedUpdateAutocomplete();
+			this.#refreshAutocomplete();
 			return;
 		}
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 		if (this.#isInSlashAutocompleteContext()) {
 			this.#tryTriggerAutocomplete();
-		} else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+		} else if (extractAtFilePrefix(textBeforeCursor)) {
 			this.#tryTriggerAutocomplete();
 		} else if (MENTION_CONTEXT_RE.test(textBeforeCursor)) {
 			this.#tryTriggerAutocomplete();
@@ -3379,6 +3587,23 @@ export class Editor implements Component, Focusable {
 		return undefined;
 	}
 
+	/** True when `[from, to)` overlaps a placeholder. Counted `r` must no-op rather than split it.
+	 *  One pass over the line's matches, so a long counted replace stays linear. */
+	#spanCutsAtomicToken(line: string, from: number, to: number): boolean {
+		const re = this.#getAtomicTokenRe();
+		if (re === undefined) return false;
+		re.lastIndex = 0;
+		for (;;) {
+			const match = re.exec(line);
+			if (match === null || match.index >= to) return false;
+			if (match[0].length === 0) {
+				re.lastIndex = match.index + 1;
+				continue;
+			}
+			if (match.index + match[0].length > from) return true;
+		}
+	}
+
 	/** Expand the half-open range [start, end) so it never cuts through an atomic
 	 *  placeholder token: a boundary landing inside a token pulls the whole token in. */
 	#expandRangeOverAtomicTokens(line: string, start: number, end: number): { start: number; end: number } {
@@ -3448,7 +3673,7 @@ export class Editor implements Component, Focusable {
 				this.#cancelAutocomplete();
 				this.onAutocompleteUpdate?.();
 			} else {
-				this.#debouncedUpdateAutocomplete();
+				this.#refreshAutocomplete();
 			}
 		} else {
 			// If autocomplete was cancelled (no matches), re-trigger if we're in a completable context
@@ -3459,7 +3684,7 @@ export class Editor implements Component, Focusable {
 				this.#tryTriggerAutocomplete();
 			}
 			// @ file reference context
-			else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+			else if (extractAtFilePrefix(textBeforeCursor)) {
 				this.#tryTriggerAutocomplete();
 			}
 			// model mention context
@@ -3628,13 +3853,13 @@ export class Editor implements Component, Focusable {
 		this.#notifyChange();
 
 		if (this.#autocompleteState) {
-			this.#debouncedUpdateAutocomplete();
+			this.#refreshAutocomplete();
 		} else {
 			const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 			const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 			if (this.#isInSlashAutocompleteContext()) {
 				this.#tryTriggerAutocomplete();
-			} else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+			} else if (extractAtFilePrefix(textBeforeCursor)) {
 				this.#tryTriggerAutocomplete();
 			} else if (MENTION_CONTEXT_RE.test(textBeforeCursor)) {
 				this.#tryTriggerAutocomplete();
@@ -3962,7 +4187,7 @@ export class Editor implements Component, Focusable {
 
 		// Update or re-trigger autocomplete after forward delete
 		if (this.#autocompleteState) {
-			this.#debouncedUpdateAutocomplete();
+			this.#refreshAutocomplete();
 		} else {
 			const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 			const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
@@ -3971,7 +4196,7 @@ export class Editor implements Component, Focusable {
 				this.#tryTriggerAutocomplete();
 			}
 			// @ file reference context
-			else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+			else if (extractAtFilePrefix(textBeforeCursor)) {
 				this.#tryTriggerAutocomplete();
 			}
 			// model mention context
@@ -4232,8 +4457,8 @@ export class Editor implements Component, Focusable {
 	 * - Mid-prompt skill branch re-anchors when the popup item is a skill and the
 	 *   current text still ends in a matching trailing slash token, preventing a
 	 *   stale selection from replacing a newer skill prefix.
-	 * - `@`-file branch re-anchors via `#extractAtPrefix`; safe when the current text
-	 *   still ends in a whitespace-anchored `@<token>`.
+	 * - `@`-file branch re-anchors via `extractAtFilePrefix`; safe when the current text
+	 *   still ends in a whitespace-anchored or double-quoted `@` token.
 	 * - Everything else is stale — accepting it would corrupt the buffer (issue #4295).
 	 */
 	#autocompletePrefixMatchesCursorText(currentTextBeforeCursor: string, item?: SelectItem | null): boolean {
@@ -4246,7 +4471,7 @@ export class Editor implements Component, Focusable {
 				if (!token.includes(" ") && !token.slice(1).includes("/")) {
 					// Guard the timing window where the popup was built for an earlier
 					// query (e.g. bare `/`) and the user typed further characters before
-					// the 100 ms debounced refresh fired: accept the stale skill only
+					// the async refresh landed: accept the stale skill only
 					// when the refreshed popup would still surface it (same gate as
 					// buildMidPromptSkillCompletions). `tmp` after a bare slash
 					// therefore falls through to file completion instead of rewriting
@@ -4268,7 +4493,7 @@ export class Editor implements Component, Focusable {
 		}
 
 		if (this.#autocompletePrefix.startsWith("@")) {
-			return /(?:^|\s)@[^\s]*$/.test(currentTextBeforeCursor);
+			return extractAtFilePrefix(currentTextBeforeCursor) !== null;
 		}
 
 		if (this.#autocompletePrefix.startsWith("^")) {
@@ -4419,6 +4644,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	async #handleTabCompletion(): Promise<void> {
+		if (this.#acceptPrediction()) return;
 		if (this.#acceptWordCompletion({ space: true })) return;
 		if (!this.#autocompleteProvider) return;
 
@@ -4454,6 +4680,13 @@ export class Editor implements Component, Focusable {
 		);
 		this.#insertTextAtCursor(space ? `${wordCompletion} ` : wordCompletion);
 		if (space) this.#lastAction = "accept-word";
+		return true;
+	}
+	/** Insert the rest of the shown {@link prediction}, if any. Never submits. */
+	#acceptPrediction(): boolean {
+		const suffix = this.#getPredictionSuffix();
+		if (!suffix) return false;
+		this.#insertTextAtCursor(suffix);
 		return true;
 	}
 
@@ -4533,7 +4766,6 @@ export class Editor implements Component, Focusable {
 
 	#cancelAutocomplete(notifyCancel: boolean = false): void {
 		const wasAutocompleting = this.#autocompleteState !== null;
-		this.#clearAutocompleteTimeout();
 		this.#invalidateAutocompleteRequests();
 		this.#autocompleteState = null;
 		this.#autocompleteList = undefined;
@@ -4648,16 +4880,17 @@ export class Editor implements Component, Focusable {
 	): void {
 		this.#autocompletePrefix = suggestions.prefix;
 		this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
+		this.#enterAcceptsSelection = !suggestions.items[0]?.descriptionMatch;
 		this.#autocompleteState = state;
 		this.onAutocompleteUpdate?.();
 	}
 
-	/** Filter a shown `@` file list to the live `@` token until the debounced refresh replaces it. */
+	/** Filter a shown `@` file list to the live `@` token until the async refresh replaces it. */
 	#narrowAtFileList(): void {
 		if (!this.#autocompleteList || !this.#autocompletePrefix.startsWith("@")) return;
 		const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
-		const token = AT_TOKEN_RE.exec(currentLine.slice(0, this.#state.cursorCol))?.[1];
-		if (token !== undefined) this.#autocompleteList.setFilter(token);
+		const token = extractAtFilePrefix(currentLine.slice(0, this.#state.cursorCol));
+		if (token !== null) this.#autocompleteList.setFilter(token);
 	}
 
 	#invalidateAutocompleteRequests(): void {
@@ -4668,27 +4901,50 @@ export class Editor implements Component, Focusable {
 		for (const resolve of waiters) resolve();
 	}
 
-	#debouncedUpdateAutocomplete(): void {
-		if (this.#autocompleteState !== "assist") this.#narrowAtFileList();
-		if (this.#autocompleteTimeout) {
-			clearTimeout(this.#autocompleteTimeout);
-		}
-		this.#autocompleteTimeout = setTimeout(() => {
-			void this.#updateAutocomplete();
-			this.#autocompleteTimeout = undefined;
-		}, 100);
+	/**
+	 * Re-query suggestions for the live text after an edit while the popup is open. Runs on
+	 * every edit; the request queue coalesces bursts (a newer request replaces the pending one
+	 * and aborts the in-flight one), so no timer delays the popup behind the typing.
+	 */
+	#refreshAutocomplete(): void {
+		if (this.#autocompleteState === "assist") return;
+		if (this.#refreshSlashCommandListSync()) return;
+		this.#narrowAtFileList();
+		void this.#updateAutocomplete();
 	}
 
-	#clearAutocompleteTimeout(): void {
-		if (this.#autocompleteTimeout) {
-			clearTimeout(this.#autocompleteTimeout);
-			this.#autocompleteTimeout = undefined;
+	/**
+	 * Rebuild a shown slash command-name popup from the live token synchronously. An async
+	 * refresh resolves a microtask later at best, so Enter/Tab arriving in the same input
+	 * batch would accept a row computed for an earlier query (`/` → `mod` → Enter ran `/login`).
+	 * Returns false when the async refresh must handle the edit (arguments, mid-prompt
+	 * skills, absolute-path fall-through).
+	 */
+	#refreshSlashCommandListSync(): boolean {
+		const provider = this.#autocompleteProvider;
+		if (this.#autocompleteState !== "regular" || !provider?.trySyncSlashCompletion) return false;
+		if (!this.#isInSubmittedSlashCommandContext()) return false;
+		const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
+		const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
+		const token = textBeforeCursor.trimStart();
+		if (token.includes(" ")) return false;
+		const suggestions = provider.trySyncSlashCompletion(textBeforeCursor);
+		if (suggestions) {
+			this.#invalidateAutocompleteRequests();
+			this.#showAutocompleteSuggestions(suggestions, "regular");
+			return true;
 		}
+		// No command matches: an inner slash may still be an absolute path, which needs the
+		// async file lookup. Otherwise the async refresh would only close the popup.
+		if (token.slice(1).includes("/")) return false;
+		this.#cancelAutocomplete();
+		this.onAutocompleteUpdate?.();
+		return true;
 	}
 
 	/**
 	 * Get inline hint text to show as dim ghost text after the cursor.
-	 * Checks selected autocomplete item's hint first, then falls back to provider.
+	 * Checks the selected autocomplete item's hint first, then the prediction, then the provider.
 	 */
 	#getInlineHint(): string | null {
 		// Check selected autocomplete item for a hint
@@ -4696,6 +4952,9 @@ export class Editor implements Component, Focusable {
 			const selected = this.#autocompleteList.getSelectedItem();
 			return selected?.hint ?? null;
 		}
+
+		const prediction = this.#getPredictionSuffix();
+		if (prediction) return prediction;
 
 		// Fall back to provider's getInlineHint
 		if (this.#autocompleteProvider?.getInlineHint) {
@@ -4710,8 +4969,21 @@ export class Editor implements Component, Focusable {
 		return this.#getWordCompletion();
 	}
 	#getPlaceholder(): string | undefined {
-		if (this.#autocompleteState || !this.#isEditorEmpty()) return undefined;
+		if (this.#autocompleteState || !this.#isEditorEmpty() || this.#getPredictionSuffix()) return undefined;
 		return this.placeholder?.() || undefined;
+	}
+	/** The part of {@link prediction} not yet typed, or `null` when no prediction is shown. */
+	#getPredictionSuffix(): string | null {
+		if (this.#autocompleteState) return null;
+		const prediction = this.prediction?.();
+		if (!prediction) return null;
+		const { lines, cursorCol } = this.#state;
+		if (lines.length !== 1) return null;
+		const typed = lines[0] ?? "";
+		if (cursorCol !== typed.length || typed.length >= prediction.length || !prediction.startsWith(typed)) {
+			return null;
+		}
+		return prediction.slice(typed.length);
 	}
 	/** Typing `typed` where it diverges from the shown ghost completion rejects that ghost. */
 	#reportTypedPastWordCompletion(typed: string): void {

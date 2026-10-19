@@ -40,9 +40,6 @@ export type {
 	KernelShutdownResult,
 } from "../kernel-base";
 
-export type { KernelDisplayOutput, PythonStatusEvent } from "./display";
-export { renderKernelDisplay } from "./display";
-
 const TRACE_IPC = $flag("PI_PYTHON_IPC_TRACE");
 
 const SHUTDOWN_GRACE_MS = 1_000;
@@ -66,7 +63,6 @@ const PYTHON_RESERVED_PRELUDE_EXPORTS: Record<string, true> = {
 	agent: true,
 	budget: true,
 	completion: true,
-	display: true,
 	env: true,
 	judge: true,
 	judge_batch: true,
@@ -177,7 +173,11 @@ async function probePythonKernelAvailability(
 export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 	#installedPreludes = new Map<string, PythonPreludeSource>();
 
-	private constructor(id: string) {
+	/** @param pythonPath Interpreter executable this kernel runs on; reported as the runtime in eval state. */
+	private constructor(
+		id: string,
+		readonly pythonPath: string,
+	) {
 		super(id, {
 			languageName: "Python",
 			traceIpc: TRACE_IPC,
@@ -303,7 +303,7 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		spawnEnv.PYTHONIOENCODING = "utf-8";
 
 		const scriptPath = await stageRunnerScript("omp-python-runner", "py", RUNNER_SCRIPT);
-		const kernel = new PythonKernel(Snowflake.next());
+		const kernel = new PythonKernel(Snowflake.next(), runtime.pythonPath);
 
 		const proc = Bun.spawn([runtime.pythonPath, "-u", scriptPath], {
 			cwd: options.cwd,

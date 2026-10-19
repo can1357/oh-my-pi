@@ -241,6 +241,57 @@ describe("AuthStorage credential block persistence", () => {
 		}
 	});
 
+	it("retires a mirrored in-memory block once a sibling process deletes its row", async () => {
+		const options = { usageProviderResolver: () => undefined, rankingStrategyResolver: () => undefined };
+		const storeA = await SqliteAuthCredentialStore.open(dbPath);
+		await storeA.saveOAuth(PROVIDER, oauthCredential("1"));
+		const [row] = storeA.listAuthCredentials(PROVIDER);
+		if (!row) throw new Error("expected credential row");
+		const storeB = await SqliteAuthCredentialStore.open(dbPath);
+		const a = new AuthStorage(storeA, options);
+		await a.credentials.reload();
+		try {
+			await a.limits.markReached(PROVIDER, "a", {
+				credentialId: row.id,
+				retryAfterMs: 3_600_000,
+				providerTimed: true,
+			});
+
+			storeB.deleteCredentialBlock(row.id, PROVIDER_KEY, "");
+
+			// A still-live mirror would win the longest-wins merge and keep the hour-long deadline.
+			const result = await a.limits.markReached(PROVIDER, "a", {
+				credentialId: row.id,
+				retryAfterMs: 60_000,
+				providerTimed: true,
+			});
+			expect(result.blockedUntilMs).toBeLessThan(Date.now() + 120_000);
+		} finally {
+			a.close();
+			storeB.close();
+		}
+	});
+
+	it("keeps an explicit session pin after hundreds of newer sessions push it out of memory", async () => {
+		const options = { usageProviderResolver: () => undefined, rankingStrategyResolver: () => undefined };
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		await store.saveOAuth(PROVIDER, oauthCredential("1"));
+		await store.saveOAuth(PROVIDER, oauthCredential("2"));
+		const [first, second] = store.listAuthCredentials(PROVIDER);
+		if (!first || !second) throw new Error("expected credential rows");
+		const storage = new AuthStorage(store, options);
+		await storage.credentials.reload();
+		try {
+			expect(storage.sessions.pin(PROVIDER, "pinned-session", second.id)).toBe(true);
+			for (let index = 0; index < 300; index++) {
+				expect(storage.sessions.pin(PROVIDER, `filler-${index}`, first.id)).toBe(true);
+			}
+			expect(await storage.keys.get(PROVIDER, "pinned-session")).toBe("access-2");
+		} finally {
+			storage.close();
+		}
+	});
+
 	it("drops expired rows from reads and clears persisted blocks through the public delete wrapper", async () => {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
 		await store.saveOAuth(PROVIDER, oauthCredential("1"));
@@ -492,6 +543,13 @@ describe("AuthStorage credential block persistence", () => {
 		expect(store.getCredentialBlock(row.id, CODEX_PROVIDER_KEY, "chat")).toBe(blockedUntilMs);
 		expect(store.getCredentialBlock(row.id, CODEX_PROVIDER_KEY, "shared")).toBeUndefined();
 		expect(store.listCredentialBlocks([row.id]).map(block => block.blockScope)).toEqual(["chat", "spark"]);
+		// The bulk read behind `blocks.blockedUntil` hides the legacy row exactly like the point reads.
+		expect(store.getCredentialBlockScopes(row.id, CODEX_PROVIDER_KEY)).toEqual(
+			new Map([
+				["chat", blockedUntilMs],
+				["spark", blockedUntilMs],
+			]),
+		);
 		expect(readCredentialBlockRows(dbPath)).toEqual([
 			{
 				credential_id: row.id,
@@ -593,6 +651,37 @@ describe("AuthStorage credential block persistence", () => {
 			const reconcileAfterMs = store.getCredentialBlockReconcileAfter(row.id, CODEX_PROVIDER_KEY, "chat");
 			expect(reconcileAfterMs).toBeGreaterThan(Date.now());
 			expect(reconcileAfterMs).toBeLessThan(blockedUntilMs);
+		} finally {
+			if (writerLocked) writer.run("ROLLBACK");
+			writer.close();
+			store.close();
+		}
+	});
+
+	it("answers block reads when the expired-row sweep finds the writer lock held", async () => {
+		const seed = await SqliteAuthCredentialStore.open(dbPath);
+		await seed.saveOAuth(PROVIDER, oauthCredential("busy"));
+		const [row] = seed.listAuthCredentials(PROVIDER);
+		if (!row) throw new Error("expected credential row");
+		seed.upsertCredentialBlock({
+			credentialId: row.id,
+			providerKey: PROVIDER_KEY,
+			blockScope: "",
+			blockedUntilMs: FUTURE_BLOCK_MS,
+		});
+		seed.close();
+
+		// A fresh store sweeps on its first block read; the held lock makes that sweep fail busy.
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		const writer = new Database(dbPath);
+		let writerLocked = false;
+		try {
+			writer.run("PRAGMA busy_timeout = 0");
+			writer.run("BEGIN IMMEDIATE");
+			writerLocked = true;
+
+			expect(store.getCredentialBlockScopes(row.id, PROVIDER_KEY)).toEqual(new Map([["", FUTURE_BLOCK_MS]]));
+			expect(store.listCredentialBlocks([row.id]).map(block => block.blockedUntilMs)).toEqual([FUTURE_BLOCK_MS]);
 		} finally {
 			if (writerLocked) writer.run("ROLLBACK");
 			writer.close();

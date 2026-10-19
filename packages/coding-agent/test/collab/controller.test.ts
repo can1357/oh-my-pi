@@ -35,7 +35,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
-import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
+import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
@@ -254,7 +254,7 @@ afterEach(async () => {
 	// session index), and models.db under tmp/agent; Windows cannot delete open files.
 	AgentStorage.close();
 	HistoryStorage.close();
-	resetSessionIndexForTests();
+	closeSessionIndex();
 	closeModelCache();
 	await fs.rm(tmp, { recursive: true, force: true });
 });
@@ -671,7 +671,7 @@ describe("interactive collaboration startup", () => {
 		const send = CollabSocket.prototype.send;
 		const capture = spyOn(CollabSocket.prototype, "send").mockImplementation(
 			function (this: CollabSocket, frame, targetPeer) {
-				if (frame.t === "hello") transport = this;
+				if (typeof frame !== "string" && frame.t === "hello") transport = this;
 				return send.call(this, frame, targetPeer);
 			},
 		);

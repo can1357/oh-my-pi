@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -44,7 +45,10 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 
 	it("reads arbitrary extension-namespaced keys from the global and project layers", async () => {
 		// Keys the typed, schema-bound `get(path)` cannot reach — an extension's own block.
-		await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify({ piVim: { mode: "normal" } }, null, 2));
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			YAML.stringify({ piVim: { mode: "normal" }, shellCommandPrefix: "export GLOBAL=1" }, null, 2),
+		);
 		fs.mkdirSync(path.join(projectDir, ".claude"), { recursive: true });
 		await Bun.write(path.join(projectDir, ".claude", "settings.json"), JSON.stringify({ piVim: { leader: "," } }));
 
@@ -53,6 +57,7 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 
 		expect(s.getGlobalSettings().piVim).toEqual({ mode: "normal" });
 		expect(s.getProjectSettings().piVim).toEqual({ leader: "," });
+		expect(s.getShellCommandPrefix()).toBe("export GLOBAL=1");
 	});
 
 	it("returns a deep clone so callers cannot mutate internal state", async () => {
@@ -80,6 +85,8 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 
 		const inMemory = SettingsManager.inMemory();
 		expect(typeof inMemory.getProjectSettings).toBe("function");
+		expect(inMemory.getShellPath()).toBeUndefined();
+		expect(inMemory.getShellCommandPrefix()).toBeUndefined();
 		expect(inMemory.getProjectSettings()).toEqual({});
 	});
 
@@ -96,30 +103,51 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 		const singleton = await Settings.init({ cwd: projectDir, agentDir });
 		const sessionB = await Settings.loadIsolated({ cwd: projectB, agentDir });
 
-		expect(SettingsManager.create(projectDir)).toBe(singleton);
-		expect(SettingsManager.create(projectB)).toBe(sessionB);
+		expect<Settings>(SettingsManager.create(projectDir)).toBe(singleton);
+		expect<Settings>(SettingsManager.create(projectB)).toBe(sessionB);
 		expect(SettingsManager.create(projectB).getProjectSettings().piVim).toEqual({ session: "b" });
 	});
 
 	it("uses the active session settings when same-cwd sessions have different managers", async () => {
 		const sdkAgentDir = tempDir.join("sdk-agent");
 		fs.mkdirSync(sdkAgentDir, { recursive: true });
-		await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify({ piVim: { session: "default" } }));
-		await Bun.write(path.join(sdkAgentDir, "config.yml"), YAML.stringify({ piVim: { session: "sdk" } }));
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			YAML.stringify({ piVim: { session: "default" }, shellPath: "/bin/sh", shellCommandPrefix: "export OTHER=1" }),
+		);
+		await Bun.write(
+			path.join(sdkAgentDir, "config.yml"),
+			YAML.stringify({
+				piVim: { session: "sdk" },
+				shellPath: "~/.local/bin/bash",
+				shellCommandPrefix: "export GLOBAL=1",
+			}),
+		);
+		fs.mkdirSync(path.join(projectDir, ".claude"), { recursive: true });
+		await Bun.write(
+			path.join(projectDir, ".claude", "settings.json"),
+			JSON.stringify({ shellCommandPrefix: "export PROJECT=1" }),
+		);
 
 		// Construct the explicit SDK instance first, then the same-cwd singleton.
 		// Outside active extension execution the singleton is therefore the newest
 		// matching fallback — exactly the leak this regression must distinguish.
 		const sdkSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir: sdkAgentDir });
 		const singleton = await Settings.init({ cwd: projectDir, agentDir });
-		expect(SettingsManager.create(projectDir)).toBe(singleton);
+		expect<Settings>(SettingsManager.create(projectDir)).toBe(singleton);
 
 		let observed: Settings | undefined;
+		let shellOptions: { shellPath: string | undefined; commandPrefix: string | undefined } | undefined;
 		const runtime = new ExtensionRuntime();
 		const extension = await loadExtensionFromFactory(
 			pi => {
 				pi.on("session_start", (_event, ctx) => {
-					observed = SettingsManager.create(ctx.cwd);
+					const settings = SettingsManager.create(ctx.cwd);
+					observed = settings;
+					shellOptions = {
+						shellPath: settings.getShellPath(),
+						commandPrefix: settings.getShellCommandPrefix(),
+					};
 				});
 			},
 			projectDir,
@@ -142,6 +170,11 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 
 			expect(observed).toBe(sdkSettings);
 			expect(observed?.getGlobalSettings().piVim).toEqual({ session: "sdk" });
+			// Legacy Pi expands `~`; a literal tilde path cannot be spawned.
+			expect(shellOptions).toEqual({
+				shellPath: `${os.homedir()}/.local/bin/bash`,
+				commandPrefix: "export PROJECT=1",
+			});
 		} finally {
 			authStorage.close();
 		}
@@ -201,7 +234,7 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 			expect(commandObserved).toBe(sdkSettings);
 			expect(shortcutObserved).toBe(sdkSettings);
 			// Without the scope the same call leaks the newest same-cwd manager.
-			expect(SettingsManager.create(projectDir)).toBe(singleton);
+			expect<Settings>(SettingsManager.create(projectDir)).toBe(singleton);
 		} finally {
 			authStorage.close();
 		}
@@ -251,7 +284,7 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 			await wrapped.execute("tool-call-id", {});
 
 			expect(observed).toBe(sdkSettings);
-			expect(SettingsManager.create(projectDir)).toBe(singleton);
+			expect<Settings>(SettingsManager.create(projectDir)).toBe(singleton);
 		} finally {
 			authStorage.close();
 		}

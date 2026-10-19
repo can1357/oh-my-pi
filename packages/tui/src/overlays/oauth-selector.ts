@@ -51,6 +51,8 @@ const ORIGIN_LABELS = {
  */
 export class OAuthSelectorComponent extends OverlayPanel {
 	#listContainer: Container;
+	/** Provider rows viewport of the last {@link #updateList}; spinner ticks repaint only its rows. */
+	#listView: ScrollView | undefined;
 	#menu: MenuSelection<OAuthProviderInfo>;
 	/** The provider search field; its value drives `#menu`'s query. */
 	#search = Object.assign(new Input(), { prompt: "" });
@@ -213,7 +215,13 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			if (frameCount > 0) {
 				this.#spinnerFrame = (this.#spinnerFrame + 1) % frameCount;
 			}
-			this.#updateList();
+			// Only the provider rows carry the spinner glyph; the window is unchanged.
+			if (this.#listView) {
+				const start = this.#scrollStart;
+				this.#listView.setLines(this.#providerRows(start, start + this.#visibleCount));
+			} else {
+				this.#updateList();
+			}
 			this.#requestRenderCallback?.();
 		}, 80);
 	}
@@ -310,14 +318,50 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		this.#nativeRoot = undefined;
 		this.#pickerRoot = undefined;
 		this.#listContainer.clear();
+		this.#listView = undefined;
 
-		const items = this.#menu.visibleItems;
-		const total = items.length;
+		const total = this.#menu.visibleItems.length;
 		const maxVisible = this.#maxVisible;
 		const { start: startIndex, end: endIndex } = centeredViewportRange(this.#menu.selectedIndex, total, maxVisible);
 		this.#scrollStart = startIndex;
 		this.#visibleCount = endIndex - startIndex;
 
+		const rows = this.#providerRows(startIndex, endIndex);
+		if (rows.length > 0) {
+			const sv = new ScrollView(rows, {
+				height: rows.length,
+				scrollbar: "auto",
+				totalRows: total,
+				theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
+			});
+			sv.setScrollOffset(startIndex);
+			this.#listView = sv;
+			this.#listContainer.addChild(sv);
+		}
+
+		// Search status line (scrollbar covers overflow indication)
+		if (this.#shouldRenderSearchStatus()) {
+			this.#listContainer.addChild(new TruncatedText(this.#renderStatusLine(total), 0, 0));
+		}
+
+		if (total === 0) {
+			const message =
+				this.#menu.items.length === 0
+					? this.#mode === "login"
+						? "No OAuth providers available"
+						: "No stored provider credentials to log out"
+					: "No matching providers";
+			this.#listContainer.addChild(new TruncatedText(theme.fg("muted", message), 0, 0));
+		}
+		if (this.#statusMessage) {
+			this.#listContainer.addChild(new Spacer(1));
+			this.#listContainer.addChild(new TruncatedText(theme.fg("warning", this.#statusMessage), 0, 0));
+		}
+	}
+
+	/** Styled rows for visible providers `[startIndex, endIndex)`: cursor, name, auth status and provenance. */
+	#providerRows(startIndex: number, endIndex: number): string[] {
+		const items = this.#menu.visibleItems;
 		const rows: string[] = [];
 		for (let i = startIndex; i < endIndex; i++) {
 			const provider = items[i];
@@ -340,36 +384,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			}
 			rows.push(line);
 		}
-
-		if (rows.length > 0) {
-			const sv = new ScrollView(rows, {
-				height: rows.length,
-				scrollbar: "auto",
-				totalRows: total,
-				theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
-			});
-			sv.setScrollOffset(startIndex);
-			this.#listContainer.addChild(sv);
-		}
-
-		// Search status line (scrollbar covers overflow indication)
-		if (this.#shouldRenderSearchStatus()) {
-			this.#listContainer.addChild(new TruncatedText(this.#renderStatusLine(total), 0, 0));
-		}
-
-		if (total === 0) {
-			const message =
-				this.#menu.items.length === 0
-					? this.#mode === "login"
-						? "No OAuth providers available"
-						: "No stored provider credentials to log out"
-					: "No matching providers";
-			this.#listContainer.addChild(new TruncatedText(theme.fg("muted", message), 0, 0));
-		}
-		if (this.#statusMessage) {
-			this.#listContainer.addChild(new Spacer(1));
-			this.#listContainer.addChild(new TruncatedText(theme.fg("warning", this.#statusMessage), 0, 0));
-		}
+		return rows;
 	}
 	handleInput(keyData: string): void {
 		// Escape or Ctrl+C

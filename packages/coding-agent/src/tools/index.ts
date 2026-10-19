@@ -130,6 +130,7 @@ export * from "./ida";
 export * from "./essential-tools";
 export * from "./eval";
 export * from "./eval-backends";
+export * from "./file-mutation-queue";
 export * from "./file-write-fallback";
 export * from "./gh";
 export * from "./glob";
@@ -214,6 +215,8 @@ export interface ToolSession {
 	hasUI: boolean;
 	/** Whether `ask` can reach a human. Defaults to `hasUI`. */
 	canPromptUser?: boolean;
+	/** Keep `ask` in a headless fork's roster; execution still requires UI. */
+	advertiseHeadlessAsk?: boolean;
 	/** The user approves `cfg://` writes for this session (top-level TUI session only). */
 	settingsApproval?: boolean;
 	/** Whether this session has begun disposal. */
@@ -320,6 +323,8 @@ export interface ToolSession {
 	 * required yield tool). Suppresses automatic tool-set expansion.
 	 */
 	restrictToolNames?: boolean;
+	/** Seance forks: the consulted session's artifacts dir, read in place by history://, artifact://, agent://. */
+	readonly seanceSourceArtifactsDir?: string;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
 	/** Get this agent's eval executor session ID; keys its retained JS/Python/Ruby/Julia state. */
@@ -354,6 +359,8 @@ export interface ToolSession {
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
+	/** Parent cache identity for sibling sharing, only when the parent model opts in. */
+	getPromptCacheKey?: () => string | undefined;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
 	/** Look up an enabled tool through the eval bridge's normal permission pipeline. */
@@ -362,8 +369,6 @@ export interface ToolSession {
 	getToolContext?: () => AgentToolContext | undefined;
 	/** Names currently authorized for invocation through the eval bridge. */
 	getEvalBridgeToolNames?: () => readonly string[];
-	/** Direct partition of the active Code Mode surface; undefined when Code Mode is inactive. */
-	getCodeModeDirectToolNames?: () => readonly string[] | undefined;
 	/** Return whether a built-in tool is active in this turn's tool set. */
 	isToolActive?: (name: string) => boolean;
 	/** Update the active built-in tool predicate when a session changes tools mid-run. */
@@ -374,10 +379,11 @@ export interface ToolSession {
 	xdev?: XdevState;
 	/**
 	 * Set when this session's `write` tool was granted only as the `xd://`
-	 * transport: `write xd://<tool>` dispatches mounted devices, but filesystem
-	 * writes are rejected. Granted by {@link createTools} to sessions whose
-	 * explicit tool list includes `read` but omits `write`, so xd:// mounting
-	 * can engage without expanding the write contract.
+	 * transport: `write xd://<tool>` dispatches mounted devices and `local://`
+	 * scratch stays writable, but other filesystem writes are rejected. Granted
+	 * by {@link createTools} to sessions whose explicit tool list includes `read`
+	 * but omits `write`, so xd:// mounting can engage without granting
+	 * working-tree writes.
 	 */
 	deviceOnlyWrite?: boolean;
 	/**
@@ -430,20 +436,7 @@ export interface ToolSession {
 	modelRegistry?: import("../config/model-registry").ModelRegistry;
 	/** Agent output manager for unique agent:// IDs across task invocations */
 	agentOutputManager?: AgentOutputManager;
-	/**
-	 * Async job manager scoped to this session.
-	 *
-	 * - Top-level session that constructed one: its own manager.
-	 * - Subagent (`parentTaskPrefix` set): the parent's manager, so background
-	 *   bash/task work and `onJobComplete` deliveries flow into the conversation
-	 *   that spawned it.
-	 * - Secondary in-process top-level session that found a singleton already
-	 *   installed (issue #1923): `undefined`. Tools refuse async work rather
-	 *   than silently route completions into the owning session's `yieldQueue`.
-	 *
-	 * Tools MUST use this instead of `AsyncJobManager.instance()` so a secondary
-	 * session never borrows the owning session's manager by accident.
-	 */
+	/** Manager of this session's root, shared only with that root's subagents. */
 	asyncJobManager?: AsyncJobManager;
 	/** MCP manager visible to subagents without relying on the process-global singleton. */
 	mcpManager?: MCPManager;
@@ -487,6 +480,8 @@ export interface ToolSession {
 	getLastAssistantText?: () => string | undefined;
 	/** Resolve a terminal yield's current or immediately preceding report, bound to its call ID. */
 	getYieldReportText?: (toolCallId: string) => string | undefined;
+	/** The `i` intent the model wrote on a tool call of the current turn, by call ID. */
+	getToolCallIntent?: (toolCallId: string) => string | undefined;
 	/** Replace the active workpool item contract and refresh its provider-facing prompt. */
 	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => Promise<void>;
 	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */
@@ -877,9 +872,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// the intended restriction, and enough to overflow narrow provider context
 	// windows on MCP-heavy sessions. Grant a device-only `write` instead:
 	// `write xd://<tool>` dispatches mounted devices while filesystem writes
-	// stay rejected (enforced by WriteTool via `session.deviceOnlyWrite`). No
-	// capability is expanded: without mounting, those tools were already
-	// presented — and callable — top-level.
+	// outside the local:// session scratch stay rejected (enforced by WriteTool
+	// via `session.deviceOnlyWrite`). Mounted tools gain no capability: without
+	// mounting, they were already presented — and callable — top-level.
 	if (
 		xdevRequested &&
 		requestedTools !== undefined &&

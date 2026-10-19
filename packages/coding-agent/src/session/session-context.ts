@@ -22,6 +22,7 @@ import {
 	type CompactionEntry,
 	type CustomMessageEntry,
 	EPHEMERAL_MODEL_CHANGE_ROLE,
+	resolveSessionLeafId,
 	type SessionEntry,
 	type SessionMessageEntry,
 } from "./session-entries";
@@ -66,7 +67,7 @@ function hasCrashRiskSnapcompactFramePayload(
 ): boolean {
 	return (
 		archive.frames.length >= LEGACY_SNAPCOMPACT_FRAME_COUNT_GUARD ||
-		snapcompactFrameDataBytes(archive, resolveFrameData) >= snapcompact.FRAME_DATA_BYTES_BUDGET
+		snapcompactFrameDataBytes(archive, resolveFrameData) >= snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET
 	);
 }
 
@@ -89,7 +90,8 @@ function isCrashRiskLegacySnapcompactArchive(
 	);
 }
 
-function snapcompactHistoryBlockOptions(
+/** Byte budget and frame resolution for one archive's prompt blocks, as context rebuilding applies them. */
+export function snapcompactHistoryBlockOptions(
 	archive: snapcompact.Archive,
 	options: BuildSessionContextOptions | undefined,
 ): snapcompact.HistoryBlockOptions {
@@ -99,7 +101,7 @@ function snapcompactHistoryBlockOptions(
 		return { maxFrameDataBytes: 0, ...(resolveFrameData ? { resolveFrameData } : {}) };
 	}
 	return {
-		maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+		maxFrameDataBytes: options?.maxFrameDataBytes ?? snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET,
 		...(resolveFrameData ? { resolveFrameData } : {}),
 	};
 }
@@ -147,7 +149,7 @@ export function getRestorableSessionModels(
 	return [roleModel, defaultModel];
 }
 
-export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEntry | null {
+export function getLatestCompactionEntry(entries: readonly SessionEntry[]): CompactionEntry | null {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		if (entries[i].type === "compaction") {
 			return entries[i] as CompactionEntry;
@@ -167,16 +169,25 @@ export interface BuildSessionContextOptions {
 	/** In transcript mode, elide entries replaced by the latest compaction. */
 	collapseCompactedHistory?: boolean;
 	/**
-	 * Transcript mode only: keep `toolCall` blocks that have no matching
-	 * `toolResult` on the path instead of stripping them. Pass this when the
-	 * session is mid-turn (a tool is still executing, its result not yet
-	 * persisted) so the rebuilt transcript renders the in-flight call as
-	 * pending; without it a focus/unfocus or overlay-close rebuild silently
-	 * hides the call the agent is still waiting on.
+	 * Tool calls the live agent loop is still executing. They count as paired, so a
+	 * mid-turn rebuild keeps the in-flight assistant turn; the loop appends their results.
 	 */
-	keepDanglingToolCalls?: boolean;
+	inFlightToolCallIds?: ReadonlySet<string>;
 	/** Price and resolve persisted snapcompact frame payloads on demand. */
 	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
+	/** Archive frame bytes the LLM context attaches: the active model's {@link snapcompact.frameDataBytesBudget}
+	 *  (unset: {@link snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET}). */
+	maxFrameDataBytes?: number;
+}
+
+/** Options for `AgentSession.buildTranscriptSessionContext` (via `SessionProviderBoundary`). */
+export interface TranscriptSessionContextOptions extends Pick<BuildSessionContextOptions, "collapseCompactedHistory"> {
+	/**
+	 * Keep the unpaired tool calls of the turn the agent loop is still executing,
+	 * so a mid-turn rebuild keeps them routable. Calls left unpaired by earlier
+	 * turns are stripped either way. Pass while the viewed session streams.
+	 */
+	keepInFlightToolCalls?: boolean;
 }
 
 /**
@@ -239,10 +250,9 @@ export function buildSessionContext(
 		}
 	}
 
-	// Find leaf
-	let leaf: SessionEntry | undefined;
-	if (leafId === null) {
-		// Explicitly null - return no messages (navigated to before first entry)
+	// An explicit null or a replayed clear marker selects no active branch.
+	const resolvedLeafId = leafId === undefined ? resolveSessionLeafId(entries) : leafId;
+	if (resolvedLeafId === null) {
 		return {
 			messages: [],
 			thinkingLevel: "off",
@@ -252,14 +262,12 @@ export function buildSessionContext(
 			mode: "none",
 		};
 	}
-	if (leafId) {
-		leaf = byId.get(leafId);
+	let leaf = byId.get(resolvedLeafId);
+	if (!leaf && leafId !== undefined) {
+		// An explicitly requested leaf is unavailable: use the replayed leaf, never a trailing usage marker.
+		const replayedLeafId = resolveSessionLeafId(entries);
+		leaf = replayedLeafId === null ? undefined : byId.get(replayedLeafId);
 	}
-	if (!leaf) {
-		// Fallback to last entry (when leafId is undefined)
-		leaf = entries[entries.length - 1];
-	}
-
 	if (!leaf) {
 		return {
 			messages: [],
@@ -501,8 +509,17 @@ export function buildSessionContext(
 				(firstKeptIdx >= 0 && firstKeptIdx < compactionIdx ? path[firstKeptIdx] : undefined) ??
 				(snapshotIdx >= 0 && snapshotIdx < compactionIdx - 1 ? path[snapshotIdx + 1] : undefined) ??
 				path[compactionIdx + 1];
-			const retainedAt = firstRetained ? new Date(firstRetained.timestamp).getTime() : NaN;
-			if (Number.isFinite(retainedAt)) historyRewriteAt = retainedAt - 1;
+			// The message's own time, not the entry's: an assistant message is
+			// stamped when its stream starts and saved after it ends, so a marker
+			// derived from the entry would postdate that turn and strip its thinking.
+			// Summaries without `exactTail` keep the entry time: thinking created
+			// after them was signed against requests that stripped that turn's.
+			if (firstRetained?.type === "message" && anthropicPayload.exactTail) {
+				historyRewriteAt = firstRetained.message.timestamp - 1;
+			} else if (firstRetained) {
+				const retainedAt = new Date(firstRetained.timestamp).getTime();
+				if (Number.isFinite(retainedAt)) historyRewriteAt = retainedAt - 1;
+			}
 		}
 
 		// Re-attach any archived snapcompact frames so the model can keep
@@ -675,45 +692,40 @@ export function buildSessionContext(
 	// visible reasoning while removing the immutability/invalid-signature hazard. Drop a
 	// turn left with no content. (Live turns only qualify mid-turn: a transcript rebuild
 	// while the tool still executes sees the persisted assistant turn without its result.
-	// Those callers pass `keepDanglingToolCalls` so the in-flight call stays visible as
-	// a pending block instead of vanishing from the chat.)
-	const keepDangling = options?.transcript === true && options.keepDanglingToolCalls === true;
-	if (!keepDangling) {
-		const pairedToolResultIds = new Set<string>();
-		for (const message of messages) {
-			if (message.role === "toolResult") pairedToolResultIds.add(message.toolCallId);
+	// Those callers pass `inFlightToolCallIds` so the in-flight call stays visible as
+	// a pending block instead of vanishing from the chat, while older abandoned calls
+	// are still stripped.)
+	const pairedToolResultIds = new Set<string>(options?.inFlightToolCallIds);
+	for (const message of messages) {
+		if (message.role === "toolResult") pairedToolResultIds.add(message.toolCallId);
+	}
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message.role !== "assistant") continue;
+		let strippedToolCalls = 0;
+		for (const block of message.content) {
+			if (block.type === "toolCall" && !pairedToolResultIds.has(block.id)) strippedToolCalls++;
 		}
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const message = messages[i];
-			if (message.role !== "assistant") continue;
-			let strippedToolCalls = 0;
-			for (const block of message.content) {
-				if (block.type === "toolCall" && !pairedToolResultIds.has(block.id)) strippedToolCalls++;
+		if (strippedToolCalls === 0) continue;
+		const normalized = message.content
+			.filter(
+				block =>
+					!(block.type === "toolCall" && !pairedToolResultIds.has(block.id)) && block.type !== "redactedThinking",
+			)
+			.map(block =>
+				block.type === "thinking" && block.thinkingSignature ? { ...block, thinkingSignature: undefined } : block,
+			);
+		if (normalized.length === 0 && !options?.transcript) {
+			messages.splice(i, 1);
+		} else {
+			const rewritten = { ...message, content: normalized };
+			if (options?.transcript) {
+				// Display transcript: keep the turn (even content-less) and mark
+				// how many calls were dropped so the TUI renders a placeholder
+				// row instead of silently erasing the turn's activity.
+				(rewritten as AgentMessage & StrippedToolCallsMarker).strippedToolCalls = strippedToolCalls;
 			}
-			if (strippedToolCalls === 0) continue;
-			const normalized = message.content
-				.filter(
-					block =>
-						!(block.type === "toolCall" && !pairedToolResultIds.has(block.id)) &&
-						block.type !== "redactedThinking",
-				)
-				.map(block =>
-					block.type === "thinking" && block.thinkingSignature
-						? { ...block, thinkingSignature: undefined }
-						: block,
-				);
-			if (normalized.length === 0 && !options?.transcript) {
-				messages.splice(i, 1);
-			} else {
-				const rewritten = { ...message, content: normalized };
-				if (options?.transcript) {
-					// Display transcript: keep the turn (even content-less) and mark
-					// how many calls were dropped so the TUI renders a placeholder
-					// row instead of silently erasing the turn's activity.
-					(rewritten as AgentMessage & StrippedToolCallsMarker).strippedToolCalls = strippedToolCalls;
-				}
-				messages[i] = rewritten;
-			}
+			messages[i] = rewritten;
 		}
 	}
 

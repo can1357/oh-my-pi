@@ -247,6 +247,68 @@ describe("agentLoop with AgentMessage", () => {
 		expect(nudgeText).toContain('<｜DSML｜invoke name=\\"TOOL_NAME\\">');
 	});
 
+	it("removes doubled-pipe residue from committed thinking and text before retrying", async () => {
+		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
+		const mock = createMockModel({
+			id: deepseekId,
+			responses: [
+				{
+					content: [
+						{ type: "thinking", thinking: "Plan.</｜｜DSML｜｜parameter>" },
+						{ type: "thinking", thinking: "Signed.</｜｜DSML｜｜parameter>", thinkingSignature: "signed" },
+						"Checking the build.</｜｜DSML｜｜invoke>",
+					],
+				},
+				{ content: ["Done."] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const messages = await agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream).result();
+
+		expect((messages[1] as AssistantMessage).content).toEqual([
+			{ type: "thinking", thinking: "Plan." },
+			{ type: "text", text: "Checking the build." },
+		]);
+		expect(messages.map(message => message.role)).toEqual(["user", "assistant", "developer", "assistant"]);
+	});
+
+	it("removes doubled-pipe wrapper residue alongside an executed tool call", async () => {
+		const executions: string[] = [];
+		const context: AgentContext = {
+			systemPrompt: ["You are helpful."],
+			messages: [],
+			tools: [makeEchoTool(executions)],
+		};
+		const mock = createMockModel({
+			id: deepseekId,
+			responses: [
+				{
+					content: [
+						{
+							type: "thinking",
+							thinking: "Ready.</｜｜DSML｜｜parameter>",
+							thinkingSignature: "reasoning_content",
+						},
+						{ type: "toolCall", name: "echo", arguments: { value: "build passed" } },
+						"Reported.</｜｜DSML｜｜ calls>",
+					],
+				},
+				{ content: ["Done."] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const messages = await agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream).result();
+
+		expect(executions).toEqual(["build passed"]);
+		expect((messages[1] as AssistantMessage).content).toEqual([
+			expect.objectContaining({ type: "toolCall", name: "echo" }),
+			{ type: "text", text: "Reported." },
+		]);
+		expect(messages.some(message => message.role === "developer")).toBe(false);
+	});
+
 	it("keeps prose that follows a removed DSML call", async () => {
 		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
 		const mock = createMockModel({
@@ -3271,6 +3333,73 @@ describe("agentLoop with AgentMessage", () => {
 		).toBe(true);
 	});
 
+	it("preserves a cancelled ask result when a background completion was queued while it waited", async () => {
+		const controller = new AbortController();
+		const peeked = Promise.withResolvers<void>();
+		let abortedBeforeCancel = true;
+		const toolSchema = type({});
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "ask",
+			label: "Ask",
+			description: "Waits for the user's answer",
+			parameters: toolSchema,
+			async execute(_toolCallId, _params, signal) {
+				await peeked.promise;
+				const tick = Promise.withResolvers<void>();
+				setImmediate(tick.resolve);
+				await tick.promise;
+				abortedBeforeCancel = signal?.aborted === true;
+				controller.abort();
+				throw new Error("Ask tool was cancelled by the user");
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [{ content: [{ type: "toolCall", id: "tool-1", name: "ask", arguments: {} }] }],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			hasBackgroundCompletions: () => {
+				peeked.resolve();
+				return true;
+			},
+		};
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop(
+			[createUserMessage("start")],
+			context,
+			config,
+			controller.signal,
+			mock.stream,
+		)) {
+			events.push(event);
+		}
+		const result = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
+		);
+		const persistedResult = events.find(
+			(event): event is Extract<AgentEvent, { type: "message_end" }> =>
+				event.type === "message_end" && event.message.role === "toolResult",
+		);
+		expect(abortedBeforeCancel).toBe(false);
+		expect(result?.isError).toBe(true);
+		expect(result && toolResultText(result.result)).toBe("Ask tool was cancelled by the user");
+		expect(result?.result.details).not.toHaveProperty("__interrupted");
+		expect(persistedResult?.message.role === "toolResult" && toolResultText(persistedResult.message)).toBe(
+			"Ask tool was cancelled by the user",
+		);
+		expect(events.filter(event => event.type === "tool_execution_end")).toHaveLength(1);
+		expect(
+			events.some(
+				event =>
+					event.type === "message_end" &&
+					event.message.role === "assistant" &&
+					event.message.stopReason === "aborted",
+			),
+		).toBe(true);
+	});
+
 	it("leaves the cooperative steering signal down for a queued background completion", async () => {
 		const toolSchema = type({});
 		let drained = false;
@@ -3341,6 +3470,132 @@ describe("agentLoop with AgentMessage", () => {
 		expect(
 			events.some(
 				e => e.type === "message_start" && e.message.role === "user" && e.message.content === "job bg_9 completed",
+			),
+		).toBe(true);
+	});
+
+	it("cuts an interruptible wait short for a queued aside and names the aside as the cause", async () => {
+		const toolSchema = type({});
+		let waiting = false;
+		let drained = false;
+		const note = createUserMessage("queued aside body");
+
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Blocks until aborted",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_toolCallId, _params, signal) {
+				waiting = true;
+				const { promise, reject } = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => reject(new Error("wait aborted")), { once: true });
+				await promise;
+				return { content: [{ type: "text", text: "waited" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			hasQueuedAsides: () => waiting && !drained,
+			getAsideMessages: async () => {
+				if (waiting && !drained) {
+					drained = true;
+					return [() => note];
+				}
+				return [];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		const toolEnd = events.find(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
+		const content = toolEnd?.result.content[0];
+		if (content?.type !== "text") throw new Error("tool result must be text");
+		expect(content.text).toContain("Skipped due to a queued aside message");
+		expect(content.text).not.toContain("background completion");
+		expect(
+			events.some(
+				e => e.type === "message_start" && e.message.role === "user" && e.message.content === "queued aside body",
+			),
+		).toBe(true);
+	});
+
+	it("leaves the cooperative steering signal down for a queued aside", async () => {
+		const toolSchema = type({});
+		let drained = false;
+		let steeringSignal: AbortSignal | undefined;
+		let softAbortedDuringRun: boolean | undefined;
+		const peeked = Promise.withResolvers<void>();
+
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "run",
+			label: "Run",
+			description: "Foreground command that backgrounds itself on a steer",
+			parameters: toolSchema,
+			async execute() {
+				await peeked.promise;
+				await new Promise<void>(resolve => setImmediate(resolve));
+				softAbortedDuringRun = steeringSignal?.aborted === true;
+				return { content: [{ type: "text", text: "ran inline" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "run", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			getToolContext: toolCall => {
+				steeringSignal = toolCall?.steeringSignal;
+				return { toolCall } as AgentToolContext;
+			},
+			hasQueuedAsides: () => {
+				peeked.resolve();
+				return !drained;
+			},
+			getAsideMessages: async () => {
+				if (drained) return [];
+				drained = true;
+				return [() => createUserMessage("aside at boundary")];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		expect(softAbortedDuringRun).toBe(false);
+		const toolEnd = events.find(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
+		const content = toolEnd?.result.content[0];
+		if (content?.type !== "text") throw new Error("tool result must be text");
+		expect(content.text).toBe("ran inline");
+		expect(
+			events.some(
+				e => e.type === "message_start" && e.message.role === "user" && e.message.content === "aside at boundary",
 			),
 		).toBe(true);
 	});

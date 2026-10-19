@@ -4,6 +4,10 @@ provider "opencode-go" {
 	default-model "kimi-k2.7-code"
 	env "OPENCODE_API_KEY"
 	dynamic-models-authoritative #true
+	// Replaces the provider check that disabled forced tool choice on Responses.
+	on-api "openai-responses" {
+		supports-forced-tool-choice #false
+	}
 
 	// The Flash lanes accept images despite their IDs lacking a vision suffix;
 	// verified against the gateway (unguessable pixel-rendered text read back
@@ -14,6 +18,37 @@ provider "opencode-go" {
 	models "deepseek-flash" "deepseek-v4.1-flash" {
 		input-modalities "text" "image"
 		strip-image-input #false
+	}
+	// residue: the ids-only Go roster lists this bare V4.1 Flash alias with no
+	// price, limits or reasoning flag, and neither models.dev nor the bundle has
+	// a row to hydrate it from (#15357). Mirror the gateway's own
+	// `deepseek-v4.1-flash` row; `cost-fallback` yields to any price discovery
+	// reports later.
+	models "deepseek-flash" {
+		thinking-upgrade-neutral #true
+		cost-fallback {
+			input 0.15
+			output 0.6
+			cache-read 0.003
+			cache-write 0.0
+		}
+		limits-patch {
+			context-window 1000000
+			max-tokens 384000
+		}
+	}
+	// Live Go discovery lists Argon without capabilities; its native Gemini
+	// endpoint requires a thinking level and accepts LOW, MEDIUM, or HIGH.
+	models "gemini-4-argon-contributor" {
+		thinking-upgrade-neutral #true
+		thinking-mode "google-level"
+		thinking-efforts "low" "medium" "high"
+		thinking-requires-effort #true
+		input-modalities "text" "image"
+		limits-patch {
+			context-window 1048576
+			max-tokens 65536
+		}
 	}
 	// Replaces the OpenCode reasoning-model whenThinking fallback object.
 	when-thinking {

@@ -46,7 +46,7 @@ export function createTurndown(): TurndownService {
 			let prefix = `${options.bulletListMarker} `;
 			if (parent?.nodeName === "OL") {
 				const start = parent.getAttribute("start");
-				const index = Array.prototype.indexOf.call(parent.children, node);
+				const index = node.elementIndex ?? Array.prototype.indexOf.call(parent.children, node);
 				prefix = `${(start ? Number(start) : 1) + index}. `;
 			}
 			return prefix + body + (node.nextSibling ? "\n" : "");

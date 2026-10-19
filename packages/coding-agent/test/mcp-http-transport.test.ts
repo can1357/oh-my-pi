@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
+import { analyzeAuthError } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 import { postmortem } from "@oh-my-pi/pi-utils";
 
@@ -101,6 +102,47 @@ describe("MCP Streamable HTTP initialization", () => {
 
 		expect(requests).toEqual(["initialize", "notifications/initialized", "GET"]);
 		await connection.transport.close();
+	});
+
+	it("aborts a stalled GET SSE listener start on the caller signal when timeouts are disabled", async () => {
+		const listenerStarted = Promise.withResolvers<void>();
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method === "GET") {
+					listenerStarted.resolve();
+					// Never answers: with timeouts disabled only the caller signal can end the handshake.
+					return Promise.withResolvers<Response>().promise;
+				}
+				if (req.method === "DELETE") return new Response(null, { status: 204 });
+				const body = (await req.json()) as { id?: string | number; method: string };
+				if (body.method === "initialize") {
+					const response = {
+						jsonrpc: "2.0",
+						id: body.id,
+						result: {
+							protocolVersion: "2025-11-25",
+							capabilities: {},
+							serverInfo: { name: "stalled-listener", version: "1.0.0" },
+						},
+					};
+					return new Response(JSON.stringify(response), {
+						headers: { "Content-Type": "application/json", "Mcp-Session-Id": "stalled-listener" },
+					});
+				}
+				return new Response(null, { status: 202 });
+			},
+		});
+
+		const controller = new AbortController();
+		const connection = connectToServer(
+			"stalled-listener",
+			{ type: "http", url: `http://127.0.0.1:${server.port}/mcp`, timeout: 0 },
+			{ signal: controller.signal },
+		);
+		await listenerStarted.promise;
+		controller.abort();
+		await expect(withPendingGuard(connection, "handshake")).rejects.toMatchObject({ name: "AbortError" });
 	});
 });
 
@@ -220,6 +262,30 @@ describe("MCP Streamable HTTP failure diagnostics", () => {
 		expect(error.data?.length).toBeLessThanOrEqual(2_000);
 		expect(error.data).toContain("[redacted]");
 		expect(error.data).not.toContain("server-secret");
+	});
+
+	it("keeps a bare Bearer resource_metadata challenge while redacting echoed credentials", async () => {
+		const metadataUrl = "https://auth.example.test/prm/probe";
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				return new Response("rejected Authorization: Bearer server-secret", {
+					status: 401,
+					headers: { "WWW-Authenticate": `Bearer resource_metadata="${metadataUrl}"` },
+				});
+			},
+		});
+		const transport = await connectedTransport();
+		const error = await transport.request("initialize").then(
+			() => undefined,
+			reason => reason,
+		);
+		if (!(error instanceof MCPTransportError)) throw error;
+
+		expect(error.message).not.toContain("server-secret");
+		const auth = analyzeAuthError(error, `http://127.0.0.1:${server.port}/mcp`);
+		expect(auth.requiresAuth).toBe(true);
+		expect(auth.resourceMetadataUrl).toBe(metadataUrl);
 	});
 });
 

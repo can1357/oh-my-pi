@@ -1,12 +1,15 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { KeybindingsManager } from "../src/app-keybindings";
 import { MoveOverlay, type MoveOverlayResult } from "../src/overlays/move-overlay";
+import { AnnotationOverlay } from "../src/overlays/annotation-overlay";
+import { AgentTranscriptViewer, type AgentTranscriptViewerDeps } from "../src/overlays/agent-transcript-viewer";
 import { BtwHistoryPanel } from "../src/overlays/btw-history-panel";
 import type { BtwHistoryRecord } from "../src/overlays/btw-history";
 import { CodexResetFireworksController } from "../src/overlays/codex-reset-fireworks";
-import type { Component, OverlayHandle } from "../src/index";
-import type { NativeChild, NativeNode } from "../src/native/node";
+import { type Component, Input, type OverlayHandle, type TUI } from "../src/index";
+import type { NativeChild, NativeNode, NativeUiEvent } from "../src/native/node";
 import { setNativeRendering } from "../src/native/state";
-import { initTheme } from "../src/theme/theme";
+import { initTheme, theme } from "../src/theme/theme";
 
 beforeAll(async () => {
 	await initTheme();
@@ -32,6 +35,9 @@ function findNode(root: NativeNode, predicate: (node: NativeNode) => boolean): N
 	return undefined;
 }
 
+/** The top-right `esc` / Close click, as the native backend delivers it. */
+const CLOSE_CLICK: NativeUiEvent = { type: "action", key: "esc-close", act: "close", mods: [] };
+
 function listOf(root: NativeNode): NativeNode & { k: "list" } {
 	const list = findNode(root, node => node.k === "list");
 	if (list?.k !== "list") throw new Error("no list described");
@@ -56,6 +62,86 @@ describe("MoveOverlay native events", () => {
 
 		overlay.handleNativeEvent({ type: "activate", key: "results", item: "/work/beta" });
 		expect(results).toEqual([{ directory: "/work/beta" }]);
+	});
+
+	it("Accept fills the field with the highlighted folder, Confirm moves there, Cancel resolves nothing", () => {
+		const results: (MoveOverlayResult | undefined)[] = [];
+		// Like the real source, suggestions narrow to the typed path.
+		const overlay = new MoveOverlay("/work", result => results.push(result), {
+			search: prefix => entries.filter(entry => entry.value.startsWith(prefix)),
+		});
+		overlay.handleNativeEvent({ type: "select", key: "results", item: "/work/gamma" });
+		overlay.handleNativeEvent({ type: "action", key: "actions/accept", act: "accept", mods: [] });
+		expect(results).toEqual([]);
+		// Accept filled the field, so the suggestions narrowed to the accepted folder.
+		expect(listOf(overlay.describe()).c?.map(child => (isNode(child) ? child.key : undefined))).toEqual([
+			"/work/gamma",
+		]);
+		overlay.handleNativeEvent({ type: "action", key: "actions/confirm", act: "confirm", mods: [] });
+		expect(results).toEqual([{ directory: "/work/gamma" }]);
+
+		const cancelled: (MoveOverlayResult | undefined)[] = [];
+		const other = new MoveOverlay("/work", result => cancelled.push(result), { search: () => entries });
+		other.handleNativeEvent({ type: "action", key: "actions/cancel", act: "cancel", mods: [] });
+		expect(cancelled).toEqual([undefined]);
+	});
+});
+
+describe("AnnotationOverlay native esc", () => {
+	it("drops a note draft first, then closes the review without a result", () => {
+		const onComplete = vi.fn();
+		const tui = { terminal: { rows: 40, columns: 100 }, requestRender: () => {} } as unknown as TUI;
+		const overlay = new AnnotationOverlay(
+			tui,
+			theme,
+			KeybindingsManager.inMemory({ "tui.select.cancel": "escape" }),
+			{ id: "s", kind: "prompt", label: "prompt", text: "one\ntwo" },
+			{ onComplete },
+		);
+		overlay.handleInput("A");
+		overlay.handleInput("x");
+		overlay.handleNativeEvent(CLOSE_CLICK);
+		expect(onComplete).not.toHaveBeenCalled();
+		expect(overlay.getTextAnnotations()).toEqual([]);
+		overlay.handleNativeEvent(CLOSE_CLICK);
+		expect(onComplete).toHaveBeenCalledWith(undefined);
+	});
+});
+
+describe("AgentTranscriptViewer native esc", () => {
+	it("clears a typed draft first, then closes the viewer", () => {
+		const onClose = vi.fn();
+		const missing = (): never => {
+			throw Object.assign(new Error("missing"), { code: "ENOENT" });
+		};
+		const deps = {
+			agentId: "a1",
+			transcript: {
+				sessionFile: () => undefined,
+				fs: { openSync: missing, closeSync: missing, readSync: missing, readFileSync: missing, statSync: missing },
+				parseEntries: () => [],
+			},
+			registry: { get: () => ({ id: "a1", kind: "task", status: "running" }) },
+			lifecycle: () => ({}),
+			ui: { terminal: { rows: 40, columns: 100 }, requestRender: () => {} },
+			cwd: "/",
+			expandKeys: ["ctrl+o"],
+			hubKeys: [],
+			requestRender: () => {},
+			onClose,
+			onHubClose: () => {},
+		} as unknown as AgentTranscriptViewerDeps;
+		const viewer = new AgentTranscriptViewer(deps);
+		try {
+			viewer.handleInput("h");
+			viewer.handleInput("i");
+			viewer.handleNativeEvent(CLOSE_CLICK);
+			expect(onClose).not.toHaveBeenCalled();
+			viewer.handleNativeEvent(CLOSE_CLICK);
+			expect(onClose).toHaveBeenCalledTimes(1);
+		} finally {
+			viewer.dispose();
+		}
 	});
 });
 
@@ -140,6 +226,91 @@ describe("BtwHistoryPanel native events", () => {
 		// Tern reports no wheel scroll: following every delta would pull a reader back down.
 		history.update([{ ...records[0]!, answer: "answer to first question, longer now" }]);
 		expect(details()?.scroll).toEqual({ by: "end", n: 1 });
+	});
+
+	it("forwards answer scroll keys while composing a follow-up, keeping the draft", () => {
+		const history = new BtwHistoryPanel({
+			records: [record("a", "first question")],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			canFollowUp: () => true,
+			onFollowUp: async () => true,
+			requestRender: () => {},
+			getHeight: () => 30,
+		});
+		const find = (key: string) => findNode(history.describe(), node => node.key === key);
+		history.handleInput("f");
+		history.pasteText("draft");
+		history.handleInput("\x1b[5~");
+		expect(find("details")?.scroll?.by).toBe("page-up");
+		history.handleInput("\x1b[A");
+		expect(find("details")?.scroll?.by).toBe("line-up");
+		const input = find("composer")?.c?.[0];
+		expect(input instanceof Input ? input.getValue() : undefined).toBe("draft");
+	});
+
+	it("routes the footer buttons to the same paths as their keys", async () => {
+		const onCopy = vi.fn();
+		const onFollowUp = vi.fn(async () => true);
+		// The accepted follow-up closes the composer and renders once more.
+		const sent = Promise.withResolvers<void>();
+		const history: BtwHistoryPanel = new BtwHistoryPanel({
+			records: [record("a", "first question"), record("b", "second question")],
+			onClose: () => {},
+			onCopy,
+			onCancel: () => {},
+			canFollowUp: () => true,
+			onFollowUp,
+			requestRender: () => {
+				if (onFollowUp.mock.calls.length > 0 && !findNode(history.describe(), node => node.key === "composer")) {
+					sent.resolve();
+				}
+			},
+			getHeight: () => 30,
+		});
+		const click = (act: string): void =>
+			history.handleNativeEvent({ type: "action", key: `actions/${act}`, act, mods: [] });
+		// Click the act the rendered button carries: `copy` would be the terminal-local
+		// action, which copies the button's own label and never reaches the panel.
+		const copyAct = findNode(
+			history.describe(),
+			node => node.p?.role === "omp.btn" && String(node.p?.title).startsWith("Copy answer"),
+		)?.p?.actions?.click;
+		expect(copyAct).toBeDefined();
+		expect(copyAct).not.toBe("copy");
+		click(copyAct!);
+		expect(onCopy).toHaveBeenCalledWith(expect.objectContaining({ id: "a" }));
+		click("follow-up");
+		expect(findNode(history.describe(), node => node.key === "composer")).toBeDefined();
+		click("discard");
+		expect(findNode(history.describe(), node => node.key === "composer")).toBeUndefined();
+		click("follow-up");
+		history.handleInput("w");
+		history.handleInput("hy?");
+		click("send");
+		await sent.promise;
+		expect(onFollowUp).toHaveBeenCalledWith(expect.objectContaining({ id: "a" }), "why?", expect.any(AbortSignal));
+	});
+
+	it("stops a running answer from its footer button and sizes the sheet to what it lists", () => {
+		const onCancel = vi.fn();
+		const running: BtwHistoryRecord = { ...record("a", "still going"), status: "running" };
+		const history = new BtwHistoryPanel({
+			records: [running],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel,
+			requestRender: () => {},
+			getHeight: () => 30,
+			escapeHides: true,
+		});
+		expect(history.nativeOverlay.size).toBe("lg");
+		history.handleNativeEvent({ type: "action", key: "actions/stop", act: "stop", mods: [] });
+		expect(onCancel).toHaveBeenCalledWith(running);
+		history.update([]);
+		expect(history.nativeOverlay.size).toBe("md");
+		expect(findNode(history.describe(), node => node.key === "empty")).toBeDefined();
 	});
 
 	it("gives a lone record's answer the arrow keys in text mode, with no pane switch to offer", () => {

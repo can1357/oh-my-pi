@@ -5,6 +5,7 @@ import {
 	type AgentTool,
 	AppendOnlyContextManager,
 	type StreamFn,
+	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import {
 	type Api,
@@ -35,6 +36,7 @@ import {
 import { RegisteredToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
+import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/memory-backend/recall-entry";
 import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { type MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { createAgentSession, type ExtensionContext, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -44,6 +46,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -1242,7 +1245,7 @@ describe("AgentSession message pipeline", () => {
 						...options,
 						apiKey: "test-key",
 						fetch: async (_url, init) => {
-							bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+							bodies.push(JSON.parse(requestBodyText(init) ?? "{}") as Record<string, unknown>);
 							// Exercise the real encoder but stop at the HTTP boundary, without inference.
 							return new Response(JSON.stringify({ error: { message: "Request captured" } }), { status: 400 });
 						},
@@ -1260,7 +1263,6 @@ describe("AgentSession message pipeline", () => {
 	);
 
 	it.each([
-		["Codex", getBundledModel("openai-codex", "gpt-5.5")],
 		["Antigravity fixed-profile transport", getBundledModel("google-antigravity", "claude-sonnet-4-6")],
 		...(["cursor-agent", "gitlab-duo-agent"] as const).map(
 			api =>
@@ -1269,15 +1271,6 @@ describe("AgentSession message pipeline", () => {
 					buildModel({ ...getBundledModel("openai", "gpt-4o"), api, provider: "custom", compat: undefined }),
 				] as const,
 		),
-		[
-			"custom Codex route",
-			buildModel({
-				...getBundledModel("openai-codex", "gpt-5.5"),
-				provider: "custom",
-				id: "opaque-model",
-				omitMaxOutputTokens: false,
-			}),
-		],
 		[
 			"Ollama Cloud",
 			buildModel({
@@ -1385,6 +1378,105 @@ describe("AgentSession message pipeline", () => {
 		await turn;
 		expect(capturedOptions).toMatchObject({ maxTokens: 32, disableReasoning: true });
 	});
+
+	it.each([
+		["adaptive thinking", "anthropic-adaptive", ThinkingLevel.Medium, true],
+		["budget thinking while thinking", "budget", ThinkingLevel.Medium, false],
+		["budget thinking while off", "budget", ThinkingLevel.Off, true],
+	] as const)(
+		"reports a side-turn cap on %s as request-preserving exactly when it leaves reasoning unchanged",
+		async (_label, mode, level, preserves) => {
+			const captured: (SimpleStreamOptions | undefined)[] = [];
+			const model = buildModel({
+				...getBundledModel("anthropic", "claude-haiku-4-5-20251001"),
+				thinking: { mode, efforts: [Effort.Medium] },
+			});
+			const session = new AgentSession({
+				agent: new Agent({ initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [] } }),
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: createModelRegistryStub() as never,
+				sideStreamFn: (_model, _context, options) => {
+					captured.push(options);
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						const message = createAssistantMessage("answer");
+						stream.push({ type: "text_delta", contentIndex: 0, delta: "answer", partial: message });
+						stream.push({ type: "done", reason: "stop", message });
+					});
+					return stream;
+				},
+			});
+			sessions.push(session);
+			session.setThinkingLevel(level);
+
+			expect(session.ephemeralMaxTokensPreservesRequest()).toBe(preserves);
+			await session.runEphemeralTurn({ promptText: "Question?" });
+			await session.runEphemeralTurn({ promptText: "Question?", maxTokens: 32 });
+			const [uncapped, capped] = captured;
+			expect(capped?.reasoning).toBe(uncapped?.reasoning);
+			expect(capped?.disableReasoning === uncapped?.disableReasoning).toBe(preserves);
+		},
+	);
+
+	it.each([
+		["a per-message-effort model with a recorded effort", "claude-sonnet-5-5", true, "low"],
+		["a per-message-effort model without a recorded effort", "claude-sonnet-5-5", false, undefined],
+		["a model without per-message effort", "claude-sonnet-4-6", false, undefined],
+	] as const)(
+		"minimizes side-turn effort on %s only where the cached prefix and top-level reasoning stay put",
+		async (_label, id, recorded, controlEffort) => {
+			const model = getBundledModel("anthropic", id);
+			const reply = {
+				...createAssistantMessage("Fixed."),
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				...(recorded ? { requestControls: { messageIndex: 1, effort: { topLevel: "high", tail: "high" } } } : {}),
+			} as AgentMessage;
+			const bodies: Record<string, unknown>[] = [];
+			const session = new AgentSession({
+				agent: new Agent({
+					initialState: {
+						model,
+						systemPrompt: ["system prompt"],
+						messages: [{ role: "user", content: "fix it", timestamp: 1 }, reply],
+						tools: [],
+					},
+				}),
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: createModelRegistryStub() as never,
+				sideStreamFn: (target, context, options) =>
+					streamSimple(target, context, {
+						...options,
+						apiKey: "test-key",
+						fetch: async (_url, init) => {
+							bodies.push(JSON.parse(requestBodyText(init) ?? "{}") as Record<string, unknown>);
+							return new Response(JSON.stringify({ error: { message: "Request captured" } }), { status: 400 });
+						},
+					}),
+			});
+			sessions.push(session);
+			session.setThinkingLevel(ThinkingLevel.High);
+
+			await expect(session.runEphemeralTurn({ promptText: "Predict." })).rejects.toThrow();
+			await expect(session.runEphemeralTurn({ promptText: "Predict.", minimizeEffort: true })).rejects.toThrow();
+			const [plain, minimized] = bodies as [Record<string, unknown>, Record<string, unknown>];
+			const history = (body: Record<string, unknown>) =>
+				(body.messages as { role: string; content: unknown }[]).slice(0, 2).map(({ role, content }) => ({
+					role,
+					content: JSON.stringify(content).replaceAll(',"cache_control":{"type":"ephemeral"}', ""),
+				}));
+			// Cache keys: tools, system, thinking, top-level effort, and the history before the side prompt.
+			for (const key of ["tools", "system", "thinking", "output_config"]) expect(minimized[key]).toEqual(plain[key]);
+			expect(history(minimized)).toEqual(history(plain));
+			const controls = (minimized.messages as { role: string; output_config?: { effort: string } }[]).filter(
+				message => message.role === "system",
+			);
+			expect(controls.map(message => message.output_config?.effort)).toEqual(controlEffort ? [controlEffort] : []);
+		},
+	);
 
 	it("rejects a tool-free Bedrock side turn with historical tool blocks before inference", async () => {
 		const agent = new Agent({
@@ -1979,6 +2071,80 @@ describe("AgentSession message pipeline", () => {
 		expect(firstSystemPrompt).toBeDefined();
 		expect(firstSystemPrompt!.join("\n")).toContain(injected);
 		expect(contexts[1]!.systemPrompt).toEqual(firstSystemPrompt);
+	});
+
+	it("delivers a memory note after its user message, persisted once and replayed in the prefix", async () => {
+		const api = "test-memory-note-delivery";
+		const contexts: Context[] = [];
+		const notice = {
+			content: "<system-reminder>A recalled memory changed.</system-reminder>",
+			details: { scope: "test", memories: [{ id: "m1", text: "The deploy host is beta-9." }] },
+		};
+		let recalled = false;
+		const fakeBackend: MemoryBackend = {
+			id: "mnemopi",
+			async start() {},
+			async buildDeveloperInstructions() {
+				return undefined;
+			},
+			async clear() {},
+			async enqueue() {},
+			async beforeAgentStartPrompt() {
+				if (recalled) return undefined;
+				return {
+					notice,
+					commit: () => {
+						recalled = true;
+						return true;
+					},
+				};
+			},
+		};
+		vi.spyOn(memoryBackend, "resolveMemoryBackend").mockResolvedValue(fakeBackend);
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "local-model",
+			name: "Local Model",
+			api,
+			provider: "ollama",
+			baseUrl: "http://127.0.0.1:11434",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["base"], messages: [], tools: [] }, convertToLlm }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+		});
+		sessions.push(session);
+
+		await session.sendUserMessage("first");
+		await session.sendUserMessage("second");
+
+		expect(contexts).toHaveLength(2);
+		const [first, second] = contexts as [Context, Context];
+		expect(first.messages).toMatchObject([
+			{ role: "user" },
+			{ role: "developer", content: [{ type: "text", text: notice.content }] },
+		]);
+		expect(second.messages.slice(0, first.messages.length)).toEqual(first.messages);
+		const notes = session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message" && entry.customType === MEMORY_RECALL_CHANGES_MESSAGE_TYPE);
+		expect(notes).toMatchObject([{ content: notice.content, details: notice.details, display: false }]);
 	});
 
 	it("preserves append-only prefixes in subagent sessions when context handlers rewrite prior turns", async () => {

@@ -62,7 +62,7 @@ function harness(options: { reasoning?: boolean; efforts?: readonly Effort[]; ce
 		getAvailableThinkingLevels: () => controls.getAvailableThinkingLevels(),
 		getAvailableEffortSelectors: () => controls.getAvailableEffortSelectors(),
 	} as unknown as AgentSession;
-	const tuiRuntime = { ctx: { session } } as unknown as TuiSlashCommandRuntime;
+	const tuiRuntime = { ctx: { session, viewSession: session } } as unknown as TuiSlashCommandRuntime;
 	return {
 		outputs,
 		runtime: {

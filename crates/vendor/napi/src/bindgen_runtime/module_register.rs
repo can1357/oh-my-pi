@@ -125,7 +125,6 @@ static FIRST_MODULE_REGISTERED: AtomicBool = AtomicBool::new(false);
 /// registration keeps the pairs unique; `thread_cleanup` ignores the value.
 #[cfg(all(
   any(feature = "tokio_rt", feature = "async-runtime"),
-  not(target_family = "wasm"),
   not(feature = "noop")
 ))]
 static ENV_CLEANUP_HOOK_COOKIE: AtomicUsize = AtomicUsize::new(1);
@@ -387,13 +386,11 @@ unsafe extern "C" fn napi_register_wasm_v1(
 /// `napi_call_threadsafe_function` reports `napi_closing`, a settle from a task that is still
 /// running traps the instance, and the promise it owned can never settle.
 ///
-/// Native targets get this ordering from Node for free — `napi_register_module_v1` registers
-/// `thread_cleanup` with `napi_add_env_cleanup_hook`, and Node runs cleanup hooks before it
-/// finalizes threadsafe functions. wasm has no equivalent: the only teardown callback there is
-/// the `exports` object finalizer that `napi_register_module_v1` installs with `napi_wrap`,
-/// which runs deep inside the environment teardown, long after JavaScript calls are disabled.
-/// This export is that missing pre-teardown barrier, and it performs exactly the same teardown
-/// as the finalizer — only early enough to be useful.
+/// On every target `napi_register_module_v1` registers `thread_cleanup` with
+/// `napi_add_env_cleanup_hook`. Node runs that hook while the env can still call into
+/// JavaScript; emnapi runs it from `Context.destroy()`, after JavaScript calls are disabled.
+/// This export is the pre-teardown barrier wasm lacks, and it performs the same teardown as the
+/// hook, only early enough to be useful.
 ///
 /// # Ordering this guarantees
 ///
@@ -457,8 +454,8 @@ unsafe extern "C" fn napi_register_wasm_v1(
 /// constructed and a post-barrier call would otherwise construct one. See
 /// `tokio_runtime::refuse_tokio_helper_during_wasm_env_disposal`.
 ///
-/// Repeated calls are harmless — the loaders guard against them anyway, and the finalizer that
-/// still fires later performs the same idempotent teardown.
+/// Repeated calls are harmless — the loaders guard against them anyway, and the env cleanup hook
+/// that `Context.destroy()` runs later performs the same idempotent teardown.
 ///
 /// # The two-phase form
 ///
@@ -545,7 +542,12 @@ extern "C" fn napi_prepare_wasm_env_cleanup_begin() -> u32 {
 ///
 /// The poll for the window between the two phases. Never blocks and is safe to call at any
 /// time, including before any `begin` and after `finish` — it then answers for the runtime as it
-/// stands. It reports the *runtime's* work, which is a different question from
+/// stands. Never blocking includes locks: the backend answers 1 while a lock its answer is read
+/// under is held elsewhere (see
+/// [`AsyncRuntime::shutdown_work_pending`](crate::bindgen_prelude::AsyncRuntime::shutdown_work_pending)),
+/// so a worker that trapped while holding one costs the loader another turn, in which it sees
+/// the crash, instead of parking the JavaScript thread for good. It reports the *runtime's*
+/// work, which is a different question from
 /// [`napi_wasm_env_cleanup_pending`] (settlements already queued for dispatch) and from
 /// [`napi_wasm_async_work_pending`] (`napi_async_work` items); a full disposal drains all three.
 #[cfg(all(target_family = "wasm", not(feature = "noop")))]
@@ -565,6 +567,44 @@ extern "C" fn napi_wasm_runtime_work_pending() -> u32 {
   {
     0
   }
+}
+
+/// Raises the flag the JavaScript thread's cleanup waits check, on `wasm32-wasip1-threads`: a
+/// wasm thread of this instance died.
+///
+/// A pool thread that traps unwinds nothing, so a lock it held stays held and work it was
+/// running never retires. [`napi_prepare_wasm_env_cleanup_begin`],
+/// [`napi_prepare_wasm_env_cleanup_finish`] and [`napi_prepare_wasm_env_cleanup`] would then
+/// wait on the JavaScript thread for good, where the loader cannot see the crash. With the flag
+/// up, the `napi-async-runtime` backend's shutdown waits there (they wait in short slices) trap
+/// instead, and the loader turns the throw into its crash rejection.
+///
+/// The generated worker raises the flag through [`napi_wasm_thread_crash_flag_address`] and
+/// calls this only when it has no view of that word but has an instance. Either way it does so
+/// after it raised the loader's own crash flag, so the loader sees that flag once the trap
+/// reaches it.
+///
+/// Safe to call from the thread that just trapped: it stores one atomic, with no lock and no
+/// allocation.
+#[cfg(all(target_family = "wasm", napi_wasi_threads, not(feature = "noop")))]
+#[no_mangle]
+extern "C" fn napi_wasm_thread_crashed() {
+  napi_sys::wasi_thread_crash::mark_thread_crashed();
+}
+
+/// The address in linear memory of the flag [`napi_wasm_thread_crashed`] raises: one 4-byte,
+/// 4-aligned word, 0 until a wasm thread of this instance dies.
+///
+/// The loader reads it once, on the JavaScript thread, and gives each pool worker an
+/// `Int32Array` over that word of the shared memory. A worker raises the flag with
+/// `Atomics.store`, which needs no instance, so a worker that fails while it loads — after the
+/// thread spawn that created it already returned — raises it too; the export above needs the
+/// instance that worker never got. The loader and worker feature-detect this export, so an addon
+/// built against an older napi keeps the unbounded waits.
+#[cfg(all(target_family = "wasm", napi_wasi_threads, not(feature = "noop")))]
+#[no_mangle]
+extern "C" fn napi_wasm_thread_crash_flag_address() -> *const std::sync::atomic::AtomicI32 {
+  napi_sys::wasi_thread_crash::thread_crash_flag()
 }
 
 /// Phase 2 of [`napi_prepare_wasm_env_cleanup`]: join what
@@ -1150,7 +1190,6 @@ pub unsafe extern "C" fn napi_register_module_v1(
     #[cfg(any(feature = "tokio_rt", feature = "async-runtime"))]
     {
       crate::tokio_runtime::start_async_runtime();
-      #[cfg(not(target_family = "wasm"))]
       {
         // Register a cleanup hook for EVERY registration, not just the first one.
         // `MODULE_COUNT` is incremented on every `napi_register_module_v1` call and
@@ -1165,36 +1204,25 @@ pub unsafe extern "C" fn napi_register_module_v1(
         // Each registration gets a distinct cookie so repeated loads of the same
         // addon into one env (`unload.spec.js`) don't collide on Node's unique
         // `(fn, arg)` assertion; the cookie is opaque and never dereferenced.
+        //
+        // wasm uses the hook too (emnapi runs it from `Context.destroy()`), never a
+        // finalizer on `exports`: emnapi's finalizer registry would keep the whole
+        // instance alive through such a finalizer, so a dropped instance is never
+        // collected.
         let cleanup_cookie =
           ENV_CLEANUP_HOOK_COOKIE.fetch_add(1, Ordering::Relaxed) as *mut std::ffi::c_void;
-        check_status_or_throw!(
-          env,
-          unsafe { sys::napi_add_env_cleanup_hook(env, Some(thread_cleanup), cleanup_cookie) },
-          "Failed to add env cleanup hook"
-        );
+        #[cfg(not(target_family = "wasm"))]
+        let status =
+          unsafe { sys::napi_add_env_cleanup_hook(env, Some(thread_cleanup), cleanup_cookie) };
+        // `sys::` would import the symbol from the `env` wasm module; emnapi provides it
+        // under `napi` (see `crate::napi_add_env_cleanup_hook`).
+        #[cfg(target_family = "wasm")]
+        let status =
+          unsafe { crate::napi_add_env_cleanup_hook(env, Some(thread_cleanup), cleanup_cookie) };
+        check_status_or_throw!(env, status, "Failed to add env cleanup hook");
       }
     }
   }
-
-  #[cfg(all(
-    any(feature = "tokio_rt", feature = "async-runtime"),
-    feature = "napi4",
-    target_family = "wasm"
-  ))]
-  check_status_or_throw!(
-    env,
-    unsafe {
-      sys::napi_wrap(
-        env,
-        exports,
-        std::ptr::null_mut(),
-        Some(thread_cleanup),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-      )
-    },
-    "Failed to add remove thread id cleanup hook"
-  );
 
   FIRST_MODULE_REGISTERED.store(true, Ordering::SeqCst);
   exports
@@ -1290,31 +1318,10 @@ fn create_custom_gc(env: sys::napi_env) {
 
 #[cfg(all(
   not(feature = "noop"),
-  all(
-    any(feature = "tokio_rt", feature = "async-runtime"),
-    feature = "napi4"
-  ),
-  not(target_family = "wasm")
+  any(feature = "tokio_rt", feature = "async-runtime"),
+  feature = "napi4"
 ))]
 unsafe extern "C" fn thread_cleanup(_data: *mut std::ffi::c_void) {
-  if MODULE_COUNT.fetch_sub(1, Ordering::Relaxed) == 1 {
-    crate::tokio_runtime::shutdown_async_runtime();
-  }
-}
-
-#[cfg(all(
-  not(feature = "noop"),
-  all(
-    any(feature = "tokio_rt", feature = "async-runtime"),
-    feature = "napi4"
-  ),
-  target_family = "wasm"
-))]
-unsafe extern "C" fn thread_cleanup(
-  _env: sys::napi_env,
-  _id: *mut std::ffi::c_void,
-  _data: *mut std::ffi::c_void,
-) {
   if MODULE_COUNT.fetch_sub(1, Ordering::Relaxed) == 1 {
     crate::tokio_runtime::shutdown_async_runtime();
   }

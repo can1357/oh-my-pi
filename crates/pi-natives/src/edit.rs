@@ -44,6 +44,8 @@ use pi_edit::{
 	text::normalize_to_lf,
 };
 
+use crate::memory::{self, Settled, native_work};
+
 fn parse_mode(mode: &str) -> Result<EditMode> {
 	EditMode::parse(mode)
 		.ok_or_else(|| napi::Error::from_reason(format!("Unknown edit mode: {mode}")))
@@ -66,6 +68,10 @@ pub struct EditPolicy {
 	pub allow_fuzzy:          bool,
 	pub fuzzy_threshold:      f64,
 	pub enforce_seen_lines:   bool,
+	/// Narrowest per-line display cap any tool applies, in UTF-8 bytes (0: no
+	/// tool cuts lines). Without recorded read provenance, hashline anchors on
+	/// longer lines are rejected.
+	pub max_columns:          u32,
 	pub block_auto_generated: bool,
 	pub plan_active:          bool,
 	/// Registered internal URL schemes (router spec keys).
@@ -100,6 +106,7 @@ impl EditPolicy {
 			allow_fuzzy:        self.allow_fuzzy,
 			fuzzy_threshold:    self.fuzzy_threshold,
 			enforce_seen_lines: self.enforce_seen_lines,
+			max_columns:        self.max_columns as usize,
 			raw_input:          self.raw_input,
 		})
 	}
@@ -308,8 +315,7 @@ impl EditStore {
 	pub fn head_hash(&self, absolute_path: String) -> Option<String> {
 		self
 			.inner
-			.head(&canonical_key(Path::new(&absolute_path)))
-			.map(|s| s.hash)
+			.head_hash(&canonical_key(Path::new(&absolute_path)))
 	}
 
 	/// Recorded text of `absolutePath` tagged `hash`.
@@ -328,7 +334,7 @@ impl EditStore {
 		self
 			.inner
 			.by_hash(&canonical_key(Path::new(&absolute_path)), &hash)
-			.and_then(|s| s.seen_lines.map(|set| set.into_iter().collect()))
+			.and_then(|s| s.seen_lines.map(|set| set.iter().copied().collect()))
 	}
 
 	#[napi]
@@ -375,7 +381,12 @@ enum ArgOp {
 struct Shared {
 	session:     napi::tokio::sync::Mutex<Session>,
 	queue:       parking_lot::Mutex<Vec<ArgOp>>,
+	/// Stops the preview pump; set by both `close` and `apply`.
 	closed:      AtomicBool,
+	/// Set by `apply` before it waits for the lock. A preview pass that
+	/// observes `closed` must then leave the session alone: it holds the
+	/// arguments the pass already drained, and `apply` releases it itself.
+	applying:    AtomicBool,
 	wake:        flume::Sender<()>,
 	/// Host internal-URL resolver; without one, misses surface as errors.
 	resolve_url: Option<ResolverCallback>,
@@ -385,6 +396,49 @@ impl Shared {
 	fn enqueue(&self, op: ArgOp) {
 		self.queue.lock().push(op);
 		let _ = self.wake.try_send(());
+	}
+
+	/// Drop the session's cached file reads, URL answers, and argument buffer
+	/// once it is closed, so they do not wait for the JS GC to finalize the
+	/// wrapper (nothing reports this native memory to the GC). A closed session
+	/// is never previewed or applied again, so a fresh one is equivalent.
+	fn release(session: &mut Session) {
+		*session = Session::new(session.config().clone(), session.store().clone());
+		memory::released();
+	}
+
+	/// `true` when the pump must stop. Releases the session's buffers only
+	/// when `close` ended it, never while `apply` is about to consume them.
+	fn stop_previewing(&self, session: &mut Session) -> bool {
+		if !self.closed.load(Ordering::Acquire) {
+			return false;
+		}
+		if !self.applying.load(Ordering::Acquire) {
+			Self::release(session);
+		}
+		true
+	}
+
+	/// Stop previews ahead of `apply`, which takes over the session.
+	fn begin_apply(&self) {
+		self.applying.store(true, Ordering::Release);
+		self.closed.store(true, Ordering::Release);
+		let _ = self.wake.try_send(());
+	}
+
+	/// One preview computation under the session lock (blocking pool): the
+	/// batch plus the URLs it missed, or `None` when nothing is pending or the
+	/// session closed meanwhile.
+	fn preview_pass(&self, session: &mut Session) -> Option<(PreviewBatch, Vec<String>)> {
+		self.drain_into(session);
+		if !session.preview_pending() {
+			return None;
+		}
+		let batch = session.preview();
+		if self.stop_previewing(session) {
+			return None;
+		}
+		Some((batch, session.take_unresolved()))
 	}
 
 	/// Apply every queued mutation to the locked session.
@@ -505,6 +559,7 @@ impl EditSession {
 			session: napi::tokio::sync::Mutex::new(Session::new(config, store.inner.clone())),
 			queue: parking_lot::Mutex::new(Vec::new()),
 			closed: AtomicBool::new(false),
+			applying: AtomicBool::new(false),
 			wake,
 			resolve_url,
 		});
@@ -543,8 +598,7 @@ impl EditSession {
 		                      Promise<EditWriteResponse>")]
 		writer: WriterCallback,
 	) -> Result<EditApplyOutcome> {
-		self.shared.closed.store(true, Ordering::Release);
-		let _ = self.shared.wake.try_send(());
+		self.shared.begin_apply();
 		let shared = Arc::clone(&self.shared);
 		let mut session = shared.session.lock().await;
 		shared.drain_into(&mut session);
@@ -575,6 +629,8 @@ impl EditSession {
 			}
 			break outcome;
 		};
+		Shared::release(&mut session);
+		drop(session);
 		Ok(match outcome {
 			Ok(outcome) => EditApplyOutcome {
 				text:     outcome.text,
@@ -610,6 +666,16 @@ impl EditSession {
 	pub fn close(&self) {
 		self.shared.closed.store(true, Ordering::Release);
 		let _ = self.shared.wake.try_send(());
+		// While `apply` runs it owns the buffers and releases them itself. A
+		// busy lock otherwise belongs to a preview pass, which releases on its
+		// way out once it observes `closed`.
+		if self.shared.applying.load(Ordering::Acquire) {
+			return;
+		}
+		if let Ok(mut session) = self.shared.session.try_lock() {
+			self.shared.queue.lock().clear();
+			Shared::release(&mut session);
+		}
 	}
 }
 
@@ -626,6 +692,9 @@ async fn preview_pump(shared: Arc<Shared>, rx: flume::Receiver<()>, on_preview: 
 		let Some(batch) = settled_preview(&shared).await else {
 			continue;
 		};
+		// Held until the delivery below has converted and released the batch
+		// on the JS thread, however this iteration ends.
+		let _settled = Settled::new(());
 		let is_final = !batch.streaming;
 		if shared.closed.load(Ordering::Acquire) {
 			return;
@@ -652,6 +721,9 @@ async fn preview_pump(shared: Arc<Shared>, rx: flume::Receiver<()>, on_preview: 
 /// `None` when nothing is pending, the session closed, or the blocking task
 /// failed.
 async fn settled_preview(shared: &Arc<Shared>) -> Option<PreviewBatch> {
+	// Every pass's batch and misses are freed by the time this returns,
+	// including passes abandoned while a URL resolver ran.
+	let _settled = Settled::new(());
 	let mut resolved = HashSet::new();
 	loop {
 		if shared.closed.load(Ordering::Acquire) {
@@ -659,13 +731,8 @@ async fn settled_preview(shared: &Arc<Shared>) -> Option<PreviewBatch> {
 		}
 		let compute = Arc::clone(shared);
 		let pass = napi::bindgen_prelude::spawn_blocking(move || {
-			let mut session = compute.session.blocking_lock();
-			compute.drain_into(&mut session);
-			if !session.preview_pending() {
-				return None;
-			}
-			let batch = session.preview();
-			Some((batch, session.take_unresolved()))
+			let _work = native_work();
+			compute.preview_pass(&mut compute.session.blocking_lock())
 		})
 		.await;
 		let Ok(Some((batch, mut misses))) = pass else {
@@ -684,6 +751,9 @@ async fn settled_preview(shared: &Arc<Shared>) -> Option<PreviewBatch> {
 			answers.push((url, resolution));
 		}
 		let mut session = shared.session.lock().await;
+		if shared.stop_previewing(&mut session) {
+			return None;
+		}
 		for (url, resolution) in answers {
 			session.provide(url, resolution);
 		}
@@ -725,7 +795,7 @@ pub struct EditInspection {
 pub fn edit_inspect(mode: String, args_json: String) -> Result<EditInspection> {
 	let mode = parse_mode(&mode)?;
 	let snapshot = snapshot_from_text(&args_json, false, true);
-	let engine = pi_edit::modes::engine_for(mode, true, 0.95, false);
+	let engine = pi_edit::modes::engine_for(mode, true, 0.95, false, 0);
 	let inspection = engine.inspect(&snapshot);
 	Ok(EditInspection {
 		paths:    inspection.paths,
@@ -764,8 +834,9 @@ pub fn edit_diff_string(
 	path: Option<String>,
 ) -> EditDiffResult {
 	let output = generate_diff_string(&old_text, &new_text, None, &BlockContextSource {
-		path: path.as_deref(),
-		lang: None,
+		path:      path.as_deref(),
+		lang:      None,
+		streaming: false,
 	});
 	EditDiffResult { diff: output.diff, first_changed_line: output.first_changed_line }
 }
@@ -894,4 +965,70 @@ pub fn hashline_count_ops(input: String) -> Vec<HashlineOpCount> {
 #[napi]
 pub fn notebook_to_editable_text(json: String, display_path: String) -> Result<String> {
 	pi_edit::notebook::notebook_to_editable_text(&json, &display_path).map_err(reason)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn shared_with_finished_patch(cwd: &Path) -> Shared {
+		let config = SessionConfig {
+			mode:               EditMode::ApplyPatch,
+			policy:             PathPolicy {
+				cwd:                  cwd.to_path_buf(),
+				home_dir:             cwd.to_path_buf(),
+				url_schemes:          Vec::new(),
+				url_alias_schemes:    Vec::new(),
+				plan_writable_roots:  Vec::new(),
+				plan_active:          false,
+				block_auto_generated: true,
+			},
+			allow_fuzzy:        true,
+			fuzzy_threshold:    0.95,
+			enforce_seen_lines: false,
+			max_columns:        512,
+			raw_input:          false,
+		};
+		let (wake, _rx) = flume::bounded::<()>(1);
+		let shared = Shared {
+			session: napi::tokio::sync::Mutex::new(Session::new(config, store::EditStore::new())),
+			queue: parking_lot::Mutex::new(Vec::new()),
+			closed: AtomicBool::new(false),
+			applying: AtomicBool::new(false),
+			wake,
+			resolve_url: None,
+		};
+		let args = serde_json::json!({
+			"input": "*** Begin Patch\n*** Add File: pi-edit-session-test.txt\n+hi\n*** End Patch\n",
+		});
+		shared.enqueue(ArgOp::SetArgs(args.to_string()));
+		shared.enqueue(ArgOp::Finish);
+		shared
+	}
+
+	/// `finish()` then `apply()` while the final preview pass holds the lock:
+	/// the pass has drained the queue into the session, so releasing it on
+	/// seeing `closed` would leave `apply` an empty buffer. Fails on the
+	/// single shared `closed` flag.
+	#[test]
+	fn preview_pass_keeps_buffers_when_apply_closed_the_session() {
+		let shared = shared_with_finished_patch(&std::env::temp_dir());
+		let mut session = shared.session.blocking_lock();
+		shared.begin_apply();
+		assert!(shared.preview_pass(&mut session).is_none());
+		assert!(shared.queue.lock().is_empty(), "the pass drained the queue");
+		let batch = session.preview();
+		assert!(!batch.streaming);
+		assert_eq!(batch.files.len(), 1, "{batch:?}");
+	}
+
+	/// A pass that sees `close()` still frees the buffers.
+	#[test]
+	fn preview_pass_releases_buffers_after_close() {
+		let shared = shared_with_finished_patch(&std::env::temp_dir());
+		let mut session = shared.session.blocking_lock();
+		shared.closed.store(true, Ordering::Release);
+		assert!(shared.preview_pass(&mut session).is_none());
+		assert!(session.preview().files.is_empty());
+	}
 }

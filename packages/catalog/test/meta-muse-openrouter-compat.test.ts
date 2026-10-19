@@ -38,5 +38,23 @@ describe("meta muse on openrouter responses: filter reasoning history", () => {
 		const policy = resolveModelPolicy(spec("meta/llama-4-maverick"));
 		expect(policy.identity.family).toBe("llama");
 		expect(policy.compat.filterReasoningHistory).toBe(false);
+		expect(policy.compat.supportsToolChoice).toBe(true);
+	});
+});
+
+/**
+ * OpenRouter forwards its hosted Muse SKUs to Meta's backend, which 400s any
+ * tool_choice but "auto" and hides the reason behind "Provider returned error".
+ * Handoff's cache-first `toolChoice: "none"` must be omitted for those SKUs,
+ * without suppressing the open-weight model's advertised tool controls (#15910).
+ */
+describe("hosted meta muse on openrouter responses: omit tool_choice", () => {
+	it.each(["meta/muse-spark-1.3-contributor", "meta/muse-wonder"])("disables tool_choice for %s", id => {
+		expect(resolveModelPolicy(spec(id)).compat.supportsToolChoice).toBe(false);
+	});
+	it("preserves explicit tool choices for the open-weight Muse Spark model", () => {
+		const policy = resolveModelPolicy(spec("meta/muse-spark-open"));
+		expect(policy.identity.family).toBe("muse-spark");
+		expect(policy.compat.supportsToolChoice).toBe(true);
 	});
 });

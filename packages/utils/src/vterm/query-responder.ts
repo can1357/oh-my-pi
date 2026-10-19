@@ -3,13 +3,14 @@
  */
 export interface TerminalQueryResponderOptions {
 	/**
-	 * Reply to `CSI 6 n` (report cursor position) with the home position. Set to
-	 * `false` when the PTY host answers cursor reports itself: the only `CSI 6 n`
-	 * left on the stream is then the host's own session-start handshake, whose
-	 * reply would be delivered to the supervised program as unsolicited input
-	 * instead of being consumed by the host. Defaults to `true`.
+	 * The PTY host opens the session with its own cursor-position query
+	 * (`CSI 6 n`), which the PTY layer has already answered — ConPTY's
+	 * `PSEUDOCONSOLE_INHERIT_CURSOR` handshake. Leave that first cursor query
+	 * unanswered: the host consumes exactly one report, so a second one would
+	 * reach the program as input it never asked for. Every later cursor query
+	 * is answered. Defaults to `false`.
 	 */
-	cursorPosition?: boolean;
+	hostCursorHandshake?: boolean;
 }
 
 /**
@@ -31,10 +32,11 @@ export interface TerminalQueryResponderOptions {
 export class TerminalQueryResponder {
 	/** Trailing bytes that may be the start of an unfinished query escape. */
 	#residual = "";
-	readonly #cursorPosition: boolean;
+	/** Whether the next cursor query is the host's already-answered session-start handshake. */
+	#hostCursorHandshakePending: boolean;
 
 	constructor(options: TerminalQueryResponderOptions = {}) {
-		this.#cursorPosition = options.cursorPosition ?? true;
+		this.#hostCursorHandshakePending = options.hostCursorHandshake ?? false;
 	}
 
 	/**
@@ -48,7 +50,12 @@ export class TerminalQueryResponder {
 		QUERY.lastIndex = 0;
 		for (let match = QUERY.exec(buffer); match !== null; match = QUERY.exec(buffer)) {
 			lastEnd = match.index + match[0].length;
-			replies += replyFor(match, this.#cursorPosition);
+			const reply = replyFor(match);
+			if (reply === CURSOR_POSITION_REPORT && this.#hostCursorHandshakePending) {
+				this.#hostCursorHandshakePending = false;
+				continue;
+			}
+			replies += reply;
 		}
 		// Keep only a short unmatched trailing escape: a query split across
 		// chunks completes on the next feed, while a long tail is ordinary output
@@ -60,6 +67,9 @@ export class TerminalQueryResponder {
 	}
 }
 
+/** Cursor position report for the home position: there is no screen to locate the cursor on. */
+const CURSOR_POSITION_REPORT = "\x1b[1;1R";
+
 /** Longest query escape we answer, bounding the cross-chunk residual. */
 const MAX_PARTIAL_QUERY = 32;
 
@@ -70,7 +80,7 @@ const MAX_PARTIAL_QUERY = 32;
 const QUERY = /\x1b\[([?>=]?)([0-9;]*)([nc])|\x1b\](10|11);\?(\x07|\x1b\\)/gu;
 
 /** Reply a real xterm-class terminal would send for one matched query. */
-function replyFor(match: RegExpExecArray, cursorPosition: boolean): string {
+function replyFor(match: RegExpExecArray): string {
 	const final = match[3];
 	if (final !== undefined) {
 		const intermediate = match[1];
@@ -82,7 +92,7 @@ function replyFor(match: RegExpExecArray, cursorPosition: boolean): string {
 		}
 		if (intermediate !== "") return ""; // private DSR forms (DECXCPR, appearance) stay unanswered
 		const selector = params.split(";", 1)[0];
-		if (selector === "6") return cursorPosition ? "\x1b[1;1R" : ""; // cursor position: home, there is no screen
+		if (selector === "6") return CURSOR_POSITION_REPORT;
 		if (selector === "5") return "\x1b[0n"; // device status: OK
 		return "";
 	}

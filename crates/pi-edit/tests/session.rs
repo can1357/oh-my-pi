@@ -428,6 +428,7 @@ async fn hashline_rem_streaming_preview_does_not_error_on_invalid_utf8() {
 		allow_fuzzy:        true,
 		fuzzy_threshold:    0.95,
 		enforce_seen_lines: false,
+		max_columns:        512,
 		raw_input:          false,
 	};
 	let mut session = Session::new(config, EditStore::new());

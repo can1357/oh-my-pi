@@ -232,10 +232,10 @@ describe("Factory Droid completions reasoning matrix", () => {
 		expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "answer" }));
 	});
 
-	it.each(["minimax-m3", "mistral-medium-3.5"])(
+	it.each(["minimax-m3", "mistral-medium-3.5", "mistral-large-4"])(
 		"preserves %s reasoning over two tool turns with native implicit effort",
 		async modelId => {
-			const model = modelId === "minimax-m3" ? factoryModel(modelId) : mistralMedium35();
+			const model = factoryModel(modelId);
 			const captured: CapturedRequest[] = [];
 			const messages: Message[] = [{ role: "user", content: "inspect twice", timestamp: 1 }];
 			for (let turn = 0; turn < 3; turn++) {

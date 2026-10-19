@@ -80,6 +80,7 @@ describe("TSP framing", () => {
 		expect(chunks.map(chunk => chunk.params.m)).toEqual([...Array(chunks.length - 1).fill("1"), undefined]);
 		for (const chunk of chunks) {
 			expect(chunk.verb).toBe("f");
+			expect(Object.keys(chunk.params).every(key => key === "c" || key === "m")).toBe(true);
 			expect(encoder.encode(chunk.body).length).toBeLessThanOrEqual(limit);
 			// Each chunk is whole UTF-8: no lone surrogates survive encoding.
 			expect(chunk.body.isWellFormed()).toBe(true);
@@ -87,6 +88,66 @@ describe("TSP framing", () => {
 		}
 		const joined = Buffer.concat(chunks.map(chunk => encoder.encode(chunk.body)));
 		expect(joined.equals(Buffer.from(encoder.encode(body)))).toBe(true);
+	});
+
+	it("frames the Tern SDK's conformance chunking cases byte for byte", () => {
+		// From the Tern SDK's conformance/framing.json; chunk ids normalized to the case's.
+		const cases = [
+			{
+				body: '{"sf":"s1","s":9,"ops":[["text","log","append","0123456789abcdefghij"]]}',
+				limit: 24,
+				out: '\x1b_tsp;f;c=k7;m=1;{"sf":"s1","s":9,"ops":[\x1b\\\x1b_tsp;f;c=k7;m=1;["text","log","append","\x1b\\\x1b_tsp;f;c=k7;0123456789abcdefghij"]]}\x1b\\',
+			},
+			{
+				body: '{"sf":"s1","s":2,"ops":[["text","m","append","héllo wörld ✓ 𝄞 done"]]}',
+				limit: 11,
+				out: '\x1b_tsp;f;c=k7;m=1;{"sf":"s1",\x1b\\\x1b_tsp;f;c=k7;m=1;"s":2,"ops"\x1b\\\x1b_tsp;f;c=k7;m=1;:[["text","\x1b\\\x1b_tsp;f;c=k7;m=1;m","append"\x1b\\\x1b_tsp;f;c=k7;m=1;,"héllo w\x1b\\\x1b_tsp;f;c=k7;m=1;örld ✓ \x1b\\\x1b_tsp;f;c=k7;m=1;𝄞 done"]\x1b\\\x1b_tsp;f;c=k7;]}\x1b\\',
+			},
+			{
+				body: '{"sf":"s1","s":3,"ops":[["text","m","replace","xab=1;q"]]}',
+				limit: 48,
+				out: '\x1b_tsp;f;c=k7;m=1;{"sf":"s1","s":3,"ops":[["text","m","replace",\x1b\\\x1b_tsp;f;c=k7;"xab=1;q"]]}\x1b\\',
+			},
+			{
+				body: '{"k":"zzzzzzzzzzzzzzzz=1;"}',
+				limit: 10,
+				out: '\x1b_tsp;f;c=k7;m=1;{"k":\x1b\\\x1b_tsp;f;c=k7;m=1;"zzzzzzzzzzzzzzzz\x1b\\\x1b_tsp;f;c=k7;=1;"}\x1b\\',
+			},
+		];
+		for (const { body, limit, out } of cases) {
+			expect(encodeTspMessage("f", body, undefined, limit).replace(/;c=[0-9a-z]+;/g, ";c=k7;")).toBe(out);
+		}
+	});
+
+	it("never cuts where the next chunk would lead with a parameter-shaped segment", () => {
+		const event: TspEvent = { ev: "error", msg: "aaaaaaaaaax=1;tail" };
+		const body = JSON.stringify(event);
+		// A cut at exactly `limit` bytes would start the next chunk with `x=1;`.
+		const limit = body.indexOf("x=1;");
+		const stream = encodeTspMessage("e", body, undefined, limit);
+		const chunks = messages(stream).map(message => splitTspMessage(message)!);
+		expect(chunks.length).toBeGreaterThan(1);
+		for (const chunk of chunks) {
+			expect(chunk.body).not.toStartWith("x=1;");
+			expect(Object.keys(chunk.params).every(key => key === "c" || key === "m")).toBe(true);
+		}
+		expect(chunks.map(chunk => chunk.body).join("")).toBe(body);
+		const reader = new TspReader();
+		const decoded = messages(stream).map(message => reader.feed(message));
+		expect(decoded.at(-1)).toEqual({ verb: "e", event });
+	});
+
+	it("cuts a large base64 body at exactly the limit, with its parameters on the first chunk only", () => {
+		const body = Buffer.from(crypto.getRandomValues(new Uint8Array(60_000))).toString("base64");
+		const limit = 8192;
+		const chunks = messages(encodeTspMessage("b", body, { mime: "image/png" }, limit)).map(message =>
+			splitTspMessage(message)!,
+		);
+		expect(chunks.length).toBe(Math.ceil(body.length / limit));
+		expect(chunks.slice(0, -1).every(chunk => chunk.body.length === limit)).toBe(true);
+		expect(chunks[0]!.params).toEqual({ mime: "image/png", c: chunks[0]!.params.c!, m: "1" });
+		expect(chunks.at(-1)!.params).toEqual({ c: chunks[0]!.params.c! });
+		expect(chunks.map(chunk => chunk.body).join("")).toBe(body);
 	});
 
 	it("sends a body at the limit as a single unchunked message", () => {

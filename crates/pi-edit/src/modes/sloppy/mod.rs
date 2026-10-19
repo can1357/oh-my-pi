@@ -31,9 +31,9 @@ pub struct SloppyEngine {
 }
 
 impl SloppyEngine {
-	fn sections(args: &ArgSnapshot, streaming: bool) -> Vec<SloppySection> {
+	fn sections(args: &ArgSnapshot, streaming: bool) -> Result<Vec<SloppySection>, EditError> {
 		let Some(input) = args.input.as_deref() else {
-			return Vec::new();
+			return Ok(Vec::new());
 		};
 		let input = if streaming {
 			input.rfind('\n').map_or("", |end| &input[..=end])
@@ -44,10 +44,10 @@ impl SloppyEngine {
 	}
 
 	fn missing_target(args: &ArgSnapshot) -> bool {
-		args
-			.input
-			.as_deref()
-			.is_some_and(|input| !input.trim().is_empty() && split_sloppy_sections(input).is_empty())
+		args.input.as_deref().is_some_and(|input| {
+			!input.trim().is_empty()
+				&& split_sloppy_sections(input).is_ok_and(|sections| sections.is_empty())
+		})
 	}
 }
 
@@ -64,7 +64,12 @@ impl ModeEngine for SloppyEngine {
 		store: &EditStore,
 	) -> Vec<PreviewFile> {
 		let _ = (self.allow_fuzzy, self.fuzzy_threshold);
-		let sections = Self::sections(args, streaming);
+		let sections = match Self::sections(args, streaming) {
+			Ok(sections) => sections,
+			Err(error) => {
+				return vec![PreviewFile { error: Some(error.to_string()), ..PreviewFile::default() }];
+			},
+		};
 		if sections.is_empty() {
 			if !streaming && Self::missing_target(args) {
 				return vec![PreviewFile {
@@ -82,9 +87,12 @@ impl ModeEngine for SloppyEngine {
 			.into_iter()
 			.enumerate()
 			.filter_map(|(index, section)| {
+				// Only the last section can still be streaming; the next
+				// `*** Edit File:` header closes every earlier one.
+				let streaming = streaming && index == last;
 				let read = match files.read(&section.path) {
 					Ok(read) => read,
-					Err(_error) if streaming && index == last => return None,
+					Err(_error) if streaming => return None,
 					Err(error) => {
 						return Some(PreviewFile {
 							display: section.path,
@@ -99,12 +107,14 @@ impl ModeEngine for SloppyEngine {
 					notes: &mut notes,
 					store,
 					canonical: &read.canonical,
+					streaming,
 				}) {
 					Ok(after) => {
 						let output =
 							generate_diff_string(&read.text, &after, None, &BlockContextSource {
 								path: Some(&read.resolved.display),
 								lang: None,
+								streaming,
 							});
 						Some(PreviewFile {
 							display: read.resolved.display.clone(),
@@ -114,7 +124,7 @@ impl ModeEngine for SloppyEngine {
 							..PreviewFile::default()
 						})
 					},
-					Err(_) if streaming && index == last => None,
+					Err(_) if streaming => None,
 					Err(error) => Some(PreviewFile {
 						display: read.resolved.display.clone(),
 						error: Some(error.to_string()),
@@ -134,7 +144,7 @@ impl ModeEngine for SloppyEngine {
 	) -> Result<Vec<StagedFile>, EditError> {
 		let _ = (self.allow_fuzzy, self.fuzzy_threshold);
 		let input = args.input.as_deref().unwrap_or_default();
-		let sections = split_sloppy_sections(input);
+		let sections = split_sloppy_sections(input)?;
 		if sections.is_empty() {
 			return Err(EditError::parse(
 				"Missing file target: start the payload with *** Edit File: relative/path.ts.",
@@ -161,6 +171,7 @@ impl ModeEngine for SloppyEngine {
 				notes: &mut notes,
 				store,
 				canonical: &read.canonical,
+				streaming: false,
 			})
 			.map_err(|error| {
 				if multi_file {
@@ -174,8 +185,9 @@ impl ModeEngine for SloppyEngine {
 			})?;
 			let persisted = read.persist(&after)?;
 			let output = generate_diff_string(&read.text, &after, None, &BlockContextSource {
-				path: Some(&read.resolved.display),
-				lang: None,
+				path:      Some(&read.resolved.display),
+				lang:      None,
+				streaming: false,
 			});
 			let mut file = StagedFile::new(
 				read.resolved.display.clone(),
@@ -195,7 +207,10 @@ impl ModeEngine for SloppyEngine {
 	}
 
 	fn inspect(&self, args: &ArgSnapshot) -> Inspection {
-		let sections = split_sloppy_sections(args.input.as_deref().unwrap_or_default());
+		// An unparseable payload targets nothing; `preview` and `stage` surface
+		// the error.
+		let sections =
+			split_sloppy_sections(args.input.as_deref().unwrap_or_default()).unwrap_or_default();
 		Inspection {
 			paths:    sections
 				.iter()

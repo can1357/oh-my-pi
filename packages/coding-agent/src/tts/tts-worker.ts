@@ -13,7 +13,13 @@ import {
 } from "../subprocess/worker-runtime";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "../tiny/device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtype";
-import { getTtsLocalModelSpec, resolveTtsVoice, type TtsLocalModelKey, type TtsLocalModelSpec } from "./models";
+import {
+	getTtsLocalModelSpec,
+	resolveTtsSpeed,
+	resolveTtsVoice,
+	type TtsLocalModelKey,
+	type TtsLocalModelSpec,
+} from "./models";
 import {
 	getTtsRuntimeDir,
 	KOKORO_PACKAGE,
@@ -38,7 +44,7 @@ type KokoroDevice = "cpu" | "wasm" | "webgpu";
 
 /** A loaded Kokoro voice synthesizer (subset of `kokoro-js`'s `KokoroTTS`). */
 interface KokoroTtsInstance {
-	generate(text: string, options: { voice: string }): Promise<RawAudio>;
+	generate(text: string, options: { voice: string; speed: number }): Promise<RawAudio>;
 }
 
 /** `KokoroTTS` static surface used to load a model from the Hugging Face Hub. */
@@ -89,6 +95,7 @@ const kokoroRuntime = new MemoizedRuntime<KokoroRuntime>();
 interface StreamSession {
 	modelKey: TtsLocalModelKey;
 	voice: string | undefined;
+	speed: number | undefined;
 	/** Speakable segments awaiting synthesis, in arrival order. */
 	queue: string[];
 	/** Resolves the run loop's idle wait when a push/end/cancel arrives. */
@@ -257,9 +264,13 @@ async function synthesize(
 	modelKey: TtsLocalModelKey,
 	text: string,
 	voice: string | undefined,
+	speed: number | undefined,
 ): Promise<{ pcm: Float32Array; sampleRate: number }> {
 	const synthesizer = await loadModel(modelKey, transport, requestId);
-	const output = await synthesizer.generate(text, { voice: resolveTtsVoice(modelKey, voice) });
+	const output = await synthesizer.generate(text, {
+		voice: resolveTtsVoice(modelKey, voice),
+		speed: resolveTtsSpeed(speed),
+	});
 	const spec = getTtsLocalModelSpec(modelKey);
 	const audio = Array.isArray(output.audio) ? output.audio[0] : output.audio;
 	if (!audio) throw new Error("Kokoro synthesis returned no audio samples");
@@ -296,6 +307,7 @@ async function handleQueuedRequest(
 			request.modelKey,
 			request.text,
 			request.voice,
+			request.speed,
 		);
 		transport.send({ type: "audio", id: request.id, pcm, sampleRate });
 	} catch (error) {
@@ -318,6 +330,7 @@ async function runStreamSession(transport: TtsTransport, id: string, session: St
 		if (session.cancelled) return;
 		const spec = getTtsLocalModelSpec(session.modelKey);
 		const voice = resolveTtsVoice(session.modelKey, session.voice);
+		const speed = resolveTtsSpeed(session.speed);
 		let index = 0;
 		while (!session.cancelled) {
 			const segment = session.queue.shift();
@@ -333,7 +346,7 @@ async function runStreamSession(transport: TtsTransport, id: string, session: St
 				await promise;
 				continue;
 			}
-			const output = await synthesizer.generate(segment, { voice });
+			const output = await synthesizer.generate(segment, { voice, speed });
 			if (session.cancelled) break;
 			const audio = Array.isArray(output.audio) ? output.audio[0] : output.audio;
 			if (!audio) continue;
@@ -366,6 +379,7 @@ function startStreamSession(
 	const session: StreamSession = {
 		modelKey: message.modelKey,
 		voice: message.voice,
+		speed: message.speed,
 		queue: [],
 		wake: null,
 		ended: false,

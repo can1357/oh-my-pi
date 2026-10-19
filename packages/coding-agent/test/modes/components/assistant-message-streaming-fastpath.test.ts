@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { trimBlankEdges } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type Component, Container, Markdown } from "@oh-my-pi/pi-tui";
 
@@ -122,6 +123,103 @@ describe("AssistantMessageComponent streaming fast path", () => {
 		expect(component.getTranscriptStableRows()).toEqual([]);
 		expect(component.renderTranscriptStableRows(count, 40)).toEqual([]);
 		component.markTranscriptBlockFinalized();
+	});
+
+	it("keeps published thinking rows when a split fence or comment sentinel completes below them", () => {
+		// A delta may end inside "```" or "<!-- -->". The prose fold then shows
+		// the partial line as text, but once it completes the fold drops it and
+		// appends its ellipsis to the line above — which must not be published yet.
+		for (const tail of ["```ts\nlet y = 2;\n```", "<!-- -->\n\n```ts\nlet y = 2;\n```"]) {
+			const thinking = `First thought.\n\nSecond thought.\n\n${tail}\n\nThird thought.\n\nStill going`;
+			const component = new AssistantMessageComponent();
+			for (let end = 1; end <= thinking.length; end++) {
+				component.updateContent(msg([{ type: "thinking", thinking: thinking.slice(0, end) }]), { transient: true });
+				const rows = trimBlankEdges(component.render(W));
+				const stable = component.renderTranscriptStableRows(component.getTranscriptStableRows().length, W);
+				expect(rows.slice(0, stable.length)).toEqual([...stable]);
+			}
+			expect(component.getTranscriptStableRows().length).toBeGreaterThan(0);
+		}
+	});
+
+	it("keeps retiring later blocks after a streamed block with a tab closes", () => {
+		// While streaming, a block publishes Markdown's settled prefix (tabs
+		// expanded); once the next block starts it publishes whole. Both must be
+		// the same bytes, or every later snapshot stops extending the published one.
+		const first = "Columns:\tname\tsize.\n\nSecond paragraph of the answer.\n\nThird paragraph.";
+		const second = "Now reasoning about the next step.\n\nAnother paragraph here.\n\nAnd a closing line.";
+		const component = new AssistantMessageComponent();
+		const counts: number[] = [];
+		const stream = (content: AssistantMessage["content"]) => {
+			component.updateContent(msg(content), { transient: true });
+			const rows = trimBlankEdges(component.render(W));
+			const stable = component.renderTranscriptStableRows(component.getTranscriptStableRows().length, W);
+			expect(rows.slice(0, stable.length)).toEqual([...stable]);
+			counts.push(stable.length);
+		};
+		for (let end = 1; end <= first.length; end++) stream([{ type: "text", text: first.slice(0, end) }]);
+		const beforeSecond = counts.at(-1)!;
+		expect(beforeSecond).toBeGreaterThan(0);
+		for (let end = 1; end <= second.length; end++) {
+			stream([
+				{ type: "text", text: first },
+				{ type: "thinking", thinking: second.slice(0, end) },
+			]);
+		}
+		// The closed first block and the settled head of the second both retire.
+		expect(counts.at(-1)!).toBeGreaterThan(beforeSecond + 2);
+	});
+
+	it("retires finished items of a list while it is still the streaming block", () => {
+		const items = Array.from(
+			{ length: 12 },
+			(_, i) =>
+				`- ITEM-${i + 1}: a **short** line about \`argv[0]\` and [a link](https://example.com) that wraps once the width gets narrow enough`,
+		);
+		const text = `Here is the list:\n\n${items.join("\n")}`;
+		const component = new AssistantMessageComponent();
+		let stable: readonly string[] = [];
+		for (let end = 1; end <= text.length; end++) {
+			component.updateContent(msg([{ type: "text", text: text.slice(0, end) }]), { transient: true });
+			const rows = trimBlankEdges(component.render(W));
+			stable = component.renderTranscriptStableRows(component.getTranscriptStableRows().length, W);
+			expect(rows.slice(0, stable.length)).toEqual([...stable]);
+		}
+		expect(stable.some(row => row.includes("ITEM-11:"))).toBe(true);
+		expect(stable.some(row => row.includes("ITEM-12:"))).toBe(false);
+	});
+
+	it("never publishes list rows that a later append or the final render changes", () => {
+		const docs = [
+			Array.from({ length: 12 }, (_, i) => `${i + 1}. step ${i + 1}`).join("\n"),
+			"- one\n- two\n- three\n\n- four, now loose\n- five",
+			"- one\n- two\n--- dashes\n- three",
+			"1. one\n2. two\n2.5 percent\n3. three",
+			"- one\n  - nested a\n  - nested b\n- two\n  continued two\n- three\n---\nafter",
+			"- one\n- two\n# Heading\n\nTail paragraph",
+			"- one\n- $$\n- x\n$$\n- three",
+			"- one\n- two\n\\begin{align}\n- x\n\\end{align}\n- three",
+			"* one\n* two\n- three\n- four",
+			"$$\nx = 1\n\n- one\n- two\n- three\n$$",
+			"- [foo]\n- second\n- [foo]: https://example.com\n- four",
+			"- [Foo][] item\n- second\n  [foo]: https://example.com\n- third",
+		];
+		for (const doc of docs) {
+			const text = `Intro.\n\n${doc}\n\nDone.`;
+			const component = new AssistantMessageComponent();
+			let published: readonly string[] = [];
+			for (let end = 1; end <= text.length; end++) {
+				component.updateContent(msg([{ type: "text", text: text.slice(0, end) }]), { transient: true });
+				const rows = trimBlankEdges(component.render(W));
+				const stable = component.renderTranscriptStableRows(component.getTranscriptStableRows().length, W);
+				expect(rows.slice(0, stable.length)).toEqual([...stable]);
+				expect(stable.slice(0, published.length)).toEqual(published.slice(0, stable.length));
+				if (stable.length > published.length) published = stable;
+			}
+			component.updateContent(msg([{ type: "text", text }]));
+			component.markTranscriptBlockFinalized();
+			expect(trimBlankEdges(component.render(W)).slice(0, published.length)).toEqual([...published]);
+		}
 	});
 
 	it("matches teardown output across a growing thinking + text stream", () => {

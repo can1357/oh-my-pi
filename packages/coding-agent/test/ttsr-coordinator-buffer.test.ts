@@ -311,6 +311,30 @@ describe("TTSR stream buffers", () => {
 		expect(emitSessionEvent).toHaveBeenCalledTimes(1);
 	});
 
+	it("settles a rule spanning lines when a long text block ends", async () => {
+		const { host, emitSessionEvent } = makeHost();
+		const manager = new TtsrManager({ enabled: true, contextMode: "discard", interruptMode: "always" });
+		expect(manager.addRule({ ...makeRule("text"), condition: ["BEGIN\\s+END"] })).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const message = assistantMessage();
+		const deltas = ["filler line\n".repeat(1_000), "BEGIN\n", "END"];
+
+		coordinator.onTurnStart();
+		coordinator.onAssistantMessageStart();
+		for (const delta of deltas) await coordinator.checkMessageUpdate(textDelta(message, delta));
+		await coordinator.checkMessageUpdate(
+			update(message, {
+				type: "text_end",
+				contentIndex: 0,
+				content: deltas.join(""),
+				partial: message as AssistantMessage,
+			}),
+		);
+
+		const isTrigger = (event: AgentSessionEvent): boolean => event.type === "ttsr_triggered";
+		expect(emitSessionEvent.mock.calls.filter(([event]) => isTrigger(event))).toHaveLength(1);
+	});
+
 	it("emits one ttsr_triggered when a delta match is re-confirmed at toolcall_end (issue #12184)", async () => {
 		const { coordinator, emitSessionEvent } = coordinatorFor("tool:edit");
 		const message = assistantMessage([{ type: "toolCall", id: "call-1", name: "edit", arguments: {} }]);

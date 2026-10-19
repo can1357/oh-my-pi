@@ -46,10 +46,33 @@ function imageBlocks(context: Context): ImageContent[] {
 function decodeImage(block: ImageContent): Uint8Array | undefined {
 	if (block.data.length === 0) return undefined;
 	try {
-		return new Uint8Array(Buffer.from(block.data, "base64"));
+		return Buffer.from(block.data, "base64");
 	} catch {
 		return undefined;
 	}
+}
+
+interface BlockFileHash {
+	data: string;
+	hash: string;
+}
+
+/**
+ * Decoded-content digest per image block. Converted session history keeps
+ * block identity across requests, so each image is decoded and hashed once;
+ * the stored `data` guards against in-place block mutation.
+ */
+const fileHashByBlock = new WeakMap<ImageContent, BlockFileHash>();
+
+/** Content digest of `block`; `bytes` is present only when this call had to decode. */
+function blockFileHash(block: ImageContent): { hash: string; bytes?: Uint8Array } | undefined {
+	const memo = fileHashByBlock.get(block);
+	if (memo?.data === block.data) return { hash: memo.hash };
+	const bytes = decodeImage(block);
+	if (!bytes) return undefined;
+	const hash = hashProviderFileContent(bytes);
+	fileHashByBlock.set(block, { data: block.data, hash });
+	return { hash, bytes };
 }
 
 /**
@@ -108,20 +131,30 @@ export class ProviderFileManager {
 		if (candidates.length === 0) return context;
 
 		const referenceByBlock = new Map<ImageContent, ImageContent["providerFile"]>();
-		const groups = new Map<string, { bytes: Uint8Array; blocks: ImageContent[] }>();
+		const groups = new Map<string, { bytes: Uint8Array | undefined; blocks: ImageContent[] }>();
 		for (const block of candidates) {
-			const bytes = decodeImage(block);
-			if (!bytes) continue;
-			const hash = hashProviderFileContent(bytes);
-			const group = groups.get(hash);
-			if (group) group.blocks.push(block);
-			else groups.set(hash, { bytes, blocks: [block] });
+			const digest = blockFileHash(block);
+			if (!digest) continue;
+			const group = groups.get(digest.hash);
+			if (group) {
+				group.blocks.push(block);
+				group.bytes ??= digest.bytes;
+			} else {
+				groups.set(digest.hash, { bytes: digest.bytes, blocks: [block] });
+			}
 		}
 
 		await Promise.all(
 			[...groups].map(async ([hash, group]) => {
 				try {
-					const handle = await this.#ensureHandle(client, credential, hash, group.bytes, group.blocks[0].mimeType);
+					// Decode only when the handle cache misses and an upload is needed.
+					const handle = await this.#ensureHandle(
+						client,
+						credential,
+						hash,
+						() => (group.bytes ??= Buffer.from(group.blocks[0].data, "base64")),
+						group.blocks[0].mimeType,
+					);
 					const reference = toProviderFileReference(handle);
 					for (const block of group.blocks) referenceByBlock.set(block, reference);
 				} catch (error) {
@@ -149,9 +182,10 @@ export class ProviderFileManager {
 		}
 		if (!credential) return;
 		for (const block of blocks) {
-			const bytes = decodeImage(block);
-			if (!bytes || !block.providerFile) continue;
-			this.#cache.delete(block.providerFile.provider, credential, hashProviderFileContent(bytes));
+			if (!block.providerFile) continue;
+			const digest = blockFileHash(block);
+			if (!digest) continue;
+			this.#cache.delete(block.providerFile.provider, credential, digest.hash);
 		}
 	}
 
@@ -179,7 +213,7 @@ export class ProviderFileManager {
 		client: ProviderFileClient,
 		credential: string,
 		contentHash: string,
-		bytes: Uint8Array,
+		getBytes: () => Uint8Array,
 		mimeType: string,
 	): Promise<ProviderFileHandle> {
 		const cached = this.#cache.get(client.provider, credential, contentHash);
@@ -187,7 +221,7 @@ export class ProviderFileManager {
 		const key = JSON.stringify([client.provider, hashProviderFileCredential(credential), contentHash]);
 		let pending = this.#uploads.get(key);
 		if (!pending) {
-			pending = client.upload({ bytes, mimeType }).then(handle => {
+			pending = client.upload({ bytes: getBytes(), mimeType }).then(handle => {
 				this.#cache.set(client.provider, credential, contentHash, handle);
 				return handle;
 			});

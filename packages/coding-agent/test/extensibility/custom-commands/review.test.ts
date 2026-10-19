@@ -5,9 +5,11 @@ import * as path from "node:path";
 import { ReviewCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
 import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
+import { parsePrUnifiedDiff } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-diff";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -29,19 +31,6 @@ const SAMPLE_PR_DIFF = `diff --git a/src/pr.ts b/src/pr.ts
 -export const pr = false;
 +export const pr = true;
 `;
-
-function makeManyFileDiff(fileCount: number): string {
-	return Array.from(
-		{ length: fileCount },
-		(_, idx) => `diff --git a/src/pr-${idx}.ts b/src/pr-${idx}.ts
---- a/src/pr-${idx}.ts
-+++ b/src/pr-${idx}.ts
-@@ -1 +1 @@
--export const pr${idx} = false;
-+export const pr${idx} = true;
-`,
-	).join("\n");
-}
 
 interface SelectCall {
 	title: string;
@@ -308,35 +297,62 @@ describe("ReviewCommand", () => {
 		}
 	});
 
-	it("prevents local file reads for PR URL reviews", async () => {
-		const dir = await createTempDir();
-		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
-		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
-
-		const result = await command.execute(["https://github.com/owner/repo/pull/123"], ctx);
-
-		expect(result).toBeDefined();
-		expect(result!).toContain("MUST NOT read local workspace files for PR file context");
-		expect(result!).toContain("`pr://owner/repo/123/diff/all`");
-		expect(result!).toContain("per-file `pr://owner/repo/123/diff/<index>`");
-		expect(result!).not.toContain("MAY read full file context as needed via `read`");
-	});
-
-	it("uses PR diff URLs for omitted large PR diff instructions", async () => {
-		const dir = await createTempDir();
-		spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(makeManyFileDiff(21)));
-		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
-		const ctx = { hasUI: false } as unknown as HookCommandContext;
-
-		const result = await command.execute(["https://github.com/owner/repo/pull/123"], ctx);
-
-		expect(result).toBeDefined();
-		expect(result!).toContain("MUST read assigned PR file diffs from `pr://owner/repo/123/diff/all`");
-		expect(result!).toContain("per-file `pr://owner/repo/123/diff/<index>`");
-		expect(result!).toContain("NEVER use local `git diff`/`git show` for PR diff content");
-		expect(result!).not.toContain("MUST run `git diff`/`git show` for assigned files");
-	});
+	it.each([
+		{ fileCount: 2, lastIndex: 4 },
+		{ fileCount: 21, lastIndex: 23 },
+	])(
+		"links each PR file to its actual diff slice with $fileCount reviewable files",
+		async ({ fileCount, lastIndex }) => {
+			const paths = [
+				"bun.lock",
+				"src/first.ts",
+				"dist/generated.js",
+				...Array.from({ length: fileCount - 2 }, (_, index) => `src/extra-${index}.ts`),
+				"src/last.ts",
+			];
+			const diff = paths
+				.map(
+					file => `diff --git a/${file} b/${file}
+--- a/${file}
++++ b/${file}
+@@ -1 +1 @@
+-old
++new
+`,
+				)
+				.join("\n");
+			const lookup = makePrDiffLookup(diff);
+			lookup.payload = parsePrUnifiedDiff(diff);
+			spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(lookup);
+			const command = new ReviewCommand({ cwd: createTempDir() } as unknown as CustomCommandAPI);
+			const result = await command.execute(["https://github.com/owner/repo/pull/123"], {
+				hasUI: false,
+			} as unknown as HookCommandContext);
+			const rows = result!
+				.split("\n")
+				.filter(line => line.startsWith("|") && line.includes("pr://"))
+				.map(line => {
+					const cells = line.split("|").map(cell => cell.trim());
+					return { index: Number(cells[1]), path: cells[2], url: cells[5]!.replaceAll("`", "") };
+				});
+			expect(rows.map(row => row.path)).toEqual(paths.filter(file => file.startsWith("src/")));
+			expect(rows[0]).toEqual({ index: 2, path: "src/first.ts", url: "pr://owner/repo/123/diff/2" });
+			expect(rows.at(-1)).toEqual({
+				index: lastIndex,
+				path: "src/last.ts",
+				url: `pr://owner/repo/123/diff/${lastIndex}`,
+			});
+			try {
+				const router = InternalUrlRouter.instance();
+				for (const row of rows) {
+					const resource = await router.resolve(row.url);
+					expect(resource.content.split("\n")[0]).toBe(`diff --git a/${row.path} b/${row.path}`);
+				}
+			} finally {
+				InternalUrlRouter.resetForTests();
+			}
+		},
+	);
 
 	it("rejects unsupported PR-like URL formats as normal instructions", async () => {
 		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));

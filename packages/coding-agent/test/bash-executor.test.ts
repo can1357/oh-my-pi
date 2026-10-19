@@ -195,9 +195,10 @@ describe("executeBash", () => {
 			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
 		};
 		const frame = await encodeTerminalImage(image);
-		const result = await executeBash(`printf '%s' ${shellQuote(frame)}; sleep 3`, {
+		// The deadline must land after the image is out, even when a loaded runner is slow to start the shell.
+		const result = await executeBash(`printf '%s' ${shellQuote(frame)}; sleep 30`, {
 			cwd: tempDir,
-			timeout: 20,
+			timeout: 1_000,
 		});
 
 		expect(result.timedOut).toBe(true);
@@ -484,6 +485,9 @@ exit 64
 			env: {
 				PATH: Bun.env.PATH ?? "",
 				HOME: shellDir,
+				// zsh reads `.zshrc` from `$ZDOTDIR` when set; terminal integrations
+				// export their own, which would bypass the fixture rc.
+				ZDOTDIR: shellDir,
 				// The command runs through an interactive login zsh, which loads the
 				// system `/etc/zshrc`. On macOS that pulls in
 				// `/etc/zshrc_Apple_Terminal`, and under Apple Terminal it appends
@@ -584,6 +588,7 @@ exit 64
 			env: {
 				PATH: Bun.env.PATH ?? "",
 				HOME: shellDir,
+				ZDOTDIR: shellDir,
 				SHELL_SESSIONS_DISABLE: "1",
 			},
 			prefix: undefined,

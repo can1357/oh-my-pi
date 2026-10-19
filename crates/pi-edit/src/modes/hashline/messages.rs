@@ -6,6 +6,7 @@ use std::{
 	fmt::Write,
 };
 
+use super::format::format_numbered_line;
 pub use super::types::BlockSpan;
 
 const HL_FILE_PREFIX: &str = "[";
@@ -15,12 +16,6 @@ const HL_PUT_KEYWORD: &str = "PUT";
 const HL_CUT_KEYWORD: &str = "CUT";
 const HL_FILE_HASH_SEP: &str = "#";
 const HL_RANGE_SEP: &str = ".=";
-const HL_LINE_BODY_SEP: &str = ":";
-
-#[inline]
-fn format_numbered_line(line_number: u32, line: &str) -> String {
-	format!("{line_number}{HL_LINE_BODY_SEP}{line}")
-}
 
 /// Tiny JS-compatible `JSON.stringify(str)` that escapes `"`, `\`, and control
 /// characters, emitting other UTF-8 characters as-is.
@@ -789,6 +784,29 @@ fn format_line_ranges(lines: &[u32]) -> String {
 pub struct RevealedLine {
 	pub line: u32,
 	pub text: String,
+}
+
+/// A wide unseen anchor cannot be safely promoted by a column-capped reveal.
+pub fn wide_unseen_lines_message(section_path: &str, unseen_lines: &[u32]) -> String {
+	let ranges = format_line_ranges(unseen_lines);
+	let selector = ranges.replace(", ", ",");
+	format!(
+		"This edit anchors to lines {ranges} of {section_path} that were not fully displayed. Read \
+		 `{section_path}:{selector}:raw` for their full content, then re-issue the edit."
+	)
+}
+
+/// No retained read records whether these over-cap anchor lines were shown
+/// whole (process restart or store eviction), so their display may have been
+/// cut.
+pub fn unverified_wide_lines_message(section_path: &str, wide_lines: &[u32]) -> String {
+	let ranges = format_line_ranges(wide_lines);
+	let selector = ranges.replace(", ", ",");
+	format!(
+		"This edit anchors to lines {ranges} of {section_path}, which exceed the display column \
+		 cap, and no retained read shows them in full. Read `{section_path}:{selector}:raw` for \
+		 their full content, then re-issue the edit."
+	)
 }
 
 /// Content preview handed to [`unseen_lines_message`].

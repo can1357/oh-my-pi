@@ -1,5 +1,7 @@
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { inflateSync } from "node:zlib";
+import type { BoxEdges, ImageContent } from "@oh-my-pi/pi-ai";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { encodeRawPng } from "./png-encode";
 
 export interface ImageResizeOptions {
 	maxWidth?: number;
@@ -24,6 +26,16 @@ export interface ResizedImage {
 	wasResized: boolean;
 	decodeFailed?: boolean;
 	get data(): string;
+}
+
+/**
+ * Raw image bytes for {@link resizeImage}. `mimeType` is the caller's hint when decoding
+ * fails; `data` is the base64 of `bytes` when the caller already has it (reused verbatim).
+ */
+export interface ImageBytesInput {
+	bytes: Uint8Array;
+	mimeType?: string;
+	data?: string;
 }
 
 // 500KB target — aggressive compression; Anthropic's 5MB per-image cap is rarely the
@@ -81,6 +93,97 @@ function readPngHeaderDimensions(buffer: Uint8Array): ImageHeaderDimensions | un
 	const height = readUint32BE(buffer, 20);
 	if (width === 0 || height === 0) return undefined;
 	return { width, height, mimeType: "image/png" };
+}
+
+/**
+ * Whether `input`'s container can hold translucent pixels: anything but a JPEG or a PNG
+ * without an alpha channel or `tRNS` transparency.
+ */
+function mayHaveAlpha(input: Uint8Array): boolean {
+	if (input[0] === 0xff && input[1] === 0xd8) return false;
+	if (!readPngHeaderDimensions(input)) return true;
+	const colorType = input[25];
+	if (colorType === 4 || colorType === 6) return true;
+	for (let offset = 33; offset + 8 <= input.length; offset += 12 + readUint32BE(input, offset)) {
+		const type = String.fromCharCode(...input.subarray(offset + 4, offset + 8));
+		if (type === "tRNS") return true;
+		if (type === "IDAT") return false;
+	}
+	return false;
+}
+
+/** 8-bit RGBA pixels read back from `Bun.Image`. */
+interface RgbaPixels {
+	width: number;
+	height: number;
+	pixels: Uint8Array;
+}
+
+/**
+ * `image`'s pixels when it decodes to RGBA. `Bun.Image` has no raw output, so this reads
+ * its uncompressed PNG, whose rows it leaves unfiltered; `undefined` for RGB output (no
+ * alpha) or any other layout.
+ */
+async function readRgba(image: Bun.Image): Promise<RgbaPixels | undefined> {
+	const png = await image.png({ compressionLevel: 0 }).bytes();
+	let width = 0;
+	let height = 0;
+	let rgba8 = false;
+	const idat: Uint8Array[] = [];
+	for (let offset = 8; offset + 12 <= png.length; offset += 12 + readUint32BE(png, offset)) {
+		const type = String.fromCharCode(...png.subarray(offset + 4, offset + 8));
+		const data = png.subarray(offset + 8, offset + 8 + readUint32BE(png, offset));
+		if (type === "IHDR") {
+			width = readUint32BE(data, 0);
+			height = readUint32BE(data, 4);
+			// 8-bit depth, RGBA, not interlaced.
+			rgba8 = data[8] === 8 && data[9] === 6 && data[12] === 0;
+		} else if (type === "IDAT") {
+			idat.push(data);
+		} else if (type === "IEND") {
+			break;
+		}
+	}
+	if (!rgba8) return undefined;
+	const raw = inflateSync(Buffer.concat(idat));
+	const stride = width * 4;
+	if (raw.length !== (stride + 1) * height) return undefined;
+	const pixels = new Uint8Array(stride * height);
+	for (let y = 0; y < height; y++) {
+		const row = y * (stride + 1);
+		if (raw[row] !== 0) return undefined;
+		pixels.set(raw.subarray(row + 1, row + 1 + stride), y * stride);
+	}
+	return { width, height, pixels };
+}
+
+/**
+ * `input` with its color premultiplied by alpha, as an uncompressed PNG for `Bun.Image` to
+ * resample, when some pixel is translucent; `undefined` when every pixel is opaque.
+ */
+async function premultipliedPng(input: Uint8Array): Promise<Uint8Array | undefined> {
+	const source = await readRgba(new Bun.Image(input));
+	if (!source) return undefined;
+	const { pixels } = source;
+	let translucent = false;
+	for (let i = 0; i < pixels.length; i += 4) {
+		const alpha = pixels[i + 3];
+		if (alpha === 255) continue;
+		translucent = true;
+		for (let c = i; c < i + 3; c++) pixels[c] = Math.round((pixels[c] * alpha) / 255);
+	}
+	return translucent ? encodeRawPng(pixels, source.width, source.height, 4, 0) : undefined;
+}
+
+/** Undoes premultiplication on resampled RGBA; a channel the kernel's overshoot left above alpha clamps to full. */
+function unpremultiply(pixels: Uint8Array): void {
+	for (let i = 0; i < pixels.length; i += 4) {
+		const alpha = pixels[i + 3];
+		if (alpha === 255) continue;
+		for (let c = i; c < i + 3; c++) {
+			pixels[c] = alpha === 0 ? 0 : Math.min(255, Math.round((pixels[c] * 255) / alpha));
+		}
+	}
 }
 
 function isJpegStartOfFrame(marker: number): boolean {
@@ -149,6 +252,35 @@ Buffer.prototype.toBase64 = function (this: Buffer) {
 	return new Uint8Array(this.buffer, this.byteOffset, this.byteLength).toBase64();
 };
 
+interface EncodedCandidate {
+	buffer: Uint8Array;
+	mimeType: string;
+}
+
+/** Build a result whose base64 `data` is computed on first access and memoized. */
+function encodedResult(
+	best: EncodedCandidate,
+	originalWidth: number,
+	originalHeight: number,
+	width: number,
+	height: number,
+): ResizedImage {
+	let data: string | undefined;
+	return {
+		buffer: best.buffer,
+		mimeType: best.mimeType,
+		originalWidth,
+		originalHeight,
+		width,
+		height,
+		wasResized: true,
+		get data() {
+			data ??= best.buffer.toBase64();
+			return data;
+		},
+	};
+}
+
 /**
  * Resize and recompress an image to fit within the specified max dimensions and file size.
  *
@@ -159,21 +291,52 @@ Buffer.prototype.toBase64 = function (this: Buffer) {
  *  4. If still too large, walk a dimension-scale ladder × quality ladder.
  *  5. If still too large, return the smallest variant produced.
  *
+ * The source is decoded and resized once per target size; the format/quality ladder
+ * re-encodes from a lossless intermediate at that size.
+ *
+ * A source with translucent pixels keeps its alpha: it resizes premultiplied (`Bun.Image`
+ * resamples straight alpha, bleeding the color under transparent pixels into the edges)
+ * and never becomes JPEG (which would show that color, usually black). Without WebP it
+ * stays PNG and only the dimension ladder shrinks it.
+ *
+ * Accepts an `ImageContent` (base64), raw bytes, or {@link ImageBytesInput}; passing
+ * bytes avoids a base64 round-trip when the caller already holds them.
+ *
  * Set OMP_NO_WEBP to exclude WebP from encoding (llama.cpp STB doesn't decode it).
  *
  * Backed by `Bun.Image`: a chainable native pipeline that runs decode/transform/encode
  * off the JS thread when the terminal (`.bytes()`) is awaited.
  */
-export async function resizeImage(img: ImageContent, options?: ImageResizeOptions): Promise<ResizedImage> {
+export async function resizeImage(
+	img: ImageContent | ImageBytesInput | Uint8Array,
+	options?: ImageResizeOptions,
+): Promise<ResizedImage> {
 	const excludeWebP = options?.excludeWebP ?? isWebPExcluded();
 	const opts = { ...DEFAULT_OPTIONS, ...options, excludeWebP };
-	const inputBuffer = Buffer.from(img.data, "base64");
+	let inputBuffer: Uint8Array;
+	let callerMime: string | undefined;
+	let originalData: string | undefined;
+	if (img instanceof Uint8Array) {
+		inputBuffer = img;
+	} else if ("bytes" in img) {
+		inputBuffer = img.bytes;
+		callerMime = img.mimeType;
+		originalData = img.data;
+	} else {
+		inputBuffer = Buffer.from(img.data, "base64");
+		callerMime = img.mimeType;
+		originalData = img.data;
+	}
+	const getOriginalData = (): string => {
+		originalData ??= inputBuffer.toBase64();
+		return originalData;
+	};
 
 	try {
 		const { width: originalWidth, height: originalHeight, format } = await new Bun.Image(inputBuffer).metadata();
 		// Trust decoded bytes over caller metadata. A mislabeled WebP must not take
 		// the fast path when the target decoder explicitly excludes WebP.
-		const sourceMime = format ? `image/${format}` : img.mimeType;
+		const sourceMime = format ? `image/${format}` : (callerMime ?? "application/octet-stream");
 
 		// Fast path: already within dimensions AND well under budget.
 		// Threshold is 1/4 of budget — if already that compact, don't re-encode.
@@ -201,7 +364,7 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 				height: originalHeight,
 				wasResized: false,
 				get data() {
-					return img.data;
+					return getOriginalData();
 				},
 			};
 		}
@@ -232,58 +395,54 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 			}
 		}
 
-		// First-attempt encoder: try PNG and JPEG (+ WebP if not excluded) — return smallest.
-		// PNG wins for line art / few-color UI; JPEG wins for photographic content;
-		// WebP usually beats JPEG by 25–35% but is disabled when OMP_NO_WEBP is set
-		// because many local inference backends (llama.cpp STB) don't decode it.
-		async function encodeSmallest(
-			width: number,
-			height: number,
-			quality: number,
-		): Promise<{ buffer: Uint8Array; mimeType: string }> {
-			const candidates = await Promise.all([
-				new Bun.Image(inputBuffer)
-					.resize(width, height)
-					.png()
-					.bytes()
-					.then(b => ({ buffer: b, mimeType: "image/png" })),
-				new Bun.Image(inputBuffer)
-					.resize(width, height)
-					.jpeg({ quality })
-					.bytes()
-					.then(b => ({ buffer: b, mimeType: "image/jpeg" })),
-				...(opts.excludeWebP
-					? []
-					: [
-							new Bun.Image(inputBuffer)
-								.resize(width, height)
-								.webp({ quality })
-								.bytes()
-								.then(b => ({ buffer: b, mimeType: "image/webp" })),
-						]),
-			]);
-			return pickSmallest(...candidates);
+		const premultiplied = mayHaveAlpha(inputBuffer) ? await premultipliedPng(inputBuffer) : undefined;
+		const translucent = premultiplied !== undefined;
+		// No lossy format keeps a translucent image's alpha once WebP is excluded.
+		const lossy = !(translucent && opts.excludeWebP);
+
+		// The source at `width`×`height` as PNG with straight alpha; `compressionLevel` 0
+		// for ladder intermediates.
+		async function resizedPng(width: number, height: number, compressionLevel?: number): Promise<Uint8Array> {
+			if (!premultiplied) {
+				const image = new Bun.Image(inputBuffer).resize(width, height);
+				return (compressionLevel === undefined ? image.png() : image.png({ compressionLevel })).bytes();
+			}
+			const resized = await readRgba(new Bun.Image(premultiplied).resize(width, height));
+			if (!resized) throw new Error("resizeImage: a translucent resize lost its alpha channel");
+			unpremultiply(resized.pixels);
+			return encodeRawPng(resized.pixels, width, height, 4, compressionLevel);
 		}
 
 		// Lossy encoder for quality/dimension fallback ladders. PNG is excluded since
 		// it's lossless and doesn't respond to quality parameters. WebP is included
-		// unless OMP_NO_WEBP is set (llama.cpp STB incompatibility).
+		// unless OMP_NO_WEBP is set (llama.cpp STB incompatibility); JPEG unless the
+		// image is translucent. Ladder steps pass a lossless PNG already at the target
+		// size, so each step only decodes that small intermediate instead of re-decoding
+		// and re-resizing the source; when `width`/`height` are given the source is
+		// resized first. Call only when `lossy`.
 		async function encodeLossy(
-			width: number,
-			height: number,
+			source: Uint8Array,
 			quality: number,
-		): Promise<{ buffer: Uint8Array; mimeType: string }> {
+			width?: number,
+			height?: number,
+		): Promise<EncodedCandidate> {
+			const pipeline = () => {
+				const image = new Bun.Image(source);
+				return width === undefined || height === undefined ? image : image.resize(width, height);
+			};
 			const candidates = await Promise.all([
-				new Bun.Image(inputBuffer)
-					.resize(width, height)
-					.jpeg({ quality })
-					.bytes()
-					.then(b => ({ buffer: b, mimeType: "image/jpeg" })),
+				...(translucent
+					? []
+					: [
+							pipeline()
+								.jpeg({ quality })
+								.bytes()
+								.then(b => ({ buffer: b, mimeType: "image/jpeg" })),
+						]),
 				...(opts.excludeWebP
 					? []
 					: [
-							new Bun.Image(inputBuffer)
-								.resize(width, height)
+							pipeline()
 								.webp({ quality })
 								.bytes()
 								.then(b => ({ buffer: b, mimeType: "image/webp" })),
@@ -291,102 +450,85 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 			]);
 			return pickSmallest(...candidates);
 		}
+
 		// Quality ladder — more aggressive steps for tighter budgets
 		const qualitySteps = [70, 60, 50, 40];
 		const scaleSteps = [1.0, 0.75, 0.5, 0.35, 0.25];
 
-		let best: { buffer: Uint8Array; mimeType: string };
 		let finalWidth = targetWidth;
 		let finalHeight = targetHeight;
 
-		// First attempt: resize to target, try PNG/JPEG (+ WebP), pick smallest
-		best = await encodeSmallest(targetWidth, targetHeight, opts.jpegQuality);
-
+		// First attempt: resize to target and try PNG/JPEG (+ WebP) in parallel, pick the
+		// smallest. PNG wins for line art / few-color UI; JPEG wins for photographic
+		// content; WebP usually beats JPEG by 25–35% but is disabled when OMP_NO_WEBP is
+		// set because many local inference backends (llama.cpp STB) don't decode it.
+		// The lossless PNG doubles as the intermediate for the quality ladder below. A
+		// translucent image's lossy encode starts from its premultiplied resize, so waits for it.
+		let targetPng: Uint8Array;
+		let firstLossy: EncodedCandidate | undefined;
+		if (translucent) {
+			targetPng = await resizedPng(targetWidth, targetHeight);
+			firstLossy = lossy ? await encodeLossy(targetPng, opts.jpegQuality) : undefined;
+		} else {
+			[targetPng, firstLossy] = await Promise.all([
+				resizedPng(targetWidth, targetHeight),
+				encodeLossy(inputBuffer, opts.jpegQuality, targetWidth, targetHeight),
+			]);
+		}
+		let best: EncodedCandidate = { buffer: targetPng, mimeType: "image/png" };
+		if (firstLossy) best = pickSmallest(best, firstLossy);
 		if (best.buffer.length <= opts.maxBytes) {
-			return {
-				buffer: best.buffer,
-				mimeType: best.mimeType,
-				originalWidth,
-				originalHeight,
-				width: finalWidth,
-				height: finalHeight,
-				wasResized: true,
-				get data() {
-					return Buffer.from(best.buffer).toBase64();
-				},
-			};
+			return encodedResult(best, originalWidth, originalHeight, finalWidth, finalHeight);
 		}
 
 		// Still too large — lossy JPEG (+ WebP) ladder with decreasing quality
-		for (const quality of qualitySteps) {
-			best = await encodeLossy(targetWidth, targetHeight, quality);
-
+		for (const quality of lossy ? qualitySteps : []) {
+			best = await encodeLossy(targetPng, quality);
 			if (best.buffer.length <= opts.maxBytes) {
-				return {
-					buffer: best.buffer,
-					mimeType: best.mimeType,
-					originalWidth,
-					originalHeight,
-					width: finalWidth,
-					height: finalHeight,
-					wasResized: true,
-					get data() {
-						return Buffer.from(best.buffer).toBase64();
-					},
-				};
+				return encodedResult(best, originalWidth, originalHeight, finalWidth, finalHeight);
 			}
 		}
 
-		// Still too large — reduce dimensions progressively with the lossy ladder
+		// Still too large — reduce dimensions progressively with the lossy ladder (PNG
+		// alone when nothing lossy applies)
 		for (const scale of scaleSteps) {
-			finalWidth = Math.round(targetWidth * scale);
-			finalHeight = Math.round(targetHeight * scale);
-
-			if (finalWidth < 100 || finalHeight < 100) {
+			// The first PNG candidate was this size.
+			if (!lossy && scale === 1) continue;
+			const width = Math.round(targetWidth * scale);
+			const height = Math.round(targetHeight * scale);
+			// Rejected before encoding: the reported size stays the last encoded one.
+			if (width < 100 || height < 100) {
 				break;
 			}
+			finalWidth = width;
+			finalHeight = height;
 
-			for (const quality of qualitySteps) {
-				best = await encodeLossy(finalWidth, finalHeight, quality);
-
+			if (!lossy) {
+				best = { buffer: await resizedPng(finalWidth, finalHeight), mimeType: "image/png" };
 				if (best.buffer.length <= opts.maxBytes) {
-					return {
-						buffer: best.buffer,
-						mimeType: best.mimeType,
-						originalWidth,
-						originalHeight,
-						width: finalWidth,
-						height: finalHeight,
-						wasResized: true,
-						get data() {
-							return Buffer.from(best.buffer).toBase64();
-						},
-					};
+					return encodedResult(best, originalWidth, originalHeight, finalWidth, finalHeight);
+				}
+				continue;
+			}
+			const resized = scale === 1 ? targetPng : await resizedPng(finalWidth, finalHeight, 0);
+			for (const quality of qualitySteps) {
+				best = await encodeLossy(resized, quality);
+				if (best.buffer.length <= opts.maxBytes) {
+					return encodedResult(best, originalWidth, originalHeight, finalWidth, finalHeight);
 				}
 			}
 		}
 
 		// Last resort: return smallest version we produced
-		return {
-			buffer: best.buffer,
-			mimeType: best.mimeType,
-			originalWidth,
-			originalHeight,
-			width: finalWidth,
-			height: finalHeight,
-			wasResized: true,
-			get data() {
-				return Buffer.from(best.buffer).toBase64();
-			},
-		};
+		return encodedResult(best, originalWidth, originalHeight, finalWidth, finalHeight);
 	} catch {
 		const headerDimensions = readImageHeaderDimensions(inputBuffer);
-		const fallbackMimeType = img.mimeType ?? headerDimensions?.mimeType ?? "application/octet-stream";
+		const fallbackMimeType = callerMime ?? headerDimensions?.mimeType ?? "application/octet-stream";
 		// Bun.Image rejected the input — we cannot decode/re-encode it.
 		// When the caller demanded WebP exclusion AND the source might be WebP,
 		// returning the original buffer would silently violate that contract,
 		// so surface an explicit error instead.
-		if (excludeWebP && (fallbackMimeType === "image/webp" || (!img.mimeType && !headerDimensions))) {
+		if (excludeWebP && (fallbackMimeType === "image/webp" || (!callerMime && !headerDimensions))) {
 			throw new Error("resizeImage: failed to decode image and cannot honor excludeWebP for a WebP source");
 		}
 		return {
@@ -399,10 +541,107 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 			wasResized: false,
 			decodeFailed: true,
 			get data() {
-				return img.data;
+				return getOriginalData();
 			},
 		};
 	}
+}
+
+/** Inclusive bounds {@link fitImage} sizes an image into; an unset field does not constrain. */
+export interface ImageFitBounds {
+	minSide?: number;
+	maxSide?: number;
+	minPixels?: number;
+	maxPixels?: number;
+	/** Encoded bytes. */
+	maxBytes?: number;
+}
+
+/** An image re-encoded by {@link fitImage}. */
+export interface FittedImage {
+	image: ImageContent;
+	/** The source's edges on `image`, as fractions of its size; padding lies outside them. Maps answers that locate things on `image` back to the source. */
+	content: BoxEdges;
+}
+
+/** JPEG qualities {@link fitImage} steps through when the PNG exceeds its byte cap. */
+const FIT_JPEG_QUALITIES = [90, 80, 70, 60, 50, 40];
+
+/**
+ * Re-encode `img` within `bounds` without distorting it, for APIs that reject out-of-bounds images
+ * instead of resizing them (TypeSafe Jev). It scales down past a maximum, or up toward a minimum as far
+ * as the maximums allow, then pads with its top-left pixel when an extreme aspect ratio still leaves a
+ * side or the area short: under 280–1568 px sides, a 401x41 toolbar strip becomes 1568x160 centered on
+ * 1568x280, whose content edges are top 60/280 and bottom 220/280. Output is PNG, or JPEG when the PNG
+ * exceeds `maxBytes`.
+ *
+ * @throws when the image cannot be decoded or no encoding fits `maxBytes`.
+ */
+export async function fitImage(img: ImageContent, bounds: ImageFitBounds): Promise<FittedImage> {
+	const { minSide = 1, maxSide = Infinity, minPixels = 1, maxPixels = Infinity, maxBytes = Infinity } = bounds;
+	const input = Buffer.from(img.data, "base64");
+	const { width, height } = await new Bun.Image(input).metadata();
+	const area = width * height;
+	const ceiling = Math.min(maxSide / Math.max(width, height), Math.sqrt(maxPixels / area));
+	const floor = Math.max(minSide / Math.min(width, height), Math.sqrt(minPixels / area));
+	// Reaching a minimum never crosses a maximum; padding below covers what scaling leaves short.
+	const scale = floor > 1 ? Math.min(floor, ceiling) : Math.min(1, ceiling);
+	let scaledWidth = Math.min(maxSide, Math.max(1, Math.round(width * scale)));
+	let scaledHeight = Math.min(maxSide, Math.max(1, Math.round(height * scale)));
+	// Rounding both sides up can overshoot the area cap by a sliver; trim the longer side.
+	if (scaledWidth * scaledHeight > maxPixels) {
+		if (scaledWidth >= scaledHeight) scaledWidth = Math.floor(maxPixels / scaledHeight);
+		else scaledHeight = Math.floor(maxPixels / scaledWidth);
+	}
+
+	let canvasWidth = Math.max(scaledWidth, minSide);
+	let canvasHeight = Math.max(scaledHeight, minSide);
+	if (canvasWidth * canvasHeight < minPixels) {
+		if (canvasWidth >= canvasHeight) canvasHeight = Math.ceil(minPixels / canvasWidth);
+		else canvasWidth = Math.ceil(minPixels / canvasHeight);
+	}
+	const left = (canvasWidth - scaledWidth) >> 1;
+	const top = (canvasHeight - scaledHeight) >> 1;
+
+	const resized = new Bun.Image(input).resize(scaledWidth, scaledHeight);
+	let png: Uint8Array;
+	if (canvasWidth === scaledWidth && canvasHeight === scaledHeight) {
+		png = await resized.png().bytes();
+	} else {
+		const source = await readRgba(resized);
+		if (!source) throw new Error("fitImage: the resized image did not read back as RGBA");
+		png = padRgba(source, canvasWidth, canvasHeight, left, top);
+	}
+
+	let encoded = png;
+	let mimeType = "image/png";
+	for (const quality of FIT_JPEG_QUALITIES) {
+		if (encoded.length <= maxBytes) break;
+		encoded = await new Bun.Image(png).jpeg({ quality }).bytes();
+		mimeType = "image/jpeg";
+	}
+	if (encoded.length > maxBytes) throw new Error(`fitImage: no encoding fits ${maxBytes} bytes`);
+	return {
+		image: { ...img, data: encoded.toBase64(), mimeType },
+		content: {
+			top: top / canvasHeight,
+			bottom: (top + scaledHeight) / canvasHeight,
+			left: left / canvasWidth,
+			right: (left + scaledWidth) / canvasWidth,
+		},
+	};
+}
+
+/** `source` at (`left`, `top`) on a `width`×`height` canvas filled with its top-left pixel, as PNG. */
+function padRgba(source: RgbaPixels, width: number, height: number, left: number, top: number): Uint8Array {
+	const canvas = new Uint8Array(width * height * 4);
+	// Both views use platform byte order, so the fill keeps the pixel's channel order.
+	new Uint32Array(canvas.buffer).fill(new Uint32Array(source.pixels.slice(0, 4).buffer)[0]);
+	const stride = source.width * 4;
+	for (let y = 0; y < source.height; y++) {
+		canvas.set(source.pixels.subarray(y * stride, (y + 1) * stride), ((top + y) * width + left) * 4);
+	}
+	return encodeRawPng(canvas, width, height, 4);
 }
 
 /**
@@ -423,13 +662,44 @@ export function formatDimensionNote(result: ResizedImage): string | undefined {
 	return `[Image: original ${result.originalWidth}x${result.originalHeight}, displayed at ${result.width}x${result.height}. Multiply coordinates by ${scale.toFixed(2)} to map to original image.]`;
 }
 
-/** Format screenshot metadata and coordinate mapping for tool output. */
+/** What a browser screenshot covers, which sets the CSS pixel space its image coordinates map to. */
+export type ScreenshotArea = "viewport" | "page" | "element";
+
+const SCREENSHOT_AREA_TARGET: Record<ScreenshotArea, string> = {
+	viewport: "viewport CSS pixels for tab.clickAt",
+	page: "CSS pixels from the page's top-left corner (tab.clickAt takes viewport pixels)",
+	element: "CSS pixels from the element's top-left corner",
+};
+
+/**
+ * Map displayed screenshot coordinates to the CSS pixels the page and `tab.clickAt` use: the capture
+ * holds `scale` image pixels per CSS pixel before any resize, or `undefined` when it could not be read.
+ */
+function formatScreenshotCoordinateNote(
+	resized: ResizedImage,
+	capture: { area: ScreenshotArea; scale: number | undefined },
+): string | undefined {
+	if (!resized.originalWidth || !resized.width) return undefined;
+	if (capture.scale === undefined || !(capture.scale > 0)) {
+		return `[Image: original ${resized.originalWidth}x${resized.originalHeight}, displayed at ${resized.width}x${resized.height}. Its scale to CSS pixels could not be read; target elements by selector or id rather than tab.clickAt.]`;
+	}
+	const factor = (resized.originalWidth / resized.width / capture.scale).toFixed(2);
+	if (factor === "1.00") return undefined;
+	const scale = `capture scale ${Number(capture.scale.toFixed(2))}`;
+	const size = resized.wasResized
+		? `original ${resized.originalWidth}x${resized.originalHeight} at ${scale}, displayed at ${resized.width}x${resized.height}`
+		: `${resized.width}x${resized.height} at ${scale}`;
+	return `[Image: ${size}. Multiply image coordinates by ${factor} to get ${SCREENSHOT_AREA_TARGET[capture.area]}.]`;
+}
+
+/** Format browser screenshot metadata and the image-to-CSS-pixel mapping for tool output. */
 export function formatScreenshot(opts: {
 	saveFullRes: boolean;
 	savedMimeType: string;
 	savedByteLength: number;
 	dest: string;
 	resized: ResizedImage;
+	capture: { area: ScreenshotArea; scale: number | undefined };
 }): string[] {
 	const lines = ["Screenshot captured"];
 	if (opts.saveFullRes) {
@@ -446,9 +716,9 @@ export function formatScreenshot(opts: {
 	if (opts.resized.decodeFailed) {
 		lines.push("Resize: image decoder failed; using original image bytes");
 	}
-	const dimensionNote = formatDimensionNote(opts.resized);
-	if (dimensionNote) {
-		lines.push(dimensionNote);
+	const coordinateNote = formatScreenshotCoordinateNote(opts.resized, opts.capture);
+	if (coordinateNote) {
+		lines.push(coordinateNote);
 	}
 	return lines;
 }

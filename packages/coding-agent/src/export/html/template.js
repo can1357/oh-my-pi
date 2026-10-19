@@ -1268,10 +1268,12 @@
             for (let blockIndex = 0; blockIndex < msg.content.length; blockIndex++) {
               const block = msg.content[blockIndex];
               const blockId = assistantBlockDomId(entry.id, blockIndex, sctx);
-              if (block.type === 'text') {
-                const canon = canonicalizeMessage(block.text);
+              // Narration is prose for the user that the provider returned as thinking.
+              const answerText = block.type === 'text' ? block.text : block.type === 'thinking' && block.narration ? block.thinking : undefined;
+              if (answerText !== undefined) {
+                const canon = canonicalizeMessage(answerText);
                 if (canon) {
-                  html += `<div class="assistant-text markdown-content" id="${blockId}">${safeMarkedParse(block.text)}</div>`;
+                  html += `<div class="assistant-text markdown-content" id="${blockId}">${safeMarkedParse(answerText)}</div>`;
                 }
               } else if (block.type === 'thinking') {
                 const thinking = canonicalizeMessage(block.thinking);

@@ -55,7 +55,7 @@ The same minimum-content guard exists inside `SessionMaintenance.handoff()` and 
 - Requires a selected model and an API key/resolver for that model.
 - Builds the handoff request through the **same side-request pipeline a live turn uses**, shared with ephemeral turns:
   1. Renders the handoff prompt (`renderHandoffPrompt(...)` with optional focus, after secret obfuscation) and appends it as an agent-attributed `user` message to a snapshot of `agent.state.messages`.
-  2. Converts the snapshot with `convertMessagesToLlm(...)` (session `transformContext`, LLM conversion, and obfuscation).
+  2. Converts the snapshot with `convertMessagesToLlm(...)` for the handoff model (the snapcompact archive view that model may read, session `transformContext`, LLM conversion, and obfuscation).
   3. Builds provider `Context` with `agent.buildSideRequestContext(llmMessages, baseSystemPrompt)` — normalized tools and provider-context transforms matching the loop. The base system prompt is pinned, so the committed summary does not inherit a per-turn `before_agent_start` override.
   4. Builds simple-stream options with the live provider cache key, a unique side `sessionId` (`<sid>:side:<snowflake>`), service tier/payload hooks, `preferWebsockets: false`, `initiatorOverride: "agent"`, and the abort signal.
 - Obfuscates the final provider context and calls `generateHandoffFromContext(...)` through the host side-stream transport.

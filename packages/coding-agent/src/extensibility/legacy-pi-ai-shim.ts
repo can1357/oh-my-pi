@@ -109,11 +109,16 @@ export function getSupportedThinkingLevels<TApi extends Api>(model: Model<TApi>)
  * {@link isRetryableAssistantError} to decide whether to restart a failed
  * assistant turn, so the wording tables must match the upstream semantics they
  * were authored against rather than OMP's own `Error`-based classifiers.
+ *
+ * The transport wording also covers OMP's own network-failure sentences from
+ * `networkFailureMessage` (offline, unreachable, refused, TLS); legacy
+ * extensions must keep restarting those turns exactly as they did for the
+ * bare `Connection error.` text they replaced.
  */
 const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN =
 	/GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i;
 const RETRYABLE_PROVIDER_ERROR_PATTERN =
-	/overloaded|rate.?limit|too many requests|429|500|502|503|504|524|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|network.?error|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|getaddrinfo|ENOTFOUND|EAI_AGAIN|upstream.?connect|reset before headers|socket hang up|socket connection was closed|timed? out|timeout|terminated|websocket.?closed|websocket.?error|ended without|stream ended before message_stop|stream ended before a terminal response event|http2 request did not get a response|retry delay|you can retry your request|try your request again|please retry your request|ResourceExhausted/i;
+	/overloaded|rate.?limit|too many requests|429|500|502|503|504|524|service.?unavailable|server.?error|internal.?error|provider.?returned.?error|network.?error|connection.?error|connection.?refused|connection.?lost|other side closed|fetch failed|getaddrinfo|ENOTFOUND|EAI_AGAIN|upstream.?connect|reset before headers|socket hang up|socket connection was closed|timed? out|timeout|terminated|websocket.?closed|websocket.?error|ended without|stream ended before message_stop|stream ended before a terminal response event|http2 request did not get a response|retry delay|you can retry your request|try your request again|please retry your request|ResourceExhausted|no internet connection|couldn.?t reach|couldn.?t connect to|FailedToOpenSocket|ETIMEOUT|ENETUNREACH|EHOSTUNREACH|TLS certificate verification failed/i;
 
 /**
  * Compatibility implementation of historical pi-ai's `isRetryableAssistantError`.
@@ -183,12 +188,15 @@ export function streamSimpleOpenAIResponses(
  * legacy extensions importing it from the pi-ai root resolving through Bun's
  * static named-export check (e.g. `omp plugin install pi-blackhole`).
  *
- * This is the full set derived from an audit of the upstream root surface: the
- * error-classification predicate `isContextOverflow` (now under
- * `@oh-my-pi/pi-ai/error`) and the JSON-repair helpers that omp relocated to
- * `@oh-my-pi/pi-utils`. Upstream root symbols with no omp equivalent are
- * intentionally not shimmed — the package has diverged and there is nothing to
- * forward.
+ * The error-classification predicate `isContextOverflow` (now under
+ * `@oh-my-pi/pi-ai/error`) and the JSON-repair helpers (relocated to
+ * `@oh-my-pi/pi-utils`) still exist in the host graph and are re-exported.
+ * Upstream pi-ai 1.x additionally exposes a transcript-replay module
+ * (`src/utils/transcript.ts`, present since at least 1.0.2) that omp's fork
+ * predates and has no equivalent of anywhere; that family is ported verbatim
+ * in `legacy-pi-transcript.ts` (observed consumer:
+ * `pi-optchat` importing `getCurrentSystemMessage`).
  */
 export { isContextOverflow } from "@oh-my-pi/pi-ai/error";
 export { parseJsonWithRepair, parseStreamingJson, repairJson } from "@oh-my-pi/pi-utils";
+export * from "./legacy-pi-transcript";

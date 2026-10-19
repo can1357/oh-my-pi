@@ -11,6 +11,8 @@
  *   and `user@example.com` are not treated as imports).
  * - Relative paths resolve against the importing file's directory, not the
  *   working directory.
+ * - `\ ` inside a path represents a literal space; unescaped whitespace
+ *   terminates the path.
  * - `~/...` resolves to the user's home directory.
  * - Imports inside fenced code blocks (` ``` ` / `~~~`) and inline code
  *   spans (`` `…` ``) are preserved verbatim so technical examples like
@@ -33,11 +35,12 @@ export const MAX_AT_IMPORT_DEPTH = 5;
 /**
  * Matches a candidate `@import` token: a leading boundary (start-of-string
  * or single whitespace char) and a token whose first character is path-like.
+ * Backslash-space pairs remain inside the token; other whitespace ends it.
  *
  * The boundary character is captured separately so the slice arithmetic in
  * {@link expandLine} aligns with the `@` position, not the whitespace.
  */
-const AT_IMPORT_REGEX = /(^|[ \t])@([./~A-Za-z0-9_-][^\s]*)/g;
+const AT_IMPORT_REGEX = /(^|[ \t])@([./~A-Za-z0-9_-](?:\\ |[^\s])*)/g;
 
 /**
  * Trailing characters stripped from a captured path token: sentence-ending
@@ -134,7 +137,7 @@ async function expandLine(
 		matches.push({
 			start: atPos,
 			end: atPos + 1 + trimmedToken.length,
-			importPath: trimmedToken,
+			importPath: trimmedToken.replace(/\\ /g, " "),
 		});
 	}
 

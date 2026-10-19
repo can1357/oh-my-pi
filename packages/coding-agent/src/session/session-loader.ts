@@ -1,4 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { ConcatSink, getBlobsDir, isEisdir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { Semaphore } from "../task/parallel";
@@ -16,6 +18,7 @@ import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./ses
 import { migrateToCurrentVersion } from "./session-migrations";
 import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
+import { enotdir } from "./session-storage-errors";
 import {
 	parseTitleSlotFromContent,
 	parseTitleSlotLine,
@@ -230,7 +233,15 @@ export async function visitEntriesFromFileStream(
 		await Bun.sleep(0);
 	};
 
-	const drain = async (): Promise<void> => {
+	const hasPayload = (bytes: Uint8Array, start: number, end: number): boolean => {
+		for (let index = start; index < end; index++) {
+			const byte = bytes[index];
+			if (byte !== 0x09 && byte !== 0x0a && byte !== 0x0d && byte !== 0x20) return true;
+		}
+		return false;
+	};
+
+	const drain = async (endOfInput = false): Promise<void> => {
 		const view = sink.flush();
 		if (!view) return;
 		// Only newline-terminated bytes may reach the parser: a trailing fragment
@@ -286,15 +297,7 @@ export async function visitEntriesFromFileStream(
 				// Malformed record: skip past the next newline and continue.
 				const nextNewline = buffer.indexOf(0x0a, read);
 				if (nextNewline === -1) break; // rest of the bad line not yet received
-				let nonWhitespace = false;
-				for (let index = read; index < nextNewline; index++) {
-					const byte = buffer[index];
-					if (byte !== 0x09 && byte !== 0x0d && byte !== 0x20) {
-						nonWhitespace = true;
-						break;
-					}
-				}
-				if (nonWhitespace) options.onMalformedRecord?.();
+				if (hasPayload(buffer, read, nextNewline)) options.onMalformedRecord?.();
 				recordsSeen++;
 				advance(nextNewline + 1);
 				if (recordsSeen >= maxRecords) {
@@ -303,7 +306,16 @@ export async function visitEntriesFromFileStream(
 				}
 				continue;
 			}
-			if (read === 0) break; // incomplete record awaiting more data
+			if (read === 0) {
+				// Incomplete value awaiting more bytes. Once the input has ended nothing more
+				// is coming, so it is a truncated record (parseJsonlLenient counts it too).
+				if (endOfInput) {
+					if (hasPayload(buffer, 0, buffer.length)) options.onMalformedRecord?.();
+					recordsSeen++;
+					advance(buffer.length);
+				}
+				break;
+			}
 			advance(read);
 			if (done) {
 				advance(buffer.length);
@@ -364,7 +376,7 @@ export async function visitEntriesFromFileStream(
 		// can complete it (readline yielded it; parseChunk needs the delimiter).
 		if (!stopped && !sink.isEmpty) {
 			sink.append(LF);
-			await drain();
+			await drain(true);
 		}
 	} catch (err) {
 		if (visitorThrew) throw err;
@@ -437,6 +449,26 @@ async function loadWithKnownSize(
 	};
 }
 
+/**
+ * Windows reports ENOENT when a path component is a regular file, where POSIX
+ * yields ENOTDIR. Inspecting the leaf itself and then climbing to the first
+ * existing ancestor distinguishes that path error from a genuinely missing
+ * file.
+ */
+export async function hasFileAsPathComponent(filePath: string): Promise<boolean> {
+	let current = path.resolve(filePath);
+	for (;;) {
+		try {
+			return !(await fs.stat(current)).isDirectory();
+		} catch {
+			// Missing component: climb to the first existing ancestor.
+		}
+		const parent = path.dirname(current);
+		if (parent === current) return false;
+		current = parent;
+	}
+}
+
 /** Load and validate a session while retaining malformed-record diagnostics. */
 export async function loadSessionFile(
 	filePath: string,
@@ -447,7 +479,17 @@ export async function loadSessionFile(
 		const statSize = storage.statSync(filePath).size;
 		const { loaded, sourceSize } = await loadWithKnownSize(filePath, storage, statSize, options);
 		return { ...loaded, sourceSize };
-	} catch (err) {
+	} catch (caught) {
+		// Windows reports ENOENT where POSIX reports ENOTDIR for a path running
+		// through a regular file; restore ENOTDIR so that path error is never
+		// masked as a missing session.
+		const err =
+			isEnoent(caught) &&
+			process.platform === "win32" &&
+			storage instanceof FileSessionStorage &&
+			(await hasFileAsPathComponent(filePath))
+				? enotdir(filePath)
+				: caught;
 		if (options?.throwIfMissing && (isEnoent(err) || isEnotdir(err))) {
 			throw err;
 		}

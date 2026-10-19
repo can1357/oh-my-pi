@@ -10,7 +10,7 @@
 use std::{
 	borrow::Cow,
 	ffi::{OsStr, OsString},
-	path::{Component, Path, PathBuf},
+	path::{Component, Path, PathBuf, Prefix},
 };
 
 /// Length in bytes of the `scheme://` root of `path`, if it is a URL.
@@ -54,10 +54,10 @@ fn subpath(path: &Path, end: usize) -> &Path {
 	}
 	#[cfg(not(unix))]
 	{
-		// SAFETY: `bytes` is a prefix of `path`'s encoded bytes that ends either at
-		// the end of the string or immediately before an ASCII '/' (or right after
-		// the ASCII `scheme://` root), which the `from_encoded_bytes_unchecked`
-		// contract permits as a split point.
+		// SAFETY: `bytes` is a prefix of `path`'s encoded bytes that ends either
+		// at the end of the string or immediately before an ASCII '/' (or
+		// right after the ASCII `scheme://` root), which the
+		// `from_encoded_bytes_unchecked` contract permits as a split point.
 		Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(bytes) })
 	}
 }
@@ -75,8 +75,9 @@ fn url_segments(path: &Path, root: usize) -> impl Iterator<Item = &OsStr> {
 			}
 			#[cfg(not(unix))]
 			{
-				// SAFETY: `seg` is delimited by ASCII '/' bytes (or the string ends) inside
-				// `path`'s encoded bytes, a permitted split point.
+				// SAFETY: `seg` is delimited by ASCII '/' bytes (or the string
+				// ends) inside `path`'s encoded bytes, a permitted
+				// split point.
 				unsafe { OsStr::from_encoded_bytes_unchecked(seg) }
 			}
 		})
@@ -103,13 +104,20 @@ const fn needs_escape(byte: u8) -> bool {
 		|| matches!(
 			byte,
 			b' '
-				| b'"' | b'#'
-				| b'%' | b'<'
-				| b'>' | b'?'
-				| b'[' | b'\\'
-				| b']' | b'^'
-				| b'`' | b'{'
-				| b'|' | b'}'
+				| b'"'
+				| b'#'
+				| b'%'
+				| b'<'
+				| b'>'
+				| b'?'
+				| b'['
+				| b'\\'
+				| b']'
+				| b'^'
+				| b'`'
+				| b'{'
+				| b'|'
+				| b'}'
 		)
 }
 
@@ -225,13 +233,19 @@ fn ends_with_separator(path: &Path) -> bool {
 
 /// URL-aware [`Path::join`].
 ///
-/// A URL, rooted, or prefixed `rel` replaces `base` (as with `Path::join`).
+/// A URL, rooted, or prefixed `rel` replaces `base` (as with `Path::join`),
+/// except a Windows drive-relative `rel` (`C:`, `C:name`), which resolves
+/// against `base` on the same drive and against the drive root otherwise,
+/// never against the process's per-drive working directory.
 /// Under a URL `base`, each component of the raw relative path becomes one
 /// percent-encoded segment ([`encode_segment`]) joined with `/`, so
 /// `scheme://` is never collapsed; a trailing separator is kept.
 pub fn join_path(base: &Path, rel: &Path) -> PathBuf {
 	if is_virtual_path(rel) {
 		return rel.to_path_buf();
+	}
+	if let Some(joined) = join_drive_relative(base, rel) {
+		return joined;
 	}
 	if !is_virtual_path(base) {
 		return base.join(rel);
@@ -261,6 +275,41 @@ pub fn join_path(base: &Path, rel: &Path) -> PathBuf {
 		spelled.push("/");
 	}
 	push_url(base, &spelled)
+}
+
+/// Joins a Windows drive-relative `rel` (`C:`, `C:name`) lexically; `None`
+/// for any other `rel`. Left to Win32, it would resolve against the process's
+/// per-drive cwd instead of the shell's. On `base`'s drive the remainder joins
+/// onto `base` (`C:` is `base` itself); otherwise (another drive, a URL
+/// `base`) onto that drive's root `X:\`.
+fn join_drive_relative(base: &Path, rel: &Path) -> Option<PathBuf> {
+	let mut components = rel.components();
+	let Some(Component::Prefix(prefix)) = components.next() else {
+		return None;
+	};
+	let Prefix::Disk(drive) = prefix.kind() else {
+		return None;
+	};
+	if rel.has_root() {
+		return None;
+	}
+	let same_drive = matches!(
+		base.components().next(),
+		Some(Component::Prefix(base_prefix))
+			if matches!(base_prefix.kind(), Prefix::Disk(d) | Prefix::VerbatimDisk(d) if d.eq_ignore_ascii_case(&drive))
+	);
+	let mut out = if same_drive {
+		base.to_path_buf()
+	} else {
+		let mut root = OsString::from(prefix.as_os_str());
+		root.push("\\");
+		PathBuf::from(root)
+	};
+	let rest = components.as_path();
+	if !rest.as_os_str().is_empty() {
+		out.push(rest);
+	}
+	Some(out)
 }
 
 /// Path of the directory entry named `name` (raw) inside `dir`: host
@@ -521,11 +570,7 @@ impl PathBuilder {
 
 	pub(crate) fn to_path(&self) -> PathBuf {
 		if self.url {
-			let mut out = self
-				.root
-				.clone()
-				.map(PathBuf::into_os_string)
-				.unwrap_or_default();
+			let mut out = self.root.clone().map_or_default(PathBuf::into_os_string);
 			for (i, seg) in self.segments.iter().enumerate() {
 				if i > 0 {
 					out.push("/");

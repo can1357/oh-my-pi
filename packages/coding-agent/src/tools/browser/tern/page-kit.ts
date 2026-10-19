@@ -469,7 +469,10 @@ const idrefText = (el, attribute) => {
 	const lookup = id => (root.getElementById ? root.getElementById(id) : null) || document.getElementById(id);
 	return normalizeSpace(ids.map(id => {
 		const target = lookup(id);
-		return target ? contentText(target, null) : "";
+		if (!target) return "";
+		// A hidden target (visibility, display: none, aria-hidden, a hidden ancestor) is read whole, as the
+		// accessibility tree reads one aria-labelledby names; its own aria-labelledby is not followed.
+		return contentText(target, null, hiddenForA11y(target) ? "any" : "visible", false);
 	}).join(" "));
 };
 const hiddenForA11y = el => {
@@ -480,33 +483,52 @@ const hiddenForA11y = el => {
 	const style = getComputedStyle(el);
 	return style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse";
 };
-// Text an element contributes as name-from-content: text nodes, embedded image alts, nested labels.
-const contentText = (el, skip) => {
+// Text an element contributes as name-from-content: text nodes, embedded control values, a child's
+// aria-labelledby text, aria-label or image alt. Text under visibility: hidden is left out, as
+// Chromium's accessibility tree leaves it out, unless visibility is "any" (a hidden referenced root,
+// read whole, display: none descendants included).
+const contentText = (el, skip, visibility = "visible", followRefs = true) => {
 	let out = "";
-	const walk = node => {
+	const walk = (node, visibility) => {
 		for (let child = node.firstChild; child; child = child.nextSibling) {
 			if (child.nodeType === Node.TEXT_NODE) {
-				out += child.nodeValue || "";
+				if (visibility === "visible" || visibility === "any") out += child.nodeValue || "";
 				continue;
 			}
 			if (child.nodeType !== Node.ELEMENT_NODE || child === skip || SKIP_TAGS.has(child.localName)) continue;
-			if (child.getAttribute("aria-hidden") === "true") continue;
+			if (visibility !== "any" && child.getAttribute("aria-hidden") === "true") continue;
 			const style = getComputedStyle(child);
-			if (style.display === "none") continue;
+			if (style.display === "none" && visibility !== "any") continue;
 			const block = style.display !== "inline" && style.display !== "contents";
 			if (block) out += " ";
+			const shown = visibility === "any" || style.visibility === "visible";
+			const inner = visibility === "any" ? "any" : style.visibility;
 			const label = child.getAttribute("aria-label");
-			if (label) out += label;
-			else if (child.localName === "img") out += child.getAttribute("alt") || "";
-			else if (child.localName === "input" || child.localName === "select" || child.localName === "textarea") {
-				out += child.localName === "select" ? (child.selectedOptions[0] ? child.selectedOptions[0].text : "") : child.value || "";
-			} else if (child.shadowRoot) walk(child.shadowRoot);
-			else walk(child);
+			const labelledBy = followRefs ? idrefText(child, "aria-labelledby") : "";
+			const field = child.localName === "input" || child.localName === "select" || child.localName === "textarea";
+			const inputButton = child.localName === "input" && ["button", "submit", "reset"].includes(inputType(child));
+			const childRole = (child.getAttribute("role") || "").trim().split(/\s+/)[0].toLowerCase();
+			// A range reads its ARIA value text, then value, before the DOM value.
+			const range = (child.localName === "input" && inputType(child) === "range") || childRole === "slider" || childRole === "spinbutton";
+			// A text field's value stands in for it; a checkbox's or radio's value ("on" by default) is not
+			// text it shows, and an input button is named by its label before its value.
+			const valueIsText = field && !inputButton && (child.localName !== "input" || !["checkbox", "radio", "file", "hidden", "image"].includes(inputType(child)));
+			// A nested field contributes its value, not its own label.
+			if (range) {
+				if (shown) out += child.getAttribute("aria-valuetext") || child.getAttribute("aria-valuenow") || child.value || "";
+			} else if (valueIsText) {
+				if (shown) out += child.localName === "select" ? Array.from(child.selectedOptions, option => option.text).join(" ") : child.value || "";
+			} else if (labelledBy) out += shown ? labelledBy : "";
+			else if (label) out += shown ? label : "";
+			else if (child.localName === "img") out += shown ? child.getAttribute("alt") || "" : "";
+			else if (inputButton) out += shown ? child.value || "" : "";
+			else if (!field && child.shadowRoot) walk(child.shadowRoot, inner);
+			else if (!field) walk(child, inner);
 			if (block) out += " ";
 		}
 	};
-	if (el.shadowRoot) walk(el.shadowRoot);
-	else walk(el);
+	if (el.shadowRoot) walk(el.shadowRoot, visibility);
+	else walk(el, visibility);
 	return normalizeSpace(out);
 };
 const accessibleName = (el, role) => {
@@ -1004,11 +1026,22 @@ const kit = {
 				return { ok: false, reason: "hidden", count, detail: "opacity:0" };
 			}
 		}
-		const left = Math.max(0, Math.min(innerWidth, rect.left));
-		const right = Math.max(0, Math.min(innerWidth, rect.right));
-		const top = Math.max(0, Math.min(innerHeight, rect.top));
-		const bottom = Math.max(0, Math.min(innerHeight, rect.bottom));
-		const inViewport = right - left >= 1 && bottom - top >= 1;
+		// A wrapped link's box centre can fall between its lines, on the parent; aim at its first visible line.
+		const fragments = Array.from(el.getClientRects());
+		const fragment =
+			fragments.length === 0
+				? rect
+				: fragments.find(
+						r =>
+							Math.min(innerWidth, r.right) - Math.max(0, r.left) >= 1 &&
+							Math.min(innerHeight, r.bottom) - Math.max(0, r.top) >= 1,
+					);
+		const box = fragment ?? rect;
+		const left = Math.max(0, Math.min(innerWidth, box.left));
+		const right = Math.max(0, Math.min(innerWidth, box.right));
+		const top = Math.max(0, Math.min(innerHeight, box.top));
+		const bottom = Math.max(0, Math.min(innerHeight, box.bottom));
+		const inViewport = fragment !== undefined && right - left >= 1 && bottom - top >= 1;
 		if ((pointer || action === "point") && !inViewport) return { ok: false, reason: "offViewport", count };
 		const x = inViewport ? Math.floor((left + right) / 2) : Math.floor(rect.left + rect.width / 2);
 		const y = inViewport ? Math.floor((top + bottom) / 2) : Math.floor(rect.top + rect.height / 2);
@@ -1089,11 +1122,17 @@ const kit = {
 		if (el.localName !== "select") throw new Error("tab.select() requires a <select> element");
 		const options = Array.from(el.options);
 		const wanted = new Set();
+		const missing = [];
 		for (const value of values.map(String)) {
 			const option =
 				options.find(candidate => candidate.value === value) ||
 				options.find(candidate => candidate.label === value || normalizeSpace(candidate.text) === value);
 			if (option) wanted.add(option);
+			else missing.push(value);
+		}
+		// A value that matches nothing leaves the select untouched rather than blanking it.
+		if (missing.length > 0) {
+			throw new Error("No <select> option matches " + missing.map(value => JSON.stringify(value)).join(", "));
 		}
 		if (el.multiple) {
 			for (const option of options) option.selected = wanted.has(option);

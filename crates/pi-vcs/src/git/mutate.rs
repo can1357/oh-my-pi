@@ -96,6 +96,11 @@ impl GitRepo {
 	pub fn stage_files(&self, files: &[String]) -> Result<()> {
 		let repo = self.gix()?;
 		let mut index = load_index_or_head(&repo, "git add")?;
+		// Whole seconds since the epoch before any file is stat'ed (see
+		// `stage_one`).
+		let staging_started = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.map_or(0, |elapsed| elapsed.as_secs());
 		let all = files.is_empty();
 		let mut requested: BTreeSet<String> = files
 			.iter()
@@ -127,8 +132,41 @@ impl GitRepo {
 		let (mut filter, filter_index) = repo
 			.filter_pipeline(None)
 			.map_err(|err| Error::backend("git add", err))?;
+		// Hash every selected path first, then rewrite the index in one pass:
+		// removing entries path by path rescans the whole index each time.
+		let mut replaced = std::collections::HashSet::<BString>::new();
+		let mut staged = Vec::new();
 		for path in selected {
-			stage_one(&mut filter, &filter_index, &mut index, &path)?;
+			match stage_one(self.root(), &mut filter, &filter_index, &path, staging_started)? {
+				Staged::Entry(entry) => {
+					replaced.insert(path.into());
+					staged.push(entry);
+				},
+				Staged::Removed => {
+					replaced.insert(path.into());
+				},
+				Staged::Kept => {},
+			}
+		}
+		index.remove_entries(|_, path, _| replaced.contains(path));
+		// A kept entry's stat as new as the old index is racy: only that
+		// index's timestamp makes git re-check the file's content, and the
+		// index written here is newer, so the stat is dropped to keep the
+		// check (git smudges such entries when it writes an index).
+		let racy_from = index.timestamp();
+		for entry in index.entries_mut() {
+			if entry.stat.is_racy(racy_from, Default::default()) {
+				entry.stat = gix::index::entry::Stat::default();
+			}
+		}
+		for entry in staged {
+			index.dangerously_push_entry(
+				entry.stat,
+				entry.id,
+				gix::index::entry::Flags::empty(),
+				entry.mode,
+				entry.path.as_bstr(),
+			);
 		}
 		index.sort_entries();
 		index
@@ -148,9 +186,19 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git reset", err))
 	}
 
-	/// Create a commit and return its object id.
+	/// Create a commit and return its object id. With `commit.gpgSign` enabled
+	/// the object is written by `git commit-tree -S` so Git runs the
+	/// configured signer; a signer failure leaves HEAD unchanged.
 	pub fn commit_create(&self, message: &str, options: &CommitOptions) -> Result<String> {
 		let repo = self.gix()?;
+		// Git rejects a malformed value before doing any work; reading it as
+		// `false` would silently write unsigned commits.
+		let sign = repo
+			.config_snapshot()
+			.try_boolean("commit.gpgSign")
+			.transpose()
+			.map_err(|err| Error::backend("git commit read commit.gpgSign", err))?
+			.unwrap_or(false);
 		run_commit_hook(self, "pre-commit", &[])?;
 		let mut head = repo
 			.head()
@@ -222,10 +270,14 @@ impl GitRepo {
 		run_commit_hook(self, "commit-msg", &[message_path.as_os_str()])?;
 		let message = fs::read_to_string(&message_path)
 			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
-		let commit = repo
-			.new_commit_as(committer, author, message, tree, parents)
-			.map_err(|err| Error::backend("git commit", err))?;
-		let id = commit.id;
+		let id = if sign {
+			sign_commit(self, &message, tree, &parents, author, committer)?
+		} else {
+			repo
+				.new_commit_as(committer, author, message, tree, parents)
+				.map_err(|err| Error::backend("git commit", err))?
+				.id
+		};
 		let expected = old_commit
 			.map_or(gix::refs::transaction::PreviousValue::MustNotExist, |old| {
 				gix::refs::transaction::PreviousValue::MustExistAndMatch(old.into())
@@ -933,6 +985,58 @@ fn run_commit_hook(repository: &GitRepo, name: &str, args: &[&OsStr]) -> Result<
 	})
 }
 
+/// Write a signed commit object through `git commit-tree -S`, which runs the
+/// signer configured by `gpg.format`/`gpg.program`/`user.signingKey`.
+/// gitoxide cannot sign, so this is the one commit path that leaves the
+/// process; HEAD is still updated in-process by the caller.
+fn sign_commit(
+	repository: &GitRepo,
+	message: &str,
+	tree: gix::hash::ObjectId,
+	parents: &[gix::hash::ObjectId],
+	author: gix::actor::SignatureRef<'_>,
+	committer: gix::actor::SignatureRef<'_>,
+) -> Result<gix::hash::ObjectId> {
+	let mut args = vec![
+		// The repository was opened with `Trust::Full`; without this override
+		// git's ownership check rejects checkouts owned by another user
+		// (host-mounted repositories in containers) that commit fine unsigned.
+		"-c".to_owned(),
+		"safe.directory=*".to_owned(),
+		"commit-tree".to_owned(),
+		"-S".to_owned(),
+		tree.to_hex().to_string(),
+	];
+	for parent in parents {
+		args.push("-p".to_owned());
+		args.push(parent.to_hex().to_string());
+	}
+	// Raw `<seconds> <offset>` dates need the `@` marker: without it git falls
+	// back to its approximate-date parser, which rejects timestamps under
+	// nine digits.
+	let author_date = format!("@{}", author.time);
+	let committer_date = format!("@{}", committer.time);
+	let env: [(&str, &OsStr); 6] = [
+		("GIT_AUTHOR_NAME", &author.name.to_os_str_lossy()),
+		("GIT_AUTHOR_EMAIL", &author.email.to_os_str_lossy()),
+		("GIT_AUTHOR_DATE", author_date.as_ref()),
+		("GIT_COMMITTER_NAME", &committer.name.to_os_str_lossy()),
+		("GIT_COMMITTER_EMAIL", &committer.email.to_os_str_lossy()),
+		("GIT_COMMITTER_DATE", committer_date.as_ref()),
+	];
+	// The message travels over stdin so it reaches git byte-for-byte, with no
+	// file path to re-encode.
+	let output = super::cli::run_sync_write(
+		repository.root(),
+		&args,
+		super::cli::COMMAND_TIMEOUT,
+		&super::cli::SyncWrite { stdin: message.as_bytes(), env: &env },
+	)?
+	.into_checked(&args)?;
+	gix::hash::ObjectId::from_hex(output.stdout.trim().as_bytes())
+		.map_err(|err| Error::backend("git commit-tree", err))
+}
+
 /// Mirrors git's `find_hook`: any failure to stat the hook (missing, or
 /// `core.hooksPath` pointing at a non-directory such as `/dev/null`) means
 /// "no hook", never a commit failure.
@@ -940,17 +1044,14 @@ fn hook_is_executable(path: &Path) -> bool {
 	let Ok(metadata) = fs::metadata(path) else {
 		return false;
 	};
-	if !metadata.is_file() {
-		return false;
-	}
 	#[cfg(unix)]
 	{
 		use std::os::unix::fs::PermissionsExt;
-		metadata.permissions().mode() & 0o111 != 0
+		metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
 	}
 	#[cfg(not(unix))]
 	{
-		true
+		metadata.is_file()
 	}
 }
 
@@ -1276,40 +1377,59 @@ fn same_worktree_file(_: &fs::Metadata, _: &fs::Metadata) -> bool {
 	false
 }
 
-/// Write the filtered worktree content at `path` into the object database and
-/// replace its index entry. A path that vanished or is untrackable (socket,
-/// plain directory) is left out of the index, as `git add` would.
+/// The new index entry for a staged path.
+struct StagedEntry {
+	path: BString,
+	stat: gix::index::entry::Stat,
+	id:   gix::ObjectId,
+	mode: gix::index::entry::Mode,
+}
+
+/// What staging a path does to its index entries.
+enum Staged {
+	/// Replace them with this entry.
+	Entry(StagedEntry),
+	/// Drop them: the path vanished or is untrackable (socket), as `git add`
+	/// would.
+	Removed,
+	/// Leave them: a plain directory.
+	Kept,
+}
+
+/// Write the filtered worktree content at `path` into the object database.
 fn stage_one(
+	root: &Path,
 	filter: &mut gix::filter::Pipeline<'_>,
 	filter_index: &gix::index::State,
-	index: &mut gix::index::File,
 	path: &str,
-) -> Result<()> {
+	staging_started: u64,
+) -> Result<Staged> {
 	use gix::objs::tree::EntryKind;
 	let rela_path = path.as_bytes().as_bstr();
+	// Stat before reading, as `git add` does, so the entry keeps a valid stat
+	// cache: a write landing after the stat changes the file's stat and later
+	// status calls re-hash it. A file last changed in the second staging
+	// began could change again within that second and keep its stat, so its
+	// stat is not recorded and the next status compares contents instead.
+	let stat = gix::index::fs::Metadata::from_path_no_follow(&root.join(path))
+		.ok()
+		.and_then(|metadata| gix::index::entry::Stat::from_fs(&metadata).ok())
+		.filter(|stat| u64::from(stat.mtime.secs) < staging_started)
+		.unwrap_or_default();
 	let Some((id, kind, _)) = filter
 		.worktree_file_to_object(rela_path, filter_index)
 		.map_err(|err| Error::backend("git add", err))?
 	else {
-		index.remove_entries(|_, p, _| p == rela_path);
-		return Ok(());
+		return Ok(Staged::Removed);
 	};
 	let mode = match kind {
 		EntryKind::Blob => gix::index::entry::Mode::FILE,
 		EntryKind::BlobExecutable => gix::index::entry::Mode::FILE_EXECUTABLE,
 		EntryKind::Link => gix::index::entry::Mode::SYMLINK,
 		EntryKind::Commit => gix::index::entry::Mode::COMMIT,
-		EntryKind::Tree => return Ok(()),
+		EntryKind::Tree => return Ok(Staged::Kept),
 	};
-	index.remove_entries(|_, p, _| p == rela_path);
-	index.dangerously_push_entry(
-		Default::default(),
-		id,
-		gix::index::entry::Flags::empty(),
-		mode,
-		rela_path,
-	);
-	Ok(())
+	Ok(Staged::Entry(StagedEntry { path: rela_path.to_owned(), stat, id, mode }))
 }
 
 fn copy_index_paths(dest: &mut gix::index::File, source: &gix::index::File, files: &[String]) {
@@ -1963,6 +2083,114 @@ mod tests {
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "?? new");
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn commit_respects_configured_signing_and_refuses_failed_signatures() {
+		let (temp, _) = fixture();
+		// A pre-1973 author date: git rejects a bare `<seconds> <offset>` under
+		// nine digits, so the amend below proves the raw date reaches the
+		// signed commit intact.
+		git(temp.path(), &["commit", "-q", "--amend", "--no-edit", "--date=@86400 +0130"]);
+		let key = temp.path().join("signing-key");
+		let output = Command::new("ssh-keygen")
+			.args(["-q", "-t", "ed25519", "-N", "", "-f"])
+			.arg(&key)
+			.output()
+			.unwrap();
+		assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+		let signers = temp.path().join("allowed-signers");
+		fs::write(
+			&signers,
+			format!("test@example.com {}\n", fs::read_to_string(key.with_extension("pub")).unwrap()),
+		)
+		.unwrap();
+		git(temp.path(), &["config", "gpg.format", "ssh"]);
+		git(temp.path(), &["config", "user.signingkey", key.to_str().unwrap()]);
+		git(temp.path(), &["config", "gpg.ssh.allowedSignersFile", signers.to_str().unwrap()]);
+		git(temp.path(), &["config", "commit.gpgsign", "true"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		let identity = |rev: &str| {
+			git(temp.path(), &["log", "-1", "--date=raw", "--format=%an|%ae|%ad|%cn|%ce", rev])
+		};
+
+		fs::write(temp.path().join("a"), "amended\n").unwrap();
+		repo.stage_files(&["a".into()]).unwrap();
+		let amended = repo
+			.commit_create("signed amend", &CommitOptions { amend: true, ..Default::default() })
+			.unwrap();
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), amended);
+		git(temp.path(), &["verify-commit", "HEAD"]);
+		assert_eq!(identity("HEAD"), "Test|test@example.com|86400 +0130|Test|test@example.com");
+		assert_eq!(git(temp.path(), &["rev-list", "--count", "HEAD"]), "1");
+
+		let message = "subject ünïcode\n\nbody line\n";
+		fs::write(temp.path().join("b"), "signed\n").unwrap();
+		repo.stage_files(&["b".into()]).unwrap();
+		let signed = repo
+			.commit_create(message, &CommitOptions::default())
+			.unwrap();
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), signed);
+		git(temp.path(), &["verify-commit", "HEAD"]);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD^"]), amended);
+		let raw = git(temp.path(), &["cat-file", "commit", "HEAD"]);
+		assert!(raw.ends_with(&format!("\n\n{}", message.trim_end())), "{raw}");
+
+		git(temp.path(), &["config", "user.signingkey", "/no-such-signing-key"]);
+		fs::write(temp.path().join("a"), "must not commit\n").unwrap();
+		repo.stage_files(&["a".into()]).unwrap();
+		let error = repo
+			.commit_create("failed signer", &CommitOptions::default())
+			.unwrap_err();
+		assert!(matches!(error, Error::Cli { .. }), "{error:?}");
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), signed);
+
+		// Git refuses a malformed boolean; committing unsigned instead would
+		// silently drop the signature the user asked for.
+		git(temp.path(), &["config", "commit.gpgsign", "sometimes"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		assert!(
+			repo
+				.commit_create("malformed config", &CommitOptions::default())
+				.is_err()
+		);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), signed);
+
+		git(temp.path(), &["config", "commit.gpgsign", "false"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+		repo
+			.commit_create("unsigned by choice", &CommitOptions::default())
+			.unwrap();
+		assert!(!git(temp.path(), &["cat-file", "-p", "HEAD"]).contains("\ngpgsig "));
+	}
+
+	/// Staged entries record the file's stat so later status calls can skip
+	/// re-hashing them; a zeroed stat would force a content check every time.
+	/// A file changed in the second staging began could change again within
+	/// that second without its stat changing, so it records none.
+	#[test]
+	fn stage_files_records_the_stat_cache_unless_racy() {
+		let (temp, repo) = fixture();
+		let set_mtime = |path: &str, when: std::time::SystemTime| {
+			fs::OpenOptions::new()
+				.write(true)
+				.open(temp.path().join(path))
+				.and_then(|file| file.set_modified(when))
+				.unwrap();
+		};
+		let now = std::time::SystemTime::now();
+		fs::write(temp.path().join("a"), "changed content\n").unwrap();
+		set_mtime("a", now - std::time::Duration::from_secs(30));
+		set_mtime("b", now + std::time::Duration::from_secs(60));
+		repo.stage_files(&[]).unwrap();
+		let index = gix::open(temp.path()).unwrap().open_index().unwrap();
+		let stat = |path: &str| index.entry_by_path(path.into()).unwrap().stat;
+		let size = fs::metadata(temp.path().join("a")).unwrap().len();
+		assert_eq!(u64::from(stat("a").size), size, "a records its size");
+		assert_ne!(stat("a").mtime, gix::index::entry::stat::Time::default(), "a records its mtime");
+		assert_eq!(stat("b"), gix::index::entry::Stat::default(), "a racy stat is not recorded");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "M  a");
+	}
+
 	#[test]
 	fn stage_applies_worktree_to_git_filters() {
 		// Regression: staging stored raw worktree bytes, so under
@@ -2397,8 +2625,8 @@ mod tests {
 		fs::write(temp.path().join("parent-untracked.txt"), "delete\n").unwrap();
 
 		// 4. Global excludesfile (core.excludesFile), configured *after* `repo`'s
-		//    cached gix handle was opened by the staging calls above. The clean below
-		//    must observe it or `global.env` is deleted.
+		//    cached gix handle was opened by the staging calls above. The clean
+		//    below must observe it or `global.env` is deleted.
 		let global_exclude = outside.path().join("global-excludes");
 		fs::write(&global_exclude, "global.env\n").unwrap();
 		git(temp.path(), &["config", "core.excludesFile", global_exclude.to_str().unwrap()]);
@@ -2463,8 +2691,8 @@ mod tests {
 			initially_empty.exists(),
 			"pathspec-scoped clean leaves directories outside the pathspec"
 		);
-		// 10. Pathspec scoping: cleaning with a pathspec prunes empty dirs inside the
-		//     pathspec but preserves the parent
+		// 10. Pathspec scoping: cleaning with a pathspec prunes empty dirs inside
+		//     the pathspec but preserves the parent
 		let pathspec_dir = temp.path().join("pathspec-parent/child/grandchild");
 		fs::create_dir_all(&pathspec_dir).unwrap();
 		fs::write(pathspec_dir.join("leaf.txt"), "leaf\n").unwrap();

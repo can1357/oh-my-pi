@@ -10,15 +10,10 @@
  * OpenRouter never saw `providers.openrouterVariant`, breaking sticky routing
  * and OpenRouter response-cache hits across advisor calls.
  */
-import {
-	fitOutputTokensToContextWindow,
-	type StreamFn,
-	Tokenizer,
-	tokenizerEncodingForModel,
-} from "@oh-my-pi/pi-agent-core";
+import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
-import type { Encoding } from "@oh-my-pi/pi-natives";
 import type { Settings } from "../config/settings";
 import { type AnthropicSlowModeLanes, anthropicSlowModeLanes } from "./anthropic-slow-mode";
 
@@ -31,6 +26,7 @@ import {
 	cfgProvidersAntigravityEndpoint,
 	cfgProvidersCacheRetention,
 	cfgProvidersMaxInFlightRequests,
+	cfgProvidersMuseCodeStoreResponses,
 	cfgProvidersOpenaiLiveSteering,
 	cfgProvidersOpenaiWebsockets,
 	cfgProvidersOpenrouterVariant,
@@ -80,8 +76,10 @@ export function createSettingsAwareStreamFn(
 	base: StreamFn = streamSimple,
 	slowModeContext?: SettingsStreamSlowModeContext,
 ): StreamFn {
-	// One tokenizer per encoding, so per-message counts are reused across requests.
-	const tokenizers = new Map<Encoding | null, Tokenizer>();
+	// One tokenizer per reading model and native-history replay state, so
+	// per-message counts are reused across requests: its prices (images,
+	// replayed thinking and reasoning) belong to that model and request state.
+	const tokenizers = new Map<string, Tokenizer>();
 	return (model, context, streamOptions) => {
 		const openrouterRoutingPreset = cfgProvidersOpenrouterVariant.get(settings);
 		const openrouterVariant =
@@ -130,11 +128,26 @@ export function createSettingsAwareStreamFn(
 						onLane: slowModeContext?.onLane,
 					})
 				: undefined;
-		const encoding = tokenizerEncodingForModel(model);
-		let tokenizer = tokenizers.get(encoding);
+		// Opt-in: storage keeps prompts and outputs on Meta's side. The setting
+		// also reads PI_MUSE_STORE_RESPONSES, which overrides it while set.
+		const storeResponses =
+			streamOptions?.storeResponses ??
+			(model.provider === "muse-code" ? cfgProvidersMuseCodeStoreResponses.get(settings) : undefined);
+		const maxInFlightRequests = validateProviderMaxInFlightRequests(
+			streamOptions?.maxInFlightRequests ?? cfgProvidersMaxInFlightRequests.get(settings),
+		);
+		// A cold Responses session rebuilds turns without their encrypted reasoning.
+		// A request that may wait for a provider slot is built when it gets one,
+		// after a concurrent response may have warmed the session, so it is
+		// fitted as replaying.
+		const nativeHistoryReplay =
+			Object.hasOwn(maxInFlightRequests, model.provider) ||
+			openAIResponsesReplaysNativeHistory(model, streamOptions?.providerSessionState);
+		const tokenizerKey = `${model.provider}\0${model.api}\0${model.id}\0${nativeHistoryReplay}`;
+		let tokenizer = tokenizers.get(tokenizerKey);
 		if (!tokenizer) {
-			tokenizer = new Tokenizer(model);
-			tokenizers.set(encoding, tokenizer);
+			tokenizer = new Tokenizer(model, { nativeHistoryReplay });
+			tokenizers.set(tokenizerKey, tokenizer);
 		}
 		const maxTokens = fitOutputTokensToContextWindow(model, context, streamOptions?.maxTokens, tokenizer);
 		const merged: SimpleStreamOptions = {
@@ -147,9 +160,7 @@ export function createSettingsAwareStreamFn(
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
 			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? cfgRetryMaxDelayMs.get(settings),
-			maxInFlightRequests: validateProviderMaxInFlightRequests(
-				streamOptions?.maxInFlightRequests ?? cfgProvidersMaxInFlightRequests.get(settings),
-			),
+			maxInFlightRequests,
 			loopGuard: {
 				enabled: cfgModelLoopGuardEnabled.get(settings),
 				checkAssistantContent: cfgModelLoopGuardCheckAssistantContent.get(settings),
@@ -159,6 +170,7 @@ export function createSettingsAwareStreamFn(
 			// An off switch, not a default: the agent loop always offers its queue.
 			liveSteering: cfgProvidersOpenaiLiveSteering.get(settings) ? streamOptions?.liveSteering : undefined,
 			...(fallbacks !== undefined ? { fallbacks } : {}),
+			...(storeResponses !== undefined ? { storeResponses } : {}),
 			...(slowModeHooks !== undefined ? { anthropicSlowMode: slowModeHooks } : {}),
 		};
 		return base(model, context, merged);

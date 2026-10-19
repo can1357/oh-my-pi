@@ -13,10 +13,54 @@ import type { TtsrMatchContext, TtsrOutput } from "../export/ttsr";
 /** Tool surface TTSR reads: identity plus the optional matcher hooks. */
 export type TtsrTool = Pick<AgentTool, "name" | "customWireName" | "matcherPaths" | "matcherDigest" | "matcherEntries">;
 
+type MatcherEntries = readonly { path: string; digest: string }[];
+
+/** Hook results and context for one arguments object; each `{ value }` is set once computed. */
+interface ArgumentsInspection {
+	tool: TtsrTool | undefined;
+	/**
+	 * {@link argumentsFingerprint} when inspected. Arguments objects are mutated
+	 * in place (streams append, reused calls are rewritten), so reuse requires
+	 * the full contents to hash the same, not just the same sizes.
+	 */
+	fingerprint: number | bigint;
+	digest?: { value: string | undefined };
+	entries?: { value: MatcherEntries | undefined };
+	context?: { id: string; name: string; contentIndex: number; cwd: string; value: TtsrMatchContext };
+}
+
+/** Past this depth the fingerprint stops descending; parsed tool arguments are never this deep. */
+const FINGERPRINT_MAX_DEPTH = 32;
+
+/**
+ * Content hash over every key and primitive value of the arguments tree,
+ * chained through `Bun.hash` seeds so it allocates no serialized copy. Any
+ * change a matcher hook could observe — nested, same-length, or appended —
+ * changes it.
+ */
+function argumentsFingerprint(value: unknown, seed: number | bigint = 0, depth = 0): number | bigint {
+	if (typeof value === "string") return Bun.hash(value, Bun.hash("s", seed));
+	if (value === null || typeof value !== "object") return Bun.hash(String(value), Bun.hash(typeof value, seed));
+	if (depth >= FINGERPRINT_MAX_DEPTH) return Bun.hash("…", seed);
+	let hash = Bun.hash(Array.isArray(value) ? "[" : "{", seed);
+	for (const [key, child] of Object.entries(value)) {
+		hash = argumentsFingerprint(child, Bun.hash(key, hash), depth + 1);
+	}
+	return Bun.hash(Array.isArray(value) ? "]" : "}", hash);
+}
+
 /** Resolves tool calls against live tool definitions and the session cwd. */
 export class TtsrToolInspector {
 	readonly #tools: () => readonly TtsrTool[];
 	readonly #cwd: () => string;
+	/**
+	 * Streaming providers re-parse a call's arguments only as its JSON grows, so one
+	 * arguments object spans many deltas; hooks are pure in their arguments, so
+	 * per-delta lookups reuse the results computed for that object until it changes.
+	 */
+	readonly #inspections = new WeakMap<object, ArgumentsInspection>();
+	/** Per-file contexts derived from one (immutable) base context. */
+	readonly #perFileContexts = new WeakMap<TtsrMatchContext, { cwd: string; byPath: Map<string, TtsrMatchContext> }>();
 
 	constructor(tools: () => readonly TtsrTool[], cwd: () => string) {
 		this.#tools = tools;
@@ -25,33 +69,62 @@ export class TtsrToolInspector {
 
 	/** Match context for a (possibly still streaming) tool call. */
 	matchContext(toolCall: ToolCall | undefined, contentIndex: number): TtsrMatchContext {
-		const context: TtsrMatchContext = { source: "tool" };
-		if (!toolCall) return context;
-		context.toolName = toolCall.name;
-		context.streamKey = toolCall.id ? `toolcall:${toolCall.id}` : `tool:${toolCall.name}:${contentIndex}`;
-		context.filePaths = this.#filePaths(toolCall);
+		if (!toolCall) return { source: "tool" };
+		const inspection = this.#inspect(toolCall);
+		const { id, name } = toolCall;
+		const cwd = this.#cwd();
+		const cached = inspection.context;
+		if (cached?.id === id && cached.name === name && cached.contentIndex === contentIndex && cached.cwd === cwd) {
+			return cached.value;
+		}
+		const context: TtsrMatchContext = {
+			source: "tool",
+			toolName: name,
+			streamKey: id ? `toolcall:${id}` : `tool:${name}:${contentIndex}`,
+			filePaths: this.#filePaths(toolCall, inspection.tool),
+		};
+		inspection.context = { id, name, contentIndex, cwd, value: context };
 		return context;
 	}
 
 	/** Combined reconstructed source snapshot, for tools exposing `matcherDigest`. */
 	digest(toolCall: ToolCall | undefined): string | undefined {
-		return this.#resolveTool(toolCall)?.matcherDigest?.(toolCall?.arguments ?? {});
+		if (!toolCall) return undefined;
+		const inspection = this.#inspect(toolCall);
+		inspection.digest ??= { value: inspection.tool?.matcherDigest?.(toolCall.arguments ?? {}) };
+		return inspection.digest.value;
 	}
 
 	/** Per-file source snapshots, for tools exposing `matcherEntries`. */
-	entries(toolCall: ToolCall | undefined): readonly { path: string; digest: string }[] | undefined {
-		const entries = this.#resolveTool(toolCall)?.matcherEntries?.(toolCall?.arguments ?? {});
-		return entries && entries.length > 0 ? entries : undefined;
+	entries(toolCall: ToolCall | undefined): MatcherEntries | undefined {
+		if (!toolCall) return undefined;
+		const inspection = this.#inspect(toolCall);
+		if (!inspection.entries) {
+			const entries = inspection.tool?.matcherEntries?.(toolCall.arguments ?? {});
+			inspection.entries = { value: entries && entries.length > 0 ? entries : undefined };
+		}
+		return inspection.entries.value;
 	}
 
 	/** Narrows a tool-call context to one touched file with its own stream key. */
 	perFileContext(base: TtsrMatchContext, filePath: string): TtsrMatchContext {
-		const filePaths = this.#normalizePathCandidates(filePath);
-		return {
-			...base,
-			filePaths: filePaths.length > 0 ? filePaths : [filePath],
-			streamKey: base.streamKey ? `${base.streamKey}#${filePath}` : undefined,
-		};
+		const cwd = this.#cwd();
+		let cache = this.#perFileContexts.get(base);
+		if (cache?.cwd !== cwd) {
+			cache = { cwd, byPath: new Map() };
+			this.#perFileContexts.set(base, cache);
+		}
+		let context = cache.byPath.get(filePath);
+		if (!context) {
+			const filePaths = this.#normalizePathCandidates(filePath);
+			context = {
+				...base,
+				filePaths: filePaths.length > 0 ? filePaths : [filePath],
+				streamKey: base.streamKey ? `${base.streamKey}#${filePath}` : undefined,
+			};
+			cache.byPath.set(filePath, context);
+		}
+		return context;
 	}
 
 	/**
@@ -94,18 +167,24 @@ export class TtsrToolInspector {
 		return [{ content, context, subject }];
 	}
 
-	#resolveTool(toolCall: ToolCall | undefined): TtsrTool | undefined {
-		if (!toolCall) return undefined;
+	#inspect(toolCall: ToolCall): ArgumentsInspection {
 		const tools = this.#tools();
-		return (
-			tools.find(tool => tool.name === toolCall.name) ??
-			tools.find(tool => tool.customWireName !== undefined && tool.customWireName === toolCall.name)
-		);
+		const tool =
+			tools.find(candidate => candidate.name === toolCall.name) ??
+			tools.find(candidate => candidate.customWireName !== undefined && candidate.customWireName === toolCall.name);
+		const args: unknown = toolCall.arguments;
+		if (!isRecord(args)) return { tool, fingerprint: -1 };
+		const fingerprint = argumentsFingerprint(args);
+		const cached = this.#inspections.get(args);
+		if (cached && cached.tool === tool && cached.fingerprint === fingerprint) return cached;
+		const inspection: ArgumentsInspection = { tool, fingerprint };
+		this.#inspections.set(args, inspection);
+		return inspection;
 	}
 
-	#filePaths(toolCall: ToolCall): string[] | undefined {
+	#filePaths(toolCall: ToolCall, tool: TtsrTool | undefined): string[] | undefined {
 		const args = toolCall.arguments ?? {};
-		const toolPaths = this.#resolveTool(toolCall)?.matcherPaths?.(args);
+		const toolPaths = tool?.matcherPaths?.(args);
 		if (toolPaths && toolPaths.length > 0) {
 			const normalized = toolPaths.flatMap(filePath => this.#normalizePathCandidates(filePath));
 			if (normalized.length > 0) return Array.from(new Set(normalized));

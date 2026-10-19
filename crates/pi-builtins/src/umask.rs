@@ -1,12 +1,13 @@
 use std::io::Write;
 
 use brush_core::{ErrorKind, ExecutionResult, builtins};
-use cfg_if::cfg_if;
 use clap::Parser;
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
-use nix::sys::stat::Mode;
 
-/// Manage the process umask.
+/// Manage the shell's file mode creation mask.
+///
+/// The mask belongs to the shell, not the host process: subshells inherit a
+/// copy, external commands receive it at startup, and files the shell creates
+/// itself are masked with it.
 #[derive(Parser)]
 pub(crate) struct UmaskCommand {
 	/// If MODE is omitted, output in a form that may be reused as input.
@@ -28,17 +29,16 @@ impl builtins::Command for UmaskCommand {
 		&self,
 		context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<brush_core::ExecutionResult, Self::Error> {
+		let current_umask = context.shell.umask().unwrap_or_else(crate::host::process_umask);
 		if let Some(mode) = &self.mode {
-			if mode.starts_with(|c: char| c.is_digit(8)) {
-				let parsed = brush_core::int_utils::parse(mode.as_str(), 8)?;
-				set_umask(parsed)?;
+			let parsed = if mode.starts_with(|c: char| c.is_digit(8)) {
+				brush_core::int_utils::parse(mode.as_str(), 8)?
 			} else {
-				let current_umask = get_umask()?;
-				let parsed = parse_symbolic_umask(mode, current_umask)?;
-				set_umask(parsed)?;
-			}
+				parse_symbolic_umask(mode, current_umask)?
+			};
+			context.shell.set_umask(validated_umask(parsed)?);
 		} else {
-			let umask = get_umask()?;
+			let umask = current_umask;
 
 			let formatted = if self.symbolic_output {
 				let u = symbolic_mask_from_bits((!umask & 0o700) >> 6);
@@ -58,22 +58,6 @@ impl builtins::Command for UmaskCommand {
 
 		Ok(ExecutionResult::success())
 	}
-}
-
-cfg_if! {
-	 if #[cfg(any(target_os = "linux", target_os = "android"))] {
-		  fn get_umask() -> Result<u32, brush_core::Error> {
-				let umask = procfs::process::Process::myself().ok().and_then(|me| me.status().ok()).and_then(|status| status.umask);
-				umask.ok_or_else(|| brush_core::ErrorKind::InvalidUmask.into())
-		  }
-	 } else {
-		  #[expect(clippy::unnecessary_wraps)]
-		  fn get_umask() -> Result<u32, brush_core::Error> {
-				let u = nix::sys::stat::umask(Mode::empty());
-				nix::sys::stat::umask(u);
-				Ok(u32::from(u.bits()))
-		  }
-	 }
 }
 
 fn parse_symbolic_umask(mode: &str, current_umask: u32) -> Result<nix::sys::stat::mode_t, brush_core::Error> {
@@ -151,11 +135,12 @@ fn parse_symbolic_umask(mode: &str, current_umask: u32) -> Result<nix::sys::stat
 	}
 }
 
-fn set_umask(value: nix::sys::stat::mode_t) -> Result<(), brush_core::Error> {
+/// Checks that `value` is a valid permission mask.
+#[allow(clippy::useless_conversion, reason = "`mode_t` is u16 on some targets")]
+fn validated_umask(value: nix::sys::stat::mode_t) -> Result<u32, brush_core::Error> {
 	// value of mode_t can be platform dependent
-	let mode = nix::sys::stat::Mode::from_bits(value).ok_or_else(|| ErrorKind::InvalidUmask)?;
-	nix::sys::stat::umask(mode);
-	Ok(())
+	let mode = nix::sys::stat::Mode::from_bits(value).ok_or(ErrorKind::InvalidUmask)?;
+	Ok(u32::from(mode.bits()))
 }
 
 fn symbolic_mask_from_bits(bits: u32) -> String {

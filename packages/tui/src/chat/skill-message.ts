@@ -13,8 +13,8 @@ import { fileHyperlink } from "../render";
 import { collapseSkillTokens, skillChipLabel, skillChipStyle, skillToken } from "../prompt/composer-attachments";
 import { type UserBubbleOptions, UserMessageComponent, userBubbleColor } from "./user-message";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { card, md, node, span, text } from "../native/describe";
-import { type NativeChild, type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
+import { card, md, node, span } from "../native/describe";
+import { type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
 import { Memo } from "../native/memo";
 
 /**
@@ -63,15 +63,13 @@ export class SkillMessageComponent extends Container {
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
-		const expanded = rootToggleExpanded(event);
-		if (expanded !== undefined) this.setExpanded(expanded);
+		if (event.type === "toggle" && event.key === "prompt") this.setExpanded(!event.collapsed);
 	}
 
 	/**
-	 * A user-toned card (role `omp.skill`): the skill chip (linked to its
-	 * SKILL.md) and prompt size in the head, the user's draft as markdown, and
-	 * the loaded skill prompt, described only while expanded because it can
-	 * be large.
+	 * A user-toned card (role `omp.skill`): the skill chip and prompt size in
+	 * the head, the user's draft always visible, and only the loaded skill
+	 * prompt behind a disclosure.
 	 */
 	override describe(): NativeNode {
 		return this.#native.get([this.#expanded], () => {
@@ -100,20 +98,20 @@ export class SkillMessageComponent extends Container {
 			const children: NativeChild[] = [];
 			if (draft) children.push(md(draft));
 			const promptText = this.#expanded ? this.#extractText() : "";
-			if (promptText) {
-				children.push(
-					node(
-						"section",
-						{ head: [span("prompt", "muted")], role: "omp.skill.prompt" },
-						[md(promptText)],
-						"prompt",
-					),
-				);
-			}
-			return card(
-				{ role: "omp.skill", tone: "user", head, collapsible: true, collapsed: !this.#expanded },
-				children.length > 0 ? children : [text([span(label, "muted")])],
+			children.push(
+				node(
+					"section",
+					{
+						head: [span("prompt", "muted")],
+						role: "omp.skill.prompt",
+						collapsible: true,
+						collapsed: !this.#expanded,
+					},
+					promptText ? [md(promptText)] : [],
+					"prompt",
+				),
 			);
+			return card({ role: "omp.skill", tone: "user", head }, children);
 		});
 	}
 
@@ -269,6 +267,12 @@ class SkillCallout implements Component {
 		this.#box.invalidate();
 		this.#source = undefined;
 		this.#lines = undefined;
+	}
+
+	releaseRenderCaches(): void {
+		this.#source = undefined;
+		this.#lines = undefined;
+		this.#box.releaseRenderCaches();
 	}
 
 	render(width: number): readonly string[] {

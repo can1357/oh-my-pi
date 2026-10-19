@@ -337,11 +337,13 @@ describe("AgentSession empty stop guard", () => {
 		expect(assistantText(session.agent.state.messages)).toContain("fresh final answer");
 	});
 
-	it("accepts a signed thinking-only stop without retrying", async () => {
-		const { session, mock } = await createHarness([
-			signedThinkingOnlyStop(),
-			{ content: ["must not be requested"], stopReason: "stop" },
-		]);
+	it("keeps a signed thinking-only stop instead of discarding it as empty", async () => {
+		// Unexpected-stop recovery owns signed thinking-only stops; disable it so
+		// only the empty-stop guard decides the turn.
+		const { session, mock } = await createHarness(
+			[signedThinkingOnlyStop(), { content: ["must not be requested"], stopReason: "stop" }],
+			{ "features.unexpectedStopDetection": "none" },
+		);
 
 		await session.prompt("finish with signed thinking");
 		await session.waitForIdle();
@@ -728,10 +730,10 @@ describe("AgentSession empty stop guard", () => {
 		await session.waitForIdle();
 		// Persisted identity must win regardless of branch enumeration order. The
 		// coarse matcher otherwise selects the commentary when it is encountered first.
-		const getBranch = session.sessionManager.getBranch.bind(session.sessionManager);
+		const getBranchView = session.sessionManager.getBranchView.bind(session.sessionManager);
 		const branchSpy = vi
-			.spyOn(session.sessionManager, "getBranch")
-			.mockImplementation(() => getBranch().slice().reverse());
+			.spyOn(session.sessionManager, "getBranchView")
+			.mockImplementation(() => getBranchView().slice().reverse());
 		await session.followUp("continue after commentary");
 		await session.waitForIdle();
 		branchSpy.mockRestore();

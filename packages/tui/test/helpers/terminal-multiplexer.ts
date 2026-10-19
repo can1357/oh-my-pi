@@ -1,38 +1,21 @@
 import { afterEach, beforeEach } from "bun:test";
+import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 
 /**
  * Neutralize every terminal-multiplexer signal for the calling test file.
  *
- * `isInsideTerminalMultiplexer()` treats `TMUX`, `STY`, `ZELLIJ`,
- * `HERDR_ENV=1` / `HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`,
- * the `CMUX_*` markers, `WMUX=1` / `WMUX_SURFACE_ID` and a `tmux`/`screen` `TERM` as
- * authoritative, and `isMultiplexerSession()` then routes rendering down the
- * path that cannot rebuild scrollback. Tests that assert the destructive
- * full-paint behavior otherwise fail for anyone running the suite inside tmux,
- * screen, Zellij or CMUX. Restores whatever was set afterwards.
+ * Multiplexer session markers and a `tmux`/`screen` `TERM` route rendering down
+ * the path that cannot rebuild scrollback, and Warp's `TERM_PROGRAM` or
+ * `PI_TUI_RESIZE_IN_PLACE` select the in-place resize path. Tests that assert the
+ * destructive full-paint behavior otherwise fail for anyone running the suite
+ * inside a multiplexer. Restores whatever was set afterwards.
  */
 export function withoutTerminalMultiplexer(): void {
-	const KEYS = [
-		"TMUX",
-		"STY",
-		"ZELLIJ",
-		"HERDR_ENV",
-		"HERDR_PANE_ID",
-		"HERDR_TAB_ID",
-		"HERDR_WORKSPACE_ID",
-		"CMUX_WORKSPACE_ID",
-		"CMUX_SURFACE_ID",
-		"CMUX_REMOTE_TRANSPORT",
-		"WMUX",
-		"WMUX_SURFACE_ID",
-		"TERM",
-		"TERM_PROGRAM",
-		"PI_TUI_RESIZE_IN_PLACE",
-	] as const;
+	const keys = [...TERMINAL_MULTIPLEXER_ENV_KEYS, "TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE"];
 	const previous = new Map<string, string | undefined>();
 
 	beforeEach(() => {
-		for (const key of KEYS) {
+		for (const key of keys) {
 			previous.set(key, Bun.env[key]);
 			delete Bun.env[key];
 		}

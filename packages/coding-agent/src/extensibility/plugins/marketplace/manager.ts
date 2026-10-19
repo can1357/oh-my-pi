@@ -364,7 +364,7 @@ export class MarketplaceManager {
 				otherScopeOldNames.set(entry.installPath, await this.#resolvePluginPackageName(entry.installPath, name));
 			}
 
-			version = await this.#resolvePluginVersion(pluginEntry, sourcePath);
+			version = (await this.#resolveCatalogVersion(pluginEntry, sourcePath)) ?? "0.0.0";
 			packageName = await this.#resolvePluginPackageName(sourcePath, name);
 			// Resolve the runtime names this plugin id currently owns BEFORE cachePlugin
 			// can overwrite the existing cache. A forced reinstall reuses the same cache
@@ -540,38 +540,44 @@ export class MarketplaceManager {
 	}
 
 	/**
-	 * Resolve plugin version from multiple sources:
-	 * 1. Catalog entry version (if set)
-	 * 2. Plugin manifest (.claude-plugin/plugin.json, Agent Plugins root plugin.json, or package.json)
-	 * 3. Git SHA from source (truncated to 7 chars)
-	 * 4. Fallback "0.0.0"
+	 * Resolve the version a catalog entry publishes, so install and {@link checkForUpdates}
+	 * agree. Relative sources (files in the marketplace clone) use Claude Code's precedence:
+	 * 1. Plugin manifest (`.claude-plugin/plugin.json`, then Agent Plugins root `plugin.json`)
+	 * 2. Catalog entry `version`
+	 * 3. `package.json` version
+	 * 4. Pinned git SHA from the source definition (truncated to 7 chars)
+	 *
+	 * Remote sources are readable only after cloning, so an update check sees the catalog
+	 * entry alone (`pluginDir` undefined): installs put the entry's version first and checks
+	 * resolve nothing else, or a manifest/SHA mismatch would report an update forever.
+	 * `undefined` when nothing declares a version.
 	 */
-	async #resolvePluginVersion(entry: MarketplacePluginEntry, sourcePath: string): Promise<string> {
-		// 1. Catalog entry version
-		if (entry.version) return entry.version;
-
-		// 2. Plugin manifest
-		for (const manifestPath of [
-			path.join(sourcePath, ".claude-plugin", "plugin.json"),
-			path.join(sourcePath, "plugin.json"),
-			path.join(sourcePath, "package.json"),
-		]) {
+	async #resolveCatalogVersion(
+		entry: MarketplacePluginEntry,
+		pluginDir: string | undefined,
+	): Promise<string | undefined> {
+		if (typeof entry.source !== "string" && entry.version) return entry.version;
+		if (!pluginDir) return undefined;
+		const readVersion = async (file: string): Promise<string | undefined> => {
 			try {
-				const content = await Bun.file(manifestPath).json();
-				if (typeof content?.version === "string" && content.version) {
-					return content.version;
-				}
+				const content = await Bun.file(path.join(pluginDir, file)).json();
+				return typeof content?.version === "string" && content.version ? content.version : undefined;
 			} catch {
-				// Missing or invalid — try next
+				// Missing or invalid — try next source
+				return undefined;
 			}
-		}
+		};
 
-		// 3. Git SHA from source definition
+		const manifestVersion =
+			(await readVersion(path.join(".claude-plugin", "plugin.json"))) ?? (await readVersion("plugin.json"));
+		if (manifestVersion) return manifestVersion;
+		if (entry.version) return entry.version;
+		const packageVersion = await readVersion("package.json");
+		if (packageVersion) return packageVersion;
 		if (typeof entry.source === "object" && "sha" in entry.source && entry.source.sha) {
 			return entry.source.sha.slice(0, 7);
 		}
-
-		return "0.0.0";
+		return undefined;
 	}
 
 	/** Validates and removes a marketplace plugin, or only validates when `dryRun` is set. */
@@ -756,9 +762,9 @@ export class MarketplaceManager {
 		}
 	}
 
-	// Compare installed plugin versions against their catalog entries.
-	// Returns one entry per (pluginId, scope) pair where the catalog declares a newer version.
-	// Catalog entries without a version field are skipped.
+	// Compare installed plugin versions against the version each catalog entry currently publishes
+	// (see #resolveCatalogVersion). Returns one entry per (pluginId, scope) pair that is outdated.
+	// Plugins whose catalog side declares no version are skipped.
 	async checkForUpdates(): Promise<Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }>> {
 		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 		const updates: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }> = [];
@@ -784,7 +790,15 @@ export class MarketplaceManager {
 				let catalogVersion: string | undefined;
 				try {
 					const catalog = await this.#readCatalog(mktEntry);
-					catalogVersion = catalog.plugins.find(p => p.name === parsed.name)?.version;
+					const pluginEntry = catalog.plugins.find(p => p.name === parsed.name);
+					if (!pluginEntry) continue;
+					// Relative sources resolve into the marketplace clone, whose manifests
+					// `updateMarketplace` refreshes; remote sources yield no local dir.
+					const pluginDir = await validatePluginSource(pluginEntry, {
+						marketplaceClonePath: this.#resolveMarketplaceRoot(mktEntry),
+						catalogMetadata: catalog.metadata,
+					});
+					catalogVersion = await this.#resolveCatalogVersion(pluginEntry, pluginDir);
 				} catch {
 					continue;
 				}

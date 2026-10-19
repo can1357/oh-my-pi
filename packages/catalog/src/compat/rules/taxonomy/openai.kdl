@@ -16,6 +16,8 @@ class "openai" {
 
 	family "gpt" glob="gpt-*"
 	family "chatgpt" glob="chatgpt-*"
+	family "gpt-image" glob="gpt-image-*"
+	family "gpt-image" glob="chatgpt-image-*"
 	family "o-series" glob="o1"
 	family "o-series" glob="o1-*"
 	family "o-series" glob="o1.*"

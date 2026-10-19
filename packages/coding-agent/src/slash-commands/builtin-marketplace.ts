@@ -6,6 +6,7 @@ import {
 	resolveOrDefaultProjectRegistryPath,
 } from "../discovery/helpers.js";
 import { PluginManager } from "../extensibility/plugins";
+import { setInstalledPluginEnabled } from "../extensibility/plugins/toggle";
 import {
 	getInstalledPluginsRegistryPath,
 	getMarketplacesCacheDir,
@@ -430,24 +431,27 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 		acpInputHint: "[list|enable|disable]",
 		subcommands: [
 			{ name: "list", description: "List all installed plugins (npm + marketplace)" },
-			{ name: "enable", description: "Enable a marketplace plugin", usage: "<name@marketplace>" },
-			{ name: "disable", description: "Disable a marketplace plugin", usage: "<name@marketplace>" },
+			{ name: "enable", description: "Enable an installed plugin", usage: "<plugin>" },
+			{ name: "disable", description: "Disable an installed plugin", usage: "<plugin>" },
 		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
 			try {
 				if (verb === "enable" || verb === "disable") {
-					const parsed = parsePluginScopeArgs(
-						rest,
-						`Usage: /plugins ${verb} [--scope user|project] <name@marketplace>`,
-					);
+					const parsed = parsePluginScopeArgs(rest, `Usage: /plugins ${verb} [--scope user|project] <plugin>`);
 					if ("error" in parsed) return usage(parsed.error, runtime);
-					const manager = await createMarketplaceManager(runtime);
-					const isEnable = verb === "enable";
-					await manager.setPluginEnabled(parsed.pluginId, isEnable, parsed.scope);
+					const marketplace = await createMarketplaceManager(runtime);
+					const marketplaceIds = new Set((await marketplace.listInstalledPlugins()).map(plugin => plugin.id));
+					await setInstalledPluginEnabled(parsed.pluginId, {
+						enabled: verb === "enable",
+						scope: parsed.scope,
+						marketplaceIds,
+						marketplace,
+						npm: new PluginManager(),
+					});
 					await runtime.reloadPlugins();
-					await runtime.output(`${isEnable ? "Enabled" : "Disabled"} ${parsed.pluginId}`);
+					await runtime.output(`${verb === "enable" ? "Enabled" : "Disabled"} ${parsed.pluginId}`);
 					return commandConsumed();
 				}
 				// Default: list
@@ -479,77 +483,6 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 				return commandConsumed();
 			} catch (err) {
 				return usage(`Plugin error: ${errorMessage(err)}`, runtime);
-			}
-		},
-		handleTui: async (command, runtime) => {
-			clearSubmittedText(runtime);
-			const args = command.args.trim().split(/\s+/);
-			const sub = args[0] || "list";
-			const rest = args.slice(1).join(" ").trim();
-
-			try {
-				const mgr = new MarketplaceManager({
-					marketplacesRegistryPath: getMarketplacesRegistryPath(),
-					installedRegistryPath: getInstalledPluginsRegistryPath(),
-					projectInstalledRegistryPath: await resolveOrDefaultProjectRegistryPath(
-						runtime.ctx.sessionManager.getCwd(),
-					),
-					marketplacesCacheDir: getMarketplacesCacheDir(),
-					pluginsCacheDir: getPluginsCacheDir(),
-					clearPluginRootsCache: clearPluginRootsAndCaches,
-				});
-
-				switch (sub) {
-					case "enable":
-					case "disable": {
-						const parsed = parsePluginScopeArgs(
-							rest ?? "",
-							`Usage: /plugins ${sub} [--scope user|project] <name@marketplace>`,
-						);
-						if ("error" in parsed) {
-							runtime.ctx.showStatus(parsed.error);
-							return;
-						}
-						const isEnable = sub === "enable";
-						await mgr.setPluginEnabled(parsed.pluginId, isEnable, parsed.scope);
-						runtime.ctx.showStatus(`${isEnable ? "Enabled" : "Disabled"} ${parsed.pluginId}`);
-						break;
-					}
-					default: {
-						const lines: string[] = [];
-
-						const npm = new PluginManager();
-						const npmPlugins = await npm.list();
-						if (npmPlugins.length > 0) {
-							lines.push("npm plugins:");
-							for (const p of npmPlugins) {
-								const status = p.enabled === false ? " (disabled)" : "";
-								lines.push(`  ${p.name}@${p.version}${status}`);
-							}
-						}
-
-						const mktPlugins = await mgr.listInstalledPlugins();
-						if (mktPlugins.length > 0) {
-							if (lines.length > 0) lines.push("");
-							lines.push("marketplace plugins:");
-							for (const p of mktPlugins) {
-								const entry = p.entries[0];
-								const status = entry?.enabled === false ? " (disabled)" : "";
-								const shadowed = p.shadowedBy ? " [shadowed]" : "";
-								lines.push(`  ${p.id} v${entry?.version ?? "?"}${status} [${p.scope}]${shadowed}`);
-							}
-						}
-
-						if (lines.length === 0) {
-							runtime.ctx.showStatus("No plugins installed");
-						} else {
-							runtime.ctx.showStatus(lines.join("\n"));
-						}
-						break;
-					}
-				}
-			} catch (err) {
-				runtime.ctx.showStatus(`Plugin error: ${err}`);
 			}
 		},
 	},

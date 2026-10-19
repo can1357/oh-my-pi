@@ -1,5 +1,6 @@
-import { enclosingBlockBoundaries } from "@oh-my-pi/pi-natives";
+import { enclosingBlockBoundaries, warmBlockParse } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
+import { ensureGrammar } from "./grammars";
 
 const OPEN_TO_CLOSE: Record<string, string> = {
 	"(": ")",
@@ -43,6 +44,23 @@ export interface BlockContextSource {
 	 * array and surface off-by-N context rows.
 	 */
 	text?: string;
+}
+
+/**
+ * Parse `source.text` into the native tree cache off the JS thread. The
+ * block-context lookup is synchronous and, for a window that hides part of
+ * the source, would otherwise run a cold whole-file parse on the event loop;
+ * awaiting this first makes it a cache hit. A failure only means the lookup
+ * parses on demand.
+ */
+export async function warmBlockContext(source: BlockContextSource & { text: string }): Promise<void> {
+	if (!source.path && !source.lang) return;
+	try {
+		await ensureGrammar({ path: source.path, lang: source.lang });
+		await warmBlockParse({ code: source.text, path: source.path, lang: source.lang });
+	} catch (error) {
+		logger.debug("warmBlockParse failed; block context parses on demand", { error });
+	}
 }
 
 export type LineEntry = { kind: "line"; lineNumber: number; text: string; context: boolean } | { kind: "ellipsis" };
@@ -91,6 +109,11 @@ function visibleLineNumbers(spans: readonly LineSpan[]): Set<number> {
 
 function hasEveryLineVisible(visible: ReadonlySet<number>, totalLines: number): boolean {
 	return totalLines > 0 && visible.size >= totalLines;
+}
+
+/** Whether `spans` show all of a `totalLines`-line source, so block context has nothing to add. */
+export function spansCoverEveryLine(spans: readonly LineSpan[], totalLines: number): boolean {
+	return hasEveryLineVisible(visibleLineNumbers(normalizeLineSpans(spans, totalLines)), totalLines);
 }
 
 /** Collapse a set of visible line numbers into sorted, merged inclusive spans. */

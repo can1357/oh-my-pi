@@ -558,4 +558,29 @@ describe("AuthStorage.health.check", () => {
 			storage.close();
 		}
 	});
+
+	it("skips excluded providers without probing them", async () => {
+		const openrouterRow: StoredAuthCredential = {
+			id: 9,
+			provider: "openrouter",
+			credential: { type: "api_key", key: "sk-or-test" },
+			disabledCause: null,
+		};
+		const store = makeStore([oauthRow(1, "alice@example.com"), openrouterRow]);
+		const storage = new AuthStorage(store);
+		await storage.credentials.reload();
+		const probed: string[] = [];
+		const completionProbe: CompletionProbe = async (input: CompletionProbeInput) => {
+			probed.push(input.provider);
+			return { ok: true };
+		};
+
+		try {
+			const results = await storage.health.check({ completionProbe, excludeProviders: new Set(["openrouter"]) });
+			expect(results.map(row => row.provider)).toEqual(["anthropic"]);
+			expect(probed).toEqual(["anthropic"]);
+		} finally {
+			storage.close();
+		}
+	});
 });

@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as crypto from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
-import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -14,10 +13,11 @@ import {
 	publishCollabHost,
 	resolveCollabHostLink,
 } from "@oh-my-pi/pi-coding-agent/collab/registry";
+import { IpcConnection, IpcServer, ipcEndpoint } from "@oh-my-pi/pi-natives";
 
 const cleanupDirs: string[] = [];
 const openPublications: CollabHostPublication[] = [];
-const openServers: { server: net.Server; sockets: Set<net.Socket> }[] = [];
+const openServers: { server: IpcServer; connections: Set<IpcConnection> }[] = [];
 
 afterEach(async () => {
 	for (const pub of openPublications.splice(0)) {
@@ -27,12 +27,10 @@ afterEach(async () => {
 			// best-effort
 		}
 	}
-	for (const { server, sockets } of openServers.splice(0)) {
-		// Hung fixture sockets must not keep server.close() waiting forever.
-		for (const socket of sockets) socket.destroy();
-		const closed = Promise.withResolvers<void>();
-		server.close(() => closed.resolve());
-		await closed.promise;
+	for (const { server, connections } of openServers.splice(0)) {
+		// Hung fixture connections must not outlive the test.
+		for (const connection of connections) connection.destroy();
+		await server.close();
 	}
 	for (const dir of cleanupDirs.splice(0)) {
 		await fs.rm(dir, { recursive: true, force: true });
@@ -104,31 +102,26 @@ async function readSoleToken(dir: string): Promise<string> {
 }
 
 /** Connects to `endpoint`, sends one JSON request line, returns the raw response line. */
-function rawRequest(endpoint: string, request: object): Promise<string> {
+async function rawRequest(endpoint: string, request: object): Promise<string> {
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
-	let buffer = "";
-	const socket = net.createConnection({ path: endpoint });
-	const done = (fn: () => void): void => {
-		socket.destroy();
-		fn();
-	};
-	socket.setEncoding("utf8");
-	socket.once("error", err => done(() => reject(err)));
-	socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
-	socket.on("data", chunk => {
-		buffer += chunk;
-		const nl = buffer.indexOf("\n");
-		if (nl >= 0) done(() => resolve(buffer.slice(0, nl)));
-	});
+	const connection = await IpcConnection.connect(endpoint, { framing: "lines" });
+	connection.start(
+		line => {
+			resolve(line);
+			connection.destroy();
+		},
+		reason => reject(new Error(`connection closed before a response: ${reason ?? "EOF"}`)),
+	);
+	connection.send(JSON.stringify(request));
 	return promise;
 }
 
 function auxEndpoint(dir: string, label: string): string {
-	const id = crypto.randomBytes(4).toString("hex");
-	return process.platform === "win32"
-		? `\\\\.\\pipe\\omp-collab-test-${label}-${id}`
-		: path.join(dir, `${label}-${id}.sock`);
+	return ipcEndpoint(dir, `${label}-${crypto.randomBytes(4).toString("hex")}`);
 }
+
+/** Forwards to the real {@link IpcConnection.connect}; captured before any spy replaces it. */
+const realConnect = IpcConnection.connect.bind(IpcConnection);
 
 async function writeMetadata(dir: string, name: string, meta: Record<string, unknown>): Promise<void> {
 	await Bun.write(
@@ -268,17 +261,14 @@ describe("collab registry", () => {
 		// The listing inside resolution answers from generation 1; the room then
 		// rotates — the old endpoint is withdrawn and generation 2 publishes under
 		// its own — before the link request connects.
-		const realConnect = net.createConnection;
 		let connections = 0;
-		const connect = spyOn(net, "createConnection").mockImplementation(((options: net.NetConnectOpts) => {
-			if (++connections !== 2) return realConnect(options);
-			const socket = new net.Socket();
-			void pub
-				.close()
-				.then(() => publish(dir, second))
-				.then(() => socket.connect(options));
-			return socket;
-		}) as typeof net.createConnection);
+		const connect = spyOn(IpcConnection, "connect").mockImplementation(async (endpoint, options) => {
+			if (++connections === 2) {
+				await pub.close();
+				await publish(dir, second);
+			}
+			return realConnect(endpoint, options);
+		});
 		try {
 			await expect(resolveCollabHostLink("rotating-endpoint", "control", { dir })).rejects.toMatchObject({
 				name: "CollabLinkError",
@@ -306,17 +296,14 @@ describe("collab registry", () => {
 		// before that request connects the room has rotated to a control-capable
 		// generation. The caller must be told to re-list, not that control is
 		// unavailable.
-		const realConnect = net.createConnection;
 		let connections = 0;
-		const connect = spyOn(net, "createConnection").mockImplementation(((options: net.NetConnectOpts) => {
-			if (++connections !== 2) return realConnect(options);
-			const socket = new net.Socket();
-			void pub
-				.close()
-				.then(() => publish(dir, control))
-				.then(() => socket.connect(options));
-			return socket;
-		}) as typeof net.createConnection);
+		const connect = spyOn(IpcConnection, "connect").mockImplementation(async (endpoint, options) => {
+			if (++connections === 2) {
+				await pub.close();
+				await publish(dir, control);
+			}
+			return realConnect(endpoint, options);
+		});
 		try {
 			await expect(resolveCollabHostLink("upgrading-host", "control", { dir })).rejects.toMatchObject({
 				name: "CollabLinkError",
@@ -490,17 +477,16 @@ describe("collab registry", () => {
 		});
 
 		const unresponsiveEndpoint = auxEndpoint(dir, "unresponsive");
-		const hungSockets = new Set<net.Socket>();
-		const unresponsive = net.createServer(socket => {
-			hungSockets.add(socket);
-			socket.on("error", () => {});
-			socket.once("close", () => hungSockets.delete(socket));
+		const hungConnections = new Set<IpcConnection>();
+		const unresponsive = await IpcServer.listen(unresponsiveEndpoint, { framing: "lines" }, connection => {
+			hungConnections.add(connection);
+			// Accept and read requests, but never answer.
+			connection.start(
+				() => {},
+				() => hungConnections.delete(connection),
+			);
 		});
-		openServers.push({ server: unresponsive, sockets: hungSockets });
-		const listening = Promise.withResolvers<void>();
-		unresponsive.once("error", err => listening.reject(err));
-		unresponsive.listen(unresponsiveEndpoint, () => listening.resolve());
-		await listening.promise;
+		openServers.push({ server: unresponsive, connections: hungConnections });
 		await writeMetadata(dir, "unresponsive.json", {
 			version: COLLAB_REGISTRY_VERSION,
 			pid: process.pid,
@@ -523,11 +509,9 @@ describe("collab registry", () => {
 		const dir = await tempDir();
 		const f = makeFixture();
 		await publish(dir, f);
-		const connect = spyOn(net, "createConnection").mockImplementation(() => {
-			const socket = new net.Socket();
-			queueMicrotask(() => socket.emit("error", Object.assign(new Error("file limit"), { code: "EMFILE" })));
-			return socket;
-		});
+		const connect = spyOn(IpcConnection, "connect").mockImplementation(() =>
+			Promise.reject(Object.assign(new Error("file limit"), { code: "EMFILE" })),
+		);
 		try {
 			expect(await listCollabHosts({ dir })).toEqual([]);
 		} finally {
@@ -546,7 +530,7 @@ describe("collab registry", () => {
 			version: COLLAB_REGISTRY_VERSION,
 			instanceId: "rotating-host",
 			pid: process.pid,
-			endpoint: path.join(dir, "rotating-host.sock"),
+			endpoint: ipcEndpoint(dir, "rotating-host"),
 			createdAt: Date.now(),
 			token: "stale-token",
 		});
@@ -695,35 +679,29 @@ describe("collab registry", () => {
 	});
 
 	it.skipIf(process.platform === "win32")(
-		"relocates the socket to a short owner-private directory when the canonical path overflows sun_path",
+		"publishes, lists, and links a host whose canonical socket path overflows sun_path",
 		async () => {
-			// A deep config root pushes `<dir>/<instanceId>.sock` past the 104/108
-			// byte socket path limit; the host must still publish, and listers
+			// A deep config root pushes `<dir>/<entryId>.sock` past the 104/108
+			// byte socket path limit; the endpoint relocates natively, and listers
 			// must find it through the endpoint recorded in the metadata.
 			const base = await tempDir();
 			const dir = path.join(base, "n".repeat(60), "m".repeat(60), "collab-hosts");
 			await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-			const fallbackBase = await tempDir();
 			const f = makeFixture({ instanceId: "deep-config-root" });
-			const pub = await publishCollabHost(sourceFor(f), {
-				dir,
-				instanceId: f.snapshot.instanceId,
-				socketFallbackBase: fallbackBase,
-			});
-			openPublications.push(pub);
+			const pub = await publish(dir, f);
 
-			// Relocated under the (short, in production `/tmp`) fallback base, in a
-			// deterministic owner-only directory keyed by this registry directory.
-			expect(path.dirname(path.dirname(pub.endpoint))).toBe(fallbackBase);
-			expect(path.basename(path.dirname(pub.endpoint))).toMatch(/^omp-collab-[0-9a-f]{20}$/);
-			expect((await fs.stat(path.dirname(pub.endpoint))).mode & 0o777).toBe(0o700);
+			const [metaName] = (await fs.readdir(dir)).filter(n => n.endsWith(".json"));
+			expect(pub.endpoint).toBe(ipcEndpoint(dir, path.basename(metaName ?? "", ".json")));
+			expect(pub.endpoint.startsWith(dir + path.sep)).toBe(false);
+			expect((await fs.stat(pub.endpoint)).mode & 0o777).toBe(0o600);
 			expect(await listCollabHosts({ dir })).toMatchObject([{ instanceId: "deep-config-root" }]);
 			expect(await resolveCollabHostLink("deep-config-root", "control", { dir })).toMatchObject({
 				url: f.controlUrl,
 			});
 
 			await pub.close();
-			expect(await fs.readdir(path.dirname(pub.endpoint))).toEqual([]);
+			await expect(fs.stat(pub.endpoint)).rejects.toMatchObject({ code: "ENOENT" });
+			await expect(fs.stat(`${pub.endpoint}.bind.lock`)).rejects.toMatchObject({ code: "ENOENT" });
 			expect(await listCollabHosts({ dir })).toEqual([]);
 		},
 	);

@@ -28,6 +28,7 @@ export * from "./components/section";
 export * from "./components/select-list";
 export * from "./components/settings-list";
 export * from "./components/spacer";
+export * from "./components/sparkline";
 export * from "./components/tab-bar";
 export * from "./components/table";
 export * from "./components/text";

@@ -293,7 +293,8 @@ describe("AgentSession eager todo enforcement", () => {
 	});
 
 	it("refreshes an auto title on todo init from recent user, assistant, and thinking context", async () => {
-		await recreateSession({ "title.refreshOnReplan": true });
+		// Boring icons: the plain title would otherwise go on to a card request.
+		await recreateSession({ "title.refreshOnReplan": true, "title.icons": "boring" });
 		await session.setSessionName("Old auto title", "auto");
 		const priorUser: AgentMessage = {
 			role: "user",
@@ -340,6 +341,29 @@ describe("AgentSession eager todo enforcement", () => {
 			throw new Error("Expected title request metadata.user_id.session_id");
 		}
 		expect(userId.session_id).not.toBe(session.sessionId);
+	});
+
+	it("keeps a card title's icon and code when a replan refreshes it", async () => {
+		// Tern indexes parked panes by the card; the title model names none, so the refresh must carry it over.
+		await recreateSession({ "title.refreshOnReplan": true });
+		await session.setSessionName("🧪 FLAKY: Fix flaky park tests", "auto");
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Stabilize park test timing</title>" }],
+		} as never);
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Park", items: ["Stabilize park test timing"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		const titleApplied = waitForSessionName("🧪 FLAKY: Stabilize park test timing");
+		await session.prompt("replan the park tests");
+		await titleApplied;
+
+		expect(session.sessionManager.getSessionName()).toBe("🧪 FLAKY: Stabilize park test timing");
 	});
 
 	it("forwards the configured title system prompt to the replan refresh path", async () => {
@@ -425,10 +449,11 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(session.sessionManager.getSessionName()).toBe("Old auto title");
 	});
 
-	it("refreshes todo-init titles for a subagent focusable in an interactive host", async () => {
+	it("refreshes and cards todo-init titles for a subagent focusable in an interactive host", async () => {
 		// A live subagent selected from the Agent Hub renders its session name in
 		// the status line, so the interactive host must keep the replan refresh the
 		// user enabled — only headless hosts skip it (issue #5910 review follow-up).
+		// Subagents never fork a title, so the replan is where a card comes from.
 		const previousInteractiveHost = setInteractiveHost(true);
 		try {
 			await recreateSession({ "title.refreshOnReplan": true }, { agentKind: "sub" });
@@ -440,10 +465,16 @@ describe("AgentSession eager todo enforcement", () => {
 			};
 			session.agent.appendMessage(priorUser);
 			session.sessionManager.appendMessage(priorUser);
-			const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
-				stopReason: "stop",
-				content: [{ type: "text", text: "<title>Parser diagnostics replan</title>" }],
-			} as never);
+			const completeSimpleMock = vi
+				.spyOn(ai, "completeSimple")
+				.mockResolvedValueOnce({
+					stopReason: "stop",
+					content: [{ type: "text", text: "<title>Parser diagnostics replan</title>" }],
+				} as never)
+				.mockResolvedValueOnce({
+					stopReason: "stop",
+					content: [{ type: "text", text: "<title>🔍 PARSE</title>" }],
+				} as never);
 			scriptedResponses = [
 				createToolCallAssistantMessage("todo", {
 					op: "init",
@@ -452,12 +483,11 @@ describe("AgentSession eager todo enforcement", () => {
 				createAssistantMessage("todo initialized"),
 			];
 
-			const titleApplied = waitForSessionName("Parser diagnostics replan");
+			const titleApplied = waitForSessionName("🔍 PARSE: Parser diagnostics replan");
 			await session.prompt("replan parser diagnostics");
 			await titleApplied;
 
-			expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-			expect(session.sessionManager.getSessionName()).toBe("Parser diagnostics replan");
+			expect(completeSimpleMock).toHaveBeenCalledTimes(2);
 		} finally {
 			setInteractiveHost(previousInteractiveHost);
 		}

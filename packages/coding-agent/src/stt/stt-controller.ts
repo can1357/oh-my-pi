@@ -11,7 +11,7 @@ import { type SttStreamHandle, sttClient } from "./asr-client";
 import { downloadSttModel, isSttModelCached } from "./downloader";
 import { resolveSttModelSpec, type SttModelKey } from "./models";
 import { evaluateSubmitTrigger } from "./submit-trigger";
-import { encodePcm16Wav } from "./wav";
+import { encodePcm16Wav, floatToPcm16 } from "./wav";
 
 import { cfgSttLanguage, cfgSttSubmitTrigger } from "./settings";
 
@@ -22,6 +22,8 @@ export interface SttCallbacks {
 	showWarning(msg: string): void;
 	showStatus(msg: string): void;
 	onStateChange(state: SttState): void;
+	/** Keep this capture as a draft, without interpreting submit commands. */
+	manualSubmit?: boolean;
 }
 
 /** The slice of a text input the controller dictates into. */
@@ -55,6 +57,8 @@ export class STTController {
 	#resolvedModelKey: SttModelKey | null = null;
 	#toggling = false;
 	#stopAfterStart = false;
+	/** Cancels the start in flight: its model preflight wait and whatever start step follows it. */
+	#startAbort: AbortController | null = null;
 	#disposed = false;
 	readonly #createCapture: CaptureFactory;
 	readonly #settings: Settings;
@@ -73,7 +77,8 @@ export class STTController {
 
 	// Buffered cloud capture.
 	#cloudModel: Model<Api> | null = null;
-	#cloudAudio: Float32Array[] = [];
+	/** Captured cloud-dictation audio, converted to 16-bit PCM on arrival (half the Float32 footprint). */
+	#cloudAudio: Int16Array[] = [];
 
 	/** Creates a controller; tests may replace the hardware capture boundary. */
 	constructor();
@@ -110,15 +115,17 @@ export class STTController {
 	 *  capture is starting, recording, or transcribing. */
 	async start(editor: SttTarget, options: SttCallbacks): Promise<void> {
 		if (this.#state === "transcribing") options.showStatus("Transcription in progress...");
-		if (this.#toggling || this.#state !== "idle") return;
+		if (this.#disposed || this.#toggling || this.#state !== "idle") return;
 		await this.#transition(options, () => this.#start(editor, options));
 	}
 
-	/** Stop the running capture and transcribe it. A capture still starting stops as soon as it is
-	 *  up; otherwise a no-op unless recording. */
+	/** Stop the running capture and transcribe it. A capture still starting is cancelled: a pending
+	 *  model preflight stops waiting (the worker keeps loading), otherwise it stops once it is up.
+	 *  A no-op unless starting or recording. */
 	async stop(): Promise<void> {
 		if (this.#toggling) {
 			if (this.#state === "idle" || this.#state === "recording") this.#stopAfterStart = true;
+			if (this.#state === "idle") this.#startAbort?.abort();
 			return;
 		}
 		const callbacks = this.#streamCallbacks;
@@ -157,26 +164,26 @@ export class STTController {
 		return resolveSttModelSpec(model?.id).key;
 	}
 
-	async #ensureDeps(options: SttCallbacks, modelKey = this.#resolveModelKey()): Promise<SttModelKey | null> {
+	async #ensureDeps(options: SttCallbacks, modelKey: SttModelKey, signal: AbortSignal): Promise<SttModelKey | null> {
 		// Keyed on the resolved role model rather than a one-shot flag: changing
 		// modelRoles.dictation mid-session re-runs preflight for the new model.
 		if (this.#resolvedModelKey === modelKey) return modelKey;
 		try {
-			// Loading the multi-hundred-MB speech model into the worker is what made
-			// the old "Checking STT dependencies…" step slow. Don't pay it before
-			// recording: when the weights are already cached, start now and warm the
-			// model in the background — the stream/transcribe paths load it on demand
-			// (memoized in the worker) and it is hot by the time recording stops.
-			// Only a genuine first-use download blocks (its progress shows in the
-			// download HUD), so we never record silently against missing weights.
-			if (await isSttModelCached(modelKey)) {
+			// Native streaming needs a ready recognizer before the microphone opens;
+			// otherwise the first words queue behind a cold model load. Buffered
+			// models can still warm in the background while recording.
+			const spec = resolveSttModelSpec(modelKey);
+			const online = spec.engine === "sherpa" && spec.mode === "online";
+			if (!online && (await isSttModelCached(modelKey))) {
 				this.#warmModel(modelKey);
 			} else {
-				await downloadSttModel(modelKey);
+				await downloadSttModel(modelKey, undefined, { signal });
 			}
 			this.#resolvedModelKey = modelKey;
 			return modelKey;
 		} catch (err) {
+			// A cancelled start is not a setup failure; the worker finishes the load for the next start.
+			if (signal.aborted) return null;
 			const msg = err instanceof Error ? err.message : "Failed to setup STT dependencies";
 			options.showWarning(msg);
 			logger.error("STT dependency setup failed", { error: msg });
@@ -201,6 +208,16 @@ export class STTController {
 	}
 
 	async #start(editor: SttTarget, options: SttCallbacks): Promise<void> {
+		const abort = new AbortController();
+		this.#startAbort = abort;
+		try {
+			await this.#startWith(editor, options, abort.signal);
+		} finally {
+			if (this.#startAbort === abort) this.#startAbort = null;
+		}
+	}
+
+	async #startWith(editor: SttTarget, options: SttCallbacks, signal: AbortSignal): Promise<void> {
 		let model = this.#resolveModel();
 		if (model?.api === "openai-transcriptions") {
 			this.#startBuffered(editor, options, model);
@@ -211,8 +228,8 @@ export class STTController {
 			return;
 		}
 
-		let modelKey = await this.#ensureDeps(options, this.#resolveModelKey(model));
-		if (!modelKey) return;
+		let modelKey = await this.#ensureDeps(options, this.#resolveModelKey(model), signal);
+		if (!modelKey || signal.aborted) return;
 		model = this.#resolveModel();
 		if (model?.api === "openai-transcriptions") {
 			this.#startBuffered(editor, options, model);
@@ -224,8 +241,8 @@ export class STTController {
 		}
 		const startModelKey = this.#resolveModelKey(model);
 		if (startModelKey !== modelKey) {
-			modelKey = await this.#ensureDeps(options, startModelKey);
-			if (!modelKey) return;
+			modelKey = await this.#ensureDeps(options, startModelKey, signal);
+			if (!modelKey || signal.aborted) return;
 		}
 		await this.#startStreaming(editor, options, modelKey);
 	}
@@ -267,7 +284,7 @@ export class STTController {
 					options.showWarning(error.message);
 					return;
 				}
-				if (samples.length > 0) this.#cloudAudio.push(samples.slice());
+				if (samples.length > 0) this.#cloudAudio.push(floatToPcm16(samples));
 			});
 		} catch (err) {
 			this.#streamAbort?.abort();
@@ -486,7 +503,7 @@ export class STTController {
 		}
 		if (!failed) options.showStatus(this.#streamCommitted ? "" : "No speech detected.");
 
-		if (this.#streamCommitted && !failed && this.#streamEditor) {
+		if (!options.manualSubmit && this.#streamCommitted && !failed && this.#streamEditor) {
 			const trigger = cfgSttSubmitTrigger.get(this.#settings);
 			const { submit, trimTrailing } = evaluateSubmitTrigger(this.#streamUtterance, trigger);
 			if (trimTrailing > 0) {
@@ -500,6 +517,7 @@ export class STTController {
 
 	dispose(): void {
 		this.#disposed = true;
+		this.#startAbort?.abort();
 		if (this.#streamAbort) {
 			this.#streamAbort.abort();
 			this.#streamAbort = null;

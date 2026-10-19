@@ -1,17 +1,17 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { JsRuntime, type RuntimeHooks } from "@oh-my-pi/pi-coding-agent/eval/js/shared/runtime";
-import type { JsDisplayOutput } from "@oh-my-pi/pi-coding-agent/eval/js/shared/types";
+import type { EvalDisplayOutput } from "@oh-my-pi/pi-coding-agent/eval/types";
 
 let runtime: JsRuntime;
 
 function makeHooks(): { hooks: RuntimeHooks; texts: string[] } {
 	const texts: string[] = [];
-	const displays: JsDisplayOutput[] = [];
+	const displays: EvalDisplayOutput[] = [];
 	const hooks: RuntimeHooks = {
 		onText: (chunk: string) => {
 			texts.push(chunk);
 		},
-		onDisplay: (output: JsDisplayOutput) => {
+		onDisplay: (output: EvalDisplayOutput) => {
 			displays.push(output);
 		},
 		callTool: async () => undefined,

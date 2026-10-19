@@ -7,6 +7,7 @@
  * widget lose per-model visibility.
  */
 import { describe, expect, it } from "bun:test";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
 
@@ -85,6 +86,28 @@ describe("openai-codex usage parser", () => {
 			expect(report?.limits.map(limit => limit.id)).toContain("openai-codex:primary");
 			if (status === 200) expect(report?.metadata?.daybreak).toBe(true);
 			else expect(report?.metadata).not.toHaveProperty("daybreak");
+		}
+	});
+
+	it("throws on a rejected token so the cached report is purged, but treats 5xx as transient", async () => {
+		// AuthStorage purges last-good quota and health checks report `ok: false`
+		// only for a thrown 401/403; `null` keeps serving the old report.
+		for (const status of [401, 403, 503]) {
+			const outcome = await openaiCodexUsageProvider
+				.fetchUsage(
+					{
+						provider: "openai-codex",
+						credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+					},
+					{ fetch: (async () => new Response("{}", { status })) as unknown as FetchImpl },
+				)
+				.catch((err: unknown) => err);
+			if (status === 503) {
+				expect(outcome).toBeNull();
+			} else {
+				expect(outcome).toBeInstanceOf(ProviderHttpError);
+				expect((outcome as ProviderHttpError).status).toBe(status);
+			}
 		}
 	});
 

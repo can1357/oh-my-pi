@@ -112,7 +112,7 @@ export const webFixtures: Record<string, GalleryFixture> = {
 			code: [
 				"const obs = await tab.observe();",
 				"const heading = obs.elements.find(e => e.role === 'heading');",
-				"display({ url: obs.url, title: obs.title, headings: obs.elements.filter(e => e.role === 'heading').length });",
+				"print({ url: obs.url, title: obs.title, headings: obs.elements.filter(e => e.role === 'heading').length });",
 				"return heading?.name ?? 'no heading found';",
 			].join("\n"),
 		},

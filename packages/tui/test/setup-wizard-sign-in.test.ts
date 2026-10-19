@@ -1,10 +1,17 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { OAuthLoginCallbacks, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth/types";
-import { SignInScene } from "@oh-my-pi/pi-tui/setup/scenes/sign-in";
-import type { SetupSceneHost } from "@oh-my-pi/pi-tui/setup/scenes/types";
+import { providersSetupScene, SignInScene } from "@oh-my-pi/pi-tui/setup/scenes/sign-in";
+import type { SetupHost, SetupSceneHost } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { type Component, TUI } from "@oh-my-pi/pi-tui";
+import { Input } from "@oh-my-pi/pi-tui/components/input";
+import { SetupWizardComponent } from "@oh-my-pi/pi-tui/setup/wizard-overlay";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
+import { VirtualRenderScheduler } from "./virtual-render-scheduler";
+import { VirtualTerminal } from "./virtual-terminal";
+
+withoutTerminalMultiplexer();
 
 beforeAll(async () => {
 	await initTheme();
@@ -193,4 +200,138 @@ describe("SignInScene", () => {
 			await loginGate.promise;
 		}
 	});
+});
+
+class SignInTerminal extends VirtualTerminal {
+	cursorVisible = false;
+	#writes: string[] = [];
+
+	override write(data: string): void {
+		this.#writes.push(data);
+		for (const match of data.matchAll(/\x1b\[\?25([hl])/g)) {
+			this.cursorVisible = match[1] === "h";
+		}
+		super.write(data);
+	}
+
+	takeWrites(): string {
+		const result = this.#writes.join("");
+		this.#writes.length = 0;
+		return result;
+	}
+}
+
+describe("fullscreen setup sign-in cursor", () => {
+	for (const hardware of [true, false]) {
+		it(`keeps the real prompt glyph and restores focus with hardware cursor ${hardware ? "on" : "off"}`, async () => {
+			const terminal = new SignInTerminal(100, 32);
+			const scheduler = new VirtualRenderScheduler();
+			const tui = new TUI(terminal, hardware, { renderScheduler: scheduler });
+			const base = new Input();
+			base.setValue("restored");
+			tui.addChild(base);
+			tui.setFocus(base);
+			const cancelled = Promise.withResolvers<void>();
+			const authStorage = {
+				credentials: { has: (_providerId: string) => false },
+				keys: { source: (_providerId: string) => undefined },
+				oauth: {
+					async login(_provider: OAuthProviderId, callbacks: OAuthLoginCallbacks): Promise<void> {
+						try {
+							callbacks.onAuth({ url: "https://example.com/offline-login" });
+							await callbacks.onPrompt({ message: "Authorization code" });
+							callbacks.signal?.throwIfAborted();
+						} finally {
+							cancelled.resolve();
+						}
+					},
+				},
+			} as unknown as AuthStorage;
+			const host = {
+				ui: tui,
+				authStorage,
+				disabledProviders: [],
+				copyToClipboard: async () => {},
+				refreshProvider: async () => {},
+				openInBrowser(): void {},
+			} as unknown as SetupHost;
+			const wizard = new SetupWizardComponent(host, [providersSetupScene]);
+			tui.start();
+			await scheduler.settle(terminal);
+			const normalCursor = terminal.getCursor();
+			const overlay = tui.showOverlay(wizard, {
+				fullscreen: true,
+				width: "100%",
+				maxHeight: "100%",
+				anchor: "top-left",
+				margin: 0,
+			});
+			try {
+				void wizard.run();
+				terminal.sendInput("\r");
+				// Reuse the wizard tests' clock-based dissolve skip, not a wall-clock sleep.
+				const afterDissolve = performance.now() + 1000;
+				vi.spyOn(performance, "now").mockReturnValue(afterDissolve);
+				await scheduler.settle(terminal);
+				for (const char of "anthropic") terminal.sendInput(char);
+				terminal.sendInput("\r");
+				await scheduler.settle(terminal);
+				const prompt = tui.getFocused();
+				expect(prompt).not.toBe(wizard);
+				expect(wizard.ownsOverlayFocusTarget(prompt!)).toBe(true);
+
+				terminal.sendInput("abcd");
+				await scheduler.settle(terminal);
+				const atEnd = terminal.getCursor();
+				terminal.sendInput("\x1b[D");
+				await scheduler.settle(terminal);
+				const beforeMove = tui.getDebugPaint()?.lines;
+				terminal.takeWrites();
+				terminal.sendInput("\x1b[D");
+				await scheduler.settle(terminal);
+				const movement = terminal.takeWrites();
+				const caret = { row: atEnd.row, col: atEnd.col - 2 };
+				expect(terminal.getCursor()).toEqual(caret);
+				const row = terminal.getViewport()[caret.row]!;
+				expect(row).toContain("abcd");
+				expect(row[caret.col]).toBe("c");
+				expect(tui.getDebugPaint()).toMatchObject({
+					altScreen: true,
+					cursor: { x: caret.col, y: caret.row, visible: hardware },
+				});
+				expect(terminal.cursorVisible).toBe(hardware);
+				const paintedRow = tui.getDebugPaint()!.lines[caret.row]!;
+				if (hardware) {
+					expect(paintedRow).not.toContain("\x1b[7m");
+					expect(tui.getDebugPaint()?.lines).toEqual(beforeMove);
+					expect([...movement.matchAll(/\x1b\[(\d+);1H/g)]).toEqual([]);
+				} else {
+					expect(paintedRow).toContain("\x1b[7mc\x1b[27m");
+					expect(movement).not.toContain("\x1b[?25h");
+				}
+
+				terminal.sendInput("\x1b");
+				await cancelled.promise;
+				await Promise.resolve();
+				await scheduler.settle(terminal);
+				expect(tui.getFocused()).toBe(wizard);
+				expect(terminal.cursorVisible).toBe(false);
+				expect(tui.getDebugPaint()?.cursor).toBeUndefined();
+				expect(terminal.getViewport().join("\n")).toContain("Login cancelled.");
+				overlay.hide();
+				await scheduler.settle(terminal);
+				expect(tui.getFocused()).toBe(base);
+				expect(base.focused).toBe(true);
+				expect(terminal.cursorVisible).toBe(hardware);
+				expect(terminal.getCursor()).toEqual(normalCursor);
+				terminal.sendInput("!");
+				await scheduler.settle(terminal);
+				expect(base.getValue()).toBe("restored!");
+			} finally {
+				wizard.dispose();
+				overlay.hide();
+				tui.stop();
+			}
+		});
+	}
 });

@@ -27,7 +27,7 @@ import type {
 } from "./host";
 import type { Editor } from "../components/editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
-import { sanitizeStatusText } from "../chrome/shared";
+import { sanitizeHookStatusText, sanitizeStatusText } from "../chrome/shared";
 import { getThemeEpoch, theme } from "../theme";
 import { type CompactionBoundaries, EMPTY_STRING_PARTS, getToolSchemaMetadataRevision } from "./context-usage";
 import {
@@ -43,18 +43,25 @@ import type { TspMeterMark, TspProps } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import { col, node, span } from "../native/describe";
 import { getContextMeterThresholds } from "../chrome/context-thresholds";
-import { isNativeRendering } from "../native/state";
+import { isNativeRendering, onNativeRenderingChange } from "../native/state";
 import { getSeparator } from "./separators";
+import { formatJobWidgetGlance, type JobWidgetEntry, latestJobWidget } from "../tools/job-widget";
 import type {
 	CollabStatus,
 	ComposerFacts,
 	ComposerFactsSource,
 	EffectiveStatusLineSettings,
 	SegmentView,
+	SeparatorDef,
 	StatusLineSegmentId,
 	StatusLineSegmentOptions,
+	StatusLineSeparatorStyle,
 	StatusLineSettings,
+	StatusResetExpiry,
 } from "./types";
+
+/** Sparkline cells the ANSI jobs segment draws after the freshest widget's headline. */
+const JOBS_SEGMENT_SPARK_CELLS = 8;
 
 /** What a click on a native status segment asks omp to open. */
 export type StatusLineNativeAction = "status.model" | "status.context" | "status.git" | "status.cost" | "status.path";
@@ -81,9 +88,9 @@ const PINNED_NATIVE_PRIORITY = 1000;
 /**
  * Segments a TSP terminal shows outside the composer's facts: the model chip,
  * the context hairline and usage text (context, cost), Tern's pane header
- * (path, git), the tab title (session name, PR), the HUD pills (subagents),
- * the editor (vim) and the brand (`pi`; while focus-proxied, the viewed agent
- * is the composer's viewing header).
+ * (path), the tab title (session name, PR), the HUD pills (subagents), the
+ * editor (vim) and the brand (`pi`; while focus-proxied, the viewed agent is
+ * the composer's viewing header).
  */
 const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
 	pi: true,
@@ -92,7 +99,6 @@ const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
 	context_total: true,
 	cost: true,
 	path: true,
-	git: true,
 	pr: true,
 	session_name: true,
 	subagents: true,
@@ -152,6 +158,10 @@ const WATCHER_FAILURE_POLL_TTL_MS = 5000;
 const BRAND_FADE_MS = 450;
 /** Repaint cadence while the brand fade is in flight (rust omp's `FADE_FRAME`). */
 const BRAND_FADE_FRAME_MS = 40;
+/** Repaint cadence while a turn's active-processing window is open: keeps the
+ * status bar's clock-driven readouts (pi spinner, turn timer) animating when
+ * no other component is requesting renders. */
+const ACTIVE_WINDOW_REPAINT_MS = 250;
 
 /**
  * Providers whose subscription quota is a single monthly bucket, so their
@@ -215,11 +225,50 @@ function reportMatchesExactIdentity(report: UsageReport, identity: OAuthAccountI
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
+ * Serialized length of tool-call arguments, memoized per arguments object.
+ * Streaming providers may grow the same object in place (at any depth), so
+ * each entry keeps a shape check — key/element counts plus string and number
+ * lengths over the whole tree — and is recomputed when it differs, without
+ * re-serializing the whole (possibly multi-KB edit/write) payload on every
+ * status-line rebuild.
+ */
+const toolArgumentsLengthCache = new WeakMap<object, { check: number; length: number }>();
+
+/** Past this depth the check stops descending; JSON.stringify rejects real cycles anyway. */
+const SHAPE_CHECK_MAX_DEPTH = 32;
+
+function toolArgumentsShapeCheck(value: unknown, depth = 0): number {
+	if (typeof value === "string") return value.length + 1;
+	if (typeof value === "number" || typeof value === "bigint") return String(value).length + 1;
+	if (value === null || typeof value !== "object" || depth >= SHAPE_CHECK_MAX_DEPTH) return 1;
+	let check = 1;
+	for (const child of Object.values(value)) check += 1 + toolArgumentsShapeCheck(child, depth + 1);
+	return check;
+}
+
+function toolArgumentsLength(args: unknown): number {
+	if (typeof args === "string") return args.length;
+	if (args === null || typeof args !== "object") return String(args).length;
+	const check = toolArgumentsShapeCheck(args);
+	const cached = toolArgumentsLengthCache.get(args);
+	if (cached !== undefined && cached.check === check) return cached.length;
+	let length: number;
+	try {
+		length =
+			JSON.stringify(args, (_key, value) => (typeof value === "bigint" ? value.toString() : value))?.length ?? 0;
+	} catch {
+		length = String(args).length;
+	}
+	toolArgumentsLengthCache.set(args, { check, length });
+	return length;
+}
+
+/**
  * Cheap structural fingerprint of a message's tokenizable content. O(blocks) —
- * only reads string `.length` and primitives, never copies or serializes.
- * Detects in-place growth of the streaming tail (and other in-place mutations)
- * so the cached `getContextUsage()` result is recomputed when — and only when —
- * the numbers it depends on change.
+ * only reads string `.length`, primitives, and memoized tool-argument sizes;
+ * never copies. Detects growth of the streaming tail (in-place text appends,
+ * freshly parsed tool arguments) so the cached `getContextUsage()` result is
+ * recomputed when — and only when — the numbers it depends on change.
  */
 function messageFingerprint(msg: AgentMessage): string {
 	const role = (msg as { role?: string }).role ?? "";
@@ -301,15 +350,7 @@ function messageFingerprint(msg: AgentMessage): string {
 					redactedLen += b.data.length;
 				} else if (b.type === "toolCall") {
 					if (typeof b.name === "string") textLen += b.name.length;
-					if (b.arguments !== undefined) {
-						try {
-							textLen += JSON.stringify(b.arguments, (_key, value) =>
-								typeof value === "bigint" ? value.toString() : value,
-							).length;
-						} catch {
-							textLen += String(b.arguments).length;
-						}
-					}
+					if (b.arguments !== undefined) textLen += toolArgumentsLength(b.arguments);
 				}
 			}
 		}
@@ -339,6 +380,7 @@ interface ContextUsageMemo {
 	length: number;
 	lastFingerprint: string | undefined;
 	modelContextWindow: number;
+	toolSchemasInContext: boolean;
 	contextUsageRevision: number;
 	toolSchemaMetadataRevision: number;
 	settingsRevision: number;
@@ -408,6 +450,8 @@ class StatusLineExternalInputs {
 	isFastModeActive = false;
 	anthropicSlowModeLabel: string | undefined = undefined;
 	compactionSpeculation: unknown = undefined;
+	/** The freshest running job widget's view (stable identity while its data is unchanged). */
+	jobWidgetRef: unknown = undefined;
 }
 
 interface CachedStatusLine {
@@ -419,6 +463,25 @@ interface CachedStatusLine {
 	inputRevision: number;
 	previewTitle: string | undefined;
 	externalInputs: StatusLineExternalInputs;
+}
+
+/** Dot separator of the plain (borderless) layouts; carries no caps. */
+const PLAIN_SEPARATOR: SeparatorDef = { left: "·", right: "·" };
+
+/** A separator style's glyphs and cell widths: theme-pure, so measured once per theme. */
+interface SeparatorMetrics {
+	themeRef: unknown;
+	themeEpoch: number;
+	style: StatusLineSeparatorStyle;
+	def: SeparatorDef;
+	leftSepWidth: number;
+	rightSepWidth: number;
+	/** Left group's closing cap (`endCaps.right`); 0 without caps. */
+	leftCapWidth: number;
+	/** Right group's opening cap (`endCaps.left`); 0 without caps. */
+	rightCapWidth: number;
+	/** Band layout's flush-left soft cap; 0 without caps. */
+	bandCapWidth: number;
 }
 
 interface ActiveRepoCache {
@@ -580,10 +643,21 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	};
 	#statusLineInputRevision = 0;
 	#statusLineClockTick = 0;
+	/**
+	 * Earliest wall-clock ms at which a TTL-throttled VCS cache the render path
+	 * served goes stale (git/jj status, watcher-less branch poll, repository
+	 * re-probe, PR activity refresh); `Infinity` when none can. The first frame
+	 * past it expires the render memo so the getters refetch — instead of a
+	 * fixed polling tick that rebuilt the whole bar every second.
+	 */
+	#vcsStaleAt = Number.POSITIVE_INFINITY;
 	/** Reused probe buffer for {@link #readStatusLineExternalInputs}; handed to the new cache entry on a miss. */
 	#externalInputsProbe = new StatusLineExternalInputs();
 	/** `adjustHsv` result for the gauge's threshold tint; pure in its source hex. */
 	#dimmedAccentMemo: { sourceHex: string; hex: string } | undefined;
+	/** Separator widths for the plain and the styled (box/band) layouts; see {@link #separatorMetrics}. */
+	#plainSeparatorMetrics: SeparatorMetrics | undefined;
+	#styledSeparatorMetrics: SeparatorMetrics | undefined;
 	/** Gauge boundary markers; a pure function of the session's compaction settings, model, and window. */
 	#compactionBoundariesMemo:
 		| {
@@ -626,6 +700,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#gitWatcherUnavailable = false;
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
+	/** Unsubscribe for the native-rendering feed; re-arms the turn-window ticker when a TSP surface is revoked. */
+	#unwatchNativeRendering: (() => void) | undefined;
 	#autoCompactEnabled: boolean = true;
 	/** Pulse timer for the running-speculation indicator; live only while speculation runs. */
 	#speculationBlinkTimer: NodeJS.Timeout | undefined;
@@ -636,6 +712,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#brandWorking = false;
 	/** Frame timer driving repaints while the brand fade is unsettled. */
 	#brandFadeTimer: NodeJS.Timeout | undefined;
+	/** Repaint ticker while a turn's active-processing window is open (see #syncActiveWindowRepaint). */
+	#activeWindowRepaintTimer: NodeJS.Timeout | undefined;
 	/** One wall-clock wakeup for the active model's next tariff change, including while idle. */
 	#pricingTimer: NodeJS.Timeout | undefined;
 	#pricingTimerCost: ModelCost | undefined;
@@ -703,9 +781,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	// than poison the fresh cache or advance its throttle.
 	#jjCacheGeneration = 0;
 
-	// PR lookup caching (invalidated on branch/repo context changes)
+	// PR lookup cache. `#cachedPrContext` is the branch/repo `#cachedPr` was
+	// resolved for; it is never shown for any other branch. Expiry forces a
+	// refetch while keeping that branch's PR visible until the lookup lands.
 	#cachedPr: { number: number; url: string } | null | undefined = undefined;
 	#cachedPrContext: PrCacheContext | undefined = undefined;
+	#cachedPrExpired = false;
 	#prLookupInFlight = false;
 	#defaultBranch?: string;
 	#defaultBranchCwd: string | undefined = undefined;
@@ -725,6 +806,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			expiryHours?: number;
 			expired?: boolean;
 			unavailableReason?: string;
+			expiring?: StatusResetExpiry;
 		};
 	} | null = null;
 	#cachedUsageContextKey: string | null = null;
@@ -737,6 +819,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#latestAppliedUsageRefreshSequence = 0;
 	#codexResetSnapshots = new Map<string, CodexResetUsageSnapshot>();
 	#onCodexResetFireworks: ((event: CodexResetFireworksEvent) => void) | undefined;
+	#onResetExpiryNotice: ((notice: string) => void) | undefined;
+	/** Conversations already warned about expiring saved resets: later refreshes stay quiet. */
+	#resetExpiryNoticedSessions = new Set<string>();
 	// Context-usage memo. The status line redraws on every agent event, so the
 	// hot path must not recompute context tokens unless an input changed.
 	// `getContextUsage()` anchors on the last assistant's real prompt-token
@@ -754,6 +839,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		private readonly host: StatusLineHost<TSession>,
 	) {
 		this.#settings = host.getSettings();
+		this.#unwatchNativeRendering = onNativeRenderingChange(() => this.#syncActiveWindowRepaint());
 	}
 
 	#gitEnabled(): boolean {
@@ -807,25 +893,44 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#resolveRepository(cache: ActiveRepoCache): VcsRepo | null {
 		if (cache.repository) return cache.repository;
 		const now = Date.now();
-		if (now - cache.repositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) return null;
-		cache.repository = vcs.repo(cache.effectiveGitCwd);
-		cache.repositoryCheckedAt = now;
+		if (now - cache.repositoryCheckedAt >= WATCHER_FAILURE_POLL_TTL_MS) {
+			cache.repository = vcs.repo(cache.effectiveGitCwd);
+			cache.repositoryCheckedAt = now;
+		}
+		// Still absent: re-probe on the bounded interval so a later `git init` shows up.
+		if (!cache.repository) this.#noteVcsStaleAt(cache.repositoryCheckedAt + WATCHER_FAILURE_POLL_TTL_MS);
 		return cache.repository;
 	}
 
 	#resolveDisplayRepository(cache: ActiveRepoCache): VcsRepo | null {
 		if (cache.displayRepository) return cache.displayRepository;
 		const now = Date.now();
-		if (now - cache.displayRepositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) return null;
-		let display: VcsRepo | null;
-		try {
-			display = vcs.repoForDisplay(cache.effectiveGitCwd);
-		} catch {
-			display = null;
+		if (now - cache.displayRepositoryCheckedAt >= WATCHER_FAILURE_POLL_TTL_MS) {
+			let display: VcsRepo | null;
+			try {
+				display = vcs.repoForDisplay(cache.effectiveGitCwd);
+			} catch {
+				display = null;
+			}
+			cache.displayRepository = display ?? cache.repository;
+			cache.displayRepositoryCheckedAt = now;
 		}
-		cache.displayRepository = display ?? cache.repository;
-		cache.displayRepositoryCheckedAt = now;
+		if (!cache.displayRepository) {
+			this.#noteVcsStaleAt(cache.displayRepositoryCheckedAt + WATCHER_FAILURE_POLL_TTL_MS);
+		}
 		return cache.displayRepository;
+	}
+
+	/** Lower {@link #vcsStaleAt} to `at` when a served VCS cache expires sooner. */
+	#noteVcsStaleAt(at: number): void {
+		if (at < this.#vcsStaleAt) this.#vcsStaleAt = at;
+	}
+
+	/** Expire the render memo once a served VCS cache has gone stale, so this frame refetches. */
+	#expireStaleVcsRender(nowMs: number): void {
+		if (nowMs < this.#vcsStaleAt) return;
+		this.#vcsStaleAt = Number.POSITIVE_INFINITY;
+		this.#invalidateStatusLineRenderCache();
 	}
 
 	/**
@@ -841,6 +946,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#invalidateSessionCaches();
 			this.#closeStaleActiveWindow();
 		}
+		// The ticker self-stops once its tick sees no open window for the
+		// newly-attached session; re-pointing focus at a session whose turn
+		// is still running must re-arm it, and no other path reliably fires
+		// here (closeStaleActiveWindow returns early while streaming, and
+		// the synthesized agent_start no-ops on an already-open window).
+		this.#syncActiveWindowRepaint();
 		this.invalidate();
 	}
 
@@ -939,6 +1050,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		meter.activeMs = 0;
 		meter.activeStartedAt = null;
 		this.#invalidateStatusLineRenderCache();
+		this.#syncActiveWindowRepaint();
 	}
 
 	/**
@@ -953,6 +1065,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (meter.activeStartedAt !== null) return;
 		meter.activeStartedAt = Date.now();
 		this.#invalidateStatusLineRenderCache();
+		this.#syncActiveWindowRepaint();
 	}
 
 	/**
@@ -967,6 +1080,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		meter.activeMs += Math.max(0, Date.now() - meter.activeStartedAt);
 		meter.activeStartedAt = null;
 		this.#invalidateStatusLineRenderCache();
+		this.#syncActiveWindowRepaint();
 	}
 
 	/**
@@ -1121,6 +1235,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#onCodexResetFireworks = handler;
 	}
 
+	/** Set the callback that presents the first pool-wide saved-reset expiry warning, or clear it with `undefined`. */
+	setResetExpiryNoticeHandler(handler: ((notice: string) => void) | undefined): void {
+		this.#onResetExpiryNotice = handler;
+	}
+
 	setHookStatus(key: string, text: string | undefined): void {
 		if (text === undefined) {
 			if (!this.#hookStatuses.delete(key)) return;
@@ -1187,9 +1306,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#onBranchChange = null;
 		this.#stopSpeculationBlink();
 		this.#stopBrandFadeTimer();
+		this.#stopActiveWindowRepaint();
 		this.#stopPricingTimer();
 		this.#clearUsageStartTimer();
+		this.#unwatchNativeRendering?.();
+		this.#unwatchNativeRendering = undefined;
 		this.#onCodexResetFireworks = undefined;
+		this.#onResetExpiryNotice = undefined;
 		this.#codexResetSnapshots.clear();
 		this.#retireGitWatcher();
 	}
@@ -1228,7 +1351,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * a 40ms frame timer so the fade keeps animating after the working loader
 	 * (the usual repaint driver) has stopped.
 	 */
-	#brandFgAnsi(working: boolean, sessionAccentEnabled: boolean): string {
+	#brandFgAnsi(working: boolean, sessionAccentEnabled: boolean, brandVisible: boolean): string {
 		const sessionName = sessionAccentEnabled ? this.session.sessionManager?.getSessionName() : undefined;
 		const idleHex = theme.getColorHex("dim");
 		const workingHex =
@@ -1242,7 +1365,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				startedAt: now,
 			};
 			this.#brandWorking = working;
-			this.#startBrandFadeTimer();
+			// Only a visible `pi` segment needs fade frames; other bars stay quiet.
+			if (brandVisible) this.#startBrandFadeTimer();
 		}
 		const hex = this.#sampleBrandHex(working ? workingHex : idleHex, now);
 		return getSessionAccentAnsi(hex) ?? theme.getFgAnsi(working ? "accent" : "dim");
@@ -1288,6 +1412,40 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (!this.#brandFadeTimer) return;
 		clearInterval(this.#brandFadeTimer);
 		this.#brandFadeTimer = undefined;
+	}
+
+	/**
+	 * Keep the status bar repainting while a turn's active-processing window
+	 * is open. The `pi` segment's spinner and turn timer are painted from the
+	 * wall clock at render time, so they only animate when frames flow; during
+	 * a quiet turn the working-row loader's 80 ms tick is normally the sole
+	 * repaint source, and paths that stop or bypass that loader mid-turn (an
+	 * error banner, a stale retry/compaction loader reference) froze the
+	 * spinner until the next keystroke. The status line owns the active
+	 * window, so it owns a repaint source for it; a native surface clocks its
+	 * own spinner and needs none.
+	 */
+	#syncActiveWindowRepaint(): void {
+		if (this.#disposed || isNativeRendering() || this.getTurnElapsedMs() === null) {
+			this.#stopActiveWindowRepaint();
+			return;
+		}
+		if (this.#activeWindowRepaintTimer) return;
+		const timer = setInterval(() => {
+			if (this.#disposed || isNativeRendering() || this.getTurnElapsedMs() === null) {
+				this.#stopActiveWindowRepaint();
+				return;
+			}
+			this.#onBranchChange?.();
+		}, ACTIVE_WINDOW_REPAINT_MS);
+		timer.unref?.();
+		this.#activeWindowRepaintTimer = timer;
+	}
+
+	#stopActiveWindowRepaint(): void {
+		if (!this.#activeWindowRepaintTimer) return;
+		clearInterval(this.#activeWindowRepaintTimer);
+		this.#activeWindowRepaintTimer = undefined;
 	}
 
 	#stopPricingTimer(): void {
@@ -1352,8 +1510,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// was designed to avoid. Explicit Git/repository invalidation (watcher
 		// HEAD-move, cwd/repo switch) goes through {@link invalidateGitCaches}.
 		// A tool may open, close, or merge a PR without moving HEAD. Expire the
-		// settled PR context on ordinary activity while leaving HEAD work intact.
-		this.#cachedPrContext = undefined;
+		// settled PR on ordinary activity while leaving HEAD work intact.
+		this.#cachedPrExpired = true;
 	}
 	#invalidateSessionCaches(): void {
 		this.#clearUsageStartTimer();
@@ -1384,7 +1542,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#branchResolveActive = undefined;
 		this.#branchLastFetch = undefined;
 		this.#branchCacheGeneration++;
-		this.#cachedPrContext = undefined;
+		this.#cachedPrExpired = true;
 		// A HEAD move (commit, checkout, reset) changes the dirty counts; keep the
 		// stale counts on screen but refetch on the next render. The generation
 		// bump stops an in-flight pre-move result from re-stamping freshness.
@@ -1441,7 +1599,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			taggedRepository[GIT_VIEW] = gitRepository;
 		}
 		if (!gitRepository) {
-			if (this.#jjBranchActive || Date.now() - this.#jjBranchLastFetch < JJ_REFRESH_TTL_MS) {
+			if (this.#jjBranchActive) return this.#cachedJjBranch;
+			if (Date.now() - this.#jjBranchLastFetch < JJ_REFRESH_TTL_MS) {
+				this.#noteVcsStaleAt(this.#jjBranchLastFetch + JJ_REFRESH_TTL_MS);
 				return this.#cachedJjBranch;
 			}
 			const request: JjResolveRequest = {
@@ -1468,6 +1628,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					if (this.#jjCacheGeneration === generation) this.#jjBranchLastFetch = Date.now();
 				}
 				if (this.#jjCacheGeneration !== generation || this.#disposed) return;
+				this.#noteVcsStaleAt(this.#jjBranchLastFetch + JJ_REFRESH_TTL_MS);
 				const changed = next !== this.#cachedJjBranch;
 				this.#cachedJjBranch = next;
 				if (changed) {
@@ -1481,6 +1642,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#gitWatcherUnavailable &&
 			(this.#branchLastFetch === undefined || Date.now() - this.#branchLastFetch >= WATCHER_FAILURE_POLL_TTL_MS);
 		if (this.#cachedBranch !== undefined && this.#cachedBranchCwd === gitCwd && !fallbackCacheExpired) {
+			if (this.#gitWatcherUnavailable && this.#branchLastFetch !== undefined) {
+				this.#noteVcsStaleAt(this.#branchLastFetch + WATCHER_FAILURE_POLL_TTL_MS);
+			}
 			return this.#cachedBranch;
 		}
 
@@ -1533,6 +1697,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				this.#cachedBranchRepoId = repoId;
 				this.#cachedBranch = next;
 				this.#branchLastFetch = Date.now();
+				if (this.#gitWatcherUnavailable) {
+					this.#noteVcsStaleAt(this.#branchLastFetch + WATCHER_FAILURE_POLL_TTL_MS);
+				}
 				if (prev !== next) {
 					this.#invalidateStatusLineRenderCache();
 					this.#onBranchChange?.();
@@ -1553,6 +1720,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#cachedBranchCwd = gitCwd;
 		this.#cachedBranchRepoId = gitHeadPath;
 		this.#branchLastFetch = Date.now();
+		if (this.#gitWatcherUnavailable) this.#noteVcsStaleAt(this.#branchLastFetch + WATCHER_FAILURE_POLL_TTL_MS);
 		if (!head) {
 			this.#cachedBranch = null;
 			return null;
@@ -1594,7 +1762,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const repository = this.#resolveRepository(activeRepoCache);
 		if (!repository) return null;
 		if (repository.kind() === "jj") {
-			if (this.#jjStatusActive || Date.now() - this.#jjStatusLastFetch < JJ_REFRESH_TTL_MS) {
+			if (this.#jjStatusActive) return this.#cachedJjStatus;
+			if (Date.now() - this.#jjStatusLastFetch < JJ_REFRESH_TTL_MS) {
+				this.#noteVcsStaleAt(this.#jjStatusLastFetch + JJ_REFRESH_TTL_MS);
 				return this.#cachedJjStatus;
 			}
 			const request: JjResolveRequest = {
@@ -1616,6 +1786,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					if (this.#jjCacheGeneration === generation) this.#jjStatusLastFetch = Date.now();
 				}
 				if (this.#jjCacheGeneration !== generation || this.#disposed) return;
+				this.#noteVcsStaleAt(this.#jjStatusLastFetch + JJ_REFRESH_TTL_MS);
 				const prev = this.#cachedJjStatus;
 				this.#cachedJjStatus = next;
 				if (JSON.stringify(prev) !== JSON.stringify(next)) {
@@ -1630,6 +1801,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 		}
 		if (this.#cachedGitStatusCwd === gitCwd && Date.now() - this.#gitStatusLastFetch < GIT_STATUS_TTL_MS) {
+			this.#noteVcsStaleAt(this.#gitStatusLastFetch + GIT_STATUS_TTL_MS);
 			return this.#cachedGitStatus;
 		}
 
@@ -1649,6 +1821,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					this.#cachedGitStatusCwd = gitCwd;
 					this.#gitStatusLastFetch = this.#gitStatusGeneration === generation ? Date.now() : 0;
 					this.#gitStatusInFlightCwd = undefined;
+					// A zeroed stamp (superseded generation) is already due: refetch next frame.
+					this.#noteVcsStaleAt(this.#gitStatusLastFetch + GIT_STATUS_TTL_MS);
 					if (!this.#disposed && JSON.stringify(prev) !== JSON.stringify(nextStatus)) {
 						this.#invalidateStatusLineRenderCache();
 						this.#onBranchChange?.();
@@ -1689,11 +1863,16 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const branch = this.#getBranchLabel(activeRepoCache, this.#resolveRepository(activeRepoCache));
 		const currentContext = branch ? createPrCacheContext(branch, this.#cachedBranchRepoId ?? null) : null;
 
-		if (canReuseCachedPr(this.#cachedPr, this.#cachedPrContext, currentContext)) {
+		if (!this.#cachedPrExpired && canReuseCachedPr(this.#cachedPr, this.#cachedPrContext, currentContext)) {
 			return this.#cachedPr ?? null;
 		}
 
-		const stalePr = this.#cachedPr;
+		// Keep an expired PR visible during the refetch only on the branch it
+		// was resolved for; after a checkout the old PR must not linger.
+		const stalePr =
+			currentContext && isSamePrCacheContext(this.#cachedPrContext, currentContext)
+				? (this.#cachedPr ?? null)
+				: null;
 
 		if (!branch) {
 			this.#cachedPr = null;
@@ -1701,10 +1880,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			return null;
 		}
 
-		// Don't look up if detached, default branch, or already in flight.
-		if (branch === "detached" || this.#isDefaultBranch(branch, gitCwd) || this.#prLookupInFlight) {
-			return stalePr ?? null;
-		}
+		// Detached HEAD and the default branch never carry a PR; no lookup.
+		if (branch === "detached" || this.#isDefaultBranch(branch, gitCwd)) return null;
+		if (this.#prLookupInFlight) return stalePr;
 
 		this.#prLookupInFlight = true;
 		const lookupContext = currentContext;
@@ -1726,6 +1904,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				if (lookupContext && isSamePrCacheContext(latestContext, lookupContext)) {
 					this.#cachedPr = value;
 					this.#cachedPrContext = lookupContext;
+					this.#cachedPrExpired = false;
 				}
 			};
 			try {
@@ -1859,6 +2038,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * cadence while a late successful fetch can still refresh the cached segment.
 	 */
 	refreshUsageInBackground(): void {
+		if (this.#disposed) return;
 		const now = Date.now();
 		const session = this.session;
 		const usageContextKey = this.#getUsageContextKey(session);
@@ -1927,6 +2107,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#invalidateStatusLineRenderCache();
 			this.#onBranchChange?.();
 		}
+		this.#noticeResetExpiry(session, reports);
 		if (!resetSnapshot) return;
 		const contextKey = this.#formatUsageContextKey(activeProvider, activeIdentity);
 		const previous = this.#codexResetSnapshots.get(contextKey);
@@ -1934,6 +2115,33 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (!previous || !this.host.codexResetFireworksEnabled()) return;
 		const event = detectCodexResetFireworks(previous, resetSnapshot);
 		if (event) this.#onCodexResetFireworks?.(event);
+	}
+
+	#noticeResetExpiry(session: TSession, reports: unknown): void {
+		// A focused subagent's view is not a conversation the user started; warn in their own.
+		if (
+			this.#focusedAgentId !== undefined ||
+			!this.#onResetExpiryNotice ||
+			!this.host.resetExpiryNotice ||
+			!Array.isArray(reports)
+		) {
+			return;
+		}
+		const sessionId = session.sessionManager.getSessionId();
+		if (this.#resetExpiryNoticedSessions.has(sessionId)) return;
+		// fetchUsageReports supplies normalized rows; keep only entries shaped like reports.
+		const usageReports = reports.filter(
+			(report): report is UsageReport =>
+				!!report &&
+				typeof report === "object" &&
+				"provider" in report &&
+				"limits" in report &&
+				Array.isArray(report.limits),
+		);
+		const notice = this.host.resetExpiryNotice(usageReports, Date.now());
+		if (!notice) return;
+		this.#resetExpiryNoticedSessions.add(sessionId);
+		this.#onResetExpiryNotice(notice);
 	}
 
 	#observeLateUsageRefresh(session: TSession, reportsPromise: Promise<unknown>, sequence: number): void {
@@ -2042,6 +2250,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			expiryHours?: number;
 			expired?: boolean;
 			unavailableReason?: string;
+			expiring?: StatusResetExpiry;
 		};
 	} | null {
 		if (!Array.isArray(reports)) return null;
@@ -2159,7 +2368,16 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					? resetReports.find(report => reportMatchesExactIdentity(report, context.identity))
 					: undefined;
 		const resetSummary = summarizeUsageResetCredits(resetReport?.resetCredits, now);
-		const resetExpiryMs = resetSummary?.soonestExpiry ? Date.parse(resetSummary.soonestExpiry) - now : undefined;
+		const expiring =
+			resetSummary && resetSummary.bankedCount > 0 && resetReport
+				? this.host.classifyResetExpiry?.(resetReport, now)
+				: undefined;
+		// The highlighted countdown is the warned reset's, not an earlier one that is not worth warning about.
+		const resetExpiryMs = expiring
+			? expiring.expiresAtMs - now
+			: resetSummary?.soonestExpiry
+				? Date.parse(resetSummary.soonestExpiry) - now
+				: undefined;
 		const resetCredits =
 			resetSummary && resetSummary.bankedCount > 0
 				? {
@@ -2171,6 +2389,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 								: undefined,
 						expired: resetExpiryMs !== undefined && resetExpiryMs <= 0,
 						unavailableReason: resetSummary.unavailableReason,
+						expiring,
 					}
 				: undefined;
 		if (!selectedGroup) return resetCredits ? { resetCredits } : null;
@@ -2247,6 +2466,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	getCachedContextBreakdown(): { usedTokens: number; contextWindow: number } {
 		const messages = this.session.messages ?? EMPTY_MESSAGES;
 		const modelContextWindow = this.session.model?.contextWindow ?? 0;
+		const toolSchemasInContext = this.session.model?.toolSchemasInContext !== false;
 		const length = messages.length;
 		const lastFingerprint = length > 0 ? messageFingerprint(messages[length - 1]!) : undefined;
 		// Bumps when the in-flight pending snapshot is set/cleared. Without it a
@@ -2268,6 +2488,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			cache.length === length &&
 			cache.lastFingerprint === lastFingerprint &&
 			cache.modelContextWindow === modelContextWindow &&
+			cache.toolSchemasInContext === toolSchemasInContext &&
 			cache.contextUsageRevision === contextUsageRevision &&
 			cache.systemPromptRef === systemPrompt &&
 			cache.toolsRef === tools &&
@@ -2288,6 +2509,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			length,
 			lastFingerprint,
 			modelContextWindow,
+			toolSchemasInContext,
 			contextUsageRevision,
 			toolSchemaMetadataRevision,
 			settingsRevision,
@@ -2369,7 +2591,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const gitPr = includePr ? this.#lookupPr(activeRepoCache) : null;
 		const compactionSpeculation = this.session.compactionSpeculation ?? "idle";
 		this.#syncSpeculationBlink(compactionSpeculation);
-		const sessionAccentEnabled = this.#resolveSettings().sessionAccent !== false;
+		const settings = this.#resolveSettings();
+		const sessionAccentEnabled = settings.sessionAccent !== false;
+		const brandVisible = settings.leftSegments.includes("pi") || settings.rightSegments.includes("pi");
 		const turnElapsedMs = this.getTurnElapsedMs();
 		return {
 			session: this.session,
@@ -2408,7 +2632,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			activeMs: this.getActiveMs(),
 			turnElapsedMs,
 			now: new Date(nowMs),
-			brandFgAnsi: this.#brandFgAnsi(turnElapsedMs !== null, sessionAccentEnabled),
+			brandFgAnsi: this.#brandFgAnsi(turnElapsedMs !== null, sessionAccentEnabled, brandVisible),
 			git: {
 				branch: gitBranch,
 				status: gitStatus,
@@ -2578,6 +2802,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				? this.session.getAnthropicSlowModeLabel()
 				: undefined;
 		target.compactionSpeculation = this.session.compactionSpeculation;
+		target.jobWidgetRef = this.#latestJobWidget()?.view;
+	}
+
+	/** The running job widget that saw data last; the ANSI jobs segment appends its glance. */
+	#latestJobWidget(): JobWidgetEntry | undefined {
+		const entries = this.session.getRunningJobWidgets?.();
+		return entries ? latestJobWidget(entries) : undefined;
 	}
 
 	#sameStatusLineExternalInputs(left: StatusLineExternalInputs, right: StatusLineExternalInputs): boolean {
@@ -2631,25 +2862,37 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			left.isAutoThinking === right.isAutoThinking &&
 			left.isFastModeActive === right.isFastModeActive &&
 			left.anthropicSlowModeLabel === right.anthropicSlowModeLabel &&
-			left.compactionSpeculation === right.compactionSpeculation
+			left.compactionSpeculation === right.compactionSpeculation &&
+			left.jobWidgetRef === right.jobWidgetRef
 		);
 	}
 
 	/**
 	 * Smallest wall-clock unit that can change a visible configured segment.
-	 * A zero tick keeps truly static bars cached indefinitely; active animation,
-	 * clocks, countdowns, and VCS fallback polling advance only at their own
-	 * display/probe cadence.
+	 * A zero tick keeps truly static bars cached indefinitely; animation, clocks,
+	 * and countdowns advance only at their own display cadence. VCS refreshes are
+	 * deadline-driven ({@link #expireStaleVcsRender}), not ticked.
 	 */
 	#statusLineClock(nowMs: number, effectiveSettings: EffectiveStatusLineSettings): number {
 		const leftSegments = effectiveSettings.leftSegments;
 		const rightSegments = effectiveSettings.rightSegments;
-		const meter = this.#meter();
-		if (meter.activeStartedAt !== null || this.#brandFade !== null) {
+		const turnActive = this.#meter().activeStartedAt !== null;
+		// The `pi` brand is the only spinner-rate animation: its braille spinner
+		// while a turn runs and its color fade across turn edges. While
+		// focus-proxied it shows the viewed agent's id instead.
+		if (
+			(turnActive || this.#brandFade !== null) &&
+			this.#focusedAgentId === undefined &&
+			(leftSegments.includes("pi") || rightSegments.includes("pi"))
+		) {
 			return Math.floor(nowMs / SPINNER_ADVANCE_MS);
 		}
 		const includesTime = leftSegments.includes("time") || rightSegments.includes("time");
 		if (
+			// A running turn also moves readouts that have no invalidation path of
+			// their own (background-job badge, live and vibe-worker tok/s): refresh
+			// them once a second instead of on the spinner tick.
+			turnActive ||
 			leftSegments.includes("time_spent") ||
 			rightSegments.includes("time_spent") ||
 			(this.#loopModeStatus?.limit?.kind === "duration" &&
@@ -2661,12 +2904,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (includesTime) {
 			return Math.floor(nowMs / 60_000);
 		}
-		if (this.#gitEnabled() && (hasGitBackedSegment(leftSegments) || hasGitBackedSegment(rightSegments))) {
-			return Math.floor(nowMs / 1_000);
-		}
-		if (this.#gitEnabled() && (hasPathSegment(leftSegments) || hasPathSegment(rightSegments))) {
-			return Math.floor(nowMs / WATCHER_FAILURE_POLL_TTL_MS);
-		}
 		return 0;
 	}
 
@@ -2675,6 +2912,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const externalInputs = this.#externalInputsProbe;
 		this.#readStatusLineExternalInputs(externalInputs);
 		const nowMs = Date.now();
+		this.#expireStaleVcsRender(nowMs);
 		const clockTick = this.#statusLineClock(nowMs, effectiveSettings);
 		if (clockTick !== this.#statusLineClockTick) {
 			this.#statusLineClockTick = clockTick;
@@ -2708,6 +2946,33 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		};
 		this.#statusLineRenderCache[layout] = result;
 		return result;
+	}
+
+	/**
+	 * Separator glyphs and cell widths for the plain or styled layouts, measured
+	 * once per theme (and style) instead of on every rebuild.
+	 */
+	#separatorMetrics(plain: boolean, style: StatusLineSeparatorStyle): SeparatorMetrics {
+		const themeEpoch = getThemeEpoch();
+		const memo = plain ? this.#plainSeparatorMetrics : this.#styledSeparatorMetrics;
+		if (memo && memo.themeRef === theme && memo.themeEpoch === themeEpoch && (plain || memo.style === style)) {
+			return memo;
+		}
+		const def = plain ? PLAIN_SEPARATOR : getSeparator(style, theme);
+		const metrics: SeparatorMetrics = {
+			themeRef: theme,
+			themeEpoch,
+			style,
+			def,
+			leftSepWidth: visibleWidth(def.left),
+			rightSepWidth: visibleWidth(def.right),
+			leftCapWidth: def.endCaps ? visibleWidth(def.endCaps.right) : 0,
+			rightCapWidth: def.endCaps ? visibleWidth(def.endCaps.left) : 0,
+			bandCapWidth: def.endCaps ? visibleWidth(theme.sep.powerlineCapLeft) : 0,
+		};
+		if (plain) this.#plainSeparatorMetrics = metrics;
+		else this.#styledSeparatorMetrics = metrics;
+		return metrics;
 	}
 
 	/**
@@ -2746,9 +3011,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			nowMs,
 			previewTitle,
 		);
-		const separatorDef = plain
-			? { left: "·", right: "·" }
-			: getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
+		const separators = this.#separatorMetrics(plain, effectiveSettings.separator ?? "powerline-thin");
+		const separatorDef = separators.def;
 
 		// `transparent` reuses the empty-string sentinel (`\x1b[49m`) so the bar
 		// inherits the terminal's default background, matching custom themes that
@@ -2808,7 +3072,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (layout !== "plain-left") {
 			const runningBackgroundJobs = this.runningBackgroundJobCount();
 			if (runningBackgroundJobs > 0) {
-				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
+				const widget = this.#latestJobWidget();
+				const glance = widget ? formatJobWidgetGlance(widget.view, theme, JOBS_SEGMENT_SPARK_CELLS) : "";
+				const count = theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`);
+				rightParts.unshift(glance ? `${count} ${glance}` : count);
 			}
 			if (subagentBadge) rightParts.unshift(subagentBadge);
 		}
@@ -2819,17 +3086,18 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const leftWidths = left.map(part => visibleWidth(part));
 		const rightWidths = right.map(part => visibleWidth(part));
 
-		const leftSepWidth = visibleWidth(separatorDef.left);
-		const rightSepWidth = visibleWidth(separatorDef.right);
+		const leftSepWidth = separators.leftSepWidth;
+		const rightSepWidth = separators.rightSepWidth;
 		// Transparent mode drops powerline caps (they need a bg fill to bridge),
 		// so the width budget excludes them too.
-		const leftCapWidth = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.right) : 0;
-		const rightCapWidth = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.left) : 0;
+		const capsVisible = separatorDef.endCaps !== undefined && !transparentBg;
+		const leftCapWidth = capsVisible ? separators.leftCapWidth : 0;
+		const rightCapWidth = capsVisible ? separators.rightCapWidth : 0;
 		// The band layout opens flush against the terminal edge with a soft cap
 		// (rust omp's status band). Like the other caps it needs an opaque
 		// background to bridge, and only powerline separator styles carry caps.
-		const bandCap = layout === "band" && separatorDef.endCaps && !transparentBg ? theme.sep.powerlineCapLeft : "";
-		const bandCapWidth = visibleWidth(bandCap);
+		const bandCap = layout === "band" && capsVisible ? theme.sep.powerlineCapLeft : "";
+		const bandCapWidth = bandCap ? separators.bandCapWidth : 0;
 
 		const groupWidth = (widths: number[], capWidth: number, sepWidth: number): number => {
 			if (widths.length === 0) return 0;
@@ -3096,29 +3364,51 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		const thresholdColor = getSessionAccentAnsi(dimmedAccent.hex) ?? usedColor;
 
+		// Emit runs, not cells: each stretch of plain rule between markers and
+		// labels is one `repeat`, and color escapes change only at run edges.
+		// Precedence per cell: percent label > threshold > speculation > window label.
+		const percentEnd = percentStart >= 0 ? percentStart + percentLabel.length : -1;
+		const windowEnd = windowStart >= 0 ? windowStart + windowLabel.length : -1;
 		let out = "\x1b[49m";
 		let activeColor = "";
-		for (let i = 0; i < gapWidth; i++) {
-			let color = i < usedCount ? usedColor : unusedColor;
-			let glyph = horizontal;
-			if (percentStart >= 0 && i >= percentStart && i < percentStart + percentLabel.length) {
+		let i = 0;
+		while (i < gapWidth) {
+			let color: string;
+			let text: string;
+			if (i >= percentStart && i < percentEnd) {
+				const end = Math.min(percentEnd, gapWidth);
 				color = percentOverflow ? overflowColor : usedColor;
-				glyph = percentLabel.charAt(i - percentStart);
+				text = percentLabel.slice(i - percentStart, end - percentStart);
+				i = end;
 			} else if (i === thresholdIdx) {
 				color = thresholdColor;
-				glyph = thresholdGlyph;
+				text = thresholdGlyph;
+				i++;
 			} else if (i === speculationIdx) {
 				color = speculationColor;
-				glyph = speculationGlyph;
-			} else if (windowStart >= 0 && i >= windowStart && i < windowStart + windowLabel.length) {
-				color = thresholdColor;
-				glyph = windowLabel.charAt(i - windowStart);
+				text = speculationGlyph;
+				i++;
+			} else {
+				const inWindow = i >= windowStart && i < windowEnd;
+				let end = Math.min(inWindow ? windowEnd : i < usedCount ? usedCount : gapWidth, gapWidth);
+				if (percentStart > i && percentStart < end) end = percentStart;
+				if (thresholdIdx > i && thresholdIdx < end) end = thresholdIdx;
+				if (speculationIdx > i && speculationIdx < end) end = speculationIdx;
+				if (!inWindow && windowStart > i && windowStart < end) end = windowStart;
+				if (inWindow) {
+					color = thresholdColor;
+					text = windowLabel.slice(i - windowStart, end - windowStart);
+				} else {
+					color = i < usedCount ? usedColor : unusedColor;
+					text = horizontal.repeat(end - i);
+				}
+				i = end;
 			}
 			if (color !== activeColor) {
 				out += color;
 				activeColor = color;
 			}
-			out += glyph;
+			out += text;
 		}
 		return `${out}\x1b[39m`;
 	}
@@ -3305,6 +3595,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const probe = this.#nativeInputsProbe;
 		this.#readStatusLineExternalInputs(probe);
 		const nowMs = Date.now();
+		this.#expireStaleVcsRender(nowMs);
 		const clockTick = this.#nativeClock(nowMs, effectiveSettings);
 		const memo = this.#nativeMemo;
 		if (
@@ -3362,13 +3653,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#buildComposerFacts(effectiveSettings: EffectiveStatusLineSettings, nowMs: number): ComposerFacts {
 		const { leftSegments, rightSegments } = effectiveSettings;
 		const segments = [...leftSegments, ...rightSegments];
-		// Tern's pane header shows the path and branch from the pane's cwd; only the PR is looked up here.
+		// Tern's pane header shows the path from the pane's cwd; the branch sits by the model chip.
+		const gitEnabled = this.#gitEnabled();
 		const ctx = this.#buildSegmentContext(
 			0,
 			effectiveSettings.segmentOptions,
 			false,
-			false,
-			this.#gitEnabled() && hasPrSegment(segments),
+			gitEnabled && hasGitSegment(segments),
+			gitEnabled && hasPrSegment(segments),
 			nowMs,
 		);
 		const pr = ctx.git.pr ?? undefined;
@@ -3386,8 +3678,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				if (!view) return;
 				const props: TspProps<"seg"> = {
 					role: "omp.composer.fact",
-					priority: statusSegmentPriority(side, index, ids.length),
+					priority:
+						(PINNED_NATIVE_SEGMENTS[id] === true ? PINNED_NATIVE_PRIORITY : 0) +
+						statusSegmentPriority(side, index, ids.length),
 				};
+				const action = NATIVE_SEGMENT_ACTIONS[id];
+				if (action) props.actions = { click: action };
 				facts.push(describeSeg(id, props, view, dim));
 			});
 		};
@@ -3491,7 +3787,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	/**
 	 * Wall-clock granularity of the native bar. Spinners, turn timers and the
 	 * brand fade are terminal-clocked, so only wall-clock text (time, loop
-	 * countdowns) and VCS fallback polling advance it.
+	 * countdowns) advances it; VCS refreshes are deadline-driven
+	 * ({@link #expireStaleVcsRender}).
 	 */
 	#nativeClock(nowMs: number, effectiveSettings: EffectiveStatusLineSettings): number {
 		const segments = [...effectiveSettings.leftSegments, ...effectiveSettings.rightSegments];
@@ -3503,8 +3800,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			return Math.floor(nowMs / 1_000);
 		}
 		if (includesTime) return Math.floor(nowMs / 60_000);
-		if (this.#gitEnabled() && hasGitBackedSegment(segments)) return Math.floor(nowMs / 1_000);
-		if (this.#gitEnabled() && hasPathSegment(segments)) return Math.floor(nowMs / WATCHER_FAILURE_POLL_TTL_MS);
 		return 0;
 	}
 
@@ -3596,7 +3891,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		const showHooks = this.#settings.showHookStatus ?? true;
 		if (showHooks && this.#sortedHookStatuses.length > 0) {
-			lines.push(...this.#sortedHookStatuses.map(text => truncateToWidth(sanitizeStatusText(text), width)));
+			lines.push(...this.#sortedHookStatuses.map(text => truncateToWidth(sanitizeHookStatusText(text), width)));
 		}
 		return lines;
 	}

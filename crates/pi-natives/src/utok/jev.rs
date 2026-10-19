@@ -20,6 +20,10 @@
 //!    short-circuited ([`RankTable::count_merged`]): `token` is a whole word
 //!    but not a base token, so `tokenize` costs 3.
 //!
+//! Both sets are o200k subsets but keep their own rank tables: merging
+//! through the shared o200k table behind a rank-membership filter priced
+//! every lookup twice and counted ~23% slower.
+//!
 //! Counts are state *content*: the request frame (question text, template,
 //! 269 tokens for a minimal one-noul request) is excluded, matching the
 //! other families' "no chat-template frame" semantics.
@@ -29,7 +33,7 @@
 use std::sync::LazyLock;
 
 use crate::utok::{
-	bpe::{BpeEncoding, RankTable},
+	bpe::{self, RankTable},
 	pretoken::Splitter,
 	utf::Unit,
 };
@@ -41,20 +45,14 @@ use crate::utok::{
 const WINDOW: usize = 512;
 
 struct Jev {
-	/// Base merge table (o200k ranks, non-base slots empty) plus the shared
-	/// Qwen3.5 splitter and NFC contract.
-	bpe:   BpeEncoding,
+	/// Base merge table (o200k ranks, non-base slots empty).
+	base:  RankTable,
 	/// Whole-word entries; only membership is read.
 	whole: RankTable,
 }
 
 static JEV: LazyLock<Jev> = LazyLock::new(|| Jev {
-	bpe:   BpeEncoding {
-		table:         RankTable::parse(include_bytes!("../../data/jev_base.bin.zst")),
-		splitter:      Splitter::Qwen,
-		nfc:           true,
-		ignore_merges: false,
-	},
+	base:  RankTable::parse(include_bytes!("../../data/jev_base.bin.zst")),
 	whole: RankTable::parse(include_bytes!("../../data/jev_whole.bin.zst")),
 });
 
@@ -63,11 +61,11 @@ static JEV: LazyLock<Jev> = LazyLock::new(|| Jev {
 pub fn content_token_count<U: Unit>(units: &[U]) -> u32 {
 	let jev = &*JEV;
 	let mut n = 0u32;
-	jev.bpe.run(units, &mut |base, piece| {
+	bpe::for_each_piece(&Splitter::Qwen, true, units, &mut |piece| {
 		n += if jev.whole.rank(piece).is_some() {
 			1
 		} else {
-			piece.chunks(WINDOW).map(|w| base.count_merged(w)).sum()
+			piece.chunks(WINDOW).map(|w| jev.base.count_merged(w)).sum()
 		};
 	});
 	n

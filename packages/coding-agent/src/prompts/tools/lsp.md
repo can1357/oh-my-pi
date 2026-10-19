@@ -11,6 +11,10 @@ Symbol-aware code intelligence from language servers — navigation, refactors, 
 - `request` — raw: `query` = method, `payload` = JSON params (else auto-built).
 </operations>
 
+<timeout>
+Default: whole call {{defaultTimeoutSec}}s; project-aware diagnostics wait {{defaultWaitSec}}s. `timeout` sets both for this call — raise it for a server still indexing or cold-starting, lower it to fail fast. Capped at {{maxTimeoutSec}}s.
+</timeout>
+
 <critical>
 - Symbol-aware work (rename, references, definition, code actions) MUST use `lsp` whenever a server is available.
   It follows shadowing, re-exports, and cross-file usages text tools miss.

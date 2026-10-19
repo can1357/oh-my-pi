@@ -117,11 +117,20 @@ export function collectUnreportedAccounts(
 		// also requires the account's own base identity inside the same-org
 		// subset (an org-only account, with no base identifiers, is covered by
 		// any same-org report). The email/account fallback below applies only
-		// when both sides are org-less.
+		// when both sides are org-less. When both the account and a report carry
+		// an email, it decides: Codex Team seats share an account id and
+		// Antigravity accounts share one Google project.
 		const accountOrg = account.orgId?.toLowerCase();
+		const email = account.email?.toLowerCase();
 		const ids = [account.email, account.accountId, account.projectId]
 			.filter((value): value is string => typeof value === "string" && value.length > 0)
 			.map(value => value.toLowerCase());
+		const covers = (report: UsageReport): boolean => {
+			const reportEmail = report.metadata?.email;
+			if (email && typeof reportEmail === "string" && reportEmail) return reportEmail.toLowerCase() === email;
+			const identifiers = reportIdentifiers(report);
+			return ids.some(id => identifiers.has(id));
+		};
 		const sameOrgReports: UsageReport[] = [];
 		let sawReportOrg = false;
 		for (const report of providerReports) {
@@ -140,21 +149,11 @@ export function collectUnreportedAccounts(
 					});
 			if (candidates.length === 0) return true;
 			if (ids.length === 0) return false;
-			return !candidates.some(report => {
-				const identifiers = reportIdentifiers(report);
-				return ids.some(id => identifiers.has(id));
-			});
+			return !candidates.some(covers);
 		}
 		if (ids.length === 0) return false;
-		const reported = new Set<string>();
-		let anyIdentified = false;
-		for (const report of providerReports) {
-			const identifiers = reportIdentifiers(report);
-			if (identifiers.size > 0) anyIdentified = true;
-			for (const id of identifiers) reported.add(id);
-		}
-		if (!anyIdentified) return false;
-		return !ids.some(id => reported.has(id));
+		if (!providerReports.some(report => reportIdentifiers(report).size > 0)) return false;
+		return !providerReports.some(covers);
 	});
 }
 

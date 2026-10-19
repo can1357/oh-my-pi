@@ -1,5 +1,7 @@
 //! Hashline syntax constants and display helpers.
 
+use std::fmt::Write as _;
+
 use super::types::Cursor;
 
 /// File-header opening delimiter.
@@ -97,7 +99,14 @@ pub fn format_hashline_header(path: &str, tag: &str) -> String {
 }
 /// Format one numbered source line.
 pub fn format_numbered_line(line_number: u32, line: &str) -> String {
-	format!("{line_number}:{line}")
+	let mut output = String::new();
+	write_numbered_line(&mut output, line_number, line);
+	output
+}
+/// Append one numbered source line to `output`: the single definition of the
+/// numbered-row encoding.
+fn write_numbered_line(output: &mut String, line_number: u32, line: &str) {
+	write!(output, "{line_number}:{line}").expect("writing to a String cannot fail");
 }
 /// Split text into lines addressable by hashline anchors.
 pub fn split_addressable_file_lines(text: &str) -> Vec<&str> {
@@ -109,17 +118,15 @@ pub fn split_addressable_file_lines(text: &str) -> Vec<&str> {
 }
 /// Format every LF-delimited row, including a terminal blank sentinel.
 pub fn format_numbered_lines(text: &str, start_line: u32) -> String {
-	text
-		.split('\n')
-		.enumerate()
-		.map(|(index, line)| {
-			format_numbered_line(
-				start_line.saturating_add(u32::try_from(index).unwrap_or(u32::MAX)),
-				line,
-			)
-		})
-		.collect::<Vec<_>>()
-		.join("\n")
+	let mut output = String::with_capacity(text.len());
+	for (index, line) in text.split('\n').enumerate() {
+		if index > 0 {
+			output.push('\n');
+		}
+		let number = start_line.saturating_add(u32::try_from(index).unwrap_or(u32::MAX));
+		write_numbered_line(&mut output, number, line);
+	}
+	output
 }
 /// Compute the normalized four-hex content tag.
 pub use crate::store::file_hash as compute_file_hash;

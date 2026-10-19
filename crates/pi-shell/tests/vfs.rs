@@ -17,8 +17,8 @@ use brush_core::{
 };
 use pi_builtins::{BuiltinSet, default_builtins, utility_builtins};
 use pi_vfs::{
-	DirEntry, File, FileHandle, FileSystem, Fs, Metadata, OpenOptions, Permissions, ReadDir,
-	join_path,
+	DirEntry, File, FileHandle, FileSystem, FileTime, Fs, Metadata, OpenOptions, Permissions,
+	ReadDir, join_path,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -53,7 +53,33 @@ impl FileSystem for DelayedFilesystem {
 
 	async fn backing_path(&self, path: &Path) -> io::Result<Option<PathBuf>> {
 		delay().await;
+		let Some(spelled) = path.to_str().filter(|path| path.starts_with("virtual://")) else {
+			// A scheme this provider does not serve aliases nothing.
+			return Ok(None);
+		};
+		// `virtual://rendered/…` stands in for a scheme that aliases no file
+		// (`omp://`, `history://`): the provider serves it, but there is
+		// nothing for the operating system to open.
+		if spelled.starts_with("virtual://rendered") {
+			return Ok(None);
+		}
 		self.path(path).map(Some)
+	}
+
+	/// `virtual://frozen/…` stands in for an immutable file-backed scheme
+	/// (`skill://`, `artifact://`): readable, but refusing every mutation.
+	async fn access(&self, path: &Path, read: bool, write: bool, execute: bool) -> io::Result<()> {
+		delay().await;
+		if write
+			&& path
+				.to_str()
+				.is_some_and(|path| path.starts_with("virtual://frozen"))
+		{
+			return Err(pi_vfs::read_only_filesystem());
+		}
+		Fs::native()
+			.access(self.path(path)?, read, write, execute)
+			.await
 	}
 
 	async fn open(&self, path: &Path, options: &OpenOptions) -> io::Result<File> {
@@ -100,9 +126,23 @@ impl FileSystem for DelayedFilesystem {
 			.await
 	}
 
+	/// Like any provider, this one cannot move entries to or from the host:
+	/// `mv` between the two must fall back to copying.
 	async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
 		delay().await;
+		if !pi_vfs::is_virtual_path(from) || !pi_vfs::is_virtual_path(to) {
+			return Err(pi_vfs::crosses_devices());
+		}
 		Fs::native().rename(self.path(from)?, self.path(to)?).await
+	}
+
+	// Symbolic links and special files keep the trait's `Unsupported`
+	// default, as on vfat.
+	async fn hard_link(&self, original: &Path, link: &Path) -> io::Result<()> {
+		delay().await;
+		Fs::native()
+			.hard_link(self.path(original)?, self.path(link)?)
+			.await
 	}
 
 	async fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -110,11 +150,40 @@ impl FileSystem for DelayedFilesystem {
 		Fs::native().remove_file(self.path(path)?).await
 	}
 
+	async fn remove_dir(&self, path: &Path) -> io::Result<()> {
+		delay().await;
+		Fs::native().remove_dir(self.path(path)?).await
+	}
+
 	async fn set_permissions(&self, path: &Path, permissions: Permissions) -> io::Result<()> {
 		delay().await;
 		Fs::native()
 			.set_permissions(self.path(path)?, permissions)
 			.await
+	}
+
+	async fn set_times(
+		&self,
+		path: &Path,
+		accessed: FileTime,
+		modified: FileTime,
+		follow: bool,
+	) -> io::Result<()> {
+		delay().await;
+		Fs::native()
+			.set_times(self.path(path)?, accessed, modified, follow)
+			.await
+	}
+
+	async fn chown(
+		&self,
+		path: &Path,
+		uid: Option<u32>,
+		gid: Option<u32>,
+		follow: bool,
+	) -> io::Result<()> {
+		delay().await;
+		Fs::native().chown(self.path(path)?, uid, gid, follow).await
 	}
 }
 
@@ -230,8 +299,8 @@ cat ./*.txt"#,
 }
 
 /// `xargs`, `ifne`, and `find -exec`/`-execdir` must dispatch their command
-/// through the shell: only in-process builtins can open provider URLs, and an
-/// external program cannot even start in a provider working directory.
+/// through the shell: only in-process builtins can open provider URLs, whereas
+/// an external program is limited to the files those URLs alias.
 #[tokio::test]
 async fn command_running_utilities_dispatch_builtins_that_open_urls() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
@@ -254,6 +323,197 @@ async fn command_running_utilities_dispatch_builtins_that_open_urls() {
 		.expect("command-running utilities");
 	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
 	assert_eq!(captured_text(&output), "alpha\nbeta\nbeta\nalpha\n");
+}
+
+/// An external program cannot open a provider URL, so one it is handed must
+/// name the file that URL aliases, in the bare spelling and in the
+/// attached-value spelling a tool's own flags use. A scheme the filesystem
+/// does not route is not a path and must reach the child as written, as must a
+/// bare scheme root, which is far likelier a search pattern than a directory.
+#[tokio::test]
+async fn external_commands_receive_host_paths_for_backed_url_arguments() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::create_dir(directory.path().join("docs")).expect("provider directory");
+	fs::write(directory.path().join("docs/a.txt"), b"alpha\n").expect("document");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	#[cfg(unix)]
+	let script = r#"/bin/sh -c 'printf "%s\n" "$0" "$1" "$2" "$3" "$4" "$5"' virtual://docs/a.txt --data-dir=virtual://docs https://example.com/a.txt 'https://example.com/?next=virtual://docs' virtual:// --root=virtual://"#;
+	#[cfg(windows)]
+	let script = "cmd.exe /c echo virtual://docs/a.txt && cmd.exe /c echo \
+	              --data-dir=virtual://docs && cmd.exe /c echo https://example.com/a.txt && \
+	              cmd.exe /c echo 'https://example.com/?next=virtual://docs' && cmd.exe /c \
+	              echo virtual:// && cmd.exe /c echo --root=virtual://";
+	let result = shell
+		.run_string(script, &SourceInfo::from("vfs-external-args"), &parameters)
+		.await
+		.expect("external command with url arguments");
+	let stdout = captured_text(&output);
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	// The provider aliases `virtual://x` to `root/x`, keeping the URL's own
+	// separators, so the expectation is built the same way.
+	let docs = directory.path().join("docs");
+	assert!(
+		stdout.contains(&directory.path().join("docs/a.txt").display().to_string()),
+		"bare url reached the child unresolved: {stdout}"
+	);
+	assert!(
+		stdout.contains(&format!("--data-dir={}", docs.display())),
+		"attached value reached the child unresolved: {stdout}"
+	);
+	assert!(
+		stdout.contains("https://example.com/a.txt"),
+		"an unrouted scheme was rewritten: {stdout}"
+	);
+	assert!(
+		stdout.contains("https://example.com/?next=virtual://docs"),
+		"a url embedded in a query string was rewritten: {stdout}"
+	);
+	let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
+	assert!(
+		lines.contains(&"virtual://") && lines.contains(&"--root=virtual://"),
+		"a bare scheme root was rewritten: {stdout}"
+	);
+}
+
+/// A URL the provider cannot resolve fails the command with the provider's
+/// reason instead of reaching the child, which could only fail on it later
+/// with no hint why.
+#[tokio::test]
+async fn external_commands_refuse_url_arguments_the_provider_rejects() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	#[cfg(unix)]
+	let script = "/bin/sh -c 'printf ran' virtual://../escape";
+	#[cfg(windows)]
+	let script = "cmd.exe /c echo ran virtual://../escape";
+	let result = shell
+		.run_string(script, &SourceInfo::from("vfs-external-args"), &parameters)
+		.await
+		.expect("external command with a rejected url argument");
+	assert_ne!(u8::from(result.exit_code), 0, "a rejected url reached the child");
+	assert!(!captured_text(&output).contains("ran"), "the child ran: {}", captured_text(&output));
+	assert!(
+		captured_text(&error).contains("outside mount"),
+		"the provider's reason was lost: {}",
+		captured_text(&error)
+	);
+}
+
+/// A provider directory that aliases a real one is a usable working directory
+/// for a child process, and the `PWD` the child inherits names that same host
+/// directory rather than the URL it cannot open; one that aliases nothing is
+/// still no working directory at all.
+#[tokio::test]
+async fn external_commands_start_in_backed_working_directories_only() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::create_dir(directory.path().join("docs")).expect("provider directory");
+	fs::create_dir(directory.path().join("rendered")).expect("unbacked directory");
+	fs::create_dir(directory.path().join("frozen")).expect("read-only directory");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	// `printenv` and `cmd /c echo` report the inherited variable; a shell would
+	// re-derive `PWD` from `getcwd()` and hide a wrong value.
+	#[cfg(unix)]
+	let script = "cd virtual://docs && /bin/sh -c 'printf %s \"$PWD\"' && /usr/bin/printenv PWD";
+	#[cfg(windows)]
+	let script = "cd virtual://docs && cmd.exe /c cd && cmd.exe /c echo %PWD%";
+	let result = shell
+		.run_string(script, &SourceInfo::from("vfs-external-cwd"), &parameters)
+		.await
+		.expect("external command in a backed working directory");
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	let docs = directory.path().join("docs").display().to_string();
+	assert!(
+		captured_text(&output).matches(docs.as_str()).count() >= 2,
+		"child saw the wrong working directory or inherited PWD: {}",
+		captured_text(&output)
+	);
+
+	let error = tempfile::tempfile().expect("captured stderr");
+	let parameters = capture_parameters(&shell, &output, &error);
+	#[cfg(unix)]
+	let unbacked = "cd virtual://rendered && /bin/sh -c 'exit 0'";
+	#[cfg(windows)]
+	let unbacked = "cd virtual://rendered && cmd.exe /c exit 0";
+	let result = shell
+		.run_string(unbacked, &SourceInfo::from("vfs-external-cwd"), &parameters)
+		.await
+		.expect("external command in an unbacked working directory");
+	assert_ne!(u8::from(result.exit_code), 0, "an unbacked directory hosted a child process");
+	assert!(
+		captured_text(&error).contains("virtual working directory"),
+		"unexpected failure: {}",
+		captured_text(&error)
+	);
+
+	// A child may write anywhere under its working directory, so a directory
+	// the shell refuses to mutate is no working directory for one either.
+	let error = tempfile::tempfile().expect("captured stderr");
+	let parameters = capture_parameters(&shell, &output, &error);
+	#[cfg(unix)]
+	let frozen = "cd virtual://frozen && /bin/sh -c 'exit 0'";
+	#[cfg(windows)]
+	let frozen = "cd virtual://frozen && cmd.exe /c exit 0";
+	let result = shell
+		.run_string(frozen, &SourceInfo::from("vfs-external-cwd"), &parameters)
+		.await
+		.expect("external command in a read-only working directory");
+	assert_ne!(u8::from(result.exit_code), 0, "a read-only directory hosted a child process");
+	assert!(
+		captured_text(&error).contains("read-only working directory"),
+		"unexpected failure: {}",
+		captured_text(&error)
+	);
+}
+
+/// A script the provider aliases is executable as itself: the child runs the
+/// file behind the URL rather than failing on a path the kernel cannot see.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_executable_url_runs_as_the_file_it_aliases() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let tool = directory.path().join("tool");
+	fs::write(&tool, b"#!/bin/sh\nprintf tool-ran\n").expect("provider script");
+	fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).expect("executable script");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	let result = shell
+		.run_string("virtual://tool", &SourceInfo::from("vfs-external-program"), &parameters)
+		.await
+		.expect("executable provider url");
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	assert_eq!(captured_text(&output), "tool-ran");
+}
+
+/// The same contract on Windows, where an executable is recognized by its
+/// extension rather than by its mode bits.
+#[cfg(windows)]
+#[tokio::test]
+async fn an_executable_url_runs_as_the_file_it_aliases() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::write(directory.path().join("tool.cmd"), b"@echo tool-ran\r\n").expect("provider script");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	let result = shell
+		.run_string("virtual://tool.cmd", &SourceInfo::from("vfs-external-program"), &parameters)
+		.await
+		.expect("executable provider url");
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	assert!(captured_text(&output).contains("tool-ran"), "{}", captured_text(&output));
 }
 
 async fn wait_for_output(path: &Path, suffix: &str) -> io::Result<()> {
@@ -318,6 +578,51 @@ async fn virtual_follow_observes_append_same_size_rotation_and_truncation() {
 	);
 }
 
+/// A provider path has no kernel watcher, so `tail -f` polls it; that idle
+/// loop must still stop once the reader of its stdout pipe exits, as in
+/// `tail -f virtual://log | grep -m1 line`.
+#[cfg(unix)]
+#[tokio::test]
+async fn virtual_follow_stops_once_stdout_reader_is_gone() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::write(directory.path().join("log"), b"line\n").expect("followed log");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let (mut reader, writer) = io::pipe().expect("stdout pipe");
+	let mut shell = virtual_shell(directory.path()).await;
+	let mut parameters = shell.default_exec_params();
+	parameters.set_fd(OpenFiles::STDIN_FD, openfiles::null().expect("null stdin"));
+	parameters.set_fd(OpenFiles::STDOUT_FD, OpenFile::from(writer));
+	parameters
+		.set_fd(OpenFiles::STDERR_FD, OpenFile::from(error.try_clone().expect("stderr descriptor")));
+	let cancel = CancellationToken::new();
+	parameters.set_cancel_token(cancel.clone());
+	let runner = tokio::spawn(async move {
+		shell
+			.run_string(
+				"tail -f --sleep-interval=.01 virtual://log",
+				&SourceInfo::from("vfs-follow-reader-gone"),
+				&parameters,
+			)
+			.await
+	});
+	// Consume the first line like `grep -m1 line`, then close the read end.
+	let first = tokio::task::spawn_blocking(move || {
+		let mut first = [0; 5];
+		reader.read_exact(&mut first).map(|()| first)
+	})
+	.await
+	.expect("reader thread")
+	.expect("initial output");
+	assert_eq!(&first, b"line\n");
+	let stopped = tokio::time::timeout(Duration::from_secs(5), runner).await;
+	cancel.cancel();
+	let result = stopped
+		.expect("tail -f kept following after its reader exited")
+		.expect("tail worker")
+		.expect("tail command");
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn backed_urls_expose_physical_paths_without_changing_native_readlink() {
@@ -379,4 +684,113 @@ async fn cmp_compares_nonseekable_files_and_discards_requested_prefixes() {
 		.await
 		.expect("stream comparison");
 	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+}
+
+/// Runs `script` from the host directory `cwd` with `virtual://` backed by
+/// `provider_root`, returning the exit status and stderr.
+#[cfg(unix)]
+async fn run_from_host_dir(provider_root: &Path, cwd: &Path, script: &str) -> (u8, String) {
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(provider_root).await;
+	shell
+		.set_working_dir(cwd)
+		.await
+		.expect("host working directory");
+	let parameters = capture_parameters(&shell, &output, &error);
+	let result = shell
+		.run_string(script, &SourceInfo::from("vfs-cross-device-mv"), &parameters)
+		.await
+		.expect("mv between host and provider");
+	(u8::from(result.exit_code), captured_text(&error))
+}
+
+/// A rename from the host into a provider is `EXDEV`, so `mv` copies and
+/// removes: the copy must keep modes and modification times, and names of
+/// one file given as separate operands must stay one file.
+#[cfg(unix)]
+#[tokio::test]
+async fn cross_device_mv_keeps_modes_times_and_hard_links() {
+	use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+	let provider = tempfile::tempdir().expect("isolated provider filesystem");
+	let host = tempfile::tempdir().expect("host directory");
+	let tree = host.path().join("tree");
+	fs::create_dir_all(tree.join("sub")).expect("source tree");
+	fs::write(tree.join("sub/tool"), b"#!/bin/sh\n").expect("source file");
+	let modified = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+	fs::File::options()
+		.write(true)
+		.open(tree.join("sub/tool"))
+		.and_then(|file| file.set_modified(modified))
+		.expect("old modification time");
+	fs::set_permissions(tree.join("sub/tool"), fs::Permissions::from_mode(0o751))
+		.expect("file mode");
+	fs::set_permissions(tree.join("sub"), fs::Permissions::from_mode(0o750)).expect("dir mode");
+	fs::write(host.path().join("a"), b"shared").expect("linked file");
+	fs::hard_link(host.path().join("a"), host.path().join("b")).expect("second name");
+
+	let (status, stderr) = run_from_host_dir(
+		provider.path(),
+		host.path(),
+		"mv tree virtual://tree && mkdir virtual://dest && mv a b virtual://dest",
+	)
+	.await;
+	assert_eq!(status, 0, "{stderr}");
+	assert!(!tree.exists() && !host.path().join("a").exists() && !host.path().join("b").exists());
+
+	let moved = provider.path().join("tree/sub/tool");
+	let metadata = fs::metadata(&moved).expect("moved file");
+	assert_eq!(metadata.mode() & 0o7777, 0o751);
+	assert_eq!(metadata.modified().expect("moved mtime"), modified);
+	let dir_mode = fs::metadata(provider.path().join("tree/sub"))
+		.expect("moved dir")
+		.mode();
+	assert_eq!(dir_mode & 0o7777, 0o750);
+	let a = fs::metadata(provider.path().join("dest/a")).expect("first name");
+	let b = fs::metadata(provider.path().join("dest/b")).expect("second name");
+	assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+	assert_eq!(a.nlink(), 2);
+}
+
+/// An entry inside a tree that cannot be copied fails the move: `mv` reports
+/// it, exits 1, and keeps the whole source tree.
+#[cfg(unix)]
+#[tokio::test]
+async fn cross_device_mv_keeps_a_tree_with_an_entry_it_could_not_copy() {
+	let provider = tempfile::tempdir().expect("isolated provider filesystem");
+	let host = tempfile::tempdir().expect("host directory");
+	let tree = host.path().join("tree");
+	fs::create_dir(&tree).expect("source tree");
+	fs::write(tree.join("file"), b"data").expect("source file");
+	// The provider supports no special files.
+	drop(std::os::unix::net::UnixListener::bind(tree.join("socket")).expect("source socket"));
+
+	let (status, stderr) =
+		run_from_host_dir(provider.path(), host.path(), "mv tree virtual://tree").await;
+	assert_eq!(status, 1, "{stderr}");
+	assert!(stderr.contains("cannot create special file"), "{stderr}");
+	assert!(tree.join("file").is_file());
+	assert!(fs::symlink_metadata(tree.join("socket")).is_ok());
+}
+
+/// A symlink the destination cannot hold (vfat, here a provider without
+/// links) fails the move like any other entry. `mv` used to drop the error
+/// and then delete the source link.
+#[cfg(unix)]
+#[tokio::test]
+async fn cross_device_mv_keeps_a_symlink_it_could_not_copy() {
+	let provider = tempfile::tempdir().expect("isolated provider filesystem");
+	let host = tempfile::tempdir().expect("host directory");
+	let tree = host.path().join("tree");
+	fs::create_dir(&tree).expect("source tree");
+	fs::write(tree.join("file"), b"data").expect("source file");
+	symlink("file", tree.join("link")).expect("source link");
+
+	let (status, stderr) =
+		run_from_host_dir(provider.path(), host.path(), "mv tree virtual://tree").await;
+	assert_eq!(status, 1, "{stderr}");
+	assert!(stderr.contains("symbolic link"), "{stderr}");
+	assert_eq!(fs::read_link(tree.join("link")).expect("source link kept"), Path::new("file"));
+	assert!(tree.join("file").is_file());
 }

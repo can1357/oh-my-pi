@@ -17,7 +17,7 @@ async fn patcher_apply_cases() {
 
 #[test]
 fn matcher_paths_accept_partial_sections_and_header_noise() {
-	let engine = HashlineEngine { enforce_seen_lines: false };
+	let engine = HashlineEngine { enforce_seen_lines: false, max_columns: 512 };
 	let inspected = engine.inspect(&ArgSnapshot {
 		input: Some(
 			"[one.ts#ABCD]\nPUT 1.=1:\n+one\n[*** Update File: dir with spaces/two.ts#1234]\nPUT \
@@ -115,6 +115,37 @@ async fn rejection_names_the_path_a_foreign_tag_was_issued_for() {
 	assert!(writer.requests.lock().is_empty());
 	assert_eq!(workspace.read("crates/a/mcp.rs").as_deref(), Some("parent\n"));
 	assert_eq!(workspace.read("wt/crates/a/mcp.rs").as_deref(), Some("worktree\n"));
+}
+
+#[tokio::test]
+async fn recovered_rem_reports_authored_and_deleted_paths() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	let target = workspace.write("correct/target.ts", "const value = 1;\n");
+	let tag = workspace.snapshot("correct/target.ts", "const value = 1;\n", None);
+	let input = format!("[wrong/target.ts#{tag}]\nREM\n");
+	let outcome = workspace
+		.apply_json(&json!({ "input": input }), &common::DiskWriter::default())
+		.await
+		.expect("recovered delete");
+
+	assert!(!target.exists());
+	let deleted = pi_edit::path_policy::canonical_key(&target);
+	assert!(
+		outcome
+			.text
+			.contains(&format!("Deleted {}", deleted.display())),
+		"{}",
+		outcome.text
+	);
+	assert!(
+		outcome.text.contains(&format!(
+			"Warnings:\nPath \"wrong/target.ts\" does not exist; matched its filename and snapshot \
+			 tag #{tag} to {}",
+			deleted.display()
+		)),
+		"{}",
+		outcome.text
+	);
 }
 
 #[test]

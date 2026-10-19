@@ -43,7 +43,7 @@ async function discoverWindows(entries: unknown[]): Promise<Map<string, number |
 }
 
 // Ids are deliberately absent from the KDL rules so no `limits-patch` masks the mapper.
-describe("#13912 github-copilot tiered default-lane window", () => {
+describe("github-copilot tiered default-lane window", () => {
 	it("bounds the base row by max_prompt_tokens when the billed default overlaps the long lane", async () => {
 		const windows = await discoverWindows([
 			copilotEntry(
@@ -54,6 +54,31 @@ describe("#13912 github-copilot tiered default-lane window", () => {
 		]);
 		expect(windows.get("gpt-9-overlap")).toBe(328_000);
 		expect(windows.get("gpt-9-overlap-1m")).toBe(1_050_000);
+	});
+
+	it("keeps a current tier-level prompt budget separate from the model-wide long-context budget (#14770)", async () => {
+		const windows = await discoverWindows([
+			{
+				id: "gpt-9-current-tiers",
+				name: "GPT 9 Current Tiers",
+				capabilities: {
+					type: "chat",
+					limits: {
+						max_context_window_tokens: 1_050_000,
+						max_prompt_tokens: 922_000,
+						max_output_tokens: 128_000,
+					},
+				},
+				billing: {
+					token_prices: {
+						default: { max_prompt_tokens: 272_000 },
+						long_context: { max_prompt_tokens: 922_000 },
+					},
+				},
+			},
+		]);
+		expect(windows.get("gpt-9-current-tiers")).toBe(400_000);
+		expect(windows.get("gpt-9-current-tiers-1m")).toBe(1_050_000);
 	});
 
 	it("keeps the billed default ceiling when it is tighter than max_prompt_tokens", async () => {

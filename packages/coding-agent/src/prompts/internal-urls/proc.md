@@ -1,1 +1,1 @@
-`proc://`: jobs/services; `proc://<id>` status/output; write sends stdin (empty = Enter); `proc://<id>/kill` cancels/stops, omit `content`; `proc://<id>/mode`: `persist`|`session`|`detached`.
+`proc://`: jobs/services; `proc://<id>` status/output; write sends stdin (empty = Enter); `proc://<id>/kill` cancels/stops, omit `content`; `proc://<id>/mode`: `persist`|`session`|`detached`; `proc://<id>/streams` lists a bash job's pipes, `proc://<id>/streams/<n>` reads what crossed pipe `n` so far (live under `| tail`/`| grep`; never rerun to see it).

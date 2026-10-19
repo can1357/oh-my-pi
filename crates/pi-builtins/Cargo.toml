@@ -68,13 +68,20 @@ grep-printer = "0.3"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 hex = "0.4.3"
-hifijson = "0.2.0"
 hostname = "0.4"
+# `sort` collates and reads numbers per call from the shell's locale; uucore's
+# i18n helpers cache one process-wide locale.
+icu_collator = { version = "2.0", default-features = false, features = ["compiled_data"] }
+icu_decimal = { version = "2.0", default-features = false, features = ["compiled_data"] }
+icu_locale_core = { version = "2.0", default-features = false, features = ["alloc"] }
+icu_provider = { version = "2.0", default-features = false }
 ignore = "0.4"
 indicatif = "0.18.0"
-jaq-core = "2.1.1"
-jaq-json = "1.1.1"
-jaq-std = "2.1.0"
+jaq-core = "3.1.1"
+# `@csv` and `@tsv` moved here in jaq 3; the other formats stay out.
+jaq-fmts = { version = "0.1.1", default-features = false, features = ["tabular"] }
+jaq-json = "2.0.3"
+jaq-std = "3.0.3"
 jiff = { version = "0.2.18", features = ["tzdb-bundle-platform"] }
 lscolors = { version = "0.21.0", default-features = false, features = ["gnu_legacy"] }
 memchr = "2.7.4"
@@ -99,7 +106,6 @@ tempfile = "3.15.0"
 tokio-util = "0.7"
 xutf.workspace = true
 libc = "0.2.172"
-memmap2 = "0.9"
 uutils_term_grid = "0.8"
 yansi = "1.0.1"
 
@@ -303,22 +309,29 @@ base = [
 "util.base32" = []
 "util.base64" = ["util.base32"]
 "util.basename" = []
-# Shared POSIX BRE translation behind grep/sed.
+# Shared POSIX BRE translation behind grep/sed/nl.
 "util.bre" = []
 "util.cat" = []
+"util.chmod" = []
 "util.cksum" = []
 "util.cmp" = []
 "util.comm" = []
 "util.cp" = []
 "util.cut" = []
 "util.date" = []
+"util.dd" = []
+"util.df" = []
 "util.diff" = []
 "util.dirname" = []
+"util.du" = []
+"util.env" = []
 "util.fd" = []
 "util.find" = []
+"util.fold" = []
 "util.grep" = ["util.bre"]
 "util.head" = []
 "util.hostname" = []
+"util.id" = []
 "util.jq" = []
 "util.ln" = []
 "util.ls" = []
@@ -332,7 +345,9 @@ base = [
 "util.sponge" = []
 "util.ts" = []
 "util.mv" = []
+"util.nl" = ["util.bre"]
 "util.nproc" = []
+"util.od" = []
 "util.paste" = []
 "util.nohup" = ["util.procs"]
 "util.pgrep" = ["util.proc-match"]
@@ -352,6 +367,7 @@ base = [
 # Shares the PCRE2 JIT probe with `grep`.
 "util.rg" = ["util.grep"]
 "util.rm" = []
+"util.rmdir" = []
 "util.sed" = ["util.bre"]
 "util.seq" = []
 "util.sha1sum" = ["util.cksum"]
@@ -369,6 +385,7 @@ base = [
 "util.truncate" = []
 "util.uname" = []
 "util.uniq" = []
+"util.uptime" = []
 "util.wc" = []
 "util.which" = []
 "util.whoami" = []
@@ -382,19 +399,26 @@ utils = [
   "util.basename",
   "util.bre",
   "util.cat",
+  "util.chmod",
   "util.cksum",
   "util.cmp",
   "util.comm",
   "util.cp",
   "util.cut",
   "util.date",
+  "util.dd",
+  "util.df",
   "util.diff",
   "util.dirname",
+  "util.du",
+  "util.env",
   "util.fd",
   "util.find",
+  "util.fold",
   "util.grep",
   "util.head",
   "util.hostname",
+  "util.id",
   "util.jq",
   "util.ln",
   "util.ls",
@@ -408,7 +432,9 @@ utils = [
   "util.sponge",
   "util.ts",
   "util.mv",
+  "util.nl",
   "util.nproc",
+  "util.od",
   "util.paste",
   "util.nohup",
   "util.pgrep",
@@ -425,6 +451,7 @@ utils = [
   "util.realpath",
   "util.rg",
   "util.rm",
+  "util.rmdir",
   "util.sed",
   "util.seq",
   "util.sha1sum",
@@ -442,6 +469,7 @@ utils = [
   "util.truncate",
   "util.uname",
   "util.uniq",
+  "util.uptime",
   "util.wc",
   "util.which",
   "util.whoami",

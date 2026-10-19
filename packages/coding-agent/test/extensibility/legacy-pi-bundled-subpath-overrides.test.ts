@@ -186,8 +186,8 @@ export const observed = buildModel({
 		expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
 	});
 
-	it("keeps non-catalog root catch-all wildcards (./* / ./*.js) out of the bundle", () => {
-		// Other packages expose CLI entrypoints at the root; importing one from
+	it("keeps coding-agent's root catch-all wildcards (./* / ./*.js) out of the bundle", () => {
+		// coding-agent exposes CLI entrypoints at the root; importing one from
 		// the virtual registry would expand the binary entry's transitive graph.
 		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/cli")).toBe(false);
 		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/main")).toBe(false);
@@ -248,8 +248,55 @@ export const observed = buildModel({
 		// import resolved from source and failed inside a binary — which is how
 		// a real extension (`quota-hud.ts`) broke on this exact specifier.
 		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/slash-commands/helpers/active-oauth-account")).toBe(true);
-		// Directory index modules stay excluded: `./x/*` must not serve `x/y`
-		// from `y/index.ts`, which Node would not resolve either.
-		expect(bundledModuleKeys.has("@oh-my-pi/pi-tui/theme/defaults/index")).toBe(false);
+		// `./theme/*` serves `theme/defaults/index` by spelling, so the key exists.
+		expect(bundledModuleKeys.has("@oh-my-pi/pi-tui/theme/defaults/index")).toBe(true);
+	});
+
+	it("loads pi-tui native/* modules through the bundled registry in compiled mode (issue #14834)", async () => {
+		// `native/*` was only reachable through pi-tui's root `./*` catch-all, which
+		// the generator skips, so extensions importing it failed inside the binary.
+		const keys = ["@oh-my-pi/pi-tui/native/overlay", "@oh-my-pi/pi-tui/native/spans"] as const;
+		const entries = bundledEntries.filter(entry => (keys as readonly string[]).includes(entry.key));
+		expect(entries.map(entry => entry.key).sort()).toEqual([...keys]);
+
+		const observed = await runRegistryProbe(
+			entries,
+			`const { actionBar, actionButton } = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/native/overlay"]();
+const { plainLine } = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/native/spans"]();
+export const observed = { role: actionBar([actionButton("Go", "go")]).p.role, line: plainLine("\\x1b[1ma\\n b\\x1b[0m") };`,
+		);
+		expect(observed).toEqual({ role: "omp.actions", line: "a b" });
+		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
+		for (const key of keys) expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
+	});
+
+	it("serves pi-tui root-level, nested, and index spellings from the host graph (issue #15659)", async () => {
+		// pi-tui's root `./*` catch-all and `x/index` spellings used to stay out of
+		// the registry, so a compiled extension loaded those specifiers from its
+		// own node_modules and saw a second `TERMINAL` / theme record.
+		const keys = [
+			"@oh-my-pi/pi-tui/terminal-capabilities",
+			"@oh-my-pi/pi-tui/chat/svg-figure",
+			"@oh-my-pi/pi-tui/theme",
+			"@oh-my-pi/pi-tui/theme/index",
+		] as const;
+		const entries = bundledEntries.filter(entry => (keys as readonly string[]).includes(entry.key));
+		expect(entries.map(entry => entry.key).sort()).toEqual([...keys].sort());
+
+		const observed = await runRegistryProbe(
+			entries,
+			`const theme = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/theme"]();
+const themeIndex = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/theme/index"]();
+const svg = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/chat/svg-figure"]();
+const caps = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-tui/terminal-capabilities"]();
+export const observed = {
+	theme: theme.setThemeInstance === themeIndex.setThemeInstance,
+	svg: typeof svg.svgFigurePalette,
+	caps: typeof caps.setTerminalImageProtocol,
+};`,
+		);
+		expect(observed).toEqual({ theme: true, svg: "function", caps: "function" });
+		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
+		for (const key of keys) expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
 	});
 });

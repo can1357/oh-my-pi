@@ -1,6 +1,8 @@
 //! Core implementation of the brush shell. Implements the shell's abstraction,
 //! its interpreter, and various facilities used internally by the shell.
 
+#![cfg_attr(unix, feature(process_setsid))]
+
 pub mod arithmetic;
 mod braceexpansion;
 pub mod builtins;
@@ -27,6 +29,7 @@ pub mod options;
 pub mod pathcache;
 pub mod pathsearch;
 pub mod patterns;
+mod pipetap;
 pub mod processes;
 mod prompt;
 mod regex;
@@ -59,6 +62,7 @@ pub use interp::{
 	ExternalCommandOutputMarkers, ProcessGroupPolicy, SpawnObserver,
 };
 pub use parser::{SourcePosition, SourcePositionOffset, SourceSpan};
+pub use pipetap::{PipeMirror, PipeTap};
 pub use results::{ExecutionControlFlow, ExecutionExitCode, ExecutionResult, ExecutionSpawnResult};
 pub use shell::{
 	CreateOptions, ProfileLoadBehavior, RcLoadBehavior, Shell, ShellBuilder, ShellBuilderState,

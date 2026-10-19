@@ -50,20 +50,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 }
 
 fn is_log_short(command: &str) -> bool {
-	has_ordered_tokens(command, "log", "short")
-}
-
-fn has_ordered_tokens(command: &str, first: &str, second: &str) -> bool {
-	let mut saw_first = false;
-	for part in command.split_whitespace() {
-		if saw_first && part == second {
-			return true;
-		}
-		if part == first {
-			saw_first = true;
-		}
-	}
-	false
+	primitives::command_has_ordered_tokens(command, "log", "short")
 }
 
 fn compact_log(input: &str) -> String {
@@ -85,7 +72,7 @@ fn compact_log(input: &str) -> String {
 
 		let trimmed = remove_email_fragments(line.trim_end());
 		if !trimmed.trim().is_empty() || !out.ends_with("\n\n") {
-			out.push_str(&trim_line(&trimmed, 140));
+			out.push_str(&primitives::truncate_line(&trimmed, 140));
 			out.push('\n');
 		}
 	}
@@ -260,18 +247,6 @@ fn remove_email_fragments(line: &str) -> String {
 		words.push(word);
 	}
 	words.join(" ")
-}
-
-fn trim_line(line: &str, max_chars: usize) -> String {
-	let mut out = String::new();
-	for (idx, ch) in line.chars().enumerate() {
-		if idx >= max_chars {
-			out.push('…');
-			return out;
-		}
-		out.push(ch);
-	}
-	out
 }
 
 fn is_progress_noise(line: &str) -> bool {

@@ -330,17 +330,6 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result.cursorCol).toBe("/skill:superpowers/tdd ".length);
 		});
 
-		it("never sync-completes Enter to the bare skill namespace", () => {
-			const provider = new CombinedAutocompleteProvider(
-				[{ name: "skill:humanizer", description: "Remove signs of AI writing" }],
-				"/tmp",
-			);
-
-			// items[0] of the sync path is applied and submitted immediately;
-			// `/skill:` alone is not a runnable command, so `/sk` must not match.
-			expect(provider.trySyncSlashCompletion("/sk")).toBeNull();
-		});
-
 		it("lists every skill while typing toward the skill: namespace mid-prompt", async () => {
 			const provider = new CombinedAutocompleteProvider(
 				[
@@ -862,6 +851,23 @@ describe("CombinedAutocompleteProvider", () => {
 
 			expect(result?.items.map(item => item.value)).toContain("@widget-app/");
 			expect(partials).toEqual([]);
+		});
+
+		it("settles on the prefix listing when the walk hits its deadline", async () => {
+			// A walk into a huge symlinked tree never finishes on its own; only the
+			// native deadline ends it. Model that walk: with a deadline it rejects
+			// as a timed-out native call does, without one it never settles.
+			spyOn(natives, "fuzzyFind").mockImplementation(options =>
+				options.timeoutMs
+					? Promise.reject(new Error("Timeout"))
+					: Promise.withResolvers<natives.FuzzyFindResult>().promise,
+			);
+
+			const provider = new CombinedAutocompleteProvider([], baseDir);
+			const line = "see @widget";
+			const result = await provider.getSuggestions([line], 0, line.length);
+
+			expect(result?.items.map(item => item.value)).toEqual(["@widget-app/"]);
 		});
 	});
 

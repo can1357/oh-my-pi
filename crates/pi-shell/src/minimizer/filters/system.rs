@@ -18,7 +18,8 @@ pub fn supports(program: &str) -> bool {
 			| "diff"
 			| "format"
 			| "pipe"
-			| "ps" | "ping"
+			| "ps"
+			| "ping"
 			| "ssh"
 			| "sops"
 	)
@@ -663,11 +664,16 @@ fn is_count_summary(trimmed: &str) -> bool {
 				matches!(
 					kind,
 					"failed"
-						| "passed" | "skipped"
-						| "flaky" | "pass"
-						| "fail" | "error"
-						| "errors" | "warning"
-						| "warnings" | "information"
+						| "passed"
+						| "skipped"
+						| "flaky"
+						| "pass"
+						| "fail"
+						| "error"
+						| "errors"
+						| "warning"
+						| "warnings"
+						| "information"
 						| "informations"
 				)
 			});
@@ -840,7 +846,7 @@ fn looks_like_path_listing(input: &str) -> bool {
 fn compact_ps_output(input: &str) -> String {
 	let mut out = String::new();
 	for line in input.lines() {
-		out.push_str(&truncate_chars(line, 120));
+		out.push_str(&primitives::truncate_line(line, 120));
 		out.push('\n');
 	}
 	if out.lines().count() > 30 {
@@ -848,15 +854,6 @@ fn compact_ps_output(input: &str) -> String {
 	} else {
 		out
 	}
-}
-
-fn truncate_chars(line: &str, max: usize) -> String {
-	if line.chars().count() <= max {
-		return line.to_string();
-	}
-	let mut out: String = line.chars().take(max.saturating_sub(1)).collect();
-	out.push('…');
-	out
 }
 
 fn compact_ping_output(input: &str) -> String {
@@ -892,12 +889,12 @@ fn compact_ssh_output(input: &str) -> String {
 		if is_ssh_noise(line) {
 			continue;
 		}
-		out.push_str(&truncate_chars(line, 120));
+		out.push_str(line);
 		out.push('\n');
 	}
 	if out.lines().count() > 200 {
 		primitives::head_tail_lines(&out, 100, 80)
-	} else if out.is_empty() {
+	} else if out.trim().is_empty() {
 		input.to_string()
 	} else {
 		out
@@ -906,8 +903,7 @@ fn compact_ssh_output(input: &str) -> String {
 
 fn is_ssh_noise(line: &str) -> bool {
 	let trimmed = line.trim();
-	trimmed.is_empty()
-		|| trimmed.starts_with("Warning: Permanently added")
+	trimmed.starts_with("Warning: Permanently added")
 		|| trimmed.starts_with("Connection to ") && trimmed.ends_with(" closed.")
 		|| trimmed.starts_with("Authenticated to ")
 		|| trimmed.starts_with("debug1:")

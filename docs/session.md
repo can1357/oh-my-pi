@@ -328,6 +328,7 @@ Current core-owned values include:
 | `user_todo_edit`         | `{ phases: TodoPhase[] }`                                                                                                                                                                                                                                | SDK/UI todo editing persists the complete phase snapshot. Todo restoration scans backward for the latest snapshot (or a successful `todo` tool result) and restores its phases.                                                                                                                            |
 | `vibe-session-lifecycle` | Version-1 event with `{ version: 1, id, ownerId, parentSessionId, action, ... }`; `spawn` adds `cli`, `agent`, `childSessionFile`, and `createdAt`; turn events add `turn`; tombstone events add `reason`.                                               | Vibe runtime persists and replays child spawn, turn-started/settled, tombstone, and tombstone-revoked transitions to recover owned child sessions and in-flight state. Invalid or out-of-scope events are ignored.                                                                                         |
 | `autoresearch-control`   | `{ mode: "on" \| "off" \| "clear", goal?: string }`                                                                                                                                                                                                      | The built-in autoresearch command writes mode/goal changes, and experiment-limit shutdown writes `mode: "off"`. `reconstructControlState()` replays valid records on resume to restore whether autoresearch is active and its goal; `clear` removes the goal.                                              |
+| `system-prompt-digest`   | Hexadecimal string: a hash of the base system prompt blocks (before a per-turn hook override)                                                                                                                                                            | `AgentSession` appends it just before a primary assistant reply with provider output whose prompt differs from the branch's latest record, and carries it onto a rewind branch with the reparented sibling reply. Before a resumed session's first model call, a prefix-bound tool-list rebuild commits only if it reproduces that prompt; without a record it freezes. Memory recall injected into the base prompt is part of the hash, so such sessions stay frozen. |
 
 On resume, a valid latest `session_exit` after a non-terminal conversation tail causes `AgentSession`/SDK initialization to append a synthetic assistant message with `stopReason: "aborted"` and rebuild the display/agent context. A normal exit only triggers that transition when it recorded pending tool calls; abnormal exit kinds can trigger it without that list. This prevents the restored transcript from presenting an interrupted turn as still live.
 
@@ -370,7 +371,7 @@ Extension-provided message that does participate in LLM context. `content` can b
 
 Append-only audit entry for a session rename. It records `title`, `source` (`auto` or `user`), and optionally `previousTitle` and `trigger`. The current title is also updated in the fixed-width title slot so listing does not require a full-file rewrite.
 
-`/rename <title>` sets an explicit title. `/rename` without a title generates one from recent conversation using the title-generation candidates (`tiny`, `commit`, `smol`, then eligible current-model fallbacks). Both are user-requested renames (`source: "user"`), so later automatic titling cannot replace them. Empty conversation or failed generation leaves the current title unchanged. A session switch or newer rename while generation runs discards the stale result. Local tiny-model failures never fall back to an online provider.
+`/rename <title>` sets an explicit title. `/rename` without a title generates one from recent conversation using the title-generation candidates (`tiny`, `commit`, `smol`, then eligible current-model fallbacks), keeping the current title's card (`<icon> <CODE>: `) if it has one. A title still without a card, typed or generated, gets one from the same candidates (`src/prompts/system/title-card.md`) unless `title.icons` is `boring`; a failed card leaves the title plain, and an interrupt drops only the card from a typed title. Both are user-requested renames (`source: "user"`), so later automatic titling cannot replace them. Empty conversation or failed generation leaves the current title unchanged. A session switch or newer rename while generation runs discards the stale result. Local tiny-model failures never fall back to an online provider.
 
 ### `ttsr_injection`
 
@@ -396,7 +397,7 @@ Records the provider and a pseudonymous SHA-256 account/scope hash used to re-pi
   "id": "d2e3f4a5",
   "parentId": "c2d3e4f5",
   "timestamp": "2026-02-16T10:29:00.000Z",
-  "systemPrompt": "...",
+  "systemPrompt": ["...", "..."],
   "task": "...",
   "tools": ["read", "edit"],
   "outputSchema": { "type": "object" },
@@ -411,6 +412,11 @@ The latest `session_init` is also the cold-subagent revival contract. Optional
 fields include `agent`, `modelRole`, `resolvedModel`, `retryFallback`, `readOnly`,
 `advisor`, and `compactionThreshold` (`thresholdPercent`/`thresholdTokens`).
 `isolated: true` marks an isolation-worktree child that cannot be cold-revived.
+`systemPrompt` holds the base prompt blocks a model call was built from (never a per-turn
+`before_agent_start` override), and revival replays them unchanged. A session appends a newer
+`session_init` when a model call runs on a different base prompt or work-pool yield items
+(`workPoolYieldItems`, restored on revival). Older files store one joined string, which revives
+as a single block.
 `extractSessionInit()` and read-only `peekSessionInit()` expose this contract.
 
 ### `mode_change`
@@ -524,6 +530,7 @@ Ordinary completed appends update memory and local file storage synchronously on
 - Afterwards, entries append incrementally.
 - Saving an editor draft forces a discoverable header and stores `draft.txt` with a marker; if the draft disappears while only startup metadata remains, close removes that draft-only session. Explicit `ensureOnDisk()` sessions remain resumable.
 - Concurrent completed appends supersede an in-flight atomic rewrite with an authoritative full-body rewrite so stale publication cannot clobber them.
+- A queued indexed full rewrite stays non-current until confirmation. When a fenced rewrite lands after a successor supersedes it, the manager validates that durable body and records its byte size before retrying the newer transcript.
 
 ### Durability operations
 
@@ -549,7 +556,7 @@ Ordinary completed appends update memory and local file storage synchronously on
 
 Before persisting entries:
 
-- Strings over 500,000 characters are truncated with `"[Session persistence truncated large content]"`, except signed/encrypted provider blocks, signature fields, validated Anthropic native web/tool-search history blocks, and Anthropic server-compaction replay carriers, which must remain byte-exact for replay.
+- Strings over 500,000 characters are truncated with `"[Session persistence truncated large content]"`, except signed/encrypted provider blocks, signature fields, validated Anthropic native web/tool-search history blocks, Anthropic server-compaction replay carriers, and Cursor server records (`cursorHistory` payloads), which must remain byte-exact for replay.
 - Transient `jsonlEvents` is removed.
 - If an object has both string `content` and numeric `lineCount`, line count is recomputed after truncation.
 - Image data URLs in `image_url` fields are always content-addressed in the blob store and replaced with `blob:sha256:<hash>`, regardless of length. Base64 payloads at least 1,024 characters are externalized in image `content` blocks, `images[]`, snapcompact `frames[]`, and image-generation results.
@@ -574,7 +581,16 @@ Implementations and adapters:
 
 `omp gc` previews maintenance by default; `--apply` is required to sweep unreferenced blobs, archive eligible cold sessions, checkpoint database WALs, or prune stale state. Storage maintenance is separate from model-context compaction.
 
+The sessions phase also removes transcript rewrite temps (`.<name>.jsonl.<snowflake>.tmp`, and the same pattern beside registered `--session` files) once they are past the 5-minute write grace. A live rewrite renames its temp into place within milliseconds, so an older one was left by a killed or crashed writer.
+
 The stale-state phase is opt-in: it runs only with `--stale` or when `gc.stale` is enabled (default off), so an unqualified `omp gc --apply` never deletes reports or replicas. It removes `custom-session-files` markers and terminal breadcrumbs whose session file no longer exists once they are a day old (a lazy session's marker names a transcript that is written only on its first turn). A breadcrumb recorded as a fresh `/new` boundary is always kept: `--continue` honors it before its transcript exists, and it is rewritten when the session materializes or replaced by the terminal's next session. For the default agent dir — or a custom agent dir named `agent`, whose parent is treated as the config root — it also expires debug report bundles (`reports/*.tar.gz`) and collab guest replicas (`collab/*.jsonl` plus their artifact directories and custom-session marker) that are both outside the newest `gc.staleRetainNewest` (default 20) and older than `gc.staleRetainDays` (default 30). A replica that a terminal breadcrumb points at, or that a running guest holds open, is kept. Stale state is pruned before the blob sweep, so blobs referenced only by an expired replica are swept in the same run.
+
+The compress phase is opt-in as well: `--compress` or `gc.compress` (default off). It stores every file of a session (the transcript and its artifact tree) with the filesystem's transparent compression once the transcript has been idle for `gc.compressAfterDays` (default 7, `--compress-after-days`); files written more recently are skipped. Session ownership leases are taken only for sessions with files left to compress: a session is skipped while a running process holds the lease of its transcript or of any transcript nested in its artifact tree (subagent sessions, recognized by their session header whatever their file name), and those leases are held while its files are rewritten. Unlike archiving, a session with an interrupted last turn qualifies, since it stays resumable. Paths, bytes, and mtimes are unchanged and no history or stats rows are deleted, so compressed sessions stay listed, resumable, and searchable. A regular file with a single link that spans more than one filesystem block qualifies; already-compressed formats (`.gz`, `.zst`, images) are skipped. The volume holding the sessions root decides the method:
+
+- **APFS (macOS):** detected by matching the directory's device against `apfs` entries in the mount table. `ditto --hfsCompression` writes compressed copies, with the original mtime to the nanosecond, into a fresh `.omp-gc-compress-XXXXXX` scratch directory beside the originals that holds an owner marker. A copy replaces its original only when its size and SHA-256 match and it allocates less space; immediately before the rename, the original's inode, size, and mtime must still match their values at selection and it must still have a single link, and a transcript's check and rename run under the session publish lock that serializes appends. A scratch directory left by a killed run is removed by the next `--compress --apply` run, under the sessions root and the archive root; a directory with that name and no owner marker is removed only when empty. Stats sync and the dashboard watcher skip `.omp-gc-compress-*` directories, so they never ingest a scratch copy. The replaced file is a new inode, so the next stats sync re-reads each compressed transcript once from the start; it replaces the session's rows rather than duplicating them. Appending to a compressed file stores it uncompressed again, which a later run picks up.
+- **NTFS (Windows):** detected with `GetVolumeInformationW`, which must report NTFS with per-file compression support. `compact /c` sets LZNT1 compression on each file in place, keeping its inode and timestamps; later appends are stored compressed too. WOF (`compact /exe`) is not used because a write inflates the whole file.
+
+Other filesystems report the phase as unsupported.
 
 Journal payload I/O is streamed during blob-reference scans, archive history/stats reconciliation, gzip creation, and rollback. Active `.jsonl`, recoverable `.jsonl.*.bak`, and archived `.jsonl.gz` records all participate in reference discovery, including references in malformed JSON text. Compressed scans drain and validate the complete stream before their results can authorize deletion. Archives retain the original JSONL bytes when decompressed, and artifact trees keep their existing layout.
 

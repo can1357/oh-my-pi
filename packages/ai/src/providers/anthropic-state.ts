@@ -5,6 +5,8 @@ import { isFoundryEnabled } from "../utils/foundry";
 
 /** Root key for Anthropic's per-session provider state. */
 export const ANTHROPIC_PROVIDER_SESSION_STATE_KEY = "anthropic-messages";
+/** Caller-map anchor for session-scoped opaque injected clients. */
+export const ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY = "anthropic-opaque-clients";
 
 /** Normalize an Anthropic base URL to its origin path without `/v1`. */
 export function normalizeAnthropicBaseUrl(baseUrl?: string): string | undefined {
@@ -25,6 +27,19 @@ export function resolveDirectAnthropicBaseUrl(model: Model<Api>): string {
 	return normalizeAnthropicBaseUrl($env.ANTHROPIC_BASE_URL) ?? configured ?? "https://api.anthropic.com";
 }
 
+/**
+ * Whether a request to `model` reaches the official endpoint its compat was built for. `compat.officialEndpoint`
+ * classifies the configured `baseUrl`, but a first-party Anthropic model is rerouted at request time by
+ * `ANTHROPIC_BASE_URL` or Foundry's `FOUNDRY_BASE_URL` without rebuilding compat. Gates official-only host
+ * limits such as the catalog's inline image byte and image count budgets.
+ */
+export function reachesOfficialEndpoint(model: Model<Api>): boolean {
+	const compat = model.compat;
+	if (!compat || !("officialEndpoint" in compat) || !compat.officialEndpoint) return false;
+	if (model.provider !== "anthropic" || model.api !== "anthropic-messages") return true;
+	return isOfficialAnthropicApiUrl(resolveDirectAnthropicBaseUrl(model));
+}
+
 /** Build the endpoint-and-model-scoped Anthropic session-state key. */
 export function anthropicProviderSessionStateKey(baseUrl: string, modelId: string): string {
 	return `${ANTHROPIC_PROVIDER_SESSION_STATE_KEY}:${baseUrl}\u0000${modelId}`;
@@ -39,6 +54,10 @@ export function clearAnthropicFastModeFallback(
 	for (const [key, value] of providerSessionState) {
 		if (key !== ANTHROPIC_PROVIDER_SESSION_STATE_KEY && !key.startsWith(prefix)) continue;
 		Object.assign(value, { fastModeDisabled: false });
+	}
+	const anchor = providerSessionState.get(ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY);
+	if (anchor && "fastModeRearmGeneration" in anchor && typeof anchor.fastModeRearmGeneration === "number") {
+		anchor.fastModeRearmGeneration++;
 	}
 }
 

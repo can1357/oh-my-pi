@@ -140,6 +140,25 @@ labeling action. `getAllTools()` returns tool schemas and source metadata, while
 
 ### Provider registration
 
+Provider `models` entries and rows returned by `fetchDynamicModels` accept the same `api`/`kind` pairs as `models.yml` (see [Models](./models.md)): a runner API such as `openai-images` implies its kind, so the model reaches the `image` role and `generate_image` instead of registering as chat. A static `models` entry whose `kind` its api cannot serve fails `registerProvider`; such a `fetchDynamicModels` row is dropped with a logged warning.
+
+```ts
+pi.registerProvider("my-gateway", {
+  baseUrl: "https://gateway.example.com/v1",
+  apiKey: "GATEWAY_API_KEY",
+  models: [{
+    id: "gpt-image-2",
+    name: "GPT Image 2",
+    api: "openai-images", // kind: "image" implied
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128000,
+    maxTokens: 16384,
+  }],
+});
+```
+
 `pi.registerProvider(name, config)` can include an optional `usage` field containing a
 `UsageProvider` imported from `@oh-my-pi/pi-ai`. Its `fetchUsage` implementation receives the
 normalized credential and returns a normalized `UsageReport`; the result is then handled
@@ -206,6 +225,57 @@ RPC rejects secret prompts instead of forwarding them as ordinary input. SDK
 hosts implementing `onPrompt` must honor `secret` or reject the prompt. Masking
 does not provide encryption, memory erasure, or general log redaction.
 
+### Command-backed providers
+
+`registerProvider` also supports providers whose transport is implemented by the
+extension itself. The `api` value is an extension-owned string (built-in API
+names are reserved), and `streamSimple` returns the canonical
+`AssistantMessageEventStream`; it does not need to be an HTTP endpoint:
+
+```ts
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+  pi.registerProvider("local-command", {
+    // Required model metadata; the custom stream does not use this URL.
+    baseUrl: "https://command-provider.invalid/",
+    apiKey: "unused-by-extension",
+    api: "local-command-api",
+    streamSimple(model, context, options) {
+      const stream = new AssistantMessageEventStream();
+      // Spawn the command, translate its output, and push canonical OMP events.
+      // The implementation owns process cleanup, cancellation, and errors; the
+      // helper needs `context` for the conversation and `options` for `signal`,
+      // `cwd`, and the stable `sessionId`.
+      void runCommandAndPushEvents(stream, model, context, options);
+      return stream;
+    },
+    models: [{
+      id: "local-command-model",
+      name: "Local command",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128000,
+      maxTokens: 16000,
+    }],
+  });
+}
+```
+
+This pattern is useful for a local CLI, stdio service, or JSONL process. It is
+also how a provider rides a plan the vendor only exposes through its CLI: the
+child authenticates with its own subscription credentials, where the same model
+reached through an API key bills per token even for an account that already pays
+for a plan. A command-backed provider should keep its own tool loop inside the
+child process and emit only the resulting assistant events if those tools must
+remain owned by the child. A complete subprocess adapter should also remove
+credentials it must not inherit, honor `options.signal`, use `options.cwd`, map
+one stable session id to one child conversation, and convert non-zero exits into
+a stream error. `models.yml` remains HTTP/configuration-only; extensions are the
+supported escape hatch for non-HTTP transports.
+
 In interactive mode, `input` handlers run before the built-in first-message auto-title check. Extensions that call `await pi.setSessionName(...)` from `input` can set the persisted session name and prevent the default auto-generated title from running for that session.
 
 Also exposed:
@@ -244,7 +314,7 @@ export default function (pi: ExtensionAPI) {
 - `deliverAs: "steer"` (default while streaming) — steers the current run
 - `deliverAs: "followUp"` — queued behind the current run while streaming
 - `deliverAs: "nextTurn"` — kept out of the editable pending-message UI; while streaming it waits for the next turn, and when idle without `triggerTurn` it is appended to context/history without starting a turn
-- `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch; when idle it normally starts a turn regardless of `triggerTurn`. Plan mode or user-interrupt auto-resume suppression folds it into context instead
+- `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch, except that it ends a running interruptible `wait` (the wait returns "Wait interrupted by message." and its job keeps running); when idle it normally starts a turn regardless of `triggerTurn`. Plan mode or user-interrupt auto-resume suppression folds it into context instead
 - `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
 
 When idle without `triggerTurn`, ordinary `sendMessage` delivery appends the
@@ -285,11 +355,16 @@ Handlers and tool `execute` receive `ctx` with:
 - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
+- `resolvePlanReview(reviewId, choice, input?)`: answer the open interactive plan review; returns `false` when the review or choice is unavailable, `refine` requires non-empty `input.feedback`, and on approvals (`execute`, `compact`, `keep`) `input.role` may name a tier from the event's `tiers` to pick the execution model (an unknown role, or a `role` on any other choice, returns `false`)
+- `getPendingPlanReview()`: the open interactive plan review still awaiting an answer, in the `plan_review_requested` shape, or `undefined`; use it to answer a review that opened before the extension loaded or reconnected
+- `openPlanReview()`: open the interactive plan review on the newest plan file, like `/plan-review`; resolves `true` once a review awaits an answer, without waiting for a choice. An already-open review is kept rather than replaced. Unlike `/plan-review` it never aborts work: it resolves `false`, silently, while the agent is streaming or compacting, when plan mode is inactive, or when no non-empty plan file exists
 - `getSystemPrompt()`
 - `isProjectTrusted()` — always `true`; OMP does not ask for per-directory trust before loading project inputs
 - `agent` — the agent this session runs: `{ kind: "main" | "sub", id, name, depth, parentId? }`. Factories are rebound to every subagent session (task tool, eval `agent()`, `/tan` clones), so a handler can check `ctx.agent.kind === "sub"` or the lowercased agent definition `name` (for example `"explore"`) to act only in subagents. Use `kind`, not `depth`: `depth` counts `task` nesting only, so `/tan` clones are subagents at depth 0 and report `name: "sub"`. An advisor's own tool calls reach the session's `tool_call`/`tool_result` handlers with `{ kind: "sub", id: "advisor", name: "advisor", depth: 0, parentId }`, so `kind === "main"` also excludes advisor activity
 - `runEphemeralTurn(...)` (optional; see below)
 - `memory` (optional structured memory runtime — status/search/save across the configured backend)
+- `annotations`: `/annotate` as an API, for boards and remote clients. `submit({ source, notes, deliver?, review?, focus? })` builds the feedback `/annotate` would and delivers it without any UI; `open({ source, deliver?, focus? })` mounts the annotation overlay on the source and resolves with the operator's notes (`undefined` when dismissed; `mode === "tui"` only). Text sources are `{ kind: "text", text, label? }`, `{ kind: "file", path }` (resolved against the live session cwd), or `{ kind: "last" }`; diff sources are `{ kind: "diff", diff, label? }`, `{ kind: "uncommitted" }`, or `{ kind: "pr", ref }`. `review`/`focus` apply to diff sources only (a type error on text sources). Text notes are `{ note, line?, quote? }` (1-based; whole-source when omitted, and the quoted line is filled in); diff notes are `{ path, note, line?, side?, occurrence?, rawLine? }` (`side` defaults to `"new"`; `rawLine` is the diff row including its `+`/`-`/space prefix). Notes that do not match their source reject rather than being dropped. `text` and `diff` sources are frozen snapshots of what you pass; `file`, `last`, `uncommitted`, and `pr` are re-read at call time and line numbers are matched against the current content, so pass `quote`/`rawLine` to reject a note (naming it) when that content drifted. `deliver` defaults to `"auto"`: pasteable notes go into the composer when the interactive TUI editor is available and are sent otherwise; an LLM review request (`review: true` on a diff) is always sent. Sending uses `pi.sendUserMessage` and queues as a follow-up while the agent is streaming. `"paste"`/`"send"` force a channel and `"none"` only returns `text`. The result is discriminated by `kind`: `"text"` carries `TextReviewAnnotation[]` and, after `open`, `editedText` when the operator replaced the source in the external editor (the feedback then refers to that text); `"diff"` carries `CodeReviewAnnotation[]` and `review` (whether `text` is an LLM review request). Both carry the rendered `text` and the `delivered` channel.
+  Explicit paste requires `ctx.ui.supportsEditor === true`: the TUI and non-headless RPC expose composers; ACP and no-op UI contexts do not. Supplied diffs used for LLM review reject above 50,000 characters or 20 reviewable files before delivery, and `open` rejects such a patch before mounting the overlay; split larger patches into smaller requests. Notes-only submissions do not have this review-prompt bound.
 - `setInterval(fn, ms, ...args)` / `setTimeout(fn, ms, ...args)` / `clearTimer(timer)` — managed timers (see below)
 
 ### Ephemeral side turns (`ctx.runEphemeralTurn`)
@@ -476,6 +551,13 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
 
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications. Distinct non-blank `additionalContext` from every handler is preserved in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before that call's `tool_call` context.
+
+### Plan review lifecycle
+
+- `plan_review_requested` reports an interactive plan review with its `reviewId`, session, title, plan path and content, plus the choices in display order. Choice ids are stable (`execute`, `compact`, `keep`, `refine`, `save`); labels may change, and `keep` carries the current token count. An extension can answer it with `ctx.resolvePlanReview(...)` while the terminal picker stays live; the first answer wins. `save` uses the default file name without opening the path prompt.
+- An approval answered by an extension runs on the tier named by `input.role`, or the one currently selected in the overlay's model slider when `role` is omitted; `plan_review_requested` lists the selectable `tiers` (`role`, `provider`, `model`, and `thinkingLevel` when the role pins one; absent when fewer than two resolve). The approval executes the plan as it is at pick time: in-overlay edits if any, otherwise the plan file re-read from disk. That can differ from the reported `planContent`; an extension may write the plan file before answering to execute its own revision.
+- Tier order follows the configured role cycle, not the selected tier. The slider initially selects `default` when available; a remote `input.role` updates the displayed tier and commits the answer, preventing later terminal input from changing it.
+- `plan_review_resolved` reports how that review closed, with the selected choice id (or `undefined` when dismissed or cancelled by a session switch, a replacement review, or shutdown) and `by: "local" | "extension"`. It fires when the overlay actually closes, after every `plan_review_requested` handler has returned, so `plan_review_requested` handlers should hand off long work (a remote round-trip, a `ctx.ui` dialog) instead of awaiting it.
 
 ### Subagent lifecycle
 
@@ -791,7 +873,7 @@ before and performs no extra syscalls.
 Supported:
 
 - dialogs: `select`, `confirm`, `input`, `editor`, optional `askDialog`
-- input editing: `setEditorText`, `getEditorText`, `pasteToEditor`, `editor`
+- input editing: `setEditorText`, `getEditorText`, `pasteToEditor`, `editor`; `supportsEditor` indicates whether paste updates a local or remote composer (absent means unsupported)
 - autocomplete stacking: `addAutocompleteProvider(factory)` wraps the built-in editor provider (factories apply in registration order and re-apply on every slash-command refresh)
 - terminal title and working message (`setTitle`, `setWorkingMessage`)
 - notifications/status/editor text/terminal input/custom overlays
@@ -805,11 +887,162 @@ Current no-op methods in this controller:
 
 `ctx.ui.setEditorComponent(factory)` is wired to the live editor; the factory
 must return a `CustomEditor` subclass, not a plain `Editor`/`EditorComponent`.
+`ctx.ui.getEditorComponent()` returns the factory currently installed (or
+`undefined` for the built-in editor), so an extension can wrap another
+extension's editor instead of replacing it; inside a factory it still returns
+the previous one.
 `setWidget` renders widget components above or below the editor via
 `setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string arrays show
 up to 10 content lines plus a truncation notice). Pass `undefined` to remove a
 widget. `setEditorText` and `pasteToEditor` request a repaint after mutating the
 editor.
+
+#### Launching terminal commands
+
+`ctx.ui.openTerminal(request)` is available only in the interactive TUI. It creates a
+multiplexer pane or provider-native group (a tmux window, Zellij/Herdr/Orca tab, or CMUX
+workspace—not an OS window) and returns the reported native ID, plus a `warning` when
+the provider started the command but could not show it where requested. RPC, ACP,
+print, and headless contexts do not provide this optional method. The request type and
+supported provider set derive from canonical launch capabilities: tmux, Zellij,
+Herdr, CMUX, and Orca are supported; screen and wmux remain recognized by the
+multiplexer taxonomy but are currently unsupported.
+
+Provider-specific session detection is centralized in
+`@oh-my-pi/pi-tui/terminal-multiplexer`, which registers one module per multiplexer.
+`hasTerminalMultiplexerSession(provider, env)` checks explicit session markers, while
+`classifyTerminalMultiplexer(env)` names the multiplexer hosting the process: session
+markers first, then a `tmux`/`screen` `TERM` fallback, then outer applications such as
+Orca, so a multiplexer running inside Orca wins. `isInsideTerminalMultiplexer(env)` is
+true only when the classified multiplexer owns the screen grid; Orca keeps the
+direct-terminal render path. A classified multiplexer does not prove that a nested
+provider session or a native pane ID exists.
+
+The TUI host injects this capability; extensions do not need to import dispatcher
+code to use it.
+
+Built-in OMP callers can pass `classifyTerminalMultiplexer(env)` to
+`getTerminalLaunchPlacement(...)` for support and presentation metadata or as the
+first argument to `createDefaultTerminalLaunchRequest(...)` for a validated
+provider-default request. The factory also takes a placement, command argv, cwd, and
+optional shell confirmation. Both helpers are exported by
+`src/subprocess/terminal-launch.ts`.
+Placement lookup returns the provider display name, user-facing group label (such as
+`pane`, `tab`, or `workspace`), and any required shell grammar, or an error when no
+multiplexer is detected or the provider does not support that placement. The request
+factory returns `{ request }` or `{ error }`, validates the constructed request, and
+leaves provider-specific target, focus, direction, and execution options unset so the
+backend applies its own defaults. For shell-input launches, pass `shellGrammar: "posix"`
+only after confirming the destination shell uses POSIX grammar; the factory rejects
+a missing assertion. Extensions can continue using `ctx.ui.openTerminal(...)` with
+explicit typed requests.
+
+```ts
+const result = await ctx.ui.openTerminal?.({
+  multiplexer: "tmux",
+  placement: "pane",
+  command: ["bun", "run", "dev"],
+  cwd: ctx.cwd,
+  target: process.env.TMUX_PANE!,
+  focus: false,
+  execution: "direct",
+});
+```
+
+Targets are provider-native IDs/refs, with different meanings by placement:
+
+- tmux pane placement targets a pane ID and defaults to `TMUX_PANE`; new-window
+  targets are session names/IDs and may be omitted inside the current TMUX session.
+  An explicit pane or session target can address the CLI when `TMUX` is unset.
+- Zellij pane placement may target an existing tab ID (Zellij 0.44.1 or newer).
+  New-tab creation has no target option. Both require an active `ZELLIJ` session.
+- Herdr pane placement targets a pane ID and defaults to `HERDR_PANE_ID`; tab
+  placement targets a workspace ID and defaults to `HERDR_WORKSPACE_ID`. The
+  destination must be in an active Herdr pane or workspace.
+- Orca pane splits resolve `ORCA_PANE_KEY` to the current terminal handle;
+  detection requires both `ORCA_PANE_KEY` and `ORCA_WORKTREE_ID`. Tab creation
+  defaults to worktree `id:<ORCA_WORKTREE_ID>`; an application label alone is
+  insufficient to detect an Orca session. Targets, titles, and commands are passed
+  as `--flag=value`, so a value starting with `--` stays data.
+- CMUX pane placement targets a surface ID; workspace placement targets a window
+  ID. Both targets may be omitted when the corresponding CMUX context is active.
+  An explicit surface target is authoritative and is not combined with the ambient
+  workspace. Socket-path and transport markers alone do not establish an active
+  local CMUX surface.
+
+Unsupported target combinations fail rather than being ignored. Capability checks
+use provider identity markers or a native target, not `TERM` alone. `focus` controls
+apply only where a placement supports them: tmux uses `-d` when false, Zellij uses
+`--no-focus` (Zellij 0.45.0 or newer), Herdr uses `--focus`/`--no-focus`, and CMUX
+passes `--focus true|false` to both split and workspace creation. Orca tab creation
+maps `focus: true` to `--focus`; otherwise focus follows Orca's default. Orca pane
+splits have no focus option. When Orca cannot show a new tab, it starts the command
+in a background terminal, and the result's `warning` says so.
+
+Execution is provider-specific. tmux execs a multi-argument command directly but runs
+a single argument through its configured `default-shell -c`, which may be fish, Nushell,
+or another non-POSIX shell. For one-argument direct launches the dispatcher prefixes
+`/usr/bin/env --`, keeping executables with spaces, leading dashes, or shell
+metacharacters as data; a one-argument executable name containing `=` is rejected
+because `env` reads it as an assignment. `execution: "shell"` POSIX-quotes the argv
+and runs it with `/bin/sh -c`, independent of `default-shell`. tmux format-expands its
+start directory, so the dispatcher passes every `#` in `cwd` as `##`. Zellij accepts
+direct argv execution. Zellij options that need a newer CLI than the one installed
+(tab placement before 0.44.0, `target` before 0.44.1, `focus: false` before 0.45.0) fail before anything is created,
+with an error naming the required version; the dispatcher checks `zellij --version`
+once per process.
+
+Herdr `pane run` types text into the destination's interactive shell, so the
+adapter writes the POSIX-quoted argv to a private, self-deleting `/bin/sh` script
+under the temp directory and types only its absolute path. Any interactive shell
+that runs a bare path (POSIX shells, fish, Nushell) launches the exact argv, so
+Herdr requests take no `shellGrammar`. Herdr launches are rejected on Windows.
+
+CMUX `--command` and Orca `terminal split`/`terminal create`
+submit shell command text to the destination's interactive shell rather than
+launching argv directly. Their requests therefore require `shellGrammar: "posix"`.
+Set it only after confirming that the destination shell accepts POSIX syntax; it
+is not inferred from the local OS or `$SHELL`, and the configured shell is not
+guessed. Without that assertion, do not request a CMUX or Orca launch.
+Once asserted, argv words are quoted with the shared POSIX shell-quoting helpers.
+Orca split/create have no `--cwd` flag, so the adapter prepends
+`cd <quoted-cwd> &&` before the quoted command in `--command`; CMUX split also
+changes directory inside its shell before entering the command. These quotes are
+not claimed to work in Nushell, PowerShell, `cmd.exe`, or other shell grammars.
+The Orca CLI is resolved in Orca's documented order: `ORCA_CLI_COMMAND` when set,
+`orca-dev` in an Orca development checkout (`ORCA_DEV_REPO_ROOT`), `orca-ide` on Linux
+outside an Orca terminal, and `orca` otherwise.
+
+Because these commands are submitted as terminal input, shell-input requests
+reject C0/C1 control bytes and DEL in command arguments before creating a pane or
+workspace; CMUX and Orca also reject them in `cwd`, which is embedded in their
+shell command. The restriction is not applied to direct tmux or Zellij argv,
+where argument newlines remain data rather than terminal input.
+
+Herdr, Zellij, and Orca `window` placements create tabs; CMUX creates a workspace.
+Provider-specific fields include pane direction, Zellij floating panes/names,
+Herdr tab labels, and CMUX workspace names. Zellij floating panes cannot specify a
+split direction, and Zellij new-tab creation cannot target a tab. tmux returns
+required pane (`%...`) or window (`@...`) IDs; Zellij 0.44.0 and newer report the pane ID
+as `terminal_<id>` and tab IDs as numeric strings, while older Zellij pane launches report
+none, so `result.id` is unavailable; Herdr requires pane/tab IDs in
+its JSON response. CMUX reports workspace/pane IDs when present, but its JSON
+response may omit an ID, in which case `result.id` is unavailable.
+Orca returns a pane handle at `result.split.handle` or a tab handle at
+`result.terminal.handle`; the top-level JSON `id` is the RPC request ID, not the
+terminal handle.
+
+`cwd` must be an absolute path. A request that is not an object or names an unknown
+multiplexer or placement rejects with a `TypeError`. Every other failure, including a
+recognized provider or placement without launch support, rejects with a sanitized
+`TerminalLaunchError` naming the provider, operation, and exit status when available;
+command argv and CLI output are not included. CMUX and Orca reject malformed JSON
+responses without retrying creation.
+
+There is no shared environment override: each multiplexer applies its own
+environment propagation rules; the dispatcher does not synthesize uniform variable
+inheritance. Request argv stays separate for direct backends; only shell-input
+backends turn argv into shell text, under the required POSIX grammar assertion.
 
 ### RPC mode (`rpc-mode.ts`)
 
@@ -823,7 +1056,7 @@ Unsupported/no-op in RPC implementation:
 
 - `onTerminalInput`
 - `custom`; optional `askDialog` is absent
-- `getEditorText` returns `""`
+- `getEditorText` returns `""`; `getEditorComponent` returns `undefined`
 - `setFooter`, `setHeader`, `setEditorComponent`, `addAutocompleteProvider`
 - `setWorkingMessage`
 - theme switching/loading (`setTheme` returns failure)

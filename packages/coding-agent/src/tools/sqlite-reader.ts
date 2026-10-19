@@ -727,21 +727,34 @@ export function queryRows(
 	table: string,
 	opts: { limit: number; offset: number; order?: string; where?: string },
 ): { columns: string[]; rows: Record<string, unknown>[]; totalCount: number } {
-	const columns = getTableColumns(db, table);
+	getTableMasterRow(db, table);
+	// table_info omits generated columns; use the columns SELECT * actually returns.
+	const columns = db.query<SqliteRow, []>(`SELECT * FROM ${quoteSqliteIdentifier(table)} LIMIT 0`).columnNames;
 	const validatedWhere = validateWhereClause(opts.where);
 	const whereClause = validatedWhere ? ` WHERE ${validatedWhere}` : "";
 	const orderClause = resolveOrderClause(opts.order, columns);
-	const countSql = `SELECT COUNT(*) AS count FROM ${quoteSqliteIdentifier(table)}${whereClause}`;
 	const selectSql = `SELECT * FROM ${quoteSqliteIdentifier(table)}${whereClause}${orderClause} LIMIT ? OFFSET ?`;
-	const totalCount = db.query<SqliteCountRow, []>(countSql).get()?.count ?? 0;
 	const statement = db.query<SqliteRow, SQLQueryBindings[]>(selectSql);
 	if (statement.paramsCount !== 2) {
 		throw new ToolError(
 			"SQLite where clause changed the expected pagination parameters; use q=SELECT ... for raw SQL",
 		);
 	}
-	const rows = statement.all(opts.limit, opts.offset);
-	return { columns, rows, totalCount };
+	const countRows = (): number =>
+		db.query<SqliteCountRow, []>(`SELECT COUNT(*) AS count FROM ${quoteSqliteIdentifier(table)}${whereClause}`).get()
+			?.count ?? 0;
+	if (!Number.isSafeInteger(opts.limit) || opts.limit < 1 || !Number.isSafeInteger(opts.offset) || opts.offset < 0) {
+		const totalCount = countRows();
+		return { columns, rows: statement.all(opts.limit, opts.offset), totalCount };
+	}
+	// Fetch one row past the page: a page that ends the result set already knows
+	// its exact total, so only a page with rows behind it (or an offset past the
+	// end) pays for the full `COUNT(*)` scan.
+	const fetched = statement.all(opts.limit + 1, opts.offset);
+	const hasMore = fetched.length > opts.limit;
+	const rows = hasMore ? fetched.slice(0, opts.limit) : fetched;
+	const endsResultSet = !hasMore && (rows.length > 0 || opts.offset === 0);
+	return { columns, rows, totalCount: endsResultSet ? opts.offset + rows.length : countRows() };
 }
 
 export function getRowByKey(
@@ -911,20 +924,27 @@ export function renderRow(row: Record<string, unknown>): string {
 export function renderTable(
 	columns: string[],
 	rows: Record<string, unknown>[],
-	meta: { totalCount: number; offset: number; limit: number; table: string; dbPath: string },
+	meta: {
+		totalCount: number;
+		offset: number;
+		limit: number;
+		table: string;
+		dbPath: string;
+		where?: string;
+		order?: string;
+	},
 ): string {
 	const parts = [buildAsciiTable(columns, rows)];
 	const shown = Math.min(meta.totalCount, meta.offset + rows.length);
 	if (shown < meta.totalCount) {
 		const remaining = meta.totalCount - shown;
 		const nextOffset = meta.offset + rows.length;
+		const params = new URLSearchParams({ limit: String(meta.limit), offset: String(nextOffset) });
+		if (meta.where !== undefined) params.set("where", meta.where);
+		if (meta.order !== undefined) params.set("order", meta.order);
+		// Keep the full selector usable even when an encoded filter exceeds the table's width.
 		parts.push(
-			truncateToWidth(
-				replaceTabs(
-					`[${remaining} more rows; append :${meta.table}?limit=${meta.limit}&offset=${nextOffset} to the database path to continue]`,
-				),
-				MAX_RENDER_WIDTH,
-			),
+			replaceTabs(`[${remaining} more rows; append :${meta.table}?${params} to the database path to continue]`),
 		);
 	}
 	return parts.join("\n");
