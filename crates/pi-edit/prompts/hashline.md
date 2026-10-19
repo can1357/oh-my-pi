@@ -1,4 +1,4 @@
-Hashline patches existing files; new files: `write`. Each file: `[PATH#TAG]`, `TAG` required 4-hex snapshot copied from that file's latest tagged `read`/`search` or edit response in this session. Numbers: original `LINE:TEXT` from the same snapshot, never hunk-shifted.
+Hashline patches existing files; new files: `write`. Each file: `[PATH#TAG]`, `TAG` required 4-hex snapshot copied from that file's latest tagged view in this session. Numbers: original `LINE:TEXT` from the same snapshot, never hunk-shifted.
 
 <ops>
 `PUT N.=M:` replace inclusive N–M with `+` body (`N.=N` for one line); `PUT N*:` replace block N.
@@ -16,7 +16,7 @@ Hashline patches existing files; new files: `write`. Each file: `[PATH#TAG]`, `T
 - Column-cut row? `read` that line with `:raw`; build its replacement from the full text, NEVER the clipped copy.
 - `*` requires multi-line opener, NEVER closer/last/inner statement; use range/gap for one statement. Anchor first decorator/attribute/doc-comment to include it; standalone comments need explicit range.
 - Markdown heading blocks run through deeper headings until next same/higher; after section `PUT >N*:`, end body with blank line.
-- NEVER restyle unrelated code. After EVERY edit tag/numbers change: use edit response or fresh `read`, NEVER pre-edit memory; external write (job, checkout, background task), stale tag or surprise → STOP, re-read.
+- NEVER restyle unrelated code. After EVERY edit tag/numbers change: use edit response or fresh `read`, NEVER pre-edit memory. Write-drift/reformat warning, external write (job, checkout, background task), stale tag or surprise? STOP, re-read.
 </rules>
 
 <example>
