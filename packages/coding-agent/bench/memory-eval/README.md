@@ -57,7 +57,7 @@ $R diff a.json b.json
 $R calibration-check calib-a.json calib-b.json
 ```
 
-`run` writes `~/.cache/omp-memory-eval/results/<dataset>.<engine>.<protocol>.<time>.json` unless `--out` is given, and prints the aggregate, per-category means, `fallbackRate`, `droppedRows` and `droppedGoldRows`. `oracle` and `random` are sanity engines. `oracle` ranks gold first, so its recall@k must reach the ceiling `min(1, k / |unique gold|)`: `k` slots hold at most `k` gold messages. Some BEAM questions have more than 10, so the oracle's mean recall@10 is below 1. `upstream-compat` runs only with `--engine mnemosyne --dataset beam-100k` (see the calibration section).
+`run` writes `~/.cache/omp-memory-eval/results/<dataset>.<engine>.<protocol>.<time>-<random>.json` unless `--out` is given (the random suffix keeps parallel ablations that start together from overwriting each other), and prints the aggregate, per-category means, `fallbackRate`, `droppedRows` and `droppedGoldRows`. `oracle` and `random` are sanity engines. `oracle` ranks gold first, so its recall@k must reach the ceiling `min(1, k / |unique gold|)`: `k` slots hold at most `k` gold messages. Some BEAM questions have more than 10, so the oracle's mean recall@10 is below 1. `upstream-compat` runs only with `--engine mnemosyne --dataset beam-100k` (see the calibration section).
 
 `--cache-root dir` selects an already prepared cache instead of relying on the operating system's home-directory variables. `run` reads datasets from `dir/data`, writes default results under `dir/results`, and resolves its Python venv and model cache under that root. Standalone preparation/calibration scripts still use the default paths shown above; the JS embedder's shared cache is unchanged.
 
