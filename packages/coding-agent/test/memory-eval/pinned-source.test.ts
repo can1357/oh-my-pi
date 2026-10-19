@@ -5,12 +5,17 @@ import { pythonPath } from "./python";
 const PY = path.join(import.meta.dir, "../../bench/memory-eval/py");
 
 it.skipIf(pythonPath === undefined).each([
-	["untracked code hidden by local status config", "local", "has local changes"],
-	["untracked code hidden by global status config", "global", "has local changes"],
-	["a tracked edit hidden by assume-unchanged", "--assume-unchanged", "index flags hide changes to ['evaluator.py']"],
-	["a tracked edit hidden by skip-worktree", "--skip-worktree", "index flags hide changes to ['evaluator.py']"],
-	["an edit hidden by core.worktree pointing at another clean tree", "core.worktree", "work tree is"],
-	["an ignored shadow module", "ignored", "ignored importable files ['numpy.py']"],
+	["untracked code hidden by local status config", "local", "does not have: ['shadow_module.py']"],
+	["untracked code hidden by global status config", "global", "does not have: ['shadow_module.py']"],
+	["a tracked edit hidden by assume-unchanged", "--assume-unchanged", "has local changes to ['evaluator.py']"],
+	["a tracked edit hidden by skip-worktree", "--skip-worktree", "has local changes to ['evaluator.py']"],
+	[
+		"an edit hidden by core.worktree pointing at another clean tree",
+		"core.worktree",
+		"has local changes to ['evaluator.py']",
+	],
+	["an ignored shadow module", "ignored", "does not have: ['numpy.py']"],
+	["an edit hidden by a clean filter", "filter", "has local changes to ['evaluator.py']"],
 ])("rejects %s, but accepts the clean pin", async (_name, mode, refusal) => {
 	const proc = Bun.spawn(
 		[
@@ -51,6 +56,13 @@ with tempfile.TemporaryDirectory(prefix="memory-eval-pin-") as tmp:
     mode = sys.argv[2]
     if mode == "ignored":
         (repo / "numpy.py").write_text("raise RuntimeError('ignored shadow dependency')\\n")
+    elif mode == "filter":
+        # A clean filter that always yields the pinned bytes makes git see the pinned blob whatever is on disk.
+        # The edit keeps the size: git counts a size change as modified without running the filter.
+        (repo / ".git" / "info" / "attributes").write_text("evaluator.py filter=hide\\n")
+        git("config", "filter.hide.clean", "printf 'PINNED = True\\\\n'")
+        (repo / "evaluator.py").write_text("PINNED = 9999\\n")
+        assert git("status", "--porcelain") == "", "the filter should hide the edit from git status"
     elif mode == "core.worktree":
         other = home / "other"
         other.mkdir()
