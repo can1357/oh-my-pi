@@ -9,19 +9,21 @@ setrlimit (clamped to the hard limit), load_dataset (pinned BEAM revision, harne
 BeamMemory.consolidate_to_episodic (recorded, because upstream swallows their exceptions).
 """
 
-import argparse
-import json
 import os
-import shutil
-import statistics
 import sys
-import tempfile
-from pathlib import Path
 
-# Another package tree could supply Mnemosyne or its dependencies; the harness's own Python children scrub these.
+# First, before any import that searches PYTHONPATH: os and sys are already loaded at interpreter startup, but an
+# override tree could shadow the standard modules below, Mnemosyne or its dependencies.
 for name in ("PYTHONPATH", "PYTHONHOME"):
 	if os.environ.get(name):
 		sys.exit(f"upstream_run_a.py: refusing to run with {name} set; unset it so the venv's packages are imported")
+
+import argparse  # noqa: E402
+import json  # noqa: E402
+import shutil  # noqa: E402
+import statistics  # noqa: E402
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 try:
 	import resource

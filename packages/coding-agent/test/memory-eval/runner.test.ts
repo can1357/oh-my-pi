@@ -40,6 +40,8 @@ interface FakeOptions {
 	vectors?: number;
 	dropped?: DroppedRow[];
 	onSleep?: () => void;
+	/** Summaries sleep left without a vector; unset is 0. */
+	unembeddedSummaries?: number;
 }
 
 function fakeEngine(options: FakeOptions): EngineAdapter {
@@ -51,6 +53,7 @@ function fakeEngine(options: FakeOptions): EngineAdapter {
 		// Unset: every remembered row has its vector.
 		vectorCount: async () => options.vectors ?? Number.POSITIVE_INFINITY,
 		sleep: async () => options.onSleep?.(),
+		unembeddedSummaries: async () => options.unembeddedSummaries ?? 0,
 		recall: async (_question, k) => options.hits.slice(0, k),
 		lastDropped: () => options.dropped ?? [],
 		close: async () => {},
@@ -210,6 +213,22 @@ describe("runner", () => {
 		);
 		opened = 0;
 		expect((await runCases(engine, cases, "fts-only", 10, tmp)).questions).toHaveLength(2);
+	});
+	it("aborts a with-sleep case whose summaries were left without a vector, before any recall", async () => {
+		let recalled = false;
+		const engine: EngineAdapter = {
+			...fakeEngine({ rowIds: items => items.map((_, i) => `r${i}`), hits: [], unembeddedSummaries: 1 }),
+			recall: async () => {
+				recalled = true;
+				return [];
+			},
+		};
+		await expect(runCases(engine, [twoMessageCase], "with-sleep", 10, tmp)).rejects.toThrow(
+			"embeddings unavailable for mnemopi: 1 summary written by sleep in case c/1 has no vector",
+		);
+		expect(recalled).toBe(false);
+		// Without sleep, summaries are never checked.
+		expect((await runCases(engine, [twoMessageCase], "standard", 10, tmp)).questions).toHaveLength(1);
 	});
 	it("builds aggregates, nearest-rank latency percentiles and the primary metric", async () => {
 		const { cases } = await loadDataset("lme-s", fixtureDir);
