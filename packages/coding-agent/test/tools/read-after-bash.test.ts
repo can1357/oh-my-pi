@@ -187,6 +187,58 @@ describe("a read after a bash call in the same message", () => {
 
 		expect(text).toContain("b.txt");
 	});
+
+	it("reads a WAL-mode SQLite table the bash command updated while another connection holds it open", async () => {
+		const directory = await tempDirectory();
+		const held = new Database(path.join(directory, "db.sqlite"));
+		try {
+			held.run("pragma journal_mode = wal");
+			held.run("create table t (v text)");
+			held.run("insert into t values ('old')");
+			// Everything in the main file, then an open read transaction: the
+			// writer's closing checkpoint cannot copy its update past this reader,
+			// so the update lives only in `db.sqlite-wal`.
+			held.run("pragma wal_checkpoint(truncate)");
+			held.run("begin");
+			held.query("select * from t").all();
+			await Bun.write(
+				path.join(directory, "update.ts"),
+				`import { Database } from "bun:sqlite"; new Database("db.sqlite").run("update t set v = 'new'");`,
+			);
+
+			const { text } = await bashThenRead(directory, `"${process.execPath}" update.ts`, "db.sqlite:t");
+
+			expect(text).toContain("new");
+			expect(text).not.toContain("old");
+		} finally {
+			held.run("rollback");
+			held.close();
+		}
+	});
+
+	it("lists an entry the bash command added under a directory too large to fingerprint", async () => {
+		const directory = await tempDirectory();
+		await Promise.all(
+			Array.from({ length: 2001 }, (_, i) =>
+				Bun.write(path.join(directory, "big", `f${String(i).padStart(4, "0")}`), ""),
+			),
+		);
+		await Bun.write(path.join(directory, "big", "zz", "a.txt"), "a\n");
+
+		const { text } = await bashThenRead(directory, "echo b > big/zz/b.txt", "big");
+
+		expect(text).toContain("b.txt");
+	});
+
+	it("reads the exact file the bash command created where a spelling fallback matched before", async () => {
+		const directory = await tempDirectory();
+		await Bun.write(path.join(directory, "it\u2019s.txt"), "fallback\n");
+
+		const { text } = await bashThenRead(directory, `echo exact > "it's.txt"`, "it's.txt");
+
+		expect(text).toContain("exact");
+		expect(text).not.toContain("fallback");
+	});
 });
 
 describe("a read beside an earlier writing call", () => {
