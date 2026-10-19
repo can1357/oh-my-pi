@@ -460,11 +460,11 @@ async function startMessageReader(client: LspClient): Promise<void> {
 								const params = message.params as { token: string | number; value?: { kind?: string } };
 								if (params.value?.kind === "begin") {
 									client.activeProgressTokens.add(params.token);
-									awaitingFolderProgress.delete(client);
+									countFolderLoad(client, -1);
 								} else if (params.value?.kind === "end") {
 									client.activeProgressTokens.delete(params.token);
 									// After a folder add, only progress that began since ends the load.
-									if (client.activeProgressTokens.size === 0 && !awaitingFolderProgress.has(client)) {
+									if (client.activeProgressTokens.size === 0 && !pendingFolderLoads.has(client)) {
 										client.resolveProjectLoaded();
 									}
 								}
@@ -549,8 +549,17 @@ function currentWorkspaceFolders(client: LspClient): Array<{ uri: string; name: 
 	return [client.cwd, ...(addedWorkspaceFolders.get(client)?.keys() ?? [])].map(workspaceFolder);
 }
 
-/** Clients that added a folder and have not seen progress begin since; their load stays pending. */
-const awaitingFolderProgress = new WeakSet<LspClient>();
+/**
+ * Per client, folder-add notifications whose load has not begun: each progress `begin`
+ * after an add starts one, and the project load stays pending while any is left.
+ */
+const pendingFolderLoads = new WeakMap<LspClient, number>();
+
+function countFolderLoad(client: LspClient, delta: number): void {
+	const count = (pendingFolderLoads.get(client) ?? 0) + delta;
+	if (count > 0) pendingFolderLoads.set(client, count);
+	else pendingFolderLoads.delete(client);
+}
 
 /** `filePath` with symlinks resolved, a missing tail kept; lexical when it cannot be resolved. */
 async function realPathOf(filePath: string): Promise<string> {
@@ -575,47 +584,57 @@ async function workspaceFolderToAdd(client: LspClient, filePath: string): Promis
 }
 
 /**
- * Add the checkout holding `filePath` to `client`'s workspace when the server would
- * otherwise not load it ({@link workspaceFolderToAdd}), and return once the server has
- * it. Concurrent callers for one checkout share one delivery, which the caller's abort
- * does not cancel. The server re-indexes, so the client's project-load wait covers that
- * load too.
+ * Add the checkouts holding `filePaths` to `client`'s workspace where the server would
+ * otherwise not load them ({@link workspaceFolderToAdd}), in one notification, and return
+ * once the server has them. Concurrent callers for one checkout share its delivery, which
+ * a caller's abort does not cancel. The server re-indexes, so the client's project-load
+ * wait covers that load too.
  */
-export async function ensureWorkspaceFolder(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
-	const folder = await workspaceFolderToAdd(client, filePath);
-	if (!folder) return;
-	let folders = addedWorkspaceFolders.get(client);
-	if (!folders) {
-		folders = new Map();
-		addedWorkspaceFolders.set(client, folders);
+export async function ensureWorkspaceFolders(
+	client: LspClient,
+	filePaths: readonly string[],
+	signal?: AbortSignal,
+): Promise<void> {
+	const wanted = new Set<string>();
+	for (const filePath of filePaths) {
+		const folder = await workspaceFolderToAdd(client, filePath);
+		if (folder) wanted.add(folder);
 	}
-	let delivery = folders.get(folder);
-	if (!delivery) {
-		delivery = addWorkspaceFolder(client, folder, folders);
+	if (wanted.size === 0) return;
+	const folders = addedWorkspaceFolders.get(client) ?? new Map<string, Promise<void>>();
+	addedWorkspaceFolders.set(client, folders);
+	const missing = [...wanted].filter(folder => !folders.has(folder));
+	if (missing.length > 0) {
+		const delivery = addWorkspaceFolders(client, missing, folders);
 		delivery.catch(() => {});
-		folders.set(folder, delivery);
+		for (const folder of missing) folders.set(folder, delivery);
 	}
-	await untilAborted(signal, delivery);
+	await untilAborted(signal, Promise.all([...wanted].map(folder => folders.get(folder))));
 }
 
-async function addWorkspaceFolder(
+/** {@link ensureWorkspaceFolders} for one file. */
+export function ensureWorkspaceFolder(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
+	return ensureWorkspaceFolders(client, [filePath], signal);
+}
+
+async function addWorkspaceFolders(
 	client: LspClient,
-	folder: string,
+	added: readonly string[],
 	folders: Map<string, Promise<void>>,
 ): Promise<void> {
 	const undoLoad = restartProjectLoad(client);
-	// Progress already running when the add arrives says nothing about the new folder.
-	awaitingFolderProgress.add(client);
+	// Progress already running when the add arrives says nothing about the new folders.
+	countFolderLoad(client, 1);
 	try {
 		await sendNotification(
 			client,
 			"workspace/didChangeWorkspaceFolders",
-			{ event: { added: [workspaceFolder(folder)], removed: [] } },
+			{ event: { added: added.map(workspaceFolder), removed: [] } },
 			AbortSignal.timeout(WATCHED_FILES_NOTIFY_TIMEOUT_MS),
 		);
 	} catch (err) {
-		folders.delete(folder);
-		awaitingFolderProgress.delete(client);
+		for (const folder of added) folders.delete(folder);
+		countFolderLoad(client, -1);
 		undoLoad();
 		throw err;
 	}

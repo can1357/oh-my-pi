@@ -21,6 +21,7 @@ import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
 	ensureWorkspaceFolder,
+	ensureWorkspaceFolders,
 	getActiveClients,
 	getOrCreateClient,
 	isRustAnalyzerClient,
@@ -612,15 +613,14 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				try {
 					client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
 					// Per renamed file, both sides, not per directory: a rename can span checkouts.
-					const checkedDirs = new Set<string>();
+					// One file per directory is enough, and one notification adds them all.
+					const byDir = new Map<string, string>();
 					for (const { oldUri, newUri } of pairs) {
 						for (const filePath of [uriToFile(oldUri), uriToFile(newUri)]) {
-							const dir = path.dirname(filePath);
-							if (checkedDirs.has(dir)) continue;
-							checkedDirs.add(dir);
-							await ensureWorkspaceFolder(client, filePath, signal);
+							if (!byDir.has(path.dirname(filePath))) byDir.set(path.dirname(filePath), filePath);
 						}
 					}
+					await ensureWorkspaceFolders(client, [...byDir.values()], signal);
 					if (isProjectAwareLspServer(serverConfig)) {
 						await waitForProjectLoaded(client, signal);
 					}

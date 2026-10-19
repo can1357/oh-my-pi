@@ -3959,6 +3959,7 @@ describe("lsp regressions", () => {
 				const { server, serverConfig } = useServer(FOLDER_CHANGES);
 				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
 				progress(server, "load", "begin");
+				await lspClient.sendRequest(client, "test/barrier", {});
 				let waited = false;
 				const waiting = lspClient.waitForProjectLoaded(client).then(() => {
 					waited = true;
@@ -4108,6 +4109,7 @@ describe("lsp regressions", () => {
 				const { server, serverConfig } = useServer(FOLDER_CHANGES);
 				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
 				progress(server, "startup", "begin");
+				await lspClient.sendRequest(client, "test/barrier", {});
 				await lspClient.ensureWorkspaceFolder(client, path.join(siblingRoot, "src", "target.py"));
 				let loaded = false;
 				const waiting = lspClient.waitForProjectLoaded(client).then(() => {
@@ -4124,6 +4126,65 @@ describe("lsp regressions", () => {
 				await waiting;
 				expect(loaded).toBe(true);
 			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("keeps the load pending until each of two separate adds has begun its own progress", async () => {
+			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-two-adds-");
+			const thirdRoot = path.join(tempDir.path(), "third");
+			try {
+				await Bun.write(path.join(thirdRoot, ".git"), "gitdir: ../main/.git/worktrees/third\n");
+				await Bun.write(path.join(thirdRoot, "src", "target.py"), "def target():\n    return 1\n");
+				const { server, serverConfig } = useServer(FOLDER_CHANGES);
+				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
+				progress(server, "startup", "begin");
+				progress(server, "startup", "end");
+				await lspClient.sendRequest(client, "test/barrier", {});
+				await lspClient.ensureWorkspaceFolder(client, path.join(siblingRoot, "src", "target.py"));
+				await lspClient.ensureWorkspaceFolder(client, path.join(thirdRoot, "src", "target.py"));
+				let loaded = false;
+				const waiting = lspClient.waitForProjectLoaded(client).then(() => {
+					loaded = true;
+				});
+
+				progress(server, "feature", "begin");
+				progress(server, "feature", "end");
+				await lspClient.sendRequest(client, "test/barrier", {});
+				expect(loaded).toBe(false);
+
+				progress(server, "third", "begin");
+				progress(server, "third", "end");
+				await waiting;
+				expect(loaded).toBe(true);
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("adds both checkouts of a rename between two other checkouts in one notification", async () => {
+			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-rename-two-");
+			const thirdRoot = path.join(tempDir.path(), "third");
+			try {
+				await Bun.write(path.join(thirdRoot, ".git"), "gitdir: ../main/.git/worktrees/third\n");
+				await fsp.mkdir(path.join(thirdRoot, "src"), { recursive: true });
+				const { server } = useServer(FOLDER_CHANGES);
+
+				await new LspTool(makeLspSession(sessionRoot)).execute("rename-between-siblings", {
+					action: "rename_file",
+					file: path.join(siblingRoot, "src", "target.py"),
+					new_name: path.join(thirdRoot, "src", "moved.py"),
+					apply: false,
+				});
+
+				const third = fs.realpathSync(thirdRoot);
+				expect(folderAdds(server)).toEqual([
+					{ event: { added: [siblingRoot, third].map(dir => folderAdd(dir).event.added[0]), removed: [] } },
+				]);
+			} finally {
+				configCache.delete(sessionRoot);
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
 			}
