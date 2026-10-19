@@ -32,6 +32,8 @@ export type UpstreamCompatOps = {
 		scope: string,
 	): Promise<string | null>;
 	recallRaw(query: string, k: number): Promise<string[]>;
+	/** How many of `ids` (working or episodic rows) have a stored vector, in any of Mnemosyne's vector tables. */
+	vectorCoverage(ids: string[]): Promise<number>;
 };
 
 interface WireHit {
@@ -106,6 +108,7 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 			return (await live().call("remember", { items: wireItems })) as (string | null)[];
 		},
 		vectorCount: async () => (await live().call("vector_count")) as number,
+		vectorCoverage: async ids => (await live().call("vector_coverage", { ids })) as number,
 		sleep: async () => {
 			await live().call("sleep");
 		},

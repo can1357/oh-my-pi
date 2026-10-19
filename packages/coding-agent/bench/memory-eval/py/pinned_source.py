@@ -23,10 +23,14 @@ def require_pinned(repo: Path, commit: str) -> None:
 
 	try:
 		head, status = git("rev-parse", "HEAD"), git("status", "--porcelain", "--untracked-files=all")
+		# A local `core.worktree` would make every check above inspect another tree than the one callers import.
+		top = git("rev-parse", "--show-toplevel")
 		# `status` skips files marked assume-unchanged (lowercase tag) or skip-worktree (`S`), so edits to them hide.
 		hidden = [line[2:] for line in git("ls-files", "-v").splitlines() if line[:1].islower() or line[:1] == "S"]
 	except (OSError, subprocess.CalledProcessError) as error:
 		sys.exit(f"{repo}: not a readable git checkout ({error}); redo the one-time setup")
+	if Path(top).resolve() != repo.resolve():
+		sys.exit(f"{repo}: work tree is {top}, not the checkout itself; restore it to {commit}")
 	if head != commit:
 		sys.exit(f"{repo}: HEAD is {head}, expected {commit}; redo the one-time setup")
 	if status:

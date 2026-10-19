@@ -41,6 +41,8 @@ export interface QuestionResult {
 export interface RunConfig {
 	dataset: DatasetName;
 	datasetRevision: string;
+	/** SHA-256 of the prepared dataset file; `diff` refuses differing digests. Absent in older files. */
+	datasetSha256?: string;
 	engine: EngineName;
 	engineInfo: Record<string, string>;
 	protocol: ProtocolName;

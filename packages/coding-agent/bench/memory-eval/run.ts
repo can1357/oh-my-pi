@@ -60,6 +60,12 @@ async function cachedRevision(dataset: DatasetName, dataDir: string): Promise<st
 	return revision;
 }
 
+/** SHA-256 of the prepared file: the revision alone does not prove which bytes a converter produced from it. */
+async function datasetSha256(dataset: DatasetName, dataDir: string): Promise<string> {
+	const file = path.join(dataDir, `${dataset.startsWith("beam") ? dataset : "lme-s"}.json`);
+	return new Bun.CryptoHasher("sha256").update(await Bun.file(file).bytes()).digest("hex");
+}
+
 interface EngineOptions {
 	embedder: MnemopiEmbedder;
 	mnemopiRecall: MnemopiRecall;
@@ -165,6 +171,7 @@ async function runCommand(argv: string[]): Promise<void> {
 			let run: RunOutput;
 			let excluded: ExcludedQuestion[] = [];
 			const datasetRevision = await cachedRevision(dataset, dataDir);
+			const datasetDigest = await datasetSha256(dataset, dataDir);
 			if (protocol === "upstream-compat") {
 				if (dataset !== "beam-100k" || !hasCompatOps(engine)) {
 					throw new Error("upstream-compat runs only with --engine mnemosyne --dataset beam-100k");
@@ -183,6 +190,7 @@ async function runCommand(argv: string[]): Promise<void> {
 				{
 					dataset,
 					datasetRevision,
+					datasetSha256: datasetDigest,
 					engine: engine.name,
 					engineInfo: await engine.describe(),
 					protocol,
@@ -270,6 +278,9 @@ async function diffCommand(argv: string[]): Promise<void> {
 	}
 	if (a.config.datasetRevision !== b.config.datasetRevision) {
 		throw new Error(`datasetRevision differs: ${a.config.datasetRevision} vs ${b.config.datasetRevision}`);
+	}
+	if (a.config.datasetSha256 && b.config.datasetSha256 && a.config.datasetSha256 !== b.config.datasetSha256) {
+		throw new Error(`datasetSha256 differs: ${a.config.datasetSha256} vs ${b.config.datasetSha256}`);
 	}
 	if (a.config.protocol !== b.config.protocol) {
 		throw new Error(`protocol differs: ${a.config.protocol} vs ${b.config.protocol}`);
