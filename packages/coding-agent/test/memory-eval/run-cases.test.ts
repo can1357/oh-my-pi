@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { stripGitRepoLocationEnv } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, stripGitRepoLocationEnv } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { pinnedCheckout } from "../../bench/memory-eval/run";
 
@@ -14,32 +14,32 @@ const BEAM_REVISION = "3205395e897e7318c7b094ef4e6047b9b82dbb03";
 // Each case spawns the CLI, which loads the harness and Mnemopi; on a loaded machine that exceeds bun's 5 s default.
 setDefaultTimeout(30_000);
 
-// Temp HOMEs whose cache holds only the BEAM fixture: runs never read or write the real cache.
+// Inject a private benchmark cache: HOME/USERPROFILE remain unchanged on every platform.
 let root: string;
-let home: string;
+let cacheRoot: string;
 beforeAll(async () => {
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-cases-"));
-	home = await cacheHome("pinned", BEAM_REVISION);
+	cacheRoot = await fixtureCache("pinned", BEAM_REVISION);
 });
 afterAll(async () => {
-	await fs.rm(root, { recursive: true, force: true });
+	await removeWithRetries(root);
 });
 
-/** A HOME holding the BEAM fixture and, unless `revision` is undefined, its revision marker. */
-async function cacheHome(name: string, revision: string | undefined): Promise<string> {
+/** A private cache holding the fixture and, unless `revision` is undefined, its revision marker. */
+async function fixtureCache(name: string, revision: string | undefined): Promise<string> {
 	const dir = path.join(root, name);
-	const data = path.join(dir, ".cache", "omp-memory-eval", "data");
+	const data = path.join(dir, "data");
 	await fs.mkdir(data, { recursive: true });
 	await fs.copyFile(path.join(FIXTURE_DATA, "beam-100k.json"), path.join(data, "beam-100k.json"));
 	if (revision !== undefined) await Bun.write(path.join(data, "beam-100k.json.revision"), `${revision}\n`);
 	return dir;
 }
 
-/** `run --dataset beam-100k` plus `args` with HOME `homeDir`, without MNEMOPI_* in the environment. */
-async function runAt(homeDir: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+/** `run --dataset beam-100k` plus `args` using an explicit cache root, with no MNEMOPI_* overrides. */
+async function runAt(cacheDir: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
 	const env = Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.startsWith("MNEMOPI_")));
-	const proc = Bun.spawn([process.execPath, RUN, "run", "--dataset", "beam-100k", ...args], {
-		env: { ...env, HOME: homeDir },
+	const proc = Bun.spawn([process.execPath, RUN, "run", "--dataset", "beam-100k", "--cache-root", cacheDir, ...args], {
+		env,
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -51,7 +51,13 @@ async function runAt(homeDir: string, args: string[]): Promise<{ stdout: string;
 	return { stdout, stderr, code };
 }
 
-const run = (...args: string[]) => runAt(home, args);
+const run = (...args: string[]) => runAt(cacheRoot, args);
+
+it("run rejects an empty cache root instead of silently using the current directory", async () => {
+	const { stderr, code } = await run("--engine", "oracle", "--protocol", "standard", "--cache-root=");
+	expect(code).toBe(1);
+	expect(stderr).toContain("--cache-root must not be empty");
+});
 
 it("run rejects a --cases value that is not a positive integer", async () => {
 	const runs = await Promise.all([
@@ -82,8 +88,8 @@ it("run rejects engine options the engine does not have", async () => {
 });
 
 it("run records the engine options in the result config", async () => {
-	const defaults = path.join(home, "defaults.json");
-	const ablation = path.join(home, "ablation.json");
+	const defaults = path.join(cacheRoot, "defaults.json");
+	const ablation = path.join(cacheRoot, "ablation.json");
 	const [a, b] = await Promise.all([
 		run("--engine", "oracle", "--protocol", "standard", "--out", defaults),
 		run(
@@ -108,12 +114,18 @@ it("run records the engine options in the result config", async () => {
 		gitDirty: expect.any(Boolean),
 	});
 	expect((await Bun.file(ablation).json()).config).toMatchObject({ mnemopiRecall: "enhanced", polyphonic: true });
+	// Only these questions survive the private fixture's blank/abstention exclusions; the user's cache must not be read.
+	expect((await Bun.file(defaults).json()).questions.map((q: { questionId: string }) => q.questionId).sort()).toEqual([
+		"c1:contradiction_resolution:0",
+		"c1:event_ordering:0",
+		"c1:multi_session_reasoning:0",
+	]);
 });
 
 it("run refuses a cached dataset whose recorded revision is missing or not the pinned one", async () => {
 	const [stale, bare] = await Promise.all([
-		cacheHome("stale", "deadbeef").then(dir => runAt(dir, ["--engine", "oracle", "--protocol", "standard"])),
-		cacheHome("bare", undefined).then(dir => runAt(dir, ["--engine", "oracle", "--protocol", "standard"])),
+		fixtureCache("stale", "deadbeef").then(dir => runAt(dir, ["--engine", "oracle", "--protocol", "standard"])),
+		fixtureCache("bare", undefined).then(dir => runAt(dir, ["--engine", "oracle", "--protocol", "standard"])),
 	]);
 	expect(stale.code).toBe(1);
 	expect(stale.stderr).toContain(`beam-100k.json.revision: revision deadbeef, expected ${BEAM_REVISION}`);

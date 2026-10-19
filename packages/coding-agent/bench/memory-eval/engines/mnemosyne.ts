@@ -6,16 +6,17 @@ import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { DroppedRow, EngineAdapter, ProtocolName, RecallHit } from "../engine";
 import { envName, PythonProcess } from "./python-process";
+import { enginePython, resolveCacheRoot } from "../paths";
 
 const EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
-const CACHE_ROOT = path.join(os.homedir(), ".cache", "omp-memory-eval");
-const DEFAULT_PYTHON = path.join(CACHE_ROOT, "venv-engine", "bin", "python");
 const DEFAULT_SCRIPT = path.resolve(import.meta.dir, "../py/mnemosyne_engine.py");
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../../..");
 
 export interface MnemosyneEngineOptions {
 	python?: string;
 	script?: string;
+	/** Venv and Python-embedder model cache root. */
+	cacheRoot?: string;
 	/** Polyphonic recall (`MNEMOSYNE_POLYPHONIC_RECALL=1`). */
 	polyphonic?: boolean;
 }
@@ -48,7 +49,8 @@ interface WireDropped {
 }
 
 export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAdapter & UpstreamCompatOps {
-	const python = options.python ?? DEFAULT_PYTHON;
+	const cacheRoot = resolveCacheRoot(options.cacheRoot);
+	const python = options.python ?? enginePython(cacheRoot);
 	const script = options.script ?? DEFAULT_SCRIPT;
 	let proc: PythonProcess | undefined;
 	let served: ProtocolName | undefined;
@@ -70,7 +72,7 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 		proc = new PythonProcess("mnemosyne engine", python, script, {
 			...Object.fromEntries(inherited),
 			MNEMOSYNE_DATA_DIR: dataDir,
-			MNEMOSYNE_FASTEMBED_CACHE_DIR: path.join(CACHE_ROOT, "fastembed"),
+			MNEMOSYNE_FASTEMBED_CACHE_DIR: path.join(cacheRoot, "fastembed"),
 			MNEMOSYNE_EMBEDDING_MODEL: EMBEDDING_MODEL,
 			MNEMOSYNE_LLM_ENABLED: "false",
 			// Larger than any conversation (BEAM 500K peaks near 1,500 messages), so working memory never evicts, like

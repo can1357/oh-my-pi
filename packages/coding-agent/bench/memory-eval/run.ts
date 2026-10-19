@@ -1,6 +1,6 @@
 // Run: bun packages/coding-agent/bench/memory-eval/run.ts <subcommand>
 //   run  --dataset <name> --engine <name> --protocol <name> [--embedder js|python] [--mnemopi-recall recall|enhanced]
-//        [--polyphonic] [--cases N] [--out file]
+//        [--polyphonic] [--cases N] [--cache-root dir] [--out file]
 //        --embedder applies to mnemopi only: `python` swaps its slow JS fastembed for the same model in Python fastembed.
 //        --mnemopi-recall applies to mnemopi only: `enhanced` recalls through `recallEnhanced` with facts, as omp does.
 //        --polyphonic turns on polyphonic recall (mnemopi needs `--mnemopi-recall enhanced`, mnemosyne).
@@ -21,8 +21,8 @@ import { oracleEngine, randomEngine } from "./engines/sanity";
 import { buildResultFile, primaryMetric, type ResultFile, type RunConfig, type RunOutput, runCases } from "./runner";
 import { type BootstrapResult, pairedBootstrap, verdict } from "./stats";
 import type { DatasetName, ExcludedQuestion } from "./types";
+import { resolveCacheRoot } from "./paths";
 
-const CACHE_ROOT = path.join(os.homedir(), ".cache", "omp-memory-eval");
 const DATASETS: DatasetName[] = ["beam-100k", "beam-500k", "lme-s", "lme-s-dev"];
 const PROTOCOLS: ProtocolName[] = ["standard", "fts-only", "with-sleep", "upstream-compat"];
 const REVISIONS = {
@@ -64,9 +64,10 @@ interface EngineOptions {
 	embedder: MnemopiEmbedder;
 	mnemopiRecall: MnemopiRecall;
 	polyphonic: boolean;
+	cacheRoot: string;
 }
 
-function createEngine(name: string, { embedder, mnemopiRecall, polyphonic }: EngineOptions): EngineAdapter {
+function createEngine(name: string, { embedder, mnemopiRecall, polyphonic, cacheRoot }: EngineOptions): EngineAdapter {
 	if (embedder !== "js" && name !== "mnemopi") throw new Error("--embedder applies to the mnemopi engine only");
 	if (mnemopiRecall !== "recall" && name !== "mnemopi") {
 		throw new Error("--mnemopi-recall applies to the mnemopi engine only");
@@ -80,9 +81,9 @@ function createEngine(name: string, { embedder, mnemopiRecall, polyphonic }: Eng
 			throw new Error("--polyphonic with --engine mnemopi needs --mnemopi-recall enhanced");
 		}
 		assertMnemopiEnvClean();
-		return mnemopiEngine({ embedder, recall: mnemopiRecall, polyphonic });
+		return mnemopiEngine({ embedder, recall: mnemopiRecall, polyphonic, cacheRoot });
 	}
-	if (name === "mnemosyne") return mnemosyneEngine({ polyphonic });
+	if (name === "mnemosyne") return mnemosyneEngine({ polyphonic, cacheRoot });
 	if (name === "oracle") return oracleEngine();
 	if (name === "random") return randomEngine();
 	throw new Error(`engine "${name}" is not available in this build (known: mnemopi, mnemosyne, oracle, random)`);
@@ -128,6 +129,7 @@ async function runCommand(argv: string[]): Promise<void> {
 			protocol: { type: "string" },
 			cases: { type: "string" },
 			out: { type: "string" },
+			"cache-root": { type: "string" },
 			embedder: { type: "string", default: "js" },
 			"mnemopi-recall": { type: "string", default: "recall" },
 			polyphonic: { type: "boolean", default: false },
@@ -136,17 +138,19 @@ async function runCommand(argv: string[]): Promise<void> {
 	const dataset = pick(values.dataset, DATASETS, "dataset");
 	const protocol = pick(values.protocol, PROTOCOLS, "protocol");
 	const cases = caseLimit(values.cases);
+	const cacheRoot = resolveCacheRoot(values["cache-root"]);
 	const engineOptions: EngineOptions = {
 		embedder: pick(values.embedder, ["js", "python"] as const, "embedder"),
 		mnemopiRecall: pick(values["mnemopi-recall"], ["recall", "enhanced"] as const, "mnemopi-recall"),
 		polyphonic: values.polyphonic,
+		cacheRoot,
 	};
 	const engine = createEngine(values.engine ?? "", engineOptions);
 	const k = dataset.startsWith("beam") ? 10 : 50;
 
 	const startedAt = new Date().toISOString();
 	const harness = await harnessHash();
-	const dataDir = path.join(CACHE_ROOT, "data");
+	const dataDir = path.join(cacheRoot, "data");
 	const result = await pinnedCheckout(REPO_ROOT, async git => {
 		const storeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-"));
 		try {
@@ -195,7 +199,7 @@ async function runCommand(argv: string[]): Promise<void> {
 
 	const out =
 		values.out ??
-		path.join(CACHE_ROOT, "results", `${dataset}.${engine.name}.${protocol}.${startedAt.replace(/[:.]/g, "-")}.json`);
+		path.join(cacheRoot, "results", `${dataset}.${engine.name}.${protocol}.${startedAt.replace(/[:.]/g, "-")}.json`);
 	await Bun.write(out, JSON.stringify(result));
 	console.log(`aggregate: ${JSON.stringify(result.aggregate, null, 2)}`);
 	console.log(`perCategory: ${JSON.stringify(result.perCategory, null, 2)}`);

@@ -1,8 +1,8 @@
 # memory-eval
 
 Retrieval benchmark harness: Mnemopi (`packages/mnemopi`) vs upstream Mnemosyne 4.0.0b4.
-Everything it downloads lives under `~/.cache/omp-memory-eval/` and is never committed, except the embedding model Mnemopi's own fastembed loads (`--embedder js`, `embed-parity.ts`): Mnemopi has no option to move it, so it shares omp's fastembed cache (`~/.omp/cache/fastembed` by default).
-The setup and commands assume a POSIX shell and virtualenv layout (`venv-engine/bin/python`): Linux or macOS, or WSL on Windows.
+Downloads default to `~/.cache/omp-memory-eval/` and are never committed, except the embedding model Mnemopi's own fastembed loads (`--embedder js`, `embed-parity.ts`): Mnemopi has no option to move it, so it shares omp's fastembed cache (`~/.omp/cache/fastembed` by default).
+The setup commands below assume a POSIX shell (Linux, macOS or WSL). The CLI resolves `venv-engine/bin/python` on POSIX and `venv-engine/Scripts/python.exe` on native Windows; a native Windows setup needs the corresponding shell commands.
 
 ## One-time setup
 
@@ -50,12 +50,14 @@ Set `MEMORY_EVAL_DEBUG_SCORES=<file.jsonl>` for both runs to append the score, t
 
 ```sh
 R="bun packages/coding-agent/bench/memory-eval/run.ts"; O=~/.cache/omp-memory-eval/results
-$R run --dataset <beam-100k|beam-500k|lme-s|lme-s-dev> --engine <mnemopi|mnemosyne|oracle|random> --protocol <standard|fts-only|with-sleep|upstream-compat> [--embedder js|python] [--mnemopi-recall recall|enhanced] [--polyphonic] [--cases N] [--out file]
+$R run --dataset <beam-100k|beam-500k|lme-s|lme-s-dev> --engine <mnemopi|mnemosyne|oracle|random> --protocol <standard|fts-only|with-sleep|upstream-compat> [--cache-root dir] [--embedder js|python] [--mnemopi-recall recall|enhanced] [--polyphonic] [--cases N] [--out file]
 $R diff a.json b.json
 $R calibration-check calib-a.json calib-b.json
 ```
 
 `run` writes `~/.cache/omp-memory-eval/results/<dataset>.<engine>.<protocol>.<time>.json` unless `--out` is given, and prints the aggregate, per-category means, `fallbackRate`, `droppedRows` and `droppedGoldRows`. `oracle` and `random` are sanity engines. `oracle` ranks gold first, so its recall@k must reach the ceiling `min(1, k / |unique gold|)`: `k` slots hold at most `k` gold messages. Some BEAM questions have more than 10, so the oracle's mean recall@10 is below 1. `upstream-compat` runs only with `--engine mnemosyne --dataset beam-100k` (see the calibration section).
+
+`--cache-root dir` selects an already prepared cache instead of relying on the operating system's home-directory variables. `run` reads datasets from `dir/data`, writes default results under `dir/results`, and resolves its Python venv and model cache under that root. Standalone preparation/calibration scripts still use the default paths shown above; the JS embedder's shared cache is unchanged.
 
 The result's `config.gitCommit` and `config.gitDirty` are the checkout's HEAD and whether it had uncommitted or untracked changes, both read before the engine warms up. If HEAD moves during the run, `run` exits 1 without writing a result: the code that produced it would be unknown.
 
@@ -102,7 +104,7 @@ The verdict is `helps` when the overall interval lies above 0 and no category's 
 
 Mnemopi runs in the harness process and reads its configuration from the environment, so `run --engine mnemopi` and `embed-parity.ts` refuse to start while any `MNEMOPI_*` or `OPENROUTER_BASE_URL` (which can route its embeddings to an API) is set. Mnemosyne's child process never inherits the parent's `MNEMOSYNE_*`.
 
-Never run real engines under `bun test`: with `NODE_ENV=test` Mnemopi's local embeddings are disabled. The tests use fakes and stub engine scripts.
+Never run real engines under `bun test`: with `NODE_ENV=test` Mnemopi's local embeddings are disabled. The tests use fakes and stub engine scripts. Python-backed tests probe for a working Python 3 (`PYTHON`, then `python3`/`python` on `PATH`) and skip if none is available, including nonworking Windows Store aliases. FTS-only and isolated CLI tests still run without Python; their explicit cache roots do not touch the user's benchmark cache.
 
 ## LongMemEval check against the official evaluator (Layer 0 check 4)
 
