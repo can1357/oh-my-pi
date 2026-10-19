@@ -88,7 +88,6 @@
 - Added `ThinkingContent.narration`, set on Anthropic and Bedrock thinking blocks whose signature marks them as between-tool narration, and `presentNarrationAsAnswer(message)` to show those blocks as reply text while replay keeps them as signed thinking
 - Added `keys.peek(provider, { includeExpired: true })` to name the stored account behind an expired OAuth token for reads that never send it, such as keying an offline model-cache lookup ([#16061](https://github.com/can1357/oh-my-pi/pull/16061) by [@gchai](https://github.com/gchai))
 - Added `prewarmModelConnection(model)` (`providers/connection-prewarm`), which opens the model's API connection ahead of a request using the same transport and TLS settings so the request reuses it instead of paying the connection handshake ([#16086](https://github.com/can1357/oh-my-pi/pull/16086) by [@H4vC](https://github.com/H4vC))
-- Added `prewarmAnthropicConnection(model)`, which opens the official Anthropic API connection for a first-party `anthropic` model ahead of a request, using the same transport and TLS settings so the request reuses it instead of paying the connection handshake ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
 
 ### Changed
 
