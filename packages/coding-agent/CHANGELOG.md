@@ -196,6 +196,8 @@
 - Fixed sessions whose first reply starts with a todo plan getting a title without its icon and code: the plan's title refresh no longer replaces the card title that is still being generated
 - Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
+- Fixed a settings change that toggled thinking-block visibility clearing and replaying the whole terminal, stalling a long transcript for a change nothing renders ([#15336](https://github.com/can1357/oh-my-pi/pull/15336) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed hiding or showing thinking blocks mid-stream losing or jumping the assistant's answer ([#15336](https://github.com/can1357/oh-my-pi/pull/15336) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.2] - 2026-10-18
 
@@ -553,9 +555,6 @@
 - Fixed hashline edits silently dropping the tail of a line that `read` or `grep` had cut at the column limit; such an edit is now refused until a `:raw` read shows the full line ([#15649](https://github.com/can1357/oh-my-pi/issues/15649))
 - Fixed isolated tasks failing on linked worktrees with initialized recursive submodules and leaving updated submodule pins unreachable after cleanup ([#15457](https://github.com/can1357/oh-my-pi/issues/15457))
 - Fixed `/tan` missing the parent's prompt cache by advertising `xd://` tools top-level and omitting `ask` ([#15578](https://github.com/can1357/oh-my-pi/issues/15578)).
-
-### Fixed
-
 
 ## [18.10.4] - 2026-10-13
 
