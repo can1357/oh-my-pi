@@ -7,7 +7,10 @@ other logic under the promised revision.
 import os
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+# Files Python can import or that alter sys.path; ignored ones would shadow evaluator dependencies unseen by `status`.
+IMPORTABLE = {".py", ".pyc", ".pyo", ".pyd", ".so", ".pth"}
 
 
 def require_pinned(repo: Path, commit: str) -> None:
@@ -22,7 +25,18 @@ def require_pinned(repo: Path, commit: str) -> None:
 		).stdout.strip()
 
 	try:
-		head, status = git("rev-parse", "HEAD"), git("status", "--porcelain", "--untracked-files=all")
+		head = git("rev-parse", "HEAD")
+		# `-z` keeps paths unquoted; ignored files are listed one by one, so a shadow module under .git/info/exclude shows.
+		entries = [e for e in git("status", "--porcelain", "-z", "--untracked-files=all", "--ignored=traditional").split("\0") if e]
+		status = [e for e in entries if not e.startswith("!! ")]
+		# Bytecode caches are written by every evaluator run and only load next to their source, so they stay allowed.
+		ignored = [
+			e[3:]
+			for e in entries
+			if e.startswith("!! ")
+			and PurePosixPath(e[3:]).suffix in IMPORTABLE
+			and "__pycache__" not in PurePosixPath(e[3:]).parts
+		]
 		# A local `core.worktree` would make every check above inspect another tree than the one callers import.
 		top = git("rev-parse", "--show-toplevel")
 		# `status` skips files marked assume-unchanged (lowercase tag) or skip-worktree (`S`), so edits to them hide.
@@ -37,3 +51,5 @@ def require_pinned(repo: Path, commit: str) -> None:
 		sys.exit(f"{repo}: has local changes; restore it to {commit}")
 	if hidden:
 		sys.exit(f"{repo}: index flags hide changes to {hidden[:5]}; restore it to {commit}")
+	if ignored:
+		sys.exit(f"{repo}: has ignored importable files {ignored[:5]}; remove them to restore {commit}")
