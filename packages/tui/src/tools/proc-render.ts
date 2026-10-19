@@ -52,7 +52,10 @@ function preview(
 	if (!body.trim()) return [];
 	const quote = theme.fg("dim", theme.md.quoteBorder);
 	const source = body.split("\n").filter(line => line.trim());
-	const shown = expanded ? source : cappedHeadLines(source, PREVIEW_LIMITS.COLLAPSED_LINES).lines;
+	// Expanded keeps its own, larger budget: a job log with thousands of lines
+	// would otherwise push the transcript off the screen.
+	const limit = expanded ? PREVIEW_LIMITS.EXPANDED_LINES : PREVIEW_LIMITS.COLLAPSED_LINES;
+	const shown = cappedHeadLines(source, limit).lines;
 	const hidden = source.length - shown.length;
 	let cut = false;
 	const lines: string[] = [];
@@ -68,7 +71,9 @@ function preview(
 		cut ||= visibleWidth(text) > TRUNCATE_LENGTHS.LINE;
 		lines.push(`  ${quote} ${theme.fg(tone, truncateToWidth(text, TRUNCATE_LENGTHS.LINE, Ellipsis.Unicode))}`);
 	}
-	if (width !== undefined && (hidden > 0 || cut)) {
+	// The hint is not width-gated: a caller that passes no width (the proc/job
+	// card) still elides lines, and a silent cap reads as if the log ended there.
+	if (hidden > 0 || cut) {
 		const hint = formatExpandHint(theme, expanded, true);
 		const marker = hidden > 0 ? `… +${hidden} more lines` : "…";
 		lines.push(`  ${quote} ${theme.fg("dim", `${marker}${hint ? ` ${hint}` : ""}`)}`);
