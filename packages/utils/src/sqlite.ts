@@ -346,7 +346,10 @@ export function checkpointWal(db: Database): void {
 /** Damaged regions one {@link readSalvageableRows} scan skips before abandoning the rest of the table. */
 const SALVAGE_MAX_DAMAGED_REGIONS = 1000;
 
-/** Interior table keys bound individual subtrees even when readable and damaged leaves alternate. */
+/**
+ * Interior table keys bound individual subtrees even when readable and damaged leaves alternate.
+ * One damaged interior page voids every bound, so the caller recovers unbounded instead.
+ */
 function readSalvageRowidStarts(db: Database, table: string): number[] {
 	const root = db
 		.query<{ rootpage: number }, [string]>("SELECT rootpage FROM sqlite_schema WHERE name = ?")
@@ -359,6 +362,7 @@ function readSalvageRowidStarts(db: Database, table: string): number[] {
 	const pending = [root.rootpage];
 	const visited = new Set<number>();
 	const starts: number[] = [];
+	let trusted = true;
 	while (pending.length > 0) {
 		const page = pending.pop()!;
 		const start = (page - 1) * pageSize;
@@ -399,7 +403,13 @@ function readSalvageRowidStarts(db: Database, table: string): number[] {
 			}
 		}
 		if (ascending) starts.push(...pageStarts);
+		else trusted = false;
 	}
+	// An invalid page also condemns the bounds of the ancestors that enclose its
+	// subtree: a bound derived from them would make the scan resume at their next
+	// surviving key and skip the readable rows the damaged subtree still holds,
+	// so a single invalid page reverts the whole scan to unbounded recovery.
+	if (!trusted) return [];
 	return starts.sort((a, b) => a - b).filter((value, index) => index === 0 || value > starts[index - 1]!);
 }
 
@@ -409,7 +419,7 @@ function readSalvageRowidStarts(db: Database, table: string): number[] {
  * rowids with indexed seeks instead: when a seek hits damage it doubles its
  * stride past it, then bisects back to the first rowid from which seeking
  * works again, losing only rows on the damaged pages. When the interior pages
- * are readable, the recovery is bounded by the next interior subtree key, so a
+ * are valid, the recovery is bounded by the next interior subtree key, so a
  * probe can no longer jump across a readable island into later damage, and a
  * run of adjacent damaged leaves counts as one damaged region. Cross-linked
  * pages can still decode rows with foreign column types, so callers validate
