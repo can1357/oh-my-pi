@@ -26,6 +26,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { CostGate } from "../../src/session/cost-gate";
 import { rejectionOf } from "../helpers/rejection";
 
+import { cfgDisabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgRetryFallbackChains, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 async function runEvalCompletionAndWait(
@@ -906,6 +907,28 @@ describe("runEvalCompletion", () => {
 		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toBeInstanceOf(
 			ToolError,
 		);
+	});
+
+	it("refuses a tier whose role names a denied model instead of matching an allowed sibling", async () => {
+		// The registry drops the denied model, leaving a same-provider sibling a fuzzy match would pick.
+		const session = makeSession({ available: [makeModel("p", "smol-mini"), DEFAULT] });
+		cfgDisabledModels.set(session.settings, ["p/smol"]);
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toBeInstanceOf(
+			ToolError,
+		);
+		expect(spy).not.toHaveBeenCalled();
+	});
+
+	it("never sends to a denied model that a registry built with other settings still lists", async () => {
+		// A fuzzy role pattern names no model exactly, so only the resolved model can be checked.
+		const session = makeSession({ available: [SMOL, DEFAULT], roles: { smol: "smo" } });
+		cfgDisabledModels.set(session.settings, ["p/smol"]);
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }).catch(() => undefined);
+		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).not.toContain("smol");
 	});
 
 	it("throws ToolError when the resolved model has no API key", async () => {
