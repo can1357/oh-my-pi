@@ -46,6 +46,13 @@ class Engine:
 	def __init__(self):
 		self.beam = None
 		self.dropped_tier_rows = 0
+		self.warm_digest = None
+
+	def model_digest(self):
+		"""The files Mnemosyne's fastembed loaded; None when no model was loaded (fts-only)."""
+		# `_embedding_model` is upstream's private lazy-load slot, so read it without assuming it exists.
+		loaded = getattr(getattr(getattr(embeddings, "_embedding_model", None), "model", None), "_model_dir", None)
+		return model_dir_digest(loaded) if loaded else None
 
 	def op_describe(self, _params):
 		info = {
@@ -57,15 +64,19 @@ class Engine:
 			"onnxruntime_version": importlib.metadata.version("onnxruntime"),
 		}
 		info.update({key: value for key, value in os.environ.items() if key.startswith("MNEMOSYNE_") and value})
-		# The files Mnemosyne's fastembed loaded; absent when no model was loaded (fts-only).
-		loaded = getattr(getattr(embeddings._embedding_model, "model", None), "_model_dir", None)
-		if loaded:
-			info["embedding_model_sha256"] = model_dir_digest(loaded)
+		# Warmup loaded the model, so its digest is the one that produced the vectors; a different one now means the
+		# files were replaced during the run.
+		now = self.model_digest()
+		if self.warm_digest and now != self.warm_digest:
+			raise RuntimeError(f"embedding model files changed during the run ({self.warm_digest} → {now}); result not written")
+		if now:
+			info["embedding_model_sha256"] = now
 		return info
 
 	def op_warmup(self, _params):
 		if embeddings.available():
 			embeddings.embed(["warmup"])
+			self.warm_digest = self.model_digest()
 
 	def op_open(self, params):
 		self.op_close(None)

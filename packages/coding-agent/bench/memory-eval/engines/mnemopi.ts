@@ -121,6 +121,11 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 		if (embedProc?.failure) throw embedProc.failure;
 		return result;
 	};
+	let warmDigest: string | undefined;
+	const currentModelDigest = async (): Promise<string> =>
+		embedder === "python"
+			? ((await startEmbedder().call("model_digest")) as string)
+			: modelDirDigest(path.join(getFastembedCacheDir(), JS_MODEL_DIR));
 
 	return {
 		name: "mnemopi",
@@ -137,13 +142,17 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 							),
 						)
 					: {};
-			// The model files actually loaded: the name maps to an unversioned download.
+			// The model files actually loaded: the name maps to an unversioned download. Warmup loaded them, so the
+			// digest taken there is the one that produced the vectors; a different one now means they were replaced.
 			const modelDigest: Record<string, string> = {};
 			if (embedding) {
-				modelDigest.embedding_model_sha256 =
-					embedder === "python"
-						? ((await startEmbedder().call("model_digest")) as string)
-						: await modelDirDigest(path.join(getFastembedCacheDir(), JS_MODEL_DIR));
+				const now = await currentModelDigest();
+				if (warmDigest !== undefined && now !== warmDigest) {
+					throw new Error(
+						`embedding model files changed during the run (${warmDigest} → ${now}); result not written`,
+					);
+				}
+				modelDigest.embedding_model_sha256 = now;
 			}
 			return {
 				package_version: pkg.version,
@@ -230,9 +239,9 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 		warmup: async protocol => {
 			opts = runtimeOptions(protocol);
 			if (protocol === "fts-only") return;
-			// Spawn outside Mnemopi's provider-error swallowing so a missing interpreter fails before ingestion.
 			if (embedder === "python") startEmbedder();
 			await scoped(() => embed(["warmup"]));
+			warmDigest = await currentModelDigest();
 		},
 	};
 }

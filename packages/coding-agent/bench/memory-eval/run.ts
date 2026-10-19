@@ -259,7 +259,11 @@ const describeConfig = (label: string, c: RunConfig): string => {
 		.filter(key => c.engineInfo[key])
 		.map(key => ` ${key.replace("_version", "")} ${c.engineInfo[key]}`)
 		.join("");
-	return `${label}: engine ${c.engine}${embedder}${runtime} protocol ${c.protocol} k ${c.k} mnemopiRecall ${c.mnemopiRecall} polyphonic ${c.polyphonic} gitCommit ${c.gitCommit}${c.gitDirty ? " (dirty)" : ""}`;
+	// The model and tokenizer files that produced the vectors (a prefix of their digest); absent in older files.
+	const model = c.engineInfo.embedding_model_sha256
+		? ` model ${c.engineInfo.embedding_model_sha256.slice(0, 12)}`
+		: "";
+	return `${label}: engine ${c.engine}${embedder}${runtime}${model} protocol ${c.protocol} k ${c.k} mnemopiRecall ${c.mnemopiRecall} polyphonic ${c.polyphonic} gitCommit ${c.gitCommit}${c.gitDirty ? " (dirty)" : ""}`;
 };
 
 function uniqueQuestionIds(label: string, file: ResultFile): Set<string> {
@@ -284,6 +288,11 @@ async function diffCommand(argv: string[]): Promise<void> {
 	const b: ResultFile = await Bun.file(fileB).json();
 	console.log(describeConfig("a", a.config));
 	console.log(describeConfig("b", b.config));
+	const [modelA, modelB] = [a.config.engineInfo.embedding_model_sha256, b.config.engineInfo.embedding_model_sha256];
+	if (modelA && modelB && modelA !== modelB) {
+		// A model ablation is a valid comparison, but a silent snapshot change is not: name it.
+		console.warn("warning: a and b embedded with different model files (embedding_model_sha256 differs)");
+	}
 	if (a.config.protocol === "upstream-compat" || b.config.protocol === "upstream-compat") {
 		throw new Error("upstream-compat results have no primary metric to diff");
 	}
