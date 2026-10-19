@@ -2508,6 +2508,9 @@ export class Markdown implements Component {
 	 */
 	tableLocks?: TableLocks;
 	#openTableTail = false;
+	// While openTableTail is set: the table that is the document's last
+	// top-level block in the render under way, the only one that ends open.
+	#openTailToken?: Token;
 	// The prefix before a rewind that only a closer on the still-growing last
 	// line caused. Once a later text holds no closer line after it, that
 	// prefix is right again, so #lexTokens puts it back.
@@ -3442,6 +3445,9 @@ export class Markdown implements Component {
 		const tailOffset = tail === undefined ? undefined : this.#tableOffsets.get(tail);
 		if (speculated !== undefined && tailOffset !== undefined) this.#tableOffsets.set(speculated, tailOffset);
 		const tokens = speculated ? [...lexed.slice(0, -1), speculated] : lexed;
+		let last = tokens.length - 1;
+		while (tokens[last]?.type === "space") last--;
+		this.#openTailToken = this.#openTableTail && tokens[last]?.type === "table" ? tokens[last] : undefined;
 		let contentLines: string[];
 		this.#activeRenderSignature = signature;
 		try {
@@ -5116,7 +5122,7 @@ export class Markdown implements Component {
 
 		// A stable prefix cut inside a table that keeps streaming ends where the
 		// next row's separator goes, not with a border no later render has.
-		if (this.#openTableTail && (!nextTokenType || nextTokenType === "space")) {
+		if (this.#openTableTail && token === this.#openTailToken) {
 			lines.push(separatorLine);
 			return lines;
 		}
