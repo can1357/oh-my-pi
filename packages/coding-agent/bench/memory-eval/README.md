@@ -31,7 +31,7 @@ The source-pin check ignores global/system Git configuration and explicitly incl
 ~/.cache/omp-memory-eval/venv-engine/bin/python packages/coding-agent/bench/memory-eval/py/prepare_datasets.py
 ```
 
-Writes `data/beam-100k.json`, `data/beam-500k.json` and `data/lme-s.json` at pinned HF revisions, each with a `<file>.revision` marker holding the revision it was downloaded at. The raw Hugging Face downloads go to `hf/` (as do `upstream_run_a.py`'s), not `~/.cache/huggingface`. It is idempotent: a file whose marker matches the pinned revision is skipped, any other (including a cache from before the markers existed) is downloaded again. `run` refuses a dataset whose marker is missing or differs from the revision it pins, and stamps the marker's revision into the result's `datasetRevision`, which `diff` compares. The revision does not prove which bytes the converter produced from it (a changed converter or an edited cache keeps the old marker), so `run` also records the prepared file's SHA-256 as `datasetSha256`, and `diff` refuses two results whose digests differ. Delete a stale file to have `prepare_datasets.py` rebuild it.
+Writes `data/beam-100k.json`, `data/beam-500k.json` and `data/lme-s.json` at pinned HF revisions, each with a `<file>.revision` marker holding the revision it was downloaded at. The raw Hugging Face downloads go to `hf/` (as do `upstream_run_a.py`'s), not `~/.cache/huggingface`. It is idempotent: a file whose marker matches the pinned revision is skipped, any other (including a cache from before the markers existed) is downloaded again. `run` refuses a dataset whose marker is missing or differs from the revision it pins, and stamps the marker's revision into the result's `datasetRevision`, which `diff` compares. The revision does not prove which bytes the converter produced from it (a changed converter or an edited cache keeps the old marker), so `run` also records the prepared file's SHA-256 as `datasetSha256`, and `diff` refuses two results whose digests differ. `run` hashes the file again after loading it and stops if it was replaced in between. Delete a stale file to have `prepare_datasets.py` rebuild it.
 
 ## Calibration against upstream (Layer 0 check 2)
 
@@ -116,6 +116,8 @@ $R run --dataset lme-s-dev --engine oracle --protocol standard --out $O/lme-orac
 $V $P/lme_official_check.py $O/lme-oracle.json                      # exit 0 iff every metric matches within 1e-12
 $V $P/lme_official_check.py $O/lme-oracle.json --oracle-from-cases  # official oracle ranking on our loaded cases
 ```
+
+`lme_official_check.py` and `upstream_run_a.py` refuse to start while `PYTHONPATH` or `PYTHONHOME` is set: either could import another copy of the evaluator's dependencies (or of Mnemosyne) than the venv they document.
 
 ## LongMemEval dev subset
 
