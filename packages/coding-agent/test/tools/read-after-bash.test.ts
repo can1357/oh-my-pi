@@ -13,6 +13,7 @@ import {
 import type { Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InternalUrlRouter, LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -21,6 +22,8 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+	LocalProtocolHandler.resetOverrideForTests();
+	InternalUrlRouter.resetForTests();
 	await Promise.all(temporaryDirectories.splice(0).map(directory => removeWithRetries(directory)));
 });
 
@@ -238,6 +241,27 @@ describe("a read after a bash call in the same message", () => {
 
 		expect(text).toContain("exact");
 		expect(text).not.toContain("fallback");
+	});
+
+	it("lists the session cwd for an empty path after the bash command adds an entry", async () => {
+		const directory = await tempDirectory();
+		await Bun.write(path.join(directory, "a.txt"), "a\n");
+
+		const { text } = await bashThenRead(directory, "echo b > added.txt", "");
+
+		expect(text).toContain("added.txt");
+	});
+
+	it("reads a single-slash local:/ URL instead of failing on it", async () => {
+		const directory = await tempDirectory();
+		const artifacts = path.join(directory, "artifacts");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifacts, getSessionId: () => "s" });
+		await Bun.write(path.join(artifacts, "local", "notes.md"), "notes\n");
+
+		const { text, isError } = await bashThenRead(directory, "true", "local:/notes.md");
+
+		expect(isError).toBe(false);
+		expect(text).toContain("notes");
 	});
 });
 
