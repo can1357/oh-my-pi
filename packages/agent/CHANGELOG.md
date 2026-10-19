@@ -6,6 +6,7 @@
 
 - Added `wireToolsFingerprint()`, a hash of the tool specs a request sends ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
+- Tool calls get `ctx.toolCall.earlierEffectsSettled`, which settles once the earlier calls of their message that may write files and run beside them have finished ([#16274](https://github.com/can1357/oh-my-pi/pull/16274) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
 - Fixed steering and follow-up queue notifications observing a batch before its preparation claim was installed and missing the transition to delivery, leaving pending-message snapshots stale after asynchronous preparation.
@@ -118,10 +119,6 @@
 ### Changed
 
 - Tools with `lenientArgValidation` now receive unknown root arguments that their closed schema would otherwise drop, so they can reject them ([#16317](https://github.com/can1357/oh-my-pi/issues/16317))
-
-### Added
-
-- Tool calls get `ctx.toolCall.earlierEffectsSettled`, which settles once the earlier calls of their message that may write files and run beside them have finished
 
 ## [18.12.2] - 2026-10-18
 
