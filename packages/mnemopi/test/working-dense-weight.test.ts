@@ -65,23 +65,24 @@ describe("working-tier dense weight", () => {
 		}
 	});
 
-	it("does not rank a row without a stored vector above an embedded row with the same query words", async () => {
+	it("keeps a row's keyword score until its embedding lands, instead of halving it", async () => {
 		const memory = new Mnemopi({
 			db: new Database(":memory:"),
 			embeddings: { provider: provider.embed.bind(provider) },
 		});
 		try {
 			const timestamp = new Date(Date.now() - 60_000).toISOString();
-			const embedded = memory.remember("deploy window adjacent", { source: "test", timestamp });
-			const unembedded = memory.remember("deploy window pending", { source: "test", timestamp });
+			// Same query words. One is embedded at right angles to the query (similarity 0, a real score); the other's
+			// embedding has not landed yet, as right after remember() or while a model change re-embeds the bank.
+			const orthogonal = memory.remember("deploy window orthogonal", { source: "test", timestamp });
+			const pending = memory.remember("deploy window pending", { source: "test", timestamp });
 			await memory.flushExtractions();
-			// As if its embedding had not landed yet; no recall has run, so nothing is cached.
-			memory.conn.run("DELETE FROM memory_embeddings WHERE memory_id = ?", [unembedded]);
+			// No recall has run, so nothing is cached.
+			memory.conn.run("DELETE FROM memory_embeddings WHERE memory_id = ?", [pending]);
 
-			const ids = (await memory.recall("zorblat deploy window", 5)).map(result => result.id);
-			expect(ids).toContain(embedded);
-			expect(ids).toContain(unembedded);
-			expect(ids.indexOf(embedded)).toBeLessThan(ids.indexOf(unembedded));
+			const results = await memory.recall("zorblat deploy window", 5);
+			const score = (id: string) => results.find(result => result.id === id)?.score ?? Number.NaN;
+			expect(score(pending)).toBeGreaterThan(score(orthogonal));
 		} finally {
 			memory.close();
 		}
