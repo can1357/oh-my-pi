@@ -79,11 +79,6 @@
 
 ## [18.12.0] - 2026-10-17
 
-- Fixed OpenCode Zen bringing back its retired bundled models after a failed refresh: the retry-backoff write no longer drops the cached snapshot's retention, so the pruned catalog survives the retry window and offline launches. ([#16054](https://github.com/can1357/oh-my-pi/pull/16054) by [@adi-IL](https://github.com/adi-IL))
-- Fixed `providers.cacheWarming` never arming for Claude on Google Antigravity: Claude models there now declare Vertex Anthropic's five-minute prompt-cache lifetime; Gemini models stay unwarmed because Google's implicit cache has no fixed lifetime ([#15764](https://github.com/can1357/oh-my-pi/issues/15764), [#16025](https://github.com/can1357/oh-my-pi/pull/16025) by [@harshaygadekar](https://github.com/harshaygadekar))
-- Scoped Jev image bounds to the selected models instead of applying them to unrelated native judges ([#16002](https://github.com/can1357/oh-my-pi/pull/16002) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
-- Fixed Bedrock sessions rejecting replayed tool names over 64 characters after a model switch ([#15839](https://github.com/can1357/oh-my-pi/issues/15839))
-
 ### Added
 
 - Added the `request-encodings`, `request-encoding-rejection`, and `endpoint-hosts` rule axes, `resolveRequestCompression(model, url)`, and `isCatalogEndpointUrl(model, url)`, declaring which providers' own endpoints decode compressed request bodies: official Anthropic API (gzip), Codex backend (zstd), and GitHub Copilot's API hosts (zstd, then gzip); Moonshot's China host counts as its own endpoint ([#16086](https://github.com/can1357/oh-my-pi/pull/16086) by [@H4vC](https://github.com/H4vC))

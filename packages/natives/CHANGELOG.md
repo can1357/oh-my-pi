@@ -38,6 +38,9 @@
 - Fixed omp sessions on macOS adding a terminal icon to the Dock after the `computer` tool listed displays ([#13455](https://github.com/can1357/oh-my-pi/pull/13455) by [@VelizarSeleznev](https://github.com/VelizarSeleznev))
 
 ## [18.12.3] - 2026-10-19
+### Breaking Changes
+
+- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/pi-natives` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -121,14 +124,6 @@
 - Fixed native memory growing without bound, and eventually crashing the process, when files in a downloaded (WASM) grammar language such as C# were parsed repeatedly ([#16067](https://github.com/can1357/oh-my-pi/issues/16067))
 
 ## [18.12.0] - 2026-10-17
-
-- Fixed Windows file-lock contention returning permission errors when an existing lease allows synchronization but not full mutex access ([#15930](https://github.com/can1357/oh-my-pi/pull/15930) by [@jchanghong023](https://github.com/jchanghong023)).
-
-### Breaking Changes
-
-- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/pi-natives` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
-## [18.11.3] - 2026-10-16
 
 ### Breaking Changes
 

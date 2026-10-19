@@ -69,6 +69,10 @@
 
 - Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/pi-ai` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+### Fixed
+
+- Fixed finalized signed reasoning disappearing from displayed thinking when no deltas streamed ([#16227](https://github.com/can1357/oh-my-pi/issues/16227))
+
 ## [18.12.2] - 2026-10-18
 
 ### Added
@@ -2403,3 +2407,26 @@ Older entries are archived in [packages/ai/CHANGELOG.md@47e6af055a17](https://gi
 
 Older entries are archived in [packages/ai/CHANGELOG.md@5eb78e90fa4e](https://github.com/can1357/oh-my-pi/blob/5eb78e90fa4ec4318b9520302f1977fa58c48745/packages/ai/CHANGELOG.md).
 Older entries are archived in [packages/ai/CHANGELOG.md@10f6e34a3954](https://github.com/can1357/oh-my-pi/blob/10f6e34a3954d2e66942f397e2c6f599b824601a/packages/ai/CHANGELOG.md).
+## [16.1.10] - 2026-06-21
+
+### Changed
+
+- Improved JSON robustness by replacing external dependency with a custom, high-performance parser
+- Strengthened streaming JSON parsing to prevent non-finite numbers from surfacing as `undefined/NaN`
+- Configured JSON parser to reject JS-specific `NaN` and `Infinity` values for tool arguments
+- Replaced the JSON repair/parse helpers (`parseJsonWithRepair`, `parseStreamingJson`) with a single from-scratch tolerant parser (`RelaxedJson`) that accepts single-quoted strings, unquoted object keys, trailing/stray commas, `//` and `/* */` comments, Python `True`/`False`/`None`, raw control characters, invalid escapes, and unescaped apostrophes (`'it's'`). Final parsing still throws on truncated/garbage input (so a malformed tool call is skipped rather than executed with half-formed args) and rejects JS-only `NaN`/`Infinity`; streaming parsing stays non-throwing and rolls back incomplete trailing tokens instead of surfacing `undefined`/`NaN`. The Cursor provider's ad-hoc regex + JSON5 tool-argument parser now routes through the shared parser.
+
+### Fixed
+
+- Fixed tool call ID normalization for Anthropic-compatible models
+- Fixed Anthropic Messages replay sanitizing malformed tool-call IDs, including aborted native tool calls with empty IDs, so retries no longer send invalid `tool_use.id` / `tool_result.tool_use_id` pairs.
+- Fixed the Codex Responses WebSocket transport attributing a prior turn's output to the current one on a reused connection: a trailing/duplicate frame from a cleanly-completed previous response that slipped past the queue drain could be consumed as this request's terminal (ending the turn with empty output) or as a stale tool call. Frames are now keyed by `response.id` — a frame carrying the previous response's id is dropped, and one carrying a third id (or a regressed `sequence_number`) fails closed so the turn retries instead of mixing two responses' streams. Idless frames (deltas, the rate-limit/metadata preamble, `response.created`-less streams) still pass through, matching upstream codex-rs.
+- Fixed `transformMessages` pulling an earlier, orphaned tool result onto a later tool call that reused the same id (left behind when compaction folded the originating `tool_use` into a summary). The pending-call flush now pairs each call with a result positioned _after_ its assistant turn, so a reused id surfaces its own output rather than a prior turn's.
+- Fixed DashScope 429 rate-limit messages that mention authorization being classified as credential failures, preventing valid API keys from being invalidated after throttling. ([#3172](https://github.com/can1357/oh-my-pi/issues/3172))
+- Fixed OpenCode Go `401 Insufficient balance` quota errors being treated as unknown failures instead of usage-limit errors, restoring credential rotation and fallback chains. ([#3169](https://github.com/can1357/oh-my-pi/issues/3169))
+
+### Removed
+
+- Removed the `partial-json` dependency; streaming JSON parsing now uses the in-house `RelaxedJson` parser.
+
+Older entries are archived in [packages/ai/CHANGELOG.md@bb602d67c9b6](https://github.com/can1357/oh-my-pi/blob/bb602d67c9b685535bbf8ef1a1cc9de3c944ede4/packages/ai/CHANGELOG.md).
