@@ -646,6 +646,8 @@
 ### Changed
 
 - While a subagent is focused, `/model`, `/switch`, `/effort`, `Alt+P`, `Ctrl+P`, and `Shift+Tab` change that subagent's model and thinking level (session-only) instead of telling you to return to the main session; `/model` and `Alt+M` open the session-only picker there, since role assignments configure the main session
+- Computer-use window input with `takeover` omitted now stays in the background after `computer.control.acquire`, so an acquired grant no longer activates the target app or moves the user's pointer; pass `takeover: true` for foreground input ([#15173](https://github.com/can1357/oh-my-pi/pull/15173) by [@will-bogusz](https://github.com/will-bogusz))
+- Mnemopi decodes each recall bank's memory embeddings in the background at session start, so the first recall finds them cached; it is skipped when embeddings are disabled or auto-recall is off ([#15729](https://github.com/can1357/oh-my-pi/pull/15729) by [@andrebrait](https://github.com/andrebrait))
 
 ### Fixed
 

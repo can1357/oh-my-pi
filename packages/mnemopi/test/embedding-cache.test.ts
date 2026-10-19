@@ -10,7 +10,11 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import "./setup";
 import { BeamMemory, initBeam } from "@oh-my-pi/pi-mnemopi/core/beam";
-import { cachedEmbeddings, MAX_CACHED_VECTORS } from "@oh-my-pi/pi-mnemopi/core/beam/embedding-cache";
+import {
+	cachedEmbeddings,
+	forgetCachedEmbeddings,
+	MAX_CACHED_VECTORS,
+} from "@oh-my-pi/pi-mnemopi/core/beam/embedding-cache";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 
 // "zorblat" and "quexim" share an axis, so a query and a memory can match by meaning without sharing a word.
@@ -368,6 +372,303 @@ describe("embedding cache", () => {
 			expect(ids).toContain(empty);
 		} finally {
 			memory.close();
+		}
+	});
+});
+
+const QUERY_TIME = "2026-05-30T12:00:00.000Z";
+const DENSE = { queryEmbedding: [1, 0], queryTime: QUERY_TIME, updateRecallCounts: false };
+
+interface SeedRow {
+	id: string;
+	table?: "working_memory" | "episodic_memory";
+	second?: number;
+	session?: string;
+	scope?: string;
+	channel?: string;
+	validUntil?: string;
+	supersededBy?: string;
+	vector?: string;
+}
+
+/** Inserts a row plus its stored embedding through raw SQL, so no provider runs. */
+function seedRow(db: Database, row: SeedRow): void {
+	db.run(
+		`INSERT INTO ${row.table ?? "working_memory"} (id, content, source, timestamp, session_id, importance, scope, channel_id, valid_until, superseded_by, veracity, memory_type, recall_count) VALUES (?, ?, 'test', ?, ?, 0.5, ?, ?, ?, ?, 'unknown', 'general', 3)`,
+		[
+			row.id,
+			`entry ${row.id}`,
+			new Date(Date.UTC(2026, 4, 30, 11, 0, row.second ?? 0)).toISOString(),
+			row.session ?? "warm",
+			row.scope ?? "session",
+			row.channel ?? null,
+			row.validUntil ?? null,
+			row.supersededBy ?? null,
+		],
+	);
+	db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+		row.id,
+		row.vector ?? "[1,0]",
+	]);
+}
+
+/** A bank of `count` visible working rows, newest last (`wm-000` oldest), all stored as `[1,0]`. */
+function bulkBeam(count: number, dbPath = ":memory:"): BeamMemory {
+	const beam = new BeamMemory({ sessionId: "warm", dbPath });
+	beam.db.transaction(() => {
+		for (let index = 0; index < count; index += 1) {
+			seedRow(beam.db, { id: `wm-${String(index).padStart(3, "0")}`, second: index });
+		}
+	})();
+	return beam;
+}
+
+/** Visible and hidden rows in both tiers for channel `chan`; returns the ids recall may return. */
+function seedMixedBank(beam: BeamMemory): string[] {
+	const em = "episodic_memory" as const;
+	const past = "2000-01-01T00:00:00.000Z";
+	seedRow(beam.db, { id: "wm-own", second: 1 });
+	seedRow(beam.db, { id: "wm-global", second: 2, session: "other", scope: "global" });
+	seedRow(beam.db, { id: "wm-channel", second: 3, session: "other", channel: "chan" });
+	seedRow(beam.db, { id: "em-own", table: em, second: 4 });
+	seedRow(beam.db, { id: "em-global", table: em, second: 5, session: "other", scope: "global" });
+	seedRow(beam.db, { id: "wm-foreign", second: 6, session: "other", channel: "elsewhere" });
+	seedRow(beam.db, { id: "wm-expired", second: 7, validUntil: past });
+	seedRow(beam.db, { id: "wm-superseded", second: 8, supersededBy: "wm-own" });
+	seedRow(beam.db, { id: "em-foreign", table: em, second: 9, session: "other", channel: "elsewhere" });
+	seedRow(beam.db, { id: "em-expired", table: em, second: 10, validUntil: past });
+	return ["wm-own", "wm-global", "wm-channel", "em-own", "em-global"];
+}
+
+function recallCounts(db: Database): unknown[] {
+	return db
+		.query(
+			"SELECT id, recall_count, last_recalled FROM working_memory UNION ALL SELECT id, recall_count, last_recalled FROM episodic_memory ORDER BY id",
+		)
+		.all();
+}
+
+/** One event-loop turn. Warmup yields with `Bun.sleep(0)`; this interleaves with it without timing anything. */
+const yieldTurn = () => {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setImmediate(resolve);
+	return promise;
+};
+
+/** Runs event-loop turns until `counter` has seen `reads` chunk reads; bounded so a missing warmup fails, not hangs. */
+async function untilReads(counter: { reads(): number }, reads: number): Promise<void> {
+	for (let turn = 0; counter.reads() < reads; turn += 1) {
+		if (turn > 1000) throw new Error(`warmup never reached ${reads} chunk read(s)`);
+		await yieldTurn();
+	}
+}
+
+async function settle(): Promise<void> {
+	for (let turn = 0; turn < 5; turn += 1) await yieldTurn();
+}
+
+describe("recall cache warmup", () => {
+	it("decodes exactly what recall reads, leaving counters alone, so the next recall reads no stored vector", async () => {
+		const beam = new BeamMemory({ sessionId: "warm", dbPath: ":memory:" });
+		try {
+			const visible = seedMixedBank(beam);
+			const before = recallCounts(beam.db);
+
+			await beam.warmRecallCache({ channelId: "chan" });
+
+			expect(recallCounts(beam.db)).toEqual(before);
+			const counter = countVectorReads(beam.db);
+			try {
+				const results = await beam.recall("zorblat plan", 20, { ...DENSE, channelId: "chan" });
+				expect(counter.reads()).toBe(0);
+				expect(results.map(result => result.id).sort()).toEqual([...visible].sort());
+			} finally {
+				counter.mockRestore();
+			}
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("skips the working tier when includeWorking is false", async () => {
+		const beam = new BeamMemory({ sessionId: "warm", dbPath: ":memory:" });
+		try {
+			seedMixedBank(beam);
+			await beam.warmRecallCache({ channelId: "chan", includeWorking: false });
+
+			const counter = countVectorReads(beam.db);
+			try {
+				await beam.recall("zorblat plan", 20, { ...DENSE, channelId: "chan", includeWorking: false });
+				expect(counter.reads()).toBe(0);
+				await beam.recall("zorblat plan", 20, { ...DENSE, channelId: "chan" });
+				expect(counter.reads()).toBeGreaterThan(0);
+			} finally {
+				counter.mockRestore();
+			}
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("reads nothing before its first yield, then decodes in several chunks the event loop can interleave with", async () => {
+		const beam = bulkBeam(450);
+		const counter = countVectorReads(beam.db);
+		try {
+			const warm = beam.warmRecallCache();
+			expect(counter.reads()).toBe(0);
+
+			let settled = false;
+			void warm.then(() => {
+				settled = true;
+			});
+			const seen = new Set<number>();
+			while (!settled) {
+				seen.add(counter.reads());
+				await yieldTurn();
+			}
+			const total = counter.reads();
+			// 450 ids fit one 500-id read; chunking shows as several reads and states observed in between.
+			expect(total).toBeGreaterThan(1);
+			expect([...seen].some(reads => reads > 0 && reads < total)).toBe(true);
+		} finally {
+			counter.mockRestore();
+			beam.close();
+		}
+	});
+
+	it("stops reading when its signal aborts, leaving the rest to demand loading", async () => {
+		const beam = bulkBeam(450);
+		const counter = countVectorReads(beam.db);
+		try {
+			const controller = new AbortController();
+			const warm = beam.warmRecallCache({}, controller.signal);
+			await untilReads(counter, 1);
+			controller.abort();
+			await expect(warm).resolves.toBeUndefined();
+			const stopped = counter.reads();
+			await settle();
+			expect(counter.reads()).toBe(stopped);
+
+			await beam.recall("zorblat plan", 5, DENSE);
+			expect(counter.reads()).toBeGreaterThan(stopped);
+		} finally {
+			counter.mockRestore();
+			beam.close();
+		}
+	});
+
+	it("makes no database call when its signal is already aborted", async () => {
+		const beam = bulkBeam(3);
+		const spy = spyOn(beam.db, "query");
+		try {
+			await expect(beam.warmRecallCache({}, AbortSignal.abort())).resolves.toBeUndefined();
+			expect(spy.mock.calls).toHaveLength(0);
+		} finally {
+			spy.mockRestore();
+			beam.close();
+		}
+	});
+
+	it("stops without rejecting when the beam closes mid-warmup, and stays inert afterwards", async () => {
+		const beam = bulkBeam(450);
+		const spy = spyOn(beam.db, "query");
+		const vectorReads = () => spy.mock.calls.filter(([sql]) => sql.includes("FROM memory_embeddings")).length;
+		try {
+			const warm = beam.warmRecallCache();
+			await untilReads({ reads: vectorReads }, 1);
+			beam.close();
+			const callsAtClose = spy.mock.calls.length;
+			await expect(warm).resolves.toBeUndefined();
+			await settle();
+			expect(spy.mock.calls).toHaveLength(callsAtClose);
+
+			await expect(beam.warmRecallCache()).resolves.toBeUndefined();
+			expect(spy.mock.calls).toHaveLength(callsAtClose);
+		} finally {
+			spy.mockRestore();
+			beam.close();
+		}
+	});
+
+	const topIdsAfterEditBetweenChunks = async (edit: (beam: BeamMemory, dbPath: string, target: string) => void) => {
+		const dir = await TempDir.create("@mnemopi-warmup-");
+		const dbPath = dir.join("bank.db");
+		const beam = bulkBeam(450, dbPath);
+		const counter = countVectorReads(beam.db);
+		try {
+			// The newest row is decoded in the first chunk (windows list newest first); the query is `[1,0]`.
+			const target = "wm-449";
+			const warm = beam.warmRecallCache();
+			await untilReads(counter, 1);
+			edit(beam, dbPath, target);
+			await warm;
+			const ids = (await beam.recall("zorblat plan", 5, DENSE)).map(result => result.id);
+			return { ids, target };
+		} finally {
+			counter.mockRestore();
+			beam.close();
+			await dir.remove();
+		}
+	};
+
+	it("does not serve a vector another connection rewrote after its chunk was warmed", async () => {
+		const { ids, target } = await topIdsAfterEditBetweenChunks((_beam, dbPath, id) => {
+			const peer = new Database(dbPath);
+			try {
+				peer.run("UPDATE memory_embeddings SET embedding_json = '[0,1]' WHERE memory_id = ?", [id]);
+			} finally {
+				peer.close();
+			}
+		});
+		// Rewritten to `[0,1]`, the newest row no longer matches the `[1,0]` query; a stale `[1,0]` would put it on top.
+		expect(ids).not.toContain(target);
+	});
+
+	it("does not serve a vector this connection rewrote after its chunk was warmed", async () => {
+		const { ids, target } = await topIdsAfterEditBetweenChunks((beam, _dbPath, id) => {
+			beam.db.run("UPDATE memory_embeddings SET embedding_json = '[0,1]' WHERE memory_id = ?", [id]);
+			forgetCachedEmbeddings(beam.db, [id]);
+		});
+		expect(ids).not.toContain(target);
+	});
+
+	it("neither reads nor caches inside a transaction, so a rolled-back vector is never served", async () => {
+		const beam = bulkBeam(3);
+		try {
+			beam.db.run("UPDATE memory_embeddings SET embedding_json = '[0,1]'");
+			beam.db.run("UPDATE memory_embeddings SET embedding_json = '[1,0]' WHERE memory_id = 'wm-001'");
+			const counter = countVectorReads(beam.db);
+			try {
+				beam.db.run("BEGIN");
+				beam.db.run("UPDATE memory_embeddings SET embedding_json = '[0,1]' WHERE memory_id = 'wm-001'");
+				await beam.warmRecallCache();
+				expect(counter.reads()).toBe(0);
+				beam.db.run("ROLLBACK");
+
+				expect((await beam.recall("zorblat plan", 1, DENSE))[0]?.id).toBe("wm-001");
+			} finally {
+				counter.mockRestore();
+			}
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("stops when a transaction opens between chunks", async () => {
+		const beam = bulkBeam(450);
+		const counter = countVectorReads(beam.db);
+		try {
+			const warm = beam.warmRecallCache();
+			await untilReads(counter, 1);
+			beam.db.run("BEGIN");
+			await expect(warm).resolves.toBeUndefined();
+			const stopped = counter.reads();
+			await settle();
+			expect(counter.reads()).toBe(stopped);
+			beam.db.run("ROLLBACK");
+		} finally {
+			counter.mockRestore();
+			beam.close();
 		}
 	});
 });
