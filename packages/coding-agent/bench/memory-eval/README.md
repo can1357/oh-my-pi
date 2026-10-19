@@ -23,7 +23,7 @@ git clone https://github.com/xiaowu0162/LongMemEval && git -C LongMemEval checko
 
 Check: `$C/venv-engine/bin/python -c "import mnemosyne, fastembed; print(mnemosyne.__version__)"` prints `4.0.0b4`. Results record the `fastembed` and `onnxruntime` versions that produced the vectors (Mnemosyne, and Mnemopi with `--embedder python`), since another numerical runtime can reorder near-ties. `upstream_run_a.py` and `lme_official_check.py` refuse a source clone that is not at its pinned commit or has local changes.
 
-The source-pin check ignores global/system Git configuration and explicitly includes untracked files, even if a checkout sets `status.showUntrackedFiles=no`; untracked evaluator modules make the checkout dirty. It also refuses files marked `assume-unchanged` or `skip-worktree`, since `git status` does not report edits to them.
+The source-pin check ignores global/system Git configuration and explicitly includes untracked files, even if a checkout sets `status.showUntrackedFiles=no`; untracked evaluator modules make the checkout dirty. It also refuses files marked `assume-unchanged` or `skip-worktree`, since `git status` does not report edits to them, a checkout whose Git work tree is redirected elsewhere, and ignored files Python could import (`.py`, `.pyc`, `.pyo`, `.pyd`, `.so`, `.pth`) outside `__pycache__`, so a shadow module listed in `.git/info/exclude` cannot pass either. Bytecode caches the evaluator itself writes stay allowed.
 
 ## Datasets
 
