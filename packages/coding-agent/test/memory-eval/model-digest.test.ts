@@ -41,6 +41,12 @@ it.skipIf(pythonPath === undefined)(
 		expect(await modelDirDigest(snapshot)).toBe(digest);
 		expect(await pythonDigest(snapshot)).toBe(digest);
 
+		// Cache byproducts the runtime never loads, such as the healer's quarantined download, are not the model.
+		await Bun.write(path.join(plain, "model_optimized.onnx.corrupt-1700000000000"), "broken-download");
+		await Bun.write(path.join(plain, ".lock"), "");
+		expect(await modelDirDigest(plain)).toBe(digest);
+		expect(await pythonDigest(plain)).toBe(digest);
+
 		await Bun.write(path.join(plain, "tokenizer.json"), '{"vocab":2}');
 		const changed = await modelDirDigest(plain);
 		expect(changed).not.toBe(digest);
