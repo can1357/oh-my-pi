@@ -1,9 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Fixed
 
-- Added `logger.warn` to the empty catch block after cursor tool result transform, so transform failures are now visible in logs
+- Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
