@@ -384,7 +384,7 @@ function formatReadPageBudgetNotice(
 	if (last === undefined) {
 		return `[Read page budget (${budget}) reached before any requested line was shown; Use ${selectorBase}:${selection} to continue]`;
 	}
-		return `[Read page budget (${budget}) reached after lines ${last.startLine}-${last.endLine}; Use ${selectorBase}:${selection} to continue]`;
+	return `[Read page budget (${budget}) reached after lines ${last.startLine}-${last.endLine}; Use ${selectorBase}:${selection} to continue]`;
 }
 
 /**

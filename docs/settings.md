@@ -735,6 +735,7 @@ read:
 | `edit.autoRepair.enabled` | boolean | `false` | Ask the `smol` model to repair an introduced AST parse regression; accept only a reparsed repair, otherwise warn. |
 | `edit.blackbox.enabled`   | boolean | `false`    | Append full source for AST parse regressions.      |
 | `read.defaultLimit`       | number  | `300`      | Default line count for `read` without a selector. |
+| `read.pageBudget`         | number  | `32`       | Inline KiB one `read` call may return across all of its ranges. `0` = unlimited. |
 | `read.summarize.enabled`  | boolean | `true`     | Structural summaries for code reads.              |
 | `read.summarize.prose`    | boolean | `false`    | Summarize prose files too.                        |
 | `read.toolResultPreview`  | boolean | `false`    | Inline preview of tool results.                   |

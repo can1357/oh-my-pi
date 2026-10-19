@@ -141,6 +141,7 @@
 - Fixed supported Bedrock Claude models falling back to soft instead of remote compaction ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Fixed browser `tab.run(fn, [url])` and `browser.open("https://…")` failing with a bare "expects an options object"; the errors now say to pass `{ args: [...] }` and `browser.open({ url, name })` ([#16236](https://github.com/can1357/oh-my-pi/pull/16236) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the built-in `ts-set-map`, `ts-import-type` and `ts-no-any` rules reminding you about code they allow: an empty or computed `Set`/`Map`, a runtime `await import()`, or the word "any" in a comment ([#16242](https://github.com/can1357/oh-my-pi/pull/16242) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `artifact://` recovery reads re-inlining unbounded text per call; `read` now pages the output and names the next range to read on the same artifact ([#15172](https://github.com/can1357/oh-my-pi/pull/15172) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 
@@ -321,7 +322,6 @@
 - Fixed a failed streamed edit preview ending the whole run without retry: the harness now re-drives the turn with the preview diagnostic so the model can read the file again and correct the patch, and gives up with a notice only after two recoveries
 - Fixed MCP OAuth login requesting every scope in an authorization server's catalogue when the protected resource advertises no scopes; `/mcp reauth` now falls back to configured scopes or authorization-server defaults ([#15996](https://github.com/can1357/oh-my-pi/pull/15996) by [@unclesamwk](https://github.com/unclesamwk)).
 - Fixed the incomplete-todo stop reminder firing (and resuming work) when the agent's final message asks for permission or a decision before a closing status line, through "If you confirm, I'll…"/"Separately, tell me…"-style requests, or with a non-English question followed by another sentence ([#15986](https://github.com/can1357/oh-my-pi/issues/15986))
-- Fixed `artifact://` recovery reads re-inlining unbounded text per call; `read` now pages the output and names the next range to read on the same artifact ([#15172](https://github.com/can1357/oh-my-pi/pull/15172) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.11.3] - 2026-10-16
 
