@@ -570,7 +570,11 @@ export class StreamingRevealController {
 				const latent = this.#hiddenBlockSpend.get(i);
 				if (latent !== undefined) {
 					this.#hiddenBlockSpend.delete(i);
-					blocks.push(latent.spent >= latent.before ? after : Math.min(latent.spent, after));
+					// The saved spend is the last point the user watched. The block may
+					// have grown while it was hidden, and crediting the grown size
+					// would flash every unit generated while hidden at once instead
+					// of letting the reveal resume from the watched point.
+					blocks.push(Math.min(latent.spent, after));
 				} else if (frontier < 0 || frontier >= i) {
 					// Never revealed while hidden: snap it whole only if the old
 					// frontier lies at or past it, or the old budget covered the

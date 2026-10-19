@@ -268,6 +268,47 @@ describe("streaming reveal", () => {
 		expect(thinkingAt(latestMessage(component), 0).length).toBeGreaterThan(partial.length);
 	});
 
+	it("resumes the reveal from the last watched point when hidden thinking keeps growing", async () => {
+		// A thinking block that was revealed whole is hidden, the provider appends
+		// more reasoning to the SAME block while it stays hidden, and the block is
+		// shown again. Crediting the grown block's whole size on show flashes every
+		// unit generated while hidden at once, instead of letting the smooth reveal
+		// resume from the last point the user watched (#15336).
+		const watched = "reasoning through the problem ".repeat(12);
+		const grown = `${watched}and the reasoning that arrives while the block is hidden `;
+		let hideThinking = false;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking: watched }]), false);
+		for (let frame = 0; frame < 40; frame++) {
+			if (thinkingAt(latestMessage(component), 0) === formatThinkingForDisplay(watched, true)) break;
+			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		}
+		expect(thinkingAt(latestMessage(component), 0)).toBe(formatThinkingForDisplay(watched, true));
+
+		// Hide the block, and let the provider extend it while it stays hidden.
+		hideThinking = true;
+		controller.resyncVisibility();
+		controller.setTarget(makeMessage([{ type: "thinking", thinking: grown }]), false);
+
+		// Show it again: the block is still the watched prefix, and the reasoning
+		// that arrived while it was hidden reveals at the normal pace.
+		hideThinking = false;
+		controller.resyncVisibility();
+		expect(thinkingAt(latestMessage(component), 0)).toBe(formatThinkingForDisplay(watched, true));
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		expect(thinkingAt(latestMessage(component), 0).length).toBeGreaterThan(
+			formatThinkingForDisplay(watched, true).length,
+		);
+	});
+
 	it("keeps the revealed answer whole when a partially revealed thinking block is shown again", async () => {
 		// Hide a leading thinking block while the reveal is still inside it, let
 		// the FOLLOWING answer stream in and reveal to completion, then show the
