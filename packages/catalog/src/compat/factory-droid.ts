@@ -6,7 +6,7 @@
  * to bind a model to the account serving it.
  */
 import { isRecord, once } from "@oh-my-pi/pi-utils";
-import type { Api, ModelSpec } from "../types";
+import type { Api, FactoryDroidCreditPromotion, ModelSpec } from "../types";
 import { FACTORY_DROID_WIRES, type FactoryDroidRegion, type FactoryDroidWire } from "../wire/factory-droid";
 import { apiRouteFor } from "./behavior";
 import { seedModels } from "./providers";
@@ -25,15 +25,6 @@ export interface FactoryDroidCreditRates {
 	input: number;
 	output?: number;
 	cacheRead?: number;
-}
-
-/** A dated Standard Credits discount; the window is `[startsAt, endsAt)` in epoch ms. */
-export interface FactoryDroidCreditPromotion {
-	/** Fraction taken off every credit rate, in (0, 1). */
-	discount: number;
-	startsAt: number;
-	endsAt: number;
-	label: string;
 }
 
 /** Account gates on one registry model (the `entitlement` axis). */

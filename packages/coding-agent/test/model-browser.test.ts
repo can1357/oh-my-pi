@@ -1,5 +1,5 @@
 import { createModelBrowserSource } from "../src/modes/model-browser-source";
-import { beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -627,6 +627,47 @@ describe("Factory Droid credits badge", () => {
 			.map(line => Bun.stripANSI(line));
 		expect(endedRows.find(line => line.includes("gpt-5.6-sol"))).toContain("$1.25/10 2×");
 		expect(endedRows.some(line => line.includes("20% off"))).toBe(false);
+	});
+});
+
+describe("Factory Droid credit promotion over time", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	const startsAt = Date.parse("2026-08-22T00:00:00Z");
+	const endsAt = Date.parse("2026-11-22T00:00:00Z");
+	const promoted: Model = {
+		...makeModel("factory-droid", "gpt-5.6-sol"),
+		cost: { input: 1.25, output: 10, cacheRead: 0, cacheWrite: 0 },
+		factoryDroidCredits: 2,
+		factoryDroidCreditPromotion: { discount: 0.2, startsAt, endsAt, label: "20% off" },
+	};
+	const text = (value: unknown) => JSON.stringify(value);
+
+	test("an open browser drops the discount from rows, picker and preview once the promotion ends", () => {
+		try {
+			setSystemTime(new Date(endsAt - 1000));
+			const browser = makeBrowser([promoted], []);
+			const catalogue = buildBrowserItems([promoted]);
+			const row = () =>
+				browser
+					.render(120)
+					.map(line => Bun.stripANSI(line))
+					.find(line => line.includes("gpt-5.6-sol"));
+			expect(row()).toContain("1.6×");
+			expect(text(browser.describe())).toContain("1.6×");
+			expect(text(browser.pickerItems(catalogue))).toContain("1.6×");
+			expect(text(browser.pickerPreview("compact"))).toContain("20% off until 2026-11-22");
+
+			setSystemTime(new Date(endsAt));
+			expect(row()).toContain("$1.25/10 2×");
+			expect(text(browser.describe())).not.toContain("1.6×");
+			expect(text(browser.pickerItems(catalogue))).not.toContain("1.6×");
+			expect(text(browser.pickerPreview("compact"))).not.toContain("20% off");
+		} finally {
+			setSystemTime();
+		}
 	});
 });
 
