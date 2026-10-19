@@ -3967,6 +3967,8 @@ describe("lsp regressions", () => {
 				await lspClient.ensureWorkspaceFolder(client, path.join(siblingRoot, "src", "target.py"));
 				expect(waited).toBe(false);
 				progress(server, "load", "end");
+				progress(server, "folder", "begin");
+				progress(server, "folder", "end");
 				// Replacing the wait instead would leave this caller on the 15 s fallback timer.
 				await waiting;
 
@@ -4094,6 +4096,33 @@ describe("lsp regressions", () => {
 				await first;
 
 				expect(folderAdds(server)).toEqual([folderAdd(siblingRoot)]);
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("keeps the load pending when progress running before the add ends before the folder's own", async () => {
+			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-progress-cycle-");
+			try {
+				const { server, serverConfig } = useServer(FOLDER_CHANGES);
+				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
+				progress(server, "startup", "begin");
+				await lspClient.ensureWorkspaceFolder(client, path.join(siblingRoot, "src", "target.py"));
+				let loaded = false;
+				const waiting = lspClient.waitForProjectLoaded(client).then(() => {
+					loaded = true;
+				});
+
+				progress(server, "startup", "end");
+				// A request round trip: the reader has handled the `end` once its reply is in.
+				await lspClient.sendRequest(client, "test/barrier", {});
+				expect(loaded).toBe(false);
+
+				progress(server, "folder", "begin");
+				progress(server, "folder", "end");
+				await waiting;
+				expect(loaded).toBe(true);
 			} finally {
 				await lspClient.shutdownAll();
 				tempDir.removeSync();

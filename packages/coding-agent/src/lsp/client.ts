@@ -1,9 +1,9 @@
-import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { resolveSyscallTarget } from "../tools/path-utils";
 import { findRepoRoot } from "../capability/fs";
 import { getConfig } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
@@ -460,9 +460,11 @@ async function startMessageReader(client: LspClient): Promise<void> {
 								const params = message.params as { token: string | number; value?: { kind?: string } };
 								if (params.value?.kind === "begin") {
 									client.activeProgressTokens.add(params.token);
+									awaitingFolderProgress.delete(client);
 								} else if (params.value?.kind === "end") {
 									client.activeProgressTokens.delete(params.token);
-									if (client.activeProgressTokens.size === 0) {
+									// After a folder add, only progress that began since ends the load.
+									if (client.activeProgressTokens.size === 0 && !awaitingFolderProgress.has(client)) {
 										client.resolveProjectLoaded();
 									}
 								}
@@ -547,19 +549,12 @@ function currentWorkspaceFolders(client: LspClient): Array<{ uri: string; name: 
 	return [client.cwd, ...(addedWorkspaceFolders.get(client)?.keys() ?? [])].map(workspaceFolder);
 }
 
-/** `filePath` with symlinks resolved; a path that does not exist yet keeps its missing tail. */
-function realPathOf(filePath: string): string {
-	const resolved = path.resolve(filePath);
-	let existing = resolved;
-	while (true) {
-		try {
-			return path.join(fs.realpathSync(existing), path.relative(existing, resolved));
-		} catch {
-			const parent = path.dirname(existing);
-			if (parent === existing) return resolved;
-			existing = parent;
-		}
-	}
+/** Clients that added a folder and have not seen progress begin since; their load stays pending. */
+const awaitingFolderProgress = new WeakSet<LspClient>();
+
+/** `filePath` with symlinks resolved, a missing tail kept; lexical when it cannot be resolved. */
+async function realPathOf(filePath: string): Promise<string> {
+	return (await resolveSyscallTarget(filePath, true)) ?? path.resolve(filePath);
 }
 
 /**
@@ -571,11 +566,11 @@ function realPathOf(filePath: string): string {
  */
 async function workspaceFolderToAdd(client: LspClient, filePath: string): Promise<string | undefined> {
 	if (!client.serverCapabilities?.workspace?.workspaceFolders?.changeNotifications) return undefined;
-	const checkout = await findRepoRoot(path.dirname(realPathOf(filePath)));
-	if (!checkout || checkout === (await findRepoRoot(realPathOf(client.cwd)))) return undefined;
+	const checkout = await findRepoRoot(path.dirname(await realPathOf(filePath)));
+	if (!checkout || checkout === (await findRepoRoot(await realPathOf(client.cwd)))) return undefined;
 	// A repository at or above the home directory (a dotfiles checkout) would have the
 	// server index everything under it.
-	if (isPathInsideWorkspace(realPathOf(os.homedir()), checkout)) return undefined;
+	if (isPathInsideWorkspace(await realPathOf(os.homedir()), checkout)) return undefined;
 	return checkout;
 }
 
@@ -609,6 +604,8 @@ async function addWorkspaceFolder(
 	folders: Map<string, Promise<void>>,
 ): Promise<void> {
 	const undoLoad = restartProjectLoad(client);
+	// Progress already running when the add arrives says nothing about the new folder.
+	awaitingFolderProgress.add(client);
 	try {
 		await sendNotification(
 			client,
@@ -618,6 +615,7 @@ async function addWorkspaceFolder(
 		);
 	} catch (err) {
 		folders.delete(folder);
+		awaitingFolderProgress.delete(client);
 		undoLoad();
 		throw err;
 	}
@@ -625,11 +623,11 @@ async function addWorkspaceFolder(
 }
 
 /** Whether a change to `filePath` concerns `client`: inside its root or a checkout added to it. */
-function clientServesPath(client: LspClient, filePath: string): boolean {
+async function clientServesPath(client: LspClient, filePath: string): Promise<boolean> {
 	if (isPathInsideWorkspace(filePath, path.resolve(client.cwd))) return true;
 	const folders = addedWorkspaceFolders.get(client);
 	if (!folders?.size) return false;
-	const file = realPathOf(filePath);
+	const file = await realPathOf(filePath);
 	return [...folders.keys()].some(folder => isPathInsideWorkspace(file, folder));
 }
 
@@ -1753,8 +1751,9 @@ export async function notifyWorkspaceWatchedFiles(
 	const sendSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	const results = await Promise.allSettled(
 		activeClients.map(async client => {
+			const served = await Promise.all(changes.map(change => clientServesPath(client, change.filePath)));
 			const clientChanges = changes
-				.filter(change => clientServesPath(client, change.filePath))
+				.filter((_change, index) => served[index])
 				.map(change => {
 					const uri = fileToUri(change.filePath);
 					client.diagnostics.delete(uri);
@@ -1944,19 +1943,11 @@ export async function sendRequest(
 		// The retry spends what is left of the first attempt's budget, the default included.
 		const budget = timeoutMs ?? (signal ? undefined : DEFAULT_REQUEST_TIMEOUT_MS);
 		const deadline = budget === undefined ? undefined : started + budget;
-		let deadlineTimer: NodeJS.Timeout | undefined;
+		const deadlineReached = Promise.withResolvers<void>();
+		const deadlineTimer =
+			deadline === undefined ? undefined : setTimeout(deadlineReached.resolve, Math.max(0, deadline - Date.now()));
 		try {
-			await untilAborted(
-				signal,
-				deadline === undefined
-					? client.projectLoaded
-					: Promise.race([
-							client.projectLoaded,
-							new Promise<void>(resolve => {
-								deadlineTimer = setTimeout(resolve, Math.max(0, deadline - Date.now()));
-							}),
-						]),
-			);
+			await untilAborted(signal, Promise.race([client.projectLoaded, deadlineReached.promise]));
 		} finally {
 			clearTimeout(deadlineTimer);
 		}
