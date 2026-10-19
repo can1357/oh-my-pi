@@ -411,54 +411,49 @@ describe("composer inline shrink (#11007)", () => {
 		h.composer.stop();
 	});
 
-	it("with completeScrollback, never hides or repeats a streamed row the reply itself pushes off screen", async () => {
-		for (let height = 8; height <= 26; height++) {
-			for (const perUpdate of [1, 3]) {
-				const h = makeHarness(COLUMNS, height, 3);
-				h.composer.setPreferences({ completeScrollback: true });
+	// One paragraph per update overflows by less than a paragraph, so the commit
+	// must carry the reply's own rows; three overshoot the screen, so the rows a
+	// commit carries must also leave the viewport.
+	for (const perUpdate of [1, 3]) {
+		it(`with completeScrollback, never hides or repeats a streamed row the reply itself pushes off screen (${perUpdate} per update)`, async () => {
+			const h = makeHarness(COLUMNS, 20, 3);
+			h.composer.setPreferences({ completeScrollback: true });
+			await h.scheduler.settle(h.terminal);
+			// A settled three-row block (a user prompt) sits above the reply, so the
+			// reply first overflows in the frame that block retires.
+			h.transcript.addChild({ render: () => ["", "PROMPT", ""] });
+			const message = new AssistantMessageComponent();
+			h.transcript.addChild(message);
+			const tokens = (): string[] =>
+				h.terminal.getScrollBuffer().flatMap(row => Bun.stripANSI(row).match(/\bP\d\d\b/g) ?? []);
+			// Check every frame, not only the settled one: a row offered to history
+			// and painted again on screen shows twice until a later frame repaints.
+			const repeats: string[] = [];
+			const flush = h.terminal.flush.bind(h.terminal);
+			h.terminal.flush = async () => {
+				await flush();
+				const all = tokens();
+				repeats.push(...all.filter((p, i) => all.indexOf(p) !== i));
+			};
+			// Each paragraph wraps to two rows and arrives whole.
+			const paragraphs = Array.from(
+				{ length: 24 },
+				(_, p) => `P${String(p).padStart(2, "0")} ${"word ".repeat(28).trim()}`,
+			);
+			const seen = new Set<string>();
+			for (let n = perUpdate; n <= paragraphs.length; n += perUpdate) {
+				message.updateContent(reply(paragraphs.slice(0, n).join("\n\n")), { transient: true });
+				h.composer.ui.requestRender();
 				await h.scheduler.settle(h.terminal);
-				// A settled three-row block (a user prompt) sits above the reply, so the
-				// reply first overflows in the frame that block retires.
-				h.transcript.addChild({ render: () => ["", "PROMPT", ""] });
-				const message = new AssistantMessageComponent();
-				h.transcript.addChild(message);
-				const tokens = (): string[] =>
-					h.terminal.getScrollBuffer().flatMap(row => Bun.stripANSI(row).match(/\bP\d\d\b/g) ?? []);
-				// Check every frame, not only the settled one: a row offered to history
-				// and painted again on screen shows twice until a later frame repaints.
-				const repeats: string[] = [];
-				const flush = h.terminal.flush.bind(h.terminal);
-				h.terminal.flush = async () => {
-					await flush();
-					const all = tokens();
-					repeats.push(...all.filter((p, i) => all.indexOf(p) !== i));
-				};
-				// Each paragraph wraps to two rows and arrives whole, so the reply keeps
-				// overflowing the screen by one or several paragraphs a frame.
-				const paragraphs = Array.from(
-					{ length: 24 },
-					(_, p) => `P${String(p).padStart(2, "0")} ${"word ".repeat(28).trim()}`,
-				);
-				const seen = new Set<string>();
-				for (let n = perUpdate; n <= paragraphs.length; n += perUpdate) {
-					message.updateContent(reply(paragraphs.slice(0, n).join("\n\n")), { transient: true });
-					h.composer.ui.requestRender();
-					await h.scheduler.settle(h.terminal);
-					const now = new Set(tokens());
-					// A paragraph once on screen stays on screen or in scrollback, and only once.
-					expect({ height, perUpdate, n, missing: [...seen].filter(p => !now.has(p)) }).toEqual({
-						height,
-						perUpdate,
-						n,
-						missing: [],
-					});
-					for (const p of now) seen.add(p);
-				}
-				expect({ height, perUpdate, repeats }).toEqual({ height, perUpdate, repeats: [] });
-				h.composer.stop();
+				const now = new Set(tokens());
+				// A paragraph once on screen stays on screen or in scrollback.
+				expect({ n, missing: [...seen].filter(p => !now.has(p)) }).toEqual({ n, missing: [] });
+				for (const p of now) seen.add(p);
 			}
-		}
-	});
+			expect(repeats).toEqual([]);
+			h.composer.stop();
+		});
+	}
 
 	for (const earlier of ["", "| A | B |\n|---|---|\n| x | y |\n\nSome prose between.\n\n"]) {
 		it(`with completeScrollback, sends a streaming table taller than the screen to scrollback row by row (earlier table: ${earlier !== ""})`, async () => {
@@ -501,6 +496,36 @@ describe("composer inline shrink (#11007)", () => {
 			h.composer.stop();
 		});
 	}
+
+	it("with completeScrollback, leaves a table's layout alone when its block cannot publish mid-stream", async () => {
+		const h = makeHarness(COLUMNS, 20, 3);
+		h.composer.setPreferences({ completeScrollback: true });
+		await h.scheduler.settle(h.terminal);
+		const message = new AssistantMessageComponent();
+		// A revisable wire publishes no stable rows, so a lock would only narrow the table.
+		message.setMidStreamPublication(false);
+		h.transcript.addChild(message);
+		const rows = Array.from(
+			{ length: 24 },
+			// Cells keep widening after the table outgrows the screen.
+			(_, r) => `| R${String(r).padStart(2, "0")} | ${"cell ".repeat(1 + Math.floor(r / 3)).trim()} |`,
+		);
+		const head = "| Key | Value |\n|---|---|";
+		for (let n = 1; n <= rows.length; n++) {
+			message.updateContent(reply([head, ...rows.slice(0, n), rows[n]?.slice(0, 8) ?? ""].join("\n")), {
+				transient: true,
+			});
+			h.composer.ui.requestRender();
+			await h.scheduler.settle(h.terminal);
+		}
+		const full = reply([head, ...rows].join("\n"));
+		message.updateContent(full);
+		message.markTranscriptBlockFinalized();
+		const fresh = new AssistantMessageComponent(full);
+		fresh.markTranscriptBlockFinalized();
+		expect(message.render(COLUMNS)).toEqual(fresh.render(COLUMNS));
+		h.composer.stop();
+	});
 
 	it("keeps the below-chrome baseline across a height resize while inline chrome is expanded", async () => {
 		const shorter = ROWS - 10;

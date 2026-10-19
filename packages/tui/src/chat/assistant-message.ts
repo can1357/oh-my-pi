@@ -1532,9 +1532,12 @@ export class AssistantMessageComponent extends Container {
 	 * calls this when rows of this block no longer fit and none of them is
 	 * stable yet. The transcript asks during a frame whose history batch is
 	 * already chosen, so a new lock requests the next frame, which publishes
-	 * and commits the table's finished rows even if the stream pauses.
+	 * and commits the table's finished rows even if the stream pauses. A block
+	 * that publishes nothing mid-stream (a revisable wire) gains nothing from a
+	 * lock, so it keeps its natural layout.
 	 */
 	lockStreamingLayout(): void {
+		if (!this.#midStreamPublication) return;
 		const items = this.#fastPathItems;
 		const md = items?.at(-1)?.md;
 		if ((md instanceof FigureMarkdown || md instanceof Markdown) && md.lockOpenTable()) this.#onImageUpdate?.();
