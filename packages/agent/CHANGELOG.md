@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Tool calls get `ctx.toolCall.earlierEffectsSettled`, which settles once the earlier calls of their message that may write files and run beside them have finished ([#16274](https://github.com/can1357/oh-my-pi/pull/16274) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.8] - 2026-11-11
 
 - Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#18654](https://github.com/can1357/oh-my-pi/pull/18654) by [@yuzu-octopus](https://github.com/yuzu-octopus))
@@ -133,10 +137,6 @@
 ### Changed
 
 - Tools with `lenientArgValidation` now receive unknown root arguments that their closed schema would otherwise drop, so they can reject them ([#16317](https://github.com/can1357/oh-my-pi/issues/16317))
-
-### Added
-
-- Tool calls get `ctx.toolCall.earlierEffectsSettled`, which settles once the earlier calls of their message that may write files and run beside them have finished
 
 ## [18.12.2] - 2026-10-18
 
