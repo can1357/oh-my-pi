@@ -1,5 +1,4 @@
 /** Mnemopi adapter: runs `BeamMemory` in the harness process with the same embedding model as upstream Mnemosyne. */
-import * as os from "node:os";
 import * as path from "node:path";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { embed } from "@oh-my-pi/pi-mnemopi/core/embeddings";
@@ -11,12 +10,11 @@ import {
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { EngineAdapter, MnemopiRecall, ProtocolName, RecallHit } from "../engine";
 import { envName, PythonProcess } from "./python-process";
+import { enginePython, resolveCacheRoot } from "../paths";
 
 const EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../../..");
 const PACKAGE_JSON = path.join(REPO_ROOT, "packages", "mnemopi", "package.json");
-const CACHE_ROOT = path.join(os.homedir(), ".cache", "omp-memory-eval");
-const EMBED_PYTHON = path.join(CACHE_ROOT, "venv-engine", "bin", "python");
 const EMBED_SCRIPT = path.resolve(import.meta.dir, "../py/embed_server.py");
 
 /**
@@ -27,6 +25,8 @@ export type MnemopiEmbedder = "js" | "python";
 
 export interface MnemopiEngineOptions {
 	embedder?: MnemopiEmbedder;
+	/** Venv and Python-embedder model cache root. */
+	cacheRoot?: string;
 	recall?: MnemopiRecall;
 	/** Polyphonic recall (omp's `mnemopi.polyphonicRecall`); only `recallEnhanced` runs it. */
 	polyphonic?: boolean;
@@ -56,6 +56,7 @@ function tierOf(label: string | undefined, summaryOf: string | undefined): Recal
 }
 
 export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter {
+	const cacheRoot = resolveCacheRoot(options.cacheRoot);
 	const embedder = options.embedder ?? "js";
 	const recallMode = options.recall ?? "recall";
 	const polyphonic = options.polyphonic ?? false;
@@ -65,12 +66,12 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 	const startEmbedder = (): PythonProcess => {
 		embedProc ??= new PythonProcess(
 			"embedding server",
-			options.embedPython ?? EMBED_PYTHON,
+			options.embedPython ?? enginePython(cacheRoot),
 			options.embedScript ?? EMBED_SCRIPT,
 			{
 				...Bun.env,
 				MEMORY_EVAL_EMBED_MODEL: EMBEDDING_MODEL,
-				MEMORY_EVAL_EMBED_CACHE_DIR: path.join(CACHE_ROOT, "fastembed"),
+				MEMORY_EVAL_EMBED_CACHE_DIR: path.join(cacheRoot, "fastembed"),
 			},
 		);
 		return embedProc;
@@ -187,6 +188,8 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 		warmup: async protocol => {
 			opts = runtimeOptions(protocol);
 			if (protocol === "fts-only") return;
+			// Spawn outside Mnemopi's provider-error swallowing so a missing interpreter fails before ingestion.
+			if (embedder === "python") startEmbedder();
 			await scoped(() => embed(["warmup"]));
 		},
 	};

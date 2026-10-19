@@ -2,11 +2,18 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { mnemosyneEngine } from "../../bench/memory-eval/engines/mnemosyne";
 import { runCases } from "../../bench/memory-eval/runner";
 import type { EvalCase } from "../../bench/memory-eval/types";
+import { pythonPath } from "./python";
 
 const REAL_SCRIPT = path.join(import.meta.dir, "../../bench/memory-eval/py/mnemosyne_engine.py");
+
+function python(): string {
+	if (!pythonPath) throw new Error("Python is required for this test");
+	return pythonPath;
+}
 
 const twoMessageCase: EvalCase = {
 	caseId: "c/1",
@@ -23,7 +30,7 @@ beforeAll(async () => {
 	tmp = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-mnemosyne-"));
 });
 afterAll(async () => {
-	await fs.rm(tmp, { recursive: true, force: true });
+	await removeWithRetries(tmp);
 });
 
 /** Writes a stub engine script; Mnemosyne itself is not needed. */
@@ -65,12 +72,12 @@ class BeamMemory:
         return ([derived] + rows)[:top_k]
 `;
 
-/** The real engine script, run against FAKE_BEAM instead of an installed Mnemosyne. */
-async function realScriptOnFakeMnemosyne(): Promise<string> {
-	const fake = path.join(tmp, "fake-mnemosyne");
+/** The real engine script, run against a fake Mnemosyne of the given version instead of an installed one. */
+async function realScriptOnFakeMnemosyne(version = "4.0.0b4"): Promise<string> {
+	const fake = path.join(tmp, `fake-mnemosyne-${version}`);
 	await Bun.write(
-		path.join(fake, "mnemosyne_memory-4.0.0b4.dist-info", "METADATA"),
-		"Metadata-Version: 2.1\nName: mnemosyne-memory\nVersion: 4.0.0b4\n",
+		path.join(fake, `mnemosyne_memory-${version}.dist-info`, "METADATA"),
+		`Metadata-Version: 2.1\nName: mnemosyne-memory\nVersion: ${version}\n`,
 	);
 	await Bun.write(path.join(fake, "mnemosyne", "__init__.py"), "");
 	await Bun.write(path.join(fake, "mnemosyne", "core", "__init__.py"), "");
@@ -80,14 +87,14 @@ async function realScriptOnFakeMnemosyne(): Promise<string> {
 	);
 	await Bun.write(path.join(fake, "mnemosyne", "core", "beam.py"), FAKE_BEAM);
 	return stub(
-		"fake-mnemosyne-run.py",
+		`fake-mnemosyne-run-${version}.py`,
 		`import runpy, sys\nsys.path.insert(0, ${JSON.stringify(fake)})\nrunpy.run_path(${JSON.stringify(REAL_SCRIPT)}, run_name="__main__")\n`,
 	);
 }
 
-describe("mnemosyne client", () => {
+describe.skipIf(!pythonPath)("mnemosyne client", () => {
 	it("adapter error aborts the run", async () => {
-		const engine = mnemosyneEngine({ python: "python3", script: await stub("erroring.py", ERRORING_STUB) });
+		const engine = mnemosyneEngine({ python: python(), script: await stub("erroring.py", ERRORING_STUB) });
 		await expect(runCases(engine, [twoMessageCase], "standard", 10, tmp)).rejects.toThrow("boom");
 		await engine.dispose();
 	});
@@ -97,7 +104,7 @@ describe("mnemosyne client", () => {
 			"crashing.py",
 			`import sys\nsys.stdin.readline()\nprint("kaput", file=sys.stderr)\nsys.exit(3)\n`,
 		);
-		const engine = mnemosyneEngine({ python: "python3", script });
+		const engine = mnemosyneEngine({ python: python(), script });
 		await expect(runCases(engine, [twoMessageCase], "standard", 10, tmp)).rejects.toThrow(/code 3.*kaput/s);
 		await expect(engine.vectorCount()).rejects.toThrow("kaput");
 		await engine.dispose();
@@ -109,7 +116,7 @@ describe("mnemosyne client", () => {
 			"eof.py",
 			`import os, sys\nsys.stdin.readline()\nos.close(1)\nprint("bye", file=sys.stderr, flush=True)\nsys.stdin.read()\n`,
 		);
-		const engine = mnemosyneEngine({ python: "python3", script });
+		const engine = mnemosyneEngine({ python: python(), script });
 		try {
 			const started = performance.now();
 			await expect(engine.warmup("standard")).rejects.toThrow(/closed stdout.*bye/s);
@@ -120,13 +127,16 @@ describe("mnemosyne client", () => {
 	});
 
 	it("a Mnemosyne version other than 4.0.0b4 aborts the run", async () => {
-		const engine = mnemosyneEngine({ python: "python3", script: REAL_SCRIPT });
-		await expect(runCases(engine, [twoMessageCase], "standard", 10, tmp)).rejects.toThrow("4.0.0b4");
+		// A fake distribution first on sys.path makes the installed Mnemosyne, if any, irrelevant.
+		const engine = mnemosyneEngine({ python: python(), script: await realScriptOnFakeMnemosyne("4.0.0b3") });
+		await expect(runCases(engine, [twoMessageCase], "standard", 10, tmp)).rejects.toThrow(
+			"mnemosyne-memory 4.0.0b4 is required, found 4.0.0b3",
+		);
 		await engine.dispose();
 	});
 
 	it("one process serves one protocol", async () => {
-		const engine = mnemosyneEngine({ python: "python3", script: await stub("erroring.py", ERRORING_STUB) });
+		const engine = mnemosyneEngine({ python: python(), script: await stub("erroring.py", ERRORING_STUB) });
 		await engine.warmup("standard");
 		await expect(engine.open(twoMessageCase, { storeDir: tmp, protocol: "fts-only" })).rejects.toThrow("fts-only");
 		await engine.dispose();
@@ -146,7 +156,7 @@ for line in sys.stdin:
     print(json.dumps({"id": req["id"], "result": env}), flush=True)
 `,
 		);
-		const engine = mnemosyneEngine({ python: "python3", script, ...options });
+		const engine = mnemosyneEngine({ python: python(), script, ...options });
 		try {
 			await engine.warmup(protocol);
 			return await engine.describe();
@@ -206,7 +216,7 @@ for line in sys.stdin:
     print(json.dumps({"id": req["id"], "result": result}), flush=True)
 `,
 		);
-		const engine = mnemosyneEngine({ python: "python3", script });
+		const engine = mnemosyneEngine({ python: python(), script });
 		try {
 			const { questions } = await runCases(engine, [twoMessageCase], "standard", 10, tmp);
 			expect(questions[0].ranked.map(h => h.messageIds)).toEqual([["m1"]]);
@@ -223,7 +233,7 @@ for line in sys.stdin:
 	};
 
 	it("widening keeps the native top-k's ranked rows and appends unseen rows from wider calls", async () => {
-		const engine = mnemosyneEngine({ python: "python3", script: await realScriptOnFakeMnemosyne() });
+		const engine = mnemosyneEngine({ python: python(), script: await realScriptOnFakeMnemosyne() });
 		try {
 			const { questions } = await runCases(engine, [threeMessageCase], "standard", 2, tmp);
 			// top_k=2 gives [derived, r1]; top_k=4 reorders to [derived, r3, r2, r1]: r1 keeps its place, r3 is appended.
@@ -236,7 +246,7 @@ for line in sys.stdin:
 	});
 
 	it("widening stops when Mnemosyne returns fewer rows than requested", async () => {
-		const engine = mnemosyneEngine({ python: "python3", script: await realScriptOnFakeMnemosyne() });
+		const engine = mnemosyneEngine({ python: python(), script: await realScriptOnFakeMnemosyne() });
 		try {
 			// Four rows exist, so the first top_k=10 call is short and must be the last.
 			const { questions } = await runCases(engine, [threeMessageCase], "standard", 10, tmp);
