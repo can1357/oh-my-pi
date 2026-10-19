@@ -2367,7 +2367,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 				return {
 					keepInFront: () => {
 						holds.push(app);
-						return new Promise<number>(() => {});
+						return Promise.withResolvers<number>().promise;
 					},
 				};
 			});
