@@ -79,6 +79,8 @@ Latency (`latency.p50`, `latency.p95`, per question `latencyMs`) is the wall tim
 
 `--embedder js` (default) uses Mnemopi's own local fastembed, as omp does in production. On the reference machine it embeds about 20-40x slower than Python fastembed with the same ONNX model file, so a full LongMemEval run takes days. `--embedder python` serves the same model from `py/embed_server.py` (in `venv-engine`) through Mnemopi's embedding-provider option. Mnemopi's retrieval code is unchanged, and an embedding-server failure aborts the run. Compare a Python-embedder run against a JS-embedder run with `diff` before relying on it for a new model.
 
+The model name alone maps to an unversioned download, so every engine also records `embedding_model_sha256` in `engineInfo`: a digest of the model and tokenizer files it actually loaded (SHA-256 over each file's name and SHA-256, in name order, symlinks followed). The JS cache's plain files and a Python Hugging Face snapshot holding the same bytes give the same digest. Runs whose digests differ embedded with different files.
+
 ### Recall options
 
 - `--mnemopi-recall recall` (default) ranks with `BeamMemory.recall`. `--mnemopi-recall enhanced` calls `recallEnhanced(question, k, { includeFacts: true })`, the call omp's auto-recall makes. Fact rows take a ranking slot (tier `fact`) and map to messages only through the content fallback. The harness ingests without fact extraction, which in production runs the host LLM over each retained transcript, so these stores hold no extracted facts: fact recall and polyphonic recall's fact voice contribute nothing, on both engines (Mnemosyne runs with `MNEMOSYNE_LLM_ENABLED=false`).
@@ -125,7 +127,7 @@ $V $P/lme_official_check.py $O/lme-oracle.json --oracle-from-cases  # official o
 
 ## Embedding parity (Layer 0)
 
-Mnemopi and Mnemosyne must embed alike. Embed 50 BEAM messages with fastembed, then embed the same texts through Mnemopi's local fastembed and compare; the second step exits 1 if any cosine is non-finite or below 0.99.
+Mnemopi and Mnemosyne must embed alike. Embed 50 BEAM messages with fastembed, then embed the same texts through Mnemopi's local fastembed and compare; the second step exits 1 if any cosine is non-finite or below 0.99. `embed_parity.py` refuses to start while `PYTHONPATH` or `PYTHONHOME` is set, as the engines' own Python helpers run without them.
 
 ```sh
 ~/.cache/omp-memory-eval/venv-engine/bin/python packages/coding-agent/bench/memory-eval/py/embed_parity.py

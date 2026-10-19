@@ -24,6 +24,8 @@ sys.stdin.reconfigure(encoding="utf-8")
 
 from fastembed import TextEmbedding  # noqa: E402
 
+from model_digest import model_dir_digest  # noqa: E402
+
 MODEL = os.environ["MEMORY_EVAL_EMBED_MODEL"]
 CACHE_DIR = os.environ["MEMORY_EVAL_EMBED_CACHE_DIR"]
 
@@ -40,7 +42,12 @@ def op_versions(_params):
 	return {name: importlib.metadata.version(name) for name in ("fastembed", "onnxruntime")}
 
 
-OPS = {"embed": op_embed, "versions": op_versions}
+def op_model_digest(_params):
+	"""The model and tokenizer files fastembed loaded; the model name alone names an unversioned download."""
+	return model_dir_digest(EMBEDDER.model._model_dir)
+
+
+OPS = {"embed": op_embed, "versions": op_versions, "model_digest": op_model_digest}
 
 
 def main():
