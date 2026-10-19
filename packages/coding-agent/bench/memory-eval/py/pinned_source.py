@@ -13,6 +13,8 @@ from pathlib import Path
 def require_pinned(repo: Path, commit: str) -> None:
 	# GIT_DIR, GIT_WORK_TREE and friends would make `-C repo` check another repository.
 	env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+	env["GIT_CONFIG_NOSYSTEM"] = "1"
+	env["GIT_CONFIG_GLOBAL"] = os.devnull
 
 	def git(*args: str) -> str:
 		return subprocess.run(
@@ -20,7 +22,7 @@ def require_pinned(repo: Path, commit: str) -> None:
 		).stdout.strip()
 
 	try:
-		head, status = git("rev-parse", "HEAD"), git("status", "--porcelain")
+		head, status = git("rev-parse", "HEAD"), git("status", "--porcelain", "--untracked-files=all")
 	except (OSError, subprocess.CalledProcessError) as error:
 		sys.exit(f"{repo}: not a readable git checkout ({error}); redo the one-time setup")
 	if head != commit:

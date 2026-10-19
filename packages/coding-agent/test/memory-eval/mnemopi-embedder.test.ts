@@ -61,7 +61,8 @@ describe("mnemopi python embedder", () => {
 			try {
 				// Mnemopi swallows the provider error and the first message may still have a vector: only the adapter
 				// rethrowing the server's failure yields "embed boom" rather than the runner's "have no vector".
-				await expect(runCases(engine, [failingEmbedCase], "standard", 10, tmp.path())).rejects.toThrow(
+				// Failed runs can leave their store behind; do not reuse it in the FTS-only fixture.
+				await expect(runCases(engine, [failingEmbedCase], "standard", 10, tmp.join("failed-run"))).rejects.toThrow(
 					"embed boom",
 				);
 			} finally {
