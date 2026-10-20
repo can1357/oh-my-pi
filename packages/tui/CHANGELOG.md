@@ -24,6 +24,8 @@
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
 
 ## [18.12.4] - 2026-10-20
+### Fixed
+- Fixed SIXEL images from eval cells, `!` shell commands, and replay being cut, reordered, or drawn twice: payload rows are kept byte-for-byte in stream order, a frame is retained whole even past the inline budget, and a frame already rendered raw no longer draws its decoded copy again ([#15327](https://github.com/can1357/oh-my-pi/pull/15327) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 
 ### Added
 
