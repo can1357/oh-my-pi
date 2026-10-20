@@ -133,6 +133,7 @@ describe("compareCalibration", () => {
 			recall: r.metrics["compat.recall@10"],
 		})),
 		meanRecall: results.reduce((sum, r) => sum + r.metrics["compat.recall@10"], 0) / results.length,
+		corpusSha256: "corpus",
 		embeddingModelSha256: "model-digest",
 		runtime: { fastembed_version: "0.9.0", onnxruntime_version: "1.28.0" },
 	});
@@ -141,6 +142,7 @@ describe("compareCalibration", () => {
 		questions: results,
 		aggregate: { "compat.recall@10": mean },
 		config: {
+			corpusSha256: "corpus" as string | undefined,
 			engineInfo: {
 				fastembed_version: "0.9.0",
 				onnxruntime_version: "1.28.0",
@@ -213,5 +215,15 @@ describe("compareCalibration", () => {
 		expect(compareCalibration(a, b)).toEqual([
 			`[1] conversation 0 "beta": A records no gold contents; re-run it with this harness`,
 		]);
+	});
+
+	it("does not calibrate stores that differ only outside every top ten", async () => {
+		const results = await runUpstreamCompat(fakeEngine().engine, conversations);
+		const a = dumpOf(results);
+		const b = runB(results, a.meanRecall);
+		b.config.corpusSha256 = "other-corpus";
+		expect(compareCalibration(a, b)).toEqual(["corpus: A corpus, B other-corpus"]);
+		b.config.corpusSha256 = undefined;
+		expect(compareCalibration(a, b)).toEqual(["corpus: B records no corpus digest; re-run it with this harness"]);
 	});
 });

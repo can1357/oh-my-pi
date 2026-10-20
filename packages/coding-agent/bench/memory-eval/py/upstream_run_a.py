@@ -12,14 +12,13 @@ BeamMemory.consolidate_to_episodic (recorded, because upstream swallows their ex
 import os
 import sys
 
-# First, before any import: os and sys are loaded at interpreter startup. PYTHONPATH, PYTHONHOME, PYTHONPYCACHEPREFIX and
-# their kin change which code or bytecode an import loads (the standard modules below, Mnemosyne, its dependencies).
-# Only these, which affect I/O and locale but not imports, are allowed. Inline in every script: an imported guard could
-# itself be loaded through an override.
-SAFE_PYTHON_ENV = {"PYTHONUNBUFFERED", "PYTHONIOENCODING", "PYTHONUTF8", "PYTHONCOERCECLOCALE", "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE", "PYTHONSTARTUP"}
-for name in sorted(os.environ):
-	if name.upper().startswith("PYTHON") and name.upper() not in SAFE_PYTHON_ENV and os.environ[name]:
-		sys.exit(f"upstream_run_a.py: refusing to run with {name} set; unset it so only the venv's code runs")
+# Run as `python -I`. Only isolated mode keeps a PYTHONPATH sitecustomize.py from running at interpreter startup, before
+# any line here, and it ignores every PYTHON* variable (PYTHONPATH, PYTHONPYCACHEPREFIX, ...) that could change which
+# Mnemosyne, dependency or bytecode runs. Isolated mode leaves this script's directory off sys.path, so it is added back
+# for the harness's own modules.
+if not sys.flags.isolated:
+	sys.exit("upstream_run_a.py: run it with `python -I`, so nothing outside the venv can change what it imports")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import argparse  # noqa: E402
 import importlib.metadata  # noqa: E402
@@ -66,7 +65,7 @@ import mnemosyne  # noqa: E402
 from mnemosyne.core import embeddings  # noqa: E402
 from mnemosyne.core.beam import BeamMemory  # noqa: E402
 
-from model_digest import model_dir_digest  # noqa: E402
+from model_digest import corpus_digest, model_dir_digest  # noqa: E402
 
 # Run B's adapter runs this exact package; another install or version would calibrate a different runtime.
 if mnemosyne.__version__ != "4.0.0b4" or not Path(mnemosyne.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()):
@@ -182,7 +181,16 @@ out_path.parent.mkdir(parents=True, exist_ok=True)
 # The numerical runtime behind the vectors can reorder near-ties; recorded under Run B's engineInfo names.
 runtime = {f"{name}_version": importlib.metadata.version(name) for name in ("fastembed", "onnxruntime")}
 out_path.write_text(
-	json.dumps({"questions": questions, "meanRecall": mean_recall, "embeddingModelSha256": MODEL_DIGEST, "runtime": runtime}),
+	json.dumps(
+		{
+			"questions": questions,
+			"meanRecall": mean_recall,
+			# The ingested corpus, so a store that differs only outside every top ten cannot calibrate.
+			"corpusSha256": corpus_digest([conv["messages"] for conv in conversations]),
+			"embeddingModelSha256": MODEL_DIGEST,
+			"runtime": runtime,
+		}
+	),
 	encoding="utf-8",
 )
 shutil.rmtree(data_dir, ignore_errors=True)

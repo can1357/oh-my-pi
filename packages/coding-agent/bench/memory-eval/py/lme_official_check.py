@@ -8,14 +8,13 @@ Usage (venv-lme python, numpy<2 because the official code uses np.asfarray):
 import os
 import sys
 
-# First, before any import: os and sys are loaded at interpreter startup. PYTHONPATH, PYTHONHOME, PYTHONPYCACHEPREFIX and
-# their kin change which code or bytecode an import loads (json, pinned_source, the evaluator's NumPy). Only these,
-# which affect I/O and locale but not imports, are allowed. Inline in every script: an imported guard could itself be
-# loaded through an override.
-SAFE_PYTHON_ENV = {"PYTHONUNBUFFERED", "PYTHONIOENCODING", "PYTHONUTF8", "PYTHONCOERCECLOCALE", "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE", "PYTHONSTARTUP"}
-for name in sorted(os.environ):
-	if name.upper().startswith("PYTHON") and name.upper() not in SAFE_PYTHON_ENV and os.environ[name]:
-		sys.exit(f"lme_official_check.py: refusing to run with {name} set; unset it so only venv-lme's code runs")
+# Run as `python -I`. Only isolated mode keeps a PYTHONPATH sitecustomize.py from running at interpreter startup, before
+# any line here, and it ignores every PYTHON* variable (PYTHONPATH, PYTHONPYCACHEPREFIX, ...) that could change which
+# NumPy, pinned_source or bytecode runs. Isolated mode leaves this script's directory off sys.path, so it is added back
+# for the harness's own modules.
+if not sys.flags.isolated:
+	sys.exit("lme_official_check.py: run it with `python -I`, so nothing outside the venv can change what it imports")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import json  # noqa: E402
 from pathlib import Path  # noqa: E402

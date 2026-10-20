@@ -9,14 +9,13 @@ again. A marker from before the digest was recorded is upgraded in place.
 import os
 import sys
 
-# First, before any import: os and sys are loaded at interpreter startup. PYTHONPATH, PYTHONHOME, PYTHONPYCACHEPREFIX and
-# their kin change which code or bytecode an import loads; a downloader that ignores the pinned revision or a converter
-# that changes the data would then be published under the pinned marker. Only these, which affect I/O and locale but
-# not imports, are allowed. Inline in every script: an imported guard could itself be loaded through an override.
-SAFE_PYTHON_ENV = {"PYTHONUNBUFFERED", "PYTHONIOENCODING", "PYTHONUTF8", "PYTHONCOERCECLOCALE", "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE", "PYTHONSTARTUP"}
-for name in sorted(os.environ):
-	if name.upper().startswith("PYTHON") and name.upper() not in SAFE_PYTHON_ENV and os.environ[name]:
-		sys.exit(f"prepare_datasets.py: refusing to run with {name} set; unset it so only venv-engine's code runs")
+# Run as `python -I`. Only isolated mode keeps a PYTHONPATH sitecustomize.py from running at interpreter startup, before
+# any line here, and it ignores every PYTHON* variable (PYTHONPATH, PYTHONPYCACHEPREFIX, ...): a downloader that ignores
+# the pinned revision or a converter that changes the data would otherwise be published under the pinned marker.
+# Isolated mode leaves this script's directory off sys.path, so it is added back for the harness's own modules.
+if __name__ == "__main__" and not sys.flags.isolated:
+	sys.exit("prepare_datasets.py: run it with `python -I`, so nothing outside the venv can change what it imports")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import ast  # noqa: E402
 import hashlib  # noqa: E402
@@ -65,25 +64,27 @@ def marker(out: Path) -> Path:
 	return out.with_name(f"{out.name}.revision")
 
 
-def digest(out: Path) -> str:
-	return hashlib.sha256(out.read_bytes()).hexdigest()
-
-
 def read_current(out: Path, revision: str) -> str | None:
 	"""The cached file's text when its marker records `revision` and the file's own SHA-256; None otherwise.
 
 	The marker is `<revision>\\n<sha256 of the data file>\\n`. A marker from before the digest was recorded names only
 	the revision; it is upgraded in place, attesting the pair as it stands, as the revision-only marker already did.
+	The bytes returned are the bytes hashed, and the marker is read again after them: a refresh removes the marker
+	before it replaces the data, so a replacement in between cannot pass as this revision.
 	"""
 	try:
 		lines = marker(out).read_text(encoding="utf-8").split()
 		if not lines or lines[0] != revision:
 			return None
+		data = out.read_bytes()
+		sha256 = hashlib.sha256(data).hexdigest()
 		if len(lines) == 1:
-			marker(out).write_text(f"{revision}\n{digest(out)}\n", encoding="utf-8")
-		elif lines[1] != digest(out):
+			marker(out).write_text(f"{revision}\n{sha256}\n", encoding="utf-8")
+		elif lines[1] != sha256:
 			return None
-		return out.read_text(encoding="utf-8")
+		if marker(out).read_text(encoding="utf-8").split() != [revision, sha256]:
+			return None
+		return data.decode("utf-8")
 	except FileNotFoundError:
 		return None
 

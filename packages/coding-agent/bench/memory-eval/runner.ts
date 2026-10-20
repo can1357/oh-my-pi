@@ -43,6 +43,8 @@ export interface RunConfig {
 	datasetRevision: string;
 	/** SHA-256 of the prepared dataset file; `diff` refuses differing digests. Absent in older files. */
 	datasetSha256?: string;
+	/** upstream-compat only: `corpusSha256` of the conversations ingested, which calibration-check compares with Run A. */
+	corpusSha256?: string;
 	engine: EngineName;
 	engineInfo: Record<string, string>;
 	protocol: ProtocolName;

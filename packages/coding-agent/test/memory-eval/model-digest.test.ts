@@ -2,6 +2,7 @@ import { expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { corpusSha256 } from "../../bench/memory-eval/compat";
 import { modelDirDigest } from "../../bench/memory-eval/engines/mnemopi";
 import { pythonPath } from "./python";
 
@@ -54,3 +55,30 @@ it.skipIf(pythonPath === undefined)(
 		expect(await pythonDigest(plain)).toBe(changed);
 	},
 );
+
+// Run A hashes the corpus in Python and Run B in TypeScript; calibration only compares them if both agree on the bytes.
+it.skipIf(pythonPath === undefined)("digests a calibration corpus identically in TS and Python", async () => {
+	const conversations = [["alpha", "", "café 日本語 🙂"], ["beta\nwith a newline"]];
+	const proc = Bun.spawn(
+		[
+			pythonPath!,
+			"-c",
+			"import json, sys; sys.path.insert(0, sys.argv[1]); from model_digest import corpus_digest; print(corpus_digest(json.loads(sys.stdin.read())))",
+			path.dirname(DIGEST_PY),
+		],
+		{ stdin: new Blob([JSON.stringify(conversations)]), stdout: "pipe", stderr: "pipe" },
+	);
+	const [code, stdout, stderr] = await Promise.all([
+		proc.exited,
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+	]);
+	expect(stderr).toBe("");
+	expect(code).toBe(0);
+	const digest = corpusSha256(conversations.map(messages => ({ messages })));
+	expect(stdout.trim()).toBe(digest);
+	// Moving a message to the next conversation changes the digest even though the flat message list is the same.
+	expect(
+		corpusSha256([{ messages: ["alpha", ""] }, { messages: ["café 日本語 🙂", "beta\nwith a newline"] }]),
+	).not.toBe(digest);
+});
