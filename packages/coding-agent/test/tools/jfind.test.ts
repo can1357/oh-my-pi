@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Judge, JudgmentRequest, JudgmentResult, NoulAnswer, Questions } from "@oh-my-pi/pi-ai";
 import { tokenUsage } from "@oh-my-pi/pi-ai";
+import * as natives from "@oh-my-pi/pi-natives";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
@@ -308,6 +309,7 @@ describe("jfind cascade", () => {
 			});
 			expect(result.hits.map(hit => hit.rel)).toEqual([file]);
 			expect(result.hits[0]!.ranges).toEqual([expect.objectContaining({ start: 1, end: 67, p: 0.95 })]);
+			expect(result.hits[0]!.truncated).toBe(false);
 			// A named file needs no filename ranking or sketch routing.
 			expect(judge.requests.filter(request => "tree" in stateOf(request))).toHaveLength(0);
 			expect(judge.requests.filter(request => "files" in stateOf(request))).toHaveLength(0);
@@ -318,12 +320,14 @@ describe("jfind cascade", () => {
 		}
 	});
 
-	it("verifies the final passage of an explicitly named file beyond the directory budgets", async () => {
+	it("verifies the final passage of an explicitly named file past the per-file window budget", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-long-file-"));
 		try {
 			const file = path.join(dir, "authority.md");
-			const body = Array.from({ length: 42 }, (_, i) =>
-				i === 41
+			// 30 windows of 8 KiB: more than the 24 windows a directory search
+			// spends on one file, fewer than the passage budget.
+			const body = Array.from({ length: 30 }, (_, i) =>
+				i === 29
 					? "The Production Planning team owns coil reservation approvals."
 					: `section ${i}: ${"x".repeat(8170)}`,
 			).join("\n");
@@ -344,8 +348,73 @@ describe("jfind cascade", () => {
 				}),
 				includeHidden: false,
 			});
-			expect(result.hits[0]!.ranges).toEqual([expect.objectContaining({ start: 42, end: 42, p: 0.9 })]);
+			expect(result.hits[0]!.ranges).toEqual([expect.objectContaining({ start: 30, end: 30, p: 0.9 })]);
 			expect(result.hits[0]!.truncated).toBe(false);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("keeps an explicitly named file inside the passage budget a directory search spends", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-budget-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			// 60 windows of 8 KiB: more passages than a directory search verifies.
+			const body = Array.from({ length: 60 }, (_, i) =>
+				i === 59
+					? "The Production Planning team owns coil reservation approvals."
+					: `section ${i}: ${"x".repeat(8170)}`,
+			).join("\n");
+			await Bun.write(file, body);
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if ("file" in state) {
+					return (state.passages as Record<string, string>)[key]!.includes("Production Planning team") ? 0.9 : 0.1;
+				}
+				return 0.1;
+			});
+			const result = await runCascade({
+				root: { path: file, type: "file", size: Buffer.byteLength(body) },
+				filesystem: urlFs(dir),
+				query: "who owns coil reservation approvals?",
+				extraKeywords: ["coil reservation"],
+				judge,
+				includeHidden: false,
+			});
+			const verifyRequests = judge.requests.filter(request => "file" in stateOf(request));
+			const judged = verifyRequests.reduce(
+				(total, request) => total + Object.keys(stateOf(request).passages as Record<string, string>).length,
+				0,
+			);
+			// A directory search verifies at most 40 passages, three per request.
+			expect(judged).toBeLessThanOrEqual(40);
+			expect(verifyRequests.length).toBeLessThanOrEqual(14);
+			// The matching window is still judged, and the dropped windows are
+			// reported as partial coverage instead of a silent miss.
+			expect(result.hits[0]!.ranges).toEqual([expect.objectContaining({ start: 60, end: 60, p: 0.9 })]);
+			expect(result.hits[0]!.truncated).toBe(true);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("never runs the native lexical scan for an explicitly named file", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-noscan-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			const body = "The Production Planning team owns coil reservation approvals.\n";
+			await Bun.write(file, body);
+			const scan = vi.spyOn(natives, "grep");
+			const result = await runCascade({
+				root: { path: file, type: "file", size: Buffer.byteLength(body) },
+				filesystem: urlFs(dir),
+				query: "who owns coil reservation approvals?",
+				extraKeywords: ["coil reservation"],
+				judge: new FakeJudge(() => 0.9),
+				includeHidden: false,
+			});
+			expect(scan).not.toHaveBeenCalled();
+			expect(result.hits.map(hit => hit.rel)).toEqual([file]);
 		} finally {
 			await removeWithRetries(dir);
 		}

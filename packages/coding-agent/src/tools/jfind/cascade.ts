@@ -9,8 +9,9 @@
  *
  * An explicitly named file skips waves 1 and 2: its own name is the answer,
  * and a 384-byte sketch cannot represent a whole file, so a keyword deep in
- * the file would never reach verification. Every read window goes straight
- * to wave 3 instead, and a file too large or with an unjudgeable line is
+ * the file would never reach verification. Its strongest windows go straight
+ * to wave 3 instead, spending no more than the passage budget a directory
+ * search spends, and a file too large to read or with an unjudgeable line is
  * rejected rather than reported as an incomplete miss.
  *
  * Sketch judgments are only routing signals: a reported heat range always
@@ -47,6 +48,8 @@ const WINDOW_BYTES = 8192;
 const SKETCH_BYTES = 384;
 /** Complete passages verified across all files. */
 const FULL_LIMIT = 40;
+/** Windows judged for one explicitly named file: the whole passage budget of a directory search. */
+const FILE_WINDOWS = FULL_LIMIT;
 /** Sketch probability below which a passage is not verified. */
 const CUTOFF = 0.45;
 /** Verified-passage probability at or above which a file is a hit. */
@@ -183,20 +186,28 @@ class Cascade {
 	async run(): Promise<CascadeResult> {
 		const { root, filesystem, query, includeHidden, signal, onProgress } = this.#options;
 		const keywords = deriveKeywords(query, this.#options.extraKeywords);
+		const singleFile = root.type === "file";
 
-		onProgress?.("lexical scan");
+		if (!singleFile) onProgress?.("lexical scan");
 		const native = filesystem.shellFilesystem();
 		const [entries, index] = await Promise.all([
 			listFiles(root, { includeHidden, filesystem: native, signal }),
-			grepIndex(root.path, keywords, { includeHidden, filesystem: native, signal, timeoutMs: SCAN_TIMEOUT_MS }),
+			// A file root has one candidate, so a lexical rank cannot reject it
+			// and the scan would read the file a second time before the read
+			// limit refuses it.
+			singleFile
+				? Promise.resolve(undefined)
+				: grepIndex(root.path, keywords, { includeHidden, filesystem: native, signal, timeoutMs: SCAN_TIMEOUT_MS }),
 		]);
 		this.stats.listed = entries.length;
-		const weights = idf(index);
+		// A file root scores its own windows with neutral weights: the counts
+		// would only rank the file against itself.
+		const weights = index ? idf(index) : keywords.map(() => 1);
 		const noCounts = Array.from({ length: keywords.length }, () => 0);
 		const ranked = entries
 			.map((entry, node) => ({
 				node,
-				lex: fileScore(index.perFileKw.get(entry.rel) ?? noCounts, weights, entry.rel, keywords),
+				lex: index ? fileScore(index.perFileKw.get(entry.rel) ?? noCounts, weights, entry.rel, keywords) : 0,
 			}))
 			.sort((a, b) => b.lex - a.lex || compareRel(entries[a.node]!, entries[b.node]!))
 			.slice(0, CANDIDATES);
@@ -239,8 +250,8 @@ class Cascade {
 		// The two strongest lexical directory candidates are read regardless of
 		// the name judgment; the rest of the budget follows name score, then
 		// lexical rank. An explicit file is the only candidate, so it is read
-		// whole rather than truncated to the shared window budget.
-		const singleFile = root.type === "file";
+		// in full and judged with the whole passage budget instead of the
+		// shared per-file window share.
 		const selected = singleFile
 			? ranked.map(candidate => candidate.node)
 			: ranked.slice(0, Math.min(FILES, 2)).map(candidate => candidate.node);
@@ -268,7 +279,10 @@ class Cascade {
 							`find cannot judge the whole explicit file: a line exceeds the ${formatBytes(WINDOW_BYTES)} passage limit`,
 						);
 					}
-					const passages = singleFile ? all : selectWindows(all, WINDOWS);
+					// A named file spends the whole passage budget on its own
+					// strongest windows; a directory file gets the shared
+					// per-file share of it.
+					const passages = selectWindows(all, singleFile ? FILE_WINDOWS : WINDOWS);
 					if (passages.length === 0) return undefined;
 					return {
 						node,
@@ -288,7 +302,7 @@ class Cascade {
 
 		// Directories route a bounded subset through lossy sketch cards. An
 		// explicit file skips that gate entirely: its windows are already
-		// byte-bounded and tagged, so every one is verified.
+		// byte-bounded and tagged, so every selected one is verified.
 		const cards: { f: number; p: number }[] = [];
 		files.forEach((plan, f) => plan.passages.forEach((_, p) => cards.push({ f, p })));
 		let sketchSentBytes = 0;
@@ -318,17 +332,19 @@ class Cascade {
 					candidates.push({ f, p, score: score ?? 1 });
 				});
 			});
-			candidates.sort(
-				(a, b) =>
-					b.score - a.score ||
-					files[b.f]!.passages[b.p]!.score - files[a.f]!.passages[a.p]!.score ||
-					compareRel(entries[files[a.f]!.node]!, entries[files[b.f]!.node]!) ||
-					files[a.f]!.passages[a.p]!.start - files[b.f]!.passages[b.p]!.start,
-			);
 		}
-		const survivors = singleFile
-			? candidates
-			: candidates.filter(candidate => candidate.score >= CUTOFF).slice(0, FULL_LIMIT);
+		// Strongest windows first, so the passage budget spends itself on the
+		// best candidates whatever gate produced them.
+		candidates.sort(
+			(a, b) =>
+				b.score - a.score ||
+				files[b.f]!.passages[b.p]!.score - files[a.f]!.passages[a.p]!.score ||
+				compareRel(entries[files[a.f]!.node]!, entries[files[b.f]!.node]!) ||
+				files[a.f]!.passages[a.p]!.start - files[b.f]!.passages[b.p]!.start,
+		);
+		// A named file skips the lossy sketch gate, so every selected window is
+		// verified; both roots spend at most the same passage budget.
+		const survivors = candidates.filter(candidate => singleFile || candidate.score >= CUTOFF).slice(0, FULL_LIMIT);
 		this.stats.windowsPruned += candidates.length - survivors.length;
 		const chosen = new Map<number, number[]>();
 		for (const { f, p } of survivors) {
