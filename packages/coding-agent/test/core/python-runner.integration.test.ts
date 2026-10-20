@@ -408,6 +408,10 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 					"worker.join()",
 				].join("\n"),
 			],
+			[
+				" with SIGTERM blocked",
+				"import signal\nsignal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})\n%pip install six",
+			],
 		] as const) {
 			it.skipIf(process.platform !== "linux")(
 				`kernel shutdown during %pip${where} stops the installer tree when /proc ${procfs}`,
@@ -434,6 +438,33 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 				30_000,
 			);
 		}
+
+		it.skipIf(process.platform !== "linux")(
+			`kernel shutdown after %pip stops what the installer left running when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-leftover-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					// Leaves a helper running, its output redirected, and exits.
+					ensurepipMain: [
+						"import os, subprocess",
+						`child = subprocess.Popen([${JSON.stringify(SLEEP)}, "30"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)`,
+						'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
+					].join("\n"),
+					sitecustomize: noProcfs,
+				});
+				let streamed = "";
+				await executePythonWithKernel(kernel, "%pip install six", {
+					onChunk: chunk => {
+						streamed += chunk;
+					},
+				});
+				const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
+				expect(match).not.toBeNull();
+				await kernel.shutdown();
+				expect([Number(match?.[1]), Number(match?.[2])].filter(isRunning)).toEqual([]);
+			},
+			30_000,
+		);
 	}
 
 	it.skipIf(process.platform === "win32")(
