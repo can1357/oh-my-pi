@@ -9,6 +9,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-sto
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { THINKING_LOOP_ERROR_MARKER } from "@oh-my-pi/pi-ai/utils/thinking-loop";
+import { logger } from "@oh-my-pi/pi-utils";
 
 /** A degenerate near-duplicate reasoning loop (the gemini-3.5-flash shape). */
 function loopThinking(): string {
@@ -116,6 +117,7 @@ describe("auth-gateway auth retry", () => {
 			{ type: "api_key", key: "healthy-key" },
 		]);
 		const markUsageLimitSpy = spyOn(storage.limits, "markReached");
+		const debugSpy = spyOn(logger, "debug");
 		const invalidateSpy = spyOn(storage.limits, "invalidateMatching");
 		let attempt = 0;
 		const mock = createMockModel({
@@ -170,11 +172,64 @@ describe("auth-gateway auth retry", () => {
 			expect(usageLimitSessionId).toBe("gw-quota-rotation");
 			expect(usageLimitOptions?.apiKey).toBe(failedKey);
 			expect(invalidateSpy.mock.calls).toHaveLength(0);
+			expect(debugSpy.mock.calls.map(([logged]) => logged)).toContain(
+				"auth-gateway retrying provider request after usage-limit block",
+			);
 			expect(store.listAuthCredentials("mock")).toHaveLength(2);
 			expect(await storage.keys.get("mock", "gw-quota-rotation")).toBe(retriedKey);
 		} finally {
 			markUsageLimitSpy.mockRestore();
 			invalidateSpy.mockRestore();
+			debugSpy.mockRestore();
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not log a retry when a usage-limit block leaves no other credential", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-quota-no-sibling-"));
+		const store = await SqliteAuthCredentialStore.open(path.join(dir, "auth.db"));
+		const storage = new AuthStorage(store);
+		await storage.credentials.set("mock", [{ type: "api_key", key: "quota-key" }]);
+		const debugSpy = spyOn(logger, "debug");
+		const mock = createMockModel({
+			provider: "mock",
+			id: "gateway-quota-model",
+			handler: () => {
+				throw new ProviderHttpError("Generic provider failure", 429, { code: "insufficient_quota" });
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["gw-test-token"],
+			storage,
+			resolveModel: () => mock.model,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gw-test-token" },
+				body: JSON.stringify({
+					model: "gateway-quota-model",
+					messages: [{ role: "user", content: "hi" }],
+					prompt_cache_key: "gw-quota-no-sibling",
+					stream: false,
+				}),
+			});
+			await res.body?.cancel();
+			const usageLimitLogs = debugSpy.mock.calls.filter(([logged]) => logged.includes("usage-limit block"));
+
+			expect(res.ok).toBe(false);
+			expect(mock.calls).toHaveLength(1);
+			expect(usageLimitLogs).toHaveLength(1);
+			const [logged, fields] = usageLimitLogs[0] ?? [];
+			expect(logged).not.toContain("retrying");
+			expect(fields).toMatchObject({ provider: "mock", switched: false });
+		} finally {
+			debugSpy.mockRestore();
 			await handle.close();
 			storage.close();
 			await fs.rm(dir, { recursive: true, force: true });
