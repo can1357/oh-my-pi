@@ -632,6 +632,7 @@
 - Fixed an extension's `ctx.compact()` rejecting instead of reporting the failure through `onError`, which surfaced as an unhandled rejection and took down RPC hosts ([#12041](https://github.com/can1357/oh-my-pi/issues/12041))
 - Fixed an extension's `ctx.compact()` rejecting instead of reporting the failure through `onError`, which surfaced as an unhandled rejection and took down RPC hosts ([#16460](https://github.com/can1357/oh-my-pi/pull/16460) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed an extension's `ctx.compact()` rejecting instead of reporting the failure through `onError`, which surfaced as an unhandled rejection and could take down the host in any mode ([#16460](https://github.com/can1357/oh-my-pi/pull/16460) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed an extension's `ctx.compact()` rejecting instead of reporting a failed compaction through `onError` exactly once — the rejection surfaced as an unhandled rejection that could take down the host in any mode ([#16460](https://github.com/can1357/oh-my-pi/pull/16460) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 
