@@ -195,8 +195,6 @@
 - Broker account-pool files (`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE`) can hide whole providers and API keys: `"*": false` makes the file an allow-list, and an entry can be `true`, `false`, or `{ "accounts": [...], "apiKeys": false }` ([#14235](https://github.com/can1357/oh-my-pi/pull/14235) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
-- Fixed the Gemini over-planning guard missing a run of reasoning-summary titles when a title line is longer than the streamed-chunk buffer, so long Gemini header runs are detected and the tool-call reminder fires regardless of how the response is chunked ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Reduced the work done while a response streamed, so long streaming replies no longer stutter as chunks arrive ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed the Gemini over-planning guard judging the same reasoning-summary title differently depending on where a streamed chunk boundary fell, so a bold title padded past its buffer is still detected and a bare bold marker no longer counts as a header ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
