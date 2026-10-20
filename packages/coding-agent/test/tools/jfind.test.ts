@@ -68,20 +68,6 @@ describe("jfind passages", () => {
 		expect(selectWindows(passages, 2).map(p => p.start)).toEqual([1, 3]);
 	});
 
-	it("refines the shared sample instead of replacing it when the budget grows", () => {
-		const passages: Passage[] = Array.from({ length: 60 }, (_, i) => ({
-			start: i + 1,
-			end: i + 1,
-			text: "",
-			score: 0,
-		}));
-		const shared = selectWindows(passages, 24).map(p => p.start);
-		const grown = selectWindows(passages, 40, 24).map(p => p.start);
-		expect(grown).toHaveLength(40);
-		// Every window the shared budget covered is still judged.
-		expect(grown.filter(start => shared.includes(start))).toEqual(shared);
-	});
-
 	it("sketches keep original line coordinates and deep evidence", () => {
 		const passage: Passage = {
 			start: 400,
@@ -346,22 +332,29 @@ describe("jfind cascade", () => {
 					: `section ${i}: ${"x".repeat(8170)}`,
 			).join("\n");
 			await Bun.write(file, body);
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if ("file" in state) {
+					return (state.passages as Record<string, string>)[key]!.includes("Production Planning team") ? 0.9 : 0.1;
+				}
+				return 0.1;
+			});
 			const result = await runCascade({
 				root: { path: file, type: "file", size: Buffer.byteLength(body) },
 				filesystem: urlFs(dir),
 				query: "who owns coil reservation approvals?",
 				extraKeywords: ["coil reservation"],
-				judge: new FakeJudge((request, key) => {
-					const state = stateOf(request);
-					if ("file" in state) {
-						return (state.passages as Record<string, string>)[key]!.includes("Production Planning team")
-							? 0.9
-							: 0.1;
-					}
-					return 0.1;
-				}),
+				judge,
 				includeHidden: false,
 			});
+			// The whole file is judged: every one of its 30 windows is verified.
+			const judged = judge.requests
+				.filter(request => "file" in stateOf(request))
+				.reduce(
+					(total, request) => total + Object.keys(stateOf(request).passages as Record<string, string>).length,
+					0,
+				);
+			expect(judged).toBe(30);
 			expect(result.hits[0]!.ranges).toEqual([expect.objectContaining({ start: 30, end: 30, p: 0.9 })]);
 			expect(result.hits[0]!.truncated).toBe(false);
 		} finally {
@@ -369,60 +362,18 @@ describe("jfind cascade", () => {
 		}
 	});
 
-	it("keeps an explicitly named file inside the passage budget a directory search spends", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-budget-"));
+	it("refuses a named file whose windows outgrow the verification budget instead of sampling it", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-over-budget-"));
 		try {
 			const file = path.join(dir, "authority.md");
-			// 60 windows of 8 KiB: more passages than a directory search verifies.
-			const body = Array.from({ length: 60 }, (_, i) =>
-				i === 59
-					? "The Production Planning team owns coil reservation approvals."
-					: `section ${i}: ${"x".repeat(8170)}`,
-			).join("\n");
-			await Bun.write(file, body);
-			const judge = new FakeJudge((request, key) => {
-				const state = stateOf(request);
-				if ("file" in state) {
-					return (state.passages as Record<string, string>)[key]!.includes("Production Planning team") ? 0.9 : 0.1;
-				}
-				return 0.1;
-			});
-			const result = await runCascade({
-				root: { path: file, type: "file", size: Buffer.byteLength(body) },
-				filesystem: urlFs(dir),
-				query: "who owns coil reservation approvals?",
-				extraKeywords: ["coil reservation"],
-				judge,
-				includeHidden: false,
-			});
-			const verifyRequests = judge.requests.filter(request => "file" in stateOf(request));
-			const judged = verifyRequests.reduce(
-				(total, request) => total + Object.keys(stateOf(request).passages as Record<string, string>).length,
-				0,
-			);
-			// A directory search verifies at most 40 passages, three per request.
-			expect(judged).toBeLessThanOrEqual(40);
-			expect(verifyRequests.length).toBeLessThanOrEqual(14);
-			// The matching window is still judged, and the dropped windows are
-			// reported as partial coverage instead of a silent miss.
-			expect(result.hits[0]!.ranges).toEqual([expect.objectContaining({ start: 60, end: 60, p: 0.9 })]);
-			expect(result.hits[0]!.truncated).toBe(true);
-		} finally {
-			await removeWithRetries(dir);
-		}
-	});
-
-	it("keeps judging the windows a shared per-file share covered when a named file outgrows the budget", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-nested-sample-"));
-		try {
-			const file = path.join(dir, "authority.md");
-			// 60 windows of 8 KiB whose text shares no keyword with the query:
-			// the sample spreads through the file, and the answer sits in the
-			// third window, which the shared per-file share always covered.
+			// 60 windows of 4 KiB whose text shares no keyword with the query.
+			// Sampling them would spread the windows through the file and could
+			// drop the one holding the answer, with no truncation flag to show
+			// for it: the search would report a clean "no hits".
 			const body = Array.from({ length: 60 }, (_, i) =>
 				i === 2
-					? "The Production Planning team signs off on the aeon release."
-					: `section ${i}: ${"x".repeat(8170)}`,
+					? `The Production Planning team signs off on the aeon release. ${"x".repeat(4030)}`
+					: `section ${i}: ${"x".repeat(4090)}`,
 			).join("\n");
 			await Bun.write(file, body);
 			const judge = new FakeJudge((request, key) => {
@@ -432,16 +383,18 @@ describe("jfind cascade", () => {
 				}
 				return 0.1;
 			});
-			const result = await runCascade({
-				root: { path: file, type: "file", size: Buffer.byteLength(body) },
-				filesystem: urlFs(dir),
-				query: "who is in charge of the quarterly rollout?",
-				extraKeywords: [],
-				judge,
-				includeHidden: false,
-			});
-			expect(result.hits.map(hit => hit.rel)).toEqual([file]);
-			expect(result.hits[0]!.ranges).toEqual([expect.objectContaining({ start: 3, end: 3, p: 0.9 })]);
+			await expect(
+				runCascade({
+					root: { path: file, type: "file", size: Buffer.byteLength(body) },
+					filesystem: urlFs(dir),
+					query: "who is in charge of the quarterly rollout?",
+					extraKeywords: [],
+					judge,
+					includeHidden: false,
+				}),
+			).rejects.toThrow("60 passages exceed the 40-passage budget");
+			// A refusal, not an empty result: nothing was judged at all.
+			expect(judge.requests).toHaveLength(0);
 		} finally {
 			await removeWithRetries(dir);
 		}
@@ -494,7 +447,8 @@ describe("jfind cascade", () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-oversized-file-"));
 		try {
 			const file = path.join(dir, "authority.md");
-			// Past the 4 MiB read limit, so the file cannot be judged whole.
+			// Past the whole-file budget the passage budget can judge, so the
+			// file cannot be judged whole.
 			const body = `${"x".repeat(1023)}\n`.repeat(4200);
 			await Bun.write(file, body);
 			const judge = new FakeJudge(() => 0.1);
@@ -507,7 +461,7 @@ describe("jfind cascade", () => {
 					judge,
 					includeHidden: false,
 				}),
-			).rejects.toThrow("exceeds the 4.0MB read limit");
+			).rejects.toThrow("exceeds the 320.0KB read limit");
 			// A refusal, not an empty result: nothing was judged at all.
 			expect(judge.requests).toHaveLength(0);
 		} finally {

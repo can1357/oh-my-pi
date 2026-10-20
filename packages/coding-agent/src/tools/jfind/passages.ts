@@ -70,16 +70,13 @@ export function windows(
 /**
  * Keep the best lexical windows and, when no words match, distribute the
  * budget evenly through the file instead of always falling back to its
- * opening bytes. `shared` is a smaller budget whose sample must survive: the
- * even distribution refines that sample instead of replacing it, so a larger
- * budget never drops a window the smaller one reached. Returned in file
- * order.
+ * opening bytes. Returned in file order.
  */
-export function selectWindows(passages: Passage[], limit: number, shared = limit): Passage[] {
+export function selectWindows(passages: Passage[], limit: number): Passage[] {
 	let selected = passages;
 	if (selected.length > limit) {
 		if (selected.every(passage => passage.score === 0)) {
-			selected = evenSample(selected, limit, shared);
+			selected = evenSample(selected, limit);
 		} else {
 			selected = [...selected].sort((a, b) => b.score - a.score || a.start - b.start).slice(0, limit);
 		}
@@ -88,14 +85,13 @@ export function selectWindows(passages: Passage[], limit: number, shared = limit
 }
 
 /**
- * An evenly spread sample of `limit` windows that keeps the `shared` sample
- * whole. The wider gaps between the shared windows are split first, so the
- * refined sample covers more of the file than the shared one and never a
- * different stretch of it.
+ * An evenly spread sample of `limit` windows: the first and the last window
+ * are always kept and the widest gap between two kept windows is split
+ * first, so the sample covers the whole file rather than its opening bytes.
  */
-function evenSample(passages: Passage[], limit: number, shared: number): Passage[] {
+function evenSample(passages: Passage[], limit: number): Passage[] {
 	const len = passages.length;
-	const base = Math.max(1, Math.min(shared, limit));
+	const base = Math.max(1, limit);
 	const keep = new Set<number>();
 	const step = Math.max(base - 1, 1);
 	for (let k = 0; k < base; k++) keep.add(Math.floor((k * (len - 1)) / step));

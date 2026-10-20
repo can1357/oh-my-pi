@@ -50,11 +50,17 @@ const SKETCH_BYTES = 384;
 const FULL_LIMIT = 40;
 /** Windows judged for one explicitly named file: the whole passage budget of a directory search. */
 const FILE_WINDOWS = FULL_LIMIT;
+/**
+ * Bytes of an explicitly named file its passage budget can judge whole. The
+ * read limit and the window budget must agree on what "in full" means, so a
+ * named file is measured against the budget it is judged with.
+ */
+const FILE_BYTES = FILE_WINDOWS * WINDOW_BYTES;
 /** Sketch probability below which a passage is not verified. */
 const CUTOFF = 0.45;
 /** Verified-passage probability at or above which a file is a hit. */
 const THRESHOLD = 0.2;
-/** Bytes of a file read for windowing; an explicit file must fit to be judged whole. */
+/** Bytes of a directory file read for windowing; a cut file reports partial coverage. */
 const READ_LIMIT = 4 * 1024 * 1024;
 /** Sketch state budget per request; sized so cards stay well inside the judge's context. */
 const SKETCH_STATE_BYTES = 18_000;
@@ -267,10 +273,10 @@ class Cascade {
 			selected.map(async (node): Promise<FilePlan | undefined> => {
 				const entry = entries[node]!;
 				try {
-					const read = await readText(filesystem, entry.path, READ_LIMIT);
+					const read = await readText(filesystem, entry.path, singleFile ? FILE_BYTES : READ_LIMIT);
 					if (singleFile && read.truncated) {
 						throw new ToolError(
-							`find cannot judge the whole explicit file: exceeds the ${formatBytes(READ_LIMIT)} read limit`,
+							`find cannot judge the whole explicit file: exceeds the ${formatBytes(FILE_BYTES)} read limit`,
 						);
 					}
 					const all = windows(read.text, WINDOW_BYTES, keywords, weights);
@@ -279,12 +285,20 @@ class Cascade {
 							`find cannot judge the whole explicit file: a line exceeds the ${formatBytes(WINDOW_BYTES)} passage limit`,
 						);
 					}
-					// A named file spends the whole passage budget on its own
-					// strongest windows; a directory file gets the shared
-					// per-file share of it. The larger budget refines the
-					// shared sample instead of replacing it, so a window the
-					// shared share covered is never dropped.
-					const passages = selectWindows(all, singleFile ? FILE_WINDOWS : WINDOWS, WINDOWS);
+					// A named file is judged whole or refused: every one of its
+					// passages must fit the verification budget. Sampling would
+					// drop windows silently — no truncation flag, no partial
+					// coverage — so a file that cannot be judged in full is
+					// refused instead of searched in part.
+					if (singleFile && all.length > FILE_WINDOWS) {
+						throw new ToolError(
+							`find cannot judge the whole explicit file: ${all.length} passages exceed the ${FILE_WINDOWS}-passage budget`,
+						);
+					}
+					// A named file is judged whole, so every one of its windows is
+					// verified; a directory file gets the shared per-file share of
+					// the passage budget.
+					const passages = singleFile ? all : selectWindows(all, WINDOWS);
 					if (passages.length === 0) return undefined;
 					return {
 						node,
