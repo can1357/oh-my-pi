@@ -444,6 +444,40 @@ describe("ReadToolGroupComponent", () => {
 		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("Some **bold** text.");
 	});
 
+	it.each(["skill://my-skill", "rule://style", "omp://docs/tools/read.md"])(
+		"keeps the body of a compact %s read viewable through the tool-output expansion toggle with previews off",
+		target => {
+			const component = new ReadToolGroupComponent();
+			component.updateArgs({ path: target }, "read-instr");
+			component.updateResult(
+				{ content: [{ type: "text", text: "---\ndescription: The one runbook\n---\nStep one\nStep two" }] },
+				false,
+				"read-instr",
+			);
+
+			const collapsed = Bun.stripANSI(component.render(120).join("\n"));
+			expect(collapsed).toContain(target);
+			expect(collapsed).not.toContain("Step one");
+
+			component.setExpanded(true);
+			const expanded = Bun.stripANSI(component.render(120).join("\n"));
+			expect(expanded).toContain("Step one");
+			expect(expanded).toContain("Step two");
+
+			component.setExpanded(false);
+			expect(Bun.stripANSI(component.render(120).join("\n"))).not.toContain("Step one");
+		},
+	);
+
+	it("does not preview ordinary file reads on expansion while previews are off", () => {
+		const component = new ReadToolGroupComponent();
+		const examplePath = path.resolve("/tmp/example.ts");
+		component.updateArgs({ path: examplePath }, "read-file");
+		component.updateResult({ content: [{ type: "text", text: "const secretBody = 1;" }] }, false, "read-file");
+		component.setExpanded(true);
+		expect(Bun.stripANSI(component.render(120).join("\n"))).not.toContain("secretBody");
+	});
+
 	it("keeps the diagnostic of a failed instruction URL read in the compact row", () => {
 		const component = new ReadToolGroupComponent();
 		component.updateArgs({ path: "skill://no-such-skill" }, "read-missing");

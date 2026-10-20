@@ -55,12 +55,19 @@ export function readArgsHaveTarget(args: unknown): boolean {
 	return readArgsTarget(args) !== undefined;
 }
 
+/** Whether a read target is an internal URL whose scheme opts into the compact transcript (skill://, rule://, omp://, xd://). */
+function isCompactInternalUrl(target: string): boolean {
+	const url = splitUrlScheme(target);
+	return (url && internalUrlSchemeSpec(url.scheme))?.compactTranscript === true;
+}
+
 /**
  * Whether a read collapses into the compact {@link ReadToolGroupComponent}
  * rather than a full tool execution. Filesystem/external targets always
  * collapse; registered internal-URL schemes render full so their resolved
  * content is visible, unless their spec declares `compactTranscript`
- * (instruction docs and device listings read better in the compact grouped view).
+ * (instruction docs and device listings read better in the compact grouped view;
+ * their bodies stay reachable through the tool-output expansion toggle).
  */
 export function readArgsCollapseIntoGroup(args: unknown): boolean {
 	const target = readArgsTarget(args);
@@ -643,7 +650,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const body: NativeChild[] = [];
 		let head: NativeToolHead;
 		// Previews (and a long error message) are what a collapse hides; plain rows always show.
-		let collapsible = previews.length > 0;
+		let collapsible = previews.length > 0 || (!this.#showContentPreview && this.#hasExpandableInternalRead());
 		if (rows.length <= 1) {
 			const row = rows[0];
 			const error = row && this.#statusForTargets(row.targets) === "error" ? this.#errorFor(row) : undefined;
@@ -1285,7 +1292,17 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	#shouldRenderPreview(entry: ReadEntry): boolean {
-		return this.#showContentPreview && entry.contentText !== undefined;
+		if (entry.contentText === undefined) return false;
+		return this.#showContentPreview || (this.#expanded && isCompactInternalUrl(entry.path));
+	}
+
+	/** Compact internal-URL reads keep their body behind the tool-output expansion toggle when previews are off. */
+	#hasExpandableInternalRead(): boolean {
+		for (const entry of this.#entries.values()) {
+			if (entry.status !== "error" && entry.contentText !== undefined && isCompactInternalUrl(entry.path))
+				return true;
+		}
+		return false;
 	}
 
 	#formatStatus(status: ReadEntry["status"]): string {

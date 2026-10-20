@@ -19,7 +19,7 @@
 ### Added
 ### Changed
 
-- `skill://`, `rule://` and `omp://` reads now collapse into the compact `Read (N)` group instead of rendering full result cards ([#16516](https://github.com/can1357/oh-my-pi/pull/16516) by [@Komzpa](https://github.com/Komzpa))
+- `skill://`, `rule://` and `omp://` reads now collapse into the compact `Read (N)` group instead of rendering full result cards; with read previews off, the tool-output expansion toggle (`Ctrl+O`) still shows their bodies ([#16516](https://github.com/can1357/oh-my-pi/pull/16516) by [@Komzpa](https://github.com/Komzpa))
 
 ### Fixed
 
