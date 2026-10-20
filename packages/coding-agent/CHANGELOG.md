@@ -2,22 +2,8 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `lsp.requestTimeout` setting to configure wait durations for language server diagnostics and requests
-- Added `omp auth-gateway serve --clients=<file>`: per-client bearer tokens, each limited to listed models and broker OAuth accounts with no fallback to other accounts or API keys, re-read while serving ([#5098](https://github.com/can1357/oh-my-pi/issues/5098), [#15900](https://github.com/can1357/oh-my-pi/pull/15900) by [@alphastorm](https://github.com/alphastorm))
-
-### Changed
-
-- The `lsp` tool now uses `lsp.requestTimeout` to dynamically adjust both call deadlines and project-aware diagnostic wait times, with support for per-call overrides
-- Reduced CPU overhead during syntax checks and automatic edit repairs ([#15904](https://github.com/can1357/oh-my-pi/pull/15904) by [@iliaal](https://github.com/iliaal)).
-- Reduced status-line refresh overhead while subagents have long conversations ([#15874](https://github.com/can1357/oh-my-pi/pull/15874) by [@iliaal](https://github.com/iliaal)).
-- Agents now send `todo` updates alongside their next tool call instead of spending a separate model turn on them ([#15402](https://github.com/can1357/oh-my-pi/pull/15402) by [@will-bogusz](https://github.com/will-bogusz))
-- The Shared Language Servers setting now says what it does: each connection gets its own server, and a released one is reused while another omp instance keeps the project's mux running ([#14633](https://github.com/can1357/oh-my-pi/pull/14633) by [@jorgoose](https://github.com/jorgoose))
-- Memories saved explicitly through the extension `memory.save` API are now stored as `stated` rather than `unknown`, so they rank as deliberate memories in Mnemopi recall ([#13824](https://github.com/can1357/oh-my-pi/pull/13824) by [@sjawhar](https://github.com/sjawhar))
-
-
 ### Fixed
+- Replaying a persisted bash execution now seeds the recorded output as the completed snapshot, so a resumed or rewound block shows every line it recorded instead of just the streaming tail ([#15326](https://github.com/can1357/oh-my-pi/pull/15326) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 
 ### Added
@@ -507,6 +493,8 @@
 ### Fixed
 
 - Replaying a persisted bash execution now seeds the recorded output as the completed snapshot, so a resumed or rewound block shows every line it recorded instead of just the streaming tail ([#15326](https://github.com/can1357/oh-my-pi/pull/15326) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed subagents spawning at a caller-supplied `effort` (e.g. `hi` → `max`) while `task.enableEffort` is off; the field is now ignored and the agent's configured thinking level (including `:auto`) applies ([#16402](https://github.com/can1357/oh-my-pi/issues/16402))
+- Fixed `omp update --check` failing against JFrog Artifactory registries that add empty `dist-tags` to a tagged manifest; the update check now uses the registry's curated latest version ([#16375](https://github.com/can1357/oh-my-pi/issues/16375))
 
 ## [18.12.4] - 2026-10-20
 
