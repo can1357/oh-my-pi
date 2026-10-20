@@ -52,6 +52,7 @@
 ## [18.12.0] - 2026-10-17
 
 ### Fixed
+- Fixed a warm stats sync worker being reused after the working directory moved, which read a relative transcript path from the previous directory instead of the current one ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 
 - Fixed usage stats pricing Google Antigravity and MiniMax Token Plan models at $0 when their catalog rows carry no price; they now use the catalog's pricing peer, as `xai-oauth` already did ([#16092](https://github.com/can1357/oh-my-pi/pull/16092) by [@H4vC](https://github.com/H4vC))
 
