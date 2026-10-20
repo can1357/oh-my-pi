@@ -91,4 +91,20 @@ describe("ToolExecutionComponent write repaint seam", () => {
 
 		expect(requestRender).not.toHaveBeenCalled();
 	});
+
+	it("does not repaint a write that never renders the filesystem tail window", () => {
+		// A URL card (`agent://`) draws a head preview and an `xd://` device
+		// write delegates to the mounted tool's own renderer: neither is the
+		// filesystem tail window that the first result re-anchors, so neither
+		// may wipe the scrollback — however long their payload is.
+		const content = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+		for (const path of ["agent://all", "xd://alpha"]) {
+			const { component, requestRender } = makeComponent({ path, content });
+			component.render(80);
+
+			component.updateResult(partialWriteResult(), true);
+
+			expect(requestRender).not.toHaveBeenCalled();
+		}
+	});
 });

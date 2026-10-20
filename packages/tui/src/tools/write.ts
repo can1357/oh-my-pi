@@ -223,6 +223,27 @@ function writeContentOf(args: unknown): string {
 	return typeof content === "string" ? content : "";
 }
 
+/**
+ * Whether a write renders through the filesystem path — the only one whose
+ * collapsed preview is the tail window the first result re-anchors.
+ *
+ * A URL card (`agent://`, `proc://`, `cfg://`) keeps a head preview, and an
+ * `xd://` device write delegates to the mounted tool's own renderer; neither
+ * uses the tail-window formatter, so neither re-anchors and neither may ask
+ * for the scrollback-wiping first-result repaint.
+ */
+function rendersThroughTailWindow(args: unknown): boolean {
+	const writeArgs = args as WriteRenderArgs | undefined;
+	const rawPath =
+		typeof writeArgs?.file_path === "string"
+			? writeArgs.file_path
+			: typeof writeArgs?.path === "string"
+				? writeArgs.path
+				: "";
+	if (writeUrlCard(rawPath)) return false;
+	return !(rawPath !== "" && couldBecomeXdUrl(rawPath));
+}
+
 function formatLineCountSuffix(lineCount: number, uiTheme: Theme): string {
 	if (lineCount <= 0) return "";
 	return uiTheme.fg("dim", ` · ${lineCount} line${lineCount === 1 ? "" : "s"}`);
@@ -920,6 +941,12 @@ export const writeToolRenderer = {
 	// The threshold is the renderer's own tail budget: a card that is already
 	// tail-anchored must be repainted, so a stricter threshold would leave the
 	// stale tail rows behind.
+	// Only a filesystem write reaches that tail window: a URL card
+	// (`agent://`, `proc://`, `cfg://`) keeps its head preview and an `xd://`
+	// device write delegates to the mounted tool's renderer, so neither
+	// re-anchors and neither may wipe the scrollback.
 	forceFirstResultViewportRepaint: (args: unknown, options: RenderResultOptions) =>
-		!options.expanded && exceedsLineCount(writeContentOf(args), writeStreamingPreviewBudget()),
+		!options.expanded &&
+		rendersThroughTailWindow(args) &&
+		exceedsLineCount(writeContentOf(args), writeStreamingPreviewBudget()),
 } satisfies ToolRenderer<WriteRenderArgs, WriteToolDetails>;
