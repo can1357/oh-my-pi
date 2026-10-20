@@ -65,6 +65,7 @@
 - `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
 
 ### Fixed
+- Fixed `wait` and `proc://<id>/kill` reporting a settled job as "not auto-delivered; recovered by this snapshot" when the call itself handed the result over, when the snapshot superseded the job's queued completion push, or when the result was genuinely late; the delivery line now says which of the three it is, so the model does not wait for a duplicate result that cannot arrive ([#16052](https://github.com/can1357/oh-my-pi/issues/16052), [#16134](https://github.com/can1357/oh-my-pi/pull/16134) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed subagents spawning at a caller-supplied `effort` (e.g. `hi` → `max`) while `task.enableEffort` is off; the field is now ignored and the agent's configured thinking level (including `:auto`) applies ([#16402](https://github.com/can1357/oh-my-pi/issues/16402))
 - Fixed `omp update --check` failing against JFrog Artifactory registries that add empty `dist-tags` to a tagged manifest; the update check now uses the registry's curated latest version ([#16375](https://github.com/can1357/oh-my-pi/issues/16375))
