@@ -2341,6 +2341,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// request is built: the `cfg://` write that applied it awaits this promise,
 	// and so does the model call that follows.
 	let pendingPromptRefresh: Promise<void> | undefined;
+	/**
+	 * Awaits every prompt rebuild a settings change queued.
+	 *
+	 * The settings listener runs on the next microtask, so the first tick lets it
+	 * queue the rebuild before it is looked for. A change that lands while a
+	 * rebuild is in flight replaces the pointer with a second one queued behind
+	 * the first, so the loop keeps waiting: the request must not be built from
+	 * the intermediate prompt.
+	 */
+	const awaitPromptRefresh = async (): Promise<void> => {
+		await Promise.resolve();
+		for (;;) {
+			const pending = pendingPromptRefresh;
+			if (!pending) break;
+			await pending;
+		}
+	};
 
 	try {
 		const getActiveModelString = (): string | undefined => {
@@ -2378,12 +2395,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			 * `cfg://` write awaits it so the turn continues only after the prompt
 			 * the change invalidated has been republished.
 			 */
-			awaitPromptRefresh: async () => {
-				// The settings listener runs on the next microtask; let it queue the
-				// rebuild before looking for it.
-				await Promise.resolve();
-				await pendingPromptRefresh;
-			},
+			awaitPromptRefresh,
 			// Explicit resolvers retain their existing pass-through contract. Ordinary
 			// sessions inherit stored affinity into the child's own provider session.
 			getApiKey: options.getApiKey,
@@ -4973,14 +4985,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the provider would then see the prompt the change was meant to replace.
 		// The loop re-reads the agent prompt right after this hook, so waiting here
 		// makes the next request carry the republished prompt.
-		session.addDisposer(
-			agent.addBeforeModelCallHook(async () => {
-				// The listener runs on the next microtask; let it queue the rebuild
-				// before looking for it.
-				await Promise.resolve();
-				await pendingPromptRefresh;
-			}),
-		);
+		session.addDisposer(agent.addBeforeModelCallHook(awaitPromptRefresh));
+		// Side requests (ephemeral turns, compaction, handoff) build their own
+		// provider context and never reach the loop's pre-model-call hook, so they
+		// take the same barrier at their own boundary.
+		session.addDisposer(agent.addBeforeSideRequestHook(awaitPromptRefresh));
 		// Agent-level tool-call switches: the loop snapshots them per prompt run, so a
 		// change applies from the next run without splitting one response's schema/strip.
 		// The prompt listener above republishes the intent-field guidance.

@@ -504,6 +504,7 @@ export class Agent {
 	#appendOnlyContext?: AppendOnlyContextManager;
 	#beforeQueuedMessageDequeueHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
 	#beforeModelCallHooks = new Set<(signal: AbortSignal | undefined, context: AgentContext) => Promise<void> | void>();
+	#beforeSideRequestHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
 
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
 	#cursorToolResultBuffer: CursorToolResultEntry[] = [];
@@ -912,12 +913,12 @@ export class Agent {
 	 * `systemPrompt` defaults to the live agent prompt so the side request hits the
 	 * same cached prefix as the main loop. Callers that must pin a different prompt
 	 * (e.g. handoff generation, which uses the base prompt rather than a per-turn
-	 * `before_agent_start` hook override) pass it explicitly.
+	 * `before_agent_start` hook override) pass it explicitly. The live prompt is
+	 * read after the {@link Agent.addBeforeSideRequestHook} hooks run, so a host
+	 * that refreshes it (a pending system-prompt rebuild, say) is seen by the request.
 	 */
-	async buildSideRequestContext(
-		llmMessages: Message[],
-		systemPrompt: string[] = this.#state.systemPrompt,
-	): Promise<Context> {
+	async buildSideRequestContext(llmMessages: Message[], systemPrompt?: string[]): Promise<Context> {
+		for (const hook of this.#beforeSideRequestHooks) await hook();
 		const model = this.#state.model;
 		if (!model) throw new Error("No active model on agent");
 		const ownedDialect =
@@ -930,7 +931,7 @@ export class Agent {
 					injectIntent: this.#intentTracing,
 					pruneDescriptions: this.#pruneToolDescriptions,
 				}) ?? []);
-		let context: Context = { systemPrompt, messages, tools };
+		let context: Context = { systemPrompt: systemPrompt ?? this.#state.systemPrompt, messages, tools };
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
 		// Side requests reuse the main loop's sent definitions without recording their own.
 		if (context.tools?.length) {
@@ -975,6 +976,15 @@ export class Agent {
 
 	async #runBeforeModelCallHooks(signal: AbortSignal | undefined, context: AgentContext): Promise<void> {
 		for (const hook of this.#beforeModelCallHooks) await hook(signal, context);
+	}
+
+	/** Register an independently removable hook that runs before a side request's provider context is
+	 *  built (ephemeral turns, compaction, handoff). Side requests bypass the main loop's
+	 *  {@link AgentLoopConfig.beforeModelCall}, so a host that must refresh state before them — a
+	 *  pending system-prompt rebuild, say — registers here. */
+	addBeforeSideRequestHook(hook: (signal?: AbortSignal) => Promise<void> | void): () => void {
+		this.#beforeSideRequestHooks.add(hook);
+		return () => this.#beforeSideRequestHooks.delete(hook);
 	}
 
 	async #runBeforeQueuedMessageDequeueHooks(signal?: AbortSignal): Promise<void> {

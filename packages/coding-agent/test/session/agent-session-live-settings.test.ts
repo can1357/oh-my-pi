@@ -35,6 +35,9 @@ describe("AgentSession live settings", () => {
 		authDir = path.join(os.tmpdir(), `pi-live-settings-auth-${Snowflake.next()}`);
 		fs.mkdirSync(authDir, { recursive: true });
 		modelRegistry = new ModelRegistry(await discoverAuthStorage(authDir));
+		// The mock provider never calls out, but the session refuses a turn
+		// without a credential for the model.
+		modelRegistry.authStorage.keys.setRuntime("openai", "test-key");
 	});
 
 	afterEach(async () => {
@@ -63,6 +66,7 @@ describe("AgentSession live settings", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			model: getBundledModel("openai", "gpt-4o-mini"),
+			getApiKey: () => "test-key",
 			disableExtensionDiscovery: true,
 			skills: [],
 			contextFiles: [],
@@ -192,5 +196,73 @@ describe("AgentSession live settings", () => {
 		expect(cfgFetchEnabled.get(settings)).toBe(false);
 		expect(live.systemPrompt.join("\n")).not.toContain("reader text/markdown");
 		expect(live.systemPrompt.join("\n")).not.toContain("bare host:port");
+	});
+
+	it("republishes the prompt before a side request builds its provider context", async () => {
+		// Side requests (ephemeral turns, compaction, handoff) build their own
+		// provider context and never reach the main loop's pre-model-call hook, so
+		// the pending rebuild has to be awaited at their boundary too.
+		const settings = Settings.isolated({ inlineToolDescriptors: "on" });
+		const live = await start(settings);
+		expect(live.systemPrompt.join("\n")).toContain("reader text/markdown");
+
+		// A settings change that did not come through a `cfg://` write: the side
+		// request still has to wait for the rebuild it queued.
+		cfgFetchEnabled.set(settings, false);
+		const context = await live.agent.buildSideRequestContext([]);
+
+		expect(context.systemPrompt?.join("\n")).not.toContain("reader text/markdown");
+	});
+
+	it("drains every queued prompt rebuild before the write returns", async () => {
+		// A change that lands while a rebuild is in flight queues a second
+		// rebuild. The write must wait for both: returning after the first would
+		// hand the next request a prompt that still contradicts the newest setting.
+		const settings = Settings.isolated({ inlineToolDescriptors: "on" });
+		const live = await start(settings, { settingsApproval: true });
+		expect(live.systemPrompt.join("\n")).toContain("reader text/markdown");
+
+		// Hold the first rebuild's completion so a second change can queue a
+		// second rebuild behind it while the write is still waiting.
+		const firstPublished = Promise.withResolvers<void>();
+		const secondRequested = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const originalRefresh = live.refreshBaseSystemPrompt.bind(live);
+		let requests = 0;
+		live.refreshBaseSystemPrompt = async (commitIf?: () => boolean) => {
+			requests++;
+			if (requests === 2) {
+				secondRequested.resolve();
+				return originalRefresh(commitIf);
+			}
+			const result = await originalRefresh(commitIf);
+			firstPublished.resolve();
+			await releaseFirst.promise;
+			return result;
+		};
+
+		const writeTool = live.agent.state.tools.find(tool => tool.name === "write");
+		expect(writeTool).toBeDefined();
+		setCfgApprovalHost({
+			approve: async () => "once",
+			applied: () => {},
+			persistentSettings: settings,
+		});
+		try {
+			const write = writeTool!.execute("cfg-1", { path: "cfg://fetch/enabled", content: "false" });
+			// The first rebuild is published and held; the write is still waiting
+			// for it. A second change now queues a second rebuild behind it.
+			await firstPublished.promise;
+			cfgIncludeWorkspaceTree.set(settings, true);
+			await secondRequested.promise;
+			releaseFirst.resolve();
+			await write;
+		} finally {
+			setCfgApprovalHost(null);
+		}
+
+		expect(live.systemPrompt.join("\n")).not.toContain("reader text/markdown");
+		// The second rebuild ran too, so the newest setting is in the prompt.
+		expect(live.systemPrompt.join("\n")).toContain("live-settings-tree-marker/");
 	});
 });
