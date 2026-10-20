@@ -4,7 +4,7 @@ Symbol-aware code intelligence from language servers — navigation, refactors, 
 - Position-based: `file` + `line` + `symbol` (substring; `#N` for Nth match). `line` is 1-indexed.
 - `rename` — applies by default; `apply: false` previews. Project-aware lookups ERROR without `symbol` — no silent fallback on missing/ambiguous matches.
 - `code_actions` — lists by default; apply ONE with `apply: true` + `query` (title substring or index).
-- `rename_file` — moves file AND rewrites all imports/references; applies by default.
+- `rename_file` — moves file AND rewrites all imports/references; applies by default. If no server can rewrite references, it says the move was plain — fix the imports yourself.
 - `diagnostics` — path, glob (`src/**/*.ts`), or `file: "*"` for workspace.
 - `symbols` — `file` lists file symbols; `file: "*"` + `query` searches workspace.
 - `reload` — restart one server (`file`) or all (`*`); `reload *` re-reads LSP config.
