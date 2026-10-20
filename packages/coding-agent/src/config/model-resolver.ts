@@ -1720,7 +1720,9 @@ export function sessionModelDiscoveryProviders(
  *
  * If neither the subagent nor the parent has working auth, returns the
  * primary resolution unchanged so the existing error path still surfaces
- * a meaningful failure downstream.
+ * a meaningful failure downstream. `primaryAuthFailed` reports whether the
+ * primary's key was checked and did not work, whether or not the parent
+ * could replace it.
  */
 export async function resolveModelOverrideWithAuthFallback(
 	modelPatterns: string[],
@@ -1733,6 +1735,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	thinkingLevel?: ConfiguredThinkingLevel;
 	explicitThinkingLevel: boolean;
 	authFallbackUsed: boolean;
+	primaryAuthFailed: boolean;
 	warning?: string;
 }> {
 	const disabledProviders = disabledProviderIds(settings);
@@ -1743,27 +1746,32 @@ export async function resolveModelOverrideWithAuthFallback(
 	}
 	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings);
 	if (!primary.model || !parentActiveModelPattern) {
-		return { ...primary, authFallbackUsed: false };
+		return { ...primary, authFallbackUsed: false, primaryAuthFailed: false };
 	}
 
 	const primaryKey = await modelRegistry.getApiKey(primary.model, sessionId);
 	if (primaryKey === kNoAuth || isAuthenticated(primaryKey)) {
-		return { ...primary, authFallbackUsed: false };
+		return { ...primary, authFallbackUsed: false, primaryAuthFailed: false };
 	}
 
 	const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);
 	if (!fallback.model) {
-		return { ...primary, authFallbackUsed: false };
+		return { ...primary, authFallbackUsed: false, primaryAuthFailed: true };
 	}
 	if (modelsAreEqual(fallback.model, primary.model)) {
-		return { ...primary, authFallbackUsed: false };
+		return { ...primary, authFallbackUsed: false, primaryAuthFailed: true };
 	}
 	const fallbackKey = await modelRegistry.getApiKey(fallback.model, sessionId);
 	if (!isAuthenticated(fallbackKey)) {
-		return { ...primary, authFallbackUsed: false };
+		return { ...primary, authFallbackUsed: false, primaryAuthFailed: true };
 	}
 
-	return { ...fallback, authFallbackUsed: true, warning: primary.warning ?? fallback.warning };
+	return {
+		...fallback,
+		authFallbackUsed: true,
+		primaryAuthFailed: true,
+		warning: primary.warning ?? fallback.warning,
+	};
 }
 
 /**

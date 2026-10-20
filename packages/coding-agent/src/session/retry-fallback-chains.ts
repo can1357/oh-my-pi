@@ -661,3 +661,63 @@ export function findRetryFallbackCandidates(
 	}
 	return chain;
 }
+
+/** Outcome of {@link resolveUnavailableModelReplacement} when the requested model's own chain owns it. */
+export type UnavailableModelReplacement =
+	| {
+			kind: "replaced";
+			/** The requested model's own key: exact `provider/id`, else a `provider/*` or prefixed wildcard. */
+			chainKey: string;
+			model: Model;
+			/** The candidate's own thinking level, else the requested selector's (bare entries inherit it). */
+			thinkingLevel: ThinkingLevel | undefined;
+			/** The requested selector's thinking level, restored if the requested model later serves again. */
+			requestedThinkingLevel: ThinkingLevel | undefined;
+	  }
+	| {
+			kind: "refused";
+			/** The requested model's own key: exact `provider/id`, else a `provider/*` or prefixed wildcard. */
+			chainKey: string;
+			/** Every candidate the chain named, none usable; empty for an empty chain. */
+			tried: string[];
+	  };
+
+/**
+ * Replace a requested model that cannot serve at startup — absent from the
+ * catalog, or without working credentials — through its own
+ * `retry.fallbackChains` entry: an exact `provider/id` key, else the most
+ * specific `provider/*` or prefixed wildcard key. Wildcard entries in that
+ * chain expand against the requested model, as they do for a runtime failure,
+ * and `resolveCandidate` resolves each entry to a model the way runtime
+ * recovery does (routes, fuzzy ids). The first candidate `isUsable` accepts
+ * replaces it; an empty chain, or one with no usable candidate, refuses it.
+ * Role and `default` chains do not decide startup: `undefined` when no key of
+ * the model's own owns it, so the caller keeps its own default.
+ */
+export function resolveUnavailableModelReplacement(
+	context: RetryFallbackResolutionContext,
+	requested: { selector: string; model: Model | undefined },
+	resolveCandidate: (selector: RetryFallbackSelector) => Model | undefined,
+	isUsable: (candidate: Model, selector: RetryFallbackSelector) => boolean,
+): UnavailableModelReplacement | undefined {
+	const chainKey = resolveRetryFallbackChainKey(context, requested.selector, requested.model);
+	if (chainKey === undefined || !isRetryFallbackModelKey(chainKey)) return undefined;
+	const candidates = findRetryFallbackCandidates(context, chainKey, requested.selector, requested.model, {
+		allowMissingPrimary: true,
+	});
+	const requestedThinkingLevel = parseRetryFallbackSelector(requested.selector, context.modelLookup)?.thinkingLevel;
+	for (const candidate of candidates) {
+		const model = resolveCandidate(candidate);
+		if (!model) continue;
+		if (requested.model && model.provider === requested.model.provider && model.id === requested.model.id) continue;
+		if (!isUsable(model, candidate)) continue;
+		return {
+			kind: "replaced",
+			chainKey,
+			model,
+			thinkingLevel: candidate.thinkingLevel ?? requestedThinkingLevel,
+			requestedThinkingLevel,
+		};
+	}
+	return { kind: "refused", chainKey, tried: candidates.map(candidate => candidate.raw) };
+}

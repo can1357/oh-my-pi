@@ -85,7 +85,7 @@ Settled response (`async.enabled=false`, no job manager, every item's agent `blo
 - identity: `index`, `id`, `agent`, `agentSource`, `task`, `description`, optional `assignment` (internal payload names; the wire fields are `name`/`agent`/`task`)
 - status: `exitCode`, optional `error`, optional `aborted`, optional `abortReason`, optional `retryFailure`
 - output: `output`, `stderr`, `truncated`, `durationMs`, `tokens`, `requests`, optional `contextTokens`/`contextWindow`, `usage`
-- model: optional `modelOverride`, `modelRole`, `resolvedModel`, `resolvedModelIdentity`, `resolvedThinkingLevel`, `resolvedModelIsFallback`, `resolvedModelRoute`, `advisor`
+- model: optional `modelOverride`, `modelRole`, `resolvedModel`, `resolvedModelIdentity`, `resolvedThinkingLevel`, `resolvedModelIsFallback`, `resolvedModelFallbackReason`, `resolvedModelRoute`, `advisor`
 - structured result: optional `structuredOutput` with schema source/mode, validation status, parsed `data`, and validation `error`
 - artifact metadata: `outputPath?`, `isolated?`, `patchPath?`, `hasRootChanges?`, `branchName?`, `branchBaseSha?`, `nestedPatches?`, `nestedPatchPaths?`, `outputMeta?`
 - extracted tool data: `extractedToolData?` from registered subprocess tool handlers such as `yield`

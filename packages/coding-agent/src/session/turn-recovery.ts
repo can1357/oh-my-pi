@@ -2476,6 +2476,11 @@ export class TurnRecovery {
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel) return false;
+		// A primary the session never ran on (startup chose its fallback) may have
+		// no effort at or below the session's ceiling; fallback selection skips
+		// such models, so restoration does too.
+		const ceiling = this.#host.thinkingLevelCeiling();
+		if (ceiling !== undefined && !modelSupportsEffortCeiling(primaryModel, ceiling)) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
 		if (!apiKey) return false;
 

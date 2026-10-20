@@ -6440,6 +6440,53 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(compatibleFallback.id);
 	});
 
+	it("keeps a startup fallback instead of restoring a primary that cannot honor the session effort ceiling", async () => {
+		const primaryModel = getBundledModel("openrouter", "deepseek/deepseek-v4-pro");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled effort-ceiling test models");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: fallbackModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push({ content: ["Answered"] });
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+			"retry.fallbackChains": { [primarySelector]: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		// Startup chose the chain entry because the primary could not serve (a
+		// task spawn whose model had no credentials); the primary, which now has
+		// credentials, has no effort at or below the spawn's ceiling.
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+			thinkingLevelCeiling: Effort.Low,
+			initialRetryFallback: {
+				role: primarySelector,
+				originalSelector: primarySelector,
+				originalThinkingLevel: undefined,
+			},
+		});
+
+		await session.prompt("Follow-up after the primary's credentials return");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([`${fallbackModel.provider}/${fallbackModel.id}`]);
+		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
 	it("accepts cached Ollama Cloud fallback selectors during startup validation", () => {
 		const primaryModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel) {
