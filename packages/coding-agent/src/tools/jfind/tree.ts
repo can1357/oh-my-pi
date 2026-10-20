@@ -12,6 +12,7 @@ import { buildPathTree, type PathTreeInput, walkPathTree } from "@oh-my-pi/pi-ut
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { type InternalUrlFilesystem, type UrlFileStat, UrlFsError } from "../../internal-urls/url-filesystem";
 import { resolveSearchBase, resolveSearchResultPath } from "../path-utils";
+import { throwIfAborted } from "../tool-errors";
 
 /** One eligible file under the search root. */
 export interface FileEntry {
@@ -242,7 +243,10 @@ export interface ListFilesOptions {
 	includeHidden: boolean;
 	/** Filesystem URL roots and their entries resolve through. */
 	filesystem: natives.ShellFilesystem;
+	maxScanEntries?: number;
+	maxScanBytes?: number;
 	signal?: AbortSignal;
+	timeoutMs?: number;
 }
 
 /**
@@ -268,8 +272,12 @@ export async function listFiles(root: SearchRoot, options: ListFilesOptions): Pr
 		gitignore: true,
 		sortByMtime: true,
 		filesystem: options.filesystem,
+		maxScanEntries: options.maxScanEntries,
+		maxScanBytes: options.maxScanBytes,
 		signal: options.signal,
+		timeoutMs: options.timeoutMs,
 	});
+	throwIfAborted(options.signal);
 	const entries: FileEntry[] = [];
 	for (const match of result.matches) {
 		const size = match.size ?? 0;

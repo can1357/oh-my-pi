@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as natives from "@oh-my-pi/pi-natives";
 import type { Judge, JudgmentRequest, JudgmentResult, NoulAnswer, Questions } from "@oh-my-pi/pi-ai";
 import { tokenUsage } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -20,7 +21,7 @@ import {
 	windows,
 } from "@oh-my-pi/pi-coding-agent/tools/jfind/passages";
 import { readText, ReadTextError } from "@oh-my-pi/pi-coding-agent/tools/jfind/text";
-import { eligibleFile, renderTree, resolveSearchRoot } from "@oh-my-pi/pi-coding-agent/tools/jfind/tree";
+import { eligibleFile, listFiles, renderTree, resolveSearchRoot } from "@oh-my-pi/pi-coding-agent/tools/jfind/tree";
 import { resolveSearchResultPath } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -108,6 +109,29 @@ describe("jfind passages", () => {
 });
 
 describe("jfind tree", () => {
+	it("stops collecting an oversized tree and asks for a narrower path", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-scan-cap-"));
+		try {
+			for (let i = 0; i < 128; i++) {
+				await Bun.write(path.join(dir, `file-${String(i).padStart(3, "0")}.ts`), "export const needle = true;\n");
+			}
+			const filesystem = urlFs(dir);
+			await expect(
+				listFiles(
+					{ path: dir, type: "directory" },
+					{
+						includeHidden: false,
+						filesystem: filesystem.shellFilesystem(),
+						maxScanEntries: 32,
+						maxScanBytes: 1024 * 1024,
+					},
+				),
+			).rejects.toThrow(/narrow.*path/i);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 	it("never lists credential material but keeps committed env templates", () => {
 		expect(eligibleFile(".env", 10, true)).toBe(false);
 		expect(eligibleFile("deploy/.env.production", 10, true)).toBe(false);
@@ -175,6 +199,23 @@ describe("jfind lexical index", () => {
 			await removeWithRetries(dir);
 		}
 	});
+	it("counts keyword occurrences past the truncated matching-line prefix", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-lexical-"));
+		try {
+			// The native stream truncates matching lines to 512 columns, so the
+			// occurrences live past the retained prefix.
+			await Bun.write(path.join(dir, "long.txt"), `${"z".repeat(2000)} needle needle\n`);
+			await Bun.write(path.join(dir, "short.txt"), "needle\n");
+			const index = await grepIndex(dir, ["needle"], {
+				includeHidden: false,
+				filesystem: urlFs(dir).shellFilesystem(),
+			});
+			expect(index.filesScanned).toBe(2);
+			expect(Object.fromEntries(index.perFileKw)).toEqual({ "long.txt": [2], "short.txt": [1] });
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
 });
 
 /** Judge that answers every noul from `answer(request, key)` and records concurrency. */
@@ -218,6 +259,61 @@ function stateOf(request: JudgmentRequest): Record<string, unknown> {
 describe("jfind cascade", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	it("does not start grep when listing rejects an oversized root", async () => {
+		const failure = new Error("Scan limit reached; narrow `path`");
+		const globSpy = spyOn(natives, "glob").mockRejectedValue(failure);
+		const grepSpy = spyOn(natives, "grep");
+		try {
+			await expect(
+				runCascade({
+					root: { path: "/unused", type: "directory" },
+					filesystem: urlFs("/unused"),
+					query: "find the target",
+					extraKeywords: [],
+					judge: new FakeJudge(() => 0.5),
+					includeHidden: false,
+				}),
+			).rejects.toBe(failure);
+			expect(grepSpy).not.toHaveBeenCalled();
+		} finally {
+			globSpy.mockRestore();
+			grepSpy.mockRestore();
+		}
+	});
+
+	it("propagates parent cancellation to the active native scan", async () => {
+		const parent = new AbortController();
+		const reason = new Error("parent cancelled");
+		const scanStarted = Promise.withResolvers<void>();
+		const waitForAbort = (signal: AbortSignal) => {
+			scanStarted.resolve();
+			const scan = Promise.withResolvers<never>();
+			if (signal.aborted) scan.reject(signal.reason);
+			else signal.addEventListener("abort", () => scan.reject(signal.reason), { once: true });
+			return scan.promise;
+		};
+		const globSpy = spyOn(natives, "glob").mockImplementation(options => waitForAbort(options.signal as AbortSignal));
+		const grepSpy = spyOn(natives, "grep");
+		try {
+			const search = runCascade({
+				root: { path: "/unused", type: "directory" },
+				filesystem: urlFs("/unused"),
+				query: "find the target",
+				extraKeywords: [],
+				judge: new FakeJudge(() => 0.5),
+				includeHidden: false,
+				signal: parent.signal,
+			});
+			await scanStarted.promise;
+			parent.abort(reason);
+			expect(await search.catch(error => error)).toBe(reason);
+			expect(grepSpy).not.toHaveBeenCalled();
+		} finally {
+			globSpy.mockRestore();
+			grepSpy.mockRestore();
+		}
 	});
 
 	it("verifies only sketched passages, reports merged ranges, and runs waves in parallel", async () => {

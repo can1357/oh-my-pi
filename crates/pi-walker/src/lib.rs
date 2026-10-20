@@ -610,6 +610,8 @@ pub struct WalkOptions {
 	pub same_file_system:    bool,
 	/// Use the shared scan cache when collecting owned entries.
 	pub cache:               bool,
+	/// Optional limits propagated into directory readers by bounded collection.
+	pub scan_limits:         Option<(usize, usize)>,
 }
 
 impl WalkOptions {
@@ -650,6 +652,7 @@ impl Default for WalkOptions {
 			directory_errors:    DirectoryErrorMode::Visit,
 			same_file_system:    false,
 			cache:               false,
+			scan_limits:         None,
 		}
 	}
 }
@@ -666,6 +669,7 @@ pub struct WalkRequest {
 	cache_policy:     CachePolicy,
 	filter:           WalkFilter,
 	limit:            Option<usize>,
+	scan_limits:      Option<(usize, usize)>,
 	empty_recheck:    EmptyRecheck,
 	visit_order:      VisitOrder,
 	size_hint_policy: SizeHintPolicy,
@@ -679,6 +683,7 @@ impl PartialEq for WalkRequest {
 			&& self.cache_policy == other.cache_policy
 			&& self.filter == other.filter
 			&& self.limit == other.limit
+			&& self.scan_limits == other.scan_limits
 			&& self.empty_recheck == other.empty_recheck
 			&& self.visit_order == other.visit_order
 			&& self.size_hint_policy == other.size_hint_policy
@@ -712,6 +717,7 @@ impl WalkRequest {
 			cache_policy,
 			filter: WalkFilter::default(),
 			limit: None,
+			scan_limits: options.scan_limits,
 			empty_recheck: EmptyRecheck::Configured,
 			visit_order,
 			size_hint_policy: SizeHintPolicy::FromDetail,
@@ -842,6 +848,16 @@ impl WalkRequest {
 	/// Limit the number of emitted entries after filtering.
 	pub const fn limit(mut self, limit: usize) -> Self {
 		self.limit = Some(limit);
+		self
+	}
+
+	/// Stop collection after `max_entries` or `max_file_bytes` would be
+	/// exceeded. Limits apply while entries are visited, before ownership is
+	/// allocated, and bypass the shared cache so a cached full scan cannot evade
+	/// the bound.
+	pub const fn scan_limits(mut self, max_entries: usize, max_file_bytes: usize) -> Self {
+		self.scan_limits = Some((max_entries, max_file_bytes));
+		self.options.scan_limits = self.scan_limits;
 		self
 	}
 
@@ -1226,19 +1242,33 @@ impl WalkRequest {
 		E: fmt::Display,
 	{
 		let mut options = self.effective_options();
+		if self.scan_limits.is_some() {
+			options.detail = WalkDetail::Full;
+		}
 		if matches!(rank, Some(WalkRank::MtimeDescPathAsc)) {
 			options.detail = WalkDetail::Full;
 		}
-		if !options.cache
+		if (!options.cache || self.scan_limits.is_some())
 			&& let (Some(rank), Some(limit)) = (rank, limit)
 		{
-			let mut collector = RankedCollectVisitor::new(&self.filter, rank, limit);
+			let mut collector = RankedCollectVisitor::new(&self.filter, rank, limit, self.scan_limits);
 			walk_entries_in(&self.filesystem, &self.root, options, &mut collector, || {
 				heartbeat().map_err(|err| err.to_string())
 			})?;
 			return Ok(collector.into_outcome());
 		}
-		let mut scan = self.collect_entries_with_options(options, &heartbeat)?;
+		if self.scan_limits.is_some() {
+			options.cache = false;
+		}
+		let mut scan = if let Some(limits) = self.scan_limits {
+			let mut collector = BoundedCollectVisitor::new(limits);
+			walk_entries_in(&self.filesystem, &self.root, options, &mut collector, || {
+				heartbeat().map_err(|err| err.to_string())
+			})?;
+			CollectedEntries { entries: collector.entries, cache_age_ms: 0 }
+		} else {
+			self.collect_entries_with_options(options, &heartbeat)?
+		};
 		let mut backend = if scan.cache_age_ms == 0 {
 			WalkBackend::Fresh
 		} else {
@@ -1302,6 +1332,7 @@ impl WalkRequest {
 		if self.filter.max_file_size.is_some() {
 			options.detail = WalkDetail::Full;
 		}
+		options.scan_limits = self.scan_limits;
 		options
 	}
 
@@ -1439,7 +1470,7 @@ struct ParallelWalkContext {
 
 struct ParallelWalkShared<'a, E, S, H> {
 	stop:      AtomicBool,
-	error:     Mutex<Option<E>>,
+	error:     Mutex<Option<WalkError<E>>>,
 	sink:      &'a S,
 	heartbeat: &'a H,
 }
@@ -1458,6 +1489,12 @@ impl<'a, E, S, H> ParallelWalkShared<'a, E, S, H> {
 	}
 
 	fn record_error(&self, error: E) {
+		self.record_walk_error(WalkError::Interrupted(error));
+	}
+
+	/// Record a walker-level error so the parallel walk surfaces it instead of
+	/// returning partial results as a complete walk.
+	fn record_walk_error(&self, error: WalkError<E>) {
 		let mut slot = match self.error.lock() {
 			Ok(slot) => slot,
 			Err(poisoned) => poisoned.into_inner(),
@@ -1468,7 +1505,7 @@ impl<'a, E, S, H> ParallelWalkShared<'a, E, S, H> {
 		self.request_stop();
 	}
 
-	fn take_error(&self) -> Option<E> {
+	fn take_error(&self) -> Option<WalkError<E>> {
 		match self.error.lock() {
 			Ok(mut slot) => slot.take(),
 			Err(poisoned) => poisoned.into_inner().take(),
@@ -1545,7 +1582,7 @@ where
 	}
 
 	if let Some(error) = shared.take_error() {
-		Err(WalkError::Interrupted(error))
+		Err(error)
 	} else if shared.should_stop() {
 		Ok(WalkStatus::Stopped)
 	} else {
@@ -1694,6 +1731,7 @@ fn walk_parallel_dir<'scope, E, S, H>(
 		&mut scratch,
 		&context.matcher,
 		derive_ignore_from_entries,
+		context.options.scan_limits,
 	) {
 		Ok(ignore_entries) => ignore_entries,
 		Err(ReadDirError::Io(err)) if pi_vfs::is_cancelled(&err) => {
@@ -1701,12 +1739,15 @@ fn walk_parallel_dir<'scope, E, S, H>(
 			recycle_parallel_scratch(scratch);
 			return;
 		},
-		Err(ReadDirError::Io(_) | ReadDirError::Walk(WalkError::InvalidData { .. })) => {
+		Err(ReadDirError::Io(_)) => {
 			recycle_parallel_scratch(scratch);
 			return;
 		},
-		Err(ReadDirError::Walk(WalkError::Interrupted(error))) => {
-			shared.record_error(error);
+		Err(ReadDirError::Walk(err)) => {
+			// The serial walker propagates walk errors (a scan-limit stop among
+			// them); dropping one here would return partial results as a
+			// complete walk.
+			shared.record_walk_error(err);
 			recycle_parallel_scratch(scratch);
 			return;
 		},
@@ -2395,17 +2436,33 @@ impl PartialEq for RankedEntry {
 impl Eq for RankedEntry {}
 
 struct RankedCollectVisitor<'a> {
-	filter:   &'a WalkFilter,
-	rank:     WalkRank,
-	limit:    usize,
-	entries:  BinaryHeap<RankedEntry>,
-	scanned:  usize,
-	filtered: usize,
+	filter:      &'a WalkFilter,
+	rank:        WalkRank,
+	limit:       usize,
+	entries:     BinaryHeap<RankedEntry>,
+	scanned:     usize,
+	filtered:    usize,
+	scan_limits: Option<(usize, usize)>,
+	file_bytes:  usize,
 }
 
 impl<'a> RankedCollectVisitor<'a> {
-	const fn new(filter: &'a WalkFilter, rank: WalkRank, limit: usize) -> Self {
-		Self { filter, rank, limit, entries: BinaryHeap::new(), scanned: 0, filtered: 0 }
+	const fn new(
+		filter: &'a WalkFilter,
+		rank: WalkRank,
+		limit: usize,
+		scan_limits: Option<(usize, usize)>,
+	) -> Self {
+		Self {
+			filter,
+			rank,
+			limit,
+			entries: BinaryHeap::new(),
+			scanned: 0,
+			filtered: 0,
+			scan_limits,
+			file_bytes: 0,
+		}
 	}
 
 	fn into_outcome(self) -> WalkOutcome {
@@ -2429,6 +2486,9 @@ impl EntryVisitor for RankedCollectVisitor<'_> {
 	type Error = String;
 
 	fn visit(&mut self, entry: Entry<'_>) -> std::result::Result<WalkControl, Self::Error> {
+		let file_bytes = entry.size.unwrap_or(0.0).max(0.0) as usize;
+		check_scan_limits(self.scanned, self.file_bytes, file_bytes, self.scan_limits)?;
+		self.file_bytes = self.file_bytes.saturating_add(file_bytes);
 		self.scanned += 1;
 		// Collection filters emission only: even SkipDescend must keep scanning.
 		if self
@@ -2461,6 +2521,59 @@ impl EntryVisitor for RankedCollectVisitor<'_> {
 		}
 		Ok(WalkControl::Continue)
 	}
+}
+
+struct BoundedCollectVisitor {
+	entries:        Vec<CollectedEntry>,
+	max_entries:    usize,
+	max_file_bytes: usize,
+	file_bytes:     usize,
+}
+
+impl BoundedCollectVisitor {
+	const fn new((max_entries, max_file_bytes): (usize, usize)) -> Self {
+		Self { entries: Vec::new(), max_entries, max_file_bytes, file_bytes: 0 }
+	}
+}
+
+impl EntryVisitor for BoundedCollectVisitor {
+	type Error = String;
+
+	fn visit(&mut self, entry: Entry<'_>) -> std::result::Result<WalkControl, Self::Error> {
+		let file_bytes = entry.size.unwrap_or(0.0).max(0.0) as usize;
+		check_scan_limits(
+			self.entries.len(),
+			self.file_bytes,
+			file_bytes,
+			Some((self.max_entries, self.max_file_bytes)),
+		)?;
+		self.file_bytes = self.file_bytes.saturating_add(file_bytes);
+		self.entries.push(CollectedEntry {
+			path:      entry.relative.to_string(),
+			file_type: entry.file_type,
+			mtime:     entry.mtime,
+			size:      entry.size,
+		});
+		Ok(WalkControl::Continue)
+	}
+}
+
+fn check_scan_limits(
+	entries: usize,
+	file_bytes: usize,
+	entry_bytes: usize,
+	limits: Option<(usize, usize)>,
+) -> Result<(), String> {
+	let Some((max_entries, max_file_bytes)) = limits else {
+		return Ok(());
+	};
+	if entries >= max_entries || file_bytes.saturating_add(entry_bytes) > max_file_bytes {
+		return Err(format!(
+			"scan limit reached ({max_entries} entries or {max_file_bytes} file bytes); narrow the \
+			 search path"
+		));
+	}
+	Ok(())
 }
 
 impl<E> CollectVisitor<E> {
@@ -2960,6 +3073,7 @@ impl<H> WalkContext<'_, H> {
 			&mut scratch,
 			&self.matcher,
 			derive_ignore_from_entries,
+			self.options.scan_limits,
 		) {
 			Ok(ignore_entries) => ignore_entries,
 			Err(err) => {
@@ -3214,13 +3328,27 @@ fn collect_directory_entries<E>(
 	scratch: &mut DirScratch,
 	matcher: &FastIgnore,
 	derive_ignore_from_entries: bool,
+	scan_limits: Option<(usize, usize)>,
 ) -> std::result::Result<IgnoreEntryNames, ReadDirError<E>> {
 	scratch.clear_listing();
 	let mut ignore_entries = IgnoreEntryNames::default();
 	let track_ignore_entries = derive_ignore_from_entries && matcher.use_gitignore;
 	let mut read_buffer = std::mem::take(&mut scratch.read_buffer);
+	let mut scanned = 0usize;
+	let mut limit_reached = false;
 	let result = {
 		let emit = |entry: RawDirEntry<'_>| -> std::result::Result<ReadDirControl, WalkError<E>> {
+			// Only the raw entry count bounds this buffered listing; byte
+			// budgets apply to entries that reach collection, after hidden,
+			// `skip_git`, and ignore filtering, so an excluded entry cannot
+			// consume them.
+			if let Some((max_entries, _)) = scan_limits {
+				if scanned >= max_entries {
+					limit_reached = true;
+					return Ok(ReadDirControl::Stop);
+				}
+				scanned += 1;
+			}
 			if track_ignore_entries {
 				ignore_entries.record(entry.name.as_ref(), entry.file_type);
 			}
@@ -3235,6 +3363,15 @@ fn collect_directory_entries<E>(
 	};
 	scratch.read_buffer = read_buffer;
 	result?;
+	if limit_reached {
+		return Err(ReadDirError::Walk(WalkError::InvalidData {
+			path:    dir.to_path_buf(),
+			message: format!(
+				"scan limit reached ({max_entries} directory entries); narrow the search path",
+				max_entries = scan_limits.map_or(usize::MAX, |limits| limits.0),
+			),
+		}));
+	}
 	Ok(ignore_entries)
 }
 
@@ -5067,6 +5204,7 @@ mod tests {
 			directory_errors:    DirectoryErrorMode::SkipSkippable,
 			same_file_system:    false,
 			cache:               false,
+			scan_limits:         None,
 		}
 	}
 
@@ -5286,7 +5424,7 @@ mod tests {
 				.glob(CompiledWalkGlob::new(["**/*.txt"]).expect("compile glob"))
 				.node_modules_unless_mentioned(mentioned);
 			for limit in [2, usize::MAX] {
-				let mut collector = RankedCollectVisitor::new(&filter, WalkRank::PathAsc, limit);
+				let mut collector = RankedCollectVisitor::new(&filter, WalkRank::PathAsc, limit, None);
 				for (relative, file_type, size) in inputs {
 					collector
 						.visit(Entry {
@@ -5388,7 +5526,7 @@ mod tests {
 			[(WalkRank::PathAsc, path_expected), (WalkRank::MtimeDescPathAsc, expected)]
 		{
 			for limit in 0..=inputs.len() + 1 {
-				let mut collector = RankedCollectVisitor::new(&filter, rank, limit);
+				let mut collector = RankedCollectVisitor::new(&filter, rank, limit, None);
 				for (relative, mtime) in inputs {
 					// Each visit borrows a temporary path; retained results must own
 					// it.
@@ -5549,6 +5687,36 @@ mod tests {
 			panic!("heartbeat interruption should be surfaced as WalkError::Interrupted");
 		};
 		assert_eq!(message, "stop requested");
+	}
+
+	#[test]
+	fn bounded_collection_stops_native_walk_and_reports_narrow_path_action() {
+		let tree = temp_tree("bounded-collection");
+		for index in 0..2_000 {
+			fs::write(tree.path().join(format!("{index:04}.txt")), "0123456789")
+				.expect("create synthetic file");
+		}
+		let request = WalkRequest::from_options(tree.path(), test_options())
+			.cache(true)
+			.scan_limits(32, 2_000);
+		let error = request
+			.collect()
+			.expect_err("large scan must stop at its collection cap");
+		assert!(
+			error.to_string().contains("scan limit reached")
+				&& error.to_string().contains("narrow the search path"),
+			"consumer needs an actionable cap error, got {error}"
+		);
+
+		let small = temp_tree("bounded-small");
+		for name in ["a.txt", "b.txt", "c.txt"] {
+			fs::write(small.path().join(name), "x").expect("create small fixture");
+		}
+		let outcome = WalkRequest::from_options(small.path(), test_options())
+			.scan_limits(8, 8)
+			.collect()
+			.expect("small scan stays under both caps");
+		assert_eq!(outcome.entries.len(), 3);
 	}
 
 	#[test]
