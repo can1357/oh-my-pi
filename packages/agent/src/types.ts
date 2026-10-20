@@ -1270,6 +1270,16 @@ export interface AgentTool<
 	/** Capability tier declaration used by approval gates. Omitted means "exec". */
 	approval?: ToolApproval;
 
+	/**
+	 * Set to `false` for a tool that must not run as a detour while a soft tool
+	 * requirement is pending, even though its approval tier is `"read"`. The
+	 * tier classifies authorization, not purity: a tool that ends the run
+	 * (`yield`) or mutates session state (`memory_edit`, `checkpoint`) would
+	 * otherwise bypass the required tool. Omitted means detour-safe when the
+	 * tier is `"read"`.
+	 */
+	softRequirementDetour?: boolean;
+
 	/** Lines appended after the standard approval prompt header. */
 	formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
 

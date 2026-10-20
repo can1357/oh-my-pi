@@ -1719,7 +1719,14 @@ async function runLoopBody(
 					toolCalls.every(toolCall => softSatisfies?.(toolCall) ?? toolCall.name === softRequiredTool);
 				const softGateActive =
 					softRequiredTool !== undefined && !hardToolChoiceBlocks(config.toolChoice, softRequiredTool);
-				const softNonCompliant = softGateActive && !calledOnlyRequiredTool;
+				const softReadOnlyDetour =
+					softGateActive &&
+					hasMoreToolCalls &&
+					!calledOnlyRequiredTool &&
+					toolCalls.every(toolCall =>
+						isReadOnlyToolCall(currentContext.tools, toolCall, config.resolveFallbackTool),
+					);
+				const softNonCompliant = softGateActive && !calledOnlyRequiredTool && !softReadOnlyDetour;
 
 				const toolResults: ToolResultMessage[] = [];
 				const additionalMessages: AgentMessage[] = [];
@@ -2990,6 +2997,23 @@ function resolveToolForCall(
 		// this request can reach.
 		resolveFallbackTool?.(toolCall.name, tools ?? [])
 	);
+}
+
+function isReadOnlyToolCall(
+	tools: AgentContext["tools"],
+	toolCall: AgentToolCall,
+	resolveFallbackTool: AgentLoopConfig["resolveFallbackTool"],
+): boolean {
+	const tool = resolveToolForCall(tools, toolCall, resolveFallbackTool);
+	if (!tool?.approval || tool.softRequirementDetour === false) return false;
+	// Todo's approval tier is intentionally broad; only its view operation is a read.
+	if (tool.name === "todo") return toolCall.arguments.op === "view";
+	try {
+		const approval = typeof tool.approval === "function" ? tool.approval(toolCall.arguments) : tool.approval;
+		return typeof approval === "string" ? approval === "read" : approval.tier === "read";
+	} catch {
+		return false;
+	}
 }
 
 /** Shortest suggestable segment; below this the match is noise (`id`, `to`). */

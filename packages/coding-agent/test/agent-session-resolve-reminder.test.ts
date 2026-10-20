@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool, isSoftToolRequirement } from "@oh-my-pi/pi-agent-core";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -22,6 +22,7 @@ describe("AgentSession resolve reminder", () => {
 	let session: AgentSession;
 	let toolSession: ToolSession;
 	let tempDir: string;
+	let mock: MockModel;
 
 	const sessions: AgentSession[] = [];
 	const authStorages: AuthStorage[] = [];
@@ -42,7 +43,7 @@ describe("AgentSession resolve reminder", () => {
 		authStorages.push(auth);
 		const modelRegistry = new ModelRegistry(auth, path.join(tempDir, `models-${Snowflake.next()}.yml`));
 
-		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
 		const bashTool: AgentTool = {
 			name: "bash",
 			label: "Bash",
@@ -225,6 +226,64 @@ describe("AgentSession resolve reminder", () => {
 		await command(toolSession, RESOLVE_COMMAND_NAME).execute("resolve-call", { reason: "looks correct" });
 
 		expect(applyRuns).toBe(1);
+		expect(session.nextToolChoiceDirective()).toBeUndefined();
+	});
+
+	it("reads the pending skill in a throwaway session before resolving the staged write", async () => {
+		let readRuns = 0;
+		queueResolveHandler(toolSession, {
+			label: "Staged write",
+			sourceToolName: "write",
+			apply: async () => ({ content: [{ type: "text", text: "Applied" }] }),
+		});
+		const readSchema = type({ path: "string" });
+		const resolveSchema = type({ reason: "string" });
+		const readTool: AgentTool<typeof readSchema> = {
+			name: "read",
+			label: "Read",
+			description: "Read a skill",
+			parameters: readSchema,
+			approval: "read",
+			async execute() {
+				readRuns++;
+				return { content: [{ type: "text", text: "Bitbucket PR guidance." }] };
+			},
+		};
+		const resolveTool: AgentTool<typeof resolveSchema> = {
+			name: RESOLVE_COMMAND_NAME,
+			label: "Resolve",
+			description: "Resolve a staged write",
+			parameters: resolveSchema,
+			approval: "exec",
+			async execute() {
+				return await command(toolSession, RESOLVE_COMMAND_NAME).execute("resolve-write", {
+					reason: "looks correct",
+				});
+			},
+		};
+		session.agent.setTools([readTool, resolveTool]);
+		mock.push(() => ({
+			content: [{ type: "toolCall", id: "read-skill", name: "read", arguments: { path: "skill://bitbucket-prs" } }],
+		}));
+		mock.push(() => ({
+			content: [
+				{
+					type: "toolCall",
+					id: "resolve-write",
+					name: RESOLVE_COMMAND_NAME,
+					arguments: { reason: "looks correct" },
+				},
+			],
+		}));
+		mock.push(() => ({ content: ["Done"] }));
+
+		await session.prompt("Read skill://bitbucket-prs");
+
+		expect(readRuns).toBe(1);
+		expect(mock.calls).toHaveLength(3);
+		expect(mock.calls[1]?.context.messages.some(message => message.role === "toolResult")).toBe(true);
+		expect(mock.calls[1]?.options?.toolChoice).toBeUndefined();
+		expect(session.peekPendingInvoker()).toBeUndefined();
 		expect(session.nextToolChoiceDirective()).toBeUndefined();
 	});
 

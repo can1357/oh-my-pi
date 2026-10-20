@@ -17,6 +17,7 @@ function identityConverter(messages: AgentMessage[]): Message[] {
 }
 
 const emptySchema = type({});
+const todoSchema = type({ op: "string" });
 
 /**
  * Build a host that gates `resolve` as a soft requirement while a preview is
@@ -28,6 +29,11 @@ function makeSoftResolveHarness() {
 	let pendingPreview = true;
 	let resolveRuns = 0;
 	let peekRuns = 0;
+	let readRuns = 0;
+	let writeRuns = 0;
+	let bashRuns = 0;
+	let todoReads = 0;
+	let todoRuns = 0;
 	const reminder = createUserMessage("<system-reminder>Resolve the pending preview.</system-reminder>");
 
 	const resolveTool: AgentTool<typeof emptySchema, Record<string, never>> = {
@@ -51,12 +57,57 @@ function makeSoftResolveHarness() {
 			return { content: [{ type: "text", text: "peeked" }], details: {} };
 		},
 	};
+	const readTool: AgentTool<typeof emptySchema, Record<string, never>> = {
+		name: "read",
+		label: "Read",
+		description: "Read-only lookup",
+		parameters: emptySchema,
+		approval: "read",
+		async execute() {
+			readRuns++;
+			return { content: [{ type: "text", text: "read" }], details: {} };
+		},
+	};
+	const writeTool: AgentTool<typeof emptySchema, Record<string, never>> = {
+		name: "write",
+		label: "Write",
+		description: "Write something",
+		parameters: emptySchema,
+		approval: "write",
+		async execute() {
+			writeRuns++;
+			return { content: [{ type: "text", text: "written" }], details: {} };
+		},
+	};
+	const bashTool: AgentTool<typeof emptySchema, Record<string, never>> = {
+		name: "bash",
+		label: "Bash",
+		description: "Run a command",
+		parameters: emptySchema,
+		approval: "exec",
+		async execute() {
+			bashRuns++;
+			return { content: [{ type: "text", text: "ran" }], details: {} };
+		},
+	};
+	const todoTool: AgentTool<typeof todoSchema, Record<string, never>> = {
+		name: "todo",
+		label: "Todo",
+		description: "Todo list",
+		parameters: todoSchema,
+		approval: "read",
+		async execute(_id, args) {
+			todoRuns++;
+			if (args.op === "view") todoReads++;
+			return { content: [{ type: "text", text: "viewed" }], details: {} };
+		},
+	};
 
 	const getToolChoice = (): SoftToolRequirement | undefined =>
 		pendingPreview ? { soft: true, id: "preview-1", toolName: "resolve", reminder: [reminder] } : undefined;
 
 	return {
-		tools: [resolveTool, peekTool],
+		tools: [resolveTool, peekTool, readTool, writeTool, bashTool, todoTool],
 		getToolChoice,
 		reminder,
 		get resolveRuns() {
@@ -64,6 +115,21 @@ function makeSoftResolveHarness() {
 		},
 		get peekRuns() {
 			return peekRuns;
+		},
+		get readRuns() {
+			return readRuns;
+		},
+		get writeRuns() {
+			return writeRuns;
+		},
+		get bashRuns() {
+			return bashRuns;
+		},
+		get todoReads() {
+			return todoReads;
+		},
+		get todoRuns() {
+			return todoRuns;
 		},
 	};
 }
@@ -132,6 +198,159 @@ describe("agentLoop soft tool requirement", () => {
 		// The skipped peek call still produced a paired tool result (API pairing).
 		const peekResult = messages.find(m => m.role === "toolResult" && m.toolCallId === "p1");
 		expect(peekResult).toBeDefined();
+	});
+
+	it("does not execute read-only detours from truncated turns while a soft requirement is pending", async () => {
+		const h = makeSoftResolveHarness();
+		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: h.tools };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", id: "read-truncated", name: "read", arguments: {} }],
+					stopReason: "length",
+				},
+				{ content: [{ type: "toolCall", id: "resolve-after-truncation", name: "resolve", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const stream = agentLoop(
+			[createUserMessage("go")],
+			context,
+			{ model: mock.model, convertToLlm: identityConverter, getToolChoice: h.getToolChoice },
+			undefined,
+			mock.stream,
+		);
+		for await (const _ of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+
+		expect(h.readRuns).toBe(0);
+		expect(messages.find(m => m.role === "toolResult" && m.toolCallId === "read-truncated")?.role).toBe("toolResult");
+	});
+
+	it("executes read-only detours without escalating, then satisfies the requirement", async () => {
+		const h = makeSoftResolveHarness();
+		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: h.tools };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "read1", name: "read", arguments: {} }] },
+				{ content: [{ type: "toolCall", id: "r1", name: "resolve", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const stream = agentLoop(
+			[createUserMessage("go")],
+			context,
+			{ model: mock.model, convertToLlm: identityConverter, getToolChoice: h.getToolChoice },
+			undefined,
+			mock.stream,
+		);
+		for await (const _ of stream) {
+			// drain
+		}
+
+		expect(h.readRuns).toBe(1);
+		expect(h.resolveRuns).toBe(1);
+		expect(mock.calls[0]?.options?.toolChoice).toBeUndefined();
+		expect(mock.calls[1]?.options?.toolChoice).toBeUndefined();
+	});
+
+	it("skips a read-tier tool that opts out of soft-requirement detours", async () => {
+		const h = makeSoftResolveHarness();
+		let yieldRuns = 0;
+		const yieldLike: AgentTool<typeof emptySchema, Record<string, never>> = {
+			name: "yield",
+			label: "Yield",
+			description: "Ends the run",
+			parameters: emptySchema,
+			approval: "read",
+			softRequirementDetour: false,
+			async execute() {
+				yieldRuns++;
+				return { content: [{ type: "text", text: "yielded" }], details: {} };
+			},
+		};
+		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: [...h.tools, yieldLike] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "y1", name: "yield", arguments: {} }] },
+				{ content: [{ type: "toolCall", id: "r1", name: "resolve", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const stream = agentLoop(
+			[createUserMessage("go")],
+			context,
+			{ model: mock.model, convertToLlm: identityConverter, getToolChoice: h.getToolChoice },
+			undefined,
+			mock.stream,
+		);
+		for await (const _ of stream) {
+			// drain
+		}
+
+		expect(yieldRuns).toBe(0);
+		expect(h.resolveRuns).toBe(1);
+	});
+
+	it("allows the todo view operation while the requirement is pending", async () => {
+		const h = makeSoftResolveHarness();
+		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: h.tools };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "todo-view", name: "todo", arguments: { op: "view" } }] },
+				{ content: [{ type: "toolCall", id: "r1", name: "resolve", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const stream = agentLoop(
+			[createUserMessage("go")],
+			context,
+			{ model: mock.model, convertToLlm: identityConverter, getToolChoice: h.getToolChoice },
+			undefined,
+			mock.stream,
+		);
+		for await (const _ of stream) {
+			// drain
+		}
+
+		expect(h.todoReads).toBe(1);
+		expect(mock.calls[1]?.options?.toolChoice).toBeUndefined();
+	});
+
+	it("skips writes and shell execution while escalating the required tool", async () => {
+		const h = makeSoftResolveHarness();
+		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: h.tools };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "w1", name: "write", arguments: {} },
+						{ type: "toolCall", id: "b1", name: "bash", arguments: {} },
+						{ type: "toolCall", id: "todo-update", name: "todo", arguments: { op: "set" } },
+					],
+				},
+				{ content: [{ type: "toolCall", id: "r1", name: "resolve", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const stream = agentLoop(
+			[createUserMessage("go")],
+			context,
+			{ model: mock.model, convertToLlm: identityConverter, getToolChoice: h.getToolChoice },
+			undefined,
+			mock.stream,
+		);
+		for await (const _ of stream) {
+			// drain
+		}
+
+		expect(h.writeRuns).toBe(0);
+		expect(h.bashRuns).toBe(0);
+		expect(h.todoRuns).toBe(0);
+		expect(h.resolveRuns).toBe(1);
+		expect(mock.calls[1]?.options?.toolChoice).toEqual({ type: "tool", name: "resolve" });
 	});
 
 	it("uses the satisfies predicate over bare name matching for compliance", async () => {
