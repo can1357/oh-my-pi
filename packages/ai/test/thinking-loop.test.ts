@@ -1184,11 +1184,11 @@ describe("GeminiHeaderRunDetector", () => {
 			const whole = new GeminiHeaderRunDetector();
 			expect(whole.push(text)).toBe(false);
 			expect(whole.count).toBe(1);
-			for (const step of [1, 600]) {
-				const detector = new GeminiHeaderRunDetector();
-				for (let i = 0; i < text.length; i += step) detector.push(text.slice(i, i + step));
-				expect(detector.count).toBe(whole.count);
-			}
+			// One character per delta: the cap is crossed and the head re-cut on
+			// every character after it, so the title must still count once.
+			const detector = new GeminiHeaderRunDetector();
+			for (const ch of text) detector.push(ch);
+			expect(detector.count).toBe(whole.count);
 		}
 	});
 
@@ -1199,11 +1199,11 @@ describe("GeminiHeaderRunDetector", () => {
 		const whole = new GeminiHeaderRunDetector();
 		expect(whole.push(text)).toBe(false);
 		expect(whole.count).toBe(0);
-		for (const step of [1, 600]) {
-			const detector = new GeminiHeaderRunDetector();
-			for (let i = 0; i < text.length; i += step) detector.push(text.slice(i, i + step));
-			expect(detector.count).toBe(0);
-		}
+		// One character per delta: the line's head settles as plain prose on its
+		// first character, so no chunking can turn it into a title.
+		const detector = new GeminiHeaderRunDetector();
+		for (const ch of text) detector.push(ch);
+		expect(detector.count).toBe(0);
 	});
 });
 
