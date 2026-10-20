@@ -816,7 +816,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		const resultBuilder = toolResult(details)
 			.content([{ type: "text", text: cappedOutputText }, ...(result.images ?? [])])
-			.truncationFromSummary(result, { direction: "tail" });
+			.truncationFromSummary(result, { direction: "tail" })
+			.minimized("minimized" in result ? result.minimized : undefined);
 		if (failedExit) resultBuilder.error();
 		return resultBuilder.done();
 	}

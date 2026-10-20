@@ -691,6 +691,7 @@ class BashResult:
     artifact_id: str | None = None
     artifact_elided_bytes: int | None = None
     artifact_error: JsonObject | None = None
+    minimized: JsonObject | None = None
     working_dir: str | None = None
     images: tuple[ImageContent, ...] | None = None
 
@@ -2040,6 +2041,7 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         artifact_id=optional(payload, "artifactId", decode_str, path),
         artifact_elided_bytes=optional(payload, "artifactElidedBytes", decode_int, path),
         artifact_error=optional(payload, "artifactError", decode_json_object, path),
+        minimized=optional(payload, "minimized", decode_json_object, path),
         working_dir=optional(payload, "workingDir", decode_str, path),
         images=optional(payload, "images", array(parse_image_content), path),
     )

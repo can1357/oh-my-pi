@@ -80,6 +80,18 @@ export interface LimitsMeta {
 }
 
 /**
+ * The bash minimizer rewrote this output: `filter` is the native filter label
+ * (`chain` for a minimized `&&`/`;` chain), the byte counts are the raw capture
+ * and the minimized text, and `artifactId` holds the raw capture.
+ */
+export interface MinimizedMeta {
+	filter: string;
+	inputBytes: number;
+	outputBytes: number;
+	artifactId: string;
+}
+
+/**
  * Structured metadata for tool outputs.
  */
 export interface OutputMeta {
@@ -91,6 +103,7 @@ export interface OutputMeta {
 	pagedSource?: true;
 	diagnostics?: DiagnosticMeta;
 	limits?: LimitsMeta;
+	minimized?: MinimizedMeta;
 }
 
 // Regex: split on the first `:digits:digits` boundary to separate path from the rest
