@@ -74,6 +74,24 @@ describe("BashExecutionComponent replay seeding", () => {
 		expect(expanded).not.toContain("line-0");
 		expect(expanded).not.toContain("to expand");
 	});
+
+	it("reports the partial line a throttled chunk lost", () => {
+		// A chunk rejected by the throttle merges its first segment into the
+		// retained last row, and that segment is discarded: the row on screen
+		// lost its tail. The loss is a fragment loss whether or not the chunk
+		// also contributed whole rows, so the footer has to name it — the
+		// retained row is not the intact line it looks like.
+		const component = new BashExecutionComponent("seq 1 10", ui, false);
+		component.appendOutput("kept-");
+		// Inside the 50 ms gate: the chunk is rejected whole.
+		component.appendOutput("suffix\nnext");
+		// The error path settles without a final snapshot.
+		component.setComplete(undefined, false);
+
+		const rows = rowsOf(component).join("\n");
+		expect(rows).toContain("lines skipped in output");
+		expect(rows).toContain("partial output skipped in output");
+	});
 });
 
 describe("ChatTranscriptBuilder bash replay", () => {

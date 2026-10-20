@@ -426,6 +426,26 @@ describe("OutputSink", () => {
 		expect(chunks).toEqual(["first", "second"]);
 	});
 
+	test("dispose does not reject when the chunk subscriber throws", async () => {
+		// Disposal runs while the command is already unwinding a backend
+		// failure. A subscriber that rejects the flushed tail used to turn the
+		// cleanup call into a rejection: it replaced the command's own error and
+		// skipped the executor's remaining cleanup, leaving the persistent
+		// shell key marked busy for later commands.
+		let calls = 0;
+		const sink = new OutputSink({
+			onChunk: () => {
+				calls++;
+				if (calls === 2) throw new Error("subscriber failed");
+			},
+			chunkThrottleMs: 60_000,
+		});
+		sink.push("first");
+		sink.push("second");
+		await sink.dispose();
+		expect(calls).toBe(2);
+	});
+
 	test("replace cancels a throttled tail and discards its pending preview", () => {
 		vi.useFakeTimers();
 		const chunks: string[] = [];
