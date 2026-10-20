@@ -1,11 +1,11 @@
 # Changelog
 
 ## [Unreleased]
-
-
 ### Breaking Changes
 
 - Raised the minimum required Bun version from >=1.3.14 to >=1.4.3; the published compiled ESM still runs on Node 20+, so only Bun-based installs and TypeScript-source resolution need 1.4.3 ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+
 ## [18.12.0] - 2026-10-17
 
 ### Fixed
