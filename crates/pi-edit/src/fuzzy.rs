@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use crate::{
 	error::EditError,
 	text::{
-		adjust_indentation, count_leading_whitespace, fuzzy_equivalent_chars, is_non_empty_line,
-		js_trim, js_trim_end, js_trim_start, normalize_for_fuzzy, normalize_to_lf, normalize_unicode,
+		adjust_indentation, count_leading_indent, fuzzy_equivalent_chars, is_non_empty_line, js_trim,
+		js_trim_end, js_trim_start, normalize_for_fuzzy, normalize_to_lf, normalize_unicode,
 		utf16_len,
 	},
 };
@@ -523,7 +523,7 @@ fn find_exact_match_outcome(
 fn relative_indent_depths(lines: &[&str]) -> Vec<usize> {
 	let indents: Vec<usize> = lines
 		.iter()
-		.map(|line| count_leading_whitespace(line))
+		.map(|line| count_leading_indent(line))
 		.collect();
 	let non_empty_indents: Vec<usize> = lines
 		.iter()
@@ -1185,8 +1185,9 @@ const MAX_HINTED_DIFFERENCES: usize = 8;
 
 /// Codepoint-level hint for a diff pair whose characters differ in forms the
 /// fuzzy matcher folds together (typographic quotes, dashes, fullwidth
-/// variants). Terminals render both sides alike, so the printed pair reads as
-/// identical and leaves the caller no actionable difference.
+/// variants) or in whitespace the terminal renders as blank space. Terminals
+/// render both sides alike, so the printed pair reads as identical and leaves
+/// the caller no actionable difference.
 ///
 /// Only exact mode reports the hint: with fuzzy matching enabled both sides
 /// are normalized before scoring, so a folded variant is free and can never be
@@ -1201,7 +1202,8 @@ const MAX_HINTED_DIFFERENCES: usize = 8;
 /// The reported position is a character index into the trimmed body, not a
 /// display column.
 ///
-/// Returns `None` when the pair differs in nothing the matcher folds.
+/// Returns `None` when the pair differs nowhere the caller cannot see: no
+/// folded difference in the body and no differing boundary codepoint.
 fn folded_difference_hint(expected: &str, actual: &str, allow_fuzzy: bool) -> Option<String> {
 	if allow_fuzzy {
 		return None;
@@ -1264,17 +1266,20 @@ fn split_boundary_whitespace(line: &str) -> (&str, &str, &str) {
 	(&line[..start], &line[start..end], &line[end..])
 }
 
-/// The first pair of characters in the leading or trailing whitespace that the
-/// matcher folds together. The glyphs are omitted: whitespace renders as blank
-/// space, so only the codepoint tells the caller what to reproduce.
+/// The first pair of characters in the leading or trailing whitespace that
+/// differ. The glyphs are omitted: whitespace renders as blank space, so only
+/// the codepoint tells the caller what to reproduce.
+///
+/// Every unequal pair counts, not only the ones the matcher folds together.
+/// The boundary whitespace is trimmed away before the match is scored, so an
+/// exact match is the only thing that charges for it — and it charges for the
+/// codepoint, not for the shape: a no-break space (`U+00A0`), a tab and the
+/// ideographic space (`U+3000`) all render as blank space.
 fn boundary_difference_hint(position: &str, expected: &str, actual: &str) -> Option<String> {
-	let (expected_char, actual_char) =
-		expected
-			.chars()
-			.zip(actual.chars())
-			.find(|(expected_char, actual_char)| {
-				expected_char != actual_char && fuzzy_equivalent_chars(*expected_char, *actual_char)
-			})?;
+	let (expected_char, actual_char) = expected
+		.chars()
+		.zip(actual.chars())
+		.find(|(expected_char, actual_char)| expected_char != actual_char)?;
 	Some(format!(
 		"  differs at the {position}: U+{:04X} vs U+{:04X}",
 		expected_char as u32, actual_char as u32
@@ -1494,6 +1499,7 @@ pub fn replace_text(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::modes::replace::ReplaceEngine;
 
 	#[test]
 	fn fast_distances_match_reference_across_block_boundaries() {
@@ -1805,19 +1811,18 @@ mod tests {
 	fn match_error_names_folded_codepoint_differences() {
 		// Exact mode charges for the folded difference, so the error names the
 		// codepoints the terminal renders identically.
-		let closest = FuzzyMatch {
-			actual_text: "foo（bar）＝1".to_owned(),
-			start_index: 0,
-			start_line:  3,
-			confidence:  1.0,
-		};
 		assert_eq!(
-			format_match_error("a.ts", "foo(bar)=1", Some(&closest), false, 0.95, None),
-			"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 3:\n  - \
-			 foo(bar)=1\n  + foo（bar）＝1\n  differs at char 4: U+0028 ( vs U+FF08 （\n  differs at \
-			 char 8: U+0029 ) vs U+FF09 ）\n  differs at char 9: U+003D = vs U+FF1D ＝\nFuzzy \
-			 matching is disabled. Enable 'Edit fuzzy match' in settings to accept high-confidence \
-			 matches."
+			exact_edit_error("foo（bar）＝1", "foo(bar)=1", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - foo(bar)=1\n",
+				"  + foo（bar）＝1\n",
+				"  differs at char 4: U+0028 ( vs U+FF08 （\n",
+				"  differs at char 8: U+0029 ) vs U+FF09 ）\n",
+				"  differs at char 9: U+003D = vs U+FF1D ＝\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
 		);
 	}
 
@@ -1825,19 +1830,19 @@ mod tests {
 	fn match_error_names_folded_differences_ignoring_indentation() {
 		// The matcher compares trimmed lines, so an indentation difference must
 		// not shift the character positions of the folded pairs.
-		let closest = FuzzyMatch {
-			actual_text: "\tfoo（bar）＝1".to_owned(),
-			start_index: 0,
-			start_line:  3,
-			confidence:  1.0,
-		};
 		assert_eq!(
-			format_match_error("a.ts", "  foo(bar)=1", Some(&closest), false, 0.95, None),
-			"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 3:\n  -   \
-			 foo(bar)=1\n  + \tfoo（bar）＝1\n  differs at char 4: U+0028 ( vs U+FF08 （\n  differs \
-			 at char 8: U+0029 ) vs U+FF09 ）\n  differs at char 9: U+003D = vs U+FF1D ＝\nFuzzy \
-			 matching is disabled. Enable 'Edit fuzzy match' in settings to accept high-confidence \
-			 matches."
+			exact_edit_error("\tfoo（bar）＝1", "  foo(bar)=1", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  -   foo(bar)=1\n",
+				"  + \tfoo（bar）＝1\n",
+				"  differs at the start: U+0020 vs U+0009\n",
+				"  differs at char 4: U+0028 ( vs U+FF08 （\n",
+				"  differs at char 8: U+0029 ) vs U+FF09 ）\n",
+				"  differs at char 9: U+003D = vs U+FF1D ＝\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
 		);
 	}
 
@@ -1845,18 +1850,10 @@ mod tests {
 	fn match_error_omits_folded_difference_hint_in_fuzzy_mode() {
 		// With fuzzy matching enabled a folded variant is free, so it cannot be
 		// the reason the match was rejected and must not be named.
-		let closest = FuzzyMatch {
-			actual_text: "foo（bar）＝2".to_owned(),
-			start_index: 0,
-			start_line:  3,
-			confidence:  0.9,
-		};
-		assert_eq!(
-			format_match_error("a.ts", "foo(bar)=1", Some(&closest), true, 0.95, None),
-			"Could not find a close enough match in a.ts.\n\nClosest match (90% similar) at line \
-			 3:\n  - foo(bar)=1\n  + foo（bar）＝2\nClosest match was below the 95% similarity \
-			 threshold."
-		);
+		let error = fuzzy_edit_error("foo（bar）＝2", "foo(bar)=1", "x");
+		assert!(error.starts_with("Could not find a close enough match in a.ts."), "{error}");
+		assert!(error.contains("Closest match was below the 95% similarity threshold."), "{error}");
+		assert!(!error.contains("differs at"), "{error}");
 	}
 
 	#[test]
@@ -1864,16 +1861,10 @@ mod tests {
 		// The matcher trims the boundary whitespace but an exact match charges
 		// for it, so the codepoints of the invisible boundary difference have
 		// to be named.
-		let closest = FuzzyMatch {
-			actual_text: "foo\u{3000}".to_owned(),
-			start_index: 0,
-			start_line:  3,
-			confidence:  1.0,
-		};
 		assert_eq!(
-			format_match_error("a.ts", "foo\u{20}", Some(&closest), false, 0.95, None),
+			exact_edit_error("foo\u{3000}", "foo\u{20}", "x"),
 			concat!(
-				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 3:\n",
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
 				"  - foo\u{20}\n",
 				"  + foo\u{3000}\n",
 				"  differs at the end: U+0020 vs U+3000\n",
@@ -1881,16 +1872,10 @@ mod tests {
 				 high-confidence matches."
 			)
 		);
-		let closest = FuzzyMatch {
-			actual_text: "\u{3000}foo".to_owned(),
-			start_index: 0,
-			start_line:  3,
-			confidence:  1.0,
-		};
 		assert_eq!(
-			format_match_error("a.ts", "\u{20}foo", Some(&closest), false, 0.95, None),
+			exact_edit_error("\u{3000}foo", "\u{20}foo", "x"),
 			concat!(
-				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 3:\n",
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
 				"  - \u{20}foo\n",
 				"  + \u{3000}foo\n",
 				"  differs at the start: U+0020 vs U+3000\n",
@@ -1901,25 +1886,54 @@ mod tests {
 	}
 
 	#[test]
-	fn match_error_omits_folded_boundary_difference_in_fuzzy_mode() {
-		// With fuzzy matching enabled the boundary whitespace is free, so it
-		// cannot be the reason the match was rejected and must not be named.
-		let closest = FuzzyMatch {
-			actual_text: "foo\u{3000}".to_owned(),
-			start_index: 0,
-			start_line:  3,
-			confidence:  0.9,
-		};
+	fn match_error_names_boundary_whitespace_codepoints() {
+		// Every unequal boundary codepoint has to be named, not only the ones
+		// the matcher folds together: a no-break space and a tab render as
+		// blank space just like the ideographic space, and the exact match
+		// charges for them all the same.
 		assert_eq!(
-			format_match_error("a.ts", "foo\u{20}", Some(&closest), true, 0.95, None),
+			exact_edit_error("foo\u{00A0}", "foo\u{20}", "x"),
 			concat!(
-				"Could not find a close enough match in a.ts.\n\nClosest match (90% similar) at line \
-				 3:\n",
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
 				"  - foo\u{20}\n",
-				"  + foo\u{3000}\n",
-				"Closest match was below the 95% similarity threshold."
+				"  + foo\u{00A0}\n",
+				"  differs at the end: U+0020 vs U+00A0\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
 			)
 		);
+		assert_eq!(
+			exact_edit_error("foo\t", "foo\u{20}", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - foo\u{20}\n",
+				"  + foo\t\n",
+				"  differs at the end: U+0020 vs U+0009\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+		assert_eq!(
+			exact_edit_error("\u{00A0}foo", "\u{20}foo", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - \u{20}foo\n",
+				"  + \u{00A0}foo\n",
+				"  differs at the start: U+0020 vs U+00A0\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn fuzzy_match_accepts_boundary_whitespace_difference() {
+		// With fuzzy matching enabled the boundary whitespace is free, so the
+		// edit is accepted instead of rejected.
+		let result = ReplaceEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 }
+			.replace("foo\u{3000}", "foo\u{20}", "bar", false, "a.ts")
+			.expect("fuzzy matching accepts the boundary whitespace");
+		assert_eq!(result, ReplaceResult { content: "bar".to_owned(), count: 1 });
 	}
 
 	#[test]
@@ -1937,6 +1951,18 @@ mod tests {
 		);
 		assert_eq!(result.content, "let x = 2;\n");
 		assert_eq!(result.count, 1);
+	}
+
+	#[test]
+	fn replace_keeps_indentation_when_ideographic_space_is_folded() {
+		// The fuzzy matcher folds the ideographic space onto an ASCII space,
+		// so this anchor matches the line — but the replacement has to keep
+		// the indentation of the line it replaces.
+		let result = replaced(
+			replace_text("\u{3000}foo", " foo", " bar", true, false, None)
+				.expect("the folded anchor must match the line"),
+		);
+		assert_eq!(result, ReplaceResult { content: " bar".to_owned(), count: 1 });
 	}
 
 	#[test]
@@ -1958,6 +1984,22 @@ mod tests {
 			ReplaceOutcome::Replaced(result) => result,
 			ReplaceOutcome::Missed(outcome) => panic!("expected a replacement, missed: {outcome:?}"),
 		}
+	}
+
+	/// The error a rejected exact edit shows the model.
+	fn exact_edit_error(content: &str, old_string: &str, new_string: &str) -> String {
+		ReplaceEngine { allow_fuzzy: false, fuzzy_threshold: 0.95 }
+			.replace(content, old_string, new_string, false, "a.ts")
+			.expect_err("the exact edit must be rejected")
+			.to_string()
+	}
+
+	/// The error a rejected fuzzy edit shows the model.
+	fn fuzzy_edit_error(content: &str, old_string: &str, new_string: &str) -> String {
+		ReplaceEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 }
+			.replace(content, old_string, new_string, false, "a.ts")
+			.expect_err("the fuzzy edit must be rejected")
+			.to_string()
 	}
 
 	#[test]

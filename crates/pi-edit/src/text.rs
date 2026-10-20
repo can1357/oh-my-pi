@@ -134,6 +134,44 @@ pub fn get_leading_whitespace(line: &str) -> &str {
 	&line[..count_leading_whitespace(line)]
 }
 
+/// True when `ch` is indentation whitespace the fuzzy matcher folds onto an
+/// ASCII space: the ideographic space (`U+3000`) folds with the spaces and
+/// tabs `normalize_for_fuzzy` collapses into a single space.
+const fn is_indent_char(ch: char) -> bool {
+	matches!(ch, ' ' | '\t' | '\u{3000}')
+}
+
+/// Leading indentation of `line` — the spaces, tabs and the ideographic space
+/// (`U+3000`) the fuzzy matcher folds onto an ASCII space.
+fn leading_indent(line: &str) -> &str {
+	let end = line
+		.char_indices()
+		.find(|(_, ch)| !is_indent_char(*ch))
+		.map_or(line.len(), |(offset, _)| offset);
+	&line[..end]
+}
+
+/// Count leading indentation characters, one per character: the ideographic
+/// space (`U+3000`) is three UTF-8 bytes but indents a line as much as one
+/// ASCII space does.
+pub fn count_leading_indent(line: &str) -> usize {
+	line.chars().take_while(|ch| is_indent_char(*ch)).count()
+}
+
+/// Drop up to `units` indentation characters from the front of `line`.
+fn strip_leading_indent(line: &str, units: usize) -> &str {
+	let mut remaining = units;
+	let mut end = 0;
+	for (offset, ch) in line.char_indices() {
+		if remaining == 0 || !is_indent_char(ch) {
+			break;
+		}
+		remaining -= 1;
+		end = offset + ch.len_utf8();
+	}
+	&line[end..]
+}
+
 /// Minimum indentation among non-empty lines (0 when there are none).
 pub fn min_indent(text: &str) -> usize {
 	text
@@ -190,9 +228,9 @@ fn build_indent_profile(text: &str) -> IndentProfile<'_> {
 			continue;
 		}
 		non_empty_count += 1;
-		let indent = get_leading_whitespace(line);
-		indent_counts.push(indent.len());
-		let has_space = indent.contains(' ');
+		let indent = leading_indent(line);
+		indent_counts.push(count_leading_indent(line));
+		let has_space = indent.chars().any(|ch| ch == ' ' || ch == '\u{3000}');
 		let has_tab = indent.contains('\t');
 		if has_space {
 			tab_only = false;
@@ -204,6 +242,9 @@ fn build_indent_profile(text: &str) -> IndentProfile<'_> {
 			mixed = true;
 		}
 		if let Some(current) = indent.chars().next() {
+			// The ideographic space indents a line as much as an ASCII space,
+			// so it must not read as a different indentation character.
+			let current = fold_unicode_variant(current).unwrap_or(current);
 			match char {
 				None => char = Some(current),
 				Some(existing) if existing != current => mixed = true,
@@ -380,12 +421,11 @@ fn maybe_convert_tab_indentation(
 		if !is_non_empty_line(old_line) || !is_non_empty_line(actual_line) {
 			continue;
 		}
-		let old_indent = get_leading_whitespace(old_line);
-		if old_indent.is_empty() {
+		let old_indent = count_leading_indent(old_line);
+		if old_indent == 0 {
 			continue;
 		}
-		let actual_indent = get_leading_whitespace(actual_line);
-		if actual_indent.len() != old_indent.len() * actual.unit {
+		if count_leading_indent(actual_line) != old_indent * actual.unit {
 			return None;
 		}
 	}
@@ -401,8 +441,8 @@ fn compute_uniform_indent_delta(
 		if !is_non_empty_line(old_line) || !is_non_empty_line(actual_line) {
 			continue;
 		}
-		let current = count_leading_whitespace(actual_line) as isize
-			- count_leading_whitespace(old_line) as isize;
+		let current =
+			count_leading_indent(actual_line) as isize - count_leading_indent(old_line) as isize;
 		match delta {
 			None => delta = Some(current),
 			Some(existing) if existing != current => return None,
@@ -425,8 +465,8 @@ fn apply_indent_delta(text: &str, delta: isize, indent_char: char) -> String {
 				out.push_str(line);
 				return out;
 			}
-			let to_remove = ((-delta) as usize).min(count_leading_whitespace(line));
-			line[to_remove..].to_owned()
+			let to_remove = ((-delta) as usize).min(count_leading_indent(line));
+			strip_leading_indent(line, to_remove).to_owned()
 		})
 		.collect();
 	adjusted.join("\n")
@@ -436,6 +476,12 @@ fn apply_indent_delta(text: &str, delta: isize, indent_char: char) -> String {
 /// `old_text` and the `actual_text` that was matched in the file.
 ///
 /// A fuzzy hit at a different nesting depth lands with the right indentation.
+///
+/// The indentation is measured in characters, not bytes, and the ideographic
+/// space (`U+3000`) counts as one unit: the fuzzy matcher folds it onto an
+/// ASCII space, so an anchor written with an ASCII space matches a line
+/// indented with it. Measuring the same line differently would compute a
+/// bogus delta and silently deindent the replacement.
 pub fn adjust_indentation(old_text: &str, actual_text: &str, new_text: &str) -> String {
 	if old_text == actual_text || is_indentation_only_rewrite(old_text, new_text) {
 		return new_text.to_owned();
@@ -508,6 +554,18 @@ mod tests {
 			adjust_indentation("\tfoo()", "    foo()", "\tbar()\n\t\tbaz()"),
 			"    bar()\n        baz()"
 		);
+	}
+
+	#[test]
+	fn adjust_indentation_treats_folded_ideographic_space_as_indentation() {
+		// The fuzzy matcher folds the ideographic space onto an ASCII space,
+		// so this anchor matches a line indented with it. The indentation
+		// profiler has to see the same indentation, or it computes a bogus
+		// delta and silently deindents the replacement.
+		assert_eq!(adjust_indentation(" foo", "\u{3000}foo", " bar"), " bar");
+		assert_eq!(adjust_indentation("\u{3000}foo", "  foo", " bar"), "  bar");
+		// A line the anchor did not indent still is indented by the file.
+		assert_eq!(adjust_indentation("foo", "\u{3000}foo", "bar"), " bar");
 	}
 
 	#[test]
