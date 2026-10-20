@@ -32,6 +32,9 @@ interface CoordinatorHostBundle {
 	emitSessionEvent: Mock<(event: AgentSessionEvent) => Promise<void>>;
 	followUp: Mock<(message: AgentMessage) => void>;
 	hasQueuedMessages: Mock<() => boolean>;
+	appendMessage: Mock<(message: AgentMessage) => void>;
+	replaceMessages: Mock<(messages: AgentMessage[]) => void>;
+	schedulePostPromptTask: Mock<(task: (signal: AbortSignal) => Promise<void>, options?: { delayMs?: number }) => void>;
 	scheduleAgentContinue: Mock<(options: Parameters<TtsrCoordinatorHost["scheduleAgentContinue"]>[0]) => void>;
 }
 
@@ -39,8 +42,13 @@ function makeHost(): CoordinatorHostBundle {
 	const emitSessionEvent = vi.fn(async (_event: AgentSessionEvent) => undefined);
 	const followUp = vi.fn((_message: AgentMessage) => undefined);
 	const hasQueuedMessages = vi.fn(() => true);
+	const appendMessage = vi.fn((_message: AgentMessage) => undefined);
+	const replaceMessages = vi.fn((_messages: AgentMessage[]) => undefined);
 	const scheduleAgentContinue = vi.fn(
 		(_options: Parameters<TtsrCoordinatorHost["scheduleAgentContinue"]>[0]) => undefined,
+	);
+	const schedulePostPromptTask = vi.fn(
+		(_task: (signal: AbortSignal) => Promise<void>, _options?: { delayMs?: number }) => undefined,
 	);
 	const host = {
 		agent: {
@@ -48,15 +56,30 @@ function makeHost(): CoordinatorHostBundle {
 			abort: vi.fn(),
 			followUp,
 			hasQueuedMessages,
+			appendMessage,
+			replaceMessages,
 		} as unknown as Agent,
-		sessionManager: { getCwd: () => "/tmp", appendTtsrInjection: vi.fn() } as unknown as SessionManager,
+		sessionManager: {
+			getCwd: () => "/tmp",
+			appendTtsrInjection: vi.fn(),
+			appendCustomMessageEntry: vi.fn(),
+		} as unknown as SessionManager,
 		settings: {} as Settings,
 		emitSessionEvent,
-		schedulePostPromptTask: vi.fn(),
+		schedulePostPromptTask,
 		scheduleAgentContinue,
 		promptGeneration: () => 0,
 	} as unknown as TtsrCoordinatorHost;
-	return { host, emitSessionEvent, followUp, hasQueuedMessages, scheduleAgentContinue };
+	return {
+		host,
+		emitSessionEvent,
+		followUp,
+		hasQueuedMessages,
+		appendMessage,
+		replaceMessages,
+		schedulePostPromptTask,
+		scheduleAgentContinue,
+	};
 }
 
 function assistantMessage(content: unknown[] = []): AgentMessage {
@@ -402,5 +425,115 @@ describe("TTSR AST deferral", () => {
 		await coordinator.checkMessageUpdate(toolDelta(message, ',"input":"const a = 1;"'));
 
 		expect(checkAst).not.toHaveBeenCalled();
+	});
+});
+
+/**
+ * A non-interrupting prose rule leaves the output in place: the deferred
+ * notice must report that the rule did not interrupt the output, and must
+ * claim nothing about the output having completed. Regression coverage for
+ * issue #15861.
+ */
+describe("TTSR deferred prose notice", () => {
+	async function deferredNotice(
+		globalMode: NonNullable<Rule["interruptMode"]>,
+		ruleInterruptMode?: Rule["interruptMode"],
+		stopReason: "stop" | "length" | "toolUse" = "stop",
+	): Promise<string> {
+		const { host, followUp } = makeHost();
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: globalMode,
+			repeatMode: "after-gap",
+			repeatGap: 6,
+		});
+		expect(manager.addRule({ ...makeRule("text"), interruptMode: ruleInterruptMode })).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const message = assistantMessage();
+
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(message, CONDITION));
+		coordinator.onAssistantMessageEnd({ ...message, stopReason } as AssistantMessage);
+
+		const delivery = followUp.mock.calls[0]?.[0];
+		if (delivery?.role !== "custom" || typeof delivery.content !== "string") {
+			throw new Error("Expected a deferred custom TTSR delivery");
+		}
+		return delivery.content;
+	}
+
+	function expectTruthfulNotice(notice: string): void {
+		expect(notice).not.toContain("Output interrupted");
+		expect(notice).not.toContain("<system-interrupt");
+		expect(notice).toContain("<system-reminder");
+		// The rule did not interrupt the output, so the notice may say that —
+		// and nothing more. "the output completed" is false for a `length`
+		// stop (truncated) and for a `toolUse` stop (the run continues into
+		// tool calls), so the notice must not claim it.
+		expect(notice).toContain("not interrupted by the rule");
+		expect(notice).not.toContain("output completed");
+	}
+
+	it("does not claim the output was interrupted (issue #15861)", async () => {
+		// "never" disables interrupts globally, "tool-only" only for prose sources:
+		// both leave the output in place, so both notices must be truthful.
+		for (const globalMode of ["never", "tool-only"] as const) {
+			const notice = await deferredNotice(globalMode);
+			expectTruthfulNotice(notice);
+			// The rule still reaches the model: the notice replaces the interrupt,
+			// it does not swallow the rule the model has to comply with.
+			expect(notice).toContain("stream-boundary-text");
+			expect(notice).toContain("Test reminder");
+		}
+	});
+
+	it("does not claim the output was interrupted for a rule-level override", async () => {
+		const notice = await deferredNotice("always", "never");
+		expectTruthfulNotice(notice);
+	});
+
+	it("does not claim the output completed when the stop reason is length", async () => {
+		// A `length` stop truncates the output: the notice must report the
+		// unmatched rule without describing the output as finished.
+		const notice = await deferredNotice("never", undefined, "length");
+		expectTruthfulNotice(notice);
+		expect(notice).toContain("stream-boundary-text");
+	});
+
+	it("does not claim the output completed when the stop reason is toolUse", async () => {
+		// A `toolUse` stop continues into tool calls: the assistant output is
+		// not the end of the run, so the notice must not call it completed.
+		const notice = await deferredNotice("never", undefined, "toolUse");
+		expectTruthfulNotice(notice);
+		expect(notice).toContain("stream-boundary-text");
+	});
+
+	it("still announces the interruption when a prose rule aborts the output", async () => {
+		const { host, appendMessage, schedulePostPromptTask } = makeHost();
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "after-gap",
+			repeatGap: 6,
+		});
+		expect(manager.addRule(makeRule("text"))).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const message = assistantMessage();
+		host.agent.state.messages.push(message);
+
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(message, CONDITION));
+		const retry = schedulePostPromptTask.mock.calls[0]?.[0];
+		if (!retry) throw new Error("Expected a scheduled TTSR retry task");
+		await retry(new AbortController().signal);
+
+		const injection = appendMessage.mock.calls[0]?.[0];
+		if (!injection || injection.role !== "custom" || typeof injection.content !== "string") {
+			throw new Error("Expected an appended TTSR injection message");
+		}
+		expect(injection.content).toContain("Output interrupted");
+		expect(injection.content).toContain("<system-interrupt");
 	});
 });
