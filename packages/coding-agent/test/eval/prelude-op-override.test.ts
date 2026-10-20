@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import * as vm from "node:vm";
-import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
+import { loadPrelude, preludeHelper } from "../helpers/prelude-sandbox";
 
 /**
  * Regression for #16446: `workpool()` and `judgeBatch()` spread the caller's
@@ -14,15 +13,6 @@ import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
  * real shipped helper. The stub mirrors the host bridges' op dispatch: only
  * `op: "create"` creates, every other op addresses an existing pool/batch.
  */
-function loadPrelude(
-	callTool: (name: string, args: Record<string, unknown>) => Promise<unknown>,
-): Record<string, unknown> {
-	const sandbox: Record<string, unknown> = { __omp_call_tool__: callTool };
-	vm.createContext(sandbox);
-	vm.runInContext(JAVASCRIPT_PRELUDE_SOURCE, sandbox);
-	return sandbox;
-}
-
 interface BridgeCall {
 	name: string;
 	args: Record<string, unknown>;
@@ -48,7 +38,7 @@ describe("eval js workpool() op precedence (issue #16446)", () => {
 			if (args.op === "push") return { ids: [] };
 			return {};
 		});
-		const workpool = sandbox.workpool as WorkpoolHelper;
+		const workpool = preludeHelper<WorkpoolHelper>(sandbox, "workpool");
 
 		const pool = await workpool("worker", { op: "close", name: "live-pool" });
 
@@ -68,7 +58,7 @@ describe("eval js judgeBatch() op precedence (issue #16446)", () => {
 			// Non-create ops need an existing batch id, exactly like the host bridge.
 			throw new Error("op requires a batch id");
 		});
-		const judgeBatch = sandbox.judgeBatch as JudgeBatchHelper;
+		const judgeBatch = preludeHelper<JudgeBatchHelper>(sandbox, "judgeBatch");
 
 		const batch = await judgeBatch({ first: { ok: true } }, { q1: { instructions: "check" } }, { op: "close" });
 
