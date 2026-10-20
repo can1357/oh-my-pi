@@ -3,7 +3,8 @@
  *
  * Extension-facing APIs accept `string | CompactOptions`, but `AgentSession.compact`
  * takes two positional arguments `(instructions, options)`. This helper splits the
- * union so the same adapter can be reused by print-mode, rpc-mode, and the executor.
+ * union so the same adapter can be reused by every mode (interactive, print, rpc,
+ * acp) — it is the single place that keeps the "never rejects" guarantee.
  */
 import type { Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -35,11 +36,22 @@ export async function runExtensionCompact(
 	const reportError = (error: Error): void => {
 		if (reported) return;
 		reported = true;
-		if (onError) onError(error);
-		else logger.warn("Extension compaction failed", { error: error.message });
+		if (!onError) {
+			logger.warn("Extension compaction failed", { error: error.message });
+			return;
+		}
+		try {
+			onError(error);
+		} catch (thrown) {
+			// The extension's own error handler threw. The returned promise must
+			// not reject, so log the throw instead of dropping it silently.
+			logger.warn("Extension compaction onError threw", {
+				error: thrown instanceof Error ? thrown.message : String(thrown),
+			});
+		}
 	};
-	// The session calls `onError` itself before rethrowing; wrap it so the
-	// extension sees exactly one report even when the session reports twice.
+	// The session reports the failure through `onError` and then rethrows it into
+	// the `catch` below; wrap it so the extension sees exactly one report.
 	const compactOptions = options ? { ...options, onError: (error: Error): void => reportError(error) } : undefined;
 	try {
 		await session.compact(instructions, compactOptions);
