@@ -5,7 +5,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool, SNAPSHOT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { cfgToolsOutputMaxColumns } from "@oh-my-pi/pi-coding-agent/tools/settings";
@@ -148,5 +148,40 @@ describe("read charges column-cut lines their displayed width", () => {
 		expect(shown.has(151)).toBe(false);
 		expect(text).toContain("Use");
 		expect(text).toContain(":151 to continue");
+	});
+
+	it("shows a first line whose cut display alone exceeds the budget, then pages on", async () => {
+		// Stray bytes decode to 3-byte U+FFFD: the 38.5 KB line shows as ~73 KB under a 30k-column cap.
+		const file = path.join(dir, "stray.txt");
+		await fs.writeFile(
+			file,
+			Buffer.concat([Buffer.from("z".repeat(8_500)), Buffer.alloc(30_000, 0xff), Buffer.from("\nnext\n")]),
+		);
+		const text = await read(createSession(dir, 30_000), file);
+		expect(rows(text).get(1)).toStartWith("z".repeat(8_500));
+		expect(text).not.toContain("Showing 0");
+		expect(text).toContain("Use :2 to continue");
+	});
+
+	it("keeps a conflict side kept only as its display head out of the conflict registry", async () => {
+		const file = path.join(dir, "conflicted.txt");
+		const ours = "O".repeat(80_000);
+		const filler = "F".repeat(SNAPSHOT_MAX_BYTES + 200_000);
+		await fs.writeFile(
+			file,
+			["head", "<<<<<<< HEAD", ours, "=======", "theirs", ">>>>>>> feat", filler, "tail", ""].join("\n"),
+		);
+		const session = createSession(dir);
+		const [readTool] = await createTools(session, ["read"]);
+		const [writeTool] = await createTools(session, ["write"]);
+		await readTool!.execute("conflicts", { path: `${file}:conflicts` });
+		expect(session.conflictHistory?.get(1)?.oursLines).toEqual([ours]);
+
+		const numbered = textOutput(await readTool!.execute("numbered", { path: file }));
+		expect(rows(numbered).get(3)).toBe(`${ours.slice(0, 768)}…`);
+		expect(session.conflictHistory?.get(1)?.oursLines).toEqual([ours]);
+
+		await writeTool!.execute("resolve", { path: "conflict://1", content: "@ours" });
+		expect(await fs.readFile(file, "utf8")).toBe(["head", ours, filler, "tail", ""].join("\n"));
 	});
 });
