@@ -2,12 +2,17 @@ import { describe, expect, it } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { saveLearnedLesson } from "@oh-my-pi/pi-coding-agent/memories";
+import {
+	buildMemoryToolDeveloperInstructions,
+	pendingMemorySnapshotCommit,
+	saveLearnedLesson,
+} from "@oh-my-pi/pi-coding-agent/memories";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionTools, type SessionToolsHost } from "@oh-my-pi/pi-coding-agent/session/session-tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const MEMORY_SNAPSHOT_TYPE = "memory-snapshot";
 
@@ -92,6 +97,65 @@ describe("memory snapshot with a replaced system prompt", () => {
 		// An empty memory store injects no block, so there is nothing to record —
 		// not even for a prompt that drops the block.
 		expect(await countSnapshots(() => ["custom prompt"], { memory: false })).toBe(0);
+	}, 30_000);
+
+	it("records the snapshot on the branch a turn continues after a navigation", async () => {
+		// The base prompt carries the memory block and is not rebuilt when the
+		// user navigates: the branch the turn continues on must record a
+		// snapshot of its own, or its later resume rereads the memory files.
+		const tempDir = TempDir.createSync("@omp-memory-snapshot-restage-");
+		try {
+			const settings = Settings.isolated({ "memory.backend": "local" });
+			await settings.reloadForCwd(tempDir.path());
+			await saveLearnedLesson(tempDir.path(), tempDir.path(), { content: "Restaged lesson" });
+
+			const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+			const messageId = sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "hi" }],
+				timestamp: Date.now(),
+			});
+			sessionManager.appendMessage(createAssistantMessage("hello"));
+			await sessionManager.flush();
+
+			const block = await buildMemoryToolDeveloperInstructions(
+				tempDir.path(),
+				tempDir.path(),
+				settings,
+				sessionManager,
+			);
+			if (!block) throw new Error("Expected a memory block");
+			pendingMemorySnapshotCommit(sessionManager)?.();
+			expect(snapshotCount(sessionManager)).toBe(1);
+
+			// The user navigates back to the first user message: the branch
+			// moves off the snapshot.
+			sessionManager.branch(messageId);
+			expect(snapshotCount(sessionManager)).toBe(0);
+
+			const host = {
+				agent: { state: { messages: [], tools: [] } },
+				sessionManager,
+				settings,
+				evalPreludes: () => [],
+				sessionAgents: () => [],
+				model: () => undefined,
+				agentKind: () => "main",
+				isStreaming: () => false,
+				isDisposed: () => false,
+				queuedMessageCount: () => 0,
+				planModeEnabled: () => false,
+			} as unknown as SessionToolsHost;
+			const tools = new SessionTools(host, { baseSystemPrompt: [block] });
+
+			const preparation = await tools.buildSystemPromptForAgentStart("hi", () => true);
+			expect(preparation.commit).toBeDefined();
+			preparation.commit?.();
+
+			expect(snapshotCount(sessionManager)).toBe(1);
+		} finally {
+			await tempDir.remove();
+		}
 	}, 30_000);
 
 	it("records no snapshot when the prompt is empty", async () => {
