@@ -1,13 +1,18 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
+import { shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
+import { type } from "@oh-my-pi/omptype";
+import type { AssistantMessage, Message, Model, ToolChoice } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { computeSessionContextBreakdown } from "@oh-my-pi/pi-coding-agent/session/context-usage-runtime";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -512,6 +517,64 @@ describe("Context usage consolidation", () => {
 		expect(cu?.percent).not.toBeNull();
 		expect(typeof cu?.percent).toBe("number");
 
+		await tempDir.remove();
+	});
+
+	it("places forced Kimi requests below the pre-prompt compaction threshold", async () => {
+		const tempDir = TempDir.createSync("@forced-kimi-context-");
+		const model = buildModel({
+			id: "kimi-k2.6",
+			name: "Kimi",
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262_144,
+			maxTokens: 32_768,
+		});
+		const prior: AssistantMessage = {
+			role: "assistant",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			content: [
+				{ type: "thinking", thinking: "reasoning ".repeat(4_000), thinkingSignature: "reasoning_content" },
+				{ type: "text", text: "Done." },
+			],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		};
+		const { session, agent } = createSession(tempDir, [{ role: "user", content: "plan", timestamp: 1 }, prior]);
+		agent.setModel(model);
+		agent.setThinkingLevel(Effort.Medium);
+		const schema = type({});
+		agent.setTools([
+			{
+				name: "read",
+				label: "Read",
+				description: "Read",
+				parameters: schema,
+				async execute() {
+					return { content: [{ type: "text", text: "done" }], details: {} };
+				},
+			},
+		]);
+		const choice: ToolChoice = { type: "tool", name: "read" };
+		const ordinary = session.getContextBreakdown()?.usedTokens ?? 0;
+		const forced = session.getContextBreakdown({ tokenizer: agent.tokenizerForToolChoice(choice) })?.usedTokens ?? 0;
+		const compaction = cfgCompaction.get(session.settings);
+		expect(shouldCompact(ordinary, model.contextWindow ?? 0, compaction)).toBe(true);
+		expect(shouldCompact(forced, model.contextWindow ?? 0, compaction)).toBe(false);
 		await tempDir.remove();
 	});
 

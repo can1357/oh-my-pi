@@ -1378,6 +1378,13 @@ async function runLoopBody(
 					}
 
 					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
+					config.syncTokenizerForRequest?.({
+						model: preparedProviderCall.model,
+						toolChoice: preparedProviderCall.ownedDialect
+							? undefined
+							: (hostToolChoice ?? softRequirementState.forcedToolChoice ?? config.toolChoice),
+						tools: preparedProviderCall.context.tools,
+					});
 					preparedProviderCall.liveSteering = openLiveSteering(config, signal, preparedProviderCall);
 					gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
 				} catch (error) {
@@ -2058,6 +2065,7 @@ async function streamAssistantResponse(
 	const effectiveToolChoice = ownedDialect ? undefined : (hostToolChoice ?? forcedToolChoice ?? config.toolChoice);
 	const effectiveReasoning = dynamicReasoning ?? config.reasoning;
 	const effectiveDisableReasoning = dynamicDisableReasoning ?? config.disableReasoning;
+	config.syncTokenizerForRequest?.({ model, toolChoice: effectiveToolChoice, tools: llmContext.tools });
 	// `getCwd` is read once per LLM call so a mid-run session move (`/move`) reaches
 	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
 	const effectiveCwd = config.getCwd?.() ?? config.cwd;

@@ -23,6 +23,7 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import { completionsRequestDropsOwnThinking } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -41,7 +42,7 @@ import {
 import type { AppendOnlyContextManager } from "./append-only-context";
 import { isProviderRefusalMessage } from "./replay-policy";
 import { SentToolDefinitions } from "./sent-tool-definitions";
-import { Tokenizer } from "./tokenizer";
+import { Tokenizer, type TokenizerOptions } from "./tokenizer";
 import {
 	createAdditionalContextMessage,
 	joinAdditionalContext,
@@ -412,6 +413,7 @@ export class Agent {
 		error: undefined,
 	};
 	#tokenizer = new Tokenizer(this.#state.model);
+	#activeRequest?: { model: Model; toolChoice?: ToolChoice; tools?: Context["tools"] };
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#queueListeners = new Set<() => void>();
 	#abortController?: AbortController;
@@ -848,11 +850,8 @@ export class Agent {
 	}
 
 	/**
-	 * Tokenizer for the active model. The instance is replaced whenever the
-	 * active model's encoding, image or thinking-replay pricing, or
-	 * replayed-reasoning reader changes (see {@link setModel}), or its Responses
-	 * session turns cold or warm, so callers must not cache it across model
-	 * switches or requests.
+	 * Tokenizer for the active request. Reasoning and tool availability can
+	 * change the chat-completions compat view without changing the model.
 	 */
 	get tokenizer(): Tokenizer {
 		// The provider warms or closes a session inside a request, so the replay
@@ -866,14 +865,38 @@ export class Agent {
 		return this.#tokenizer;
 	}
 
-	/**
-	 * Swap the tokenizer only when the encoding, image or thinking-replay
-	 * pricing, replayed-reasoning reader or native-history replay state
-	 * actually changes, so the warm
-	 * per-message memo survives same-pricing model switches.
-	 */
+	/** Count a pending forced-tool prompt without changing the tokenizer kept for subsequent turns. */
+	tokenizerForToolChoice(toolChoice: ToolChoice | undefined): Tokenizer {
+		const model = this.#state.model;
+		const active = this.tokenizer;
+		if (!model || !toolChoice) return active;
+		const options = this.#tokenizerOptions(model, { model, toolChoice, tools: this.#state.tools });
+		return active.countsAlike(model, options) ? active : new Tokenizer(model, options);
+	}
+
+	#tokenizerOptions(
+		model: Model | null | undefined,
+		request?: { model: Model; toolChoice?: ToolChoice; tools?: Context["tools"] },
+	): TokenizerOptions {
+		const tools = request ? request.tools : this.#state.tools;
+		return {
+			nativeHistoryReplay: openAIResponsesReplaysNativeHistory(model, this.#providerSessionState),
+			dropsOwnThinking: model
+				? completionsRequestDropsOwnThinking(model, {
+						reasoning: this.#state.thinkingLevel,
+						disableReasoning: this.#state.disableReasoning,
+						toolChoice: request?.toolChoice,
+						hasTools: (tools?.length ?? 0) > 0,
+						tools,
+					})
+				: undefined,
+		};
+	}
+
+	/** Swap only when the effective request's count changes, retaining settled-message estimates otherwise. */
 	#syncTokenizer(model: Model | null | undefined): void {
-		const options = { nativeHistoryReplay: openAIResponsesReplaysNativeHistory(model, this.#providerSessionState) };
+		const request = this.#activeRequest?.model === model ? this.#activeRequest : undefined;
+		const options = this.#tokenizerOptions(model, request);
 		if (!this.#tokenizer.countsAlike(model, options)) this.#tokenizer = new Tokenizer(model, options);
 	}
 
@@ -1253,10 +1276,12 @@ export class Agent {
 
 	setThinkingLevel(l: Effort | undefined) {
 		this.#state.thinkingLevel = l;
+		this.#syncTokenizer(this.#state.model);
 	}
 
 	setDisableReasoning(disabled: boolean) {
 		this.#state.disableReasoning = disabled;
+		this.#syncTokenizer(this.#state.model);
 	}
 
 	setSteeringMode(mode: "all" | "one-at-a-time") {
@@ -1285,6 +1310,7 @@ export class Agent {
 
 	setTools(t: AgentTool<any>[]) {
 		this.#state.tools = t;
+		this.#syncTokenizer(this.#state.model);
 	}
 
 	replaceMessages(ms: AgentMessage[]) {
@@ -1951,8 +1977,17 @@ export class Agent {
 			transformAssistantMessagePreservesToolCalls: this.transformAssistantMessagePreservesToolCalls,
 			onAssistantMessageEvent: this.#onAssistantMessageEvent,
 			onHarmonyLeak: this.#onHarmonyLeak,
-			onTurnEnd: (messages, signal, context) => this.#onTurnEnd?.(messages, signal, context),
+			onTurnEnd: (messages, signal, context) => {
+				// The next request may not carry this turn's forced tool choice.
+				this.#activeRequest = undefined;
+				this.#syncTokenizer(this.#state.model);
+				return this.#onTurnEnd?.(messages, signal, context);
+			},
 			getToolChoice,
+			syncTokenizerForRequest: request => {
+				this.#activeRequest = request;
+				this.#syncTokenizer(request.model);
+			},
 			softToolRequirementState: this.#softToolRequirementState,
 			onToolChoiceRejected: () => {
 				if (claimedToolChoice !== undefined) this.#deferredToolChoice = claimedToolChoice;
@@ -2202,6 +2237,8 @@ export class Agent {
 				this.#emit({ type: "agent_end", messages: [errorMsg] });
 			}
 		} finally {
+			this.#activeRequest = undefined;
+			this.#syncTokenizer(this.#state.model);
 			this.#restoreUndeliveredQueuedMessages(loopAbortController);
 			resolveRun?.();
 			if (this.#abortController === loopAbortController) {

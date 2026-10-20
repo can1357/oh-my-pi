@@ -61,6 +61,7 @@ import type {
 	Message,
 	Model,
 	ProviderSessionState,
+	ToolChoice,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -491,6 +492,7 @@ export interface SessionMaintenanceHost {
 	getContextBreakdown(options?: {
 		contextWindow?: number;
 		pendingMessages?: AgentMessage[];
+		tokenizer?: Tokenizer;
 	}): ContextUsageBreakdown | undefined;
 	getContextUsage(options?: { contextWindow?: number }): ContextUsage | undefined;
 	shake(mode: ShakeMode, options?: { config?: ShakeConfig; signal?: AbortSignal }): Promise<ShakeResult>;
@@ -2566,9 +2568,9 @@ export class SessionMaintenance {
 		);
 	}
 
-	#estimatePrePromptContextTokens(messages: AgentMessage[], contextWindow: number): number {
-		const breakdown = this.#host.getContextBreakdown({ contextWindow, pendingMessages: messages });
-		const localEstimate = this.#estimateStoredContextTokens(messages);
+	#estimatePrePromptContextTokens(messages: AgentMessage[], contextWindow: number, tokenizer: Tokenizer): number {
+		const breakdown = this.#host.getContextBreakdown({ contextWindow, pendingMessages: messages, tokenizer });
+		const localEstimate = this.#estimateStoredContextTokens(messages, tokenizer);
 		// Floor by the local estimate: a payload-shrinking before_provider_request
 		// hook deflates the provider-anchored breakdown, which must not suppress
 		// pre-prompt compaction (see #estimateStoredContextTokens).
@@ -2611,13 +2613,14 @@ export class SessionMaintenance {
 		return tokens;
 	}
 
-	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
+	async runPrePromptCompactionIfNeeded(messages: AgentMessage[], toolChoice?: ToolChoice): Promise<void> {
 		const model = this.#model;
 		if (!model) return;
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
 		const compactionSettings = this.#compactionSettings;
-		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
+		const tokenizer = this.#host.agent.tokenizerForToolChoice(toolChoice);
+		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow, tokenizer);
 		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
 		this.#midTurnDeadEndPendingPrePrompt = false;
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {

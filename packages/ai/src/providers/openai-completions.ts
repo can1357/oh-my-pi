@@ -107,6 +107,7 @@ import {
 	isCompiledGrammarTooLargeStrictError,
 	isStrictToolsDisabledForScope,
 	type OpenAICompatPolicy,
+	type OpenAICompatPolicyCompat,
 	type OpenAICompletionsParams,
 	type OpenAIPromptCacheOptions,
 	type OpenAIRequestSetup,
@@ -269,26 +270,32 @@ function getLiteLLMThinkingBlocksDelta(delta: object): unknown[] | undefined {
 }
 
 /**
- * Rebuilds LiteLLM `thinking_blocks` from a stored assistant turn. Thinking
- * blocks parsed from `thinking_blocks` keep the raw Anthropic signature as
- * `thinkingSignature`; blocks parsed from `reasoning_content`-style fields
- * carry the field name instead and are skipped. `transformMessages` strips
- * signatures and redacted blocks on cross-model replays, so only the issuing
- * model ever receives them back.
+ * Whether a thinking block's `thinkingSignature` is a raw LiteLLM (Anthropic)
+ * signature. Blocks parsed from `reasoning_content`-style fields store the
+ * field name there instead.
+ */
+export function isLiteLLMThinkingSignature(signature: string | undefined): signature is string {
+	return (
+		signature !== undefined &&
+		signature !== "" &&
+		signature !== "reasoning_content" &&
+		signature !== "reasoning" &&
+		signature !== "reasoning_text"
+	);
+}
+
+/**
+ * Rebuilds LiteLLM `thinking_blocks` from a stored assistant turn. Only
+ * thinking blocks carrying a raw signature ({@link isLiteLLMThinkingSignature})
+ * replay. `transformMessages` strips signatures and redacted blocks on
+ * cross-model replays, so only the issuing model ever receives them back.
  */
 function encodeLiteLLMThinkingBlocks(content: AssistantMessage["content"]): LiteLLMThinkingBlock[] {
 	const blocks: LiteLLMThinkingBlock[] = [];
 	for (const block of content) {
 		if (block.type === "thinking") {
 			const signature = block.thinkingSignature;
-			if (
-				!signature ||
-				signature === "reasoning_content" ||
-				signature === "reasoning" ||
-				signature === "reasoning_text"
-			) {
-				continue;
-			}
+			if (!isLiteLLMThinkingSignature(signature)) continue;
 			blocks.push({ type: "thinking", thinking: block.thinking, signature });
 		} else if (block.type === "redactedThinking") {
 			blocks.push({ type: "redacted_thinking", data: block.data });
@@ -2334,6 +2341,101 @@ function maybeAddAnthropicCacheControl(compat: ResolvedOpenAICompat, messages: C
 			}
 		}
 	}
+}
+
+/** Whether {@link convertMessages} drops the reader's own prior thinking text under `compat`. */
+function compatDropsOwnThinking(model: { reasoning?: boolean }, compat: OpenAICompatPolicyCompat): boolean {
+	return !(
+		compat.mistralReasoningContentParts === true ||
+		compat.requiresThinkingAsText ||
+		compat.requiresReasoningContentForToolCalls ||
+		(compat.thinkingFormat === "zai" && model.reasoning === true) ||
+		compat.replayReasoningContent
+	);
+}
+
+/**
+ * Whether every chat-completions request to `model` drops the thinking text of
+ * its own prior turns: neither the base compat nor its `whenThinking` view
+ * sends it. Counters that don't know the request's reasoning state (one-shot
+ * budgets, output fitting without options) rely on this so they never
+ * undercount; {@link completionsRequestDropsOwnThinking} narrows it to one
+ * request. A block with a raw LiteLLM signature
+ * ({@link isLiteLLMThinkingSignature}) replays in `thinking_blocks` regardless,
+ * and other models' turns reach the encoder as demoted text
+ * (`transformMessages`). The agent's `Tokenizer` skips what this drops.
+ */
+export function completionsDropsOwnThinking(model: {
+	api?: string;
+	reasoning?: boolean;
+	compat?: Model["compat"];
+}): boolean {
+	const compat = model.compat;
+	if (model.api !== "openai-completions" || compat === undefined || !("replayReasoningContent" in compat)) {
+		return false;
+	}
+	if (!compatDropsOwnThinking(model, compat)) return false;
+	const thinkingView = "whenThinking" in compat ? compat.whenThinking : undefined;
+	return thinkingView === undefined || compatDropsOwnThinking(model, thinkingView);
+}
+
+/** Request state that selects the chat-completions compat view {@link convertMessages} encodes with. */
+export interface OpenAICompletionsThinkingRequest {
+	reasoning?: string;
+	disableReasoning?: boolean;
+	toolChoice?: ToolChoice;
+	hasTools?: boolean;
+	/** Advertised tools, used to verify a named force survives request construction. */
+	tools?: readonly { name: string }[];
+}
+
+/**
+ * Whether a chat-completions request drops its own prior thinking. A supported
+ * forced choice with an advertised tool survives `buildParams`; other choices
+ * may be downgraded or omitted, so count thinking if any fallback sends it.
+ */
+export function completionsRequestDropsOwnThinking(model: Model, request: OpenAICompletionsThinkingRequest): boolean {
+	if (completionsDropsOwnThinking(model)) return true;
+	const compat = model.compat;
+	if (model.api !== "openai-completions" || compat === undefined || !("replayReasoningContent" in compat)) {
+		return false;
+	}
+	const forcedChoice = request.toolChoice && mapToOpenAICompletionsToolChoice(request.toolChoice);
+	const initialCompat = resolveOpenAICompatPolicy(model, {
+		endpoint: "chat-completions",
+		reasoning: request.reasoning,
+		disableReasoning: request.disableReasoning,
+		toolChoice: forcedChoice,
+		hasTools: request.hasTools,
+	}).compat;
+	if (!compatDropsOwnThinking(model, initialCompat)) return false;
+	const keepsForcedChoice =
+		forcedChoice !== undefined &&
+		isForcedToolChoice(forcedChoice) &&
+		request.hasTools === true &&
+		initialCompat.supportsToolChoice === true &&
+		initialCompat.supportsForcedToolChoice === true &&
+		(typeof forcedChoice !== "object" ||
+			(initialCompat.supportsNamedToolChoice === true &&
+				request.tools?.some(tool => tool.name === forcedChoice.function.name) === true));
+	if (request.toolChoice === undefined || keepsForcedChoice) return true;
+	const autoCompat = resolveOpenAICompatPolicy(model, {
+		endpoint: "chat-completions",
+		reasoning: request.reasoning,
+		disableReasoning: request.disableReasoning,
+		toolChoice: "auto",
+		hasTools: request.hasTools,
+	}).compat;
+	if (!compatDropsOwnThinking(model, autoCompat)) return false;
+	return compatDropsOwnThinking(
+		model,
+		resolveOpenAICompatPolicy(model, {
+			endpoint: "chat-completions",
+			reasoning: request.reasoning,
+			disableReasoning: request.disableReasoning,
+			hasTools: request.hasTools,
+		}).compat,
+	);
 }
 
 export function convertMessages(

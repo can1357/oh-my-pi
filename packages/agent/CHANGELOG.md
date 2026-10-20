@@ -60,6 +60,10 @@
 - Fixed a Cursor tool call re-sent by the server persisting two results under one id; the re-run's result replaces the first ([#15749](https://github.com/can1357/oh-my-pi/issues/15749))
 - Fixed compaction keeping more recent history than `keepRecentTokens` when the latest Claude turn on the Anthropic Messages API ended its tool calls on `stop` or `length`: the replay keeps that turn's signed reasoning, but the cut point counted only its visible blocks ([#15791](https://github.com/can1357/oh-my-pi/pull/15791) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- Fixed auto-compaction firing far below the threshold on OpenAI-compatible chat-completions models when past reasoning is not replayed, including after switching thinking off or forcing a tool: the context estimate no longer counts thinking the request drops ([#15797](https://github.com/can1357/oh-my-pi/issues/15797))
+
 ## [18.11.0] - 2026-10-14
 
 ### Breaking Changes
