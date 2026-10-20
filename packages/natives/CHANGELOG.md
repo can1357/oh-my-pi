@@ -22,6 +22,7 @@
 
 ### Changed
 
+- Fixed `grep` searching the file its own output is redirected into, including standard input redirected from that same file: that input is now refused with `input file is also the output` instead of the matches being read back and matched again; the refusal follows the file that was actually opened, so a path replaced while `grep` runs cannot slip past it, and `--label` names standard input in the diagnostic ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Reduced native Git diff allocation overhead ([#16349](https://github.com/can1357/oh-my-pi/pull/16349) by [@kyle-elliott](https://github.com/kyle-elliott))
 - Reduced native memory-reranking allocations when candidate text contains repeated words ([#16348](https://github.com/can1357/oh-my-pi/pull/16348) by [@kyle-elliott](https://github.com/kyle-elliott))
 - Reduced allocation overhead when collecting directory grep results, including paginated searches ([#16226](https://github.com/can1357/oh-my-pi/pull/16226) by [@kyle-elliott](https://github.com/kyle-elliott))
