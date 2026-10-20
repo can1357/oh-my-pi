@@ -54,11 +54,16 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 
 	it("requests alternate keys when the kitty reply arrives before the DA1 sentinel", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
-		await harness.settle();
 		// The negotiation queries and arms the terminal in one write.
 		expect(harness.writes.join("")).toContain("\x1b[?u\x1b[>5u\x1b[c");
 		harness.writes.length = 0;
 
+		// The reply is fed in the same tick as the negotiation. The terminal
+		// gives the negotiation 150 ms to answer, and a reply that arrives
+		// after that window finds the arming frame already popped — it then
+		// pushes a frame of its own instead of rewriting the one in place.
+		// Both paths are correct, but only the in-place rewrite is the one
+		// under test here, so the reply must not race the probe timeout.
 		await harness.feed("\x1b[?0u", "\x1b[?1;2c");
 
 		const out = harness.writes.join("");
@@ -87,9 +92,12 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 
 	it("preserves event-type reporting enabled by a parent app", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
-		await harness.settle();
 		harness.writes.length = 0;
 
+		// Fed in the same tick as the negotiation: a reply that arrives after
+		// the 150 ms probe window finds the arming frame already popped and
+		// pushes a frame of its own, so the in-place rewrite under test here
+		// would never happen.
 		await harness.feed("\x1b[?3u");
 
 		// The armed frame is already on the kitty stack, so the level is
