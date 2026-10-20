@@ -11,7 +11,11 @@ import {
 	type MentalModelTrigger,
 } from "../src/hindsight/client";
 import { loadHindsightConfig } from "../src/hindsight/config";
-import { mentalModelRefreshState, summarizeMentalModel } from "../src/hindsight/mental-models";
+import {
+	mentalModelRefreshState,
+	refreshMentalModelsAndWait,
+	summarizeMentalModel,
+} from "../src/hindsight/mental-models";
 import { HindsightSessionState } from "../src/hindsight/state";
 import { CommandController } from "../src/modes/controllers/command-controller";
 import type { InteractiveModeContext } from "../src/modes/types";
@@ -63,7 +67,8 @@ interface ServerOptions {
 	models: MentalModelSummary[];
 	operations?: Record<string, OperationStep[]>;
 	omitOperationId?: boolean;
-	onPoll?: () => void;
+	onRefresh?: (id: string) => void;
+	onPoll?: (id: string, step: OperationStep) => void;
 }
 
 function serveHindsight(options: ServerOptions): string[] {
@@ -78,6 +83,7 @@ function serveHindsight(options: ServerOptions): string[] {
 
 			const refresh = /^POST mental-models\/(.+)\/refresh$/.exec(route);
 			if (refresh) {
+				options.onRefresh?.(refresh[1]);
 				return Response.json(options.omitOperationId ? {} : { operation_id: `op-${refresh[1]}` });
 			}
 
@@ -96,7 +102,7 @@ function serveHindsight(options: ServerOptions): string[] {
 						last_memory_seen_at: "2026-10-11T00:00:00Z",
 					});
 				}
-				options.onPoll?.();
+				options.onPoll?.(id, step);
 				return Response.json({ operation_id: `op-${id}`, ...step });
 			}
 
@@ -251,6 +257,29 @@ describe("/memory mm refresh <id>", () => {
 		expect(h.ui.setFocus).toHaveBeenLastCalledWith(h.editor);
 	});
 
+	for (const failure of ["fetch", "publication"] as const) {
+		it(`warns that previous guidance remains when the post-refresh ${failure} fails`, async () => {
+			serveHindsight({ models: [model("project-conventions", { content: OLD })] });
+			const api = client();
+			const h = harness(api);
+			await h.state.reloadMentalModels();
+			if (failure === "fetch") {
+				vi.spyOn(api, "listMentalModels").mockRejectedValue(new Error("list unavailable"));
+			} else {
+				vi.spyOn(h.state.session, "refreshBaseSystemPrompt").mockRejectedValue(new Error("publication failed"));
+			}
+
+			await h.controller.handleMemoryCommand("/memory mm refresh project-conventions");
+
+			expect(h.state.mentalModelsSnippet).toContain(OLD);
+			expect(h.statuses().join("\n")).not.toContain("cache reloaded");
+			expect(h.warnings().join("\n")).toContain("keeps the previous guidance");
+			expect(h.warnings().join("\n")).toContain("Server refresh completed");
+			expect(h.warnings().join("\n")).toContain("/memory mm reload");
+			expect(await h.state.reloadMentalModels()).toBe(false);
+		});
+	}
+
 	for (const step of [
 		{ status: "failed", error_message: "reflect wall timeout" },
 		{ status: "cancelled" },
@@ -384,6 +413,41 @@ describe("/memory mm refresh (bank-wide)", () => {
 		expect(h.state.mentalModelsSnippet).toContain("# manual");
 		expect(h.statuses().at(-1)).toContain("Refreshed 2/2");
 		expect(h.statuses().at(-1)).toContain("skipped 3 manual-only");
+	});
+
+	it("bounds concurrent refresh and poll tasks while returning an outcome for every model", async () => {
+		const models = Array.from({ length: 17 }, (_, index) => model(`model-${index}`, { trigger: CRON }));
+		const active = new Set<string>();
+		let maxActive = 0;
+		serveHindsight({
+			models,
+			operations: Object.fromEntries(
+				models.map((item, index): [string, OperationStep[]] => [
+					item.id,
+					[PROCESSING, index === 2 ? { status: "failed", error_message: "no quota" } : COMPLETED],
+				]),
+			),
+			onRefresh: id => {
+				active.add(id);
+				maxActive = Math.max(maxActive, active.size);
+			},
+			onPoll: (id, step) => {
+				if (step.status !== "pending" && step.status !== "processing") active.delete(id);
+			},
+		});
+
+		const outcomes = await refreshMentalModelsAndWait(
+			client(),
+			BANK,
+			models.map(item => item.id),
+		);
+
+		expect(maxActive).toBeLessThanOrEqual(4);
+		expect(active.size).toBe(0);
+		expect(outcomes.map(outcome => outcome.id)).toEqual(models.map(item => item.id));
+		expect(outcomes.filter(outcome => outcome.error !== undefined)).toEqual([
+			{ id: "model-2", error: "Operation op-model-2 failed: no quota" },
+		]);
 	});
 
 	it("reloads once for the models that completed and warns about the one that failed", async () => {

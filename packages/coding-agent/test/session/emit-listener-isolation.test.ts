@@ -1,15 +1,19 @@
 // Tests #emit listener isolation in agent.ts (Agent) and agent-session.ts (AgentSession):
 // a throwing or rejecting listener must not prevent later listeners from receiving the event,
 // and an async listener's rejection must not become an unhandled rejection.
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { AutoLearnController } from "@oh-my-pi/pi-coding-agent/autolearn/controller";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
+import { loadHindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
+import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -90,6 +94,7 @@ describe("#emit listener isolation", () => {
 		});
 
 		afterEach(async () => {
+			vi.restoreAllMocks();
 			await session.dispose();
 			authStorage?.close();
 			authStorage = undefined;
@@ -100,6 +105,54 @@ describe("#emit listener isolation", () => {
 					// Windows may hold sqlite handles briefly after close; best-effort cleanup.
 				}
 			}
+		});
+
+		it("delivers mental-model startup warnings to a later subscriber exactly once", async () => {
+			const client = new HindsightApi({ baseUrl: "https://hindsight.invalid" });
+			new AutoLearnController({ session, settings: Settings.isolated(), capture: async () => {} });
+			vi.spyOn(client, "listMentalModels").mockResolvedValue({
+				items: [
+					{
+						id: "paused-guidance",
+						bank_id: "bank",
+						name: "Paused guidance",
+						content: "Previous guidance",
+						last_refresh_failed_at: "2026-10-09T00:00:00Z",
+					},
+				],
+			});
+			vi.spyOn(session, "refreshBaseSystemPrompt").mockResolvedValue(undefined);
+			const state = new HindsightSessionState({
+				sessionId: "startup-warning",
+				client,
+				bankId: "bank",
+				config: {
+					...loadHindsightConfig(Settings.isolated()),
+					mentalModelsEnabled: true,
+					mentalModelAutoSeed: false,
+				},
+				session,
+				banksSet: new Set(["bank"]),
+			});
+			session.setHindsightSessionState(state);
+			state.attachSessionListeners();
+
+			await state.runMentalModelLoad({ bankId: "bank" });
+
+			const first: string[] = [];
+			const unsubscribe = session.subscribe(event => {
+				if (event.type === "notice") first.push(event.message);
+			});
+			expect(first).toHaveLength(1);
+			expect(first[0]).toContain("paused-guidance");
+			expect(first[0]).toContain("automatic refresh paused");
+			unsubscribe();
+			const later: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "notice") later.push(event.message);
+			});
+			expect(later).toEqual([]);
+			expect(first).toHaveLength(1);
 		});
 
 		it("continues to deliver to later listeners when an earlier listener throws synchronously", () => {
