@@ -6,7 +6,7 @@
  * Project-level discovery walks up from cwd to repoRoot.
  */
 import * as path from "node:path";
-import { isWsl, ptree, windowsPathToWslMount } from "@oh-my-pi/pi-utils";
+import { isWsl, windowsPathToWslMount } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
 import { readFile } from "../capability/fs";
@@ -16,6 +16,7 @@ import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type SystemPrompt, systemPromptCapability } from "../capability/system-prompt";
 import type { LoadContext, LoadResult } from "../capability/types";
+import { runBoundedProbe } from "../utils/bounded-probe";
 import {
 	discoverRuleFromMarkdown,
 	calculateDepth,
@@ -36,50 +37,12 @@ interface UserPathCandidateOptions {
 	wslPath?: (windowsPath: string) => string | undefined;
 }
 
-/**
- * Hard cap for best-effort host-discovery probes.
- *
- * WSL→Windows interop can wedge indefinitely (issue #8402). The probe result
- * only ever augments discovery with an extra host-home candidate, so a few
- * hundred milliseconds is a generous ceiling — past it we treat the host as
- * unavailable.
- */
-const HOST_PROBE_TIMEOUT_MS = 500;
-
-/**
- * Run a best-effort discovery probe and return its trimmed stdout, or
- * `undefined` when the command fails, produces no output, or exceeds the
- * timeout.
- *
- * `ptree.exec` owns the wall-clock bound: at the deadline it kills the whole
- * process group and cancels the pending pipe readers, so neither a wedged interop
- * pipe nor a descendant that inherited stdout can hold the read open past
- * `timeoutMs` (issue #8402). The killed/non-zero/blank outcomes all report
- * "unavailable", and discovery falls back to the Linux `$HOME`/`~/.omp`
- * candidates.
- */
-export async function runHostProbe(cmd: string[], timeoutMs = HOST_PROBE_TIMEOUT_MS): Promise<string | undefined> {
-	try {
-		const result = await ptree.exec(cmd, {
-			timeout: timeoutMs,
-			allowNonZero: true,
-			allowAbort: true,
-			detached: true,
-		});
-		if (!result.ok || result.exitError?.aborted) return undefined;
-		const resolved = result.stdout.trim();
-		return resolved.length > 0 ? resolved : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
 async function resolveWithWslPath(windowsPath: string): Promise<string | undefined> {
-	return runHostProbe(["wslpath", "-u", windowsPath]);
+	return runBoundedProbe(["wslpath", "-u", windowsPath]);
 }
 
 async function resolveWindowsUserProfile(): Promise<string | undefined> {
-	const resolved = await runHostProbe(["cmd.exe", "/d", "/c", "echo", "%USERPROFILE%"]);
+	const resolved = await runBoundedProbe(["cmd.exe", "/d", "/c", "echo", "%USERPROFILE%"]);
 	return resolved && resolved !== "%USERPROFILE%" ? resolved : undefined;
 }
 
