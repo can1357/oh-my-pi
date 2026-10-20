@@ -132,17 +132,23 @@ describe("compareCalibration", () => {
 			recall: r.metrics["compat.recall@10"],
 		})),
 		meanRecall: results.reduce((sum, r) => sum + r.metrics["compat.recall@10"], 0) / results.length,
+		embeddingModelSha256: "model-digest",
+	});
+	/** Run B's result; `model` null leaves the digest out, as in results from before it was recorded. */
+	const runB = (results: QuestionResult[], mean: number, model: string | null = "model-digest") => ({
+		questions: results,
+		aggregate: { "compat.recall@10": mean },
+		config: { engineInfo: (model === null ? {} : { embedding_model_sha256: model }) as Record<string, string> },
 	});
 
 	it("reports no mismatch for identical runs", async () => {
 		const results = await runUpstreamCompat(fakeEngine().engine, conversations);
-		const b = { questions: results, aggregate: { "compat.recall@10": dumpOf(results).meanRecall } };
-		expect(compareCalibration(dumpOf(results), b)).toEqual([]);
+		expect(compareCalibration(dumpOf(results), runB(results, dumpOf(results).meanRecall))).toEqual([]);
 	});
 
 	it("names the first differing rank, the recall and the mean", async () => {
 		const results = await runUpstreamCompat(fakeEngine().engine, conversations);
-		const b = { questions: results, aggregate: { "compat.recall@10": dumpOf(results).meanRecall } };
+		const b = runB(results, dumpOf(results).meanRecall);
 		const a = dumpOf(results);
 		a.questions[0].rankedContents.reverse();
 		a.questions[1].recall = 1;
@@ -159,7 +165,20 @@ describe("compareCalibration", () => {
 		const results = await runUpstreamCompat(fakeEngine().engine, conversations);
 		const a = dumpOf(results);
 		a.questions.pop();
-		const b = { questions: results, aggregate: { "compat.recall@10": a.meanRecall } };
-		expect(compareCalibration(a, b)[0]).toBe("question count: A 2, B 3");
+		expect(compareCalibration(a, runB(results, a.meanRecall))[0]).toBe("question count: A 2, B 3");
+	});
+
+	it("does not calibrate identical rankings from different or unrecorded model files", async () => {
+		const results = await runUpstreamCompat(fakeEngine().engine, conversations);
+		const a = dumpOf(results);
+		expect(compareCalibration(a, runB(results, a.meanRecall, "other-model"))).toEqual([
+			"embedding model: A model-digest, B other-model",
+		]);
+		expect(compareCalibration({ ...a, embeddingModelSha256: undefined }, runB(results, a.meanRecall))).toEqual([
+			"embedding model: A records no model digest; re-run it with this harness",
+		]);
+		expect(compareCalibration(a, runB(results, a.meanRecall, null))).toEqual([
+			"embedding model: B records no model digest; re-run it with this harness",
+		]);
 	});
 });
