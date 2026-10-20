@@ -1729,10 +1729,18 @@ export class OutputSink {
 	 * A chunk the throttle still holds back is delivered first: the error path
 	 * never reaches {@link dump}'s flush, and without this the subscriber's
 	 * retained tail silently ends one chunk early with no skipped count.
+	 *
+	 * Disposal never throws. It runs while a command is already unwinding a
+	 * backend failure, and a subscriber that rejects the flushed tail would
+	 * replace that failure and skip the executor's own cleanup — the session
+	 * key stays marked busy for later commands. The subscriber's error is the
+	 * caller's to handle; the artifact is closed either way.
 	 */
 	async dispose(): Promise<void> {
 		try {
 			this.#flushPendingChunk();
+		} catch {
+			// A throwing subscriber must not turn a cleanup call into a failure.
 		} finally {
 			await this.#finalizeFile();
 		}
