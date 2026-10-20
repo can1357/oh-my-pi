@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
@@ -9,17 +10,24 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
-function makeSession(cwd: string): ToolSession {
+function makeSession(
+	cwd: string,
+	settings: Record<string, unknown> = {},
+	asyncJobManager?: AsyncJobManager,
+): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
 		skills: [],
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
+		getSessionId: () => "bash-view-tags",
+		asyncJobManager,
 		settings: Settings.isolated({
 			"async.enabled": false,
 			"bash.autoBackground.enabled": false,
 			"bashInterceptor.enabled": false,
+			...settings,
 		}),
 		enableLsp: false,
 		getClientBridge: () => undefined,
@@ -129,5 +137,93 @@ describe("bash numbered file views mint edit tags", () => {
 		const tag = store.recordSnapshot(file, SOURCE, []);
 		expect(footerTag(await bash("grep -n limit retry.ts"), "retry.ts")).toBe(tag);
 		expect(store.seenLines(file, tag)).toEqual([]);
+	});
+
+	it("keeps a retained unrestricted snapshot unrestricted when the file returns to it", async () => {
+		const file = path.join(cwd, "retry.ts");
+		const store = getEditStore(session);
+		const original = store.recordSnapshot(file, SOURCE, []);
+		store.recordSnapshot(file, SOURCE.replace("times * 2", "times * 4"), []);
+		expect(footerTag(await bash("grep -n limit retry.ts"), "retry.ts")).toBe(original);
+		expect(store.seenLines(file, original)).toEqual([]);
+
+		const result = await new EditTool(session, "hashline").execute("edit", {
+			input: `[retry.ts#${original}]\nPUT 4.=4:\n+\t\tawait attempt(i);\n`,
+		});
+		expect(result.isError).toBeFalsy();
+	});
+
+	it("resolves `path:` rows in the directory an inner `cd` moved to, and skips names both directories hold", async () => {
+		await fs.mkdir(path.join(cwd, "sub"));
+		await Bun.write(path.join(cwd, "sub", "a.ts"), "target\n");
+		await Bun.write(path.join(cwd, "sub", "b.ts"), "target\n");
+		const output = await bash("true; cd sub; grep -n target a.ts b.ts");
+		const tag = footerTag(output, "sub/a.ts");
+		expect(tag).toBeDefined();
+		expect(footerTag(output, "sub/b.ts")).toBeDefined();
+		const result = await new EditTool(session, "hashline").execute("edit", {
+			input: `[sub/a.ts#${tag}]\nPUT 1.=1:\n+changed\n`,
+		});
+		expect(result.isError).toBeFalsy();
+
+		await Bun.write(path.join(cwd, "b.ts"), "target\n");
+		const ambiguous = await bash("true; cd sub; grep -n target a.ts b.ts");
+		expect(footerTag(ambiguous, "sub/b.ts")).toBeUndefined();
+		expect(footerTag(ambiguous, "b.ts")).toBeUndefined();
+		expect(getEditStore(session).headHash(path.join(cwd, "b.ts"))).toBeNull();
+	});
+
+	it("tags every row of a long listing of short lines", async () => {
+		await Bun.write(path.join(cwd, "blank.txt"), "\n".repeat(5000));
+		const output = await bash("grep -n '^$' blank.txt");
+		expect(output).toContain("5000:");
+		const tag = footerTag(output, "blank.txt");
+		expect(tag).toBeDefined();
+		const result = await new EditTool(session, "hashline").execute("edit", {
+			input: `[blank.txt#${tag}]\nPUT 5000.=5000:\n+last\n`,
+		});
+		expect(result.isError).toBeFalsy();
+	});
+
+	it("records nothing when the tagged result would pass the spill threshold", async () => {
+		// 1 KiB threshold: 30 rows come to ~980 bytes, which the tag line pushes past it.
+		const rows = Array.from({ length: 30 }, (_, i) => `entry ${String(i).padStart(2, "0")} ${"x".repeat(20)}`);
+		await Bun.write(path.join(cwd, "list.txt"), `${rows.join("\n")}\n`);
+		const small = makeSession(cwd, { "tools.artifactSpillThreshold": 1 });
+		const near = textOf(await new BashTool(small).execute("bash", { command: "grep -n entry list.txt" }));
+		expect(Buffer.byteLength(near)).toBeLessThanOrEqual(1024);
+		expect(near).not.toContain("Edit tags for the numbered lines above:");
+		await Bun.write(path.join(cwd, "list.txt"), `${[...rows, ...rows].join("\n")}\n`);
+		const over = textOf(await new BashTool(small).execute("bash", { command: "grep -n entry list.txt" }));
+		expect(over).not.toContain("Edit tags for the numbered lines above:");
+		expect(getEditStore(small).headHash(path.join(cwd, "list.txt"))).toBeNull();
+	});
+
+	it("records rows only for a job result the call returns itself", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		try {
+			const foreground = makeSession(
+				cwd,
+				{ "async.enabled": true, "bash.autoBackground.enabled": true, "bash.autoBackground.thresholdMs": 60_000 },
+				manager,
+			);
+			const waited = textOf(await new BashTool(foreground).execute("bash", { command: "grep -n limit retry.ts" }));
+			const tag = footerTag(waited, "retry.ts");
+			expect(tag).toBeDefined();
+			expect(getEditStore(foreground).seenLines(path.join(cwd, "retry.ts"), tag!)).toEqual([2, 3]);
+
+			const background = makeSession(cwd, { "async.enabled": true }, manager);
+			const started = await new BashTool(background).execute("bash", {
+				command: "grep -n limit retry.ts",
+				async: true,
+			});
+			const jobId = started.details?.async?.jobId;
+			if (!jobId) throw new Error("expected a background job");
+			await manager.getJob(jobId)?.promise;
+			await manager.drainDeliveries();
+			expect(getEditStore(background).headHash(path.join(cwd, "retry.ts"))).toBeNull();
+		} finally {
+			await manager.dispose();
+		}
 	});
 });
