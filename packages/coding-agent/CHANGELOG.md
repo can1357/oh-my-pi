@@ -559,6 +559,9 @@
 - Fixed `<path>:conflicts` on a file past the 10 MiB scan cap reporting no conflicts with no hint: it now names the line the scan stopped at and the ranged `read` that registers the blocks after it ([#16269](https://github.com/can1357/oh-my-pi/pull/16269))
 - Fixed the `ts-set-map` rule stalling tool-call streaming for seconds on a long single-line `Map` literal, and missing `Map` entries written `["key", value] as const` ([#16242](https://github.com/can1357/oh-my-pi/pull/16242))
 - Fixed the `ts-import-type` rule missing inline type imports whose member name is non-ASCII, such as `import("./units").温度` ([#16242](https://github.com/can1357/oh-my-pi/pull/16242))
+### Fixed
+
+- Fixed worktree creation with copy-on-write cloning into a destination inside the checkout recursing into the source tree: such a destination is now refused with an explicit error, and the copy keeps nested repositories, submodules and their remotes usable ([#16076](https://github.com/can1357/oh-my-pi/issues/16076), [#16097](https://github.com/can1357/oh-my-pi/pull/16097) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.4] - 2026-10-20
 
