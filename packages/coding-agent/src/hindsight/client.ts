@@ -8,7 +8,7 @@
  * tests to spy on.
  */
 
-import { USER_AGENT, truncate, tryParseJson } from "@oh-my-pi/pi-utils";
+import { USER_AGENT, truncate, tryParseJson, untilAborted } from "@oh-my-pi/pi-utils";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 import type { HindsightConfig } from "./config";
 
@@ -18,6 +18,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_REFLECT_TIMEOUT_MS = 120_000;
 const DEFAULT_RECALL_TIMEOUT_MS = 30_000;
 const DEFAULT_RETAIN_TIMEOUT_MS = 60_000;
+const DEFAULT_OPERATION_POLL_INTERVAL_MS = 1000;
 /** Server-side maximum `limit` on the mental-model list endpoint; keeps typical banks to one request. */
 const MENTAL_MODEL_PAGE_SIZE = 1000;
 /** Cap on server-supplied error text copied into `HindsightError.message` (logged unconditionally). */
@@ -43,6 +44,8 @@ export interface HindsightApiOptions {
 	userAgent?: string;
 	/** Per-op deadlines; unset entries fall back to built-in defaults. */
 	timeouts?: HindsightTimeouts;
+	/** Delay between operation status polls; defaults to one second. */
+	operationPollIntervalMs?: number;
 }
 
 /** Caller cancellation shared by Hindsight request option bags. */
@@ -164,6 +167,21 @@ export type MentalModelMode = "full" | "delta";
 export interface MentalModelTrigger {
 	mode?: MentalModelMode;
 	refresh_after_consolidation?: boolean;
+	refresh_cron?: string | null;
+	exclude_mental_models?: boolean;
+}
+
+export type HindsightOperationStatus = "pending" | "processing" | "completed" | "failed" | "cancelled" | "not_found";
+
+export interface HindsightOperation {
+	operation_id: string;
+	status: HindsightOperationStatus;
+	error_message?: string | null;
+	[key: string]: unknown;
+}
+
+export interface WaitForOperationOptions extends HindsightRequestOptions {
+	timeoutMs?: number;
 }
 
 /** Shape returned by list/get on the mental-models endpoint. Fields are populated by `detail`. */
@@ -173,6 +191,9 @@ export interface MentalModelSummary {
 	name: string;
 	tags?: string[];
 	last_refreshed_at?: string | null;
+	last_memory_seen_at?: string | null;
+	last_refresh_failed_at?: string | null;
+	is_stale?: boolean | null;
 	created_at?: string | null;
 	source_query?: string;
 	content?: string;
@@ -211,7 +232,7 @@ export interface CreateMentalModelResponse {
 }
 
 export interface RefreshMentalModelResponse {
-	operation_id?: string;
+	operation_id: string;
 	[key: string]: unknown;
 }
 
@@ -281,6 +302,7 @@ export class HindsightApi implements HindsightClientApi {
 	#recallTimeoutMs: number;
 	#retainTimeoutMs: number;
 	#requestTimeoutMs: number;
+	#operationPollIntervalMs: number;
 
 	constructor(options: HindsightApiOptions) {
 		this.#baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -296,6 +318,7 @@ export class HindsightApi implements HindsightClientApi {
 		this.#reflectTimeoutMs = timeouts?.reflect ?? DEFAULT_REFLECT_TIMEOUT_MS;
 		this.#recallTimeoutMs = timeouts?.recall ?? DEFAULT_RECALL_TIMEOUT_MS;
 		this.#retainTimeoutMs = timeouts?.retain ?? DEFAULT_RETAIN_TIMEOUT_MS;
+		this.#operationPollIntervalMs = options.operationPollIntervalMs ?? DEFAULT_OPERATION_POLL_INTERVAL_MS;
 	}
 
 	async retain(bankId: string, content: string, options?: RetainOptions): Promise<RetainResponse> {
@@ -542,13 +565,68 @@ export class HindsightApi implements HindsightClientApi {
 	}
 
 	/** Trigger an out-of-band refresh of a mental model. Returns the operation handle. */
-	async refreshMentalModel(bankId: string, mentalModelId: string): Promise<RefreshMentalModelResponse> {
+	async refreshMentalModel(
+		bankId: string,
+		mentalModelId: string,
+		options?: HindsightRequestOptions,
+	): Promise<RefreshMentalModelResponse> {
 		return this.#request<RefreshMentalModelResponse>(
 			"POST",
 			`/v1/default/banks/${encodeURIComponent(bankId)}/mental-models/${encodeURIComponent(mentalModelId)}/refresh`,
 			"refreshMentalModel",
-			{},
+			{ signal: options?.signal },
 		);
+	}
+
+	async getOperationStatus(
+		bankId: string,
+		operationId: string,
+		options?: HindsightRequestOptions,
+	): Promise<HindsightOperation> {
+		return this.#request<HindsightOperation>(
+			"GET",
+			`/v1/default/banks/${encodeURIComponent(bankId)}/operations/${encodeURIComponent(operationId)}`,
+			"getOperationStatus",
+			{ signal: options?.signal },
+		);
+	}
+
+	async waitForOperation(
+		bankId: string,
+		operationId: string,
+		options?: WaitForOperationOptions,
+	): Promise<HindsightOperation> {
+		if (!operationId) throw new HindsightError("Hindsight returned no operation ID to wait on.");
+		const timeoutMs = options?.timeoutMs ?? this.#reflectTimeoutMs;
+		const signal = withTimeoutSignal(timeoutMs, options?.signal);
+		try {
+			while (true) {
+				signal.throwIfAborted();
+				const operation = await this.getOperationStatus(bankId, operationId, { signal });
+				signal.throwIfAborted();
+				switch (operation.status) {
+					case "completed":
+						return operation;
+					case "failed":
+					case "cancelled":
+					case "not_found":
+						throw new HindsightError(
+							`Operation ${operationId} ${operation.status}${operation.error_message ? `: ${operation.error_message}` : ""}`,
+						);
+					case "pending":
+					case "processing":
+						await untilAborted(signal, () => Bun.sleep(this.#operationPollIntervalMs));
+						break;
+					default:
+						throw new HindsightError(`Operation ${operationId} returned an unknown status: ${operation.status}`);
+				}
+			}
+		} catch (error) {
+			if (signal.aborted && isTimeoutError(signal.reason)) {
+				throw new HindsightError(`Operation ${operationId} timed out after ${Math.round(timeoutMs / 1000)}s`);
+			}
+			throw error;
+		}
 	}
 
 	/** Delete a mental model. Returns `true` on success, `false` if it was already gone (404). */
