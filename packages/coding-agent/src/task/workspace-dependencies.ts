@@ -1,29 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { readWorkspacePatterns, workspaceMembers } from "../utils/workspace-packages";
 
 interface WorkspacePackages {
 	paths: Map<string, string>;
 	bins: Map<string, string>;
-}
-
-async function readJsonObject(filePath: string): Promise<Record<string, unknown> | undefined> {
-	try {
-		const value: unknown = await Bun.file(filePath).json();
-		return value && typeof value === "object" && !Array.isArray(value)
-			? (value as Record<string, unknown>)
-			: undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-function workspacePatterns(value: unknown): string[] {
-	if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
-	if (value && typeof value === "object" && !Array.isArray(value) && "packages" in value) {
-		const packages = (value as { packages?: unknown }).packages;
-		return Array.isArray(packages) ? packages.filter((item): item is string => typeof item === "string") : [];
-	}
-	return [];
 }
 
 function packageBins(manifest: Record<string, unknown>, packageRoot: string): Map<string, string> {
@@ -41,29 +22,12 @@ function packageBins(manifest: Record<string, unknown>, packageRoot: string): Ma
 }
 
 async function workspacePackages(root: string): Promise<WorkspacePackages> {
-	const rootManifest = await readJsonObject(path.join(root, "package.json"));
-	const patterns = workspacePatterns(rootManifest?.workspaces);
-	try {
-		const pnpmWorkspace = Bun.YAML.parse(await Bun.file(path.join(root, "pnpm-workspace.yaml")).text()) as unknown;
-		if (pnpmWorkspace && typeof pnpmWorkspace === "object" && !Array.isArray(pnpmWorkspace)) {
-			patterns.push(...workspacePatterns((pnpmWorkspace as Record<string, unknown>).packages));
-		}
-	} catch {
-		// package.json workspaces are sufficient when no readable pnpm manifest exists.
-	}
-
 	const paths = new Map<string, string>();
 	const bins = new Map<string, string>();
-	for (const pattern of new Set(patterns)) {
-		if (pattern.startsWith("!")) continue;
-		const glob = new Bun.Glob(path.join(pattern, "package.json"));
-		for await (const match of glob.scan({ cwd: root, onlyFiles: true })) {
-			const packageRoot = path.dirname(path.join(root, match));
-			const manifest = await readJsonObject(path.join(packageRoot, "package.json"));
-			if (!manifest || typeof manifest.name !== "string") continue;
-			paths.set(manifest.name, packageRoot);
-			for (const [name, target] of packageBins(manifest, packageRoot)) bins.set(name, target);
-		}
+	for await (const member of workspaceMembers(root, await readWorkspacePatterns(root))) {
+		if (typeof member.manifest.name !== "string") continue;
+		paths.set(member.manifest.name, member.root);
+		for (const [name, target] of packageBins(member.manifest, member.root)) bins.set(name, target);
 	}
 	return { paths, bins };
 }
@@ -91,7 +55,21 @@ async function linkPackageEntry(
 ): Promise<void> {
 	const workspacePath = packages.get(name);
 	if (workspacePath) return;
+	// External packages stay linked into the borrowed tree on purpose: copying a registry cache per
+	// worker is the cost this repair exists to avoid. A package there that itself imports a workspace
+	// package resolves it from the borrowed checkout, not the worker.
 	await linkPath(sourceEntry, destination);
+}
+
+/**
+ * Runtime that executes a workspace package's bin script from a Windows
+ * launcher. A standalone compiled omp has `process.execPath === omp.exe`, which
+ * would treat the script path as its own argument, so only a Bun executable is
+ * used directly; anything else resolves `bun` from PATH like the package
+ * manager's own shims.
+ */
+export function workspaceBinRuntime(execPath: string = process.execPath): string {
+	return /^bun(?:-[\w.-]+)?(?:\.exe)?$/iu.test(path.win32.basename(execPath.replaceAll("/", "\\"))) ? execPath : "bun";
 }
 
 async function rebindWorkspaceBins(
@@ -115,12 +93,13 @@ async function rebindWorkspaceBins(
 	for (const [name, target] of bins) {
 		const launcher = path.join(destination, name);
 		if (process.platform === "win32") {
+			const runtime = workspaceBinRuntime();
 			const relativeTarget = path.relative(destination, target).split(path.sep).join("\\");
 			const windowsTarget = relativeTarget.startsWith(".") ? relativeTarget : `.\\${relativeTarget}`;
-			await Bun.write(`${launcher}.cmd`, `@"${process.execPath}" "%~dp0${windowsTarget}" %*\r\n`);
+			await Bun.write(`${launcher}.cmd`, `@"${runtime}" "%~dp0${windowsTarget}" %*\r\n`);
 			await Bun.write(
 				`${launcher}.ps1`,
-				`& "${process.execPath}" "$PSScriptRoot\\${relativeTarget}" @args\nexit $LASTEXITCODE\n`,
+				`& "${runtime}" "$PSScriptRoot\\${relativeTarget}" @args\nexit $LASTEXITCODE\n`,
 			);
 			continue;
 		}

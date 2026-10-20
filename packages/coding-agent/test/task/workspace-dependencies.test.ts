@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { repairBorrowedWorkspaceNodeModules } from "../../src/task/workspace-dependencies";
+import { repairBorrowedWorkspaceNodeModules, workspaceBinRuntime } from "../../src/task/workspace-dependencies";
 
 const roots: string[] = [];
 
@@ -210,5 +210,47 @@ describe("borrowed workspace dependencies", () => {
 				"--next",
 			),
 		).toEqual({ source: "checkout-current", args: ["arg with spaces", "--next"] });
+	});
+	it("never launches Windows workspace bins through a compiled omp executable", () => {
+		expect(workspaceBinRuntime("C:\\Program Files\\omp\\omp.exe")).toBe("bun");
+		expect(workspaceBinRuntime("/usr/local/bin/omp")).toBe("bun");
+		expect(workspaceBinRuntime("C:\\tools\\bun\\bun.exe")).toBe("C:\\tools\\bun\\bun.exe");
+		expect(workspaceBinRuntime("/home/user/.bun/bin/bun")).toBe("/home/user/.bun/bin/bun");
+	});
+
+	it("leaves workspace packages removed by a negative pattern linked to the borrowed tree", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-negated-workspace-"));
+		roots.push(root);
+		const oldCheckout = path.join(root, "checkout-old");
+		const workerCheckout = path.join(root, "worker-current");
+		await fs.mkdir(path.join(oldCheckout, "node_modules", "@example"), { recursive: true });
+		await fs.mkdir(path.join(oldCheckout, "registry", "legacy"), { recursive: true });
+		await fs.symlink(
+			path.join(oldCheckout, "registry", "legacy"),
+			path.join(oldCheckout, "node_modules", "@example", "legacy"),
+			"dir",
+		);
+		for (const name of ["local", "legacy"]) {
+			await fs.mkdir(path.join(workerCheckout, "packages", name), { recursive: true });
+			await fs.writeFile(
+				path.join(workerCheckout, "packages", name, "package.json"),
+				JSON.stringify({ name: `@example/${name}` }),
+			);
+		}
+		await fs.writeFile(path.join(workerCheckout, "package.json"), JSON.stringify({ name: "pnpm-root" }));
+		await fs.writeFile(
+			path.join(workerCheckout, "pnpm-workspace.yaml"),
+			"packages:\n  - packages/**\n  - '!packages/legacy'\n",
+		);
+		await fs.symlink(path.join(oldCheckout, "node_modules"), path.join(workerCheckout, "node_modules"), "dir");
+
+		await repairBorrowedWorkspaceNodeModules(workerCheckout);
+
+		expect(await fs.realpath(path.join(workerCheckout, "node_modules", "@example", "local"))).toBe(
+			path.join(workerCheckout, "packages", "local"),
+		);
+		expect(await fs.realpath(path.join(workerCheckout, "node_modules", "@example", "legacy"))).toBe(
+			path.join(oldCheckout, "registry", "legacy"),
+		);
 	});
 });
