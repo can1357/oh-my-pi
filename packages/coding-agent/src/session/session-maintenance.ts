@@ -267,6 +267,17 @@ function findUsageAnchorIndex(branchEntries: readonly SessionEntry[], compaction
 	return -1;
 }
 
+/**
+ * The active branch without the usage ledger's records.
+ *
+ * A `model_usage` entry bills a side request; it carries no transcript. It
+ * must never read as branch growth — a speculation's own summary request would
+ * otherwise look like the live turn moved on (see `#armedSpeculationValid`).
+ */
+function transcriptBranch(branch: readonly SessionEntry[]): SessionEntry[] {
+	return branch.filter(entry => entry.type !== "model_usage");
+}
+
 /** A terminal payload rejection may be byte-sized history or irreducible media, not necessarily token overflow. */
 function payloadRejectionNotice(storedTokens: number, contextWindow: number): string {
 	const remedies =
@@ -2390,7 +2401,9 @@ export class SessionMaintenance {
 		) {
 			return false;
 		}
-		const branch = this.#host.sessionManager.getBranch();
+		// The usage ledger is not transcript: a speculation's own summary
+		// request must not read as branch growth (see #armedSpeculationValid).
+		const branch = transcriptBranch(this.#host.sessionManager.getBranchView());
 		const leafIdx = branch.findIndex(entry => entry.id === armed.snapshotLeafId);
 		if (leafIdx < 0) return false;
 		for (let i = leafIdx + 1; i < branch.length; i++) {
@@ -4855,6 +4868,10 @@ export class SessionMaintenance {
 					action,
 					reason,
 				});
+				// The usage ledger is not transcript: only a transcript entry
+				// after the snapshot needs the native history replayed.
+				const branchGrewPastSnapshot =
+					transcriptBranch(this.#host.sessionManager.getBranchView()).at(-1)?.id !== armedSpec.snapshotLeafId;
 				return await this.#commitAutoCompactionResult({
 					summary: armedSpec.result.summary,
 					shortSummary: armedSpec.result.shortSummary,
@@ -4868,8 +4885,7 @@ export class SessionMaintenance {
 					providerReplayThroughEntryId:
 						armedSpec.result.providerReplayThroughEntryId ??
 						(armedSpec.result.preserveData?.openaiRemoteCompaction ||
-						(armedSpec.result.preserveData?.anthropicCompaction &&
-							this.#host.sessionManager.getBranch().at(-1)?.id !== armedSpec.snapshotLeafId)
+						(armedSpec.result.preserveData?.anthropicCompaction && branchGrewPastSnapshot)
 							? armedSpec.snapshotLeafId
 							: undefined),
 					action,
