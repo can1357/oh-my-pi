@@ -275,6 +275,21 @@ fallbacks, including unbounded first-event waits on local backends.
 A pre-response timer is cleared once the HTTP attempt settles; it is not an
 absolute deadline on an actively streaming body. Retries arm a fresh timer.
 
+Generic OpenAI Responses treats exactly structured `type: "codex.keepalive"`
+events as idle activity only after an existing semantic-progress event (such as
+`response.created`). The optional iterator `isIdleActivityItem` predicate never
+satisfies first progress or extends its deadline. The semantic-progress allowlist
+is unchanged: arbitrary keepalives, SSE comments, and `response.in_progress` do
+not refresh either deadline. With an explicit 60 s idle budget, heartbeat traffic
+every 10 s can preserve a healthy reasoning gap beyond 173 s; a silent connection
+still expires after 60 s. Heartbeats do not establish that generation is making
+progress: `idleActivityMaxGapMs` independently caps semantic silence at the
+greater of the configured idle budget and 300 s. Genuine progress refreshes both
+clocks; heartbeat traffic refreshes only idle activity. Thus a hung producer that
+still sends heartbeats expires at 300 s with idle 60 s, not necessarily within
+60–90 s. This consumer support does not imply any backend is installed or emitting
+heartbeats.
+
 ## Backpressure boundaries
 
 There is no hard backpressure mechanism between provider transports and downstream consumers:

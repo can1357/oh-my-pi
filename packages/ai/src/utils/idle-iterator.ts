@@ -139,6 +139,13 @@ export interface IdleTimeoutIteratorOptions {
 	 */
 	isProgressItem?: (item: unknown) => boolean;
 	/**
+	 * Optional transport-liveness predicate. Matching items refresh only the idle
+	 * deadline after semantic progress; they never satisfy or extend first progress.
+	 */
+	isIdleActivityItem?: (item: unknown) => boolean;
+	/** Maximum semantic-progress gap while idle activity extends the idle deadline. */
+	idleActivityMaxGapMs?: number;
+	/**
 	 * Consumer-side local work in flight for the stream: the provider transport
 	 * is waiting on a server-requested local tool bridge (e.g. the Cursor exec
 	 * channel) before anything can flow upstream again. While work is pending,
@@ -211,6 +218,7 @@ export async function* iterateWithIdleTimeout<T>(
 		}
 	};
 	let lastProgressAt = Date.now();
+	let lastSemanticProgressAt = lastProgressAt;
 
 	const hasPendingLocalWork = (): boolean => options.localWork?.hasPendingLocalWork ?? false;
 	const localWorkSettledAt = (): number => options.localWork?.localWorkSettledAt ?? 0;
@@ -225,6 +233,7 @@ export async function* iterateWithIdleTimeout<T>(
 			}
 		} else {
 			lastProgressAt = Date.now();
+			lastSemanticProgressAt = lastProgressAt;
 		}
 	};
 	// Deadlines as seen by the provider: never earlier than a full budget after
@@ -271,7 +280,14 @@ export async function* iterateWithIdleTimeout<T>(
 	const currentDeadlineMs = (): number | undefined => {
 		if (awaitingFirstItem) return firstItemDeadline();
 		if (options.idleTimeoutMs !== undefined && options.idleTimeoutMs > 0) {
-			return Math.max(lastProgressAt, localWorkSettledAt()) + options.idleTimeoutMs;
+			const idleDeadlineMs = Math.max(lastProgressAt, localWorkSettledAt()) + options.idleTimeoutMs;
+			if (options.idleActivityMaxGapMs !== undefined && options.idleActivityMaxGapMs > 0) {
+				return Math.min(
+					idleDeadlineMs,
+					Math.max(lastSemanticProgressAt, localWorkSettledAt()) + options.idleActivityMaxGapMs,
+				);
+			}
+			return idleDeadlineMs;
 		}
 		return undefined;
 	};
@@ -346,7 +362,7 @@ export async function* iterateWithIdleTimeout<T>(
 					}
 				}
 			} else if (options.idleTimeoutMs !== undefined && options.idleTimeoutMs > 0) {
-				activeTimeoutMs = options.idleTimeoutMs - (Date.now() - Math.max(lastProgressAt, localWorkSettledAt()));
+				activeTimeoutMs = currentDeadlineMs()! - Date.now();
 				if (activeTimeoutMs <= 0) {
 					if (!hasPendingLocalWork()) {
 						options.onIdle?.();
@@ -354,7 +370,7 @@ export async function* iterateWithIdleTimeout<T>(
 						throw new AIError.StreamTimeoutError(options.errorMessage);
 					}
 					extendDeadlineForLocalWork();
-					activeTimeoutMs = options.idleTimeoutMs;
+					activeTimeoutMs = currentDeadlineMs()! - Date.now();
 				}
 			}
 
@@ -426,6 +442,9 @@ export async function* iterateWithIdleTimeout<T>(
 				// on the model's first real output.
 				if (isProgressItem(item)) {
 					markFirstItemReceived();
+					lastProgressAt = Date.now();
+					lastSemanticProgressAt = lastProgressAt;
+				} else if (!awaitingFirstItem && options.isIdleActivityItem?.(item)) {
 					lastProgressAt = Date.now();
 				}
 				yield item;
