@@ -637,6 +637,32 @@ describe("provider context image budgets", () => {
 		expect(body.split(screenshot)).toHaveLength(4);
 	});
 
+	it("does not charge computer metadata screenshots on a route that sends only content", () => {
+		// Factory Claude takes the Messages wire, which sends a tool result's content and never its metadata.
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: Array.from({ length: 4 }, (_, index) =>
+				computerTurn(index, "A".repeat(1_000_000), [image("p".repeat(1_000))]),
+			).flat(),
+		};
+		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
+		expect(clampProviderContextImageBytes(context, hosted)).toBe(context);
+	});
+
+	it("keeps a computer screenshot that fits Anthropic's inline budget exactly", () => {
+		const fresh = "C".repeat(23_000_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				...computerTurn(0, "A".repeat(1_000_000)),
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 3 },
+			],
+		};
+		expect(clampProviderContextImageBytes(context, ANTHROPIC_MODEL)).toBe(context);
+	});
+
 	it("keeps a fresh Factory image that alone fits the route, evicting older ones instead", () => {
 		const older = "B".repeat(500_000);
 		const fresh = "C".repeat(3_800_000);
