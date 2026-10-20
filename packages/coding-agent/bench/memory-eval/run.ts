@@ -12,7 +12,7 @@ import * as path from "node:path";
 import { parseArgs } from "node:util";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, removeWithRetries } from "@oh-my-pi/pi-utils";
-import { type CalibrationDump, compareCalibration, runUpstreamCompat } from "./compat";
+import { type CalibrationDump, compareCalibration, corpusSha256, runUpstreamCompat } from "./compat";
 import { loadBeamUpstreamCompat, loadDataset } from "./datasets";
 import type { EngineAdapter, MnemopiRecall, ProtocolName } from "./engine";
 import { assertMnemopiEnvClean, type MnemopiEmbedder, mnemopiEngine } from "./engines/mnemopi";
@@ -176,6 +176,7 @@ async function runCommand(argv: string[]): Promise<void> {
 		try {
 			let run: RunOutput;
 			let excluded: ExcludedQuestion[] = [];
+			let corpus: string | undefined;
 			const { revision: datasetRevision, sha256: datasetDigest } = await cachedDataset(dataset, dataDir);
 			// The loaders reopen the file: a replacement in between would leave the cases and the digest apart.
 			const sameSnapshot = async () => {
@@ -191,6 +192,7 @@ async function runCommand(argv: string[]): Promise<void> {
 				const count = cases ?? UPSTREAM_COMPAT_CONVERSATIONS;
 				const conversations = await loadBeamUpstreamCompat(dataDir, count);
 				await sameSnapshot();
+				corpus = corpusSha256(conversations);
 				const questions = await runUpstreamCompat(engine, conversations);
 				// No warmup runs here.
 				run = { questions, warmupMs: 0, unstoredMessages: [] };
@@ -206,6 +208,7 @@ async function runCommand(argv: string[]): Promise<void> {
 					dataset,
 					datasetRevision,
 					datasetSha256: datasetDigest,
+					...(corpus === undefined ? {} : { corpusSha256: corpus }),
 					engine: engine.name,
 					engineInfo: await engine.describe(),
 					protocol,
