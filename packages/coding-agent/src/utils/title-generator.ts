@@ -827,8 +827,17 @@ export function nerdGlyphsActive(): boolean {
  * new titles keep flowing through `setSessionTerminalTitle`, which recomposes
  * against the same stored cwd, so the project is never lost either way.
  */
-export function setTerminalTitleTaskNow(task: string | undefined): void {
+export function setTerminalTitleTaskNow(
+	task: string | undefined,
+	source?: { sessionName: string | undefined; cwd: string },
+): void {
 	terminalTitleRuntime.taskNow = sanitizeTerminalTitlePart(task);
+	// The todo list belongs to the session the UI displays, which is a focused subagent (with its own
+	// name and, when isolated, worktree cwd) rather than the main session. Compose against that session.
+	if (source && terminalTitleRuntime.titleClaimed) {
+		terminalTitleRuntime.sessionName = sanitizeTerminalTitlePart(source.sessionName);
+		terminalTitleRuntime.cwd = source.cwd;
+	}
 	// Initial TODO loading precedes the shell-title push. Keep the task pending
 	// until ownership is claimed and the session supplies its project/cwd.
 	if (!terminalTitleRuntime.titleClaimed) return;

@@ -17,6 +17,7 @@ import {
 	setTerminalTitleState,
 	setTerminalTitleTaskNow,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import type { VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
@@ -102,10 +103,25 @@ describe("buildTerminalTitleWithState", () => {
 	});
 });
 
+/**
+ * Make `project` look like a repository root to the shared VCS API, without
+ * spawning Git: lookups from the project or anything below it report that root.
+ */
+function stubProjectRepo(project: string): { mockRestore(): void } {
+	const roots = [project, fs.realpathSync(project)];
+	return spyOn(vcs, "repo").mockImplementation((dir: string) => {
+		const root = roots.find(candidate => dir === candidate || dir.startsWith(`${candidate}${path.sep}`));
+		return root === undefined ? null : ({ root: () => root } as unknown as VcsRepo);
+	});
+}
+
 describe("session label carries the project", () => {
 	let scratchDirs: string[] = [];
+	let repoStubs: Array<{ mockRestore(): void }> = [];
 
 	afterEach(() => {
+		for (const stub of repoStubs) stub.mockRestore();
+		repoStubs = [];
 		for (const dir of scratchDirs) fs.rmSync(dir, { recursive: true, force: true });
 		scratchDirs = [];
 	});
@@ -115,8 +131,7 @@ describe("session label carries the project", () => {
 		scratchDirs.push(scratch);
 		const project = path.join(scratch, projectName);
 		fs.mkdirSync(project, { recursive: true });
-		// A real repository: the VCS API rejects a bare empty `.git` directory.
-		Bun.spawnSync(["git", "init", "-q", project]);
+		repoStubs.push(stubProjectRepo(project));
 		return project;
 	}
 
@@ -174,9 +189,7 @@ describe("session label carries the project", () => {
 
 	it("takes the project from whatever root the shared VCS API reports (Jujutsu included)", () => {
 		const plain = makePlainDir("nested-cwd");
-		const repoSpy = spyOn(vcs, "repo").mockReturnValue({ root: () => "/work/jj-project" } as unknown as ReturnType<
-			typeof vcs.repo
-		>);
+		const repoSpy = spyOn(vcs, "repo").mockReturnValue({ root: () => "/work/jj-project" } as unknown as VcsRepo);
 		try {
 			expect(buildSessionTerminalLabel("Deep fix", plain)).toBe("jj-project · Deep fix");
 		} finally {
@@ -267,6 +280,7 @@ describe("session label carries the project", () => {
 describe("label tracks what the session is doing now", () => {
 	let scratchDirs: string[] = [];
 	let writes: string[] = [];
+	let repoStubs: Array<{ mockRestore(): void }> = [];
 	let stdoutSpy: { mockRestore(): void } | undefined;
 	let prevHeadless = false;
 	let ttyDescriptor: PropertyDescriptor | undefined;
@@ -276,8 +290,7 @@ describe("label tracks what the session is doing now", () => {
 		scratchDirs.push(scratch);
 		const project = path.join(scratch, projectName);
 		fs.mkdirSync(project, { recursive: true });
-		// A real repository: the VCS API rejects a bare empty `.git` directory.
-		Bun.spawnSync(["git", "init", "-q", project]);
+		repoStubs.push(stubProjectRepo(project));
 		return project;
 	}
 
@@ -306,6 +319,8 @@ describe("label tracks what the session is doing now", () => {
 		disposeTerminalTitleState();
 		stdoutSpy?.mockRestore();
 		stdoutSpy = undefined;
+		for (const stub of repoStubs) stub.mockRestore();
+		repoStubs = [];
 		if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
 		else Reflect.deleteProperty(process.stdout, "isTTY");
 		setTerminalHeadless(prevHeadless);
@@ -321,6 +336,19 @@ describe("label tracks what the session is doing now", () => {
 		expect(lastTitle()).toBe(`${BRAND} > demo-repo · Collect statistics`);
 		setTerminalTitleTaskNow(undefined);
 		expect(lastTitle()).toBe(`${BRAND} > demo-repo · Topic A`);
+	});
+
+	it("composes the task half against the focused session, then returns to the main one", () => {
+		const main = makeProject("main-repo");
+		const worker = makeProject("worker-tree");
+		setSessionTerminalTitle("Main topic", main);
+		setTerminalTitleTaskNow("Worker step", { sessionName: "Worker topic", cwd: worker });
+		expect(lastTitle()).toBe(`${BRAND} > worker-tree · Worker step`);
+		// Clearing the focused session's task falls back to that session, not the main one.
+		setTerminalTitleTaskNow(undefined, { sessionName: "Worker topic", cwd: worker });
+		expect(lastTitle()).toBe(`${BRAND} > worker-tree · Worker topic`);
+		setTerminalTitleTaskNow("Main step", { sessionName: "Main topic", cwd: main });
+		expect(lastTitle()).toBe(`${BRAND} > main-repo · Main step`);
 	});
 
 	it("keeps startup todos pending until the terminal is claimed and the project is supplied", () => {
