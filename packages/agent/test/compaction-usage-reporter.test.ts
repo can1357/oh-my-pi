@@ -134,7 +134,11 @@ describe("compaction usage reporter", () => {
 		reportRemoteCompactionUsage(
 			{ onUsage: usage => observed.push(usage) },
 			makeModel(),
-			{ inputTokens: 100, outputTokens: 7, totalTokens: 107, cachedInputTokens: 40 },
+			{
+				inputTokens: 100,
+				outputTokens: 7,
+				accounting: { input: 60, output: 7, cacheRead: 40, cacheWrite: 0, totalTokens: 107 },
+			},
 			COMPACTION_USAGE_PURPOSES.remote,
 			"provider wrote no payload",
 		);

@@ -126,16 +126,12 @@ export function reportRemoteCompactionUsage(
 	failure?: string,
 ): void {
 	if (!options?.onUsage || !reported) return;
-	// The Responses API counts cached input inside `input_tokens`; the ledger
-	// bills it as a cache read (see calculateOpenAIUsageAccounting).
-	const cacheRead = reported.cachedInputTokens ?? 0;
+	// The buckets come from the shared OpenAI accounting path, so a compaction
+	// request is billed exactly like the equivalent Responses request — the
+	// cache-write and provider-side orchestration buckets included, and the
+	// recorded total is the sum of the recorded buckets.
 	const usage: Usage = {
-		input: Math.max(0, reported.inputTokens - cacheRead),
-		output: reported.outputTokens,
-		cacheRead,
-		cacheWrite: 0,
-		totalTokens: reported.totalTokens,
-		...(reported.reasoningOutputTokens !== undefined ? { reasoningTokens: reported.reasoningOutputTokens } : {}),
+		...reported.accounting,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	calculateCost(model, usage);

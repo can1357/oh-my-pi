@@ -1062,8 +1062,8 @@ describe("requestCompactionV2Streaming", () => {
 		expect(requestBody?.input[requestBody.input.length - 1]).toEqual({ type: "compaction_trigger" });
 		expect(result.replacementHistory).toEqual([userItem, compactionItem]);
 		expect(result.usedTokens).toBe(123);
-		expect(result.usage?.cachedInputTokens).toBe(7);
-		expect(result.usage?.reasoningOutputTokens).toBe(1);
+		expect(result.usage?.accounting.cacheRead).toBe(7);
+		expect(result.usage?.accounting.reasoningTokens).toBe(1);
 	});
 	test("keeps the LiteLLM conversation session header on the compaction request", async () => {
 		const model = makeOpenAiModel({
@@ -3524,6 +3524,112 @@ describe("compact() provider-native compaction usage", () => {
 			cacheWrite: 0,
 			totalTokens: 129,
 			reasoningTokens: 4,
+		});
+	});
+
+	test("reports the cache-write bucket of a native V1 compaction request", async () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-1",
+			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled: false },
+		};
+		const model = makeOpenAiModel({ remoteCompaction: { enabled: true } });
+		const observed: CompactionRequestUsage[] = [];
+		const fetchMock: FetchImpl = async () =>
+			Response.json({
+				output: [{ type: "compaction", encrypted_content: "enc-v1" }],
+				usage: {
+					input_tokens: 120,
+					output_tokens: 9,
+					total_tokens: 129,
+					input_tokens_details: { cached_tokens: 50, cache_write_tokens: 10 },
+					output_tokens_details: { reasoning_tokens: 4 },
+				},
+			});
+
+		await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			onUsage: usage => observed.push(usage),
+		});
+
+		// The cache write is billed on its own rate. A reduced wire shape that
+		// kept only `cached_tokens` charged those tokens as plain input and
+		// reported no cache write at all.
+		expect(observed).toHaveLength(1);
+		expect(observed[0].purpose).toBe(COMPACTION_USAGE_PURPOSES.remote);
+		expect(observed[0].usage).toMatchObject({
+			input: 60,
+			output: 9,
+			cacheRead: 50,
+			cacheWrite: 10,
+			totalTokens: 129,
+			reasoningTokens: 4,
+		});
+	});
+
+	test("reports the orchestration buckets of a streamed V2 compaction request", async () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-1",
+			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled: true },
+		};
+		const model = makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: true } });
+		const observed: CompactionRequestUsage[] = [];
+		const fetchMock: FetchImpl = async () =>
+			sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc-v2" },
+				},
+				{
+					type: "response.completed",
+					response: {
+						usage: {
+							input_tokens: 100,
+							output_tokens: 20,
+							total_tokens: 149,
+							input_tokens_details: {
+								cached_tokens: 40,
+								orchestration_input_tokens: 20,
+								orchestration_input_cached_tokens: 5,
+							},
+							output_tokens_details: {
+								reasoning_tokens: 3,
+								orchestration_output_tokens: 9,
+							},
+						},
+					},
+				},
+			]);
+
+		await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			onUsage: usage => observed.push(usage),
+		});
+
+		// The provider bills orchestration on top of the conversation buckets.
+		// A reduced wire shape dropped them, so the recorded buckets no longer
+		// added up to the total the provider billed.
+		expect(observed).toHaveLength(1);
+		expect(observed[0].purpose).toBe(COMPACTION_USAGE_PURPOSES.remote);
+		expect(observed[0].usage).toMatchObject({
+			input: 60,
+			output: 20,
+			cacheRead: 40,
+			cacheWrite: 0,
+			totalTokens: 149,
+			orchestration: { input: 15, cacheRead: 5, output: 9 },
 		});
 	});
 
