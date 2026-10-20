@@ -3,8 +3,8 @@ import {
 	clearMemoryData,
 	clearMemoryToolDeveloperInstructionsCache,
 	enqueueMemoryConsolidation,
-	pendingMemorySnapshotCommit,
 	saveLearnedLesson,
+	stagedMemorySnapshot,
 	startMemoryStartupTask,
 } from "../memories";
 import type { MemoryBackend } from "./types";
@@ -26,7 +26,7 @@ export const localBackend: MemoryBackend = {
 		return buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, sessionManager ?? session?.sessionManager);
 	},
 	pendingInstructionsCommit(sessionManager) {
-		return pendingMemorySnapshotCommit(sessionManager);
+		return stagedMemorySnapshot(sessionManager);
 	},
 	async clear(agentDir, cwd, session) {
 		clearMemoryToolDeveloperInstructionsCache(session?.sessionManager);

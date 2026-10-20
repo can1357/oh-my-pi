@@ -20,13 +20,18 @@ import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { redactMemorySecrets as redactSecrets } from "../memory-backend/redact";
-import type { MemoryBackendSaveInput, MemoryBackendSaveResult } from "../memory-backend/types";
+import type {
+	MemoryBackendSaveInput,
+	MemoryBackendSaveResult,
+	PendingInstructionsCommit,
+} from "../memory-backend/types";
 import consolidationTemplate from "../prompts/memories/consolidation.md" with { type: "text" };
 import consolidationSystemTemplate from "../prompts/memories/consolidation_system.md" with { type: "text" };
 import readPathTemplate from "../prompts/memories/read-path.md" with { type: "text" };
 import stageOneInputTemplate from "../prompts/memories/stage_one_input.md" with { type: "text" };
 import stageOneSystemTemplate from "../prompts/memories/stage_one_system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { MEMORY_SNAPSHOT_ENTRY_TYPE } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import {
 	claimStage1Jobs,
@@ -188,14 +193,6 @@ function memoryConversationStarted(session: MemoryInstructionSession): boolean {
 	return (session.agent?.state.messages.length ?? 0) > 0;
 }
 
-/**
- * Custom entry holding the memory files' content a transcript's prompts are
- * built from, so a resumed process rebuilds the same memory block instead of
- * rereading disk — a lesson another session learned, or a consolidation that
- * rewrote the summary, would otherwise rewrite the whole prompt cache.
- */
-const MEMORY_SNAPSHOT_CUSTOM_TYPE = "memory-snapshot";
-
 /** Memory block state of one transcript in this process. */
 interface TranscriptMemoryState {
 	/** Session file the state belongs to; another session file invalidates it. */
@@ -287,7 +284,7 @@ function findRecordedMemorySnapshot(
 	if (!branch) return undefined;
 	for (let index = branch.length - 1; index >= 0; index--) {
 		const entry = branch[index];
-		if (entry.type !== "custom" || entry.customType !== MEMORY_SNAPSHOT_CUSTOM_TYPE) continue;
+		if (entry.type !== "custom" || entry.customType !== MEMORY_SNAPSHOT_ENTRY_TYPE) continue;
 		const data = entry.data;
 		if (!isRecord(data)) return undefined;
 		if (typeof data.summary !== "string" || typeof data.learned !== "string") return undefined;
@@ -316,6 +313,47 @@ async function readMemoryToolDeveloperInstructionsSnapshot(
 	return { summary, learned };
 }
 
+/**
+ * The memory content a prompt may carry.
+ *
+ * The summary and the lessons share ONE injection budget so the combined
+ * block stays within `summaryInjectionTokenLimit` (~4 chars/token, matching
+ * truncateByApproxTokens). With no summary, lessons get the whole budget.
+ * Clamp to 0: truncateByApproxTokens appends a marker, so a truncated summary
+ * can exceed `limit * 4` chars and drive the remainder negative — when the
+ * summary already fills the budget, lessons are simply dropped.
+ *
+ * Only bounded content is staged and recorded: the memory files can hold far
+ * more than a prompt can use, and a transcript that carried the surplus
+ * would grow with the whole memory store instead of the block it injected.
+ * `undefined` when nothing is injectable — an empty store, or a budget that
+ * leaves no room.
+ */
+function boundMemorySnapshot(
+	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined,
+	settings: Settings,
+): MemoryToolDeveloperInstructionsSnapshot | undefined {
+	if (!snapshot) return undefined;
+	const cfg = loadMemoryConfig(settings);
+	if (!cfg.enabled) return undefined;
+
+	const summaryOut = snapshot.summary
+		? truncateByApproxTokens(snapshot.summary, cfg.summaryInjectionTokenLimit).trim()
+		: "";
+	const learnedBudget = Math.max(0, cfg.summaryInjectionTokenLimit - Math.ceil(summaryOut.length / 4));
+	const learnedOut =
+		snapshot.learned && learnedBudget > 0 ? truncateByApproxTokens(snapshot.learned, learnedBudget).trim() : "";
+	if (!summaryOut && !learnedOut) return undefined;
+	return { summary: summaryOut, learned: learnedOut };
+}
+
+/**
+ * The prompt block of a memory snapshot.
+ *
+ * The snapshot is bounded already, so the block carries exactly the content
+ * the snapshot holds: a recorded snapshot rebuilds the very same block, and
+ * the recorded content stays as small as the block it stands for.
+ */
 function renderMemoryToolDeveloperInstructionsSnapshot(
 	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined,
 	settings: Settings,
@@ -325,23 +363,9 @@ function renderMemoryToolDeveloperInstructionsSnapshot(
 	if (!cfg.enabled) return undefined;
 	if (!snapshot.summary && !snapshot.learned) return undefined;
 
-	const summaryOut = snapshot.summary
-		? truncateByApproxTokens(snapshot.summary, cfg.summaryInjectionTokenLimit).trim()
-		: "";
-	// Lessons share ONE injection budget with the summary so the combined block
-	// stays within `summaryInjectionTokenLimit` (~4 chars/token, matching
-	// truncateByApproxTokens). With no summary, lessons get the whole budget.
-	// Clamp to 0: truncateByApproxTokens appends a marker, so a truncated summary
-	// can exceed `limit * 4` chars and drive the remainder negative — when the
-	// summary already fills the budget, lessons are simply dropped.
-	const learnedBudget = Math.max(0, cfg.summaryInjectionTokenLimit - Math.ceil(summaryOut.length / 4));
-	const learnedOut =
-		snapshot.learned && learnedBudget > 0 ? truncateByApproxTokens(snapshot.learned, learnedBudget).trim() : "";
-	if (!summaryOut && !learnedOut) return undefined;
-
 	return prompt.render(readPathTemplate, {
-		memory_summary: summaryOut,
-		learned: learnedOut,
+		memory_summary: snapshot.summary,
+		learned: snapshot.learned,
 	});
 }
 
@@ -388,12 +412,9 @@ function stagedBranchStillHolds(transcript: MemoryTranscript, state: TranscriptM
  *
  * The transcript must not claim a memory block the session never sent: the
  * snapshot is staged by the build and recorded only once the prompt that
- * carries it commits. Returns `undefined` when nothing is staged.
+ * carries it commits.
  */
-export function pendingMemorySnapshotCommit(transcript: MemoryTranscript | undefined): (() => void) | undefined {
-	if (!transcript) return undefined;
-	const state = memoryStateByTranscript.get(transcript);
-	if (!state?.pending) return undefined;
+function memorySnapshotRecorder(transcript: MemoryTranscript, state: TranscriptMemoryState): () => void {
 	return () => {
 		if (!state.pending) return;
 		state.pending = false;
@@ -414,13 +435,83 @@ export function pendingMemorySnapshotCommit(transcript: MemoryTranscript | undef
 			if (current) current.recordedEntryId = recorded.entryId;
 			return;
 		}
-		const entryId = transcript.appendCustomEntry?.(MEMORY_SNAPSHOT_CUSTOM_TYPE, {
+		const entryId = transcript.appendCustomEntry?.(MEMORY_SNAPSHOT_ENTRY_TYPE, {
 			summary: staged?.summary ?? "",
 			learned: staged?.learned ?? "",
 			scope: state.scope,
 			token: state.token,
 		});
 		if (entryId && current) current.recordedEntryId = entryId;
+	};
+}
+
+/**
+ * The callback that records the memory block a prompt was built from.
+ *
+ * The transcript must not claim a memory block the session never sent: the
+ * snapshot is staged by the build and recorded only once the prompt that
+ * carries it commits. Returns `undefined` when nothing is staged.
+ */
+export function pendingMemorySnapshotCommit(transcript: MemoryTranscript | undefined): (() => void) | undefined {
+	if (!transcript) return undefined;
+	const state = memoryStateByTranscript.get(transcript);
+	if (!state?.pending) return undefined;
+	return memorySnapshotRecorder(transcript, state);
+}
+
+/**
+ * Whether a prompt still carries the staged memory block.
+ *
+ * The block is embedded in the project prompt, so a caller that replaces the
+ * prompt wholesale drops it. Matching ignores whitespace runs: the rendered
+ * prompt re-flows the block it embeds, and a replacement may split it across
+ * the prompt's parts — the provider receives the whole block either way, so
+ * the parts are joined with whitespace instead of matched one by one.
+ */
+function promptCarriesMemoryBlock(promptParts: readonly string[], memoryBlock: string | undefined): boolean {
+	if (!memoryBlock) return false;
+	const needle = memoryBlock.replace(/\s+/g, " ").trim();
+	if (!needle) return false;
+	const haystack = promptParts.join(" ").replace(/\s+/g, " ").trim();
+	return haystack.includes(needle);
+}
+
+/**
+ * Drop a staged memory block the prompt did not carry.
+ *
+ * The rejected block must not be reused: the next build reads the memory
+ * files again, so the first prompt that actually carries memory is built from
+ * the current state instead of the rejected one.
+ */
+function cancelStagedMemorySnapshot(transcript: MemoryTranscript, state: TranscriptMemoryState): void {
+	state.pending = false;
+	if (memoryStateByTranscript.get(transcript) === state) memoryStateByTranscript.delete(transcript);
+}
+
+/**
+ * The memory block staged for a prompt, and the commit that records it.
+ *
+ * The block is staged by the build and recorded only once the prompt carrying
+ * it commits. A prompt that replaced the block — an override that dropped it,
+ * or an empty prompt — cancels the staging instead: the transcript must not
+ * claim a memory block the session never sent, and the next build reads the
+ * current memory state rather than the rejected one.
+ *
+ * `undefined` when nothing is staged: the memory files hold no injectable
+ * content, or the block was recorded already.
+ */
+export function stagedMemorySnapshot(transcript: MemoryTranscript | undefined): PendingInstructionsCommit | undefined {
+	if (!transcript) return undefined;
+	const state = memoryStateByTranscript.get(transcript);
+	if (!state?.pending) return undefined;
+	return {
+		commit(promptParts: readonly string[]) {
+			if (!promptCarriesMemoryBlock(promptParts, state.value)) {
+				cancelStagedMemorySnapshot(transcript, state);
+				return undefined;
+			}
+			return memorySnapshotRecorder(transcript, state);
+		},
 	};
 }
 
@@ -467,7 +558,7 @@ export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 	const baseline = memoryBaselineByRoot.get(root);
 	const baselineLearned = baseline && baseline.token === token ? baseline.snapshot.learned : undefined;
 	const learned = pinned?.learned ?? baselineLearned ?? "";
-	const snapshot = current ? { summary: current.summary, learned } : undefined;
+	const snapshot = current ? boundMemorySnapshot({ summary: current.summary, learned }, settings) : undefined;
 	memoryStateByTranscript.set(transcript, {
 		sessionFile,
 		scope,
@@ -505,7 +596,7 @@ export async function buildMemoryToolDeveloperInstructions(
 	const scope = normalizeScopeCwd(cwd);
 	if (!transcript) {
 		const token = await readMemoryClearToken(root);
-		const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(root, settings);
+		const snapshot = boundMemorySnapshot(await readMemoryToolDeveloperInstructionsSnapshot(root, settings), settings);
 		if (snapshot) memoryBaselineByRoot.set(root, { snapshot, token });
 		return renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
 	}
@@ -542,7 +633,9 @@ export async function buildMemoryToolDeveloperInstructions(
 	// commit records it there and a later resume restores the same block
 	// instead of rereading the memory files.
 	const snapshot =
-		recorded?.snapshot ?? reusable?.snapshot ?? (await readMemoryToolDeveloperInstructionsSnapshot(root, settings));
+		recorded?.snapshot ??
+		reusable?.snapshot ??
+		boundMemorySnapshot(await readMemoryToolDeveloperInstructionsSnapshot(root, settings), settings);
 	const value = renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
 	memoryStateByTranscript.set(transcript, {
 		sessionFile,

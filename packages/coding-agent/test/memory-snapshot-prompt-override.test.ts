@@ -21,7 +21,10 @@ function snapshotCount(sessionManager: SessionManager): number {
 
 describe("memory snapshot with a replaced system prompt", () => {
 	/** Build a session whose prompt is replaced by the given function. */
-	async function countSnapshots(systemPrompt?: (defaultPrompt: string[]) => string[]): Promise<number> {
+	async function countSnapshots(
+		systemPrompt?: (defaultPrompt: string[]) => string[],
+		options?: { memory?: boolean },
+	): Promise<number> {
 		const tempDir = TempDir.createSync("@omp-memory-snapshot-override-");
 		const authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("anthropic", "test-key");
@@ -30,7 +33,9 @@ describe("memory snapshot with a replaced system prompt", () => {
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
 		const settings = Settings.isolated({ "memory.backend": "local" });
 		await settings.reloadForCwd(tempDir.path());
-		await saveLearnedLesson(tempDir.path(), tempDir.path(), { content: "Override lesson" });
+		if (options?.memory !== false) {
+			await saveLearnedLesson(tempDir.path(), tempDir.path(), { content: "Override lesson" });
+		}
 
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		const { session } = await createAgentSession({
@@ -75,6 +80,18 @@ describe("memory snapshot with a replaced system prompt", () => {
 
 	it("records the snapshot when the base prompt keeps the memory block", async () => {
 		expect(await countSnapshots()).toBe(1);
+	}, 30_000);
+
+	it("records the snapshot when the replacement prompt splits the memory block across parts", async () => {
+		// The provider receives the whole block either way, so the snapshot is
+		// recorded: the parts are joined before the block is looked for.
+		expect(await countSnapshots(defaultPrompt => defaultPrompt.flatMap(part => part.split("\n")))).toBe(1);
+	}, 30_000);
+
+	it("records no snapshot when the memory files hold nothing injectable", async () => {
+		// An empty memory store injects no block, so there is nothing to record —
+		// not even for a prompt that drops the block.
+		expect(await countSnapshots(() => ["custom prompt"], { memory: false })).toBe(0);
 	}, 30_000);
 
 	it("records no snapshot when the prompt is empty", async () => {
