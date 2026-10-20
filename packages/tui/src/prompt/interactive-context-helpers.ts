@@ -10,8 +10,8 @@ export interface AssistantMessageSession {
 	readonly model?: Model;
 	readonly extensionRunner?: {
 		getAssistantThinkingRenderers(): readonly AssistantThinkingRenderer[];
-		/** Empty while the setting that enables them is off. */
-		getAssistantTextRenderers(): readonly AssistantTextRenderer[];
+		/** Empty while the setting that enables them is off; hosts predating it may omit it. */
+		getAssistantTextRenderers?(): readonly AssistantTextRenderer[];
 	};
 }
 
@@ -132,7 +132,7 @@ export function createAssistantMessageComponent(
 		ctx.proseOnlyThinking,
 		linkTargets,
 		ctx.expandThinkingBlocks,
-		{ renderers: ctx.viewSession.extensionRunner?.getAssistantTextRenderers() ?? [], contentOffset },
+		{ renderers: ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.() ?? [], contentOffset },
 	);
 	component.setImagesVisible(ctx.assistantImagesVisible);
 	component.setTableChartsVisible(ctx.tableChartsVisible);
