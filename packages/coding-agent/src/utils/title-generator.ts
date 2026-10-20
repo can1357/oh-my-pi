@@ -175,14 +175,14 @@ export async function generateSessionTitle(
 	// deterministically before any model is invoked; the caller retries on the
 	// next user message while the session stays unnamed.
 	if (isLowSignalTitleInput(firstMessage)) {
-		logger.debug("title-generator: skipped low-signal input", { sessionId, reason: "low-signal" });
+		logger.debug("title-generator: skipped low-signal input", { titleSessionId: sessionId, reason: "low-signal" });
 		return null;
 	}
 
 	const models = getTitleModels(registry, settings, currentModel);
 	const firstModel = models[0];
 	if (!firstModel) {
-		logger.warn("title-generator: no title model found", { sessionId, reason: "no-title-model" });
+		logger.warn("title-generator: no title model found", { titleSessionId: sessionId, reason: "no-title-model" });
 		return null;
 	}
 
@@ -220,7 +220,7 @@ export async function generateSessionTitle(
 		}
 		if (!localTitle) {
 			logger.warn("title-generator: local tiny model produced no title; skipping (no online fallback)", {
-				sessionId,
+				titleSessionId: sessionId,
 				model: firstModel.id,
 				reason: "local-no-output",
 			});
@@ -229,7 +229,7 @@ export async function generateSessionTitle(
 		return localTitle;
 	} catch (err) {
 		logger.warn("title-generator: local tiny model errored; skipping (no online fallback)", {
-			sessionId,
+			titleSessionId: sessionId,
 			model: firstModel.id,
 			error: err instanceof Error ? err.message : String(err),
 		});
@@ -250,7 +250,7 @@ export async function generateTitleOnline(
 ): Promise<string | null> {
 	const models = getTitleModels(registry, settings, currentModel);
 	if (models.length === 0) {
-		logger.warn("title-generator: no title model found", { sessionId, reason: "no-title-model" });
+		logger.warn("title-generator: no title model found", { titleSessionId: sessionId, reason: "no-title-model" });
 		return null;
 	}
 	return generateTitleOnlineWithModels(
@@ -287,7 +287,7 @@ async function generateTitleOnlineWithModels(
 	for (const model of models) {
 		const modelName = `${model.provider}/${model.id}`;
 		const modelContext = {
-			sessionId,
+			titleSessionId: sessionId,
 			provider: model.provider,
 			id: model.id,
 			model: modelName,
