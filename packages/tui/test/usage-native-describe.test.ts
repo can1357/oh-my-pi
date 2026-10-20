@@ -91,6 +91,21 @@ describe("UsageDashboardComponent.describe", () => {
 		]);
 	});
 
+	it("labels the meter percentage with the same quota the meter fills", () => {
+		// Regression: the meter filled by quota used while the number beside it
+		// printed the remaining quota, so the two moved in opposite directions.
+		const root = dashboard([
+			report("anthropic", "a@test", [limit("anthropic", "5h", "Claude 5h", 0.25, "ok")]),
+		]).describe(cx);
+		const meter = findAll(root, n => n.k === "meter")[0];
+		const pct = findAll(root, n => n.p?.role === "omp.usage.pct")[0];
+		expect(meter?.k === "meter" ? meter.p?.value : undefined).toBe(0.25);
+		expect(pct?.k === "text" ? pct.p?.spans : undefined).toEqual([
+			{ t: "25%", s: "mono" },
+			{ t: " used", s: "dim" },
+		]);
+	});
+
 	it("switches to the per-account detail table when the Details tab is selected", () => {
 		const component = dashboard([
 			report("anthropic", "a@test", [limit("anthropic", "5h", "Claude 5h", 0.25, "ok")]),
@@ -104,15 +119,15 @@ describe("UsageDashboardComponent.describe", () => {
 		expect(tabs?.p).toEqual(expect.objectContaining({ active: "detail" }));
 		// One row per account in the detail table, not the bucket mean.
 		const table = findAll(detail, n => n.k === "table")[0];
-		const left = table?.k === "table" ? table.p?.rows.map(row => row.cells.left) : undefined;
-		expect(left).toEqual([
+		const used = table?.k === "table" ? table.p?.rows.map(row => row.cells.used) : undefined;
+		expect(used).toEqual([
 			[
-				{ t: "75%", s: "mono" },
-				{ t: " left", s: "dim" },
+				{ t: "25%", s: "mono" },
+				{ t: " used", s: "dim" },
 			],
 			[
-				{ t: "25%", s: "mono warning" },
-				{ t: " left", s: "dim" },
+				{ t: "75%", s: "mono warning" },
+				{ t: " used", s: "dim" },
 			],
 		]);
 	});
@@ -143,7 +158,7 @@ describe("UsageDashboardComponent.describe", () => {
 			findAll(tile, n => n.k === "text").map(plain),
 		);
 		expect(tiles).toEqual([
-			["Tightest quota", "10% left", "Claude Weekly · Anthropic"],
+			["Tightest quota", "90% used", "Claude Weekly · Anthropic"],
 			["Past year", "$247", "740 requests"],
 			["Last 30 days", "$46.50", "140 requests"],
 			["Busiest day", "$200", expect.stringMatching(/ · 600 requests$/)],
