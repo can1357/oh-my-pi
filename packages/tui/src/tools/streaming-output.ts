@@ -24,6 +24,16 @@ export const ARTIFACT_DEFAULT_MAX_BYTES = 16 * 1024 * 1024; // 16 MiB
 export const ARTIFACT_DEFAULT_HEAD_BYTES = 3 * 1024 * 1024; // 3 MiB
 /** Upper bound on how far the rolling artifact tail may outgrow its budget between trims. */
 const ARTIFACT_TAIL_MAX_SLACK_BYTES = 4 * 1024 * 1024;
+/**
+ * Aggregate budget for the complete SIXEL payloads the inline window keeps.
+ * A payload is never sliced, so the window drops whole frames — oldest first —
+ * once the retained frames exceed this budget; the newest frame is always
+ * kept, so a single frame larger than the budget stays whole instead of
+ * disappearing. The budget bounds what a plotting loop can retain in memory
+ * (and what the snapshot carries into the model) while still holding a
+ * realistic number of frames.
+ */
+const SIXEL_RETAINED_MAX_BYTES = 8 * 1024 * 1024; // 8 MiB
 
 const NL = "\n";
 const CR = "\r";
@@ -1076,6 +1086,10 @@ export class OutputSink {
 	 */
 	push(chunk: string, options?: { inline?: string; emitInline?: boolean }): void {
 		if (this.#finalized) return;
+		// The bytes the parser holds from earlier chunks belong to no chunk of
+		// their own: an artifact that opens mid-frame needs them to hold the
+		// frame whole, so they are captured before this chunk is parsed.
+		const heldBytes = isSixelPassthroughEnabled() ? this.#sixelParser.heldBytes : "";
 		// Split raw output into text spans and DCS payload spans before
 		// sanitizing: `sanitizeText` strips ESC and the C1 range, which would
 		// delete the introducer of an 8-bit frame. Passthrough off leaves the
@@ -1095,7 +1109,7 @@ export class OutputSink {
 		// column cap run on the substitute: the elided byte and line counts are
 		// derived from those totals, so counting the substitute as the whole
 		// stream reports nothing was elided from a display the artifact kept.
-		this.#store(chunk, bufferSpans, content, substituted);
+		this.#store(chunk, bufferSpans, content, substituted, true, heldBytes);
 
 		// Throttled onChunk: coalesce chunks arriving inside the throttle window.
 		// A timer flushes quiet tails at the throttle boundary; dump() catches a
@@ -1161,7 +1175,10 @@ export class OutputSink {
 	 * count the normalized `content` of the whole chunk while `spans` carry what
 	 * the in-memory view retains, so an inline substitute reports the bytes it
 	 * elided. `mirrorToArtifact: false` skips that mirror for bytes that already
-	 * streamed to the artifact with earlier chunks.
+	 * streamed to the artifact with earlier chunks. `heldBytes` are the raw bytes
+	 * the parser holds from earlier chunks: they belong to no chunk of their
+	 * own, so the mirror writes them with this chunk unless they are already on
+	 * disk.
 	 */
 	#store(
 		chunk: string,
@@ -1169,6 +1186,7 @@ export class OutputSink {
 		content: string,
 		substituted: boolean,
 		mirrorToArtifact = true,
+		heldBytes = "",
 	): void {
 		const normalizedBytes = Buffer.byteLength(content, "utf-8");
 		this.#totalBytes += normalizedBytes;
@@ -1232,12 +1250,19 @@ export class OutputSink {
 			this.#artifactPath &&
 			(this.#file != null || substituted || cappedThisChunk || this.#willOverflow(cappedBytes))
 		) {
-			this.#writeToFile(chunk);
+			// A frame split over chunks keeps its earlier bytes in the parser, not
+			// in a chunk: the artifact gets them with the chunk that completes the
+			// frame, so a capture that opens mid-frame still holds the frame's
+			// introducer and body instead of only its tail.
+			this.#writeToFile(this.#heldBytesMirrored ? chunk : heldBytes + chunk);
 			// The chunk carrying an unterminated frame went to disk whole, so the
 			// held prefix is already mirrored and must not be written a second time
 			// when the stream ends mid-frame.
 			if (this.#sixelParser.holding) this.#heldBytesMirrored = true;
 		}
+		// A completed frame releases the held bytes: the next frame's prefix is
+		// not on disk yet, so it has to be written with the chunk that follows.
+		if (!this.#sixelParser.holding) this.#heldBytesMirrored = false;
 		if (retained.length === 0) return;
 
 		for (const span of retained) {
@@ -1461,11 +1486,46 @@ export class OutputSink {
 	 * the window may drop it: the introducer and the terminator both have to
 	 * survive, or the terminal that replays this snapshot stays inside an open
 	 * DCS string for the rest of the output.
+	 *
+	 * The retained frames are bounded in aggregate: the oldest whole frames
+	 * leave the window once they exceed {@link SIXEL_RETAINED_MAX_BYTES}, so a
+	 * stream of frames cannot grow the snapshot without limit.
 	 */
 	#pushTailSixel(payload: string): void {
 		if (payload.length === 0) return;
 		this.#tailWindowOpened = true;
 		this.#appendTail({ kind: "sixel", payload }, 0);
+		this.#evictOldPayloads();
+	}
+
+	/**
+	 * Drop the oldest complete frames until the retained payloads fit their
+	 * aggregate budget. A frame leaves whole — introducer and terminator
+	 * together — so the snapshot stays a valid DCS stream; only the newest
+	 * frame is exempt, so a single oversized frame survives on its own.
+	 */
+	#evictOldPayloads(): void {
+		if (this.#tailSixelBytes <= SIXEL_RETAINED_MAX_BYTES) return;
+		let payloads = 0;
+		for (const region of this.#tail) if (region.kind === "sixel") payloads++;
+		if (payloads <= 1) return;
+		let retainedBytes = this.#tailSixelBytes;
+		const kept: RawSixelSegment[] = [];
+		let dropped = false;
+		for (const region of this.#tail) {
+			if (region.kind === "sixel" && retainedBytes > SIXEL_RETAINED_MAX_BYTES && payloads > 1) {
+				payloads--;
+				retainedBytes -= Buffer.byteLength(region.payload, "utf-8");
+				dropped = true;
+				continue;
+			}
+			kept.push(region);
+		}
+		if (!dropped) return;
+		this.#tailSixelBytes = retainedBytes;
+		this.#setTail(kept);
+		// The dropped frames are still in the artifact; the snapshot lost them.
+		this.#truncated = true;
 	}
 
 	#appendTail(region: RawSixelSegment, textBytes: number): void {
@@ -1716,8 +1776,22 @@ export class OutputSink {
 	replace(text: string): void {
 		this.#clearPendingChunkTimer();
 		const bytes = Buffer.byteLength(text, "utf-8");
-		this.#setTail([{ kind: "text", text }]);
-		this.#tailTextBytes = bytes;
+		// The replacement is held to the per-line column cap like streamed
+		// output: a minimizer that rewrites the captured output into a wider
+		// line must not bypass `tools.outputMaxColumns`. The cap state starts
+		// fresh, and the totals keep the uncapped size — the replacement is
+		// what the stream produced, the cap only shapes what is displayed.
+		this.#currentLineBytes = 0;
+		this.#columnEllipsisAdded = false;
+		this.#columnDroppedBytes = 0;
+		this.#columnTruncatedLines = 0;
+		this.#columnFirstCutLine = 0;
+		this.#columnLastCutLine = 0;
+		// The artifact keeps the replaced stream, so later line numbers no longer match it.
+		this.#columnCutLinesUnmapped = true;
+		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(text, 0) : text;
+		this.#setTail([{ kind: "text", text: capped }]);
+		this.#tailTextBytes = Buffer.byteLength(capped, "utf-8");
 		this.#tailSixelBytes = 0;
 		this.#tailUntrimmed = false;
 		this.#head = "";
@@ -1729,12 +1803,6 @@ export class OutputSink {
 		this.#totalLines = countNewlines(text);
 		this.#sawData = text.length > 0;
 		this.#truncated = false;
-		this.#currentLineBytes = 0;
-		this.#columnEllipsisAdded = false;
-		this.#columnDroppedBytes = 0;
-		this.#columnTruncatedLines = 0;
-		// The artifact keeps the replaced stream, so later line numbers no longer match it.
-		this.#columnCutLinesUnmapped = true;
 		this.#pendingChunk = "";
 		this.#pendingCarriageReturn = false;
 		this.#lineBreaksRedrawn = false;

@@ -4,7 +4,7 @@ import type { DescribeContext, NativeNode } from "../native/node";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import type { Theme } from "../theme/theme";
 import type { Component } from "../tui";
-import { getPaddingX } from "../utils";
+import { getPaddingX, padding } from "../utils";
 import { truncateToVisualLines } from "../chrome/visual-truncate";
 import { classifySixelRow, getSixelLineMask } from "./sixel";
 import { formatExpandHint, replaceTabs } from "./render-utils";
@@ -381,7 +381,11 @@ export class OutputPane implements Component {
 			const line = formatted.lines[index]!;
 			if (sixelRows[index] === true) {
 				flush();
-				rows.push(line);
+				// The payload row bypasses `Text`, so the pane's left margin is
+				// missing on it: the image would start at column 0 while every
+				// other row starts one cell in. The margin goes outside the DCS,
+				// so the payload itself stays byte-for-byte.
+				rows.push(paddingX > 0 ? padding(paddingX) + line : line);
 				continue;
 			}
 			run.push(line);

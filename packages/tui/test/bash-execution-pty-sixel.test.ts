@@ -201,6 +201,29 @@ describe("BashExecutionComponent PTY SIXEL", () => {
 		expect(plain).toBe(`a   ${SIXEL}`);
 	});
 
+	it("resolves the frame's anchor against the row's final cells", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		// The PTY rewrote the cells to the left of an emitted frame: the text
+		// that stood there when the frame landed is gone. The frame belongs at
+		// the column it was emitted on, so the offset has to be resolved against
+		// the row as it is now — a length measured when the frame arrived
+		// addresses text that is no longer there.
+		const component = new BashExecutionComponent("img", ui, false);
+		component.appendPtyChunk(`界${SIXEL}\rAB`);
+		component.setComplete(0, false);
+
+		await renderUntil(component, () => component.isTranscriptBlockFinalized());
+
+		const output = component.getOutput();
+		const row = output.split("\n").find(line => line.includes(SIXEL));
+		expect(row).toBeDefined();
+		const plain = row!.replace(/\x1b\[[0-9;]*m/gu, "");
+		expect(plain).toBe(`AB${SIXEL}`);
+	});
+
 	it("keeps the stream order of a payload emitted after a wide character row", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
@@ -361,6 +384,36 @@ describe("BashExecutionComponent PTY SIXEL", () => {
 		expect(text).toContain(SIXEL);
 		// The sixel fallback is gone; exactly one image fallback (the Kitty
 		// decode) renders below the output.
+		expect(text.match(/\[Image:/g)).toHaveLength(1);
+	});
+
+	it("keeps the decode of a frame whose replay row was evicted", async () => {
+		// #15327: the raw frames the replay rows render and the decoded copies
+		// of every frame the executor saw are two different sets. A frame whose
+		// replay row was evicted has no raw rendering left, so its decode is the
+		// only copy of that image — suppressing every sixel decode because
+		// another frame was rendered raw dropped it from the card.
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		const component = new BashExecutionComponent("img", ui, false);
+		component.appendPtyChunk(`${SIXEL}\r\n`);
+		// Enough output to push the first frame's row out of the scrollback.
+		const rows = Array.from({ length: 6000 }, (_, index) => `L${index}\r\n`).join("");
+		component.appendPtyChunk(rows);
+		component.appendPtyChunk(`${SIXEL}\r\n`);
+		component.setComplete(0, false, {
+			images: [
+				{ type: "image", data: PNG, mimeType: "image/png", source: "sixel" },
+				{ type: "image", data: PNG, mimeType: "image/png", source: "sixel" },
+			],
+			showImages: false,
+		});
+
+		const text = await renderUntil(component, () => component.isTranscriptBlockFinalized());
+		// The first frame is rendered by its decode alone; the second one is
+		// rendered raw, so its decode is the duplicate that is dropped.
 		expect(text.match(/\[Image:/g)).toHaveLength(1);
 	});
 

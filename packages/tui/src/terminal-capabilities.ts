@@ -153,18 +153,30 @@ export class TerminalInfo {
 		);
 	}
 
+	/**
+	 * Whether a byte can begin an image marker under this terminal's protocol:
+	 * the ESC of a 7-bit introducer, the C1 DCS of an 8-bit SIXEL frame, or the
+	 * Kitty placeholder's high surrogate. The renderer's common classifier and
+	 * the slow-path scan share it, so neither can miss an introducer the other
+	 * recognises.
+	 */
+	isImageMarkerStart(code: number): boolean {
+		if (!this.imageProtocol) return false;
+		if (code === 0x1b) return true;
+		if (code === KITTY_PLACEHOLDER_HIGH_SURROGATE) return true;
+		// The 8-bit C1 DCS is a legal sixel introducer but is not an ESC, so it
+		// needs its own scan candidate or an 8-bit frame never classifies.
+		return this.imageProtocol === ImageProtocol.Sixel && code === C1_DCS;
+	}
+
 	isImageLine(line: string): boolean {
 		if (!this.imageProtocol) return false;
 		const limit = Math.min(
 			line.length,
 			this.imageProtocol === ImageProtocol.Sixel ? SIXEL_MARKER_SCAN_LIMIT : IMAGE_MARKER_SCAN_LIMIT,
 		);
-		// The 8-bit C1 DCS is a legal sixel introducer but is not an ESC, so it
-		// needs its own scan candidate or an 8-bit frame never classifies.
-		const sixel = this.imageProtocol === ImageProtocol.Sixel;
 		for (let i = 0; i < limit; i++) {
-			const code = line.charCodeAt(i);
-			if (code !== 0x1b && code !== KITTY_PLACEHOLDER_HIGH_SURROGATE && !(sixel && code === C1_DCS)) continue;
+			if (!this.isImageMarkerStart(line.charCodeAt(i))) continue;
 			if (this.hasImageMarkerAt(line, i)) return true;
 		}
 		return false;

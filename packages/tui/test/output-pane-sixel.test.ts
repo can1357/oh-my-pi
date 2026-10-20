@@ -42,11 +42,39 @@ describe("OutputPane SIXEL rows", () => {
 		const rows = pane.render(20);
 
 		// Both payload rows survive byte-for-byte, in stream order, with no
-		// wrapping artifact injected between them.
-		expect(rows).toContain(head);
-		expect(rows).toContain(tail);
+		// wrapping artifact injected between them. The pane's left margin sits
+		// outside the DCS, so the frame still starts where the plain rows do.
+		expect(rows).toContain(` ${head}`);
+		expect(rows).toContain(` ${tail}`);
 		expect(rows.join("\n")).toContain("plain row");
 		expect(rows.length).toBe(3);
+	});
+
+	it("keeps the pane's left margin on a sixel row", () => {
+		// A payload row bypasses `Text`, which is what applies the pane's
+		// padding: without the margin the image started at column 0 while
+		// every other row started one cell in.
+		TERMINAL.imageProtocol = ImageProtocol.Sixel;
+
+		const frame = `\x1bPq${"A".repeat(40)}\x1b\\`;
+		const pane = new OutputPane(theme, {
+			expanded: false,
+			collapsedMaxLines: 4,
+			edge: "tail",
+			uncapSixel: true,
+			visual: true,
+			paddingX: 1,
+		});
+		pane.setLines([frame, "plain row"]);
+
+		const rows = pane.render(20);
+		const payloadRow = rows.find(row => row.includes("\x1bPq"));
+		const plainRow = rows.find(row => row.includes("plain row"));
+
+		expect(payloadRow?.startsWith(" ")).toBe(true);
+		expect(plainRow?.startsWith(" ")).toBe(true);
+		// The margin is outside the DCS: the payload itself is untouched.
+		expect(payloadRow).toBe(` ${frame}`);
 	});
 
 	it("keeps wrapping plain rows at the pane width", () => {

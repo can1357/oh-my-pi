@@ -204,6 +204,16 @@ export class SixelSpanParser {
 		return this.#mode !== "ground" || this.#pending.length > 0;
 	}
 
+	/**
+	 * The bytes held from earlier chunks: an open frame's bytes so far, or a
+	 * partial introducer. The sink writes them with the chunk that completes
+	 * the frame, so an artifact that opens mid-frame still holds the frame's
+	 * introducer and body instead of only its tail.
+	 */
+	get heldBytes(): string {
+		return this.#pending.length > 0 ? this.#pending : this.#frame;
+	}
+
 	/** Consume one chunk, returning the spans it completed. */
 	push(chunk: string): RawSixelSegment[] {
 		if (chunk.length === 0) return [];

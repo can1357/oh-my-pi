@@ -1402,6 +1402,61 @@ describe("OutputSink SIXEL spill window", () => {
 		expect(artifactText.endsWith(held)).toBe(true);
 		expect(artifactText).toContain("~".repeat(70_000));
 	});
+
+	test("the artifact holds a frame split across chunks when its terminator opens the spill", async () => {
+		// #15327: the chunks that carry a frame's beginning produce no spans,
+		// so they were never mirrored. Only the chunk that completed the frame
+		// reached the artifact — and the frame's introducer and body were lost
+		// with it, leaving an artifact that cannot recover the raw output.
+		enableSixelPassthrough();
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "split.log");
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "art-split",
+			spillThreshold: 50 * 1024,
+			maxColumns: 768,
+		});
+		const frame = `\x1bPq${"~".repeat(70_000)}\x1b\\`;
+		await sink.push("before\n");
+		await sink.push(frame.slice(0, 20_000));
+		await sink.push(frame.slice(20_000, 40_000));
+		await sink.push(frame.slice(40_000));
+		await sink.push("\nafter");
+
+		await sink.dump();
+		const artifactText = await Bun.file(artifactPath).text();
+
+		// The whole frame is in the artifact, once: the introducer, the body and
+		// the terminator.
+		expect(artifactText).toContain("\x1bPq");
+		expect(artifactText).toContain("~".repeat(70_000));
+		expect(artifactText).toContain("\x1b\\");
+		expect(artifactText.split("\x1bPq").length - 1).toBe(1);
+	});
+
+	test("the oldest frames leave the retained window once the frames exceed their budget", async () => {
+		// #15327: every completed frame that missed the head window was
+		// appended, while the spill budget only counted text. A plotting loop
+		// that streamed frame after frame therefore retained all of them, and
+		// the snapshot grew without limit.
+		enableSixelPassthrough();
+		const sink = new OutputSink({ spillThreshold: 50 * 1024, maxColumns: 768 });
+		const frame = (marker: string) => `\x1bPq#0;2;100;0;0#0${marker}${"~".repeat(3 * 1024 * 1024)}\x1b\\`;
+		await sink.push(frame("FIRST"));
+		await sink.push(frame("SECOND"));
+		await sink.push(frame("THIRD"));
+
+		const dumped = await sink.dump();
+
+		// The oldest frame left the window whole; the newest one survived.
+		expect(dumped.output).not.toContain("FIRST");
+		expect(dumped.output).toContain("SECOND");
+		expect(dumped.output).toContain("THIRD");
+		// A frame that leaves the window is bytes the snapshot lost, so the
+		// summary reports the output as truncated.
+		expect(dumped.truncated).toBe(true);
+	});
 });
 
 describe("OutputSink SIXEL mixed-write column cap", () => {
