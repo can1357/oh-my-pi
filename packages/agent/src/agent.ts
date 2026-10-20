@@ -399,6 +399,9 @@ interface QueuedMessageClaim {
 	controller: AbortController;
 }
 
+/** Ordinary, forced-choice and one model switch back. */
+const MAX_RECENT_TOKENIZERS = 4;
+
 export class Agent {
 	#state: AgentState = {
 		systemPrompt: [],
@@ -413,6 +416,13 @@ export class Agent {
 		error: undefined,
 	};
 	#tokenizer = new Tokenizer(this.#state.model);
+	/**
+	 * Recently active tokenizers, most recent first. A forced turn can flip the
+	 * own-thinking drop state and back; reusing the instance that already counts
+	 * that way keeps its per-message memo warm instead of recounting the
+	 * transcript on every flip.
+	 */
+	#recentTokenizers: Tokenizer[] = [this.#tokenizer];
 	#activeRequest?: { model: Model; toolChoice?: ToolChoice; tools?: Context["tools"] };
 	#lastRequestDropsOwnThinking: boolean | undefined;
 	#listeners = new Set<(e: AgentEvent) => void>();
@@ -882,7 +892,7 @@ export class Agent {
 		const active = this.tokenizer;
 		if (!model || !toolChoice) return active;
 		const options = this.#tokenizerOptions(model, { model, toolChoice, tools: this.#state.tools });
-		return active.countsAlike(model, options) ? active : new Tokenizer(model, options);
+		return this.#tokenizerFor(model, options);
 	}
 
 	#tokenizerOptions(
@@ -910,7 +920,19 @@ export class Agent {
 	#syncTokenizer(model: Model | null | undefined): void {
 		const request = this.#activeRequest?.model === model ? this.#activeRequest : undefined;
 		const options = this.#tokenizerOptions(model, request);
-		if (!this.#tokenizer.countsAlike(model, options)) this.#tokenizer = new Tokenizer(model, options);
+		this.#tokenizer = this.#tokenizerFor(model, options);
+	}
+
+	/** A recent tokenizer that counts for `model` and `options` alike, else a new one. */
+	#tokenizerFor(model: Model | null | undefined, options: TokenizerOptions): Tokenizer {
+		const index = this.#recentTokenizers.findIndex(tokenizer => tokenizer.countsAlike(model, options));
+		const tokenizer = index === -1 ? new Tokenizer(model, options) : this.#recentTokenizers[index];
+		if (index !== 0) {
+			if (index > 0) this.#recentTokenizers.splice(index, 1);
+			this.#recentTokenizers.unshift(tokenizer);
+			this.#recentTokenizers.length = Math.min(this.#recentTokenizers.length, MAX_RECENT_TOKENIZERS);
+		}
+		return tokenizer;
 	}
 
 	get appendOnlyContext(): AppendOnlyContextManager | undefined {

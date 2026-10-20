@@ -697,7 +697,11 @@ describe("countMessage chat-completions thinking", () => {
 		agent.setOnTurnEnd(() => {
 			turnEndCounts.push(agent.tokenizer.countMessage(turn, { excludeEncryptedReasoning: true }));
 		});
+		const ordinary = agent.tokenizer;
 		await agent.prompt("call read", { toolChoice: { type: "tool", name: "read" } });
+		// Flipping back to the ordinary state reuses its tokenizer, so the
+		// per-message memo stays warm instead of recounting the transcript.
+		expect(agent.tokenizer).toBe(ordinary);
 		// The forced request's state outlives the turn end that resets the tokenizer,
 		// so its reported usage can be recorded with the state it was billed in.
 		expect(agent.lastRequestDropsOwnThinking).toBe(true);
