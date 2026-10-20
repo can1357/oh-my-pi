@@ -3,6 +3,7 @@ import {
 	clearMemoryData,
 	clearMemoryToolDeveloperInstructionsCache,
 	enqueueMemoryConsolidation,
+	pendingMemorySnapshotCommit,
 	saveLearnedLesson,
 	startMemoryStartupTask,
 } from "../memories";
@@ -21,11 +22,14 @@ export const localBackend: MemoryBackend = {
 	start(options) {
 		startMemoryStartupTask(options);
 	},
-	async buildDeveloperInstructions(agentDir, cwd, settings, session) {
-		return buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+	async buildDeveloperInstructions(agentDir, cwd, settings, session, sessionManager) {
+		return buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, sessionManager ?? session?.sessionManager);
+	},
+	pendingInstructionsCommit(sessionManager) {
+		return pendingMemorySnapshotCommit(sessionManager);
 	},
 	async clear(agentDir, cwd, session) {
-		clearMemoryToolDeveloperInstructionsCache(session);
+		clearMemoryToolDeveloperInstructionsCache(session?.sessionManager);
 		await clearMemoryData(agentDir, cwd);
 	},
 	async enqueue(agentDir, cwd) {

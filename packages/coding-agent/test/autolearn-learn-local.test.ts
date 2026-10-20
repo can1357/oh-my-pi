@@ -180,15 +180,20 @@ describe("learned-lesson read-back", () => {
 		const session = sessionWithFile("session-1.jsonl");
 
 		expect(
-			await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, session),
+			await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, session.sessionManager),
 		).toBeUndefined();
 		await saveLearnedLesson(agentDir, settings.getCwd(), { content: "Later session only" });
 
 		expect(
-			await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, session),
+			await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, session.sessionManager),
 		).toBeUndefined();
 		const nextSession = sessionWithFile("session-2.jsonl");
-		const out = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, nextSession);
+		const out = await buildMemoryToolDeveloperInstructions(
+			agentDir,
+			settings.getCwd(),
+			settings,
+			nextSession.sessionManager,
+		);
 		expect(out).toContain("- Later session only");
 	});
 
@@ -196,13 +201,13 @@ describe("learned-lesson read-back", () => {
 		const settings = Settings.isolated({ "memory.backend": "local" });
 		const session = sessionWithFile("session-clear.jsonl");
 		await saveLearnedLesson(agentDir, settings.getCwd(), { content: "Clearable lesson" });
-		expect(await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, session)).toContain(
-			"Clearable lesson",
-		);
+		expect(
+			await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, session.sessionManager),
+		).toContain("Clearable lesson");
 		await localBackend.clear(agentDir, settings.getCwd(), session as unknown as AgentSession);
 
 		expect(
-			await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, session),
+			await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, session.sessionManager),
 		).toBeUndefined();
 	});
 
@@ -221,13 +226,23 @@ describe("learned-lesson read-back", () => {
 		await Bun.write(path.join(root, "memory_summary.md"), "Consolidated guidance here.\n");
 
 		await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(session, agentDir, settings.getCwd(), settings);
-		const out = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, session);
+		const out = await buildMemoryToolDeveloperInstructions(
+			agentDir,
+			settings.getCwd(),
+			settings,
+			session.sessionManager,
+		);
 		expect(out).toContain("Consolidated guidance here.");
 		expect(out).toContain("Prior-session lesson");
 		expect(out).not.toContain("Active-session lesson");
 
 		const nextSession = sessionWithFile("session-after-consolidate.jsonl");
-		const nextOut = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, nextSession);
+		const nextOut = await buildMemoryToolDeveloperInstructions(
+			agentDir,
+			settings.getCwd(),
+			settings,
+			nextSession.sessionManager,
+		);
 		expect(nextOut).toContain("Consolidated guidance here.");
 		expect(nextOut).toContain("Active-session lesson");
 	});
@@ -240,17 +255,32 @@ describe("learned-lesson read-back", () => {
 		};
 		const root = getMemoryRoot(agentDir, settings.getCwd());
 		await Bun.write(path.join(root, "memory_summary.md"), "Original guidance");
-		const initial = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, session);
+		const initial = await buildMemoryToolDeveloperInstructions(
+			agentDir,
+			settings.getCwd(),
+			settings,
+			session.sessionManager,
+		);
 		expect(initial ?? "").toContain("Original guidance");
 
 		await Bun.write(path.join(root, "memory_summary.md"), "Updated guidance");
 		await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(session, agentDir, settings.getCwd(), settings);
 
-		const active = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, session);
+		const active = await buildMemoryToolDeveloperInstructions(
+			agentDir,
+			settings.getCwd(),
+			settings,
+			session.sessionManager,
+		);
 		expect(active ?? "").toContain("Original guidance");
 		expect(active ?? "").not.toContain("Updated guidance");
 		const nextSession = sessionWithFile("session-next-startup.jsonl");
-		const next = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings, nextSession);
+		const next = await buildMemoryToolDeveloperInstructions(
+			agentDir,
+			settings.getCwd(),
+			settings,
+			nextSession.sessionManager,
+		);
 		expect(next ?? "").toContain("Updated guidance");
 	});
 
