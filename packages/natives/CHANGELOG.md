@@ -117,7 +117,7 @@
 
 ### Fixed
 
-- Fixed macOS background input leaving the target app in front of yours when it came forward right after a quick click in your app that macOS was slow to hit-test
+- Fixed macOS background input leaving the target app in front of yours when it came forward right after a quick click in your app that macOS was slow to hit-test ([#16553](https://github.com/can1357/oh-my-pi/pull/16553) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.4] - 2026-10-20
 
