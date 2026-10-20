@@ -59,6 +59,17 @@ async function createGitRepo(): Promise<string> {
 	return repo;
 }
 
+async function createNonRepoDir(prefix: string): Promise<string> {
+	const candidates = process.platform === "win32" ? [os.tmpdir()] : [os.tmpdir(), "/tmp"];
+	for (const candidate of candidates) {
+		if (vcs.git(candidate)) continue;
+		const dir = await fs.mkdtemp(path.join(candidate, prefix));
+		tempDirs.push(dir);
+		return dir;
+	}
+	throw new Error("No repository-free temp directory available for getRepoRoot test.");
+}
+
 afterEach(async () => {
 	vi.restoreAllMocks();
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
@@ -262,15 +273,18 @@ describe("worktree isolation helpers", () => {
 			);
 
 			const handle = await ensureIsolation(repo, "retry-path-unavailable");
-
-			expect(isoResolve).toHaveBeenCalledWith(null);
-			expect(isoStart.mock.calls.map(call => call[0])).toEqual([
-				natives.IsoBackendKind.Btrfs,
-				natives.IsoBackendKind.Rcopy,
-			]);
-			expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
-			expect(handle.fellBack).toBe(true);
-			expect(handle.fallbackReason).toBe(unavailable.message);
+			try {
+				expect(isoResolve).toHaveBeenCalledWith(null);
+				expect(isoStart.mock.calls.map(call => call[0])).toEqual([
+					natives.IsoBackendKind.Btrfs,
+					natives.IsoBackendKind.Rcopy,
+				]);
+				expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
+				expect(handle.fellBack).toBe(true);
+				expect(handle.fallbackReason).toBe(unavailable.message);
+			} finally {
+				await cleanupIsolation(handle);
+			}
 		});
 
 		it("uses compact isolation paths that do not embed long task ids", async () => {
@@ -290,12 +304,16 @@ describe("worktree isolation helpers", () => {
 			try {
 				const longTaskId = "orchestrate-goal-execution.Test1-0982d2a";
 				const handle = await ensureIsolation(repo, longTaskId);
-				const mergedLeaf = path.basename(handle.mergedDir);
-				const isolationSegment = path.basename(path.dirname(handle.mergedDir));
+				try {
+					const mergedLeaf = path.basename(handle.mergedDir);
+					const isolationSegment = path.basename(path.dirname(handle.mergedDir));
 
-				expect(mergedLeaf).toBe("m");
-				expect(isolationSegment).not.toContain(longTaskId);
-				expect(isolationSegment.length).toBeLessThanOrEqual(12);
+					expect(mergedLeaf).toBe("m");
+					expect(isolationSegment).not.toContain(longTaskId);
+					expect(isolationSegment.length).toBeLessThanOrEqual(12);
+				} finally {
+					await cleanupIsolation(handle);
+				}
 			} finally {
 				if (originalWorktreeDir === undefined) {
 					delete process.env.OMP_WORKTREE_DIR;
@@ -306,6 +324,74 @@ describe("worktree isolation helpers", () => {
 			}
 		});
 
+		it("starts isolated checkouts from clean HEAD even when the parent checkout is dirty", async () => {
+			const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-base-"));
+			tempDirs.push(worktreeBase);
+			const parentOnly = path.join(repo, "parent-only.txt");
+			delete process.env.OMP_WORKTREE_DIR;
+			setWorktreesDir(worktreeBase);
+			await fs.writeFile(path.join(repo, "merged.txt"), "parent dirty tracked change\n");
+			await fs.writeFile(parentOnly, "parent-only untracked\n");
+			await runGit(repo, ["add", "merged.txt"]);
+			vi.spyOn(natives, "isoResolve").mockResolvedValue({
+				kind: natives.IsoBackendKind.Rcopy,
+				candidates: [natives.IsoBackendKind.Rcopy],
+				fellBack: false,
+				reason: undefined,
+			});
+			vi.spyOn(natives, "isoStart").mockImplementation(async (_backend, source, merged) => {
+				await fs.cp(source, merged, { recursive: true });
+			});
+
+			try {
+				const handle = await ensureIsolation(repo, "dirty-parent-clean-head");
+				try {
+					const [status, mergedContent, parentOnlyExists] = await Promise.all([
+						runGit(handle.mergedDir, ["status", "--porcelain=v1"]),
+						fs.readFile(path.join(handle.mergedDir, "merged.txt"), "utf8"),
+						Bun.file(path.join(handle.mergedDir, "parent-only.txt")).exists(),
+					]);
+
+					expect(status).toBe("");
+					expect(mergedContent).toBe("base version\n");
+					expect(parentOnlyExists).toBe(false);
+				} finally {
+					await cleanupIsolation(handle);
+				}
+			} finally {
+				await runGit(repo, ["reset", "-q", "--hard", initialSha]);
+				await fs.rm(parentOnly, { force: true });
+				if (originalWorktreeDir === undefined) {
+					delete process.env.OMP_WORKTREE_DIR;
+				} else {
+					process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+				}
+				setWorktreesDir(undefined);
+			}
+		});
+
+		// First mutator: runs on the pristine fixture, so no reset is needed. Leaves
+		// behind a stash that the next test's reset clears.
+		it("does not pop an unrelated pre-existing stash when the working tree is clean", async () => {
+			// A tracked-file edit makes the cheapest possible "unrelated" stash; the
+			// kind of stash is irrelevant — mergeTaskBranches must not pop one it did
+			// not create. Stashing restores the working tree to clean.
+			await fs.writeFile(path.join(repo, "merged.txt"), "unrelated user change\n");
+			await runGit(repo, ["stash", "push", "-m", "preexisting-user-stash"]);
+
+			const result = await mergeTaskBranches(repo, []);
+
+			const [stashList, status] = await Promise.all([
+				runGit(repo, ["stash", "list"]),
+				runGit(repo, ["status", "--porcelain=v1"]),
+			]);
+			expect(result).toEqual({ failed: [], merged: [] });
+			const stashEntries = stashList.split("\n").filter(Boolean);
+			expect(stashEntries).toHaveLength(1);
+			expect(stashEntries[0]).toContain("preexisting-user-stash");
+			expect(status).toBe("");
+		});
 		// These rewind the fixture so each starts from the pristine post-`initial`
 		// state: `reset --hard` restores HEAD + index + tracked files and the parallel
 		// `stash clear` drops any leftover stash. No `git clean` is needed — none of
@@ -333,6 +419,58 @@ describe("worktree isolation helpers", () => {
 				expect(status).toBe("M  staged.txt");
 				expect(cached).toContain("+local staged change");
 				expect(stashList).toBe("");
+			});
+
+			it("merges task branches while preserving unrelated untracked files", async () => {
+				await fs.mkdir(path.join(repo, "finish-2026-09-22"), { recursive: true });
+				const untrackedPath = path.join(repo, "finish-2026-09-22", "additive.patch");
+				await fs.writeFile(untrackedPath, "manual landing note\n");
+				try {
+					const result = await mergeTaskBranches(repo, [{ branchName: TASK_BRANCH, taskId: "task-1" }]);
+
+					const [mergedContent, untrackedContent, status, stashList] = await Promise.all([
+						fs.readFile(path.join(repo, "merged.txt"), "utf8"),
+						fs.readFile(untrackedPath, "utf8"),
+						runGit(repo, ["status", "--porcelain=v1"]),
+						runGit(repo, ["stash", "list"]),
+					]);
+					expect(result).toEqual({ failed: [], merged: [TASK_BRANCH] });
+					expect(mergedContent).toBe("task branch change\n");
+					expect(untrackedContent).toBe("manual landing note\n");
+					expect(status).toBe("?? finish-2026-09-22/");
+					expect(stashList).toBe("");
+				} finally {
+					await fs.rm(path.join(repo, "finish-2026-09-22"), { recursive: true, force: true });
+				}
+			});
+
+			it("reports a real untracked path collision instead of hiding it in the merge stash", async () => {
+				const collisionBranch = "task/untracked-collision";
+				await runGit(repo, ["checkout", "-q", "-b", collisionBranch, initialSha]);
+				await fs.writeFile(path.join(repo, "collision.txt"), "task output\n");
+				await runGit(repo, ["add", "collision.txt"]);
+				await runGit(repo, ["commit", "-q", "-m", "add collision fixture"]);
+				await runGit(repo, ["checkout", "-q", BASE_BRANCH]);
+				await fs.writeFile(path.join(repo, "collision.txt"), "local untracked\n");
+				try {
+					const result = await mergeTaskBranches(repo, [{ branchName: collisionBranch, taskId: "task-1" }]);
+					const [status, unmerged, content] = await Promise.all([
+						runGit(repo, ["status", "--porcelain=v1"]),
+						runGit(repo, ["ls-files", "--unmerged"]),
+						fs.readFile(path.join(repo, "collision.txt"), "utf8"),
+					]);
+
+					expect(result.merged).toEqual([]);
+					expect(result.failed).toEqual([collisionBranch]);
+					expect(result.conflict).toContain(collisionBranch);
+					expect(result.conflict).toContain("collision.txt");
+					expect(status).toBe("?? collision.txt");
+					expect(unmerged).toBe("");
+					expect(content).toBe("local untracked\n");
+				} finally {
+					await cleanupTaskBranches(repo, [collisionBranch]);
+					await fs.rm(path.join(repo, "collision.txt"), { force: true });
+				}
 			});
 
 			// Merges never stash: a pick that would overwrite uncommitted edits is
@@ -562,8 +700,7 @@ describe("getRepoRoot", () => {
 	});
 
 	it("preserves the generic git-not-found error for directories without any repo", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-norepo-"));
-		tempDirs.push(dir);
+		const dir = await createNonRepoDir("omp-norepo-");
 		await expect(getRepoRoot(dir)).rejects.toThrow("Git repository not found for isolated task execution.");
 	});
 
@@ -1007,19 +1144,23 @@ describe("detachGitDir", () => {
 		setWorktreesDir(worktreeBase);
 		try {
 			const handle = await ensureIsolation(wt, "parent-isolation-guard");
-			await runGit(handle.mergedDir, ["checkout", "-q", "-b", "feature/a", baseSha]);
-			await fs.writeFile(path.join(handle.mergedDir, "a.txt"), "task a\n");
-			await runGit(handle.mergedDir, ["add", "a.txt"]);
-			await runGit(handle.mergedDir, ["commit", "-q", "-m", "task a"]);
+			try {
+				await runGit(handle.mergedDir, ["checkout", "-q", "-b", "feature/a", baseSha]);
+				await fs.writeFile(path.join(handle.mergedDir, "a.txt"), "task a\n");
+				await runGit(handle.mergedDir, ["add", "a.txt"]);
+				await runGit(handle.mergedDir, ["commit", "-q", "-m", "task a"]);
 
-			// Parent branch, HEAD, and worktree list are all unchanged.
-			expect(await runGit(wt, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe("feature/parent");
-			expect(await runGit(wt, ["branch", "--format=%(refname:short)"])).not.toContain("feature/a");
-			const worktrees = (await runGit(wt, ["worktree", "list", "--porcelain"]))
-				.split("\n")
-				.filter(line => line.startsWith("worktree "));
-			expect(worktrees).toHaveLength(2); // main + the linked parent only
-			expect(await runGit(handle.mergedDir, ["rev-parse", "HEAD^"])).toBe(baseSha);
+				// Parent branch, HEAD, and worktree list are all unchanged.
+				expect(await runGit(wt, ["rev-parse", "--abbrev-ref", "HEAD"])).toBe("feature/parent");
+				expect(await runGit(wt, ["branch", "--format=%(refname:short)"])).not.toContain("feature/a");
+				const worktrees = (await runGit(wt, ["worktree", "list", "--porcelain"]))
+					.split("\n")
+					.filter(line => line.startsWith("worktree "));
+				expect(worktrees).toHaveLength(2); // main + the linked parent only
+				expect(await runGit(handle.mergedDir, ["rev-parse", "HEAD^"])).toBe(baseSha);
+			} finally {
+				await cleanupIsolation(handle);
+			}
 		} finally {
 			setWorktreesDir(undefined);
 			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
