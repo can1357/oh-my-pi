@@ -2,8 +2,11 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { Api, AssistantMessage, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { completionsRequestDropsOwnThinking, convertMessages } from "@oh-my-pi/pi-ai/providers/openai-completions";
-import { resolveOpenAICompatPolicy } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import {
+	completionsRequestDropsOwnThinking,
+	type OpenAICompletionsThinkingRequest,
+	streamOpenAICompletions,
+} from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -524,20 +527,83 @@ describe("countMessage chat-completions thinking", () => {
 		expect(new Tokenizer(dropping).countsAlike(dropping)).toBe(true);
 	});
 
+	// The encoder's own payload is the oracle: the predicate must agree with what
+	// `streamOpenAICompletions` sends, through compat views, forced-choice
+	// downgrades and tools whose schema the provider omits.
+	const readTool = { name: "read", description: "Read a file", parameters: { type: "object", properties: {} } };
+	// `enum` values that cannot match `type: "null"`: the encoder omits this tool.
+	const rejectedTool = {
+		name: "read",
+		description: "Read a file",
+		parameters: { type: "object", properties: { mode: { enum: ["A", "B"], type: "null" } } },
+	};
+	const kimi = buildModel({
+		id: "kimi-k2.6",
+		name: "Kimi",
+		api: "openai-completions",
+		provider: "opencode-go",
+		baseUrl: "https://opencode.ai/zen/go/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 32_768,
+	});
+
+	async function encodedCarriesThinking(
+		model: Model<"openai-completions">,
+		turn: AssistantMessage,
+		request: OpenAICompletionsThinkingRequest,
+	): Promise<boolean> {
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamOpenAICompletions(
+			model,
+			{ messages: [turn], tools: request.tools ? [...request.tools] : undefined },
+			{
+				apiKey: "test-key",
+				reasoning: request.reasoning,
+				disableReasoning: request.disableReasoning,
+				toolChoice: request.toolChoice,
+				fetch: async () => new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } }),
+				onPayload: payload => resolve(payload),
+			},
+		);
+		return JSON.stringify(await promise).includes(THINKING);
+	}
+
 	test.each([
-		{ name: "replay off", replay: false },
-		{ name: "replay on", replay: true },
-		{ name: "thinking view active", replay: false, effort: Effort.Medium, alternate: true },
-		{ name: "thinking view inactive", replay: false, alternate: true },
-		{ name: "thinking view suppressed", replay: false, effort: Effort.Medium, alternate: true, disabled: true },
-	])("matches the encoded request for $name", ({ replay, effort, alternate, disabled }) => {
-		const model = completionsModel("Qwen3.8-27B", replay, alternate);
+		{ name: "replay off", model: () => completionsModel("Qwen3.8-27B", false), request: {} },
+		{ name: "replay on", model: () => completionsModel("Qwen3.8-27B", true), request: {} },
+		{
+			name: "thinking view active",
+			model: () => completionsModel("Qwen3.8-27B", false, true),
+			request: { reasoning: Effort.Medium },
+		},
+		{ name: "thinking view inactive", model: () => completionsModel("Qwen3.8-27B", false, true), request: {} },
+		{
+			name: "thinking view suppressed",
+			model: () => completionsModel("Qwen3.8-27B", false, true),
+			request: { reasoning: Effort.Medium, disableReasoning: true },
+		},
+		{
+			name: "forced tool suppresses the thinking view",
+			model: () => kimi,
+			request: { reasoning: Effort.Medium, toolChoice: { type: "tool", name: "read" }, tools: [readTool] },
+		},
+		{
+			// The forced tool's schema is omitted, so the force drops and thinking replays.
+			name: "forced tool omitted by schema conversion",
+			model: () => kimi,
+			request: { reasoning: Effort.Medium, toolChoice: { type: "tool", name: "read" }, tools: [rejectedTool] },
+		},
+	] satisfies {
+		name: string;
+		model: () => Model<"openai-completions">;
+		request: OpenAICompletionsThinkingRequest;
+	}[])("matches the encoded request for $name", async ({ model: makeModel, request }) => {
+		const model = makeModel();
 		const turn = thinkingTurn(model, "reasoning_content");
-		const request = { reasoning: effort, disableReasoning: disabled, hasTools: true };
-		const selected = resolveOpenAICompatPolicy(model, { endpoint: "chat-completions", ...request }).compat;
-		const compat =
-			model.compat.whenThinking && selected === model.compat.whenThinking ? model.compat.whenThinking : model.compat;
-		const carriesThinking = JSON.stringify(convertMessages(model, { messages: [turn] }, compat)).includes(THINKING);
+		const carriesThinking = await encodedCarriesThinking(model, turn, request);
 		const dropsOwnThinking = completionsRequestDropsOwnThinking(model, request);
 		expect(dropsOwnThinking).toBe(!carriesThinking);
 		const count = new Tokenizer(model, { dropsOwnThinking }).countMessage(turn, { excludeEncryptedReasoning: true });

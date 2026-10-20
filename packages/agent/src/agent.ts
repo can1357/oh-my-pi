@@ -886,7 +886,6 @@ export class Agent {
 						reasoning: this.#state.thinkingLevel,
 						disableReasoning: this.#state.disableReasoning,
 						toolChoice: request?.toolChoice,
-						hasTools: (tools?.length ?? 0) > 0,
 						tools,
 					})
 				: undefined,

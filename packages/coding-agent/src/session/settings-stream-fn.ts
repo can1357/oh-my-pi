@@ -151,7 +151,6 @@ export function createSettingsAwareStreamFn(
 			reasoning: streamOptions?.reasoning,
 			disableReasoning: streamOptions?.disableReasoning || streamOptions?.forceReasoningOff,
 			toolChoice: streamOptions?.toolChoice,
-			hasTools: (context.tools?.length ?? 0) > 0,
 			tools: context.tools,
 		});
 		const tokenizerKey = `${model.provider}\0${model.api}\0${model.id}\0${nativeHistoryReplay}\0${dropsOwnThinking}`;

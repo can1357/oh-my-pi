@@ -2022,6 +2022,125 @@ function applyOpenAIChatCompletionsPromptCachePolicy(
 		markLatestStableChatCompletionsCacheBreakpoint(params.messages);
 }
 
+/** The tools and tool choice `buildParams` sends, after schema conversion and every downgrade. */
+interface OpenAICompletionsToolSelection {
+	tools: ChatCompletionTool[] | undefined;
+	toolChoice: OpenAICompletionsParams["tool_choice"];
+	toolStrictMode: AppliedToolStrictMode;
+	strictToolsApplied: boolean;
+}
+
+/**
+ * Resolve the request's `tools` and `tool_choice` exactly as `buildParams`
+ * sends them: tools whose schema the provider rejects are omitted, and a forced
+ * choice is downgraded or dropped when its tool or the host's support is gone.
+ * {@link completionsRequestDropsOwnThinking} reuses it, since the surviving
+ * choice selects the compat view that decides whether past thinking is sent.
+ */
+function selectOpenAICompletionsTools(
+	model: Model<"openai-completions">,
+	contextTools: Tool[] | undefined,
+	messages: Message[],
+	options: OpenAICompletionsOptions | undefined,
+	initialCompat: ResolvedOpenAICompat,
+	toolStrictModeOverride?: ToolStrictModeOverride,
+	logOmittedTools = true,
+): OpenAICompletionsToolSelection {
+	let tools: ChatCompletionTool[] | undefined;
+	let toolChoice: OpenAICompletionsParams["tool_choice"];
+	let toolStrictMode: AppliedToolStrictMode = "none";
+	let strictToolsApplied = false;
+
+	if (contextTools?.length) {
+		const builtTools = convertTools(contextTools, initialCompat, toolStrictModeOverride, logOmittedTools);
+		tools = builtTools.tools;
+		toolStrictMode = builtTools.toolStrictMode;
+		strictToolsApplied = builtTools.strictToolsApplied;
+	} else if (contextTools === undefined && hasToolHistory(messages)) {
+		// Anthropic (via LiteLLM/proxy) requires the `tools` param when the conversation
+		// contains tool_calls/tool_results, even when no tools are offered this turn.
+		// Only inject the sentinel when the caller passed `context.tools = undefined`
+		// (i.e. tools were not specified at all). An explicit `context.tools = []` means
+		// the caller opted out of tools for this turn (as /btw and IRC background replies
+		// do via AgentSession.runEphemeralTurn) — honour that intent and emit nothing,
+		// so LiteLLM → Bedrock never sees an empty `toolConfig` block.
+		tools = [];
+	}
+
+	if (options?.toolChoice && initialCompat.supportsToolChoice) {
+		toolChoice = mapToOpenAICompletionsToolChoice(options.toolChoice);
+	}
+	const forcedToolName =
+		typeof toolChoice === "object" && toolChoice !== null && "function" in toolChoice
+			? toolChoice.function.name
+			: undefined;
+	if (typeof toolChoice === "object" && toolChoice !== null && !initialCompat.supportsNamedToolChoice) {
+		// String-only hosts (llama.cpp, LM Studio) accept only none/auto/required,
+		// so a named object degrades to "required". "required" alone lets the host
+		// satisfy the hard choice with ANY advertised tool, defeating the named
+		// force. When the forced tool is present, narrow the advertised tools to it
+		// so "required" still enforces that specific call (mirrors the Ollama chat
+		// transport's selectToolsForToolChoice). When it is absent, leave the full
+		// list intact and let the absent-tool guard below drop the choice for an
+		// unforced turn.
+		if (
+			forcedToolName !== undefined &&
+			Array.isArray(tools) &&
+			tools.some(tool => tool.type === "function" && tool.function.name === forcedToolName)
+		) {
+			tools = tools.filter(tool => tool.type === "function" && tool.function.name === forcedToolName);
+		}
+		toolChoice = "required";
+	}
+	if (
+		forcedToolName !== undefined &&
+		Array.isArray(tools) &&
+		tools.some(tool => tool.type === "function" && tool.function.name === forcedToolName) &&
+		hasActiveNativeKimiK3Reasoning(model, options)
+	) {
+		// Native K3 reasoning is incompatible with selecting a specific function.
+		// Preserve the hard tool-use contract while letting K3 choose among tools.
+		toolChoice = "required";
+	}
+	if (isForcedToolChoice(toolChoice) && !initialCompat.supportsForcedToolChoice) {
+		// Some thinking-required OpenAI-compatible models reject forced
+		// `tool_choice` while still accepting tools with the default auto
+		// selector. Keep the tool available and let the model choose it.
+		toolChoice = "auto";
+	}
+
+	if ((!Array.isArray(tools) || tools.length === 0) && (toolChoice === "none" || isForcedToolChoice(toolChoice))) {
+		// `tool_choice: "none"` with no tools to gate is redundant and also
+		// trips LiteLLM → Bedrock: the proxy serializes the directive into a
+		// `toolConfig` block, and Bedrock requires `toolConfig.tools` to be
+		// non-empty whenever the conversation already holds `toolUse`/`toolResult`
+		// content. Drop it whenever the resolved tools list is missing or empty.
+		// Side-channel turns hit this: `/btw` and IRC background replies route
+		// through `AgentSession.runEphemeralTurn`, which sets `context.tools = []`
+		// and `toolChoice: "none"` (see packages/coding-agent/src/session/agent-session.ts).
+		// The same empty-tools case applies after leftover-union quarantine: a
+		// leftover `"required"` / named force would 400 just like the bad schema.
+		toolChoice = undefined;
+	}
+
+	if (
+		forcedToolName !== undefined &&
+		(!Array.isArray(tools) || !tools.some(tool => tool.type === "function" && tool.function.name === forcedToolName))
+	) {
+		// A forced named tool_choice is only valid when the same request offers
+		// that function in `tools`. Active-tool filtering normally enforces this
+		// before provider dispatch; this guard keeps raw provider callers from
+		// emitting a self-inconsistent OpenAI-compatible payload.
+		toolChoice = undefined;
+	}
+
+	if (shouldDropAutoToolChoiceForReasoning(model, initialCompat, toolChoice, options)) {
+		toolChoice = undefined;
+	}
+
+	return { tools, toolChoice, toolStrictMode, strictToolsApplied };
+}
+
 function buildParams(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -2087,100 +2206,18 @@ function buildParams(
 	}
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
 
-	if (context.tools?.length) {
-		const builtTools = convertTools(context.tools, initialCompat, toolStrictModeOverride);
-		params.tools = builtTools.tools;
-		toolStrictMode = builtTools.toolStrictMode;
-		strictToolsApplied = builtTools.strictToolsApplied;
-	} else if (context.tools === undefined && hasToolHistory(context.messages)) {
-		// Anthropic (via LiteLLM/proxy) requires the `tools` param when the conversation
-		// contains tool_calls/tool_results, even when no tools are offered this turn.
-		// Only inject the sentinel when the caller passed `context.tools = undefined`
-		// (i.e. tools were not specified at all). An explicit `context.tools = []` means
-		// the caller opted out of tools for this turn (as /btw and IRC background replies
-		// do via AgentSession.runEphemeralTurn) — honour that intent and emit nothing,
-		// so LiteLLM → Bedrock never sees an empty `toolConfig` block.
-		params.tools = [];
-	}
-
-	if (options?.toolChoice && initialCompat.supportsToolChoice) {
-		params.tool_choice = mapToOpenAICompletionsToolChoice(options.toolChoice);
-	}
-	const forcedToolName =
-		typeof params.tool_choice === "object" && params.tool_choice !== null && "function" in params.tool_choice
-			? params.tool_choice.function.name
-			: undefined;
-	if (
-		typeof params.tool_choice === "object" &&
-		params.tool_choice !== null &&
-		!initialCompat.supportsNamedToolChoice
-	) {
-		// String-only hosts (llama.cpp, LM Studio) accept only none/auto/required,
-		// so a named object degrades to "required". "required" alone lets the host
-		// satisfy the hard choice with ANY advertised tool, defeating the named
-		// force. When the forced tool is present, narrow the advertised tools to it
-		// so "required" still enforces that specific call (mirrors the Ollama chat
-		// transport's selectToolsForToolChoice). When it is absent, leave the full
-		// list intact and let the absent-tool guard below drop the choice for an
-		// unforced turn.
-		if (
-			forcedToolName !== undefined &&
-			Array.isArray(params.tools) &&
-			params.tools.some(tool => tool.type === "function" && tool.function.name === forcedToolName)
-		) {
-			params.tools = params.tools.filter(tool => tool.type === "function" && tool.function.name === forcedToolName);
-		}
-		params.tool_choice = "required";
-	}
-	if (
-		forcedToolName !== undefined &&
-		Array.isArray(params.tools) &&
-		params.tools.some(tool => tool.type === "function" && tool.function.name === forcedToolName) &&
-		hasActiveNativeKimiK3Reasoning(model, options)
-	) {
-		// Native K3 reasoning is incompatible with selecting a specific function.
-		// Preserve the hard tool-use contract while letting K3 choose among tools.
-		params.tool_choice = "required";
-	}
-	if (isForcedToolChoice(params.tool_choice) && !initialCompat.supportsForcedToolChoice) {
-		// Some thinking-required OpenAI-compatible models reject forced
-		// `tool_choice` while still accepting tools with the default auto
-		// selector. Keep the tool available and let the model choose it.
-		params.tool_choice = "auto";
-	}
-
-	if (
-		(!Array.isArray(params.tools) || params.tools.length === 0) &&
-		(params.tool_choice === "none" || isForcedToolChoice(params.tool_choice))
-	) {
-		// `tool_choice: "none"` with no tools to gate is redundant and also
-		// trips LiteLLM → Bedrock: the proxy serializes the directive into a
-		// `toolConfig` block, and Bedrock requires `toolConfig.tools` to be
-		// non-empty whenever the conversation already holds `toolUse`/`toolResult`
-		// content. Drop it whenever the resolved tools list is missing or empty.
-		// Side-channel turns hit this: `/btw` and IRC background replies route
-		// through `AgentSession.runEphemeralTurn`, which sets `context.tools = []`
-		// and `toolChoice: "none"` (see packages/coding-agent/src/session/agent-session.ts).
-		// The same empty-tools case applies after leftover-union quarantine: a
-		// leftover `"required"` / named force would 400 just like the bad schema.
-		delete params.tool_choice;
-	}
-
-	if (
-		forcedToolName !== undefined &&
-		(!Array.isArray(params.tools) ||
-			!params.tools.some(tool => tool.type === "function" && tool.function.name === forcedToolName))
-	) {
-		// A forced named tool_choice is only valid when the same request offers
-		// that function in `tools`. Active-tool filtering normally enforces this
-		// before provider dispatch; this guard keeps raw provider callers from
-		// emitting a self-inconsistent OpenAI-compatible payload.
-		delete params.tool_choice;
-	}
-
-	if (shouldDropAutoToolChoiceForReasoning(model, initialCompat, params.tool_choice, options)) {
-		delete params.tool_choice;
-	}
+	const toolSelection = selectOpenAICompletionsTools(
+		model,
+		context.tools,
+		context.messages,
+		options,
+		initialCompat,
+		toolStrictModeOverride,
+	);
+	if (toolSelection.tools !== undefined) params.tools = toolSelection.tools;
+	if (toolSelection.toolChoice !== undefined) params.tool_choice = toolSelection.toolChoice;
+	toolStrictMode = toolSelection.toolStrictMode;
+	strictToolsApplied = toolSelection.strictToolsApplied;
 
 	const finalPolicy = resolveOpenAICompatPolicy(model, {
 		endpoint: "chat-completions",
@@ -2381,61 +2418,55 @@ export function completionsDropsOwnThinking(model: {
 
 /** Request state that selects the chat-completions compat view {@link convertMessages} encodes with. */
 export interface OpenAICompletionsThinkingRequest {
-	reasoning?: string;
+	reasoning?: OpenAICompletionsOptions["reasoning"];
 	disableReasoning?: boolean;
 	toolChoice?: ToolChoice;
-	hasTools?: boolean;
-	/** Advertised tools, used to verify a named force survives request construction. */
-	tools?: readonly { name: string }[];
+	/** Tools offered on the request; converted as `buildParams` converts them, so omitted schemas drop out. */
+	tools?: readonly Tool[];
 }
 
 /**
- * Whether a chat-completions request drops its own prior thinking. A supported
- * forced choice with an advertised tool survives `buildParams`; other choices
- * may be downgraded or omitted, so count thinking if any fallback sends it.
+ * Whether a chat-completions request drops its own prior thinking. Resolves
+ * the request's surviving tools and tool choice with the same
+ * {@link selectOpenAICompletionsTools} `buildParams` uses, then the compat view
+ * that choice selects, so the counter follows the encoder through every
+ * forced-choice downgrade and omitted tool schema.
  */
 export function completionsRequestDropsOwnThinking(model: Model, request: OpenAICompletionsThinkingRequest): boolean {
 	if (completionsDropsOwnThinking(model)) return true;
-	const compat = model.compat;
-	if (model.api !== "openai-completions" || compat === undefined || !("replayReasoningContent" in compat)) {
+	if (
+		model.api !== "openai-completions" ||
+		model.compat === undefined ||
+		!("replayReasoningContent" in model.compat)
+	) {
 		return false;
 	}
-	const forcedChoice = request.toolChoice && mapToOpenAICompletionsToolChoice(request.toolChoice);
-	const initialCompat = resolveOpenAICompatPolicy(model, {
-		endpoint: "chat-completions",
+	const completionsModel = model as Model<"openai-completions">;
+	const options: OpenAICompletionsOptions = {
 		reasoning: request.reasoning,
 		disableReasoning: request.disableReasoning,
-		toolChoice: forcedChoice,
-		hasTools: request.hasTools,
-	}).compat;
-	if (!compatDropsOwnThinking(model, initialCompat)) return false;
-	const keepsForcedChoice =
-		forcedChoice !== undefined &&
-		isForcedToolChoice(forcedChoice) &&
-		request.hasTools === true &&
-		initialCompat.supportsToolChoice === true &&
-		initialCompat.supportsForcedToolChoice === true &&
-		(typeof forcedChoice !== "object" ||
-			(initialCompat.supportsNamedToolChoice === true &&
-				request.tools?.some(tool => tool.name === forcedChoice.function.name) === true));
-	if (request.toolChoice === undefined || keepsForcedChoice) return true;
-	const autoCompat = resolveOpenAICompatPolicy(model, {
-		endpoint: "chat-completions",
-		reasoning: request.reasoning,
-		disableReasoning: request.disableReasoning,
-		toolChoice: "auto",
-		hasTools: request.hasTools,
-	}).compat;
-	if (!compatDropsOwnThinking(model, autoCompat)) return false;
-	return compatDropsOwnThinking(
-		model,
-		resolveOpenAICompatPolicy(model, {
-			endpoint: "chat-completions",
-			reasoning: request.reasoning,
-			disableReasoning: request.disableReasoning,
-			hasTools: request.hasTools,
-		}).compat,
+		toolChoice: request.toolChoice,
+	};
+	const tools = request.tools ? [...request.tools] : undefined;
+	const initialCompat = resolveOpenAICompatForRequest(completionsModel, options, Boolean(tools?.length))
+		.compat as ResolvedOpenAICompat;
+	const selection = selectOpenAICompletionsTools(
+		completionsModel,
+		tools,
+		[],
+		options,
+		initialCompat,
+		undefined,
+		false,
 	);
+	const finalCompat = resolveOpenAICompatPolicy(completionsModel, {
+		endpoint: "chat-completions",
+		reasoning: request.reasoning,
+		disableReasoning: request.disableReasoning,
+		toolChoice: selection.toolChoice,
+		hasTools: Array.isArray(selection.tools) && selection.tools.length > 0,
+	}).compat;
+	return compatDropsOwnThinking(model, finalCompat);
 }
 
 export function convertMessages(
@@ -2956,6 +2987,7 @@ function convertTools(
 	tools: Tool[],
 	compat: ResolvedOpenAICompat,
 	toolStrictModeOverride?: ToolStrictModeOverride,
+	logOmittedTools = true,
 ): BuiltOpenAICompletionTools {
 	const rejectRootObjectUnion = compat.rejectRootObjectUnion;
 	const adaptedTools = tools.map(tool => {
@@ -3009,9 +3041,10 @@ function convertTools(
 					: wireParameters;
 		const violation = findStrictToolSchemaViolation(emittedParameters, "#", { rejectRootObjectUnion });
 		if (violation) {
-			logger.warn(
-				`Tool "${tool.name}" omitted from the openai-completions request: its parameter schema is invalid for this provider at ${violation} (an enum/const value cannot match its declared type, or leftover xAI object-root union). Other tools are unaffected.`,
-			);
+			if (logOmittedTools)
+				logger.warn(
+					`Tool "${tool.name}" omitted from the openai-completions request: its parameter schema is invalid for this provider at ${violation} (an enum/const value cannot match its declared type, or leftover xAI object-root union). Other tools are unaffected.`,
+				);
 			continue;
 		}
 		if (includeStrict) anyStrictEmitted = true;
