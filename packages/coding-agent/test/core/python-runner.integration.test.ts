@@ -360,32 +360,37 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		30_000,
 	);
 
-	it.skipIf(process.platform !== "linux")(
-		"cancelling %pip stops the installer tree when /proc cannot be listed",
-		async () => {
-			using tempDir = TempDir.createSync("@python-runner-pip-cancel-no-procfs-");
-			const { kernel } = await startPiplessKernel(tempDir.path(), {
-				ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
-				// Denies listing /proc the way some containers and chroots do.
-				sitecustomize: [
-					"import os",
-					"_listdir = os.listdir",
-					"def _denied(path='.'):",
-					"    if os.fspath(path) == '/proc':",
-					"        raise PermissionError(13, 'Permission denied', '/proc')",
-					"    return _listdir(path)",
-					"os.listdir = _denied",
-				].join("\n"),
-			});
-			try {
-				const pids = await cancelInstall(kernel, "%pip install six");
-				expect(pids.filter(isRunning)).toEqual([]);
-			} finally {
-				await kernel.shutdown();
-			}
-		},
-		30_000,
-	);
+	for (const [procfs, listing] of [
+		["cannot be listed", "raise PermissionError(13, 'Permission denied', '/proc')"],
+		["is an empty, unmounted directory", "return []"],
+	] as const) {
+		it.skipIf(process.platform !== "linux")(
+			`cancelling %pip stops the installer tree when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-cancel-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+					// What listing /proc gives in some containers and chroots.
+					sitecustomize: [
+						"import os",
+						"_listdir = os.listdir",
+						"def _listdir_without_procfs(path='.'):",
+						"    if os.fspath(path) == '/proc':",
+						`        ${listing}`,
+						"    return _listdir(path)",
+						"os.listdir = _listdir_without_procfs",
+					].join("\n"),
+				});
+				try {
+					const pids = await cancelInstall(kernel, "%pip install six");
+					expect(pids.filter(isRunning)).toEqual([]);
+				} finally {
+					await kernel.shutdown();
+				}
+			},
+			30_000,
+		);
+	}
 
 	it.skipIf(process.platform === "win32")(
 		"cancelling %pip while uv installs pip stops uv and what it spawned",
