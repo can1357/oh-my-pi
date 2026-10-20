@@ -37,6 +37,7 @@ import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identit
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
@@ -2356,6 +2357,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const pending = pendingPromptRefresh;
 			if (!pending) break;
 			await pending;
+		}
+	};
+	/**
+	 * The side-request variant of {@link awaitPromptRefresh}: the wait ends when
+	 * the caller's signal aborts, so a cancelled side request does not stay
+	 * blocked on a rebuild that may never finish.
+	 */
+	const awaitSideRequestPromptRefresh = async (signal?: AbortSignal): Promise<void> => {
+		await Promise.resolve();
+		for (;;) {
+			const pending = pendingPromptRefresh;
+			if (!pending) break;
+			await untilAborted(signal, pending);
 		}
 	};
 
@@ -4988,8 +5002,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		session.addDisposer(agent.addBeforeModelCallHook(awaitPromptRefresh));
 		// Side requests (ephemeral turns, compaction, handoff) build their own
 		// provider context and never reach the loop's pre-model-call hook, so they
-		// take the same barrier at their own boundary.
-		session.addDisposer(agent.addBeforeSideRequestHook(awaitPromptRefresh));
+		// take the same barrier at their own boundary — and a cancelled side
+		// request stops waiting for the rebuild instead of blocking on it.
+		session.addDisposer(agent.addBeforeSideRequestHook(awaitSideRequestPromptRefresh));
 		// Agent-level tool-call switches: the loop snapshots them per prompt run, so a
 		// change applies from the next run without splitting one response's schema/strip.
 		// The prompt listener above republishes the intent-field guidance.

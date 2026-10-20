@@ -160,6 +160,7 @@ export class SessionHandoff {
 			const handoffContext = await this.#host.agent.buildSideRequestContext(
 				handoffLlmMessages,
 				readBaseSystemPrompt,
+				handoffSignal,
 			);
 			const handoffStreamOptions = this.#host.prepareSimpleStreamOptions(
 				{
