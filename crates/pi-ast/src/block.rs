@@ -72,7 +72,9 @@ fn brace_fallback_for(lang: Option<&str>, path: Option<&str>) -> bool {
 /// structural brace is a closer — a continuation like `} else {` or a lone
 /// `}` — resolves to nothing, mirroring the tree-sitter path's "no block
 /// begins here" verdict. Braces inside string literals and comments are
-/// skipped so they never open or close a group.
+/// skipped so they never open or close a group; so are regular-expression
+/// literals (`/}/`, `/[{]/`), recognised by the token before the `/` (an
+/// operator or opener rather than an operand, which would make it a division).
 fn brace_block_span(code: &str, line: u32) -> Option<BlockRange> {
 	if line == 0 {
 		return None;
@@ -86,6 +88,11 @@ fn brace_block_span(code: &str, line: u32) -> Option<BlockRange> {
 	let mut escaped = false;
 	let mut line_comment = false;
 	let mut block_comment = false;
+	let mut regex = false;
+	let mut regex_class = false;
+	// Last non-whitespace byte seen outside comments, used to tell a regex
+	// literal from a division.
+	let mut prev = 0u8;
 	let mut i = 0usize;
 	while i < bytes.len() {
 		let byte = bytes[i];
@@ -93,6 +100,9 @@ fn brace_block_span(code: &str, line: u32) -> Option<BlockRange> {
 		if byte == b'\n' {
 			row += 1;
 			line_comment = false;
+			// A regex literal never spans lines; a stray `/` ends the guess.
+			regex = false;
+			regex_class = false;
 			escaped = false;
 			i += 1;
 			continue;
@@ -108,6 +118,22 @@ fn brace_block_span(code: &str, line: u32) -> Option<BlockRange> {
 			} else {
 				i += 1;
 			}
+			continue;
+		}
+		if regex {
+			if escaped {
+				escaped = false;
+			} else if byte == b'\\' {
+				escaped = true;
+			} else if byte == b'[' {
+				regex_class = true;
+			} else if byte == b']' {
+				regex_class = false;
+			} else if byte == b'/' && !regex_class {
+				regex = false;
+				prev = b')';
+			}
+			i += 1;
 			continue;
 		}
 		if string_delim != 0 {
@@ -130,9 +156,30 @@ fn brace_block_span(code: &str, line: u32) -> Option<BlockRange> {
 				block_comment = true;
 				i += 2;
 			},
+			b'/'
+				if matches!(
+					prev,
+					0 | b'('
+						| b','
+						| b'='
+						| b':'
+						| b'['
+						| b'!'
+						| b'&'
+						| b'|'
+						| b'?'
+						| b'{'
+						| b'}'
+						| b';'
+				) =>
+			{
+				regex = true;
+				i += 1;
+			},
 			// Backtick template literals are strings too, so a `}` inside one never closes a group.
 			b'"' | b'\'' | b'`' => {
 				string_delim = byte;
+				prev = byte;
 				i += 1;
 			},
 			b'{' if !opener && row == target => {
@@ -153,6 +200,14 @@ fn brace_block_span(code: &str, line: u32) -> Option<BlockRange> {
 			},
 			b'}' if row == target => return None,
 			_ => i += 1,
+		}
+		if !byte.is_ascii_whitespace()
+			&& !regex
+			&& string_delim == 0
+			&& !line_comment
+			&& !block_comment
+		{
+			prev = byte;
 		}
 	}
 	None
@@ -1498,6 +1553,15 @@ mod tests {
 		let code = "Item {\n    property string value: `}`\n    property string open: \
 		            `{`\n}\nRectangle {\n}\n";
 		assert_eq!(resolve(code, "x.qml", 1), Some(BlockRange { start_line: 1, end_line: 4 }));
+	}
+
+	#[test]
+	fn qml_braces_inside_regex_literals_do_not_change_depth() {
+		let code = "Item {\n    property var close: /}/\n    property var open: /[{]\\//\n    \
+		            property real half: width / 2\n    onClicked: { x = /\\}/.test(s) \
+		            }\n}\nRectangle {\n}\n";
+		assert_eq!(resolve(code, "x.qml", 1), Some(BlockRange { start_line: 1, end_line: 6 }));
+		assert_eq!(resolve(code, "x.qml", 7), Some(BlockRange { start_line: 7, end_line: 8 }));
 	}
 
 	#[test]
