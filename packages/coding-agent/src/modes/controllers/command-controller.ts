@@ -29,6 +29,7 @@ import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-exe
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
 import { parseExportArgs } from "../../export/html/args";
 import { shareSession } from "../../export/share";
+import { createCompactErrorReporter } from "../../extensibility/extensions/compact-handler";
 import type { CompactOptions } from "../../extensibility/extensions/types";
 import {
 	diffMentalModelContent,
@@ -2213,18 +2214,25 @@ export class CommandController {
 		this.ctx.ui.requestRender();
 
 		let outcome: CompactionOutcome = "ok";
+		const baseOptions =
+			customInstructionsOrOptions && typeof customInstructionsOrOptions === "object"
+				? customInstructionsOrOptions
+				: undefined;
+		// A failed compaction must reach the extension's `onError` exactly once
+		// (issue #12041). The session reports the failures it owns, but it
+		// rejects some calls before that report — "Compaction already in
+		// progress" is raised before the compaction pass starts — so the same
+		// reporter also runs from the catch below. It collapses both into a
+		// single call and keeps a throwing extension callback from escaping.
+		const reportFailure = createCompactErrorReporter(baseOptions?.onError);
 		try {
 			const instructions = typeof customInstructionsOrOptions === "string" ? customInstructionsOrOptions : undefined;
-			const baseOptions =
-				customInstructionsOrOptions && typeof customInstructionsOrOptions === "object"
-					? customInstructionsOrOptions
-					: undefined;
 			// The slash path passes `mode` positionally; the extension path carries
 			// it inside the options object. Either source wins over no mode.
 			const effectiveMode = mode ?? baseOptions?.mode;
 			const options =
 				baseOptions || effectiveMode
-					? { ...baseOptions, ...(effectiveMode ? { mode: effectiveMode } : {}) }
+					? { ...baseOptions, ...(effectiveMode ? { mode: effectiveMode } : {}), onError: reportFailure }
 					: undefined;
 			await this.ctx.session.compact(instructions, options);
 
@@ -2240,13 +2248,14 @@ export class CommandController {
 			// duplicate transcript, exactly as `/compact` reproduced (#12140).
 			this.ctx.ui.requestRender(true, { clearScrollback: true });
 		} catch (error) {
+			const failure = error instanceof Error ? error : new Error(String(error));
+			reportFailure(failure);
 			if (error instanceof CompactionCancelledError) {
 				outcome = "cancelled";
 				this.ctx.showError("Compaction cancelled");
 			} else {
 				outcome = "failed";
-				const message = error instanceof Error ? error.message : String(error);
-				this.ctx.showError(`Compaction failed: ${message}`);
+				this.ctx.showError(`Compaction failed: ${failure.message}`);
 			}
 		} finally {
 			compactingLoader.stop();

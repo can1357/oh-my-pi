@@ -475,7 +475,9 @@ export interface CompactOptions {
 	onComplete?: (result: CompactionResult) => void;
 	/**
 	 * Invoked when the compaction fails. Always called exactly once per failed
-	 * compaction — `ctx.compact()` itself never rejects (issue #12041).
+	 * compaction — including a compaction rejected before it starts, such as one
+	 * that overlaps a compaction already in progress — and `ctx.compact()` itself
+	 * never rejects (issue #12041).
 	 */
 	onError?: (error: Error) => void;
 	/**
