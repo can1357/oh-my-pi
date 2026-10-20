@@ -1105,21 +1105,25 @@ fn search_file_path<M: Matcher, W: Write>(
 	had_error: &mut bool,
 ) -> io::Result<bool> {
 	let display_path = display_path_for_operand(operand, resolved, path);
-	if opts.refuse_output_file && host.path_is_stdout(path) {
-		// GNU grep refuses to read the file its own output lands in: the
-		// matches it writes would be read back and matched again.
-		*had_error = true;
-		if !opts.no_messages {
-			let _ = writeln!(
-				host.stderr,
-				"grep: {}: input file is also the output",
-				display_path.to_string_lossy()
-			);
-		}
-		return Ok(false);
-	}
 	match host.fs().open(path) {
 		Ok(file) => {
+			if opts.refuse_output_file && host.file_is_stdout(&file) {
+				// GNU grep refuses to read the file its own output lands in:
+				// the matches it writes would be read back and matched
+				// again. The comparison is made on the handle that was
+				// opened, as GNU's `SAME_INODE (st, out_stat)` does, so a
+				// path that is replaced — or a symlink that is retargeted —
+				// between the check and the open cannot slip past it.
+				*had_error = true;
+				if !opts.no_messages {
+					let _ = writeln!(
+						host.stderr,
+						"grep: {}: input file is also the output",
+						display_path.to_string_lossy()
+					);
+				}
+				return Ok(false);
+			}
 			let display = display_path.as_os_str().as_encoded_bytes();
 			match process_reader(matcher, searcher, file, display, opts, out) {
 				Ok(matched) => Ok(matched),
@@ -1431,11 +1435,10 @@ fn execute_search<M: Matcher>(
 		processed_operand = true;
 
 		if operand == OsStr::new("-") {
-			let display = cli
-				.label
-				.as_deref()
-				.unwrap_or_else(|| OsStr::new("(standard input)"))
-				.as_encoded_bytes();
+			// `--label` names standard input everywhere else, so it names it
+			// in the refusal diagnostic too.
+			let input_name = cli.label.as_deref().unwrap_or_else(|| OsStr::new("(standard input)"));
+			let display = input_name.as_encoded_bytes();
 			if opts.refuse_output_file && host.stdin_is_stdout() {
 				// GNU grep refuses standard input that is the file its output
 				// lands in: the matches it writes would be read back and
@@ -1444,7 +1447,8 @@ fn execute_search<M: Matcher>(
 				if !opts.no_messages {
 					let _ = writeln!(
 						host.stderr,
-						"grep: (standard input): input file is also the output"
+						"grep: {}: input file is also the output",
+						input_name.to_string_lossy()
 					);
 				}
 			} else {
@@ -1877,6 +1881,38 @@ mod tests {
 		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
 	}
 
+	/// Contract: `--label` names standard input in the refusal diagnostic.
+	///
+	/// GNU grep reports the label it was given, not the generic
+	/// `(standard input)`, when it refuses an input that is also its output.
+	#[test]
+	fn the_label_names_standard_input_in_the_refusal_diagnostic() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let stdout = std::fs::OpenOptions::new()
+			.append(true)
+			.open(&path)
+			.expect("stdout file");
+		let stdin = std::fs::OpenOptions::new()
+			.read(true)
+			.open(&path)
+			.expect("stdin file");
+		let (mut host, capture) = Host::for_test("grep", "", tree.path());
+		host.set_test_stdin(openfiles::OpenFile::File(stdin));
+		host.set_test_stdout(openfiles::OpenFile::File(stdout));
+		let parsed = Grep::try_parse_from(["grep", "--label=foo", "needle", "-"]).unwrap();
+		let code = run_caught(parsed, &mut host);
+		assert_eq!(code, 2, "{}", capture.err());
+		assert!(
+			capture.err().contains("grep: foo: input file is also the output"),
+			"{}",
+			capture.err()
+		);
+		// The refused input is left exactly as it was.
+		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
+	}
+
 	/// Contract: the modes whose output cannot feed back into the search
 	/// still read standard input that is also the output file.
 	///
@@ -1934,7 +1970,13 @@ mod tests {
 		let (code, err) =
 			run_with_stdout_file::<Grep>(&["-r", "needle", "tree"], tree.path(), &path);
 		assert_eq!(code, 2, "{err}");
-		assert!(err.contains("tree/out.txt: input file is also the output"), "{err}");
+		// The name is built with `Path::join`, as the implementation builds
+		// it, so the separator is the native one.
+		let named = Path::new("tree").join("out.txt");
+		assert!(
+			err.contains(&format!("{}: input file is also the output", named.display())),
+			"{err}"
+		);
 		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
 	}
 
