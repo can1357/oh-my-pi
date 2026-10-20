@@ -50,10 +50,20 @@ function normalizeBasePath(basePath: string): string {
 	return basePath.replace(/\/$/, "");
 }
 
-function parseTopicPath(pathname: string): { basePath: string; topicId: string } | null {
-	const match = pathname.match(/^(.*?)(?:\/t\/)(?:[^/]+\/)?(\d+)(?:\.json)?(?:\/|$)/);
+function parseTopicPath(pathname: string): { basePath: string; topicId: string; postNumber: string | null } | null {
+	const match = pathname.match(/^(.*?)\/t\/([^?#]*)$/);
 	if (!match) return null;
-	return { basePath: match[1] ?? "", topicId: match[2] };
+	const segments = (match[2] ?? "")
+		.replace(/\.json$/, "")
+		.split("/")
+		.filter(Boolean);
+	// Shapes: <slug>/<id>[/<post>], <id>[/<post>]. Slugs are never purely numeric ids followed by nothing else.
+	const idIndex =
+		/^\d+$/.test(segments[0] ?? "") && (segments.length === 1 || /^\d+$/.test(segments[1] ?? "")) ? 0 : 1;
+	const topicId = segments[idIndex];
+	if (!topicId || !/^\d+$/.test(topicId)) return null;
+	const postNumber = segments[idIndex + 1];
+	return { basePath: match[1] ?? "", topicId, postNumber: postNumber && /^\d+$/.test(postNumber) ? postNumber : null };
 }
 
 function parsePostPath(pathname: string): { basePath: string; postId: string } | null {
@@ -95,10 +105,33 @@ function buildTopicUrl(baseUrl: string, topicId: string): string {
 	return topicUrl.toString();
 }
 
+function buildPostByNumberUrl(baseUrl: string, topicId: string, postNumber: string): string {
+	const postUrl = new URL(`${baseUrl}/posts/by_number/${topicId}/${postNumber}.json`);
+	postUrl.searchParams.set("include_raw", "1");
+	return postUrl.toString();
+}
+
 function buildPostUrl(baseUrl: string, postId: string): string {
 	const postUrl = new URL(`${baseUrl}/posts/${postId}.json`);
 	postUrl.searchParams.set("include_raw", "1");
 	return postUrl.toString();
+}
+
+/** Requested post first (author, date, text), then the topic title and counters for context. */
+async function renderRequestedPost(topic: DiscourseTopic, title: string, post: DiscoursePost): Promise<string> {
+	const author = formatAuthor({ name: post.name, username: post.username });
+	const content = await formatPostBody(post);
+	let md = `# Post ${post.post_number} - ${author} - ${formatIsoDate(post.created_at)}\n\n`;
+	md += content ? `${content}\n\n---\n\n` : "_No content available._\n\n---\n\n";
+	md += `## Topic: ${title}\n\n`;
+	const metaParts: string[] = [];
+	if (topic.id != null) metaParts.push(`**Topic ID:** ${topic.id}`);
+	if (topic.posts_count != null) metaParts.push(`**Posts:** ${topic.posts_count}`);
+	if (metaParts.length) md += `${metaParts.join(" | ")}\n`;
+	const categoryLabel = formatCategory(topic);
+	if (categoryLabel) md += `**Category:** ${categoryLabel}\n`;
+	if (topic.tags?.length) md += `**Tags:** ${topic.tags.join(", ")}\n`;
+	return md;
 }
 
 /**
@@ -121,6 +154,22 @@ export const handleDiscourse: SpecialHandler = async (
 
 		let requestedPost: DiscoursePost | null = null;
 		let topicId = topicMatch?.topicId ?? null;
+		// A trailing post number (/t/<slug>/<topic>/<n>) names one post: fetch it directly, because the
+		// topic JSON window starts at post 1 and need not contain it.
+		let postFromNumber = false;
+		if (topicMatch?.postNumber && topicMatch.postNumber !== "1") {
+			const postResult = await loadPage(buildPostByNumberUrl(baseUrl, topicMatch.topicId, topicMatch.postNumber), {
+				timeout,
+				signal,
+			});
+			if (postResult.ok) {
+				const postData = tryParseJson<DiscoursePostResponse>(postResult.content);
+				if (postData && postData.post_number === Number(topicMatch.postNumber)) {
+					requestedPost = postData;
+					postFromNumber = true;
+				}
+			}
+		}
 
 		if (!topicId && postMatch) {
 			const postResult = await loadPage(buildPostUrl(baseUrl, postMatch.postId), { timeout, signal });
@@ -162,6 +211,14 @@ export const handleDiscourse: SpecialHandler = async (
 		const fetchedAt = new Date().toISOString();
 
 		const posts: DiscoursePost[] = [...(topic.post_stream?.posts ?? [])];
+		if (postFromNumber && requestedPost) {
+			return buildResult(await renderRequestedPost(topic, title, requestedPost), {
+				url,
+				method: "discourse-api",
+				fetchedAt,
+				notes: [`Fetched post ${requestedPost.post_number} via Discourse API`],
+			});
+		}
 		if (requestedPost && !posts.some(post => post.id === requestedPost?.id)) {
 			posts.unshift(requestedPost);
 		}
