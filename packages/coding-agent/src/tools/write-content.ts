@@ -8,6 +8,7 @@ import {
 	splitAddressableFileLines,
 	stripHashlinePrefixes,
 } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore } from "../edit/store";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -88,6 +89,13 @@ export function stripWriteContent(session: ToolSession, content: string): { text
 export const WRITE_MAP_MAX_LINES = 1000;
 /** Characters of numbered map the write result may carry. */
 export const WRITE_MAP_MAX_CHARS = 32_768;
+/**
+ * Byte budget of the head window the write map reads. UTF-8 encodes at most
+ * three bytes per UTF-16 code unit, so this budget never binds before
+ * {@link WRITE_MAP_MAX_CHARS}: the map is cut by lines and characters, never
+ * by encoding.
+ */
+const WRITE_MAP_MAX_BYTES = WRITE_MAP_MAX_CHARS * 3;
 
 /**
  * A write's hashline display: the `[path#TAG]` header plus the numbered rows
@@ -105,19 +113,28 @@ export interface WriteSnapshotDisplay {
 }
 
 /**
- * The leading lines of `lines` the write result numbers, bounded so a large
+ * The leading lines of `content` the write result numbers, bounded so a large
  * write cannot flood the transcript.
+ *
+ * The head window is cut on line boundaries before anything is split, so a
+ * file with millions of rows never materializes millions of strings: only the
+ * rows the map can show are split out, while the totals come from the scan
+ * that cut the window.
  */
-function takeWriteMapLines(lines: readonly string[]): string[] {
+function takeWriteMap(content: string): { shown: string[]; hiddenLines: number } {
+	const head = truncateHead(content, { maxLines: WRITE_MAP_MAX_LINES, maxBytes: WRITE_MAP_MAX_BYTES });
 	const shown: string[] = [];
 	let chars = 0;
-	for (const line of lines) {
+	for (const line of splitAddressableFileLines(head.content)) {
 		if (shown.length >= WRITE_MAP_MAX_LINES) break;
 		chars += line.length + 1;
 		if (chars > WRITE_MAP_MAX_CHARS) break;
 		shown.push(line);
 	}
-	return shown;
+	// `truncateHead` counts the segment after a trailing newline as a line; a
+	// trailing newline opens no addressable row.
+	const totalLines = content.length === 0 ? 0 : content.endsWith("\n") ? head.totalLines - 1 : head.totalLines;
+	return { shown, hiddenLines: totalLines - shown.length };
 }
 
 /**
@@ -165,8 +182,7 @@ export function maybeWriteSnapshotDisplay(
 ): WriteSnapshotDisplay | undefined {
 	if (!resolveFileDisplayMode(session).hashLines) return undefined;
 	const normalized = normalizeToLF(content);
-	const lines = splitAddressableFileLines(normalized);
-	const shown = takeWriteMapLines(lines);
+	const { shown, hiddenLines } = takeWriteMap(normalized);
 	const seenLines = shown.map((_, index) => index + 1);
 	// The numbered rows are the snapshot's seen lines: the model displayed
 	// them, so it may edit them. An empty set is not "unrestricted" — it says
@@ -180,7 +196,7 @@ export function maybeWriteSnapshotDisplay(
 		header: formatHashlineHeader(displayPath, tag),
 		rows,
 		seenLines,
-		hiddenLines: lines.length - shown.length,
+		hiddenLines,
 	};
 }
 

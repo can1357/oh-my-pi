@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,6 +8,7 @@ import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { WRITE_MAP_MAX_CHARS, WRITE_MAP_MAX_LINES } from "@oh-my-pi/pi-coding-agent/tools/write-content";
+import * as hashlineFormat from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
@@ -46,6 +47,7 @@ describe("write tool hashline header", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await removeWithRetries(tmpDir);
 	});
 
@@ -220,5 +222,28 @@ describe("write tool hashline header", () => {
 		const echoPath = path.join(tmpDir, "echo.ts");
 		await tool.execute("call-2", { path: echoPath, content: "1:const a = 1;\n2:const b = 2;\n" });
 		expect(await Bun.file(echoPath).text()).toBe("const a = 1;\nconst b = 2;\n");
+	});
+
+	it("numbers a huge write without turning the file into a million line strings", async () => {
+		const filePath = path.join(tmpDir, "huge.ts");
+		const session = createSession(tmpDir);
+		const rows = 1_000_000;
+		const content = "row\n".repeat(rows);
+
+		// The map can only show the first WRITE_MAP_MAX_LINES rows, so the write
+		// must cut the head window before it splits anything: a file with a
+		// million rows must not become a million line strings.
+		const split = vi.spyOn(hashlineFormat, "splitAddressableFileLines");
+		const result = await new WriteTool(session).execute("call-1", { path: filePath, content });
+		const widestSplit = split.mock.calls.reduce((widest, call) => Math.max(widest, (call[0] as string).length), 0);
+		vi.restoreAllMocks();
+
+		expect(widestSplit).toBeLessThan(content.length);
+
+		// The map stays bounded, and it still names every line the file has.
+		const text = resultText(result);
+		const numbered = text.split("\n").filter(row => /^\d+:/.test(row));
+		expect(numbered.length).toBe(WRITE_MAP_MAX_LINES);
+		expect(text).toContain(`(${rows} lines; the first ${WRITE_MAP_MAX_LINES} are numbered below`);
 	});
 });
