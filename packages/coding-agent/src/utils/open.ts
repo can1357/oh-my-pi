@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
-import { $which, isWsl, logger, ptree } from "@oh-my-pi/pi-utils";
+import { $which, isWsl, logger } from "@oh-my-pi/pi-utils";
+import { runBoundedProbe } from "./bounded-probe";
 
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
 
@@ -26,31 +27,6 @@ function wslLocalPathFor(urlOrPath: string): string | undefined {
 	}
 	if (!localPath || !fs.existsSync(localPath)) return undefined;
 	return localPath;
-}
-
-/**
- * Ceiling for the WSL `wslpath` probe in {@link toWindowsPath}.
- *
- * WSL interop can wedge indefinitely (issue #8402), so the probe that translates
- * a local path into the Windows path `wslview` needs carries the same budget as
- * the discovery probe.
- */
-const WSL_PATH_PROBE_TIMEOUT_MS = 500;
-
-/** Convert a WSL-local path to the Windows path `wslview` needs (bounded, async). */
-async function toWindowsPath(localPath: string): Promise<string | undefined> {
-	try {
-		const result = await ptree.exec(["wslpath", "-w", localPath], {
-			timeout: WSL_PATH_PROBE_TIMEOUT_MS,
-			allowNonZero: true,
-			allowAbort: true,
-			detached: true,
-		});
-		if (!result.ok || result.exitError?.aborted) return undefined;
-		return result.stdout.trim() || undefined;
-	} catch {
-		return undefined;
-	}
 }
 
 /**
@@ -112,12 +88,12 @@ export function openPath(urlOrPath: string): void {
 				break;
 			}
 			// `wslview` wants a Windows path. Resolving it is an async probe
-			// (bounded by WSL_PATH_PROBE_TIMEOUT_MS), so the returning opener is
+			// (bounded by the shared probe budget), so the returning opener is
 			// spawned from the continuation rather than inline — a wedged interop
 			// pipe (issue #8402) can no longer block the calling thread. The
 			// fallback is the same `xdg-open` decision the other failure paths
 			// produce.
-			void toWindowsPath(localPath).then(
+			void runBoundedProbe(["wslpath", "-w", localPath]).then(
 				wslPath => spawnOpener(wslPath ? ["wslview", wslPath] : ["xdg-open", urlOrPath], urlOrPath),
 				() => spawnOpener(["xdg-open", urlOrPath], urlOrPath),
 			);

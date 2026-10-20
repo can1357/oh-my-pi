@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
 import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
-import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
+import { getWslWindowsHomeCandidate } from "@oh-my-pi/pi-coding-agent/discovery/agents";
 import {
 	type LoadSkillsResult,
 	loadSkills,
@@ -295,48 +295,6 @@ describe("skills", () => {
 			});
 
 			expect(resolved).toBe("/mnt/c/Users/alice");
-		});
-
-		it("kills a host probe that never exits instead of blocking startup (#8402)", async () => {
-			// Integration test against real OS timer behavior: the contract is that
-			// the probe's wall-clock bound actually kills a genuinely blocked
-			// child. Injecting a short deadline preserves that native lifecycle
-			// coverage without paying the production discovery budget.
-			const start = performance.now();
-			const result = await runHostProbe([process.execPath, "-e", "await Bun.sleep(60_000)"], 25);
-			const elapsed = performance.now() - start;
-			expect(result).toBeUndefined();
-			// Loose bound proves the probe returned via its timeout, not the child.
-			expect(elapsed).toBeLessThan(1_000);
-		});
-
-		it("returns trimmed stdout for a host probe that succeeds (#8402)", async () => {
-			const result = await runHostProbe([process.execPath, "-e", "process.stdout.write('  host-home  ')"]);
-			expect(result).toBe("host-home");
-		});
-
-		it.skipIf(process.platform === "win32")(
-			"keeps the probe bound when a descendant inherits stdout (#8402)",
-			async () => {
-				// The pipe is held open by the forked child, not by the leader the
-				// deadline kills: only a group kill plus cancelled pipe readers ends
-				// the wait at the deadline instead of when the descendant exits.
-				const start = performance.now();
-				const result = await runHostProbe(["sh", "-c", "sleep 3 & exec sleep 60"], 25);
-				const elapsed = performance.now() - start;
-				expect(result).toBeUndefined();
-				expect(elapsed).toBeLessThan(1_000);
-			},
-		);
-
-		it("treats a non-zero exit as an unavailable host (#8402)", async () => {
-			const result = await runHostProbe([process.execPath, "-e", "process.exit(3)"]);
-			expect(result).toBeUndefined();
-		});
-
-		it("treats empty stdout as an unavailable host (#8402)", async () => {
-			const result = await runHostProbe([process.execPath, "-e", "process.stdout.write('')"]);
-			expect(result).toBeUndefined();
 		});
 
 		it("respects an explicit enableAgentsUser: false (#2401)", async () => {
