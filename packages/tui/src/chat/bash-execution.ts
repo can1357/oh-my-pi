@@ -263,7 +263,14 @@ export class BashExecutionComponent extends Container {
 			// and substrings proportional to every row just to be discarded.
 			const skippedRows = Math.max(0, countNewlines(chunk) + 1 - (this.#outputLines.length > 0 ? 1 : 0));
 			this.#throttledLiveLines += skippedRows;
-			if (skippedRows === 0 && chunk.length > 0) this.#throttledFragmentLost = true;
+			// The chunk's first segment would have merged into the retained last
+			// row, and it is discarded: that row lost its tail. The loss is a
+			// fragment loss whether or not the chunk also contributed whole rows,
+			// so it is tracked apart from the row count. A chunk that starts with
+			// a newline merges nothing, so the retained row stays intact.
+			if (chunk.length > 0 && this.#outputLines.length > 0 && chunk.charCodeAt(0) !== 0x0a) {
+				this.#throttledFragmentLost = true;
+			}
 			return;
 		}
 		this.#chunkGate = true;
