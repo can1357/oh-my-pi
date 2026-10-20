@@ -117,7 +117,7 @@ Core methods:
 
 - `on(event, handler)`
 - `registerTool`, `registerCommand`, `registerShortcut`, `registerFlag`
-- `registerMessageRenderer`, `registerAssistantThinkingRenderer`
+- `registerMessageRenderer`, `registerAssistantThinkingRenderer`, `registerAssistantTextRenderer`
 - `registerComposerShape`
 - `setLabel`, `getFlag`
 - `sendMessage`, `sendUserMessage`, `appendEntry`, `exec`
@@ -879,6 +879,7 @@ Supported:
 - notifications/status/editor text/terminal input/custom overlays
 - theme listing/loading by name (`setTheme` supports string names)
 - tools expanded toggle
+- `rerenderMessage(timestamp)`: draws the assistant reply with that `message.timestamp` again, re-running the [assistant text renderers](#assistant-text-renderer); a no-op while `extensionRenderers.assistantText` is off
 
 Current no-op methods in this controller:
 
@@ -1265,6 +1266,25 @@ pi.registerAssistantThinkingRenderer((context, theme) => {
 ```
 
 Used by interactive rendering to add display-only supplemental UI below each visible assistant thinking block. The renderer receives the already-visible thinking text, content/thinking indexes, theme, and a `requestRender()` callback for async renderers. All registered renderers that return a component are appended in registration order. Renderers must not mutate messages; the original thinking block remains the provider/session source of truth.
+
+## Assistant text renderer
+
+Opt-in: renderers run only while the `extensionRenderers.assistantText` setting is on (default off; **Tools → Extensions → Extension Reply Renderers**). Off, they are never called and replies draw exactly as without them.
+
+```ts
+pi.registerAssistantTextRenderer(({ message, contentIndex, text, streaming }) => {
+  // Return the markdown to draw for this text block, or undefined to draw `text` unchanged.
+  return streaming ? text.replace(/\{\{[^}]*$/, "") : text;
+});
+```
+
+A display-only transform of each assistant text block in the main transcript, used by both the terminal renderer and the native (TSP) view. The session, `/export` and the model context keep the text as written; the native Copy action copies it as written too.
+
+- **Context.** `message` is the message being drawn and `message.timestamp` identifies the reply. It is a deep copy: editing it, at any depth, cannot change the stored reply. `contentIndex` is the block's index in the full reply's `content`, also when the reply is drawn as segments around tool calls. For text after a tool call, `message` holds only that segment, so `message.content[contentIndex]` is not the block. `contentIndex` counts the reply's content as currently stored and replayed: when the transcript is rebuilt (for example on resume) and a reply holds tool calls that never got a result, those calls and any redacted thinking are dropped and later blocks move down, so the same block can get a smaller index. Key renderer state on `message.timestamp` and `contentIndex` only for the live session; do not persist the pair as a permanent key. `text` is the block's markdown so far, after any earlier renderer; renderers run in registration order.
+- **Streaming.** The renderer is called with the full text so far each time a streaming update is drawn (`streaming: true`), and once more when the text is final (`streaming: false`): at the end of the reply, or earlier when a tool call or any other block starts after it. Deltas that arrive within one frame are drawn, and rendered, once. A block whose text and `streaming` value are unchanged since its last render reuses that output without calling the renderers again (for example a block sealed at a tool call while the call's arguments stream). Replies stream without `display.smoothStreaming`'s typing reveal while renderers are active, so a renderer never sees a partly revealed prefix. Output may be shorter than the input and may change text drawn earlier, so a reply with renderers stays in the live viewport until its turn ends instead of retiring finished rows to terminal scrollback mid-stream.
+- **Failures.** `registerAssistantTextRenderer` throws for anything but a function, failing the extension's load. A renderer that throws leaves its input drawn; the failure is logged once per renderer.
+- **Redraw.** Call `ctx.ui.rerenderMessage(message.timestamp)` after state the renderer reads changes (for example a click) to draw that reply again in place; it calls the renderers again even for blocks whose text is unchanged. A reply still in the live viewport just repaints; in a plain terminal, a reply with rows already in scrollback rebuilds the scrollback (as toggling thinking visibility does), which is costly, so avoid animating such replies frame by frame.
+- **Links.** Links the renderer draws behave like any model-authored link: they are not routed back to the extension. Relative link targets the renderer adds are not resolved against the session's working directory the way the model's own are, so Tern's native view opens them relative to its own; use absolute paths or URLs.
 
 ## Tool call/result renderer
 

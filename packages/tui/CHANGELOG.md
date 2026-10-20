@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `AssistantMessageComponent` accepts display-only assistant text renderers and redraws one reply with `rerenderMessage(timestamp)`; `splitAssistantMessageToolTimeline` reports each segment's `contentOffsets` ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
+
 ## [18.12.3] - 2026-10-19
 
 ### Added

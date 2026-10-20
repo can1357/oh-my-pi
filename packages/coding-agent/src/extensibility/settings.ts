@@ -160,3 +160,16 @@ export const cfgExtensionHandlersToolCallTimeoutMs = register({
 			"Positive finite active-work timeout for extension tool_call handlers; invalid values use 30000ms, and time awaiting OMP-owned dialogs does not count",
 	},
 });
+
+export const cfgExtensionAssistantTextRenderers = register({
+	id: "extensionRenderers.assistantText",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Extensions",
+		label: "Extension Reply Renderers",
+		description:
+			"Let extensions change how assistant replies are drawn and redraw a reply in place; the session, exports and model context keep the reply as written",
+	},
+});

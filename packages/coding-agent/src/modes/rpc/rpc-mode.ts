@@ -1479,6 +1479,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			return () => {};
 		}
 
+		rerenderMessage(): void {
+			// No transcript is drawn in RPC mode
+		}
+
 		notify(message: string, type?: "info" | "warning" | "error"): void {
 			// Fire and forget - no response needed
 			this.output({

@@ -207,11 +207,14 @@ export function assistantHasVisibleContent(message: AssistantAgentMessage): bool
 export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage): {
 	beforeTools: AssistantAgentMessage;
 	afterToolCalls: ReadonlyMap<string, AssistantAgentMessage>;
+	/** Index in `message.content` of each after-tool segment's first block, by tool-call id. */
+	contentOffsets: ReadonlyMap<string, number>;
 	hasToolCalls: boolean;
 	lastToolCallId?: string;
 } {
 	const beforeTools: AssistantAgentMessage["content"] = [];
 	const afterToolCalls = new Map<string, AssistantAgentMessage>();
+	const contentOffsets = new Map<string, number>();
 	let pendingAfterTool: AssistantAgentMessage["content"] = [];
 	let lastToolCallId: string | undefined;
 	let sawToolCall = false;
@@ -230,11 +233,13 @@ export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage
 		pendingAfterTool = [];
 	};
 
-	for (const content of message.content) {
+	for (let index = 0; index < message.content.length; index++) {
+		const content = message.content[index]!;
 		if (content.type === "toolCall") {
 			flushPendingAfterTool();
 			sawToolCall = true;
 			lastToolCallId = content.id;
+			contentOffsets.set(content.id, index + 1);
 			continue;
 		}
 		if (sawToolCall) {
@@ -246,10 +251,16 @@ export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage
 	flushPendingAfterTool();
 
 	if (!sawToolCall) {
-		return { beforeTools: message, afterToolCalls, hasToolCalls: false };
+		return { beforeTools: message, afterToolCalls, contentOffsets, hasToolCalls: false };
 	}
 
-	return { beforeTools: displaySegment(beforeTools), afterToolCalls, hasToolCalls: true, lastToolCallId };
+	return {
+		beforeTools: displaySegment(beforeTools),
+		afterToolCalls,
+		contentOffsets,
+		hasToolCalls: true,
+		lastToolCallId,
+	};
 }
 
 /**
