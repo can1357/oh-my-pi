@@ -1378,6 +1378,8 @@ async function runLoopBody(
 					}
 
 					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
+					// The one sync per provider call: `beforeModelCall` (next) only inspects
+					// this context, and streamAssistantResponse sends it as prepared.
 					config.syncTokenizerForRequest?.({
 						model: preparedProviderCall.model,
 						toolChoice: preparedProviderCall.ownedDialect
@@ -2065,7 +2067,6 @@ async function streamAssistantResponse(
 	const effectiveToolChoice = ownedDialect ? undefined : (hostToolChoice ?? forcedToolChoice ?? config.toolChoice);
 	const effectiveReasoning = dynamicReasoning ?? config.reasoning;
 	const effectiveDisableReasoning = dynamicDisableReasoning ?? config.disableReasoning;
-	config.syncTokenizerForRequest?.({ model, toolChoice: effectiveToolChoice, tools: llmContext.tools });
 	// `getCwd` is read once per LLM call so a mid-run session move (`/move`) reaches
 	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
 	const effectiveCwd = config.getCwd?.() ?? config.cwd;
