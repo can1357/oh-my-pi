@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { TUI } from "@oh-my-pi/pi-tui";
@@ -16,15 +16,28 @@ function partialWriteResult(text = "Writing notes.txt...") {
 
 describe("ToolExecutionComponent write repaint seam", () => {
 	const components: ToolExecutionComponent[] = [];
+	/**
+	 * The write repaint threshold is the collapsed streaming window budget,
+	 * which is sized from the live viewport. Pin it so the thresholds below do
+	 * not follow the test runner's terminal.
+	 */
+	const VIEWPORT_ROWS = 32;
+	const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 
 	beforeAll(async () => {
 		await initTheme();
+	});
+
+	beforeEach(() => {
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: VIEWPORT_ROWS });
 	});
 
 	afterEach(() => {
 		for (const component of components) component.stopAnimation();
 		components.length = 0;
 		vi.restoreAllMocks();
+		if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+		else Reflect.deleteProperty(process.stdout, "rows");
 	});
 
 	function makeComponent(args: unknown) {
