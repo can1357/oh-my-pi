@@ -47,8 +47,6 @@
 
 ### Fixed
 
-- Fixed a warm stats sync worker being reused after the agent directory moved (for example an SDK that re-points at a different sessions root), which persisted new transcripts under `..` and as subagent usage instead of their real folder and type ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
-- Fixed a stats sync that kept dispatching transcripts to a worker which had already crashed mid-run, stalling the run until a reply that never came; the drain now fails cleanly and the caller retries with a fresh worker ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 - Fixed a warm stats sync worker being reused after the working directory moved, which read a relative transcript path from the previous directory instead of the current one ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 
 ## [18.12.0] - 2026-10-17
