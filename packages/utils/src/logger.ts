@@ -7,11 +7,13 @@
  * transport so a process supervisor (pm2, journald, k8s) captures the logs.
  *
  * Each entry includes `process.pid` so concurrent omp instances stay
- * traceable. The file is created on the first record written. Records are
- * batched — one write per second or per 64 KiB — while `warn`/`error` records
- * are written at once together with everything buffered before them; exit,
- * fatal, and signal paths flush the rest. `OMP_LOG_LEVEL` optionally limits
- * the levels written to the file (default: all).
+ * traceable, and the fields of the enclosing {@link withContext} (a session's
+ * `sessionId`) so sessions sharing one process stay apart. The file is created
+ * on the first record written. Records are batched — one write per second or
+ * per 64 KiB — while `warn`/`error` records are written at once together with
+ * everything buffered before them; exit, fatal, and signal paths flush the
+ * rest. `OMP_LOG_LEVEL` optionally limits the levels written to the file
+ * (default: all).
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
@@ -251,6 +253,18 @@ function formatLocalTimestamp(date: Date): string {
 
 const FORMAT_TOKEN_PATTERN = /%[scdjifoO%]/;
 
+const logContextStorage = new AsyncLocalStorage<Readonly<Record<string, unknown>>>();
+
+/**
+ * Run `fn` with `context` added to every record logged while it runs, including
+ * from the promises, timers and callbacks it starts. A nested call extends the
+ * enclosing context; a field passed to the log call itself wins over both.
+ */
+export function withContext<T>(context: Readonly<Record<string, unknown>>, fn: () => T): T {
+	const outer = logContextStorage.getStore();
+	return logContextStorage.run(outer ? { ...outer, ...context } : context, fn);
+}
+
 /** Serialize one log record: timestamp, level, pid, message, then context fields. */
 function formatLogRecord(
 	level: LogLevel,
@@ -266,6 +280,8 @@ function formatLogRecord(
 		pid: process.pid,
 		message: metadata?.message ? `${message} ${metadata.message}` : message,
 	};
+	const scoped = logContextStorage.getStore();
+	if (scoped) Object.assign(entry, scoped);
 	if (metadata) {
 		for (const key of Object.keys(metadata)) {
 			if (key !== "level" && key !== "timestamp" && key !== "message") entry[key] = metadata[key];

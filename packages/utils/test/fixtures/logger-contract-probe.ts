@@ -81,6 +81,27 @@ switch (scenario) {
 		disableTransports();
 		break;
 	}
+	case "context": {
+		logger.setTransports({ console: false, file: primaryDir });
+		const { promise: parentLogged, resolve: parentDone } = Promise.withResolvers<void>();
+		// Two sessions interleave on one event loop: each record keeps its own
+		// session's fields across awaits and timers.
+		const parent = logger.withContext({ sessionId: "parent" }, async () => {
+			logger.info("parent-start");
+			await Bun.sleep(5);
+			logger.info("parent-after-timer");
+			logger.info("explicit-wins", { sessionId: "explicit" });
+			parentDone();
+		});
+		const child = logger.withContext({ sessionId: "child" }, async () => {
+			await parentLogged;
+			logger.withContext({ turn: 2 }, () => logger.info("child-nested", { ordinal: 1 }));
+		});
+		logger.info("outside");
+		await Promise.all([parent, child]);
+		disableTransports();
+		break;
+	}
 	case "serialization-failures": {
 		logger.setTransports({ console: false, file: primaryDir });
 		interface CircularContext extends Record<string, unknown> {

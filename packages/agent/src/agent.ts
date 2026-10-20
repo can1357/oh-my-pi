@@ -636,6 +636,12 @@ export class Agent {
 	}
 
 	/**
+	 * Fields added to every log record written while this agent runs (the
+	 * owning session's `sessionId`), so in-process agents' records stay apart.
+	 */
+	logContext: Readonly<Record<string, unknown>> | undefined;
+
+	/**
 	 * Static metadata forwarded to every API request when no resolver is installed
 	 * (e.g. `metadata.user_id` for Anthropic session attribution). Setting this
 	 * clears any installed resolver.
@@ -1750,15 +1756,25 @@ export class Agent {
 	}
 
 	/**
-	 * Run the agent loop.
+	 * Run the agent loop with {@link logContext} on every record it logs.
 	 * If messages are provided, starts a new conversation turn with those messages.
 	 * Otherwise, continues from existing context.
 	 */
-	async #runLoop(
+	#runLoop(
 		messages?: AgentMessage[],
 		options?: AgentPromptOptions & { skipInitialSteeringPoll?: boolean },
 		continuationSignal?: AbortSignal,
 		runStateClaimed = false,
+	): Promise<void> {
+		const run = () => this.#runLoopInContext(messages, options, continuationSignal, runStateClaimed);
+		return this.logContext ? logger.withContext(this.logContext, run) : run();
+	}
+
+	async #runLoopInContext(
+		messages: AgentMessage[] | undefined,
+		options: (AgentPromptOptions & { skipInitialSteeringPoll?: boolean }) | undefined,
+		continuationSignal: AbortSignal | undefined,
+		runStateClaimed: boolean,
 	) {
 		const model = this.#state.model;
 		if (!model) throw new Error("No model configured");

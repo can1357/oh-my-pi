@@ -187,6 +187,19 @@ describe("central logger byte contract", () => {
 		expect((await readSingleLog(result.primaryDir)).text).toBe(expected);
 	});
 
+	test("stamps each record with its own async context, which call fields override", async () => {
+		const result = await runScenario("context");
+		expect(result.stderr).toBe("");
+		const expected = [
+			expectedLine(result.pid, "info", "parent-start", { sessionId: "parent" }),
+			expectedLine(result.pid, "info", "outside"),
+			expectedLine(result.pid, "info", "parent-after-timer", { sessionId: "parent" }),
+			expectedLine(result.pid, "info", "explicit-wins", { sessionId: "explicit" }),
+			expectedLine(result.pid, "info", "child-nested", { sessionId: "child", turn: 2, ordinal: 1 }),
+		].join("");
+		expect((await readSingleLog(result.primaryDir)).text).toBe(expected);
+	});
+
 	test("drops native JSON failures locally but sends original contexts to sinks", async () => {
 		const result = await runScenario("serialization-failures");
 		expect(result.stdout).toBe("");

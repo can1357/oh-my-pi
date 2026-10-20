@@ -116,4 +116,44 @@ describe("report bundle logs", () => {
 		expect(logsText).toContain(`omp.${localDay(new Date())}.${process.pid}.log`);
 		expect(logsText).toContain(marker);
 	});
+
+	it("bundles every same-day record of the session and its subagents, past the per-file tail", async () => {
+		cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-report-session-logs-"));
+		await isolateLogsRoot(cleanupRoot);
+		const logsDir = getLogsDir();
+		await fs.mkdir(logsDir, { recursive: true });
+		const sessionFile = path.join(cleanupRoot, "session-main.jsonl");
+		await Bun.write(
+			sessionFile,
+			'{"type":"title","title":"t"}\n{"type":"session","version":3,"id":"main-session","cwd":"/"}\n',
+		);
+		await Bun.write(
+			path.join(cleanupRoot, "session-main", "0-Worker.jsonl"),
+			'{"type":"session","version":3,"id":"sub-session","cwd":"/"}\n',
+		);
+		const record = (message: string, sessionId?: string) =>
+			JSON.stringify({ level: "warn", pid: 4242, message, ...(sessionId ? { sessionId } : {}) });
+		const lines = [
+			record("main early", "main-session"),
+			record("subagent early", "sub-session"),
+			record("other session", "other-session"),
+			record("nested only", undefined).replace("}", ',"detail":{"sessionId":"main-session"}}'),
+			...Array.from({ length: 1500 }, (_, i) => record(`filler ${i}`)),
+			record("main late", "main-session"),
+		];
+		await Bun.write(path.join(logsDir, `omp.${localDay(new Date())}.4242.log`), `${lines.join("\n")}\n`);
+
+		const result = await createReportBundle({ sessionFile });
+
+		const archive = await new Bun.Archive(await Bun.file(result.path).bytes()).files();
+		await fs.rm(result.path, { force: true });
+		// The 1000-line tail of the crashed process's file misses the early records.
+		expect((await archive.get("logs.txt")?.text()) ?? "").not.toContain("main early");
+		const sessionLogs = (await archive.get("session-logs.txt")?.text()) ?? "";
+		expect(sessionLogs.split("\n").map(line => JSON.parse(line).message)).toEqual([
+			"main early",
+			"subagent early",
+			"main late",
+		]);
+	});
 });

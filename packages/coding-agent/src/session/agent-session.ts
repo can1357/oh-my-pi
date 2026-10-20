@@ -3262,11 +3262,16 @@ export class AgentSession implements SettingsScope {
 		return this.#admittedSubmissionsSettled.promise;
 	}
 
+	/** Run session work outside an agent run (prompt setup, manual maintenance) under the agent's log context. */
+	#inLogContext<T>(work: () => T): T {
+		return this.agent.logContext ? logger.withContext(this.agent.logContext, work) : work();
+	}
+
 	async #admitSubmission<T>(work: () => Promise<T>): Promise<T> {
 		this.#admittedSubmissionCount++;
 		try {
 			if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
-			return await work();
+			return await this.#inLogContext(work);
 		} finally {
 			if (--this.#admittedSubmissionCount === 0 && this.#admittedSubmissionsSettled) {
 				const settled = this.#admittedSubmissionsSettled;
@@ -5781,6 +5786,7 @@ export class AgentSession implements SettingsScope {
 			this.#observedSessionId = currentSessionId;
 			if (notifyChange) this.#notifySessionChangeCallbacks();
 		}
+		this.agent.logContext = { sessionId: currentSessionId };
 		const sid = this.#activeProviderSessionId(sessionId);
 		this.agent.sessionId = sid;
 		this.agent.setMetadataResolver((provider: string) =>
@@ -6955,12 +6961,12 @@ export class AgentSession implements SettingsScope {
 
 	/** Reduce stored context with the selected shake strategy. */
 	shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
-		return this.#maintenance.shake(mode, opts);
+		return this.#inLogContext(() => this.#maintenance.shake(mode, opts));
 	}
 
 	/** Compact the active session history. */
 	compact(customInstructions?: string, options?: CompactOptions): Promise<CompactionResult> {
-		return this.#maintenance.compact(customInstructions, options);
+		return this.#inLogContext(() => this.#maintenance.compact(customInstructions, options));
 	}
 
 	/** Cancel active manual, automatic, and handoff maintenance, preserving an optional source reason. */
@@ -11385,7 +11391,7 @@ export class AgentSession implements SettingsScope {
 	 * @returns The handoff document text, or undefined if cancelled/failed
 	 */
 	handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
-		return this.#maintenance.handoff(customInstructions, options);
+		return this.#inLogContext(() => this.#maintenance.handoff(customInstructions, options));
 	}
 
 	#isTerminalYieldToolResult(event: { toolName: string; isError?: boolean; result?: { details?: unknown } }): boolean {
