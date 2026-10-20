@@ -62,6 +62,10 @@
 
 - Added `RpcConnection.requestCancellable()` and `Client.requestPermission(params, { signal })`; client connections abort a handler and answer `-32800` when the peer sends `$/cancel_request`, while agent connections keep running the request and return its real result ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
 
+### Fixed
+
+- Fixed `readSalvageableRows()` skipping every readable row trapped between two separate damaged regions, so damaged-store recovery of input history, session titles, and recaps keeps the rows that were still readable ([#16144](https://github.com/can1357/oh-my-pi/pull/16144) by [@jchanghong023](https://github.com/jchanghong023))
+
 ## [18.12.4] - 2026-10-20
 
 ### Breaking Changes
@@ -77,10 +81,6 @@
 - Fixed `bun test` runs writing their logs into your real `~/.omp/logs`: test processes now log to a per-user `omp-test-logs-<uid>/` under the OS temp dir ([#16386](https://github.com/can1357/oh-my-pi/pull/16386) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `.tar.gz` and `.tar.zst` archives that decompress past 256 MB failing to list or read with a raw `Cannot create a Buffer larger than …` error; a bare `.gz` or `.zst` that large now names the archive size limit ([#16394](https://github.com/can1357/oh-my-pi/pull/16394) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed frontmatter repair deleting HTML comments from document bodies and plain markdown; it now strips only leading comments ahead of the opening delimiter, so prompt bodies keep their comments ([#16481](https://github.com/can1357/oh-my-pi/pull/16481) by [@adi-IL](https://github.com/adi-IL)).
-
-### Fixed
-
-- Fixed `readSalvageableRows()` skipping every readable row trapped between two separate damaged regions, so damaged-store recovery of input history, session titles, and recaps keeps the rows that were still readable ([#16144](https://github.com/can1357/oh-my-pi/pull/16144) by [@jchanghong023](https://github.com/jchanghong023))
 
 ## [18.12.2] - 2026-10-18
 
