@@ -115,6 +115,7 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 	let ref: string;
 	let detach = false;
 	let createdBranch: string | undefined;
+	let derivedBranch: string | undefined;
 	if (options.branch || options.forceBranch) {
 		const branch = options.branch ?? options.forceBranch;
 		if (!branch) throw new Error("branch name is required");
@@ -132,6 +133,7 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 		if (!(await repository.refExists(`refs/heads/${branch}`))) {
 			await repository.createBranch(branch, "HEAD", false);
 			createdBranch = branch;
+			derivedBranch = branch;
 		}
 		ref = branch;
 	}
@@ -147,11 +149,26 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 				: `checking out '${ref}'`;
 		console.log(`Preparing worktree (${preparation})`);
 	}
-	const result = await repository.worktreeAdd(worktreePath, ref, {
-		detach,
-		clone: cfgWorktreeClone.get(settings),
-		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
-	});
+	const result = await repository
+		.worktreeAdd(worktreePath, ref, {
+			detach,
+			clone: cfgWorktreeClone.get(settings),
+			backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
+		})
+		.catch(async (error: unknown) => {
+			// A refused worktree — the destination lies inside the source
+			// checkout — must not leave the branch this command derived
+			// behind: the next attempt would fail because the branch already
+			// exists.
+			if (derivedBranch) {
+				try {
+					await repository.deleteBranch(derivedBranch, true);
+				} catch {
+					// The branch is gone or still in use; the refusal is what matters.
+				}
+			}
+			throw error;
+		});
 	if (!options.quiet) {
 		console.log(`HEAD is now at ${shortSha} ${subject}`);
 		if (result.clonedWith != null) {
