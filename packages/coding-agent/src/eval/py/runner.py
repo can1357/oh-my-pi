@@ -1329,19 +1329,20 @@ def _has_pip() -> bool:
         return False
 
 
+def _procfs_usable() -> bool:
+    # /proc can be missing, unreadable or an empty unmounted directory (some
+    # containers and chroots); a mounted procfs lists this process.
+    try:
+        return str(os.getpid()) in os.listdir("/proc")
+    except OSError:
+        return False
+
+
 def _child_pids() -> dict[int, list[int]]:
     """Map each live pid to the pids of its children."""
     children: dict[int, list[int]] = {}
-    entries: list[str] = []
     if sys.platform.startswith("linux"):
-        try:
-            entries = os.listdir("/proc")
-        except OSError:
-            pass
-    # /proc can be missing, unreadable or an empty unmounted directory (some
-    # containers and chroots): unless it lists this process, ask ps.
-    if str(os.getpid()) in entries:
-        for entry in entries:
+        for entry in os.listdir("/proc"):
             if not entry.isdigit():
                 continue
             try:
@@ -1368,11 +1369,9 @@ def _child_pids() -> dict[int, list[int]]:
     return children
 
 
-def _kill_process_tree(proc: subprocess.Popen) -> None:
+def _kill_process_tree(proc: subprocess.Popen, own_group: bool) -> None:
     # Installers spawn their own children (ensurepip runs pip in one, source
     # builds run backends and compilers), so killing `proc` alone is not enough.
-    # The tree stays in the kernel's process group so kernel shutdown still
-    # reaches it.
     if os.name == "nt":
         subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
@@ -1381,6 +1380,13 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
             stderr=subprocess.DEVNULL,
         )
         proc.kill()
+        proc.wait()
+        return
+    if own_group:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         proc.wait()
         return
     # Stop each process before listing its children, so nothing can spawn
@@ -1409,6 +1415,12 @@ def _run_installer(
     on_text: Callable[[str], None] | None = None,
     env: dict[str, str] | None = None,
 ) -> int:
+    # The installer's tree normally stays in the kernel's process group, so
+    # kernel shutdown still reaches it, and cancelling walks it. Without procfs
+    # nothing on Linux can list processes (ps reads /proc too), so there the
+    # installer leads a group of its own to kill instead, and a SIGTERM to the
+    # kernel (what shutdown sends) takes that group down first.
+    own_group = sys.platform.startswith("linux") and not _procfs_usable()
     # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
@@ -1416,14 +1428,37 @@ def _run_installer(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         env=env,
+        start_new_session=own_group,
     )
+    forwarding_sigterm = False
+    previous_sigterm: Any = None
+    if own_group:
+
+        def on_sigterm(signum: int, frame: Any) -> None:
+            # No proc.wait() here: the interrupted frame may hold its lock.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            signal.signal(signal.SIGTERM, previous_sigterm if previous_sigterm is not None else signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        try:
+            previous_sigterm = signal.signal(signal.SIGTERM, on_sigterm)
+            forwarding_sigterm = True
+        except ValueError:
+            # Not the main thread; cancelling still kills the group.
+            pass
     try:
         _stream_process_output(proc, on_text)
         return proc.wait()
     except BaseException:
         # Cancelling the cell interrupts only the kernel: stop the installer too.
-        _kill_process_tree(proc)
+        _kill_process_tree(proc, own_group)
         raise
+    finally:
+        if forwarding_sigterm:
+            signal.signal(signal.SIGTERM, previous_sigterm if previous_sigterm is not None else signal.SIG_DFL)
 
 
 def _bootstrap_pip() -> int:

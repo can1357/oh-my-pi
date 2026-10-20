@@ -364,22 +364,27 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		["cannot be listed", "raise PermissionError(13, 'Permission denied', '/proc')"],
 		["is an empty, unmounted directory", "return []"],
 	] as const) {
+		// What a kernel sees without procfs (some containers and chroots): /proc
+		// lists nothing, and Linux `ps` reads /proc too, so it is hidden as well.
+		const noProcfs = [
+			"import os",
+			"_listdir = os.listdir",
+			"def _listdir_without_procfs(path='.'):",
+			"    if os.fspath(path) == '/proc':",
+			`        ${listing}`,
+			"    return _listdir(path)",
+			"os.listdir = _listdir_without_procfs",
+			"_exists = os.path.exists",
+			"os.path.exists = lambda path: os.fspath(path) != '/bin/ps' and _exists(path)",
+		].join("\n");
+
 		it.skipIf(process.platform !== "linux")(
 			`cancelling %pip stops the installer tree when /proc ${procfs}`,
 			async () => {
 				using tempDir = TempDir.createSync("@python-runner-pip-cancel-no-procfs-");
 				const { kernel } = await startPiplessKernel(tempDir.path(), {
 					ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
-					// What listing /proc gives in some containers and chroots.
-					sitecustomize: [
-						"import os",
-						"_listdir = os.listdir",
-						"def _listdir_without_procfs(path='.'):",
-						"    if os.fspath(path) == '/proc':",
-						`        ${listing}`,
-						"    return _listdir(path)",
-						"os.listdir = _listdir_without_procfs",
-					].join("\n"),
+					sitecustomize: noProcfs,
 				});
 				try {
 					const pids = await cancelInstall(kernel, "%pip install six");
@@ -387,6 +392,31 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 				} finally {
 					await kernel.shutdown();
 				}
+			},
+			30_000,
+		);
+
+		it.skipIf(process.platform !== "linux")(
+			`kernel shutdown during %pip stops the installer tree when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-shutdown-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+					sitecustomize: noProcfs,
+				});
+				const started = Promise.withResolvers<number[]>();
+				let streamed = "";
+				const pending = executePythonWithKernel(kernel, "%pip install six", {
+					onChunk: chunk => {
+						streamed += chunk;
+						const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
+						if (match) started.resolve([Number(match[1]), Number(match[2])]);
+					},
+				});
+				const pids = await started.promise;
+				await kernel.shutdown();
+				await pending;
+				expect(pids.filter(isRunning)).toEqual([]);
 			},
 			30_000,
 		);
