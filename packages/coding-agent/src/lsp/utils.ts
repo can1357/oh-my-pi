@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import { DIAGNOSTICS_UNAVAILABLE_SUMMARY } from "@oh-my-pi/pi-tui/tools/lsp";
 import { formatPathRelativeToCwd, resolveToCwd, specialFileKind } from "../tools/path-utils";
 import type {
 	CodeAction,
@@ -243,6 +244,20 @@ export function summarizeDiagnosticMessages(messages: string[]): { summary: stri
 		summary: parts.length > 0 ? parts.join(", ") : "no issues",
 		errored: counts.error > 0,
 	};
+}
+
+/**
+ * Compose the summary of a file's diagnostics, naming the servers that never
+ * produced a verdict for it. A file no server judged is not a clean file, so
+ * the summary must not read as one (issue #15408).
+ *
+ * @param base - Summary of the findings themselves ("OK", "no issues", "2 error(s)").
+ * @param unjudgedServers - Servers that published no diagnostics for the file.
+ */
+export function composeDiagnosticsSummary(base: string, unjudgedServers: readonly string[]): string {
+	if (unjudgedServers.length === 0) return base;
+	const notice = `${DIAGNOSTICS_UNAVAILABLE_SUMMARY} from ${unjudgedServers.join(", ")}`;
+	return base === "" || base === "OK" || base === "no issues" ? notice : `${base}; ${notice}`;
 }
 
 // =============================================================================

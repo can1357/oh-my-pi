@@ -26,7 +26,7 @@ import {
 import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import { notifyFileSaved, splitServers, syncFileContent } from "./servers";
 import type { LspClient, ServerConfig } from "./types";
-import { summarizeDiagnosticMessages } from "./utils";
+import { summarizeDiagnosticMessages, composeDiagnosticsSummary } from "./utils";
 
 const TSSERVER_REQUEST_COMMAND = "typescript.tsserverRequest";
 
@@ -207,6 +207,7 @@ function mergeDiagnostics(
 ): FileDiagnosticsResult | undefined {
 	const messages: string[] = [];
 	const servers = new Set<string>();
+	const unjudgedServers = new Set<string>();
 	let hasResults = false;
 	let hasFormatter = false;
 	let formatted = false;
@@ -226,6 +227,9 @@ function mergeDiagnostics(
 		}
 		if (result.messages.length > 0) {
 			messages.push(...result.messages);
+		}
+		for (const server of result.unjudgedServers ?? []) {
+			unjudgedServers.add(server);
 		}
 		if (result.formatter !== undefined) {
 			hasFormatter = true;
@@ -266,9 +270,10 @@ function mergeDiagnostics(
 	return {
 		server: servers.size > 0 ? Array.from(servers).join(", ") : undefined,
 		messages: limitedMessages,
-		summary,
+		summary: composeDiagnosticsSummary(summary, Array.from(unjudgedServers)),
 		errored,
 		formatter,
+		unjudgedServers: unjudgedServers.size > 0 ? Array.from(unjudgedServers) : undefined,
 	};
 }
 

@@ -422,10 +422,17 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add LSP diagnostics. No-op if no messages. */
-	diagnostics(summary: string, messages: string[]): this {
-		if (messages.length === 0) return this;
-		this.#meta.diagnostics = { summary, messages };
+	/**
+	 * Add LSP diagnostics. No-op when there is nothing to report: no messages
+	 * and no server that left the file unjudged.
+	 */
+	diagnostics(summary: string, messages: string[], unjudgedServers?: readonly string[]): this {
+		if (messages.length === 0 && (unjudgedServers?.length ?? 0) === 0) return this;
+		this.#meta.diagnostics = {
+			summary,
+			messages,
+			unjudgedServers: unjudgedServers && unjudgedServers.length > 0 ? [...unjudgedServers] : undefined,
+		};
 		return this;
 	}
 

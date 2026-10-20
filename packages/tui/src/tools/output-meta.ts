@@ -53,6 +53,12 @@ export type SourceMeta =
 export interface DiagnosticMeta {
 	summary: string;
 	messages: string[];
+	/**
+	 * Servers that produced no verdict for the file: they published no
+	 * diagnostics and returned no report, so the file was left unjudged and
+	 * the report is incomplete (#15408).
+	 */
+	unjudgedServers?: string[];
 }
 
 /**
@@ -357,9 +363,18 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 
 	// Diagnostics
 	let diagnosticsNotice = "";
-	if (meta.diagnostics && meta.diagnostics.messages.length > 0) {
+	if (meta.diagnostics) {
 		const d = meta.diagnostics;
-		diagnosticsNotice = `\n\nLSP Diagnostics (${d.summary}):\n${formatGroupedDiagnosticMessages(d.messages)}`;
+		const parts: string[] = [];
+		if (d.messages.length > 0) {
+			parts.push(`LSP Diagnostics (${d.summary}):\n${formatGroupedDiagnosticMessages(d.messages)}`);
+		}
+		// A file no server judged is not a clean file: say so instead of
+		// letting the silence read as "no problems" (issue #15408).
+		if (d.unjudgedServers && d.unjudgedServers.length > 0) {
+			parts.push(`LSP diagnostics unavailable from ${d.unjudgedServers.join(", ")}`);
+		}
+		if (parts.length > 0) diagnosticsNotice = `\n\n${parts.join("\n")}`;
 	}
 
 	const notice = parts.length ? `\n\n[${parts.join(". ")}]` : "";

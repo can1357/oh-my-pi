@@ -69,8 +69,10 @@ describe("issue #4910: diagnostics pipeline is wall-clock bounded", () => {
 		);
 		const elapsed = Date.now() - started;
 
-		// The hung server is skipped, so no server produced results.
-		expect(result).toBeUndefined();
+		// The hung server is skipped, so no server judged the file: the result
+		// reports the missing verdict instead of claiming the file is clean.
+		expect(result?.messages).toEqual([]);
+		expect(result?.summary).toBe("diagnostics unavailable from hung-linter-4910");
 		// Bounded promptly by the budget, not by any multi-second default.
 		// Generous ceiling to stay robust on slow CI machines.
 		expect(elapsed).toBeLessThan(5_000);
@@ -107,7 +109,8 @@ describe("issue #4910: diagnostics pipeline is wall-clock bounded", () => {
 			{ pipelineBudgetMs: 50 },
 		);
 
-		expect(result).toBeUndefined();
+		// The linter never produced a verdict, so the file is unjudged.
+		expect(result?.summary).toBe("diagnostics unavailable from cancellable-linter-4910");
 		expect(aborted).toBe(true);
 	});
 

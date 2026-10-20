@@ -252,7 +252,7 @@ function toPerFileResult(file: EditFileOutcome, mode: EditMode): EditToolPerFile
 		newText: file.newText,
 		snapshotsPruned: file.snapshotsPruned || undefined,
 		meta: outputMeta()
-			.diagnostics(diagnostics?.summary ?? "", diagnostics?.messages ?? [])
+			.diagnostics(diagnostics?.summary ?? "", diagnostics?.messages ?? [], diagnostics?.unjudgedServers)
 			.get(),
 	};
 }

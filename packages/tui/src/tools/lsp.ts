@@ -85,7 +85,20 @@ export interface FileDiagnosticsResult {
 	errored: boolean;
 	/** Whether the file was formatted */
 	formatter?: FileFormatResult;
+	/**
+	 * Servers that produced no verdict for this file: they published no
+	 * diagnostics and returned no report. The file was left unjudged by them,
+	 * so the report is incomplete and must not be read as "clean" (#15408).
+	 */
+	unjudgedServers?: string[];
 }
+
+/**
+ * Status of a file whose diagnostics were never obtained. It is not a finding:
+ * it says the file was left unjudged, so it never counts as a diagnostic
+ * (#15408).
+ */
+export const DIAGNOSTICS_UNAVAILABLE_SUMMARY = "diagnostics unavailable";
 
 /** Outcome of automatic file formatting. */
 export enum FileFormatResult {
