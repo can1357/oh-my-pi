@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { isOpenAIResponsesProgressEvent } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
@@ -158,6 +159,124 @@ async function drainMicrotasksUntil(predicate: () => boolean, errorMessage: stri
 }
 
 describe("iterateWithIdleTimeout", () => {
+	it.each([
+		{
+			name: "known heartbeat after progress",
+			created: true,
+			activity: true,
+			type: "codex.keepalive",
+			error: undefined,
+			duration: 180_000,
+			expectedElapsed: 180_000,
+		},
+		{
+			name: "heartbeat before first progress",
+			created: false,
+			activity: true,
+			type: "codex.keepalive",
+			error: "first progress timeout",
+			duration: 180_000,
+			expectedElapsed: 90_000,
+		},
+		{
+			name: "silent stream after progress",
+			created: true,
+			activity: true,
+			type: undefined,
+			error: "idle timeout",
+			duration: 180_000,
+			expectedElapsed: 60_000,
+		},
+		{
+			name: "unrecognized heartbeat",
+			created: true,
+			activity: true,
+			type: "keepalive",
+			error: "idle timeout",
+			duration: 180_000,
+			expectedElapsed: 60_000,
+		},
+		{
+			name: "predicate omitted",
+			created: true,
+			activity: false,
+			type: "codex.keepalive",
+			error: "idle timeout",
+			duration: 180_000,
+			expectedElapsed: 60_000,
+		},
+		{
+			name: "known heartbeats cannot mask a hung producer",
+			created: true,
+			activity: true,
+			type: "codex.keepalive",
+			error: "idle timeout",
+			duration: 7_200_000,
+			expectedElapsed: 300_000,
+		},
+	])("preserves watchdog deadlines: $name", async ({ created, activity, type, error, duration, expectedElapsed }) => {
+		vi.useFakeTimers();
+		const startedAt = Date.now();
+		let pull = Promise.withResolvers<IteratorResult<{ type: string }>>();
+		let pulls = 0;
+		const source: AsyncIterable<{ type: string }> = {
+			[Symbol.asyncIterator]: () => ({
+				next: () => {
+					pulls++;
+					return pull.promise;
+				},
+				return: async () => ({ done: true, value: undefined }),
+			}),
+		};
+		let settled = false;
+		let failure: unknown;
+		let received = 0;
+		const run = (async () => {
+			try {
+				for await (const _item of iterateWithIdleTimeout(source, {
+					firstItemTimeoutMs: created ? 300_000 : 90_000,
+					idleTimeoutMs: 60_000,
+					idleActivityMaxGapMs: 300_000,
+					errorMessage: "idle timeout",
+					firstItemErrorMessage: "first progress timeout",
+					isProgressItem: isOpenAIResponsesProgressEvent,
+					...(activity
+						? {
+								isIdleActivityItem: (item: unknown) =>
+									!!item && typeof item === "object" && "type" in item && item.type === "codex.keepalive",
+							}
+						: {}),
+				}))
+					received++;
+			} catch (error) {
+				failure = error;
+			}
+			settled = true;
+		})();
+		await drainMicrotasksUntil(() => pulls === 1, "first pull missing");
+		const send = async (item: IteratorResult<{ type: string }>) => {
+			const current = pull;
+			pull = Promise.withResolvers<IteratorResult<{ type: string }>>();
+			const previousPulls = pulls;
+			current.resolve(item);
+			await drainMicrotasksUntil(() => settled || pulls > previousPulls, "next pull missing");
+		};
+		if (created) await send({ done: false, value: { type: "response.created" } });
+		// Exact production budgets; 180 s exceeds the measured healthy 173.829 s gap.
+		for (let elapsed = 10_000; elapsed <= duration && !settled; elapsed += 10_000) {
+			vi.advanceTimersByTime(10_000);
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+			if (type && !settled) await send({ done: false, value: { type } });
+		}
+		if (!settled) await send({ done: true, value: undefined });
+		await run;
+		expect(Date.now() - startedAt).toBe(expectedElapsed);
+		if (error) expect(failure).toMatchObject({ message: error });
+		else {
+			expect(failure).toBeUndefined();
+			expect(received).toBe(19);
+		}
+	});
 	it("does not reset the first-progress deadline for no-progress items", async () => {
 		const abortController = new AbortController();
 		const abortTimer = setTimeout(() => abortController.abort(new Error("fallback abort")), 150);
