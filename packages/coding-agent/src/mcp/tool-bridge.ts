@@ -12,7 +12,7 @@ import {
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { normalizeSchemaForMCP } from "@oh-my-pi/pi-ai/utils/schema";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { formatBytes, logger, SUPPORTED_IMAGE_MIME_TYPES, untilAborted } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { SourceMeta } from "../capability/types";
 import type {
@@ -24,6 +24,7 @@ import type {
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import { normalizeBlobExtension } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { formatApprovalArguments } from "../tools/approval";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
@@ -199,11 +200,93 @@ async function prepareOutboundArgs(
 	return (await resolveOutboundUrlArgs(args, context)) as MCPToolArgs;
 }
 
+/** File extension for a saved blob: the sanitized MIME subtype, else `bin`. */
+function blobExtensionForMime(mime: string): string {
+	const slash = mime.indexOf("/");
+	const subtype = slash === -1 ? "" : (mime.slice(slash + 1).split("+")[0] ?? "").replace(/^x-/, "");
+	if (!subtype || subtype === "octet-stream") return "bin";
+	return normalizeBlobExtension(subtype) ?? "bin";
+}
+
 /**
- * Convert MCP content to agent content while retaining image payloads.
+ * Absolute filesystem paths (POSIX or Windows) that start at a token boundary.
+ * The lookbehind keeps URL paths intact — a URL's slashes follow `:` or `/`.
  */
-function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageContent> {
+const ABSOLUTE_PATH_PATTERN = /(?<![\w:/\\])(?:[A-Za-z]:)?[\\/][^\s'"`<>|]*/g;
+
+/**
+ * Replace absolute filesystem paths in model-facing text. A local save failure
+ * otherwise discloses the user's home directory to the model and the terminal.
+ */
+function redactAbsolutePaths(text: string): string {
+	return text.replace(ABSOLUTE_PATH_PATTERN, match => {
+		if (!/\w/.test(match)) return match;
+		const trailing = /[.,;:)\]}]+$/.exec(match)?.[0] ?? "";
+		return trailing ? `[path]${trailing}` : "[path]";
+	});
+}
+
+/**
+ * Render an embedded resource's binary payload.
+ *
+ * A supported image becomes an image block; any other blob is decoded and
+ * written into the session's `local://` root so the model can open it, and the
+ * text says where it went. The server URI is provenance only — it need not be
+ * fetchable. `delivered` marks a payload that now lives in the result (an
+ * image block or a file on disk), so the caller can drop the base64 copy from
+ * `details.rawContent`.
+ */
+async function formatResourceBlob(
+	uri: string,
+	blob: string,
+	mimeType: string | undefined,
+	context: CustomToolContext,
+): Promise<{ text: string; image?: ImageContent; delivered: boolean }> {
+	const header = `[Resource: ${uri}]`;
+	const mime = mimeType?.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
+	// A zero-byte payload is a valid attachment but never a decodable image.
+	if (blob.length > 0 && SUPPORTED_IMAGE_MIME_TYPES.has(mime)) {
+		return { text: header, image: { type: "image", data: blob, mimeType: mime }, delivered: true };
+	}
+	let bytes: Uint8Array;
+	try {
+		bytes = Uint8Array.fromBase64(blob);
+	} catch {
+		return { text: `${header}\n${mime} payload dropped: invalid base64 blob.`, delivered: false };
+	}
+	const size = formatBytes(bytes.length);
+	const url = `local://mcp-resource-${Bun.hash(bytes).toString(16)}.${blobExtensionForMime(mime)}`;
+	try {
+		const filePath = await InternalUrlRouter.instance().locate(
+			url,
+			{ localProtocolOptions: context.localProtocolOptions },
+			{ create: true },
+		);
+		if (filePath === null) throw new Error("no local file backs the resource URL");
+		await Bun.write(filePath, bytes);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		logger.warn("Failed to save MCP resource blob", { uri, mimeType: mime, error: message });
+		// The absolute local path stays in the local log; the model-facing
+		// reason must not disclose the user's home directory.
+		const reason = redactAbsolutePaths(message) || "unknown error";
+		return { text: `${header}\n${mime} payload (${size}) could not be saved: ${reason}`, delivered: false };
+	}
+	return { text: `${header}\n${mime} payload (${size}) saved to ${url}`, delivered: true };
+}
+
+/**
+ * Convert MCP content to agent content while retaining image payloads and
+ * making embedded binary resources reachable (see {@link formatResourceBlob}).
+ * `rawContent` is the input minus every resource blob that was delivered, so
+ * the session details never carry a second copy of the payload.
+ */
+async function formatMCPContent(
+	content: MCPContent[],
+	context: CustomToolContext,
+): Promise<{ content: Array<TextContent | ImageContent>; rawContent: MCPContent[] }> {
 	const blocks: Array<TextContent | ImageContent> = [];
+	let rawContent = content;
 	let text = "";
 	const flushText = () => {
 		if (!text) return;
@@ -214,7 +297,7 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
 		text += text ? `\n\n${value}` : value;
 	};
 
-	for (const item of content) {
+	for (const [index, item] of content.entries()) {
 		switch (item.type) {
 			case "text":
 				appendText(item.text);
@@ -223,17 +306,37 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
 				flushText();
 				blocks.push(item);
 				break;
-			case "resource":
-				appendText(
-					item.resource.text
-						? `[Resource: ${item.resource.uri}]\n${item.resource.text}`
-						: `[Resource: ${item.resource.uri}]`,
-				);
+			case "resource": {
+				const { uri, text: resourceText, blob, mimeType } = item.resource;
+				// The MCP spec allows exactly one of text/blob, so a text
+				// resource keeps its text form.
+				if (resourceText) {
+					appendText(`[Resource: ${uri}]\n${resourceText}`);
+					break;
+				}
+				// An absent blob is not an empty one: `blob: ""` is a real
+				// zero-byte attachment and must stay reachable.
+				if (blob === undefined) {
+					appendText(`[Resource: ${uri}]`);
+					break;
+				}
+				const formatted = await formatResourceBlob(uri, blob, mimeType, context);
+				appendText(formatted.text);
+				if (formatted.image) {
+					flushText();
+					blocks.push(formatted.image);
+				}
+				if (formatted.delivered) {
+					if (rawContent === content) rawContent = content.slice();
+					const { blob: _delivered, ...retained } = item.resource;
+					rawContent[index] = { ...item, resource: retained };
+				}
 				break;
+			}
 		}
 	}
 	flushText();
-	return blocks.length > 0 ? blocks : [{ type: "text", text: "" }];
+	return { content: blocks.length > 0 ? blocks : [{ type: "text", text: "" }], rawContent };
 }
 
 /**
@@ -275,19 +378,20 @@ function structuredContentAlreadyInText(structured: Record<string, unknown>, con
 }
 
 /** Build a CustomToolResult from a callTool response. */
-function buildResult(
+async function buildResult(
 	result: MCPToolCallResult,
+	context: CustomToolContext,
 	serverName: string,
 	mcpToolName: string,
 	provider?: string,
 	providerName?: string,
-): CustomToolResult<MCPToolDetails> {
-	const content = formatMCPContent(result.content);
+): Promise<CustomToolResult<MCPToolDetails>> {
+	const { content, rawContent } = await formatMCPContent(result.content, context);
 	const details: MCPToolDetails = {
 		serverName,
 		mcpToolName,
 		isError: result.isError,
-		rawContent: result.content,
+		rawContent,
 		mcpMeta: result._meta,
 		provider,
 		providerName,
@@ -777,11 +881,11 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		_toolCallId: string,
 		params: unknown,
 		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
-		_ctx: CustomToolContext,
+		ctx: CustomToolContext,
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
 		throwIfAborted(signal);
-		const args = await prepareOutboundArgs(params, this.tool.inputSchema, _ctx);
+		const args = await prepareOutboundArgs(params, this.tool.inputSchema, ctx);
 		const provider = this.connection._source?.provider;
 		const providerName = this.connection._source?.providerName;
 		const progress = progressUpdater(onUpdate, this.connection.name, this.tool.name, provider, providerName);
@@ -809,8 +913,9 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 				);
 			}
 			this.connection = attempt.connection;
-			return buildResult(
+			return await buildResult(
 				attempt.result,
+				ctx,
 				attempt.connection.name,
 				this.tool.name,
 				attempt.connection._source?.provider ?? provider,
@@ -827,7 +932,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 					const retryProviderName = newConn._source?.providerName ?? providerName;
 					try {
 						const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
-						return buildResult(result, newConn.name, this.tool.name, retryProvider, retryProviderName);
+						return await buildResult(result, ctx, newConn.name, this.tool.name, retryProvider, retryProviderName);
 					} catch (retryError) {
 						rethrowIfAborted(retryError, signal);
 						return buildErrorResult(
@@ -923,11 +1028,11 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		_toolCallId: string,
 		params: unknown,
 		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
-		_ctx: CustomToolContext,
+		ctx: CustomToolContext,
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
 		throwIfAborted(signal);
-		const args = await prepareOutboundArgs(params, this.tool.inputSchema, _ctx);
+		const args = await prepareOutboundArgs(params, this.tool.inputSchema, ctx);
 		const provider = this.#fallbackProvider;
 		const providerName = this.#fallbackProviderName;
 		const progress = progressUpdater(onUpdate, this.serverName, this.tool.name, provider, providerName);
@@ -963,8 +1068,9 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 						providerName,
 					);
 				}
-				return buildResult(
+				return await buildResult(
 					attempt.result,
+					ctx,
 					this.serverName,
 					this.tool.name,
 					attempt.connection._source?.provider ?? provider,
@@ -979,7 +1085,14 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 						const retryProviderName = newConn._source?.providerName ?? providerName;
 						try {
 							const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
-							return buildResult(result, this.serverName, this.tool.name, retryProvider, retryProviderName);
+							return await buildResult(
+								result,
+								ctx,
+								this.serverName,
+								this.tool.name,
+								retryProvider,
+								retryProviderName,
+							);
 						} catch (retryError) {
 							rethrowIfAborted(retryError, signal);
 							return buildErrorResult(
@@ -1004,8 +1117,9 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 				if (newConn) {
 					try {
 						const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
-						return buildResult(
+						return await buildResult(
 							result,
+							ctx,
 							this.serverName,
 							this.tool.name,
 							newConn._source?.provider ?? provider,
