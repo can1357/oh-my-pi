@@ -562,7 +562,9 @@ export class CollabGuestLink {
 		this.#ctx.syncRunningSubagentBadge();
 		this.#assistantStreamSynced = false;
 		this.#streamedSnapshot = undefined;
-		setSessionTerminalTitle(pending.state.sessionName ?? pending.header.title, pending.state.cwd);
+		setSessionTerminalTitle(pending.state.sessionName ?? pending.header.title, pending.state.cwd, {
+			remoteCwd: true,
+		});
 		// No eager teardown here: renderInitialMessages() stages the replacement
 		// transcript and disposes the visible children only when the staged tree
 		// commits (ui-helpers), which both preserves its atomicity/rollback
@@ -661,7 +663,7 @@ export class CollabGuestLink {
 			case "state": {
 				this.state = frame.state;
 				this.#applyHostState(frame.state);
-				setSessionTerminalTitle(frame.state.sessionName, frame.state.cwd);
+				setSessionTerminalTitle(frame.state.sessionName, frame.state.cwd, { remoteCwd: true });
 				this.#updateStatusSegment();
 				reconcileGuestSnapshotHostState(this.#ctx, frame.state.isStreaming);
 				this.#reconcileLifecycle(frame.state.isStreaming);
