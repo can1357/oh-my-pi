@@ -5,6 +5,7 @@
 ### Added
 
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
+- Added a fullscreen extension link browser: pressing Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen, replays the transcript so links already scrolled into terminal scrollback can be picked by tag or click, and an extension's `ctx.ui.rerenderMessage` redraws the reply in place inside it. Link tags prefer the letter they cover (a label's first letter, then its others), and in the browser a link keeps its tag while it stays in view ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 
 ### Fixed
 
