@@ -4,6 +4,7 @@
  * judgment is spent.
  */
 import * as natives from "@oh-my-pi/pi-natives";
+import { resolveSearchResultPath } from "../path-utils";
 import { countOccurrences } from "./text";
 
 export interface GrepIndex {
@@ -24,6 +25,8 @@ export interface GrepIndexOptions {
 	includeHidden: boolean;
 	/** Filesystem URL roots and their entries resolve through. */
 	filesystem: natives.ShellFilesystem;
+	maxScanFiles?: number;
+	maxScanBytes?: number;
 	signal?: AbortSignal;
 	timeoutMs?: number;
 }
@@ -45,14 +48,19 @@ export async function grepIndex(
 	const index: GrepIndex = { keywords, perFileKw: new Map(), filesScanned: 0 };
 	if (keywords.length === 0) return index;
 	const { perFileKw } = index;
+	const pattern = keywords.map(escapeRegex).join("|");
+	const truncated = new Set<string>();
 	const result = await natives.grep({
-		pattern: keywords.map(escapeRegex).join("|"),
+		pattern,
 		path: root,
 		ignoreCase: true,
 		hidden: options.includeHidden,
 		gitignore: true,
 		mode: natives.GrepOutputMode.Content,
 		filesystem: options.filesystem,
+		maxScanFiles: options.maxScanFiles,
+		maxScanBytes: options.maxScanBytes,
+		maxColumns: 512,
 		signal: options.signal,
 		timeoutMs: options.timeoutMs,
 		onMatches: matches => {
@@ -62,6 +70,7 @@ export async function grepIndex(
 					counts = Array.from({ length: keywords.length }, () => 0);
 					perFileKw.set(match.path, counts);
 				}
+				if (match.truncated) truncated.add(match.path);
 				const line = match.line.toLowerCase();
 				for (let k = 0; k < keywords.length; k++) {
 					counts[k]! += countOccurrences(line, keywords[k]!);
@@ -70,6 +79,31 @@ export async function grepIndex(
 		},
 	});
 	index.filesScanned = result.filesSearched + (result.skippedOversized ?? 0);
+	// A truncated matching line hides occurrences past the retained prefix, so
+	// recount the affected files over their untruncated lines. The native scan
+	// reads at most one bounded window per file, which bounds this fallback
+	// even for pathological single-line files.
+	for (const rel of truncated) {
+		const recount = await natives.grep({
+			pattern,
+			path: resolveSearchResultPath(root, rel),
+			ignoreCase: true,
+			hidden: options.includeHidden,
+			gitignore: true,
+			mode: natives.GrepOutputMode.Content,
+			filesystem: options.filesystem,
+			signal: options.signal,
+			timeoutMs: options.timeoutMs,
+		});
+		const counts = Array.from({ length: keywords.length }, () => 0);
+		for (const match of recount.matches) {
+			const line = match.line.toLowerCase();
+			for (let k = 0; k < keywords.length; k++) {
+				counts[k]! += countOccurrences(line, keywords[k]!);
+			}
+		}
+		perFileKw.set(rel, counts);
+	}
 	return index;
 }
 
