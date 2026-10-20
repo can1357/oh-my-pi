@@ -186,6 +186,7 @@
 ## [18.12.4] - 2026-10-20
 
 ### Added
+- Assistant messages on `openai-codex-responses` and `openai-responses` carry `effort`, the reasoning effort the request actually sent on the wire after the model's effort ladder clamped the selector, so JSON/RPC and session consumers can read it the way Anthropic routes read `requestControls.effort` ([#15165](https://github.com/can1357/oh-my-pi/pull/15165) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Added opt-in `reclaimAbovePct` to `auth.accountPolicies`: sessions automatically moved to a lower-priority account return to the preferred one once it has that much quota left ([#14237](https://github.com/can1357/oh-my-pi/pull/14237) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `reachesBudgetedHost()`: whether the catalog's host request budgets (inline image bytes, official image count) apply to a request, true on a model's official endpoint and on Factory Droid's own hosts ([#16288](https://github.com/can1357/oh-my-pi/pull/16288) by [@will-bogusz](https://github.com/will-bogusz))
@@ -200,7 +201,6 @@
 - Fixed Claude requests answering a turn whose attachment is a video, PDF, HEIC or other format sent outside a JPEG/PNG/GIF/WebP image as if nothing were attached; the turn now fails with an error naming the format ([#16407](https://github.com/can1357/oh-my-pi/pull/16407) by [@will-bogusz](https://github.com/will-bogusz))
 ### Added
 
-- Assistant messages on `openai-codex-responses` and `openai-responses` carry `effort`, the reasoning effort the request actually sent on the wire after the model's effort ladder clamped the selector, so JSON/RPC and session consumers can read it the way Anthropic routes read `requestControls.effort` ([#15165](https://github.com/can1357/oh-my-pi/pull/15165) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Added Inception API-key login (`/login inception`) and `INCEPTION_API_KEY` environment authentication ([#16439](https://github.com/can1357/oh-my-pi/pull/16439) by [@eggpeat](https://github.com/eggpeat))
 
 ### Changed
