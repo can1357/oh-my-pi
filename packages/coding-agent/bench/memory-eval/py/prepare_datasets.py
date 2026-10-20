@@ -9,11 +9,14 @@ again. A marker from before the digest was recorded is upgraded in place.
 import os
 import sys
 
-# First, before any import that searches PYTHONPATH: an override tree could supply a downloader that ignores the
-# pinned revision or a converter that changes the data, which would then be published under the pinned marker.
-for name in ("PYTHONPATH", "PYTHONHOME"):
-	if os.environ.get(name):
-		sys.exit(f"prepare_datasets.py: refusing to run with {name} set; unset it so venv-engine's packages are imported")
+# First, before any import: os and sys are loaded at interpreter startup. PYTHONPATH, PYTHONHOME, PYTHONPYCACHEPREFIX and
+# their kin change which code or bytecode an import loads; a downloader that ignores the pinned revision or a converter
+# that changes the data would then be published under the pinned marker. Only these, which affect I/O and locale but
+# not imports, are allowed. Inline in every script: an imported guard could itself be loaded through an override.
+SAFE_PYTHON_ENV = {"PYTHONUNBUFFERED", "PYTHONIOENCODING", "PYTHONUTF8", "PYTHONCOERCECLOCALE", "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE", "PYTHONSTARTUP"}
+for name in sorted(os.environ):
+	if name.upper().startswith("PYTHON") and name.upper() not in SAFE_PYTHON_ENV and os.environ[name]:
+		sys.exit(f"prepare_datasets.py: refusing to run with {name} set; unset it so only venv-engine's code runs")
 
 import ast  # noqa: E402
 import hashlib  # noqa: E402

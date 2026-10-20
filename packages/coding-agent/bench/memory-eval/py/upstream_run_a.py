@@ -12,11 +12,14 @@ BeamMemory.consolidate_to_episodic (recorded, because upstream swallows their ex
 import os
 import sys
 
-# First, before any import that searches PYTHONPATH: os and sys are already loaded at interpreter startup, but an
-# override tree could shadow the standard modules below, Mnemosyne or its dependencies.
-for name in ("PYTHONPATH", "PYTHONHOME"):
-	if os.environ.get(name):
-		sys.exit(f"upstream_run_a.py: refusing to run with {name} set; unset it so the venv's packages are imported")
+# First, before any import: os and sys are loaded at interpreter startup. PYTHONPATH, PYTHONHOME, PYTHONPYCACHEPREFIX and
+# their kin change which code or bytecode an import loads (the standard modules below, Mnemosyne, its dependencies).
+# Only these, which affect I/O and locale but not imports, are allowed. Inline in every script: an imported guard could
+# itself be loaded through an override.
+SAFE_PYTHON_ENV = {"PYTHONUNBUFFERED", "PYTHONIOENCODING", "PYTHONUTF8", "PYTHONCOERCECLOCALE", "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE", "PYTHONSTARTUP"}
+for name in sorted(os.environ):
+	if name.upper().startswith("PYTHON") and name.upper() not in SAFE_PYTHON_ENV and os.environ[name]:
+		sys.exit(f"upstream_run_a.py: refusing to run with {name} set; unset it so only the venv's code runs")
 
 import argparse  # noqa: E402
 import json  # noqa: E402
@@ -59,12 +62,29 @@ os.environ.update(
 # Import mnemosyne before upstream's `sys.path.insert(0, PROJECT_ROOT)` can run: sys.modules then pins the venv's
 # installed package, the same one the harness adapter (Run B) uses, instead of the source checkout.
 import mnemosyne  # noqa: E402
+from mnemosyne.core import embeddings  # noqa: E402
 from mnemosyne.core.beam import BeamMemory  # noqa: E402
+
+from model_digest import model_dir_digest  # noqa: E402
 
 # Run B's adapter runs this exact package; another install or version would calibrate a different runtime.
 if mnemosyne.__version__ != "4.0.0b4" or not Path(mnemosyne.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()):
 	sys.exit(f"mnemosyne must be 4.0.0b4 from this venv ({sys.prefix}), got {mnemosyne.__version__} from {mnemosyne.__file__}")
 print(f"mnemosyne {mnemosyne.__version__} from {mnemosyne.__file__}")
+
+
+def loaded_model_digest() -> str | None:
+	"""The files Mnemosyne's fastembed loaded, as Run B's engine records them; None before a model is loaded."""
+	loaded = getattr(getattr(getattr(embeddings, "_embedding_model", None), "model", None), "_model_dir", None)
+	return model_dir_digest(loaded) if loaded else None
+
+
+# Load the model before upstream ingests anything, as Run B's engine does, so the digest names the model every vector
+# came from; calibration-check compares it with Run B's.
+embeddings.embed(["warmup"])
+MODEL_DIGEST = loaded_model_digest()
+if MODEL_DIGEST is None:
+	sys.exit("Mnemosyne loaded no local embedding model; calibration needs fastembed embeddings")
 
 _setrlimit = resource.setrlimit
 
@@ -149,8 +169,12 @@ questions = [
 	for (conversation, question), (_, contents), recall in zip(queries, recalls, result["recalls"])
 ]
 mean_recall = statistics.mean(result["recalls"])
+if loaded_model_digest() != MODEL_DIGEST:
+	sys.exit("embedding model files changed during Run A; dump not written")
 out_path.parent.mkdir(parents=True, exist_ok=True)
-out_path.write_text(json.dumps({"questions": questions, "meanRecall": mean_recall}), encoding="utf-8")
+out_path.write_text(
+	json.dumps({"questions": questions, "meanRecall": mean_recall, "embeddingModelSha256": MODEL_DIGEST}), encoding="utf-8"
+)
 shutil.rmtree(data_dir, ignore_errors=True)
 print(f"evaluated {len(questions)} questions, mean recall {mean_recall:.6f}")
 print(f"wrote {out_path}")
