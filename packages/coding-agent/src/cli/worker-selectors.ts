@@ -17,3 +17,5 @@ export const SUBAGENT_WORKER_ARG = "__omp_worker_subagent";
 export const STATS_ACTIVITY_WORKER_ARG = "__omp_worker_stats_activity";
 /** Transcript-index worker selector shared by the CLI dispatcher and `transcript-index-client.ts`. */
 export const TRANSCRIPT_INDEX_WORKER_ARG = "__omp_worker_transcript_index";
+/** Persisted-history worker selector shared by the CLI dispatcher and `persisted-history-client.ts`. */
+export const PERSISTED_HISTORY_WORKER_ARG = "__omp_worker_persisted_history";
