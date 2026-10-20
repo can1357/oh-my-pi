@@ -3031,9 +3031,18 @@ export class Markdown implements Component {
 		if (key === undefined) return;
 		this.#openTableKey = key;
 		if (!this.tableLocks?.has(key)) return;
-		// Like a list, the table must start right at the settled boundary: a
-		// display-math opener in front of it could still absorb it.
-		if (start !== (this.#streamPrefixText?.length ?? 0) || (this.#streamSettledText?.length ?? 0) !== start) return;
+		// Like a list, the table must start at the settled boundary: a
+		// display-math opener in front of it could still absorb it. ATX headings
+		// right above it (no blank line between) are finished and cannot hold
+		// such an opener, so the boundary may sit in front of them instead.
+		const prefix = this.#streamPrefixText?.length ?? 0;
+		const settled = this.#streamSettledText?.length ?? 0;
+		let boundary = start;
+		for (let i = index - 1; boundary !== prefix || settled !== boundary; i--) {
+			const before = tokens[i];
+			if (before?.type !== "heading" || !/^ {0,3}#/.test(before.raw) || !before.raw.endsWith("\n")) return;
+			boundary -= before.raw.length;
+		}
 		// The header, the delimiter and every finished row end in a newline;
 		// whatever follows the last one is the row still being written. A later
 		// reference definition can still turn a bracketed label into a link, so

@@ -1168,4 +1168,16 @@ describe("Locked streaming tables", () => {
 		expect(stable).toContain("| a | b |");
 		expect(stable).not.toContain("[doc]");
 	});
+
+	// An ATX heading may be indented up to three spaces.
+	for (const heading of ["## Results", "  ## Results"]) {
+		it(`settles the finished rows of a table written right under a heading (${JSON.stringify(heading)})`, () => {
+			const live = lockedStream(`${heading}\n${header}| a | b |\n| c | d |\n| e`, new Map());
+			// No blank line separates them, but a heading line is finished once it ends.
+			const stable = live.getLastRenderStableText();
+			expect(stable).toStartWith(`${heading}\n`);
+			expect(stable).toContain("| c | d |");
+			expect(stable).not.toContain("| e");
+		});
+	}
 });
