@@ -293,6 +293,7 @@ import {
 	setTerminalTitleSpinnerInterval,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
+	setTerminalTitleTaskNow,
 } from "../utils/title-generator";
 import {
 	aggregateVibeWorkerTokensPerSecond,
@@ -5339,6 +5340,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#syncTodoHudState(owner: AgentViewSession): void {
+		const activeTask = this.todoPhases.flatMap(phase => phase.tasks).find(task => task.status === "in_progress");
+		setTerminalTitleTaskNow(activeTask?.content);
 		this.#cancelTodoAutoClearTimer();
 		const phases = this.todoPhases;
 		const persisted = getTodoHudVisibility(owner.sessionManager.getBranch(), phases);

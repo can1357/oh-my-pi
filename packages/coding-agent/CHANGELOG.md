@@ -20,6 +20,10 @@
 - Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
 - Fixed the omp daemon staying alive for up to 3 seconds after shutdown, or 11 seconds after stopping a module unit such as the image URL broker, once its work was done
 
+### Changed
+
+- Terminal tab titles now read `<project> · <task>`: the project is the Git/Jujutsu repository root (or the directory outside a repo), and the task is the in-progress todo row of the session you are viewing, falling back to the session name; the native Tern/TSP title uses the same label. A collab guest labels the tab with the last segment of the host's working directory, parsed on any OS and never looked up on the guest's filesystem ([#16531](https://github.com/can1357/oh-my-pi/pull/16531) by [@Komzpa](https://github.com/Komzpa))
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes
