@@ -274,14 +274,25 @@ export function __renderLegacyPiVirtualModule(entries: readonly BundledPiEntry[]
  * Build plugin that materializes lazy legacy Pi module loaders entirely in
  * memory. Literal dynamic imports retain every compile-time edge without
  * evaluating unrelated host modules during extension bootstrap.
+ *
+ * The virtual module is anchored inside the installed package. Bun resolves
+ * the bare specifiers of the generated loaders against the importing module's
+ * directory, so anchoring it there makes Node resolution look through that
+ * package's own dependency graph (nested `node_modules`, hoisted siblings,
+ * pnpm links) instead of the host project's — a host that installs
+ * `@oh-my-pi/pi-coding-agent` without its dependencies hoisted to the top
+ * level would otherwise fail to resolve `@oh-my-pi/pi-agent-core`.
  */
-export async function createLegacyPiVirtualModulePlugin(): Promise<Bun.BunPlugin> {
-	const source = __renderLegacyPiVirtualModule(await collectBundledPiEntries());
+export async function createLegacyPiVirtualModulePlugin(
+	layout: LegacyPiLayout = DEFAULT_LAYOUT,
+): Promise<Bun.BunPlugin> {
+	const source = __renderLegacyPiVirtualModule(await collectBundledPiEntries(layout));
+	const virtualPath = path.join(layout.packageDir, LEGACY_PI_MODULES_SPECIFIER);
 	return {
 		name: "omp:legacy-pi-modules",
 		setup(build) {
 			build.onResolve({ filter: /^omp-legacy-pi-modules$/ }, () => ({
-				path: LEGACY_PI_MODULES_SPECIFIER,
+				path: virtualPath,
 				namespace: VIRTUAL_NAMESPACE,
 			}));
 			build.onLoad({ filter: /.*/, namespace: VIRTUAL_NAMESPACE }, () => ({ contents: source, loader: "ts" }));
