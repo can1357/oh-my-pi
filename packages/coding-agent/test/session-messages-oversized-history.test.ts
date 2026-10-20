@@ -187,6 +187,23 @@ describe("convertToLlm oversized tool history", () => {
 		expect((open!.arguments.tasks as Array<{ data: string }>)[0]!.data).toBe(HUGE);
 	});
 
+	it("drops a Gemini thoughtSignature when a signed call's arguments are rewritten, keeping it otherwise", () => {
+		const signed: ToolCall = { ...taskCall("signed", HUGE), thoughtSignature: "sig-signed" };
+		const small: ToolCall = { ...taskCall("small", "tiny"), thoughtSignature: "sig-small" };
+		const messages = [
+			user("start"),
+			assistant([signed, small]),
+			result(signed.id, "ok"),
+			result(small.id, "ok"),
+			user("next"),
+		];
+		const calls = toolCalls(convertToLlm(messages));
+		expect(calls.find(call => call.id === "signed")?.thoughtSignature).toBeUndefined();
+		expect(calls.find(call => call.id === "small")?.thoughtSignature).toBe("sig-small");
+		// The persisted message keeps the original signature.
+		expect(signed.thoughtSignature).toBe("sig-signed");
+	});
+
 	it("keeps UTF-8-safe 8KiB head and tail of a prior-turn tool result over 256KiB", () => {
 		const head = "H".repeat(8_191);
 		const tail = "T".repeat(8_191);

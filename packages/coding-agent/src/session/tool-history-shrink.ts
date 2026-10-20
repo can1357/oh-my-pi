@@ -17,6 +17,7 @@ import { registerMessageCacheInvalidator } from "@oh-my-pi/pi-agent-core/compact
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { normalizeResponsesToolCallId } from "@oh-my-pi/pi-ai/utils";
 import { isUserTurnInitiator } from "@oh-my-pi/pi-tui/chat/messages";
+import { truncateHeadBytes, truncateTailBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { stringifyJson } from "@oh-my-pi/pi-utils";
 
 /** Argument strings above this many UTF-8 bytes are replaced by a marker. */
@@ -76,8 +77,10 @@ function shrinkToolCall(call: ToolCall): ToolCall {
 	let shrunk = call;
 	if (args !== call.arguments) {
 		// The in-band raw block replays the original huge arguments verbatim; drop it so
-		// the provider re-renders the call from the shrunk arguments.
-		const { rawBlock: _rawBlock, ...rest } = call;
+		// the provider re-renders the call from the shrunk arguments. A Gemini
+		// `thoughtSignature` is an encrypted attestation over the original call, so it
+		// cannot ride along with rewritten arguments (see obfuscateAssistantContentForReplay).
+		const { rawBlock: _rawBlock, thoughtSignature: _thoughtSignature, ...rest } = call;
 		shrunk = { ...rest, arguments: args };
 	}
 	shrunkCalls.set(call, shrunk);
@@ -86,16 +89,13 @@ function shrinkToolCall(call: ToolCall): ToolCall {
 
 function shrinkResultText(text: string): string {
 	if (text.length * 3 <= MAX_TOOL_RESULT_TEXT_BYTES) return text;
-	const bytes = Buffer.from(text, "utf8");
-	if (bytes.length <= MAX_TOOL_RESULT_TEXT_BYTES) return text;
-	// Move both cut points off UTF-8 continuation bytes so no character is split.
-	let headEnd = TOOL_RESULT_EDGE_BYTES;
-	while (headEnd > 0 && (bytes[headEnd]! & 0xc0) === 0x80) headEnd--;
-	let tailStart = bytes.length - TOOL_RESULT_EDGE_BYTES;
-	while (tailStart < bytes.length && (bytes[tailStart]! & 0xc0) === 0x80) tailStart++;
-	const head = bytes.subarray(0, headEnd).toString("utf8");
-	const tail = bytes.subarray(tailStart).toString("utf8");
-	return `${head}\n${omittedMarker(tailStart - headEnd, text)}\n${tail}`;
+	// Byte count without materializing a second copy of a very large result; only the
+	// two retained edges are windowed out of the string.
+	const totalBytes = Buffer.byteLength(text, "utf8");
+	if (totalBytes <= MAX_TOOL_RESULT_TEXT_BYTES) return text;
+	const head = truncateHeadBytes(text, TOOL_RESULT_EDGE_BYTES);
+	const tail = truncateTailBytes(text, TOOL_RESULT_EDGE_BYTES);
+	return `${head.text}\n${omittedMarker(totalBytes - head.bytes - tail.bytes, text)}\n${tail.text}`;
 }
 
 interface MessageMemo {

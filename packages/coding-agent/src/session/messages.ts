@@ -1435,7 +1435,9 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 		if (i === len - 1) prefixOutputLen = out.length;
 		if (i === turnStart) turnOutputLen = out.length;
 		const source = shrinkToolHistoryMessage(messages[i], completedToolCallIds(messages, i), i < turnStart);
-		const fragment = convertMessageAt(messages, i, (_m, interruptedNext) => convertOneCached(source, interruptedNext));
+		const fragment = convertMessageAt(messages, i, (_m, interruptedNext) =>
+			convertOneCached(source, interruptedNext),
+		);
 		for (const msg of fragment) out.push(msg);
 	}
 	if (len === 0) prefixOutputLen = 0;
