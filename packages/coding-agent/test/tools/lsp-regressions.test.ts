@@ -3478,6 +3478,144 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("rename_file reports a plain move when no server supports workspace/willRenameFiles", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-file-unsupported-");
+		try {
+			const sourceFile = path.join(tempDir.path(), "src", "old.ts");
+			const destFile = path.join(tempDir.path(), "src", "new.ts");
+			await Bun.write(sourceFile, "export const value = 42;\n");
+
+			const server: ServerConfig = { command: "test-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const client: LspClient = {
+				name: "test-lsp",
+				cwd: tempDir.path(),
+				config: server,
+				proc: {
+					stdin: { write() {}, flush: async () => {} },
+				} as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+			};
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "test-lsp": server },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			// The server does not implement workspace/willRenameFiles, so it
+			// cannot rewrite the imports pointing at the old path.
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(async (_client, method) => {
+				if (method === "workspace/willRenameFiles") {
+					throw new Error("Method not found: -32601");
+				}
+				return null;
+			});
+			vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("rename-file-unsupported", {
+				action: "rename_file",
+				file: sourceFile,
+				new_name: destFile,
+				timeout: 5,
+			});
+
+			// The path moves, but the result must not read as a semantic rename:
+			// the caller has to know the imports were left pointing at a file
+			// that no longer exists.
+			expect(fs.existsSync(sourceFile)).toBe(false);
+			expect(fs.existsSync(destFile)).toBe(true);
+			const output = textResult(result);
+			expect(output).toContain("does not support workspace/willRenameFiles");
+			expect(output).toContain("NOT updated");
+			expect(result.details).toMatchObject({
+				action: "rename_file",
+				// `success` reports the file move; `semanticRename` reports that
+				// no server rewrote the references.
+				success: true,
+				semanticRename: false,
+				referenceEdits: 0,
+				unsupportedServers: ["test-lsp"],
+			});
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("rename_file distinguishes a supporting server that finds no references to update", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-file-zero-edits-");
+		try {
+			const sourceFile = path.join(tempDir.path(), "src", "old.ts");
+			const destFile = path.join(tempDir.path(), "src", "new.ts");
+			await Bun.write(sourceFile, "export const value = 42;\n");
+
+			const server: ServerConfig = { command: "test-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const client: LspClient = {
+				name: "test-lsp",
+				cwd: tempDir.path(),
+				config: server,
+				proc: {
+					stdin: { write() {}, flush: async () => {} },
+				} as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+			};
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "test-lsp": server },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			// A supporting server answers and reports that nothing references
+			// the old path — a real "0 reference edits", not a missing server.
+			vi.spyOn(lspClient, "sendRequest").mockResolvedValue({ documentChanges: [] });
+			vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("rename-file-zero-edits", {
+				action: "rename_file",
+				file: sourceFile,
+				new_name: destFile,
+				timeout: 5,
+			});
+
+			expect(fs.existsSync(destFile)).toBe(true);
+			const output = textResult(result);
+			expect(output).toContain("0 reference edits");
+			expect(output).not.toContain("NOT updated");
+			expect(result.details).toMatchObject({
+				action: "rename_file",
+				success: true,
+				semanticRename: true,
+				referenceEdits: 0,
+			});
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
 	it("rename_file with apply:false previews edits without filesystem changes", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-rename-file-preview-");
 		try {

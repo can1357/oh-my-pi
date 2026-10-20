@@ -9,6 +9,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import { isEnoent, isFsError, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import { activeThemeSymbol } from "@oh-my-pi/pi-tui/theme/active-symbols";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
@@ -169,6 +170,49 @@ function formatRenameStatError(error: unknown): string {
 	if (!isFsError(error)) return "unknown filesystem error";
 	const syscall = error.syscall ? ` during ${replaceTabs(error.syscall)}` : "";
 	return `${replaceTabs(error.code)}${syscall}`;
+}
+
+/**
+ * Lines describing a rename that no language server could assist with: the
+ * path moves, but the imports and references pointing at it stay stale
+ * (issue #15526). The move is still performed — refusing it would make
+ * `rename_file` unusable for every language whose server does not implement
+ * `workspace/willRenameFiles` — but the result must never imply that the
+ * references were rewritten.
+ */
+function describeMissingSemanticAssist(
+	relevantServerCount: number,
+	unsupportedServers: string[],
+	unreachableServers: string[],
+	mode: "preview" | "applied",
+): string[] {
+	const warning = activeThemeSymbol("status.warning");
+	const lines: string[] = [];
+	if (relevantServerCount === 0) {
+		lines.push(
+			`  ${warning} no language server handles this file type — the rename ${
+				mode === "applied" ? "was" : "would be"
+			} a plain move`,
+		);
+	} else {
+		lines.push(
+			`  ${warning} no language server could update references — the rename ${
+				mode === "applied" ? "was" : "would be"
+			} a plain move`,
+		);
+	}
+	for (const name of unsupportedServers) {
+		lines.push(`    ${name}: does not support workspace/willRenameFiles`);
+	}
+	for (const name of unreachableServers) {
+		lines.push(`    ${name}: could not be reached`);
+	}
+	lines.push(
+		`  0 reference edits — imports and references to the old path ${
+			mode === "applied" ? "were" : "would be"
+		} NOT updated`,
+	);
+	return lines;
 }
 
 /**
@@ -637,6 +681,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// — moving the path without those edits leaves dangling references
 			// (issue #8380).
 			const hardFailures: string[] = [];
+			// Servers that do not implement workspace/willRenameFiles. They cannot
+			// contribute reference updates, so a rename they alone could have
+			// assisted is a plain move (issue #15526).
+			const unsupportedServers: string[] = [];
+			// Servers that could not be reached. Like unsupported servers they
+			// contribute no reference updates.
+			const unreachableServers: string[] = [];
 
 			for (const [serverName, serverConfig] of servers) {
 				throwIfAborted(signal);
@@ -667,7 +718,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						throw err;
 					}
 					// Could not reach the server at all; note it but don't block —
-					// this is not a willRenameFiles failure.
+					// this is not a willRenameFiles failure. It does mean the
+					// server contributes no reference updates, so the result has
+					// to say so (issue #15526).
+					unreachableServers.push(serverName);
 					const msg = err instanceof Error ? err.message : String(err);
 					serverNotes.push(`  ${serverName}: ${msg}`);
 					continue;
@@ -693,16 +747,29 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					if (err instanceof ToolAbortError || signal?.aborted) {
 						throw err;
 					}
-					// method-not-found means the server doesn't implement the request;
-					// skip it silently. Any other error is a genuine failure from a
-					// server that supports willRenameFiles.
-					if (!isMethodNotFoundError(err)) {
-						const msg = err instanceof Error ? err.message : String(err);
-						serverNotes.push(`  ${serverName}: ${msg}`);
-						hardFailures.push(serverName);
+					// method-not-found means the server doesn't implement the
+					// request, so it cannot contribute reference updates. Record
+					// it: a rename no server could assist is a plain move, and
+					// the result must not imply the references were updated
+					// (issue #15526).
+					if (isMethodNotFoundError(err)) {
+						unsupportedServers.push(serverName);
+						continue;
 					}
+					// Any other error is a genuine failure from a server that
+					// supports willRenameFiles.
+					const msg = err instanceof Error ? err.message : String(err);
+					serverNotes.push(`  ${serverName}: ${msg}`);
+					hardFailures.push(serverName);
 				}
 			}
+
+			// The rename is semantic only when a server actually answered the
+			// willRenameFiles request. Servers that do not implement the method
+			// (or could not be reached) leave the workspace references stale, so
+			// the result must report a plain move instead of implying that the
+			// references were rewritten (issue #15526).
+			const semanticAssist = respondingServers.size > 0;
 
 			const sourceLabel = formatPathRelativeToCwd(source, this.session.cwd);
 			const destLabel = formatPathRelativeToCwd(dest, this.session.cwd);
@@ -714,9 +781,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			if (!shouldApply) {
 				const lines: string[] = [];
 				lines.push(`Rename preview: ${fileCountLabel} → ${destLabel}`);
-				if (perServerEdits.length === 0) {
-					lines.push("  No LSP edits would be applied");
+				if (!semanticAssist) {
+					lines.push(
+						...describeMissingSemanticAssist(servers.length, unsupportedServers, unreachableServers, "preview"),
+					);
 				} else {
+					let printedServers = 0;
 					for (const { serverName, edit } of perServerEdits) {
 						const edits = formatWorkspaceEdit(edit, this.session.cwd);
 						if (edits.length === 0) continue;
@@ -724,6 +794,14 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						for (const e of edits) {
 							lines.push(`    ${e}`);
 						}
+						printedServers++;
+					}
+					if (printedServers === 0) {
+						// A supporting server answered and found nothing to change:
+						// that is a real "0 reference edits", not a missing server.
+						lines.push(
+							`  ${Array.from(respondingServers).join(", ")}: 0 reference edits (no references to update)`,
+						);
 					}
 				}
 				if (serverNotes.length > 0) {
@@ -736,6 +814,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						action,
 						serverName: Array.from(respondingServers).join(", "),
 						success: true,
+						semanticRename: semanticAssist,
+						unsupportedServers,
+						unreachableServers,
 						request: params,
 					},
 				};
@@ -854,6 +935,19 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			await applyEditsThenRename(referenceEdits, source, dest);
 			summary.push(`  Renamed ${sourceLabel} → ${destLabel}`);
 
+			const appliedReferenceEdits = referenceEdits.reduce((total, ref) => total + ref.edits.length, 0);
+			if (!semanticAssist) {
+				// The path moved, but no server rewrote the references pointing at
+				// it. Say so instead of letting a plain move read as a semantic
+				// rename (issue #15526).
+				summary.push(
+					...describeMissingSemanticAssist(servers.length, unsupportedServers, unreachableServers, "applied"),
+				);
+			} else if (appliedReferenceEdits === 0) {
+				// A supporting server answered and found nothing to change.
+				summary.push(`  ${Array.from(respondingServers).join(", ")}: 0 reference edits (no references to update)`);
+			}
+
 			for (const [serverName, serverConfig] of servers) {
 				try {
 					const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
@@ -885,6 +979,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					action,
 					serverName: Array.from(respondingServers).join(", "),
 					success: true,
+					// `success` reports the file move; `semanticRename` reports
+					// whether a language server actually rewrote the references
+					// pointing at the old path (issue #15526).
+					semanticRename: semanticAssist,
+					referenceEdits: appliedReferenceEdits,
+					unsupportedServers,
+					unreachableServers,
 					request: params,
 				},
 			};
