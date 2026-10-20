@@ -68,6 +68,25 @@ function isUsageWindowBoundary(entry: SessionEntry): boolean {
 	);
 }
 
+/**
+ * The usage record that billed a compaction's own side request.
+ *
+ * The request is billed before the compaction lands, so its record can sit
+ * before a transcript turn the live loop appended meanwhile. Anchoring on the
+ * compaction entry alone would drop the request's tokens and cost from the
+ * session totals, so the anchor walks back over those turns to the record
+ * itself. The walk stops at the previous compaction or reset boundary: an
+ * earlier compaction's request belongs to an earlier window.
+ */
+function findCompactionUsageAnchor(branch: readonly SessionEntry[], fromIndex: number): number | undefined {
+	for (let index = fromIndex; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry.type === "compaction" || entry.type === "reset_boundary") return undefined;
+		if (entry.type === "model_usage" && entry.purpose.startsWith("compaction:")) return index;
+	}
+	return undefined;
+}
+
 /** Model calls belonging to the same active transcript window as `agent.state.messages`. */
 function forEachActiveModelUsage(branch: readonly SessionEntry[], visit: (usage: Usage) => void): void {
 	const latestCompaction = getLatestCompactionEntry(branch);
@@ -92,6 +111,12 @@ function forEachActiveModelUsage(branch: readonly SessionEntry[], visit: (usage:
 		// session totals the moment the compaction succeeds.
 		startIndex = firstKeptIndex >= 0 ? firstKeptIndex : compactionIndex;
 		while (startIndex > 0 && !isUsageWindowBoundary(branch[startIndex - 1])) startIndex--;
+		if (firstKeptIndex < 0) {
+			// The live loop can append a turn between the request's record and
+			// the compaction, so the record is not always adjacent. Anchor on
+			// the compaction's own request instead of the turn boundary.
+			startIndex = findCompactionUsageAnchor(branch, startIndex - 1) ?? startIndex;
+		}
 	}
 	for (let index = startIndex; index < branch.length; index++) {
 		const entry = branch[index];

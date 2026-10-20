@@ -274,6 +274,48 @@ describe("compaction usage ledger", () => {
 		expect(session.getSessionStats().tokens.total).toBe(130);
 		expect(session.getSessionStats().cost).toBe(6);
 	});
+
+	it("keeps a compaction's own request usage when a turn separates it from the compaction", async () => {
+		const target = getBundledModel("aimlapi", "alibaba/qwen3-coder-480b-a35b-instruct");
+		if (!target) throw new Error("Expected bundled model");
+		const manager = SessionManager.inMemory();
+		manager.appendMessage({ role: "user", content: "old history", timestamp: 1 });
+		const observe = manager.createUsageObserver();
+		observe({
+			purpose: "compaction:summary",
+			api: target.api,
+			provider: target.provider,
+			model: target.id,
+			stopReason: "stop",
+			usage: SUMMARY_USAGE,
+		});
+		// The live loop appended a turn while the compaction was still running,
+		// so the request's record is no longer adjacent to the compaction.
+		manager.appendMessage({ role: "user", content: "live turn", timestamp: 2 });
+		// The provider found no safe retained boundary, so the compaction kept
+		// nothing and the entry carries no first-kept id.
+		manager.appendCompaction("summary", undefined, "", 100);
+
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: target,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: manager.buildSessionContext().messages,
+				},
+			}),
+			sessionManager: manager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: new ModelRegistry(await AuthStorage.create(":memory:")),
+		});
+
+		// The compaction's own request was billed, so its tokens and cost stay
+		// in the session totals even though a turn separates the record from
+		// the compaction entry.
+		expect(session.getSessionStats().tokens.total).toBe(130);
+		expect(session.getSessionStats().cost).toBe(6);
+	});
 });
 
 /**
