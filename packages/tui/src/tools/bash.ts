@@ -1,5 +1,5 @@
 import type { Component } from "../tui";
-import { getProjectDir, jsonContainerEnd } from "@oh-my-pi/pi-utils";
+import { formatBytes, getProjectDir, jsonContainerEnd } from "@oh-my-pi/pi-utils";
 import { highlightCode, type Theme } from "../theme/theme";
 import { renderStatusLine } from "../render/status-line";
 import { framedToolCard, type ToolCardSnapshot } from "../render/tool-card";
@@ -14,6 +14,7 @@ import {
 } from "../render/render-utils";
 import {
 	formatStyledTruncationWarning,
+	type MinimizedMeta,
 	type OutputMeta,
 	stripOutputNotice,
 	stripRawOutputArtifactNotice,
@@ -351,10 +352,19 @@ function bashStatsParts(
 	if (artifactId) {
 		statsParts.push(`Artifact: ${artifactId}`);
 	}
+	const minimized = details?.meta?.minimized;
+	if (minimized) {
+		statsParts.push(`Minimized: ${formatMinimized(minimized)}`);
+	}
 	if (isError && typeof details?.exitCode === "number") {
 		statsParts.push(`Exit: ${details.exitCode}`);
 	}
 	return statsParts;
+}
+
+/** `git 120.4KB → 3.2KB`: the minimizer filter that ran and the bytes it took the output from and to. */
+function formatMinimized(minimized: MinimizedMeta): string {
+	return `${minimized.filter} ${formatBytes(minimized.inputBytes)} → ${formatBytes(minimized.outputBytes)}`;
 }
 
 /**
@@ -400,6 +410,8 @@ function shellFootParts(details: BashToolDetails | undefined, artifactId: string
 		if (service.pid !== undefined) parts.push(`PID ${service.pid}`);
 	}
 	if (artifactId) parts.push(`Artifact ${artifactId}`);
+	const minimized = details?.meta?.minimized;
+	if (minimized) parts.push(`Minimized ${formatMinimized(minimized)}`);
 	return parts;
 }
 
