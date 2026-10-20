@@ -234,6 +234,46 @@ describe("compaction usage ledger", () => {
 		// The spend is still billed to the session it was made in.
 		expect(manager.getUsageStatistics().totalTokens).toBe(130);
 	});
+
+	it("keeps a compaction's own request usage after an empty-tail compaction", async () => {
+		const target = getBundledModel("aimlapi", "alibaba/qwen3-coder-480b-a35b-instruct");
+		if (!target) throw new Error("Expected bundled model");
+		const manager = SessionManager.inMemory();
+		manager.appendMessage({ role: "user", content: "old history", timestamp: 1 });
+		const observe = manager.createUsageObserver();
+		observe({
+			purpose: "compaction:summary",
+			api: target.api,
+			provider: target.provider,
+			model: target.id,
+			stopReason: "stop",
+			usage: SUMMARY_USAGE,
+		});
+		// The provider found no safe retained boundary, so the compaction kept
+		// nothing and the entry carries no first-kept id.
+		manager.appendCompaction("summary", undefined, "", 100);
+
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: target,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: manager.buildSessionContext().messages,
+				},
+			}),
+			sessionManager: manager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: new ModelRegistry(await AuthStorage.create(":memory:")),
+		});
+
+		// The request that produced the compaction was billed, and its record
+		// sits right before the compaction entry. The new active window starts
+		// at that compaction, so the record has to be counted there — otherwise
+		// the spend vanishes the moment the compaction succeeds.
+		expect(session.getSessionStats().tokens.total).toBe(130);
+		expect(session.getSessionStats().cost).toBe(6);
+	});
 });
 
 /**

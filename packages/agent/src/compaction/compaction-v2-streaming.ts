@@ -459,6 +459,8 @@ interface CompactionV2CollectionState {
 	compactionItems: Array<Record<string, unknown>>;
 	sawCompleted: boolean;
 	usage: CompactionV2Usage | undefined;
+	/** Whether the billed usage was already handed to the observer. */
+	usageReported: boolean;
 }
 
 function createCompactionV2CollectionState(): CompactionV2CollectionState {
@@ -467,7 +469,27 @@ function createCompactionV2CollectionState(): CompactionV2CollectionState {
 		compactionItems: [],
 		sawCompleted: false,
 		usage: undefined,
+		usageReported: false,
 	};
+}
+
+/**
+ * Hand the billed usage to the observer exactly once.
+ *
+ * Two terminal events carry a usage object: a completed response and an
+ * incomplete one (`max_output_tokens`, content filter). Both billed the
+ * request, and the incomplete one is rejected — so its report has to happen
+ * before the rejection, or the fallback underreports the abandoned attempt.
+ */
+function reportCompactionV2Usage(
+	state: CompactionV2CollectionState,
+	onUsage: ((usage: RemoteCompactionUsage) => void) | undefined,
+): void {
+	if (state.usageReported) return;
+	const usage = state.usage;
+	if (!usage) return;
+	state.usageReported = true;
+	onUsage?.(usage);
 }
 
 async function collectCompactionV2Events(
@@ -477,7 +499,7 @@ async function collectCompactionV2Events(
 ): Promise<CompactionV2Response> {
 	const state = createCompactionV2CollectionState();
 	for await (const event of events) {
-		handleCompactionV2Event(event, undefined, state);
+		handleCompactionV2Event(event, undefined, state, onUsage);
 	}
 	return finishCompactionV2Collection(state, request, onUsage);
 }
@@ -504,7 +526,7 @@ async function collectCompactionV2Output(
 				eventName = undefined;
 				return;
 			}
-			handleCompactionV2SseEvent(dataLines.join("\n"), eventName, state);
+			handleCompactionV2SseEvent(dataLines.join("\n"), eventName, state, onUsage);
 			eventName = undefined;
 			dataLines = [];
 		};
@@ -553,7 +575,7 @@ function finishCompactionV2Collection(
 	// The provider billed this attempt whatever its payload turns out to be.
 	// Report the usage before the output-count validation, so an attempt that
 	// is abandoned here is still in the ledger when the fallback runs.
-	if (state.usage) onUsage?.(state.usage);
+	reportCompactionV2Usage(state, onUsage);
 	if (state.compactionItems.length !== 1) {
 		throw new Error(
 			`V2 compaction expected exactly one compaction output item, got ${state.compactionItems.length} from ${state.outputItemCount} output items`,
@@ -579,6 +601,7 @@ function handleCompactionV2SseEvent(
 	data: string,
 	eventName: string | undefined,
 	state: CompactionV2CollectionState,
+	onUsage?: (usage: RemoteCompactionUsage) => void,
 ): void {
 	if (data === "[DONE]") return;
 	let event: Record<string, unknown>;
@@ -587,13 +610,14 @@ function handleCompactionV2SseEvent(
 	} catch (err) {
 		throw new Error(`V2 compaction stream parse failed: ${err instanceof Error ? err.message : String(err)}`);
 	}
-	handleCompactionV2Event(event, eventName, state);
+	handleCompactionV2Event(event, eventName, state, onUsage);
 }
 
 function handleCompactionV2Event(
 	event: Record<string, unknown>,
 	eventName: string | undefined,
 	state: CompactionV2CollectionState,
+	onUsage?: (usage: RemoteCompactionUsage) => void,
 ): void {
 	const type = typeof event.type === "string" ? event.type : eventName;
 	if (type === "response.output_item.done") {
@@ -611,7 +635,20 @@ function handleCompactionV2Event(
 		return;
 	}
 
-	if (type === "response.failed" || type === "response.incomplete") {
+	if (type === "response.incomplete") {
+		// The provider billed this attempt even though the stream ended
+		// incomplete (`max_output_tokens`, content filter). Report the terminal
+		// usage before rejecting the stream, so the fallback that follows bills
+		// the abandoned request instead of losing it.
+		const usage = parseCompactionV2Usage(event);
+		if (usage) {
+			state.usage = usage;
+			reportCompactionV2Usage(state, onUsage);
+		}
+		throw new Error(formatCompactionV2Failure(event, type));
+	}
+
+	if (type === "response.failed") {
 		throw new Error(formatCompactionV2Failure(event, type));
 	}
 

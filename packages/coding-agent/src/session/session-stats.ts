@@ -84,7 +84,13 @@ function forEachActiveModelUsage(branch: readonly SessionEntry[], visit: (usage:
 		startIndex = resetIndex + 1;
 	} else if (latestCompaction) {
 		const firstKeptIndex = branch.findIndex(entry => entry.id === latestCompaction.firstKeptEntryId);
-		startIndex = firstKeptIndex >= 0 ? firstKeptIndex : compactionIndex + 1;
+		// A compaction that kept nothing — the provider found no safe retained
+		// boundary — has no first-kept entry to anchor on. Its own side request
+		// was billed before the compaction landed, so the window starts at the
+		// compaction and the walk-back below picks that record up. Anchoring
+		// after it instead would drop the request's tokens and cost from the
+		// session totals the moment the compaction succeeds.
+		startIndex = firstKeptIndex >= 0 ? firstKeptIndex : compactionIndex;
 		while (startIndex > 0 && !isUsageWindowBoundary(branch[startIndex - 1])) startIndex--;
 	}
 	for (let index = startIndex; index < branch.length; index++) {

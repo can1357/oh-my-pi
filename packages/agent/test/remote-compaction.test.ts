@@ -3588,6 +3588,59 @@ describe("compact() provider-native compaction usage", () => {
 			totalTokens: 107,
 		});
 	});
+
+	test("reports an incomplete V2 stream's usage before the stream is rejected", async () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-1",
+			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled: true },
+		};
+		const model = makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: true } });
+		const observed: CompactionRequestUsage[] = [];
+		const fetchMock: FetchImpl = async input => {
+			if (String(input).endsWith("/responses/compact")) {
+				// The V1 fallback answers without a usage object.
+				return Response.json({ output: [{ type: "compaction", encrypted_content: "enc-v1" }] });
+			}
+			return sseResponse([
+				{
+					type: "response.incomplete",
+					response: {
+						status: "incomplete",
+						incomplete_details: { reason: "max_output_tokens" },
+						usage: {
+							input_tokens: 100,
+							output_tokens: 7,
+							total_tokens: 107,
+							input_tokens_details: { cached_tokens: 40 },
+						},
+					},
+				},
+			]);
+		};
+
+		await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			onUsage: usage => observed.push(usage),
+		});
+
+		// The provider billed the truncated attempt even though the stream never
+		// produced a compaction payload; the fallback must not hide that spend.
+		expect(observed).toHaveLength(1);
+		expect(observed[0].purpose).toBe(COMPACTION_USAGE_PURPOSES.remote);
+		expect(observed[0].usage).toMatchObject({
+			input: 60,
+			output: 7,
+			cacheRead: 40,
+			cacheWrite: 0,
+			totalTokens: 107,
+		});
+	});
 });
 
 describe("compact() remote summary usage", () => {
@@ -3649,5 +3702,127 @@ describe("compact() remote summary usage", () => {
 			totalTokens: 230,
 		});
 		expect(observed[1].usage).toMatchObject({ input: 120, output: 30, cacheRead: 80, totalTokens: 230 });
+	});
+
+	test("reports the usage of a remote summary the provider billed but left empty", async () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-1",
+			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: {
+				...DEFAULT_COMPACTION_SETTINGS,
+				remoteEndpoint: "http://127.0.0.1:8001/v1/chat/completions",
+				remoteStreamingV2Enabled: false,
+			},
+		};
+		const model = buildModel({
+			id: "catalog-selection-id",
+			name: "Qwopus 3.6 35B-A3B Coder",
+			api: "openai-completions",
+			provider: "local-llama",
+			baseUrl: "http://127.0.0.1:8001/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 131072,
+			maxTokens: 4096,
+		});
+		const observed: CompactionRequestUsage[] = [];
+		const fetchMock: FetchImpl = async () =>
+			Response.json({
+				// HTTP 200 with a billed request, but no summary to use.
+				choices: [{ message: { content: "" } }],
+				usage: {
+					prompt_tokens: 200,
+					completion_tokens: 30,
+					total_tokens: 230,
+					prompt_tokens_details: { cached_tokens: 80 },
+				},
+			});
+
+		await expect(
+			compact(preparation, model, "local-key", undefined, undefined, {
+				fetch: fetchMock,
+				onUsage: usage => observed.push(usage),
+			}),
+		).rejects.toThrow("Remote compaction response missing choices[0].message.content");
+
+		// The payload was rejected, but the provider still billed the request.
+		expect(observed).toHaveLength(1);
+		expect(observed[0].purpose).toBe(COMPACTION_USAGE_PURPOSES.summary);
+		expect(observed[0].usage).toMatchObject({
+			input: 120,
+			output: 30,
+			cacheRead: 80,
+			cacheWrite: 0,
+			totalTokens: 230,
+		});
+	});
+
+	test("reports the usage of a rejected remote short summary", async () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-1",
+			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: {
+				...DEFAULT_COMPACTION_SETTINGS,
+				remoteEndpoint: "http://127.0.0.1:8001/v1/chat/completions",
+				remoteStreamingV2Enabled: false,
+			},
+		};
+		const model = buildModel({
+			id: "catalog-selection-id",
+			name: "Qwopus 3.6 35B-A3B Coder",
+			api: "openai-completions",
+			provider: "local-llama",
+			baseUrl: "http://127.0.0.1:8001/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 131072,
+			maxTokens: 4096,
+		});
+		const observed: CompactionRequestUsage[] = [];
+		let requests = 0;
+		const fetchMock: FetchImpl = async () => {
+			if (++requests === 1) {
+				// The history summary succeeds; only the short summary is rejected.
+				return Response.json({ choices: [{ message: { content: "remote summary" } }] });
+			}
+			return Response.json({
+				choices: [{ message: { content: "" } }],
+				usage: {
+					prompt_tokens: 200,
+					completion_tokens: 30,
+					total_tokens: 230,
+					prompt_tokens_details: { cached_tokens: 80 },
+				},
+			});
+		};
+
+		await expect(
+			compact(preparation, model, "local-key", undefined, undefined, {
+				fetch: fetchMock,
+				onUsage: usage => observed.push(usage),
+			}),
+		).rejects.toThrow("Remote compaction response missing choices[0].message.content");
+
+		expect(observed).toHaveLength(1);
+		expect(observed[0].purpose).toBe(COMPACTION_USAGE_PURPOSES.shortSummary);
+		expect(observed[0].usage).toMatchObject({
+			input: 120,
+			output: 30,
+			cacheRead: 80,
+			cacheWrite: 0,
+			totalTokens: 230,
+		});
 	});
 });

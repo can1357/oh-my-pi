@@ -1120,21 +1120,30 @@ async function summarizeConversationWindow(
 
 	if (options?.remoteEndpoint) {
 		const endpoint = options.remoteEndpoint;
-		const remote = await withAuth(
-			apiKey,
-			key =>
-				requestRemoteCompaction(
-					endpoint,
-					{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
-					signal,
-					{ fetch: options.fetch, model, apiKey: key },
-				),
-			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
-		);
-		// The remote summarizer billed this request; the observer never ran for
-		// it, so journal it here.
-		reportRemoteCompactionUsage(options, model, remote.usage, COMPACTION_USAGE_PURPOSES.summary);
-		return remote.summary;
+		try {
+			const remote = await withAuth(
+				apiKey,
+				key =>
+					requestRemoteCompaction(
+						endpoint,
+						{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
+						signal,
+						{ fetch: options.fetch, model, apiKey: key },
+					),
+				{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
+			);
+			// The remote summarizer billed this request; the observer never ran for
+			// it, so journal it here.
+			reportRemoteCompactionUsage(options, model, remote.usage, COMPACTION_USAGE_PURPOSES.summary);
+			return remote.summary;
+		} catch (err) {
+			// A payload the provider billed but we cannot use is an abandoned
+			// attempt: it still cost tokens.
+			if (err instanceof RemoteCompactionPayloadError) {
+				reportRemoteCompactionUsage(options, model, err.usage, COMPACTION_USAGE_PURPOSES.summary);
+			}
+			throw err;
+		}
 	}
 
 	const response = await instrumentedCompleteSimple(
@@ -1357,21 +1366,30 @@ async function generateShortSummary(
 
 	if (options?.remoteEndpoint) {
 		const endpoint = options.remoteEndpoint;
-		const remote = await withAuth(
-			apiKey,
-			key =>
-				requestRemoteCompaction(
-					endpoint,
-					{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
-					signal,
-					{ fetch: options?.fetch, model, apiKey: key },
-				),
-			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
-		);
-		// The remote summarizer billed this request; the observer never ran for
-		// it, so journal it here.
-		reportRemoteCompactionUsage(options, model, remote.usage, COMPACTION_USAGE_PURPOSES.shortSummary);
-		return remote.summary;
+		try {
+			const remote = await withAuth(
+				apiKey,
+				key =>
+					requestRemoteCompaction(
+						endpoint,
+						{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
+						signal,
+						{ fetch: options.fetch, model, apiKey: key },
+					),
+				{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
+			);
+			// The remote summarizer billed this request; the observer never ran for
+			// it, so journal it here.
+			reportRemoteCompactionUsage(options, model, remote.usage, COMPACTION_USAGE_PURPOSES.shortSummary);
+			return remote.summary;
+		} catch (err) {
+			// A payload the provider billed but we cannot use is an abandoned
+			// attempt: it still cost tokens.
+			if (err instanceof RemoteCompactionPayloadError) {
+				reportRemoteCompactionUsage(options, model, err.usage, COMPACTION_USAGE_PURPOSES.shortSummary);
+			}
+			throw err;
+		}
 	}
 
 	const response = await instrumentedCompleteSimple(
