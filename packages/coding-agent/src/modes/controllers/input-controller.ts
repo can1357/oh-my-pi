@@ -329,9 +329,32 @@ export class InputController {
 		void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 	}
 
+	/**
+	 * Leave the focused-subagent view: clear the typed draft, else detach back to
+	 * the main session. Esc reaches this through the configured `app.interrupt`
+	 * action and — when that action was remapped off Escape — through the editor's
+	 * raw-Escape cancel path (#8952). It never aborts the focused agent's turn.
+	 */
+	#cancelFocusedSubagentView(): void {
+		if (this.ctx.editor.getText().trim()) {
+			this.ctx.editor.setText("");
+			this.ctx.ui.requestRender();
+			return;
+		}
+		void this.ctx.unfocusSession();
+	}
+
 	setupKeyHandlers(): void {
 		this.#draftText ??= this.ctx.editor.getText();
 		this.ctx.editor.setActionKeys("app.interrupt", this.ctx.keybindings.getKeys("app.interrupt"));
+		// Escape keeps leaving the focused-subagent view even when `app.interrupt`
+		// was remapped to another key: the remap moves the abort action, not the
+		// view's cancel key (#8952).
+		this.ctx.editor.onEscapeCancel = () => {
+			if (!this.ctx.focusedAgentId) return false;
+			this.#cancelFocusedSubagentView();
+			return true;
+		};
 		if (!this.#focusedLeftTapListenerInstalled) {
 			this.#focusedLeftTapListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
@@ -554,12 +577,7 @@ export class InputController {
 				// Esc never interrupts the focused agent's turn: clear typed text,
 				// else return the view to the main session. Interrupt via empty
 				// steer-flush submit if needed.
-				if (this.ctx.editor.getText().trim()) {
-					this.ctx.editor.setText("");
-					this.ctx.ui.requestRender();
-				} else {
-					void this.ctx.unfocusSession();
-				}
+				this.#cancelFocusedSubagentView();
 				return; // double-escape backtrack (/tree, /branch) stays main-only
 			}
 			if (this.ctx.collabGuest) {

@@ -1448,6 +1448,13 @@ export class CustomEditor extends Editor {
 	}
 
 	onEscape?: () => void;
+	/**
+	 * Called for a raw Escape that no configured action claims. The `app.interrupt`
+	 * shortcut may have been remapped to another key, and surfaces that leave their
+	 * view with Escape (returning from a focused subagent) still need the key.
+	 * Return true when the key was handled; false leaves it to the base editor.
+	 */
+	onEscapeCancel?: () => boolean;
 	onClear?: () => void;
 	onExit?: () => void;
 	onDisplayReset?: () => void;
@@ -1713,9 +1720,13 @@ export class CustomEditor extends Editor {
 
 		// One union probe decides whether any per-action interception below can
 		// match — plain typing then skips the ~20 per-action set lookups per key.
+		// Raw Escape joins the probe when a cancel handler is installed: the
+		// `app.interrupt` shortcut may have been remapped off Escape, and the
+		// cancel path still has to see the key.
+		const escapeCancel = canonical === "escape" && this.onEscapeCancel !== undefined;
 		if (
 			canonical !== undefined &&
-			(this.#actionMatchKeyUnion.has(canonical) || this.#customMatchKeys.has(canonical))
+			(this.#actionMatchKeyUnion.has(canonical) || this.#customMatchKeys.has(canonical) || escapeCancel)
 		) {
 			// Serialize configured clipboard paste just like bracketed image paste:
 			// explicit sends and subsequent keys must wait for its attachments.
@@ -1790,6 +1801,22 @@ export class CustomEditor extends Editor {
 			) {
 				this.onEscape();
 				return;
+			}
+
+			// Raw Escape stays a cancel key when no configured action claims it:
+			// remapping `app.interrupt` moves the abort action, it must not strand
+			// surfaces that leave their view with Escape (returning from a focused
+			// subagent). The autocomplete popup and Vim's insert mode keep their
+			// claim on the key, exactly as they do for the interrupt shortcut
+			// above, and an action that does claim Escape (app.interrupt included)
+			// is handled by its own branch above.
+			if (
+				escapeCancel &&
+				!this.#actionMatchKeyUnion.has("escape") &&
+				!this.isShowingAutocomplete() &&
+				!this.vimConsumesEscape()
+			) {
+				if (this.onEscapeCancel?.()) return;
 			}
 
 			// Intercept configured clear shortcut
