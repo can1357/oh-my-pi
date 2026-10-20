@@ -1,4 +1,5 @@
 import { isReadableUrlPath, type ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { BigIntStats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
@@ -976,6 +977,147 @@ async function assessLocalReadSpeculation(
 	};
 }
 
+/** A read target up to this size adds a content hash to its {@link targetState}, for filesystems with coarse timestamps. */
+const READ_STATE_HASH_MAX_BYTES = 1024n * 1024n;
+/** Entries a directory's {@link targetState} stats, across the two levels a directory read lists. */
+const READ_STATE_MAX_DIRECTORY_ENTRIES = 2000;
+
+function statState(stat: BigIntStats): string {
+	return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+}
+
+/**
+ * Names, sizes and times of a directory's entries, `levels` deep; undefined
+ * once `budget` entries run out, since a partial listing proves nothing.
+ */
+async function listingState(
+	directory: string,
+	levels: number,
+	budget: { entries: number },
+): Promise<string | undefined> {
+	const names = await fs.readdir(directory).catch((error: NodeJS.ErrnoException) => error);
+	if (names instanceof Error) return `error:${names.code ?? "unknown"}`;
+	let state = "";
+	for (const name of names.sort()) {
+		if (budget.entries-- <= 0) return undefined;
+		const entryPath = path.join(directory, name);
+		const stat = await fs.lstat(entryPath, { bigint: true }).catch((error: NodeJS.ErrnoException) => error);
+		state += `\n${name}/${stat instanceof Error ? `error:${stat.code ?? "unknown"}` : statState(stat)}`;
+		if (!(stat instanceof Error) && stat.isDirectory() && levels > 1) {
+			const nested = await listingState(entryPath, levels - 1, budget);
+			if (nested === undefined) return undefined;
+			state += nested;
+		}
+	}
+	return state;
+}
+
+/**
+ * Fingerprint of one path a read may show: identity, size and times; a content
+ * hash for a small file; the entries of the two levels a directory read lists.
+ * Undefined when the path cannot be fingerprinted whole (a directory past the
+ * entry budget).
+ */
+async function targetState(absolutePath: string): Promise<string | undefined> {
+	const stat = await fs.stat(absolutePath, { bigint: true }).catch((error: NodeJS.ErrnoException) => error);
+	if (stat instanceof Error) return `error:${stat.code ?? "unknown"}`;
+	let state = statState(stat);
+	if (stat.isFile() && stat.size <= READ_STATE_HASH_MAX_BYTES) {
+		const bytes = await fs.readFile(absolutePath).catch((error: NodeJS.ErrnoException) => error);
+		state += bytes instanceof Error ? `:error:${bytes.code ?? "unknown"}` : `:${Bun.hash(bytes)}`;
+	} else if (stat.isDirectory()) {
+		const listing = await listingState(absolutePath, 2, { entries: READ_STATE_MAX_DIRECTORY_ENTRIES });
+		if (listing === undefined) return undefined;
+		state += listing;
+	}
+	return state;
+}
+
+/**
+ * Fingerprints of every local path a read of `readPath` may resolve to, keyed
+ * by candidate spelling: each `;` entry (`file://` expanded), without its image
+ * question or `?` query, and each prefix ending at a `:` (an archive, SQLite
+ * database or line selector's file). Each records the path the spelling
+ * resolves to now, so a new exact match for a fallback spelling counts as a
+ * change, and that path's `-wal` sidecar, which a SQLite write in WAL mode may
+ * change alone. Extra candidates cost only a stat. Undefined when no entry is
+ * local (URLs, internal URLs).
+ */
+async function readTargetStates(
+	cwd: string,
+	readPath: string,
+): Promise<Map<string, { absolutePath: string; state: string | undefined }> | undefined> {
+	const internalRouter = InternalUrlRouter.instance();
+	const candidates = new Set<string>();
+	for (const entry of [readPath, ...readPath.split(";")]) {
+		let target = entry.trim();
+		if (target.startsWith("file://")) target = expandPath(target);
+		else if (parseReadUrlTarget(target) !== null || internalRouter.canResolve(internalRouter.normalize(target))) {
+			continue;
+		}
+		target = splitImageQuestionTarget(target).path;
+		// An empty path reads the session cwd, so "" stays a candidate.
+		candidates.add(target);
+		candidates.add(target.split("?")[0]);
+		for (let colon = target.indexOf(":"); colon > 0; colon = target.indexOf(":", colon + 1)) {
+			candidates.add(target.slice(0, colon));
+		}
+	}
+	if (candidates.size === 0) return undefined;
+	const states = new Map<string, { absolutePath: string; state: string | undefined }>();
+	for (const candidate of candidates) {
+		// A spelling the resolver rejects proves nothing; the read itself reports it.
+		const absolutePath = await resolveReadPathAsync(candidate, cwd).catch(() => undefined);
+		if (absolutePath === undefined) {
+			states.set(candidate, { absolutePath: candidate, state: undefined });
+			continue;
+		}
+		const state = await targetState(absolutePath);
+		const wal = await targetState(`${absolutePath}-wal`);
+		states.set(candidate, { absolutePath, state: state === undefined ? undefined : `${state}\0${wal}` });
+	}
+	return states;
+}
+
+/**
+ * Whether a finished read still shows its target: it succeeded, the file it
+ * came from was fingerprinted in `before`, and every candidate still resolves
+ * to the same path with the same fingerprint. A web fetch has no file source;
+ * its `;` tails are its only local state (whether they exist decides how the
+ * list splits), so it is current while they are. Anything else (an error, a
+ * suffix-matched or delimited read, a directory too large to fingerprint, an
+ * IDA view rendered from its open database) reads again.
+ */
+async function readStillCurrent(
+	session: ToolSession,
+	readPath: string,
+	before: Map<string, { absolutePath: string; state: string | undefined }>,
+	outcome: PromiseSettledResult<AgentToolResult<ReadToolDetails>>,
+): Promise<boolean> {
+	if (outcome.status === "rejected" || outcome.value.isError) return false;
+	const source = readDetailsLinkPath(outcome.value.details);
+	if (source === null) {
+		if (outcome.value.details?.kind !== "url") return false;
+	} else if (![...before.values()].some(entry => entry.absolutePath === source)) {
+		return false;
+	} else if (
+		cfgIdaAvailable.get(session.settings) &&
+		(isIdaDatabasePath(source) || (await isExecutableFile(source)))
+	) {
+		// An IDA edit changes the open database, not the file fingerprinted here.
+		return false;
+	}
+	const after = await readTargetStates(session.cwd, readPath);
+	if (!after || after.size !== before.size) return false;
+	for (const [candidate, entry] of before) {
+		const now = after.get(candidate);
+		if (entry.state === undefined || now?.absolutePath !== entry.absolutePath || now.state !== entry.state) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /**
  * Read tool implementation.
  *
@@ -1720,7 +1862,25 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		const result = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
+		// Running beside an earlier call that may write (a `bash` before this read
+		// in the same message), the read can finish before that write lands. The
+		// model sees the batch's results only after every call ends, so once those
+		// calls settle, read again unless the read came from a fingerprinted path
+		// and no fingerprint changed.
+		const earlierEffects = toolContext?.toolCall?.earlierEffectsSettled;
+		const before = earlierEffects ? await readTargetStates(this.session.cwd, params.path) : undefined;
+		let [outcome] = await Promise.allSettled([this.#executeInner(toolCallId, params, signal, onUpdate, toolContext)]);
+		if (earlierEffects && before) {
+			// An abort during the wait rejects the read rather than return an unchecked result.
+			await untilAborted(signal, earlierEffects);
+			if (!(await readStillCurrent(this.session, params.path, before, outcome))) {
+				[outcome] = await Promise.allSettled([
+					this.#executeInner(toolCallId, params, signal, onUpdate, toolContext),
+				]);
+			}
+		}
+		if (outcome.status === "rejected") throw outcome.reason;
+		const result = outcome.value;
 		const displayTarget = InternalUrlRouter.instance().locateSync(params.path);
 		if (displayTarget && result.details) result.details.displayTarget = displayTarget;
 		appendRepeatReadHint(this.session, params.path, result);
@@ -1742,22 +1902,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			readPath = expandPath(readPath);
 		}
 		readPath = recoverConflictUriPrefix(readPath).path;
-		// Every read but a web URL reads local state: files, archives, SQLite,
-		// internal and MCP resources, views of an open IDA database. An earlier
-		// call of this message that may write (a `bash` before this read) runs
-		// beside it and may still be changing that state, and the model sees the
-		// batch's results only once every call ends, so read it as those calls
-		// leave it. A `;` list waits too, before it is split: the split looks its
-		// parts up on disk, so a part such a call is still creating changes how the
-		// list splits. A plain web URL reads nothing such a call writes and fetches
-		// at once.
-		const earlierEffects = toolContext?.toolCall?.earlierEffectsSettled;
-		if (
-			earlierEffects &&
-			(readPath.includes(";") || parseReadUrlTarget(splitImageQuestionTarget(readPath).path) === null)
-		) {
-			await untilAborted(signal, earlierEffects);
-		}
 		// A `;` list mixing URLs with local paths must split before URL detection
 		// claims the whole string as one fetch or one internal/MCP resource.
 		const mixedParts = await splitMixedUrlPathList(
