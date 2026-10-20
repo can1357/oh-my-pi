@@ -35,7 +35,7 @@ Writes `data/beam-100k.json`, `data/beam-500k.json` and `data/lme-s.json` at pin
 
 ## Calibration against upstream (Layer 0 check 2)
 
-Run A is upstream's own `benchmark_mnemosyne` on the first 3 BEAM 100K conversations; Run B replays it through the harness (`--protocol upstream-compat`, Mnemosyne only, upstream's default recall, so `--polyphonic` is refused). Run B aborts unless every remembered row, and then the consolidated summary, has a stored vector, so it never calibrates a partly FTS-only store. `calibration-check` exits 0 only when every question's ranked contents, recall and the mean recall match. Upstream's benchmark imports the Unix-only `resource` module, so Run A runs on Linux, macOS or WSL only; on native Windows it exits with that message.
+Run A is upstream's own `benchmark_mnemosyne` on the first 3 BEAM 100K conversations; Run B replays it through the harness (`--protocol upstream-compat`, Mnemosyne only, upstream's default recall, so `--polyphonic` is refused). Run B aborts unless every remembered row, and then the consolidated summary, has a stored vector, so it never calibrates a partly FTS-only store. Both runs record the digest of the embedding model files they loaded. `calibration-check` exits 0 only when both digests are present and equal and every question's ranked contents, recall and the mean recall match; equal rankings from two different models would calibrate nothing. Upstream's benchmark imports the Unix-only `resource` module, so Run A runs on Linux, macOS or WSL only; on native Windows it exits with that message.
 
 ```sh
 R="bun packages/coding-agent/bench/memory-eval/run.ts"; O=~/.cache/omp-memory-eval/results
@@ -119,7 +119,7 @@ $V $P/lme_official_check.py $O/lme-oracle.json                      # exit 0 iff
 $V $P/lme_official_check.py $O/lme-oracle.json --oracle-from-cases  # official oracle ranking on our loaded cases
 ```
 
-`lme_official_check.py` and `upstream_run_a.py` refuse to start while `PYTHONPATH` or `PYTHONHOME` is set: either could import another copy of the evaluator's dependencies (or of Mnemosyne) than the venv they document.
+The harness's Python scripts (`upstream_run_a.py`, `lme_official_check.py`, `embed_parity.py`, `prepare_datasets.py`, `make_dev_subset.py`) refuse to start while any `PYTHON*` variable that can change what an import loads is set, such as `PYTHONPATH`, `PYTHONHOME` or `PYTHONPYCACHEPREFIX`: each could load another copy of a dependency, or stale bytecode for one, than the venv they document. The engines' own Python helpers run with every `PYTHON*` variable removed. Only `PYTHONUNBUFFERED`, `PYTHONIOENCODING`, `PYTHONUTF8`, `PYTHONCOERCECLOCALE`, `PYTHONDONTWRITEBYTECODE`, `PYTHONNOUSERSITE` and `PYTHONSTARTUP` are allowed.
 
 ## LongMemEval dev subset
 
@@ -127,7 +127,7 @@ $V $P/lme_official_check.py $O/lme-oracle.json --oracle-from-cases  # official o
 
 ## Embedding parity (Layer 0)
 
-Mnemopi and Mnemosyne must embed alike. Embed 50 BEAM messages with fastembed, then embed the same texts through Mnemopi's local fastembed and compare; the second step exits 1 if any cosine is non-finite or below 0.99. `embed_parity.py` refuses to start while `PYTHONPATH` or `PYTHONHOME` is set, as the engines' own Python helpers run without them.
+Mnemopi and Mnemosyne must embed alike. Embed 50 BEAM messages with fastembed, then embed the same texts through Mnemopi's local fastembed and compare; the second step exits 1 if any cosine is non-finite or below 0.99. `embed_parity.py` applies the import-override guard described above.
 
 ```sh
 ~/.cache/omp-memory-eval/venv-engine/bin/python packages/coding-agent/bench/memory-eval/py/embed_parity.py
