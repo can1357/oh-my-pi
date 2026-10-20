@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
+- Compact read rows now name why a read failed, so a failed `skill://`, `rule://` or file read keeps its diagnostic when previews are off ([#16516](https://github.com/can1357/oh-my-pi/pull/16516) by [@Komzpa](https://github.com/Komzpa))
 
 ## [19.1.0] - 2026-11-21
 

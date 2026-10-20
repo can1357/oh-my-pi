@@ -47,6 +47,7 @@ export class RuleProtocolHandler implements ProtocolHandler {
 		selectors: "lines",
 		immutable: true,
 		linkable: true,
+		compactTranscript: true,
 	};
 
 	/** Advertised only when the rulebook has addressable rules. */
