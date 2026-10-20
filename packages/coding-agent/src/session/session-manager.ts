@@ -1477,6 +1477,20 @@ function unboxedPrimitive(value: object): number | string | boolean | undefined 
 }
 
 /**
+ * `Object.prototype` viewed through the three keys `ToPrimitive` consults. The
+ * `Object` interface declares `valueOf` and `toString` but no
+ * `Symbol.toPrimitive` member, so the symbol lookup needs the key spelled out;
+ * the optionality keeps the assertion a plain widening of `Object`.
+ */
+interface CoercionIntrinsicHost {
+	readonly [Symbol.toPrimitive]?: unknown;
+	readonly valueOf: unknown;
+	readonly toString: unknown;
+}
+
+const OBJECT_PROTOTYPE_INTRINSICS = Object.prototype as CoercionIntrinsicHost;
+
+/**
  * The coercion functions `JSON.stringify`'s `ToPrimitive` unboxing treats as
  * built-in, captured at module load. A prototype-level replacement must not
  * compare equal to itself, and a box built on `Number.prototype` unboxes
@@ -1485,9 +1499,9 @@ function unboxedPrimitive(value: object): number | string | boolean | undefined 
  * wrapper's chain is listed.
  */
 const BOX_COERCION_INTRINSICS: readonly unknown[] = [
-	Object.prototype[Symbol.toPrimitive],
-	Object.prototype.valueOf,
-	Object.prototype.toString,
+	OBJECT_PROTOTYPE_INTRINSICS[Symbol.toPrimitive],
+	OBJECT_PROTOTYPE_INTRINSICS.valueOf,
+	OBJECT_PROTOTYPE_INTRINSICS.toString,
 	Number.prototype.valueOf,
 	Number.prototype.toString,
 	String.prototype.valueOf,
