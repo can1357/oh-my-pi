@@ -11,6 +11,7 @@ import {
 	isNonBlankContext,
 	joinAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
+import { messageEstimateVersion } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	AssistantMessage,
 	CredentialDisabledEvent,
@@ -176,6 +177,8 @@ function handlerTimeoutForEvent(eventType: string): number {
 type ContextMessageMutationState = {
 	readonly source: AgentMessage;
 	readonly root: AgentMessage;
+	/** True when the clone holds descendants the mutation proxy cannot track (Map, Date, typed arrays, class instances). */
+	readonly opaque: boolean;
 	dirty: boolean;
 	readonly proxies: WeakMap<object, object>;
 };
@@ -187,6 +190,13 @@ type ContextMessageProxyInfo = {
 
 const contextMessageProxyInfo = new WeakMap<object, ContextMessageProxyInfo>();
 
+type ContextMessageCloneEntry = {
+	readonly clone: AgentMessage;
+	/** {@link messageEstimateVersion} of the source when cloned; owner rewrites bump it. */
+	readonly version: number;
+	readonly opaque: boolean;
+};
+
 function cloneContextMessage(message: AgentMessage): AgentMessage {
 	try {
 		return structuredClone(message);
@@ -195,6 +205,19 @@ function cloneContextMessage(message: AgentMessage): AgentMessage {
 		return structuredCloneJSON(message);
 	} catch {}
 	return { ...message } as AgentMessage;
+}
+
+function hasOpaqueDescendant(value: unknown, seen = new Set<object>()): boolean {
+	if (value === null || typeof value !== "object") return false;
+	if (seen.has(value)) return false;
+	seen.add(value);
+	if (!isContextProxyableObject(value)) return true;
+	for (const key of Reflect.ownKeys(value)) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor?.enumerable) continue;
+		if (hasOpaqueDescendant(Reflect.get(value, key), seen)) return true;
+	}
+	return false;
 }
 
 function isContextProxyableObject(value: unknown): value is object {
@@ -648,7 +671,7 @@ export class ExtensionRunner {
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
 	/** Link schemes already reported as claimed by more than one extension. */
 	#warnedLinkSchemes = new Set<string>();
-	#contextMessageCloneCache = new WeakMap<AgentMessage, AgentMessage>();
+	#contextMessageCloneCache = new WeakMap<AgentMessage, ContextMessageCloneEntry>();
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
 	#initialized = false;
@@ -2380,12 +2403,18 @@ export class ExtensionRunner {
 		return transformed;
 	}
 
-	#getContextMessageClone(message: AgentMessage): AgentMessage {
+	#getContextMessageClone(message: AgentMessage): ContextMessageCloneEntry {
+		// Owner rewrites (advisor eviction, prune/shake, /drop-images) mutate the message in place and
+		// bump its estimate version; a clone taken before that bump is stale.
+		const version = messageEstimateVersion(message);
 		const cached = this.#contextMessageCloneCache.get(message);
-		if (cached) return cached;
+		if (cached && cached.version === version) return cached;
 		const clone = cloneContextMessage(message);
-		this.#contextMessageCloneCache.set(message, clone);
-		return clone;
+		const entry: ContextMessageCloneEntry = { clone, version, opaque: hasOpaqueDescendant(clone) };
+		// Opaque payloads cannot be change-tracked, so they are re-cloned on every call.
+		if (entry.opaque) this.#contextMessageCloneCache.delete(message);
+		else this.#contextMessageCloneCache.set(message, entry);
+		return entry;
 	}
 
 	async emitContext(messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]> {
@@ -2401,17 +2430,24 @@ export class ExtensionRunner {
 			// Sparse slots stay aligned with history indexes and get no index stamp.
 			if (!message) {
 				currentMessages.push(message);
-				mutationStates.push({ source: message, root: message, dirty: false, proxies: new WeakMap() });
+				mutationStates.push({
+					source: message,
+					root: message,
+					opaque: false,
+					dirty: false,
+					proxies: new WeakMap(),
+				});
 				continue;
 			}
 			// Per-message clone cache; non-cloneable payloads (ToolResultMessage.details,
 			// ProviderPayload) degrade gracefully inside #getContextMessageClone instead of
 			// aborting the whole context build.
-			const clone = this.#getContextMessageClone(message);
+			const { clone, opaque } = this.#getContextMessageClone(message);
 			setContextHistoryIndex(clone, index);
 			const mutationState: ContextMessageMutationState = {
 				source: message,
 				root: clone,
+				opaque,
 				dirty: false,
 				proxies: new WeakMap(),
 			};
@@ -2463,7 +2499,8 @@ export class ExtensionRunner {
 			const unchanged =
 				historyMessage !== undefined &&
 				historyIndex !== undefined &&
-				this.#contextMessageCloneCache.get(historyMessage) === message &&
+				this.#contextMessageCloneCache.get(historyMessage)?.clone === message &&
+				!mutationStates[historyIndex]?.opaque &&
 				!mutationStates[historyIndex]?.dirty
 					? true
 					: historyMessage !== undefined && Bun.deepEquals(message, historyMessage);
