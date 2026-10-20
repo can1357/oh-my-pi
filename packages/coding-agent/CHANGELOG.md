@@ -73,8 +73,6 @@
 - Fixed the `ts-import-type` rule missing inline type imports whose member name is non-ASCII, such as `import("./units").温度` ([#16242](https://github.com/can1357/oh-my-pi/pull/16242))
 
 ## [18.12.4] - 2026-10-20
-### Fixed
-- Fixed a subagent's reported model coming from another spawn in the same batch, a model id containing `"` breaking the `<task-result>` envelope, and a restored or woken subagent's model missing from its delivery details ([#16017](https://github.com/can1357/oh-my-pi/issues/16017), [#16135](https://github.com/can1357/oh-my-pi/pull/16135) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -112,10 +110,6 @@
 - Fixed `/restart` losing the active named profile and failing to resume its session ([#15742](https://github.com/can1357/oh-my-pi/pull/15742) by [@sapran](https://github.com/sapran))
 - Fixed aborted and timed-out stdio MCP requests continuing to run on the server: OMP now sends `notifications/cancelled` with the original request id, once and never for `initialize`, after settling the call and without waiting on the pipe ([#16430](https://github.com/can1357/oh-my-pi/pull/16430) by [@alphastorm](https://github.com/alphastorm))
 - Fixed the agent restarting on its own after you stopped it with Esc whenever a background subagent or job finished; the result is recorded in the transcript and the agent waits for your next message
-- Fixed a subagent's resolved model reported from another spawn's progress row when a batch call's shared `progress[]` rows carried colliding agent ids — the match now prefers the job's own id first ([#16135](https://github.com/can1357/oh-my-pi/pull/16135) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed a subagent's model selector containing `"` breaking the `<task-result>` XML envelope and letting the rest of the id forge attributes — the selector is now escaped for an XML attribute value ([#16135](https://github.com/can1357/oh-my-pi/pull/16135) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed a restored or wake-turn subagent's resolved model missing from its delivery `details` because neither path streams `progress[]` — the job's carrier now reports it ([#16135](https://github.com/can1357/oh-my-pi/pull/16135) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed a subagent's reported model coming from another spawn in the same batch, a model id containing `"` breaking the `<task-result>` envelope, and a restored or woken subagent's model missing from its delivery details ([#16135](https://github.com/can1357/oh-my-pi/pull/16135) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed Mnemopi memory completions ignoring the memory role's thinking suffix, including one inherited from `tiny` or `smol` when `modelRoles.memory` is unset; each `retry.fallbackChains.memory` entry sends its own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))
 - Fixed MCP tools running a call twice when the server connection dropped mid-request: a stdio request already written to the server, or an HTTP or legacy SSE request whose connection reset or closed after it was sent, now fails as non-retryable with a diagnostic saying it may have run, instead of being replayed after a reconnect; requests that never left OMP, including refused connections, still reconnect and retry once ([#16429](https://github.com/can1357/oh-my-pi/pull/16429) by [@alphastorm](https://github.com/alphastorm))
 - Fixed `/move` path completion jumping into a subfolder on Tab: `..`, `.`, and `~` now complete to `../`, `./`, and `~/` before listing their children, a trailing `\` lists a folder on Windows, absolute Windows paths (`C:/…`) are no longer rewritten as relative paths, and the project directory is offered as `./` instead of `/`
@@ -254,7 +248,6 @@
 - Fixed `omp --restore` and `/retry` reporting nothing to retry for a turn cut off by a process exit in a session that had used `eval`; the interrupted turn now continues ([#16195](https://github.com/can1357/oh-my-pi/issues/16195))
 - Fixed session loading on Windows treating a session path with a regular-file component as a missing session (an empty session) instead of rejecting it with `ENOTDIR` like POSIX does ([#16145](https://github.com/can1357/oh-my-pi/pull/16145) by [@jchanghong023](https://github.com/jchanghong023))
 - Fixed models from extension providers listed in `enabledModels` or `--models` missing from `/model`, the Ctrl+P cycle and the startup model scope notice until the background catalog refresh finished ([#16096](https://github.com/can1357/oh-my-pi/pull/16096) by [@skipper019](https://github.com/skipper019))
-- Fixed the built-in `ts-set-map`, `ts-import-type` and `ts-no-any` rules reminding you about code they allow: an empty or computed `Set`/`Map`, a runtime `await import()`, or the word "any" in a comment ([#16242](https://github.com/can1357/oh-my-pi/pull/16242) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.1] - 2026-10-17
 
