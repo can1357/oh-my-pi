@@ -15,6 +15,8 @@ import type {
 	DocumentResponse,
 	GetMentalModelOptions,
 	HindsightClientApi,
+	HindsightOperation,
+	HindsightRequestOptions,
 	ListDocumentsOptions,
 	ListDocumentsResponse,
 	ListMemoriesOptions,
@@ -33,6 +35,7 @@ import type {
 	RetainOptions,
 	RetainResponse,
 	UpdateDocumentOptions,
+	WaitForOperationOptions,
 } from "../../hindsight/client";
 import type { HindsightConfig } from "../../hindsight/config";
 import type { MnemopiBackendConfig } from "../../mnemopi/config";
@@ -78,7 +81,18 @@ export type HindsightClientProtocol = {
 		[bankId: string, name: string, sourceQuery: string, options?: CreateMentalModelOptions],
 		CreateMentalModelResponse
 	>;
-	refreshMentalModel: RpcMethod<[bankId: string, mentalModelId: string], RefreshMentalModelResponse>;
+	refreshMentalModel: RpcMethod<
+		[bankId: string, mentalModelId: string, options?: HindsightRequestOptions],
+		RefreshMentalModelResponse
+	>;
+	getOperationStatus: RpcMethod<
+		[bankId: string, operationId: string, options?: HindsightRequestOptions],
+		HindsightOperation
+	>;
+	waitForOperation: RpcMethod<
+		[bankId: string, operationId: string, options?: WaitForOperationOptions],
+		HindsightOperation
+	>;
 	deleteMentalModel: RpcMethod<[bankId: string, mentalModelId: string], boolean>;
 	getMentalModelHistory: RpcMethod<[bankId: string, mentalModelId: string], MentalModelHistoryEntry[]>;
 };

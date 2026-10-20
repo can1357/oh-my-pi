@@ -13,6 +13,8 @@ import type {
 	DocumentResponse,
 	GetMentalModelOptions,
 	HindsightClientApi,
+	HindsightOperation,
+	HindsightRequestOptions,
 	ListDocumentsOptions,
 	ListDocumentsResponse,
 	ListMemoriesOptions,
@@ -31,6 +33,7 @@ import type {
 	RetainOptions,
 	RetainResponse,
 	UpdateDocumentOptions,
+	WaitForOperationOptions,
 } from "../../hindsight/client";
 import type { HindsightConfig } from "../../hindsight/config";
 import type { HindsightSessionStateApi } from "../../hindsight/state";
@@ -123,8 +126,28 @@ export class RemoteHindsightClient implements HindsightClientApi {
 		return this.#remote.call("createMentalModel", bankId, name, sourceQuery, options);
 	}
 
-	refreshMentalModel(bankId: string, mentalModelId: string): Promise<RefreshMentalModelResponse> {
-		return this.#remote.call("refreshMentalModel", bankId, mentalModelId);
+	refreshMentalModel(
+		bankId: string,
+		mentalModelId: string,
+		options?: HindsightRequestOptions,
+	): Promise<RefreshMentalModelResponse> {
+		return this.#remote.call("refreshMentalModel", bankId, mentalModelId, options);
+	}
+
+	getOperationStatus(
+		bankId: string,
+		operationId: string,
+		options?: HindsightRequestOptions,
+	): Promise<HindsightOperation> {
+		return this.#remote.call("getOperationStatus", bankId, operationId, options);
+	}
+
+	waitForOperation(
+		bankId: string,
+		operationId: string,
+		options?: WaitForOperationOptions,
+	): Promise<HindsightOperation> {
+		return this.#remote.call("waitForOperation", bankId, operationId, options);
 	}
 
 	deleteMentalModel(bankId: string, mentalModelId: string): Promise<boolean> {
