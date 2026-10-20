@@ -65,6 +65,17 @@ Disabling future native compaction does not disable normal replay of an existing
 
 The LLM context is built for the model that reads it. When the active model cannot replay the latest OpenAI payload (another provider, including `openai` ↔ `openai-codex`), the context stands on the newest compaction it can read and carries the raw history behind the unreadable one; a model switch rebuilds the agent's messages when the two models stand on different boundaries. The pre-prompt threshold then measures that history, so a target whose window cannot hold it compacts before its first request. Retry fallback and context promotion judge a candidate's window against the context that candidate would read, and a compact-first switch (`/switch`, Alt+P, plan approval) skips a native method whose payload the target cannot replay.
 
+### Oversized tool history at the provider boundary
+
+Provider requests must shrink already-executed tool history without changing persisted session entries or their full values:
+
+- Completed tool calls' nested argument strings exceeding 16 KiB of UTF-8 bytes are replaced with `[omitted <N> bytes, sha256=<hex12>; full value kept in the session file]` in every turn, including the current one, in both normalized calls and native provider replay copies. Tool-call IDs, names, matching results, and unrelated signed or encrypted reasoning remain intact. A pending call (no result yet) remains unchanged; once its result exists, the next request shrinks it.
+- Tool-result text exceeding 256 KiB keeps its first and last 8 KiB with an omission marker between them. Results are eligible only before the latest real user turn; the current turn's results stay full. UTF-8 characters must remain valid.
+- Advancing to a new user turn must update cached conversion eligibility for results without rewriting history. Argument strings at or below 16 KiB remain unchanged during normal conversion.
+- If overflow repeats immediately after recovery compaction, the next request applies result shrinking across the whole active context and retries once. A further overflow surfaces as an error and must not restart the recovery loop.
+
+The full argument values and tool-result text remain available in the session file. Shrinking is a request-only view, never a replacement for execution arguments or persisted history.
+
 ## Compaction pipeline
 
 ### Triggers
@@ -133,6 +144,7 @@ The automatic paths are intentionally different:
    - Context promotion is tried first; if a configured larger model is available, the agent switches model and retries without compacting.
    - If promotion is unavailable and compaction is enabled, automatic maintenance walks `compaction.methodOrder` with `reason: "overflow"` and `willRetry: true`; handoff is skipped because its request would reuse the overflowing input.
    - On success, `agent.continue()` is scheduled to retry the turn.
+   - If the retried request overflows again, completed tool history across the active context is shrunk at send time for one final retry and stays shrunk for the remaining requests of that prompt; another overflow of that retry stops automatic recovery and surfaces the error.
 
 - **Incomplete-output recovery**
    - Trigger: same-model assistant message ends with `stopReason === "length"` and the message is not older than the latest compaction.
