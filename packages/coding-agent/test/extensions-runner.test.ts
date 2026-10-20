@@ -457,6 +457,90 @@ describe("ExtensionRunner", () => {
 			await expect(pending).rejects.toThrow("caller aborted");
 		});
 
+		it("keeps append-only context handlers cheap for long histories", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("context", event => ({
+						messages: [...event.messages, {
+							role: "developer",
+							content: [{ type: "text", text: "request-local context" }],
+							timestamp: 999999,
+						}],
+					}));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "append-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const payload = "x".repeat(2500);
+			const messages: AgentMessage[] = Array.from({ length: 400 }, (_, index) => ({
+				role: "user",
+				content: [{ type: "text", text: `${index}:${payload}` }],
+				timestamp: index,
+			}));
+
+			const warmup = await runner.emitContext(messages);
+			expect(warmup).toHaveLength(401);
+
+			const iterations = 20;
+			const started = performance.now();
+			for (let index = 0; index < iterations; index++) {
+				const transformed = await runner.emitContext(messages);
+				expect(transformed).toHaveLength(401);
+			}
+			const msPerCall = (performance.now() - started) / iterations;
+
+			expect(msPerCall).toBeLessThan(1.25);
+		});
+
+		it("keeps mutating context handlers detached from live history and future calls", async () => {
+			const extCode = `
+				let calls = 0;
+				export default function(pi) {
+					pi.on("context", event => {
+						calls++;
+						if (calls === 1) {
+							event.messages[0].content[0].text = "mutated detached copy";
+						}
+						return { messages: event.messages };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "mutate-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const messages: AgentMessage[] = [
+				{
+					role: "user",
+					content: [{ type: "text", text: "live history" }],
+					timestamp: 1,
+				},
+			];
+
+			const first = await runner.emitContext(messages);
+			expect(((first[0] as { content: TextContent[] }).content[0] as TextContent).text).toBe(
+				"mutated detached copy",
+			);
+			expect(((messages[0] as { content: TextContent[] }).content[0] as TextContent).text).toBe("live history");
+
+			const second = await runner.emitContext(messages);
+			expect(((second[0] as { content: TextContent[] }).content[0] as TextContent).text).toBe("live history");
+		});
+
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `
 				export default function(pi) {
