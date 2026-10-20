@@ -10,7 +10,7 @@ import {
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "../src/overlays/session-observer-registry";
-import { initTheme } from "../src/theme";
+import { initTheme, setSymbolPreset } from "../src/theme";
 
 const pickerCx: DescribeContext = {
 	cols: 120,
@@ -292,7 +292,29 @@ test("a narrow activity footer keeps the roster hint and the rest of the hints",
 	}
 });
 
-test("both sections' native footers advertise the section keys that switch sections", () => {
+// The ascii preset spells `Enter`, `Space` and `Esc` out, so the same hints are
+// far wider than the unicode keycaps. The section pair therefore only stays
+// while the rendered footer still fits — otherwise the row cuts the tail off.
+test("the ascii preset's footers keep their Esc:close tail where the section pair does not fit", async () => {
+	await setSymbolPreset("ascii");
+	const hub = createHub([agent("alpha", 3_000)]);
+	try {
+		hub.showSection("activity");
+		const activityFooter = hub.render(104).at(-2) ?? "";
+		expect(activityFooter).toContain("Esc:close");
+
+		hub.showSection("agents");
+		const rosterFooter = hub.render(104).at(-2) ?? "";
+		expect(rosterFooter).toContain("Esc:close");
+	} finally {
+		hub.dispose();
+		await setSymbolPreset("unicode");
+	}
+});
+
+// The native hint rows of the generic (non-picker) description carry the same
+// pair as the terminal footers, so a section key never reads as a dead key.
+test("both sections' native hint rows advertise the section keys that switch sections", () => {
 	const hub = createHub([agent("alpha", 3_000)]);
 	try {
 		expect(nativeFooterHints(hub).filter(hint => hint.label === "agents" || hint.label === "activity")).toEqual([
@@ -305,6 +327,26 @@ test("both sections' native footers advertise the section keys that switch secti
 			{ keys: ["1"], label: "agents" },
 			{ keys: ["2"], label: "activity" },
 		]);
+	} finally {
+		hub.dispose();
+	}
+});
+
+// A picker-capable client describes the hub as a `picker` sheet, which has no
+// hint row: it names the sections through its own tab bar instead.
+test("the picker sheet names the sections through its tabs, not through section keycaps", () => {
+	const hub = createHub([agent("alpha", 3_000)]);
+	try {
+		const props = pickerProps(hub);
+		// The wire carries text either as a string or as spans.
+		const tabLabels = props.tabs?.map(tab =>
+			typeof tab.label === "string" ? tab.label : tab.label.map(span => span.t).join(""),
+		);
+		expect(tabLabels).toEqual(["Agents", "Activity"]);
+		const sectionKeys = (props.actions ?? [])
+			.flatMap(action => action.keys ?? [])
+			.filter(key => key === "1" || key === "2");
+		expect(sectionKeys).toEqual([]);
 	} finally {
 		hub.dispose();
 	}

@@ -216,7 +216,7 @@
 - Added Eval `mcp_progress` status events, updated in place per call and evictable under the status-event cap, plus `formatMCPProgress()` and `MCPToolDetails.progress` for MCP progress display ([#16431](https://github.com/can1357/oh-my-pi/pull/16431) by [@alphastorm](https://github.com/alphastorm))
 ### Fixed
 
-- Fixed the Agent Hub activity view's footer dropping the `2:activity` section hint its roster footer advertises; both views now name the same section keys in the terminal and natively ([#16469](https://github.com/can1357/oh-my-pi/pull/16469) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed the Agent Hub activity view's footer dropping the `2:activity` section hint its roster footer advertises; both views now name the same sections, and a footer too narrow for the section keys keeps every other hint instead of cutting its tail off ([#16469](https://github.com/can1357/oh-my-pi/pull/16469) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 
