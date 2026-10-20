@@ -2548,6 +2548,21 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Initialize hooks with TUI-based UI context
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
+		// A live `disabledExtensions` edit suspends or resumes extensions: redraw the transcript
+		// without (or with) their assistant text renderers, as toggling the setting does.
+		const extensionRunner = this.session.extensionRunner;
+		if (extensionRunner) {
+			this.#eventBusUnsubscribers.push(
+				extensionRunner.onSuspensionChange(() => {
+					if (!cfgExtensionAssistantTextRenderers.get(this.settings)) return;
+					this.#eventController.applyAssistantTextRenderers();
+					// Before the first transcript replay commits, that replay draws with the current set.
+					if (!this.initialChatRendered) return;
+					this.rebuildChatFromMessages();
+					this.ui.resetDisplay();
+				}),
+			);
+		}
 
 		// Restore mode from session (e.g. plan mode on resume)
 		this.session.setSessionBeforeSwitchReconciler?.(async () => {
