@@ -41,29 +41,35 @@ async function harnessHash(): Promise<string> {
 	return Bun.hash(parts.join("\0")).toString(16);
 }
 
-/** The revision `py/prepare_datasets.py` recorded next to the cached file; anything but the pinned one is refused. */
-async function cachedRevision(dataset: DatasetName, dataDir: string): Promise<string> {
-	const beam = dataset.startsWith("beam");
-	const marker = path.join(dataDir, `${beam ? dataset : "lme-s"}.json.revision`);
-	const pinned = beam ? REVISIONS.beam : REVISIONS.lme;
-	let revision: string | undefined;
+/**
+ * The revision and data digest `py/prepare_datasets.py` recorded next to the cached file (`<revision>\n<sha256>\n`).
+ * A revision other than the pinned one is refused, and so is a digest that does not match the file now on disk: two
+ * setups racing on one cache could otherwise leave one's marker next to the other's data.
+ */
+async function cachedDataset(dataset: DatasetName, dataDir: string): Promise<{ revision: string; sha256: string }> {
+	const name = `${dataset.startsWith("beam") ? dataset : "lme-s"}.json`;
+	const marker = path.join(dataDir, `${name}.revision`);
+	const pinned = dataset.startsWith("beam") ? REVISIONS.beam : REVISIONS.lme;
+	let lines: string[] = [];
 	try {
-		revision = (await Bun.file(marker).text()).trim();
+		lines = (await Bun.file(marker).text()).split(/\s+/).filter(Boolean);
 	} catch (err) {
 		if (!isEnoent(err)) throw err;
 	}
+	const [revision, recorded] = lines;
 	if (revision !== pinned) {
 		throw new Error(
 			`${marker}: ${revision === undefined ? "missing" : `revision ${revision}`}, expected ${pinned}; re-run py/prepare_datasets.py`,
 		);
 	}
-	return revision;
-}
-
-/** SHA-256 of the prepared file: the revision alone does not prove which bytes a converter produced from it. */
-async function datasetSha256(dataset: DatasetName, dataDir: string): Promise<string> {
-	const file = path.join(dataDir, `${dataset.startsWith("beam") ? dataset : "lme-s"}.json`);
-	return new Bun.CryptoHasher("sha256").update(await Bun.file(file).bytes()).digest("hex");
+	// SHA-256 of the prepared file: the revision alone does not prove which bytes a converter produced from it.
+	const sha256 = new Bun.CryptoHasher("sha256").update(await Bun.file(path.join(dataDir, name)).bytes()).digest("hex");
+	if (recorded !== sha256) {
+		throw new Error(
+			`${marker}: ${recorded === undefined ? "records no data digest" : "records a digest of other data"}; re-run py/prepare_datasets.py`,
+		);
+	}
+	return { revision, sha256 };
 }
 
 interface EngineOptions {
@@ -170,16 +176,11 @@ async function runCommand(argv: string[]): Promise<void> {
 		try {
 			let run: RunOutput;
 			let excluded: ExcludedQuestion[] = [];
-			const datasetRevision = await cachedRevision(dataset, dataDir);
-			const datasetDigest = await datasetSha256(dataset, dataDir);
-			// The loaders reopen the file: a replacement in between would leave the cases and the digest apart. A refresh
-			// removes the marker before it replaces the data, so reading the marker again after the data proves both
-			// still belong to the revision recorded above.
+			const { revision: datasetRevision, sha256: datasetDigest } = await cachedDataset(dataset, dataDir);
+			// The loaders reopen the file: a replacement in between would leave the cases and the digest apart.
 			const sameSnapshot = async () => {
-				if (
-					(await datasetSha256(dataset, dataDir)) !== datasetDigest ||
-					(await cachedRevision(dataset, dataDir)) !== datasetRevision
-				) {
+				const now = await cachedDataset(dataset, dataDir);
+				if (now.sha256 !== datasetDigest || now.revision !== datasetRevision) {
 					throw new Error("the prepared dataset file changed while it was loaded; result not written");
 				}
 			};
