@@ -312,6 +312,42 @@ describe("memory snapshot across a resume", () => {
 		expect(snapshotRecords(session)).toHaveLength(0);
 	});
 
+	it("re-stages a pending snapshot on the branch the leaf moved to", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const cwd = settings.getCwd();
+		await saveLearnedLesson(agentDir, cwd, { content: "Stable lesson" });
+
+		const session = SessionManager.create(cwd, sessionsDir);
+		const userId = session.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "hi" }],
+			timestamp: Date.now(),
+		});
+		session.appendMessage(createAssistantMessage("hello"));
+		await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+
+		// The user rewinds onto another branch before the prompt commits. The
+		// destination branch records no snapshot of its own, so the staged one
+		// has to move with it.
+		session.branch(userId);
+		const block = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		expect(block).toContain("Stable lesson");
+
+		// The snapshot is recorded on the branch the prompt was built for.
+		pendingMemorySnapshotCommit(session)?.();
+		expect(snapshotRecords(session)).toHaveLength(1);
+
+		// Another session learns a lesson before this one is resumed.
+		await saveLearnedLesson(agentDir, cwd, { content: "Learned elsewhere later" });
+		await session.flush();
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const resumed = await SessionManager.open(sessionFile, sessionsDir);
+		const resumedBlock = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, resumed);
+		expect(resumedBlock).toContain("Stable lesson");
+		expect(resumedBlock).not.toContain("Learned elsewhere later");
+	});
+
 	it("does not adopt the consolidated summary once the first turn started", async () => {
 		const settings = Settings.isolated({ "memory.backend": "local" });
 		const cwd = settings.getCwd();

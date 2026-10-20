@@ -21,7 +21,7 @@ function snapshotCount(sessionManager: SessionManager): number {
 
 describe("memory snapshot with a replaced system prompt", () => {
 	/** Build a session whose prompt is replaced by the given function. */
-	async function countSnapshots(systemPrompt: (defaultPrompt: string[]) => string[]): Promise<number> {
+	async function countSnapshots(systemPrompt?: (defaultPrompt: string[]) => string[]): Promise<number> {
 		const tempDir = TempDir.createSync("@omp-memory-snapshot-override-");
 		const authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("anthropic", "test-key");
@@ -42,7 +42,7 @@ describe("memory snapshot with a replaced system prompt", () => {
 			modelRegistry,
 			settings,
 			model,
-			systemPrompt,
+			...(systemPrompt ? { systemPrompt } : {}),
 			disableExtensionDiscovery: true,
 			skills: [],
 			contextFiles: [],
@@ -71,5 +71,22 @@ describe("memory snapshot with a replaced system prompt", () => {
 
 	it("records the snapshot when the replacement prompt keeps the memory block", async () => {
 		expect(await countSnapshots(defaultPrompt => defaultPrompt)).toBe(1);
+	}, 30_000);
+
+	it("records the snapshot when the base prompt keeps the memory block", async () => {
+		expect(await countSnapshots()).toBe(1);
+	}, 30_000);
+
+	it("records no snapshot when the prompt is empty", async () => {
+		const previous = process.env.NULL_PROMPT;
+		process.env.NULL_PROMPT = "true";
+		try {
+			// An empty prompt carries no memory block: recording the snapshot
+			// would pin memory this session never sent.
+			expect(await countSnapshots()).toBe(0);
+		} finally {
+			if (previous === undefined) delete process.env.NULL_PROMPT;
+			else process.env.NULL_PROMPT = previous;
+		}
 	}, 30_000);
 });
