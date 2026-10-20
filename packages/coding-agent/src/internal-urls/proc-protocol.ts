@@ -7,6 +7,7 @@ import {
 	cancelAgentRegistration,
 	executeCancel,
 	runningAgentsOutsideJobs,
+	settledJobIds,
 	snapshotJobs,
 } from "../async/job-control";
 import {
@@ -248,6 +249,12 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		if (action === "streams") throw new Error(`proc://${id}/streams is read-only`);
 		if (!id) throw new Error("Write requires proc://<id>, proc://<id>/kill, or proc://<id>/mode");
 		const ownerId = session.getAgentId?.() ?? undefined;
+		// Stamped before the broker lookup below: a job that settles while that
+		// await runs finished during this call, and the kill snapshot must say so
+		// rather than calling the result genuinely late (#16052 review).
+		const callStartedAt = Date.now();
+		const manager = session.asyncJobManager;
+		const settledAtEntry = manager ? settledJobIds(manager, ownerId) : undefined;
 		const job = ownerJobs(session).find(item => item.id === id);
 		const agent = runningAgentsOutsideJobs(session).find(item => item.id === id);
 		let service: DaemonSnapshot | undefined;
@@ -293,7 +300,10 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			};
 		}
 		if ((job || agent) && session.asyncJobManager) {
-			const result = await executeCancel(session, session.asyncJobManager, ownerId, [id]);
+			const result = await executeCancel(session, session.asyncJobManager, ownerId, [id], {
+				startedAtMs: callStartedAt,
+				settledAtEntry,
+			});
 			return { content: result.content, details: { proc: result.details } };
 		}
 		if (agent) {

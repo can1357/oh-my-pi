@@ -463,6 +463,63 @@ describe("proc:// background jobs", () => {
 			await manager.dispose();
 		}
 	});
+
+	it("labels a kill of a job that settled during the call as delivered by that call", async () => {
+		// `write proc://<id>/kill` awaits the daemon-broker lookup before it
+		// cancels, so a job can settle inside that window. The call that hands
+		// the result over must say so — the same wording `wait` uses — instead
+		// of calling the result a lost completion push (#16052).
+		const gate = Promise.withResolvers<DaemonRpcResult>();
+		const broker = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue({
+			request: async () => gate.promise,
+			onCompletion: () => () => {},
+		} as unknown as daemonClient.DaemonBrokerClient);
+		const manager = new AsyncJobManager({});
+		const settled = Promise.withResolvers<string>();
+		const id = manager.register("bash", "late build", async () => settled.promise, { ownerId: "Main" });
+		const session = toolSession(process.cwd(), manager, { launch: true });
+		const proc = new ProcProtocolHandler();
+		try {
+			// The call is parked on the broker lookup, so the job settles during it.
+			const killing = proc.write(parseInternalUrl(`proc://${id}/kill`), "", { session });
+			settled.resolve("late result");
+			await manager.getJob(id)?.promise;
+			gate.resolve({ op: "list", daemons: [] });
+			const killed = await killing;
+			const text = killed.content[0]?.type === "text" ? killed.content[0].text : "";
+			expect(text).toContain("Delivery: delivered by this call");
+			expect(text).not.toContain("not auto-delivered");
+		} finally {
+			broker.mockRestore();
+			await manager.dispose();
+		}
+	});
+
+	it("keeps the missed-push wording for a job that settled before the kill call", async () => {
+		// The job was already done when the kill arrived and nothing was on the
+		// way, so the result is genuinely late — the line must stay honest and
+		// say how long before the call it had finished.
+		const broker = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue({
+			request: async () => ({ op: "list", daemons: [] }) as DaemonRpcResult,
+			onCompletion: () => () => {},
+		} as unknown as daemonClient.DaemonBrokerClient);
+		const manager = new AsyncJobManager({});
+		const id = manager.register("bash", "earlier build", async () => "done earlier", { ownerId: "Main" });
+		await manager.getJob(id)?.promise;
+		manager.getJob(id)!.endTime = Date.now() - 5_000;
+		const session = toolSession(process.cwd(), manager, { launch: true });
+		const proc = new ProcProtocolHandler();
+		try {
+			const killed = await proc.write(parseInternalUrl(`proc://${id}/kill`), "", { session });
+			const text = killed.content[0]?.type === "text" ? killed.content[0].text : "";
+			expect(text).toContain("Delivery: not auto-delivered; recovered by this snapshot");
+			expect(text).toMatch(/already finished \d+(ms|\.\ds) before this call/);
+			expect(text).not.toContain("delivered by this call");
+		} finally {
+			broker.mockRestore();
+			await manager.dispose();
+		}
+	});
 });
 
 describe("bash services via proc://", () => {
