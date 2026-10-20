@@ -1,7 +1,7 @@
 /**
  * Focused subagent views are chat-only, except for viewer-scoped commands: `/btw`
  * asks a side question about the focused transcript, `/export` writes the focused
-* agent's own transcript (with its nested subagents), `/advisor on|off` (and bare
+ * agent's own transcript (with its nested subagents), `/advisor on|off` (and bare
  * `/advisor`) toggles the focused agent's own advisor, `/jobs` lists the focused
  * agent's background jobs, `/usage` reports account-wide limits, and the model and
  * thinking controls (`/model`, `/switch`, `/effort`, their keys) act on the focused
