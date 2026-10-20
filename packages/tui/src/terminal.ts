@@ -767,6 +767,13 @@ export function isConPTYHosted(): boolean {
 	return process.platform === "win32" || isWsl(process.platform, $env);
 }
 
+/**
+ * The screen whose kitty keyboard-mode stack a frame belongs to. Kitty keeps an
+ * independent stack for the main and the alternate screen, so a frame can only
+ * be raised and popped while its own screen is active.
+ */
+type KittyScreen = "main" | "alternate";
+
 /** Discriminated owner of an outstanding DA1 sentinel in the unified probe FIFO. */
 type Da1SentinelOwner =
 	| { kind: "keyboard" }
@@ -852,6 +859,26 @@ export class ProcessTerminal implements Terminal {
 	// gone again when the reply never comes; every frame omp takes is matched by
 	// exactly one pop, so no frame is ever left behind on the terminal's stack.
 	#kittyFrameCount = 0;
+	// The screen whose kitty stack holds omp's own frame. Kitty keeps an
+	// independent keyboard-mode stack for the main and the alternate screen, and
+	// every push, pop and in-place rewrite acts on the *active* screen's stack,
+	// so a frame can only be raised and popped while its own screen is active.
+	#kittyFrameScreen: KittyScreen = "main";
+	// The screen omp is currently writing to, derived from the alternate-screen
+	// switches in omp's own output: kitty's keyboard-mode stack follows the
+	// active screen, so this is the stack a pop would reach.
+	#kittyScreen: KittyScreen = "main";
+	// A pop owed to #kittyFrameScreen that could not be applied yet, because
+	// omp was writing to the other screen when it came due. Kitty pops the
+	// active screen's stack, so the pop waits for the switch back instead of
+	// taking a frame omp does not own and leaving omp's own frame behind for
+	// the parent application to inherit.
+	#kittyPopPending = false;
+	// The flags omp's own kitty frame has to be raised to, waiting for the
+	// screen that holds it. `CSI = flags;1u` rewrites the active screen's
+	// stack top, so a rewrite aimed at the other screen would change a frame
+	// omp does not own instead of omp's own.
+	#kittyRewritePending: number | undefined;
 	#modifyOtherKeysActive = false;
 	#modifyOtherKeysTimeout?: Timer;
 	// Windows console fallback when kitty is unavailable: key records arrive as
@@ -1648,22 +1675,29 @@ export class ProcessTerminal implements Terminal {
 				// protocol. The reported flag value is the *current* stack-top, so
 				// support is implied by the reply itself, not by the flag value.
 				//
-				// The negotiation asks before it arms the terminal (see
-				// #queryAndEnableKittyProtocol), so the terminal answers the query
-				// before omp's push is applied: the reply therefore describes the
-				// flags that were in effect before omp's own frame — a parent
-				// application's flags, if any. Pick the level omp wants; keep the
-				// parent's event-type reporting when it had it.
-				const reportedFlags = parseInt(match[1]!, 10);
+				// The reply carries the *parent's* flags: the negotiation asks
+				// before it arms the terminal, in the same write (see
+				// #queryAndEnableKittyProtocol), and the terminal answers the
+				// query while it parses that sequence — before the push that
+				// follows it is applied. The reply therefore describes the flags
+				// that were in effect before omp's own frame overwrote the stack
+				// top: a parent application's flags, if any. Capture them here so
+				// the parent's event-type reporting survives the negotiation.
+				const parentFlags = parseInt(match[1]!, 10);
 				this.#kittyProtocolActive = true;
 				setKittyProtocolActive(true);
+				// The frame is confirmed now, so a pop that was owed to the
+				// unconfirmed negotiation (the DA1 sentinel resolved the
+				// probe before this reply arrived) must not take it off the
+				// stack anymore.
+				this.#kittyPopPending = false;
 				let flags: number;
 				if (this.#conpty) {
 					// ConPTY (native Windows and WSL) drops Shift+letter keypresses
 					// entirely when flag 4 (report alternate keys) is set. Use flag 1
 					// (disambiguate only), preserving flag 2 if already active.
-					flags = (reportedFlags & 2) !== 0 ? 3 : 1;
-				} else if ((reportedFlags & 2) !== 0) {
+					flags = (parentFlags & 2) !== 0 ? 3 : 1;
+				} else if ((parentFlags & 2) !== 0) {
 					// Preserve event-type reporting already enabled by a parent app.
 					// Push level-2 to keep its shortcuts reporting consistently.
 					flags = 7;
@@ -1682,7 +1716,17 @@ export class ProcessTerminal implements Terminal {
 					// pop, and a parent application's frame is never rewritten.
 					if (flags !== this.#kittyFlags) {
 						this.#kittyFlags = flags;
-						this.#safeWrite(`\x1b[=${flags};1u`);
+						// `CSI = flags;1u` rewrites the top of the *active*
+						// screen's stack, and omp's frame lives on the screen it
+						// was pushed on. Rewrite that screen's frame: a rewrite
+						// aimed at the other screen would change a frame omp does
+						// not own (or create one) and leave omp's own frame at the
+						// arming level. The rewrite waits for the switch back.
+						if (this.#kittyFrameScreen === this.#kittyScreen) {
+							this.#safeWrite(`\x1b[=${flags};1u`);
+						} else {
+							this.#kittyRewritePending = flags;
+						}
 					}
 				} else {
 					// The DA1 sentinel popped the arming frame before the reply
@@ -1690,6 +1734,8 @@ export class ProcessTerminal implements Terminal {
 					// is confirmed.
 					this.#kittyFlags = flags;
 					this.#kittyFrameCount++;
+					// The push lands on the screen omp is on right now.
+					this.#kittyFrameScreen = this.#kittyScreen;
 					this.#safeWrite(`\x1b[>${flags}u`);
 				}
 				return;
@@ -2189,9 +2235,11 @@ export class ProcessTerminal implements Terminal {
 		// pressed while the terminal is still answering the negotiation would
 		// be reported in legacy encoding.
 		//
-		// The query comes first on purpose: the terminal answers it before the
-		// push below is applied, so the reply still describes the flags a
-		// parent application pushed (see the reply handler).
+		// The query comes first on purpose: the terminal answers it while it
+		// parses that sequence, before the push below is applied, so the reply
+		// still describes the flags a parent application pushed. The parent's
+		// flags are therefore captured before omp's own frame overwrites the
+		// stack top (see the reply handler).
 		//
 		// This push is omp's own frame on the kitty stack: the reply handler
 		// replaces its flags in place, so the stack stays balanced with the
@@ -2199,6 +2247,9 @@ export class ProcessTerminal implements Terminal {
 		const armingFlags = this.#conpty ? 1 : 5;
 		this.#kittyFlags = armingFlags;
 		this.#kittyFrameCount++;
+		// The push lands on the screen omp is on right now; the pop that takes
+		// it off again has to reach that same screen's stack.
+		this.#kittyFrameScreen = this.#kittyScreen;
 		this.#safeWrite(`\x1b[?u\x1b[>${armingFlags}u\x1b[c`);
 		this.#modifyOtherKeysTimeout = setTimeout(() => {
 			this.#modifyOtherKeysTimeout = undefined;
@@ -2222,13 +2273,53 @@ export class ProcessTerminal implements Terminal {
 	 * Pop the kitty frames omp owns off the terminal's stack. Every frame omp
 	 * pushed is popped exactly once, so the kitty stack stays balanced and a
 	 * parent application's frame is never popped.
+	 *
+	 * Kitty keeps an independent keyboard-mode stack for the main and the
+	 * alternate screen, and a pop always reaches the *active* screen's stack.
+	 * A frame that lives on the other screen therefore waits for the switch
+	 * back: popping the active stack there would take a frame omp does not own
+	 * and leave omp's own frame behind for the parent application to inherit.
 	 */
 	#popKittyFrame(): void {
+		if (this.#kittyFrameCount === 0) return;
+		this.#kittyPopPending = true;
+		this.#flushKittyScreenState();
+	}
+
+	/**
+	 * Apply the kitty operations that are owed to the screen that holds omp's
+	 * frame, now that the terminal is on that screen again. Kitty's pop and its
+	 * in-place rewrite both act on the *active* screen's stack, so neither can
+	 * be applied while the other screen is active.
+	 */
+	#flushKittyScreenState(): void {
+		if (this.#kittyFrameScreen !== this.#kittyScreen) return;
+		if (this.#kittyRewritePending !== undefined) {
+			const flags = this.#kittyRewritePending;
+			this.#kittyRewritePending = undefined;
+			// Only rewrite a frame that is still on the stack: `CSI = flags;1u`
+			// would create one on an empty stack.
+			if (this.#kittyFrameCount > 0) this.#safeWrite(`\x1b[=${flags};1u`);
+		}
+		if (!this.#kittyPopPending) return;
+		this.#kittyPopPending = false;
 		while (this.#kittyFrameCount > 0) {
 			this.#kittyFrameCount--;
 			this.#safeWrite("\x1b[<u");
 		}
 		this.#kittyFlags = 0;
+	}
+
+	/**
+	 * Follow the alternate-screen switches in omp's own output. Kitty swaps its
+	 * keyboard-mode stack when the screen changes, so this is the stack a
+	 * kitty pop would reach.
+	 */
+	#trackKittyScreen(data: string): void {
+		const enter = data.lastIndexOf("\x1b[?1049h");
+		const leave = data.lastIndexOf("\x1b[?1049l");
+		if (enter > leave) this.#kittyScreen = "alternate";
+		else if (leave > enter) this.#kittyScreen = "main";
 	}
 
 	/**
@@ -2365,10 +2456,15 @@ export class ProcessTerminal implements Terminal {
 
 	async drainInput(maxMs = 1000, idleMs = 50): Promise<void> {
 		if (this.#headless) return;
+		// Take omp's kitty frame off the terminal's stack whether or not the
+		// negotiation confirmed kitty support: the arming push goes out before
+		// the reply arrives, so a shutdown inside the 150 ms negotiation window
+		// would otherwise leave the frame behind and keep the terminal
+		// reporting kitty keys.
+		this.#popKittyFrame();
 		if (this.#kittyProtocolActive) {
 			// Disable Kitty keyboard protocol first so any late key releases
 			// do not generate new Kitty escape sequences.
-			this.#popKittyFrame();
 			this.#kittyProtocolActive = false;
 			setKittyProtocolActive(false);
 		}
@@ -2622,7 +2718,14 @@ export class ProcessTerminal implements Terminal {
 		// Hosts can reset bracketed paste (e.g. iTerm2's Terminal State toggle).
 		// Reassert it with existing output, never on a timer while idle.
 		if (data && this.#active && this.#rearmBracketedPaste) data = `\x1b[?2004h${data}`;
+		// The alternate-screen switch in this write decides which kitty stack
+		// the following output reaches, and which screen a pending pop has to
+		// wait for.
+		this.#trackKittyScreen(data);
 		this.#safeWrite(data);
+		// The switch has reached the terminal: a pop or rewrite owed to the
+		// screen that is now active can go out, after the switch itself.
+		this.#flushKittyScreenState();
 		if (this.#writeLogPath) {
 			try {
 				// Keep clipboard contents out of the debug log: record the payload's length only.
