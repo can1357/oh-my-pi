@@ -27,7 +27,11 @@ import {
 } from "./usage-display";
 import { colorToAnsi } from "../theme/color";
 import { ensureThemeSync, theme } from "../theme/theme";
-import { formatAbsoluteOnlyAmount } from "../prompt/usage-amounts";
+import {
+	formatAbsoluteOnlyAmount,
+	isRemainingOnlyAbsoluteAmount,
+	isUsedOnlyAbsoluteAmount,
+} from "../prompt/usage-amounts";
 import { truncateMiddleToWidth } from "../render/render-utils";
 import { sanitizeDisplayLine } from "./extensions/display-text";
 import {
@@ -505,6 +509,35 @@ function statTile(
 function usedSpans(fraction: number, status: UsageLimit["status"]): TspSpan[] {
 	const token = status === "exhausted" ? "mono error" : status === "warning" ? "mono warning" : "mono";
 	return [span(`${Math.max(0, Math.round(fraction * 100))}%`, token), span(" used", "dim")];
+}
+
+/** Which direction a limit's quota amount reports: spent quota, prepaid headroom, or neither. */
+type QuotaShape = "used" | "left" | "none";
+
+/**
+ * The direction a detail-table quota cell reads. Percentage and spend-to-date
+ * limits count quota used; a prepaid balance counts quota left.
+ */
+function quotaShape(limit: UsageLimit): QuotaShape {
+	if (resolveUsedFraction(limit) !== undefined) return "used";
+	if (isUsedOnlyAbsoluteAmount(limit)) return "used";
+	if (isRemainingOnlyAbsoluteAmount(limit)) return "left";
+	return "none";
+}
+
+/**
+ * Heading for the detail table's quota column.
+ *
+ * Every cell spells out its own direction (`62% used`, `100 credits left`), so
+ * the heading must not contradict what the column actually holds: a table of
+ * spent quotas reads `Used`, a table of prepaid balances reads `Left`, and a
+ * table mixing both — or holding no readable amount — reads the neutral
+ * `Quota`.
+ */
+function quotaColumnHead(shapes: ReadonlySet<QuotaShape>): string {
+	if (shapes.size !== 1) return "Quota";
+	const shape = [...shapes][0];
+	return shape === "used" ? "Used" : shape === "left" ? "Left" : "Quota";
 }
 
 /** Stable, human account name for a report in the detail view. */
@@ -1677,6 +1710,7 @@ export class UsageDashboardComponent implements Component {
 
 			const buckets = new Map<string, { label: string; window?: string; rows: Record<string, TspText>[] }>();
 			const limitNotes: string[] = [];
+			const quotaShapes = new Set<QuotaShape>();
 			for (const [index, report] of reports.entries()) {
 				for (const limit of report.limits) {
 					const label = sanitizeDisplayLine(formatLimitTitle(limit));
@@ -1692,9 +1726,10 @@ export class UsageDashboardComponent implements Component {
 					}
 					const fraction = resolveUsedFraction(limit);
 					const resetsAt = limit.window?.resetsAt;
+					quotaShapes.add(quotaShape(limit));
 					bucket.rows.push({
 						account: [span(reportAccountLabel(report, limit, index), "muted")],
-						used:
+						quota:
 							fraction === undefined
 								? [span(formatAbsoluteOnlyAmount([limit]) ?? "No data", "muted")]
 								: usedSpans(fraction, limit.status),
@@ -1725,7 +1760,7 @@ export class UsageDashboardComponent implements Component {
 				const cols: TspTableColumn[] = [
 					{ id: "limit", head: "Limit", grow: 1, priority: 4 },
 					{ id: "account", head: "Account", truncate: "middle", priority: 1 },
-					{ id: "used", head: "Used", align: "end", priority: 3 },
+					{ id: "quota", head: quotaColumnHead(quotaShapes), align: "end", priority: 3 },
 					{ id: "reset", head: "Resets", align: "end", priority: 2 },
 				];
 				children.push(node("table", { cols, rows, role: "omp.usage.limits" }, undefined, "limits"));
