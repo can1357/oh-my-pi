@@ -146,15 +146,12 @@ it("retains a deferred forced choice when session switching rolls back", async (
 	expect(mock.calls[0]?.options?.toolChoice).toEqual({ type: "tool", name: "write" });
 });
 
-// Pre-prompt compaction sizes the prompt with the tokenizer for the force the
-// request will carry (a forced turn can drop past thinking); the peek must not
-// serve the force, or the model call would lose it.
-it("sizes pre-prompt compaction for a queued force without consuming it", async () => {
+// Pre-prompt compaction peeks the queued force to size the request; the peek
+// must not serve it, or the model call would lose the force.
+it("still sends a queued force after pre-prompt compaction peeks it", async () => {
 	session.setForcedToolChoice("write");
-	const sized = vi.spyOn(session.agent, "tokenizerForToolChoice");
 
 	await session.prompt("write it");
 
-	expect(sized).toHaveBeenCalledWith({ type: "tool", name: "write" });
 	expect(mock.calls[0]?.options?.toolChoice).toEqual({ type: "tool", name: "write" });
 });

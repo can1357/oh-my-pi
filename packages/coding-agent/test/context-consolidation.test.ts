@@ -32,6 +32,7 @@ describe("Context usage consolidation", () => {
 		authStorage = await AuthStorage.create(path.join(sharedDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		authStorage.keys.setRuntime("openai", "test-key");
+		authStorage.keys.setRuntime("opencode-go", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 		await Settings.init({ inMemory: true });
 		await initTheme();
@@ -69,6 +70,7 @@ describe("Context usage consolidation", () => {
 		tempDir: TempDir,
 		messages: AgentMessage[] = [],
 		systemPrompt: string[] = ["You are a helpful assistant."],
+		settingsOverrides: Record<string, unknown> = {},
 	): { session: AgentSession; sessionManager: SessionManager; agent: Agent } {
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		for (const msg of messages) {
@@ -96,6 +98,7 @@ describe("Context usage consolidation", () => {
 				"compaction.autoContinue": false,
 				"compaction.methodOrder": ["soft"],
 				"compaction.thresholdTokens": 8000,
+				...settingsOverrides,
 			}),
 			modelRegistry,
 		});
@@ -557,7 +560,12 @@ describe("Context usage consolidation", () => {
 
 		// A thinking turn, then a later anchor. `anchorInput` is what the anchor's
 		// request billed: with the earlier thinking replayed, or without it.
-		function setup(tempDir: TempDir, anchorInput: number, snapshotDrops?: boolean) {
+		function setup(
+			tempDir: TempDir,
+			anchorInput: number,
+			snapshotDrops?: boolean,
+			settingsOverrides?: Record<string, unknown>,
+		) {
 			const anchor = turn([{ type: "text", text: "Done." }], anchorInput, 4);
 			if (snapshotDrops !== undefined) {
 				anchor.contextSnapshot = {
@@ -566,12 +574,17 @@ describe("Context usage consolidation", () => {
 					dropsOwnThinking: snapshotDrops,
 				};
 			}
-			const { session, agent } = createSession(tempDir, [
-				{ role: "user", content: "plan", timestamp: 1 },
-				turn([{ type: "thinking", thinking: THINKING, thinkingSignature: "reasoning_content" }], 50, 2),
-				{ role: "user", content: "next", timestamp: 3 },
-				anchor,
-			]);
+			const { session, agent } = createSession(
+				tempDir,
+				[
+					{ role: "user", content: "plan", timestamp: 1 },
+					turn([{ type: "thinking", thinking: THINKING, thinkingSignature: "reasoning_content" }], 50, 2),
+					{ role: "user", content: "next", timestamp: 3 },
+					anchor,
+				],
+				undefined,
+				settingsOverrides,
+			);
 			agent.setModel(model);
 			agent.setThinkingLevel(Effort.Medium);
 			const schema = type({});
@@ -602,6 +615,28 @@ describe("Context usage consolidation", () => {
 			const choice: ToolChoice = { type: "tool", name: "read" };
 			expect(compacts()).toBe(true);
 			expect(compacts(agent.tokenizerForToolChoice(choice))).toBe(false);
+			await tempDir.remove();
+		});
+
+		// The session is over the threshold only while past thinking counts. A
+		// queued force (served later by nextToolChoiceDirective) drops it, so the
+		// pre-prompt check must not compact; without the force it must. Shake keeps
+		// compaction local: no summarizer request leaves the test.
+		it.each([
+			{ name: "skips pre-prompt compaction before a queued forced Kimi call", forced: true, compacts: false },
+			{ name: "runs pre-prompt compaction before the same prompt unforced", forced: false, compacts: true },
+		])("$name", async ({ forced, compacts }) => {
+			const tempDir = TempDir.createSync("@queued-force-context-");
+			const { session, agent } = setup(tempDir, 10_020, undefined, { "compaction.methodOrder": ["shake"] });
+			const started: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "auto_compaction_start") started.push(event.reason);
+			});
+			vi.spyOn(agent, "prompt").mockResolvedValue(undefined);
+			if (forced) session.setForcedToolChoice("read");
+			await session.prompt("continue");
+			expect(started.length > 0).toBe(compacts);
+			vi.restoreAllMocks();
 			await tempDir.remove();
 		});
 
