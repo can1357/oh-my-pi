@@ -1113,11 +1113,65 @@ fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
 	}
 }
 
+/// What a detachment keeps of the source repository beyond its objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetachGitDirMode {
+	/// Detach into a repository that borrows the source's objects and keeps
+	/// only the identity configuration (`user.*`, `core.*`).
+	#[default]
+	Borrowed,
+	/// Detach into a repository that also keeps the source's `remote.*` and
+	/// `branch.*` configuration, so the detached copy stays connected to its
+	/// upstream and can fetch later updates.
+	Persistent,
+}
+
+/// The configuration a detached repository needs to stay connected to its
+/// upstream: the remotes it talks to and the branches that track them.
+///
+/// `remote.<name>.url`/`fetch` and `branch.<name>.remote`/`merge` name a
+/// remote and a refspec — nothing about the machine the source lived on —
+/// so they are safe to carry into the copy.
+fn persistent_config_values(repo: &gix::Repository) -> Vec<(String, String)> {
+	let snapshot = repo.config_snapshot();
+	let mut out = Vec::new();
+	for name in repo.remote_names() {
+		for value_name in ["url", "fetch"] {
+			let key = format!("remote.{name}.{value_name}");
+			if let Some(value) = snapshot.string(key.as_str()) {
+				out.push((key, value.to_str_lossy().into_owned()));
+			}
+		}
+	}
+	for name in repo.branch_names() {
+		for value_name in ["remote", "merge"] {
+			let key = format!("branch.{name}.{value_name}");
+			if let Some(value) = snapshot.string(key.as_str()) {
+				out.push((key, value.to_str_lossy().into_owned()));
+			}
+		}
+	}
+	out
+}
+
 /// Sever a copied linked worktree from its source metadata without copying
 /// objects.
 pub fn detach_git_dir(
 	worktree_root: &Path,
 	source_common_dir: &Path,
+) -> Result<DetachGitDirResult> {
+	detach_git_dir_with(worktree_root, source_common_dir, DetachGitDirMode::default())
+}
+
+/// Sever a copied tree from its source metadata, keeping what `mode` asks for.
+///
+/// [`DetachGitDirMode::Persistent`] carries the source's `remote.*` and
+/// `branch.*` configuration along: a detached submodule that lost its
+/// `origin` could never fetch again.
+pub fn detach_git_dir_with(
+	worktree_root: &Path,
+	source_common_dir: &Path,
+	mode: DetachGitDirMode,
 ) -> Result<DetachGitDirResult> {
 	let git_entry = worktree_root.join(".git");
 	let meta = match fs::symlink_metadata(&git_entry) {
@@ -1137,7 +1191,7 @@ pub fn detach_git_dir(
 	let head = read_optional_file(&original.info().head_path)?;
 	let index = read_optional_file(&original.info().git_dir.join("index"))?;
 	let refs = snapshot_refs(&repo)?;
-	let config_values = [
+	let mut config_values = [
 		"user.name",
 		"user.email",
 		"core.fileMode",
@@ -1153,6 +1207,9 @@ pub fn detach_git_dir(
 			.map(|v| (key, v.to_str_lossy().into_owned()))
 	})
 	.collect::<Vec<_>>();
+	if mode == DetachGitDirMode::Persistent {
+		config_values.extend(persistent_config_values(&repo));
+	}
 	let shared = copy_named_files(&original.info().git_dir, "sharedindex.")?;
 	let sparse = read_optional_file(&original.info().git_dir.join("info/sparse-checkout"))?;
 	let shallow = read_optional_file(&source_common.join("shallow"))?;
@@ -1976,10 +2033,18 @@ fn remove_existing(path: &Path) -> Result<()> {
 /// is written by `register_worktree` and is not affected.
 ///
 /// `source_root` is the checkout the tree was copied from: a submodule's
-/// pointer is relative to that checkout, so it only resolves there.
+/// pointer — and a linked worktree's pointer written with
+/// `worktree.useRelativePaths` — is relative to that checkout, so it only
+/// resolves there.
 fn remove_nested_git_files(root: &Path, source_root: &Path, common: &Path) -> Result<()> {
 	let mut dirs = vec![root.to_path_buf()];
 	while let Some(dir) = dirs.pop() {
+		// The directory the same path had in the source checkout: a pointer
+		// copied from there is relative to it, not to the copy.
+		let source_dir = match dir.strip_prefix(root) {
+			Ok(relative) if !relative.as_os_str().is_empty() => source_root.join(relative),
+			_ => source_root.to_path_buf(),
+		};
 		let entries = fs::read_dir(&dir).map_err(|e| {
 			Error::backend("git worktree add", format!("read_dir {}: {e}", dir.display()))
 		})?;
@@ -2007,7 +2072,7 @@ fn remove_nested_git_files(root: &Path, source_root: &Path, common: &Path) -> Re
 					if detach_copied_submodule(root, source_root, &dir)? {
 						continue;
 					}
-					if gitdir_points_into(&path, common) {
+					if gitdir_points_into(&path, &source_dir, common) {
 						remove_existing(&path)?;
 					}
 				}
@@ -2029,7 +2094,13 @@ fn remove_nested_git_files(root: &Path, source_root: &Path, common: &Path) -> Re
 /// pointer still refers to the source's worktree metadata and must not
 /// survive the clone; a pointer into another repository is the nested
 /// repository's own business and stays.
-fn gitdir_points_into(path: &Path, common: &Path) -> bool {
+///
+/// A relative target is resolved against `source_dir`, the directory the
+/// pointer was written in: the copy carries the pointer verbatim, so it still
+/// means what it meant in the source. Resolving it against the copy instead
+/// would point at the copy's own — freshly created — metadata, and the
+/// pointer would survive as a dangling reference.
+fn gitdir_points_into(path: &Path, source_dir: &Path, common: &Path) -> bool {
 	let Ok(content) = fs::read_to_string(path) else {
 		return false;
 	};
@@ -2049,7 +2120,7 @@ fn gitdir_points_into(path: &Path, common: &Path) -> bool {
 	let joined = if target.is_absolute() {
 		target.to_path_buf()
 	} else {
-		path.parent().unwrap_or_else(|| Path::new(".")).join(target)
+		source_dir.join(target)
 	};
 	let resolved = fs::canonicalize(&joined)
 		.map(|path| normalize_path(&path))
@@ -2090,17 +2161,32 @@ fn gitdir_pointer_target(path: &Path, base: &Path) -> Option<PathBuf> {
 
 /// Whether `target` is the module directory git keeps for a submodule.
 ///
-/// An absorbed submodule's repository lives in `<git-dir>/modules/<name>` and
+/// An absorbed submodule's repository lives under `<git-dir>/modules` and
 /// owns its config, unlike a linked worktree's admin directory
 /// (`<git-dir>/worktrees/<name>`), which only points back at the repository
 /// it belongs to.
 fn is_submodule_module_dir(target: &Path) -> bool {
-	target
-		.parent()
-		.and_then(|parent| parent.file_name())
-		.is_some_and(|name| name == "modules")
-		&& target.join("HEAD").is_file()
-		&& target.join("config").is_file()
+	if !target.join("HEAD").is_file() || !target.join("config").is_file() {
+		return false;
+	}
+	// A submodule at a multi-component path (`packages/module`) keeps its
+	// module directory at `<git-dir>/modules/packages/module`, so the
+	// `modules` root is an ancestor of it, not its immediate parent.
+	let Some(modules_root) = target
+		.ancestors()
+		.skip(1)
+		.find(|ancestor| ancestor.file_name().is_some_and(|name| name == "modules"))
+	else {
+		return false;
+	};
+	// A linked worktree of the submodule lives in `worktrees/` inside the
+	// module directory: it points back at the module and owns no config.
+	let components = target
+		.strip_prefix(modules_root)
+		.unwrap_or(target)
+		.components()
+		.collect::<Vec<_>>();
+	components.len() < 2 || components[components.len() - 2].as_os_str() != "worktrees"
 }
 
 /// Detach a copied submodule so the clone keeps the submodule's own
@@ -2116,7 +2202,8 @@ fn is_submodule_module_dir(target: &Path) -> bool {
 /// The pointer is rewritten at the source's module directory and the
 /// submodule is detached into an independent repository that borrows the
 /// module's objects — the same treatment the isolation path gives
-/// submodules.
+/// submodules. The module's `remote.*` and `branch.*` configuration travels
+/// along, so the detached submodule can still fetch from its upstream.
 fn detach_copied_submodule(root: &Path, source_root: &Path, dir: &Path) -> Result<bool> {
 	let Ok(relative) = dir.strip_prefix(root) else {
 		return Ok(false);
@@ -2132,7 +2219,8 @@ fn detach_copied_submodule(root: &Path, source_root: &Path, dir: &Path) -> Resul
 	}
 	fs::write(dir.join(".git"), format!("gitdir: {}\n", git_metadata_path(&target)))?;
 	let module = GitRepo::require(dir)?;
-	let detached = detach_git_dir(dir, &module.info().common_dir)?;
+	let detached =
+		detach_git_dir_with(dir, &module.info().common_dir, DetachGitDirMode::Persistent)?;
 	if detached != DetachGitDirResult::Detached {
 		// The module directory turned out to be shared with another
 		// repository: the pointer must not survive, or Git commands inside
@@ -3622,11 +3710,11 @@ mod tests {
 		assert!(external.join(".git").exists(), "a pointer into another repository must survive");
 	}
 
-	/// A repository with an initialized submodule at `sub`, a nested linked
-	/// worktree, and a nested independent repository — the three shapes a
-	/// clone copies along. The submodule's origin is returned as well, so a
-	/// test can compare the submodule's history.
-	fn fixture_with_submodule() -> (TempDir, PathBuf, PathBuf, GitRepo) {
+	/// A repository with an initialized submodule at `submodule_path`, a
+	/// nested linked worktree, and a nested independent repository — the
+	/// three shapes a clone copies along. The submodule's origin is returned
+	/// as well, so a test can compare the submodule's history.
+	fn fixture_with_submodule(submodule_path: &str) -> (TempDir, PathBuf, PathBuf, GitRepo) {
 		let temp = tempfile::tempdir().unwrap();
 		let origin = temp.path().join("origin");
 		let source = temp.path().join("source");
@@ -3648,7 +3736,7 @@ mod tests {
 			"add",
 			"-q",
 			origin.to_str().unwrap(),
-			"sub",
+			submodule_path,
 		]);
 		git(&source, &["commit", "-qm", "add submodule"]);
 		// A nested linked worktree of this repository: its `.git` points into
@@ -3683,7 +3771,7 @@ mod tests {
 
 	#[test]
 	fn remove_nested_git_files_keeps_a_submodule_repository() {
-		let (temp, source, origin, repo) = fixture_with_submodule();
+		let (temp, source, origin, repo) = fixture_with_submodule("sub");
 		// The clone copies the source tree verbatim, minus the root `.git`.
 		let clone = temp.path().join("clone");
 		copy_tree(&source, &clone, true);
@@ -3724,8 +3812,88 @@ mod tests {
 	}
 
 	#[test]
+	fn remove_nested_git_files_detaches_a_submodule_at_a_multi_component_path() {
+		let (temp, source, origin, repo) = fixture_with_submodule("packages/module");
+		// The clone copies the source tree verbatim, minus the root `.git`.
+		let clone = temp.path().join("clone");
+		copy_tree(&source, &clone, true);
+		let clone_admin = repo.info().common_dir.join("worktrees/clone");
+		fs::create_dir_all(&clone_admin).unwrap();
+		fs::write(clone.join(".git"), format!("gitdir: {}\n", clone_admin.display())).unwrap();
+
+		remove_nested_git_files(&clone, &source, &repo.info().common_dir).unwrap();
+
+		// Git keeps the module directory of a submodule at a multi-component
+		// path below `modules`, so the pointer addresses
+		// `.git/modules/packages/module` — the copy must detach it just like
+		// a submodule at the repository root.
+		let submodule = clone.join("packages/module");
+		assert!(submodule.join(".git").exists(), "the submodule's Git metadata must survive");
+		let toplevel = git(&submodule, &["rev-parse", "--show-toplevel"]);
+		assert_eq!(
+			fs::canonicalize(&toplevel).unwrap(),
+			fs::canonicalize(&submodule).unwrap(),
+			"Git inside the submodule must resolve to the submodule, not to the outer clone"
+		);
+		assert_eq!(
+			git(&submodule, &["rev-parse", "HEAD"]),
+			git(&origin, &["rev-parse", "HEAD"]),
+			"the detached submodule must keep the submodule's history"
+		);
+	}
+
+	#[test]
+	fn remove_nested_git_files_strips_a_relative_pointer_into_this_repository() {
+		let (temp, repo) = fixture();
+		// A linked worktree of this repository that records its metadata path
+		// relative to the checkout — the form git writes when
+		// `worktree.useRelativePaths` is enabled.
+		git(temp.path(), &["config", "worktree.useRelativePaths", "true"]);
+		git(temp.path(), &["worktree", "add", "-q", "-b", "inner", "nested/deep/inner"]);
+		// The copy lives outside the source, so copying the source tree into
+		// it does not recurse.
+		let outside = tempfile::tempdir().unwrap();
+		let clone = outside.path().join("clone");
+		copy_tree(temp.path(), &clone, true);
+		assert!(
+			clone.join("nested/deep/inner/.git").exists(),
+			"the copy must carry the nested worktree's pointer"
+		);
+
+		remove_nested_git_files(&clone, temp.path(), &repo.info().common_dir).unwrap();
+
+		// The pointer is relative to the source checkout, so it addresses the
+		// source's metadata — it must not survive as a dangling reference.
+		assert!(
+			!clone.join("nested/deep/inner/.git").exists(),
+			"a relative pointer into this repository's metadata must be removed"
+		);
+	}
+
+	#[test]
+	fn remove_nested_git_files_keeps_the_submodule_remote_configuration() {
+		let (temp, source, origin, repo) = fixture_with_submodule("sub");
+		let clone = temp.path().join("clone");
+		copy_tree(&source, &clone, true);
+		let clone_admin = repo.info().common_dir.join("worktrees/clone");
+		fs::create_dir_all(&clone_admin).unwrap();
+		fs::write(clone.join(".git"), format!("gitdir: {}\n", clone_admin.display())).unwrap();
+
+		remove_nested_git_files(&clone, &source, &repo.info().common_dir).unwrap();
+
+		// A detached submodule that lost its `origin` could never fetch
+		// again, so the remote travels with it.
+		let submodule = clone.join("sub");
+		assert_eq!(
+			git(&submodule, &["config", "--get", "remote.origin.url"]),
+			origin.to_str().unwrap(),
+			"a detached submodule must keep the remote it fetches from"
+		);
+	}
+
+	#[test]
 	fn clone_first_worktree_keeps_a_submodule_repository() {
-		let (temp, source, origin, repo) = fixture_with_submodule();
+		let (temp, source, origin, repo) = fixture_with_submodule("sub");
 		git(&source, &["branch", "clone-target"]);
 		let linked = temp.path().join("../linked-clone-submodule");
 		let _ = fs::remove_dir_all(&linked);
