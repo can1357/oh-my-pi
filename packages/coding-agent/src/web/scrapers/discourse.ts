@@ -50,10 +50,8 @@ function normalizeBasePath(basePath: string): string {
 	return basePath.replace(/\/$/, "");
 }
 
-function parseTopicPath(pathname: string): { basePath: string; topicId: string; postNumber: string | null } | null {
-	const match = pathname.match(/^(.*?)\/t\/([^?#]*)$/);
-	if (!match) return null;
-	const segments = (match[2] ?? "")
+function parseTopicSegments(rest: string): { topicId: string; postNumber: string | null } | null {
+	const segments = rest
 		.replace(/\.json$/, "")
 		.split("/")
 		.filter(Boolean);
@@ -63,7 +61,17 @@ function parseTopicPath(pathname: string): { basePath: string; topicId: string; 
 	const topicId = segments[idIndex];
 	if (!topicId || !/^\d+$/.test(topicId)) return null;
 	const postNumber = segments[idIndex + 1];
-	return { basePath: match[1] ?? "", topicId, postNumber: postNumber && /^\d+$/.test(postNumber) ? postNumber : null };
+	return { topicId, postNumber: postNumber && /^\d+$/.test(postNumber) ? postNumber : null };
+}
+
+function parseTopicPath(pathname: string): { basePath: string; topicId: string; postNumber: string | null } | null {
+	// A forum mounted under a prefix may itself contain `/t/` (base `/t` gives `/t/t/slug/123`): take the
+	// first `/t/` whose remainder is a valid topic route, not simply the first one.
+	for (let at = pathname.indexOf("/t/"); at !== -1; at = pathname.indexOf("/t/", at + 1)) {
+		const parsed = parseTopicSegments(pathname.slice(at + 3));
+		if (parsed) return { basePath: pathname.slice(0, at), ...parsed };
+	}
+	return null;
 }
 
 function parsePostPath(pathname: string): { basePath: string; postId: string } | null {
@@ -155,9 +163,10 @@ export const handleDiscourse: SpecialHandler = async (
 		let requestedPost: DiscoursePost | null = null;
 		let topicId = topicMatch?.topicId ?? null;
 		// A trailing post number (/t/<slug>/<topic>/<n>) names one post: fetch it directly, because the
-		// topic JSON window starts at post 1 and need not contain it.
+		// topic JSON window starts at post 1 and need not contain it. If it cannot be resolved the handler
+		// declines, so generic fetching runs instead of silently substituting the topic's first post.
 		let postFromNumber = false;
-		if (topicMatch?.postNumber && topicMatch.postNumber !== "1") {
+		if (topicMatch?.postNumber) {
 			const postResult = await loadPage(buildPostByNumberUrl(baseUrl, topicMatch.topicId, topicMatch.postNumber), {
 				timeout,
 				signal,
@@ -168,7 +177,10 @@ export const handleDiscourse: SpecialHandler = async (
 					requestedPost = postData;
 					postFromNumber = true;
 				}
+			} else if (isNonJsonApiResponse(postResult)) {
+				discourseBases.record(baseUrl, false);
 			}
+			if (!postFromNumber) return null;
 		}
 
 		if (!topicId && postMatch) {

@@ -21,9 +21,13 @@ beforeEach(() => {
 		const body =
 			pathname === "/posts/by_number/184189/12.json"
 				? postFixture
-				: pathname === "/t/184189.json"
-					? topicFixture
-					: null;
+				: pathname === "/posts/by_number/184189/1.json"
+					? JSON.stringify(JSON.parse(topicFixture).post_stream.posts[0])
+					: pathname === "/t/184189.json" || pathname === "/t/t/184189.json"
+						? topicFixture
+						: pathname === "/t/posts/by_number/184189/12.json"
+							? postFixture
+							: null;
 		if (body === null) return new Response("{}", { status: 404, headers: { "content-type": "application/json" } });
 		return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
 	}) as typeof fetch;
@@ -62,5 +66,23 @@ describe("discourse post-number URLs", () => {
 		expect(result!.content).toContain("## Posts");
 		expect(result!.content).toContain("### Post 1 - ");
 		expect(result!.content).not.toContain("No problem, take your time.");
+	});
+
+	test("an explicit post 1 URL renders as the cited post", async () => {
+		const result = await handleDiscourse(`${origin}/t/community-network-visualisation/184189/1`, 5);
+		expect(requested.some(u => u.includes("/posts/by_number/184189/1.json"))).toBe(true);
+		expect(result?.content.startsWith("# Post 1 - ")).toBe(true);
+		expect(result?.content).not.toContain("## Posts");
+	});
+
+	test("declines instead of substituting the topic when the cited post cannot be fetched", async () => {
+		const result = await handleDiscourse(`${origin}/t/community-network-visualisation/184189/99`, 5);
+		expect(result).toBeNull();
+	});
+
+	test("a forum mounted at /t (base path containing /t/) still resolves the cited post", async () => {
+		const result = await handleDiscourse(`${origin}/t/t/community-network-visualisation/184189/12`, 5);
+		expect(requested.some(u => u.includes("/t/posts/by_number/184189/12.json"))).toBe(true);
+		expect(result?.content).toContain("# Post 12 - Jakke Flemming");
 	});
 });
