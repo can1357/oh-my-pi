@@ -20,6 +20,10 @@
 - Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
 - Fixed the omp daemon staying alive for up to 3 seconds after shutdown, or 11 seconds after stopping a module unit such as the image URL broker, once its work was done
 
+### Changed
+
+- Rereading an unchanged skill file that is already in the current context now returns a short stub instead of repeating it; `?full` still returns the whole file ([#16521](https://github.com/can1357/oh-my-pi/pull/16521) by [@Komzpa](https://github.com/Komzpa))
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes
