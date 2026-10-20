@@ -87,8 +87,8 @@ describe("buildProviderCards", () => {
 	const now = Date.now();
 
 	it("averages a window across accounts instead of showing the worst account", () => {
-		// One exhausted + one barely-used account: the classic report shows the
-		// aggregate (~50% free), so the card must not read 0% free.
+		// One exhausted + one barely-used account: the card shows the mean used
+		// fraction (~50% used), not either account's own usage.
 		const reports = [
 			report("anthropic", "a@x.test", [
 				{ ...limit("anthropic", "a", "7d", "Claude 7 Day", 1.0, "exhausted", now + 1000), id: "anthropic:7d" },
@@ -348,10 +348,30 @@ describe("UsageDashboardComponent", () => {
 					expect(bars[0][0].length).toBeGreaterThanOrEqual(12);
 					for (const bar of bars) expect(bar[0].length).toBe(bars[0][0].length);
 				}
-				expect(quotaLines[0]).toContain("10%");
-				expect(quotaLines[1]).toContain("84%");
+				expect(quotaLines[0]).toContain("90% used");
+				expect(quotaLines[1]).toContain("16% used");
 				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			}
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("labels the grid percentage with the same quota its bar fills", () => {
+		// Regression: the grid filled the bar by quota used but printed the
+		// remaining percentage, so the number moved opposite to the bar.
+		const component = dashboard([
+			report("anthropic", "a@test", [limit("anthropic", "a", "7d", "Claude 7 Day", 0.25, "ok")]),
+		]);
+		try {
+			const lines = component.render(72).map(line => Bun.stripANSI(line));
+			const barLine = lines.find(line => /[█░]/.test(line))!;
+			const bar = barLine.match(/[█░]+/)![0];
+			const filled = (bar.match(/█/g) ?? []).length;
+			const shown = Number(barLine.match(/(\d+)% used/)![1]);
+			expect(shown).toBe(25);
+			// The bar is filled by the same quota, within one cell of rounding.
+			expect(Math.abs(filled / bar.length - 0.25)).toBeLessThanOrEqual(1 / bar.length);
 		} finally {
 			component.dispose();
 		}
@@ -455,8 +475,8 @@ describe("UsageDashboardComponent", () => {
 				const output = Bun.stripANSI(lines.join("\n"));
 				expect(output).toContain("Claude 7 Day (Fable)");
 				expect(output).toContain("Claude Extra Usage");
-				expect(output).toContain("84%");
-				expect(output).toContain("95%");
+				expect(output).toContain("16% used");
+				expect(output).toContain("5% used");
 				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			}
 		} finally {
