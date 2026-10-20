@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed directory grep returning no results when the search root is a symlink to a directory: the root symlink is now followed, while symlinks below it are still skipped ([#15529](https://github.com/can1357/oh-my-pi/issues/15529), [#16562](https://github.com/can1357/oh-my-pi/pull/16562) by [@Baytowne](https://github.com/Baytowne))
+
 ## [18.12.4] - 2026-10-20
 
 ### Changed

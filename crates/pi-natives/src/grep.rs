@@ -1385,7 +1385,13 @@ fn build_grep_walk_request(
 		filter = filter.glob(compiled);
 	}
 
-	Ok(pi_walker::WalkRequest::new(search_path)
+	let root = if fs.is_symlink(search_path) {
+		iofs::canonical_search_path(fs, search_path.to_path_buf())
+	} else {
+		search_path.to_path_buf()
+	};
+
+	Ok(pi_walker::WalkRequest::new(root)
 		.filesystem(fs.clone())
 		.hidden(include_hidden)
 		.gitignore(use_gitignore)
@@ -3395,6 +3401,37 @@ mod tests {
 		assert_eq!(result.files_searched, 1);
 		assert_eq!(result.matches.len(), 1);
 		assert_eq!(result.matches[0].path, "regular.txt");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn grep_directory_follows_a_symlinked_root_but_not_descendant_symlinks() {
+		let root = TempDirGuard::new();
+		write_file(&root.path().join("real/a.txt"), "needle in real\n");
+		write_file(&root.path().join("elsewhere/b.txt"), "needle elsewhere\n");
+		std::os::unix::fs::symlink(root.path().join("real"), root.path().join("link"))
+			.expect("create root symlink");
+		std::os::unix::fs::symlink(
+			root.path().join("elsewhere"),
+			root.path().join("real/nested-link"),
+		)
+		.expect("create nested symlink");
+
+		let through_link =
+			grep_sync(base_grep_config(&root.path().join("link")), None, task::CancelToken::default())
+				.expect("grep through a symlinked root should succeed");
+		assert_eq!(through_link.files_searched, 1);
+		assert_eq!(through_link.total_matches, 1);
+		assert_eq!(through_link.matches.len(), 1);
+		assert_eq!(through_link.matches[0].path, "a.txt");
+		assert_eq!(through_link.matches[0].line, "needle in real");
+
+		let direct =
+			grep_sync(base_grep_config(&root.path().join("real")), None, task::CancelToken::default())
+				.expect("grep of the real directory should succeed");
+		assert_eq!(direct.files_searched, 1);
+		assert_eq!(direct.total_matches, 1);
+		assert_eq!(direct.matches[0].path, "a.txt");
 	}
 
 	#[cfg(unix)]
