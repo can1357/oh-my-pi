@@ -22,7 +22,7 @@ import { GlobTool } from "../src/tools/glob";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
 
 import { cfgEditFuzzyMatch, cfgEditFuzzyThreshold } from "@oh-my-pi/pi-coding-agent/edit/settings";
-import { cfgFetchEnabled, cfgReadDefaultLimit } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgReadDefaultLimit } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 // Helper to extract text from content blocks
 function getTextOutput(result: any): string {
@@ -767,27 +767,6 @@ describe("Coding Agent Tools", () => {
 			const second = getTextOutput(await readTool.execute("live-limit-25", { path: testFile }));
 			expect(second).toContain("Line 25");
 			expect(second).not.toContain("Line 26");
-		});
-
-		it("stops advertising URL reads when fetch.enabled is off (#11347)", () => {
-			const settings = Settings.isolated();
-			const liveReadTool = new ReadTool(createTestToolSession(testDir, settings));
-
-			// URL reads work, so the prompt and the `path` schema advertise them.
-			expect(liveReadTool.description).toContain("reader text/markdown");
-			expect(liveReadTool.description).toContain("bare host:port needs trailing slash");
-			expect(JSON.stringify(liveReadTool.parameters.toJsonSchema())).toContain("or URL");
-
-			// The runtime gate now refuses URL reads, so the copy must stop steering the model there.
-			cfgFetchEnabled.set(settings, false);
-
-			expect(liveReadTool.description).not.toContain("reader text/markdown");
-			expect(liveReadTool.description).not.toContain("static web");
-			// The `host:port` escape is URL-selector guidance, so it goes with the rest of the URL copy.
-			expect(liveReadTool.description).not.toContain("bare host:port needs trailing slash");
-			expect(JSON.stringify(liveReadTool.parameters.toJsonSchema())).not.toContain("or URL");
-			// Internal URIs still resolve, so their copy stays.
-			expect(JSON.stringify(liveReadTool.parameters.toJsonSchema())).toContain("internal URI");
 		});
 
 		it("should truncate when byte limit exceeded", async () => {

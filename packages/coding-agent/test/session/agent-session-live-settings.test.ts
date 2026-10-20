@@ -280,15 +280,21 @@ describe("AgentSession live settings", () => {
 			const settings = Settings.isolated({ inlineToolDescriptors });
 			const live = await start(settings);
 
+			// Everything the provider receives for one side request: the prompt, the
+			// tool descriptions and the published tool schemas.
 			const catalog = async (): Promise<string> => {
 				const context = await live.agent.buildSideRequestContext([]);
 				const descriptions = (context.tools ?? []).map(tool => tool.description ?? "").join("\n");
-				return `${(context.systemPrompt ?? []).join("\n")}\n${descriptions}`;
+				const schemas = (context.tools ?? []).map(tool => JSON.stringify(tool.parameters ?? {})).join("\n");
+				return `${(context.systemPrompt ?? []).join("\n")}\n${descriptions}\n${schemas}`;
 			};
 
 			const enabled = await catalog();
 			expect(enabled).toContain("Known URLs/programmatic data → `read`");
-			expect(enabled).toContain("file/dir/glob/URL");
+			expect(enabled).toContain("file/dir/glob/internal URI/web URL");
+			// The `read` tool's `path` schema is published to the provider, so its
+			// copy has to stop offering a web URL with the setting.
+			expect(enabled).toContain("Local path, internal URI, or URL");
 
 			cfgFetchEnabled.set(settings, false);
 			await Promise.resolve();
@@ -296,9 +302,14 @@ describe("AgentSession live settings", () => {
 
 			const disabled = await catalog();
 			expect(disabled).not.toContain("Known URLs/programmatic data");
-			expect(disabled).not.toContain("file/dir/glob/URL");
+			expect(disabled).not.toContain("file/dir/glob/internal URI/web URL");
 			expect(disabled).not.toContain("reader text/markdown");
 			expect(disabled).not.toContain("bare host:port");
+			// The `read` tool's own line drops the web reading hint with the setting.
+			expect(disabled).not.toContain("static web");
+			expect(disabled).not.toContain("Local path, internal URI, or URL");
+			// Internal URIs still resolve, so their copy stays.
+			expect(disabled).toContain("Local path or internal URI");
 
 			await live.dispose();
 			session = undefined;
