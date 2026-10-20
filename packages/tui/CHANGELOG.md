@@ -157,6 +157,13 @@
 - Fixed an inline image (such as a table's chart) disappearing in iTerm2 when new output pushed it past the top of the screen; it now moves to scrollback whole ([#16467](https://github.com/can1357/oh-my-pi/pull/16467) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
 - Fixed inline images, hyperlinks, notifications and styled underlines staying off in iTerm2 sessions reached over SSH, where the forwarded `LC_TERMINAL` marker was ignored ([#16450](https://github.com/can1357/oh-my-pi/pull/16450) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Added Eval `mcp_progress` status events, updated in place per call and evictable under the status-event cap, plus `formatMCPProgress()` and `MCPToolDetails.progress` for MCP progress display ([#16431](https://github.com/can1357/oh-my-pi/pull/16431) by [@alphastorm](https://github.com/alphastorm))
+### Changed
+
+- Expanded tool output (Ctrl+O) now soft-wraps the full body of IRC cards - outgoing `agent://` messages and incoming IRC bubbles - instead of cutting every line at 100/110 columns, and a collapsed IRC card with hidden text now shows the `Ctrl+O: Expand` hint ([#15164](https://github.com/can1357/oh-my-pi/pull/15164) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+### Fixed
+
+- Fixed expanded tool output (Ctrl+O) dropping the line budget on proc/job cards and agent message bodies, which printed every line of a long log into the transcript; the cap and its "… +N more lines" marker are back ([#15164](https://github.com/can1357/oh-my-pi/pull/15164) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 
@@ -167,10 +174,6 @@
 - `ApprovalDialogComponent` accepts `grants` and `onGrant`: grant choices above **Approve Once**, led by a toggle that keeps them across sessions ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
 - Added `describeJobWidget`/`renderJobWidgetLines` to draw a background job's widget natively and as terminal lines, `describeJobTiles`/`renderJobTileLines` to draw jobs as tiles (status, title, figure, widget), and `renderSparkline` (with `peakBuckets`/`fitSparkValues`) for one-row block sparklines
 
-### Changed
-
-- Expanded tool output (Ctrl+O) now soft-wraps the full body of IRC cards - outgoing `agent://` messages and incoming IRC bubbles - instead of cutting every line at 100/110 columns, and a collapsed IRC card with hidden text now shows the `Ctrl+O: Expand` hint ([#15164](https://github.com/can1357/oh-my-pi/pull/15164) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
 ### Fixed
 
 - Fixed transparent images with empty top rows disappearing inside Zellij ([#16346](https://github.com/can1357/oh-my-pi/pull/16346) by [@Bouska](https://github.com/Bouska))
@@ -178,7 +181,6 @@
 - Fixed the composer caret drifting one cell left per pasted image or video chip in terminals that draw the chip icon as a wide emoji (JetBrains terminal); the `unicode` preset now uses `📷`/`🎬` chip icons ([#16270](https://github.com/can1357/oh-my-pi/issues/16270))
 - Fixed Tern hiding user text sent with `/skill:<name>` inside a collapsed skill card; only the loaded skill prompt is hidden ([#16311](https://github.com/can1357/oh-my-pi/issues/16311))
 - Fixed SIXEL charts and images overlapping following content when their top rows scroll out of the viewport ([#16245](https://github.com/can1357/oh-my-pi/pull/16245) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
-- Fixed expanded tool output (Ctrl+O) dropping the line budget on proc/job cards and agent message bodies, which printed every line of a long log into the transcript; the cap and its "… +N more lines" marker are back ([#15164](https://github.com/can1357/oh-my-pi/pull/15164) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.2] - 2026-10-18
 
