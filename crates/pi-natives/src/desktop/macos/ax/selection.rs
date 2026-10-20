@@ -85,25 +85,27 @@ fn write_selection(
 
 /// A background left drag from global point `start` to `end` in an app of
 /// `pid`, made as a text selection when both points lie on the text of one
-/// native text element mapping to window `wid` (for a remote view such as a
-/// system Open or Save panel, the drawing process's window): the element at
-/// both points, whose `AXSelectedTextRange` is settable and which places each
-/// point on a character (`AXRangeForPosition`, `AXBoundsForRange`), outside
-/// web content and terminals. The selection runs between the carets a press
-/// and a release there would leave, so no mouse event is posted and no
-/// drag-and-drop session can begin. `None`, with nothing written, for any
-/// other drag, for one pressing where it could pick up an item (on selected
-/// text or on an attachment), and in text holding right-to-left script.
+/// native text element mapping to window `wid` (an attached sheet's, or for a
+/// `remote` view such as a system Open or Save panel, the drawing process's
+/// window): the element at both points, whose `AXSelectedTextRange` is
+/// settable and which places each point on a character (`AXRangeForPosition`,
+/// `AXBoundsForRange`), outside web content and terminal grids. The selection
+/// runs between the carets a press and a release there would leave, so no
+/// mouse event is posted and no drag-and-drop session can begin. `None`, with
+/// nothing written, for any other drag, for one pressing where it could pick
+/// up an item (on selected text or on an attachment), and in text holding
+/// right-to-left script.
 pub(in crate::desktop::macos) fn select_dragged(
 	pid: libc::pid_t,
 	wid: u32,
+	remote: bool,
 	start: (f64, f64),
 	end: (f64, f64),
 ) -> CoreResult<Option<AxTextSelection>> {
 	// Read before the probes below, which can block: an app the user brings
 	// forward meanwhile is left to them, as in `select`.
 	let started_in_background = may_borrow_focus(skylight::front_pid(), pid);
-	if process::is_terminal(pid) {
+	if shows_terminal_grid(remote, || process::is_terminal(pid)) {
 		return Ok(None);
 	}
 	let Some(app) = probe_application(pid) else {
@@ -133,6 +135,13 @@ pub(in crate::desktop::macos) fn select_dragged(
 		return Ok(None);
 	};
 	write_selection(&element, pid, started_in_background, &before, wanted).map(Some)
+}
+
+/// Whether the text under a drag in an app is a terminal's rendered grid
+/// (`is_terminal`, read only when needed): never for a `remote` view, such as
+/// a terminal app's Save panel, whose fields `openAndSavePanelService` draws.
+fn shows_terminal_grid(remote: bool, is_terminal: impl FnOnce() -> bool) -> bool {
+	!remote && is_terminal()
 }
 
 /// Where a press or release lands in an element's text: the character
@@ -347,7 +356,8 @@ mod tests {
 	use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
 	use super::{
-		Caret, CoreResult, Utf16Range, apply, character_caret, dragged_range, write_result,
+		Caret, CoreResult, Utf16Range, apply, character_caret, dragged_range, shows_terminal_grid,
+		write_result,
 	};
 	use crate::desktop::{control, error::ErrorCode};
 
@@ -368,6 +378,13 @@ mod tests {
 		assert_eq!(at(12.0, 130.0), None);
 		let empty = CGRect::new(CGPoint::new(0.0, 1200.0), CGSize::new(0.0, 0.0));
 		assert_eq!(character_caret(0.0, 1200.0, Utf16Range { start: 0, length: 0 }, empty), None);
+	}
+
+	#[test]
+	fn a_terminal_app_s_remote_panel_is_not_its_grid() {
+		assert!(shows_terminal_grid(false, || true));
+		assert!(!shows_terminal_grid(false, || false));
+		assert!(!shows_terminal_grid(true, || panic!("a remote panel is never the grid")));
 	}
 
 	#[test]

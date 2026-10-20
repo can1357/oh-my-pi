@@ -505,18 +505,33 @@ pub(super) fn drag_selection(
 	};
 	let window = capture.window(id)?;
 	let (pid, wid) = window_identity(&window)?;
-	ax::select_dragged(pid, text_window(wid, ax::window_content(pid, &window)), start, end)
+	let (text_wid, remote) = text_window(
+		window,
+		wid,
+		|window, wid| attached_window(capture, window, pid, wid, event),
+		|window| ax::window_content(pid, window),
+	)?;
+	ax::select_dragged(pid, text_wid, remote, start, end)
 }
 
-/// The window id the text elements of window `wid` map to, given who draws
-/// it (`content`): `_AXUIElementGetWindow` maps the elements of a remote view,
-/// such as a system Open or Save panel, to the drawing process's own window,
-/// not to `wid` (as [`input_owner`] routes their input).
-const fn text_window(wid: u32, content: ax::WindowContent) -> u32 {
-	match content {
-		ax::WindowContent::Own => wid,
-		ax::WindowContent::Remote { window, .. } => window,
-	}
+/// The window id the text elements under a drag on window `wid` map to, and
+/// whether another process draws them. The press may land in a sheet or
+/// popover attached to `wid` (`attached`, as pointer input resolves it),
+/// whose fields map to that window; and `_AXUIElementGetWindow` maps the
+/// elements of a remote view, such as a system Open or Save panel, to the
+/// drawing process's own window (`content`, as [`input_owner`] routes their
+/// input).
+fn text_window<W>(
+	window: W,
+	wid: u32,
+	attached: impl FnOnce(W, u32) -> CoreResult<(W, u32)>,
+	content: impl FnOnce(&W) -> ax::WindowContent,
+) -> CoreResult<(u32, bool)> {
+	let (window, wid) = attached(window, wid)?;
+	Ok(match content(&window) {
+		ax::WindowContent::Own => (wid, false),
+		ax::WindowContent::Remote { window, .. } => (window, true),
+	})
 }
 
 /// The global points a drag presses at and releases at.
@@ -7176,12 +7191,21 @@ mod tests {
 	}
 
 	#[test]
-	fn a_drag_selection_in_a_remote_panel_looks_for_text_in_the_drawing_window() {
-		// TextEdit's Open panel 554 is drawn by openAndSavePanelService (pid
-		// 7592) in its window 556, the window its text fields map to.
-		let drawn = ax::WindowContent::Remote { pid: 7592, window: 556 };
-		assert_eq!(text_window(554, drawn), 556);
-		assert_eq!(text_window(554, ax::WindowContent::Own), 554);
+	fn a_drag_selection_looks_for_text_in_the_attached_sheet_and_its_drawing_window() {
+		let own = |_: &u32| ax::WindowContent::Own;
+		let none = |window, wid| Ok((window, wid));
+		assert_eq!(text_window(554, 554, none, own).unwrap(), (554, false));
+		// TextEdit's Save sheet 1362, attached to its document window 554,
+		// takes the press; its fields map to the sheet.
+		let sheet = |_, _| Ok((1362, 1362));
+		assert_eq!(text_window(554, 554, sheet, own).unwrap(), (1362, false));
+		// openAndSavePanelService (pid 16472) draws that sheet in its window
+		// 1363, the window its text fields map to.
+		let drawn = |window: &u32| {
+			assert_eq!(*window, 1362, "the content of the attached sheet");
+			ax::WindowContent::Remote { pid: 16472, window: 1363 }
+		};
+		assert_eq!(text_window(554, 554, sheet, drawn).unwrap(), (1363, true));
 	}
 
 	#[test]
