@@ -184,6 +184,8 @@
 - Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
 
 ## [18.12.4] - 2026-10-20
+### Fixed
+- Fixed the Gemini over-planning guard judging the same reasoning-summary title differently depending on where a streamed chunk boundary fell, so a bold title padded past its buffer is still detected and a bare bold marker no longer counts as a header ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
