@@ -57,16 +57,28 @@ const WINDOWED_ROUTES: Record<string, Route> = {
 			},
 		},
 	},
+	"/alpha/billing/subscriptions": {
+		body: {
+			success: true,
+			data: {
+				status: "active",
+				planId: "individual-goat",
+				currentPeriodStart: "2026-10-15T05:10:24.000Z",
+				currentPeriodEnd: "2026-11-15T05:10:24.000Z",
+			},
+		},
+	},
 };
 
 describe("command code usage provider", () => {
-	it("maps a windowed plan to 5-hour, weekly, and balance limits", async () => {
+	it("maps a windowed plan to 5-hour, weekly, monthly, and balance limits", async () => {
 		const seen: SeenRequest[] = [];
 		const report = await commandCodeUsageProvider.fetchUsage(makeParams(), makeCtx(WINDOWED_ROUTES, seen));
 
 		expect(seen.map(request => request.url)).toEqual([
 			"https://api.commandcode.ai/alpha/whoami",
 			"https://api.commandcode.ai/alpha/billing/credits?orgId=org_1",
+			"https://api.commandcode.ai/alpha/billing/subscriptions?orgId=org_1",
 		]);
 		for (const request of seen) {
 			expect(request.headers?.Authorization).toBe("Bearer user_test");
@@ -77,10 +89,11 @@ describe("command code usage provider", () => {
 		expect(report!.limits.map(limit => limit.id)).toEqual([
 			"commandcode:5h",
 			"commandcode:7d",
+			"commandcode:monthly",
 			"commandcode:balance",
 		]);
 
-		const [fiveHour, weekly, balance] = report!.limits;
+		const [fiveHour, weekly, monthly, balance] = report!.limits;
 		expect(fiveHour).toMatchObject({
 			label: "5-hour limit",
 			scope: { provider: "commandcode", accountId: "user_1", orgId: "org_1", windowId: "5h", shared: true },
@@ -95,6 +108,20 @@ describe("command code usage provider", () => {
 			amount: { used: 3, limit: 100, usedFraction: 0.03, unit: "credits" },
 			status: "exhausted",
 		});
+		// 12.5 of the GOAT plan's 70-credit grant remains.
+		expect(monthly).toMatchObject({
+			label: "Monthly credits",
+			scope: { provider: "commandcode", accountId: "user_1", orgId: "org_1", windowId: "monthly", shared: true },
+			window: {
+				id: "monthly",
+				label: "Monthly",
+				durationMs: Date.parse("2026-11-15T05:10:24.000Z") - Date.parse("2026-10-15T05:10:24.000Z"),
+				resetsAt: Date.parse("2026-11-15T05:10:24.000Z"),
+			},
+			amount: { used: 57.5, limit: 70, remaining: 12.5, unit: "credits" },
+			status: "ok",
+		});
+		expect(monthly!.amount.usedFraction).toBeCloseTo(57.5 / 70);
 		expect(balance).toMatchObject({
 			label: "Credit balance",
 			scope: { provider: "commandcode", accountId: "user_1", orgId: "org_1", windowId: "balance", shared: true },
@@ -106,8 +133,43 @@ describe("command code usage provider", () => {
 			email: "ada@example.com",
 			orgId: "org_1",
 			orgName: "acme",
-			planType: "individual-pro-v1",
+			planType: "individual-goat",
 		});
+	});
+
+	it("sizes the monthly grant from monthlyCreditsGranted before the plan", async () => {
+		const report = await commandCodeUsageProvider.fetchUsage(
+			makeParams(),
+			makeCtx({
+				...WINDOWED_ROUTES,
+				"/alpha/billing/credits": { body: { credits: { monthlyCredits: 30, monthlyCreditsGranted: 120 } } },
+			}),
+		);
+		const monthly = report!.limits.find(limit => limit.id === "commandcode:monthly");
+		expect(monthly?.amount).toMatchObject({ used: 90, limit: 120, remaining: 30, usedFraction: 0.75 });
+	});
+
+	it("omits only the monthly limit when the grant cannot be sized", async () => {
+		const cases: [name: string, routes: Record<string, Route>][] = [
+			[
+				"unknown plan",
+				{
+					...WINDOWED_ROUTES,
+					"/alpha/billing/subscriptions": { body: { data: { planId: "individual-new-tier" } } },
+				},
+			],
+			[
+				"subscription lookup fails",
+				{ ...WINDOWED_ROUTES, "/alpha/billing/subscriptions": { status: 500, body: "{}" } },
+			],
+		];
+		for (const [name, routes] of cases) {
+			const report = await commandCodeUsageProvider.fetchUsage(makeParams(), makeCtx(routes));
+			expect(
+				report!.limits.map(limit => limit.id),
+				name,
+			).toEqual(["commandcode:5h", "commandcode:7d", "commandcode:balance"]);
+		}
 	});
 
 	it("grades a window by used fraction when the API does not flag it exceeded", async () => {
@@ -159,7 +221,11 @@ describe("command code usage provider", () => {
 				},
 			}),
 		);
-		expect(report!.limits.map(limit => limit.id)).toEqual(["commandcode:5h", "commandcode:balance"]);
+		expect(report!.limits.map(limit => limit.id)).toEqual([
+			"commandcode:5h",
+			"commandcode:monthly",
+			"commandcode:balance",
+		]);
 		const validated = usageReportSchema(report);
 		expect(validated instanceof type.errors ? validated.summary : "valid").toBe("valid");
 	});
@@ -177,7 +243,10 @@ describe("command code usage provider", () => {
 			),
 		);
 
-		expect(seen[1]!.url).toBe("https://api.commandcode.ai/alpha/billing/credits");
+		expect(seen.map(request => request.url)).toEqual([
+			"https://api.commandcode.ai/alpha/whoami",
+			"https://api.commandcode.ai/alpha/billing/credits",
+		]);
 		expect(report!.limits).toHaveLength(1);
 		expect(report!.limits[0]).toMatchObject({
 			id: "commandcode:balance",
@@ -223,7 +292,7 @@ describe("command code usage provider", () => {
 		}
 	});
 
-	it("sends both probes to the configured origin instead of the canonical host", async () => {
+	it("sends every probe to the configured origin instead of the canonical host", async () => {
 		const seen: SeenRequest[] = [];
 		await commandCodeUsageProvider.fetchUsage(
 			makeParams({ baseUrl: "https://proxy.example/provider/v1" }),
@@ -232,6 +301,7 @@ describe("command code usage provider", () => {
 		expect(seen.map(request => request.url)).toEqual([
 			"https://proxy.example/alpha/whoami",
 			"https://proxy.example/alpha/billing/credits?orgId=org_1",
+			"https://proxy.example/alpha/billing/subscriptions?orgId=org_1",
 		]);
 	});
 
