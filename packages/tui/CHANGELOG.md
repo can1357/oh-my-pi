@@ -34,6 +34,7 @@
 - `splitPathAndSel` and `splitInternalUrlSel` peel comma line lists that include a tail chunk (`:1-12,-15`) or repeat the colon after a comma (`:1-30,:-30`, also beside `:raw`); `splitPathAndSel(path, { foldListColons: false })` keeps the repeated colon in the path ([#16435](https://github.com/can1357/oh-my-pi/pull/16435) by [@will-bogusz](https://github.com/will-bogusz))
 - Generic tool cards now reveal the complete result when expanded ([#15335](https://github.com/can1357/oh-my-pi/pull/15335) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed modified keys pressed while the terminal is still answering the kitty keyboard negotiation being reported in legacy encoding (Shift+Enter arrived as a bare CR and submitted the prompt instead of inserting a newline) ([#12411](https://github.com/can1357/oh-my-pi/issues/12411), [#16458](https://github.com/can1357/oh-my-pi/pull/16458) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Generic tool cards now reveal the complete result when expanded ([#15335](https://github.com/can1357/oh-my-pi/pull/15335) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Added `footerMeta` to `OutputBlockOptions` and `ToolCardSnapshot` to draw short facts inside a frame's bottom border ([#16486](https://github.com/can1357/oh-my-pi/pull/16486) by [@H4vC](https://github.com/H4vC))
 
 ### Changed
