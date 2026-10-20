@@ -7,7 +7,7 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { WRITE_MAP_MAX_LINES } from "@oh-my-pi/pi-coding-agent/tools/write-content";
+import { WRITE_MAP_MAX_CHARS, WRITE_MAP_MAX_LINES } from "@oh-my-pi/pi-coding-agent/tools/write-content";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
@@ -125,6 +125,43 @@ describe("write tool hashline header", () => {
 
 		expect(resultText(editResult)).toContain("never displayed");
 		expect(await fs.readFile(filePath, "utf8")).toBe(content);
+	});
+
+	it("records no seen line when it numbered none, so every anchor is unseen", async () => {
+		const filePath = path.join(tmpDir, "unnumbered.ts");
+		const session = createSession(tmpDir);
+		// A first line past the map's character cap leaves the write with no
+		// numbered row at all. The tag then records the empty seen set — "no
+		// line was displayed" — instead of a missing record, so the guard runs
+		// and reads every anchor on it as unseen.
+		const content = `${"x".repeat(WRITE_MAP_MAX_CHARS + 1)}\n`;
+
+		const writeResult = await new WriteTool(session).execute("call-1", { path: filePath, content });
+		const text = resultText(writeResult);
+		const headerLine = text.split("\n")[0] ?? "";
+		expect(HASHLINE_HEADER_LINE.test(headerLine)).toBe(true);
+		const tag = HASHLINE_HEADER_LINE.exec(headerLine)![2];
+
+		// No row is numbered, and the note says so instead of claiming a
+		// numbered range that does not exist.
+		expect(text).not.toContain(`1:${"x".repeat(8)}`);
+		expect(text).toContain("(1 line; none were numbered — read the file before anchoring an edit)");
+		// The empty set, not a missing one: the guard rejects every anchor.
+		expect(getEditStore(session).seenLines(filePath, tag)).toEqual([]);
+	});
+
+	it("says the file is empty when the write numbered nothing", async () => {
+		const filePath = path.join(tmpDir, "empty.ts");
+		const session = createSession(tmpDir);
+
+		const writeResult = await new WriteTool(session).execute("call-1", { path: filePath, content: "" });
+		const text = resultText(writeResult);
+		const headerLine = text.split("\n")[0] ?? "";
+		expect(HASHLINE_HEADER_LINE.test(headerLine)).toBe(true);
+		const tag = HASHLINE_HEADER_LINE.exec(headerLine)![2];
+
+		expect(text).toContain("(the file is empty; there is nothing to anchor)");
+		expect(getEditStore(session).seenLines(filePath, tag)).toEqual([]);
 	});
 
 	it("names a local:// write by its URL, and the header round-trips through edit and write", async () => {

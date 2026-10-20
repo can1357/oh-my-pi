@@ -87,7 +87,7 @@ export function stripWriteContent(session: ToolSession, content: string): { text
 /** Lines of the written content the write result numbers for the model. */
 export const WRITE_MAP_MAX_LINES = 1000;
 /** Characters of numbered map the write result may carry. */
-const WRITE_MAP_MAX_CHARS = 32_768;
+export const WRITE_MAP_MAX_CHARS = 32_768;
 
 /**
  * A write's hashline display: the `[path#TAG]` header plus the numbered rows
@@ -152,7 +152,10 @@ export function maybeWriteSnapshotHeader(
  * after a successful edit — the model gets a tag without an extra `read` —
  * and numbers the written lines the same way, so the model knows the line
  * numbers it anchors on instead of guessing them. The numbered rows are the
- * snapshot's seen lines: the model displayed them, so it may edit them.
+ * snapshot's seen lines: the model displayed them, so it may edit them. A
+ * write that numbered no row at all (an empty file, or a first line past the
+ * map cap) records the empty set instead, which the guard reads as "no line
+ * was displayed" — every anchor on it is unseen.
  */
 export function maybeWriteSnapshotDisplay(
 	session: ToolSession,
@@ -165,14 +168,13 @@ export function maybeWriteSnapshotDisplay(
 	const lines = splitAddressableFileLines(normalized);
 	const shown = takeWriteMapLines(lines);
 	const seenLines = shown.map((_, index) => index + 1);
-	// A file with no lines has no provenance to record: an empty set would say
-	// "no line was displayed", which the guard reads as "every anchor is
-	// unseen".
-	const tag = getEditStore(session).recordSnapshot(
-		absolutePath,
-		normalized,
-		seenLines.length > 0 ? seenLines : undefined,
-	);
+	// The numbered rows are the snapshot's seen lines: the model displayed
+	// them, so it may edit them. An empty set is not "unrestricted" — it says
+	// the write displayed no line at all, so every anchor on this tag is
+	// unseen and the guard rejects it. Only a snapshot with no seen-line
+	// record (`None`) skips the guard, and that is what the handler-owned
+	// writes (`maybeWriteSnapshotHeader`) mint.
+	const tag = getEditStore(session).recordSnapshot(absolutePath, normalized, seenLines);
 	const rows = shown.map((line, index) => formatNumberedLine(index + 1, line)).join("\n");
 	return {
 		header: formatHashlineHeader(displayPath, tag),
@@ -183,17 +185,29 @@ export function maybeWriteSnapshotDisplay(
 }
 
 /**
+ * The note that tells the model which lines the write numbered and where the
+ * numbered map stops. A write that numbered nothing (an empty file, or a
+ * first line past the map cap) says so plainly: no line was displayed, so an
+ * anchor on the tag is unseen until the file is read.
+ */
+function formatWriteMapNote(numbered: number, hidden: number): string {
+	const total = numbered + hidden;
+	if (numbered === 0) {
+		if (total === 0) return " (the file is empty; there is nothing to anchor)";
+		return ` (${total} line${total === 1 ? "" : "s"}; none were numbered — read the file before anchoring an edit)`;
+	}
+	if (hidden === 0) return "";
+	return ` (${total} lines; the first ${numbered} are numbered below — read the file before anchoring edits past line ${numbered})`;
+}
+
+/**
  * Assemble a write result from its hashline display: the `[path#TAG]` header,
  * the summary line, and the numbered rows of the written content that give the
  * model the line numbers it anchors on.
  */
 export function formatWriteSnapshotText(display: WriteSnapshotDisplay | undefined, summary: string): string {
 	if (!display) return summary;
-	const numbered = display.seenLines.length;
-	const note =
-		display.hiddenLines > 0
-			? ` (${numbered + display.hiddenLines} lines; the first ${numbered} are numbered below — read the file before anchoring edits past line ${numbered})`
-			: "";
+	const note = formatWriteMapNote(display.seenLines.length, display.hiddenLines);
 	const rows = display.rows ? `\n${display.rows}` : "";
 	return `${display.header}\n${summary}${note}${rows}`;
 }
