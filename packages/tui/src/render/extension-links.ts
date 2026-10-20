@@ -131,26 +131,6 @@ export function formatExtensionLink(label: string, href: string, key: string): s
 	return `${MARKER_OPEN}-${id};${safe}\x07${UNDERLINE.on}${body}${UNDERLINE.off}\x1b]8;;\x07`;
 }
 
-/** Hint tag letters, home row first. */
-const LINK_HINT_ALPHABET = "asdfghjklqwertyuiopzxcvbnm";
-
-/**
- * Tags for `count` links in keyboard link-hint mode: single letters while they suffice, otherwise
- * two letters each, so no tag is a prefix of another. At most the alphabet squared (676) are made;
- * links past that stay untagged.
- */
-export function linkHintTags(count: number): string[] {
-	if (count <= LINK_HINT_ALPHABET.length) return LINK_HINT_ALPHABET.slice(0, Math.max(0, count)).split("");
-	const tags: string[] = [];
-	for (const first of LINK_HINT_ALPHABET) {
-		for (const second of LINK_HINT_ALPHABET) {
-			if (tags.length === count) return tags;
-			tags.push(`${first}${second}`);
-		}
-	}
-	return tags;
-}
-
 /**
  * `line` without omp's extension-link markers (the OSC 8 open and close around each label), for
  * terminal output. Every other hyperlink is kept as is.

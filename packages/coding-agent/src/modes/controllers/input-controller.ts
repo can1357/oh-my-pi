@@ -47,7 +47,8 @@ import manualContinuePrompt from "../../prompts/system/manual-continue.md" with 
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
-import { PINNED_HUD_TOGGLE_ID, type ViewportLink } from "@oh-my-pi/pi-tui/prompt/composer";
+import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
+import type { ViewportLink } from "@oh-my-pi/pi-tui/render/link-hints";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { restoreDetachedDraft } from "../../slash-commands/helpers/draft";
@@ -813,11 +814,12 @@ export class InputController {
 
 	/**
 	 * Keyboard link picking. `app.links.hint` enters link-hint mode, which then owns the keyboard
-	 * while the editor has focus: a lowercase letter narrows the tags, and any other key cancels and
-	 * is swallowed so a stray Esc or Enter does nothing else. Ctrl+C and a paste cancel and still do
-	 * what they always do. Key releases and repeats (the hint key's own) are ignored; mouse reports
-	 * pass through untouched. Keys the TUI routes before input listeners (a space held for
-	 * push-to-talk) never reach this.
+	 * while the editor has focus: a lowercase letter narrows the tags, the hint key again or Page Up
+	 * opens the fullscreen link browser (for links scrolled into terminal scrollback), and any other
+	 * key cancels and is swallowed so a stray Esc or Enter does nothing else. Ctrl+C and a paste
+	 * cancel and still do what they always do. Key releases and repeats (the hint key's own) are
+	 * ignored; mouse reports pass through untouched. Keys the TUI routes before input listeners (a
+	 * space held for push-to-talk) never reach this.
 	 */
 	#handleLinkHintInput(data: string): { consume?: boolean } | undefined {
 		// Overlays and editor-area dialogs (ask, selectors, hook input) own the keyboard.
@@ -835,6 +837,11 @@ export class InputController {
 		if (matchesKey(data, "ctrl+c") || data.startsWith("\x1b[200~")) {
 			this.ctx.cancelLinkHints();
 			return undefined;
+		}
+		if (this.ctx.keybindings.matches(data, "app.links.hint") || matchesKey(data, "pageUp")) {
+			// Leaves link-hint mode whether or not the browser opens.
+			this.ctx.openLinkBrowser();
+			return { consume: true };
 		}
 		const key = parseKey(data);
 		if (key !== undefined && /^[a-z]$/.test(key)) this.ctx.typeLinkHint(key);
