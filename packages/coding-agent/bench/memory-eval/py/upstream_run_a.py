@@ -155,19 +155,25 @@ if len(consolidations) != 1 or isinstance(consolidations[0], Exception):
 if len(recalls) != len(result["recalls"]):
 	sys.exit(f"{len(recalls)} recorded recalls but upstream scored {len(result['recalls'])}: a recall raised")
 
-# Same skip rule as upstream's query loop, so each recorded call lines up with its conversation and question.
+# Same skip rule as upstream's query loop, so each recorded call lines up with its conversation and question. The gold
+# contents are what upstream scores against: each distinct gold index's message, "" for an index past the conversation
+# (it still counts in the denominator but can never hit).
 queries = [
-	(index, q["question"])
+	(
+		index,
+		q["question"],
+		[conv["messages"][i] if i < len(conv["messages"]) else "" for i in dict.fromkeys(q["gold_message_indices"])],
+	)
 	for index, conv in enumerate(conversations)
 	for q in conv["questions"]
 	if q["question"] and q.get("gold_message_indices")
 ]
-if [query for _, query in queries] != [query for query, _ in recalls]:
+if [query for _, query, _ in queries] != [query for query, _ in recalls]:
 	sys.exit("recorded recall queries do not match the questions upstream evaluates")
 
 questions = [
-	{"conversation": conversation, "question": question, "rankedContents": contents, "recall": recall}
-	for (conversation, question), (_, contents), recall in zip(queries, recalls, result["recalls"])
+	{"conversation": conversation, "question": question, "goldContents": gold, "rankedContents": contents, "recall": recall}
+	for (conversation, question, gold), (_, contents), recall in zip(queries, recalls, result["recalls"])
 ]
 mean_recall = statistics.mean(result["recalls"])
 if loaded_model_digest() != MODEL_DIGEST:
