@@ -1,5 +1,8 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { Component } from "@oh-my-pi/pi-tui";
+import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
+import type { AltGrHost } from "@oh-my-pi/pi-tui/windows-altgr";
+import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import {
 	createProcessTerminalRenderHarness,
 	type ProcessTerminalRenderHarness,
@@ -34,12 +37,60 @@ class ModalProbe implements Component {
 	}
 }
 
+// These suites drive the real ProcessTerminal start()/probe pipeline, so they
+// opt out of the test-default headless suppression and restore it per case.
+let previousHeadless = false;
+
+const processPlatformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+const originalSshConnection = Bun.env.SSH_CONNECTION;
+const originalSshTty = Bun.env.SSH_TTY;
+const originalSshClient = Bun.env.SSH_CLIENT;
+
+/**
+ * A raw ProcessTerminal whose input handler is observable. The render harness
+ * routes the input into the TUI instead, which hides what the input path does
+ * with a key press.
+ */
+function setupRawTerminal(options?: { conpty?: boolean; altGrHost?: AltGrHost }): {
+	terminal: ProcessTerminal;
+	received: string[];
+} {
+	const received: string[] = [];
+	previousHeadless = setTerminalHeadless(false);
+	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+	Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+	Object.defineProperty(process.stdin, "setRawMode", { value: vi.fn(), configurable: true });
+	vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+	const terminal = new ProcessTerminal({ conpty: false, ...options });
+	terminal.start(
+		data => received.push(data),
+		() => {},
+	);
+	return { terminal, received };
+}
+
 describe("ProcessTerminal kitty keyboard arming", () => {
 	let harness: ProcessTerminalRenderHarness | undefined;
+	let rawTerminal: ProcessTerminal | undefined;
 
 	afterEach(() => {
 		harness?.dispose();
 		harness = undefined;
+		rawTerminal?.stop();
+		rawTerminal = undefined;
+		vi.restoreAllMocks();
+		vi.useRealTimers();
+		setTerminalHeadless(previousHeadless);
+		if (processPlatformDescriptor) Object.defineProperty(process, "platform", processPlatformDescriptor);
+		else Reflect.deleteProperty(process, "platform");
+		for (const [name, value] of [
+			["SSH_CONNECTION", originalSshConnection],
+			["SSH_TTY", originalSshTty],
+			["SSH_CLIENT", originalSshClient],
+		] as const) {
+			if (value === undefined) delete Bun.env[name];
+			else Bun.env[name] = value;
+		}
 	});
 
 	it("arms the terminal in the same write as the query", async () => {
@@ -88,12 +139,16 @@ describe("ProcessTerminal kitty keyboard arming", () => {
 
 	it("raises its own frame to keep a parent application's event-type reporting", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30, { conpty: false });
-		await harness.settle();
 		harness.writes.length = 0;
 
 		// The parent application pushed flags = 3 (event types). The reply
 		// describes the parent's frame, so omp's own frame — which sits above
 		// it — is raised in place instead of pushing a second frame.
+		//
+		// Fed in the same tick as the negotiation: a reply that arrives after
+		// the 150 ms probe window finds the arming frame already popped and
+		// pushes a frame of its own, so the in-place rewrite under test here
+		// would never happen.
 		await harness.feed("\x1b[?3u");
 
 		expect(harness.terminal.kittyEnableSequence).toBe("\x1b[>7u");
@@ -200,9 +255,12 @@ describe("ProcessTerminal kitty keyboard arming", () => {
 		{ host: "a parent application", reply: "\x1b[?3u" },
 	])("keeps the kitty stack balanced with $host", async ({ reply }) => {
 		harness = createProcessTerminalRenderHarness(100, 30, { conpty: false });
-		await harness.settle();
 		const writes = harness.writes;
 
+		// Fed in the same tick as the negotiation: a reply that arrives after
+		// the 150 ms probe window finds the arming frame already popped and
+		// pushes a frame of its own, so the single-push balance under test here
+		// would not hold.
 		await harness.feed(reply, "\x1b[?1;2c");
 
 		// The exit path takes omp's frame back off the kitty stack.
@@ -216,5 +274,136 @@ describe("ProcessTerminal kitty keyboard arming", () => {
 		// One push (the arming) and one pop (on exit) — a parent application's
 		// frame is neither pushed over nor popped.
 		expect(countMatches(out, KITTY_PUSH)).toBe(1);
+	});
+	it("arms the active screen when the kitty reply arrives after an overlay", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: false });
+		const writes = harness.writes;
+
+		const overlay = harness.tui.showOverlay(new ModalProbe(), {
+			fullscreen: true,
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		await harness.settle();
+		// The negotiation has not resolved yet, so the overlay entered without a
+		// kitty frame: the alternate screen's kitty stack carries nothing of
+		// omp's.
+		const entered = writes.join("");
+		expect(entered).toContain("\x1b[?1049h");
+		expect(entered.slice(entered.indexOf("\x1b[?1049h"))).not.toContain("\x1b[>5u");
+
+		// The reply arrives while the overlay holds the alternate screen.
+		const beforeReply = writes.length;
+		await harness.feed("\x1b[?0u");
+
+		// The alternate screen has to carry a frame of omp's own now: the keys
+		// inside the overlay stay legacy-encoded otherwise, and the overlay's
+		// exit pop would take a frame omp does not own.
+		expect(writes.slice(beforeReply).join("")).toContain("\x1b[>5u");
+
+		// The overlay's exit pops the frame the reply pushed, and every push
+		// omp made is matched by exactly one pop.
+		overlay.hide();
+		await harness.settle();
+		harness.dispose();
+		harness = undefined;
+
+		const out = writes.join("");
+		expect(countMatches(out, KITTY_PUSH)).toBe(2);
+		expect(countMatches(out, KITTY_POP)).toBe(2);
+	});
+
+	it("pops the alternate-screen kitty frame before the mode is cleared", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: false });
+		const writes = harness.writes;
+
+		// The kitty reply confirms the protocol before the overlay opens, so the
+		// overlay pushes a kitty frame of its own on the alternate screen.
+		await harness.feed("\x1b[?0u");
+		expect(harness.terminal.kittyProtocolActive).toBe(true);
+
+		const overlay = harness.tui.showOverlay(new ModalProbe(), {
+			fullscreen: true,
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		await harness.settle();
+		expect(writes.join("")).toContain("\x1b[?1049h\x1b[>5u");
+
+		// The shutdown drains the input while the overlay still holds the
+		// alternate screen.
+		await harness.terminal.drainInput(10, 5);
+
+		// The overlay's frame has to go back before the mode is cleared: the
+		// alternate-screen exit omits the `CSI < u` that balances it once the
+		// mode is off, and the frame would stay on that stack for the next
+		// application that enters the alternate screen.
+		expect(writes.join("")).toContain("\x1b[<u");
+		expect(harness.terminal.kittyProtocolActive).toBe(false);
+
+		overlay.hide();
+		await harness.settle();
+		harness.dispose();
+		harness = undefined;
+
+		const out = writes.join("");
+		// The pop happened while the alternate screen was still the active one:
+		// a pop emitted after the switch back would reach the main screen's
+		// stack instead and leave the overlay's frame behind.
+		expect(out.indexOf("\x1b[<u")).toBeGreaterThanOrEqual(0);
+		expect(out.indexOf("\x1b[<u")).toBeLessThan(out.indexOf("\x1b[?1049l"));
+		expect(countMatches(out, KITTY_PUSH)).toBe(2);
+		expect(countMatches(out, KITTY_POP)).toBe(2);
+	});
+
+	it("holds a split kitty key until its tail arrives during the provisional arming", () => {
+		vi.useFakeTimers();
+		const { terminal, received } = setupRawTerminal();
+		rawTerminal = terminal;
+
+		// The negotiation armed the terminal, but the reply has not arrived
+		// yet: the terminal already encodes kitty-style keys, so the tail of a
+		// split CSI-u belongs to the same key press.
+		process.stdin.emit("data", "\x1b[13;2");
+		vi.advanceTimersByTime(60);
+		vi.advanceTimersByTime(10);
+		process.stdin.emit("data", "u");
+
+		// The whole key press arrives as one sequence: the legacy flush would
+		// deliver the prefix as text and the tail as a separate keystroke, so
+		// Shift+Enter would never reach the composer as a newline.
+		expect(received).toEqual(["\x1b[13;2u"]);
+	});
+
+	it("decodes AltGr during the provisional kitty arming", () => {
+		// A Hungarian layout: AltGr+F produces "[".
+		const altGrHost: AltGrHost = {
+			activeLayer: () => new Map([["102:0", "["]]),
+			isRightAltDown: () => true,
+		};
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		// Keep the modifyOtherKeys fallback inert: it would install the
+		// win32-input-mode decoder and rewrite the very sequence under test.
+		Bun.env.SSH_CONNECTION = "192.0.2.10 54321 192.0.2.20 22";
+		delete Bun.env.SSH_TTY;
+		delete Bun.env.SSH_CLIENT;
+
+		const { terminal, received } = setupRawTerminal({ conpty: true, altGrHost });
+		rawTerminal = terminal;
+
+		// The reply has not arrived yet, but the terminal is already armed: the
+		// chord is a kitty sequence from the first keystroke on, so the layout
+		// text is recovered instead of the Alt chord reaching the keybindings.
+		process.stdin.emit("data", "\x1b[102;3u");
+		expect(received).toEqual(["["]);
+
+		// The negotiation gives up: the provisional state is rolled back and
+		// the chord reaches the keybindings as the Alt chord it is.
+		process.stdin.emit("data", "\x1b[?1;2c");
+		received.length = 0;
+		process.stdin.emit("data", "\x1b[102;3u");
+		expect(received).toEqual(["\x1b[102;3u"]);
 	});
 });

@@ -76,9 +76,12 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 
 	it("keeps alternate-key reporting without enabling event types after a previous session", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
-		await harness.settle();
 		harness.writes.length = 0;
 
+		// Fed in the same tick as the negotiation: a reply that arrives after
+		// the 150 ms probe window finds the arming frame already popped and
+		// pushes a frame of its own, so the level under test here would be a
+		// different one.
 		await harness.feed("\x1b[?5u");
 
 		const out = harness.writes.join("");
