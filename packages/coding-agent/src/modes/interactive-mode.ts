@@ -1351,8 +1351,35 @@ const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 /** Repaint cadence of the open jobs sheet: output tails, pids and list ages are polled, not pushed. */
 const JOBS_SHEET_REFRESH_MS = 250;
 
+/** Rows the TODO HUD spends outside its stage tree: leading blank, title, closing tail. */
+const TODO_HUD_CHROME_ROWS = 3;
+
+/**
+ * Pick the open tasks the collapsed TODO HUD shows across every rendered stage.
+ * When all of them fit in `budget` rows they all show. Otherwise one row is
+ * reserved for the "n more todos" summary and the rest go to in-progress (or
+ * subagent-matched) work, then blocked, then pending, each in plan order.
+ */
+function selectHudOpenTodos(
+	stages: readonly TodoPhase[],
+	budget: number,
+	isMatched: (todo: TodoItem) => boolean,
+): { shown: Map<TodoItem, true>; hidden: number } {
+	const open = stages.flatMap(stage => stage.tasks.filter(task => !isClosedTodo(task)));
+	if (open.length <= budget) return { shown: new Map(open.map(task => [task, true])), hidden: 0 };
+	const rank = (task: TodoItem): number =>
+		task.status === "in_progress" || isMatched(task) ? 0 : task.status === "blocked" ? 1 : 2;
+	const kept = open
+		.map((task, order) => ({ task, order }))
+		.sort((a, b) => rank(a.task) - rank(b.task) || a.order - b.order)
+		.slice(0, Math.max(1, budget - 1));
+	return { shown: new Map(kept.map(entry => [entry.task, true])), hidden: open.length - kept.length };
+}
+
 export class InteractiveMode implements InteractiveModeContext {
 	#todoHudAllocation: { terminalRows: number; panelRows: number } | undefined;
+	/** Panel row budget the collapsed TODO HUD was last built against. */
+	#todoHudRenderedRows = -1;
 
 	#preferredTodoHudPanelRows(terminalRows: number): number {
 		const rows = Number.isFinite(terminalRows) && terminalRows > 0 ? terminalRows : EDITOR_FALLBACK_ROWS;
@@ -2534,6 +2561,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.hookWidgetContainerBelow,
 			],
 			{
+				// Roots that collapse without new transcript output must not raise the
+				// post-run chrome floor: user-driven ones (editor drafts, dialogs and
+				// selectors, staged attachments, reports, queued messages, dismissible
+				// panels and the error banner). Any root listed in neither set counts
+				// as persistent: once it holds its height after a run the floor rises
+				// to it, and its later collapse floats the editor until output fills
+				// in. Classify every new root that can collapse on its own.
 				transientChrome: [
 					this.editorContainer,
 					this.attachmentChipsContainer,
@@ -2545,6 +2579,9 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.cleanseContainer,
 					this.errorBannerContainer,
 				],
+				// HUDs that clear themselves on a timer or registry change (todos,
+				// background subagents, model cycle, progress). Their first paint can be
+				// their tallest (a restored todo list on resume), so it is never a baseline.
 				selfClearingChrome: [
 					this.todoContainer,
 					this.subagentContainer,
@@ -2588,9 +2625,8 @@ export class InteractiveMode implements InteractiveModeContext {
 								),
 							),
 						};
-						// Renderer topics may consume the fresh allocation before the HUD is measured.
-						const renderer = this as InteractiveMode & { refreshTodoHud?: (width: number) => void };
-						renderer.refreshTodoHud?.(viewport.columns);
+						// The HUD is measured right after this callback: rebuild it against the fresh row budget.
+						if (this.#todoHudRenderedRows !== this.getTodoHudPanelRows()) this.#renderTodoList();
 					},
 				},
 				// Natively the HUD pills lead the dock, queued messages sit between
@@ -5230,39 +5266,66 @@ export class InteractiveMode implements InteractiveModeContext {
 		const activeIdx = phases.indexOf(this.#getActivePhase(phases) ?? phases[0]);
 		// Fixed budgets keep the HUD bounded regardless of plan size / progress.
 		const subsequentStageCap = 4; // stages shown after the active one (a trailing summary row covers the rest)
-		const activeTaskCap = 5; // open tasks previewed for the active stage
+		this.#todoHudRenderedRows = this.getTodoHudPanelRows();
 
 		// A pending todo "lights up" (accent) when an in-flight subagent is doing
 		// its work, matched by normalized content overlap.
 		const isMatched = (todo: TodoItem): boolean =>
 			activeDescs.length > 0 && todoMatchesAnyDescription(todo.content, activeDescs);
 
-		// Task subtree for a phase. Collapsed runs the shared walking-viewport
-		// policy (completed/abandoned omitted, active work pulled to the head,
-		// then following pending tasks) so the HUD and the transient tool result
-		// can never disagree about the current work (#5873). Expanded lists all.
-		const renderTasks = (phase: TodoPhase): string[] => {
-			if (expanded) {
-				return renderTreeList(
-					{
-						items: phase.tasks,
-						expanded: true,
-						renderItem: todo => this.#formatTodoLine(todo, "", isMatched(todo)),
-					},
-					theme,
+		// Collapsed stage window: the active stage, any earlier stage that still
+		// holds open (blocked) work, and a bounded number of following stages, with
+		// a "… n more stages" row for anything past the cap. Expanded: every stage
+		// from the top. Roman numerals stay tied to the real phase index.
+		const firstOpenIdx = phases.findIndex(phase => phase.tasks.some(task => !isClosedTodo(task)));
+		const baseIdx = expanded ? 0 : Math.max(0, Math.min(activeIdx, firstOpenIdx < 0 ? activeIdx : firstOpenIdx));
+		const phaseSlice = expanded ? phases.slice(baseIdx) : phases.slice(baseIdx, activeIdx + 1 + subsequentStageCap);
+		const hiddenStages = phases.length - baseIdx - phaseSlice.length;
+
+		// Collapsed open-task selection is global over the rendered stages and sized
+		// by the Composer's row allocation, so open work is not capped per stage while
+		// the panel has room, and the summary reports exactly what did not fit.
+		const activePhase = phases[activeIdx]!;
+		const activeHasOpenAndClosed =
+			activePhase.tasks.some(task => !isClosedTodo(task)) && activePhase.tasks.some(isClosedTodo);
+		const hudSelection = expanded
+			? undefined
+			: selectHudOpenTodos(
+					phaseSlice,
+					Math.max(
+						1,
+						this.getTodoHudPanelRows() -
+							TODO_HUD_CHROME_ROWS -
+							phaseSlice.length -
+							(hiddenStages > 0 ? 1 : 0) -
+							(activeHasOpenAndClosed ? 1 : 0),
+					),
+					isMatched,
 				);
+		// Tasks a collapsed stage lists: the open ones that fit, plus one closed task
+		// of context in the active stage. A fully closed active stage shows its
+		// closed tasks through the shared viewport policy.
+		const collapsedTasks = (phase: TodoPhase): TodoItem[] => {
+			const open = phase.tasks.filter(task => hudSelection?.shown.has(task));
+			if (phase === activePhase && !phase.tasks.some(task => !isClosedTodo(task))) {
+				return selectCollapsedTodos(phase.tasks, isMatched, 5).items;
 			}
-			const selection = selectCollapsedTodos(phase.tasks, isMatched, activeTaskCap);
-			return renderTreeList(
+			const lead = phase === activePhase && open.length > 0 ? phase.tasks.filter(isClosedTodo).slice(-1) : [];
+			return phase.tasks.filter(task => lead.includes(task) || open.includes(task));
+		};
+
+		// Task subtree for a phase. Collapsed omits completed/abandoned tasks (bar
+		// one lead) so the HUD and the transient tool result agree about the current
+		// work (#5873). Expanded lists all.
+		const renderTasks = (phase: TodoPhase): string[] =>
+			renderTreeList(
 				{
-					items: selection.items,
-					itemType: "task",
-					trailingSummary: selection.summary,
+					items: expanded ? phase.tasks : collapsedTasks(phase),
+					expanded,
 					renderItem: todo => this.#formatTodoLine(todo, "", isMatched(todo)),
 				},
 				theme,
 			);
-		};
 
 		// One phase node. The active stage is highlighted with normal-brightness task
 		// progress; other stages render their whole row (name + progress) in the
@@ -5275,18 +5338,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			const progress = ` · ${done}/${phase.tasks.length}`;
 			if (!isActive) {
 				const header = theme.fg("muted", label) + theme.fg("dim", progress);
-				return expanded ? [header, ...renderTasks(phase)] : header;
+				const tasks = renderTasks(phase);
+				return tasks.length > 0 ? [header, ...tasks] : header;
 			}
 			const header = theme.bold(theme.fg("accent", label)) + theme.fg("dim", progress);
 			return [header, ...renderTasks(phase)];
 		};
-
-		// Collapsed: active stage + a bounded number of following stages, with a
-		// "… n more stages" row for anything past the cap. Expanded: every stage
-		// from the top. Roman numerals stay tied to the real phase index.
-		const baseIdx = expanded ? 0 : activeIdx;
-		const phaseSlice = expanded ? phases.slice(baseIdx) : phases.slice(baseIdx, baseIdx + 1 + subsequentStageCap);
-		const hiddenStages = phases.length - baseIdx - phaseSlice.length;
 
 		// Flatten the stage tree into content rows plus a per-row top-level spine
 		// glyph (`├─` for stage rows, `│` for continuations). The spine never
@@ -5309,6 +5366,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (hiddenStages > 0) {
 			pushBlock(theme.fg("muted", formatMoreItems(hiddenStages, "stage")));
+		}
+		if (hudSelection && hudSelection.hidden > 0) {
+			pushBlock(theme.fg("muted", `${formatMoreItems(hudSelection.hidden, "todo")} · /todo expand`));
 		}
 
 		// Closing tail: hook + a few horizontals. Every tail cell is 1 column in
@@ -5355,10 +5415,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		const describeTasks = (phase: TodoPhase, phaseIndex: number): TspTreeNode[] => {
 			const index = (todo: TodoItem): string => `${phaseIndex}.${phase.tasks.indexOf(todo)}`;
-			if (expanded) return phase.tasks.map(todo => describeTask(todo, index(todo)));
-			const selection = selectCollapsedTodos(phase.tasks, isMatched, activeTaskCap);
-			const nodes = selection.items.map(todo => describeTask(todo, index(todo)));
-			if (selection.summary) nodes.push({ id: `${phaseIndex}.more`, label: [span(selection.summary, "muted")] });
+			const nodes = (expanded ? phase.tasks : collapsedTasks(phase)).map(todo => describeTask(todo, index(todo)));
 			return nodes;
 		};
 		const phaseNodes: TspTreeNode[] = phaseSlice.map((phase, offset) => {
@@ -5366,16 +5423,23 @@ export class InteractiveMode implements InteractiveModeContext {
 			const isActive = phaseIndex === activeIdx;
 			const name = multiPhase ? formatPhaseDisplayName(phase.name, phaseIndex + 1) : phase.name;
 			const done = phase.tasks.filter(isClosedTodo).length;
-			const open = isActive || expanded;
+			const children = describeTasks(phase, phaseIndex);
+			const open = isActive || expanded || children.length > 0;
 			return {
 				id: `${phaseIndex}`,
 				label: [span(name, isActive ? "accent strong" : "muted"), span(` · ${done}/${phase.tasks.length}`, "dim")],
 				open,
-				children: open ? describeTasks(phase, phaseIndex) : undefined,
+				children: open ? children : undefined,
 			};
 		});
 		if (hiddenStages > 0) {
 			phaseNodes.push({ id: "more", label: [span(formatMoreItems(hiddenStages, "stage"), "muted")] });
+		}
+		if (hudSelection && hudSelection.hidden > 0) {
+			phaseNodes.push({
+				id: "more-todos",
+				label: [span(`${formatMoreItems(hudSelection.hidden, "todo")} · /todo expand`, "muted")],
+			});
 		}
 		const fallback = node(
 			"col",

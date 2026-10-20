@@ -20,46 +20,48 @@ class Rows implements Component {
 beforeAll(initTheme);
 
 describe("Composer runtime allocation", () => {
-	for (const rows of [12, 18, 27]) {
-		for (const inputRows of [3, 8]) {
-			it(`shares the ${rows}-row viewport with a ${inputRows}-row input without rendering siblings twice`, () => {
-				const terminal = new VirtualTerminal(80, rows);
-				const composer = new Composer({ terminal, preferences: { ...COMPOSER_DEFAULTS, quiet: true } });
-				const transcript = new TranscriptContainer();
-				const chrome = new Rows("QUEUE", 2);
-				const hud = new Rows("HUD", 20);
-				const input = new Rows("INPUT", inputRows);
-				let available = 0;
-				let allocations = 0;
-				composer.setRuntimeChildren([transcript, chrome, hud, input], {
-					allocation: {
-						hud,
-						input,
-						apply: (viewport, chromeRows, renderInput) => {
-							allocations++;
-							expect(viewport).toEqual({ columns: 80, rows });
-							expect(renderInput()).toBe(inputRows);
-							expect(renderInput()).toBe(inputRows);
-							available = Math.max(0, viewport.rows - chromeRows - inputRows);
-							hud.count = Math.min(6, available);
-						},
+	// (12, 8) exercises the constrained branch (the HUD gets fewer than 6 rows); (27, 3) the capped one.
+	for (const [rows, inputRows] of [
+		[12, 8],
+		[27, 3],
+	] as const) {
+		it(`shares the ${rows}-row viewport with a ${inputRows}-row input without rendering siblings twice`, () => {
+			const terminal = new VirtualTerminal(80, rows);
+			const composer = new Composer({ terminal, preferences: { ...COMPOSER_DEFAULTS, quiet: true } });
+			const transcript = new TranscriptContainer();
+			const chrome = new Rows("QUEUE", 2);
+			const hud = new Rows("HUD", 20);
+			const input = new Rows("INPUT", inputRows);
+			let available = 0;
+			let allocations = 0;
+			composer.setRuntimeChildren([transcript, chrome, hud, input], {
+				allocation: {
+					hud,
+					input,
+					apply: (viewport, chromeRows, renderInput) => {
+						allocations++;
+						expect(viewport).toEqual({ columns: 80, rows });
+						expect(renderInput()).toBe(inputRows);
+						expect(renderInput()).toBe(inputRows);
+						available = Math.max(0, viewport.rows - chromeRows - inputRows);
+						hud.count = Math.min(6, available);
 					},
-				});
-				composer.start({ playWelcomeIntro: false });
-				try {
-					const frame = composer.renderFrame({ columns: 80, rows });
-					expect(allocations).toBe(1);
-					expect(chrome.reads).toBe(1);
-					expect(input.reads).toBe(1);
-					expect(hud.reads).toBe(1);
-					expect(frame.viewport.filter(line => line.includes("HUD "))).toHaveLength(Math.min(6, available));
-					expect(frame.viewport.filter(line => line.includes("INPUT "))).toHaveLength(inputRows);
-					expect(frame.viewport.length).toBeLessThanOrEqual(rows);
-				} finally {
-					composer.stop();
-				}
+				},
 			});
-		}
+			composer.start({ playWelcomeIntro: false });
+			try {
+				const frame = composer.renderFrame({ columns: 80, rows });
+				expect(allocations).toBe(1);
+				expect(chrome.reads).toBe(1);
+				expect(input.reads).toBe(1);
+				expect(hud.reads).toBe(1);
+				expect(frame.viewport.filter(line => line.includes("HUD "))).toHaveLength(Math.min(6, available));
+				expect(frame.viewport.filter(line => line.includes("INPUT "))).toHaveLength(inputRows);
+				expect(frame.viewport.length).toBeLessThanOrEqual(rows);
+			} finally {
+				composer.stop();
+			}
+		});
 	}
 
 	it("does not allocate absent roots and preserves the ordinary runtime rendering", () => {
