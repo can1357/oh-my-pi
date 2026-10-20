@@ -16,6 +16,10 @@
 
 - SQLite beam store and binary vector store reads now use typed `db.prepare<Row, Params>()` generics instead of `as` casts, so a schema drift between SQL and the consumer fails the typecheck instead of silently casting at runtime ([#15437](https://github.com/can1357/oh-my-pi/pull/15437) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+### Fixed
+
+- Fixed background fact extraction storing only the first 5 facts of a plain-line extractor answer; it now keeps up to 20, matching JSON answers ([#16377](https://github.com/can1357/oh-my-pi/pull/16377) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.11.2] - 2026-10-16
 
 ### Fixed
