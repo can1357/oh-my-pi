@@ -187,6 +187,7 @@
 - Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
 
 - Fixed provider in-flight lock cleanup failures being swallowed silently — they are now logged instead of ignored ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.12.4] - 2026-10-20
 
 ### Added
