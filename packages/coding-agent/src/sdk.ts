@@ -4238,8 +4238,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend
-				? await memoryBackend.buildDeveloperInstructions(agentDir, sessionManager.getCwd(), settings, session)
+				? await memoryBackend.buildDeveloperInstructions(
+						agentDir,
+						sessionManager.getCwd(),
+						settings,
+						session,
+						sessionManager,
+					)
 				: undefined;
+			// The memory block is staged here and recorded in the transcript only
+			// once the prompt carrying it commits, so the transcript never claims
+			// a memory block this session did not send.
+			const memoryCommit = memoryBackend?.pendingInstructionsCommit?.(sessionManager);
 			// Advisors get the same memory block (sharpshooter decisions, mnemopi/
 			// hindsight instructions) wrapped as shared background knowledge; the
 			// tool-availability caveat lives in the wrapper template.
@@ -4401,11 +4411,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			});
 
 			if (typeof options.systemPrompt !== "function") {
-				return defaultPrompt;
+				return { ...defaultPrompt, commit: memoryCommit };
 			}
 			const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
 			return {
 				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+				commit: memoryCommit,
 			};
 		};
 
@@ -4558,7 +4569,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		setSessionActiveToolNames(initialToolNames);
-		const { systemPrompt } = await logger.time(
+		const { systemPrompt, commit: commitMemorySnapshot } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
 			initialToolNames,
@@ -4906,6 +4917,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// session adopts every model with the window its own settings select (a
 		// subagent with a compaction override must not inherit the parent's).
 		agent.setModelResolver(next => modelRegistry.fitContextWindow(next, settings));
+
+		// The initial prompt is live now: record the memory block it carries, so a
+		// resumed process rebuilds the same block instead of rereading disk.
+		commitMemorySnapshot?.();
 
 		cursorEventEmitter = event => agent.emitExternalEvent(event);
 

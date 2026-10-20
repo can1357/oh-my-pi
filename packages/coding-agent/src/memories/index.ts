@@ -9,6 +9,7 @@ import {
 	getAgentDbPath,
 	getMemoriesDir,
 	isEnoent,
+	isRecord,
 	logger,
 	parseJsonlLenient,
 	peekFile,
@@ -26,6 +27,7 @@ import readPathTemplate from "../prompts/memories/read-path.md" with { type: "te
 import stageOneInputTemplate from "../prompts/memories/stage_one_input.md" with { type: "text" };
 import stageOneSystemTemplate from "../prompts/memories/stage_one_system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import type { SessionManager } from "../session/session-manager";
 import {
 	claimStage1Jobs,
 	clearMemoryData as clearMemoryDataInDb,
@@ -160,8 +162,18 @@ export function startMemoryStartupTask(options: {
 		.finally(() => session.endLocalMemoryStartup?.(signal));
 }
 
+/**
+ * Transcript a memory prompt block is built for and recorded in.
+ *
+ * The branch view and the custom-entry append are optional so a caller that
+ * only holds a session file (a preview, a test double) can still ask for the
+ * memory block; such a transcript simply keeps no snapshot in the session file.
+ */
+export type MemoryTranscript = Pick<SessionManager, "getSessionFile"> &
+	Partial<Pick<SessionManager, "getBranchView" | "appendCustomEntry">>;
+
 interface MemoryInstructionSession {
-	sessionManager: Pick<AgentSession["sessionManager"], "getSessionFile">;
+	sessionManager: MemoryTranscript;
 	agent?: { state: { messages: readonly unknown[] } };
 }
 
@@ -176,20 +188,85 @@ function memoryConversationStarted(session: MemoryInstructionSession): boolean {
 	return (session.agent?.state.messages.length ?? 0) > 0;
 }
 
-interface CachedMemoryToolDeveloperInstructions {
+/**
+ * Custom entry holding the memory files' content a transcript's prompts are
+ * built from, so a resumed process rebuilds the same memory block instead of
+ * rereading disk — a lesson another session learned, or a consolidation that
+ * rewrote the summary, would otherwise rewrite the whole prompt cache.
+ */
+const MEMORY_SNAPSHOT_CUSTOM_TYPE = "memory-snapshot";
+
+/** Memory block state of one transcript in this process. */
+interface TranscriptMemoryState {
+	/** Session file the state belongs to; another session file invalidates it. */
 	sessionFile: string | undefined;
+	/** Normalized project scope the state belongs to. */
+	scope: string;
+	/** Clear token the content was read under. */
+	token: string;
+	/** The memory files' content the prompt block is built from. */
 	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined;
+	/** The rendered prompt block. */
 	value: string | undefined;
+	/** The snapshot is not in the transcript yet; the prompt commit records it. */
+	pending: boolean;
 }
 
-const memoryToolDeveloperInstructionsBySession = new WeakMap<
-	MemoryInstructionSession,
-	CachedMemoryToolDeveloperInstructions
->();
-const memoryToolDeveloperInstructionsByRoot = new Map<string, MemoryToolDeveloperInstructionsSnapshot | undefined>();
+const memoryStateByTranscript = new WeakMap<MemoryTranscript, TranscriptMemoryState>();
+/** Memory files' content of a project read before any transcript was involved. */
+const memoryBaselineByRoot = new Map<string, { snapshot: MemoryToolDeveloperInstructionsSnapshot; token: string }>();
 
-function getMemoryInstructionSessionFile(session: MemoryInstructionSession): string | undefined {
-	return session.sessionManager.getSessionFile() ?? undefined;
+/**
+ * Per-project file holding the clear token of the last `/memory clear`.
+ *
+ * A snapshot is only valid under the token it was read with. A clear writes a
+ * fresh token, so every snapshot taken before it — on any branch of any
+ * session of the project — is rejected and the memory is read from disk again.
+ * The token is a fresh random value, not a timestamp: two clears in the same
+ * millisecond must still retire the snapshots between them.
+ */
+function memoryClearTokenPath(memoryRoot: string): string {
+	return `${memoryRoot}.clear-token`;
+}
+
+async function readMemoryClearToken(memoryRoot: string): Promise<string> {
+	const file = Bun.file(memoryClearTokenPath(memoryRoot));
+	if (!(await file.exists())) return "";
+	return (await file.text()).trim();
+}
+
+async function writeMemoryClearToken(memoryRoot: string): Promise<void> {
+	const tokenPath = memoryClearTokenPath(memoryRoot);
+	await fs.mkdir(path.dirname(tokenPath), { recursive: true });
+	await Bun.write(tokenPath, crypto.randomUUID());
+}
+
+/**
+ * The snapshot recorded on the transcript's branch that still applies.
+ *
+ * `undefined` when the branch holds none, a malformed one, one taken for
+ * another project scope, or one taken before the project's last clear: such a
+ * snapshot holds memory the session may not use, so the memory files are read
+ * from disk instead.
+ */
+function findRecordedMemorySnapshot(
+	transcript: MemoryTranscript,
+	scope: string,
+	token: string,
+): MemoryToolDeveloperInstructionsSnapshot | undefined {
+	const branch = transcript.getBranchView?.();
+	if (!branch) return undefined;
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry.type !== "custom" || entry.customType !== MEMORY_SNAPSHOT_CUSTOM_TYPE) continue;
+		const data = entry.data;
+		if (!isRecord(data)) return undefined;
+		if (typeof data.summary !== "string" || typeof data.learned !== "string") return undefined;
+		if (typeof data.scope !== "string" || data.scope !== scope) return undefined;
+		if (typeof data.token !== "string" || data.token !== token) return undefined;
+		return { summary: data.summary, learned: data.learned };
+	}
+	return undefined;
 }
 
 async function readMemoryToolDeveloperInstructionsSnapshot(
@@ -239,24 +316,40 @@ function renderMemoryToolDeveloperInstructionsSnapshot(
 	});
 }
 
-function cacheMemoryToolDeveloperInstructions(
-	session: MemoryInstructionSession,
-	sessionFile: string | undefined,
-	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined,
-	settings: Settings,
-): string | undefined {
-	const value = renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
-	memoryToolDeveloperInstructionsBySession.set(session, { sessionFile, snapshot, value });
-	return value;
+/**
+ * Drop the transcript's memory block after an explicit memory state change
+ * that must affect the active conversation immediately, such as `/memory
+ * clear`. The next build reads the memory files again and records the result.
+ */
+export function clearMemoryToolDeveloperInstructionsCache(transcript: MemoryTranscript | undefined): void {
+	if (transcript) memoryStateByTranscript.delete(transcript);
 }
 
 /**
- * Drop the per-session memory instruction snapshot after explicit memory state
- * changes that must affect the active conversation immediately, such as
- * `/memory clear`.
+ * The callback that records the memory block a prompt was built from.
+ *
+ * The transcript must not claim a memory block the session never sent: the
+ * snapshot is staged by the build and recorded only once the prompt that
+ * carries it commits. Returns `undefined` when nothing is staged.
  */
-export function clearMemoryToolDeveloperInstructionsCache(session: MemoryInstructionSession | undefined): void {
-	if (session) memoryToolDeveloperInstructionsBySession.delete(session);
+export function pendingMemorySnapshotCommit(transcript: MemoryTranscript | undefined): (() => void) | undefined {
+	if (!transcript) return undefined;
+	const state = memoryStateByTranscript.get(transcript);
+	if (!state?.pending) return undefined;
+	return () => {
+		if (!state.pending) return;
+		state.pending = false;
+		const recorded = findRecordedMemorySnapshot(transcript, state.scope, state.token);
+		if (recorded && recorded.summary === state.snapshot?.summary && recorded.learned === state.snapshot?.learned) {
+			return;
+		}
+		transcript.appendCustomEntry?.(MEMORY_SNAPSHOT_CUSTOM_TYPE, {
+			summary: state.snapshot?.summary ?? "",
+			learned: state.snapshot?.learned ?? "",
+			scope: state.scope,
+			token: state.token,
+		});
+	};
 }
 
 /**
@@ -265,9 +358,10 @@ export function clearMemoryToolDeveloperInstructionsCache(session: MemoryInstruc
  * Startup may finish after the first prompt build and write `memory_summary.md`.
  * The session adopts that summary only while it holds no messages: once a
  * request went out, signed thinking is bound to the prompt it carried, so the
- * new summary waits for the next session, whose cache key (session file) differs.
- * It must not reread `learned.md`, because a `learn` call racing with startup
- * belongs to the next session's memory prompt, not the active prompt-cache prefix.
+ * new summary waits for the next session, whose transcript records its own
+ * snapshot. It must not reread `learned.md`, because a `learn` call racing with
+ * startup belongs to the next session's memory prompt, not the active
+ * prompt-cache prefix.
  */
 export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 	session: MemoryInstructionSession,
@@ -276,16 +370,36 @@ export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 	settings: Settings,
 ): Promise<void> {
 	if (memoryConversationStarted(session)) return;
-	const sessionFile = getMemoryInstructionSessionFile(session);
-	const cached = memoryToolDeveloperInstructionsBySession.get(session);
+	const transcript = session.sessionManager;
 	const root = getMemoryRoot(agentDir, cwd);
+	const scope = normalizeScopeCwd(cwd);
+	const sessionFile = transcript.getSessionFile() ?? undefined;
+	// The clear token is read before the memory files: a clear that lands while
+	// they are read leaves this snapshot under the older token, so it is
+	// rejected instead of restoring cleared memory.
+	const token = await readMemoryClearToken(root);
 	const current = await readMemoryToolDeveloperInstructionsSnapshot(root, settings);
 	if (memoryConversationStarted(session)) return;
-	const baseline = memoryToolDeveloperInstructionsByRoot.get(root);
-	const cachedLearned = cached && cached.sessionFile === sessionFile ? cached.snapshot?.learned : undefined;
-	const learned = cachedLearned ?? baseline?.learned ?? "";
+	// A clear that raced the read retired the snapshot: keep the cleared state.
+	if ((await readMemoryClearToken(root)) !== token) return;
+
+	const state = memoryStateByTranscript.get(transcript);
+	const pinned =
+		state && state.sessionFile === sessionFile && state.scope === scope && state.token === token
+			? state.snapshot
+			: undefined;
+	const baseline = memoryBaselineByRoot.get(root);
+	const baselineLearned = baseline && baseline.token === token ? baseline.snapshot.learned : undefined;
+	const learned = pinned?.learned ?? baselineLearned ?? "";
 	const snapshot = current ? { summary: current.summary, learned } : undefined;
-	cacheMemoryToolDeveloperInstructions(session, sessionFile, snapshot, settings);
+	memoryStateByTranscript.set(transcript, {
+		sessionFile,
+		scope,
+		token,
+		snapshot,
+		value: renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings),
+		pending: snapshot !== undefined,
+	});
 }
 
 /**
@@ -294,30 +408,53 @@ export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
  * `cwd` is the session's project directory, the same scope consolidation and
  * `learn` write to; never `settings.getCwd()`, which an embedding host may pin
  * to one directory for sessions spanning several projects.
+ *
+ * With a transcript, the memory block is pinned: the first build of a session
+ * records the content it read in the transcript, and later builds — including
+ * those of a process that resumes the session — reuse that record instead of
+ * rereading the memory files, so a lesson another session learned or a
+ * consolidation that rewrote the summary cannot rewrite the prompt cache.
  */
 export async function buildMemoryToolDeveloperInstructions(
 	agentDir: string,
 	cwd: string,
 	settings: Settings,
-	session?: MemoryInstructionSession,
+	transcript?: MemoryTranscript,
 ): Promise<string | undefined> {
 	const root = getMemoryRoot(agentDir, cwd);
-	if (!session) {
+	const scope = normalizeScopeCwd(cwd);
+	if (!transcript) {
+		const token = await readMemoryClearToken(root);
 		const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(root, settings);
-		memoryToolDeveloperInstructionsByRoot.set(root, snapshot);
+		if (snapshot) memoryBaselineByRoot.set(root, { snapshot, token });
 		return renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
 	}
 
-	const sessionFile = getMemoryInstructionSessionFile(session);
-	const cached = memoryToolDeveloperInstructionsBySession.get(session);
-	if (cached && cached.sessionFile === sessionFile) return cached.value;
+	const sessionFile = transcript.getSessionFile() ?? undefined;
+	const token = await readMemoryClearToken(root);
+	const state = memoryStateByTranscript.get(transcript);
+	if (state && state.sessionFile === sessionFile && state.scope === scope && state.token === token) {
+		return state.value;
+	}
 
-	const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(root, settings);
-	return cacheMemoryToolDeveloperInstructions(session, sessionFile, snapshot, settings);
+	const recorded = findRecordedMemorySnapshot(transcript, scope, token);
+	const snapshot = recorded ?? (await readMemoryToolDeveloperInstructionsSnapshot(root, settings));
+	const value = renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
+	memoryStateByTranscript.set(transcript, {
+		sessionFile,
+		scope,
+		token,
+		snapshot,
+		value,
+		pending: snapshot !== undefined,
+	});
+	return value;
 }
 
 /**
- * Clear the persisted memory state and generated artifacts of one project.
+ * Clear all persisted memory state and generated artifacts, and retire every
+ * snapshot of the project: the next build of any session reads the memory
+ * files again instead of restoring cleared memory.
  */
 export async function clearMemoryData(agentDir: string, cwd: string): Promise<void> {
 	const db = openMemoryDb(getAgentDbPath(agentDir));
@@ -326,7 +463,9 @@ export async function clearMemoryData(agentDir: string, cwd: string): Promise<vo
 	} finally {
 		closeMemoryDb(db);
 	}
-	await fs.rm(getMemoryRoot(agentDir, cwd), { recursive: true, force: true });
+	const memoryRoot = getMemoryRoot(agentDir, cwd);
+	await fs.rm(memoryRoot, { recursive: true, force: true });
+	await writeMemoryClearToken(memoryRoot);
 }
 
 /**
