@@ -59,6 +59,10 @@
 
 - Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/pi-catalog` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+### Added
+
+- Added native Inception support with Mercury 3, Mercury 2.5, and Mercury 2, live chat-model discovery, API-key login, reasoning controls, and Mercury 3 launch pricing while its catalog reports none; Mercury 3 waits up to 10 minutes for its first output, since high-effort reasoning streams nothing ([#16439](https://github.com/can1357/oh-my-pi/pull/16439) by [@eggpeat](https://github.com/eggpeat))
+
 ### Fixed
 
 - Fixed Amazon Bedrock Kimi K3 (`global.`/`us.moonshotai.kimi-k3`) offering Anthropic-style thinking budgets it ignores; it now offers `low`, `high` and `max` effort, defaulting to `max` ([#13697](https://github.com/can1357/oh-my-pi/pull/13697) by [@alblez](https://github.com/alblez))
