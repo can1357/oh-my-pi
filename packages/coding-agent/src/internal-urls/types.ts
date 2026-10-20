@@ -120,7 +120,7 @@ export interface SchemeSpec {
 	unbounded?: boolean;
 	/** Renderers may call `locate` to hyperlink these URLs: locate is local, cheap, never spawns or fetches. */
 	linkable?: boolean;
-	/** Transcript read cards collapse like plain files instead of expanding (xd://). */
+	/** Transcript read cards collapse like plain files instead of expanding. */
 	compactTranscript?: boolean;
 	/** `read` peels a trailing `?q=<question>` as an image question (local://, attachment://); other schemes own their query. */
 	imageQuestion?: true;

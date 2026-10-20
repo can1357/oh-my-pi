@@ -60,7 +60,7 @@ export function readArgsHaveTarget(args: unknown): boolean {
  * rather than a full tool execution. Filesystem/external targets always
  * collapse; registered internal-URL schemes render full so their resolved
  * content is visible, unless their spec declares `compactTranscript`
- * (device listings/docs read better in the compact grouped view).
+ * (instruction docs and device listings read better in the compact grouped view).
  */
 export function readArgsCollapseIntoGroup(args: unknown): boolean {
 	const target = readArgsTarget(args);

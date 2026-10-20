@@ -443,19 +443,62 @@ describe("ReadToolGroupComponent", () => {
 		component.updateArgs({ path: readme, raw: true }, "read-md");
 		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("Some **bold** text.");
 	});
+
+	it("keeps instruction URL reads compact without previewing their bodies", () => {
+		const component = new ReadToolGroupComponent();
+		component.updateArgs({ path: "skill://chief-of-staff" }, "read-chief");
+		component.updateArgs({ path: "skill://i-have-adhd" }, "read-adhd");
+		component.updateArgs({ path: "rule://local-source-patches" }, "read-rule");
+		component.updateResult(
+			{
+				content: [
+					{
+						type: "text",
+						text: "---\nname: chief-of-staff\ndescription: The one runbook\n---\n\n# chief-of-staff\n\nLong body",
+					},
+				],
+			},
+			false,
+			"read-chief",
+		);
+		component.updateResult(
+			{
+				content: [
+					{
+						type: "text",
+						text: "---\nname: i-have-adhd\ndescription: Shape output\n---\n\n# i-have-adhd\n\nLong body",
+					},
+				],
+			},
+			false,
+			"read-adhd",
+		);
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "# local-source-patches\n\nLong body" }],
+			},
+			false,
+			"read-rule",
+		);
+
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+
+		expect(rendered).toContain("Read (3)");
+		expect(rendered).toContain(`${themeModule.theme.tree.branch} skill://chief-of-staff`);
+		expect(rendered).toContain(`${themeModule.theme.tree.branch} skill://i-have-adhd`);
+		expect(rendered).toContain(`${themeModule.theme.tree.last} rule://local-source-patches`);
+		expect(rendered).not.toContain("description: The one runbook");
+		expect(rendered).not.toContain("# chief-of-staff");
+	});
 });
 
 describe("readArgsCollapseIntoGroup", () => {
 	it.each([
-		["skill://my-skill"],
-		["skill://my-skill/file.md"],
-		["omp://docs/tools/read.md"],
 		["issue://123"],
 		["pr://can1357/oh-my-pi/456"],
 		["agent://abc"],
 		["artifact://abc"],
 		["memory://root"],
-		["rule://name"],
 		["mcp://server/resource"],
 		["local://PLAN.md"],
 	])("keeps %s as a full tool execution (not grouped)", target => {
@@ -464,6 +507,10 @@ describe("readArgsCollapseIntoGroup", () => {
 	});
 
 	it.each([
+		["skill://my-skill"],
+		["skill://my-skill/file.md"],
+		["omp://docs/tools/read.md"],
+		["rule://name"],
 		[path.resolve("/tmp/example.ts")],
 		["./relative/path.md"],
 		["https://example.com/file"],
