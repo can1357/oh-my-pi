@@ -18,10 +18,12 @@ import { createAssistantMessage } from "./helpers/agent-session-setup";
 const MEMORY_SNAPSHOT_TYPE = "memory-snapshot";
 
 function snapshotRecords(session: SessionManager): { scope?: string; token?: string }[] {
-	return session
-		.getBranchView()
-		.filter(entry => entry.type === "custom" && entry.customType === MEMORY_SNAPSHOT_TYPE)
-		.map(entry => (entry.data ?? {}) as { scope?: string; token?: string });
+	const records: { scope?: string; token?: string }[] = [];
+	for (const entry of session.getBranchView()) {
+		if (entry.type !== "custom" || entry.customType !== MEMORY_SNAPSHOT_TYPE) continue;
+		records.push((entry.data ?? {}) as { scope?: string; token?: string });
+	}
+	return records;
 }
 
 describe("memory snapshot across a resume", () => {
