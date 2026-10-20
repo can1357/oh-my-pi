@@ -107,4 +107,50 @@ describe("ToolExecutionComponent write repaint seam", () => {
 			expect(requestRender).not.toHaveBeenCalled();
 		}
 	});
+
+	it("does not repaint a call that has no path to preview", () => {
+		// A streamed or malformed call can expose its content while the path is
+		// still missing: the renderer draws nothing at its missing-path guard,
+		// so no preview reached the terminal and no repaint is owed.
+		const content = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+		const { component, requestRender } = makeComponent({ content });
+		component.render(80);
+
+		component.updateResult(partialWriteResult(), true);
+
+		expect(requestRender).not.toHaveBeenCalled();
+	});
+
+	it("repaints a delegated xd://write whose payload renders the filesystem tail window", () => {
+		// The write transport accepts the active top-level tools, so `xd://write`
+		// delegates back to the write renderer: it paints the same tail window,
+		// and its first result re-anchors that frame to the head of the file.
+		const payload = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+		const { component, requestRender } = makeComponent({
+			path: "xd://write",
+			content: JSON.stringify({ path: "notes.txt", content: payload }),
+		});
+		// The delegated card stays queued until the dispatch starts executing.
+		component.setExecutionStarted();
+		component.render(80);
+
+		component.updateResult(partialWriteResult(), true);
+
+		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not repaint when the transcript squeezes the pending card to its compact row", () => {
+		// The transcript measures every block with an unlimited allocation, so
+		// the pending tail window arms the repaint flag even when the block is
+		// later squeezed to its compact row. The compact row is the shape that
+		// reaches the terminal, and it carries no tail window to re-anchor.
+		const { component, requestRender } = makeComponent(writeArgs(20));
+		component.render(80);
+		component.setTranscriptAllocation(2, { tick: 0, now: 0 });
+		component.render(80);
+
+		component.updateResult(partialWriteResult(), true);
+
+		expect(requestRender).not.toHaveBeenCalled();
+	});
 });

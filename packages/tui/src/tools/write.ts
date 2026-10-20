@@ -46,6 +46,7 @@ import type { CardToolResult } from "./result-card";
 import type {
 	NativeToolHead,
 	NativeToolView,
+	RenderResultContextOptions,
 	RenderResultOptions,
 	ToolActivityContext,
 	ToolActivitySummary,
@@ -55,10 +56,12 @@ import type {
 import { splitUrlScheme } from "./url-scheme-host";
 import { couldBecomeXdUrl, parseXdUrl } from "./xd-url";
 import {
+	decodeInnerArgs,
 	describeXdevCall,
 	describeXdevResult,
 	renderXdevCall,
 	renderXdevResult,
+	resolveXdevDelegatedRenderer,
 	xdevActivitySummary,
 	type XdevRenderDispatch,
 	type XdevMountedRenderer,
@@ -209,10 +212,27 @@ function exceedsLineCount(text: string, maxLines: number): boolean {
 	// The terminator is the last newline, so what it contributes is settled up
 	// front: without this a `maxLines`-line file ending in "\n" reads as
 	// `maxLines + 1` lines.
-	const terminator = text.endsWith("\n") ? 1 : 0;
+	const terminator = endsWithTerminator(text) ? 1 : 0;
 	let lines = 1;
 	for (let index = text.indexOf("\n"); index !== -1; index = text.indexOf("\n", index + 1)) {
 		if (++lines > maxLines + terminator) return true;
+	}
+	return false;
+}
+
+/**
+ * Whether the text ends in a newline once the preview's carriage-return
+ * normalization is applied.
+ *
+ * The preview strips every `\r` before it counts lines, so a newline that is
+ * only followed by carriage returns still terminates the last line — and the
+ * threshold has to agree with the render it guards.
+ */
+function endsWithTerminator(text: string): boolean {
+	for (let index = text.length - 1; index >= 0; index--) {
+		const code = text.charCodeAt(index);
+		if (code === 13) continue;
+		return code === 10;
 	}
 	return false;
 }
@@ -224,16 +244,26 @@ function writeContentOf(args: unknown): string {
 }
 
 /**
- * Whether a write renders through the filesystem path — the only one whose
- * collapsed preview is the tail window the first result re-anchors.
+ * Whether the collapsed preview of a write is the filesystem tail window the
+ * first result re-anchors — and therefore whether that result has to replay
+ * the viewport.
  *
- * A URL card (`agent://`, `proc://`, `cfg://`) keeps a head preview, and an
- * `xd://` device write delegates to the mounted tool's own renderer; neither
- * uses the tail-window formatter, so neither re-anchors and neither may ask
- * for the scrollback-wiping first-result repaint.
+ * The routing mirrors `renderCall`:
+ *
+ *  - a call without a path renders nothing at all (the renderer's
+ *    missing-path guard), so no preview reached the terminal;
+ *  - a URL card (`agent://`, `proc://`, `cfg://`) keeps its own head preview;
+ *  - an `xd://` dispatch delegates to the device's renderer and stays queued
+ *    until the dispatch starts executing, so it paints no tail window before
+ *    that — and only a delegation back to this renderer paints one, with the
+ *    delegated payload rather than the dispatch's own.
  */
-function rendersThroughTailWindow(args: unknown): boolean {
+function writeRendersTailWindow(args: unknown, options: RenderResultOptions, depth = 0): boolean {
+	if (depth > 4) return false;
 	const writeArgs = args as WriteRenderArgs | undefined;
+	// The renderer draws nothing without a path, so no preview reached the
+	// terminal.
+	if (writeArgs?.path === undefined && writeArgs?.file_path === undefined) return false;
 	const rawPath =
 		typeof writeArgs?.file_path === "string"
 			? writeArgs.file_path
@@ -241,7 +271,19 @@ function rendersThroughTailWindow(args: unknown): boolean {
 				? writeArgs.path
 				: "";
 	if (writeUrlCard(rawPath)) return false;
-	return !(rawPath !== "" && couldBecomeXdUrl(rawPath));
+	if (rawPath !== "" && couldBecomeXdUrl(rawPath)) {
+		const xdev = parseXdUrl(rawPath);
+		if (!xdev?.name) return false;
+		// The delegated card stays queued until the dispatch starts executing.
+		if (options.executionStarted !== true) return false;
+		const renderContext = (options as RenderResultContextOptions).renderContext as WriteRenderContext | undefined;
+		const mounted = renderContext?.resolveXdevMounted?.(xdev.name);
+		// Only a delegation back to this renderer paints the tail window.
+		if (resolveXdevDelegatedRenderer(xdev.name, mounted) !== (writeToolRenderer as unknown as XdevMountedRenderer))
+			return false;
+		return writeRendersTailWindow(decodeInnerArgs(writeContentOf(args)), options, depth + 1);
+	}
+	return exceedsLineCount(writeContentOf(args), writeStreamingPreviewBudget());
 }
 
 function formatLineCountSuffix(lineCount: number, uiTheme: Theme): string {
@@ -279,8 +321,6 @@ const writeStreamingPreviewStateKey = Symbol("writeStreamingPreviewState");
 interface WriteStreamingPreviewState {
 	/** Prior full content; append-only growth is validated with an exact prefix check. */
 	previous: string;
-	/** `1 + count("\n")` over the scanned content. */
-	lineCount: number;
 	/** Raw offset immediately after the last newline consumed by `highlighter`. */
 	completeLength: number;
 	/** Highlighted, complete logical lines; the unfinished trailing line is rendered plain. */
@@ -302,7 +342,6 @@ interface WriteStreamingPreviewStateCarrier {
 function createWriteStreamingPreviewState(language: string | undefined, uiTheme: Theme): WriteStreamingPreviewState {
 	return {
 		previous: "",
-		lineCount: 1,
 		completeLength: 0,
 		highlightedLines: [],
 		highlighter: createHighlightStream(language, uiTheme),
@@ -314,7 +353,7 @@ function createWriteStreamingPreviewState(language: string | undefined, uiTheme:
 }
 
 /**
- * Advance line counting and syntax highlighting only across newly appended
+ * Advance the line split and syntax highlighting only across newly appended
  * content. Complete lines are retained because Ctrl+O can expand the preview;
  * the current partial line stays plain until its terminating newline arrives.
  * Once args are final, the trailing line is flushed through the highlighter
@@ -347,10 +386,7 @@ function updateStreamingPreview(
 
 	let completeLength = state.completeLength;
 	for (let i = state.previous.length; i < content.length; i++) {
-		if (content.charCodeAt(i) === 10) {
-			state.lineCount++;
-			completeLength = i + 1;
-		}
+		if (content.charCodeAt(i) === 10) completeLength = i + 1;
 	}
 	if (completeLength > state.completeLength) {
 		const chunk = content.slice(state.completeLength, completeLength).replace(/\r/g, "");
@@ -410,16 +446,22 @@ function formatStreamingContent(
 		let startIndex: number;
 		let visibleLines: string[];
 		if (state) {
-			totalLines = state.lineCount;
-			// The partial tail is not yet in `lineCount` (no newline), so budget
+			// The partial tail is not a complete line yet (no newline), so budget
 			// it explicitly instead of appending it: a complete line always yields
 			// exactly `budget` rows, so the block height stops oscillating
 			// line-by-line as the stream advances.
 			const flushed = argsComplete === true && state.finalFlushedLength === content.length;
 			const trailingLine = flushed ? state.finalTrailing : content.slice(state.completeLength).replace(/\r/g, "");
 			const partial = trailingLine.length > 0;
-			startIndex = expanded ? 0 : Math.max(0, state.highlightedLines.length - (partial ? budget - 1 : budget));
-			if (totalLines === 1 && !partial) return "";
+			// The rows the preview draws are the retained complete lines plus a
+			// real partial tail. The terminating newline that closes the last
+			// line opens no row of its own — it is dropped — so it must not
+			// count towards the line total either: at the 1000-line crossing it
+			// would widen the gutter a token early and wrap the visible rows.
+			const completeLines = state.highlightedLines.length;
+			totalLines = completeLines + (partial ? 1 : 0);
+			startIndex = expanded ? 0 : Math.max(0, completeLines - (partial ? budget - 1 : budget));
+			if (completeLines === 0 && !partial) return "";
 			visibleLines = partial
 				? [...state.highlightedLines.slice(startIndex), trailingLine]
 				: state.highlightedLines.slice(startIndex);
@@ -941,12 +983,11 @@ export const writeToolRenderer = {
 	// The threshold is the renderer's own tail budget: a card that is already
 	// tail-anchored must be repainted, so a stricter threshold would leave the
 	// stale tail rows behind.
-	// Only a filesystem write reaches that tail window: a URL card
+	// Only a preview the tail-window formatter draws re-anchors: a URL card
 	// (`agent://`, `proc://`, `cfg://`) keeps its head preview and an `xd://`
-	// device write delegates to the mounted tool's renderer, so neither
-	// re-anchors and neither may wipe the scrollback.
+	// dispatch paints the device's own card, so neither re-anchors and neither
+	// may wipe the scrollback — unless the dispatch delegates back to this
+	// renderer, which paints the same tail window.
 	forceFirstResultViewportRepaint: (args: unknown, options: RenderResultOptions) =>
-		!options.expanded &&
-		rendersThroughTailWindow(args) &&
-		exceedsLineCount(writeContentOf(args), writeStreamingPreviewBudget()),
+		!options.expanded && writeRendersTailWindow(args, options),
 } satisfies ToolRenderer<WriteRenderArgs, WriteToolDetails>;
