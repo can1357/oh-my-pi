@@ -75,6 +75,7 @@
 ### Fixed
 
 - Fixed cancelling `%pip` in Python eval leaving the installer stopped but alive on Linux hosts where `/proc` cannot be listed (unmounted, or denied in some containers and chroots): the runner now asks `ps` for the installer's children there and always kills and reaps the installer
+- Fixed cancelling `%pip` in Python eval leaving the installer stopped but alive on Linux hosts where `/proc` cannot be listed (unmounted, or denied in some containers and chroots): the runner now asks `ps` for the installer's children there and always kills and reaps the installer ([#16552](https://github.com/can1357/oh-my-pi/pull/16552) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.4] - 2026-10-20
 
