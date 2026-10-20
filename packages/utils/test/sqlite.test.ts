@@ -591,3 +591,72 @@ test("salvage falls back when an interior child link is duplicated", async () =>
 		reopened.close();
 	}
 });
+
+test("salvage falls back when an interior child link is redirected to a foreign leaf", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-redirect-");
+	const dbPath = dir.join("store.db");
+	const db = new Database(dbPath);
+	db.run("PRAGMA page_size = 512");
+	db.run("PRAGMA secure_delete = ON");
+	db.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+	db.run("CREATE TABLE other (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+	const insertEntries = db.prepare("INSERT INTO entries (id, value) VALUES (?, ?)");
+	const insertOther = db.prepare("INSERT INTO other (id, value) VALUES (?, ?)");
+	db.transaction(() => {
+		for (let id = 1; id <= 24; id++) insertEntries.run(id, `row-${String(id).padStart(2, "0")}-${"x".repeat(90)}`);
+		for (let id = 21; id <= 24; id++) insertOther.run(id, `other-${id}-${"x".repeat(90)}`);
+	})();
+	insertEntries.finalize();
+	insertOther.finalize();
+	const pageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()!.page_size;
+	const rootPage = db
+		.query<{ rootpage: number }, []>("SELECT rootpage FROM sqlite_schema WHERE name = 'entries'")
+		.get()!.rootpage;
+	// The `other` table fits in one leaf whose rowids mirror `entries`' last leaf.
+	const foreignPage = db
+		.query<{ rootpage: number }, []>("SELECT rootpage FROM sqlite_schema WHERE name = 'other'")
+		.get()!.rootpage;
+	db.close();
+	const bytes = Buffer.from(fs.readFileSync(dbPath));
+	const leaves: Array<{ page: number; ids: number[] }> = [];
+	for (let page = 1; page < bytes.length / pageSize; page++) {
+		const ids = leafPageIds(bytes, page, pageSize);
+		if (ids.length > 0) leaves.push({ page, ids });
+	}
+	leaves.sort((a, b) => a.ids[0]! - b.ids[0]!);
+	const leafOf = (id: number) => leaves.find(leaf => leaf.ids.includes(id))!;
+	// Repoint the `<= 8` child at the other table's `21-24` leaf: the link stays in
+	// range and unvisited, so only its keys betray the redirection.
+	const header = (rootPage - 1) * pageSize + (rootPage === 1 ? 100 : 0);
+	const cells = bytes.readUInt16BE(header + 3);
+	let repointed = false;
+	for (let index = 0; index < cells; index++) {
+		const cell = (rootPage - 1) * pageSize + bytes.readUInt16BE(header + 12 + index * 2);
+		const key = bytes[cell + 4]!;
+		if (key < 0x80 && key === 8) {
+			bytes.writeUInt32BE(foreignPage, cell);
+			repointed = true;
+		}
+	}
+	expect(repointed).toBe(true);
+	// Damage the `1-4` and `13-16` leaves the scan must not fabricate rows from.
+	for (const id of [1, 13]) {
+		const page = leafOf(id).page;
+		bytes.fill(0xff, page * pageSize, (page + 1) * pageSize);
+	}
+	fs.writeFileSync(dbPath, bytes);
+
+	const reopened = new Database(dbPath, { readonly: true });
+	try {
+		const ids = readSalvageableRows<{ id: number }>(reopened, "entries", "id").map(row => row.id);
+		// The redirected child's keys fall outside the range its separators
+		// establish, so every bound is voided and the readable `17-24` rows
+		// survive via unbounded recovery instead of the scan resuming at the
+		// foreign leaf and dropping `17-20`.
+		expect(ids).toEqual(expect.arrayContaining([17, 18, 19, 20, 21, 22, 23, 24]));
+		expect(ids.filter(id => id <= 4 || (id >= 13 && id <= 16))).toEqual([]);
+		expect(new Set(ids).size).toBe(ids.length);
+	} finally {
+		reopened.close();
+	}
+});

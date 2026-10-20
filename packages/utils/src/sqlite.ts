@@ -349,6 +349,8 @@ const SALVAGE_MAX_DAMAGED_REGIONS = 1000;
 /**
  * Interior table keys bound individual subtrees even when readable and damaged leaves alternate.
  * One damaged interior page voids every bound, so the caller recovers unbounded instead.
+ * A readable child page outside the interval its ancestors' separators establish proves a
+ * redirected link, which voids every bound the same way.
  */
 function readSalvageRowidStarts(db: Database, table: string): number[] {
 	const root = db
@@ -359,12 +361,14 @@ function readSalvageRowidStarts(db: Database, table: string): number[] {
 	const image = db.serialize();
 	const encodedPageSize = image.readUInt16BE(16);
 	const pageSize = encodedPageSize === 1 ? 65536 : encodedPageSize;
-	const pending = [root.rootpage];
+	const pending: Array<{ page: number; low: number; high: number }> = [
+		{ page: root.rootpage, low: Number.MIN_SAFE_INTEGER, high: Number.MAX_SAFE_INTEGER },
+	];
 	const visited = new Set<number>();
 	const starts: number[] = [];
 	let trusted = true;
 	while (pending.length > 0) {
-		const page = pending.pop()!;
+		const { page, low, high } = pending.pop()!;
 		const start = (page - 1) * pageSize;
 		const end = start + pageSize;
 		// A child link that is out of range, or reaches a page an earlier link
@@ -377,27 +381,86 @@ function readSalvageRowidStarts(db: Database, table: string): number[] {
 		}
 		visited.add(page);
 		const header = start + (page === 1 ? 100 : 0);
+		if (image[header] === 0x0d) {
+			// A leaf that still decodes is validated against its parent range; one
+			// that does not is ordinary damage and voids nothing here.
+			const cells = image.readUInt16BE(header + 3);
+			const contentStart = header + 8 + cells * 2;
+			if (contentStart > end) continue;
+			let min = Number.MAX_SAFE_INTEGER;
+			let max = Number.MIN_SAFE_INTEGER;
+			for (let index = 0; index < cells; index++) {
+				const cell = start + image.readUInt16BE(header + 8 + index * 2);
+				if (cell < contentStart || cell + 2 > end) continue;
+				// Table leaf cell: payload-size varint, then the rowid varint.
+				let offset = cell;
+				for (let consumed = 0; offset < end; consumed++, offset++) {
+					const byte = image[offset]!;
+					if (consumed === 8 || byte < 0x80) {
+						offset++;
+						break;
+					}
+				}
+				let key = 0n;
+				let readable = false;
+				for (let byteIndex = 0; offset < end; byteIndex++, offset++) {
+					const byte = image[offset]!;
+					key = (key << BigInt(byteIndex === 8 ? 8 : 7)) | BigInt(byteIndex === 8 ? byte : byte & 0x7f);
+					if (byteIndex === 8 || byte < 0x80) {
+						readable = true;
+						break;
+					}
+				}
+				if (!readable) continue;
+				const rowid = Number(BigInt.asIntN(64, key));
+				if (Number.isSafeInteger(rowid)) {
+					min = Math.min(min, rowid);
+					max = Math.max(max, rowid);
+				}
+			}
+			if (min <= max && (min <= low || max > high)) trusted = false;
+			continue;
+		}
 		if (image[header] !== 0x05) continue;
 		const cells = image.readUInt16BE(header + 3);
 		const contentStart = header + 12 + cells * 2;
 		if (contentStart > end) continue;
-		pending.push(image.readUInt32BE(header + 8));
+		const children: Array<{ page: number; low: number; high: number }> = [];
+		let previous = low;
 		const pageStarts: number[] = [];
 		for (let index = 0; index < cells; index++) {
 			const cell = start + image.readUInt16BE(header + 12 + index * 2);
 			if (cell < contentStart || cell + 5 > end) continue;
-			pending.push(image.readUInt32BE(cell));
+			const child: { page: number; low: number; high: number } = {
+				page: image.readUInt32BE(cell),
+				low: previous,
+				high,
+			};
+			children.push(child);
 			let key = 0n;
 			for (let byteIndex = 0, offset = cell + 4; byteIndex < 9 && offset < end; byteIndex++, offset++) {
 				const byte = image[offset]!;
 				key = (key << BigInt(byteIndex === 8 ? 8 : 7)) | BigInt(byteIndex === 8 ? byte : byte & 0x7f);
 				if (byteIndex === 8 || byte < 0x80) {
 					const rowid = Number(BigInt.asIntN(64, key));
-					if (Number.isSafeInteger(rowid) && rowid < Number.MAX_SAFE_INTEGER) pageStarts.push(rowid + 1);
+					if (Number.isSafeInteger(rowid)) {
+						// The separator bounds this child from above and the next child
+						// from below; a key outside this page's own parent range proves
+						// a redirection above it.
+						if (rowid <= low || rowid > high) trusted = false;
+						if (rowid < Number.MAX_SAFE_INTEGER) {
+							child.high = rowid;
+							previous = rowid;
+							pageStarts.push(rowid + 1);
+						}
+					}
 					break;
 				}
 			}
 		}
+		// The rightmost child holds every key above the last separator.
+		children.push({ page: image.readUInt32BE(header + 8), low: previous, high });
+		pending.push(...children);
 		// A valid interior page stores its separator keys in ascending order; a
 		// page that violates the format is itself damaged, and its values must
 		// not be trusted as skip points. Its subtree is still walked — child
