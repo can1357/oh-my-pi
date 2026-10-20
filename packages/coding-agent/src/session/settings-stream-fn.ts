@@ -11,8 +11,12 @@
  * and OpenRouter response-cache hits across advisor calls.
  */
 import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my-pi/pi-agent-core";
-import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
-import { completionsRequestDropsOwnThinking } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import {
+	completionsRequestDropsOwnThinking,
+	type Model,
+	type SimpleStreamOptions,
+	streamSimple,
+} from "@oh-my-pi/pi-ai";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { Settings } from "../config/settings";
@@ -147,12 +151,7 @@ export function createSettingsAwareStreamFn(
 			openAIResponsesReplaysNativeHistory(model, streamOptions?.providerSessionState);
 		// The request's reasoning and tool state picks the chat-completions compat
 		// view, which decides whether the model's own past thinking is sent.
-		const dropsOwnThinking = completionsRequestDropsOwnThinking(model, {
-			reasoning: streamOptions?.reasoning,
-			disableReasoning: streamOptions?.disableReasoning || streamOptions?.forceReasoningOff,
-			toolChoice: streamOptions?.toolChoice,
-			tools: context.tools,
-		});
+		const dropsOwnThinking = completionsRequestDropsOwnThinking(model, streamOptions, context.tools);
 		const tokenizerKey = `${model.provider}\0${model.api}\0${model.id}\0${nativeHistoryReplay}\0${dropsOwnThinking}`;
 		let tokenizer = tokenizers.get(tokenizerKey);
 		if (!tokenizer) {

@@ -36,7 +36,7 @@ import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
-import type { OpenAICompletionsOptions } from "./providers/openai-completions";
+import { completionsOptionsDropOwnThinking, type OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";
 import { streamSynthetic } from "./providers/synthetic";
 import {
@@ -66,6 +66,7 @@ import type {
 	SimpleStreamOptions,
 	StreamOptions,
 	ThinkingBudgets,
+	Tool,
 	ToolChoice,
 } from "./types";
 import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
@@ -1748,6 +1749,30 @@ function assertExplicitOpenAIResponsesPromptCacheSupport<TApi extends Api>(
 	throw new AIError.ConfigurationError(
 		`OpenAI explicit prompt caching is unsupported for ${model.provider}/${model.id}; enable compat.supportsPromptCacheBreakpoints only for a compatible endpoint.`,
 	);
+}
+
+/**
+ * Whether the chat-completions request {@link streamSimple} builds from
+ * `options` drops the model's own prior thinking. Applies the same request
+ * shaping first (unverified-thinking strip, provider model preparation and
+ * {@link mapOptionsForApi}, which floors mandatory-effort models and maps effort
+ * and tool choice), so the answer follows the wire rather than the caller's raw
+ * reasoning state. False for other wires.
+ */
+export function completionsRequestDropsOwnThinking(
+	model: Model,
+	options:
+		| Pick<SimpleStreamOptions, "reasoning" | "disableReasoning" | "forceReasoningOff" | "toolChoice">
+		| undefined,
+	tools: readonly Tool[] | undefined,
+): boolean {
+	const effortRequested = options?.reasoning !== undefined && !options.disableReasoning && !options.forceReasoningOff;
+	const requestModel = effortRequested ? model : withoutUnverifiedThinking(model);
+	const providerModel = getProviderDefinition(requestModel.provider)?.prepareModel?.(requestModel) ?? requestModel;
+	if (providerModel.api !== "openai-completions") return false;
+	const completionsModel = providerModel as Model<"openai-completions">;
+	const providerOptions = mapOptionsForApi(completionsModel, options) as OpenAICompletionsOptions;
+	return completionsOptionsDropOwnThinking(completionsModel, providerOptions, tools);
 }
 
 function mapOptionsForApi<TApi extends Api>(

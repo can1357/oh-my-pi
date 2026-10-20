@@ -2034,7 +2034,7 @@ interface OpenAICompletionsToolSelection {
  * Resolve the request's `tools` and `tool_choice` exactly as `buildParams`
  * sends them: tools whose schema the provider rejects are omitted, and a forced
  * choice is downgraded or dropped when its tool or the host's support is gone.
- * {@link completionsRequestDropsOwnThinking} reuses it, since the surviving
+ * {@link completionsOptionsDropOwnThinking} reuses it, since the surviving
  * choice selects the compat view that decides whether past thinking is sent.
  */
 function selectOpenAICompletionsTools(
@@ -2396,8 +2396,8 @@ function compatDropsOwnThinking(model: { reasoning?: boolean }, compat: OpenAICo
  * its own prior turns: neither the base compat nor its `whenThinking` view
  * sends it. Counters that don't know the request's reasoning state (one-shot
  * budgets, output fitting without options) rely on this so they never
- * undercount; {@link completionsRequestDropsOwnThinking} narrows it to one
- * request. A block with a raw LiteLLM signature
+ * undercount; `completionsRequestDropsOwnThinking` (stream.ts) narrows it
+ * to one request. A block with a raw LiteLLM signature
  * ({@link isLiteLLMThinkingSignature}) replays in `thinking_blocks` regardless,
  * and other models' turns reach the encoder as demoted text
  * (`transformMessages`). The agent's `Tokenizer` skips what this drops.
@@ -2416,53 +2416,31 @@ export function completionsDropsOwnThinking(model: {
 	return thinkingView === undefined || compatDropsOwnThinking(model, thinkingView);
 }
 
-/** Request state that selects the chat-completions compat view {@link convertMessages} encodes with. */
-export interface OpenAICompletionsThinkingRequest {
-	reasoning?: OpenAICompletionsOptions["reasoning"];
-	disableReasoning?: boolean;
-	toolChoice?: ToolChoice;
-	/** Tools offered on the request; converted as `buildParams` converts them, so omitted schemas drop out. */
-	tools?: readonly Tool[];
-}
-
 /**
- * Whether a chat-completions request drops its own prior thinking. Resolves
- * the request's surviving tools and tool choice with the same
- * {@link selectOpenAICompletionsTools} `buildParams` uses, then the compat view
- * that choice selects, so the counter follows the encoder through every
- * forced-choice downgrade and omitted tool schema.
+ * Whether a chat-completions request built from these provider options drops
+ * its own prior thinking. Resolves the surviving tools and tool choice with
+ * the same {@link selectOpenAICompletionsTools} `buildParams` uses, then the
+ * compat view that choice selects, so the counter follows the encoder through
+ * every forced-choice downgrade and omitted tool schema. `options` must be the
+ * mapped provider options; callers holding `SimpleStreamOptions` use
+ * `completionsRequestDropsOwnThinking` (stream.ts), which applies
+ * `streamSimple`'s request shaping first.
  */
-export function completionsRequestDropsOwnThinking(model: Model, request: OpenAICompletionsThinkingRequest): boolean {
+export function completionsOptionsDropOwnThinking(
+	model: Model<"openai-completions">,
+	options: OpenAICompletionsOptions | undefined,
+	tools: readonly Tool[] | undefined,
+): boolean {
 	if (completionsDropsOwnThinking(model)) return true;
-	if (
-		model.api !== "openai-completions" ||
-		model.compat === undefined ||
-		!("replayReasoningContent" in model.compat)
-	) {
-		return false;
-	}
-	const completionsModel = model as Model<"openai-completions">;
-	const options: OpenAICompletionsOptions = {
-		reasoning: request.reasoning,
-		disableReasoning: request.disableReasoning,
-		toolChoice: request.toolChoice,
-	};
-	const tools = request.tools ? [...request.tools] : undefined;
-	const initialCompat = resolveOpenAICompatForRequest(completionsModel, options, Boolean(tools?.length))
+	if (model.compat === undefined || !("replayReasoningContent" in model.compat)) return false;
+	const contextTools = tools ? [...tools] : undefined;
+	const initialCompat = resolveOpenAICompatForRequest(model, options, Boolean(contextTools?.length))
 		.compat as ResolvedOpenAICompat;
-	const selection = selectOpenAICompletionsTools(
-		completionsModel,
-		tools,
-		[],
-		options,
-		initialCompat,
-		undefined,
-		false,
-	);
-	const finalCompat = resolveOpenAICompatPolicy(completionsModel, {
+	const selection = selectOpenAICompletionsTools(model, contextTools, [], options, initialCompat, undefined, false);
+	const finalCompat = resolveOpenAICompatPolicy(model, {
 		endpoint: "chat-completions",
-		reasoning: request.reasoning,
-		disableReasoning: request.disableReasoning,
+		reasoning: options?.reasoning,
+		disableReasoning: options?.disableReasoning,
 		toolChoice: selection.toolChoice,
 		hasTools: Array.isArray(selection.tools) && selection.tools.length > 0,
 	}).compat;

@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import type { Api, AssistantMessage, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
-import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
+	type Api,
+	type AssistantMessage,
 	completionsRequestDropsOwnThinking,
-	type OpenAICompletionsThinkingRequest,
-	streamOpenAICompletions,
-} from "@oh-my-pi/pi-ai/providers/openai-completions";
+	type Model,
+	type ProviderSessionState,
+	type SimpleStreamOptions,
+	streamSimple,
+	type Tool,
+} from "@oh-my-pi/pi-ai";
+import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -527,9 +531,9 @@ describe("countMessage chat-completions thinking", () => {
 		expect(new Tokenizer(dropping).countsAlike(dropping)).toBe(true);
 	});
 
-	// The encoder's own payload is the oracle: the predicate must agree with what
-	// `streamOpenAICompletions` sends, through compat views, forced-choice
-	// downgrades and tools whose schema the provider omits.
+	// The wire is the oracle: the predicate must agree with the payload
+	// `streamSimple` sends, through its request shaping (mandatory-effort
+	// floor), compat views, forced-choice downgrades and omitted tool schemas.
 	const readTool = { name: "read", description: "Read a file", parameters: { type: "object", properties: {} } };
 	// `enum` values that cannot match `type: "null"`: the encoder omits this tool.
 	const rejectedTool = {
@@ -549,21 +553,25 @@ describe("countMessage chat-completions thinking", () => {
 		contextWindow: 262_144,
 		maxTokens: 32_768,
 	});
+	// Mandatory-effort OpenCode Go models: `streamSimple` floors an absent or
+	// disabled effort to the lowest supported one, engaging the replaying view.
+	const mandatoryEffort = (id: string) => () => getBundledModel<"openai-completions">("opencode-go", id);
 
-	async function encodedCarriesThinking(
+	type ThinkingRequest = Pick<SimpleStreamOptions, "reasoning" | "disableReasoning" | "toolChoice">;
+
+	async function sentCarriesThinking(
 		model: Model<"openai-completions">,
 		turn: AssistantMessage,
-		request: OpenAICompletionsThinkingRequest,
+		request: ThinkingRequest,
+		tools: Tool[] | undefined,
 	): Promise<boolean> {
 		const { promise, resolve } = Promise.withResolvers<unknown>();
-		streamOpenAICompletions(
+		streamSimple(
 			model,
-			{ messages: [turn], tools: request.tools ? [...request.tools] : undefined },
+			{ messages: [turn], tools },
 			{
+				...request,
 				apiKey: "test-key",
-				reasoning: request.reasoning,
-				disableReasoning: request.disableReasoning,
-				toolChoice: request.toolChoice,
 				fetch: async () => new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } }),
 				onPayload: payload => resolve(payload),
 			},
@@ -588,23 +596,37 @@ describe("countMessage chat-completions thinking", () => {
 		{
 			name: "forced tool suppresses the thinking view",
 			model: () => kimi,
-			request: { reasoning: Effort.Medium, toolChoice: { type: "tool", name: "read" }, tools: [readTool] },
+			request: { reasoning: Effort.Medium, toolChoice: { type: "tool", name: "read" } },
+			tools: [readTool],
 		},
 		{
 			// The forced tool's schema is omitted, so the force drops and thinking replays.
 			name: "forced tool omitted by schema conversion",
 			model: () => kimi,
-			request: { reasoning: Effort.Medium, toolChoice: { type: "tool", name: "read" }, tools: [rejectedTool] },
+			request: { reasoning: Effort.Medium, toolChoice: { type: "tool", name: "read" } },
+			tools: [rejectedTool],
+		},
+		{ name: "mandatory effort, thinking unset (glm-5.3)", model: mandatoryEffort("glm-5.3"), request: {} },
+		{
+			name: "mandatory effort, thinking off (glm-5.3-flash)",
+			model: mandatoryEffort("glm-5.3-flash"),
+			request: { disableReasoning: true },
+		},
+		{
+			name: "mandatory effort, thinking off (kimi-k3)",
+			model: mandatoryEffort("kimi-k3"),
+			request: { disableReasoning: true },
 		},
 	] satisfies {
 		name: string;
 		model: () => Model<"openai-completions">;
-		request: OpenAICompletionsThinkingRequest;
-	}[])("matches the encoded request for $name", async ({ model: makeModel, request }) => {
+		request: ThinkingRequest;
+		tools?: Tool[];
+	}[])("matches the sent request for $name", async ({ model: makeModel, request, tools }) => {
 		const model = makeModel();
 		const turn = thinkingTurn(model, "reasoning_content");
-		const carriesThinking = await encodedCarriesThinking(model, turn, request);
-		const dropsOwnThinking = completionsRequestDropsOwnThinking(model, request);
+		const carriesThinking = await sentCarriesThinking(model, turn, request, tools);
+		const dropsOwnThinking = completionsRequestDropsOwnThinking(model, request, tools);
 		expect(dropsOwnThinking).toBe(!carriesThinking);
 		const count = new Tokenizer(model, { dropsOwnThinking }).countMessage(turn, { excludeEncryptedReasoning: true });
 		expect(count > toolCallOnly + 4_000).toBe(carriesThinking);

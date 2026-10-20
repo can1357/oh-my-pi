@@ -9,6 +9,7 @@ import {
 	type Context,
 	type CursorExecHandlers,
 	type CursorToolResultHandler,
+	completionsRequestDropsOwnThinking,
 	type Effort,
 	type ImageContent,
 	type Message,
@@ -23,7 +24,6 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
-import { completionsRequestDropsOwnThinking } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -893,12 +893,15 @@ export class Agent {
 		return {
 			nativeHistoryReplay: openAIResponsesReplaysNativeHistory(model, this.#providerSessionState),
 			dropsOwnThinking: model
-				? completionsRequestDropsOwnThinking(model, {
-						reasoning: this.#state.thinkingLevel,
-						disableReasoning: this.#state.disableReasoning,
-						toolChoice: request?.toolChoice,
+				? completionsRequestDropsOwnThinking(
+						model,
+						{
+							reasoning: this.#state.thinkingLevel,
+							disableReasoning: this.#state.disableReasoning,
+							toolChoice: request?.toolChoice,
+						},
 						tools,
-					})
+					)
 				: undefined,
 		};
 	}
