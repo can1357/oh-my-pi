@@ -1790,7 +1790,14 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 	// container's own closing-marker check and popped in queue order, so the
 	// worklist consumes the stamp in exactly the order the recursive walk did.
 	const pending: StampMatchPending[] = [
-		{ kind: "value", live: value, key: undefined, keyed: false, isTopLevelToolResultDetails: undefined, atomic: false },
+		{
+			kind: "value",
+			live: value,
+			key: undefined,
+			keyed: false,
+			isTopLevelToolResultDetails: undefined,
+			atomic: false,
+		},
 	];
 	for (let frame = pending.pop(); frame !== undefined; frame = pending.pop()) {
 		if (frame.kind === "end") {
