@@ -5,6 +5,8 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildMemoryToolDeveloperInstructions,
+	clearMemoryData,
+	getMemoryRoot,
 	pendingMemorySnapshotCommit,
 	refreshMemoryToolDeveloperInstructionsCacheAfterStartup,
 	saveLearnedLesson,
@@ -24,6 +26,16 @@ function snapshotRecords(session: SessionManager): { scope?: string; token?: str
 		records.push((entry.data ?? {}) as { scope?: string; token?: string });
 	}
 	return records;
+}
+
+/** Ids of the memory snapshots the active branch records. */
+function snapshotEntryIds(session: SessionManager): string[] {
+	const ids: string[] = [];
+	for (const entry of session.getBranchView()) {
+		if (entry.type !== "custom" || entry.customType !== MEMORY_SNAPSHOT_TYPE) continue;
+		ids.push(entry.id);
+	}
+	return ids;
 }
 
 describe("memory snapshot across a resume", () => {
@@ -180,5 +192,146 @@ describe("memory snapshot across a resume", () => {
 		// belongs to project A and must not be injected there.
 		const inProjectB = await buildMemoryToolDeveloperInstructions(agentDir, projectB, settings, session);
 		expect(inProjectB).toBeUndefined();
+	});
+
+	it("reselects the snapshot the active branch records after the leaf moves off it", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const cwd = settings.getCwd();
+		await saveLearnedLesson(agentDir, cwd, { content: "Original lesson" });
+
+		const session = SessionManager.create(cwd, sessionsDir);
+		const original = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		expect(original).toContain("Original lesson");
+		pendingMemorySnapshotCommit(session)?.();
+		const firstSnapshotId = snapshotEntryIds(session)[0];
+		if (!firstSnapshotId) throw new Error("Expected a recorded snapshot");
+
+		// Startup maintenance rewrote the consolidated summary of the project.
+		const memoryRoot = getMemoryRoot(agentDir, cwd);
+		await fs.mkdir(memoryRoot, { recursive: true });
+		await fs.writeFile(path.join(memoryRoot, "memory_summary.md"), "Rewritten summary");
+		await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
+			{ sessionManager: session },
+			agentDir,
+			cwd,
+			settings,
+		);
+		const rewritten = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		expect(rewritten).toContain("Rewritten summary");
+		pendingMemorySnapshotCommit(session)?.();
+		expect(snapshotEntryIds(session)).toHaveLength(2);
+
+		// The user navigates back to the first snapshot: the active branch now
+		// records only the original block, and the prompt must follow it.
+		session.branch(firstSnapshotId);
+		const reselected = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		expect(reselected).toContain("Original lesson");
+		expect(reselected).not.toContain("Rewritten summary");
+	});
+
+	it("records the snapshot on the branch the leaf moved to", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const cwd = settings.getCwd();
+		await saveLearnedLesson(agentDir, cwd, { content: "Stable lesson" });
+
+		const session = SessionManager.create(cwd, sessionsDir);
+		session.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "hi" }],
+			timestamp: Date.now(),
+		});
+		const assistantId = session.appendMessage(createAssistantMessage("hello"));
+		await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		pendingMemorySnapshotCommit(session)?.();
+		expect(snapshotEntryIds(session)).toHaveLength(1);
+
+		// Another session learns a lesson before this one continues.
+		await saveLearnedLesson(agentDir, cwd, { content: "Learned elsewhere later" });
+
+		// The user rewinds to the message before the recorded snapshot: the
+		// branch holds no snapshot of its own now.
+		session.branch(assistantId);
+		const block = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		expect(block).toContain("Stable lesson");
+		expect(block).not.toContain("Learned elsewhere later");
+
+		// The new branch records the block, so a later resume restores it.
+		pendingMemorySnapshotCommit(session)?.();
+		expect(snapshotEntryIds(session)).toHaveLength(1);
+		await session.flush();
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const resumed = await SessionManager.open(sessionFile, sessionsDir);
+		const resumedBlock = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, resumed);
+		expect(resumedBlock).toContain("Stable lesson");
+		expect(resumedBlock).not.toContain("Learned elsewhere later");
+	});
+
+	it("does not adopt the consolidated summary once the first turn started", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const cwd = settings.getCwd();
+		await saveLearnedLesson(agentDir, cwd, { content: "Startup lesson" });
+
+		const session = SessionManager.create(cwd, sessionsDir);
+		await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		pendingMemorySnapshotCommit(session)?.();
+
+		// Startup maintenance rewrote the consolidated summary of the project.
+		const memoryRoot = getMemoryRoot(agentDir, cwd);
+		await fs.mkdir(memoryRoot, { recursive: true });
+		await fs.writeFile(path.join(memoryRoot, "memory_summary.md"), "Consolidated summary");
+
+		// The first user turn is appended while the refresh re-reads the clear
+		// token: the turn that went out was built from the old prompt, so the
+		// consolidated summary belongs to the next session.
+		let conversationChecks = 0;
+		await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
+			{
+				sessionManager: session,
+				agent: {
+					state: {
+						get messages(): readonly unknown[] {
+							conversationChecks++;
+							return conversationChecks > 2 ? [{}] : [];
+						},
+					},
+				},
+			},
+			agentDir,
+			cwd,
+			settings,
+		);
+
+		const block = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		expect(block).not.toContain("Consolidated summary");
+	});
+
+	it("retires the recorded snapshot when the memory files cannot be removed", async () => {
+		if (process.platform === "win32") return;
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const cwd = settings.getCwd();
+		await saveLearnedLesson(agentDir, cwd, { content: "Snapshot lesson" });
+
+		const session = SessionManager.create(cwd, sessionsDir);
+		await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		pendingMemorySnapshotCommit(session)?.();
+
+		// Another session learns a lesson before the clear.
+		await saveLearnedLesson(agentDir, cwd, { content: "Disk lesson" });
+
+		// The removal of the memory files fails: the clear token is the only
+		// thing that can retire the recorded snapshot.
+		const memoryRoot = getMemoryRoot(agentDir, cwd);
+		await fs.chmod(memoryRoot, 0o555);
+		try {
+			await expect(clearMemoryData(agentDir, cwd)).rejects.toThrow();
+		} finally {
+			await fs.chmod(memoryRoot, 0o755);
+		}
+
+		// The recorded snapshot is retired: the block is read from the memory
+		// files again instead of being restored from the snapshot.
+		const block = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		expect(block).toContain("Disk lesson");
 	});
 });

@@ -1921,6 +1921,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
 }
 
+/**
+ * Whether a system prompt still carries the memory block.
+ *
+ * The block is embedded in the project prompt, so a caller that replaces the
+ * prompt wholesale drops it. Matching ignores whitespace runs: the rendered
+ * prompt re-flows the block it embeds.
+ */
+function promptCarriesMemoryBlock(promptParts: readonly string[], memoryBlock: string | undefined): boolean {
+	if (!memoryBlock) return true;
+	const needle = memoryBlock.replace(/\s+/g, " ").trim();
+	if (!needle) return true;
+	return promptParts.some(part => part.replace(/\s+/g, " ").includes(needle));
+}
+
 async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
 	if (options.systemPromptTemplate !== undefined && options.customSystemPrompt !== undefined) {
 		throw new Error("systemPromptTemplate cannot be combined with a literal custom system prompt");
@@ -4414,9 +4428,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return { ...defaultPrompt, commit: memoryCommit };
 			}
 			const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
+			const customSystemPrompt = typeof customPrompt === "string" ? [customPrompt] : customPrompt;
 			return {
-				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
-				commit: memoryCommit,
+				systemPrompt: customSystemPrompt,
+				// A replacement prompt may drop the memory block: recording the
+				// snapshot then would pin memory this session never sent, and a
+				// later resume without the override would restore it as if it had.
+				commit: promptCarriesMemoryBlock(customSystemPrompt, memoryInstructions) ? memoryCommit : undefined,
 			};
 		};
 
