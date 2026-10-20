@@ -207,6 +207,24 @@ describe("task speculative launch", () => {
 		expect(manager.getJob("Alpha")!.status).toBe("completed");
 		expect(manager.getJob("Beta")!.status).toBe("completed");
 	});
+	it("does not start a builtin unavailable to the selected agent", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ ...taskAgent, tools: ["read"] }],
+			projectAgentsDir: null,
+		});
+		const { session } = await openSession();
+		const unavailableBuiltin = {
+			context: "ctx",
+			tasks: [{ name: "Write", agent: "task", task: "Write the assigned file.", tools: ["write"] }],
+		};
+
+		session.update(toolCall, JSON.stringify(unavailableBuiltin));
+		const adopted = await session.adopt([
+			{ agent: "task", name: "Write", task: "Write the assigned file.", context: "ctx" },
+		]);
+
+		expect(adopted.size).toBe(0);
+	});
 
 	it("aborts launched agents when the finished call is invalid", async () => {
 		const { session } = await openSession();

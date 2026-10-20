@@ -44,6 +44,9 @@ export interface SubagentEventPayload {
 
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
+const evalToolsField = type("string[]").describe(
+	"Names of eval-defined tools only; built-in tools come from the agent profile.",
+);
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
 
@@ -79,7 +82,7 @@ export const taskItemSchema = type({
 	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
+	"tools?": evalToolsField,
 	"model?": "string",
 	"+": "delete",
 });
@@ -90,7 +93,7 @@ const taskItemSchemaIsolated = type({
 	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
+	"tools?": evalToolsField,
 	"model?": "string",
 	"isolated?": "boolean",
 	"+": "delete",
@@ -103,7 +106,7 @@ export const taskSchema = type({
 	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
+	"tools?": evalToolsField,
 	"model?": "string",
 	"isolated?": "boolean",
 	"+": "delete",
@@ -115,7 +118,7 @@ const taskSchemaNoIsolation = type({
 	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
+	"tools?": evalToolsField,
 	"model?": "string",
 	"+": "delete",
 });
@@ -189,7 +192,7 @@ function createTaskSchema(options: {
 	const schemaFields = options.structured
 		? { "outputSchema?": outputSchemaInputSchema, "schemaMode?": '"permissive" | "strict"' }
 		: {};
-	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
+	const toolsField = options.evalToolsEnabled ? { "tools?": evalToolsField } : {};
 	// `model` is always declared, and preflight decides whether a per-call model
 	// is allowed; seance widens it to a list.
 	const seanceFields = { "model?": "string", ...options.seanceFields };
