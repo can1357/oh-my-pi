@@ -22,6 +22,7 @@ import { cfgTtsrEnabled } from "@oh-my-pi/pi-coding-agent/export/ttsr-settings";
 import { cfgToolsFormat } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgInterruptMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgSteeringMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgFetchEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 describe("AgentSession live settings", () => {
 	const tempDirs: string[] = [];
@@ -106,7 +107,11 @@ describe("AgentSession live settings", () => {
 	});
 
 	it("rebuilds the system prompt when prompt-affecting settings change", async () => {
-		const settings = Settings.isolated();
+		// Inline descriptors put a tool's description in the prompt (and strip it
+		// from the provider schema), so the `read` tool's URL guidance is prompt
+		// content: a live toggle must republish the prompt, or the model keeps
+		// seeing copy for a URL read the runtime now refuses.
+		const settings = Settings.isolated({ inlineToolDescriptors: "on" });
 		const live = await start(settings);
 		expect(live.systemPrompt.join("\n")).not.toContain("live-settings-tree-marker/");
 
@@ -122,6 +127,15 @@ describe("AgentSession live settings", () => {
 		await Promise.resolve();
 		await live.refreshBaseSystemPrompt();
 		expect(live.systemPrompt.join("\n")).not.toBe(beforePersonality);
+
+		// `fetch.enabled` gates the `read` tool's URL guidance, so turning it off
+		// must republish the prompt without an unrelated settings change.
+		expect(live.systemPrompt.join("\n")).toContain("reader text/markdown");
+		cfgFetchEnabled.set(settings, false);
+		await Promise.resolve();
+		await live.runToolRegistryMutation(async () => {});
+		expect(live.systemPrompt.join("\n")).not.toContain("reader text/markdown");
+		expect(live.systemPrompt.join("\n")).not.toContain("bare host:port");
 	});
 
 	it("rebuilds the system prompt once for a bulk change across several prompt inputs", async () => {
@@ -133,6 +147,7 @@ describe("AgentSession live settings", () => {
 				return defaultPrompt;
 			},
 		});
+
 		// Let startup-queued rebuilds drain before counting.
 		await live.runToolRegistryMutation(async () => {});
 		const before = live.systemPrompt.join("\n");

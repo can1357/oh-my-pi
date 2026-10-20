@@ -51,6 +51,7 @@ import {
 import { cfgTaskBatch, cfgTaskEager } from "./task/settings";
 import {
 	cfgAsyncEnabled,
+	cfgFetchEnabled,
 	cfgToolsIntentTracing,
 	cfgToolsXdevDocs,
 	cfgToolsXdevInlineDevices,
@@ -73,6 +74,10 @@ export const cfgSystemPromptInputs = combine({
 	xdevDocs: cfgToolsXdevDocs,
 	xdevInlineDevices: cfgToolsXdevInlineDevices,
 	vaultEnabled: cfgVaultEnabled,
+	// The `read` tool renders its URL guidance from this flag, so a live toggle
+	// must rebuild the prompt: with inline descriptors the description rides in
+	// the prompt, and the provider schema copy is pruned from the wire.
+	fetchEnabled: cfgFetchEnabled,
 	renderMermaid: cfgTuiRenderMermaid,
 	renderSvg: cfgTuiRenderSvg,
 	autoGraph: cfgTuiAutoGraph,

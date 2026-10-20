@@ -144,6 +144,7 @@
 - Fixed the `read` tool still advertising web-URL reads in its prompt and `path` schema when `fetch.enabled` is off, steering the model into a refused call ([#11347](https://github.com/can1357/oh-my-pi/issues/11347))
 - Fixed the `read` tool still advertising web-URL reads in its prompt and `path` schema when `fetch.enabled` is off, steering the model into a refused call ([#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed the `read` tool still advertising web-URL reads in its prompt and `path` schema when `fetch.enabled` is off ([#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed the `read` tool still advertising web-URL reads in its prompt and `path` schema when `fetch.enabled` is off, including after turning it off mid-session ([#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 
