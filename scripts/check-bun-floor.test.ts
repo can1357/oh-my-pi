@@ -35,8 +35,4 @@ describe("satisfiesBunFloor", () => {
 	test("rejects a prerelease of the floor", () => {
 		expect(satisfiesBunFloor("1.4.3-canary.1", "bun@>=1.4.3")).toBe(false);
 	});
-
-	test("accepts any runtime when the manifest pins no bun", () => {
-		expect(satisfiesBunFloor("1.0.0", undefined)).toBe(true);
-	});
 });

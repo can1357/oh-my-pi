@@ -17,6 +17,8 @@ interface SetupOutcome {
 	exitCode: number;
 	outputs: Record<string, string>;
 	log: string;
+	/** Every `bun` invocation the setup step made, in order, as argv arrays. */
+	bunInvocations: string[][];
 }
 
 /** The Bun floor the repo declares, i.e. the version the gate accepts. */
@@ -61,6 +63,9 @@ async function runDetectStep(version: string, cwd: string = REPO_ROOT, guardExit
 			path.join(binDir, "bun"),
 			[
 				"#!/usr/bin/env bash",
+				"# Record every invocation so a test can inspect how the probe called Bun.",
+				'  sep=""; for arg in "$@"; do printf \'%s%s\' "$sep" "$arg"; sep=$\'\\037\'; done >> "$FAKE_BUN_LOG"',
+				"  printf '\\n' >> \"$FAKE_BUN_LOG\"",
 				'if [ "$1" = "--version" ]; then',
 				"  printf '%s\\n' \"$FAKE_BUN_VERSION\"",
 				"  exit 0",
@@ -81,7 +86,9 @@ async function runDetectStep(version: string, cwd: string = REPO_ROOT, guardExit
 			{ mode: 0o755 },
 		);
 		const outputFile = path.join(dir, "github_output");
-		await fs.writeFile(outputFile, "");
+		await Bun.write(outputFile, "");
+		const bunLog = path.join(dir, "bun-invocations");
+		await Bun.write(bunLog, "");
 		const proc = Bun.spawn(["bash", "-c", script], {
 			cwd,
 			env: {
@@ -90,6 +97,7 @@ async function runDetectStep(version: string, cwd: string = REPO_ROOT, guardExit
 				GITHUB_OUTPUT: outputFile,
 				FAKE_BUN_VERSION: version,
 				FAKE_BUN_REAL: process.execPath,
+				FAKE_BUN_LOG: bunLog,
 				FAKE_GUARD_EXIT: guardExit === undefined ? "" : String(guardExit),
 			},
 			stdout: "pipe",
@@ -102,19 +110,21 @@ async function runDetectStep(version: string, cwd: string = REPO_ROOT, guardExit
 			const separator = line.indexOf("=");
 			if (separator > 0) outputs[line.slice(0, separator)] = line.slice(separator + 1);
 		}
-		return { exitCode, outputs, log: `${stdout}${stderr}` };
+		const bunInvocations = (await Bun.file(bunLog).text())
+			.split("\n")
+			.filter(line => line.length > 0)
+			.map(line => line.split("\u001f"));
+		return { exitCode, outputs, log: `${stdout}${stderr}`, bunInvocations };
 	} finally {
 		await fs.rm(dir, { recursive: true, force: true });
 	}
 }
 
 async function runGuard(args: string[]): Promise<number> {
-	const proc = Bun.spawn([process.execPath, GUARD_FILE, ...args], {
-		cwd: REPO_ROOT,
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	return await proc.exited;
+	// One-shot invocation whose only consumed result is the exit code, so it
+	// runs through Bun Shell instead of a spawned child with unread pipes.
+	const result = await Bun.$`${process.execPath} ${GUARD_FILE} ${args}`.cwd(REPO_ROOT).quiet().nothrow();
+	return result.exitCode;
 }
 
 describe("bun-install setup decision", () => {
@@ -155,7 +165,7 @@ describe("bun-install setup decision", () => {
 	test("keeps the exact pinned Bun and installs every other build", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bun-install-pin-"));
 		try {
-			await fs.writeFile(path.join(dir, "package.json"), JSON.stringify({ packageManager: `bun@${FLOOR}` }));
+			await Bun.write(path.join(dir, "package.json"), JSON.stringify({ packageManager: `bun@${FLOOR}` }));
 			const keep = await runDetectStep(FLOOR, dir);
 			expect(keep.exitCode).toBe(0);
 			expect(keep.outputs.setup_bun).toBe("false");
@@ -186,11 +196,19 @@ describe("check-bun-floor --satisfies", () => {
 
 describe("bun-install setup probe", () => {
 	// AGENTS.md bans inline imports, so the probe must reach the floor guard
-	// through its CLI instead of pulling it in with a runtime `await import()`
-	// inside a `bun -e` module — the very form the repo forbids.
-	test("never loads the floor guard through a dynamic import", async () => {
-		const action = await Bun.file(ACTION_FILE).text();
-		expect(action).not.toMatch(/\bimport\s*\(/);
+	// through the guard's CLI instead of pulling it in at runtime inside a
+	// `bun -e` module — the very form the repo forbids. The probe's own
+	// invocations show which way it went.
+	test("reaches the floor guard through its CLI instead of an inline module", async () => {
+		const outcome = await runDetectStep(FLOOR);
+		// The guard answers as a separate process, so its exit code can decide
+		// the setup. An inline `bun -e` module would have evaluated the guard
+		// in-process and left no such invocation behind.
+		const guardCalls = outcome.bunInvocations.filter(args => args.some(arg => arg.endsWith("check-bun-floor.ts")));
+		expect(guardCalls.length).toBe(1);
+		expect(guardCalls[0]).toEqual([expect.stringContaining("check-bun-floor.ts"), "--satisfies", FLOOR]);
+		// No invocation evaluated an inline module.
+		expect(outcome.bunInvocations.some(args => args.includes("-e") || args.includes("--eval"))).toBe(false);
 	});
 
 	// The ordering belongs to the guard: runner setup and the `check:types`
