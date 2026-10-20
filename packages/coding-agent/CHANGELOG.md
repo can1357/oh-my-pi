@@ -6,6 +6,7 @@
 
 - Fixed Mnemopi memory completions ignoring the memory role's thinking suffix, including one inherited from `tiny` or `smol` when `modelRoles.memory` is unset; each `retry.fallbackChains.memory` entry sends its own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))
 - Fixed `/move` path completion jumping into a subfolder on Tab: `..`, `.`, and `~` now complete to `../`, `./`, and `~/` before listing their children, a trailing `\` lists a folder on Windows, absolute Windows paths (`C:/…`) are no longer rewritten as relative paths, and the project directory is offered as `./` instead of `/`
+- Fixed a `models.yml` edit that does not parse (such as a half-saved file) removing every custom provider, override and API key it defines from the running session the next time the model picker opened; the session now keeps the last config that loaded and still shows the error until the file loads again ([#16401](https://github.com/can1357/oh-my-pi/pull/16401) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.12.3] - 2026-10-19
 
