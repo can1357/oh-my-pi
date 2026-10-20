@@ -173,6 +173,14 @@ export function maybeWriteSnapshotHeader(
  * write that numbered no row at all (an empty file, or a first line past the
  * map cap) records the empty set instead, which the guard reads as "no line
  * was displayed" — every anchor on it is unseen.
+ *
+ * The rows number the file's own lines: `content` is what the write put on
+ * disk, so a row shows the line the model will find there, not the row it
+ * authored. A row is a display prefix in front of that line, exactly as a
+ * `read` prints it, so copying the result back into a write behaves as
+ * copying read output does. Numbers that are content rather than display (a
+ * hex dump's addresses, a log's timestamps) were never display prefixes, so
+ * they stay as written and are numbered like any other line.
  */
 export function maybeWriteSnapshotDisplay(
 	session: ToolSession,
@@ -191,6 +199,7 @@ export function maybeWriteSnapshotDisplay(
 	// record (`None`) skips the guard, and that is what the handler-owned
 	// writes (`maybeWriteSnapshotHeader`) mint.
 	const tag = getEditStore(session).recordSnapshot(absolutePath, normalized, seenLines);
+	// A display prefix in front of the file's own line, in the shape a `read` prints.
 	const rows = shown.map((line, index) => formatNumberedLine(index + 1, line)).join("\n");
 	return {
 		header: formatHashlineHeader(displayPath, tag),
