@@ -25,6 +25,7 @@ import { cfgToolsFormat } from "@oh-my-pi/pi-coding-agent/session/context-settin
 import { cfgInterruptMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgSteeringMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgFetchEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { createAssistantMessage } from "../helpers/agent-session-setup";
 
 describe("AgentSession live settings", () => {
 	const tempDirs: string[] = [];
@@ -328,12 +329,7 @@ describe("AgentSession live settings", () => {
 			attribution: "user",
 			timestamp: Date.now(),
 		});
-		manager.appendMessage({
-			role: "assistant",
-			content: [{ type: "text", text: "working" }],
-			attribution: "agent",
-			timestamp: Date.now(),
-		});
+		manager.appendMessage(createAssistantMessage("working"));
 
 		let handoffPrompt: string | undefined;
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async context => {
