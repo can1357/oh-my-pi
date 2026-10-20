@@ -202,6 +202,7 @@
 - Bash cards show the elapsed time while a command runs, and wall time, timeout and backgrounded job in the bottom border instead of a separate `⟨…⟩` line ([#16486](https://github.com/can1357/oh-my-pi/pull/16486) by [@H4vC](https://github.com/H4vC))
 - The terminal `/jobs` sheet shows the selected job's full command ([#16486](https://github.com/can1357/oh-my-pi/pull/16486) by [@H4vC](https://github.com/H4vC))
 - Grep, glob, find, IRC message, and `proc://`/`agent://`/`cfg://` result rows start at the same column as other tool rows ([#16486](https://github.com/can1357/oh-my-pi/pull/16486) by [@H4vC](https://github.com/H4vC))
+- Expanded tool output (Ctrl+O) now soft-wraps the full body of IRC cards - outgoing `agent://` messages and incoming IRC bubbles - to the card width instead of cutting every line at 100/110 columns, and a collapsed card with hidden text now shows the `Ctrl+O: Expand` hint ([#15049](https://github.com/can1357/oh-my-pi/issues/15049), [#15164](https://github.com/can1357/oh-my-pi/pull/15164) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
