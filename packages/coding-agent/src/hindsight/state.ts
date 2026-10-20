@@ -293,6 +293,7 @@ export class HindsightSessionState {
 	}
 
 	async recallForContext(query: string, signal?: AbortSignal): Promise<RecallOutcome> {
+		const startedAt = performance.now();
 		try {
 			const response = await this.client.recall(this.bankId, query, {
 				budget: this.config.recallBudget,
@@ -304,6 +305,13 @@ export class HindsightSessionState {
 			});
 			if (signal?.aborted) return { context: null, ok: false };
 			const results = response.results ?? [];
+			if (this.config.debug) {
+				logger.debug("Hindsight: recall succeeded", {
+					bankId: this.bankId,
+					items: results.length,
+					durationMs: Math.round(performance.now() - startedAt),
+				});
+			}
 			if (results.length === 0) return { context: null, ok: true };
 			const formatted = formatMemories(results);
 			const block = `<memories>\n${this.config.recallPromptPreamble}\n\n${formatted}\n</memories>`;
