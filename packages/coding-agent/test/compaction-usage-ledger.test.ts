@@ -1,13 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
-import {
-	AssistantMessageEventStream,
-	type AssistantMessage,
-	type Message,
-	type Model,
-	type Usage,
-} from "@oh-my-pi/pi-ai";
+import type { Message, Model, Usage } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -59,21 +54,23 @@ describe("compaction usage ledger", () => {
 	});
 
 	/** One assistant response, shaped like the provider would return it. */
-	function response(model: Model, overrides: Partial<AssistantMessage> = {}): AssistantMessageEventStream {
+	function response(model: Model): AssistantMessageEventStream {
 		const stream = new AssistantMessageEventStream();
-		stream.push({
-			type: "done",
-			reason: "stop",
-			message: {
-				role: "assistant",
-				content: [{ type: "text", text: "## Goal\nSummary of the conversation" }],
-				api: model.api,
-				provider: model.provider,
-				model: model.id,
-				stopReason: "stop",
-				usage: SUMMARY_USAGE,
-				...overrides,
-			},
+		queueMicrotask(() => {
+			stream.push({
+				type: "done",
+				reason: "stop",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "## Goal\nSummary of the conversation" }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					stopReason: "stop",
+					usage: SUMMARY_USAGE,
+					timestamp: Date.now(),
+				},
+			});
 		});
 		return stream;
 	}
@@ -81,20 +78,23 @@ describe("compaction usage ledger", () => {
 	/** A provider rejection that still billed the request. */
 	function rejectedResponse(model: Model): AssistantMessageEventStream {
 		const stream = new AssistantMessageEventStream();
-		stream.push({
-			type: "error",
-			reason: "error",
-			error: {
-				role: "assistant",
-				content: [],
-				api: model.api,
-				provider: model.provider,
-				model: model.id,
-				stopReason: "error",
-				errorMessage: "429 Too Many Requests",
-				errorStatus: 429,
-				usage: SUMMARY_USAGE,
-			},
+		queueMicrotask(() => {
+			stream.push({
+				type: "error",
+				reason: "error",
+				error: {
+					role: "assistant",
+					content: [],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					stopReason: "error",
+					errorMessage: "429 Too Many Requests",
+					errorStatus: 429,
+					usage: SUMMARY_USAGE,
+					timestamp: Date.now(),
+				},
+			});
 		});
 		return stream;
 	}
