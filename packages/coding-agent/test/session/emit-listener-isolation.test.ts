@@ -9,15 +9,21 @@ import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AutoLearnController } from "@oh-my-pi/pi-coding-agent/autolearn/controller";
+import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
+import { COLLAB_PROTO } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
 import { loadHindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
 import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { installInMemoryRelay, uninstallInMemoryRelay } from "../collab/helpers/in-memory-relay";
 
 function makeEvent(): AgentEvent {
 	return { type: "tool_execution_start", toolCallId: "probe-1", toolName: "probe", args: {} };
@@ -107,7 +113,7 @@ describe("#emit listener isolation", () => {
 			}
 		});
 
-		it("delivers mental-model startup warnings to a later subscriber exactly once", async () => {
+		it("delivers mental-model startup warnings past an auto-started collab mirror exactly once", async () => {
 			const client = new HindsightApi({ baseUrl: "https://hindsight.invalid" });
 			new AutoLearnController({ session, settings: Settings.isolated(), capture: async () => {} });
 			vi.spyOn(client, "listMentalModels").mockResolvedValue({
@@ -139,20 +145,61 @@ describe("#emit listener isolation", () => {
 
 			await state.runMentalModelLoad({ bankId: "bank" });
 
-			const first: string[] = [];
-			const unsubscribe = session.subscribe(event => {
-				if (event.type === "notice") first.push(event.message);
+			AgentRegistry.resetGlobalForTests();
+			installInMemoryRelay();
+			const ctx = {
+				session,
+				sessionManager: session.sessionManager,
+				settings: session.settings,
+				statusLine: {
+					setCollabStatus: () => {},
+					invalidate: () => {},
+					getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+				},
+				ui: { requestRender: () => {} },
+				showStatus: () => {},
+			} as unknown as InteractiveModeContext;
+			const host = new CollabHost(ctx);
+			const originalConnect = CollabSocket.prototype.connect;
+			let transport: CollabSocket | undefined;
+			vi.spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+				transport = this;
+				return originalConnect.call(this);
 			});
-			expect(first).toHaveLength(1);
-			expect(first[0]).toContain("paused-guidance");
-			expect(first[0]).toContain("automatic refresh paused");
-			unsubscribe();
-			const later: string[] = [];
-			session.subscribe(event => {
-				if (event.type === "notice") later.push(event.message);
-			});
-			expect(later).toEqual([]);
-			expect(first).toHaveLength(1);
+			try {
+				await host.start("ws://localhost:8788");
+				if (!transport) throw new Error("host transport missing");
+				const send = vi.spyOn(transport, "send").mockImplementation(() => {});
+				vi.spyOn(transport, "sendBatch").mockImplementation(() => {});
+
+				const first: string[] = [];
+				const unsubscribe = session.subscribe(event => {
+					if (event.type === "notice" && event.source === "Hindsight") first.push(event.message);
+				});
+				expect(first).toHaveLength(1);
+				expect(first[0]).toContain("paused-guidance");
+				expect(first[0]).toContain("automatic refresh paused");
+				expect(send.mock.calls).toEqual([]);
+				unsubscribe();
+				const later: string[] = [];
+				session.subscribe(event => {
+					if (event.type === "notice" && event.source === "Hindsight") later.push(event.message);
+				});
+				expect(later).toEqual([]);
+
+				// A later guest gets a welcome, not a replay of the startup warning.
+				transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "late-guest" }, 1);
+				expect(send.mock.calls[0]?.[0]).toMatchObject({ t: "welcome" });
+				expect(JSON.stringify(send.mock.calls)).not.toContain("paused-guidance");
+				session.emitNotice("info", "live-probe", "test");
+				expect(JSON.stringify(send.mock.calls)).toContain("live-probe");
+				expect(first).toHaveLength(1);
+				expect(later).toEqual([]);
+			} finally {
+				await host.stop("test cleanup");
+				uninstallInMemoryRelay();
+				AgentRegistry.resetGlobalForTests();
+			}
 		});
 
 		it("continues to deliver to later listeners when an earlier listener throws synchronously", () => {

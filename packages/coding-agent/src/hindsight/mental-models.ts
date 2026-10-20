@@ -426,7 +426,7 @@ export interface MentalModelRefreshOutcome {
  * state, so callers act only after content was rewritten. Failure, cancellation and timeout are reported per id.
  */
 export async function refreshMentalModelsAndWait(
-	client: HindsightApi,
+	client: HindsightClientApi,
 	bankId: string,
 	ids: readonly string[],
 	options?: WaitForOperationOptions,

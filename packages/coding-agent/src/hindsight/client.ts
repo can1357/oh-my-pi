@@ -294,7 +294,21 @@ export interface HindsightClientApi {
 		sourceQuery: string,
 		options?: CreateMentalModelOptions,
 	): Promise<CreateMentalModelResponse>;
-	refreshMentalModel(bankId: string, mentalModelId: string): Promise<RefreshMentalModelResponse>;
+	refreshMentalModel(
+		bankId: string,
+		mentalModelId: string,
+		options?: HindsightRequestOptions,
+	): Promise<RefreshMentalModelResponse>;
+	getOperationStatus(
+		bankId: string,
+		operationId: string,
+		options?: HindsightRequestOptions,
+	): Promise<HindsightOperation>;
+	waitForOperation(
+		bankId: string,
+		operationId: string,
+		options?: WaitForOperationOptions,
+	): Promise<HindsightOperation>;
 	deleteMentalModel(bankId: string, mentalModelId: string): Promise<boolean>;
 	getMentalModelHistory(bankId: string, mentalModelId: string): Promise<MentalModelHistoryEntry[]>;
 }
