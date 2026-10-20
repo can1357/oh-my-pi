@@ -15,6 +15,8 @@ import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { cfgEvalToolsEnabled } from "../eval/settings";
 import { BUILTIN_TOOL_NAMES, normalizeToolName } from "../tools/builtin-names";
 import type { AgentDefinition } from "./types";
+import { cfgTaskMaxRecursionDepth } from "./settings";
+import { resolveSubagentToolNames } from "./tool-plan";
 
 interface EvalToolQueryResult {
 	tools: EvalToolDescriptor[];
@@ -118,11 +120,23 @@ export function isBuiltinToolName(name: string): boolean {
 	return BUILTIN_TOOL_NAME_LOOKUP[normalizeToolName(name)] === true;
 }
 
-/** Whether the selected agent already supplies a built-in tool name. */
-export function isBuiltinToolAvailable(name: string, agent: AgentDefinition): boolean {
+/**
+ * Whether the selected agent's effective tool plan supplies a built-in tool
+ * name. Uses the executor's plan (auto-added `task`/`wait`, `exec` expansion,
+ * recursion limit), not the raw `tools` frontmatter.
+ */
+export function isBuiltinToolAvailable(name: string, agent: AgentDefinition, session: ToolSession): boolean {
 	const canonical = normalizeToolName(name);
 	if (BUILTIN_TOOL_NAME_LOOKUP[canonical] !== true) return false;
-	return (agent.tools ?? BUILTIN_TOOL_NAMES).map(normalizeToolName).includes(canonical);
+	const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(session.settings);
+	const childDepth = (session.taskDepth ?? 0) + 1;
+	const plan = resolveSubagentToolNames(agent, {
+		settings: session.settings,
+		structured: true,
+		atMaxDepth: maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth,
+		restrictToolNames: false,
+	});
+	return (plan ?? BUILTIN_TOOL_NAMES).map(normalizeToolName).includes(canonical);
 }
 
 /**
@@ -135,7 +149,8 @@ export function stripBuiltinToolNames(item: { tools?: string[] }, record: WeakMa
 	const kept: string[] = [];
 	const stripped: string[] = [];
 	for (const name of item.tools) {
-		if (isBuiltinToolName(name)) stripped.push(normalizeToolName(name));
+		// Malformed entries are left for the tool-shape validation to reject.
+		if (typeof name === "string" && isBuiltinToolName(name)) stripped.push(normalizeToolName(name));
 		else kept.push(name);
 	}
 	if (stripped.length === 0) return;

@@ -151,6 +151,43 @@ describe("task spawn routing", () => {
 			"Note: `read` is a built-in tool provided by agent `task`; it was removed from `tools`, which accepts eval-defined tools only.",
 		);
 	});
+	it("treats a built-in the executor auto-adds as available", async () => {
+		// `spawns` makes the executor add `task` to the child even though the profile does not list it.
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ ...taskAgent, tools: ["read"], spawns: ["scout"] }],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => makeResult(options.id ?? "?"));
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false } }));
+
+		const result = await tool.execute("auto-added-builtin", {
+			agent: "task",
+			task: "Delegate the work.",
+			tools: ["task"],
+		} as TaskParams);
+
+		expect(runSpy).toHaveBeenCalledTimes(1);
+		expect(getFirstText(result)).not.toContain("Unknown eval tool");
+		expect(getFirstText(result)).toContain("`task` is a built-in tool provided by agent `task`");
+	});
+
+	it("returns a task error instead of throwing on malformed tool entries", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
+		const runSpy = vi.spyOn(executorModule, "runSubprocess");
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false } }));
+
+		const result = await tool.execute("malformed-tools", {
+			agent: "task",
+			task: "Use the requested tool.",
+			tools: [42],
+		} as unknown as TaskParams);
+
+		expect(getFirstText(result)).toContain("invalid `tools` value");
+		expect(runSpy).not.toHaveBeenCalled();
+	});
+
 	it("allows an available built-in tool in plan mode", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [{ ...taskAgent, tools: ["read"] }],

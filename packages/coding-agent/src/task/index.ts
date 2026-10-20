@@ -285,6 +285,13 @@ function validateEffort(effort: TaskEffort | undefined, label: string): string |
 	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
 }
 
+/** Reject a non-array `tools`, or non-string entries, on calls that bypass the wire schema (lenient validation). */
+function validateTools(tools: unknown, label: string): string | undefined {
+	if (tools === undefined) return undefined;
+	if (Array.isArray(tools) && tools.every(name => typeof name === "string")) return undefined;
+	return `${label} has an invalid \`tools\` value. Use an array of tool-name strings.`;
+}
+
 /**
  * Check a spawn's work: a non-empty `task`, or non-empty `steps`. The wire schema
  * advertises only the one `task.steps` selects, which names the missing field;
@@ -338,6 +345,8 @@ function validateSpawnParams(
 			if (effortError) return effortError;
 			const modelError = validateModel(item, label, settings);
 			if (modelError) return modelError;
+			const toolsError = validateTools(item.tools, label);
+			if (toolsError) return toolsError;
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
@@ -361,6 +370,7 @@ function validateSpawnParams(
 	return (
 		validateTaskInput(params, "The call", stepsEnabled) ??
 		validateEffort(params.effort, "The call") ??
+		validateTools(params.tools, "The call") ??
 		validateModel(params, "The call", settings)
 	);
 }
@@ -1019,12 +1029,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		} catch {
 			return undefined;
 		}
-		const evalToolNames = [
-			...(spawn.tools ?? []),
-			...(speculativeBuiltinTools.get(spawn) ?? []).filter(
-				name => !isBuiltinToolAvailable(name, policy.effectiveAgent),
-			),
-		];
+		// A built-in the chosen agent lacks is re-added as an eval tool at dispatch, so the running
+		// speculative child (launched with the stripped list) would be rejected on adopt. Refuse it.
+		if (
+			(speculativeBuiltinTools.get(spawn) ?? []).some(
+				name => !isBuiltinToolAvailable(name, policy.effectiveAgent, this.session),
+			)
+		) {
+			return undefined;
+		}
+		const evalToolNames = spawn.tools ?? [];
 		if (evalToolNames.length > 0) {
 			if (this.session.getPlanModeState?.()?.enabled === true) return undefined;
 			try {
@@ -1185,7 +1199,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawnItems.forEach((item, index) => {
 			const policy = policies[index]!;
 			for (const name of strippedBuiltinTools.get(item) ?? []) {
-				if (isBuiltinToolAvailable(name, policy.effectiveAgent)) {
+				if (isBuiltinToolAvailable(name, policy.effectiveAgent, this.session)) {
 					toolNotices.push(
 						`Note: \`${name}\` is a built-in tool provided by agent \`${policy.agentName}\`; it was removed from \`tools\`, which accepts eval-defined tools only.`,
 					);
