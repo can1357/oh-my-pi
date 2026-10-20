@@ -22,7 +22,12 @@ import {
 	truncateMiddle,
 	truncateTail,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { formatOutputNotice, type OutputMeta, type TruncationMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import {
+	formatOutputNotice,
+	type MinimizedMeta,
+	type OutputMeta,
+	type TruncationMeta,
+} from "@oh-my-pi/pi-tui/tools/output-meta";
 import { renderError } from "./tool-errors";
 import {
 	cfgToolsArtifactHeadBytes,
@@ -426,6 +431,12 @@ export class OutputMetaBuilder {
 	diagnostics(summary: string, messages: string[]): this {
 		if (messages.length === 0) return this;
 		this.#meta.diagnostics = { summary, messages };
+		return this;
+	}
+
+	/** Record the bash minimizer's rewrite. No-op when the output was not minimized. */
+	minimized(value: MinimizedMeta | undefined): this {
+		if (value) this.#meta.minimized = value;
 		return this;
 	}
 

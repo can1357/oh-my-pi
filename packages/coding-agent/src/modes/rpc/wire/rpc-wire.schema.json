@@ -2718,6 +2718,11 @@
 					"properties": {},
 					"additionalProperties": {}
 				},
+				"minimized": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {}
+				},
 				"workingDir": {
 					"type": "string"
 				},

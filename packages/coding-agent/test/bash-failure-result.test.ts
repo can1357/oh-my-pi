@@ -213,6 +213,69 @@ describe("BashTool execution results", () => {
 		expect(result.details?.exitCode).toBe(1);
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(text).toContain("TS2304 Cannot find name 'foo'");
+		expect(result.details?.meta?.minimized).toBeUndefined();
+	});
+
+	it("records the minimizer's filter and byte counts with the saved raw output", async () => {
+		const rawOutput = `${"src/a.ts:1:1 error TS2304 Cannot find name 'foo'\n".repeat(40)}`;
+		const minimizedText = "src/a.ts: 40 errors TS2304\n";
+		spyOn(Shell.prototype, "run").mockImplementation(function (this: Shell, _options, onChunk) {
+			onChunk?.(null, rawOutput);
+			return Promise.resolve({
+				exitCode: 1,
+				cancelled: false,
+				timedOut: false,
+				workingDir: process.cwd(),
+				minimized: {
+					filter: "lint",
+					text: minimizedText,
+					originalText: rawOutput,
+					inputBytes: Buffer.byteLength(rawOutput, "utf-8"),
+					outputBytes: Buffer.byteLength(minimizedText, "utf-8"),
+				},
+			});
+		});
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-minimized-meta-"));
+		const ids: Record<string, string> = { bash: "1", "bash-original": "2" };
+		const session = {
+			...makeSession(),
+			allocateOutputArtifact: async (kind: string) => ({
+				id: ids[kind],
+				path: path.join(artifactsDir, `${kind}.log`),
+			}),
+		} as unknown as ToolSession;
+
+		try {
+			const args = { command: "pnpm lint" };
+			const result = await new BashTool(session).execute("call-minimized-meta", args);
+
+			expect(result.details?.meta?.minimized).toEqual({
+				filter: "lint",
+				inputBytes: Buffer.byteLength(rawOutput, "utf-8"),
+				outputBytes: Buffer.byteLength(minimizedText, "utf-8"),
+				artifactId: "2",
+			});
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+			expect(text).toContain("[raw output: artifact://2]");
+			expect(text).not.toContain("Minimized");
+			expect(await Bun.file(path.join(artifactsDir, "bash-original.log")).text()).toBe(rawOutput);
+
+			const theme = await getThemeByName("dark");
+			if (!theme) throw new Error("Expected dark theme");
+			const rendered = Bun.stripANSI(
+				bashToolRenderer
+					.renderResult(result, { expanded: false, isPartial: false }, theme, args)
+					.render(160)
+					.join("\n"),
+			);
+			expect(rendered).toContain("Minimized: lint 1.9KB → 27B");
+			const view = JSON.stringify(
+				bashToolRenderer.describeResult(result, { expanded: false, isPartial: false }, args),
+			);
+			expect(view).toContain("Minimized lint 1.9KB → 27B");
+		} finally {
+			await fs.rm(artifactsDir, { recursive: true, force: true });
+		}
 	});
 
 	it("preserves final-stage output when a pipeline ends in head or tail", async () => {
