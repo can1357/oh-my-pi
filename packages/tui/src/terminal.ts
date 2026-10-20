@@ -847,6 +847,10 @@ export class ProcessTerminal implements Terminal {
 	#kittyProtocolActive = false;
 	// Kitty flags omp pushed on its own stack frame; meaningful only while kitty is active.
 	#kittyFlags = 0;
+	// Whether omp's own kitty frame is currently on the terminal's stack. The
+	// negotiation arms the terminal before the reply arrives, so the frame can
+	// be gone again when the reply never comes.
+	#kittyFramePushed = false;
 	#modifyOtherKeysActive = false;
 	#modifyOtherKeysTimeout?: Timer;
 	// Windows console fallback when kitty is unavailable: key records arrive as
@@ -1593,6 +1597,10 @@ export class ProcessTerminal implements Terminal {
 							clearTimeout(this.#modifyOtherKeysTimeout);
 							this.#modifyOtherKeysTimeout = undefined;
 						}
+						// The terminal never confirmed the arming push: take omp's frame
+						// off the kitty stack so it does not keep reporting kitty keys
+						// that omp would decode as plain keys.
+						this.#popUnconfirmedKittyFrame();
 						this.#enableModifyOtherKeysFallback();
 						break;
 					}
@@ -1636,28 +1644,47 @@ export class ProcessTerminal implements Terminal {
 				}
 				this.#disableWin32InputMode();
 				// Any reply to `\x1b[?u` means the terminal speaks the kitty keyboard
-				// protocol. The reported flag value is the *current* stack-top — fresh
-				// terminals report 0 — so support is implied by the reply itself, not by
-				// the flag value. Pick the level we want; `\x1b[>Nu` pushes one frame
-				// that shutdown's single `\x1b[<u` pop balances.
+				// protocol. The negotiation armed the terminal with its own push
+				// before the query, so the reply echoes the flags omp asked for;
+				// support is implied by the reply itself, not by the flag value.
+				// Pick the level we want; the flags sit on omp's own stack frame,
+				// which shutdown's single `\x1b[<u` pop balances.
 				const reportedFlags = parseInt(match[1]!, 10);
 				this.#kittyProtocolActive = true;
 				setKittyProtocolActive(true);
+				let flags: number;
 				if (this.#conpty) {
 					// ConPTY (native Windows and WSL) drops Shift+letter keypresses
 					// entirely when flag 4 (report alternate keys) is set. Use flag 1
 					// (disambiguate only), preserving flag 2 if already active.
-					this.#kittyFlags = (reportedFlags & 2) !== 0 ? 3 : 1;
+					flags = (reportedFlags & 2) !== 0 ? 3 : 1;
 				} else if ((reportedFlags & 2) !== 0) {
 					// Preserve event-type reporting already enabled by a parent app.
 					// Push level-2 to keep its shortcuts reporting consistently.
-					this.#kittyFlags = 7;
+					flags = 7;
 				} else {
 					// Disambiguate escape codes and report base-layout keys for physical
 					// shortcut matching, without event reporting that caused regression #3259.
-					this.#kittyFlags = 5;
+					flags = 5;
 				}
-				this.#safeWrite(`\x1b[>${this.#kittyFlags}u`);
+				if (this.#kittyFramePushed && reportedFlags !== 0) {
+					// omp's frame is already on the kitty stack (pushed when the
+					// negotiation armed the terminal). Replace its flags in place
+					// instead of pushing a second frame, so the stack stays
+					// balanced with the single pop on exit.
+					if (flags !== this.#kittyFlags) {
+						this.#kittyFlags = flags;
+						this.#safeWrite(`\x1b[=${flags};1u`);
+					}
+				} else {
+					// The DA1 sentinel popped the arming frame before the reply
+					// arrived (see #2042), or the terminal ignored the arming push
+					// and answered the query with an empty stack: push omp's frame
+					// now that kitty support is confirmed.
+					this.#kittyFlags = flags;
+					this.#kittyFramePushed = true;
+					this.#safeWrite(`\x1b[>${flags}u`);
+				}
 				return;
 			}
 
@@ -2132,8 +2159,9 @@ export class ProcessTerminal implements Terminal {
 	/**
 	 * Query terminal for Kitty keyboard protocol support and enable if available.
 	 *
-	 * Sends CSI ? u to query current flags. If terminal responds with CSI ? <flags> u,
-	 * it supports the protocol and we enable it with CSI > 1 u.
+	 * Arms the terminal with CSI > flags u first, then sends CSI ? u to query
+	 * the current flags. If terminal responds with CSI ? <flags> u, it supports
+	 * the protocol and the level we want is in effect.
 	 *
 	 * The response is detected in setupStdinBuffer's data handler, which properly
 	 * handles the case where the response arrives split across multiple stdin events.
@@ -2145,11 +2173,43 @@ export class ProcessTerminal implements Terminal {
 		// kitty keyboard flags (no side effect on the stack); the DA1 sentinel
 		// guarantees a reply even from terminals that ignore CSI ?u.
 		this.#da1SentinelOwners.push({ kind: "keyboard" });
-		this.#safeWrite("\x1b[?u\x1b[c");
+		// Self-arm before the query: kitty's progressive enhancement is only
+		// observable once the flags sit on the terminal's stack, and terminals
+		// that implement the push half of the protocol but answer the query with
+		// the honest "flags = 0" reply (rio) never arm themselves. An unarmed
+		// terminal keeps encoding Shift+Enter as a bare CR, which omp reads as
+		// submit instead of a newline (#12411).
+		//
+		// This push is omp's own frame on the kitty stack: the reply handler
+		// replaces its flags in place, so the stack stays balanced with the
+		// single `\x1b[<u` pop on exit.
+		this.#kittyFlags = this.#conpty ? 1 : 5;
+		this.#kittyFramePushed = true;
+		this.#safeWrite(`\x1b[>${this.#kittyFlags}u\x1b[?u\x1b[c`);
 		this.#modifyOtherKeysTimeout = setTimeout(() => {
 			this.#modifyOtherKeysTimeout = undefined;
+			this.#popUnconfirmedKittyFrame();
 			this.#enableModifyOtherKeysFallback();
 		}, 150);
+	}
+
+	/**
+	 * Pop the kitty frame omp pushed while arming the terminal, unless the
+	 * negotiation already confirmed kitty support. A terminal that honors the
+	 * arming push but never answers the query would otherwise stay in kitty
+	 * mode while omp decodes plain keys.
+	 */
+	#popUnconfirmedKittyFrame(): void {
+		if (this.#kittyProtocolActive) return;
+		this.#popKittyFrame();
+	}
+
+	/** Pop omp's kitty frame off the terminal's stack. */
+	#popKittyFrame(): void {
+		if (!this.#kittyFramePushed) return;
+		this.#kittyFramePushed = false;
+		this.#kittyFlags = 0;
+		this.#safeWrite("\x1b[<u");
 	}
 
 	/**
@@ -2289,7 +2349,7 @@ export class ProcessTerminal implements Terminal {
 		if (this.#kittyProtocolActive) {
 			// Disable Kitty keyboard protocol first so any late key releases
 			// do not generate new Kitty escape sequences.
-			this.#safeWrite("\x1b[<u");
+			this.#popKittyFrame();
 			this.#kittyProtocolActive = false;
 			setKittyProtocolActive(false);
 		}
@@ -2432,9 +2492,11 @@ export class ProcessTerminal implements Terminal {
 		this.#reportedColumns = undefined;
 		this.#reportedRows = undefined;
 
-		// Disable Kitty keyboard protocol if not already done by drainInput()
+		// Disable Kitty keyboard protocol if not already done by drainInput().
+		// The negotiation may also have been torn down before it confirmed
+		// kitty support, leaving the arming frame on the terminal's stack.
+		this.#popKittyFrame();
 		if (this.#kittyProtocolActive) {
-			this.#safeWrite("\x1b[<u");
 			this.#kittyProtocolActive = false;
 			setKittyProtocolActive(false);
 		}
