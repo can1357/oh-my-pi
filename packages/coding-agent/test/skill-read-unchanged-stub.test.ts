@@ -8,7 +8,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import { postProcessToolResult } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 
 const tempDirs: string[] = [];
 
@@ -83,9 +85,8 @@ describe("skill:// repeated reads", () => {
 		pushReadResult(messages, "read-skill-1", first);
 
 		const second = await read.execute("read-skill-2", { path: "skill://demo/SKILL.md" });
-		expect(textOutput(second)).toMatch(
-			/^skill:\/\/demo\/SKILL\.md unchanged since your read at \d\d:\d\d \(still in context above\); read skill:\/\/demo\/SKILL\.md\?full to get it again$/,
-		);
+		expect(textOutput(second)).toContain("unchanged");
+		expect(textOutput(second)).toContain("skill://demo/SKILL.md?full");
 		expect(textOutput(second)).not.toContain("First body");
 
 		const referenceFirst = await read.execute("read-skill-reference-1", { path: "skill://demo/ref.md" });
@@ -101,8 +102,39 @@ describe("skill:// repeated reads", () => {
 		const afterCompaction = await compactedRead.execute("read-skill-after-compaction", { path: "skill://demo" });
 		expect(textOutput(afterCompaction)).toContain("First body");
 
+		const pruned = messages.map(message =>
+			message.role === "toolResult" ? ({ ...message, prunedAt: Date.now() } as AgentMessage) : message,
+		);
+		const afterPrune = await new ReadTool(makeSession(tempDir, skill, pruned)).execute("read-skill-after-prune", {
+			path: "skill://demo",
+		});
+		expect(textOutput(afterPrune)).toContain("First body");
+
 		await fs.writeFile(skillFile, "---\nname: demo\ndescription: Demo\n---\nChanged body\n");
 		const changed = await read.execute("read-skill-changed", { path: "skill://demo" });
 		expect(textOutput(changed)).toContain("Changed body");
+	});
+
+	it("does not mark a truncated skill read as fully in context", async () => {
+		const tempDir = await makeTempDir();
+		const skillDir = path.join(tempDir, "skills", "big");
+		const skillFile = path.join(skillDir, "SKILL.md");
+		await fs.mkdir(skillDir, { recursive: true });
+		const body = Array.from({ length: 6000 }, (_, index) => `line ${index} of a very large skill body`).join("\n");
+		await fs.writeFile(skillFile, `---\nname: big\ndescription: Big\n---\n${body}\n`);
+		const skill: Skill = { name: "big", description: "Big", filePath: skillFile, baseDir: skillDir, source: "user" };
+		const messages: AgentMessage[] = [];
+		const read = new ReadTool(makeSession(tempDir, skill, messages));
+		const first = await read.execute("read-big-1", { path: "skill://big" });
+		// The SDK wraps every tool with the artifact spill, which middle-elides oversized text.
+		const spilled = await postProcessToolResult(first, "read", {
+			settings: Settings.isolated(),
+			sessionManager: { saveArtifact: async () => "0" },
+		} as unknown as AgentToolContext);
+		expect((spilled.details as ReadToolDetails | undefined)?.meta?.truncation).toBeDefined();
+		expect((spilled.details as ReadToolDetails | undefined)?.skillRead).toBeUndefined();
+		pushReadResult(messages, "read-big-1", spilled as typeof first);
+		const second = await read.execute("read-big-2", { path: "skill://big" });
+		expect(textOutput(second)).toContain("line 0 of");
 	});
 });

@@ -266,6 +266,8 @@ function findMatchingSkillRead(
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
 		if (message?.role !== "toolResult" || message.toolName !== "read" || message.isError) continue;
+		// Pruned/shaken results keep their details but no longer carry the text.
+		if (message.prunedAt !== undefined) continue;
 		const marker = (message.details as ReadToolDetails | undefined)?.skillRead;
 		if (
 			marker?.full === true &&
@@ -2397,7 +2399,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (firstText) firstText.text = `${provenance}\n${firstText.text}`;
 			else result.content.unshift({ type: "text", text: provenance });
 		}
-		if (skillRead) {
+		// Only a read that put the whole file in context may later be stubbed; a truncated page did not.
+		if (skillRead && !details.truncation && !details.meta?.truncation) {
 			details.skillRead = {
 				sourcePath: skillRead.sourcePath,
 				contentHash: skillRead.contentHash,
