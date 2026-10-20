@@ -48,9 +48,10 @@ async function readDetectStep(): Promise<string> {
  *
  * The fake Bun reports the fixture version for `--version` and hands every
  * other invocation to the real Bun, so the guard's own comparison decides the
- * outcome exactly as it would on a runner.
+ * outcome exactly as it would on a runner. `guardExit` pins the guard's answer
+ * to a fixed exit code, which shows who decides the setup.
  */
-async function runDetectStep(version: string, cwd: string = REPO_ROOT): Promise<SetupOutcome> {
+async function runDetectStep(version: string, cwd: string = REPO_ROOT, guardExit?: number): Promise<SetupOutcome> {
 	const script = await readDetectStep();
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bun-install-"));
 	try {
@@ -64,6 +65,16 @@ async function runDetectStep(version: string, cwd: string = REPO_ROOT): Promise<
 				"  printf '%s\\n' \"$FAKE_BUN_VERSION\"",
 				"  exit 0",
 				"fi",
+				"# The guard answers through its exit code; a fixture can pin it.",
+				'for arg in "$@"; do',
+				'  case "$arg" in',
+				"    *check-bun-floor.ts*)",
+				'      if [ -n "$FAKE_GUARD_EXIT" ]; then',
+				'        exit "$FAKE_GUARD_EXIT"',
+				"      fi",
+				"      ;;",
+				"  esac",
+				"done",
 				'exec "$FAKE_BUN_REAL" "$@"',
 				"",
 			].join("\n"),
@@ -79,6 +90,7 @@ async function runDetectStep(version: string, cwd: string = REPO_ROOT): Promise<
 				GITHUB_OUTPUT: outputFile,
 				FAKE_BUN_VERSION: version,
 				FAKE_BUN_REAL: process.execPath,
+				FAKE_GUARD_EXIT: guardExit === undefined ? "" : String(guardExit),
 			},
 			stdout: "pipe",
 			stderr: "pipe",
@@ -169,5 +181,34 @@ describe("check-bun-floor --satisfies", () => {
 		expect(await runGuard(["--satisfies", CANARY_FLOOR])).toBe(1);
 		expect(await runGuard(["--satisfies"])).toBe(2);
 		expect(await runGuard(["--unknown-flag", FLOOR])).toBe(2);
+	});
+});
+
+describe("bun-install setup probe", () => {
+	// AGENTS.md bans inline imports, so the probe must reach the floor guard
+	// through its CLI instead of pulling it in with a runtime `await import()`
+	// inside a `bun -e` module — the very form the repo forbids.
+	test("never loads the floor guard through a dynamic import", async () => {
+		const action = await Bun.file(ACTION_FILE).text();
+		expect(action).not.toMatch(/\bimport\s*\(/);
+	});
+
+	// The ordering belongs to the guard: runner setup and the `check:types`
+	// gate have to agree on one comparison, so the setup follows the guard's
+	// answer. A probe that compared versions itself would answer the opposite
+	// of the guard for both fixtures below.
+	test("follows the floor guard's answer instead of comparing versions itself", async () => {
+		const accepted = await runDetectStep(BELOW_FLOOR, REPO_ROOT, 0);
+		expect(accepted.exitCode).toBe(0);
+		expect(accepted.outputs.setup_bun).toBe("false");
+
+		const rejected = await runDetectStep(ABOVE_FLOOR, REPO_ROOT, 1);
+		expect(rejected.exitCode).toBe(0);
+		expect(rejected.outputs.setup_bun).toBe("true");
+
+		// A guard that cannot answer is not a pass: the setup installs Bun.
+		const broken = await runDetectStep(ABOVE_FLOOR, REPO_ROOT, 2);
+		expect(broken.exitCode).toBe(0);
+		expect(broken.outputs.setup_bun).toBe("true");
 	});
 });
