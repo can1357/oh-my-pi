@@ -519,18 +519,17 @@ describe("IRC body wrapping", () => {
 				waited: { id: "1", from: "Peer", to: "Main", body: longLine, ts: Date.now() },
 			},
 		};
-		const component = waitToolRenderer.renderResult(
-			result,
-			{ expanded: true, isPartial: false },
-			theme,
-		);
+		const component = waitToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme);
 		const lines = component.render(120) as readonly string[];
 		const stripped = lines.map(line => Bun.stripANSI(line));
 		const bodyLines = stripped.filter(line => line.includes("word"));
 		// A 200-char line wraps to multiple lines at the card width
 		expect(bodyLines.length).toBeGreaterThanOrEqual(2);
 		// Full content preserved across the wrap
-		const words = bodyLines.join(" ").split(/\s+/).filter(w => w === "word");
+		const words = bodyLines
+			.join(" ")
+			.split(/\s+/)
+			.filter(w => w === "word");
 		expect(words).toHaveLength(40);
 	});
 
@@ -543,11 +542,7 @@ describe("IRC body wrapping", () => {
 				waited: { id: "1", from: "Peer", to: "Main", body, ts: Date.now() },
 			},
 		};
-		const component = waitToolRenderer.renderResult(
-			result,
-			{ expanded: false, isPartial: false },
-			theme,
-		);
+		const component = waitToolRenderer.renderResult(result, { expanded: false, isPartial: false }, theme);
 		const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
 		expect(output).toContain("+2 more lines");
 		expect(output).toContain("Expand");
@@ -562,11 +557,7 @@ describe("IRC body wrapping", () => {
 				waited: { id: "1", from: "Peer", to: "Main", body: longLine, ts: Date.now() },
 			},
 		};
-		const component = waitToolRenderer.renderResult(
-			result,
-			{ expanded: true, isPartial: false },
-			theme,
-		);
+		const component = waitToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme);
 		const lines = component.render(120) as readonly string[];
 		const rawJoined = lines.join("\n");
 		// ANSI codes preserved in raw output
@@ -580,16 +571,15 @@ describe("IRC body wrapping", () => {
 
 	it("soft-wraps a long body in an expanded IRC message card", () => {
 		const longLine = "word ".repeat(40).trim();
-		const component = createIrcMessageCard(
-			{ kind: "incoming", from: "Peer", body: longLine },
-			() => true,
-			theme,
-		);
+		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body: longLine }, () => true, theme);
 		const lines = component.render(120) as readonly string[];
 		const stripped = lines.map(line => Bun.stripANSI(line));
 		const bodyLines = stripped.filter(line => line.includes("word"));
 		expect(bodyLines.length).toBeGreaterThanOrEqual(2);
-		const words = bodyLines.join(" ").split(/\s+/).filter(w => w === "word");
+		const words = bodyLines
+			.join(" ")
+			.split(/\s+/)
+			.filter(w => w === "word");
 		expect(words).toHaveLength(40);
 	});
 });
