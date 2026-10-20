@@ -643,7 +643,6 @@ impl GitRepo {
 				));
 			}
 		}
-		let dest = resolve_destination(path);
 		let head = if options.detach {
 			id.to_hex().to_string()
 		} else {
@@ -683,6 +682,7 @@ impl GitRepo {
 		};
 		let mut clone_error = None;
 		if let Some(preferred) = preferred {
+			let candidates = pi_iso::clone_candidates(preferred);
 			// A clone copies the source tree verbatim, so a destination inside it
 			// would be copied into itself (recursing until the path is too long)
 			// and would drag nested worktrees' `.git` pointers along. Only the
@@ -692,13 +692,14 @@ impl GitRepo {
 			// unavailable backend and fall back to that plain checkout.
 			let source_root = fs::canonicalize(self.root())
 				.map_err(|e| Error::backend("git worktree add", format!("canonicalize source: {e}")))?;
-			if dest != source_root && dest.starts_with(&source_root) {
+			if rejects_destination_inside_source(&candidates, path, &source_root) {
 				return Err(Error::backend(
 					"git worktree add",
-					"destination is inside the source checkout",
+					"destination is inside the source checkout; set worktree.clone=false to check out \
+					 in place",
 				));
 			}
-			for kind in pi_iso::clone_candidates(preferred) {
+			for kind in candidates {
 				match self.worktree_add_cloned(path, id, &head, kind, options.keep_changes) {
 					Ok(()) => {
 						return Ok(WorktreeAddResult { cloned_with: Some(kind), clone_error });
@@ -800,7 +801,7 @@ impl GitRepo {
 			.clone_tree(self.root(), path, &[OsStr::new(".git")])
 			.map_err(|err| Error::backend("git worktree add", err))?;
 		let admin = register_worktree(path, &self.info().common_dir, head)?;
-		remove_nested_git_files(path)?;
+		remove_nested_git_files(path, &self.info().common_dir)?;
 		fs::copy(&source_index, admin.join("index"))?;
 
 		let (dirty_tracked, _) = collect_clone_reconciliation_paths(&repo)?;
@@ -1962,12 +1963,14 @@ fn remove_existing(path: &Path) -> Result<()> {
 	Ok(())
 }
 
-/// Remove `.git` files/directories found below `root` (excluding `root`
-/// itself). After a clone, nested worktrees' `.git` files are copied along —
-/// they still point at the original worktree's metadata, creating a dangerous
-/// second checkout that shares state with the source. The root `.git` is
-/// written by `register_worktree` and is not affected.
-fn remove_nested_git_files(root: &Path) -> Result<()> {
+/// Remove nested `.git` pointer files that point into `common`, the metadata
+/// directory of the repository being cloned. After a clone, nested worktrees'
+/// `.git` files are copied along — they still point at the original
+/// worktree's metadata, creating a dangerous second checkout that shares
+/// state with the source. A nested repository's own `.git` directory is
+/// self-contained and stays, and so does a pointer into another repository.
+/// The root `.git` is written by `register_worktree` and is not affected.
+fn remove_nested_git_files(root: &Path, common: &Path) -> Result<()> {
 	let mut dirs = vec![root.to_path_buf()];
 	while let Some(dir) = dirs.pop() {
 		let entries = fs::read_dir(&dir).map_err(|e| {
@@ -1981,9 +1984,15 @@ fn remove_nested_git_files(root: &Path) -> Result<()> {
 			let name = entry.file_name();
 			if name == OsStr::new(".git") {
 				// Skip the root `.git` — it was written by register_worktree
-				// and belongs to this worktree. Only remove nested `.git` entries
-				// that were copied from the source's linked worktrees.
-				if path != root.join(".git") {
+				// and belongs to this worktree. Only remove nested `.git`
+				// pointers that were copied from the source's linked worktrees.
+				if path == root.join(".git") {
+					continue;
+				}
+				let ft = entry.file_type().map_err(|e| {
+					Error::backend("git worktree add", format!("file_type {}: {e}", path.display()))
+				})?;
+				if ft.is_file() && gitdir_points_into(&path, common) {
 					remove_existing(&path)?;
 				}
 			} else {
@@ -1997,6 +2006,66 @@ fn remove_nested_git_files(root: &Path) -> Result<()> {
 		}
 	}
 	Ok(())
+}
+
+/// Whether `path` is a `.git` pointer file whose `gitdir:` target lives inside
+/// `common`, the metadata directory of the repository being cloned. Such a
+/// pointer still refers to the source's worktree metadata and must not
+/// survive the clone; a pointer into another repository is the nested
+/// repository's own business and stays.
+fn gitdir_points_into(path: &Path, common: &Path) -> bool {
+	let Ok(content) = fs::read_to_string(path) else {
+		return false;
+	};
+	let Some(target) = content
+		.lines()
+		.next()
+		.map(str::trim)
+		.and_then(|line| line.strip_prefix("gitdir:"))
+	else {
+		return false;
+	};
+	let target = target.trim();
+	if target.is_empty() {
+		return false;
+	}
+	let target = Path::new(target);
+	let joined = if target.is_absolute() {
+		target.to_path_buf()
+	} else {
+		path.parent().unwrap_or_else(|| Path::new(".")).join(target)
+	};
+	let resolved = fs::canonicalize(&joined)
+		.map(|path| normalize_path(&path))
+		.unwrap_or_else(|_| {
+			let absolute = std::path::absolute(&joined).unwrap_or_else(|_| joined.clone());
+			normalize_path(&absolute)
+		});
+	let common = fs::canonicalize(common)
+		.map(|path| normalize_path(&path))
+		.unwrap_or_else(|_| normalize_path(common));
+	resolved.starts_with(&common)
+}
+
+/// Whether a worktree destination that lies inside the source checkout must
+/// be rejected.
+///
+/// A clone copies the source tree verbatim, so a destination inside the source
+/// would be copied into itself (recursing until the path is too long) and
+/// would drag nested worktrees' `.git` pointers along. Only the clone path
+/// recurses: a plain checkout writes the target tree in place and is safe —
+/// an in-tree worktree is legitimate (omp's own `.worktrees/`) — so the
+/// destination is only rejected when a clone backend can actually run.
+fn rejects_destination_inside_source(
+	candidates: &[pi_iso::BackendKind],
+	path: &Path,
+	source_root: &Path,
+) -> bool {
+	if candidates.is_empty() {
+		return false;
+	}
+	let dest = resolve_destination(path);
+	dest.as_path() != source_root && dest.starts_with(source_root)
 }
 
 /// Absolute, symlink-resolved form of a destination that does not exist yet:
@@ -2013,14 +2082,19 @@ fn resolve_destination(path: &Path) -> PathBuf {
 			for part in suffix.iter().rev() {
 				out.push(part);
 			}
-			return out;
+			// The tail does not exist yet, so `canonicalize` cannot collapse a
+			// `..` that follows a missing component (`missing/../repo/child`
+			// stays spelled out and no longer looks like the source's child).
+			// Collapse it lexically instead, so the verdict cannot flip on the
+			// presence of an unrelated sibling directory.
+			return normalize_path(&out);
 		}
 		match (current.parent(), current.file_name()) {
 			(Some(parent), Some(name)) => {
 				suffix.push(name.to_os_string());
 				current = parent;
 			},
-			_ => return absolute,
+			_ => return normalize_path(&absolute),
 		}
 	}
 }
@@ -3284,80 +3358,150 @@ mod tests {
 		git(temp.path(), &["branch", "target"]);
 		let nested_dest = temp.path().join("nested-dest");
 		let _ = fs::remove_dir_all(&nested_dest);
-		// When clone is available, a destination inside the source must be
-		// rejected — otherwise the clone recurses into itself or copies
-		// nested worktrees. When no clone backend exists on this host the
-		// plain checkout succeeds, so we only assert the rejection when the
-		// clone path was attempted.
-		let clone_works = clone_works_on(temp.path());
-		if clone_works {
-			let result = repo.worktree_add(&nested_dest, "target", WorktreeAddOptions {
+		// The destination-inside-source policy does not depend on a clone
+		// backend being usable on this host: it is a policy decision about
+		// the destination, so it is asserted unconditionally.
+		let error = repo
+			.worktree_add(&nested_dest, "target", WorktreeAddOptions {
 				detach:       false,
 				clone:        WorktreeClone::Auto,
 				keep_changes: false,
-			});
-			assert!(result.is_err(), "destination inside source must be rejected: {result:?}");
-			assert!(!nested_dest.exists());
-		}
+			})
+			.expect_err("a destination inside the source must be rejected");
+		assert!(error.to_string().contains("inside the source"), "{error}");
+		assert!(!nested_dest.exists(), "the rejected destination must not be created");
 		let _ = fs::remove_dir_all(&nested_dest);
 	}
 
 	#[test]
-	fn clone_first_worktree_removes_nested_git_files() {
+	fn clone_first_worktree_rejects_destination_inside_source_behind_a_missing_component() {
 		let (temp, repo) = fixture();
-		// The assertion below requires the clone path. `worktree_add` silently
-		// falls back to a plain checkout when no backend can clone this
-		// filesystem (e.g. tmpfs without FICLONE), so skip rather than assert
-		// against a fallback that never reaches remove_nested_git_files.
-		if !clone_works_on(temp.path()) {
-			return;
-		}
 		git(temp.path(), &["branch", "target"]);
-		// Create a nested worktree inside the source so the clone would
-		// copy its `.git` file.
-		let inner = temp.path().join(".worktrees/inner");
-		let _ = fs::remove_dir_all(&inner);
-		// Detached: `main` is checked out in the source root, and worktree_add
-		// rejects a second non-detached checkout of the same branch.
-		repo
-			.worktree_add(&inner, "main", WorktreeAddOptions {
-				detach:       true,
-				clone:        WorktreeClone::Off,
-				keep_changes: false,
-			})
-			.unwrap();
-		assert!(inner.join(".git").exists());
-
-		// `std::path::absolute` keeps the literal `..` component, so the
-		// destination-inside-source check would reject the clone and the test
-		// would never reach remove_nested_git_files. Normalize the sibling path.
-		let linked = normalize_path(&temp.path().join("../linked-nested-cleanup"));
-		let _ = fs::remove_dir_all(&linked);
-		let result = repo
-			.worktree_add(&linked, "target", WorktreeAddOptions {
+		// `missing` does not exist, so the destination can only be resolved by
+		// canonicalizing the nearest existing ancestor and collapsing the
+		// remaining tail lexically. Without that collapse the destination
+		// hides inside the source and the clone recurses into itself.
+		let nested_dest = temp.path().join("missing/../nested-dest");
+		let _ = fs::remove_dir_all(temp.path().join("nested-dest"));
+		let error = repo
+			.worktree_add(&nested_dest, "target", WorktreeAddOptions {
 				detach:       false,
 				clone:        WorktreeClone::Auto,
 				keep_changes: false,
 			})
+			.expect_err("a destination inside the source must be rejected");
+		assert!(error.to_string().contains("inside the source"), "{error}");
+		assert!(
+			!temp.path().join("nested-dest").exists(),
+			"the rejected destination must not be created"
+		);
+		let _ = fs::remove_dir_all(temp.path().join("nested-dest"));
+		let _ = fs::remove_dir_all(temp.path().join("missing"));
+	}
+
+	#[test]
+	fn resolve_destination_collapses_a_parent_after_a_missing_component() {
+		let (temp, _repo) = fixture();
+		let base = fs::canonicalize(temp.path()).unwrap();
+		let source = base.join("repo");
+		fs::create_dir_all(&source).unwrap();
+
+		assert_eq!(resolve_destination(&base.join("child")), base.join("child"));
+		assert_eq!(resolve_destination(&base.join("repo/../child")), base.join("child"));
+		// The `..` follows a component that does not exist, so only a lexical
+		// collapse can resolve it.
+		assert_eq!(resolve_destination(&base.join("missing/../repo/child")), base.join("repo/child"));
+		// The same path must not change its meaning once an unrelated sibling
+		// directory happens to exist.
+		fs::create_dir_all(base.join("missing")).unwrap();
+		assert_eq!(resolve_destination(&base.join("missing/../repo/child")), base.join("repo/child"));
+		assert_eq!(
+			resolve_destination(&base.join("../outside")),
+			base.parent().unwrap().join("outside")
+		);
+	}
+
+	#[test]
+	fn remove_nested_git_files_strips_only_pointers_into_this_repository() {
+		let (temp, repo) = fixture();
+		let root = temp.path().join("clone-target");
+		// The root `.git` belongs to the new worktree itself. It points into
+		// this repository's metadata like every other worktree pointer, but
+		// it must survive: it is the new worktree's own link.
+		fs::create_dir_all(&root).unwrap();
+		let root_admin = repo.info().common_dir.join("worktrees/root");
+		fs::create_dir_all(&root_admin).unwrap();
+		fs::write(root.join(".git"), format!("gitdir: {}\n", root_admin.display())).unwrap();
+		// A nested worktree of this repository: its `.git` file points into
+		// this repository's metadata and must not survive the clone.
+		let nested = root.join(".worktrees/inner");
+		fs::create_dir_all(&nested).unwrap();
+		let admin = repo.info().common_dir.join("worktrees/inner");
+		fs::create_dir_all(&admin).unwrap();
+		fs::write(nested.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+		// A nested independent repository: its `.git` is a self-contained
+		// directory and must survive.
+		let independent = root.join("vendor");
+		fs::create_dir_all(independent.join(".git")).unwrap();
+		fs::write(independent.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+		// A nested worktree of another repository: a pointer file that leaves
+		// this repository and must survive.
+		let external = root.join("external");
+		fs::create_dir_all(&external).unwrap();
+		fs::write(external.join(".git"), "gitdir: /elsewhere/other/.git/worktrees/x\n").unwrap();
+
+		remove_nested_git_files(&root, &repo.info().common_dir).unwrap();
+
+		assert!(root.join(".git").exists(), "the root .git belongs to the new worktree");
+		assert!(
+			!nested.join(".git").exists(),
+			"a pointer into this repository's metadata must be removed"
+		);
+		assert!(
+			independent.join(".git").is_dir(),
+			"a nested repository's own .git directory must survive"
+		);
+		assert!(external.join(".git").exists(), "a pointer into another repository must survive");
+	}
+
+	#[test]
+	fn destination_inside_source_is_rejected_only_when_a_clone_backend_can_run() {
+		let (temp, _repo) = fixture();
+		let source_root = fs::canonicalize(temp.path()).unwrap();
+		let inside = source_root.join("wt");
+		let outside = source_root.parent().unwrap().join("wt");
+		let backend = [pi_iso::BackendKind::LinuxReflink];
+
+		assert!(rejects_destination_inside_source(&backend, &inside, &source_root));
+		assert!(
+			!rejects_destination_inside_source(&[], &inside, &source_root),
+			"without a clone backend the plain checkout in place is safe"
+		);
+		assert!(!rejects_destination_inside_source(&backend, &outside, &source_root));
+		assert!(!rejects_destination_inside_source(&backend, &source_root, &source_root));
+	}
+
+	#[test]
+	fn worktree_add_without_clone_checks_out_in_place_inside_the_source() {
+		let (temp, repo) = fixture();
+		git(temp.path(), &["branch", "target"]);
+		let nested_dest = temp.path().join("nested-dest");
+		let _ = fs::remove_dir_all(&nested_dest);
+		// The remedy the rejection names: with cloning off, no tree is copied,
+		// so an in-tree destination is checked out in place like real git does.
+		let result = repo
+			.worktree_add(&nested_dest, "target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
 			.unwrap();
-		// `worktree_add` falls back to a plain checkout whenever no backend can
-		// clone this tree (unsupported filesystem, or a source tree the reflink
-		// walk rejects). The cleanup contract only exists on the clone path, so
-		// assert it there and skip the fallback.
-		if result.cloned_with.is_none() {
-			let _ = repo.worktree_remove(&inner, true);
-			let _ = repo.worktree_remove(&linked, true);
-			return;
-		}
-		{
-			// After a successful clone, the nested `.git` must be removed
-			// so the copy doesn't share state with the source worktree.
-			assert!(
-				!linked.join(".worktrees/inner/.git").exists(),
-				"nested .git must be removed after clone"
-			);
-		}
-		let _ = repo.worktree_remove(&inner, true);
-		let _ = repo.worktree_remove(&linked, true);
+		assert!(result.cloned_with.is_none());
+		assert!(nested_dest.join("a").exists(), "the plain checkout must materialize the tree");
+		assert_eq!(
+			git(&nested_dest, &["rev-parse", "HEAD"]),
+			git(temp.path(), &["rev-parse", "target"])
+		);
+		let _ = repo.worktree_remove(&nested_dest, true);
 	}
 }
