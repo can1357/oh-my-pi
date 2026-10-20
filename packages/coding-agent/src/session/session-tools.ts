@@ -161,6 +161,8 @@ interface SessionToolsOptions {
 	mcpManagerToolNames?: Iterable<string>;
 	ensureWriteRegistered?: () => Promise<boolean>;
 	isDeviceOnlyWrite?: () => boolean;
+	/** True when `write` is only the agent:// reply transport of a read-only agent. */
+	isAgentOnlyWrite?: () => boolean;
 	setDeviceOnlyWrite?: (enabled: boolean) => void;
 	setPendingFullWriteDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
@@ -455,6 +457,7 @@ export class SessionTools {
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
 	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];
 	#isDeviceOnlyWrite: SessionToolsOptions["isDeviceOnlyWrite"];
+	#isAgentOnlyWrite: SessionToolsOptions["isAgentOnlyWrite"];
 	#setDeviceOnlyWrite: SessionToolsOptions["setDeviceOnlyWrite"];
 	#setPendingFullWriteDescription: SessionToolsOptions["setPendingFullWriteDescription"];
 	/**
@@ -503,6 +506,7 @@ export class SessionTools {
 		this.#presentationPinnedToolNames = options.presentationPinnedToolNames;
 		this.#ensureWriteRegistered = options.ensureWriteRegistered;
 		this.#isDeviceOnlyWrite = options.isDeviceOnlyWrite;
+		this.#isAgentOnlyWrite = options.isAgentOnlyWrite;
 		this.#deviceOnlyWriteTransportAvailable = this.#isDeviceOnlyWrite?.() === true;
 		this.#setDeviceOnlyWrite = options.setDeviceOnlyWrite;
 		this.#setPendingFullWriteDescription = options.setPendingFullWriteDescription;
@@ -1336,7 +1340,10 @@ export class SessionTools {
 
 		const pinnedWrite = isPresentationPinned("write");
 		const activeDeferrableTool = tools.some(tool => tool.deferrable === true);
-		const transportNeeded = mountNames.size > 0 || activeDeferrableTool || this.#host.planModeEnabled();
+		// A read-only agent's agent:// reply transport is needed for as long as the session lives, not just at startup.
+		const agentReplyTransport = this.#isAgentOnlyWrite?.() === true && this.#isDeviceOnlyWrite?.() === true;
+		const transportNeeded =
+			mountNames.size > 0 || activeDeferrableTool || this.#host.planModeEnabled() || agentReplyTransport;
 		if (transportNeeded && !builtInWriteAvailable) {
 			const writeRegistration = this.#ensureWriteRegistered?.();
 			builtInWriteAvailable = writeRegistration ? (await untilAborted(signal, writeRegistration)) === true : false;
@@ -2153,7 +2160,8 @@ export class SessionTools {
 			this.#presentationPinnedToolNames?.has("write") !== true &&
 			this.#runtimeSelectedToolNames?.has("write") !== true &&
 			((this.#host.planModeEnabled() && (!writeSelected || deviceOnlyWriteActive)) ||
-				(writeSelected && deviceOnlyWriteActive && (retainedMountedDevice || retainedDeferrableTool)));
+				(writeSelected && deviceOnlyWriteActive && (retainedMountedDevice || retainedDeferrableTool)) ||
+				(!writeSelected && deviceOnlyWriteActive && this.#isAgentOnlyWrite?.() === true));
 		const previousRuntimeSelectedToolNames = this.#runtimeSelectedToolNames;
 		this.#runtimeSelectedToolNames = new Set(
 			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),

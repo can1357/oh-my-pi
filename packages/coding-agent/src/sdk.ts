@@ -4603,7 +4603,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// A read-only agent's synthetic agent:// `write` (see createTools) is the
 		// reply transport: it must be active even though the explicit list omits it.
-		if (toolSession.agentOnlyWrite === true && toolRegistry.has("write") && !initialToolNames.includes("write")) {
+		// Only the native tool qualifies: an extension replacement of `write` is not gated by agentOnlyWrite.
+		if (
+			toolSession.agentOnlyWrite === true &&
+			builtInRegistryToolNames.has("write") &&
+			toolRegistry.has("write") &&
+			!initialToolNames.includes("write")
+		) {
 			initialToolNames.push("write");
 		}
 
@@ -5177,6 +5183,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,
 			isDeviceOnlyWrite: () => toolSession.deviceOnlyWrite === true,
+			isAgentOnlyWrite: () => toolSession.agentOnlyWrite === true,
 			setDeviceOnlyWrite: enabled => {
 				toolSession.deviceOnlyWrite = enabled ? true : undefined;
 			},

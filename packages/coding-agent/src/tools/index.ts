@@ -943,7 +943,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// Restricted sessions own an exact capability list and never get the grant.
 	if (requestedTools !== undefined && !restrictToolNames) {
 		const declaredTools = toolNames === undefined ? undefined : normalizeToolNames(toolNames);
-		const agentOnly = !requestedTools.includes("write") && isReadOnlyToolNames(declaredTools);
+		// Without peer messaging `agent://` writes are rejected, so there is nothing to grant.
+		const messagingAvailable = session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0);
+		const agentOnly = !requestedTools.includes("write") && isReadOnlyToolNames(declaredTools) && messagingAvailable;
 		session.agentOnlyWrite = agentOnly ? true : undefined;
 		if (agentOnly) {
 			session.deviceOnlyWrite = true;

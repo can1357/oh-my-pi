@@ -126,6 +126,14 @@ describe("read-only agent reply via write agent://", () => {
 		expect(session.agentOnlyWrite).toBe(true);
 	});
 
+	it("grants nothing when peer messaging is disabled, since agent:// writes would all be rejected", async () => {
+		const session = { ...readOnlySession(), enableIrc: false } as ToolSession;
+		const tools = await createTools(session, [...READ_ONLY_AGENT_TOOLS]);
+		expect(tools.map(tool => tool.name)).not.toContain("write");
+		expect(session.agentOnlyWrite).toBeUndefined();
+		expect(session.deviceOnlyWrite).toBeUndefined();
+	});
+
 	it("does not mount write for a list with a mutating tool", async () => {
 		const tools = await createTools(readOnlySession(), ["read", "bash"]);
 		expect(tools.map(tool => tool.name)).not.toContain("write");

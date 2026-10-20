@@ -1857,11 +1857,12 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
-			toolNames: ["read"],
+			// A list with a mutating tool is not a read-only agent, so no agent:// reply grant applies.
+			toolNames: ["read", "edit"],
 		});
 
 		try {
-			await session.setActiveToolsByName(["read"]);
+			await session.setActiveToolsByName(["read", "edit"]);
 			expect(session.getActiveToolNames()).not.toContain("write");
 		} finally {
 			await session.dispose();
@@ -1891,6 +1892,27 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(full?.description).not.toContain("limited to");
 			await full!.execute("runtime-full-write-2", { path: filePath, content: "ok\n" });
 			expect(await Bun.file(filePath).text()).toBe("ok\n");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps the agent:// reply write through runtime tool re-application without widening it", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "grep"],
+		});
+
+		try {
+			await session.setActiveToolsByName(["read", "grep"]);
+			await session.refreshMCPTools([]);
+			expect(session.getActiveToolNames()).toContain("write");
+			const write = session.getToolByName("write");
+			expect(write?.description).toContain("agent://");
+			await expect(
+				write!.execute("still-agent-only", { path: path.join(tempDir, "nope.txt"), content: "x" }),
+			).rejects.toThrow("agent:// messages");
 		} finally {
 			await session.dispose();
 		}
