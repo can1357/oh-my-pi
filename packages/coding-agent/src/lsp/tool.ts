@@ -610,6 +610,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const [serverName, serverConfig] of servers) {
 				throwIfAborted(signal);
 				let client: LspClient;
+				// A server that never received the rename's checkouts answers without them.
+				let folderError: unknown;
 				try {
 					client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
 					// Per renamed file, both sides, not per directory: a rename can span checkouts.
@@ -620,7 +622,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							if (!byDir.has(path.dirname(filePath))) byDir.set(path.dirname(filePath), filePath);
 						}
 					}
-					await ensureWorkspaceFolders(client, [...byDir.values()], signal);
+					try {
+						await ensureWorkspaceFolders(client, [...byDir.values()], signal);
+					} catch (err) {
+						if (err instanceof ToolAbortError || signal?.aborted) throw err;
+						folderError = err;
+					}
 					if (isProjectAwareLspServer(serverConfig)) {
 						await waitForProjectLoaded(client, signal);
 					}
@@ -642,7 +649,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						signal,
 					)) as WorkspaceEdit | null;
 					respondingServers.add(serverName);
-					if (result && (result.changes || result.documentChanges)) {
+					if (folderError !== undefined) {
+						// Its edits leave out the checkout it never loaded; method-not-found
+						// (below) means it has no rename edits to miss.
+						const msg = folderError instanceof Error ? folderError.message : String(folderError);
+						serverNotes.push(`  ${serverName}: could not add the rename's checkout to its workspace: ${msg}`);
+						hardFailures.push(serverName);
+					} else if (result && (result.changes || result.documentChanges)) {
 						perServerEdits.push({ serverName, edit: result });
 					}
 				} catch (err) {

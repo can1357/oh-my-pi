@@ -4058,6 +4058,44 @@ describe("lsp regressions", () => {
 			}
 		});
 
+		it("aborts an applied rename whose checkout could not be added to a renaming server", async () => {
+			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-rename-folder-failed-");
+			try {
+				const { server, serverConfig } = useServer(FOLDER_CHANGES, (message, srv) => {
+					if (message.method !== "workspace/willRenameFiles") return false;
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { changes: {} } });
+					return true;
+				});
+				const client = await lspClient.getOrCreateClient(serverConfig, sessionRoot);
+				const stdin = client.proc.stdin;
+				const write = stdin.write.bind(stdin);
+				vi.spyOn(stdin, "write").mockImplementation((chunk: string | Uint8Array) => {
+					const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+					if (text.includes("workspace/didChangeWorkspaceFolders")) throw new Error("EPIPE");
+					return write(chunk);
+				});
+				const source = path.join(sessionRoot, "src", "target.py");
+				const dest = path.join(siblingRoot, "src", "moved.py");
+
+				const result = await new LspTool(makeLspSession(sessionRoot)).execute("rename-folder-failed", {
+					action: "rename_file",
+					file: source,
+					new_name: dest,
+				});
+
+				const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+				expect(text).toContain("aborted rename");
+				expect(text).toContain("EPIPE");
+				expect(server.received.some(message => message.method === "workspace/willRenameFiles")).toBe(true);
+				expect(fs.existsSync(source)).toBe(true);
+				expect(fs.existsSync(dest)).toBe(false);
+			} finally {
+				configCache.delete(sessionRoot);
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
 		it("retries ContentModified within the request's timeout and never re-runs a command", async () => {
 			const { tempDir, sessionRoot, siblingRoot } = await makeCheckouts("@omp-lsp-retry-bounds-");
 			try {
