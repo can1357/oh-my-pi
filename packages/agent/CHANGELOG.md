@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- Compaction and handoff oneshots now report every completed provider attempt through a new `onUsage` option, including provider-native compaction requests (V1 `/responses/compact`, streamed V2, and OpenAI-compatible chat-completions summarizers), attempts a transient retry replaced, responses the provider rejected, and attempts the provider billed but whose payload or stream ended unusable (an incomplete or failed V2 stream, a chat-completions response without content); a billed attempt that produced nothing usable is recorded as a failed request rather than a successful one ([#16468](https://github.com/can1357/oh-my-pi/pull/16468) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Compaction and handoff oneshots now report every completed provider attempt through a new `onUsage` option, including provider-native compaction requests (V1 `/responses/compact`, streamed V2, Anthropic's native compaction, and OpenAI-compatible chat-completions summarizers), attempts a transient retry replaced, responses the provider rejected, and attempts the provider billed but whose payload or stream ended unusable (an incomplete or failed V2 stream, an Anthropic compaction without a signed block, a handoff without a document, a chat-completions response without content); a billed attempt that produced nothing usable is recorded as a failed request rather than a successful one ([#16468](https://github.com/can1357/oh-my-pi/pull/16468) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Enabled native compaction for supported Bedrock Claude models ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 
 ## [18.12.3] - 2026-10-19

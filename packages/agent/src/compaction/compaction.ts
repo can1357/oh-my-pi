@@ -38,7 +38,6 @@ import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messag
 import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
-import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -47,6 +46,7 @@ import { ThinkingLevel } from "../thinking";
 import { Tokenizer } from "../tokenizer";
 import type { AgentMessage } from "../types";
 import {
+	anthropicCompactionRejection,
 	buildAnthropicCompactionInstructions,
 	findAnthropicCompactionCut,
 	getPreservedAnthropicCompactionData,
@@ -82,7 +82,6 @@ import {
 	trimRemoteCompactionInputToContextWindow,
 	withOpenAiRemoteCompactionPreserveData,
 } from "./openai";
-import { type RemoteCompactionUsage } from "./remote-usage";
 import autoHandoffThresholdFocusPrompt from "./prompts/auto-handoff-threshold-focus.md" with { type: "text" };
 import compactionShortSummaryPrompt from "./prompts/compaction-short-summary.md" with { type: "text" };
 import compactionSummaryPrompt from "./prompts/compaction-summary.md" with { type: "text" };
@@ -90,6 +89,7 @@ import compactionTurnPrefixPrompt from "./prompts/compaction-turn-prefix.md" wit
 import compactionUpdateSummaryPrompt from "./prompts/compaction-update-summary.md" with { type: "text" };
 import handoffDocumentPrompt from "./prompts/handoff-document.md" with { type: "text" };
 import snapcompactArchiveContextPrompt from "./prompts/snapcompact-archive-context.md" with { type: "text" };
+import { compactionUsageObserver, type CompactionRequestUsage, reportRemoteCompactionUsage } from "./usage-reporter";
 
 import {
 	computeFileLists,
@@ -181,89 +181,6 @@ export const COMPACTION_USAGE_PURPOSES = {
 	handoff: "compaction:handoff",
 	remote: "compaction:remote",
 } as const;
-
-/**
- * Billing metadata for one completed compaction-side provider request.
- *
- * Reported for every attempt the provider billed — including attempts a
- * transient retry discarded and responses the provider rejected.
- */
-export type CompactionRequestUsage = Pick<
-	AssistantMessage,
-	"api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
-> & { purpose: string };
-
-/** Extract the billing fields of one completed compaction-side provider request. */
-export function compactionRequestUsage(response: AssistantMessage, purpose: string): CompactionRequestUsage {
-	return {
-		purpose,
-		api: response.api,
-		provider: response.provider,
-		model: response.model,
-		usage: response.usage,
-		stopReason: response.stopReason,
-		errorMessage: response.errorMessage,
-	};
-}
-
-/**
- * Build the per-attempt observer for one compaction-side request kind.
- *
- * Returns `undefined` when the host does not track usage, so the oneshot keeps
- * its zero-overhead path.
- */
-function usageObserver(
-	options: { onUsage?: (usage: CompactionRequestUsage) => void } | undefined,
-	purpose: string,
-): ((response: AssistantMessage) => void) | undefined {
-	if (!options?.onUsage) return undefined;
-	return response => options.onUsage?.(compactionRequestUsage(response, purpose));
-}
-
-/**
- * Report one remote compaction request to the host's usage observer.
- *
- * A provider-native compaction request never goes through a summarization
- * oneshot, so without this the session ledger would omit what the provider
- * billed. The attempt is billed as soon as the provider reports its usage —
- * including an attempt whose payload is later rejected.
- *
- * `failure` names the reason an attempt produced nothing usable. The record
- * is then stored as a failed request rather than a successful one, so a
- * rejected compaction stays distinguishable from a working one in the
- * session's request log.
- */
-function reportRemoteCompactionUsage(
-	options: { onUsage?: (usage: CompactionRequestUsage) => void } | undefined,
-	model: Model,
-	reported: RemoteCompactionUsage | undefined,
-	purpose: string,
-	failure?: string,
-): void {
-	if (!options?.onUsage || !reported) return;
-	// The Responses API counts cached input inside `input_tokens`; the ledger
-	// bills it as a cache read (see calculateOpenAIUsageAccounting).
-	const cacheRead = reported.cachedInputTokens ?? 0;
-	const usage: Usage = {
-		input: Math.max(0, reported.inputTokens - cacheRead),
-		output: reported.outputTokens,
-		cacheRead,
-		cacheWrite: 0,
-		totalTokens: reported.totalTokens,
-		...(reported.reasoningOutputTokens !== undefined ? { reasoningTokens: reported.reasoningOutputTokens } : {}),
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-	calculateCost(model, usage);
-	options.onUsage({
-		purpose,
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage,
-		stopReason: failure === undefined ? "stop" : "error",
-		...(failure === undefined ? {} : { errorMessage: failure }),
-	});
-}
 
 // ============================================================================
 // Types
@@ -1174,7 +1091,7 @@ async function summarizeConversationWindow(
 			oneshotKind: "compaction_summary",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
-			onAttemptCompleted: usageObserver(options, COMPACTION_USAGE_PURPOSES.summary),
+			onAttemptCompleted: compactionUsageObserver(options, COMPACTION_USAGE_PURPOSES.summary),
 		},
 	);
 
@@ -1258,6 +1175,22 @@ export interface HandoffFromContextOptions {
 }
 
 /**
+ * Why a billed handoff request produced no document, or undefined when it did.
+ *
+ * A handoff response without text leaves the host without a document: it
+ * discards the handoff and the request still cost tokens, so the attempt is
+ * recorded as a failed request rather than a successful one.
+ */
+export function handoffRejection(response: AssistantMessage): string | undefined {
+	const text = response.content
+		.filter((c): c is { type: "text"; text: string } => c.type === "text")
+		.map(c => c.text)
+		.join("\n");
+	if (text.trim().length > 0) return undefined;
+	return "Handoff generation produced no content";
+}
+
+/**
  * Run the handoff oneshot against a fully-built provider {@link Context}.
  *
  * The caller assembles `context` exactly like a live agent turn — same system
@@ -1285,7 +1218,7 @@ export async function generateHandoffFromContext(
 		oneshotKind: "handoff",
 		completeImpl: options.completeImpl,
 		retry: {},
-		onAttemptCompleted: usageObserver(options, COMPACTION_USAGE_PURPOSES.handoff),
+		onAttemptCompleted: compactionUsageObserver(options, COMPACTION_USAGE_PURPOSES.handoff, handoffRejection),
 	});
 	if (response.stopReason === "error" && shouldRetryHandoffWithAutoToolChoice(response)) {
 		response = await instrumentedCompleteSimple(
@@ -1297,7 +1230,7 @@ export async function generateHandoffFromContext(
 				oneshotKind: "handoff",
 				completeImpl: options.completeImpl,
 				retry: {},
-				onAttemptCompleted: usageObserver(options, COMPACTION_USAGE_PURPOSES.handoff),
+				onAttemptCompleted: compactionUsageObserver(options, COMPACTION_USAGE_PURPOSES.handoff, handoffRejection),
 			},
 		);
 	}
@@ -1423,7 +1356,7 @@ async function generateShortSummary(
 			oneshotKind: "compaction_short_summary",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
-			onAttemptCompleted: usageObserver(options, COMPACTION_USAGE_PURPOSES.shortSummary),
+			onAttemptCompleted: compactionUsageObserver(options, COMPACTION_USAGE_PURPOSES.shortSummary),
 		},
 	);
 
@@ -2338,7 +2271,11 @@ export async function compact(
 					retry: summaryOneshotRetry(summaryOptions),
 					// The provider wrote the summary, but the request was still
 					// billed: report it like any other summary attempt.
-					onAttemptCompleted: usageObserver(summaryOptions, COMPACTION_USAGE_PURPOSES.summary),
+					onAttemptCompleted: compactionUsageObserver(
+						summaryOptions,
+						COMPACTION_USAGE_PURPOSES.summary,
+						anthropicCompactionRejection,
+					),
 				},
 			);
 			nativeSummary = remote.content;
@@ -2523,7 +2460,7 @@ async function generateTurnPrefixSummary(
 			oneshotKind: "compaction_turn_prefix",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
-			onAttemptCompleted: usageObserver(options, COMPACTION_USAGE_PURPOSES.turnPrefix),
+			onAttemptCompleted: compactionUsageObserver(options, COMPACTION_USAGE_PURPOSES.turnPrefix),
 		},
 	);
 

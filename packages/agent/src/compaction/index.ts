@@ -14,4 +14,5 @@ export * from "./pruning";
 export * from "./remote-usage";
 export * from "./shake";
 export * from "./transcript-tokens";
+export * from "./usage-reporter";
 export * from "./utils";
