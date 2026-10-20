@@ -275,43 +275,19 @@ describe("a read after a bash call in the same message", () => {
 		expect(text).not.toContain("old");
 	});
 
-	it("fetches a URL with a `;` in its query once, without waiting for bash", async () => {
+	it("fetches a web URL without waiting for bash", async () => {
 		const directory = await tempDirectory();
-		let requests = 0;
-		const server = Bun.serve({
-			hostname: "127.0.0.1",
-			port: 0,
-			fetch: () => {
-				requests++;
-				return new Response("page body", { headers: { "content-type": "text/plain" } });
-			},
-		});
+		const { server, requests } = pageServer();
 		try {
-			const session = {
-				...createSession(directory),
-				settings: Settings.isolated({
-					"async.enabled": false,
-					"bash.autoBackground.enabled": false,
-					"bashInterceptor.enabled": false,
-					"fetch.enabled": true,
-				}),
-				getArtifactsDir: () => path.join(directory, "artifacts"),
-				allocateOutputArtifact: async (toolType: string) => ({
-					id: "test",
-					path: path.join(directory, "artifacts", `test.${toolType}.log`),
-				}),
-			} as unknown as ToolSession;
-
-			const { text, isError, events } = await bashThenRead(
+			const { text, events } = await bashThenRead(
 				directory,
 				"true",
-				`http://127.0.0.1:${server.port}/x?a=1;b=2`,
-				session,
+				`http://127.0.0.1:${server.port}/x`,
+				fetchSession(directory),
 			);
 
-			expect(isError).toBe(false);
 			expect(text).toContain("page body");
-			expect(requests).toBe(1);
+			expect(requests.count).toBe(1);
 			const readEnd = events.findIndex(
 				event => event.type === "tool_execution_end" && event.toolCallId === "read-1",
 			);
@@ -323,7 +299,74 @@ describe("a read after a bash call in the same message", () => {
 			server.stop(true);
 		}
 	});
+
+	it("fetches a URL with a `;` in its query once", async () => {
+		const directory = await tempDirectory();
+		const { server, requests } = pageServer();
+		try {
+			const { text, isError } = await bashThenRead(
+				directory,
+				"true",
+				`http://127.0.0.1:${server.port}/x?a=1;b=2`,
+				fetchSession(directory),
+			);
+
+			expect(isError).toBe(false);
+			expect(text).toContain("page body");
+			expect(requests.count).toBe(1);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("splits a URL from a local file the bash command created in the same `;` list", async () => {
+		const directory = await tempDirectory();
+		const { server } = pageServer();
+		try {
+			const { text } = await bashThenRead(
+				directory,
+				"echo written-by-bash > generated.txt",
+				`http://127.0.0.1:${server.port}/page;generated.txt`,
+				fetchSession(directory),
+			);
+
+			expect(text).toContain("page body");
+			expect(text).toContain("written-by-bash");
+		} finally {
+			server.stop(true);
+		}
+	});
 });
+
+function pageServer() {
+	const requests = { count: 0 };
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		fetch: () => {
+			requests.count++;
+			return new Response("page body", { headers: { "content-type": "text/plain" } });
+		},
+	});
+	return { server, requests };
+}
+
+function fetchSession(directory: string): ToolSession {
+	return {
+		...createSession(directory),
+		settings: Settings.isolated({
+			"async.enabled": false,
+			"bash.autoBackground.enabled": false,
+			"bashInterceptor.enabled": false,
+			"fetch.enabled": true,
+		}),
+		getArtifactsDir: () => path.join(directory, "artifacts"),
+		allocateOutputArtifact: async (toolType: string) => ({
+			id: "test",
+			path: path.join(directory, "artifacts", `test.${toolType}.log`),
+		}),
+	} as unknown as ToolSession;
+}
 
 describe("a read beside an earlier writing call", () => {
 	it("stops waiting for that call when the read is aborted", async () => {
@@ -350,8 +393,8 @@ describe("a read beside an earlier writing call", () => {
 		);
 		controller.abort();
 
-		// Settles at all: a read that ignored its signal would wait for the call forever.
-		const [outcome] = await Promise.allSettled([read]);
-		expect(outcome.status).toBeDefined();
+		// A read that ignored its signal would wait for the call forever; one
+		// that skipped the wait would fulfill with the file.
+		await expect(read).rejects.toThrow(/^Aborted/);
 	});
 });
