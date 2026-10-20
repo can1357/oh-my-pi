@@ -639,28 +639,51 @@ describe("provider context image budgets", () => {
 
 	it("does not charge computer metadata screenshots on a route that sends only content", () => {
 		// Factory Claude takes the Messages wire, which sends a tool result's content and never its metadata.
+		const thumbnail = "p".repeat(1_000);
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
 			messages: Array.from({ length: 4 }, (_, index) =>
-				computerTurn(index, "A".repeat(1_000_000), [image("p".repeat(1_000))]),
+				computerTurn(index, "A".repeat(1_000_000), [image(thumbnail)]),
 			).flat(),
 		};
 		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
-		expect(clampProviderContextImageBytes(context, hosted)).toBe(context);
+		expect(imageData(clampProviderContextImageBytes(context, hosted))).toEqual(Array(4).fill(thumbnail));
 	});
 
 	it("keeps a computer screenshot that fits Anthropic's inline budget exactly", () => {
+		const screenshot = "A".repeat(1_000_000);
 		const fresh = "C".repeat(23_000_000);
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
 			messages: [
-				...computerTurn(0, "A".repeat(1_000_000)),
+				...computerTurn(0, screenshot),
 				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 3 },
 			],
 		};
-		expect(clampProviderContextImageBytes(context, ANTHROPIC_MODEL)).toBe(context);
+		expect(imageData(clampProviderContextImageBytes(context, ANTHROPIC_MODEL))).toEqual([screenshot, fresh]);
+	});
+
+	it("keeps a small computer screenshot on Factory's Responses route beside a large unsent content image", async () => {
+		// The Responses wire sends the 1 KB metadata screenshot; the 4 MB content image never travels, so this request
+		// carries about 1 MB of images, and the fresh image after it leaves no room to protect a 4 MB charge.
+		const screenshot = "A".repeat(1_000);
+		const fresh = "C".repeat(1_000_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: "use the computer", timestamp: 0 },
+				...computerTurn(0, screenshot, [image("B".repeat(4_000_000))]),
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 3 },
+			],
+		};
+		const hosted = factoryGptModel();
+		const body = await factoryRequestBody(hosted, clampProviderContextImageBytes(context, hosted));
+		expect(body).toContain(`data:image/png;base64,${screenshot}`);
+		expect(body).toContain(fresh);
+		expect(Buffer.byteLength(body)).toBeLessThan(1_100_000);
 	});
 
 	it("keeps a fresh Factory image that alone fits the route, evicting older ones instead", () => {

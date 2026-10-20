@@ -82,22 +82,26 @@ function sendsComputerScreenshotMetadata(model: Model): boolean {
 }
 
 /**
- * Inline bytes a computer result's metadata screenshot adds beyond its content images, or `undefined` when the
- * metadata holds no inline screenshot. The result stores its screenshot twice, as a content image and as
- * `providerMetadata.screenshot`; where the route sends the metadata copy (`metadataWire`, see
- * {@link sendsComputerScreenshotMetadata}), charging this on top of the content images charges the result its larger
- * copy. Elsewhere the metadata copy is never sent and adds nothing.
+ * Inline bytes of a computer result's `providerMetadata.screenshot` on a route that sends it in place of the result's
+ * content ({@link sendsComputerScreenshotMetadata}), or `undefined` where the route sends the content. On such a route
+ * the result's content images never travel, and a `file_id` screenshot costs nothing.
  */
-function computerScreenshotExtraBytes(message: Message, model: Model, metadataWire: boolean): number | undefined {
-	if (message.role !== "toolResult" || message.providerMetadata?.type !== "computer") return undefined;
+function sentScreenshotBytes(message: Message, metadataWire: boolean): number | undefined {
+	if (!metadataWire || message.role !== "toolResult" || message.providerMetadata?.type !== "computer") return undefined;
 	const imageUrl = message.providerMetadata.screenshot.image_url;
-	if (imageUrl?.slice(0, 5).toLowerCase() !== "data:") return undefined;
-	if (!metadataWire) return 0;
-	let contentBytes = 0;
+	return imageUrl?.slice(0, 5).toLowerCase() === "data:" ? imageUrl.length : 0;
+}
+
+/** Inline image bytes a user, developer or tool-result message puts on the wire. */
+function sentImageBytes(message: Message, model: Model, metadataWire: boolean): number {
+	const screenshot = sentScreenshotBytes(message, metadataWire);
+	if (screenshot !== undefined) return screenshot;
+	if (!Array.isArray(message.content)) return 0;
+	let bytes = 0;
 	for (const part of message.content) {
-		if (part.type === "image") contentBytes += inlineImageBytes(part, model);
+		if (part.type === "image") bytes += inlineImageBytes(part, model);
 	}
-	return Math.max(0, imageUrl.length - contentBytes);
+	return bytes;
 }
 
 interface ImageBudgetState {
@@ -151,19 +155,25 @@ function clampDeveloperMessage(message: DeveloperMessage, state: ImageBudgetStat
 }
 
 /**
- * A computer result's screenshot leaves with its image: evicting the content copy alone would leave the metadata copy
- * on the Responses wire (see {@link computerScreenshotExtraBytes}). The result then goes out as its remaining content,
- * as for an unreadable screenshot in {@link dropUnreadableContextImages}.
+ * A computer result's screenshot leaves as one image. Where the route sends the metadata copy, that copy is what the
+ * byte clamp charges and evicts. Elsewhere evicting the content image also drops the metadata, which the count clamp
+ * needs on a route it cannot see. Either way the result then goes out as its remaining text, as for an unreadable
+ * screenshot in {@link dropUnreadableContextImages}.
  */
 function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetState): ToolResultMessage {
 	if (!needsImageDrop(state)) return message;
-	const extra = state.metadataWire ? (computerScreenshotExtraBytes(message, state.model, true) ?? 0) : 0;
+	const screenshot = sentScreenshotBytes(message, state.metadataWire === true);
+	if (screenshot !== undefined) {
+		if (screenshot === 0 || state.inlineBytes <= state.byteBudget) return message;
+		state.inlineBytes -= screenshot;
+		const text = message.content.filter(part => part.type === "text");
+		return { ...message, content: text.length > 0 ? text : [IMAGE_OMISSION], providerMetadata: undefined };
+	}
 	const content = clampContent(message.content, state);
-	if (message.providerMetadata?.type !== "computer") return content ? { ...message, content } : message;
-	// A metadata screenshot with no inline content copy is evicted on its own bytes.
-	if (!content && !(extra > 0 && state.inlineBytes > state.byteBudget)) return message;
-	state.inlineBytes -= extra;
-	return { ...message, content: content ?? message.content, providerMetadata: undefined };
+	if (!content) return message;
+	return message.providerMetadata?.type === "computer"
+		? { ...message, content, providerMetadata: undefined }
+		: { ...message, content };
 }
 
 function clampImages(context: Context, state: ImageBudgetState): Context {
@@ -221,10 +231,7 @@ function newestImageMessages(
 		if (!Array.isArray(message.content)) continue;
 		const isUser = !user && message.role === "user" && message.historyRewriteAt === undefined;
 		if (!isUser && (toolResult || message.role !== "toolResult")) continue;
-		let messageBytes = computerScreenshotExtraBytes(message, model, metadataWire) ?? 0;
-		for (const part of message.content) {
-			if (part.type === "image") messageBytes += inlineImageBytes(part, model);
-		}
+		const messageBytes = sentImageBytes(message, model, metadataWire);
 		if (isUser) user = message;
 		else if (messageBytes > 0) toolResult = message;
 		else continue;
@@ -246,30 +253,29 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	if (byteBudget === undefined) return context;
 	const metadataWire = sendsComputerScreenshotMetadata(model);
 	let inlineBytes = 0;
-	// What computer results' metadata screenshots add beyond their content images (see computerScreenshotExtraBytes).
-	let screenshotExtraBytes = 0;
 	// Assistant images are model outputs no serializer replays (see countImages): never charged or reserved.
 	let unsentBytes = 0;
 	for (const message of context.messages) {
-		if (!Array.isArray(message.content)) continue;
-		for (const part of message.content) {
-			if (part.type !== "image") continue;
-			if (message.role === "assistant") unsentBytes += part.data.length;
-			else inlineBytes += inlineImageBytes(part, model);
+		if (message.role !== "assistant") {
+			inlineBytes += sentImageBytes(message, model, metadataWire);
+			continue;
 		}
-		screenshotExtraBytes += computerScreenshotExtraBytes(message, model, metadataWire) ?? 0;
+		for (const part of message.content) {
+			if (part.type === "image") unsentBytes += part.data.length;
+		}
 	}
-	if (inlineBytes + screenshotExtraBytes <= byteBudget) return context;
+	if (inlineBytes <= byteBudget) return context;
 	const bodyLimit = resolveRequestBodyByteLimit(model, budgetedHost);
 	// Text, tools and the system prompt ride in the same body, as UTF-8: only what they leave may hold protected
 	// images. Base64 is ASCII, so its characters are its bytes. Never sent: tool-result `details` (UI-only) and
 	// another provider's native payload (assistant turns, compaction summaries), which this request does not replay.
-	// A computer result's inline metadata screenshot is charged as its content images plus `screenshotExtraBytes`, or
-	// is not sent at all.
+	// A computer result carries its screenshot twice and sends one copy (sentScreenshotBytes): the other stays out.
 	const wire = context.messages.map(message => {
 		if (message.role === "toolResult") {
-			const inlineScreenshot = computerScreenshotExtraBytes(message, model, metadataWire) !== undefined;
-			return { ...message, details: undefined, ...(inlineScreenshot ? { providerMetadata: undefined } : {}) };
+			if (sentScreenshotBytes(message, metadataWire) !== undefined) {
+				return { ...message, details: undefined, content: message.content.filter(part => part.type !== "image") };
+			}
+			return { ...message, details: undefined, providerMetadata: undefined };
 		}
 		const payload = message.providerPayload;
 		if (!payload) return message;
@@ -280,14 +286,7 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	const otherBytes = Buffer.byteLength(JSON.stringify({ ...context, messages: wire })) - inlineBytes - unsentBytes;
 	const imageRoom = bodyLimit === undefined ? undefined : bodyLimit - REQUEST_ENVELOPE_BYTES - otherBytes;
 	const kept = newestImageMessages(context, model, metadataWire, imageRoom);
-	return clampImages(context, {
-		remainingDrops: 0,
-		inlineBytes: inlineBytes + screenshotExtraBytes,
-		byteBudget,
-		model,
-		metadataWire,
-		kept,
-	});
+	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model, metadataWire, kept });
 }
 
 /**
