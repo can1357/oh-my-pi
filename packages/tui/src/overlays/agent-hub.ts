@@ -124,11 +124,26 @@ const VIEW_TABS = [
 	{ id: "roster", label: "Flat" },
 	{ id: "tree", label: "By parent" },
 ] as const satisfies ReadonlyArray<{ id: HubViewMode; label: string }>;
+/**
+ * The section keys every footer advertises: `1` opens the roster, `2` the activity log.
+ * Both views name the same pair, so a section hint never reads as a dead key in one view.
+ */
+const SECTION_FOOTER_HINTS = "1:agents  2:activity";
+/** The roster key alone, for a footer too narrow to carry the whole pair. */
+const ROSTER_FOOTER_HINT = "1:agents";
+/** The same pair as native keycaps: `1` opens the roster, `2` the activity log. */
+const SECTION_HINTS: readonly NativeHint[] = [
+	{ keys: ["1"], label: "agents" },
+	{ keys: ["2"], label: "activity" },
+];
+/** Inner width from which a footer carries the section hints; below it they crowd out the rest. */
+const SECTION_HINT_MIN_WIDTH = 96;
 const AGENT_HINTS: Readonly<Record<HubViewMode, readonly NativeHint[]>> = {
 	roster: agentHints("by parent"),
 	tree: agentHints("flat"),
 };
 const ACTIVITY_HINTS: readonly NativeHint[] = [
+	...SECTION_HINTS,
 	{ keys: ["j", "k"], label: "select" },
 	{ keys: ["enter"], label: "transcript" },
 	{ keys: ["space"], label: "follow" },
@@ -179,6 +194,7 @@ const ACTIVITY_KIND_ICON: Readonly<Record<AgentActivityKind, string>> = {
 
 function agentHints(nextView: string): readonly NativeHint[] {
 	return [
+		...SECTION_HINTS,
 		{ keys: ["j", "k"], label: "select" },
 		{ keys: ["enter"], label: "open" },
 		{ keys: ["t"], label: nextView },
@@ -1758,6 +1774,10 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		}
 		while (body.length < contentRows) body.push("");
 
+		// The roster footer names both sections, so this one does too: a section key that is
+		// advertised in one view and missing in the other reads as a dead key.
+		const sectionHints =
+			innerWidth >= SECTION_HINT_MIN_WIDTH ? `${SECTION_FOOTER_HINTS}  ` : `${ROSTER_FOOTER_HINT}  `;
 		const lines = [topBorder(width, "Agent Hub")];
 		for (const line of body.slice(0, contentRows)) lines.push(row(line, width));
 		lines.push(divider(width));
@@ -1765,7 +1785,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			row(
 				theme.fg(
 					"dim",
-					`1:agents  ${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:transcript  ${formatKeyHint("space")}:follow  ${formatKeyHint("f")}:filter  ${formatKeyHint("s")}:scope  /:search  ${formatKeyHint("escape")}:close`,
+					`${sectionHints}${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:transcript  ${formatKeyHint("space")}:follow  ${formatKeyHint("f")}:filter  ${formatKeyHint("s")}:scope  /:search  ${formatKeyHint("escape")}:close`,
 				),
 				width,
 			),
@@ -1835,10 +1855,10 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		if (showingNarrowDetails) {
 			return theme.fg(
 				"dim",
-				`${filter}1:agents  2:activity  ${formatKeyHint("tab")}:roster  ${formatKeyHints(["pageUp", "pageDown"])}:scroll  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("escape")}:roster`,
+				`${filter}${SECTION_FOOTER_HINTS}  ${formatKeyHint("tab")}:roster  ${formatKeyHints(["pageUp", "pageDown"])}:scroll  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("escape")}:roster`,
 			);
 		}
-		if (availableWidth < 96) {
+		if (availableWidth < SECTION_HINT_MIN_WIDTH) {
 			return theme.fg(
 				"dim",
 				`${filter}${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("tab")}:details  ${formatKeyHints(["r", "x"])}:manage  ${formatKeyHint("escape")}:close`,
@@ -1846,7 +1866,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		}
 		return theme.fg(
 			"dim",
-			`${filter}1:agents  2:activity  ${formatKeyHints(["j", "k"])}/wheel:select  ${formatKeyHints(["pageUp", "pageDown"])}:details  ${formatKeyHint("enter")}/click:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("r")}:revive  ${formatKeyHint("x")}:kill  ${formatKeyHint("escape")}:close`,
+			`${filter}${SECTION_FOOTER_HINTS}  ${formatKeyHints(["j", "k"])}/wheel:select  ${formatKeyHints(["pageUp", "pageDown"])}:details  ${formatKeyHint("enter")}/click:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("r")}:revive  ${formatKeyHint("x")}:kill  ${formatKeyHint("escape")}:close`,
 		);
 	}
 
