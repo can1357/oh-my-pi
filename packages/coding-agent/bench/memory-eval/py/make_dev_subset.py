@@ -5,14 +5,23 @@ Takes all single-session-assistant ids plus, for each other type, the 19 ids wit
 sha256(question_id).
 """
 
-# First: the script's own directory precedes PYTHONPATH on sys.path, so this import cannot be shadowed, and it runs
-# prepare_datasets' guard against import overrides before anything else is imported.
-from prepare_datasets import DATA as DATA_DIR, LME_REVISION, read_current  # isort: skip
+import os
+import sys
+
+# First, before any import: os and sys are loaded at interpreter startup. PYTHONPATH, PYTHONHOME, PYTHONPYCACHEPREFIX and
+# their kin change which code or bytecode an import loads, prepare_datasets included. Only these, which affect I/O and
+# locale but not imports, are allowed. Inline in every script: an imported guard could itself be loaded through an
+# override.
+SAFE_PYTHON_ENV = {"PYTHONUNBUFFERED", "PYTHONIOENCODING", "PYTHONUTF8", "PYTHONCOERCECLOCALE", "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE", "PYTHONSTARTUP"}
+for name in sorted(os.environ):
+	if name.upper().startswith("PYTHON") and name.upper() not in SAFE_PYTHON_ENV and os.environ[name]:
+		sys.exit(f"make_dev_subset.py: refusing to run with {name} set; unset it so only venv-engine's code runs")
 
 import hashlib  # noqa: E402
 import json  # noqa: E402
-import sys  # noqa: E402
 from pathlib import Path  # noqa: E402
+
+from prepare_datasets import DATA as DATA_DIR, LME_REVISION, read_current  # noqa: E402
 
 DATA = DATA_DIR / "lme-s.json"
 OUT = Path(__file__).resolve().parent.parent / "lme-dev-subset.json"

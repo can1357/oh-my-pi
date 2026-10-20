@@ -45,11 +45,9 @@ assert len(marker.read_text(encoding="utf-8").split()) == 2
 			JSON.stringify(text).replace(/[\u0080-\uffff]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`),
 		],
 		{
-			// The script refuses PYTHONPATH/PYTHONHOME, so a developer's own must not leak in.
+			// The script refuses PYTHON* import overrides, so a developer's own must not leak in.
 			env: {
-				...Object.fromEntries(
-					Object.entries(Bun.env).filter(([key]) => !["PYTHONPATH", "PYTHONHOME"].includes(key.toUpperCase())),
-				),
+				...Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.toUpperCase().startsWith("PYTHON"))),
 				PYTHONUTF8: "0",
 				PYTHONCOERCECLOCALE: "0",
 				LC_ALL: "C",

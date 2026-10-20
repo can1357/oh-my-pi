@@ -20,6 +20,8 @@ const SUMMARY_CHARS = 500;
 export interface CalibrationDump {
 	questions: { conversation: number; question: string; rankedContents: string[]; recall: number }[];
 	meanRecall: number;
+	/** The model files Run A loaded (`py/model_digest.py`); absent in dumps from before it was recorded. */
+	embeddingModelSha256?: string;
 }
 
 /** One store and one session for every conversation, ingested, consolidated and queried exactly as upstream does. */
@@ -110,8 +112,19 @@ export async function runUpstreamCompat(
 const MEAN_TOLERANCE = 1e-9;
 
 /** Mismatches between Run A's dump and Run B's result file, paired by position. Empty means calibrated. */
-export function compareCalibration(a: CalibrationDump, b: Pick<ResultFile, "questions" | "aggregate">): string[] {
+export function compareCalibration(
+	a: CalibrationDump,
+	b: Pick<ResultFile, "questions" | "aggregate"> & { config: { engineInfo: Record<string, string> } },
+): string[] {
 	const mismatches: string[] = [];
+	// Equal rankings from two different models would calibrate nothing: both runs must name the same model files.
+	const modelA = a.embeddingModelSha256;
+	const modelB = b.config.engineInfo.embedding_model_sha256;
+	if (!modelA || !modelB) {
+		mismatches.push(`embedding model: ${modelA ? "B" : "A"} records no model digest; re-run it with this harness`);
+	} else if (modelA !== modelB) {
+		mismatches.push(`embedding model: A ${modelA.slice(0, 12)}, B ${modelB.slice(0, 12)}`);
+	}
 	if (a.questions.length !== b.questions.length) {
 		mismatches.push(`question count: A ${a.questions.length}, B ${b.questions.length}`);
 	}

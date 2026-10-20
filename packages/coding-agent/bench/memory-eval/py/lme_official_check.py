@@ -8,11 +8,14 @@ Usage (venv-lme python, numpy<2 because the official code uses np.asfarray):
 import os
 import sys
 
-# First, before any import that searches PYTHONPATH: os and sys are already loaded at interpreter startup, but an
-# override tree could shadow json, pathlib, pinned_source or the evaluator's NumPy.
-for name in ("PYTHONPATH", "PYTHONHOME"):
-	if os.environ.get(name):
-		sys.exit(f"lme_official_check.py: refusing to run with {name} set; unset it so venv-lme's packages are imported")
+# First, before any import: os and sys are loaded at interpreter startup. PYTHONPATH, PYTHONHOME, PYTHONPYCACHEPREFIX and
+# their kin change which code or bytecode an import loads (json, pinned_source, the evaluator's NumPy). Only these,
+# which affect I/O and locale but not imports, are allowed. Inline in every script: an imported guard could itself be
+# loaded through an override.
+SAFE_PYTHON_ENV = {"PYTHONUNBUFFERED", "PYTHONIOENCODING", "PYTHONUTF8", "PYTHONCOERCECLOCALE", "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE", "PYTHONSTARTUP"}
+for name in sorted(os.environ):
+	if name.upper().startswith("PYTHON") and name.upper() not in SAFE_PYTHON_ENV and os.environ[name]:
+		sys.exit(f"lme_official_check.py: refusing to run with {name} set; unset it so only venv-lme's code runs")
 
 import json  # noqa: E402
 from pathlib import Path  # noqa: E402
