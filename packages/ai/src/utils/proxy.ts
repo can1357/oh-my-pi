@@ -124,6 +124,11 @@ export function shouldBypassProxy(urlObj: URL): boolean {
 		// Strip IPv6 brackets
 		ruleHost = ruleHost.replace(/^\[|\]$/g, "");
 
+		// The rule's hostname is normalized the same way as the target's, so an
+		// absolute DNS spelling on either side still matches: `api.internal.example.`
+		// must exempt `https://api.internal.example./`.
+		ruleHost = normalizeHostname(ruleHost);
+
 		if (rulePort && rulePort !== targetPort) {
 			continue;
 		}
