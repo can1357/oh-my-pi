@@ -258,28 +258,38 @@ function brandTimer(elapsedMs: number): string {
 	return `${Math.min(99, Math.floor(seconds / 3600))}h`;
 }
 
+/** Sanitized extension/hook status values, in display order. */
+function hookStatusTexts(ctx: SegmentContext): string[] {
+	const texts: string[] = [];
+	for (const status of ctx.hookStatuses ?? []) {
+		const sanitized = sanitizeStatusText(status);
+		if (sanitized) texts.push(sanitized);
+	}
+	return texts;
+}
+
 const statusSegment: StatusLineSegment = {
 	id: "status",
 	render(ctx) {
-		let text = "";
-		for (const status of ctx.hookStatuses ?? []) {
-			const sanitized = sanitizeStatusText(status);
-			if (!sanitized) continue;
-			text += text ? `${theme.sep.dot}${sanitized}` : sanitized;
-		}
+		const statuses = hookStatusTexts(ctx);
+		if (statuses.length === 0) return { content: "", visible: false };
+		// The dot separates the statuses, so it takes the status line's separator
+		// color; the status text keeps the accent.
+		const dot = theme.fg("statusLineSep", theme.sep.dot);
 		return {
-			content: text ? accentFg(ctx, "accent", text) : "",
-			visible: text.length > 0,
+			content: statuses.map(status => accentFg(ctx, "accent", status)).join(dot),
+			visible: true,
 		};
 	},
 	describe(ctx) {
-		let text = "";
-		for (const status of ctx.hookStatuses ?? []) {
-			const sanitized = sanitizeStatusText(status);
-			if (!sanitized) continue;
-			text += text ? `${theme.sep.dot}${sanitized}` : sanitized;
+		const statuses = hookStatusTexts(ctx);
+		if (statuses.length === 0) return null;
+		const spans: TspSpan[] = [];
+		for (const [index, status] of statuses.entries()) {
+			if (index > 0) spans.push(span(theme.sep.dot, "statusLineSep"));
+			spans.push(span(status, accentToken(ctx, "accent")));
 		}
-		return text ? segView([span(text, accentToken(ctx, "accent"))]) : null;
+		return segView(spans);
 	},
 };
 
