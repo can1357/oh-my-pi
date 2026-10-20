@@ -542,6 +542,7 @@
 - Fixed supported Bedrock Claude models falling back to soft instead of remote compaction ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Fixed browser `tab.run(fn, [url])` and `browser.open("https://…")` failing with a bare "expects an options object"; the errors now say to pass `{ args: [...] }` and `browser.open({ url, name })` ([#16236](https://github.com/can1357/oh-my-pi/pull/16236) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the built-in `ts-set-map`, `ts-import-type` and `ts-no-any` rules reminding you about code they allow: an empty or computed `Set`/`Map`, a runtime `await import()`, or the word "any" in a comment ([#16242](https://github.com/can1357/oh-my-pi/pull/16242) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed worktree creation with copy-on-write cloning into a destination inside the checkout recursing into the source tree and copying nested worktrees' Git metadata along; such a destination is now refused with an explicit error, and the copy leaves a nested repository's own Git metadata in place ([#16076](https://github.com/can1357/oh-my-pi/issues/16076), [#16097](https://github.com/can1357/oh-my-pi/pull/16097) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 

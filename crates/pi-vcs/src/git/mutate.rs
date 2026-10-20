@@ -5,7 +5,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet},
 	ffi::OsStr,
 	fs,
-	path::{Path, PathBuf},
+	path::{Component, Path, PathBuf},
 	process::{Command, Stdio},
 };
 
@@ -2068,35 +2068,40 @@ fn rejects_destination_inside_source(
 	dest.as_path() != source_root && dest.starts_with(source_root)
 }
 
-/// Absolute, symlink-resolved form of a destination that does not exist yet:
-/// the nearest existing ancestor is canonicalized and the remaining components
-/// are appended. A lexical `..` (e.g. `checkout/../sibling`) or a symlinked
+/// Absolute, symlink-resolved form of a destination that does not exist yet.
+///
+/// The path is resolved the way the filesystem resolves it once the missing
+/// parents have been created: every component that already exists is
+/// canonicalized, so a symlinked parent is followed, while the components that
+/// do not exist yet stay as spelled, with a `..` cancelling the component in
+/// front of it. A lexical `..` (e.g. `checkout/../sibling`) or a symlinked
 /// parent must not disguise a destination as a child of the source tree.
 fn resolve_destination(path: &Path) -> PathBuf {
 	let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-	let mut suffix: Vec<std::ffi::OsString> = Vec::new();
-	let mut current = absolute.as_path();
-	loop {
-		if let Ok(resolved) = fs::canonicalize(current) {
-			let mut out = resolved;
-			for part in suffix.iter().rev() {
-				out.push(part);
-			}
-			// The tail does not exist yet, so `canonicalize` cannot collapse a
-			// `..` that follows a missing component (`missing/../repo/child`
-			// stays spelled out and no longer looks like the source's child).
-			// Collapse it lexically instead, so the verdict cannot flip on the
-			// presence of an unrelated sibling directory.
-			return normalize_path(&out);
-		}
-		match (current.parent(), current.file_name()) {
-			(Some(parent), Some(name)) => {
-				suffix.push(name.to_os_string());
-				current = parent;
+	let mut resolved = PathBuf::new();
+	for component in absolute.components() {
+		match component {
+			Component::CurDir => {},
+			// `..` cancels the component in front of it. The resolved path is
+			// symlink-free by then, so this is the same parent the filesystem
+			// would walk into.
+			Component::ParentDir => {
+				resolved.pop();
 			},
-			_ => return normalize_path(&absolute),
+			// Canonicalizing follows a symlinked component and resolves the
+			// parents it inherits from; a component that does not exist yet
+			// stays as spelled, because the clone backend creates it as a
+			// plain directory.
+			Component::Normal(name) => {
+				let candidate = resolved.join(name);
+				resolved = fs::canonicalize(&candidate).unwrap_or(candidate);
+			},
+			// The root and a Windows drive prefix start the path.
+			Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
+			Component::RootDir => resolved.push(std::path::MAIN_SEPARATOR_STR),
 		}
 	}
+	resolved
 }
 
 /// Recreate the symlink at `src` as `dst` (a plain file holding the link
@@ -3419,6 +3424,64 @@ mod tests {
 			resolve_destination(&base.join("../outside")),
 			base.parent().unwrap().join("outside")
 		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn resolve_destination_follows_a_symlinked_parent_before_a_missing_component() {
+		let (temp, _repo) = fixture();
+		let base = fs::canonicalize(temp.path()).unwrap();
+		let source = base.join("repo");
+		fs::create_dir_all(&source).unwrap();
+		// A symlink that points at the source checkout. The destination is
+		// spelled through that link, so it only lands inside the source once
+		// the link is resolved.
+		let link = base.join("link");
+		std::os::unix::fs::symlink(&source, &link).unwrap();
+
+		// `missing` does not exist, so the `..` behind it cannot be collapsed
+		// by the filesystem: the resolution has to follow the link first and
+		// only then cancel the missing component.
+		assert_eq!(
+			resolve_destination(&link.join("missing/../child")),
+			source.join("child"),
+			"a symlinked parent must be resolved before the missing component is collapsed"
+		);
+		// The same path must not change its meaning once the missing component
+		// happens to exist.
+		fs::create_dir_all(source.join("missing")).unwrap();
+		assert_eq!(resolve_destination(&link.join("missing/../child")), source.join("child"));
+		// A symlink that points elsewhere stays outside the source.
+		let elsewhere = base.join("elsewhere");
+		fs::create_dir_all(&elsewhere).unwrap();
+		let out_link = base.join("outlink");
+		std::os::unix::fs::symlink(&elsewhere, &out_link).unwrap();
+		assert_eq!(resolve_destination(&out_link.join("child")), elsewhere.join("child"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn clone_first_worktree_rejects_destination_behind_a_symlinked_parent() {
+		let (temp, repo) = fixture();
+		git(temp.path(), &["branch", "target"]);
+		let source = fs::canonicalize(temp.path()).unwrap();
+		// The symlink sits outside the checkout and points at it, so the
+		// destination only lands inside the source once the link is resolved.
+		let outside = tempfile::tempdir().unwrap();
+		let link = outside.path().join("link");
+		std::os::unix::fs::symlink(&source, &link).unwrap();
+
+		let nested_dest = link.join("missing/../child");
+		let error = repo
+			.worktree_add(&nested_dest, "target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.expect_err("a destination that resolves inside the source must be rejected");
+		assert!(error.to_string().contains("inside the source"), "{error}");
+		assert!(!source.join("child").exists(), "the rejected destination must not be created");
+		assert!(!source.join("missing").exists(), "the rejected destination must not create parents");
 	}
 
 	#[test]
