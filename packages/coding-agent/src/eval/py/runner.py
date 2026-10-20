@@ -1442,6 +1442,7 @@ def _run_installer(
         start_new_session=own_group,
     )
     previous_sigterm: Any = None
+    sigterm_was_blocked = False
     if own_group:
 
         def on_sigterm(signum: int, frame: Any) -> None:
@@ -1454,6 +1455,8 @@ def _run_installer(
             os.kill(os.getpid(), signal.SIGTERM)
 
         previous_sigterm = signal.signal(signal.SIGTERM, on_sigterm)
+        # A cell may have blocked SIGTERM; shutdown's must still reach the handler.
+        sigterm_was_blocked = signal.SIGTERM in signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
     try:
         _stream_process_output(proc, on_text)
         return proc.wait()
@@ -1463,6 +1466,14 @@ def _run_installer(
         raise
     finally:
         if own_group:
+            # Shutdown's group sweep cannot reach anything the installer left
+            # running in its own group, so that goes with the installer.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if sigterm_was_blocked:
+                signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
             signal.signal(signal.SIGTERM, previous_sigterm if previous_sigterm is not None else signal.SIG_DFL)
 
 
