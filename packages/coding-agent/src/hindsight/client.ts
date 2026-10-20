@@ -171,8 +171,10 @@ export interface MentalModelTrigger {
 	exclude_mental_models?: boolean;
 }
 
+/** Operation lifecycle: pending/processing are active; completed/failed/cancelled/not_found are terminal. */
 export type HindsightOperationStatus = "pending" | "processing" | "completed" | "failed" | "cancelled" | "not_found";
 
+/** Status snapshot returned by Hindsight for an asynchronous bank operation. */
 export interface HindsightOperation {
 	operation_id: string;
 	status: HindsightOperationStatus;
@@ -180,7 +182,9 @@ export interface HindsightOperation {
 	[key: string]: unknown;
 }
 
+/** Cancellation and total polling deadline for {@link HindsightApi.waitForOperation}. */
 export interface WaitForOperationOptions extends HindsightRequestOptions {
+	/** Total wait in milliseconds; defaults to the client's reflect timeout (120 seconds unless overridden). */
 	timeoutMs?: number;
 }
 
@@ -578,6 +582,10 @@ export class HindsightApi implements HindsightClientApi {
 		);
 	}
 
+	/**
+	 * Fetches one operation status snapshot without waiting for completion.
+	 * HTTP/transport failures reject with {@link HindsightError}; cancellation follows the request error contract.
+	 */
 	async getOperationStatus(
 		bankId: string,
 		operationId: string,
@@ -591,6 +599,18 @@ export class HindsightApi implements HindsightClientApi {
 		);
 	}
 
+	/**
+	 * Polls pending/processing operations until a terminal status or the total deadline.
+	 *
+	 * @returns The terminal operation snapshot only for `completed`.
+	 * @throws {@link HindsightError} for terminal `failed`, `cancelled`, or `not_found` statuses
+	 * (including the server's error message), missing operation ids, unknown statuses, request failures,
+	 * or timeout. The total deadline defaults to the client's reflect timeout and includes requests and sleeps.
+	 *
+	 * Aborting `options.signal` interrupts polling and sleeps, rejecting with its abort reason or a
+	 * request's {@link HindsightError} if cancellation interrupts HTTP. Neither local abort nor timeout
+	 * cancels the server operation, which may still complete.
+	 */
 	async waitForOperation(
 		bankId: string,
 		operationId: string,

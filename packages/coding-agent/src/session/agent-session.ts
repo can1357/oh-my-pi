@@ -1094,6 +1094,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
+	#externalEventListenerCount = 0;
+	#pendingRetainedNotices: Extract<AgentSessionEvent, { type: "notice" }>[] = [];
 	#activeToolExecutionUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	/** Epoch ms the current run went `running`; undefined while idle. */
@@ -3871,9 +3873,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Notices are NOT added to agent state and never reach the LLM — use this
 	 * for out-of-band conditions the user should see but the model shouldn't
 	 * react to (e.g. background queue flush failures).
+	 * With `retainUntilSubscribed`, a notice without an external subscriber is
+	 * held until the first external subscription and delivered exactly once.
 	 */
-	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void {
-		this.#emit({ type: "notice", level, message, source });
+	emitNotice(
+		level: "info" | "warning" | "error",
+		message: string,
+		source?: string,
+		options?: { retainUntilSubscribed?: boolean },
+	): void {
+		const notice: Extract<AgentSessionEvent, { type: "notice" }> = { type: "notice", level, message, source };
+		if (options?.retainUntilSubscribed && this.#externalEventListenerCount === 0) {
+			this.#pendingRetainedNotices.push(notice);
+			return;
+		}
+		this.#emit(notice);
 	}
 
 	#recordToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
@@ -5967,15 +5981,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Subscribe to agent events.
 	 * Session persistence is handled internally (saves messages on message_end).
 	 * Multiple listeners can be added. Returns unsubscribe function for this listener.
+	 * Internal maintenance subscriptions do not consume retained startup notices.
 	 */
-	subscribe(listener: AgentSessionEventListener): () => void {
+	subscribe(listener: AgentSessionEventListener, options?: { internal?: boolean }): () => void {
 		// Copy-on-write: `#emit` iterates the array it read without copying it.
 		this.#eventListeners = [...this.#eventListeners, listener];
+		if (!options?.internal) {
+			this.#externalEventListenerCount++;
+			const pending = this.#pendingRetainedNotices;
+			this.#pendingRetainedNotices = [];
+			for (const notice of pending) this.#emit(notice);
+		}
 
 		// Return unsubscribe function for this specific listener
 		return () => {
 			const index = this.#eventListeners.indexOf(listener);
 			if (index === -1) return;
+			if (!options?.internal) this.#externalEventListenerCount--;
 			const listeners = this.#eventListeners.slice();
 			listeners.splice(index, 1);
 			this.#eventListeners = listeners;
@@ -6728,6 +6750,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// beginDispose() drained the rest; this catches registrations made during teardown.
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#eventListeners = [];
+		this.#externalEventListenerCount = 0;
+		this.#pendingRetainedNotices = [];
 		this.#runStateListeners.clear();
 		this.#ircWakeHoldListeners.clear();
 		this.#sessionChangeCallbacks.clear();

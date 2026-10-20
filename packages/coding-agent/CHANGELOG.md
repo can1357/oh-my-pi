@@ -15,7 +15,7 @@
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
 ### Added
 
-- Added Hindsight mental-model refresh status to `/memory mm list` and `/memory mm show`, with load-time warnings for paused automatic refreshes and stale models without an automatic trigger ([#16475](https://github.com/can1357/oh-my-pi/pull/16475) by [@shgew](https://github.com/shgew))
+- Added Hindsight mental-model refresh status to `/memory mm list` and `/memory mm show`, with startup-safe load warnings for paused automatic refreshes and stale models without an automatic trigger ([#16475](https://github.com/can1357/oh-my-pi/pull/16475) by [@shgew](https://github.com/shgew))
 
 ### Fixed
 
@@ -816,6 +816,8 @@
 - Fixed bank-wide `/memory mm refresh` skipping cron-managed mental models while continuing to leave manual-only models untouched.
 - Fixed `/memory mm refresh <id>` reloading cached guidance before the refresh completes; failed, cancelled, and timed-out refreshes now preserve the cache, and Escape cancels the wait ([#16475](https://github.com/can1357/oh-my-pi/pull/16475) by [@shgew](https://github.com/shgew))
 - Fixed bank-wide `/memory mm refresh` skipping cron-managed mental models while continuing to leave manual-only models untouched ([#16475](https://github.com/can1357/oh-my-pi/pull/16475) by [@shgew](https://github.com/shgew))
+- Fixed `/memory mm refresh <id>` reloading cached guidance before the refresh completes; failed, cancelled, and timed-out refreshes preserve the cache, failed reloads warn that previous guidance remains, and Escape cancels the wait ([#16475](https://github.com/can1357/oh-my-pi/pull/16475) by [@shgew](https://github.com/shgew))
+- Fixed bank-wide `/memory mm refresh` skipping cron-managed mental models while continuing to leave manual-only models untouched, with at most four refreshes in progress at once ([#16475](https://github.com/can1357/oh-my-pi/pull/16475) by [@shgew](https://github.com/shgew))
 - Fixed Mnemopi memory completions ignoring the memory role's thinking suffix, including one inherited from `tiny` or `smol` when `modelRoles.memory` is unset; each `retry.fallbackChains.memory` entry sends its own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))
 - Fixed MCP tools running a call twice when the server connection dropped mid-request: a stdio request already written to the server, or an HTTP or legacy SSE request whose connection reset or closed after it was sent, now fails as non-retryable with a diagnostic saying it may have run, instead of being replayed after a reconnect; requests that never left OMP, including refused connections, still reconnect and retry once ([#16429](https://github.com/can1357/oh-my-pi/pull/16429) by [@alphastorm](https://github.com/alphastorm))
 - Fixed `/move` path completion jumping into a subfolder on Tab: `..`, `.`, and `~` now complete to `../`, `./`, and `~/` before listing their children, a trailing `\` lists a folder on Windows, absolute Windows paths (`C:/…`) are no longer rewritten as relative paths, and the project directory is offered as `./` instead of `/`

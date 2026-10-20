@@ -1271,7 +1271,7 @@ export class CommandController {
 				);
 			} else {
 				this.ctx.showWarning(
-					`Refreshed ${completed}/${ids.length} mental model(s)${skippedSuffix}, but the mental-model cache could not be reloaded.`,
+					`Server refresh completed for ${completed}/${ids.length} mental model(s)${skippedSuffix}, but this session keeps the previous guidance because the cache could not be reloaded. Try /memory mm reload.`,
 				);
 			}
 		} catch (error) {
@@ -1362,7 +1362,9 @@ export class CommandController {
 		if (ok) {
 			this.ctx.showStatus("Mental-model cache reloaded.");
 		} else {
-			this.ctx.showError("Reload failed (Hindsight backend not active or mental models disabled).");
+			this.ctx.showError(
+				"Reload failed; guidance was not updated. Check the Hindsight connection and mental-model settings.",
+			);
 		}
 	}
 

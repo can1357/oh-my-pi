@@ -43,6 +43,7 @@
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
+import { Semaphore } from "../task/parallel";
 import type { BankScope } from "./bank";
 import type {
 	HindsightClientApi,
@@ -421,8 +422,8 @@ export interface MentalModelRefreshOutcome {
 }
 
 /**
- * Queue a refresh for each id and wait for its operation to reach a terminal state, so callers can act on
- * the content only after it was actually rewritten. Failure, cancellation and timeout are reported per id.
+ * Queue a refresh for each id with at most four concurrent refresh/poll tasks and wait for its terminal
+ * state, so callers act only after content was rewritten. Failure, cancellation and timeout are reported per id.
  */
 export async function refreshMentalModelsAndWait(
 	client: HindsightApi,
@@ -430,12 +431,18 @@ export async function refreshMentalModelsAndWait(
 	ids: readonly string[],
 	options?: WaitForOperationOptions,
 ): Promise<MentalModelRefreshOutcome[]> {
+	const slots = new Semaphore(4);
 	return Promise.all(
 		ids.map(async (id): Promise<MentalModelRefreshOutcome> => {
 			try {
-				const { operation_id } = await client.refreshMentalModel(bankId, id, { signal: options?.signal });
-				await client.waitForOperation(bankId, operation_id, options);
-				return { id };
+				await slots.acquire(options?.signal);
+				try {
+					const { operation_id } = await client.refreshMentalModel(bankId, id, { signal: options?.signal });
+					await client.waitForOperation(bankId, operation_id, options);
+					return { id };
+				} finally {
+					slots.release();
+				}
 			} catch (error) {
 				return { id, error: error instanceof Error ? error.message : String(error) };
 			}
