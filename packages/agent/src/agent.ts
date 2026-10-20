@@ -926,10 +926,35 @@ export class Agent {
 	 * refreshes it (a pending system-prompt rebuild, say) is seen by the request —
 	 * pass a {@link SideRequestSystemPrompt} provider to have a pinned prompt read
 	 * at that same point instead of at call time.
+	 *
+	 * `signal` is forwarded to those hooks and re-checked afterwards, so a
+	 * cancelled side request unwinds instead of waiting on a hook that is still
+	 * running, and no request is built for a caller that already gave up.
+	 *
+	 * The model is the one active when the call started: a hook may await (a
+	 * prompt rebuild, say) while the user switches models, and the caller's
+	 * history and tool roster were already captured for the call-time model.
 	 */
-	async buildSideRequestContext(llmMessages: Message[], systemPrompt?: SideRequestSystemPrompt): Promise<Context> {
-		for (const hook of this.#beforeSideRequestHooks) await hook();
+	async buildSideRequestContext(
+		llmMessages: Message[],
+		systemPrompt?: SideRequestSystemPrompt,
+		signal?: AbortSignal,
+	): Promise<Context> {
+		// Snapshotted before the hooks run: a hook may await (a prompt rebuild,
+		// say) while the user switches models, and the caller converted its
+		// history for the model that was active when it called.
 		const model = this.#state.model;
+		signal?.throwIfAborted();
+		try {
+			for (const hook of this.#beforeSideRequestHooks) await hook(signal);
+		} catch (error) {
+			// A hook that unwinds on the caller's cancellation raises its own
+			// error; the caller's abort reason is the contract the side-request
+			// callers match on, so it is what surfaces.
+			if (signal?.aborted) signal.throwIfAborted();
+			throw error;
+		}
+		signal?.throwIfAborted();
 		if (!model) throw new Error("No active model on agent");
 		const ownedDialect =
 			(this.#dialectResolver ? this.#dialectResolver(model) : this.#dialect) ??

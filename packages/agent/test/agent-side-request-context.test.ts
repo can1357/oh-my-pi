@@ -206,10 +206,94 @@ describe("Agent — buildSideRequestContext", () => {
 		);
 		expect(pinned.systemPrompt).toEqual(["pinned"]);
 
+		// The pinned call above already ran the hook, so the base is stale again:
+		// the callback below sees the fresh value only if it is read after the
+		// hooks ran.
+		base = ["stale"];
 		const provided = await agent.buildSideRequestContext(
 			[{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() }],
 			() => base,
 		);
 		expect(provided.systemPrompt).toEqual(["fresh"]);
+	});
+
+	it("forwards the caller's signal to the before-side-request hooks", async () => {
+		// A cancelled side request must reach the hooks, so a hook that waits on
+		// something slow (a pending prompt rebuild) can unwind instead of blocking
+		// the caller forever.
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["system"],
+				tools: [tool],
+			},
+		});
+		const controller = new AbortController();
+		let seen: AbortSignal | undefined;
+		agent.addBeforeSideRequestHook(async signal => {
+			seen = signal;
+		});
+
+		await agent.buildSideRequestContext(
+			[{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() }],
+			undefined,
+			controller.signal,
+		);
+
+		expect(seen).toBe(controller.signal);
+	});
+
+	it("rejects a side request whose caller was cancelled before the hooks ran", async () => {
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["system"],
+				tools: [tool],
+			},
+		});
+		const controller = new AbortController();
+		controller.abort();
+		let hookRan = false;
+		agent.addBeforeSideRequestHook(async () => {
+			hookRan = true;
+		});
+
+		await expect(
+			agent.buildSideRequestContext(
+				[{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() }],
+				undefined,
+				controller.signal,
+			),
+		).rejects.toThrow();
+		expect(hookRan).toBe(false);
+	});
+
+	it("keeps the call-time model when a before-side-request hook switches models", async () => {
+		// The caller converted its history for the model that was active when it
+		// called, so a `/model` change landing while the hook waits must not
+		// re-normalize the request for the new model.
+		const otherModel = createMockModel({ id: "other-mock-model" });
+		let normalizedFor: unknown;
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["system"],
+				tools: [tool],
+			},
+			transformProviderContext: (ctx: Context, m: typeof model) => {
+				normalizedFor = m;
+				return ctx;
+			},
+		});
+		agent.addBeforeSideRequestHook(async () => {
+			agent.setModel(otherModel);
+		});
+
+		await agent.buildSideRequestContext([
+			{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() },
+		]);
+
+		expect(agent.state.model).toBe(otherModel);
+		expect(normalizedFor).toBe(model);
 	});
 });
