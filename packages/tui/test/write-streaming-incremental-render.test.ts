@@ -89,8 +89,9 @@ describe("write streaming preview incremental line tracking", () => {
 	async function renderCollapsed(
 		content: string,
 		options: { expanded: boolean; isPartial: boolean; spinnerFrame: number },
+		rows: number = VIEWPORT_ROWS,
 	) {
-		pinViewportRows(VIEWPORT_ROWS);
+		pinViewportRows(rows);
 		const uiTheme = await getUiTheme();
 		const component = writeToolRenderer.renderCall({ path: "/tmp/inc.ts", content }, options, uiTheme);
 		if (!component) throw new Error("expected a rendered component for a non-xdev write path");
@@ -226,22 +227,31 @@ describe("write streaming preview incremental line tracking", () => {
 		// content outgrows the renderer's tail budget. Only then does the first
 		// result re-anchor the frame to the head of the file, and only then does
 		// the tail already committed to scrollback need a full repaint.
+		//
+		// The boundary is exact: a write of exactly `budget` lines still fits
+		// the window and renders top-anchored, so it must not ask for the
+		// scrollback-wiping repaint. A terminating newline closes the last line
+		// instead of opening an empty one — the preview drops that row, so the
+		// threshold must not count it either.
 		const options = { expanded: false, isPartial: false };
-		pinViewportRows(30);
+		// 26 rows leaves a six-row window: the budget is below the shared
+		// preview limit, where the two counts used to disagree.
+		pinViewportRows(26);
 		const budget = streamingBudget();
 		const lines = (count: number) => Array.from({ length: count }, (_, i) => `line ${i + 1}`).join("\n");
-		expect(
-			writeToolRenderer.forceFirstResultViewportRepaint(
-				{ path: "/tmp/repaint.ts", content: lines(budget) },
-				options,
-			),
-		).toBe(false);
-		expect(
-			writeToolRenderer.forceFirstResultViewportRepaint(
-				{ path: "/tmp/repaint.ts", content: lines(budget + 1) },
-				options,
-			),
-		).toBe(true);
+		const repaints = (content: string) =>
+			writeToolRenderer.forceFirstResultViewportRepaint({ path: "/tmp/repaint.ts", content }, options);
+		expect(repaints(lines(budget))).toBe(false);
+		expect(repaints(`${lines(budget)}\n`)).toBe(false);
+		expect(repaints(lines(budget + 1))).toBe(true);
+		expect(repaints(`${lines(budget + 1)}\n`)).toBe(true);
+
+		// The render agrees with the threshold on both sides of the boundary.
+		const streamOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		const atBudget = stripAnsi((await renderCollapsed(`${lines(budget)}\n`, streamOptions, 26)).join("\n"));
+		expect(atBudget).not.toContain("earlier line");
+		const overBudget = stripAnsi((await renderCollapsed(`${lines(budget + 1)}\n`, streamOptions, 26)).join("\n"));
+		expect(overBudget).toContain("… (1 earlier line)");
 	});
 
 	it("does not re-tokenize the whole markdown window as streamed content grows", async () => {

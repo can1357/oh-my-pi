@@ -197,12 +197,22 @@ function countLines(text: string): number {
 
 /** Bounded newline scan: whether `text` spans more than `maxLines` lines.
  *  Runs on every live compose (the repaint predicate below), so it must not
- *  materialize the split the way `countLines` does. */
+ *  materialize the split the way `countLines` does.
+ *
+ *  A terminating newline closes the last line instead of opening an empty one,
+ *  and the collapsed preview drops that empty row — so the threshold must not
+ *  count it either. Counting it classifies a write that still renders
+ *  top-anchored as tail-anchored right at the budget boundary, and asks for a
+ *  scrollback-wiping repaint the render never needs. */
 function exceedsLineCount(text: string, maxLines: number): boolean {
 	if (!text) return false;
+	// The terminator is the last newline, so what it contributes is settled up
+	// front: without this a `maxLines`-line file ending in "\n" reads as
+	// `maxLines + 1` lines.
+	const terminator = text.endsWith("\n") ? 1 : 0;
 	let lines = 1;
 	for (let index = text.indexOf("\n"); index !== -1; index = text.indexOf("\n", index + 1)) {
-		if (++lines > maxLines) return true;
+		if (++lines > maxLines + terminator) return true;
 	}
 	return false;
 }
