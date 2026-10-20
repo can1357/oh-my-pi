@@ -2,14 +2,14 @@
 //! `sloppy`: Levenshtein similarity, whole-block fuzzy search,
 //! line-sequence placement, and context-line placement.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::{
 	error::EditError,
 	text::{
-		adjust_indentation, count_leading_indent, fuzzy_equivalent_chars, is_non_empty_line, js_trim,
-		js_trim_end, js_trim_start, normalize_for_fuzzy, normalize_to_lf, normalize_unicode,
-		utf16_len,
+		FoldedChar, adjust_indentation, count_leading_indent, folded_chars, fuzzy_equivalent_chars,
+		is_non_empty_line, js_trim, js_trim_end, js_trim_start, normalize_for_fuzzy, normalize_to_lf,
+		normalize_unicode, utf16_len,
 	},
 };
 
@@ -1194,13 +1194,13 @@ const MAX_HINTED_DIFFERENCES: usize = 8;
 /// the reason the match was rejected — naming it would point at a difference
 /// the matcher does not charge for.
 ///
-/// The body of the two lines is compared trimmed, the way the matcher
-/// compares it, so an indentation difference does not shift the character
-/// positions. The leading and trailing whitespace are compared separately:
-/// the matcher trims them away, but an exact match charges for them, so
-/// trimming them here would hide a difference the caller has to reproduce.
-/// The reported position is a character index into the trimmed body, not a
-/// display column.
+/// The body of the two lines is compared the way the matcher compares it:
+/// through the same folding, so the characters line up even when one of the
+/// two lines inserted or deleted whitespace in front of a difference. The
+/// leading and trailing whitespace are compared separately: the matcher trims
+/// them away, but an exact match charges for them, so trimming them here
+/// would hide a difference the caller has to reproduce. The reported position
+/// is a character index into the expected line's body, not a display column.
 ///
 /// Returns `None` when the pair differs nowhere the caller cannot see: no
 /// folded difference in the body and no differing boundary codepoint.
@@ -1211,18 +1211,14 @@ fn folded_difference_hint(expected: &str, actual: &str, allow_fuzzy: bool) -> Op
 	let (expected_leading, expected_body, expected_trailing) = split_boundary_whitespace(expected);
 	let (actual_leading, actual_body, actual_trailing) = split_boundary_whitespace(actual);
 	let mut hints: Vec<String> = Vec::new();
-	if let Some(hint) = boundary_difference_hint("start", expected_leading, actual_leading) {
-		hints.push(hint);
-	}
+	hints.extend(boundary_difference_hint("start", expected_leading, actual_leading));
 	let mut body_hints = 0usize;
 	let mut omitted = 0usize;
-	for (index, (expected_char, actual_char)) in
-		expected_body.chars().zip(actual_body.chars()).enumerate()
-	{
-		if expected_char == actual_char {
+	for (expected_char, actual_char) in folded_chars(expected_body).zip(folded_chars(actual_body)) {
+		if expected_char.source == actual_char.source {
 			continue;
 		}
-		if !fuzzy_equivalent_chars(expected_char, actual_char) {
+		if !fuzzy_equivalent_chars(expected_char.source, actual_char.source) {
 			continue;
 		}
 		if body_hints == MAX_HINTED_DIFFERENCES {
@@ -1230,18 +1226,9 @@ fn folded_difference_hint(expected: &str, actual: &str, allow_fuzzy: bool) -> Op
 			continue;
 		}
 		body_hints += 1;
-		hints.push(format!(
-			"  differs at char {}: U+{:04X} {} vs U+{:04X} {}",
-			index + 1,
-			expected_char as u32,
-			expected_char,
-			actual_char as u32,
-			actual_char,
-		));
+		hints.push(folded_difference_line(expected_char, actual_char));
 	}
-	if let Some(hint) = boundary_difference_hint("end", expected_trailing, actual_trailing) {
-		hints.push(hint);
-	}
+	hints.extend(boundary_difference_hint("end", expected_trailing, actual_trailing));
 	if hints.is_empty() {
 		return None;
 	}
@@ -1249,6 +1236,32 @@ fn folded_difference_hint(expected: &str, actual: &str, allow_fuzzy: bool) -> Op
 		hints.push(format!("  ... and {omitted} more differences"));
 	}
 	Some(hints.join("\n"))
+}
+
+/// The hint for one folded pair of characters.
+///
+/// A whitespace glyph is left out: it renders as blank space — a tab renders
+/// as a hole once the renderer replaces it — so the codepoints alone tell the
+/// caller what to reproduce.
+fn folded_difference_line(expected: FoldedChar, actual: FoldedChar) -> String {
+	let (expected_char, actual_char) = (expected.source, actual.source);
+	if expected_char.is_whitespace() || actual_char.is_whitespace() {
+		format!(
+			"  differs at char {}: U+{:04X} vs U+{:04X}",
+			expected.index + 1,
+			expected_char as u32,
+			actual_char as u32
+		)
+	} else {
+		format!(
+			"  differs at char {}: U+{:04X} {} vs U+{:04X} {}",
+			expected.index + 1,
+			expected_char as u32,
+			expected_char,
+			actual_char as u32,
+			actual_char
+		)
+	}
 }
 
 /// Split a line into its leading whitespace, its body and its trailing
@@ -1266,24 +1279,55 @@ fn split_boundary_whitespace(line: &str) -> (&str, &str, &str) {
 	(&line[..start], &line[start..end], &line[end..])
 }
 
-/// The first pair of characters in the leading or trailing whitespace that
-/// differ. The glyphs are omitted: whitespace renders as blank space, so only
-/// the codepoint tells the caller what to reproduce.
+/// The boundary whitespace that differs between the two lines. The glyphs are
+/// omitted: whitespace renders as blank space, so only the codepoint tells
+/// the caller what to reproduce.
 ///
 /// Every unequal pair counts, not only the ones the matcher folds together.
 /// The boundary whitespace is trimmed away before the match is scored, so an
 /// exact match is the only thing that charges for it — and it charges for the
 /// codepoint, not for the shape: a no-break space (`U+00A0`), a tab and the
 /// ideographic space (`U+3000`) all render as blank space.
-fn boundary_difference_hint(position: &str, expected: &str, actual: &str) -> Option<String> {
-	let (expected_char, actual_char) = expected
-		.chars()
-		.zip(actual.chars())
-		.find(|(expected_char, actual_char)| expected_char != actual_char)?;
-	Some(format!(
-		"  differs at the {position}: U+{:04X} vs U+{:04X}",
-		expected_char as u32, actual_char as u32
-	))
+///
+/// One line can carry boundary whitespace the other one does not have at all.
+/// The paired comparison never reaches those characters, so they are reported
+/// with their codepoint and count.
+fn boundary_difference_hint(position: &str, expected: &str, actual: &str) -> Vec<String> {
+	let expected_chars: Vec<char> = expected.chars().collect();
+	let actual_chars: Vec<char> = actual.chars().collect();
+	let mut hints = Vec::new();
+	if let Some((expected_char, actual_char)) = expected_chars
+		.iter()
+		.copied()
+		.zip(actual_chars.iter().copied())
+		.find(|(expected_char, actual_char)| expected_char != actual_char)
+	{
+		hints.push(format!(
+			"  differs at the {position}: U+{:04X} vs U+{:04X}",
+			expected_char as u32, actual_char as u32
+		));
+		return hints;
+	}
+	// The characters left over after the paired comparison: one line has
+	// boundary whitespace where the other has none.
+	let (leftover, side) = if expected_chars.len() > actual_chars.len() {
+		(&expected_chars[actual_chars.len()..], "-")
+	} else if actual_chars.len() > expected_chars.len() {
+		(&actual_chars[expected_chars.len()..], "+")
+	} else {
+		return hints;
+	};
+	let mut counts: BTreeMap<char, usize> = BTreeMap::new();
+	for ch in leftover {
+		*counts.entry(*ch).or_insert(0) += 1;
+	}
+	let codepoints = counts
+		.iter()
+		.map(|(ch, count)| format!("U+{:04X} x{count}", *ch as u32))
+		.collect::<Vec<_>>()
+		.join(", ");
+	hints.push(format!("  differs at the {position}: {codepoints} only in the {side} line"));
+	hints
 }
 
 /// Format `EditMatchError.formatMessage` byte-for-byte, plus a codepoint hint
@@ -1920,6 +1964,61 @@ mod tests {
 				"  - \u{20}foo\n",
 				"  + \u{00A0}foo\n",
 				"  differs at the start: U+0020 vs U+00A0\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_names_folded_interior_whitespace() {
+		// The matcher folds a tab onto a space, so the two lines are the same
+		// line — but the renderer replaces the tab, so the printed pair reads
+		// as identical. The codepoints have to be named.
+		assert_eq!(
+			exact_edit_error("foo\tbar", "foo bar", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - foo bar\n",
+				"  + foo\tbar\n",
+				"  differs at char 4: U+0020 vs U+0009\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_names_unpaired_boundary_whitespace() {
+		// One line carries boundary whitespace the other one does not have at
+		// all: the paired comparison never reaches those characters, so they
+		// have to be named with their codepoint and count.
+		assert_eq!(
+			exact_edit_error("foo\u{3000}\nbar", "foo\nbar", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - foo\n",
+				"  + foo\u{3000}\n",
+				"  differs at the end: U+3000 x1 only in the + line\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_names_folded_differences_after_collapsed_whitespace() {
+		// The matcher folds the whitespace run away, so the fullwidth parens
+		// line up with the halfwidth ones — the raw character positions do
+		// not.
+		assert_eq!(
+			exact_edit_error("a  （x）", "a (x)", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - a (x)\n",
+				"  + a  （x）\n",
+				"  differs at char 3: U+0028 ( vs U+FF08 （\n",
+				"  differs at char 5: U+0029 ) vs U+FF09 ）\n",
 				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
 				 high-confidence matches."
 			)

@@ -362,13 +362,58 @@ fn fold_unicode_variant(ch: char) -> Option<char> {
 	}
 }
 
+/// Fold a character to the form the fuzzy matcher compares it as: the
+/// typographic and width variants collapse onto their ASCII form and a tab
+/// collapses onto a space.
+fn fuzzy_fold_char(ch: char) -> char {
+	match ch {
+		'\t' => ' ',
+		other => fold_unicode_variant(other).unwrap_or(other),
+	}
+}
+
 /// True when two characters compare as the same in fuzzy matching, i.e. they
-/// differ only by a typographic or width variant (`“` vs `"`, `（` vs `(`).
+/// differ only by a typographic or width variant (`“` vs `"`, `（` vs `(`) or
+/// by the whitespace the matcher collapses (`\t` vs ` `).
 ///
 /// The comparison is transitive: `｀` folds to `` ` ``, which folds to `'`,
 /// so `｀` and `'` compare equal too.
 pub fn fuzzy_equivalent_chars(left: char, right: char) -> bool {
-	fold_unicode_variant(left).unwrap_or(left) == fold_unicode_variant(right).unwrap_or(right)
+	fuzzy_fold_char(left) == fuzzy_fold_char(right)
+}
+
+/// One character of a line as the fuzzy matcher compares it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldedChar {
+	/// The folded character the matcher compares.
+	pub folded: char,
+	/// The character in the source line.
+	pub source: char,
+	/// The 0-based index of `source` in the source line.
+	pub index:  usize,
+}
+
+/// The characters of `line` as the fuzzy matcher compares them: the
+/// typographic and width variants collapse onto their ASCII form, a tab
+/// collapses onto a space and a run of whitespace collapses into one space.
+///
+/// Every character keeps the source it came from, so two lines the matcher
+/// considers equal can still be compared character by character — the folded
+/// positions line up even when one of them inserted or deleted whitespace.
+pub fn folded_chars(line: &str) -> impl Iterator<Item = FoldedChar> + '_ {
+	let mut in_space = false;
+	line.chars().enumerate().filter_map(move |(index, source)| {
+		let folded = fuzzy_fold_char(source);
+		if folded == ' ' {
+			if in_space {
+				return None;
+			}
+			in_space = true;
+		} else {
+			in_space = false;
+		}
+		Some(FoldedChar { folded, source, index })
+	})
 }
 
 /// Normalize a line for fuzzy comparison: trim, fold quotes/dashes/fullwidth
@@ -379,21 +424,8 @@ pub fn normalize_for_fuzzy(line: &str) -> String {
 		return String::new();
 	}
 	let mut out = String::with_capacity(trimmed.len());
-	let mut in_space = false;
-	for ch in trimmed.chars() {
-		let mapped = match ch {
-			' ' | '\t' => ' ',
-			other => fold_unicode_variant(other).unwrap_or(other),
-		};
-		if mapped == ' ' {
-			if in_space {
-				continue;
-			}
-			in_space = true;
-		} else {
-			in_space = false;
-		}
-		out.push(mapped);
+	for folded in folded_chars(trimmed) {
+		out.push(folded.folded);
 	}
 	out
 }
@@ -595,5 +627,14 @@ mod tests {
 		assert_eq!(normalize_for_fuzzy("｀"), "'");
 		assert_eq!(normalize_for_fuzzy("｀"), normalize_for_fuzzy("'"));
 		assert!(fuzzy_equivalent_chars('｀', '\''));
+	}
+
+	#[test]
+	fn fuzzy_normalization_folds_a_tab_onto_a_space() {
+		// The matcher collapses a tab onto a space, so the two characters
+		// compare equal — an interior tab would otherwise stay invisible in
+		// the exact-match hint.
+		assert_eq!(normalize_for_fuzzy("a\tb"), normalize_for_fuzzy("a b"));
+		assert!(fuzzy_equivalent_chars('\t', ' '));
 	}
 }
