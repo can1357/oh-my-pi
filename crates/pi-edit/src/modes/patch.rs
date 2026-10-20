@@ -23,8 +23,9 @@ use crate::{
 	store::EditStore,
 	stream_json::{ArgSnapshot, EditEntry},
 	text::{
-		adjust_indentation, convert_leading_tabs_to_spaces, count_leading_whitespace,
-		get_leading_whitespace, js_trim, js_trim_end, js_trim_start, normalize_for_fuzzy,
+		adjust_indentation, convert_leading_tabs_to_spaces, count_leading_indent, get_leading_indent,
+		indent_has_space, indent_has_tab, js_trim, merge_file_characters, normalize_for_fuzzy,
+		strip_leading_indent,
 	},
 };
 
@@ -118,7 +119,7 @@ fn equal_trimmed(left: &[String], right: &[String]) -> bool {
 fn indent_char(lines: &[String]) -> char {
 	lines
 		.iter()
-		.find_map(|line| get_leading_whitespace(line).chars().next())
+		.find_map(|line| get_leading_indent(line).chars().next())
 		.unwrap_or(' ')
 }
 
@@ -133,90 +134,62 @@ fn apply_indent_delta(lines: &[String], delta: isize, indent: char) -> Vec<Strin
 				return format!("{}{}", indent.to_string().repeat(delta as usize), line);
 			}
 			let remove = (-delta) as usize;
-			let remove = remove.min(count_leading_whitespace(line));
-			line[remove..].to_owned()
+			let remove = remove.min(count_leading_indent(line));
+			strip_leading_indent(line, remove).to_owned()
 		})
 		.collect()
 }
 
 /// The file's own line for every line the hunk left unchanged.
 ///
-/// A context line appears in the old and the new block alike, so the hunk did
-/// not change it and the file's line is the one to keep: the matcher folds a
-/// fullwidth character onto its ASCII counterpart, so an authored ASCII line
+/// A context line appears in the hunk's old and new block alike, so the hunk
+/// did not change it and the file's line is the one to keep: the matcher folds
+/// a fullwidth character onto its ASCII counterpart, so an authored ASCII line
 /// matches a file line that holds the fullwidth form — writing the authored
 /// line would silently rewrite text the hunk marked unchanged.
 ///
-/// The context lines are the blocks' common prefix and suffix, and a line is
-/// only mapped when the matcher matched it to that very line of the file.
+/// The correspondence comes from the diff of the two blocks, so a context line
+/// between two edits is mapped as well as the ones at the edges.
 fn context_lines(
 	pattern: &[String],
 	actual: &[String],
 	new_lines: &[String],
 ) -> Vec<Option<String>> {
 	let mut mapping: Vec<Option<String>> = vec![None; new_lines.len()];
-	let limit = pattern.len().min(new_lines.len());
-	let prefix = pattern
-		.iter()
-		.zip(new_lines.iter())
-		.take_while(|(pattern_line, new_line)| pattern_line == new_line)
-		.count();
-	let suffix = pattern
-		.iter()
-		.rev()
-		.zip(new_lines.iter().rev())
-		.take_while(|(pattern_line, new_line)| pattern_line == new_line)
-		.count()
-		.min(limit - prefix);
-	for index in 0..prefix {
-		mapping[index] = matched_file_line(pattern, actual, index);
-	}
-	for offset in 0..suffix {
-		mapping[new_lines.len() - 1 - offset] =
-			matched_file_line(pattern, actual, pattern.len() - 1 - offset);
+	for (pattern_index, new_index) in shared_lines(pattern, new_lines) {
+		mapping[new_index] = actual.get(pattern_index).cloned();
 	}
 	mapping
 }
 
-/// The line of the file the pattern's line was matched to, when the two are
-/// the same line: the matcher compares the lines folded, so a fullwidth
-/// character and its ASCII counterpart match each other.
-fn matched_file_line(pattern: &[String], actual: &[String], index: usize) -> Option<String> {
-	let pattern_line = pattern.get(index)?;
-	let actual_line = actual.get(index)?;
-	if normalize_for_fuzzy(pattern_line) != normalize_for_fuzzy(actual_line) {
-		return None;
-	}
-	Some(actual_line.clone())
-}
-
-/// The authored line with the characters the file holds.
+/// The lines the hunk's old and new block share, as (old index, new index)
+/// pairs.
 ///
-/// The matcher folds a fullwidth character onto its ASCII counterpart, so the
-/// file can hold characters the authored line does not: writing the authored
-/// line would silently rewrite text the hunk marked unchanged. The whitespace
-/// stays the authored one — the hunk may have changed it on purpose.
-fn merge_file_characters(authored: &str, file_line: &str) -> String {
-	let authored_body = js_trim(authored);
-	let file_body = js_trim(file_line);
-	if authored_body == file_body {
-		return authored.to_owned();
+/// The blocks differ only in the lines the hunk changes, so the lines they
+/// share are the ones it left alone.
+fn shared_lines(old: &[String], new: &[String]) -> Vec<(usize, usize)> {
+	let old_refs = old.iter().map(String::as_str).collect::<Vec<_>>();
+	let new_refs = new.iter().map(String::as_str).collect::<Vec<_>>();
+	let (old_ids, new_ids) = pi_diff::intern(&old_refs, &new_refs);
+	let mut shared = Vec::new();
+	let (mut old_index, mut new_index) = (0usize, 0usize);
+	for run in pi_diff::myers_diff(&old_ids, &new_ids) {
+		let count = run.count as usize;
+		if run.added {
+			new_index += count;
+			continue;
+		}
+		if run.removed {
+			old_index += count;
+			continue;
+		}
+		for offset in 0..count {
+			shared.push((old_index + offset, new_index + offset));
+		}
+		old_index += count;
+		new_index += count;
 	}
-	if normalize_for_fuzzy(authored_body) != normalize_for_fuzzy(file_body) {
-		return authored.to_owned();
-	}
-	if without_whitespace(authored_body) == without_whitespace(file_body) {
-		// Only the whitespace differs: that is the hunk's own change.
-		return authored.to_owned();
-	}
-	let leading = &authored[..authored.len() - js_trim_start(authored).len()];
-	let trailing = &authored[js_trim_end(authored).len()..];
-	format!("{leading}{file_body}{trailing}")
-}
-
-/// The characters of a line that are not whitespace.
-fn without_whitespace(line: &str) -> String {
-	line.chars().filter(|ch| !ch.is_whitespace()).collect()
+	shared
 }
 
 fn adjust_lines_indentation(
@@ -265,27 +238,25 @@ fn adjust_lines_indentation(
 	let pattern_tab_only = pattern
 		.iter()
 		.filter(|line| !is_blank_line(line))
-		.all(|line| !get_leading_whitespace(line).contains(' '));
+		.all(|line| !indent_has_space(line));
 	let actual_space_only = actual
 		.iter()
 		.filter(|line| !is_blank_line(line))
-		.all(|line| !get_leading_whitespace(line).contains('\t'));
+		.all(|line| !indent_has_tab(line));
 	let pattern_space_only = pattern
 		.iter()
 		.filter(|line| !is_blank_line(line))
-		.all(|line| !get_leading_whitespace(line).contains('\t'));
+		.all(|line| !indent_has_tab(line));
 	let actual_tab_only = actual
 		.iter()
 		.filter(|line| !is_blank_line(line))
-		.all(|line| !get_leading_whitespace(line).contains(' '));
-	let pattern_mixed = pattern.iter().any(|line| {
-		let ws = get_leading_whitespace(line);
-		ws.contains(' ') && ws.contains('\t')
-	});
-	let actual_mixed = actual.iter().any(|line| {
-		let ws = get_leading_whitespace(line);
-		ws.contains(' ') && ws.contains('\t')
-	});
+		.all(|line| !indent_has_space(line));
+	let pattern_mixed = pattern
+		.iter()
+		.any(|line| indent_has_space(line) && indent_has_tab(line));
+	let actual_mixed = actual
+		.iter()
+		.any(|line| indent_has_space(line) && indent_has_tab(line));
 	if !pattern_mixed && !actual_mixed && pattern_tab_only && actual_space_only {
 		let mut ratio = None;
 		let mut consistent = true;
@@ -293,8 +264,8 @@ fn adjust_lines_indentation(
 			if is_blank_line(old) || is_blank_line(found) {
 				continue;
 			}
-			let old_indent = count_leading_whitespace(old);
-			let found_indent = count_leading_whitespace(found);
+			let old_indent = count_leading_indent(old);
+			let found_indent = count_leading_indent(found);
 			if old_indent == 0 {
 				continue;
 			}
@@ -312,10 +283,10 @@ fn adjust_lines_indentation(
 		if consistent && ratio.is_some_and(|value| value > 0) {
 			let ratio = ratio.unwrap();
 			let valid = pattern.iter().zip(actual).all(|(old, found)| {
-				is_blank_line(old)
-					|| is_blank_line(found)
-					|| get_leading_whitespace(old).is_empty()
-					|| count_leading_whitespace(found) == count_leading_whitespace(old) * ratio
+				is_blank_line(found)
+					|| is_blank_line(old)
+					|| get_leading_indent(old).is_empty()
+					|| count_leading_indent(found) == count_leading_indent(old) * ratio
 			});
 			if valid {
 				return with_file_characters(
@@ -335,8 +306,8 @@ fn adjust_lines_indentation(
 			if is_blank_line(old) || is_blank_line(found) {
 				continue;
 			}
-			let spaces = count_leading_whitespace(old);
-			let tabs = count_leading_whitespace(found);
+			let spaces = count_leading_indent(old);
+			let tabs = count_leading_indent(found);
 			if tabs == 0 {
 				continue;
 			}
@@ -378,7 +349,7 @@ fn adjust_lines_indentation(
 							if is_blank_line(line) {
 								return line.clone();
 							}
-							let spaces = count_leading_whitespace(line);
+							let spaces = count_leading_indent(line);
 							if spaces == 0 {
 								return line.clone();
 							}
@@ -388,7 +359,12 @@ fn adjust_lines_indentation(
 							}
 							let tabs = adjusted as usize / width;
 							let remainder = adjusted as usize - tabs * width;
-							format!("{}{}{}", "\t".repeat(tabs), " ".repeat(remainder), &line[spaces..])
+							format!(
+								"{}{}{}",
+								"\t".repeat(tabs),
+								" ".repeat(remainder),
+								strip_leading_indent(line, spaces)
+							)
 						})
 						.collect(),
 				);
@@ -400,14 +376,14 @@ fn adjust_lines_indentation(
 		.iter()
 		.zip(actual)
 		.filter(|(a, b)| !is_blank_line(a) && !is_blank_line(b))
-		.map(|(a, b)| count_leading_whitespace(b) as isize - count_leading_whitespace(a) as isize);
+		.map(|(a, b)| count_leading_indent(b) as isize - count_leading_indent(a) as isize);
 	let delta = deltas
 		.next()
 		.filter(|first| deltas.all(|value| value == *first));
 	let pattern_min = pattern
 		.iter()
 		.filter(|line| !is_blank_line(line))
-		.map(|line| count_leading_whitespace(line))
+		.map(|line| count_leading_indent(line))
 		.min()
 		.unwrap_or(0);
 	let mut by_content = std::collections::HashMap::<String, Vec<&String>>::new();
@@ -453,17 +429,16 @@ fn adjust_lines_indentation(
 				&& !is_blank_line(pattern_line)
 				&& !is_blank_line(actual_line)
 			{
-				let local_delta = count_leading_whitespace(actual_line) as isize
-					- count_leading_whitespace(pattern_line) as isize;
-				if local_delta != 0
-					&& count_leading_whitespace(line) == count_leading_whitespace(pattern_line)
+				let local_delta = count_leading_indent(actual_line) as isize
+					- count_leading_indent(pattern_line) as isize;
+				if local_delta != 0 && count_leading_indent(line) == count_leading_indent(pattern_line)
 				{
 					return apply_indent_delta(std::slice::from_ref(line), local_delta, indent)
 						.remove(0);
 				}
 			}
 			if let Some(delta) = delta.filter(|value| *value != 0)
-				&& count_leading_whitespace(line) == pattern_min
+				&& count_leading_indent(line) == pattern_min
 			{
 				return apply_indent_delta(std::slice::from_ref(line), delta, indent).remove(0);
 			}
@@ -2094,6 +2069,87 @@ mod tests {
 				.unwrap()
 				.0,
 			"foo（bar）\nchanged\n"
+		);
+	}
+
+	#[test]
+	fn a_fuzzy_patch_keeps_an_interior_context_line() {
+		// The context line between two edits is a context line as well: the
+		// hunk left it unchanged, so it has to keep the characters the file
+		// holds.
+		let hunk = DiffHunk {
+			change_context:    None,
+			old_start_line:    None,
+			new_start_line:    None,
+			has_context_lines: true,
+			old_lines:         vec!["old1".into(), "foo(bar)".into(), "old2".into()],
+			new_lines:         vec!["new1".into(), "foo(bar)".into(), "new2".into()],
+			is_end_of_file:    false,
+		};
+		assert_eq!(
+			apply_hunks(
+				"old1\nfoo（bar）\nold2\n",
+				"a.txt",
+				std::slice::from_ref(&hunk),
+				0.95,
+				true,
+				false
+			)
+			.unwrap()
+			.0,
+			"new1\nfoo（bar）\nnew2\n"
+		);
+	}
+
+	#[test]
+	fn a_fuzzy_patch_keeps_a_context_line_the_matcher_accepted_fuzzily() {
+		// The context line does not match the file's line even folded: the
+		// matcher accepted the hunk by scoring it. The line the hunk left
+		// unchanged is still the file's line.
+		let hunk = DiffHunk {
+			change_context:    None,
+			old_start_line:    None,
+			new_start_line:    None,
+			has_context_lines: true,
+			old_lines:         vec!["foo(bar)x".into(), "keep".into()],
+			new_lines:         vec!["foo(bar)x".into(), "changed".into()],
+			is_end_of_file:    false,
+		};
+		assert_eq!(
+			apply_hunks(
+				"foo（baz）x\nkeep\n",
+				"a.txt",
+				std::slice::from_ref(&hunk),
+				0.95,
+				true,
+				false
+			)
+			.unwrap()
+			.0,
+			"foo（baz）x\nchanged\n"
+		);
+	}
+
+	#[test]
+	fn a_fuzzy_patch_keeps_the_ideographic_indentation() {
+		// The matcher folds the ideographic space onto an ASCII space, so the
+		// hunk matches the file — but the indentation the file holds is
+		// measured in characters: the patch must not read the three bytes of
+		// the ideographic space as three spaces.
+		let hunk = DiffHunk {
+			change_context:    None,
+			old_start_line:    None,
+			new_start_line:    None,
+			has_context_lines: true,
+			old_lines:         vec![" foo(x)".into()],
+			new_lines:         vec![" bar(x)".into()],
+			is_end_of_file:    false,
+		};
+		assert_eq!(
+			apply_hunks("\u{3000}foo（x）\n", "a.txt", std::slice::from_ref(&hunk), 0.95, true, false)
+				.unwrap()
+				.0,
+			" bar(x)\n"
 		);
 	}
 }

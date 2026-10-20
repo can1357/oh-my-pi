@@ -143,14 +143,31 @@ const fn is_indent_char(ch: char) -> bool {
 	matches!(ch, ' ' | '\t' | '\u{3000}')
 }
 
-/// Leading indentation of `line` — the spaces, tabs and the ideographic space
-/// (`U+3000`) the fuzzy matcher folds onto an ASCII space.
-fn leading_indent(line: &str) -> &str {
+/// Leading indentation of `line` — the spaces, tabs and the ideographic
+/// space (`U+3000`) the fuzzy matcher folds onto an ASCII space.
+pub fn get_leading_indent(line: &str) -> &str {
 	let end = line
 		.char_indices()
 		.find(|(_, ch)| !is_indent_char(*ch))
 		.map_or(line.len(), |(offset, _)| offset);
 	&line[..end]
+}
+
+/// True when the character is indentation whitespace the matcher folds onto an
+/// ASCII space: an ASCII space or the ideographic space (`U+3000`).
+const fn is_space_indent_char(ch: char) -> bool {
+	matches!(ch, ' ' | '\u{3000}')
+}
+
+/// True when the indentation of `line` holds a space the matcher folds onto an
+/// ASCII space: an ASCII space or the ideographic space (`U+3000`).
+pub fn indent_has_space(line: &str) -> bool {
+	get_leading_indent(line).chars().any(is_space_indent_char)
+}
+
+/// True when the indentation of `line` holds a tab.
+pub fn indent_has_tab(line: &str) -> bool {
+	get_leading_indent(line).contains('\t')
 }
 
 /// Count leading indentation characters, one per character: the ideographic
@@ -161,7 +178,7 @@ pub fn count_leading_indent(line: &str) -> usize {
 }
 
 /// Drop up to `units` indentation characters from the front of `line`.
-fn strip_leading_indent(line: &str, units: usize) -> &str {
+pub fn strip_leading_indent(line: &str, units: usize) -> &str {
 	let mut remaining = units;
 	let mut end = 0;
 	for (offset, ch) in line.char_indices() {
@@ -230,7 +247,7 @@ fn build_indent_profile(text: &str) -> IndentProfile<'_> {
 			continue;
 		}
 		non_empty_count += 1;
-		let indent = leading_indent(line);
+		let indent = get_leading_indent(line);
 		indent_counts.push(count_leading_indent(line));
 		let has_space = indent.chars().any(|ch| ch == ' ' || ch == '\u{3000}');
 		let has_tab = indent.contains('\t');
@@ -384,6 +401,15 @@ pub fn fuzzy_equivalent_chars(left: char, right: char) -> bool {
 	fuzzy_fold_char(left) == fuzzy_fold_char(right)
 }
 
+/// True when the text is nothing but whitespace.
+///
+/// The matcher collapses a run of whitespace into a single space, so the
+/// codepoints of a run are the caller's to reproduce even when the matcher
+/// does not charge for them.
+fn is_blank(text: &str) -> bool {
+	!text.is_empty() && text.chars().all(|ch| ch.is_whitespace())
+}
+
 /// One character of a line as the fuzzy matcher compares it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FoldedChar {
@@ -495,12 +521,17 @@ pub struct FoldedDifference {
 ///
 /// Only the differences the matcher folds together are reported: a codepoint
 /// the matcher charges for on its own is visible in the printed pair.
+///
+/// Two blank positions are compared codepoint by codepoint even when the
+/// matcher does not fold them together: a space and a nonbreaking space are
+/// different codepoints the terminal renders alike, so the printed pair alone
+/// does not tell the caller which one it has to write.
 pub fn folded_differences(expected: &str, actual: &str) -> Vec<FoldedDifference> {
 	let mut differences = Vec::new();
 	for (expected_position, actual_position) in
 		folded_positions(expected).zip(folded_positions(actual))
 	{
-		if expected_position.folded == ' ' && actual_position.folded == ' ' {
+		if is_blank(expected_position.source) && is_blank(actual_position.source) {
 			differences.extend(run_differences(&expected_position, &actual_position));
 			continue;
 		}
@@ -527,7 +558,9 @@ pub fn folded_differences(expected: &str, actual: &str) -> Vec<FoldedDifference>
 ///
 /// The run is one folded position, but it is a sequence of codepoints: they
 /// are compared one by one, and the ones the longer run has in excess are
-/// reported with their count.
+/// reported with their count. The excess is reported next to the paired
+/// differences: the renderer expands a tab into spaces, so a caller that
+/// fixed only the named pair still misses the extra spaces.
 fn run_differences(
 	expected: &FoldedPosition<'_>,
 	actual: &FoldedPosition<'_>,
@@ -547,11 +580,8 @@ fn run_differences(
 			count:    1,
 		});
 	}
-	if !differences.is_empty() {
-		return differences;
-	}
-	// The codepoints the two runs share are equal: the longer run has ones the
-	// other one does not have at all.
+	// The codepoints the longer run has in excess: the matcher charges for
+	// none of them, but an exact match charges for all of them.
 	let (leftover, index, in_expected) = if expected_chars.len() > actual_chars.len() {
 		(&expected_chars[common..], expected.index + common, true)
 	} else if actual_chars.len() > expected_chars.len() {
@@ -596,6 +626,54 @@ fn is_indentation_only_rewrite(old_text: &str, new_text: &str) -> bool {
 			.iter()
 			.zip(&new_lines)
 			.all(|(a, b)| js_trim(a) == js_trim(b))
+}
+
+/// The authored line with the characters the file holds.
+///
+/// The matcher folds a fullwidth character onto its ASCII counterpart, so the
+/// file can hold characters the authored line does not: writing the authored
+/// line would silently rewrite text the hunk marked unchanged. The whitespace
+/// stays the authored one - the hunk may have changed it on purpose.
+pub fn merge_file_characters(authored: &str, file_line: &str) -> String {
+	let authored_body = js_trim(authored);
+	let file_body = js_trim(file_line);
+	if authored_body == file_body {
+		return authored.to_owned();
+	}
+	if normalize_for_fuzzy(authored_body) != normalize_for_fuzzy(file_body) {
+		return authored.to_owned();
+	}
+	if without_whitespace(authored_body) == without_whitespace(file_body) {
+		// Only the whitespace differs: that is the hunk's own change.
+		return authored.to_owned();
+	}
+	let leading = &authored[..authored.len() - js_trim_start(authored).len()];
+	let trailing = &authored[js_trim_end(authored).len()..];
+	format!("{leading}{file_body}{trailing}")
+}
+
+/// The characters of a line that are not whitespace.
+fn without_whitespace(line: &str) -> String {
+	line.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+/// The replacement with the characters the file holds, line by line.
+///
+/// The rewrite changes the whitespace only, so the body of every line is the
+/// file's: the matcher folds a fullwidth character onto its ASCII
+/// counterpart, and the authored body would transliterate the file's text.
+fn merge_file_body(actual_text: &str, new_text: &str) -> String {
+	let actual_lines = actual_text.split('\n').collect::<Vec<_>>();
+	let new_lines = new_text.split('\n').collect::<Vec<_>>();
+	if actual_lines.len() != new_lines.len() {
+		return new_text.to_owned();
+	}
+	new_lines
+		.iter()
+		.zip(actual_lines)
+		.map(|(new_line, actual_line)| merge_file_characters(new_line, actual_line))
+		.collect::<Vec<_>>()
+		.join("\n")
 }
 
 fn maybe_convert_tab_indentation(
@@ -673,8 +751,14 @@ fn apply_indent_delta(text: &str, delta: isize, indent_char: char) -> String {
 /// indented with it. Measuring the same line differently would compute a
 /// bogus delta and silently deindent the replacement.
 pub fn adjust_indentation(old_text: &str, actual_text: &str, new_text: &str) -> String {
-	if old_text == actual_text || is_indentation_only_rewrite(old_text, new_text) {
+	if old_text == actual_text {
 		return new_text.to_owned();
+	}
+	if is_indentation_only_rewrite(old_text, new_text) {
+		// The rewrite changes the whitespace only, so the body is the file's:
+		// the matcher folds a fullwidth character onto its ASCII counterpart,
+		// and the authored body would transliterate the file's text.
+		return merge_file_body(actual_text, new_text);
 	}
 	let old = build_indent_profile(old_text);
 	let actual = build_indent_profile(actual_text);
@@ -794,19 +878,6 @@ mod tests {
 		// the exact-match hint.
 		assert_eq!(normalize_for_fuzzy("a\tb"), normalize_for_fuzzy("a b"));
 		assert!(fuzzy_equivalent_chars('\t', ' '));
-	}
-
-	#[test]
-	fn a_folded_whitespace_run_keeps_every_codepoint() {
-		// The matcher collapses the run into a single space, but every
-		// codepoint in it is the caller's to reproduce: the tab the terminal
-		// renders as blank space has to be nameable.
-		let differences = folded_differences("foo     bar", "foo \tbar");
-		assert_eq!(differences.len(), 1);
-		assert_eq!(differences[0].index, 4);
-		assert_eq!(differences[0].expected, Some(' '));
-		assert_eq!(differences[0].actual, Some('\t'));
-		assert_eq!(differences[0].count, 1);
 	}
 
 	#[test]

@@ -1192,7 +1192,9 @@ const MAX_HINTED_DIFFERENCES: usize = 8;
 /// Only exact mode reports the hint: with fuzzy matching enabled both sides
 /// are normalized before scoring, so a folded variant is free and can never be
 /// the reason the match was rejected — naming it would point at a difference
-/// the matcher does not charge for.
+/// the matcher does not charge for. The ambiguous case is the exception: there
+/// the folded variants are exactly what made the candidates tie, so the
+/// codepoints are what tells the candidates apart.
 ///
 /// The body of the two lines is compared the way the matcher compares it:
 /// through the same folding, so the characters line up even when one of the
@@ -1204,8 +1206,8 @@ const MAX_HINTED_DIFFERENCES: usize = 8;
 ///
 /// Returns `None` when the pair differs nowhere the caller cannot see: no
 /// folded difference in the body and no differing boundary codepoint.
-fn folded_difference_hint(expected: &str, actual: &str, allow_fuzzy: bool) -> Option<String> {
-	if allow_fuzzy {
+fn folded_difference_hint(expected: &str, actual: &str, report: bool) -> Option<String> {
+	if !report {
 		return None;
 	}
 	let (expected_leading, expected_body, expected_trailing) = split_boundary_whitespace(expected);
@@ -1302,28 +1304,30 @@ fn split_boundary_whitespace(line: &str) -> (&str, &str, &str) {
 /// One line can carry boundary whitespace the other one does not have at all.
 /// The paired comparison never reaches those characters, so they are reported
 /// with their codepoint and count.
+///
+/// Every unequal pair is reported: they all render as blank whitespace, so
+/// naming one of them leaves the next one undiscovered.
 fn boundary_difference_hint(position: &str, expected: &str, actual: &str) -> Vec<String> {
 	let expected_chars: Vec<char> = expected.chars().collect();
 	let actual_chars: Vec<char> = actual.chars().collect();
 	let mut hints = Vec::new();
-	if let Some((expected_char, actual_char)) = expected_chars
-		.iter()
-		.copied()
-		.zip(actual_chars.iter().copied())
-		.find(|(expected_char, actual_char)| expected_char != actual_char)
-	{
+	let common = expected_chars.len().min(actual_chars.len());
+	for offset in 0..common {
+		let (expected_char, actual_char) = (expected_chars[offset], actual_chars[offset]);
+		if expected_char == actual_char {
+			continue;
+		}
 		hints.push(format!(
 			"  differs at the {position}: U+{:04X} vs U+{:04X}",
 			expected_char as u32, actual_char as u32
 		));
-		return hints;
 	}
 	// The characters left over after the paired comparison: one line has
 	// boundary whitespace where the other has none.
-	let (leftover, side) = if expected_chars.len() > actual_chars.len() {
-		(&expected_chars[actual_chars.len()..], "-")
-	} else if actual_chars.len() > expected_chars.len() {
-		(&actual_chars[expected_chars.len()..], "+")
+	let (leftover, side) = if expected_chars.len() > common {
+		(&expected_chars[common..], "-")
+	} else if actual_chars.len() > common {
+		(&actual_chars[common..], "+")
 	} else {
 		return hints;
 	};
@@ -1341,8 +1345,8 @@ fn boundary_difference_hint(position: &str, expected: &str, actual: &str) -> Vec
 }
 
 /// Format `EditMatchError.formatMessage` byte-for-byte, plus a codepoint hint
-/// when fuzzy matching is disabled and the printed diff pair differs in
-/// characters the matcher folds together.
+/// when the printed diff pair differs in characters the matcher folds
+/// together: in exact mode, and in fuzzy mode when several candidates tied.
 pub fn format_match_error(
 	path: &str,
 	search_text: &str,
@@ -1391,7 +1395,12 @@ pub fn format_match_error(
 	} else {
 		format!("Could not find the exact text in {path}.")
 	};
-	let difference_hint = folded_difference_hint(old_line, new_line, allow_fuzzy)
+	// In fuzzy mode the matcher compares the normalized text, so a folded
+	// variant is free and can never be the reason the match was rejected. The
+	// ambiguous case is the exception: the folded variants are what made the
+	// candidates tie, so the codepoints are what tells them apart.
+	let report_differences = !allow_fuzzy || fuzzy_matches.is_some_and(|count| count > 1);
+	let difference_hint = folded_difference_hint(old_line, new_line, report_differences)
 		.map_or_else(String::new, |hint| format!("{hint}\n"));
 	format!(
 		"{heading}\n\nClosest match ({similarity_percent}% similar) at line {}:\n  - {old_line}\n  \
@@ -1897,6 +1906,7 @@ mod tests {
 				"  -   foo(bar)=1\n",
 				"  + \tfoo（bar）＝1\n",
 				"  differs at the start: U+0020 vs U+0009\n",
+				"  differs at the start: U+0020 x1 only in the - line\n",
 				"  differs at char 4: U+0028 ( vs U+FF08 （\n",
 				"  differs at char 8: U+0029 ) vs U+FF09 ）\n",
 				"  differs at char 9: U+003D = vs U+FF1D ＝\n",
@@ -1914,6 +1924,16 @@ mod tests {
 		assert!(error.starts_with("Could not find a close enough match in a.ts."), "{error}");
 		assert!(error.contains("Closest match was below the 95% similarity threshold."), "{error}");
 		assert!(!error.contains("differs at"), "{error}");
+	}
+
+	#[test]
+	fn match_error_names_the_codepoints_of_an_ambiguous_fuzzy_match() {
+		// The folded variants are what made the candidates tie, so their
+		// codepoints are what tells them apart: the caller needs them to
+		// write an exact retry.
+		let error = fuzzy_edit_error("foo（bar）\nfoo｟bar｠\n", "foo(bar)", "x");
+		assert!(error.contains("Found 2 high-confidence matches"), "{error}");
+		assert!(error.contains("  differs at char 4: U+0028 ( vs U+FF08 （"), "{error}");
 	}
 
 	#[test]
@@ -2083,6 +2103,18 @@ mod tests {
 	}
 
 	#[test]
+	fn replace_keeps_the_files_folded_body_when_only_the_indentation_changes() {
+		// The rewrite changes the indentation only, so the body is the file's:
+		// the matcher folds a fullwidth character onto its ASCII counterpart,
+		// and the authored body would transliterate the file's text.
+		let result = replaced(
+			replace_text("ｆｏｏ", "foo", "  foo", true, false, None)
+				.expect("the folded anchor must match the line"),
+		);
+		assert_eq!(result, ReplaceResult { content: "  ｆｏｏ".to_owned(), count: 1 });
+	}
+
+	#[test]
 	fn occurrence_error_includes_preview_limit_suffix() {
 		let outcome = MatchOutcome {
 			occurrences: Some(7),
@@ -2100,7 +2132,10 @@ mod tests {
 	fn match_error_names_the_codepoint_inside_a_folded_whitespace_run() {
 		// The matcher collapses the whitespace run into a single space, so the
 		// two lines are the same line — but the tab the file holds renders as
-		// blank space, so its codepoint has to be named.
+		// blank space, so its codepoint has to be named. The spaces the run
+		// has in excess are named as well: the renderer expands the tab into
+		// spaces, so a caller that fixed only the named pair still misses
+		// them.
 		assert_eq!(
 			exact_edit_error("foo \tbar", "foo     bar", "x"),
 			concat!(
@@ -2108,6 +2143,37 @@ mod tests {
 				"  - foo     bar\n",
 				"  + foo \tbar\n",
 				"  differs at char 5: U+0020 vs U+0009\n",
+				"  differs at char 6: U+0020 x3 only in the - line\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_names_an_interior_nonbreaking_space() {
+		// The matcher does not fold a nonbreaking space onto a space, but the
+		// terminal renders both as blank space, so the printed pair alone does
+		// not tell the caller which codepoint it has to write.
+		let error = exact_edit_error("foo\u{00A0}bar", "foo bar", "x");
+		assert!(error.contains("  - foo bar\n"), "{error}");
+		assert!(error.contains("  + foo\u{00A0}bar\n"), "{error}");
+		assert!(error.contains("  differs at char 4: U+0020 vs U+00A0\n"), "{error}");
+	}
+
+	#[test]
+	fn match_error_names_every_differing_boundary_codepoint() {
+		// The boundary whitespace renders as blank space, so every unequal
+		// codepoint has to be named: naming one of them leaves the next one
+		// undiscovered.
+		assert_eq!(
+			exact_edit_error("\t\u{3000}foo", " \u{00A0}foo", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  -  \u{00A0}foo\n",
+				"  + \t\u{3000}foo\n",
+				"  differs at the start: U+0020 vs U+0009\n",
+				"  differs at the start: U+00A0 vs U+3000\n",
 				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
 				 high-confidence matches."
 			)
