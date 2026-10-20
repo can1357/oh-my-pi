@@ -43,11 +43,18 @@ const REQUEST_ENVELOPE_BYTES = 64_000;
  * arm at all. So an assistant image never occupies an input-image slot, and
  * counting it inflates the drop budget until the clamp starts evicting user
  * and tool-result images the provider was perfectly happy to accept.
+ *
+ * A computer result on a route that sends its metadata screenshot counts as
+ * that one image, whatever its content holds ({@link sentScreenshotBytes}).
  */
-function countImages(context: Context): number {
+function countImages(context: Context, metadataWire: boolean): number {
 	let count = 0;
 	for (const message of context.messages) {
 		if (message.role === "assistant") continue;
+		if (sentScreenshotBytes(message, metadataWire) !== undefined) {
+			count++;
+			continue;
+		}
 		if (!Array.isArray(message.content)) continue;
 		for (const part of message.content) {
 			if (part.type === "image") count++;
@@ -109,8 +116,8 @@ interface ImageBudgetState {
 	inlineBytes: number;
 	byteBudget: number;
 	model: Model;
-	/** {@link sendsComputerScreenshotMetadata} for `model`; the count clamp charges no bytes and leaves it unset. */
-	metadataWire?: boolean;
+	/** {@link sendsComputerScreenshotMetadata} for `model`. */
+	metadataWire: boolean;
 	/** Messages whose images the byte clamp must not evict. */
 	kept?: ReadonlySet<Message>;
 }
@@ -155,25 +162,24 @@ function clampDeveloperMessage(message: DeveloperMessage, state: ImageBudgetStat
 }
 
 /**
- * A computer result's screenshot leaves as one image. Where the route sends the metadata copy, that copy is what the
- * byte clamp charges and evicts. Elsewhere evicting the content image also drops the metadata, which the count clamp
- * needs on a route it cannot see. Either way the result then goes out as its remaining text, as for an unreadable
- * screenshot in {@link dropUnreadableContextImages}.
+ * Where the route sends a computer result's metadata screenshot, the result is that one image, never its content:
+ * evicting it drops the metadata (and the unsent content images), and the result goes out as its remaining text, as
+ * for an unreadable screenshot in {@link dropUnreadableContextImages}. Elsewhere the content is what is sent and
+ * clamped, and the unsent metadata stays.
  */
 function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetState): ToolResultMessage {
 	if (!needsImageDrop(state)) return message;
-	const screenshot = sentScreenshotBytes(message, state.metadataWire === true);
-	if (screenshot !== undefined) {
-		if (screenshot === 0 || state.inlineBytes <= state.byteBudget) return message;
-		state.inlineBytes -= screenshot;
-		const text = message.content.filter(part => part.type === "text");
-		return { ...message, content: text.length > 0 ? text : [IMAGE_OMISSION], providerMetadata: undefined };
+	const screenshot = sentScreenshotBytes(message, state.metadataWire);
+	if (screenshot === undefined) {
+		const content = clampContent(message.content, state);
+		return content ? { ...message, content } : message;
 	}
-	const content = clampContent(message.content, state);
-	if (!content) return message;
-	return message.providerMetadata?.type === "computer"
-		? { ...message, content, providerMetadata: undefined }
-		: { ...message, content };
+	const bytes = state.byteBudget === Number.POSITIVE_INFINITY ? 0 : screenshot;
+	if (state.remainingDrops <= 0 && !(state.inlineBytes > state.byteBudget && bytes > 0)) return message;
+	if (state.remainingDrops > 0) state.remainingDrops--;
+	state.inlineBytes -= bytes;
+	const text = message.content.filter(part => part.type === "text");
+	return { ...message, content: text.length > 0 ? text : [IMAGE_OMISSION], providerMetadata: undefined };
 }
 
 function clampImages(context: Context, state: ImageBudgetState): Context {
@@ -203,10 +209,17 @@ function clampImages(context: Context, state: ImageBudgetState): Context {
  */
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
-	const totalImages = countImages(context);
+	const metadataWire = sendsComputerScreenshotMetadata(model);
+	const totalImages = countImages(context, metadataWire);
 	const remainingDrops = totalImages - providerImageBudget(model);
 	if (remainingDrops <= 0) return context;
-	return clampImages(context, { remainingDrops, inlineBytes: 0, byteBudget: Number.POSITIVE_INFINITY, model });
+	return clampImages(context, {
+		remainingDrops,
+		inlineBytes: 0,
+		byteBudget: Number.POSITIVE_INFINITY,
+		model,
+		metadataWire,
+	});
 }
 
 /**
@@ -269,13 +282,13 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	// Text, tools and the system prompt ride in the same body, as UTF-8: only what they leave may hold protected
 	// images. Base64 is ASCII, so its characters are its bytes. Never sent: tool-result `details` (UI-only) and
 	// another provider's native payload (assistant turns, compaction summaries), which this request does not replay.
-	// A computer result carries its screenshot twice and sends one copy (sentScreenshotBytes): the other stays out.
+	// A computer result carries its screenshot twice and sends one copy (sentScreenshotBytes); where that is the
+	// metadata copy, none of its content is sent.
 	const wire = context.messages.map(message => {
 		if (message.role === "toolResult") {
-			if (sentScreenshotBytes(message, metadataWire) !== undefined) {
-				return { ...message, details: undefined, content: message.content.filter(part => part.type !== "image") };
-			}
-			return { ...message, details: undefined, providerMetadata: undefined };
+			return sentScreenshotBytes(message, metadataWire) === undefined
+				? { ...message, details: undefined, providerMetadata: undefined }
+				: { ...message, details: undefined, content: [] };
 		}
 		const payload = message.providerPayload;
 		if (!payload) return message;

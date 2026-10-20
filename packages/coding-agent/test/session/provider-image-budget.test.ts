@@ -686,6 +686,44 @@ describe("provider context image budgets", () => {
 		expect(Buffer.byteLength(body)).toBeLessThan(1_100_000);
 	});
 
+	it("leaves a computer result's unsent text out of the room reserved on Factory's Responses route", async () => {
+		// A result whose content became 1 MB of text: the Responses wire sends only its 2 MB metadata screenshot, so the
+		// screenshot and a fresh 2 MB image fit the route together.
+		const screenshot = "A".repeat(2_000_000);
+		const fresh = "C".repeat(2_000_000);
+		const messages = computerTurn(0, screenshot, []);
+		const result = messages[1];
+		if (result.role !== "toolResult") throw new Error("computerTurn lost its result");
+		messages[1] = { ...result, content: [text("x".repeat(1_000_000))] };
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [...messages, { role: "user", content: [text("look at this"), image(fresh)], timestamp: 3 }],
+		};
+		const hosted = factoryGptModel();
+		const body = await factoryRequestBody(hosted, clampProviderContextImageBytes(context, hosted));
+		expect(body).toContain(screenshot);
+		expect(body).toContain(fresh);
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+	});
+
+	it("counts a computer result as its one sent screenshot on Factory's Responses route", async () => {
+		// Six content thumbnails exceed Factory's five-image count, but the Responses wire sends only the screenshot.
+		const screenshot = "A".repeat(1_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: "use the computer", timestamp: 0 },
+				...computerTurn(0, screenshot, Array.from({ length: 6 }, () => image("p".repeat(100)))),
+			],
+		};
+		const hosted = factoryGptModel();
+		const body = await factoryRequestBody(hosted, clampProviderContextImages(context, hosted));
+		expect(body).toContain(`data:image/png;base64,${screenshot}`);
+		expect(body).not.toContain("p".repeat(100));
+	});
+
 	it("keeps a fresh Factory image that alone fits the route, evicting older ones instead", () => {
 		const older = "B".repeat(500_000);
 		const fresh = "C".repeat(3_800_000);
