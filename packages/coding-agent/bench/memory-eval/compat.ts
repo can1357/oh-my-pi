@@ -22,6 +22,8 @@ export interface CalibrationDump {
 	meanRecall: number;
 	/** The model files Run A loaded (`py/model_digest.py`); absent in dumps from before it was recorded. */
 	embeddingModelSha256?: string;
+	/** `fastembed_version` and `onnxruntime_version` of Run A's venv, under Run B's `engineInfo` names; may be absent. */
+	runtime?: Record<string, string>;
 }
 
 /** One store and one session for every conversation, ingested, consolidated and queried exactly as upstream does. */
@@ -124,6 +126,13 @@ export function compareCalibration(
 		mismatches.push(`embedding model: ${modelA ? "B" : "A"} records no model digest; re-run it with this harness`);
 	} else if (modelA !== modelB) {
 		mismatches.push(`embedding model: A ${modelA.slice(0, 12)}, B ${modelB.slice(0, 12)}`);
+	}
+	// The same model under another numerical runtime can reorder near-ties: both runs must name the same versions.
+	for (const key of ["fastembed_version", "onnxruntime_version"]) {
+		const [versionA, versionB] = [a.runtime?.[key], b.config.engineInfo[key]];
+		if (!versionA || !versionB)
+			mismatches.push(`${key}: ${versionA ? "B" : "A"} records none; re-run it with this harness`);
+		else if (versionA !== versionB) mismatches.push(`${key}: A ${versionA}, B ${versionB}`);
 	}
 	if (a.questions.length !== b.questions.length) {
 		mismatches.push(`question count: A ${a.questions.length}, B ${b.questions.length}`);

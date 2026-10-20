@@ -133,12 +133,19 @@ describe("compareCalibration", () => {
 		})),
 		meanRecall: results.reduce((sum, r) => sum + r.metrics["compat.recall@10"], 0) / results.length,
 		embeddingModelSha256: "model-digest",
+		runtime: { fastembed_version: "0.9.0", onnxruntime_version: "1.28.0" },
 	});
 	/** Run B's result; `model` null leaves the digest out, as in results from before it was recorded. */
 	const runB = (results: QuestionResult[], mean: number, model: string | null = "model-digest") => ({
 		questions: results,
 		aggregate: { "compat.recall@10": mean },
-		config: { engineInfo: (model === null ? {} : { embedding_model_sha256: model }) as Record<string, string> },
+		config: {
+			engineInfo: {
+				fastembed_version: "0.9.0",
+				onnxruntime_version: "1.28.0",
+				...(model === null ? {} : { embedding_model_sha256: model }),
+			} as Record<string, string>,
+		},
 	});
 
 	it("reports no mismatch for identical runs", async () => {
@@ -179,6 +186,18 @@ describe("compareCalibration", () => {
 		]);
 		expect(compareCalibration(a, runB(results, a.meanRecall, null))).toEqual([
 			"embedding model: B records no model digest; re-run it with this harness",
+		]);
+	});
+
+	it("does not calibrate identical rankings from another or unrecorded numerical runtime", async () => {
+		const results = await runUpstreamCompat(fakeEngine().engine, conversations);
+		const a = dumpOf(results);
+		const b = runB(results, a.meanRecall);
+		b.config.engineInfo.onnxruntime_version = "1.29.0";
+		expect(compareCalibration(a, b)).toEqual(["onnxruntime_version: A 1.28.0, B 1.29.0"]);
+		expect(compareCalibration({ ...a, runtime: undefined }, runB(results, a.meanRecall))).toEqual([
+			"fastembed_version: A records none; re-run it with this harness",
+			"onnxruntime_version: A records none; re-run it with this harness",
 		]);
 	});
 });
