@@ -542,6 +542,7 @@
 - Fixed supported Bedrock Claude models falling back to soft instead of remote compaction ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Fixed browser `tab.run(fn, [url])` and `browser.open("https://…")` failing with a bare "expects an options object"; the errors now say to pass `{ args: [...] }` and `browser.open({ url, name })` ([#16236](https://github.com/can1357/oh-my-pi/pull/16236) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the built-in `ts-set-map`, `ts-import-type` and `ts-no-any` rules reminding you about code they allow: an empty or computed `Set`/`Map`, a runtime `await import()`, or the word "any" in a comment ([#16242](https://github.com/can1357/oh-my-pi/pull/16242) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a resumed session rebuilding its memory block (`Memory summary`, `Learned lessons`) from disk, so a `learn` call or a consolidation in another session no longer makes the next turn rewrite the whole prompt cache ([#15704](https://github.com/can1357/oh-my-pi/issues/15704))
 
 ## [18.12.3] - 2026-10-19
 

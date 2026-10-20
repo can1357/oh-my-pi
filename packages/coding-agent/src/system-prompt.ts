@@ -627,6 +627,14 @@ export interface BuildSystemPromptResult {
 	 * a catalog the prompt already carries (issue #7139).
 	 */
 	xdevCatalogNames?: readonly string[];
+	/**
+	 * Publishes state the prompt was built from, once the prompt is committed.
+	 *
+	 * The memory block is recorded in the session transcript only here: a prompt
+	 * that was built but never committed must not leave a memory snapshot behind
+	 * that a resumed session would restore.
+	 */
+	commit?: () => void;
 }
 
 /** Static wrapper; compiled (not rendered) so user-authored Markdown passes through byte-for-byte. */

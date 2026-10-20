@@ -1382,6 +1382,7 @@ export class SessionTools {
 		this.#setActiveToolNames?.(validToolNames);
 
 		let rebuiltSystemPrompt: string[] | undefined;
+		let rebuiltCommit: (() => void) | undefined;
 		let rebuiltSignature: string | undefined;
 		let frozenSignature: string | undefined;
 		// Trigger of an implicit (non-forced) rebuild, rechecked at commit.
@@ -1432,6 +1433,7 @@ export class SessionTools {
 						),
 					);
 					rebuiltSystemPrompt = built.systemPrompt;
+					rebuiltCommit = built.commit;
 					if (!forcePromptRefresh) implicitRebuildSignature = triggerSignature;
 					rebuiltSignature = signature;
 					rebuiltXdevCatalogNames = built.xdevCatalogNames;
@@ -1486,6 +1488,9 @@ export class SessionTools {
 				this.#baseSystemPrompt = rebuiltSystemPrompt;
 				this.#host.clearMemoryPromotionSnapshot();
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+				// The prompt is live: record the memory block it was built from, so a
+				// resumed process rebuilds the same block instead of rereading disk.
+				rebuiltCommit?.();
 				invalidateToolSchemaMetadata(this.#host.agent.state.tools);
 				this.#lastAppliedToolSignature = rebuiltSignature;
 				this.#promptModelKey = this.#currentPromptModelKey();
@@ -2320,6 +2325,9 @@ export class SessionTools {
 					this.#host.clearInheritedProviderPromptCacheKey();
 				}
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+				// The prompt is live: record the memory block it was built from, so a
+				// resumed process rebuilds the same block instead of rereading disk.
+				built.commit?.();
 				invalidateToolSchemaMetadata(this.#host.agent.state.tools);
 				// The rebuilt prompt is a fresh roster snapshot. Keep the complete pending
 				// delta for a turn override that hides it, while separately tracking any
