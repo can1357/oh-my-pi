@@ -14,6 +14,7 @@ import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { parsePrUnifiedDiff } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-diff";
 import {
 	getCached,
+	getCachedGeneration,
 	putCached,
 	resetForTests as resetCacheForTests,
 	resolveGithubCacheAuthKey,
@@ -516,6 +517,55 @@ describe("pr://.../diff family", () => {
 		await expect(router.resolve("pr://owner/example/77/diff/1?at=1")).rejects.toThrow(/not available/);
 		await expect(router.resolve("pr://owner/example/77/diff/1?at=nope")).rejects.toThrow(
 			/Invalid pr:\/\/ diff snapshot/,
+		);
+		expect(textSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects a pinned diff past the hard TTL and drops that generation", async () => {
+		const oldDiff = makePrDiff([{ name: "src/old.ts", adds: 1, dels: 0 }]);
+		const textSpy = vi.spyOn(github, "text").mockResolvedValue(oldDiff);
+		const settings = Settings.isolated({
+			"github.cache.softTtlSec": 60,
+			"github.cache.hardTtlSec": 10,
+		});
+		const router = InternalUrlRouter.instance();
+		const aged = Date.now() - 60_000;
+		const authKey = resolveGithubCacheAuthKey();
+		expect(authKey).toBeDefined();
+		const parsed = parsePrUnifiedDiff(oldDiff);
+		putCached({
+			authKey,
+			repo: "owner/example",
+			kind: "pr-diff",
+			number: 77,
+			includeComments: false,
+			payload: { unified: "", files: parsed.files },
+			rendered: oldDiff,
+			fetchedAt: aged,
+		});
+
+		await expect(router.resolve(`pr://owner/example/77/diff/1?at=${aged}`, { settings })).rejects.toThrow(
+			/not available/,
+		);
+		expect(getCachedGeneration("owner/example", "pr-diff", 77, false, aged, authKey)).toBeNull();
+		expect(textSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not serve a pinned diff when the GitHub cache is disabled", async () => {
+		const oldDiff = makePrDiff([{ name: "src/old.ts", adds: 1, dels: 0 }]);
+		const textSpy = vi.spyOn(github, "text").mockResolvedValue(oldDiff);
+		const router = InternalUrlRouter.instance();
+		await router.resolve("pr://owner/example/77/diff/1");
+		const authKey = resolveGithubCacheAuthKey();
+		const stored = getCached("owner/example", "pr-diff", 77, false, authKey);
+		expect(stored).not.toBeNull();
+		const settings = Settings.isolated({ "github.cache.enabled": false });
+
+		await expect(
+			router.resolve(`pr://owner/example/77/diff/1?at=${stored!.fetchedAt}`, { settings }),
+		).rejects.toThrow(/not available/);
+		expect(getCachedGeneration("owner/example", "pr-diff", 77, false, stored!.fetchedAt, authKey)?.rendered).toBe(
+			oldDiff,
 		);
 		expect(textSpy).toHaveBeenCalledTimes(1);
 	});

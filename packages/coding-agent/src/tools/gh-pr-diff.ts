@@ -3,7 +3,12 @@ import type { Settings } from "../config/settings";
 import { github } from "../utils/github";
 import { appendRepoFlag, ghApiHostArgs, parseRepoRef } from "./gh-common";
 import type { ViewLookupResult } from "./gh-view";
-import { getCachedGeneration, getOrFetchView, retainCachedGeneration, resolveGithubCacheAuthKey } from "./github-cache";
+import {
+	getOrFetchView,
+	getRetainedGeneration,
+	retainCachedGeneration,
+	resolveGithubCacheAuthKey,
+} from "./github-cache";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 export const PR_DIFF_FILES_PAGE_SIZE = 100;
@@ -486,11 +491,13 @@ export interface PrDiffGenerationOptions {
 /**
  * Persist the exact diff `/review` froze. Writes the generation table only,
  * so a later live refresh cannot replace this snapshot.
- * Returns false when the cache identity or database is unavailable.
+ * Returns the stored generation id (which can differ from `fetchedAt` when that
+ * id already belongs to a different snapshot), or null when the cache identity
+ * or database is unavailable.
  */
-export function retainPrDiffGeneration(options: PrDiffGenerationOptions): boolean {
+export function retainPrDiffGeneration(options: PrDiffGenerationOptions): number | null {
 	const authKey = options.cacheAuthKey === undefined ? (resolveGithubCacheAuthKey() ?? null) : options.cacheAuthKey;
-	if (authKey === null) return false;
+	if (authKey === null) return null;
 	return retainCachedGeneration<PrDiffPayload>({
 		authKey,
 		repo: options.repo,
@@ -505,17 +512,20 @@ export function retainPrDiffGeneration(options: PrDiffGenerationOptions): boolea
 
 /** Load one retained generation. Does not refresh the live row. */
 export function getPinnedPrDiff(
-	options: Pick<PrDiffGenerationOptions, "repo" | "number" | "fetchedAt" | "cacheAuthKey">,
+	options: Pick<PrDiffGenerationOptions, "repo" | "number" | "fetchedAt" | "cacheAuthKey"> & {
+		settings?: Settings;
+	},
 ): ViewLookupResult<PrDiffPayload> | undefined {
 	const authKey = options.cacheAuthKey === undefined ? (resolveGithubCacheAuthKey() ?? null) : options.cacheAuthKey;
 	if (authKey === null) return undefined;
-	const row = getCachedGeneration<PrDiffPayload>(
+	const row = getRetainedGeneration<PrDiffPayload>(
 		options.repo,
 		"pr-diff",
 		options.number,
 		false,
 		options.fetchedAt,
 		authKey,
+		options.settings,
 	);
 	if (!row) return undefined;
 	return {

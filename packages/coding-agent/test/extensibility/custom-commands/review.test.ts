@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -86,16 +86,16 @@ interface EditorCall {
 
 describe("ReviewCommand", () => {
 	let tmpDir: string;
-	let originalCacheDb: string | undefined;
-	let originalGhToken: string | undefined;
+	let retainGeneration!: Mock<typeof gh.retainPrDiffGeneration>;
 
 	beforeAll(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-command-"));
-		originalCacheDb = process.env.OMP_GITHUB_CACHE_DB;
-		originalGhToken = process.env.GH_TOKEN;
-		process.env.OMP_GITHUB_CACHE_DB = path.join(tmpDir, "github-cache.db");
-		process.env.GH_TOKEN = "review-test-token";
-		resetCacheForTests();
+	});
+
+	beforeEach(() => {
+		// PR review cases call the real generation writer. Keep that off the
+		// developer cache; the one case that resolves pinned links restores it.
+		retainGeneration = spyOn(gh, "retainPrDiffGeneration").mockReturnValue(1);
 	});
 
 	afterEach(() => {
@@ -103,12 +103,6 @@ describe("ReviewCommand", () => {
 	});
 
 	afterAll(async () => {
-		resetCacheForTests();
-		if (originalCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
-		else process.env.OMP_GITHUB_CACHE_DB = originalCacheDb;
-		if (originalGhToken === undefined) delete process.env.GH_TOKEN;
-		else process.env.GH_TOKEN = originalGhToken;
-		resetCacheForTests();
 		await removeWithRetries(tmpDir);
 	});
 
@@ -302,6 +296,8 @@ describe("ReviewCommand", () => {
 			"https://github.com/owner/repo/pull/123/commits",
 			"pr://owner/repo/123/diff/all",
 			"pr://owner/repo/123/diff/1",
+			"pr://owner/repo/123/diff/2?at=1710000000000",
+			"pr://owner/repo/123/diff/all?at=1710000000000",
 		];
 
 		for (const url of cases) {
@@ -319,58 +315,75 @@ describe("ReviewCommand", () => {
 	])(
 		"links each PR file to its actual diff slice with $fileCount reviewable files",
 		async ({ fileCount, lastIndex }) => {
-			const paths = [
-				"bun.lock",
-				"src/first.ts",
-				"dist/generated.js",
-				...Array.from({ length: fileCount - 2 }, (_, index) => `src/extra-${index}.ts`),
-				"src/last.ts",
-			];
-			const diff = paths
-				.map(
-					file => `diff --git a/${file} b/${file}
+			const previousCacheDb = process.env.OMP_GITHUB_CACHE_DB;
+			const previousGhToken = process.env.GH_TOKEN;
+			const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-cache-"));
+			process.env.OMP_GITHUB_CACHE_DB = path.join(cacheDir, "github-cache.db");
+			process.env.GH_TOKEN = "review-test-token";
+			retainGeneration.mockRestore();
+			resetCacheForTests();
+			try {
+				const paths = [
+					"bun.lock",
+					"src/first.ts",
+					"dist/generated.js",
+					...Array.from({ length: fileCount - 2 }, (_, index) => `src/extra-${index}.ts`),
+					"src/last.ts",
+				];
+				const diff = paths
+					.map(
+						file => `diff --git a/${file} b/${file}
 --- a/${file}
 +++ b/${file}
 @@ -1 +1 @@
 -old
 +new
 `,
-				)
-				.join("\n");
-			const lookup = makePrDiffLookup(diff);
-			lookup.payload = parsePrUnifiedDiff(diff);
-			spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(lookup);
-			const command = new ReviewCommand({ cwd: createTempDir() } as unknown as CustomCommandAPI);
-			const result = await command.execute(["https://github.com/owner/repo/pull/123"], {
-				hasUI: false,
-			} as unknown as HookCommandContext);
-			const rows = result!
-				.split("\n")
-				.filter(line => line.startsWith("|") && line.includes("pr://"))
-				.map(line => {
-					const cells = line.split("|").map(cell => cell.trim());
-					return { index: Number(cells[1]), path: cells[2], url: cells[5]!.replaceAll("`", "") };
+					)
+					.join("\n");
+				const lookup = makePrDiffLookup(diff);
+				lookup.payload = parsePrUnifiedDiff(diff);
+				spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(lookup);
+				const command = new ReviewCommand({ cwd: createTempDir() } as unknown as CustomCommandAPI);
+				const result = await command.execute(["https://github.com/owner/repo/pull/123"], {
+					hasUI: false,
+				} as unknown as HookCommandContext);
+				const rows = result!
+					.split("\n")
+					.filter(line => line.startsWith("|") && line.includes("pr://"))
+					.map(line => {
+						const cells = line.split("|").map(cell => cell.trim());
+						return { index: Number(cells[1]), path: cells[2], url: cells[5]!.replaceAll("`", "") };
+					});
+				expect(rows.map(row => row.path)).toEqual(paths.filter(file => file.startsWith("src/")));
+				const snapshotQuery = `?at=${lookup.fetchedAt}`;
+				expect(rows[0]).toEqual({
+					index: 2,
+					path: "src/first.ts",
+					url: `pr://owner/repo/123/diff/2${snapshotQuery}`,
 				});
-			expect(rows.map(row => row.path)).toEqual(paths.filter(file => file.startsWith("src/")));
-			const snapshotQuery = `?at=${lookup.fetchedAt}`;
-			expect(rows[0]).toEqual({
-				index: 2,
-				path: "src/first.ts",
-				url: `pr://owner/repo/123/diff/2${snapshotQuery}`,
-			});
-			expect(rows.at(-1)).toEqual({
-				index: lastIndex,
-				path: "src/last.ts",
-				url: `pr://owner/repo/123/diff/${lastIndex}${snapshotQuery}`,
-			});
-			try {
-				const router = InternalUrlRouter.instance();
-				for (const row of rows) {
-					const resource = await router.resolve(row.url);
-					expect(resource.content.split("\n")[0]).toBe(`diff --git a/${row.path} b/${row.path}`);
+				expect(rows.at(-1)).toEqual({
+					index: lastIndex,
+					path: "src/last.ts",
+					url: `pr://owner/repo/123/diff/${lastIndex}${snapshotQuery}`,
+				});
+				try {
+					const router = InternalUrlRouter.instance();
+					for (const row of rows) {
+						const resource = await router.resolve(row.url);
+						expect(resource.content.split("\n")[0]).toBe(`diff --git a/${row.path} b/${row.path}`);
+					}
+				} finally {
+					InternalUrlRouter.resetForTests();
 				}
 			} finally {
-				InternalUrlRouter.resetForTests();
+				resetCacheForTests();
+				if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
+				else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
+				if (previousGhToken === undefined) delete process.env.GH_TOKEN;
+				else process.env.GH_TOKEN = previousGhToken;
+				resetCacheForTests();
+				await removeWithRetries(cacheDir);
 			}
 		},
 	);

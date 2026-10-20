@@ -390,8 +390,13 @@ function buildSingleResource({
 	};
 }
 
-function loadPinnedPrDiff(repo: string, number: number, fetchedAt: number) {
-	const pinned = getPinnedPrDiff({ repo, number, fetchedAt });
+function loadPinnedPrDiff(
+	repo: string,
+	number: number,
+	fetchedAt: number,
+	settings: ResolveContext["settings"],
+) {
+	const pinned = getPinnedPrDiff({ repo, number, fetchedAt, settings });
 	if (!pinned) {
 		throw new Error(
 			`pr://${repo}/${number}/diff?at=${fetchedAt} is not available. The pinned diff expired; run /review again.`,
@@ -426,7 +431,7 @@ async function fetchAndRenderPrDiff(
 					signal: context?.signal,
 					settings: context?.settings,
 				})
-			: loadPinnedPrDiff(repo, parsed.number, parsed.fetchedAt);
+			: loadPinnedPrDiff(repo, parsed.number, parsed.fetchedAt, context?.settings);
 	return renderDiffFamilyResource(url, parsed.mode, parsed.index, lookup, {
 		baseUrl: `pr://${repo}/${parsed.number}`,
 		heading: `Pull Request Diff: ${repo}#${parsed.number}`,

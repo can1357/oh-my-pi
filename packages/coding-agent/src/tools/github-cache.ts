@@ -15,7 +15,10 @@
  *     row AND schedule a background refresh (errors logged, never thrown).
  *     Every pr-diff generation is also stored by `fetched_at`, so a review
  *     URL can keep reading the snapshot it froze after that refresh lands.
- *   Past hard TTL → treat as miss and fetch fresh.
+ *     A published generation is insert-only: a later snapshot that collides
+ *     on the same millisecond gets a new id instead of replacing it.
+ *   Past hard TTL → treat as miss and fetch fresh. Pinned generation reads
+ *     use that same hard TTL and the cache kill switch.
  */
 
 import { Database } from "bun:sqlite";
@@ -374,34 +377,81 @@ export interface PutCachedInput<T = unknown> {
 	fetchedAt?: number;
 }
 
+/** Caps a pathological run of distinct snapshots claiming the same millisecond. */
+const MAX_GENERATION_ID_STEPS = 1000;
+
+function isSqliteConstraint(err: unknown): boolean {
+	if (!(err instanceof Error)) return false;
+	const code = (err as { code?: string }).code;
+	return (
+		code === "SQLITE_CONSTRAINT_PRIMARYKEY" ||
+		code === "SQLITE_CONSTRAINT" ||
+		err.message.includes("UNIQUE constraint failed")
+	);
+}
+
 /**
  * Keep one immutable pr-diff generation. The live row is still one-per-PR and
  * a background refresh replaces it; review URLs address this copy by `fetchedAt`
  * so that refresh cannot retarget a file index. Does not write the live row.
+ *
+ * A published id is never overwritten. Storing the same snapshot again returns
+ * its existing id. A different snapshot that lands on the same millisecond gets
+ * the next free id, which the caller must publish.
+ * Returns that id, or null when the database is unavailable.
  */
-export function retainCachedGeneration<T = unknown>(input: PutCachedInput<T>): boolean {
+export function retainCachedGeneration<T = unknown>(input: PutCachedInput<T>): number | null {
 	const db = openDb();
-	if (!db) return false;
+	if (!db) return null;
+	const authKey = input.authKey ?? DEFAULT_CACHE_AUTH_KEY;
+	const repo = normalizeRepo(input.repo);
+	const includeComments = input.includeComments ? 1 : 0;
+	const payloadJson = JSON.stringify(input.payload);
+	let fetchedAt = input.fetchedAt ?? Date.now();
 	try {
-		const fetchedAt = input.fetchedAt ?? Date.now();
-		db.query(
-			"INSERT OR REPLACE INTO github_view_cache_generation (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		).run(
-			input.authKey ?? DEFAULT_CACHE_AUTH_KEY,
-			normalizeRepo(input.repo),
-			input.kind,
-			input.number,
-			input.includeComments ? 1 : 0,
-			fetchedAt,
-			JSON.stringify(input.payload),
-			input.rendered,
-			input.sourceUrl ?? null,
-		);
-		protectDbFiles(getGithubCacheDbPath());
-		return true;
+		for (let step = 0; step < MAX_GENERATION_ID_STEPS; step++) {
+			const existing = db
+				.query(
+					"SELECT (payload = ? AND rendered = ?) AS same FROM github_view_cache_generation WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ? AND fetched_at = ?",
+				)
+				.get(payloadJson, input.rendered, authKey, repo, input.kind, input.number, includeComments, fetchedAt) as
+				| { same: number }
+				| undefined;
+			if (existing?.same === 1) return fetchedAt;
+			if (existing) {
+				fetchedAt += 1;
+				continue;
+			}
+			try {
+				db.query(
+					"INSERT INTO github_view_cache_generation (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				).run(
+					authKey,
+					repo,
+					input.kind,
+					input.number,
+					includeComments,
+					fetchedAt,
+					payloadJson,
+					input.rendered,
+					input.sourceUrl ?? null,
+				);
+				protectDbFiles(getGithubCacheDbPath());
+				return fetchedAt;
+			} catch (err) {
+				if (!isSqliteConstraint(err)) throw err;
+				fetchedAt += 1;
+			}
+		}
+		logger.debug("github cache: generation id retries exhausted", {
+			repo,
+			kind: input.kind,
+			number: input.number,
+		});
+		return null;
 	} catch (err) {
 		logger.debug("github cache: generation write failed", { err: String(err) });
-		return false;
+		return null;
 	}
 }
 
@@ -447,12 +497,80 @@ export function getCachedGeneration<T = unknown>(
 	}
 }
 
-export function putCached<T = unknown>(input: PutCachedInput<T>): void {
+function deleteCachedGeneration(
+	repo: string,
+	kind: CacheKind,
+	number: number,
+	includeComments: boolean,
+	fetchedAt: number,
+	authKey: string,
+): void {
 	const db = openDb();
 	if (!db) return;
 	try {
-		const fetchedAt = input.fetchedAt ?? Date.now();
+		db.query(
+			"DELETE FROM github_view_cache_generation WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ? AND fetched_at = ?",
+		).run(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0, fetchedAt);
+	} catch (err) {
+		logger.debug("github cache: generation delete failed", { err: String(err) });
+	}
+}
+
+/**
+ * Read one immutable generation, enforcing the cache kill switch and hard TTL.
+ * An expired generation is deleted. Does not read or refresh the live row.
+ */
+export function getRetainedGeneration<T = unknown>(
+	repo: string,
+	kind: CacheKind,
+	number: number,
+	includeComments: boolean,
+	fetchedAt: number,
+	authKey: string = DEFAULT_CACHE_AUTH_KEY,
+	settings?: Settings,
+): CachedView<T> | null {
+	const ttl = resolveCacheTtl(settings);
+	// Pinned-only sessions never enter `getOrFetchView`, so the sweep has to
+	// run here too. Disabled lookups sweep as well; they just refuse the read.
+	sweepIfDue(ttl.hardMs);
+	if (!ttl.enabled) return null;
+	const row = getCachedGeneration<T>(repo, kind, number, includeComments, fetchedAt, authKey);
+	if (!row) return null;
+	if (Date.now() - row.fetchedAt > ttl.hardMs) {
+		deleteCachedGeneration(repo, kind, number, includeComments, fetchedAt, authKey);
+		return null;
+	}
+	return row;
+}
+
+function hasCachedGeneration(view: CachedView<unknown>): boolean {
+	const db = openDb();
+	if (!db) return false;
+	try {
+		const row = db
+			.query(
+				"SELECT 1 AS present FROM github_view_cache_generation WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ? AND fetched_at = ?",
+			)
+			.get(view.authKey, view.repo, view.kind, view.number, view.includeComments ? 1 : 0, view.fetchedAt) as
+			| { present: number }
+			| undefined;
+		return row !== null && row !== undefined;
+	} catch (err) {
+		logger.debug("github cache: generation lookup failed", { err: String(err) });
+		return false;
+	}
+}
+
+export function putCached<T = unknown>(input: PutCachedInput<T>): number | null {
+	const db = openDb();
+	if (!db) return null;
+	try {
+		let fetchedAt = input.fetchedAt ?? Date.now();
 		const payloadJson = JSON.stringify(input.payload);
+		if (input.kind === "pr-diff") {
+			const storedAt = retainCachedGeneration({ ...input, fetchedAt });
+			if (storedAt !== null) fetchedAt = storedAt;
+		}
 		db.query(
 			"INSERT OR REPLACE INTO github_view_cache (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		).run(
@@ -466,12 +584,11 @@ export function putCached<T = unknown>(input: PutCachedInput<T>): void {
 			input.rendered,
 			input.sourceUrl ?? null,
 		);
-		if (input.kind === "pr-diff") {
-			retainCachedGeneration({ ...input, fetchedAt });
-		}
 		protectDbFiles(getGithubCacheDbPath());
+		return fetchedAt;
 	} catch (err) {
 		logger.debug("github cache: write failed", { err: String(err) });
+		return null;
 	}
 }
 
@@ -643,18 +760,20 @@ function storeResult<T>(
 	includeComments: boolean,
 	result: FreshResult<T>,
 	fetchedAt: number,
-): void {
-	putCached<T>({
-		authKey,
-		repo,
-		kind,
-		number,
-		includeComments,
-		payload: result.payload,
-		rendered: result.rendered,
-		sourceUrl: result.sourceUrl,
-		fetchedAt,
-	});
+): number {
+	return (
+		putCached<T>({
+			authKey,
+			repo,
+			kind,
+			number,
+			includeComments,
+			payload: result.payload,
+			rendered: result.rendered,
+			sourceUrl: result.sourceUrl,
+			fetchedAt,
+		}) ?? fetchedAt
+	);
 }
 
 /**
@@ -693,9 +812,13 @@ function scheduleBackgroundRefresh<T>(
 	});
 }
 
-/** Copy a live pr-diff row into the generation table before a refresh can replace it. */
+/**
+ * Backfill a live pr-diff row that predates the generation table. An existing
+ * generation is left untouched so a cache hit does not rewrite the patch.
+ */
 function pinPrDiffGeneration<T>(kind: CacheKind, cached: CachedView<T>): void {
 	if (kind !== "pr-diff") return;
+	if (hasCachedGeneration(cached)) return;
 	retainCachedGeneration({
 		authKey: cached.authKey,
 		repo: cached.repo,
@@ -791,8 +914,15 @@ export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise
 	}
 
 	const fresh = await options.fetchFresh();
-	const fetchedAt = Date.now();
-	storeResult(authKey, options.repo, options.kind, options.number, options.includeComments, fresh, fetchedAt);
+	const fetchedAt = storeResult(
+		authKey,
+		options.repo,
+		options.kind,
+		options.number,
+		options.includeComments,
+		fresh,
+		Date.now(),
+	);
 	return { ...fresh, status: "miss", fetchedAt };
 }
 

@@ -49,7 +49,8 @@ const PICK_PR_CHOICE_LABEL = "4. Review a specific PR/MR";
 /** `gh pr list` / `glab mr list` page size. 100 is the per-page maximum of both forges. */
 const PR_PICKER_LIMIT = 100;
 const REPO_SEGMENT_PATTERN = /^[A-Za-z0-9_.-]+$/;
-const PR_SCHEME_PATTERN = /^pr:\/\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/([1-9]\d*)(?:\/diff(?:\/(?:all|[1-9]\d*))?)?$/;
+const PR_SCHEME_PATTERN =
+	/^pr:\/\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/([1-9]\d*)(?:\/diff(?:\/(?:all|[1-9]\d*))?)?(?:\?at=\d+)?$/;
 const PR_REF_TEXT_PATTERN =
 	/https:\/\/github\.com\/[^\s<>"']+|pr:\/\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[^\s<>"']+|https:\/\/[^\s<>"'/]+\/[^\s<>"']*\/-\/merge_requests\/[^\s<>"']+|mr:\/\/[^\s<>"']+/g;
 
@@ -183,18 +184,19 @@ export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promis
 	}
 	try {
 		const lookup = await gh.getOrFetchPrDiff({ cwd, repo: ref.repo, number: ref.number });
-		const pinned =
-			lookup.status !== "disabled" &&
-			gh.retainPrDiffGeneration({
-				repo: ref.repo,
-				number: ref.number,
-				rendered: lookup.rendered,
-				files: lookup.payload.files,
-				fetchedAt: lookup.fetchedAt,
-			});
+		const generationAt =
+			lookup.status === "disabled"
+				? null
+				: gh.retainPrDiffGeneration({
+						repo: ref.repo,
+						number: ref.number,
+						rendered: lookup.rendered,
+						files: lookup.payload.files,
+						fetchedAt: lookup.fetchedAt,
+					});
 		return createResolvedReviewTarget("pr", label, lookup.payload.unified, `${label} has no diff content available`, {
 			prDiffUrl: `pr://${ref.repo}/${ref.number}/diff`,
-			prDiffQuery: pinned ? `?at=${lookup.fetchedAt}` : "",
+			prDiffQuery: generationAt !== null ? `?at=${generationAt}` : "",
 		});
 	} catch (error) {
 		throw new Error(

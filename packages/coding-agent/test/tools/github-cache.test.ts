@@ -20,6 +20,7 @@ import {
 	putCached,
 	resetForTests as resetCacheForTests,
 	resolveGitlabCacheAuthKey,
+	retainCachedGeneration,
 } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import { ToolAbortError, throwIfAborted } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
@@ -521,6 +522,84 @@ describe("getOrFetchView (TTL semantics)", () => {
 		expect(result.status).toBe("stale");
 		expect(result.rendered).toBe("legacy-diff");
 		expect(getCachedGeneration(TEST_REPO, "pr-diff", 88, false, fetchedAt)?.rendered).toBe("legacy-diff");
+	});
+
+	it("keeps a published generation when a different diff reuses its timestamp", () => {
+		const fetchedAt = 1_700_000_000_000;
+		const first = retainCachedGeneration({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 9,
+			includeComments: false,
+			payload: { n: 1 },
+			rendered: "diff-a",
+			fetchedAt,
+		});
+		const second = retainCachedGeneration({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 9,
+			includeComments: false,
+			payload: { n: 2 },
+			rendered: "diff-b",
+			fetchedAt,
+		});
+		const again = retainCachedGeneration({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 9,
+			includeComments: false,
+			payload: { n: 1 },
+			rendered: "diff-a",
+			fetchedAt,
+		});
+
+		expect(first).toBe(fetchedAt);
+		expect(second).toBe(fetchedAt + 1);
+		expect(again).toBe(fetchedAt);
+		expect(getCachedGeneration(TEST_REPO, "pr-diff", 9, false, fetchedAt)?.rendered).toBe("diff-a");
+		expect(getCachedGeneration(TEST_REPO, "pr-diff", 9, false, fetchedAt + 1)?.rendered).toBe("diff-b");
+	});
+
+	it("does not rewrite an existing pr-diff generation on a fresh cache hit", async () => {
+		const settings = Settings.isolated({
+			"github.cache.softTtlSec": 300,
+			"github.cache.hardTtlSec": 86400,
+		});
+		const fetchedAt = Date.now();
+		putCached({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 91,
+			includeComments: false,
+			payload: { files: [] },
+			rendered: "original-diff",
+			fetchedAt,
+		});
+		openDb()
+			?.query(
+				"UPDATE github_view_cache_generation SET rendered = ? WHERE kind = ? AND number = ? AND fetched_at = ?",
+			)
+			.run("sentinel-diff", "pr-diff", 91, fetchedAt);
+
+		const fetchFresh = vi.fn(async () => ({
+			rendered: "should-not-fetch",
+			sourceUrl: undefined,
+			payload: { files: [] },
+		}));
+		const result = await getOrFetchView({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 91,
+			includeComments: false,
+			fetchFresh,
+			settings,
+		});
+
+		expect(result.status).toBe("fresh");
+		expect(result.rendered).toBe("original-diff");
+		expect(fetchFresh).not.toHaveBeenCalled();
+		expect(getCachedGeneration(TEST_REPO, "pr-diff", 91, false, fetchedAt)?.rendered).toBe("sentinel-diff");
 	});
 
 	it("treats past-hard-TTL rows as cache misses (fetcher runs)", async () => {
