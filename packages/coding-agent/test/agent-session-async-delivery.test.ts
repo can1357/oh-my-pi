@@ -685,6 +685,34 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 	});
 
+	it("reports the raw model id in details, not the envelope's escaped one", () => {
+		// The delivery's `details` is read as JSON: a consumer verifying which
+		// model ran must see the id the parent configured, not the `<task-result>`
+		// attribute's escaped form (`&quot;`), which is a different string than
+		// the model id (#16135 review).
+		const job: AsyncJob = {
+			id: "raw-model-job",
+			agentId: "RawModelWorker",
+			type: "task",
+			status: "completed",
+			startTime: Date.now(),
+			label: "raw model task",
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+			latestDetails: {
+				progress: [{ id: "RawModelWorker", resolvedModel: 'evil" & <model>', resolvedModelIsFallback: false }],
+			},
+		};
+		const message = buildAsyncResultBatchMessage([
+			{ jobId: "raw-model-job", result: "done", job, durationMs: 1000, epoch: 0 },
+		]);
+
+		expect(message?.details?.jobs[0]?.model).toEqual({
+			selector: 'evil" & <model>',
+			fallback: false,
+		});
+	});
+
 	it("omits the model when the job never resolved one", () => {
 		const job: AsyncJob = {
 			id: "unresolved-job",

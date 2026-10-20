@@ -193,7 +193,11 @@ export function snapshotJobs(
 				const trimmed = modelValue.trim();
 				if (trimmed) resolvedModel = trimmed;
 			}
-			const identityValue = progressRecord?.resolvedModelIdentity ?? carried?.selector;
+			// The identity is "provider/id, no thinking suffix"; the carried
+			// selector carries the suffix, so it must not be reported as the
+			// identity. Consumers fall back to `resolvedModel` (the same
+			// selector) instead (#16135 review).
+			const identityValue = progressRecord?.resolvedModelIdentity;
 			if (typeof identityValue === "string") {
 				const trimmed = identityValue.trim();
 				if (trimmed) resolvedModelIdentity = trimmed;

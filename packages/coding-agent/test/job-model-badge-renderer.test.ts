@@ -183,6 +183,31 @@ describe("hub jobs task model badges", () => {
 		}
 	});
 
+	it("falls back to the carried selector when a run never streamed a model identity", async () => {
+		cfgTaskShowResolvedModelBadge.override(settings, true);
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		// A restored subagent, wake turn, or resumed delivery settles without
+		// `progress[]`; only the job's own carrier names its model.
+		const id = manager.register(
+			"task",
+			"Restored",
+			async () => ({ text: "done", model: { selector: "p/runtime:max", fallback: false } }),
+			{ id: "Restored" },
+		);
+		await manager.getJob(id)?.promise;
+
+		const session = { asyncJobManager: manager } as unknown as ToolSession;
+		const snapshot = snapshotJobs(session, manager.getAllJobs())[0];
+		// The identity is "provider/id, with no thinking suffix"; the carried
+		// selector carries the suffix, so it must not be reported as the
+		// identity — consumers fall back to the selector instead (#16135 review).
+		expect(snapshot?.resolvedModel).toBe("p/runtime:max");
+		expect(snapshot?.resolvedModelIdentity).toBeUndefined();
+
+		const text = renderJobText({ jobs: [snapshot!] });
+		expect(text).toContain("p/runtime:max");
+	});
+
 	it("preserves a legacy selector without inferring a thinking glyph", () => {
 		cfgTaskShowResolvedModelBadge.override(settings, true);
 		const text = renderJobText({

@@ -5,7 +5,7 @@
  * when a woken subagent re-yields, so a parent reads the same shape (status,
  * preview, `agent://` pointer) regardless of which path delivered it.
  */
-import { prompt } from "@oh-my-pi/pi-utils";
+import { escapeXmlAttribute, prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { escapeHarnessTags } from "../session/harness-tags";
@@ -68,12 +68,17 @@ export function formatTaskResultSummary(
 	// irc instead of redoing the work. Isolated runs are parked without a
 	// reviver (their worktree is gone), so they must not read as resumable.
 	const resumable = result.aborted && !result.isolated && isResumable(AgentRegistry.global().get(result.id));
+	// The envelope renders attributes unescaped, so the selector is escaped
+	// here — at the one XML render site. The projection keeps the raw model id
+	// so a JSON consumer (`details.jobs[].model.selector`) reads the id the
+	// parent is meant to verify, not `&quot;` (#16135 review).
+	const model = resolvedModelDisplay(result);
 	return prompt.render(taskSummaryTemplate, {
 		agentName: result.agent,
 		id: result.id,
 		status,
 		duration: formatDuration(options.totalDurationMs),
-		model: resolvedModelDisplay(result),
+		model: model && { ...model, selector: escapeXmlAttribute(model.selector) },
 		abortReason: result.aborted ? escapeHarnessTags(result.abortReason ?? "") || undefined : undefined,
 		error: error === undefined ? undefined : escapeHarnessTags(error),
 		resumable,
