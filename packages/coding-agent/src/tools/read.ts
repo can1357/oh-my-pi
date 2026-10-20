@@ -1735,7 +1735,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const outputMime = imageMetadata?.mimeType ?? mimeType;
 			const imageQuestionPath = questionPath ?? formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			const metadataLines = [
-				"Image metadata:",
+				"Image metadata (this session's active model does not support image input):",
 				`- MIME: ${outputMime}`,
 				`- Bytes: ${fileSize} (${formatBytes(fileSize)})`,
 				imageMetadata?.width !== undefined && imageMetadata.height !== undefined
@@ -2693,13 +2693,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			return this.#readVideoFile(absolutePath, localTarget.sel, fileSize, suffixResolution, question, signal);
 		}
 		if (parsed.kind === "image") {
+			const isSvg = ext === ".svg" || ext === ".svgz";
 			({ content, details, sourcePath } = await this.#loadImageContent({
 				readPath: localReadPath,
 				absolutePath,
-				mimeType: "image/svg+xml",
-				imageMetadata: null,
+				mimeType: isSvg ? "image/svg+xml" : (mimeType ?? "application/octet-stream"),
+				imageMetadata: isSvg ? null : imageMetadata,
 				fileSize,
-				imageKind: "svg",
+				...(isSvg ? { imageKind: "svg" as const } : {}),
 				question,
 				questionPath: questionPath ?? `${resolvedDisplayPath}:img`,
 				signal,

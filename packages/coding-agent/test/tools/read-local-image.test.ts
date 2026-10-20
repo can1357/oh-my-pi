@@ -188,6 +188,13 @@ describe("read local:// images", () => {
 		expect(joinText(repeated.content)).toContain("identical output 3 times");
 	});
 
+	it("reads a local raster through :img", async () => {
+		const imagePath = path.join(localRoot, "clifford.png");
+		await Bun.write(imagePath, TINY_PNG);
+		const result = await new ReadTool(makeSession(testDir)).execute("call", { path: `${imagePath}:img` });
+		const image = result.content.find(content => content.type === "image");
+		expect(image && "mimeType" in image ? image.mimeType : undefined).toBe("image/png");
+	});
 	it("rasterizes a local SVG into a PNG attachment when :img is selected", async () => {
 		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);
 		const tool = new ReadTool(makeSession(testDir));
@@ -207,7 +214,7 @@ describe("read local:// images", () => {
 		const result = await tool.execute("call", { path: "local://diagram.svg:img" });
 
 		expect(result.content.some(content => content.type === "image")).toBe(false);
-		expect(joinText(result.content)).toContain("local://diagram.svg:img?q=<question>");
+		expect(joinText(result.content)).toContain("active model does not support image input");
 	});
 
 	it("answers questions about selected local SVGs", async () => {
