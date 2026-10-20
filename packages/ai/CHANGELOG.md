@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `completionsDropsOwnThinking` and `completionsRequestDropsOwnThinking`, which report whether a chat-completions request drops the model's own past thinking, so token estimates can match what is actually sent ([#15797](https://github.com/can1357/oh-my-pi/issues/15797), [#16498](https://github.com/can1357/oh-my-pi/pull/16498) by [@ghisguth](https://github.com/ghisguth))
+- Added `completionsDropsOwnThinking`, `completionsRequestDropsOwnThinking` and `isLiteLLMThinkingSignature`, which report whether a chat-completions request drops the model's own past thinking, so token estimates can match what is actually sent ([#15797](https://github.com/can1357/oh-my-pi/issues/15797), [#16498](https://github.com/can1357/oh-my-pi/pull/16498) by [@ghisguth](https://github.com/ghisguth))
 - Added Inception API-key login (`/login inception`) and `INCEPTION_API_KEY` environment authentication ([#16439](https://github.com/can1357/oh-my-pi/pull/16439) by [@eggpeat](https://github.com/eggpeat))
 
 ### Fixed
