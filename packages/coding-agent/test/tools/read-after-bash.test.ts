@@ -264,6 +264,18 @@ describe("a read after a bash call in the same message", () => {
 		expect(text).toContain("notes");
 	});
 
+	it("reads a local:// file the bash command rewrote", async () => {
+		const directory = await tempDirectory();
+		const artifacts = path.join(directory, "artifacts");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifacts, getSessionId: () => "s" });
+		await Bun.write(path.join(artifacts, "local", "notes.md"), "old\n");
+
+		const { text } = await bashThenRead(directory, "echo new > artifacts/local/notes.md", "local://notes.md");
+
+		expect(text).toContain("new");
+		expect(text).not.toContain("old");
+	});
+
 	it("fetches a web URL without waiting for bash", async () => {
 		const directory = await tempDirectory();
 		const { server, requests } = pageServer();

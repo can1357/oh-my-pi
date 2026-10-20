@@ -1057,8 +1057,9 @@ async function targetState(absolutePath: string): Promise<string | undefined> {
  * database or line selector's file). Each records the path the spelling
  * resolves to now, so a new exact match for a fallback spelling counts as a
  * change, and that path's `-wal` sidecar, which a SQLite write in WAL mode may
- * change alone. Extra candidates cost only a stat. Undefined when no entry is
- * local (URLs, internal URLs).
+ * change alone. Extra candidates cost only a stat. A file-backed internal URL
+ * (`local://`, `skill://`) is recorded unfingerprinted, so it always reads
+ * again. Undefined when no entry is local (web URLs, other internal URLs).
  */
 async function readTargetStates(
 	cwd: string,
@@ -1066,11 +1067,18 @@ async function readTargetStates(
 ): Promise<Map<string, { absolutePath: string; state: string | undefined }> | undefined> {
 	const internalRouter = InternalUrlRouter.instance();
 	const candidates = new Set<string>();
+	const internalFiles = new Set<string>();
 	for (const entry of [readPath, ...readPath.split(";")]) {
 		let target = entry.trim();
 		if (target.startsWith("file://")) target = expandPath(target);
-		else if (parseReadUrlTarget(target) !== null || internalRouter.canResolve(internalRouter.normalize(target))) {
-			continue;
+		else if (parseReadUrlTarget(target) !== null) continue;
+		else {
+			const normalized = internalRouter.normalize(target);
+			if (internalRouter.canResolve(normalized)) {
+				const scheme = extractUriScheme(normalized);
+				if (scheme !== undefined && internalRouter.spec(scheme)?.backing === "file") internalFiles.add(target);
+				continue;
+			}
 		}
 		target = splitImageQuestionTarget(target).path;
 		// An empty path reads the session cwd, so "" stays a candidate.
@@ -1080,8 +1088,9 @@ async function readTargetStates(
 			candidates.add(target.slice(0, colon));
 		}
 	}
-	if (candidates.size === 0) return undefined;
+	if (candidates.size === 0 && internalFiles.size === 0) return undefined;
 	const states = new Map<string, { absolutePath: string; state: string | undefined }>();
+	for (const internalFile of internalFiles) states.set(internalFile, { absolutePath: internalFile, state: undefined });
 	for (const candidate of candidates) {
 		// A spelling the resolver rejects proves nothing; the read itself reports it.
 		const absolutePath = await resolveReadPathAsync(candidate, cwd).catch(() => undefined);
