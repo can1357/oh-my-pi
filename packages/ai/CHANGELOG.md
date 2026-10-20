@@ -152,7 +152,7 @@
 - Broker account-pool files (`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE`) can hide whole providers and API keys: `"*": false` makes the file an allow-list, and an entry can be `true`, `false`, or `{ "accounts": [...], "apiKeys": false }` ([#14235](https://github.com/can1357/oh-my-pi/pull/14235) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
-- Fixed requests to `.local` LAN endpoints (e.g. `gpu-box.local:8080`) being sent through the remote egress proxy instead of staying on the local network ([#13591](https://github.com/can1357/oh-my-pi/issues/13591))
+- Fixed requests to `.local` LAN endpoints (e.g. `gpu-box.local:8080`) being sent through the remote egress proxy instead of staying on the local network ([#16457](https://github.com/can1357/oh-my-pi/pull/16457) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
