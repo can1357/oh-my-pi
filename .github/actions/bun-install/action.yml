@@ -25,8 +25,8 @@ runs:
              exit 1
            fi
            case "$want" in
-             '>='*) floor="${want#>=}"; install="latest" ;;
-             *)     floor="$want";      install="bun-v$want" ;;
+             '>='*) install="latest" ;;
+             *)     install="bun-v$want" ;;
            esac
            # bun.sh/install takes a release tag argument; "latest" is spelled as no argument.
            echo "bun_install=$([ "$install" = latest ] || echo "$install")" >> "$GITHUB_OUTPUT"
@@ -40,9 +40,9 @@ runs:
                # The repo's floor guard (scripts/check-bun-floor.ts) compares with
                # Bun's own semver ordering, where a prerelease of the floor sorts
                # below it. GNU `sort -V` orders "1.4.3" before "1.4.3-canary.1",
-               # so it would keep a canary the guard then rejects; reuse the
-               # guard's ordering so the runner and the gate agree.
-               if bun -e 'const { satisfiesBunFloor } = await import("./scripts/check-bun-floor.ts"); process.exit(satisfiesBunFloor(process.argv[1], "bun@" + process.argv[2]) ? 0 : 1)' "$have" "$floor"; then
+               # so it would keep a canary the guard then rejects; ask the guard
+               # itself so the runner and the gate agree on one ordering.
+               if bun scripts/check-bun-floor.ts --satisfies "$have"; then
                  ok=true
                fi
              elif [ "$have" = "$want" ]; then

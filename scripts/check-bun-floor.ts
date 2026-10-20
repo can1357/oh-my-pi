@@ -8,6 +8,11 @@
  * script would report success without checking a single file. Each package runs
  * this guard as its `precheck:types` hook, so a runtime below the floor is a
  * hard error instead of a silently green gate.
+ *
+ * The guard also owns the repo's version ordering for everyone else:
+ * `--satisfies <version>` answers "would this runtime pass the gate?" with an
+ * exit code, so the CI setup action (`.github/actions/bun-install/action.yml`)
+ * asks the guard instead of comparing versions on its own.
  */
 
 import * as path from "node:path";
@@ -33,12 +38,29 @@ export function satisfiesBunFloor(version: string, packageManager: unknown): boo
 	return Bun.semver.order(version, floor) >= 0;
 }
 
+const USAGE = "usage: check-bun-floor.ts [--satisfies <bun-version>]";
+
+/** Exit code for a usage error (unknown flag, missing argument). */
+const EXIT_USAGE = 2;
+
 async function main(): Promise<void> {
 	const manifest = (await Bun.file(path.join(REPO_ROOT, "package.json")).json()) as { packageManager?: unknown };
 	const floor = bunFloor(manifest.packageManager);
 	if (floor === undefined) {
 		process.stderr.write("error: root package.json declares no bun version in packageManager\n");
 		process.exit(1);
+	}
+	const args = process.argv.slice(2);
+	if (args.length > 0) {
+		// The exit code is the answer: 0 when the candidate runtime passes the
+		// gate, 1 when it does not. Unknown flags fail loudly instead of
+		// falling through to the gate check, which would answer for the
+		// running Bun instead of the candidate.
+		if (args.length === 2 && args[0] === "--satisfies") {
+			process.exit(satisfiesBunFloor(args[1], manifest.packageManager) ? 0 : 1);
+		}
+		process.stderr.write(`error: unrecognized arguments: ${args.join(" ")}\n${USAGE}\n`);
+		process.exit(EXIT_USAGE);
 	}
 	if (!satisfiesBunFloor(Bun.version, manifest.packageManager)) {
 		process.stderr.write(
