@@ -27,6 +27,9 @@ import type {
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
 	type AskDialogPrompt,
@@ -137,11 +140,37 @@ export class ExtensionUiController {
 			this.#composerShapeDisposers.push(installExtensionComposerShape(definition));
 		}
 		this.ctx.syncComposerShape();
+		this.ctx.syncExtensionLinks();
 	}
 
 	/** Remove extension-owned composer styles from the process registries. */
 	disposeComposerShapes(): void {
 		for (const dispose of this.#composerShapeDisposers.splice(0)) dispose();
+	}
+
+	/**
+	 * Redraw every transcript component of the reply sent at `timestamp` (one per tool-call segment).
+	 * A plain terminal cannot repaint rows it already moved into scrollback, so a reply with retired
+	 * rows rebuilds the scrollback, as the thinking-visibility toggle does; one still in the live
+	 * viewport (and any block in Tern's native view) just repaints.
+	 */
+	#rerenderAssistantMessage(timestamp: number): void {
+		if (!cfgExtensionAssistantTextRenderers.get(this.ctx.settings)) return;
+		const native = isNativeRendering();
+		let redrawn = false;
+		let retired = false;
+		for (const child of this.ctx.chatContainer.children) {
+			if (!(child instanceof AssistantMessageComponent)) continue;
+			if (!child.rerenderMessage(timestamp)) continue;
+			redrawn = true;
+			retired ||= !native && !this.ctx.chatContainer.canRemoveBlock(child);
+		}
+		if (retired) {
+			this.ctx.chatContainer.resetStableEmission();
+			this.ctx.ui.resetDisplay();
+		} else if (redrawn) {
+			this.ctx.ui.requestRender();
+		}
 	}
 
 	/**
@@ -159,6 +188,8 @@ export class ExtensionUiController {
 			approve: (prompt, dialogOptions) => this.showCollabAwareApproval(prompt, dialogOptions),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
+			rerenderMessage: timestamp => this.#rerenderAssistantMessage(timestamp),
+			getLinkClicksAvailable: () => this.ctx.linkActivationAvailable,
 			setStatus: (key, text) => this.setHookStatus(key, text),
 			setWorkingMessage: message => this.ctx.setWorkingMessage(message),
 			setWidget: (key, content, options) => this.setHookWidget(key, content, options),

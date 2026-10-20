@@ -4,6 +4,19 @@ import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
 
 const TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
 const TRACKING_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
+const POINTER = "\x1b]22;pointer\x1b\\";
+const POINTER_DEFAULT = "\x1b]22;\x1b\\";
+
+/** Each OSC 22 pointer request in `output`, with whether an alternate screen was shown when it was written. */
+function pointerWrites(output: string): { sequence: string; onAltScreen: boolean }[] {
+	const writes: { sequence: string; onAltScreen: boolean }[] = [];
+	let onAltScreen = false;
+	for (const match of output.matchAll(/\x1b\[\?1049([hl])|\x1b\]22;[^\x1b]*\x1b\\/g)) {
+		if (match[1] !== undefined) onAltScreen = match[1] === "h";
+		else writes.push({ sequence: match[0], onAltScreen });
+	}
+	return writes;
+}
 
 class MinimalTerminal implements Terminal {
 	columns = 80;
@@ -186,6 +199,51 @@ describe("inline mouse tracking", () => {
 			tui.start();
 			tui.renderNow();
 			expect(terminal.output.includes(TRACKING_ON)).toBe(false);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("gives the shell its default pointer back on stop even with tracking off", () => {
+		const enabled = { current: false };
+		const { terminal, tui } = makeInlineTui(enabled);
+		try {
+			tui.start();
+			tui.renderNow();
+			tui.setPointerShape("pointer");
+			expect(terminal.output.endsWith(POINTER)).toBe(true);
+
+			tui.stop();
+			expect(terminal.output.lastIndexOf(POINTER_DEFAULT)).toBeGreaterThan(terminal.output.lastIndexOf(POINTER));
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("sets and restores the pointer on the normal screen only, around a fullscreen overlay and at stop", () => {
+		const enabled = { current: true };
+		const { terminal, tui } = makeInlineTui(enabled);
+		try {
+			tui.start();
+			tui.renderNow();
+			tui.setPointerShape("pointer");
+			const overlay = tui.showOverlay(new StaticOverlay(), { fullscreen: true });
+			tui.renderNow();
+			// A request while the overlay covers the normal screen would land on the alternate one.
+			tui.setPointerShape("pointer");
+			overlay.hide();
+			tui.renderNow();
+			tui.setPointerShape("pointer");
+			tui.showOverlay(new StaticOverlay(), { fullscreen: true });
+			tui.renderNow();
+			tui.stop();
+
+			expect(pointerWrites(terminal.output)).toEqual([
+				{ sequence: POINTER, onAltScreen: false },
+				{ sequence: POINTER_DEFAULT, onAltScreen: false },
+				{ sequence: POINTER, onAltScreen: false },
+				{ sequence: POINTER_DEFAULT, onAltScreen: false },
+			]);
 		} finally {
 			tui.stop();
 		}

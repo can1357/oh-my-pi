@@ -212,6 +212,15 @@ import {
 } from "@oh-my-pi/pi-tui/tools/todo";
 import { vocalizer } from "../tts/vocalizer";
 import { applyHyperlinkSetting, fileHyperlink } from "@oh-my-pi/pi-tui/render/hyperlink";
+import {
+	extensionLinkClicksAvailable,
+	extensionLinksRouted,
+	extensionLinksVersion,
+	onExtensionLinkDrawn,
+	setExtensionLinkPicking,
+	setExtensionLinks,
+} from "@oh-my-pi/pi-tui/render/extension-links";
+import { onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
 import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
@@ -275,6 +284,7 @@ import {
 	type ComposerPreferences,
 	type ComposerStatusCache,
 	PINNED_HUD_TOGGLE_ID,
+	type ViewportLink,
 } from "@oh-my-pi/pi-tui/prompt/composer";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
@@ -417,6 +427,7 @@ import { cfgStreamRedactPatterns } from "../stream/settings";
 import { cfgSttEnabled } from "../stt/settings";
 import { combine, type SettingValueOf } from "../config/registry";
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
+import { cfgExtensionAssistantTextRenderers } from "../extensibility/settings";
 import { cfgTierAdvisor } from "../session/settings";
 import {
 	cfgCompactionEnabled,
@@ -465,6 +476,7 @@ const cfgLiveUiSettings = combine({
 	"display.showTurnTime": cfgDisplayShowTurnTime,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
 	"tui.renderSvg": cfgTuiRenderSvg,
+	"extensionRenderers.assistantText": cfgExtensionAssistantTextRenderers,
 	"tui.autoGraph": cfgTuiAutoGraph,
 	"tui.textSizing": cfgTuiTextSizing,
 	"tui.tight": cfgTuiTight,
@@ -492,6 +504,8 @@ const STILL_CLOSING_DELAY_MS = 3_000;
 const JUDGMENT_BATCH_PROGRESS_RETAIN_MS = 1_000;
 /** Startup emits several status-bar changes within a second; persist only the settled one. */
 const COMPOSER_STATUS_PERSIST_DELAY_MS = 1_000;
+/** Status-line slot of the link-hint mode prompt; the `omp:` prefix keeps it apart from extension keys. */
+const LINK_HINT_STATUS_KEY = "omp:link-hints";
 const DEFAULT_WORKING_MESSAGE = "Working…";
 /** Native working-message shimmer under a session accent: the hue itself is the terminal's `accent`. */
 const NATIVE_ACCENT_SHIMMER: ShimmerPalette = { low: "dim", mid: "accent", high: "accent", bold: true };
@@ -1831,6 +1845,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBusUnsubscribers: Array<() => void> = [];
 	/** Mirror of `tui.mouse`, read by the TUI's per-frame inline mouse tracking probe. */
 	#mouseCapture = false;
+	/** The "press alt+o to pick an extension link" hint is shown at most once per interactive session. */
+	#linkKeyHintShown = false;
+	/** A link-scheme change awaits its transcript rebuild; any rebuild before it covers it. */
+	#extensionLinkRebuildPending = false;
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
@@ -1949,19 +1967,30 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#mouseCapture = cfgTuiMouse.get(this.settings);
 		this.#eventBusUnsubscribers.push(
 			cfgTuiMouse.listen(this.settings, on => {
+				const linksWereAvailable = this.linkActivationAvailable;
 				this.#mouseCapture = on;
+				// With the hint key unbound, the mouse is the only way to activate extension links.
+				if (this.linkActivationAvailable !== linksWereAvailable) this.#redrawExtensionLinks();
 				// Dropping capture must also drop the band: with reporting off no
 				// motion event will ever arrive to clear a mid-hover highlight.
 				// The controller cache goes too, or a re-enable plus motion over
 				// the same card would look unchanged and skip restoring the band.
 				if (!on) {
 					this.composer.setHoveredClickId(undefined);
+					this.setLinkHover(undefined);
 					this.#inputController?.clearHoverHighlight();
 				}
 				this.ui.requestRender();
 			}),
 		);
 		this.ui.setInlineMouseTrackingProvider(() => this.#mouseCapture);
+		// Tern's native view routes link clicks itself, so claimed links stop (or start) being
+		// pickable here: re-run the renderers reading `getLinkClicksAvailable()`.
+		this.#eventBusUnsubscribers.push(
+			onNativeRenderingChange(() => {
+				if ((this.viewSession.extensionRunner?.getLinkSchemes().length ?? 0) > 0) this.#redrawExtensionLinks();
+			}),
+		);
 		this.chatContainer = new TranscriptContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.progressHudContainer = new AnchoredLiveContainer();
@@ -2546,6 +2575,17 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Initialize hooks with TUI-based UI context
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
+		// A live `disabledExtensions` edit suspends or resumes extensions: drop (or restore) their link
+		// schemes and renderers from the transcript.
+		const extensionRunner = this.session.extensionRunner;
+		if (extensionRunner) {
+			this.#eventBusUnsubscribers.push(
+				extensionRunner.onSuspensionChange(() => {
+					this.#applyExtensionLinks();
+					this.#redrawExtensionLinks();
+				}),
+			);
+		}
 
 		// Restore mode from session (e.g. plan mode on resume)
 		this.session.setSessionBeforeSwitchReconciler?.(async () => {
@@ -3756,6 +3796,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			setSvgFigureRendering(cfgTuiRenderSvg.get(this.settings));
 			rebuildChat = true;
 		}
+		// Components take the extension text renderers when built; the rebuild keeps the streaming
+		// reply's components, so hand them the new set directly.
+		if (any("extensionRenderers.assistantText")) {
+			this.#applyExtensionLinks();
+			this.#eventController.applyAssistantTextRenderers();
+			rebuildChat = true;
+		}
 		if (any("tui.autoGraph")) {
 			this.#applyAutoGraphSetting();
 			rebuildChat = true;
@@ -3831,6 +3878,125 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.updateEditorBorderColor();
 		this.#scheduleComposerStatusPersist();
 		this.ui.requestRender();
+	}
+
+	/**
+	 * Push the viewed session's extension link schemes to the markdown renderer; returns whether that
+	 * changed. A focused subagent's runner draws with what the main runner leaves active.
+	 */
+	#applyExtensionLinks(): boolean {
+		const before = extensionLinksVersion();
+		const viewed = this.viewSession.extensionRunner;
+		viewed?.followSuspension(this.session.extensionRunner);
+		setExtensionLinks(viewed?.getLinkSchemes() ?? []);
+		onExtensionLinkDrawn(this.#showLinkKeyHint);
+		setExtensionLinkPicking(this.#linkPickable);
+		return extensionLinksVersion() !== before;
+	}
+
+	/** Whether the user can pick a claimed link: the link-hint key is bound or `tui.mouse` delivers clicks. */
+	#linkPickable = (): boolean => this.#mouseCapture || Boolean(appKey(this.keybindings, "app.links.hint"));
+
+	/** A claimed link was drawn: say at most once which key picks it (nothing while it is unbound). */
+	#showLinkKeyHint = (): void => {
+		if (this.#linkKeyHintShown) return;
+		this.#linkKeyHintShown = true;
+		const key = appKey(this.keybindings, "app.links.hint");
+		// Called while markdown renders; show the status after this frame.
+		if (key) queueMicrotask(() => this.showStatus(`Press ${key} to pick an extension link`));
+	};
+
+	/**
+	 * Whether a claimed link drawn now can be activated: links are routed (plain terminal, setting
+	 * on) and either the link-hint key is bound or `tui.mouse` delivers clicks. The same process-wide
+	 * answer a subagent's UI-less runner gives, since its links are picked on this screen.
+	 */
+	get linkActivationAvailable(): boolean {
+		return extensionLinkClicksAvailable();
+	}
+
+	syncExtensionLinks(): void {
+		if (!this.#applyExtensionLinks()) return;
+		this.#redrawExtensionLinks();
+	}
+
+	/** Redraw the transcript so renderers reading `getLinkClicksAvailable()` switch form now. */
+	#redrawExtensionLinks(): void {
+		// Before the first transcript replay commits (or while one is in flight), that replay draws with
+		// the current links; a rebuild now would put the transcript in the chat it re-appends (#1955).
+		if (!this.initialChatRendered) return;
+		// The rebuild keeps the live reply's components; re-run their renderers rather than waiting
+		// for the next streaming update.
+		this.#eventController.applyAssistantTextRenderers();
+		// Coalesced: a settings apply changing another transcript setting in the same pass rebuilds once.
+		if (this.#extensionLinkRebuildPending) return;
+		this.#extensionLinkRebuildPending = true;
+		queueMicrotask(() => {
+			// Cleared by any rebuild since; a replay started since draws the current links itself.
+			const pending = this.#extensionLinkRebuildPending;
+			this.#extensionLinkRebuildPending = false;
+			if (!pending || !this.initialChatRendered) return;
+			this.rebuildChatFromMessages();
+			this.ui.resetDisplay();
+		});
+	}
+
+	/** Raise `link_activate` for `url` on the viewed session's extension runner. */
+	#activateLink(url: string): boolean {
+		const runner = this.viewSession.extensionRunner;
+		if (!runner) return false;
+		// A focused subagent's runner is headless: hand its handler the UI drawing that transcript.
+		runner.emitLinkActivate(url, this.session.extensionRunner?.getUIContext()).catch((error: unknown) => {
+			logger.warn("link_activate dispatch failed", { url, error: String(error) });
+		});
+		return true;
+	}
+
+	activateViewportLink(index: number, col: number): boolean {
+		const url = this.composer.viewportLinkAt(index, col)?.url;
+		return url !== undefined && this.#activateLink(url);
+	}
+
+	startLinkHints(): boolean {
+		if (!extensionLinksRouted()) return false;
+		if (this.composer.viewportLinkCount() === 0) {
+			this.showStatus("No extension links on screen");
+			return true;
+		}
+		this.composer.startLinkHints(reason => {
+			this.statusLine.setHookStatus(LINK_HINT_STATUS_KEY, undefined);
+			if (reason === "crowded") {
+				// Raised while the composer paints; show the status after this frame.
+				queueMicrotask(() => this.showStatus("Too many extension links on one row to tag; widen the terminal"));
+			}
+			this.ui.requestRender();
+		});
+		this.statusLine.setHookStatus(LINK_HINT_STATUS_KEY, "Type a link tag · Esc cancels");
+		this.ui.requestRender();
+		return true;
+	}
+
+	get linkHintsActive(): boolean {
+		return this.composer.linkHintsActive;
+	}
+
+	typeLinkHint(letter: string): void {
+		const picked = this.composer.typeLinkHint(letter);
+		if (typeof picked === "object") this.#activateLink(picked.url);
+		this.ui.requestRender();
+	}
+
+	cancelLinkHints(): void {
+		this.composer.cancelLinkHints();
+	}
+
+	viewportLinkAt(index: number, col: number): ViewportLink | undefined {
+		return this.composer.viewportLinkAt(index, col);
+	}
+
+	setLinkHover(link: ViewportLink | undefined): void {
+		this.composer.setHoveredLink(link);
+		this.ui.setPointerShape(link === undefined ? undefined : "pointer");
 	}
 
 	/** Coalesce status-cache writes; `stop()` flushes a pending one synchronously. */
@@ -4036,6 +4202,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	rebuildChatFromMessages(options: { reuseSettledComponents?: boolean } = {}): void {
+		this.#extensionLinkRebuildPending = false;
 		// Mid-stream rebuilds (e.g. `/shake`, theme/setting changes that touch the
 		// transcript) replay only committed `state.messages`. The agent's in-flight
 		// `streamMessage` and its still-pending tool calls live OUTSIDE
@@ -4051,6 +4218,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.viewSession?.isStreaming) {
 			const liveSet = new Set<Component>();
 			if (this.streamingComponent) liveSet.add(this.streamingComponent);
+			// Text after a tool call in the streaming reply is drawn by its own components.
+			for (const segment of this.#eventController.liveAssistantSegments()) liveSet.add(segment);
 			for (const [id, component] of this.pendingTools) {
 				livePendingTools.set(id, component);
 				liveSet.add(component as unknown as Component);
@@ -7245,6 +7414,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.stop();
 			this.#ownsStartedUi = false;
 		}
+		// The markdown renderer's extension-link state is process-wide; release this session's schemes
+		// only after the TUI's final history flush, which still strips their markers.
+		setExtensionLinks([]);
+		onExtensionLinkDrawn(undefined);
+		setExtensionLinkPicking(undefined);
 		this.isInitialized = false;
 	}
 
@@ -8012,6 +8186,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		preserveExistingChat?: boolean;
 		clearTerminalHistory?: boolean;
 	}): Promise<void> {
+		// A focus switch replays another session's transcript: claim that session's link schemes first.
+		this.#applyExtensionLinks();
 		await this.#uiHelpers.renderInitialMessages(options);
 		this.syncRetryHintRow();
 	}

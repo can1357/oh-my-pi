@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in extension reply renderers: with `extensionRenderers.assistantText` on, `pi.registerAssistantTextRenderer()` changes how assistant text is drawn (terminal and Tern native view) without touching the session or model context, and `ctx.ui.rerenderMessage(timestamp)` redraws one reply in place ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
+- Added extension link schemes behind the same setting: `pi.registerLinkScheme()` claims a scheme whose links draw with a dotted underline and without the ` (url)` suffix, and raise `link_activate` for that extension instead of opening anything. Alt+O (`app.links.hint`) tags each such link on screen so typing its tag picks it, no mouse needed; with `tui.mouse` on a click picks it too, and hovering highlights it with a hand pointer. omp says once which key picks them, and `ctx.ui.getLinkClicksAvailable()` lets a renderer fall back to inline content ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
+
 ### Fixed
 
 - Fixed Mnemopi memory completions ignoring the memory role's thinking suffix, including one inherited from `tiny` or `smol` when `modelRoles.memory` is unset; each `retry.fallbackChains.memory` entry sends its own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))
