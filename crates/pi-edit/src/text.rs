@@ -294,7 +294,9 @@ pub fn normalize_unicode(text: &str) -> String {
 ///
 /// Typographic quotes and dashes collapse onto their ASCII counterparts, the
 /// Halfwidth and Fullwidth Forms block (`U+FF01`–`U+FF5E`) collapses onto
-/// ASCII, and the fullwidth white parentheses (`U+FF5F`/`U+FF60`) and the
+/// ASCII — that block holds fullwidth punctuation *and* fullwidth letters and
+/// digits (`Ａ`–`Ｚ`, `０`–`９`), which are the same characters in their wide
+/// form — and the fullwidth white parentheses (`U+FF5F`/`U+FF60`) and the
 /// ideographic space (`U+3000`) collapse onto their ASCII counterparts.
 /// Returns `None` for characters that have no such variant.
 fn fold_unicode_variant(ch: char) -> Option<char> {
@@ -308,7 +310,10 @@ fn fold_unicode_variant(ch: char) -> Option<char> {
 		other => {
 			let cp = other as u32;
 			if (0xff01..=0xff5e).contains(&cp) {
-				char::from_u32(cp - 0xfee0)
+				// The ASCII result may itself be a variant that folds further
+				// (`｀` → `` ` `` → `'`), so fold it once more to keep the
+				// equivalence transitive.
+				char::from_u32(cp - 0xfee0).map(|folded| fold_unicode_variant(folded).unwrap_or(folded))
 			} else {
 				None
 			}
@@ -318,6 +323,9 @@ fn fold_unicode_variant(ch: char) -> Option<char> {
 
 /// True when two characters compare as the same in fuzzy matching, i.e. they
 /// differ only by a typographic or width variant (`“` vs `"`, `（` vs `(`).
+///
+/// The comparison is transitive: `｀` folds to `` ` ``, which folds to `'`,
+/// so `｀` and `'` compare equal too.
 pub fn fuzzy_equivalent_chars(left: char, right: char) -> bool {
 	fold_unicode_variant(left).unwrap_or(left) == fold_unicode_variant(right).unwrap_or(right)
 }
@@ -519,5 +527,15 @@ mod tests {
 		assert_eq!(normalize_for_fuzzy("a\u{3000}b"), "a b");
 		// Halfwidth katakana sit outside the folded range and stay verbatim.
 		assert_eq!(normalize_for_fuzzy("ｱ"), "ｱ");
+	}
+
+	#[test]
+	fn fuzzy_normalization_folds_fullwidth_variants_transitively() {
+		// U+FF40 FULLWIDTH GRAVE ACCENT folds to the ASCII grave accent, which
+		// folds to the ASCII apostrophe: the fold must not stop halfway, or
+		// `｀` and `'` would compare unequal.
+		assert_eq!(normalize_for_fuzzy("｀"), "'");
+		assert_eq!(normalize_for_fuzzy("｀"), normalize_for_fuzzy("'"));
+		assert!(fuzzy_equivalent_chars('｀', '\''));
 	}
 }

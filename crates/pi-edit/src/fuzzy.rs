@@ -1183,15 +1183,28 @@ fn first_different_line<'a>(old_lines: &'a [&str], new_lines: &'a [&str]) -> (&'
 /// Maximum number of codepoint differences named in a match-error hint.
 const MAX_HINTED_DIFFERENCES: usize = 8;
 
-/// Codepoint-level hint for a diff pair whose characters differ only in forms
-/// the fuzzy matcher folds together (typographic quotes, dashes, fullwidth
+/// Codepoint-level hint for a diff pair whose characters differ in forms the
+/// fuzzy matcher folds together (typographic quotes, dashes, fullwidth
 /// variants). Terminals render both sides alike, so the printed pair reads as
 /// identical and leaves the caller no actionable difference.
 ///
+/// Only exact mode reports the hint: with fuzzy matching enabled both sides
+/// are normalized before scoring, so a folded variant is free and can never be
+/// the reason the match was rejected — naming it would point at a difference
+/// the matcher does not charge for.
+///
+/// The lines are compared trimmed, the way the matcher compares them: an
+/// indentation difference would otherwise shift every character position and
+/// hide the folded pairs. The reported position is a character index into the
+/// trimmed line, not a display column.
+///
 /// Returns `None` when the pair differs in nothing the matcher folds.
-fn folded_difference_hint(expected: &str, actual: &str) -> Option<String> {
-	let expected_chars: Vec<char> = expected.chars().collect();
-	let actual_chars: Vec<char> = actual.chars().collect();
+fn folded_difference_hint(expected: &str, actual: &str, allow_fuzzy: bool) -> Option<String> {
+	if allow_fuzzy {
+		return None;
+	}
+	let expected_chars: Vec<char> = js_trim(expected).chars().collect();
+	let actual_chars: Vec<char> = js_trim(actual).chars().collect();
 	let mut hints: Vec<String> = Vec::new();
 	let mut omitted = 0usize;
 	for (index, (expected_char, actual_char)) in expected_chars.iter().zip(&actual_chars).enumerate()
@@ -1207,7 +1220,7 @@ fn folded_difference_hint(expected: &str, actual: &str) -> Option<String> {
 			continue;
 		}
 		hints.push(format!(
-			"  differs at col {}: U+{:04X} {} vs U+{:04X} {}",
+			"  differs at char {}: U+{:04X} {} vs U+{:04X} {}",
 			index + 1,
 			*expected_char as u32,
 			expected_char,
@@ -1224,9 +1237,9 @@ fn folded_difference_hint(expected: &str, actual: &str) -> Option<String> {
 	Some(hints.join("\n"))
 }
 
-/// Format `EditMatchError.formatMessage` byte-for-byte, plus a codepoint
-/// hint when the printed diff pair differs only in characters the matcher
-/// folds together.
+/// Format `EditMatchError.formatMessage` byte-for-byte, plus a codepoint hint
+/// when fuzzy matching is disabled and the printed diff pair differs in
+/// characters the matcher folds together.
 pub fn format_match_error(
 	path: &str,
 	search_text: &str,
@@ -1269,7 +1282,7 @@ pub fn format_match_error(
 	} else {
 		format!("Could not find the exact text in {path}.")
 	};
-	let difference_hint = folded_difference_hint(old_line, new_line)
+	let difference_hint = folded_difference_hint(old_line, new_line, allow_fuzzy)
 		.map_or_else(String::new, |hint| format!("{hint}\n"));
 	format!(
 		"{heading}\n\nClosest match ({similarity_percent}% similar) at line {}:\n  - {old_line}\n  \
@@ -1746,33 +1759,59 @@ mod tests {
 
 	#[test]
 	fn match_error_names_folded_codepoint_differences() {
+		// Exact mode charges for the folded difference, so the error names the
+		// codepoints the terminal renders identically.
 		let closest = FuzzyMatch {
 			actual_text: "foo（bar）＝1".to_owned(),
 			start_index: 0,
 			start_line:  3,
-			confidence:  0.93,
+			confidence:  1.0,
 		};
 		assert_eq!(
-			format_match_error("a.ts", "foo(bar)=1", Some(&closest), true, 0.95, None),
-			"Could not find a close enough match in a.ts.\n\nClosest match (93% similar) at line \
-			 3:\n  - foo(bar)=1\n  + foo（bar）＝1\n  differs at col 4: U+0028 ( vs U+FF08 （\n  \
-			 differs at col 8: U+0029 ) vs U+FF09 ）\n  differs at col 9: U+003D = vs U+FF1D \
-			 ＝\nClosest match was below the 95% similarity threshold."
+			format_match_error("a.ts", "foo(bar)=1", Some(&closest), false, 0.95, None),
+			"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 3:\n  - \
+			 foo(bar)=1\n  + foo（bar）＝1\n  differs at char 4: U+0028 ( vs U+FF08 （\n  differs at \
+			 char 8: U+0029 ) vs U+FF09 ）\n  differs at char 9: U+003D = vs U+FF1D ＝\nFuzzy \
+			 matching is disabled. Enable 'Edit fuzzy match' in settings to accept high-confidence \
+			 matches."
 		);
 	}
 
 	#[test]
-	fn fuzzy_match_folds_fullwidth_punctuation() {
-		let outcome =
-			find_match("let x = foo（bar）＝1;\n", "let x = foo(bar)=1;", &FindMatchOptions {
-				allow_fuzzy:     true,
-				threshold:       Some(0.95),
-				excluded_ranges: &[],
-			});
+	fn match_error_names_folded_differences_ignoring_indentation() {
+		// The matcher compares trimmed lines, so an indentation difference must
+		// not shift the character positions of the folded pairs.
+		let closest = FuzzyMatch {
+			actual_text: "\tfoo（bar）＝1".to_owned(),
+			start_index: 0,
+			start_line:  3,
+			confidence:  1.0,
+		};
 		assert_eq!(
-			outcome.matched.as_ref().map(|matched| matched.confidence),
-			Some(1.0),
-			"fullwidth punctuation must match its halfwidth form"
+			format_match_error("a.ts", "  foo(bar)=1", Some(&closest), false, 0.95, None),
+			"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 3:\n  -   \
+			 foo(bar)=1\n  + \tfoo（bar）＝1\n  differs at char 4: U+0028 ( vs U+FF08 （\n  differs \
+			 at char 8: U+0029 ) vs U+FF09 ）\n  differs at char 9: U+003D = vs U+FF1D ＝\nFuzzy \
+			 matching is disabled. Enable 'Edit fuzzy match' in settings to accept high-confidence \
+			 matches."
+		);
+	}
+
+	#[test]
+	fn match_error_omits_folded_difference_hint_in_fuzzy_mode() {
+		// With fuzzy matching enabled a folded variant is free, so it cannot be
+		// the reason the match was rejected and must not be named.
+		let closest = FuzzyMatch {
+			actual_text: "foo（bar）＝2".to_owned(),
+			start_index: 0,
+			start_line:  3,
+			confidence:  0.9,
+		};
+		assert_eq!(
+			format_match_error("a.ts", "foo(bar)=1", Some(&closest), true, 0.95, None),
+			"Could not find a close enough match in a.ts.\n\nClosest match (90% similar) at line \
+			 3:\n  - foo(bar)=1\n  + foo（bar）＝2\nClosest match was below the 95% similarity \
+			 threshold."
 		);
 	}
 
