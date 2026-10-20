@@ -2346,7 +2346,24 @@ export class SessionTools {
 		signal?: AbortSignal,
 	): Promise<SystemPromptPreparation> {
 		const backend = await resolveMemoryBackend(this.#host.settings);
-		if (!isCurrent() || !backend.beforeAgentStartPrompt) return { systemPrompt: this.#baseSystemPrompt };
+		if (!isCurrent() || !backend.beforeAgentStartPrompt) {
+			// The local memory backend keeps its block in the base prompt, so a
+			// branch that moved off the staged snapshot — a `/tree` navigation
+			// or a checkpoint rewind — records a snapshot of its own when this
+			// turn's prompt commits.
+			const recorder = backend
+				.pendingInstructionsCommit?.(this.#host.sessionManager)
+				?.commit(this.#baseSystemPrompt);
+			return {
+				systemPrompt: this.#baseSystemPrompt,
+				commit: recorder
+					? () => {
+							recorder();
+							return true;
+						}
+					: undefined,
+			};
+		}
 
 		try {
 			const memory = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText, signal);
