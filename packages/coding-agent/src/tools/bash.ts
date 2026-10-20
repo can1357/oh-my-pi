@@ -38,6 +38,7 @@ import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
+import { tagNumberedFileViews } from "./bash-view-tags";
 import { checkBashInterception } from "./bash-interceptor";
 import { rewriteGitWorktreeAdd } from "./bash-worktree-rewrite";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
@@ -715,6 +716,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			requestedTimeoutSec?: number;
 			notices?: readonly string[];
 			wallTimeMs?: number;
+			/** The command and its working directory, to tag the numbered file rows it printed. */
+			view?: { command: string; cwd: string };
 		} = {},
 	): Promise<AgentToolResult<BashToolDetails>> {
 		const exitCode = result.exitCode;
@@ -722,6 +725,16 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		const outputLines = [this.#formatResultOutput(result)];
 		const notices: string[] = [];
+		const viewOutput = options.view && result.timedOut !== true ? normalizeResultOutput(result) : undefined;
+		// Output past the inline cap reaches the model cut, so its rows were not all shown.
+		if (
+			options.view &&
+			viewOutput !== undefined &&
+			Buffer.byteLength(viewOutput) <= resolveInlineByteCapBudget(this.session.settings)
+		) {
+			const tags = await tagNumberedFileViews(this.session, options.view.command, options.view.cwd, viewOutput);
+			if (tags) notices.push(tags);
+		}
 		const wallTimeMs = options.wallTimeMs;
 		const wallTimeNoticeEmitted = wallTimeMs !== undefined && wallTimeMs >= WALL_TIME_NOTICE_MIN_MS;
 		if (wallTimeNoticeEmitted) {
@@ -937,6 +950,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						requestedTimeoutSec: options.requestedTimeoutSec,
 						notices,
 						wallTimeMs,
+						view: { command: options.command, cwd: options.commandCwd },
 					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
@@ -1567,6 +1581,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					requestedTimeoutSec,
 					notices: bridgeNotices,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
+					view: { command, cwd: commandCwd },
 				});
 			} finally {
 				clearTimeout(timeoutTimer);
@@ -1653,6 +1668,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			requestedTimeoutSec,
 			notices: pendingNotices,
 			wallTimeMs,
+			view: { command, cwd: commandCwd },
 		});
 	}
 }

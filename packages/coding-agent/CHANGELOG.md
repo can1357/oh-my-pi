@@ -37,6 +37,10 @@
 
 - `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
 
+### Changed
+
+- `bash` output that prints file lines with their numbers (`grep -n`, `rg -n`, `cat -n`, `nl`) now ends with those files' edit tags, so `edit` can change the printed lines without a `read` first
+
 ### Fixed
 
 - Fixed subagents spawning at a caller-supplied `effort` (e.g. `hi` → `max`) while `task.enableEffort` is off; the field is now ignored and the agent's configured thinking level (including `:auto`) applies ([#16402](https://github.com/can1357/oh-my-pi/issues/16402))
