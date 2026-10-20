@@ -667,6 +667,24 @@ pub const MOVE_TAKES_NO_BODY: &str = "`MV DEST` does not take body rows. Put lin
                                       `MV` row; the destination path follows `MV` on the same \
                                       line.";
 
+/// Longest echoed authored row, in chars, in a parse error.
+const ECHOED_ROW_MAX_CHARS: usize = 80;
+
+/// JSON-quote an authored row for an error message, bounded so a very long
+/// malformed row cannot flood the preview.
+pub fn preview_row(text: &str) -> String {
+	if text.chars().count() > ECHOED_ROW_MAX_CHARS {
+		let head: String = text.chars().take(ECHOED_ROW_MAX_CHARS - 1).collect();
+		json_quote(&format!("{head}…"))
+	} else {
+		json_quote(text)
+	}
+}
+
+/// A row named an op keyword but did not parse as an operation header.
+pub const MALFORMED_OP_HEADER: &str = "malformed operation header. Body lines start with `+`; to \
+                                       write this text as content, prefix the row with `+`.";
+
 /// `CUT` hunk received a body row.
 pub const CUT_TAKES_NO_BODY: &str = "`CUT` deletes (and captures) the named lines and takes no \
                                      body rows. To write new content, use `PUT N.=M:` with \
