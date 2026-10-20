@@ -3856,10 +3856,13 @@ export class AgentSession implements SettingsScope {
 			if (this.#recovery.isClassifierRefusal(assistantMsg)) return;
 			if (isEmptyErrorTurn(assistantMsg)) return;
 			if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
+				// The state the request that reported this usage was billed in.
+				const dropsOwnThinking = this.agent.lastRequestDropsOwnThinking;
 				assistantMsg.contextSnapshot = {
 					promptTokens: calculatePromptTokens(assistantMsg.usage),
 					...this.#stats.nonMessageSnapshot(),
 					compactionEpoch: this.#stats.compactionEpoch,
+					...(dropsOwnThinking === undefined ? {} : { dropsOwnThinking }),
 				};
 			}
 		}

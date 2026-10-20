@@ -242,6 +242,11 @@ export class Tokenizer {
 	readonly #readsDeploymentSignatures: boolean;
 	/** The reader whose requests drop its own turns' thinking text; see {@link thinkingDropReader}. */
 	readonly #thinkingDropper: ReasoningReplayReader | undefined;
+	/** Construction inputs, kept to build {@link #dropStateTwin}. */
+	readonly #model: TokenizerModel | null | undefined;
+	readonly #options: TokenizerOptions | undefined;
+	/** The same reader counting for the opposite own-thinking drop state; see {@link ownThinkingTokens}. */
+	#dropStateTwin: Tokenizer | undefined;
 	readonly reasoningReplayKey: string;
 	/** How the reader bills replayed signed thinking (catalog `thinking-replay-tokens`). */
 	readonly thinkingReplayTokens: ThinkingReplayTokens;
@@ -279,6 +284,8 @@ export class Tokenizer {
 		this.#reasoningReader = reasoningReplayReader(model);
 		this.#dropsOllamaThinking = ollamaChatDropsOwnThinking(model);
 		this.#thinkingDropper = thinkingDropReader(model, options?.dropsOwnThinking);
+		this.#model = model;
+		this.#options = options;
 		const compat = model?.compat;
 		this.#readsDeploymentSignatures =
 			model?.api === "anthropic-messages" &&
@@ -291,6 +298,30 @@ export class Tokenizer {
 
 	get encoding(): natives.Encoding | null {
 		return this.#encoding;
+	}
+
+	/**
+	 * Whether this counts for a chat-completions request that drops the
+	 * reader's own prior thinking. Undefined for other wires, where the state
+	 * does not apply.
+	 */
+	get dropsOwnThinking(): boolean | undefined {
+		return this.#model?.api === "openai-completions" ? this.#thinkingDropper !== undefined : undefined;
+	}
+
+	/**
+	 * Tokens of the reader's own prior thinking in `messages` that a
+	 * chat-completions request carries only when it does not drop it: the gap
+	 * between counting for this drop state and the opposite one. Lets a provider
+	 * anchor recorded in one state be repriced for a request in the other.
+	 */
+	ownThinkingTokens(messages: readonly AgentMessage[]): number {
+		if (this.dropsOwnThinking === undefined) return 0;
+		this.#dropStateTwin ??= new Tokenizer(this.#model, {
+			...this.#options,
+			dropsOwnThinking: !this.dropsOwnThinking,
+		});
+		return Math.abs(this.#dropStateTwin.countMessages(messages) - this.countMessages(messages));
 	}
 
 	countTokens(text: string | string[], mode: TokenCountMode = "approximate"): number {

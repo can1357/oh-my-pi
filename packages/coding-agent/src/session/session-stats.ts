@@ -120,6 +120,24 @@ export class SessionStatsTracker {
 	}
 
 	/**
+	 * An anchor's provider base, repriced for the own-thinking drop state
+	 * `tokenizer` counts in. The base holds the model's own prior thinking only
+	 * when the anchor's chat-completions request sent it, so a request in the
+	 * opposite state (thinking switched off, a forced tool) loses or gains that
+	 * thinking across the anchored prefix. An anchor recorded without a state is
+	 * taken to match the session's ordinary request.
+	 */
+	#repricedAnchorBase(anchor: AssistantMessage, prefix: readonly AgentMessage[], tokenizer: Tokenizer): number {
+		const base = correctedPromptTokens(anchor);
+		const requestDrops = tokenizer.dropsOwnThinking;
+		if (requestDrops === undefined) return base;
+		const anchorDropped = anchor.contextSnapshot?.dropsOwnThinking ?? this.#tokenizer.dropsOwnThinking;
+		if (anchorDropped === undefined || anchorDropped === requestDrops) return base;
+		const thinking = tokenizer.ownThinkingTokens(prefix);
+		return requestDrops ? Math.max(0, base - thinking) : base + thinking;
+	}
+
+	/**
 	 * Anchored used-token arithmetic shared by every anchored branch: provider
 	 * base + non-message change since the anchor + local tail + pending.
 	 *
@@ -334,7 +352,7 @@ export class SessionStatsTracker {
 		if (useAnchor && anchorAssistant) {
 			anchored = true;
 			usedTokens = this.#anchoredUsedTokens(
-				correctedPromptTokens(anchorAssistant),
+				this.#repricedAnchorBase(anchorAssistant, activeMessages.slice(0, anchorIndex), tokenizer),
 				anchorAssistant.contextSnapshot ?? current,
 				current,
 				anchorIndex + 1,
@@ -359,7 +377,7 @@ export class SessionStatsTracker {
 			const liveAnchor = findTranscriptUsageAnchor(activeMessages);
 			if (liveAnchor) {
 				usedTokens = this.#anchoredUsedTokens(
-					correctedPromptTokens(liveAnchor.message),
+					this.#repricedAnchorBase(liveAnchor.message, activeMessages.slice(0, liveAnchor.index), tokenizer),
 					liveAnchor.message.contextSnapshot ?? current,
 					current,
 					liveAnchor.index + 1,

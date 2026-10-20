@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import { type } from "@oh-my-pi/omptype";
 import type { AssistantMessage, Message, Model, ToolChoice } from "@oh-my-pi/pi-ai";
@@ -520,8 +520,9 @@ describe("Context usage consolidation", () => {
 		await tempDir.remove();
 	});
 
-	it("places forced Kimi requests below the pre-prompt compaction threshold", async () => {
-		const tempDir = TempDir.createSync("@forced-kimi-context-");
+	describe("anchored estimate across own-thinking drop states", () => {
+		// opencode-go Kimi: the reasoning view replays past thinking, while a forced
+		// tool or disabled reasoning selects the base view, which drops it.
 		const model = buildModel({
 			id: "kimi-k2.6",
 			name: "Kimi",
@@ -534,48 +535,92 @@ describe("Context usage consolidation", () => {
 			contextWindow: 262_144,
 			maxTokens: 32_768,
 		});
-		const prior: AssistantMessage = {
+		const THINKING = "reasoning ".repeat(4_000);
+		const usage = (input: number) => ({
+			input,
+			output: 10,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: input + 10,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		});
+		const turn = (content: AssistantMessage["content"], input: number, timestamp: number): AssistantMessage => ({
 			role: "assistant",
 			api: model.api,
 			provider: model.provider,
 			model: model.id,
-			content: [
-				{ type: "thinking", thinking: "reasoning ".repeat(4_000), thinkingSignature: "reasoning_content" },
-				{ type: "text", text: "Done." },
-			],
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
+			content,
+			usage: usage(input),
 			stopReason: "stop",
-			timestamp: 2,
-		};
-		const { session, agent } = createSession(tempDir, [{ role: "user", content: "plan", timestamp: 1 }, prior]);
-		agent.setModel(model);
-		agent.setThinkingLevel(Effort.Medium);
-		const schema = type({});
-		agent.setTools([
-			{
-				name: "read",
-				label: "Read",
-				description: "Read",
-				parameters: schema,
-				async execute() {
-					return { content: [{ type: "text", text: "done" }], details: {} };
+			timestamp,
+		});
+
+		// A thinking turn, then a later anchor. `anchorInput` is what the anchor's
+		// request billed: with the earlier thinking replayed, or without it.
+		function setup(tempDir: TempDir, anchorInput: number, snapshotDrops?: boolean) {
+			const anchor = turn([{ type: "text", text: "Done." }], anchorInput, 4);
+			if (snapshotDrops !== undefined) {
+				anchor.contextSnapshot = {
+					promptTokens: anchorInput,
+					nonMessageTokens: 0,
+					dropsOwnThinking: snapshotDrops,
+				};
+			}
+			const { session, agent } = createSession(tempDir, [
+				{ role: "user", content: "plan", timestamp: 1 },
+				turn([{ type: "thinking", thinking: THINKING, thinkingSignature: "reasoning_content" }], 50, 2),
+				{ role: "user", content: "next", timestamp: 3 },
+				anchor,
+			]);
+			agent.setModel(model);
+			agent.setThinkingLevel(Effort.Medium);
+			const schema = type({});
+			agent.setTools([
+				{
+					name: "read",
+					label: "Read",
+					description: "Read",
+					parameters: schema,
+					async execute() {
+						return { content: [{ type: "text", text: "done" }], details: {} };
+					},
 				},
-			},
-		]);
-		const choice: ToolChoice = { type: "tool", name: "read" };
-		const ordinary = session.getContextBreakdown()?.usedTokens ?? 0;
-		const forced = session.getContextBreakdown({ tokenizer: agent.tokenizerForToolChoice(choice) })?.usedTokens ?? 0;
-		const compaction = cfgCompaction.get(session.settings);
-		expect(shouldCompact(ordinary, model.contextWindow ?? 0, compaction)).toBe(true);
-		expect(shouldCompact(forced, model.contextWindow ?? 0, compaction)).toBe(false);
-		await tempDir.remove();
+			]);
+			const compacts = (tokenizer?: Tokenizer) =>
+				shouldCompact(
+					session.getContextBreakdown(tokenizer ? { tokenizer } : undefined)?.usedTokens ?? 0,
+					model.contextWindow ?? 0,
+					cfgCompaction.get(session.settings),
+				);
+			return { session, agent, compacts };
+		}
+
+		it("drops anchored past thinking from a forced Kimi request", async () => {
+			const tempDir = TempDir.createSync("@forced-kimi-context-");
+			// Billed with the ~10k-token thinking replayed; no recorded state.
+			const { agent, compacts } = setup(tempDir, 10_020);
+			const choice: ToolChoice = { type: "tool", name: "read" };
+			expect(compacts()).toBe(true);
+			expect(compacts(agent.tokenizerForToolChoice(choice))).toBe(false);
+			await tempDir.remove();
+		});
+
+		it("drops anchored past thinking once reasoning is switched off", async () => {
+			const tempDir = TempDir.createSync("@think-off-context-");
+			const { agent, compacts } = setup(tempDir, 10_020, false);
+			expect(compacts()).toBe(true);
+			agent.setDisableReasoning(true);
+			expect(compacts()).toBe(false);
+			await tempDir.remove();
+		});
+
+		it("adds past thinking to an anchor billed without it once a request replays it", async () => {
+			const tempDir = TempDir.createSync("@think-on-context-");
+			// Billed with reasoning off, so the earlier thinking was not sent.
+			const { compacts } = setup(tempDir, 20, true);
+			expect(compacts()).toBe(true);
+			await tempDir.remove();
+		});
 	});
 
 	// A before_agent_start extension can hand back a system-prompt array with a

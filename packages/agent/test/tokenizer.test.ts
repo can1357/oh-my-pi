@@ -676,11 +676,15 @@ describe("countMessage chat-completions thinking", () => {
 			turnEndCounts.push(agent.tokenizer.countMessage(turn, { excludeEncryptedReasoning: true }));
 		});
 		await agent.prompt("call read", { toolChoice: { type: "tool", name: "read" } });
+		// The forced request's state outlives the turn end that resets the tokenizer,
+		// so its reported usage can be recorded with the state it was billed in.
+		expect(agent.lastRequestDropsOwnThinking).toBe(true);
 		expect(turnEndCounts[0]).toBeGreaterThan(toolCallOnly + 4_000);
 		expect(agent.tokenizer.countMessage(turn, { excludeEncryptedReasoning: true })).toBeGreaterThan(
 			toolCallOnly + 4_000,
 		);
 		await agent.prompt("answer normally");
+		expect(agent.lastRequestDropsOwnThinking).toBe(false);
 		expect(mock.calls.map(call => call.options?.toolChoice)).toEqual([{ type: "tool", name: "read" }, undefined]);
 		expect(counts).toEqual([toolCallOnly, expect.any(Number)]);
 		expect(counts[1]).toBeGreaterThan(toolCallOnly + 4_000);
