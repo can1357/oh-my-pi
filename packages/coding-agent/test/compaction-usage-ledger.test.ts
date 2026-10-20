@@ -8,6 +8,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { ModelUsageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -232,5 +233,99 @@ describe("compaction usage ledger", () => {
 		expect(session.getSessionStats().cost).toBe(0);
 		// The spend is still billed to the session it was made in.
 		expect(manager.getUsageStatistics().totalTokens).toBe(130);
+	});
+});
+
+/**
+ * Where a usage record lands on the branch.
+ *
+ * A request that runs beside the live turn is billed against the branch that
+ * issued it. Ordinary descendant turns keep that branch current, so the record
+ * follows them; a committed compaction or a branch the user navigated away
+ * from ends the branch the request belonged to, so the record stays where it
+ * was issued and names the leaf it could not follow.
+ */
+describe("usage observer branch placement", () => {
+	const model = getBundledModel("aimlapi", "alibaba/qwen3-coder-480b-a35b-instruct");
+	if (!model) throw new Error("Expected bundled text-only model");
+
+	const OBSERVED_USAGE: Usage = {
+		input: 80,
+		output: 20,
+		cacheRead: 30,
+		cacheWrite: 0,
+		totalTokens: 130,
+		cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 0, total: 6 },
+	};
+
+	/** The written record, wherever it landed on the tree. */
+	function usageEntry(manager: SessionManager): ModelUsageEntry | undefined {
+		return manager.getEntries().findLast(entry => entry.type === "model_usage");
+	}
+
+	it("lands the record on the branch tip after ordinary turns", () => {
+		const manager = SessionManager.inMemory();
+		manager.appendMessage({ role: "user", content: "first question", timestamp: 1 });
+		const observe = manager.createUsageObserver();
+		const tipId = manager.appendMessage({ role: "user", content: "second question", timestamp: 2 });
+
+		observe({
+			purpose: "compaction:summary",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: OBSERVED_USAGE,
+		});
+
+		const entry = usageEntry(manager);
+		expect(entry?.parentId).toBe(tipId);
+		expect(entry?.activeLeafId).toBeUndefined();
+	});
+
+	it("parks the record on its issuing parent when a compaction opens a new window", () => {
+		const manager = SessionManager.inMemory();
+		const issuingParentId = manager.appendMessage({ role: "user", content: "first question", timestamp: 1 });
+		const observe = manager.createUsageObserver();
+		manager.appendCompaction("summary", undefined, issuingParentId, 100);
+		const compactionLeafId = manager.getLeafId();
+
+		observe({
+			purpose: "compaction:summary",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: OBSERVED_USAGE,
+		});
+
+		const entry = usageEntry(manager);
+		expect(entry?.parentId).toBe(issuingParentId);
+		expect(entry?.activeLeafId).toBe(compactionLeafId);
+	});
+
+	it("parks the record on its issuing parent when the session moved to another branch", () => {
+		const manager = SessionManager.inMemory();
+		const firstId = manager.appendMessage({ role: "user", content: "first question", timestamp: 1 });
+		const issuingParentId = manager.appendMessage({ role: "user", content: "second question", timestamp: 2 });
+		const observe = manager.createUsageObserver();
+		// The user navigates to a sibling branch; the issuing parent is no
+		// longer on the active path.
+		manager.branch(firstId);
+		manager.appendMessage({ role: "user", content: "other branch", timestamp: 3 });
+		const otherBranchLeafId = manager.getLeafId();
+
+		observe({
+			purpose: "compaction:summary",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: OBSERVED_USAGE,
+		});
+
+		const entry = usageEntry(manager);
+		expect(entry?.parentId).toBe(issuingParentId);
+		expect(entry?.activeLeafId).toBe(otherBranchLeafId);
 	});
 });
