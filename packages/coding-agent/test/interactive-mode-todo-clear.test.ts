@@ -651,15 +651,14 @@ describe("InteractiveMode todo HUD anchor", () => {
 		const root = lines.find(line => line.includes("TODO"));
 		expect(root?.trim()).toBe("TODO");
 		// Active stage: highlighted header with its own task progress, expanded as a
-		// connector tree; the just-completed task stays as the lead row so progress
-		// is visible while the stage still has open work.
+		// connector tree; closed tasks are not drawn while open work exists (progress
+		// is carried by the header count).
 		expect(lines.some(line => line.includes("I. Foundation") && line.includes("1/3"))).toBe(true);
 		const secondLine = lines.find(line => line.includes("second task"));
 		expect(secondLine).toContain(theme.tree.branch);
 		expect(secondLine).toContain(theme.checkbox.unchecked);
 		expect(lines.some(line => line.includes("third task"))).toBe(true);
-		const firstLine = lines.find(line => line.includes("first task"));
-		expect(firstLine).toContain(theme.checkbox.checked);
+		expect(lines.some(line => line.includes("first task"))).toBe(false);
 		// Upcoming stage: header with its own progress; its open task shows too because
 		// every open row fits the panel.
 		expect(lines.some(line => line.includes("II. Verification") && line.includes("0/1"))).toBe(true);
@@ -786,11 +785,17 @@ describe("InteractiveMode todo HUD anchor", () => {
 			expect(text).not.toContain("more todo");
 		});
 
+		it("never draws a closed row while any open row exists, even with spare room", () => {
+			setTerminalRows(40);
+			mode.setTodos(stages);
+			expect(renderTodos(mode)).not.toContain("done one");
+		});
+
 		it("prioritises in-progress then blocked work and counts the hidden remainder exactly", () => {
 			setTerminalRows(21);
 			mode.setTodos(stages);
 			const text = renderTodos(mode);
-			const open = 9; // 7 open in Build + 2 in Ship; the completed task is context
+			const open = 9; // 7 open in Build + 2 in Ship; the completed task is never drawn
 			const shown = stages
 				.flatMap(stage => stage.tasks)
 				.filter(task => task.status !== "completed" && text.includes(task.content));

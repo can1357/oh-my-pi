@@ -5286,37 +5286,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		// by the Composer's row allocation, so open work is not capped per stage while
 		// the panel has room, and the summary reports exactly what did not fit.
 		const activePhase = phases[activeIdx]!;
-		const activeHasOpenAndClosed =
-			activePhase.tasks.some(task => !isClosedTodo(task)) && activePhase.tasks.some(isClosedTodo);
 		const hudSelection = expanded
 			? undefined
 			: selectHudOpenTodos(
 					phaseSlice,
 					Math.max(
 						1,
-						this.getTodoHudPanelRows() -
-							TODO_HUD_CHROME_ROWS -
-							phaseSlice.length -
-							(hiddenStages > 0 ? 1 : 0) -
-							(activeHasOpenAndClosed ? 1 : 0),
+						this.getTodoHudPanelRows() - TODO_HUD_CHROME_ROWS - phaseSlice.length - (hiddenStages > 0 ? 1 : 0),
 					),
 					isMatched,
 				);
-		// Tasks a collapsed stage lists: the open ones that fit, plus one closed task
-		// of context in the active stage. A fully closed active stage shows its
-		// closed tasks through the shared viewport policy.
+		// Tasks a collapsed stage lists: only the open ones that fit, never closed
+		// rows. When nothing in the rendered stages is open, the active stage shows
+		// its closed tasks through the shared viewport policy.
+		const anyOpen = !hudSelection || hudSelection.shown.size > 0;
 		const collapsedTasks = (phase: TodoPhase): TodoItem[] => {
-			const open = phase.tasks.filter(task => hudSelection?.shown.has(task));
-			if (phase === activePhase && !phase.tasks.some(task => !isClosedTodo(task))) {
-				return selectCollapsedTodos(phase.tasks, isMatched, 5).items;
-			}
-			const lead = phase === activePhase && open.length > 0 ? phase.tasks.filter(isClosedTodo).slice(-1) : [];
-			return phase.tasks.filter(task => lead.includes(task) || open.includes(task));
+			if (!anyOpen) return phase === activePhase ? selectCollapsedTodos(phase.tasks, isMatched, 5).items : [];
+			return phase.tasks.filter(task => hudSelection?.shown.has(task));
 		};
 
-		// Task subtree for a phase. Collapsed omits completed/abandoned tasks (bar
-		// one lead) so the HUD and the transient tool result agree about the current
-		// work (#5873). Expanded lists all.
+		// Task subtree for a phase. Collapsed omits completed/abandoned tasks so the HUD and the transient
+		// tool result agree about the current work (#5873). Expanded lists all.
 		const renderTasks = (phase: TodoPhase): string[] =>
 			renderTreeList(
 				{
