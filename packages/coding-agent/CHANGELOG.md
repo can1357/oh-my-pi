@@ -142,6 +142,7 @@
 - Fixed browser `tab.run(fn, [url])` and `browser.open("https://…")` failing with a bare "expects an options object"; the errors now say to pass `{ args: [...] }` and `browser.open({ url, name })` ([#16236](https://github.com/can1357/oh-my-pi/pull/16236) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the built-in `ts-set-map`, `ts-import-type` and `ts-no-any` rules reminding you about code they allow: an empty or computed `Set`/`Map`, a runtime `await import()`, or the word "any" in a comment ([#16242](https://github.com/can1357/oh-my-pi/pull/16242) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the edit tool failing to match a line whose fullwidth punctuation differs from the halfwidth anchor, and the match error now names the differing codepoints instead of printing two lines that look identical ([#16113](https://github.com/can1357/oh-my-pi/issues/16113))
+- Fixed the edit tool failing to match a line whose fullwidth punctuation differs from the halfwidth anchor, and the match error now names the differing codepoints instead of printing two lines that look identical ([#16466](https://github.com/can1357/oh-my-pi/pull/16466) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 
