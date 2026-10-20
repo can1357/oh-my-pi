@@ -476,6 +476,38 @@ describe("memory snapshot across a resume", () => {
 		expect(rebuilt).toContain("Learned elsewhere");
 	});
 
+	it("records the snapshot on the branch the prompt is built for after a navigation", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const cwd = settings.getCwd();
+		await saveLearnedLesson(agentDir, cwd, { content: "Lesson at build time" });
+
+		const session = SessionManager.create(cwd, sessionsDir);
+		const messageId = session.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "hi" }],
+			timestamp: Date.now(),
+		});
+		session.appendMessage(createAssistantMessage("hello"));
+		await session.flush();
+
+		const block = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		if (!block) throw new Error("Expected a memory block");
+		expect(block).toContain("Lesson at build time");
+		pendingMemorySnapshotCommit(session)?.();
+		expect(snapshotRecords(session)).toHaveLength(1);
+
+		// The user navigates back to the first user message: the branch moves
+		// off the snapshot, and no prompt is rebuilt, so the snapshot must be
+		// staged for the branch the user continued on.
+		session.branch(messageId);
+		expect(snapshotRecords(session)).toHaveLength(0);
+
+		const recorder = stagedMemorySnapshot(session)?.commit([block]);
+		expect(recorder).toBeDefined();
+		recorder?.();
+		expect(snapshotRecords(session)).toHaveLength(1);
+	});
+
 	it("records only the memory content the prompt injects", async () => {
 		const settings = Settings.isolated({ "memory.backend": "local", "memories.summaryInjectionTokenLimit": 100 });
 		const cwd = settings.getCwd();

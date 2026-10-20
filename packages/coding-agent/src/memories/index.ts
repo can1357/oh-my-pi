@@ -432,7 +432,13 @@ function memorySnapshotRecorder(transcript: MemoryTranscript, state: TranscriptM
 		const current = memoryStateByTranscript.get(transcript);
 		const recorded = findRecordedMemorySnapshot(transcript, state.scope, state.token);
 		if (recorded && recorded.snapshot.summary === staged?.summary && recorded.snapshot.learned === staged?.learned) {
-			if (current) current.recordedEntryId = recorded.entryId;
+			// The snapshot now lives on this branch: a leaf that moves off that
+			// entry re-stages the block for the branch it moved to.
+			state.stagedLeafId = recorded.entryId;
+			if (current) {
+				current.recordedEntryId = recorded.entryId;
+				current.stagedLeafId = recorded.entryId;
+			}
 			return;
 		}
 		const entryId = transcript.appendCustomEntry?.(MEMORY_SNAPSHOT_ENTRY_TYPE, {
@@ -441,7 +447,12 @@ function memorySnapshotRecorder(transcript: MemoryTranscript, state: TranscriptM
 			scope: state.scope,
 			token: state.token,
 		});
-		if (entryId && current) current.recordedEntryId = entryId;
+		if (!entryId) return;
+		state.stagedLeafId = entryId;
+		if (current) {
+			current.recordedEntryId = entryId;
+			current.stagedLeafId = entryId;
+		}
 	};
 }
 
@@ -497,19 +508,32 @@ function cancelStagedMemorySnapshot(transcript: MemoryTranscript, state: Transcr
  * claim a memory block the session never sent, and the next build reads the
  * current memory state rather than the rejected one.
  *
+ * The branch the prompt is built for decides where the snapshot lands: a leaf
+ * that moved off the entry it was staged on re-stages it, so the branch the
+ * user continued on records a snapshot of its own instead of inheriting the
+ * one of the branch it left.
+ *
  * `undefined` when nothing is staged: the memory files hold no injectable
- * content, or the block was recorded already.
+ * content.
  */
 export function stagedMemorySnapshot(transcript: MemoryTranscript | undefined): PendingInstructionsCommit | undefined {
 	if (!transcript) return undefined;
 	const state = memoryStateByTranscript.get(transcript);
-	if (!state?.pending) return undefined;
+	if (!state || state.snapshot === undefined) return undefined;
 	return {
 		commit(promptParts: readonly string[]) {
+			if (!stagedBranchStillHolds(transcript, state)) {
+				// The leaf moved onto another branch: the snapshot is staged
+				// again for the branch the prompt is built for, and recorded
+				// there.
+				state.stagedLeafId = activeBranchLeafId(transcript);
+				state.pending = true;
+			}
 			if (!promptCarriesMemoryBlock(promptParts, state.value)) {
 				cancelStagedMemorySnapshot(transcript, state);
 				return undefined;
 			}
+			if (!state.pending) return undefined;
 			return memorySnapshotRecorder(transcript, state);
 		},
 	};
