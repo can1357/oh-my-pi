@@ -6,6 +6,7 @@
  * permanently truncated to its tail — Ctrl+O expanded to the same 100 lines and
  * the footer under-reported the hidden count by ~9900 lines.
  */
+import { beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { BashExecutionComponent, STREAMING_LINE_CAP } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
 import { PREVIEW_LINES } from "@oh-my-pi/pi-tui/chat/execution-shared";
