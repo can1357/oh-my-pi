@@ -597,9 +597,6 @@ const MOUSE_BUTTON_EVENTS: [u32; 6] = [1, 2, 3, 4, 25, 26];
 const SWITCH_MODIFIERS: u64 = 0x0010_0000 | 0x0004_0000;
 /// How soon after a click [`ClickPlacer`] still places it where the pointer is.
 const CLICK_PLACE: Duration = Duration::from_millis(30);
-/// How far, in points, the pointer may move between a press and its release
-/// for [`ClickPlacer`] to count them as one click rather than a drag.
-const CLICK_SLOP: f64 = 4.0;
 
 /// The HID counters of `MOUSE_BUTTON_EVENTS`.
 fn hid_buttons() -> [u32; 6] {
@@ -722,6 +719,10 @@ struct ClickPlace {
 	buttons: [u32; 6],
 	hit:     Option<bool>,
 }
+
+/// How far, in points, the pointer may move between a press and its release
+/// for [`ClickPlacer`] to count them as one click rather than a drag.
+const CLICK_SLOP: f64 = 4.0;
 
 /// Places the user's clicks by the accessibility hit-test the pointer's
 /// position gets, on a thread of its own: the hit-test can block for an AX
