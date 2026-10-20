@@ -109,10 +109,19 @@ function clampDeveloperMessage(message: DeveloperMessage, state: ImageBudgetStat
 	return content ? { ...message, content, providerPayload: undefined } : message;
 }
 
+/**
+ * A computer result carries its screenshot twice: as a content image and as `providerMetadata.screenshot`, which the
+ * Responses wire sends in place of the content (a `computer_call_output`, or an assistant note quoting it on a model
+ * without native computer use). Evicting the image therefore drops the metadata too; the result then goes out as its
+ * remaining content, as for an unreadable screenshot in {@link dropUnreadableContextImages}.
+ */
 function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetState): ToolResultMessage {
 	if (!needsImageDrop(state)) return message;
 	const content = clampContent(message.content, state);
-	return content ? { ...message, content } : message;
+	if (!content) return message;
+	return message.providerMetadata?.type === "computer"
+		? { ...message, content, providerMetadata: undefined }
+		: { ...message, content };
 }
 
 function clampImages(context: Context, state: ImageBudgetState): Context {
@@ -204,8 +213,15 @@ export function clampProviderContextImageBytes(context: Context, model: Model): 
 	// Text, tools and the system prompt ride in the same body, as UTF-8: only what they leave may hold protected
 	// images. Base64 is ASCII, so its characters are its bytes. Never sent: tool-result `details` (UI-only) and
 	// another provider's native payload (assistant turns, compaction summaries), which this request does not replay.
+	// A computer result's screenshot goes out once, as its content image or its metadata (see clampToolResultMessage):
+	// `inlineBytes` already charges it when the content holds it.
 	const wire = context.messages.map(message => {
-		if (message.role === "toolResult") return { ...message, details: undefined };
+		if (message.role === "toolResult") {
+			const charged =
+				message.providerMetadata?.type === "computer" &&
+				message.content.some(part => part.type === "image" && inlineImageBytes(part, model) > 0);
+			return { ...message, details: undefined, ...(charged ? { providerMetadata: undefined } : {}) };
+		}
 		const payload = message.providerPayload;
 		if (!payload) return message;
 		const owner =

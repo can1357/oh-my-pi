@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { Context, ImageContent, Message, ModelSpec, TextContent } from "@oh-my-pi/pi-ai";
+import type { Context, ImageContent, Message, Model, ModelSpec, TextContent } from "@oh-my-pi/pi-ai";
 import { streamFactoryDroid } from "@oh-my-pi/pi-ai/providers/factory-droid";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
@@ -13,6 +13,7 @@ import {
 	clampProviderContextImageBytes,
 	clampProviderContextImages,
 } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
+import { isRecord } from "@oh-my-pi/pi-utils";
 
 const UMANS_MODEL = buildModel({
 	id: "umans-glm-5.2",
@@ -124,6 +125,87 @@ function textData(context: Context): string[] {
 		}
 	}
 	return data;
+}
+
+/**
+ * One OpenAI computer-use step: the call and its screenshot result, which carries the screenshot both as a content
+ * image and as `providerMetadata`, as the agent loop records it.
+ */
+function computerTurn(index: number, screenshot: string): Message[] {
+	const id = `call_${index}|cu_${index}`;
+	return [
+		{
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id,
+					name: "computer",
+					arguments: {},
+					providerMetadata: {
+						type: "computer",
+						providerItemId: `cu_${index}`,
+						actions: [{ type: "screenshot" }],
+						pendingSafetyChecks: [],
+					},
+				},
+			],
+			api: "openai-responses",
+			provider: "openai",
+			model: OPENAI_RESPONSES_MODEL.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: index * 2 + 1,
+		},
+		{
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "computer",
+			content: [text(`result-${index}`), image(screenshot)],
+			isError: false,
+			timestamp: index * 2 + 2,
+			providerMetadata: {
+				type: "computer",
+				screenshot: { type: "computer_screenshot", image_url: `data:image/png;base64,${screenshot}` },
+				acknowledgedSafetyChecks: [],
+			},
+		},
+	];
+}
+
+/** Factory GPT: its requests take the Responses wire, and the model has no native computer use. */
+function factoryGptModel() {
+	const entry = factoryDroidRegistry().find(model => model.spec.id === "gpt-5.6-terra");
+	if (!entry) throw new Error("Factory registry lost gpt-5.6-terra");
+	return buildModel(buildFactoryDroidModel(entry));
+}
+
+/** The request body `context` produces on `model`'s Factory route, as sent. */
+async function factoryRequestBody(model: Model<"factory-droid-agent">, context: Context): Promise<string> {
+	let body = "";
+	const fetch = async (_url: string | URL | Request, init?: RequestInit) => {
+		body = typeof init?.body === "string" ? init.body : new TextDecoder().decode(init?.body as Uint8Array);
+		const completed = { type: "response.completed", response: { status: "completed", usage: {} } };
+		return new Response(`data: ${JSON.stringify(completed)}\n\ndata: [DONE]\n\n`, {
+			headers: { "Content-Type": "text/event-stream" },
+		});
+	};
+	const [header, claims] = [{ alg: "none" }, { external_org_id: "org-1" }].map(part =>
+		Buffer.from(JSON.stringify(part)).toString("base64url"),
+	);
+	await streamFactoryDroid(model, context, {
+		apiKey: `${header}.${claims}.sig`,
+		fetch: fetch as typeof globalThis.fetch,
+	}).result();
+	if (!body) throw new Error("Factory request was not sent");
+	return body;
 }
 
 describe("provider context image budgets", () => {
@@ -474,83 +556,51 @@ describe("provider context image budgets", () => {
 	});
 
 	it("keeps five 1 MB computer screenshots on Factory's Responses route under the body limit", async () => {
-		// An OpenAI computer-use transcript continued on a Factory GPT model: each result also carries its screenshot
-		// in `providerMetadata`, which the Responses wire sends instead of the content image when the model has no
-		// native computer use.
+		// An OpenAI computer-use transcript continued on a Factory GPT model, which has no native computer use: the
+		// Responses wire sends each result's metadata screenshot (in an assistant note), not its content image.
 		const screenshot = "A".repeat(1_000_000);
-		const messages: Message[] = [{ role: "user", content: "use the computer", timestamp: 0 }];
-		for (let index = 0; index < 5; index++) {
-			const id = `call_${index}|cu_${index}`;
-			messages.push(
-				{
-					role: "assistant",
-					content: [
-						{
-							type: "toolCall",
-							id,
-							name: "computer",
-							arguments: {},
-							providerMetadata: {
-								type: "computer",
-								providerItemId: `cu_${index}`,
-								actions: [{ type: "screenshot" }],
-								pendingSafetyChecks: [],
-							},
-						},
-					],
-					api: "openai-responses",
-					provider: "openai",
-					model: OPENAI_RESPONSES_MODEL.id,
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "toolUse",
-					timestamp: index * 2 + 1,
-				},
-				{
-					role: "toolResult",
-					toolCallId: id,
-					toolName: "computer",
-					content: [text(`result-${index}`), image(screenshot)],
-					isError: false,
-					timestamp: index * 2 + 2,
-					providerMetadata: {
-						type: "computer",
-						screenshot: { type: "computer_screenshot", image_url: `data:image/png;base64,${screenshot}` },
-						acknowledgedSafetyChecks: [],
-					},
-				},
-			);
-		}
-		const context: Context = { systemPrompt: [], tools: [], messages };
-		const factory = factoryDroidRegistry().find(entry => entry.spec.id === "gpt-5.6-terra");
-		if (!factory) throw new Error("Factory registry lost gpt-5.6-terra");
-		const hosted = buildModel(buildFactoryDroidModel(factory));
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: "use the computer", timestamp: 0 },
+				...Array.from({ length: 5 }, (_, index) => computerTurn(index, screenshot)).flat(),
+			],
+		};
+		const hosted = factoryGptModel();
 		const clamped = clampProviderContextImageBytes(clampProviderContextImages(context, hosted), hosted);
 		expect(imageData(clamped)).toHaveLength(3);
 
-		let bodyBytes = 0;
-		const fetch = async (_url: string | URL | Request, init?: RequestInit) => {
-			bodyBytes = typeof init?.body === "string" ? Buffer.byteLength(init.body) : (init?.body as Uint8Array).length;
-			const completed = { type: "response.completed", response: { status: "completed", usage: {} } };
-			return new Response(`data: ${JSON.stringify(completed)}\n\ndata: [DONE]\n\n`, {
-				headers: { "Content-Type": "text/event-stream" },
-			});
+		const body = await factoryRequestBody(hosted, clamped);
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		expect(body.split(screenshot)).toHaveLength(4);
+		// The two evicted results still report their text.
+		expect(body).toContain("result-0");
+		expect(body).toContain("result-1");
+		const request: unknown = JSON.parse(body);
+		if (!isRecord(request) || !Array.isArray(request.input)) throw new Error("Responses request without input");
+		const input = request.input.filter(isRecord);
+		const calls = new Set(input.filter(item => item.type === "function_call").map(item => item.call_id));
+		// An evicted screenshot's result is not left as an output with no call to pair with.
+		expect(input.filter(item => item.type === "function_call_output" && !calls.has(item.call_id))).toEqual([]);
+	});
+
+	it("charges a computer screenshot once when reserving room for a fresh Factory image", async () => {
+		const fresh = "C".repeat(3_600_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				...computerTurn(0, "A".repeat(1_000_000)),
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 3 },
+			],
 		};
-		const [header, claims] = [{ alg: "none" }, { external_org_id: "org-1" }].map(part =>
-			Buffer.from(JSON.stringify(part)).toString("base64url"),
-		);
-		await streamFactoryDroid(hosted, clamped, {
-			apiKey: `${header}.${claims}.sig`,
-			fetch: fetch as typeof globalThis.fetch,
-		}).result();
-		expect(bodyBytes).toBeGreaterThan(0);
-		expect(bodyBytes).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		const hosted = factoryGptModel();
+		const clamped = clampProviderContextImageBytes(context, hosted);
+		expect(imageData(clamped)).toEqual([fresh]);
+		const body = await factoryRequestBody(hosted, clamped);
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		expect(body).toContain(fresh);
 	});
 
 	it("keeps a fresh Factory image that alone fits the route, evicting older ones instead", () => {
