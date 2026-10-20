@@ -96,6 +96,8 @@ When at least one runtime is enabled, disabled runtimes are removed from the ses
 - `async`: present when the cell was auto-backgrounded as an async job (`{ state, jobId, type: "eval" }`).
 - `isError`: set for backend failure or cancellation.
 
+`mcp_progress` status lines show an MCP tool's name and its latest progress while an awaited call is running: the server's message with `progress/total` when a total exists, or the bare progress value when there is no message. Updates for one call replace one another, including after Eval auto-backgrounds; old MCP snapshots can be evicted under the status-log cap. Internal call ids are not displayed.
+
 The renderer merges call and result inline, syntax-highlights from the declared language, renders cell views as tables, JSON trees, and Markdown in place of their text, and shows timeout/truncation metadata. `session.allocateOutputArtifact?.("eval")` backs spilled output; `artifact://...` in `meta` reaches the full capture.
 
 ## Execution flow
@@ -104,7 +106,7 @@ The renderer merges call and result inline, syntax-highlights from the declared 
 2. `execute()` maps `py/js` to `python/js`, resolves availability, reads file-backed source once, and wraps the input in the renderer-compatible cell list. Runtime probing is bounded by the requested timeout and abort signal. The JS backend installs requested packages inside the cancellation/background lifecycle.
 3. It obtains the retained executor id from `session.getEvalSessionId?.()` or `defaultEvalSessionId(session)`, allocates the output sink/artifact, and registers the run through `trackEvalExecution?.(...)`.
 4. The timeout defaults to 30 seconds. `0` creates no watchdog. Otherwise `IdleTimeout` is combined with tool and session abort signals.
-5. Waiting on agent/completion handles, `judge()`, judgment-batch drains, and package installation pause the watchdog. Resuming starts a fresh timeout window. Compute, output, status helpers, and ordinary `tool.*` calls count against it.
+5. Agent/completion handle waits, `judge()`, judgment-batch drains, package installation, delegated `tool.task()`/`tool.wait()`, and browser/computer preludes pause the watchdog. Resuming starts a fresh timeout window. Compute, output, status helpers, and ordinary `tool.*` calls, including MCP tools that report progress, count against it.
 6. The selected backend receives cwd, retained session id, session file, kernel owner, reset flag, callbacks, and cancellation signal.
 7. Output chunks stream into an artifact-aware `OutputSink` and live tail. Runtime display outputs are separated into view, image, and status channels.
 8. Success, nonzero exit, and cancellation are assembled into the result shapes above. The output sink is finalized even when execution fails.
@@ -114,7 +116,7 @@ The renderer merges call and result inline, syntax-highlights from the declared 
 With `eval.autoBackground.enabled` (default `false`), a cell that outlives `eval.autoBackground.thresholdMs` (default 60000 ms) is converted into a managed async job instead of blocking the turn:
 
 - The tool foreground-waits for `resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs)`: the threshold, clamped down to the cell's own clamped timeout minus a 1 s buffer so a deadline expiry resolves inline rather than backgrounding moments before it fires. Raising `timeout` therefore does not extend foreground execution beyond the threshold. A threshold of `0` backgrounds immediately.
-- On backgrounding, the tool returns the live output tail plus `Backgrounded as job <id> (killed once it has run <n>s in total; …)` — or `(no deadline)` under `timeout: 0` — and the no-polling instruction (`formatBackgroundNotice`), stating the cell's clamped timeout, with `details.async = { state: "running", jobId, type: "eval" }`. The deadline is the cell's runtime budget, counted from cell start (including the foreground wait) and paused across `agent()`/tool bridge calls, so it is not a wall-clock time left. The job's completion is delivered later like a backgrounded bash command.
+- On backgrounding, the tool returns the live output tail plus `Backgrounded as job <id> (killed once it has run <n>s in total; …)` — or `(no deadline)` under `timeout: 0` — and the no-polling instruction (`formatBackgroundNotice`), stating the cell's clamped timeout, with `details.async = { state: "running", jobId, type: "eval" }`. The deadline is the cell's runtime budget, counted from cell start (including the foreground wait), not wall-clock time left. Agent/completion handle waits, `judge()`, judgment-batch drains, package installation, delegated `tool.task()`/`tool.wait()`, and browser/computer preludes pause the watchdog; ordinary `tool.*` calls, including MCP tools that report progress, do not. The job's completion is delivered later like a backgrounded bash command.
 - A queued user/peer message (steer) arriving mid-wait backgrounds the cell immediately ("Backgrounded early to handle an incoming message; the cell keeps running.").
 - At the async-job manager's running-job capacity the tool falls through to ordinary foreground execution instead of failing.
 - A failed, cancelled, or timed-out cell is reported as a failed background job (an errored execution is re-entered into the job manager's failure path), never as a silent success.

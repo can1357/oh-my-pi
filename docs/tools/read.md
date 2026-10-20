@@ -46,7 +46,7 @@ For normal file-like reads, `splitPathAndSel()` in `packages/tui/src/tools/read.
 | `:A+C` / `:LA+LC`             | `C` lines starting at `A`; tool converts this to end line `A + C - 1`.                                                                         |
 | `:-N`                        | Last `N` lines; `N` must be positive. Also combines with `:raw`. |
 | `:R1,R2,...`                  | Multiple ranges, sorted and merged before reading (for example `:5-16,960-973`).                                                               |
-| `:range:raw` or `:raw:range`  | Same line selection, but raw output.                                                                                                           |
+| `:range:raw` or `:raw:range`  | Same line selection, but raw output. Exception: a lone bare `N` is the single line `N` (`:17:raw`); `:N-:raw` stays open-ended.                |
 
 Validation in `parseLineRangeChunk()`:
 

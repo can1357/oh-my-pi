@@ -61,7 +61,7 @@ function invalidSelector(sel: string): ToolError {
 
 /** Parse a bare (non-compound) chunk as a line-range list or a tail count. */
 function parseRangeOrTail(chunk: string, raw: boolean): ParsedSelector | null {
-	const ranges = parseLineRanges(chunk);
+	const ranges = parseLineRanges(chunk, raw ? "single" : "onward");
 	if (ranges) return raw ? { kind: "lines", ranges, raw } : { kind: "lines", ranges };
 	const count = parseTailCount(chunk);
 	if (count !== null) return raw ? { kind: "tail", count, raw } : { kind: "tail", count };

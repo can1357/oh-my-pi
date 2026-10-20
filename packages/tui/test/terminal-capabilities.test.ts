@@ -159,6 +159,85 @@ describe("detectTerminalId", () => {
 	});
 });
 
+describe("iTerm2 over SSH", () => {
+	// Env as reported in #12419: an iTerm2 session reached over SSH keeps only
+	// LC_TERMINAL/LC_TERMINAL_VERSION — ITERM_SESSION_ID and TERM_PROGRAM are
+	// stripped by the hop, so detection landed on the true-color profile and
+	// every image degraded to the `[Image: image/webp]` text fallback.
+	const sshEnv = {
+		TERM: "xterm-256color",
+		COLORTERM: "truecolor",
+		LC_TERMINAL: "iTerm2",
+		LC_TERMINAL_VERSION: "3.6.11",
+		SSH_CONNECTION: "client 1 server 22",
+	};
+
+	it("detects iTerm2 from the forwarded LC_TERMINAL and keeps the inline image protocol", () => {
+		const id = detectTerminalId(sshEnv);
+		expect(id).toBe("iterm2");
+		// The observable payoff: OSC 1337 inline images instead of the text
+		// fallback, plus OSC 8 hyperlinks and OSC 9 notifications.
+		expect(resolveImageProtocol(id, sshEnv, true)).toBe(ImageProtocol.Iterm2);
+		expect(shouldEnableHyperlinksByDefault(sshEnv, id)).toBe(true);
+		expect(getTerminalInfo(id).notifyProtocol).toBe(NotifyProtocol.Osc9);
+	});
+
+	it("keeps the flat underline until LC_TERMINAL_VERSION proves iTerm2 3.5 or newer", () => {
+		// The colon-form underline needs iTerm2 >= 3.5; over SSH the version
+		// arrives as LC_TERMINAL_VERSION, so an old or unknown version must keep
+		// the flat underline the terminal can actually render.
+		expect(detectStyledUnderlineSupport("iterm2", { LC_TERMINAL_VERSION: "3.6.11" })).toBe(true);
+		expect(detectStyledUnderlineSupport("iterm2", { LC_TERMINAL_VERSION: "3.4.0" })).toBe(false);
+		expect(detectStyledUnderlineSupport("iterm2", {})).toBe(false);
+	});
+
+	it("does not claim iTerm2 inside a multiplexer, where the OSC 1337 payload has no passthrough", () => {
+		// iTerm2's image encoder is the only one that does not wrap its payload
+		// in a tmux passthrough envelope, so a forwarded LC_TERMINAL must not
+		// re-enable the protocol inside a pane: the sequence would be swallowed
+		// by the multiplexer instead of reaching the outer terminal.
+		const env = { ...sshEnv, TMUX: "/tmp/tmux-1000/default,4242,0", TERM: "tmux-256color" };
+		const id = detectTerminalId(env);
+		expect(id).not.toBe("iterm2");
+		expect(resolveImageProtocol(id, env, true)).not.toBe(ImageProtocol.Iterm2);
+	});
+
+	it("resolves the process-wide terminal id and image protocol from the forwarded LC_TERMINAL", async () => {
+		const env = subprocessEnv({
+			TERM: "xterm-256color",
+			COLORTERM: "truecolor",
+			// TERM_PROGRAM/TERM_PROGRAM_VERSION are stripped by the SSH hop too,
+			// so they must not leak in from the runner's own terminal.
+			TERM_PROGRAM: "",
+			TERM_PROGRAM_VERSION: undefined,
+			LC_TERMINAL: "iTerm2",
+			LC_TERMINAL_VERSION: "3.6.11",
+			SSH_CONNECTION: "client 1 server 22",
+		});
+
+		const proc = Bun.spawn({
+			cmd: [
+				process.execPath,
+				"--eval",
+				`import { TERMINAL, TERMINAL_ID } from "@oh-my-pi/pi-tui/terminal-capabilities";
+console.log(JSON.stringify({ id: TERMINAL_ID, imageProtocol: TERMINAL.imageProtocol }));`,
+			],
+			env,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+
+		expect(stderr).toBe("");
+		expect(exitCode).toBe(0);
+		expect(JSON.parse(stdout)).toMatchObject({ id: "iterm2", imageProtocol: ImageProtocol.Iterm2 });
+	});
+});
+
 describe("tmux client terminal resolution", () => {
 	const CLIENT_QUERY = "display-message -p #{client_termtype}\t#{client_termname}";
 	// Kitty graphics inside tmux also require pane passthrough; these tests
@@ -457,6 +536,8 @@ function subprocessEnv(overrides: Record<string, string | undefined>): Record<st
 		"ITERM_SESSION_ID",
 		"VSCODE_PID",
 		"ALACRITTY_WINDOW_ID",
+		"LC_TERMINAL",
+		"LC_TERMINAL_VERSION",
 	]) {
 		delete env[key];
 	}

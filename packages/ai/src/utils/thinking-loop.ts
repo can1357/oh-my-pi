@@ -70,6 +70,11 @@ const EXACT_SHORT_MAX_UNIT = 60;
 const EXACT_SHORT_MIN_REPEATED_CHARS = 180;
 /** Long cycles need at least three repeats covering at least this many chars. */
 const EXACT_LONG_MIN_REPEATED_CHARS = 1024;
+/** Repeated characters before a punctuation-only run counts as a loop. Matches
+ *  {@link EXACT_LONG_MIN_REPEATED_CHARS}: a model that has emitted a kilobyte of
+ *  one punctuation cycle back-to-back is degenerate, while the short separators
+ *  real output produces (table rules, dividers) never reach it. */
+const EXACT_PUNCTUATION_MIN_REPEATED_CHARS = EXACT_LONG_MIN_REPEATED_CHARS;
 
 /** Char cap for an unterminated segment; forces a flush so a wall-of-text loop
  *  (no blank lines / headings) still segments. */
@@ -535,6 +540,12 @@ const exactZ = new Uint16Array(EXACT_MAX_UNIT + 1);
  * only `z[i - left]` with `i - left < i`, which is already filled. Short
  * cycles retain the original 180-character/four-repeat sensitivity; long
  * cycles require at least three repeats and 1024 repeated characters.
+ *
+ * A unit carrying a letter or an emoji matches at those thresholds. A unit with
+ * neither, such as the `?!?!` run a stuck model emits, matches only once it has
+ * repeated for {@link EXACT_PUNCTUATION_MIN_REPEATED_CHARS} characters, and never
+ * when it holds only digits and whitespace: padding, indentation and zero-filled
+ * hexdumps or literals are ordinary output at any length.
  */
 function detectExactSuffixCycle(text: string): [unit: string, count: number] | null {
 	const n = text.length;
@@ -557,10 +568,15 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 	for (let len = 2; len <= maxUnit; len++) {
 		const count = 1 + Math.floor(z[len] / len);
 		const minCount = len <= EXACT_SHORT_MAX_UNIT ? 4 : 3;
-		const minChars = len <= EXACT_SHORT_MAX_UNIT ? EXACT_SHORT_MIN_REPEATED_CHARS : EXACT_LONG_MIN_REPEATED_CHARS;
-		if (count < minCount || len * count < minChars) continue;
+		if (count < minCount) continue;
 		const unit = text.slice(-len);
-		if (/\p{L}|\p{Extended_Pictographic}/u.test(unit)) return [unit, count];
+		if (/\p{L}|\p{Extended_Pictographic}/u.test(unit)) {
+			const minChars = len <= EXACT_SHORT_MAX_UNIT ? EXACT_SHORT_MIN_REPEATED_CHARS : EXACT_LONG_MIN_REPEATED_CHARS;
+			if (len * count >= minChars) return [unit, count];
+			continue;
+		}
+		if (/^[\p{N}\s]*$/u.test(unit)) continue;
+		if (len * count >= EXACT_PUNCTUATION_MIN_REPEATED_CHARS) return [unit, count];
 	}
 	return null;
 }

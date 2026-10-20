@@ -531,6 +531,11 @@ pub(crate) fn apply_with_recovery(
 		result.warnings = resolve_warnings;
 		return Ok(result);
 	}
+	// A bare `MV`/`REM` has no content edit to stand on; the tag is its only
+	// evidence the caller saw this file.
+	if resolved.is_empty() {
+		return Err(mismatch(section, canonical, normalized, expected, store));
+	}
 	if !has_anchor_scoped_edit(&resolved) {
 		let mut result = apply_edits(normalized, &resolved, ApplyOptions {
 			clipboard:      Some(clipboard),

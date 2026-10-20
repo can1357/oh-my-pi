@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseLineRangeChunk, parseLineRanges } from "../src/tools/line-ranges";
+import { parseLineRangeChunk, parseLineRanges, selectorLineRanges } from "../src/tools/line-ranges";
 
 describe("parseLineRanges bare numbers", () => {
 	it("reads a lone bare number from that line onward", () => {
@@ -27,5 +27,12 @@ describe("parseLineRanges bare numbers", () => {
 
 	it("merges a pinned line into an adjacent range", () => {
 		expect(parseLineRanges("5-10,11")).toEqual([{ startLine: 5, endLine: 11 }]);
+	});
+
+	it("pins a lone bare number compounded with raw to that line", () => {
+		expect(selectorLineRanges("17:raw")).toEqual([{ startLine: 17, endLine: 17 }]);
+		expect(selectorLineRanges("raw:17")).toEqual([{ startLine: 17, endLine: 17 }]);
+		expect(selectorLineRanges("17-:raw")).toEqual([{ startLine: 17, endLine: undefined }]);
+		expect(selectorLineRanges("17")).toEqual([{ startLine: 17, endLine: undefined }]);
 	});
 });

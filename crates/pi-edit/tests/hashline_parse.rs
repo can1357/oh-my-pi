@@ -723,6 +723,29 @@ fn prefix_helpers_leave_mixed_content_unchanged() {
 	assert_eq!(strip_new_line_prefixes(&lines), lines);
 }
 
+fn rows(text: &str) -> Vec<String> {
+	text.split('\n').map(str::to_owned).collect()
+}
+
+#[test]
+fn write_prefix_strip_keeps_numbers_that_do_not_count_up_by_one() {
+	for text in [
+		"100000000: 30 00 00 54 bc.eq 0x100000004\n100000004: c0 03 5f d6 ret\n",
+		"00:00 welcome back\n00:02 to the series\n00:03 today we\n",
+		"20:56:07 read a\n20:56:07 read b\n",
+	] {
+		assert_eq!(strip_hashline_prefixes(&rows(text)), rows(text), "{text:?}");
+	}
+}
+
+#[test]
+fn write_prefix_strip_still_removes_read_and_search_numbering() {
+	let read = "[a.ts#1A2B]\n1:one\n2:two\n\n…\n\n9:nine\n10:ten\n";
+	assert_eq!(strip_hashline_prefixes(&rows(read)), ["one", "two", "", "", "nine", "ten", ""]);
+	let search = "[a.ts#1A2B]\n 4:ctx\n*5:hit\n...\n*9:hit\n[b.ts#3C4D]\n*2:hit\n";
+	assert_eq!(strip_hashline_prefixes(&rows(search)), ["ctx", "hit", "hit", "hit", ""]);
+}
+
 #[test]
 fn mismatch_messages_distinguish_stale_and_unrecognized_hashes() {
 	let stale = MismatchDetails {

@@ -3,7 +3,8 @@ import { MCPConnectionTimeoutError, connectToServer, listTools } from "@oh-my-pi
 import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import { isRetriableConnectionError } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { LegacySseTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/sse";
-import type { JsonRpcMessage } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type { JsonRpcMessage, JsonRpcRequest } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type { MCPProgress } from "@oh-my-pi/pi-tui/tools/mcp";
 import { withTimeout } from "@oh-my-pi/pi-utils";
 
 const encoder = new TextEncoder();
@@ -15,6 +16,77 @@ afterEach(() => {
 });
 
 describe("legacy MCP HTTP+SSE transport", () => {
+	it("routes GET-stream progress only while its POST request is pending and preserves notification fanout", async () => {
+		let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+		let sent: JsonRpcRequest | undefined;
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method === "GET") {
+					return new Response(
+						new ReadableStream<Uint8Array>({
+							start(controller) {
+								stream = controller;
+								controller.enqueue(encoder.encode("event: endpoint\ndata: /messages\n\n"));
+							},
+						}),
+						{ headers: { "Content-Type": "text/event-stream" } },
+					);
+				}
+				sent = (await req.json()) as JsonRpcRequest;
+				const token = (sent.params?._meta as Record<string, unknown> | undefined)?.progressToken;
+				for (const message of [
+					{
+						jsonrpc: "2.0",
+						method: "notifications/progress",
+						params: { progressToken: String(token), progress: 99 },
+					},
+					{
+						jsonrpc: "2.0",
+						method: "notifications/progress",
+						params: { progressToken: token, progress: 1, message: "working" },
+					},
+					{ jsonrpc: "2.0", id: sent.id, result: { done: true } },
+					{ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: token, progress: 2 } },
+				]) {
+					stream?.enqueue(encoder.encode(`event: message\ndata: ${JSON.stringify(message)}\n\n`));
+				}
+				return new Response(null, { status: 202 });
+			},
+		});
+		const transport = new LegacySseTransport({
+			type: "sse",
+			url: `http://127.0.0.1:${server.port}/sse`,
+			timeout: 300,
+		});
+		const updates: MCPProgress[] = [];
+		const notifications: unknown[] = [];
+		const late = Promise.withResolvers<void>();
+		transport.onNotification = (_method, params) => {
+			notifications.push(params);
+			if ((params as Record<string, unknown>).progress === 2) late.resolve();
+		};
+		try {
+			await transport.connect();
+			const args = { steps: 1 };
+			const result = await transport.request(
+				"tools/call",
+				{ arguments: args, _meta: { trace: "keep" } },
+				{
+					onProgress: progress => updates.push(progress),
+				},
+			);
+			await withTimeout(late.promise, 300, "late progress was not forwarded");
+			expect(result).toEqual({ done: true });
+			expect(updates).toEqual([{ progress: 1, message: "working" }]);
+			expect(sent?.params?._meta).toEqual({ trace: "keep", progressToken: sent?.id });
+			expect(sent?.params?.arguments).toEqual(args);
+			expect(notifications).toHaveLength(3);
+		} finally {
+			await transport.close();
+		}
+	});
+
 	it("classifies a missing endpoint event as a retryable startup timeout", async () => {
 		server = Bun.serve({
 			port: 0,

@@ -12857,7 +12857,11 @@ export class AgentSession implements SettingsScope {
 				isError: reanswer.isError === true,
 				timestamp: Date.now(),
 			};
-			newLeafId = this.sessionManager.appendMessageToBranch(toolResultMessage, targetEntry.parentId);
+			// The new sibling answer itself becomes the leaf below (`branch(newLeafId)`),
+			// so it must not record the pre-navigation leaf as its own.
+			newLeafId = this.sessionManager.appendMessageToBranch(toolResultMessage, targetEntry.parentId, {
+				preserveActiveLeaf: false,
+			});
 			isAskReanswerCompletion = true;
 		} else {
 			// Non-user message (or an agent/autoload skill-prompt injection): land the

@@ -49,16 +49,19 @@ function parseChunk(sel: string, pinBare: boolean): LineRange | null {
 	return { startLine: rawStart, endLine: rawEnd };
 }
 
+/** What a bare `N` selects in a one-chunk list: lines `N` onward (`:50`), or the single line `N`. */
+export type BareLineMode = "onward" | "single";
+
 /**
  * Parse a comma-separated list of line ranges (e.g. `5-16,960-973` or `19,59`). Returns
  * the ranges in ascending order with overlapping/adjacent ranges merged so
  * downstream consumers can stream the file in a single forward pass per range.
  */
-export function parseLineRanges(sel: string): [LineRange, ...LineRange[]] | null {
+export function parseLineRanges(sel: string, bare: BareLineMode = "onward"): [LineRange, ...LineRange[]] | null {
 	const chunks = sel.split(",");
-	// A lone `:50` means "from line 50". Inside a comma list, a bare number is
-	// that one line; otherwise `:19,59` collapses to "from 19 through EOF".
-	const pinBare = chunks.length > 1;
+	// A lone `:50` means "from line 50" unless `bare` pins it. Inside a comma list,
+	// a bare number is that one line; otherwise `:19,59` collapses to "from 19 through EOF".
+	const pinBare = bare === "single" || chunks.length > 1;
 	const parsed: LineRange[] = [];
 	for (const chunk of chunks) {
 		const range = parseChunk(chunk, pinBare);
@@ -98,10 +101,12 @@ export function parseLineRanges(sel: string): [LineRange, ...LineRange[]] | null
  */
 export function selectorLineRanges(sel: string | undefined): [LineRange, ...LineRange[]] | undefined {
 	if (!sel) return undefined;
-	for (const chunk of sel.split(":")) {
+	const chunks = sel.split(":");
+	const bare = chunks.some(chunk => chunk.toLowerCase() === "raw") ? "single" : "onward";
+	for (const chunk of chunks) {
 		const lower = chunk.toLowerCase();
 		if (lower === "raw" || lower === "conflicts") continue;
-		const ranges = parseLineRanges(chunk);
+		const ranges = parseLineRanges(chunk, bare);
 		if (ranges) return ranges;
 	}
 	return undefined;

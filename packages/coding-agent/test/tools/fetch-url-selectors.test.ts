@@ -73,6 +73,15 @@ describe("parseReadUrlTarget", () => {
 		expect(parseReadUrlTarget("https://example.com/foo:1-120:raw")).toEqual(expected);
 	});
 
+	it("pins a bare line number beside raw to that line, in both orders", () => {
+		const expected: ParsedReadUrlTarget = {
+			path: "https://example.com/foo",
+			sel: { kind: "lines", ranges: [{ startLine: 17, endLine: 17 }], raw: true },
+		};
+		expect(parseReadUrlTarget("https://example.com/foo:raw:17")).toEqual(expected);
+		expect(parseReadUrlTarget("https://example.com/foo:17:raw")).toEqual(expected);
+	});
+
 	it("rejects two range groups on the same URL", () => {
 		expect(() => parseReadUrlTarget("https://example.com/foo:5-10:20-30")).toThrow(/range groups/);
 		expect(() => parseReadUrlTarget("https://example.com/foo:5-10:-30")).toThrow(/range groups/);

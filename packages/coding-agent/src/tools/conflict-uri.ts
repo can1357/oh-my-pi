@@ -186,14 +186,16 @@ async function resolveConflict(
 	};
 }
 
-const BULK_DIRECTIVE_RE = /^#?(\d+)\s*[:=]\s*(@ours|@theirs|@base|@both)$/;
+/** `<id>: @side`, optionally behind a copied `LINE:` display prefix (`40:#4 = @ours`). */
+const BULK_DIRECTIVE_RE = /^(?:\d+:)?#?(\d+)\s*[:=]\s*(@ours|@theirs|@base|@both)$/;
 /**
- * The head of a per-id directive line — `<id>:` / `<id>=` (optionally `#`-prefixed),
+ * The head of a per-id directive line — `<id>:` / `<id>=` (optionally `#`-prefixed,
+ * and optionally behind a copied `LINE:` prefix like `BULK_DIRECTIVE_RE`),
  * regardless of whether its value is a valid `@side` token. Used to recognise a
  * per-id block with literal values (e.g. `15: some literal text`) and to sharpen
  * its error message.
  */
-const BULK_DIRECTIVE_HEAD_RE = /^#?(\d+)\s*[:=]/;
+const BULK_DIRECTIVE_HEAD_RE = /^(?:\d+:)?#?(\d+)\s*[:=]/;
 
 function truncateDirectiveLine(line: string): string {
 	return line.length > 60 ? `${line.slice(0, 57)}…` : line;

@@ -276,3 +276,46 @@ describe("Anthropic search request body", () => {
 		}
 	});
 });
+
+describe("Anthropic search answer", () => {
+	it("keeps cited fragments in one paragraph and breaks only where text resumes after a search", async () => {
+		const fixture = createFixture();
+		const citation = { type: "web_search_result_location", url: "https://pi.dev", title: "Pi", cited_text: "MCP" };
+		const fetch: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					id: "msg_test",
+					model: "claude-haiku-4-5",
+					content: [
+						{ type: "text", text: "Let me look that up." },
+						{ type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: { query: "pi mcp" } },
+						{ type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [] },
+						{ type: "text", text: "" },
+						{ type: "text", text: "His objection was that " },
+						{ type: "text", text: "MCP floods the context window", citations: [citation] },
+						{ type: "text", text: ". There is also a " },
+						{ type: "text", text: "model router", citations: [citation] },
+						{ type: "text", text: "." },
+					],
+					usage: { input_tokens: 1, output_tokens: 2 },
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		try {
+			const response = await searchAnthropic({
+				query: "pi mcp",
+				systemPrompt: "Use web search.",
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch,
+			});
+
+			expect(response.answer).toBe(
+				"Let me look that up.\n\nHis objection was that MCP floods the context window. There is also a model router.",
+			);
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+});

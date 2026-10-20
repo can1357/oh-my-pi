@@ -27,6 +27,7 @@ import {
 	normalizeMCPTransportError,
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
+import { routeProgressNotification, withProgressToken } from "../progress";
 import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
 import { isThenable } from "../../utils/ipc";
 
@@ -554,6 +555,7 @@ export class StdioTransport implements MCPTransport {
 		{
 			resolve: (value: unknown) => void;
 			reject: (error: Error) => void;
+			onProgress?: MCPRequestOptions["onProgress"];
 		}
 	>();
 	#connected = false;
@@ -717,6 +719,11 @@ export class StdioTransport implements MCPTransport {
 		// Notification: has method but no id
 		if ("method" in message) {
 			const notification = message as { method: string; params?: unknown };
+			routeProgressNotification(
+				notification.method,
+				notification.params,
+				token => this.#pendingRequests.get(token)?.onProgress,
+			);
 			this.onNotification?.(notification.method, notification.params);
 		}
 	}
@@ -787,7 +794,7 @@ export class StdioTransport implements MCPTransport {
 			jsonrpc: "2.0" as const,
 			id,
 			method,
-			params: params ?? {},
+			params: options?.onProgress ? withProgressToken(params, id) : (params ?? {}),
 		};
 
 		const timeout = resolveMCPTimeoutMs(this.config.timeout);
@@ -839,6 +846,7 @@ export class StdioTransport implements MCPTransport {
 		};
 
 		this.#pendingRequests.set(id, {
+			onProgress: options?.onProgress,
 			resolve: (value: unknown) => {
 				settle(undefined, value);
 			},

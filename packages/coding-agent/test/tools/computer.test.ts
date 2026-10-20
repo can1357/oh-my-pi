@@ -2491,6 +2491,77 @@ describe("expanded computer APIs", () => {
 		}
 	});
 
+	it.each([
+		["settles when its dialog closes", true],
+		["ignores the close", false],
+	])("closes an unanswered control prompt before the run times out, when the UI %s", async (_label, settles) => {
+		const native = new FakeNativeSession();
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => liveWorker(native),
+			undefined,
+			undefined,
+			NO_ESCAPE_STOPS,
+		);
+		const lateAnswer = Promise.withResolvers<boolean>();
+		let closedAfterMs: number | undefined;
+		try {
+			const result = await supervisor.run(
+				'return await desktop.control.acquire({ reason: "Nobody is here" })',
+				2_000,
+				snapshot(),
+				undefined,
+				confirmationContext(async (_title, _reason, options) => {
+					const shown = performance.now();
+					options?.signal?.addEventListener("abort", () => {
+						closedAfterMs = performance.now() - shown;
+						if (settles) lateAnswer.resolve(false);
+					});
+					return await lateAnswer.promise;
+				}),
+			);
+			expect(result.returnValue).toEqual({ active: false, reason: "unanswered" });
+			// The prompt closed before the 2 s run timed out, leaving a quarter of it to the script.
+			expect(closedAfterMs).toBeGreaterThan(1_000);
+			expect(closedAfterMs).toBeLessThan(2_000);
+			// A yes after the prompt closed grants nothing.
+			lateAnswer.resolve(true);
+			expect(
+				(await supervisor.run("return await desktop.control.state()", 2_000, snapshot(true))).returnValue,
+			).toEqual({ active: false });
+			expect(native.acquireCount).toBe(0);
+		} finally {
+			await supervisor.close();
+		}
+	});
+
+	it("answers unanswered without a prompt when the run has no time left to wait", async () => {
+		const native = new FakeNativeSession();
+		const supervisor = new ComputerSupervisor(
+			toolSession(),
+			() => liveWorker(native),
+			undefined,
+			undefined,
+			NO_ESCAPE_STOPS,
+		);
+		const confirm = vi.fn(async () => true);
+		try {
+			const result = await supervisor.run(
+				// 400 ms remain of the 2 s run, less than the quarter (500 ms) a prompt must leave the script.
+				'await wait(1_600); return await desktop.control.acquire({ reason: "Too late" })',
+				2_000,
+				snapshot(),
+				undefined,
+				confirmationContext(confirm),
+			);
+			expect(result.returnValue).toEqual({ active: false, reason: "unanswered" });
+			expect(confirm).not.toHaveBeenCalled();
+			expect(native.acquireCount).toBe(0);
+		} finally {
+			await supervisor.close();
+		}
+	});
+
 	it("revokes an acquired grant on worker error and disposal", async () => {
 		const native = new FakeNativeSession();
 		const supervisor = new ComputerSupervisor(
@@ -3547,6 +3618,31 @@ describe("display hold follows the agent turn", () => {
 		const result = await transport.waitFor(message => message.type === "result" && message.id === "unknown-verdict");
 		if (result.type !== "result" || !result.ok) throw new Error("control.acquire failed");
 		expect(result.payload.returnValue).toEqual({ active: false, reason: "denied" });
+		expect(native.acquireCount).toBe(0);
+	});
+
+	it("gives a control confirmation the run's time less 5 s, and passes an unanswered verdict on", async () => {
+		const native = new FakeNativeSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		transport.inbound({
+			type: "run",
+			id: "unanswered-verdict",
+			code: 'return await desktop.control.acquire({ reason: "Edit" });',
+			timeoutMs: 120_000,
+			session: snapshot(),
+			escape: escapeScope(),
+		});
+		const confirm = await transport.waitFor(message => message.type === "control-request");
+		if (confirm.type !== "control-request") throw new Error("Expected the run's control confirmation");
+		expect(confirm.timeoutMs).toBeGreaterThan(114_000);
+		expect(confirm.timeoutMs).toBeLessThanOrEqual(115_000);
+		transport.inbound({ type: "tool-reply", id: confirm.id, reply: { ok: true, value: "unanswered" } });
+		const result = await transport.waitFor(
+			message => message.type === "result" && message.id === "unanswered-verdict",
+		);
+		if (result.type !== "result" || !result.ok) throw new Error("control.acquire failed");
+		expect(result.payload.returnValue).toEqual({ active: false, reason: "unanswered" });
 		expect(native.acquireCount).toBe(0);
 	});
 

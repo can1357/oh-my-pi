@@ -17,6 +17,7 @@ import {
 	normalizeMCPTransportError,
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
+import { routeProgressNotification, withProgressToken } from "../progress";
 import { createMCPTimeout, getNeverAbortSignal, resolveMCPTimeoutMs } from "../timeout";
 import { type MCPFetchInit, mcpFetch } from "./header-policy";
 
@@ -31,6 +32,7 @@ interface PendingLegacySseRequest {
 	reject: (reason?: unknown) => void;
 	operation: MCPTimeoutOperation;
 	abortHandler?: () => void;
+	onProgress?: MCPRequestOptions["onProgress"];
 }
 
 /** Identifies a legacy SSE transport whose endpoint handshake timed out. */
@@ -237,6 +239,7 @@ export class LegacySseTransport implements MCPTransport {
 			return;
 		}
 		if ("method" in message && !("id" in message)) {
+			routeProgressNotification(message.method, message.params, token => this.#pending.get(token)?.onProgress);
 			this.onNotification?.(message.method, message.params);
 		}
 	}
@@ -255,7 +258,7 @@ export class LegacySseTransport implements MCPTransport {
 			jsonrpc: "2.0" as const,
 			id,
 			method,
-			params: params ?? {},
+			params: options?.onProgress ? withProgressToken(params, id) : (params ?? {}),
 		};
 		const timeout = resolveMCPTimeoutMs(this.#config.timeout);
 		const operation = createMCPTimeout(timeout, this.#operationSignal(options?.signal));
@@ -269,6 +272,7 @@ export class LegacySseTransport implements MCPTransport {
 			resolve: deferred.resolve,
 			reject: deferred.reject,
 			operation,
+			onProgress: options?.onProgress,
 		};
 		if (operation.signal) {
 			pending.abortHandler = () => {

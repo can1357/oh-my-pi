@@ -1,4 +1,10 @@
-import type { MCPContent, MCPImageContent, MCPResourceContent, MCPTextContent } from "@oh-my-pi/pi-tui/tools/mcp";
+import type {
+	MCPContent,
+	MCPImageContent,
+	MCPProgress,
+	MCPResourceContent,
+	MCPTextContent,
+} from "@oh-my-pi/pi-tui/tools/mcp";
 /**
  * MCP (Model Context Protocol) type definitions.
  *
@@ -293,6 +299,11 @@ export interface MCPToolCallResult {
 export interface MCPRequestOptions {
 	/** Abort signal (e.g. Escape-to-interrupt) */
 	signal?: AbortSignal;
+	/**
+	 * Adds `_meta.progressToken` to the request and receives only this request's
+	 * `notifications/progress` while pending. Progress never extends its deadline.
+	 */
+	onProgress?: (progress: MCPProgress) => void;
 }
 
 /** Transport interface - abstracts stdio/http */
@@ -490,6 +501,7 @@ export interface MCPGetPromptResult {
 
 /** MCP server notification method names */
 export const MCPNotificationMethods = {
+	PROGRESS: "notifications/progress",
 	TOOLS_LIST_CHANGED: "notifications/tools/list_changed",
 	RESOURCES_LIST_CHANGED: "notifications/resources/list_changed",
 	RESOURCES_UPDATED: "notifications/resources/updated",

@@ -167,23 +167,25 @@ async function readPersistedAgentHistory(
 				if (!id) return;
 				const parentId = typeof record.parentId === "string" ? record.parentId : undefined;
 				parents.set(id, parentId);
-				leafId = id;
+				// Same replay rule as `sessionEntryLeafId`: an entry written off the active
+				// branch (late usage, a routed bash result) restores the leaf it captured
+				// instead of becoming the leaf itself.
+				if (typeof record.activeLeafId === "string") {
+					leafId = record.activeLeafId;
+				} else if (record.activeLeafId === null) {
+					leafId = undefined;
+				} else {
+					leafId = id;
+					selfSelectedLeafId = id;
+				}
 				const parsedTimestamp = timestampOf(record.timestamp);
 				if (parsedTimestamp !== undefined) leafTimestamp = parsedTimestamp;
 				if (record.type === "model_usage") {
 					const usage = recordOf(record.usage);
 					const cost = recordOf(usage?.cost);
 					directCost += finiteNumber(cost?.total);
-					if (typeof record.activeLeafId === "string") {
-						leafId = record.activeLeafId;
-					} else if (record.activeLeafId === null) {
-						leafId = undefined;
-					} else {
-						selfSelectedLeafId = id;
-					}
 					return;
 				}
-				selfSelectedLeafId = id;
 				if (record.type === "model_change" && typeof record.model === "string") {
 					modelChangeById.set(id, {
 						model: record.model,

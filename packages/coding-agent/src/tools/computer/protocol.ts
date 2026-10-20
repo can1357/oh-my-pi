@@ -30,10 +30,11 @@ export interface ComputerSessionSnapshot {
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };
 
 /**
- * The host's answer to a `control.acquire` confirmation: the user approved or declined, or nobody could be
- * asked because the session has no interactive UI (a subagent, print mode or another headless run).
+ * The host's answer to a `control.acquire` confirmation: the user approved or declined, nobody could be
+ * asked because the session has no interactive UI (a subagent, print mode or another headless run), or
+ * nobody answered before the confirmation's `timeoutMs` closed it.
  */
-export type ControlVerdict = "approved" | "denied" | "no-ui";
+export type ControlVerdict = "approved" | "denied" | "no-ui" | "unanswered";
 
 /** Where the native session counts the user's Escape stops, and how many the user's latest message acknowledged. */
 export interface ComputerEscapeScope {
@@ -132,7 +133,7 @@ export type ComputerWorkerOutbound =
 	| { type: "capabilities"; id: string; ok: true; capabilities: DesktopCapabilities }
 	| { type: "capabilities"; id: string; ok: false; error: RunErrorPayload }
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }
-	| { type: "control-request"; id: string; runId: string; reason: string }
+	| { type: "control-request"; id: string; runId: string; reason: string; timeoutMs: number }
 	| { type: "closed" };
 
 /** Transport used by the worker core in Bun workers and tests. */

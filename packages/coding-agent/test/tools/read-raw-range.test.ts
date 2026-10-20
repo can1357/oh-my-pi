@@ -61,6 +61,16 @@ describe("read tool raw range exactness", () => {
 		expect(output.trimEnd()).toBe("L01\nL02");
 	});
 
+	it("reads a bare line number beside raw as that one line, and N- as open-ended", async () => {
+		for (const selector of ["31:raw", "raw:31"]) {
+			const result = await tool.execute("call-raw-bare", { path: `${filePath}:${selector}` });
+			expect(getTextOutput(result)).toBe("L31");
+		}
+
+		const open = await tool.execute("call-raw-open", { path: `${filePath}:58-:raw` });
+		expect(getTextOutput(open)).toBe("L58\nL59\nL60");
+	});
+
 	it("returns only a closed raw range from a newline-terminated file and counts its lines", async () => {
 		const lines = Array.from({ length: 40 }, (_, index) => `line ${index + 1}`);
 		await Bun.write(filePath, `${lines.join("\n")}\n`);
