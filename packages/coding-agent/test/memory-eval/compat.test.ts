@@ -129,6 +129,7 @@ describe("compareCalibration", () => {
 			conversation: Number(r.questionId.split(":")[0]),
 			question: r.compat!.question,
 			rankedContents: [...r.compat!.rankedContents],
+			goldContents: [...r.compat!.goldContents].reverse(),
 			recall: r.metrics["compat.recall@10"],
 		})),
 		meanRecall: results.reduce((sum, r) => sum + r.metrics["compat.recall@10"], 0) / results.length,
@@ -198,6 +199,19 @@ describe("compareCalibration", () => {
 		expect(compareCalibration({ ...a, runtime: undefined }, runB(results, a.meanRecall))).toEqual([
 			"fastembed_version: A records none; re-run it with this harness",
 			"onnxruntime_version: A records none; re-run it with this harness",
+		]);
+	});
+
+	it("does not calibrate an equal recall scored against another gold set", async () => {
+		const results = await runUpstreamCompat(fakeEngine().engine, conversations);
+		const a = dumpOf(results);
+		// Same size and the same recall on both sides; only which messages count as gold changed.
+		a.questions[1].goldContents = a.questions[1].goldContents!.map(g => (g === "" ? "" : "another message"));
+		const b = runB(results, a.meanRecall);
+		expect(compareCalibration(a, b)).toEqual([`[1] conversation 0 "beta": gold contents differ (A 2, B 2)`]);
+		a.questions[1].goldContents = undefined;
+		expect(compareCalibration(a, b)).toEqual([
+			`[1] conversation 0 "beta": A records no gold contents; re-run it with this harness`,
 		]);
 	});
 });
