@@ -57,7 +57,7 @@ import { formatCodeFrameLine } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
-import { cfgGrepContextAfter, cfgGrepContextBefore } from "./settings";
+import { cfgFetchEnabled, cfgGrepContextAfter, cfgGrepContextBefore } from "./settings";
 import { cfgTaskDisabledAgents } from "../task/settings";
 
 const searchSchema = type({
@@ -511,13 +511,17 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			cfgTaskDisabledAgents.get(this.session.settings),
 			this.session.getSessionSpawns?.() ?? "*",
 		);
+		// A web URL is materialized through the gated URL reader, so the path list
+		// must not offer one while `fetch.enabled` is off.
+		const fetchEnabled = cfgFetchEnabled.get(this.session.settings);
 		// Every render input is a boolean; pack them so repeat reads skip the template render.
 		const key =
 			(isHlMode ? 1 : 0) |
 			(isLineNumberMode ? 2 : 0) |
 			(hasFind ? 4 : 0) |
 			(eagerDelegation ? 8 : 0) |
-			(scoutAvailable ? 16 : 0);
+			(scoutAvailable ? 16 : 0) |
+			(fetchEnabled ? 32 : 0);
 		if (key !== this.#descriptionKey) {
 			this.#description = prompt.render(grepDescription, {
 				IS_HL_MODE: isHlMode,
@@ -525,6 +529,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				hasFind,
 				eagerDelegation,
 				scoutAvailable,
+				FETCH_ENABLED: fetchEnabled,
 			});
 			this.#descriptionKey = key;
 		}

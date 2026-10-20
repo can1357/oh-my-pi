@@ -1,7 +1,8 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -30,6 +31,7 @@ describe("AgentSession live settings", () => {
 	let modelRegistry!: ModelRegistry;
 	let authDir: string;
 	let session: AgentSession | undefined;
+	let sessionManager: SessionManager | undefined;
 
 	beforeAll(async () => {
 		authDir = path.join(os.tmpdir(), `pi-live-settings-auth-${Snowflake.next()}`);
@@ -59,11 +61,13 @@ describe("AgentSession live settings", () => {
 		const cwd = path.join(os.tmpdir(), `pi-live-settings-${Snowflake.next()}`);
 		tempDirs.push(cwd);
 		fs.mkdirSync(cwd, { recursive: true });
+		const manager = SessionManager.inMemory();
+		sessionManager = manager;
 		const created = await createAgentSession({
 			cwd,
 			agentDir: cwd,
 			modelRegistry,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: manager,
 			settings,
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			getApiKey: () => "test-key",
@@ -264,5 +268,85 @@ describe("AgentSession live settings", () => {
 		expect(live.systemPrompt.join("\n")).not.toContain("reader text/markdown");
 		// The second rebuild ran too, so the newest setting is in the prompt.
 		expect(live.systemPrompt.join("\n")).toContain("live-settings-tree-marker/");
+	});
+
+	it("keeps the provider-visible catalog free of URL reads when fetch.enabled is off", async () => {
+		// The catalog is what the model reads: the prompt when tool descriptions are
+		// inline, the provider schema otherwise. Neither may send the model to a
+		// URL read the runtime refuses, so every description that names one has to
+		// drop it with the setting.
+		for (const inlineToolDescriptors of ["off", "on"] as const) {
+			const settings = Settings.isolated({ inlineToolDescriptors });
+			const live = await start(settings);
+
+			const catalog = async (): Promise<string> => {
+				const context = await live.agent.buildSideRequestContext([]);
+				const descriptions = (context.tools ?? []).map(tool => tool.description ?? "").join("\n");
+				return `${(context.systemPrompt ?? []).join("\n")}\n${descriptions}`;
+			};
+
+			const enabled = await catalog();
+			expect(enabled).toContain("Known URLs/programmatic data → `read`");
+			expect(enabled).toContain("file/dir/glob/URL");
+
+			cfgFetchEnabled.set(settings, false);
+			await Promise.resolve();
+			await live.runToolRegistryMutation(async () => {});
+
+			const disabled = await catalog();
+			expect(disabled).not.toContain("Known URLs/programmatic data");
+			expect(disabled).not.toContain("file/dir/glob/URL");
+			expect(disabled).not.toContain("reader text/markdown");
+			expect(disabled).not.toContain("bare host:port");
+
+			await live.dispose();
+			session = undefined;
+		}
+	});
+
+	it("re-reads the handoff base prompt after the side-request hooks rebuilt it", async () => {
+		// A handoff request pins the base prompt (not the per-turn override), and
+		// the side-request hooks rebuild that prompt when a setting invalidated it.
+		// A base prompt captured before the hooks ran would still advertise the URL
+		// read the toggle just removed.
+		const settings = Settings.isolated({
+			inlineToolDescriptors: "on",
+			"compaction.enabled": true,
+			"compaction.autoContinue": false,
+			"compaction.asyncEnabled": false,
+			"compaction.keepRecentTokens": 1,
+		});
+		const live = await start(settings);
+		expect(live.systemPrompt.join("\n")).toContain("reader text/markdown");
+
+		// The handoff reads a snapshot of the live messages, so the branch needs a
+		// turn to summarize.
+		const manager = sessionManager!;
+		manager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "start" }],
+			attribution: "user",
+			timestamp: Date.now(),
+		});
+		manager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "working" }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+
+		let handoffPrompt: string | undefined;
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async context => {
+			handoffPrompt = (context.systemPrompt ?? []).join("\n");
+			return "## Goal\nHandoff";
+		});
+
+		cfgFetchEnabled.set(settings, false);
+		const result = await live.handoff();
+
+		expect(result?.document).toBe("## Goal\nHandoff");
+		expect(handoffPrompt).toBeDefined();
+		expect(handoffPrompt).not.toContain("reader text/markdown");
+		expect(handoffPrompt).not.toContain("bare host:port");
 	});
 });
