@@ -13,7 +13,7 @@
 - Enabled native compaction for supported Bedrock Claude models ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 ### Added
 
-- Compaction and handoff oneshots now report every completed provider attempt through a new `onUsage` option, including attempts a transient retry replaced and responses the provider rejected ([#16468](https://github.com/can1357/oh-my-pi/pull/16468) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Compaction and handoff oneshots now report every completed provider attempt through a new `onUsage` option, including provider-native compaction requests, attempts a transient retry replaced and responses the provider rejected ([#16468](https://github.com/can1357/oh-my-pi/pull/16468) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 

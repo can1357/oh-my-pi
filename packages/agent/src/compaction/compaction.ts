@@ -38,6 +38,7 @@ import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messag
 import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -56,6 +57,7 @@ import {
 import {
 	buildCompactionV2Request,
 	buildCompactionV2RequestFromBody,
+	type CompactionV2Response,
 	getCompactionV2PreserveData,
 	requestCompactionV2Streaming,
 	shouldUseCompactionV2Streaming,
@@ -177,6 +179,7 @@ export const COMPACTION_USAGE_PURPOSES = {
 	shortSummary: "compaction:short-summary",
 	turnPrefix: "compaction:turn-prefix",
 	handoff: "compaction:handoff",
+	remote: "compaction:remote",
 } as const;
 
 /**
@@ -215,6 +218,43 @@ function usageObserver(
 ): ((response: AssistantMessage) => void) | undefined {
 	if (!options?.onUsage) return undefined;
 	return response => options.onUsage?.(compactionRequestUsage(response, purpose));
+}
+
+/**
+ * Report one provider-native V2 compaction request to the host's usage observer.
+ *
+ * The V2 stream reports the tokens the provider billed. Without this the
+ * session ledger would omit the provider-native compaction request entirely —
+ * it never goes through a summarization oneshot.
+ */
+function reportCompactionV2Usage(
+	options: { onUsage?: (usage: CompactionRequestUsage) => void } | undefined,
+	model: Model,
+	response: CompactionV2Response,
+): void {
+	const reported = response.usage;
+	if (!options?.onUsage || !reported) return;
+	// The Responses API counts cached input inside `input_tokens`; the ledger
+	// bills it as a cache read (see calculateOpenAIUsageAccounting).
+	const cacheRead = reported.cachedInputTokens ?? 0;
+	const usage: Usage = {
+		input: Math.max(0, reported.inputTokens - cacheRead),
+		output: reported.outputTokens,
+		cacheRead,
+		cacheWrite: 0,
+		totalTokens: reported.totalTokens,
+		...(reported.reasoningOutputTokens !== undefined ? { reasoningTokens: reported.reasoningOutputTokens } : {}),
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	calculateCost(model, usage);
+	options.onUsage({
+		purpose: COMPACTION_USAGE_PURPOSES.remote,
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage,
+		stopReason: "stop",
+	});
 }
 
 // ============================================================================
@@ -1997,6 +2037,9 @@ export async function compact(
 				{ signal },
 			);
 			preserveData = { ...preserveData, ...storeCompactionV2PreserveData(remote, model) };
+			// The provider billed this request; journal it like every other
+			// compaction-side request.
+			reportCompactionV2Usage(summaryOptions, model, remote);
 		};
 		const whole = await buildV2Input(true);
 		if (whole.remoteHistory.length > 0) {

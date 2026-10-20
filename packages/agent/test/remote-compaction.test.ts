@@ -3,6 +3,8 @@ import { ThinkingLevel, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionPreparation,
 	compact,
+	COMPACTION_USAGE_PURPOSES,
+	type CompactionRequestUsage,
 	createCustomMessage,
 	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
@@ -3419,5 +3421,63 @@ describe("Amazon Bedrock compaction request preparation", () => {
 		}
 
 		expect(proxies).toEqual(["http://proxy.example.test:8080", "http://proxy.example.test:8080"]);
+	});
+});
+
+describe("compact() provider-native compaction usage", () => {
+	test("reports a provider-native V2 compaction request to the usage observer", async () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-1",
+			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled: true },
+		};
+		const model = makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: true } });
+		const observed: CompactionRequestUsage[] = [];
+		const fetchMock: FetchImpl = async () =>
+			sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc-v2" },
+				},
+				{
+					type: "response.completed",
+					response: {
+						usage: {
+							input_tokens: 100,
+							output_tokens: 7,
+							total_tokens: 107,
+							input_tokens_details: { cached_tokens: 40 },
+							output_tokens_details: { reasoning_tokens: 3 },
+						},
+					},
+				},
+			]);
+
+		await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			onUsage: usage => observed.push(usage),
+		});
+
+		// The provider billed this request; the session ledger must see it.
+		expect(observed).toHaveLength(1);
+		expect(observed[0].purpose).toBe(COMPACTION_USAGE_PURPOSES.remote);
+		expect(observed[0].api).toBe(model.api);
+		expect(observed[0].provider).toBe(model.provider);
+		expect(observed[0].model).toBe(model.id);
+		expect(observed[0].stopReason).toBe("stop");
+		expect(observed[0].usage).toMatchObject({
+			input: 60,
+			output: 7,
+			cacheRead: 40,
+			cacheWrite: 0,
+			totalTokens: 107,
+			reasoningTokens: 3,
+		});
 	});
 });
