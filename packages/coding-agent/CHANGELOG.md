@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed auto-compaction firing early on OpenAI-compatible chat-completions models that don't replay past reasoning, including before a queued forced tool call and after switching thinking off ([#15797](https://github.com/can1357/oh-my-pi/issues/15797), [#16498](https://github.com/can1357/oh-my-pi/pull/16498) by [@ghisguth](https://github.com/ghisguth))
 - Fixed GitLab merge request reads rendering `[object Promise]` instead of the description ([#16477](https://github.com/can1357/oh-my-pi/pull/16477) by [@adi-IL](https://github.com/adi-IL))
 - Fixed aborted and timed-out stdio MCP requests continuing to run on the server: OMP now sends `notifications/cancelled` with the original request id, once and never for `initialize`, after settling the call and without waiting on the pipe ([#16430](https://github.com/can1357/oh-my-pi/pull/16430) by [@alphastorm](https://github.com/alphastorm))
 - Fixed Mnemopi memory completions ignoring the memory role's thinking suffix, including one inherited from `tiny` or `smol` when `modelRoles.memory` is unset; each `retry.fallbackChains.memory` entry sends its own level, and `:off` disables reasoning ([#16378](https://github.com/can1357/oh-my-pi/pull/16378) by [@alphastorm](https://github.com/alphastorm))

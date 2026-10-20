@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed auto-compaction firing far below the threshold on OpenAI-compatible chat-completions models when past reasoning is not replayed, including after switching thinking off or forcing a tool: the context estimate no longer counts thinking the request drops ([#15797](https://github.com/can1357/oh-my-pi/issues/15797))
+- Fixed auto-compaction firing far below the threshold on OpenAI-compatible chat-completions models when past reasoning is not replayed, including after switching thinking off or forcing a tool: the context estimate no longer counts thinking the request drops ([#15797](https://github.com/can1357/oh-my-pi/issues/15797), [#16498](https://github.com/can1357/oh-my-pi/pull/16498) by [@ghisguth](https://github.com/ghisguth))
 
 ## [18.12.3] - 2026-10-19
 
