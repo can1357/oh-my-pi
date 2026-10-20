@@ -270,6 +270,45 @@ describe("async speculative compaction", () => {
 		expect(events).toEqual(expect.arrayContaining(["auto_compaction_start", "auto_compaction_end"]));
 	});
 
+	it("arms a speculation when the branch tip is a usage record", async () => {
+		let summarizations = 0;
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: summarizations++ === 0 ? "speculative summary" : "paid a second summarizer",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+
+		// The ledger's record is the branch tip: a previous compaction billed its
+		// own summary request and no transcript turn followed it.
+		sessionManager.createUsageObserver()({
+			purpose: "compaction:summary",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 80,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		});
+		expect(sessionManager.getBranch().at(-1)?.type).toBe("model_usage");
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
+
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("speculative summary");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("applies an Anthropic snapshot after append-only growth without dropping its tail or new turns", async () => {
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-6");
 		if (!bundled) throw new Error("Expected compaction-capable Anthropic model");

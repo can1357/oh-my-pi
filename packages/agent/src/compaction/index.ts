@@ -11,6 +11,7 @@ export * from "./message-cache";
 export * from "./messages";
 export * from "./openai";
 export * from "./pruning";
+export * from "./remote-usage";
 export * from "./shake";
 export * from "./transcript-tokens";
 export * from "./utils";

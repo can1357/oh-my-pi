@@ -2293,7 +2293,12 @@ export class SessionMaintenance {
 		const settings = this.#compactionSettings;
 		const effectiveSettings = resolveMethodSettings(settings, method);
 		const branch = this.#host.sessionManager.getBranch();
-		const snapshotLeafId = branch[branch.length - 1]?.id;
+		// The usage ledger is not transcript: the branch can end on a
+		// `model_usage` record (a compaction's own summary request was billed
+		// and no transcript turn followed it). The snapshot must anchor on a
+		// transcript entry, or the staleness check below can never find it and
+		// the freshly paid speculation is thrown away.
+		const snapshotLeafId = transcriptBranch(branch).at(-1)?.id;
 		if (!snapshotLeafId) return clear();
 		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
 		if (!preparation) return clear();

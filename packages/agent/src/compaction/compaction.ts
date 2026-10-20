@@ -57,7 +57,6 @@ import {
 import {
 	buildCompactionV2Request,
 	buildCompactionV2RequestFromBody,
-	type CompactionV2Response,
 	getCompactionV2PreserveData,
 	requestCompactionV2Streaming,
 	shouldUseCompactionV2Streaming,
@@ -65,7 +64,7 @@ import {
 	V2_RETAINED_MESSAGE_TOKEN_BUDGET,
 } from "./compaction-v2-streaming";
 import type { CompactionEntry, SessionEntry } from "./entries";
-import { NativeCompactionError } from "./errors";
+import { NativeCompactionError, RemoteCompactionPayloadError } from "./errors";
 import {
 	type ConvertToLlm,
 	createCompactionSummaryMessage,
@@ -83,6 +82,7 @@ import {
 	trimRemoteCompactionInputToContextWindow,
 	withOpenAiRemoteCompactionPreserveData,
 } from "./openai";
+import { type RemoteCompactionUsage } from "./remote-usage";
 import autoHandoffThresholdFocusPrompt from "./prompts/auto-handoff-threshold-focus.md" with { type: "text" };
 import compactionShortSummaryPrompt from "./prompts/compaction-short-summary.md" with { type: "text" };
 import compactionSummaryPrompt from "./prompts/compaction-summary.md" with { type: "text" };
@@ -221,18 +221,19 @@ function usageObserver(
 }
 
 /**
- * Report one provider-native V2 compaction request to the host's usage observer.
+ * Report one remote compaction request to the host's usage observer.
  *
- * The V2 stream reports the tokens the provider billed. Without this the
- * session ledger would omit the provider-native compaction request entirely —
- * it never goes through a summarization oneshot.
+ * A provider-native compaction request never goes through a summarization
+ * oneshot, so without this the session ledger would omit what the provider
+ * billed. The attempt is billed as soon as the provider reports its usage —
+ * including an attempt whose payload is later rejected.
  */
-function reportCompactionV2Usage(
+function reportRemoteCompactionUsage(
 	options: { onUsage?: (usage: CompactionRequestUsage) => void } | undefined,
 	model: Model,
-	response: CompactionV2Response,
+	reported: RemoteCompactionUsage | undefined,
+	purpose: string,
 ): void {
-	const reported = response.usage;
 	if (!options?.onUsage || !reported) return;
 	// The Responses API counts cached input inside `input_tokens`; the ledger
 	// bills it as a cache read (see calculateOpenAIUsageAccounting).
@@ -248,7 +249,7 @@ function reportCompactionV2Usage(
 	};
 	calculateCost(model, usage);
 	options.onUsage({
-		purpose: COMPACTION_USAGE_PURPOSES.remote,
+		purpose,
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
@@ -1130,6 +1131,9 @@ async function summarizeConversationWindow(
 				),
 			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
 		);
+		// The remote summarizer billed this request; the observer never ran for
+		// it, so journal it here.
+		reportRemoteCompactionUsage(options, model, remote.usage, COMPACTION_USAGE_PURPOSES.summary);
 		return remote.summary;
 	}
 
@@ -1364,6 +1368,9 @@ async function generateShortSummary(
 				),
 			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
 		);
+		// The remote summarizer billed this request; the observer never ran for
+		// it, so journal it here.
+		reportRemoteCompactionUsage(options, model, remote.usage, COMPACTION_USAGE_PURPOSES.shortSummary);
 		return remote.summary;
 	}
 
@@ -2033,13 +2040,16 @@ export async function compact(
 						providerSessionState: summaryOptions.providerSessionState,
 						preferWebsockets: summaryOptions.preferWebsockets,
 						codexCompaction: summaryOptions.codexCompaction,
+						// The provider billed this request; journal it like every
+						// other compaction-side request. The collector reports it
+						// as soon as the terminal event arrives, so an attempt
+						// whose payload is rejected is billed too.
+						onUsage: usage =>
+							reportRemoteCompactionUsage(summaryOptions, model, usage, COMPACTION_USAGE_PURPOSES.remote),
 					}),
 				{ signal },
 			);
 			preserveData = { ...preserveData, ...storeCompactionV2PreserveData(remote, model) };
-			// The provider billed this request; journal it like every other
-			// compaction-side request.
-			reportCompactionV2Usage(summaryOptions, model, remote);
 		};
 		const whole = await buildV2Input(true);
 		if (whole.remoteHistory.length > 0) {
@@ -2087,26 +2097,38 @@ export async function compact(
 		const convertToLlm = summaryOptions.convertToLlm ?? defaultConvertToLlm;
 		const supportsOriginalDetail = openAiCompatSupportsImageDetailOriginal(model);
 		const sendV1 = async (remoteHistory: Array<Record<string, unknown>>, rewriteOutputs: boolean): Promise<void> => {
-			const remote = await withAuth(
-				apiKey,
-				key =>
-					requestOpenAiRemoteCompaction(
-						model,
-						key,
-						remoteHistory,
-						summaryOptions.remoteSystemPrompt?.join("\n\n") ?? SUMMARIZATION_SYSTEM_PROMPT,
-						signal,
-						{
-							fetch: summaryOptions.fetch,
-							sessionId: summaryOptions.sessionId,
-							providerSessionState: summaryOptions.providerSessionState,
-							codexCompaction: summaryOptions.codexCompaction,
-							rewriteOutputs,
-						},
-					),
-				{ signal },
-			);
-			preserveData = withOpenAiRemoteCompactionPreserveData(preserveData, remote);
+			try {
+				const remote = await withAuth(
+					apiKey,
+					key =>
+						requestOpenAiRemoteCompaction(
+							model,
+							key,
+							remoteHistory,
+							summaryOptions.remoteSystemPrompt?.join("\n\n") ?? SUMMARIZATION_SYSTEM_PROMPT,
+							signal,
+							{
+								fetch: summaryOptions.fetch,
+								sessionId: summaryOptions.sessionId,
+								providerSessionState: summaryOptions.providerSessionState,
+								codexCompaction: summaryOptions.codexCompaction,
+								rewriteOutputs,
+							},
+						),
+					{ signal },
+				);
+				// The provider billed this request; journal it like every other
+				// compaction-side request.
+				reportRemoteCompactionUsage(summaryOptions, model, remote.usage, COMPACTION_USAGE_PURPOSES.remote);
+				preserveData = withOpenAiRemoteCompactionPreserveData(preserveData, remote);
+			} catch (err) {
+				// A payload the provider billed but we cannot use is an
+				// abandoned attempt: it still cost tokens.
+				if (err instanceof RemoteCompactionPayloadError) {
+					reportRemoteCompactionUsage(summaryOptions, model, err.usage, COMPACTION_USAGE_PURPOSES.remote);
+				}
+				throw err;
+			}
 		};
 		const whole = buildOpenAiNativeHistory(
 			convertToLlm(remoteMessages),

@@ -3480,4 +3480,174 @@ describe("compact() provider-native compaction usage", () => {
 			reasoningTokens: 3,
 		});
 	});
+
+	test("reports a native V1 compaction request to the usage observer", async () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-1",
+			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled: false },
+		};
+		const model = makeOpenAiModel({ remoteCompaction: { enabled: true } });
+		const observed: CompactionRequestUsage[] = [];
+		const fetchMock: FetchImpl = async () =>
+			Response.json({
+				output: [{ type: "compaction", encrypted_content: "enc-v1" }],
+				usage: {
+					input_tokens: 120,
+					output_tokens: 9,
+					total_tokens: 129,
+					input_tokens_details: { cached_tokens: 50 },
+					output_tokens_details: { reasoning_tokens: 4 },
+				},
+			});
+
+		await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			onUsage: usage => observed.push(usage),
+		});
+
+		// The V1 endpoint bills the request like any other Responses call.
+		expect(observed).toHaveLength(1);
+		expect(observed[0].purpose).toBe(COMPACTION_USAGE_PURPOSES.remote);
+		expect(observed[0].api).toBe(model.api);
+		expect(observed[0].provider).toBe(model.provider);
+		expect(observed[0].model).toBe(model.id);
+		expect(observed[0].usage).toMatchObject({
+			input: 70,
+			output: 9,
+			cacheRead: 50,
+			cacheWrite: 0,
+			totalTokens: 129,
+			reasoningTokens: 4,
+		});
+	});
+
+	test("reports the V2 attempt's usage before its compaction payload is validated", async () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-1",
+			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled: true },
+		};
+		const model = makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: true } });
+		const observed: CompactionRequestUsage[] = [];
+		const fetchMock: FetchImpl = async input => {
+			if (String(input).endsWith("/responses/compact")) {
+				// The V1 fallback answers without a usage object.
+				return Response.json({ output: [{ type: "compaction", encrypted_content: "enc-v1" }] });
+			}
+			return sseResponse([
+				// Two compaction output items: the payload is unusable, but the
+				// provider already billed the request.
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc-a" },
+				},
+				{
+					type: "response.output_item.done",
+					output_index: 1,
+					item: { type: "compaction", encrypted_content: "enc-b" },
+				},
+				{
+					type: "response.completed",
+					response: {
+						usage: {
+							input_tokens: 100,
+							output_tokens: 7,
+							total_tokens: 107,
+							input_tokens_details: { cached_tokens: 40 },
+						},
+					},
+				},
+			]);
+		};
+
+		await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			onUsage: usage => observed.push(usage),
+		});
+
+		// The abandoned V2 attempt is billed before the V1 fallback runs.
+		expect(observed).toHaveLength(1);
+		expect(observed[0].purpose).toBe(COMPACTION_USAGE_PURPOSES.remote);
+		expect(observed[0].usage).toMatchObject({
+			input: 60,
+			output: 7,
+			cacheRead: 40,
+			cacheWrite: 0,
+			totalTokens: 107,
+		});
+	});
+});
+
+describe("compact() remote summary usage", () => {
+	test("reports both chat-completions summary requests with their own purpose", async () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-1",
+			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: {
+				...DEFAULT_COMPACTION_SETTINGS,
+				remoteEndpoint: "http://127.0.0.1:8001/v1/chat/completions",
+				remoteStreamingV2Enabled: false,
+			},
+		};
+		const model = buildModel({
+			id: "catalog-selection-id",
+			name: "Qwopus 3.6 35B-A3B Coder",
+			api: "openai-completions",
+			provider: "local-llama",
+			baseUrl: "http://127.0.0.1:8001/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 131072,
+			maxTokens: 4096,
+		});
+		const observed: CompactionRequestUsage[] = [];
+		const fetchMock: FetchImpl = async () =>
+			Response.json({
+				choices: [{ message: { content: "remote summary" } }],
+				usage: {
+					prompt_tokens: 200,
+					completion_tokens: 30,
+					total_tokens: 230,
+					prompt_tokens_details: { cached_tokens: 80 },
+				},
+			});
+
+		await compact(preparation, model, "local-key", undefined, undefined, {
+			fetch: fetchMock,
+			onUsage: usage => observed.push(usage),
+		});
+
+		// The remote summarizer is paid per request; both the history summary
+		// and the short summary must reach the ledger.
+		expect(observed.map(entry => entry.purpose)).toEqual([
+			COMPACTION_USAGE_PURPOSES.summary,
+			COMPACTION_USAGE_PURPOSES.shortSummary,
+		]);
+		expect(observed[0].usage).toMatchObject({
+			input: 120,
+			output: 30,
+			cacheRead: 80,
+			cacheWrite: 0,
+			totalTokens: 230,
+		});
+		expect(observed[1].usage).toMatchObject({ input: 120, output: 30, cacheRead: 80, totalTokens: 230 });
+	});
 });

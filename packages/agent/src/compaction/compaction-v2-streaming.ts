@@ -36,6 +36,7 @@ import {
 import { $env, isUnexpectedSocketCloseMessage, logger, ptree, stringifyJson } from "@oh-my-pi/pi-utils";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
 import { prepareBedrockCompactionRequest } from "./bedrock";
+import { parseResponsesUsage, type RemoteCompactionUsage } from "./remote-usage";
 
 // ============================================================================
 // Types & Configuration
@@ -65,13 +66,7 @@ const CONTEXTUAL_USER_PREFIXES = [
 ];
 
 /** Token usage reported by the streamed V2 Responses completion. */
-export interface CompactionV2Usage {
-	inputTokens: number;
-	outputTokens: number;
-	totalTokens: number;
-	cachedInputTokens?: number;
-	reasoningOutputTokens?: number;
-}
+export type CompactionV2Usage = RemoteCompactionUsage;
 
 /** Provider-ready Responses body and local state needed for V2 compaction. */
 export interface CompactionV2Request {
@@ -257,6 +252,14 @@ export async function requestCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
+		/**
+		 * Bills the attempt as soon as the terminal event reports its usage.
+		 *
+		 * The provider charged for the request even when the compaction
+		 * payload turns out to be unusable, so the usage is reported before
+		 * the payload is validated.
+		 */
+		onUsage?: (usage: RemoteCompactionUsage) => void;
 	},
 ): Promise<CompactionV2Response> {
 	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
@@ -296,6 +299,7 @@ export async function requestCompactionV2Streaming(
 				providerSessionState: options?.providerSessionState,
 				codexCompaction: options?.codexCompaction,
 				preferWebsockets: options?.preferWebsockets,
+				onUsage: options?.onUsage,
 			});
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err));
@@ -332,6 +336,7 @@ async function attemptCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
+		onUsage?: (usage: RemoteCompactionUsage) => void;
 	},
 ): Promise<CompactionV2Response> {
 	// Faithful to Codex: append the compaction trigger as the final input item
@@ -361,7 +366,7 @@ async function attemptCompactionV2Streaming(
 				implementation: "responses_compaction_v2",
 			}),
 		});
-		return collectCompactionV2Events(eventStream, request);
+		return collectCompactionV2Events(eventStream, request, options.onUsage);
 	}
 
 	const response = await fetchImpl(endpoint, {
@@ -389,7 +394,7 @@ async function attemptCompactionV2Streaming(
 		);
 	}
 
-	return collectCompactionV2Output(response, request);
+	return collectCompactionV2Output(response, request, options.onUsage);
 }
 
 function buildCompactionV2Headers(
@@ -468,17 +473,19 @@ function createCompactionV2CollectionState(): CompactionV2CollectionState {
 async function collectCompactionV2Events(
 	events: AsyncIterable<Record<string, unknown>>,
 	request: CompactionV2Request,
+	onUsage?: (usage: RemoteCompactionUsage) => void,
 ): Promise<CompactionV2Response> {
 	const state = createCompactionV2CollectionState();
 	for await (const event of events) {
 		handleCompactionV2Event(event, undefined, state);
 	}
-	return finishCompactionV2Collection(state, request);
+	return finishCompactionV2Collection(state, request, onUsage);
 }
 
 async function collectCompactionV2Output(
 	response: Response,
 	request: CompactionV2Request,
+	onUsage?: (usage: RemoteCompactionUsage) => void,
 ): Promise<CompactionV2Response> {
 	const reader = response.body?.getReader();
 	if (!reader) {
@@ -532,16 +539,21 @@ async function collectCompactionV2Output(
 		reader.releaseLock();
 	}
 
-	return finishCompactionV2Collection(state, request);
+	return finishCompactionV2Collection(state, request, onUsage);
 }
 
 function finishCompactionV2Collection(
 	state: CompactionV2CollectionState,
 	request: CompactionV2Request,
+	onUsage?: (usage: RemoteCompactionUsage) => void,
 ): CompactionV2Response {
 	if (!state.sawCompleted) {
 		throw new Error("V2 compaction stream closed before response.completed");
 	}
+	// The provider billed this attempt whatever its payload turns out to be.
+	// Report the usage before the output-count validation, so an attempt that
+	// is abandoned here is still in the ledger when the fallback runs.
+	if (state.usage) onUsage?.(state.usage);
 	if (state.compactionItems.length !== 1) {
 		throw new Error(
 			`V2 compaction expected exactly one compaction output item, got ${state.compactionItems.length} from ${state.outputItemCount} output items`,
@@ -614,25 +626,7 @@ function handleCompactionV2Event(
 
 function parseCompactionV2Usage(event: Record<string, unknown>): CompactionV2Usage | undefined {
 	const response = isRecord(event.response) ? event.response : undefined;
-	const usage = response && isRecord(response.usage) ? response.usage : undefined;
-	if (!usage) return undefined;
-
-	const inputTokens = numberField(usage, "input_tokens");
-	const outputTokens = numberField(usage, "output_tokens");
-	const totalTokens = numberField(usage, "total_tokens");
-	if (inputTokens === undefined || outputTokens === undefined || totalTokens === undefined) return undefined;
-
-	const inputDetails = isRecord(usage.input_tokens_details) ? usage.input_tokens_details : undefined;
-	const outputDetails = isRecord(usage.output_tokens_details) ? usage.output_tokens_details : undefined;
-	const cachedInputTokens = inputDetails ? numberField(inputDetails, "cached_tokens") : undefined;
-	const reasoningOutputTokens = outputDetails ? numberField(outputDetails, "reasoning_tokens") : undefined;
-	return {
-		inputTokens,
-		outputTokens,
-		totalTokens,
-		...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
-		...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
-	};
+	return parseResponsesUsage(response?.usage);
 }
 
 function formatCompactionV2Failure(event: Record<string, unknown>, type: string): string {
