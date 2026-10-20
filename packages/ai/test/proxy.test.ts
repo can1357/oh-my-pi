@@ -223,6 +223,20 @@ describe("isLocalOrMetadataHost / shouldBypassProxy hard-coded ranges", () => {
 	}
 });
 
+describe("isLocalOrMetadataHost mDNS .local names", () => {
+	it("bypasses the proxy for a LAN inference box on a .local name", () => {
+		// A home-LAN inference endpoint (gpu-box.local:8080) is only reachable
+		// directly; sending it through the remote egress proxy fails the request.
+		expect(isLocalOrMetadataHost("gpu-box.local")).toBe(true);
+		expect(shouldBypassProxy(new URL("http://gpu-box.local:8080/v1"))).toBe(true);
+	});
+
+	it("does not bypass a host that merely ends in 'local'", () => {
+		expect(isLocalOrMetadataHost("notlocal")).toBe(false);
+		expect(shouldBypassProxy(new URL("http://notlocal/v1"))).toBe(false);
+	});
+});
+
 describe("shouldBypassProxy NO_PROXY rules", () => {
 	it("matches an exact host", () => {
 		Bun.env.NO_PROXY = "api.sakana.ai";
