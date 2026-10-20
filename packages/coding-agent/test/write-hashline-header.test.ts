@@ -110,6 +110,24 @@ describe("write tool hashline header", () => {
 		expect(getEditStore(session).seenLines(filePath, tag)).toEqual([1, 2]);
 	});
 
+	it("numbers the file's own lines, not the rows the model authored", async () => {
+		const filePath = path.join(tmpDir, "copied.ts");
+		const session = createSession(tmpDir);
+
+		// Copied `read` rows: the write strips the display prefixes, so the
+		// file holds "const a = 1;" on line 1. The row must number that line,
+		// not the row the model authored.
+		const result = await new WriteTool(session).execute("call-1", {
+			path: filePath,
+			content: "1:const a = 1;\n2:const b = 2;\n",
+		});
+
+		expect(await fs.readFile(filePath, "utf8")).toBe("const a = 1;\nconst b = 2;\n");
+		const rows = resultText(result).split("\n");
+		expect(rows).toContain("1:const a = 1;");
+		expect(rows).toContain("2:const b = 2;");
+	});
+
 	it("rejects an anchor on a line the write did not display", async () => {
 		const filePath = path.join(tmpDir, "long.ts");
 		const session = createSession(tmpDir);
@@ -222,6 +240,21 @@ describe("write tool hashline header", () => {
 		const echoPath = path.join(tmpDir, "echo.ts");
 		await tool.execute("call-2", { path: echoPath, content: "1:const a = 1;\n2:const b = 2;\n" });
 		expect(await Bun.file(echoPath).text()).toBe("const a = 1;\nconst b = 2;\n");
+	});
+
+	it("keeps a dump's own numbers, which are not display prefixes", async () => {
+		const filePath = path.join(tmpDir, "dump.txt");
+		const session = createSession(tmpDir);
+		const dump = "100000000: 30 00 00 54 bc.eq 0x100000004\n100000004: c0 03 5f d6 ret\n";
+
+		const result = await new WriteTool(session).execute("call-1", { path: filePath, content: dump });
+
+		// The dump's numbers do not count up by one, so they are content, not
+		// a display prefix: they stay as written, and the write numbers the
+		// file's own lines in front of them.
+		const rows = resultText(result).split("\n");
+		expect(rows).toContain("1:100000000: 30 00 00 54 bc.eq 0x100000004");
+		expect(rows).toContain("2:100000004: c0 03 5f d6 ret");
 	});
 
 	it("numbers a huge write without turning the file into a million line strings", async () => {
