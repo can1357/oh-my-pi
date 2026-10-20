@@ -1390,7 +1390,16 @@ export class ToolExecutionComponent extends Container {
 			// results, one-line receipts) keep that content instead of an equally
 			// tall but contentless frame.
 			const trimmed = trimBlankEdges(lines);
-			if (trimmed.length > this.#allocation) return this.#renderCompact(width);
+			if (trimmed.length > this.#allocation) {
+				// The compact row is the shape that reaches the terminal, and it
+				// carries no tail window for the first result to re-anchor. The
+				// flag is a per-paint fact, so the compact render has to clear
+				// it: the transcript measures every block with an unlimited
+				// allocation first, and that measurement arms the flag for a
+				// shape that never reaches the screen.
+				this.#firstResultViewportRepaintShapePainted = false;
+				return this.#renderCompact(width);
+			}
 			lines = trimmed;
 		}
 		this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();

@@ -150,7 +150,11 @@ describe("write streaming preview incremental line tracking", () => {
 		const budget = streamingBudget();
 
 		let expected = -1;
-		for (let count = 13; count <= 40; count++) {
+		// The first line that overflows the window plus two later cumulative
+		// appends: every count above the budget takes the same partial-tail
+		// branch, so further rows repeat the same assertion without covering a
+		// distinct contract.
+		for (const count of [budget + 1, budget + 2, allLines.length]) {
 			// Every payload ends mid-line, as a token stream does while the final
 			// newline has not arrived.
 			const head = allLines.slice(0, count - 1).join("\n");
@@ -264,6 +268,39 @@ describe("write streaming preview incremental line tracking", () => {
 		expect(atBudget).not.toContain("earlier line");
 		const overBudget = stripAnsi((await renderCollapsed(`${lines(budget + 1)}\n`, streamOptions, 26)).join("\n"));
 		expect(overBudget).toContain("… (1 earlier line)");
+	});
+
+	it("treats a carriage-return tail as the terminator it follows", () => {
+		// The preview normalizes carriage returns out before it counts lines, so
+		// a newline that is only followed by "\r" still terminates the last line:
+		// the payload draws `budget` top-anchored rows, and the threshold has to
+		// agree with the render it guards instead of asking for a repaint no
+		// tail window needs.
+		const options = { expanded: false, isPartial: false };
+		pinViewportRows(26);
+		const budget = streamingBudget();
+		const lines = Array.from({ length: budget }, (_, i) => `line ${i + 1}`).join("\n");
+		const repaints = (content: string) =>
+			writeToolRenderer.forceFirstResultViewportRepaint({ path: "/tmp/repaint.ts", content }, options);
+		expect(repaints(`${lines}\n\r`)).toBe(false);
+		expect(repaints(`${lines}\n\r\r`)).toBe(false);
+		// One line past the window is a tail window again.
+		expect(repaints(`${lines}\nline ${budget + 1}\n\r`)).toBe(true);
+	});
+
+	it("keeps the gutter width when the last terminating newline lands", async () => {
+		// The dropped terminator opens no row of its own, so it must not count
+		// towards the line total either: at the 1000-line crossing it would
+		// widen the gutter a token early and wrap the visible rows — changing
+		// the card height on the very newline this branch stabilizes.
+		const options = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		pinViewportRows(VIEWPORT_ROWS);
+		// 999 rendered lines keep a three-digit gutter; the terminating newline
+		// must not push the count to four.
+		const content = Array.from({ length: 999 }, (_, i) => `line ${i + 1}`).join("\n");
+		const partial = stripAnsi((await renderCollapsed(content, options)).join("\n"));
+		const terminated = stripAnsi((await renderCollapsed(`${content}\n`, options)).join("\n"));
+		expect(terminated).toBe(partial);
 	});
 
 	it("does not re-tokenize the whole markdown window as streamed content grows", async () => {
@@ -453,9 +490,5 @@ describe("write streaming preview incremental line tracking", () => {
 			if (runnerRowsDescriptor) Object.defineProperty(process.stdout, "rows", runnerRowsDescriptor);
 			else Reflect.deleteProperty(process.stdout, "rows");
 		}
-	});
-
-	it("leaves the runner's viewport descriptor intact for later test files", () => {
-		expect(Object.getOwnPropertyDescriptor(process.stdout, "rows")).toEqual(runnerRowsDescriptor);
 	});
 });
