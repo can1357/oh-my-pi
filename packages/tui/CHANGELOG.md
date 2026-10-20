@@ -5,10 +5,14 @@
 ### Added
 
 - Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Render gaps longer than two seconds now log a bounded pipeline timeline for diagnosis.
 
 ### Fixed
 
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
+- Keep the working-row animation moving without keyboard input when synchronized output is unavailable ([#16542](https://github.com/can1357/oh-my-pi/pull/16542) by [@Komzpa](https://github.com/Komzpa)).
+- Fixed every keypress in a long session rescanning the whole retained transcript: `TranscriptContainer` now tracks writes to the child array it owns and skips retained-history reconciliation on stable renders, and still reconciles when the children array is replaced from outside ([#16542](https://github.com/can1357/oh-my-pi/pull/16542) by [@Komzpa](https://github.com/Komzpa))
+- Fixed typing stalls when frequent background updates repeatedly postponed the pending keypress repaint.
 
 ## [19.1.0] - 2026-11-21
 

@@ -388,6 +388,35 @@ const NO_RUNS: ReadonlyMap<Component, CompactRun> = new Map();
 
 /** Owns transcript order, live capacity, and ordered immutable retirement. */
 export class TranscriptContainer extends Container {
+	// Owned child-array writes are explicit invalidations; externally replaced arrays
+	// remain untrusted and are compared until clear() restores ownership.
+	#ownedChildren: Component[];
+	#childrenDirty = false;
+
+	constructor() {
+		super();
+		this.#ownedChildren = this.#trackChildren(this.children);
+		this.children = this.#ownedChildren;
+		this.#syncedChildren = this.#ownedChildren;
+	}
+
+	#trackChildren(children: Component[]): Component[] {
+		return new Proxy(children, {
+			set: (target, property, value) => {
+				this.#childrenDirty = true;
+				return Reflect.set(target, property, value);
+			},
+			deleteProperty: (target, property) => {
+				this.#childrenDirty = true;
+				return Reflect.deleteProperty(target, property);
+			},
+			defineProperty: (target, property, descriptor) => {
+				this.#childrenDirty = true;
+				return Reflect.defineProperty(target, property, descriptor);
+			},
+		});
+	}
+
 	#entries: TranscriptEntry[] = [];
 	#frontier = 0;
 	#nextBatchId = 1;
@@ -451,6 +480,7 @@ export class TranscriptContainer extends Container {
 	#liveWrappersStart = 0;
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
+		const synchronized = this.children === this.#ownedChildren && !this.#childrenDirty;
 		super.addChild(component);
 		this.#entries.push({
 			component,
@@ -464,9 +494,11 @@ export class TranscriptContainer extends Container {
 			stableRenderPrefix: new RowPrefixCheck(),
 			split: undefined,
 		});
-		// `children` is public and may be edited externally; re-check the whole
-		// list once instead of trusting positions. Insert-after-anchor callers
-		// use insertChildAt, which keeps both arrays in lockstep.
+		if (synchronized) this.#childrenDirty = false;
+		// `children` is public and may be edited externally (callers may splice a
+		// just-added block into place, inserting after an anchor); re-check the
+		// whole list once instead of trusting positions. Insert-after-anchor
+		// callers use insertChildAt, which keeps both arrays in lockstep.
 		this.#entriesUnverified = true;
 	}
 
@@ -501,10 +533,15 @@ export class TranscriptContainer extends Container {
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
 		this.#fullRender = undefined;
+		if (this.children === this.#ownedChildren) this.#childrenDirty = false;
 	}
 
 	override clear(): void {
 		super.clear();
+		this.#ownedChildren = this.#trackChildren(this.children);
+		this.children = this.#ownedChildren;
+		this.#syncedChildren = this.#ownedChildren;
+		this.#childrenDirty = false;
 		this.#entries = [];
 		this.#frontier = 0;
 		this.#offered = undefined;
@@ -2046,16 +2083,32 @@ export class TranscriptContainer extends Container {
 	 */
 	#syncEntries(): void {
 		const children = this.children;
+		// The owned array is trusted only while it is also the array `#entries` last
+		// mirrored: a caller may swap in another array, let a render sync it, and
+		// then restore the owned one without writing to it.
+		if (
+			children === this.#ownedChildren &&
+			children === this.#syncedChildren &&
+			!this.#childrenDirty &&
+			!this.#entriesUnverified
+		) {
+			return;
+		}
 		if (
 			!this.#entriesUnverified &&
 			children === this.#syncedChildren &&
 			this.#entriesMatch(children, this.#frontier)
 		) {
+			this.#childrenDirty = false;
 			return;
 		}
 		this.#entriesUnverified = false;
 		this.#syncedChildren = children;
-		if (this.#entriesMatch(children, 0)) return;
+		if (this.#entriesMatch(children, 0)) {
+			this.#childrenDirty = false;
+			return;
+		}
+		this.#childrenDirty = false;
 		const existing = new Map(this.#entries.map(entry => [entry.component, entry]));
 		this.#entries = this.children.map(
 			component =>

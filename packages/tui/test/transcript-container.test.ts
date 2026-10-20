@@ -446,6 +446,79 @@ describe("TranscriptContainer row split", () => {
 });
 
 describe("TranscriptContainer", () => {
+	it("does not re-read the live children on stable renders", () => {
+		const transcript = new TranscriptContainer();
+		for (let index = 0; index < 300; index++) transcript.addChild(new Block([`live ${index}`], false));
+		transcript.renderViewport(80, 10, frame);
+		let childIndexReads = 0;
+		const children = transcript.children;
+		for (let index = 0; index < children.length; index++) {
+			const child = children[index]!;
+			Object.defineProperty(children, index, {
+				configurable: true,
+				enumerable: true,
+				get: () => {
+					childIndexReads++;
+					return child;
+				},
+			});
+		}
+		// Defining the probes writes to the owned array, so one render reconciles; the
+		// renders after it are the stable ones being measured.
+		transcript.renderViewport(80, 10, frame);
+		childIndexReads = 0;
+		for (let render = 0; render < 5; render++) transcript.renderViewport(80, 10, frame);
+		expect(childIndexReads).toBe(0);
+	});
+
+	it("still picks up an in-place write to the children array", () => {
+		const transcript = new TranscriptContainer();
+		for (let index = 0; index < 20; index++) transcript.addChild(new Block([`live ${index}`], false));
+		transcript.renderViewport(80, 40, frame);
+		transcript.children[5] = new Block(["swapped"], false);
+		const rows = transcript.renderViewport(80, 40, frame);
+		expect(rows).toContain("swapped");
+		expect(rows).not.toContain("live 5");
+	});
+
+	it("picks up an index rewrite made with defineProperty", () => {
+		const transcript = new TranscriptContainer();
+		for (let index = 0; index < 20; index++) transcript.addChild(new Block([`live ${index}`], false));
+		transcript.renderViewport(80, 40, frame);
+		Object.defineProperty(transcript.children, 5, {
+			configurable: true,
+			enumerable: true,
+			writable: true,
+			value: new Block(["swapped"], false),
+		});
+		const rows = transcript.renderViewport(80, 40, frame);
+		expect(rows).toContain("swapped");
+		expect(rows).not.toContain("live 5");
+	});
+
+	it("picks up a truncation made with defineProperty on length", () => {
+		const transcript = new TranscriptContainer();
+		for (let index = 0; index < 20; index++) transcript.addChild(new Block([`live ${index}`], false));
+		transcript.renderViewport(80, 40, frame);
+		Object.defineProperty(transcript.children, "length", { value: 10 });
+		const rows = transcript.renderViewport(80, 40, frame);
+		expect(rows).toContain("live 9");
+		expect(rows).not.toContain("live 10");
+	});
+
+	it("re-syncs when the owned children array is restored after a temporary replacement", () => {
+		const transcript = new TranscriptContainer();
+		for (let index = 0; index < 5; index++) transcript.addChild(new Block([`live ${index}`], false));
+		transcript.renderViewport(80, 40, frame);
+		const owned = transcript.children;
+		transcript.children = [new Block(["temporary"], false)];
+		expect(transcript.renderViewport(80, 40, frame)).toContain("temporary");
+		transcript.children = owned;
+		const rows = transcript.renderViewport(80, 40, frame);
+		expect(rows).toContain("live 4");
+		expect(rows).not.toContain("temporary");
+	});
+
 	it("preserves retirement while externally reordered and replaced live children settle", () => {
 		const transcript = new TranscriptContainer();
 		const archived = new Block(["archived"], true);
