@@ -20,6 +20,12 @@
 
 ## [18.12.4] - 2026-10-20
 
+- Fixed `index.d.ts` drifting from the generated bindings, so building the natives no longer leaves the checkout modified ([#16306](https://github.com/can1357/oh-my-pi/pull/16306) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `cargo test` writing crash reports from panicking Rust tests into your real `~/.omp/logs`: they now go to a per-user `pi-natives-test-logs-<uid>/` under the OS temp dir ([#16386](https://github.com/can1357/oh-my-pi/pull/16386) by [@will-bogusz](https://github.com/will-bogusz))
+### Breaking Changes
+
+- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/pi-natives` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ### Changed
 
 - Reduced native Git diff allocation overhead ([#16349](https://github.com/can1357/oh-my-pi/pull/16349) by [@kyle-elliott](https://github.com/kyle-elliott))
@@ -38,9 +44,6 @@
 - Fixed omp sessions on macOS adding a terminal icon to the Dock after the `computer` tool listed displays ([#13455](https://github.com/can1357/oh-my-pi/pull/13455) by [@VelizarSeleznev](https://github.com/VelizarSeleznev))
 
 ## [18.12.3] - 2026-10-19
-### Breaking Changes
-
-- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3, so Bun 1.3.14–1.4.2 no longer satisfies `@oh-my-pi/pi-natives` ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
