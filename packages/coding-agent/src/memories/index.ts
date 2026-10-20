@@ -212,6 +212,14 @@ interface TranscriptMemoryState {
 	 * the next build reselects the snapshot the branch holds.
 	 */
 	recordedEntryId: string | undefined;
+	/**
+	 * Id of the branch leaf the state was staged on; `null` for an empty branch.
+	 *
+	 * The commit that records the staged snapshot must land on the branch it
+	 * was staged for: the branch still holds this leaf while the leaf only
+	 * grew, and lost it when the leaf moved onto another branch.
+	 */
+	stagedLeafId: string | null;
 	/** The memory files' content the prompt block is built from. */
 	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined;
 	/** The rendered prompt block. */
@@ -347,6 +355,35 @@ export function clearMemoryToolDeveloperInstructionsCache(transcript: MemoryTran
 }
 
 /**
+ * Id of the entry the transcript's active branch ends on.
+ *
+ * `null` for an empty branch. The active branch is the path to the leaf, so it
+ * still holds a staged leaf while the leaf only grew, and lost it when the
+ * leaf moved onto another branch.
+ */
+function activeBranchLeafId(transcript: MemoryTranscript): string | null {
+	const branch = transcript.getBranchView?.();
+	if (!branch || branch.length === 0) return null;
+	return branch[branch.length - 1].id;
+}
+
+/**
+ * Whether the transcript still sits on the branch a snapshot was staged for.
+ *
+ * The session file must match: a session switch keeps the transcript object
+ * but swaps the file behind it. The branch must still hold the staged leaf, so
+ * a branch that grew keeps the snapshot and a leaf that moved onto another
+ * branch loses it.
+ */
+function stagedBranchStillHolds(transcript: MemoryTranscript, state: TranscriptMemoryState): boolean {
+	if ((transcript.getSessionFile() ?? undefined) !== state.sessionFile) return false;
+	const branch = transcript.getBranchView?.();
+	if (!branch) return false;
+	if (state.stagedLeafId === null) return true;
+	return branch.some(entry => entry.id === state.stagedLeafId);
+}
+
+/**
  * The callback that records the memory block a prompt was built from.
  *
  * The transcript must not claim a memory block the session never sent: the
@@ -360,6 +397,13 @@ export function pendingMemorySnapshotCommit(transcript: MemoryTranscript | undef
 	return () => {
 		if (!state.pending) return;
 		state.pending = false;
+		// The snapshot belongs to the branch it was staged for. A session switch
+		// or a leaf move since the staging would record it on another branch,
+		// whose transcript would then restore a block it never carried.
+		if (!stagedBranchStillHolds(transcript, state)) {
+			logger.debug("Discarded a stale memory snapshot commit", { sessionFile: state.sessionFile });
+			return;
+		}
 		const staged = state.snapshot;
 		// The state this process holds may have moved on (the startup refresh
 		// adopts a newer summary); it keeps its own pending flag, so only the
@@ -431,6 +475,7 @@ export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 		// The refreshed block still belongs to the branch the state was derived
 		// from: the branch decides whether the state still applies.
 		recordedEntryId: findRecordedMemorySnapshot(transcript, scope, token)?.entryId,
+		stagedLeafId: activeBranchLeafId(transcript),
 		snapshot,
 		value: renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings),
 		pending: snapshot !== undefined,
@@ -471,6 +516,8 @@ export async function buildMemoryToolDeveloperInstructions(
 	// a leaf that moved onto another branch must not keep the block of the
 	// branch it left.
 	const recorded = findRecordedMemorySnapshot(transcript, scope, token);
+	// The leaf the snapshot is staged on: the branch it belongs to.
+	const stagedLeafId = activeBranchLeafId(transcript);
 	const state = memoryStateByTranscript.get(transcript);
 	const reusable =
 		state && state.sessionFile === sessionFile && state.scope === scope && state.token === token ? state : undefined;
@@ -491,6 +538,7 @@ export async function buildMemoryToolDeveloperInstructions(
 		scope,
 		token,
 		recordedEntryId: recorded?.entryId,
+		stagedLeafId,
 		snapshot,
 		value,
 		pending: snapshot !== undefined,

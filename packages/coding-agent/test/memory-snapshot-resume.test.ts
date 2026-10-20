@@ -267,6 +267,51 @@ describe("memory snapshot across a resume", () => {
 		expect(resumedBlock).not.toContain("Learned elsewhere later");
 	});
 
+	it("discards a staged snapshot when the session switched before the prompt committed", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const cwd = settings.getCwd();
+		await saveLearnedLesson(agentDir, cwd, { content: "Source lesson" });
+
+		const session = SessionManager.create(cwd, sessionsDir);
+		await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		const commit = pendingMemorySnapshotCommit(session);
+
+		// The session resumes another transcript before the prompt commits.
+		const target = SessionManager.create(cwd, sessionsDir);
+		const targetFile = target.getSessionFile();
+		if (!targetFile) throw new Error("Expected a persisted session file");
+		await session.setSessionFile(targetFile);
+
+		// The staged snapshot belongs to the source transcript: recording it
+		// here would make it the target's newest valid record.
+		commit?.();
+		expect(snapshotRecords(session)).toHaveLength(0);
+	});
+
+	it("discards a staged snapshot when the leaf moved before the prompt committed", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const cwd = settings.getCwd();
+		await saveLearnedLesson(agentDir, cwd, { content: "Stable lesson" });
+
+		const session = SessionManager.create(cwd, sessionsDir);
+		const userId = session.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "hi" }],
+			timestamp: Date.now(),
+		});
+		session.appendMessage(createAssistantMessage("hello"));
+		await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		const commit = pendingMemorySnapshotCommit(session);
+
+		// The user rewinds onto another branch before the prompt commits.
+		session.branch(userId);
+
+		// The branch the prompt was built for is gone: recording the snapshot
+		// here would pin a block the branch never carried.
+		commit?.();
+		expect(snapshotRecords(session)).toHaveLength(0);
+	});
+
 	it("does not adopt the consolidated summary once the first turn started", async () => {
 		const settings = Settings.isolated({ "memory.backend": "local" });
 		const cwd = settings.getCwd();
