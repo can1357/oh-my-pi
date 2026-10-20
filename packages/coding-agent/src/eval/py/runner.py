@@ -1342,7 +1342,11 @@ def _child_pids() -> dict[int, list[int]]:
     """Map each live pid to the pids of its children."""
     children: dict[int, list[int]] = {}
     if sys.platform.startswith("linux"):
-        for entry in os.listdir("/proc"):
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return children
+        for entry in entries:
             if not entry.isdigit():
                 continue
             try:
@@ -1419,8 +1423,15 @@ def _run_installer(
     # kernel shutdown still reaches it, and cancelling walks it. Without procfs
     # nothing on Linux can list processes (ps reads /proc too), so there the
     # installer leads a group of its own to kill instead, and a SIGTERM to the
-    # kernel (what shutdown sends) takes that group down first.
-    own_group = sys.platform.startswith("linux") and not _procfs_usable()
+    # kernel (what shutdown sends) takes that group down first. Only the main
+    # thread can install that handler, and only it is cancelled by SIGINT, so an
+    # installer started elsewhere (a `%pip` inside a tool call) stays in the
+    # kernel's group.
+    own_group = (
+        sys.platform.startswith("linux")
+        and threading.current_thread() is threading.main_thread()
+        and not _procfs_usable()
+    )
     # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
@@ -1430,7 +1441,6 @@ def _run_installer(
         env=env,
         start_new_session=own_group,
     )
-    forwarding_sigterm = False
     previous_sigterm: Any = None
     if own_group:
 
@@ -1443,12 +1453,7 @@ def _run_installer(
             signal.signal(signal.SIGTERM, previous_sigterm if previous_sigterm is not None else signal.SIG_DFL)
             os.kill(os.getpid(), signal.SIGTERM)
 
-        try:
-            previous_sigterm = signal.signal(signal.SIGTERM, on_sigterm)
-            forwarding_sigterm = True
-        except ValueError:
-            # Not the main thread; cancelling still kills the group.
-            pass
+        previous_sigterm = signal.signal(signal.SIGTERM, on_sigterm)
     try:
         _stream_process_output(proc, on_text)
         return proc.wait()
@@ -1457,7 +1462,7 @@ def _run_installer(
         _kill_process_tree(proc, own_group)
         raise
     finally:
-        if forwarding_sigterm:
+        if own_group:
             signal.signal(signal.SIGTERM, previous_sigterm if previous_sigterm is not None else signal.SIG_DFL)
 
 
