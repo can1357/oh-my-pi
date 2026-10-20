@@ -1180,7 +1180,7 @@ fn first_different_line<'a>(old_lines: &'a [&str], new_lines: &'a [&str]) -> (&'
 	(old_lines.first().copied().unwrap_or(""), new_lines.first().copied().unwrap_or(""))
 }
 
-/// Maximum number of codepoint differences named in a match-error hint.
+/// Maximum number of body differences named in a match-error hint.
 const MAX_HINTED_DIFFERENCES: usize = 8;
 
 /// Codepoint-level hint for a diff pair whose characters differ in forms the
@@ -1193,40 +1193,52 @@ const MAX_HINTED_DIFFERENCES: usize = 8;
 /// the reason the match was rejected — naming it would point at a difference
 /// the matcher does not charge for.
 ///
-/// The lines are compared trimmed, the way the matcher compares them: an
-/// indentation difference would otherwise shift every character position and
-/// hide the folded pairs. The reported position is a character index into the
-/// trimmed line, not a display column.
+/// The body of the two lines is compared trimmed, the way the matcher
+/// compares it, so an indentation difference does not shift the character
+/// positions. The leading and trailing whitespace are compared separately:
+/// the matcher trims them away, but an exact match charges for them, so
+/// trimming them here would hide a difference the caller has to reproduce.
+/// The reported position is a character index into the trimmed body, not a
+/// display column.
 ///
 /// Returns `None` when the pair differs in nothing the matcher folds.
 fn folded_difference_hint(expected: &str, actual: &str, allow_fuzzy: bool) -> Option<String> {
 	if allow_fuzzy {
 		return None;
 	}
-	let expected_chars: Vec<char> = js_trim(expected).chars().collect();
-	let actual_chars: Vec<char> = js_trim(actual).chars().collect();
+	let (expected_leading, expected_body, expected_trailing) = split_boundary_whitespace(expected);
+	let (actual_leading, actual_body, actual_trailing) = split_boundary_whitespace(actual);
 	let mut hints: Vec<String> = Vec::new();
+	if let Some(hint) = boundary_difference_hint("start", expected_leading, actual_leading) {
+		hints.push(hint);
+	}
+	let mut body_hints = 0usize;
 	let mut omitted = 0usize;
-	for (index, (expected_char, actual_char)) in expected_chars.iter().zip(&actual_chars).enumerate()
+	for (index, (expected_char, actual_char)) in
+		expected_body.chars().zip(actual_body.chars()).enumerate()
 	{
 		if expected_char == actual_char {
 			continue;
 		}
-		if !fuzzy_equivalent_chars(*expected_char, *actual_char) {
+		if !fuzzy_equivalent_chars(expected_char, actual_char) {
 			continue;
 		}
-		if hints.len() == MAX_HINTED_DIFFERENCES {
+		if body_hints == MAX_HINTED_DIFFERENCES {
 			omitted += 1;
 			continue;
 		}
+		body_hints += 1;
 		hints.push(format!(
 			"  differs at char {}: U+{:04X} {} vs U+{:04X} {}",
 			index + 1,
-			*expected_char as u32,
+			expected_char as u32,
 			expected_char,
-			*actual_char as u32,
+			actual_char as u32,
 			actual_char,
 		));
+	}
+	if let Some(hint) = boundary_difference_hint("end", expected_trailing, actual_trailing) {
+		hints.push(hint);
 	}
 	if hints.is_empty() {
 		return None;
@@ -1235,6 +1247,38 @@ fn folded_difference_hint(expected: &str, actual: &str, allow_fuzzy: bool) -> Op
 		hints.push(format!("  ... and {omitted} more differences"));
 	}
 	Some(hints.join("\n"))
+}
+
+/// Split a line into its leading whitespace, its body and its trailing
+/// whitespace.
+///
+/// `js_trim` erases the boundary whitespace, but an exact match charges for
+/// it, so the regions are kept to report the codepoints that differ.
+fn split_boundary_whitespace(line: &str) -> (&str, &str, &str) {
+	let start = line.len() - js_trim_start(line).len();
+	let end = js_trim_end(line).len();
+	if start >= end {
+		// The line is nothing but whitespace.
+		return (line, "", "");
+	}
+	(&line[..start], &line[start..end], &line[end..])
+}
+
+/// The first pair of characters in the leading or trailing whitespace that the
+/// matcher folds together. The glyphs are omitted: whitespace renders as blank
+/// space, so only the codepoint tells the caller what to reproduce.
+fn boundary_difference_hint(position: &str, expected: &str, actual: &str) -> Option<String> {
+	let (expected_char, actual_char) =
+		expected
+			.chars()
+			.zip(actual.chars())
+			.find(|(expected_char, actual_char)| {
+				expected_char != actual_char && fuzzy_equivalent_chars(*expected_char, *actual_char)
+			})?;
+	Some(format!(
+		"  differs at the {position}: U+{:04X} vs U+{:04X}",
+		expected_char as u32, actual_char as u32
+	))
 }
 
 /// Format `EditMatchError.formatMessage` byte-for-byte, plus a codepoint hint
@@ -1812,6 +1856,69 @@ mod tests {
 			"Could not find a close enough match in a.ts.\n\nClosest match (90% similar) at line \
 			 3:\n  - foo(bar)=1\n  + foo（bar）＝2\nClosest match was below the 95% similarity \
 			 threshold."
+		);
+	}
+
+	#[test]
+	fn match_error_names_folded_boundary_difference() {
+		// The matcher trims the boundary whitespace but an exact match charges
+		// for it, so the codepoints of the invisible boundary difference have
+		// to be named.
+		let closest = FuzzyMatch {
+			actual_text: "foo\u{3000}".to_owned(),
+			start_index: 0,
+			start_line:  3,
+			confidence:  1.0,
+		};
+		assert_eq!(
+			format_match_error("a.ts", "foo\u{20}", Some(&closest), false, 0.95, None),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 3:\n",
+				"  - foo\u{20}\n",
+				"  + foo\u{3000}\n",
+				"  differs at the end: U+0020 vs U+3000\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+		let closest = FuzzyMatch {
+			actual_text: "\u{3000}foo".to_owned(),
+			start_index: 0,
+			start_line:  3,
+			confidence:  1.0,
+		};
+		assert_eq!(
+			format_match_error("a.ts", "\u{20}foo", Some(&closest), false, 0.95, None),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 3:\n",
+				"  - \u{20}foo\n",
+				"  + \u{3000}foo\n",
+				"  differs at the start: U+0020 vs U+3000\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_omits_folded_boundary_difference_in_fuzzy_mode() {
+		// With fuzzy matching enabled the boundary whitespace is free, so it
+		// cannot be the reason the match was rejected and must not be named.
+		let closest = FuzzyMatch {
+			actual_text: "foo\u{3000}".to_owned(),
+			start_index: 0,
+			start_line:  3,
+			confidence:  0.9,
+		};
+		assert_eq!(
+			format_match_error("a.ts", "foo\u{20}", Some(&closest), true, 0.95, None),
+			concat!(
+				"Could not find a close enough match in a.ts.\n\nClosest match (90% similar) at line \
+				 3:\n",
+				"  - foo\u{20}\n",
+				"  + foo\u{3000}\n",
+				"Closest match was below the 95% similarity threshold."
+			)
 		);
 	}
 
