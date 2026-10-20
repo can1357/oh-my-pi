@@ -229,6 +229,20 @@ pub fn is_hunk_header_text(text: &str) -> bool {
 		&& parse_hunk_header(text).is_some()
 }
 
+/// Whether text starts like an operation header but does not parse as one.
+///
+/// A row such as `PUT 351*=357` names an op keyword, so it is a malformed
+/// header, not payload: body lines start with `+`, and letting the row fall
+/// through as a bare body row would splice it (and its body) verbatim into the
+/// file. Such rows must raise a parse error naming the line.
+pub fn is_malformed_op_header(text: &str) -> bool {
+	let line = text.trim();
+	[HL_PUT_KEYWORD, HL_CUT_KEYWORD, HL_REM_KEYWORD, HL_MOVE_KEYWORD]
+		.iter()
+		.any(|keyword| keyword_tail(line, keyword).is_some())
+		&& parse_hunk_header(line).is_none()
+}
+
 /// Return canonical metaharness labels for operation headers in payload order.
 pub fn op_labels(input: &str) -> Vec<String> {
 	let mut tokenizer = Tokenizer::new();

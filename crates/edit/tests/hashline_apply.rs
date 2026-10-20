@@ -536,6 +536,144 @@ fn native_block_resolver_uses_real_syntax() {
 }
 
 #[test]
+fn qml_opener_blocks_resolve_for_put_and_cut() {
+	// No tree-sitter grammar exists for QML; block ops must still resolve the
+	// brace group a multi-line opener begins (the `PUT 45*` / `CUT 57*` shape).
+	let text = "Item {\n    width: 100\n    function go() {\n        run();\n    }\n}\n";
+	assert_eq!(
+		native_block_resolver("tst_maildetail.qml", text, 3).map(|span| (span.start, span.end)),
+		Some((3, 5))
+	);
+	assert_eq!(
+		native_block_resolver("tst_bundleexpand.qml", text, 1).map(|span| (span.start, span.end)),
+		Some((1, 6))
+	);
+	assert_eq!(native_block_resolver("tst_bundleexpand.qml", text, 4), None);
+}
+
+#[test]
+fn qml_block_cut_removes_the_resolved_block() {
+	let text = "Item {\n    width: 100\n    function go() {\n        run();\n    }\n}\n";
+	let edit = Edit::Block {
+		anchor:   Anchor { line: 3 },
+		payloads: Vec::new(),
+		mode:     Some(BlockMode::Cut),
+		register: Some("q".into()),
+		line_num: 1,
+		index:    0,
+	};
+	let mut resolutions = Vec::new();
+	let edits = [edit];
+	let lowered = resolve_block_edits(
+		&edits,
+		text,
+		"tst_maildetail.qml",
+		Unresolved::Throw,
+		&mut |resolution| resolutions.push(resolution),
+		&mut |_| {},
+	)
+	.unwrap();
+	assert_eq!(resolutions.len(), 1);
+	assert_eq!(
+		apply(text, &lowered, Some("tst_maildetail.qml")).text,
+		"Item {\n    width: 100\n}\n"
+	);
+}
+
+#[test]
+fn closer_anchored_insert_stays_at_the_specified_gap() {
+	// `PUT >4:` after the method closer: a shallower `private:` body stays at
+	// the gap the locator specified instead of sliding past the class closer
+	// where `private:` is invalid C++.
+	let text = "class Foo {\n    void bar() {\n        work();\n    }\n};\n";
+	let edit = Edit::Insert {
+		cursor:      Cursor::AfterAnchor(Anchor { line: 4 }),
+		text:        "private:".into(),
+		line_num:    1,
+		index:       0,
+		replacement: false,
+		block_start: None,
+	};
+	let result = apply(text, &[edit], Some("x.cpp"));
+	assert_eq!(result.text, "class Foo {\n    void bar() {\n        work();\n    }\nprivate:\n};\n");
+}
+
+#[test]
+fn comment_trailed_closer_anchored_insert_stays_at_the_specified_gap() {
+	let text = "class Foo {\n    void bar() {\n        work();\n    } // bar\n};\n";
+	let edit = Edit::Insert {
+		cursor:      Cursor::AfterAnchor(Anchor { line: 4 }),
+		text:        "private:".into(),
+		line_num:    1,
+		index:       0,
+		replacement: false,
+		block_start: None,
+	};
+	let result = apply(text, &[edit], Some("x.cpp"));
+	assert_eq!(
+		result.text,
+		"class Foo {\n    void bar() {\n        work();\n    } // bar\nprivate:\n};\n"
+	);
+}
+
+#[test]
+fn closer_anchored_insert_stays_despite_a_broken_batch_mate() {
+	let text = "class Foo {\n    void bar() {\n        work();\n    }\n};\n";
+	let edits = [
+		Edit::Insert {
+			cursor:      Cursor::AfterAnchor(Anchor { line: 4 }),
+			text:        "private:".into(),
+			line_num:    1,
+			index:       0,
+			replacement: false,
+			block_start: None,
+		},
+		Edit::Insert {
+			cursor:      Cursor::AfterAnchor(Anchor { line: 3 }),
+			text:        "            oops(".into(),
+			line_num:    2,
+			index:       1,
+			replacement: false,
+			block_start: None,
+		},
+	];
+	let result = apply(text, &edits, Some("x.cpp"));
+	assert_eq!(
+		result.text,
+		"class Foo {\n    void bar() {\n        work();\n            oops(\n    }\nprivate:\n};\n"
+	);
+}
+
+#[test]
+fn block_insert_after_opener_lands_as_a_sibling_after_the_block() {
+	let text = "class Foo {\n    void bar() {\n        work();\n    }\n};\n";
+	let edit = Edit::Block {
+		anchor:   Anchor { line: 2 },
+		payloads: vec!["private:".into()],
+		mode:     Some(BlockMode::InsertAfter),
+		register: None,
+		line_num: 1,
+		index:    0,
+	};
+	let mut resolutions = Vec::new();
+	let edits = [edit];
+	let lowered = resolve_block_edits(
+		&edits,
+		text,
+		"x.cpp",
+		Unresolved::Throw,
+		&mut |resolution| resolutions.push(resolution),
+		&mut |_| {},
+	)
+	.unwrap();
+	assert_eq!(resolutions.len(), 1);
+	assert_eq!(
+		apply(text, &lowered, Some("x.cpp")).text,
+		"class Foo {\n    void bar() {\n        work();\n    }\nprivate:\n};\n"
+	);
+}
+
+#[test]
 fn block_replace_lowers_to_replacement_inserts_and_deletes() {
 	let text = "fn outer() {\n\tif true {\n\t\twork();\n\t}\n}\n";
 	let edit = Edit::Block {
