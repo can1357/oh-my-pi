@@ -94,7 +94,7 @@
 - The pinned Subagents list shows how many agents are running and the agent hub key, and previews an agent's assignment at full width instead of the first 40 characters of its prompt template ([#16486](https://github.com/can1357/oh-my-pi/pull/16486) by [@H4vC](https://github.com/H4vC))
 ### Added
 
-- Added a debug log line for successful Hindsight recalls, carrying the recalled item count and the recall latency, so `hindsight.debug: true` sessions can measure how much memory was recalled and how long it took ([#10960](https://github.com/can1357/oh-my-pi/issues/10960))
+- Added a debug log line for successful Hindsight recalls, carrying the recalled item count and the recall latency, so `hindsight.debug: true` sessions can measure how much memory was recalled and how long it took ([#16456](https://github.com/can1357/oh-my-pi/pull/16456) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
