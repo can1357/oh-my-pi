@@ -490,6 +490,63 @@ describe("jfind cascade", () => {
 		}
 	});
 
+	it("refuses an explicitly named file too large to read instead of reporting a miss", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-oversized-file-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			// Past the 4 MiB read limit, so the file cannot be judged whole.
+			const body = `${"x".repeat(1023)}\n`.repeat(4200);
+			await Bun.write(file, body);
+			const judge = new FakeJudge(() => 0.1);
+			await expect(
+				runCascade({
+					root: { path: file, type: "file", size: Buffer.byteLength(body) },
+					filesystem: urlFs(dir),
+					query: "who owns coil reservation approvals?",
+					extraKeywords: ["coil reservation"],
+					judge,
+					includeHidden: false,
+				}),
+			).rejects.toThrow("exceeds the 4.0MB read limit");
+			// A refusal, not an empty result: nothing was judged at all.
+			expect(judge.requests).toHaveLength(0);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("keeps a source line that looks like a line tag intact when judging a named file", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-literal-tag-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			// The source line starts with the same text the window format adds, so
+			// a judge that strips the tag must still see the author's own prefix.
+			const body = "L1| The Production Planning team owns coil reservation approvals.\n";
+			await Bun.write(file, body);
+			const judged: string[] = [];
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if (!("file" in state)) return 0.1;
+				const passage = (state.passages as Record<string, string>)[key]!;
+				judged.push(passage);
+				return passage.includes("L1| The Production Planning team") ? 0.9 : 0.1;
+			});
+			const result = await runCascade({
+				root: { path: file, type: "file", size: Buffer.byteLength(body) },
+				filesystem: urlFs(dir),
+				query: "who owns coil reservation approvals?",
+				extraKeywords: ["coil reservation"],
+				judge,
+				includeHidden: false,
+			});
+			// The literal prefix reaches the judge alongside the window tag.
+			expect(judged.join("\n")).toContain("L1| The Production Planning team");
+			expect(result.hits.map(hit => hit.rel)).toEqual([file]);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 	it("routes sketches onward when their judgment fails and reports the failure", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-fail-"));
 		try {
