@@ -37,6 +37,7 @@
 - Fixed macOS background input leaving the target app in front of yours when it came forward just as you clicked another window of your app; your app comes back with the window you clicked ([#16217](https://github.com/can1357/oh-my-pi/pull/16217) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed omp sessions on macOS adding a terminal icon to the Dock after the `computer` tool listed displays ([#13455](https://github.com/can1357/oh-my-pi/pull/13455) by [@VelizarSeleznev](https://github.com/VelizarSeleznev))
 - Fixed `grep` searching the file its own output is redirected into: that input is now refused with `input file is also the output` instead of the matches being read back and matched again ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed `grep` searching the file its own output is redirected into, including standard input redirected from that same file: that input is now refused with `input file is also the output` instead of the matches being read back and matched again ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 

@@ -1436,25 +1436,38 @@ fn execute_search<M: Matcher>(
 				.as_deref()
 				.unwrap_or_else(|| OsStr::new("(standard input)"))
 				.as_encoded_bytes();
-			match process_reader(
-				matcher,
-				&mut searcher,
-				&mut host.stdin,
-				display,
-				opts,
-				&mut out,
-			) {
-				Ok(matched) => any_match |= matched,
-				// Abort remaining work; the host maps the BrokenPipe status.
-				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-					return crate::host::SIGPIPE_EXIT_CODE;
-				},
-				Err(error) => {
-					had_error = true;
-					if !opts.no_messages {
-						let _ = writeln!(host.stderr, "grep: (standard input): {error}");
-					}
-				},
+			if opts.refuse_output_file && host.stdin_is_stdout() {
+				// GNU grep refuses standard input that is the file its output
+				// lands in: the matches it writes would be read back and
+				// matched again.
+				had_error = true;
+				if !opts.no_messages {
+					let _ = writeln!(
+						host.stderr,
+						"grep: (standard input): input file is also the output"
+					);
+				}
+			} else {
+				match process_reader(
+					matcher,
+					&mut searcher,
+					&mut host.stdin,
+					display,
+					opts,
+					&mut out,
+				) {
+					Ok(matched) => any_match |= matched,
+					// Abort remaining work; the host maps the BrokenPipe status.
+					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+						return crate::host::SIGPIPE_EXIT_CODE;
+					},
+					Err(error) => {
+						had_error = true;
+						if !opts.no_messages {
+							let _ = writeln!(host.stderr, "grep: (standard input): {error}");
+						}
+					},
+				}
 			}
 			if host.is_cancelled() {
 				had_error = true;
@@ -1826,6 +1839,40 @@ mod tests {
 			run_with_stdout_file::<Grep>(&["-m2", "needle", "out.txt"], tree.path(), &path);
 		assert_eq!(code, 2, "{err}");
 		assert!(err.contains("input file is also the output"), "{err}");
+		// The refused input is left exactly as it was.
+		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
+	}
+
+	/// Contract: grep refuses standard input that is the file its output
+	/// lands in.
+	///
+	/// GNU grep reports `(standard input): input file is also the output` and
+	/// exits 2, because the matches it writes would be read back and matched
+	/// again; the input is never read at all.
+	#[test]
+	fn reading_standard_input_that_is_the_output_file_is_refused() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let stdout = std::fs::OpenOptions::new()
+			.append(true)
+			.open(&path)
+			.expect("stdout file");
+		let stdin = std::fs::OpenOptions::new()
+			.read(true)
+			.open(&path)
+			.expect("stdin file");
+		let (mut host, capture) = Host::for_test("grep", "", tree.path());
+		host.set_test_stdin(openfiles::OpenFile::File(stdin));
+		host.set_test_stdout(openfiles::OpenFile::File(stdout));
+		let parsed = Grep::try_parse_from(["grep", "needle", "-"]).unwrap();
+		let code = run_caught(parsed, &mut host);
+		assert_eq!(code, 2, "{}", capture.err());
+		assert!(
+			capture.err().contains("(standard input): input file is also the output"),
+			"{}",
+			capture.err()
+		);
 		// The refused input is left exactly as it was.
 		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
 	}

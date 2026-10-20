@@ -157,7 +157,11 @@ fn output_handle(file: &OpenFile) -> Option<OpenFile> {
 	}
 }
 
-fn output_metadata(file: &OpenFile) -> Option<Metadata> {
+/// The identity of the file behind a handle, when the handle names one.
+///
+/// The metadata is taken from the handle itself rather than from its path,
+/// so two descriptors onto the same file compare equal.
+fn handle_metadata(file: &OpenFile) -> Option<Metadata> {
 	match file {
 		// `Metadata::from_file` keeps the handle identity a Windows path stat
 		// drops; without it `path_is_stdout` can never match on Windows.
@@ -179,6 +183,25 @@ fn output_metadata(file: &OpenFile) -> Option<Metadata> {
 			#[cfg(not(any(unix, windows)))]
 			{
 				let _ = stdout;
+				None
+			}
+		},
+		OpenFile::Stdin(stdin) => {
+			#[cfg(unix)]
+			{
+				use std::os::fd::AsFd;
+				let handle = stdin.as_fd().try_clone_to_owned().ok()?;
+				Metadata::from_file(&std::fs::File::from(handle)).ok()
+			}
+			#[cfg(windows)]
+			{
+				use std::os::windows::io::AsHandle;
+				let handle = stdin.as_handle().try_clone_to_owned().ok()?;
+				Metadata::from_file(&std::fs::File::from(handle)).ok()
+			}
+			#[cfg(not(any(unix, windows)))]
+			{
+				let _ = stdin;
 				None
 			}
 		},
@@ -550,10 +573,27 @@ impl Host {
 	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
 	pub fn path_is_stdout(&self, path: &Path) -> bool {
 		self.stdout_metadata
-			.get_or_init(|| self.stdout_handle.as_ref().and_then(output_metadata))
+			.get_or_init(|| self.stdout_handle.as_ref().and_then(handle_metadata))
 			.as_ref()
 			.is_some_and(|stdout| {
 				stdout.is_file() && self.fs().metadata(path).is_ok_and(|candidate| stdout.same_file(&candidate))
+			})
+	}
+
+	/// Whether standard input is the regular file currently backing stdout.
+	///
+	/// The descriptor counterpart of [`Host::path_is_stdout`]: GNU grep's
+	/// guard against reading the file it writes is `SAME_INODE (st,
+	/// out_stat)` — the same inode, not merely the same path — so the
+	/// comparison is made between the two handles, not between their paths.
+	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
+	pub fn stdin_is_stdout(&self) -> bool {
+		self.stdout_metadata
+			.get_or_init(|| self.stdout_handle.as_ref().and_then(handle_metadata))
+			.as_ref()
+			.is_some_and(|stdout| {
+				stdout.is_file()
+					&& handle_metadata(self.stdin.file()).is_ok_and(|stdin| stdout.same_file(&stdin))
 			})
 	}
 
@@ -2091,6 +2131,17 @@ mod testing {
 			self.stdout_handle = output_handle(&file);
 			self.stdout_metadata.take();
 			self.stdout = SigpipeGuard::wrap(file, GuardedStream::Stdout, &self.sigpipe);
+		}
+
+		/// Replaces stdin on a test host with a real file, the way a shell
+		/// redirection (`<`) sets it up. Tests that model an input that is
+		/// also the output file hand in the same file they give stdout.
+		pub(crate) fn set_test_stdin(&mut self, file: OpenFile) {
+			self.stdin.file = file;
+			self.stdin_is_search_input = matches!(
+				&self.stdin.file,
+				&OpenFile::PipeReader(_) | &OpenFile::Stream(_) | &OpenFile::Vfs(_)
+			);
 		}
 
 		/// Sets an exported variable on a test host.
