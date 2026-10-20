@@ -147,12 +147,24 @@ export async function createSessionWorktree(
 	await fs.mkdir(path.dirname(worktreePath), { recursive: true });
 
 	await repository.createBranch(branch, baseCommit, false);
-	const result = await repository.worktreeAdd(worktreePath, branch, {
-		detach: false,
-		clone: cfgWorktreeClone.get(settings),
-		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
-		keepChanges,
-	});
+	const result = await repository
+		.worktreeAdd(worktreePath, branch, {
+			detach: false,
+			clone: cfgWorktreeClone.get(settings),
+			backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
+			keepChanges,
+		})
+		.catch(async (error: unknown) => {
+			// A refused worktree — the destination lies inside the source
+			// checkout — must not leave the branch behind: the next attempt
+			// would fail because the branch already exists.
+			try {
+				await repository.deleteBranch(branch, true);
+			} catch {
+				// The branch is gone or still in use; the refusal is what matters.
+			}
+			throw error;
+		});
 	return {
 		path: await fs.realpath(worktreePath),
 		branch,
