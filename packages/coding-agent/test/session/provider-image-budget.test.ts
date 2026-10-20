@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import type { Context, ImageContent, ModelSpec, TextContent } from "@oh-my-pi/pi-ai";
+import type { Context, ImageContent, Message, ModelSpec, TextContent } from "@oh-my-pi/pi-ai";
+import { streamFactoryDroid } from "@oh-my-pi/pi-ai/providers/factory-droid";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
+import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { factoryDroidWireBaseUrl } from "@oh-my-pi/pi-catalog/wire/factory-droid";
@@ -468,6 +471,86 @@ describe("provider context image budgets", () => {
 		const clamped = clampProviderContextImageBytes(counted, hosted);
 		expect(imageData(clamped)).toHaveLength(3);
 		expect(clamped.messages.slice(2).every(message => message.content.length === 2)).toBe(true);
+	});
+
+	it("keeps five 1 MB computer screenshots on Factory's Responses route under the body limit", async () => {
+		// An OpenAI computer-use transcript continued on a Factory GPT model: each result also carries its screenshot
+		// in `providerMetadata`, which the Responses wire sends instead of the content image when the model has no
+		// native computer use.
+		const screenshot = "A".repeat(1_000_000);
+		const messages: Message[] = [{ role: "user", content: "use the computer", timestamp: 0 }];
+		for (let index = 0; index < 5; index++) {
+			const id = `call_${index}|cu_${index}`;
+			messages.push(
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id,
+							name: "computer",
+							arguments: {},
+							providerMetadata: {
+								type: "computer",
+								providerItemId: `cu_${index}`,
+								actions: [{ type: "screenshot" }],
+								pendingSafetyChecks: [],
+							},
+						},
+					],
+					api: "openai-responses",
+					provider: "openai",
+					model: OPENAI_RESPONSES_MODEL.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: index * 2 + 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: id,
+					toolName: "computer",
+					content: [text(`result-${index}`), image(screenshot)],
+					isError: false,
+					timestamp: index * 2 + 2,
+					providerMetadata: {
+						type: "computer",
+						screenshot: { type: "computer_screenshot", image_url: `data:image/png;base64,${screenshot}` },
+						acknowledgedSafetyChecks: [],
+					},
+				},
+			);
+		}
+		const context: Context = { systemPrompt: [], tools: [], messages };
+		const factory = factoryDroidRegistry().find(entry => entry.spec.id === "gpt-5.6-terra");
+		if (!factory) throw new Error("Factory registry lost gpt-5.6-terra");
+		const hosted = buildModel(buildFactoryDroidModel(factory));
+		const clamped = clampProviderContextImageBytes(clampProviderContextImages(context, hosted), hosted);
+		expect(imageData(clamped)).toHaveLength(3);
+
+		let bodyBytes = 0;
+		const fetch = async (_url: string | URL | Request, init?: RequestInit) => {
+			bodyBytes = typeof init?.body === "string" ? Buffer.byteLength(init.body) : (init?.body as Uint8Array).length;
+			const completed = { type: "response.completed", response: { status: "completed", usage: {} } };
+			return new Response(`data: ${JSON.stringify(completed)}\n\ndata: [DONE]\n\n`, {
+				headers: { "Content-Type": "text/event-stream" },
+			});
+		};
+		const [header, claims] = [{ alg: "none" }, { external_org_id: "org-1" }].map(part =>
+			Buffer.from(JSON.stringify(part)).toString("base64url"),
+		);
+		await streamFactoryDroid(hosted, clamped, {
+			apiKey: `${header}.${claims}.sig`,
+			fetch: fetch as typeof globalThis.fetch,
+		}).result();
+		expect(bodyBytes).toBeGreaterThan(0);
+		expect(bodyBytes).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
 	});
 
 	it("keeps a fresh Factory image that alone fits the route, evicting older ones instead", () => {
