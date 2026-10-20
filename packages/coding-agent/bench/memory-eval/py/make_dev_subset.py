@@ -5,11 +5,16 @@ Takes all single-session-assistant ids plus, for each other type, the 19 ids wit
 sha256(question_id).
 """
 
-import hashlib
-import json
-from pathlib import Path
+# First: the script's own directory precedes PYTHONPATH on sys.path, so this import cannot be shadowed, and it runs
+# prepare_datasets' guard against import overrides before anything else is imported.
+from prepare_datasets import DATA as DATA_DIR, LME_REVISION, read_current  # isort: skip
 
-DATA = Path.home() / ".cache" / "omp-memory-eval" / "data" / "lme-s.json"
+import hashlib  # noqa: E402
+import json  # noqa: E402
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+DATA = DATA_DIR / "lme-s.json"
 OUT = Path(__file__).resolve().parent.parent / "lme-dev-subset.json"
 PER_TYPE = 19
 KEEP_ALL = "single-session-assistant"
@@ -22,7 +27,10 @@ def scored(q: dict) -> bool:
 
 
 by_type: dict[str, list[str]] = {}
-for q in json.loads(DATA.read_text(encoding="utf-8")):
+text = read_current(DATA, LME_REVISION)
+if text is None:
+	sys.exit(f"{DATA}: not the pinned revision {LME_REVISION} (or its marker does not match the data); re-run prepare_datasets.py")
+for q in json.loads(text):
 	if scored(q):
 		by_type.setdefault(q["question_type"], []).append(q["question_id"])
 
