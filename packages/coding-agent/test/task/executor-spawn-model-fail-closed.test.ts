@@ -136,6 +136,54 @@ describe("explicit spawn model resolution fails closed", () => {
 		expect(session.model).toBeUndefined();
 	});
 
+	it("keeps the role chain when the unresolved patterns were inherited from the parent session", async () => {
+		const session = createMockSession();
+		// The role chain resolved a model for the child; only the parent's pattern missed.
+		(session as unknown as { model: Model }).model = GPT as unknown as Model;
+		const prompt = vi.spyOn(session, "prompt");
+		mockCreateAgentSession(session, "Model not found");
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			task: "do work",
+			index: 0,
+			id: "spawn-inherited",
+			modelOverride: ["anthropic/claude-opus-5-5:high"],
+			modelExplicit: false,
+			settings: Settings.isolated(),
+			modelRegistry: fakeRegistry([GPT]),
+			enableLsp: false,
+		});
+		expect(result.error).toBeUndefined();
+		expect(prompt).toHaveBeenCalledTimes(1);
+	});
+
+	it("classifies a disabled or unauthenticated catalog model by its real cause", async () => {
+		const CLAUDE = model("anthropic", "claude-opus-5-5");
+		const OFFLINE = model("offline", "local-model");
+		const registry = {
+			refresh: async () => {},
+			getAvailable: () => [GPT],
+			getAll: () => [GPT, CLAUDE, OFFLINE],
+			getApiKey: async () => "sk-test",
+		} as unknown as ModelRegistry;
+		mockCreateAgentSession(createMockSession(), "Model not found");
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			task: "do work",
+			index: 0,
+			id: "spawn-classified",
+			modelOverride: ["anthropic/claude-opus-5-5", "offline/local-model", "ghost/none"],
+			settings: Settings.isolated({ disabledProviders: ["anthropic"] }),
+			modelRegistry: registry,
+			enableLsp: false,
+		});
+		expect(String(result.error).split("\n")[0]).toContain(
+			"anthropic/claude-opus-5-5 (provider disabled); offline/local-model (no auth); ghost/none (absent from catalog)",
+		);
+	});
+
 	it("control: with no explicit model the spawn still proceeds to the role chain", async () => {
 		const spy = mockCreateAgentSession(createMockSession());
 		const result = await runSubprocess({

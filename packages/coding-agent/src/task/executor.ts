@@ -319,11 +319,16 @@ function explicitModelResolutionError(
 ): Error | undefined {
 	if (modelPatterns.length === 0) return undefined;
 	const disabledProviders = new Set(cfgDisabledProviders.get(settings));
+	// Resolve against the full catalog: getAvailable() already drops disabled and unauthenticated
+	// providers, which would make every such request look absent from the catalog.
+	const catalog = { getAvailable: () => modelRegistry.getAll() };
+	const available = new Set(modelRegistry.getAvailable().map(candidate => `${candidate.provider}/${candidate.id}`));
 	const reasons = modelPatterns.map(pattern => {
-		const match = resolveModelOverride([pattern], modelRegistry, settings).model;
+		const match = resolveModelOverride([pattern], catalog, settings).model;
 		if (!match) return `${pattern} (absent from catalog)`;
 		if (disabledProviders.has(match.provider)) return `${pattern} (provider disabled)`;
-		return `${pattern} (no auth)`;
+		if (!available.has(`${match.provider}/${match.id}`)) return `${pattern} (no auth)`;
+		return `${pattern} (unavailable)`;
 	});
 	return new Error(
 		`Subagent spawn model resolution failed: none of the requested models resolved to a usable model: ${reasons.join("; ")}`,
@@ -517,6 +522,11 @@ export interface ExecutorOptions {
 	 */
 	detached?: boolean;
 	modelOverride?: string | string[];
+	/**
+	 * False when `modelOverride` was inherited from the parent session. Inherited patterns that stop
+	 * resolving keep the role-chain fallback; named ones fail the spawn. Defaults to true.
+	 */
+	modelExplicit?: boolean;
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
 	/** Extension routing note for the chosen model; surfaced as `resolvedModelRoute`. */
@@ -4732,6 +4742,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		id,
 		worktree,
 		modelOverride,
+		modelExplicit,
 		modelRole,
 		thinkingLevel,
 		outputSchema,
@@ -5419,7 +5430,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			}
 			// The SDK owns deferred resolution; a warning about a successful role-chain
 			// usage fallback is not a resolution failure.
-			if (modelPatternResolutionFailed) {
+			if (modelPatternResolutionFailed && modelExplicit !== false) {
 				const explicitModelError = explicitModelResolutionError(modelPatterns, modelRegistry, settings);
 				if (explicitModelError) {
 					session.dispose().catch(() => {});

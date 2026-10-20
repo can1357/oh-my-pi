@@ -1112,7 +1112,10 @@ export interface CreateAgentSessionResult {
 	mcpManager?: MCPManager;
 	/** Warning if session was restored with a different model than saved */
 	modelFallbackMessage?: string;
-	/** True only when deferred explicit model patterns resolved to no model after discovery. */
+	/**
+	 * True only when deferred explicit model patterns resolved to no model after discovery. A parent
+	 * `modelPatternAuthFallback` substitution is a separate, deliberate degradation and does not set it.
+	 */
 	modelPatternResolutionFailed?: boolean;
 	/** LSP servers detected for startup; warmup may continue in the background */
 	lspServers?: LspStartupServerInfo[];
