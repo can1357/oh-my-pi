@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,6 +13,7 @@ import {
 import type { Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as idaClient from "@oh-my-pi/pi-coding-agent/ida/client";
 import { InternalUrlRouter, LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
@@ -100,7 +101,7 @@ async function bashThenRead(directory: string, change: string, readPath: string,
 }
 
 describe("a read after a bash call in the same message", () => {
-	it("returns the file as the bash command left it, the read scheduled beside bash", async () => {
+	it("returns the file as the bash command left it, starting while bash runs", async () => {
 		const directory = await tempDirectory();
 		await Bun.write(path.join(directory, "f"), "old\n");
 
@@ -263,18 +264,6 @@ describe("a read after a bash call in the same message", () => {
 		expect(text).toContain("notes");
 	});
 
-	it("reads a local:// file the bash command rewrote", async () => {
-		const directory = await tempDirectory();
-		const artifacts = path.join(directory, "artifacts");
-		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifacts, getSessionId: () => "s" });
-		await Bun.write(path.join(artifacts, "local", "notes.md"), "old\n");
-
-		const { text } = await bashThenRead(directory, "echo new > artifacts/local/notes.md", "local://notes.md");
-
-		expect(text).toContain("new");
-		expect(text).not.toContain("old");
-	});
-
 	it("fetches a web URL without waiting for bash", async () => {
 		const directory = await tempDirectory();
 		const { server, requests } = pageServer();
@@ -300,7 +289,7 @@ describe("a read after a bash call in the same message", () => {
 		}
 	});
 
-	it("fetches a URL with a `;` in its query once", async () => {
+	it("fetches a URL with a `;` in its query once after bash ends", async () => {
 		const directory = await tempDirectory();
 		const { server, requests } = pageServer();
 		try {
@@ -314,6 +303,26 @@ describe("a read after a bash call in the same message", () => {
 			expect(isError).toBe(false);
 			expect(text).toContain("page body");
 			expect(requests.count).toBe(1);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("re-reads the local part of a URL `;` list the bash command rewrote", async () => {
+		const directory = await tempDirectory();
+		await Bun.write(path.join(directory, "notes.txt"), "old\n");
+		const { server } = pageServer();
+		try {
+			const { text } = await bashThenRead(
+				directory,
+				"echo new > notes.txt",
+				`http://127.0.0.1:${server.port}/page;notes.txt`,
+				fetchSession(directory),
+			);
+
+			expect(text).toContain("page body");
+			expect(text).toContain("new");
+			expect(text).not.toContain("old");
 		} finally {
 			server.stop(true);
 		}
@@ -334,6 +343,65 @@ describe("a read after a bash call in the same message", () => {
 			expect(text).toContain("written-by-bash");
 		} finally {
 			server.stop(true);
+		}
+	});
+
+	it("re-reads an internal URL the bash command rewrote in a `;` list led by a web URL", async () => {
+		const directory = await tempDirectory();
+		const artifacts = path.join(directory, "artifacts");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifacts, getSessionId: () => "s" });
+		await Bun.write(path.join(artifacts, "local", "notes.md"), "old\n");
+		// Unchanged, so only the internal URL's change can trigger the second read.
+		await Bun.write(path.join(directory, "sentinel.txt"), "sentinel\n");
+		const { server } = pageServer();
+		try {
+			const { text } = await bashThenRead(
+				directory,
+				"echo new > artifacts/local/notes.md",
+				`http://127.0.0.1:${server.port}/page;local://notes.md;sentinel.txt`,
+				fetchSession(directory),
+			);
+
+			expect(text).toContain("page body");
+			expect(text).toContain("new");
+			expect(text).not.toContain("old");
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("re-reads an IDA view, which an IDA edit changes without touching the binary", async () => {
+		const directory = await tempDirectory();
+		const idaDir = path.join(directory, "ida");
+		for (const lib of ["libidalib.dylib", "libidalib.so", "idalib.dll"]) await Bun.write(path.join(idaDir, lib), "");
+		await Bun.write(path.join(directory, "app"), new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]));
+		// Stands in for the open database: the bash command edits it, the binary stays as it was.
+		const database = path.join(directory, "database.txt");
+		await Bun.write(database, "old\n");
+		const acquire = spyOn(idaClient, "acquireIdaDatabase").mockImplementation(
+			async () =>
+				({
+					id: "fake",
+					fat: undefined,
+					request: async () => ({ text: await Bun.file(database).text() }),
+				}) as unknown as idaClient.IdaDatabase,
+		);
+		try {
+			const session = {
+				...createSession(directory),
+				settings: Settings.isolated({
+					"async.enabled": false,
+					"bash.autoBackground.enabled": false,
+					"bashInterceptor.enabled": false,
+					"ida.installDir": idaDir,
+				}),
+			} as unknown as ToolSession;
+			const { text } = await bashThenRead(directory, "echo new > database.txt", "./app:main", session);
+
+			expect(text).toContain("new");
+			expect(text).not.toContain("old");
+		} finally {
+			acquire.mockRestore();
 		}
 	});
 });
@@ -393,8 +461,8 @@ describe("a read beside an earlier writing call", () => {
 		);
 		controller.abort();
 
-		// A read that ignored its signal would wait for the call forever; one
-		// that skipped the wait would fulfill with the file.
+		// A read that ignored its signal would wait for the call forever; the
+		// abort rejects it instead of returning a read it did not check.
 		await expect(read).rejects.toThrow(/^Aborted/);
 	});
 });
