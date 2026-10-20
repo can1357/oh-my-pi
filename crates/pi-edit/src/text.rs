@@ -289,8 +289,41 @@ pub fn normalize_unicode(text: &str) -> String {
 	out.into_nfc()
 }
 
-/// Normalize a line for fuzzy comparison: trim, fold quotes/dashes to ASCII,
-/// collapse runs of spaces and tabs.
+/// Fold a typographic or width variant to the ASCII form the fuzzy matcher
+/// compares it as.
+///
+/// Typographic quotes and dashes collapse onto their ASCII counterparts, the
+/// Halfwidth and Fullwidth Forms block (`U+FF01`–`U+FF5E`) collapses onto
+/// ASCII, and the fullwidth white parentheses (`U+FF5F`/`U+FF60`) and the
+/// ideographic space (`U+3000`) collapse onto their ASCII counterparts.
+/// Returns `None` for characters that have no such variant.
+fn fold_unicode_variant(ch: char) -> Option<char> {
+	match ch {
+		'"' | '\u{201E}' | '\u{201F}' | '\u{AB}' | '\u{BB}' => Some('"'),
+		'\'' | '\u{201A}' | '\u{201B}' | '`' | '\u{B4}' => Some('\''),
+		'\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => Some('-'),
+		'\u{FF5F}' => Some('('),
+		'\u{FF60}' => Some(')'),
+		'\u{3000}' => Some(' '),
+		other => {
+			let cp = other as u32;
+			if (0xff01..=0xff5e).contains(&cp) {
+				char::from_u32(cp - 0xfee0)
+			} else {
+				None
+			}
+		},
+	}
+}
+
+/// True when two characters compare as the same in fuzzy matching, i.e. they
+/// differ only by a typographic or width variant (`“` vs `"`, `（` vs `(`).
+pub fn fuzzy_equivalent_chars(left: char, right: char) -> bool {
+	fold_unicode_variant(left).unwrap_or(left) == fold_unicode_variant(right).unwrap_or(right)
+}
+
+/// Normalize a line for fuzzy comparison: trim, fold quotes/dashes/fullwidth
+/// forms to ASCII, collapse runs of spaces and tabs.
 pub fn normalize_for_fuzzy(line: &str) -> String {
 	let trimmed = js_trim(line);
 	if trimmed.is_empty() {
@@ -300,11 +333,8 @@ pub fn normalize_for_fuzzy(line: &str) -> String {
 	let mut in_space = false;
 	for ch in trimmed.chars() {
 		let mapped = match ch {
-			'"' | '\u{201E}' | '\u{201F}' | '\u{AB}' | '\u{BB}' => '"',
-			'\'' | '\u{201A}' | '\u{201B}' | '`' | '\u{B4}' => '\'',
-			'\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => '-',
 			' ' | '\t' => ' ',
-			other => other,
+			other => fold_unicode_variant(other).unwrap_or(other),
 		};
 		if mapped == ' ' {
 			if in_space {
@@ -476,5 +506,18 @@ mod tests {
 	fn fuzzy_normalization_folds_punctuation() {
 		assert_eq!(normalize_for_fuzzy("  a \t b \u{201C}x\u{2014}y\u{201F}  "), "a b \u{201C}x-y\"");
 		assert_eq!(normalize_unicode(" caf\u{E9} \u{2260} 1\u{2010}"), "caf\u{E9} != 1-");
+	}
+
+	#[test]
+	fn fuzzy_normalization_folds_fullwidth_forms() {
+		// Halfwidth and Fullwidth Forms collapse onto ASCII, so a line written
+		// with fullwidth punctuation compares equal to its halfwidth twin.
+		assert_eq!(normalize_for_fuzzy("foo（bar）＝1"), "foo(bar)=1");
+		assert_eq!(normalize_for_fuzzy("Ａ！～"), "A!~");
+		assert_eq!(normalize_for_fuzzy("foo（bar）"), normalize_for_fuzzy("foo(bar)"));
+		// The ideographic space folds to an ASCII space and joins the run.
+		assert_eq!(normalize_for_fuzzy("a\u{3000}b"), "a b");
+		// Halfwidth katakana sit outside the folded range and stay verbatim.
+		assert_eq!(normalize_for_fuzzy("ｱ"), "ｱ");
 	}
 }

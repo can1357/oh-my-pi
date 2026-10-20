@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use crate::{
 	error::EditError,
 	text::{
-		adjust_indentation, count_leading_whitespace, is_non_empty_line, js_trim, js_trim_end,
-		js_trim_start, normalize_for_fuzzy, normalize_to_lf, normalize_unicode, utf16_len,
+		adjust_indentation, count_leading_whitespace, fuzzy_equivalent_chars, is_non_empty_line,
+		js_trim, js_trim_end, js_trim_start, normalize_for_fuzzy, normalize_to_lf, normalize_unicode,
+		utf16_len,
 	},
 };
 
@@ -1179,7 +1180,53 @@ fn first_different_line<'a>(old_lines: &'a [&str], new_lines: &'a [&str]) -> (&'
 	(old_lines.first().copied().unwrap_or(""), new_lines.first().copied().unwrap_or(""))
 }
 
-/// Format `EditMatchError.formatMessage` byte-for-byte.
+/// Maximum number of codepoint differences named in a match-error hint.
+const MAX_HINTED_DIFFERENCES: usize = 8;
+
+/// Codepoint-level hint for a diff pair whose characters differ only in forms
+/// the fuzzy matcher folds together (typographic quotes, dashes, fullwidth
+/// variants). Terminals render both sides alike, so the printed pair reads as
+/// identical and leaves the caller no actionable difference.
+///
+/// Returns `None` when the pair differs in nothing the matcher folds.
+fn folded_difference_hint(expected: &str, actual: &str) -> Option<String> {
+	let expected_chars: Vec<char> = expected.chars().collect();
+	let actual_chars: Vec<char> = actual.chars().collect();
+	let mut hints: Vec<String> = Vec::new();
+	let mut omitted = 0usize;
+	for (index, (expected_char, actual_char)) in expected_chars.iter().zip(&actual_chars).enumerate()
+	{
+		if expected_char == actual_char {
+			continue;
+		}
+		if !fuzzy_equivalent_chars(*expected_char, *actual_char) {
+			continue;
+		}
+		if hints.len() == MAX_HINTED_DIFFERENCES {
+			omitted += 1;
+			continue;
+		}
+		hints.push(format!(
+			"  differs at col {}: U+{:04X} {} vs U+{:04X} {}",
+			index + 1,
+			*expected_char as u32,
+			expected_char,
+			*actual_char as u32,
+			actual_char,
+		));
+	}
+	if hints.is_empty() {
+		return None;
+	}
+	if omitted > 0 {
+		hints.push(format!("  ... and {omitted} more differences"));
+	}
+	Some(hints.join("\n"))
+}
+
+/// Format `EditMatchError.formatMessage` byte-for-byte, plus a codepoint
+/// hint when the printed diff pair differs only in characters the matcher
+/// folds together.
 pub fn format_match_error(
 	path: &str,
 	search_text: &str,
@@ -1222,9 +1269,11 @@ pub fn format_match_error(
 	} else {
 		format!("Could not find the exact text in {path}.")
 	};
+	let difference_hint = folded_difference_hint(old_line, new_line)
+		.map_or_else(String::new, |hint| format!("{hint}\n"));
 	format!(
 		"{heading}\n\nClosest match ({similarity_percent}% similar) at line {}:\n  - {old_line}\n  \
-		 + {new_line}\n{hint}",
+		 + {new_line}\n{difference_hint}{hint}",
 		closest.start_line
 	)
 }
@@ -1693,6 +1742,55 @@ mod tests {
 			format_match_error("src/a.ts", "x", None, true, 0.95, None),
 			"Could not find a close enough match in src/a.ts."
 		);
+	}
+
+	#[test]
+	fn match_error_names_folded_codepoint_differences() {
+		let closest = FuzzyMatch {
+			actual_text: "foo（bar）＝1".to_owned(),
+			start_index: 0,
+			start_line:  3,
+			confidence:  0.93,
+		};
+		assert_eq!(
+			format_match_error("a.ts", "foo(bar)=1", Some(&closest), true, 0.95, None),
+			"Could not find a close enough match in a.ts.\n\nClosest match (93% similar) at line \
+			 3:\n  - foo(bar)=1\n  + foo（bar）＝1\n  differs at col 4: U+0028 ( vs U+FF08 （\n  \
+			 differs at col 8: U+0029 ) vs U+FF09 ）\n  differs at col 9: U+003D = vs U+FF1D \
+			 ＝\nClosest match was below the 95% similarity threshold."
+		);
+	}
+
+	#[test]
+	fn fuzzy_match_folds_fullwidth_punctuation() {
+		let outcome =
+			find_match("let x = foo（bar）＝1;\n", "let x = foo(bar)=1;", &FindMatchOptions {
+				allow_fuzzy:     true,
+				threshold:       Some(0.95),
+				excluded_ranges: &[],
+			});
+		assert_eq!(
+			outcome.matched.as_ref().map(|matched| matched.confidence),
+			Some(1.0),
+			"fullwidth punctuation must match its halfwidth form"
+		);
+	}
+
+	#[test]
+	fn replace_folds_fullwidth_punctuation() {
+		let result = replaced(
+			replace_text(
+				"let x = foo（bar）＝1;\n",
+				"let x = foo(bar)=1;",
+				"let x = 2;",
+				true,
+				false,
+				Some(0.95),
+			)
+			.expect("halfwidth anchor must match fullwidth content"),
+		);
+		assert_eq!(result.content, "let x = 2;\n");
+		assert_eq!(result.count, 1);
 	}
 
 	#[test]
