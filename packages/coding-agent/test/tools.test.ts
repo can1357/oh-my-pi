@@ -982,7 +982,11 @@ describe("Coding Agent Tools", () => {
 			fs.writeFileSync(testFile, `${firstLine}\n${tail}`);
 			expect(fs.statSync(testFile).size).toBeGreaterThan(4 * 1024 * 1024);
 
-			const result = await readTool.execute("test-hashline-preview-large", { path: `${testFile}:1-1` });
+			// With the column cap on, the line's cut display fits the page; only an uncapped read hits this branch.
+			const uncappedReadTool = wrapToolWithMetaNotice(
+				new ReadTool(createTestToolSession(testDir, Settings.isolated({ "tools.outputMaxColumns": 0 }))),
+			);
+			const result = await uncappedReadTool.execute("test-hashline-preview-large", { path: `${testFile}:1-1` });
 			const output = getTextOutput(result);
 
 			expect(output).toContain("Hashline output requires full lines");
@@ -1021,7 +1025,8 @@ describe("Coding Agent Tools", () => {
 			const artifactsDir = path.join(testDir, "artifact-limit-session");
 			fs.mkdirSync(artifactsDir, { recursive: true });
 			fs.writeFileSync(path.join(artifactsDir, "7.mcp.log"), `skip\n{\n${"x".repeat(60 * 1024)}\ntail`);
-			const artifactSession = createTestToolSession(testDir, Settings.isolated(), {
+			// Uncapped, so the 60KB line is charged its full size rather than its cut display.
+			const artifactSession = createTestToolSession(testDir, Settings.isolated({ "tools.outputMaxColumns": 0 }), {
 				localProtocolOptions: {
 					getArtifactsDir: () => artifactsDir,
 					getSessionId: () => "artifact-limit-session",
