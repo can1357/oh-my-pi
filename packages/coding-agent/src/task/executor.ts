@@ -131,6 +131,7 @@ import { appendToolResult, createTaskWidgetInputs, TOOLS_SOURCE_LABEL } from "./
 import { TextTap } from "../job-widgets/text-tap";
 import { TOOLS_SOURCE_ID } from "../job-widgets/types";
 import { attributeSubagentError } from "./error-attribution";
+import { findFallbackEntryForEvent } from "./fallback-attribution";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
@@ -2450,6 +2451,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	const attach = (session: AgentSession): (() => void) => {
+		const attributedFallbackEntries = new Set<string>();
 		// The session owns attribution: it knows which model produced its output
 		// and withholds an armed-but-unproven fallback. Re-deriving that here from
 		// the event stream got it wrong twice over — the stream also carries
@@ -2485,6 +2487,25 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			emitSubagentEvent(event);
 			publishAdvisorState(session);
 			publishServingModel();
+			if (event.type === "message_end" && event.message.role === "assistant") {
+				progress.firstTurnModel ??= `${event.message.provider}/${event.message.model}`;
+			}
+			if (event.type === "retry_fallback_applied") {
+				const entry = findFallbackEntryForEvent(
+					session.sessionManager.getBranch(),
+					event.from,
+					attributedFallbackEntries,
+				);
+				if (entry) {
+					attributedFallbackEntries.add(entry.id);
+					(progress.fallbacks ??= []).push({
+						from: entry.fallback?.from ?? event.from,
+						to: entry.model,
+						at: entry.timestamp,
+						reason: entry.fallback?.reason,
+					});
+				}
+			}
 			if (event.type === "auto_retry_start") {
 				progress.retryState = {
 					attempt: event.attempt,
@@ -3371,6 +3392,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		resolvedModelIdentity: progress.resolvedModelIdentity,
 		resolvedThinkingLevel: progress.resolvedThinkingLevel,
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
+		firstTurnModel: progress.firstTurnModel,
+		fallbacks: progress.fallbacks,
 		resolvedModelRoute: progress.resolvedModelRoute,
 		advisor: progress.advisor,
 		error: exitCode !== 0 && stderr ? stderr : undefined,

@@ -1,4 +1,6 @@
-import type { ModelUsageHealth } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ModelUsageHealth } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import type { TaskFallbackReason } from "@oh-my-pi/pi-tui/tools/task";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 
 /** Describe the health snapshot that actually caused a preflight switch. */
@@ -21,4 +23,21 @@ export function describeUsageFallback(health: ModelUsageHealth, reservePercent: 
 		? ` Earliest reported reset in ${formatDuration(earliestReset - now)}.`
 		: "";
 	return `Usage preflight: ${condition}.${reset} No request was sent to the source model for this attempt.`;
+}
+
+/** Reuse the retry classifier; retain only a bounded provider message head. */
+export function providerFallbackReason(message: AssistantMessage): TaskFallbackReason {
+	const id = AIError.classifyMessage(message);
+	const status = message.errorStatus ?? (Number(/^\s*(\d{3})\b/.exec(message.errorMessage ?? "")?.[1]) || undefined);
+	return {
+		class:
+			AIError.is(id, AIError.Flag.UsageLimit) || status === 429
+				? "quota"
+				: AIError.is(id, AIError.Flag.AuthFailed)
+					? "auth"
+					: "other",
+		...(status !== undefined ? { status } : {}),
+		message: (message.errorMessage ?? "provider returned an error without details").split("\n", 1)[0]!.slice(0, 400),
+		source: "provider-error",
+	};
 }
