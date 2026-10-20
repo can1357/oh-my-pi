@@ -83,16 +83,17 @@ fn write_selection(
 	})
 }
 
-/// A background left drag from global point `start` to `end` on window `wid`
-/// of `pid`, made as a text selection when both points lie on the text of one
-/// native text element of that window: the element at both points, whose
-/// `AXSelectedTextRange` is settable and which places each point on a
-/// character (`AXRangeForPosition`, `AXBoundsForRange`), outside web content
-/// and terminals. The selection runs between the carets a press and a release
-/// there would leave, so no mouse event is posted and no drag-and-drop session
-/// can begin. `None`, with nothing written, for any other drag, for one
-/// pressing where it could pick up an item (on selected text or on an
-/// attachment), and in text holding right-to-left script.
+/// A background left drag from global point `start` to `end` in an app of
+/// `pid`, made as a text selection when both points lie on the text of one
+/// native text element mapping to window `wid` (for a remote view such as a
+/// system Open or Save panel, the drawing process's window): the element at
+/// both points, whose `AXSelectedTextRange` is settable and which places each
+/// point on a character (`AXRangeForPosition`, `AXBoundsForRange`), outside
+/// web content and terminals. The selection runs between the carets a press
+/// and a release there would leave, so no mouse event is posted and no
+/// drag-and-drop session can begin. `None`, with nothing written, for any
+/// other drag, for one pressing where it could pick up an item (on selected
+/// text or on an attachment), and in text holding right-to-left script.
 pub(in crate::desktop::macos) fn select_dragged(
 	pid: libc::pid_t,
 	wid: u32,
