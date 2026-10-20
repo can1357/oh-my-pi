@@ -1204,7 +1204,10 @@ pub fn detach_git_dir_with(
 		repo
 			.config_snapshot()
 			.string(key)
-			.map(|v| (key, v.to_str_lossy().into_owned()))
+			// The key is owned so that the borrowed keys of this list and the
+			// owned keys of `persistent_config_values` describe the same
+			// thing: a configuration key that is written back verbatim.
+			.map(|v| (key.to_owned(), v.to_str_lossy().into_owned()))
 	})
 	.collect::<Vec<_>>();
 	if mode == DetachGitDirMode::Persistent {
@@ -1258,7 +1261,7 @@ pub fn detach_git_dir_with(
 		fs::write(git_entry.join("HEAD"), head)?;
 	}
 	for (key, value) in config_values {
-		set_config_file(&git_entry.join("config"), key, &value)?;
+		set_config_file(&git_entry.join("config"), &key, &value)?;
 	}
 	if let Some(bytes) = shallow {
 		fs::write(git_entry.join("shallow"), bytes)?;
@@ -2458,6 +2461,22 @@ mod tests {
 			.output()
 			.unwrap();
 		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+		String::from_utf8(output.stdout)
+			.unwrap()
+			.trim_end()
+			.to_owned()
+	}
+
+	/// The value of a configuration key, empty when the key is unset. `git
+	/// config --get` fails for an unset key, which the `git` helper above
+	/// treats as a fatal error, so a missing key needs its own accessor.
+	fn git_config(dir: &Path, key: &str) -> String {
+		let output = Command::new("git")
+			.arg("-C")
+			.arg(dir)
+			.args(["config", "--get", key])
+			.output()
+			.unwrap();
 		String::from_utf8(output.stdout)
 			.unwrap()
 			.trim_end()
@@ -3889,6 +3908,17 @@ mod tests {
 			origin.to_str().unwrap(),
 			"a detached submodule must keep the remote it fetches from"
 		);
+		// Everything the module configured to stay connected to its upstream
+		// travels with it: the refspec it fetches with and the branch
+		// tracking it fetches into.
+		let module_dir = source.join(".git/modules/sub");
+		for key in ["remote.origin.fetch", "branch.main.remote", "branch.main.merge"] {
+			let expected = git_config(&module_dir, key);
+			if expected.is_empty() {
+				continue;
+			}
+			assert_eq!(git_config(&submodule, key), expected, "a detached submodule must keep {key}");
+		}
 	}
 
 	#[test]
