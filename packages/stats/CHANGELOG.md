@@ -38,6 +38,8 @@
 ### Fixed
 
 - Fixed a warm stats sync worker being reused after the working directory moved, which read a relative transcript path from the previous directory instead of the current one ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
+
+
 ## [18.12.0] - 2026-10-17
 
 ### Fixed
