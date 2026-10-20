@@ -5,6 +5,7 @@
 ### Added
 
 - `AssistantMessageComponent` accepts display-only assistant text renderers and redraws one reply with `rerenderMessage(timestamp)`; `splitAssistantMessageToolTimeline` reports each segment's `contentOffsets` ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
+- `setExtensionLinks()` makes markdown draw links with registered schemes without a URL suffix or openable hyperlink and draws their labels with a dotted underline, `Composer.viewportLinkAt(row, col)` finds the one under a click, `Composer.setHoveredLink()` highlights a hovered one, `Composer.startLinkHints()` / `typeLinkHint()` tag the ones on screen for picking by keyboard (new `app.links.hint` keybinding, Alt+O), `setExtensionLinkPicking()` / `extensionLinkClicksAvailable()` share whether they can be picked process-wide, and `TUI.setPointerShape()` sets the mouse pointer shape (OSC 22) on the normal screen ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 
 ## [18.12.3] - 2026-10-19
 
@@ -22,10 +23,6 @@
 - Fixed the composer caret drifting one cell left per pasted image or video chip in terminals that draw the chip icon as a wide emoji (JetBrains terminal); the `unicode` preset now uses `📷`/`🎬` chip icons ([#16270](https://github.com/can1357/oh-my-pi/issues/16270))
 - Fixed Tern hiding user text sent with `/skill:<name>` inside a collapsed skill card; only the loaded skill prompt is hidden ([#16311](https://github.com/can1357/oh-my-pi/issues/16311))
 - Fixed SIXEL charts and images overlapping following content when their top rows scroll out of the viewport ([#16245](https://github.com/can1357/oh-my-pi/pull/16245) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
-### Added
-
-- `AssistantMessageComponent` accepts display-only assistant text renderers and redraws one reply with `rerenderMessage(timestamp)`; `splitAssistantMessageToolTimeline` reports each segment's `contentOffsets` ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
-- `setExtensionLinks()` makes markdown draw links with registered schemes without a URL suffix or openable hyperlink and draws their labels with a dotted underline, `Composer.viewportLinkAt(row, col)` finds the one under a click, `Composer.setHoveredLink()` highlights a hovered one, `Composer.startLinkHints()` / `typeLinkHint()` tag the ones on screen for picking by keyboard (new `app.links.hint` keybinding, Alt+O), `setExtensionLinkPicking()` / `extensionLinkClicksAvailable()` share whether they can be picked process-wide, and `TUI.setPointerShape()` sets the mouse pointer shape (OSC 22) on the normal screen ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 
 ## [18.12.2] - 2026-10-18
 

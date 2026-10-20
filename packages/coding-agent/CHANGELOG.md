@@ -5,6 +5,7 @@
 ### Added
 
 - Added opt-in extension reply renderers: with `extensionRenderers.assistantText` on, `pi.registerAssistantTextRenderer()` changes how assistant text is drawn (terminal and Tern native view) without touching the session or model context, and `ctx.ui.rerenderMessage(timestamp)` redraws one reply in place ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
+- Added extension link schemes behind the same setting: `pi.registerLinkScheme()` claims a scheme whose links draw with a dotted underline and without the ` (url)` suffix, and raise `link_activate` for that extension instead of opening anything. Alt+O (`app.links.hint`) tags each such link on screen so typing its tag picks it, no mouse needed; with `tui.mouse` on a click picks it too, and hovering highlights it with a hand pointer. omp says once which key picks them, and `ctx.ui.getLinkClicksAvailable()` lets a renderer fall back to inline content ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 
 ### Fixed
 
@@ -65,12 +66,6 @@
 - Fixed sessions whose first reply starts with a todo plan getting a title without its icon and code: the plan's title refresh no longer replaces the card title that is still being generated
 - Fixed generated titles that come out without an icon and code (a subagent's title, a title-model fallback, a malformed card reply) staying plain: they now get a card like `/rename` titles do
 - Fixed running the test suite adding fixture titles (`PLAN`, `renamed session`, …) to your real `~/.omp/agent/history.db`
-
-## [18.12.2] - 2026-10-18
-### Added
-
-- Added opt-in extension reply renderers: with `extensionRenderers.assistantText` on, `pi.registerAssistantTextRenderer()` changes how assistant text is drawn (terminal and Tern native view) without touching the session or model context, and `ctx.ui.rerenderMessage(timestamp)` redraws one reply in place ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
-- Added extension link schemes behind the same setting: `pi.registerLinkScheme()` claims a scheme whose links draw with a dotted underline and without the ` (url)` suffix, and raise `link_activate` for that extension instead of opening anything. Alt+O (`app.links.hint`) tags each such link on screen so typing its tag picks it, no mouse needed; with `tui.mouse` on a click picks it too, and hovering highlights it with a hand pointer. omp says once which key picks them, and `ctx.ui.getLinkClicksAvailable()` lets a renderer fall back to inline content ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
 
 ## [18.12.2] - 2026-10-18
 
