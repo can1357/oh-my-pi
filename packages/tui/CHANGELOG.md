@@ -133,6 +133,8 @@
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
 
 ## [18.12.4] - 2026-10-20
+### Fixed
+- Fixed the collapsed streaming `write` preview changing height line-by-line as tokens arrive, which shifted every row on screen; the preview now holds a steady height while the file streams in ([#16033](https://github.com/can1357/oh-my-pi/issues/16033), [#16099](https://github.com/can1357/oh-my-pi/pull/16099) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
