@@ -1047,9 +1047,15 @@ const streamOpenAIResponsesOnce = (
 					abortSignal: options?.signal,
 					isProgressItem: useWebSocket ? isResponsesWebSocketProgressEvent : isOpenAIResponsesProgressEvent,
 					isIdleActivityItem: event =>
-						!!event && typeof event === "object" && "type" in event && event.type === "codex.keepalive",
+						!useWebSocket &&
+						!!event &&
+						typeof event === "object" &&
+						"type" in event &&
+						event.type === "codex.keepalive",
 					idleActivityMaxGapMs:
-						idleTimeoutMs !== undefined && idleTimeoutMs > 0 ? Math.max(idleTimeoutMs, 300_000) : undefined,
+						!useWebSocket && idleTimeoutMs !== undefined && idleTimeoutMs > 0
+							? Math.max(idleTimeoutMs, 300_000)
+							: undefined,
 				});
 			};
 			let strictRetryAvailable = true;
