@@ -584,6 +584,7 @@
 - Fixed native remote compaction for supported Bedrock Claude models without changing ordinary Converse turns; a custom non-AWS `baseUrl` needs `remoteCompaction.enabled: true` ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Fixed Anthropic compaction blocks dropping their signed `tool_changes`, which made the replayed block fail its signature ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Added a `commandcode:monthly` usage limit for Command Code subscriptions: the monthly credit grant, graded against what remains and reset at the subscription's billing period end, so a monthly cap that binds before the weekly window is visible
+- Added a `commandcode:monthly` usage limit for Command Code subscriptions: the monthly credit grant, graded against what remains and reset at the subscription's billing period end, so a monthly cap that binds before the weekly window is visible ([#16492](https://github.com/can1357/oh-my-pi/pull/16492) by [@enieuwy](https://github.com/enieuwy))
 
 ## [18.12.3] - 2026-10-19
 

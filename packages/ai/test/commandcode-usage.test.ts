@@ -149,18 +149,52 @@ describe("command code usage provider", () => {
 		expect(monthly?.amount).toMatchObject({ used: 90, limit: 120, remaining: 30, usedFraction: 0.75 });
 	});
 
-	it("omits only the monthly limit when the grant cannot be sized", async () => {
+	it("omits only the monthly limit when the grant or its billing period is unknown", async () => {
+		const granted: Route = {
+			body: {
+				credits: { monthlyCredits: 30, monthlyCreditsGranted: 120 },
+				windowLimits: { fiveHour: { used: 4, cap: 10 }, weekly: { used: 3, cap: 100 } },
+			},
+		};
 		const cases: [name: string, routes: Record<string, Route>][] = [
 			[
 				"unknown plan",
 				{
 					...WINDOWED_ROUTES,
-					"/alpha/billing/subscriptions": { body: { data: { planId: "individual-new-tier" } } },
+					"/alpha/billing/subscriptions": {
+						body: {
+							data: {
+								planId: "individual-new-tier",
+								currentPeriodStart: "2026-10-15T05:10:24.000Z",
+								currentPeriodEnd: "2026-11-15T05:10:24.000Z",
+							},
+						},
+					},
 				},
 			],
 			[
 				"subscription lookup fails",
 				{ ...WINDOWED_ROUTES, "/alpha/billing/subscriptions": { status: 500, body: "{}" } },
+			],
+			[
+				"subscription route denies the key",
+				{ ...WINDOWED_ROUTES, "/alpha/billing/subscriptions": { status: 401, body: { success: false } } },
+			],
+			[
+				"grant known but subscription lookup fails",
+				{
+					...WINDOWED_ROUTES,
+					"/alpha/billing/credits": granted,
+					"/alpha/billing/subscriptions": { status: 500, body: "{}" },
+				},
+			],
+			[
+				"grant known but no billing period",
+				{
+					...WINDOWED_ROUTES,
+					"/alpha/billing/credits": granted,
+					"/alpha/billing/subscriptions": { body: { data: { planId: "individual-goat" } } },
+				},
 			],
 		];
 		for (const [name, routes] of cases) {

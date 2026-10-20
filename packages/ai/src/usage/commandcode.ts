@@ -60,14 +60,17 @@ function finiteNumber(value: unknown): number | undefined {
 
 /**
  * Returns the unwrapped JSON body, or `null` for any failure that should read
- * as "no data", 403 included. Only a 401 throws, so a revoked key purges the
- * cached report instead of re-serving it.
+ * as "no data", 403 included. Only a 401 on a required route throws, so a
+ * revoked key purges the cached report instead of re-serving it; an optional
+ * route reads its 401 as "no data", so a route-specific denial cannot
+ * invalidate a key the required routes accepted.
  */
 async function getJson(
 	url: string,
 	apiKey: string,
 	signal: AbortSignal | undefined,
 	ctx: UsageFetchContext,
+	optional = false,
 ): Promise<Record<string, unknown> | null> {
 	try {
 		const response = await ctx.fetch(url, {
@@ -78,7 +81,7 @@ async function getJson(
 			signal,
 		});
 		if (!response.ok) {
-			if (response.status === 401) {
+			if (response.status === 401 && !optional) {
 				throw new ProviderHttpError(
 					`Command Code usage endpoint returned ${response.status} ${response.statusText}`.trim(),
 					response.status,
@@ -151,7 +154,8 @@ function buildWindowLimit(
 /**
  * Builds the monthly grant limit from the remaining `monthlyCredits`, the
  * grant size, and the subscription's billing period. Without a known grant
- * the remaining amount alone cannot be graded, so no limit is emitted and the
+ * the remaining amount alone cannot be graded, and without the billing period
+ * the limit has no reset, so in either case no limit is emitted and the
  * balance limit stays the only record of it.
  */
 function buildMonthlyLimit(
@@ -162,27 +166,20 @@ function buildMonthlyLimit(
 	orgId: string | undefined,
 ): UsageLimit | undefined {
 	if (remaining === undefined) return undefined;
+	const periodStart = parseIsoTimestamp(subscription?.currentPeriodStart);
+	const resetsAt = parseIsoTimestamp(subscription?.currentPeriodEnd);
+	if (periodStart === undefined || resetsAt === undefined || resetsAt <= periodStart) return undefined;
+	const durationMs = resetsAt - periodStart;
 	const planId = nonEmptyString(subscription?.planId);
 	const grant = finiteNumber(credits.monthlyCreditsGranted) ?? (planId ? MONTHLY_GRANT_BY_PLAN[planId] : undefined);
 	if (grant === undefined || grant <= 0) return undefined;
 	const used = Math.max(0, grant - remaining);
 	const usedFraction = used / grant;
-	const periodStart = parseIsoTimestamp(subscription?.currentPeriodStart);
-	const resetsAt = parseIsoTimestamp(subscription?.currentPeriodEnd);
-	const durationMs =
-		periodStart !== undefined && resetsAt !== undefined && resetsAt > periodStart
-			? resetsAt - periodStart
-			: undefined;
 	return {
 		id: `${PROVIDER}:monthly`,
 		label: "Monthly credits",
 		scope: { provider: PROVIDER, accountId, ...(orgId ? { orgId } : {}), windowId: "monthly", shared: true },
-		window: {
-			id: "monthly",
-			label: "Monthly",
-			...(durationMs !== undefined ? { durationMs } : {}),
-			...(resetsAt !== undefined ? { resetsAt } : {}),
-		},
+		window: { id: "monthly", label: "Monthly", durationMs, resetsAt },
 		amount: { used, limit: grant, remaining, usedFraction, unit: "credits" },
 		status: usageStatus(usedFraction),
 	};
@@ -228,7 +225,13 @@ async function fetchCommandCodeUsage(params: UsageFetchParams, ctx: UsageFetchCo
 	// skip the lookup. A failed lookup drops the monthly limit and nothing else.
 	const subscriptionBody =
 		monthly !== undefined
-			? await getJson(`${origin}${SUBSCRIPTIONS_PATH}${orgQuery}`, params.credential.apiKey, params.signal, ctx)
+			? await getJson(
+					`${origin}${SUBSCRIPTIONS_PATH}${orgQuery}`,
+					params.credential.apiKey,
+					params.signal,
+					ctx,
+					true,
+				)
 			: null;
 	const subscription = subscriptionBody ?? undefined;
 
