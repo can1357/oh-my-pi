@@ -142,6 +142,9 @@
 
 ## [18.12.4] - 2026-10-20
 
+- Fixed requests to `.local` LAN endpoints (e.g. `gpu-box.local:8080`) being sent through an egress proxy — `PI_PROXY` or `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` — instead of staying on the local network ([#16457](https://github.com/can1357/oh-my-pi/pull/16457) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed Anthropic and Bedrock logging one warning per dropped thinking block (hundreds for one request) after a conversation change; the drop now logs one warning with the count ([#16392](https://github.com/can1357/oh-my-pi/pull/16392) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Factory Droid Core models (Kimi, GLM, DeepSeek and others) dropping calls to tools with names over 64 characters and their results from later requests; such names now shorten to 64 characters, and shorter names are sent unchanged ([#16384](https://github.com/can1357/oh-my-pi/pull/16384) by [@will-bogusz](https://github.com/will-bogusz))
 ### Added
 
 - Added opt-in `reclaimAbovePct` to `auth.accountPolicies`: sessions automatically moved to a lower-priority account return to the preferred one once it has that much quota left ([#14237](https://github.com/can1357/oh-my-pi/pull/14237) by [@will-bogusz](https://github.com/will-bogusz))
