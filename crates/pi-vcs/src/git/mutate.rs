@@ -2344,7 +2344,7 @@ fn collect_gitlinks_into(
 		.map_err(|err| Error::backend("git worktree add", err))?;
 	for entry in tree.iter() {
 		let entry = entry.map_err(|err| Error::backend("git worktree add", err))?;
-		let name = entry.inner.filename.to_string_lossy().into_owned();
+		let name = entry.inner.filename.to_str_lossy().into_owned();
 		let path = if prefix.is_empty() {
 			name
 		} else {
