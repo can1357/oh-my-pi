@@ -1458,24 +1458,31 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		function continuationHost(message: AssistantMessage, textOutputCommitted = true) {
 			const messages: AgentMessage[] = [message];
 			const continues: string[] = [];
+			const beforeContinue: (() => void)[] = [];
 			const host = createHost(model, modelRegistry, { messages, textOutputCommitted });
 			host.agent = {
 				state: { messages },
 				appendMessage: (appended: AgentMessage) => messages.push(appended),
 			} as never;
-			host.scheduleAgentContinue = options => continues.push(options.source);
-			return { host, messages, continues };
+			host.scheduleAgentContinue = options => {
+				continues.push(options.source);
+				if (options.beforeContinue) beforeContinue.push(options.beforeContinue);
+			};
+			return { host, messages, continues, beforeContinue };
 		}
 
 		it("keeps the partial turn and continues with a resume reminder", () => {
 			const message = stalledTextTurn();
-			const { host, messages, continues } = continuationHost(message);
+			const { host, messages, continues, beforeContinue } = continuationHost(message);
 			const recovery = new TurnRecovery(host);
 
 			expect(recovery.isRetryableError(message)).toBe(false);
 			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
 
+			// The reminder lands only when the delayed continuation starts.
+			expect(messages).toEqual([message]);
+			for (const run of beforeContinue) run();
 			expect(messages[0]).toBe(message);
 			const reminder = messages[1];
 			if (reminder?.role !== "developer") throw new Error("expected developer reminder");

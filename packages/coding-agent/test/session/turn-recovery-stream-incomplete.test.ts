@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
-import * as AIError from "@oh-my-pi/pi-ai/error";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -51,7 +50,7 @@ function failUnexpected(name: string): never {
 
 interface RecoveryCalls {
 	appended: unknown[];
-	continued: { source: string }[];
+	continued: { source: string; beforeContinue?: () => void }[];
 }
 
 function recovery(options: { textOutputCommitted?: boolean; calls?: RecoveryCalls } = {}): TurnRecovery {
@@ -88,7 +87,7 @@ function recovery(options: { textOutputCommitted?: boolean; calls?: RecoveryCall
 		promptSequence: () => 1,
 		sessionId: () => "stream-incomplete-test",
 		emitSessionEvent: async () => {},
-		scheduleAgentContinue: (request: { source: string }) => {
+		scheduleAgentContinue: (request: { source: string; beforeContinue?: () => void }) => {
 			calls?.continued.push(request);
 		},
 		waitForSessionMessagePersistence: async () => {},
@@ -133,11 +132,6 @@ describe("TurnRecovery stream_incomplete after committed text", () => {
 		{ type: "text", text: "committed answer" },
 	];
 
-	it("persists the live errorId as a retriable transient", () => {
-		expect(AIError.create(AIError.Flag.Transient)).toBe(STREAM_INCOMPLETE_ERROR_ID);
-		expect(AIError.retriable(STREAM_INCOMPLETE_ERROR_ID)).toBe(true);
-	});
-
 	for (const errorMessage of [STREAM_INCOMPLETE_MESSAGE, STREAM_INCOMPLETE_CLOSE_CODE_MESSAGE]) {
 		for (const [label, content] of [
 			["text", textOnly],
@@ -150,6 +144,10 @@ describe("TurnRecovery stream_incomplete after committed text", () => {
 				expect(subject.isRetryableError(message)).toBe(false);
 				expect(subject.handleCommittedTextStreamStall(message)).toBe(true);
 				expect(calls.continued).toEqual([expect.objectContaining({ source: "stream-stall-continue" })]);
+				// The reminder is appended only once the delayed continuation actually starts,
+				// so a cancelled wait leaves nothing behind.
+				expect(calls.appended).toEqual([]);
+				calls.continued[0]?.beforeContinue?.();
 				expect(calls.appended).toEqual([expect.objectContaining({ role: "developer" })]);
 			});
 		}

@@ -312,6 +312,8 @@ export interface TurnRecoveryHost {
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
+		/** Runs once, immediately before `agent.continue()`; never runs for a skipped request. */
+		beforeContinue?: () => void;
 		onError?: (error: unknown) => void;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -807,24 +809,29 @@ export class TurnRecovery {
 			provider: message.provider,
 			errorMessage: message.errorMessage,
 		});
-		this.#host.agent.appendMessage({
-			role: "developer",
-			content: [
-				{
-					type: "text",
-					text: prompt.render(streamStallContinueTemplate, {
-						retryCount: this.#streamStallContinueCount,
-						maxRetries: STREAM_STALL_CONTINUE_MAX_RETRIES,
-					}),
-				},
-			],
-			attribution: "agent",
-			timestamp: Date.now(),
-		});
+		const retryCount = this.#streamStallContinueCount;
 		this.#host.scheduleAgentContinue({
 			source: "stream-stall-continue",
-			delayMs: STREAM_STALL_CONTINUE_DELAYS_MS[this.#streamStallContinueCount - 1],
+			delayMs: STREAM_STALL_CONTINUE_DELAYS_MS[retryCount - 1],
 			generation: this.#host.promptGeneration(),
+			// Append the reminder only when the delayed continuation really starts:
+			// an Esc during the wait must not leave a "resume the answer" instruction
+			// behind for the user's next, unrelated prompt.
+			beforeContinue: () =>
+				this.#host.agent.appendMessage({
+					role: "developer",
+					content: [
+						{
+							type: "text",
+							text: prompt.render(streamStallContinueTemplate, {
+								retryCount,
+								maxRetries: STREAM_STALL_CONTINUE_MAX_RETRIES,
+							}),
+						},
+					],
+					attribution: "agent",
+					timestamp: Date.now(),
+				}),
 		});
 		return true;
 	}

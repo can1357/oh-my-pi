@@ -182,10 +182,7 @@ describe("AgentSession text-only stream stall", () => {
 				() => (settled = true),
 				() => (settled = true),
 			);
-			await pumpUntil(
-				() => callTimes.length === 1 && created.agent.state.messages.some(message => message.role === "developer"),
-				"scheduled continuation",
-			);
+			await pumpUntil(() => callTimes.length === 1 && !created.agent.state.isStreaming, "scheduled continuation");
 
 			let aborted = false;
 			created.abort().then(
@@ -196,6 +193,9 @@ describe("AgentSession text-only stream stall", () => {
 			vi.advanceTimersByTime(600_000);
 			for (let tick = 0; tick < 100; tick++) await Promise.resolve();
 			expect(callTimes.length).toBe(1);
+			// The resume reminder is appended only when the continuation starts, so a
+			// cancelled wait leaves no stale instruction for the next prompt.
+			expect(created.agent.state.messages.some(message => message.role === "developer")).toBe(false);
 		} finally {
 			await session?.abort();
 			vi.useRealTimers();
@@ -219,10 +219,7 @@ describe("AgentSession text-only stream stall", () => {
 				() => (settled = true),
 				() => (settled = true),
 			);
-			await pumpUntil(
-				() => settled && created.agent.state.messages.some(message => message.role === "developer"),
-				"scheduled continuation",
-			);
+			await pumpUntil(() => settled, "scheduled continuation");
 
 			let reset = false;
 			created.resetSessionContext().then(
@@ -233,6 +230,9 @@ describe("AgentSession text-only stream stall", () => {
 			vi.advanceTimersByTime(600_000);
 			for (let tick = 0; tick < 100; tick++) await Promise.resolve();
 			expect(callTimes.length).toBe(1);
+			// The resume reminder is appended only when the continuation starts, so a
+			// cancelled wait leaves no stale instruction for the next prompt.
+			expect(created.agent.state.messages.some(message => message.role === "developer")).toBe(false);
 		} finally {
 			await session?.abort();
 			vi.useRealTimers();
