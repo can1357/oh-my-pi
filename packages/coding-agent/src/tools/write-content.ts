@@ -2,7 +2,12 @@
  * Content helpers shared by every whole-file writer: the `write` tool's file
  * pipeline and handler-owned writes that splice files directly (conflict://).
  */
-import { formatHashlineHeader, stripHashlinePrefixes } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import {
+	formatHashlineHeader,
+	formatNumberedLine,
+	splitAddressableFileLines,
+	stripHashlinePrefixes,
+} from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore } from "../edit/store";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -79,19 +84,50 @@ export function stripWriteContent(session: ToolSession, content: string): { text
 	return stripWriteContentWithPotentialLooseHeader(content);
 }
 
+/** Lines of the written content the write result numbers for the model. */
+export const WRITE_MAP_MAX_LINES = 1000;
+/** Characters of numbered map the write result may carry. */
+const WRITE_MAP_MAX_CHARS = 32_768;
+
 /**
- * Record a snapshot of the freshly-written `content` for `absolutePath`
- * so subsequent hashline edits address the new file with a current tag,
- * and return the matching `[displayPath#TAG]` header (`displayPath` defaults to
- * `absolutePath` relative to cwd; URL writes pass their URL). Returns `undefined`
- * when the session is not in hashline mode so callers can no-op cheaply.
+ * A write's hashline display: the `[path#TAG]` header plus the numbered rows
+ * of the written content that tell the model which line holds what.
+ */
+export interface WriteSnapshotDisplay {
+	/** `[displayPath#TAG]` header for the written file. */
+	header: string;
+	/** Numbered rows (`N:text`) of the written content. */
+	rows: string;
+	/** Line numbers the rows display. */
+	seenLines: number[];
+	/** Lines of the written content the rows do not cover. */
+	hiddenLines: number;
+}
+
+/**
+ * The leading lines of `lines` the write result numbers, bounded so a large
+ * write cannot flood the transcript.
+ */
+function takeWriteMapLines(lines: readonly string[]): string[] {
+	const shown: string[] = [];
+	let chars = 0;
+	for (const line of lines) {
+		if (shown.length >= WRITE_MAP_MAX_LINES) break;
+		chars += line.length + 1;
+		if (chars > WRITE_MAP_MAX_CHARS) break;
+		shown.push(line);
+	}
+	return shown;
+}
+
+/**
+ * Record a snapshot of a handler-written file and return its `[path#TAG]`
+ * header (`displayPath` defaults to `absolutePath` relative to cwd; URL writes
+ * pass their URL). Returns `undefined` when the session is not in hashline mode
+ * so callers can no-op cheaply.
  *
- * Mirrors the post-commit snapshot recording the hashline patcher performs
- * after a successful edit — the model gets a tag without an extra `read` —
- * but with EMPTY seen-line provenance: a write displays no numbered lines,
- * so anchored edits against this tag must first see the anchor content (the
- * patcher rejects them with an inline reveal). Authoring content is not
- * knowing its line numbers.
+ * The handler's result shows no numbered lines, so the tag carries no
+ * seen-line provenance: it marks the content, not what the model saw.
  */
 export function maybeWriteSnapshotHeader(
 	session: ToolSession,
@@ -101,6 +137,63 @@ export function maybeWriteSnapshotHeader(
 ): string | undefined {
 	if (!resolveFileDisplayMode(session).hashLines) return undefined;
 	const normalized = normalizeToLF(content);
-	const tag = getEditStore(session).recordSnapshot(absolutePath, normalized, []);
+	const tag = getEditStore(session).recordSnapshot(absolutePath, normalized);
 	return formatHashlineHeader(displayPath, tag);
+}
+
+/**
+ * Record a snapshot of the freshly-written `content` for `absolutePath`
+ * so subsequent hashline edits address the new file with a current tag,
+ * and return the matching `[displayPath#TAG]` header (`displayPath` defaults to
+ * `absolutePath` relative to cwd; URL writes pass their URL). Returns `undefined`
+ * when the session is not in hashline mode so callers can no-op cheaply.
+ *
+ * Mirrors the post-commit snapshot recording the hashline patcher performs
+ * after a successful edit — the model gets a tag without an extra `read` —
+ * and numbers the written lines the same way, so the model knows the line
+ * numbers it anchors on instead of guessing them. The numbered rows are the
+ * snapshot's seen lines: the model displayed them, so it may edit them.
+ */
+export function maybeWriteSnapshotDisplay(
+	session: ToolSession,
+	absolutePath: string,
+	content: string,
+	displayPath = formatPathRelativeToCwd(absolutePath, session.cwd),
+): WriteSnapshotDisplay | undefined {
+	if (!resolveFileDisplayMode(session).hashLines) return undefined;
+	const normalized = normalizeToLF(content);
+	const lines = splitAddressableFileLines(normalized);
+	const shown = takeWriteMapLines(lines);
+	const seenLines = shown.map((_, index) => index + 1);
+	// A file with no lines has no provenance to record: an empty set would say
+	// "no line was displayed", which the guard reads as "every anchor is
+	// unseen".
+	const tag = getEditStore(session).recordSnapshot(
+		absolutePath,
+		normalized,
+		seenLines.length > 0 ? seenLines : undefined,
+	);
+	const rows = shown.map((line, index) => formatNumberedLine(index + 1, line)).join("\n");
+	return {
+		header: formatHashlineHeader(displayPath, tag),
+		rows,
+		seenLines,
+		hiddenLines: lines.length - shown.length,
+	};
+}
+
+/**
+ * Assemble a write result from its hashline display: the `[path#TAG]` header,
+ * the summary line, and the numbered rows of the written content that give the
+ * model the line numbers it anchors on.
+ */
+export function formatWriteSnapshotText(display: WriteSnapshotDisplay | undefined, summary: string): string {
+	if (!display) return summary;
+	const numbered = display.seenLines.length;
+	const note =
+		display.hiddenLines > 0
+			? ` (${numbered + display.hiddenLines} lines; the first ${numbered} are numbered below — read the file before anchoring edits past line ${numbered})`
+			: "";
+	const rows = display.rows ? `\n${display.rows}` : "";
+	return `${display.header}\n${summary}${note}${rows}`;
 }

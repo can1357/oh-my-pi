@@ -7,6 +7,7 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { WRITE_MAP_MAX_LINES } from "@oh-my-pi/pi-coding-agent/tools/write-content";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
@@ -87,6 +88,43 @@ describe("write tool hashline header", () => {
 
 		const final = await fs.readFile(filePath, "utf8");
 		expect(final).toBe("export const enabled = true;\n");
+	});
+
+	it("numbers the written lines so the model knows the line numbers it anchors on", async () => {
+		const filePath = path.join(tmpDir, "numbered.ts");
+		const session = createSession(tmpDir);
+		const content = "export const enabled = false;\nexport const flag = true;\n";
+
+		const result = await new WriteTool(session).execute("call-1", { path: filePath, content });
+		const lines = resultText(result).split("\n");
+		const match = HASHLINE_HEADER_LINE.exec(lines[0] ?? "");
+		expect(match).not.toBeNull();
+		const tag = match![2];
+
+		// The write displays the lines it wrote, numbered like a read, so the
+		// model anchors on the line numbers it just saw instead of guessing.
+		expect(lines).toContain("1:export const enabled = false;");
+		expect(lines).toContain("2:export const flag = true;");
+		expect(getEditStore(session).seenLines(filePath, tag)).toEqual([1, 2]);
+	});
+
+	it("rejects an anchor on a line the write did not display", async () => {
+		const filePath = path.join(tmpDir, "long.ts");
+		const session = createSession(tmpDir);
+		const content = `${Array.from({ length: WRITE_MAP_MAX_LINES + 1 }, (_, i) => `line ${i + 1}`).join("\n")}\n`;
+
+		const writeResult = await new WriteTool(session).execute("call-1", { path: filePath, content });
+		const headerLine = resultText(writeResult).split("\n")[0] ?? "";
+
+		// Only the first WRITE_MAP_MAX_LINES lines are numbered, so the last
+		// line is an anchor the write never displayed: the seen-line guard
+		// rejects it instead of applying the edit at a guessed line number.
+		const editResult = await new EditTool(session, "hashline").execute("call-2", {
+			input: `${headerLine}\nPUT ${WRITE_MAP_MAX_LINES + 1}.=${WRITE_MAP_MAX_LINES + 1}:\n+changed\n`,
+		});
+
+		expect(resultText(editResult)).toContain("never displayed");
+		expect(await fs.readFile(filePath, "utf8")).toBe(content);
 	});
 
 	it("names a local:// write by its URL, and the header round-trips through edit and write", async () => {
