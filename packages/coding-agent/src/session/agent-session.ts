@@ -14526,8 +14526,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// No breakpoint after it can be read by the next request.
 		let volatileSuffix = false;
 		if (history?.length) {
-			// Detach before the conversion pipeline can await or mutate caller-owned messages.
-			const detachedHistory = structuredClone(history);
+			// Detach before the conversion pipeline can await or mutate caller-owned
+			// messages, without paying to walk every nested content block. A full
+			// `structuredClone` here is O(bytes of caller-supplied history): with a
+			// large or growing side-channel thread (BTW follow-ups, an extension's
+			// own peer-conversation cache), that cost is repeated on every ephemeral
+			// turn. Content blocks are treated as immutable after construction
+			// throughout this codebase (see `convertOneCached`'s identity-keyed
+			// cache), so a shallow detach — new message wrapper, new content array,
+			// new top-level block objects (strings are immutable and stay shared) —
+			// stops a caller replacing or editing block fields while the pipeline
+			// awaits. Nested objects inside a block (e.g. tool-call arguments) are
+			// shared by design; they are not mutated after construction.
+			const detachedHistory = history.map(
+				message =>
+					({
+						...message,
+						content: Array.isArray(message.content)
+							? message.content.map(block => ({ ...block }))
+							: message.content,
+					}) as AgentMessage,
+			);
 			for (const message of detachedHistory) {
 				if (message.role === "custom" && message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE) {
 					volatileSuffix = true;
