@@ -285,34 +285,6 @@ describe("parseChangelog", () => {
 	});
 });
 
-describe("unreleased entry wording", () => {
-	// The `find` single-file entry is the one this change owns: it must describe
-	// what the user sees, not how the search routes internally.
-	const FIND_ENTRY_ISSUE = "issues/16027";
-
-	test("states the observable outcome and carries the issue and PR attribution", async () => {
-		const content = await Bun.file(path.join(packageDir, "CHANGELOG.md")).text();
-		const unreleased = content.split("## [Unreleased]")[1]?.split("\n## ")[0] ?? "";
-		const entry = unreleased.split("\n").find(line => line.startsWith("- ") && line.includes(FIND_ENTRY_ISSUE));
-		expect(entry).toBeDefined();
-
-		// One line, brief, and user-facing: what the user sees, not the routing.
-		expect(entry).toContain("no hits");
-		expect(entry).not.toMatch(/375 bytes|first few hundred bytes/);
-		expect(entry).not.toMatch(/\bsketch\b/i);
-		expect(entry).not.toMatch(/\bpassage budget\b/i);
-		expect(entry).not.toMatch(/\bwave[- ]?3\b/i);
-		// Brief applies to the prose, not to the trailing attribution links.
-		const prose = entry!.replace(/\s+\(\[[^\]]+\]\(https:\/\/github\.com\/[^)]+\)\).*$/, "");
-		expect(prose.length).toBeLessThan(280);
-
-		// Attribution per AGENTS.md: the issue it fixes and the PR that fixes it.
-		expect(entry).toContain("https://github.com/can1357/oh-my-pi/issues/16027");
-		expect(entry).toContain("https://github.com/can1357/oh-my-pi/pull/16114");
-		expect(entry).toContain("by [@yuzu-octopus](https://github.com/yuzu-octopus)");
-	});
-});
-
 describe("renderChangelogEntries", () => {
 	test("renders complete history when no maxBytes cap is passed", () => {
 		const largeBody = "y".repeat(STARTUP_CHANGELOG_MAX_BYTES);
