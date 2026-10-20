@@ -306,6 +306,30 @@ export function subagentRetryFallbackRole(id: string): string {
 	return `subagent:${id}`;
 }
 
+/**
+ * Fail closed when explicit model patterns (task `model`, agent profile model,
+ * router `order`) resolve to no model: the spawn must error naming the request
+ * instead of silently running on the role chain's model. Empty patterns (no
+ * explicit model) keep the role chain resolution unchanged.
+ */
+function explicitModelResolutionError(
+	modelPatterns: string[],
+	modelRegistry: ModelRegistry,
+	settings: Settings,
+): Error | undefined {
+	if (modelPatterns.length === 0) return undefined;
+	const disabledProviders = new Set(cfgDisabledProviders.get(settings));
+	const reasons = modelPatterns.map(pattern => {
+		const match = resolveModelOverride([pattern], modelRegistry, settings).model;
+		if (!match) return `${pattern} (absent from catalog)`;
+		if (disabledProviders.has(match.provider)) return `${pattern} (provider disabled)`;
+		return `${pattern} (no auth)`;
+	});
+	return new Error(
+		`Subagent spawn model resolution failed: none of the requested models resolved to a usable model: ${reasons.join("; ")}`,
+	);
+}
+
 interface SubagentRetryFallbackCandidate {
 	model: Model<Api>;
 	selector: string;
@@ -5347,6 +5371,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			let session: AgentSession;
 			let modelFallbackMessage: string | undefined;
 			let sessionPromise: Promise<CreateAgentSessionResult> | undefined;
+			let modelPatternResolutionFailed: boolean | undefined;
 			try {
 				sessionPromise = createAgentSession(
 					buildSubagentSessionOptions(sessionSpec, subagentSettings, sessionManager, null, mcpFollower, {
@@ -5360,7 +5385,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						},
 					}),
 				);
-				({ session, modelFallbackMessage } = await awaitAbortable(sessionPromise));
+				({ session, modelFallbackMessage, modelPatternResolutionFailed } = await awaitAbortable(sessionPromise));
 				// Stash the sibling family candidate once the child session exists,
 				// independent of its initial model, so a later model change (retry
 				// fallback, model switch) still finds it. Consumption is gated per
@@ -5391,6 +5416,15 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				formatModelStringWithRouting(session.model) === formatModelStringWithRouting(model)
 			) {
 				sessionManager.appendModelChange(formatModelStringWithRouting(model), retryFallbackRole);
+			}
+			// The SDK owns deferred resolution; a warning about a successful role-chain
+			// usage fallback is not a resolution failure.
+			if (modelPatternResolutionFailed) {
+				const explicitModelError = explicitModelResolutionError(modelPatterns, modelRegistry, settings);
+				if (explicitModelError) {
+					session.dispose().catch(() => {});
+					throw explicitModelError;
+				}
 			}
 			// Bill the auto-prewalk judgment to the child session it decided for, only now:
 			// an earlier entry would make the SDK treat this fresh session as resumed and
