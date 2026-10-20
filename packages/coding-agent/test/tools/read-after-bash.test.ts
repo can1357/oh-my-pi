@@ -56,8 +56,7 @@ function createSession(directory: string): ToolSession {
  * before the change. A read that waits never returns first; bash then stops
  * waiting after half a second.
  */
-async function bashThenRead(directory: string, change: string, readPath: string) {
-	const session = createSession(directory);
+async function bashThenRead(directory: string, change: string, readPath: string, session = createSession(directory)) {
 	const command = `for i in $(seq 50); do [ -e go ] && break; sleep 0.01; done; ${change}`;
 	const mock = createMockModel({
 		responses: [
@@ -101,7 +100,7 @@ async function bashThenRead(directory: string, change: string, readPath: string)
 }
 
 describe("a read after a bash call in the same message", () => {
-	it("returns the file as the bash command left it, starting while bash runs", async () => {
+	it("returns the file as the bash command left it, the read scheduled beside bash", async () => {
 		const directory = await tempDirectory();
 		await Bun.write(path.join(directory, "f"), "old\n");
 
@@ -262,6 +261,67 @@ describe("a read after a bash call in the same message", () => {
 
 		expect(isError).toBe(false);
 		expect(text).toContain("notes");
+	});
+
+	it("reads a local:// file the bash command rewrote", async () => {
+		const directory = await tempDirectory();
+		const artifacts = path.join(directory, "artifacts");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifacts, getSessionId: () => "s" });
+		await Bun.write(path.join(artifacts, "local", "notes.md"), "old\n");
+
+		const { text } = await bashThenRead(directory, "echo new > artifacts/local/notes.md", "local://notes.md");
+
+		expect(text).toContain("new");
+		expect(text).not.toContain("old");
+	});
+
+	it("fetches a URL with a `;` in its query once, without waiting for bash", async () => {
+		const directory = await tempDirectory();
+		let requests = 0;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () => {
+				requests++;
+				return new Response("page body", { headers: { "content-type": "text/plain" } });
+			},
+		});
+		try {
+			const session = {
+				...createSession(directory),
+				settings: Settings.isolated({
+					"async.enabled": false,
+					"bash.autoBackground.enabled": false,
+					"bashInterceptor.enabled": false,
+					"fetch.enabled": true,
+				}),
+				getArtifactsDir: () => path.join(directory, "artifacts"),
+				allocateOutputArtifact: async (toolType: string) => ({
+					id: "test",
+					path: path.join(directory, "artifacts", `test.${toolType}.log`),
+				}),
+			} as unknown as ToolSession;
+
+			const { text, isError, events } = await bashThenRead(
+				directory,
+				"true",
+				`http://127.0.0.1:${server.port}/x?a=1;b=2`,
+				session,
+			);
+
+			expect(isError).toBe(false);
+			expect(text).toContain("page body");
+			expect(requests).toBe(1);
+			const readEnd = events.findIndex(
+				event => event.type === "tool_execution_end" && event.toolCallId === "read-1",
+			);
+			const bashEnd = events.findIndex(
+				event => event.type === "tool_execution_end" && event.toolCallId === "bash-1",
+			);
+			expect(readEnd).toBeLessThan(bashEnd);
+		} finally {
+			server.stop(true);
+		}
 	});
 });
 
