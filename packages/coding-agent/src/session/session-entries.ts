@@ -20,6 +20,15 @@ export const SESSION_TITLE_SLOT_BYTES = 256;
 
 export const SESSION_TITLE_SLOT_ENTRY_TYPE = "title";
 
+/**
+ * Custom entry holding the memory block a session's prompt was built from.
+ *
+ * The entry records what a prompt carried, not a conversation: a session that
+ * never produced a message holds nothing else, so its file stays droppable
+ * once the draft it was created for is cleared.
+ */
+export const MEMORY_SNAPSHOT_ENTRY_TYPE = "memory-snapshot";
+
 export const TITLE_CHANGE_ENTRY_TYPE = "title_change";
 
 export type SessionTitleSource = "auto" | "user";
