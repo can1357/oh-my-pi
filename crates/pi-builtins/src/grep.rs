@@ -1877,6 +1877,33 @@ mod tests {
 		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
 	}
 
+	/// Contract: the modes whose output cannot feed back into the search
+	/// still read standard input that is also the output file.
+	///
+	/// GNU grep exempts them from the same-file rejection — `-q`, `-c` and
+	/// the list modes write at most one line per file, and `-m1` stops after
+	/// the first match — so the exemption holds for standard input as well as
+	/// for a named file.
+	#[test]
+	fn modes_that_cannot_feed_their_output_back_still_read_standard_input() {
+		for (args, expected_code, expected_file) in [
+			(&["-q", "needle"][..], 0, &b"needle\n"[..]),
+			(&["-c", "needle"][..], 0, &b"needle\n1\n"[..]),
+			(&["-l", "needle"][..], 0, &b"needle\n(standard input)\n"[..]),
+			// A file without a match is the one `-L` lists, so it prints its
+			// name and reports that no line matched.
+			(&["-L", "absent"][..], 1, &b"needle\n(standard input)\n"[..]),
+			(&["-m1", "needle"][..], 0, &b"needle\nneedle\n"[..]),
+		] {
+			let tree = tempfile::tempdir().unwrap();
+			let path = tree.path().join("out.txt");
+			std::fs::write(&path, "needle\n").unwrap();
+			let (code, err) = run_with_stdin_and_stdout_file::<Grep>(args, tree.path(), &path);
+			assert_eq!(code, expected_code, "{args:?}: {err}");
+			assert_eq!(std::fs::read(&path).unwrap(), *expected_file, "{args:?}: {err}");
+		}
+	}
+
 	/// Contract: `--no-messages` silences the refusal but keeps its status.
 	///
 	/// GNU grep still exits 2 for an input that is also its output when `-s`
@@ -1936,6 +1963,33 @@ mod tests {
 			assert_eq!(code, expected_code, "{args:?}: {err}");
 			assert_eq!(std::fs::read(&path).unwrap(), *expected_file, "{args:?}: {err}");
 		}
+	}
+
+	/// Runs a utility whose standard input and stdout are the same file, the
+	/// way `… < out >> out` sets them up, and returns its exit status
+	/// together with the captured stderr.
+	fn run_with_stdin_and_stdout_file<U: Utility>(
+		args: &[&str],
+		cwd: &std::path::Path,
+		path: &std::path::Path,
+	) -> (i32, String) {
+		let stdout = std::fs::OpenOptions::new()
+			.append(true)
+			.open(path)
+			.expect("stdout file");
+		let stdin = std::fs::OpenOptions::new()
+			.read(true)
+			.open(path)
+			.expect("stdin file");
+		let (mut host, capture) = Host::for_test(U::NAME, "", cwd);
+		host.set_test_stdin(openfiles::OpenFile::File(stdin));
+		host.set_test_stdout(openfiles::OpenFile::File(stdout));
+		let argv = std::iter::once(std::ffi::OsString::from(U::NAME))
+			.chain(args.iter().copied().map(std::ffi::OsString::from))
+			.collect::<Vec<_>>();
+		let argv = U::rewrite_argv(argv).expect("rewrite argv");
+		let parsed = U::try_parse_from(argv).expect("parse");
+		(run_caught::<U>(parsed, &mut host), capture.err())
 	}
 
 	/// Runs a utility whose stdout is the file at `stdout_path`, the way a
