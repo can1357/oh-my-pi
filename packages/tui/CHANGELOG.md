@@ -199,7 +199,6 @@
 
 - `splitPathAndSel` and `splitInternalUrlSel` peel comma line lists that include a tail chunk (`:1-12,-15`) or repeat the colon after a comma (`:1-30,:-30`, also beside `:raw`); `splitPathAndSel(path, { foldListColons: false })` keeps the repeated colon in the path ([#16435](https://github.com/can1357/oh-my-pi/pull/16435) by [@will-bogusz](https://github.com/will-bogusz))
 - Generic tool cards now reveal the complete result when expanded ([#15335](https://github.com/can1357/oh-my-pi/pull/15335) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed the Agent Hub activity view's footer dropping the `2:activity` section hint its roster footer advertises; both views now name the same sections, and a footer too narrow for the section keys keeps every other hint instead of cutting its tail off ([#16469](https://github.com/can1357/oh-my-pi/pull/16469) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Added `footerMeta` to `OutputBlockOptions` and `ToolCardSnapshot` to draw short facts inside a frame's bottom border ([#16486](https://github.com/can1357/oh-my-pi/pull/16486) by [@H4vC](https://github.com/H4vC))
 
 ### Changed
