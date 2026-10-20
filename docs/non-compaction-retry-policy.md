@@ -72,6 +72,14 @@ Non-retryable hard errors may consult a configured fallback chain when switching
 
 Malformed-function failures that cannot replay their committed text preserve the turn and append a corrective developer reminder, capped at three continuations per prompt. These terminal-stop continuations are separate from the standard retry lifecycle.
 
+Committed-text transport continuation has its own finite budget, separate from the standard retry lifecycle:
+
+- Only text-only failed turns with already-committed non-whitespace text qualify; tool calls, images, and server-tool blocks remain excluded. Partial text stays in context with a developer continuation reminder, never replayed or discarded.
+- Up to five eligible continuations run per consecutive failure sequence, waiting **2, 5, 15, 30, then 60 seconds** before their respective provider requests. A sixth eligible failure surfaces without another continuation.
+- `retry.enabled` still gates this path. Its existing independent budget does not consume or override generic `retry.maxRetries`; generic jittered backoff and provider retry/fallback behavior are unchanged.
+- A successful/nonmatching turn or new prompt resets the sequence. Abort, disposal, or conversation-generation invalidation cancels or skips a pending scheduled continuation.
+
+
 Retry state is owned by `TurnRecovery`:
 
 - retry attempt counter (`0` means idle)

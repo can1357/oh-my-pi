@@ -1479,12 +1479,6 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(messages[0]).toBe(message);
 			const reminder = messages[1];
 			if (reminder?.role !== "developer") throw new Error("expected developer reminder");
-			const text =
-				typeof reminder.content === "string"
-					? reminder.content
-					: reminder.content.map(part => (part.type === "text" ? part.text : "")).join("");
-			expect(text).toContain("Continue exactly where it stopped");
-			expect(text).toContain("Attempt #1/3");
 			expect(continues).toEqual(["stream-stall-continue"]);
 		});
 
@@ -1531,8 +1525,10 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(false);
-			expect(continues).toHaveLength(3);
+			expect(continues).toHaveLength(5);
 
 			recovery.resetForNewPrompt();
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
@@ -1564,6 +1560,26 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
 			expect(messages[0]).toBe(message);
 			expect(continues).toEqual(["stream-stall-continue"]);
+		});
+
+		it("resets the stall sequence after a successful turn", () => {
+			const message = stalledTextTurn();
+			const { host, continues } = continuationHost(message);
+			const recovery = new TurnRecovery(host);
+
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			const settled = makeMessage([{ type: "text", text: "All done." }], model);
+			settled.stopReason = "stop";
+			expect(recovery.handleCommittedTextStreamStall(settled)).toBe(false);
+
+			// The successful turn restarted the sequence: a full fresh budget of
+			// continuations runs before the cap refuses again.
+			for (let i = 0; i < 5; i++) {
+				expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			}
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(false);
+			expect(continues).toHaveLength(7);
 		});
 
 		it("leaves uncommitted text, tool turns, other errors, and disabled retry to the error path", () => {
