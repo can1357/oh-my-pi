@@ -4,12 +4,23 @@ import {
 	type ProcessTerminalRenderHarness,
 } from "./process-terminal-render-harness";
 
-// Kitty keyboard negotiation must arm the terminal before it asks which flags
-// are in effect. The query alone (`CSI ? u`) is answered honestly with
-// "flags = 0" by terminals that never push anything themselves (rio), and
-// rio ignores the modifyOtherKeys fallback omp would use instead — so an
-// unarmed terminal keeps encoding Shift+Enter as a bare CR and omp submits
-// the prompt instead of inserting a newline (#12411).
+// Kitty keyboard negotiation must arm the terminal in the same write as the
+// query it asks. `CSI ? u` alone leaves the terminal unarmed, and an unarmed
+// terminal keeps encoding Shift+Enter as a bare CR that omp reads as submit
+// instead of a newline (#12411).
+//
+// The query comes first in that write, so the terminal answers it before omp's
+// push is applied: the reply describes the flags a parent application pushed,
+// and omp's own frame is the top of the kitty stack. Every push omp makes must
+// be matched by exactly one pop — a frame left behind keeps the terminal
+// reporting kitty keys after omp exits.
+
+const KITTY_PUSH = /\x1b\[>\d+u/g;
+const KITTY_POP = /\x1b\[<u/g;
+
+function countMatches(haystack: string, pattern: RegExp): number {
+	return [...haystack.matchAll(pattern)].length;
+}
 
 describe("ProcessTerminal kitty keyboard arming", () => {
 	let harness: ProcessTerminalRenderHarness | undefined;
@@ -19,11 +30,14 @@ describe("ProcessTerminal kitty keyboard arming", () => {
 		harness = undefined;
 	});
 
-	it("pushes the kitty flags before querying them", async () => {
+	it("arms the terminal in the same write as the query", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30, { conpty: false });
 		await harness.settle();
 
-		expect(harness.writes.join("")).toContain("\x1b[>5u\x1b[?u\x1b[c");
+		// The query precedes the push on purpose: the terminal answers it
+		// before the push is applied, so the reply still describes the flags a
+		// parent application pushed and omp's own frame is the stack top.
+		expect(harness.writes.join("")).toContain("\x1b[?u\x1b[>5u\x1b[c");
 	});
 
 	it("arms ConPTY hosts with disambiguation only", async () => {
@@ -32,7 +46,7 @@ describe("ProcessTerminal kitty keyboard arming", () => {
 		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true });
 		await harness.settle();
 
-		expect(harness.writes.join("")).toContain("\x1b[>1u\x1b[?u\x1b[c");
+		expect(harness.writes.join("")).toContain("\x1b[?u\x1b[>1u\x1b[c");
 	});
 
 	it("arms the terminal before the negotiation reply arrives", async () => {
@@ -60,18 +74,42 @@ describe("ProcessTerminal kitty keyboard arming", () => {
 		expect(harness.writes.join("")).toContain("\x1b[<u");
 	});
 
-	it("keeps a single kitty frame on the stack across the negotiation", async () => {
+	it("raises its own frame to keep a parent application's event-type reporting", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30, { conpty: false });
 		await harness.settle();
 		harness.writes.length = 0;
 
-		await harness.feed("\x1b[?5u", "\x1b[?1;2c");
+		// The parent application pushed flags = 3 (event types). The reply
+		// describes the parent's frame, so omp's own frame — which sits above
+		// it — is raised in place instead of pushing a second frame.
+		await harness.feed("\x1b[?3u");
 
+		expect(harness.terminal.kittyEnableSequence).toBe("\x1b[>7u");
 		const out = harness.writes.join("");
-		expect(harness.terminal.kittyProtocolActive).toBe(true);
-		// The reply echoed the armed level: no second push, so the single pop
-		// on exit balances the kitty stack.
-		expect(out).not.toContain("\x1b[>5u");
-		expect(out).not.toContain("\x1b[<u");
+		expect(out).toContain("\x1b[=7;1u");
+		expect(out).not.toContain("\x1b[>7u");
+	});
+
+	it.each([
+		{ host: "a fresh terminal", reply: "\x1b[?0u" },
+		{ host: "a parent application", reply: "\x1b[?3u" },
+	])("keeps the kitty stack balanced with $host", async ({ reply }) => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: false });
+		await harness.settle();
+		const writes = harness.writes;
+
+		await harness.feed(reply, "\x1b[?1;2c");
+
+		// The exit path takes omp's frame back off the kitty stack.
+		harness.dispose();
+		harness = undefined;
+
+		const out = writes.join("");
+		// Every push omp made must be matched by exactly one pop: a frame left
+		// behind keeps the terminal reporting kitty keys after omp exits.
+		expect(countMatches(out, KITTY_PUSH)).toBe(countMatches(out, KITTY_POP));
+		// One push (the arming) and one pop (on exit) — a parent application's
+		// frame is neither pushed over nor popped.
+		expect(countMatches(out, KITTY_PUSH)).toBe(1);
 	});
 });

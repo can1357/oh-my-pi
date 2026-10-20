@@ -50,7 +50,7 @@
 - Added Eval `mcp_progress` status events, updated in place per call and evictable under the status-event cap, plus `formatMCPProgress()` and `MCPToolDetails.progress` for MCP progress display ([#16431](https://github.com/can1357/oh-my-pi/pull/16431) by [@alphastorm](https://github.com/alphastorm))
 ### Fixed
 
-- Fixed Shift+Enter submitting the prompt instead of inserting a newline in terminals that answer the kitty keyboard query without arming themselves (rio): the keyboard negotiation now pushes the kitty flags before querying them ([#16458](https://github.com/can1357/oh-my-pi/pull/16458) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed the kitty keyboard negotiation leaving the terminal unarmed until it answered: the flags are now pushed in the same write as the query, so a key pressed while the negotiation is still in flight (Shift+Enter arriving as a bare CR that submits the prompt) is reported as a kitty key ([#16458](https://github.com/can1357/oh-my-pi/pull/16458) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 

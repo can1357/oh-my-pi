@@ -6,12 +6,13 @@ import {
 	type ProcessTerminalRenderHarness,
 } from "./process-terminal-render-harness";
 
-// Progressive-enhancement probe ordering contract. omp arms the terminal with
-// `CSI > flags u` and then sends `CSI ? u \ CSI c` at startup: the arming push
-// puts the kitty keyboard protocol on the terminal's stack before the query
-// answers (a terminal that only answers the query with the honest
-// "flags = 0" reply — rio — never arms itself, and an unarmed terminal folds
-// Shift+Enter into a bare CR that submits the prompt, #12411). The kitty reply
+// Progressive-enhancement probe ordering contract. omp sends `CSI ? u \ CSI c`
+// at startup and arms the terminal with `CSI > flags u` in the same write: the
+// arming push puts the kitty keyboard protocol on the terminal's stack before
+// the negotiation finishes (an unarmed terminal folds Shift+Enter into a bare
+// CR that submits the prompt, #12411). The query comes first in that write, so
+// the terminal answers it before the push is applied and the reply still
+// describes the flags a parent application pushed. The kitty reply
 // (`CSI ? <flags> u`) authoritatively says the terminal speaks the kitty
 // keyboard protocol; the DA1 reply (`CSI ? ... c`) is only a sentinel that
 // guarantees a reply even from terminals that ignore `CSI ? u`. Some terminals
@@ -54,14 +55,17 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 	it("requests alternate keys when the kitty reply arrives before the DA1 sentinel", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
-		expect(harness.writes.join("")).toContain("\x1b[?u\x1b[c");
+		// The negotiation queries and arms the terminal in one write.
+		expect(harness.writes.join("")).toContain("\x1b[?u\x1b[>5u\x1b[c");
 		harness.writes.length = 0;
 
 		await harness.feed("\x1b[?0u", "\x1b[?1;2c");
 
 		const out = harness.writes.join("");
 		expect(harness.terminal.kittyProtocolActive).toBe(true);
-		expect(out).toContain("\x1b[>5u");
+		// The terminal is already armed by the negotiation, so the reply must
+		// not push a second frame.
+		expect(out).not.toContain("\x1b[>5u");
 		expect(out).not.toContain("\x1b[>4;2m");
 	});
 
