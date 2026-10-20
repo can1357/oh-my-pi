@@ -543,6 +543,7 @@
 - Fixed browser `tab.run(fn, [url])` and `browser.open("https://…")` failing with a bare "expects an options object"; the errors now say to pass `{ args: [...] }` and `browser.open({ url, name })` ([#16236](https://github.com/can1357/oh-my-pi/pull/16236) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the built-in `ts-set-map`, `ts-import-type` and `ts-no-any` rules reminding you about code they allow: an empty or computed `Set`/`Map`, a runtime `await import()`, or the word "any" in a comment ([#16242](https://github.com/can1357/oh-my-pi/pull/16242) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed MCP tool results dropping embedded binary resources: a supported image now reaches the model as an image block, and any other payload is saved under `local://` with its MIME type and size instead of only `[Resource: <uri>]` ([#14598](https://github.com/can1357/oh-my-pi/issues/14598))
+- Fixed MCP tool results dropping embedded binary resources: a supported image now reaches the model as an image block, and any other payload is saved under `local://` with its MIME type and size instead of only `[Resource: <uri>]` ([#16451](https://github.com/can1357/oh-my-pi/pull/16451) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 
