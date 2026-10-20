@@ -18,7 +18,14 @@ const SUMMARY_CHARS = 500;
 
 /** Run A's dump (`py/upstream_run_a.py`). */
 export interface CalibrationDump {
-	questions: { conversation: number; question: string; rankedContents: string[]; recall: number }[];
+	questions: {
+		conversation: number;
+		question: string;
+		/** Upstream's gold message contents ("" for an index past the conversation); absent in older dumps. */
+		goldContents?: string[];
+		rankedContents: string[];
+		recall: number;
+	}[];
 	meanRecall: number;
 	/** The model files Run A loaded (`py/model_digest.py`); absent in dumps from before it was recorded. */
 	embeddingModelSha256?: string;
@@ -146,6 +153,13 @@ export function compareCalibration(
 			mismatches.push(`${label}: conversation, A ${qa.conversation}, B questionId ${qb.questionId}`);
 		}
 		if (qa.question !== qb.compat.question) mismatches.push(`${label}: question text differs`);
+		// The same recall from another gold set would pass unnoticed: compare the sets themselves (order-free).
+		const goldA = qa.goldContents?.toSorted();
+		const goldB = qb.compat.goldContents.toSorted();
+		if (!goldA) mismatches.push(`${label}: A records no gold contents; re-run it with this harness`);
+		else if (goldA.length !== goldB.length || goldA.some((g, j) => g !== goldB[j])) {
+			mismatches.push(`${label}: gold contents differ (A ${goldA.length}, B ${goldB.length})`);
+		}
 		const rankedA = qa.rankedContents;
 		const rankedB = qb.compat.rankedContents;
 		const rank = Array.from({ length: Math.max(rankedA.length, rankedB.length) }, (_, r) => r).find(
