@@ -472,7 +472,14 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 			// in `truncateForPersistence` for why `for..in`'s prototype walk
 			// is a step a thrown `getPrototypeOf` trap fails.
 			for (const childKey of Object.keys(value)) {
-				pending.push({ value: (value as Record<string, unknown>)[childKey], key: childKey, parent: path });
+				const childValue = (value as Record<string, unknown>)[childKey];
+				// The snapcompact archive is rebuilt by `persistSnapcompactArchive`,
+				// not the generic path, so only its frames decide a rewrite.
+				if (isSnapcompactArchiveSlot(key, childKey, childValue)) {
+					if (snapcompactArchiveNeedsRewrite(childValue)) return true;
+					continue;
+				}
+				pending.push({ value: childValue, key: childKey, parent: path });
 			}
 		}
 	}
