@@ -5,15 +5,23 @@ run.ts refuses data whose marker is missing or not its pinned revision. Idempote
 pinned revision is skipped, any other is downloaded again.
 """
 
-import ast
-import json
 import os
-import tempfile
-from collections import Counter
-from pathlib import Path
+import sys
 
-import pyarrow.parquet as pq
-from huggingface_hub import hf_hub_download
+# First, before any import that searches PYTHONPATH: an override tree could supply a downloader that ignores the
+# pinned revision or a converter that changes the data, which would then be published under the pinned marker.
+for name in ("PYTHONPATH", "PYTHONHOME"):
+	if os.environ.get(name):
+		sys.exit(f"prepare_datasets.py: refusing to run with {name} set; unset it so venv-engine's packages are imported")
+
+import ast  # noqa: E402
+import json  # noqa: E402
+import tempfile  # noqa: E402
+from collections import Counter  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pyarrow.parquet as pq  # noqa: E402
+from huggingface_hub import hf_hub_download  # noqa: E402
 
 DATA = Path.home() / ".cache" / "omp-memory-eval" / "data"
 
