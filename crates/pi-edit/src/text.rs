@@ -5,6 +5,8 @@
 //! Ports `packages/hashline/src/normalize.ts` and
 //! `packages/coding-agent/src/edit/normalize.ts`.
 
+use std::collections::BTreeMap;
+
 use xutf::IntoUnicodeNormalized;
 
 /// Line-ending style of a file.
@@ -393,6 +395,57 @@ pub struct FoldedChar {
 	pub index:  usize,
 }
 
+/// One folded position of a line: a character, or the whitespace run the
+/// matcher collapses into a single space.
+struct FoldedPosition<'a> {
+	/// The folded character the matcher compares.
+	folded: char,
+	/// The 0-based index of the position in the line.
+	index:  usize,
+	/// The source text of the position: the character, or the whole run.
+	source: &'a str,
+}
+
+/// The folded positions of `line`: one per character, one per whitespace run.
+///
+/// The matcher collapses a run of whitespace into a single space, so the run
+/// is one folded position — but every codepoint in it is still the caller's to
+/// reproduce, and the ones the terminal renders alike (a tab the renderer
+/// expands to spaces) are the ones the caller cannot see.
+fn folded_positions(line: &str) -> impl Iterator<Item = FoldedPosition<'_>> + '_ {
+	let mut chars = line.char_indices();
+	let mut pending: Option<(usize, char)> = None;
+	let mut index = 0usize;
+	std::iter::from_fn(move || {
+		let (offset, source) = match pending.take() {
+			Some(next) => next,
+			None => chars.next()?,
+		};
+		let folded = fuzzy_fold_char(source);
+		let mut end = offset + source.len_utf8();
+		let mut count = 1usize;
+		if folded == ' ' {
+			// The whole run collapses into the one space.
+			loop {
+				match chars.next() {
+					Some((next_offset, next)) if fuzzy_fold_char(next) == ' ' => {
+						end = next_offset + next.len_utf8();
+						count += 1;
+					},
+					Some(next) => {
+						pending = Some(next);
+						break;
+					},
+					None => break,
+				}
+			}
+		}
+		let position = FoldedPosition { folded, index, source: &line[offset..end] };
+		index += count;
+		Some(position)
+	})
+}
+
 /// The characters of `line` as the fuzzy matcher compares them: the
 /// typographic and width variants collapse onto their ASCII form, a tab
 /// collapses onto a space and a run of whitespace collapses into one space.
@@ -401,19 +454,124 @@ pub struct FoldedChar {
 /// considers equal can still be compared character by character — the folded
 /// positions line up even when one of them inserted or deleted whitespace.
 pub fn folded_chars(line: &str) -> impl Iterator<Item = FoldedChar> + '_ {
-	let mut in_space = false;
-	line.chars().enumerate().filter_map(move |(index, source)| {
-		let folded = fuzzy_fold_char(source);
-		if folded == ' ' {
-			if in_space {
-				return None;
-			}
-			in_space = true;
-		} else {
-			in_space = false;
-		}
-		Some(FoldedChar { folded, source, index })
+	folded_positions(line).map(|position| FoldedChar {
+		folded: position.folded,
+		source: position.source.chars().next().unwrap_or(' '),
+		index:  position.index,
 	})
+}
+
+/// One place where two lines differ in characters the fuzzy matcher folds
+/// together.
+///
+/// A whitespace run is one folded position, so a difference inside a run
+/// carries the codepoints of the run: every one of them is the caller's to
+/// reproduce, and the ones the terminal renders alike are the ones it cannot
+/// see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldedDifference {
+	/// The 0-based index of the difference: the index of the codepoint in the
+	/// line that holds it — the expected line, or the actual line for a
+	/// codepoint only it has.
+	pub index:    usize,
+	/// The codepoint of the expected line, when it has one here.
+	pub expected: Option<char>,
+	/// The codepoint of the actual line, when it has one here.
+	pub actual:   Option<char>,
+	/// How many codepoints the difference covers.
+	pub count:    usize,
+}
+
+/// The places where two lines differ in characters the fuzzy matcher folds
+/// together: the typographic and width variants and the whitespace the
+/// matcher collapses.
+///
+/// The lines are compared the way the matcher compares them — one folded
+/// position per character, one per whitespace run — so the positions line up
+/// even when one of the lines inserted or deleted whitespace in front of a
+/// difference. Every codepoint of a run is compared: the matcher charges for
+/// none of them, but an exact match charges for all of them, and a codepoint
+/// the terminal renders as blank space (a tab) is one the caller cannot see.
+///
+/// Only the differences the matcher folds together are reported: a codepoint
+/// the matcher charges for on its own is visible in the printed pair.
+pub fn folded_differences(expected: &str, actual: &str) -> Vec<FoldedDifference> {
+	let mut differences = Vec::new();
+	for (expected_position, actual_position) in
+		folded_positions(expected).zip(folded_positions(actual))
+	{
+		if expected_position.folded == ' ' && actual_position.folded == ' ' {
+			differences.extend(run_differences(&expected_position, &actual_position));
+			continue;
+		}
+		let Some(expected_char) = expected_position.source.chars().next() else {
+			continue;
+		};
+		let Some(actual_char) = actual_position.source.chars().next() else {
+			continue;
+		};
+		if expected_char == actual_char || !fuzzy_equivalent_chars(expected_char, actual_char) {
+			continue;
+		}
+		differences.push(FoldedDifference {
+			index:    expected_position.index,
+			expected: Some(expected_char),
+			actual:   Some(actual_char),
+			count:    1,
+		});
+	}
+	differences
+}
+
+/// The differences inside a whitespace run.
+///
+/// The run is one folded position, but it is a sequence of codepoints: they
+/// are compared one by one, and the ones the longer run has in excess are
+/// reported with their count.
+fn run_differences(
+	expected: &FoldedPosition<'_>,
+	actual: &FoldedPosition<'_>,
+) -> Vec<FoldedDifference> {
+	let expected_chars = expected.source.chars().collect::<Vec<_>>();
+	let actual_chars = actual.source.chars().collect::<Vec<_>>();
+	let mut differences = Vec::new();
+	let common = expected_chars.len().min(actual_chars.len());
+	for offset in 0..common {
+		if expected_chars[offset] == actual_chars[offset] {
+			continue;
+		}
+		differences.push(FoldedDifference {
+			index:    expected.index + offset,
+			expected: Some(expected_chars[offset]),
+			actual:   Some(actual_chars[offset]),
+			count:    1,
+		});
+	}
+	if !differences.is_empty() {
+		return differences;
+	}
+	// The codepoints the two runs share are equal: the longer run has ones the
+	// other one does not have at all.
+	let (leftover, index, in_expected) = if expected_chars.len() > actual_chars.len() {
+		(&expected_chars[common..], expected.index + common, true)
+	} else if actual_chars.len() > expected_chars.len() {
+		(&actual_chars[common..], actual.index + common, false)
+	} else {
+		return differences;
+	};
+	let mut counts: BTreeMap<char, usize> = BTreeMap::new();
+	for ch in leftover {
+		*counts.entry(*ch).or_insert(0) += 1;
+	}
+	for (ch, count) in counts {
+		differences.push(FoldedDifference {
+			index,
+			expected: in_expected.then_some(ch),
+			actual: (!in_expected).then_some(ch),
+			count,
+		});
+	}
+	differences
 }
 
 /// Normalize a line for fuzzy comparison: trim, fold quotes/dashes/fullwidth
@@ -636,5 +794,29 @@ mod tests {
 		// the exact-match hint.
 		assert_eq!(normalize_for_fuzzy("a\tb"), normalize_for_fuzzy("a b"));
 		assert!(fuzzy_equivalent_chars('\t', ' '));
+	}
+
+	#[test]
+	fn a_folded_whitespace_run_keeps_every_codepoint() {
+		// The matcher collapses the run into a single space, but every
+		// codepoint in it is the caller's to reproduce: the tab the terminal
+		// renders as blank space has to be nameable.
+		let differences = folded_differences("foo     bar", "foo \tbar");
+		assert_eq!(differences.len(), 1);
+		assert_eq!(differences[0].index, 4);
+		assert_eq!(differences[0].expected, Some(' '));
+		assert_eq!(differences[0].actual, Some('\t'));
+		assert_eq!(differences[0].count, 1);
+	}
+
+	#[test]
+	fn a_folded_whitespace_run_names_the_codepoints_it_has_in_excess() {
+		// The run of the file holds a tab the search text does not have: it
+		// is the codepoint the caller cannot see, so it has to be named.
+		let differences = folded_differences("foo bar", "foo \tbar");
+		assert_eq!(differences.len(), 1);
+		assert_eq!(differences[0].expected, None);
+		assert_eq!(differences[0].actual, Some('\t'));
+		assert_eq!(differences[0].count, 1);
 	}
 }

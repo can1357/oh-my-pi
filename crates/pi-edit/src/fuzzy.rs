@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::{
 	error::EditError,
 	text::{
-		FoldedChar, adjust_indentation, count_leading_indent, folded_chars, fuzzy_equivalent_chars,
+		FoldedDifference, adjust_indentation, count_leading_indent, folded_differences,
 		is_non_empty_line, js_trim, js_trim_end, js_trim_start, normalize_for_fuzzy, normalize_to_lf,
 		normalize_unicode, utf16_len,
 	},
@@ -1214,19 +1214,13 @@ fn folded_difference_hint(expected: &str, actual: &str, allow_fuzzy: bool) -> Op
 	hints.extend(boundary_difference_hint("start", expected_leading, actual_leading));
 	let mut body_hints = 0usize;
 	let mut omitted = 0usize;
-	for (expected_char, actual_char) in folded_chars(expected_body).zip(folded_chars(actual_body)) {
-		if expected_char.source == actual_char.source {
-			continue;
-		}
-		if !fuzzy_equivalent_chars(expected_char.source, actual_char.source) {
-			continue;
-		}
+	for difference in folded_differences(expected_body, actual_body) {
 		if body_hints == MAX_HINTED_DIFFERENCES {
 			omitted += 1;
 			continue;
 		}
 		body_hints += 1;
-		hints.push(folded_difference_line(expected_char, actual_char));
+		hints.push(folded_difference_line(difference));
 	}
 	hints.extend(boundary_difference_hint("end", expected_trailing, actual_trailing));
 	if hints.is_empty() {
@@ -1238,29 +1232,45 @@ fn folded_difference_hint(expected: &str, actual: &str, allow_fuzzy: bool) -> Op
 	Some(hints.join("\n"))
 }
 
-/// The hint for one folded pair of characters.
+/// The hint for one folded difference.
 ///
 /// A whitespace glyph is left out: it renders as blank space — a tab renders
 /// as a hole once the renderer replaces it — so the codepoints alone tell the
 /// caller what to reproduce.
-fn folded_difference_line(expected: FoldedChar, actual: FoldedChar) -> String {
-	let (expected_char, actual_char) = (expected.source, actual.source);
-	if expected_char.is_whitespace() || actual_char.is_whitespace() {
-		format!(
-			"  differs at char {}: U+{:04X} vs U+{:04X}",
-			expected.index + 1,
-			expected_char as u32,
-			actual_char as u32
-		)
-	} else {
-		format!(
-			"  differs at char {}: U+{:04X} {} vs U+{:04X} {}",
-			expected.index + 1,
-			expected_char as u32,
-			expected_char,
-			actual_char as u32,
-			actual_char
-		)
+///
+/// A difference one side has and the other one does not — the codepoints a
+/// longer whitespace run has in excess — is reported with its count and the
+/// side it is on.
+fn folded_difference_line(difference: FoldedDifference) -> String {
+	let index = difference.index + 1;
+	match (difference.expected, difference.actual) {
+		(Some(expected_char), Some(actual_char))
+			if expected_char.is_whitespace() || actual_char.is_whitespace() =>
+		{
+			format!(
+				"  differs at char {index}: U+{:04X} vs U+{:04X}",
+				expected_char as u32, actual_char as u32
+			)
+		},
+		(Some(expected_char), Some(actual_char)) => {
+			format!(
+				"  differs at char {index}: U+{:04X} {expected_char} vs U+{:04X} {actual_char}",
+				expected_char as u32, actual_char as u32
+			)
+		},
+		(Some(expected_char), None) => {
+			format!(
+				"  differs at char {index}: U+{:04X} x{} only in the - line",
+				expected_char as u32, difference.count
+			)
+		},
+		(None, Some(actual_char)) => {
+			format!(
+				"  differs at char {index}: U+{:04X} x{} only in the + line",
+				actual_char as u32, difference.count
+			)
+		},
+		(None, None) => String::new(),
 	}
 }
 
@@ -1353,8 +1363,14 @@ pub fn format_match_error(
 	};
 	let similarity_percent = (closest.confidence * 100.0).round() as i64;
 	let threshold_percent = (threshold * 100.0).round() as i64;
-	let search_lines: Vec<&str> = search_text.split('\n').collect();
-	let actual_lines: Vec<&str> = closest.actual_text.split('\n').collect();
+	// The matcher compares the text with the line endings normalized to LF, so
+	// the printed pair is built from the same text: a `\r` the matcher folded
+	// away is not a difference the caller has to reproduce, and reporting it
+	// would hide the difference that is.
+	let normalized_search = normalize_to_lf(search_text);
+	let normalized_actual = normalize_to_lf(&closest.actual_text);
+	let search_lines: Vec<&str> = normalized_search.split('\n').collect();
+	let actual_lines: Vec<&str> = normalized_actual.split('\n').collect();
 	let (old_line, new_line) = first_different_line(&search_lines, &actual_lines);
 	let hint = if allow_fuzzy {
 		if fuzzy_matches.is_some_and(|count| count > 1) {
@@ -2010,13 +2026,15 @@ mod tests {
 	fn match_error_names_folded_differences_after_collapsed_whitespace() {
 		// The matcher folds the whitespace run away, so the fullwidth parens
 		// line up with the halfwidth ones — the raw character positions do
-		// not.
+		// not. The run is compared codepoint by codepoint, so the space the
+		// file has in excess is named as well.
 		assert_eq!(
 			exact_edit_error("a  （x）", "a (x)", "x"),
 			concat!(
 				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
 				"  - a (x)\n",
 				"  + a  （x）\n",
+				"  differs at char 3: U+0020 x1 only in the + line\n",
 				"  differs at char 3: U+0028 ( vs U+FF08 （\n",
 				"  differs at char 5: U+0029 ) vs U+FF09 ）\n",
 				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
@@ -2076,6 +2094,35 @@ mod tests {
 			"Found 7 occurrences in a.ts (showing first 5 of 7):\n\npreview\n\nAdd more context \
 			 lines to disambiguate."
 		);
+	}
+
+	#[test]
+	fn match_error_names_the_codepoint_inside_a_folded_whitespace_run() {
+		// The matcher collapses the whitespace run into a single space, so the
+		// two lines are the same line — but the tab the file holds renders as
+		// blank space, so its codepoint has to be named.
+		assert_eq!(
+			exact_edit_error("foo \tbar", "foo     bar", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - foo     bar\n",
+				"  + foo \tbar\n",
+				"  differs at char 5: U+0020 vs U+0009\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_normalizes_the_line_endings_before_naming_the_difference() {
+		// The matcher folds the carriage return away, so it is not a
+		// difference the caller has to reproduce: the difference behind it
+		// has to be named instead.
+		let error = exact_edit_error("foo\nbaz", "foo\r\nbar", "x");
+		assert!(error.contains("  - bar\n  + baz"), "{error}");
+		assert!(!error.contains('\r'), "{error}");
+		assert!(!error.contains("U+000D"), "{error}");
 	}
 
 	fn replaced(outcome: ReplaceOutcome) -> ReplaceResult {
