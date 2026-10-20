@@ -396,30 +396,44 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			30_000,
 		);
 
-		it.skipIf(process.platform !== "linux")(
-			`kernel shutdown during %pip stops the installer tree when /proc ${procfs}`,
-			async () => {
-				using tempDir = TempDir.createSync("@python-runner-pip-shutdown-no-procfs-");
-				const { kernel } = await startPiplessKernel(tempDir.path(), {
-					ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
-					sitecustomize: noProcfs,
-				});
-				const started = Promise.withResolvers<number[]>();
-				let streamed = "";
-				const pending = executePythonWithKernel(kernel, "%pip install six", {
-					onChunk: chunk => {
-						streamed += chunk;
-						const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
-						if (match) started.resolve([Number(match[1]), Number(match[2])]);
-					},
-				});
-				const pids = await started.promise;
-				await kernel.shutdown();
-				await pending;
-				expect(pids.filter(isRunning)).toEqual([]);
-			},
-			30_000,
-		);
+		for (const [where, code] of [
+			["", "%pip install six"],
+			[
+				" started off the main thread",
+				// As a `%pip` inside a tool call runs: on another thread, which SIGINT never reaches.
+				[
+					"import contextvars, threading",
+					"worker = threading.Thread(target=contextvars.copy_context().run, args=(__omp_magic, 'pip', 'install six'))",
+					"worker.start()",
+					"worker.join()",
+				].join("\n"),
+			],
+		] as const) {
+			it.skipIf(process.platform !== "linux")(
+				`kernel shutdown during %pip${where} stops the installer tree when /proc ${procfs}`,
+				async () => {
+					using tempDir = TempDir.createSync("@python-runner-pip-shutdown-no-procfs-");
+					const { kernel } = await startPiplessKernel(tempDir.path(), {
+						ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+						sitecustomize: noProcfs,
+					});
+					const started = Promise.withResolvers<number[]>();
+					let streamed = "";
+					const pending = executePythonWithKernel(kernel, code, {
+						onChunk: chunk => {
+							streamed += chunk;
+							const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
+							if (match) started.resolve([Number(match[1]), Number(match[2])]);
+						},
+					});
+					const pids = await started.promise;
+					await kernel.shutdown();
+					await pending;
+					expect(pids.filter(isRunning)).toEqual([]);
+				},
+				30_000,
+			);
+		}
 	}
 
 	it.skipIf(process.platform === "win32")(
