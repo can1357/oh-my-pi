@@ -209,21 +209,16 @@ function blobExtensionForMime(mime: string): string {
 }
 
 /**
- * Absolute filesystem paths (POSIX or Windows) that start at a token boundary.
- * The lookbehind keeps URL paths intact — a URL's slashes follow `:` or `/`.
+ * Model-facing reason for a failed local save.
+ *
+ * Only the filesystem error code (`ENOTDIR`, `EACCES`, …) or a fixed fallback
+ * reaches the model. The error message itself embeds the absolute path — and a
+ * path may contain spaces, which no path-shaped redaction can strip reliably —
+ * so the code names the failure class without disclosing the location.
  */
-const ABSOLUTE_PATH_PATTERN = /(?<![\w:/\\])(?:[A-Za-z]:)?[\\/][^\s'"`<>|]*/g;
-
-/**
- * Replace absolute filesystem paths in model-facing text. A local save failure
- * otherwise discloses the user's home directory to the model and the terminal.
- */
-function redactAbsolutePaths(text: string): string {
-	return text.replace(ABSOLUTE_PATH_PATTERN, match => {
-		if (!/\w/.test(match)) return match;
-		const trailing = /[.,;:)\]}]+$/.exec(match)?.[0] ?? "";
-		return trailing ? `[path]${trailing}` : "[path]";
-	});
+function saveFailureReason(error: unknown): string {
+	const code = (error as { code?: unknown } | null | undefined)?.code;
+	return typeof code === "string" && code.length > 0 ? code : "local save failed";
 }
 
 /**
@@ -244,15 +239,18 @@ async function formatResourceBlob(
 ): Promise<{ text: string; image?: ImageContent; delivered: boolean }> {
 	const header = `[Resource: ${uri}]`;
 	const mime = mimeType?.split(";")[0]?.trim().toLowerCase() || "application/octet-stream";
-	// A zero-byte payload is a valid attachment but never a decodable image.
-	if (blob.length > 0 && SUPPORTED_IMAGE_MIME_TYPES.has(mime)) {
-		return { text: header, image: { type: "image", data: blob, mimeType: mime }, delivered: true };
-	}
+	// Decode first: both branches need the bytes, and an invalid base64 payload
+	// must be reported whichever MIME it claims — an `image/png` blob that is
+	// not base64 would otherwise reach the provider as an image block.
 	let bytes: Uint8Array;
 	try {
 		bytes = Uint8Array.fromBase64(blob);
 	} catch {
 		return { text: `${header}\n${mime} payload dropped: invalid base64 blob.`, delivered: false };
+	}
+	// A zero-byte payload is a valid attachment but never a decodable image.
+	if (blob.length > 0 && SUPPORTED_IMAGE_MIME_TYPES.has(mime)) {
+		return { text: header, image: { type: "image", data: blob, mimeType: mime }, delivered: true };
 	}
 	const size = formatBytes(bytes.length);
 	const url = `local://mcp-resource-${Bun.hash(bytes).toString(16)}.${blobExtensionForMime(mime)}`;
@@ -269,7 +267,7 @@ async function formatResourceBlob(
 		logger.warn("Failed to save MCP resource blob", { uri, mimeType: mime, error: message });
 		// The absolute local path stays in the local log; the model-facing
 		// reason must not disclose the user's home directory.
-		const reason = redactAbsolutePaths(message) || "unknown error";
+		const reason = saveFailureReason(error);
 		return { text: `${header}\n${mime} payload (${size}) could not be saved: ${reason}`, delivered: false };
 	}
 	return { text: `${header}\n${mime} payload (${size}) saved to ${url}`, delivered: true };

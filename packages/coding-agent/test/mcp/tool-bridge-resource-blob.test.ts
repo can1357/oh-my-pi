@@ -134,10 +134,12 @@ describe("MCP bridge embedded resource blobs (#14598)", () => {
 	});
 
 	it("keeps the absolute local path out of a failed save's reason", async () => {
-		using temp = TempDir.createSync("@mcp-resource-blob-");
+		// A path with spaces: a path-shaped redaction stops at the first
+		// whitespace, so only reporting the failure class keeps the location out.
+		using temp = TempDir.createSync("@mcp resource blob-");
 		// The artifacts dir is unreachable through a file, so the save fails with
 		// a filesystem error that names the absolute path.
-		const blocker = path.join(temp.path(), "blocker");
+		const blocker = path.join(temp.path(), "blocker file");
 		await Bun.write(blocker, "not a directory");
 		const context = localContext(path.join(blocker, "artifacts"));
 
@@ -147,9 +149,26 @@ describe("MCP bridge embedded resource blobs (#14598)", () => {
 		);
 		const text = textOf(result);
 		expect(text).toContain("could not be saved:");
+		// The failure class, not the location.
+		expect(text).toContain("ENOTDIR");
 		expect(text).not.toContain(blocker);
 		expect(text).not.toContain(temp.path());
-		expect(text).toContain("[path]");
+		expect(text).not.toContain("blocker file");
+	});
+
+	it("drops an image blob whose payload is not base64", async () => {
+		using temp = TempDir.createSync("@mcp-resource-blob-");
+		const result = await callWithContent(
+			[{ type: "resource", resource: { uri: "example://image/bad", mimeType: "image/png", blob: "not*base64!" } }],
+			localContext(temp.path()),
+		);
+		expect(textOf(result)).toBe("[Resource: example://image/bad]\nimage/png payload dropped: invalid base64 blob.");
+		// No image block: the undecodable payload must not reach the provider.
+		expect(result.content.some(block => block.type === "image")).toBe(false);
+		// Not delivered, so the only copy stays in the raw details.
+		expect(result.details?.rawContent).toEqual([
+			{ type: "resource", resource: { uri: "example://image/bad", mimeType: "image/png", blob: "not*base64!" } },
+		]);
 	});
 
 	it("still renders a text resource as text", async () => {
