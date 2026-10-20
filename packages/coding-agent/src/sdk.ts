@@ -1777,20 +1777,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
 }
 
-/**
- * Whether a system prompt still carries the memory block.
- *
- * The block is embedded in the project prompt, so a caller that replaces the
- * prompt wholesale drops it. Matching ignores whitespace runs: the rendered
- * prompt re-flows the block it embeds.
- */
-function promptCarriesMemoryBlock(promptParts: readonly string[], memoryBlock: string | undefined): boolean {
-	if (!memoryBlock) return true;
-	const needle = memoryBlock.replace(/\s+/g, " ").trim();
-	if (!needle) return true;
-	return promptParts.some(part => part.replace(/\s+/g, " ").includes(needle));
-}
-
 async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
 	if (options.systemPromptTemplate !== undefined && options.customSystemPrompt !== undefined) {
 		throw new Error("systemPromptTemplate cannot be combined with a literal custom system prompt");
@@ -4113,7 +4099,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// The memory block is staged here and recorded in the transcript only
 			// once the prompt carrying it commits, so the transcript never claims
 			// a memory block this session did not send.
-			const memoryCommit = memoryBackend?.pendingInstructionsCommit?.(sessionManager);
+			const stagedMemory = memoryBackend?.pendingInstructionsCommit?.(sessionManager);
 			// Advisors get the same memory block (sharpshooter decisions, mnemopi/
 			// hindsight instructions) wrapped as shared background knowledge; the
 			// tool-availability caveat lives in the wrapper template.
@@ -4126,8 +4112,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Preserve the bookkeeping above, but skip discovering or rendering a
 			// template whose output would be discarded.
 			if (options.systemPrompt !== undefined && typeof options.systemPrompt !== "function") {
+				const literalPrompt =
+					typeof options.systemPrompt === "string" ? [options.systemPrompt] : options.systemPrompt;
 				return {
-					systemPrompt: typeof options.systemPrompt === "string" ? [options.systemPrompt] : options.systemPrompt,
+					systemPrompt: literalPrompt,
+					// The replaced prompt carries no memory block, so the staged
+					// one is cancelled instead of recorded.
+					commit: stagedMemory?.commit(literalPrompt),
 				};
 			}
 
@@ -4281,9 +4272,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// resume without the override would restore it as if it had.
 				return {
 					...defaultPrompt,
-					commit: promptCarriesMemoryBlock(defaultPrompt.systemPrompt, memoryInstructions)
-						? memoryCommit
-						: undefined,
+					commit: stagedMemory?.commit(defaultPrompt.systemPrompt),
 				};
 			}
 			const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
@@ -4293,7 +4282,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// A replacement prompt may drop the memory block: recording the
 				// snapshot then would pin memory this session never sent, and a
 				// later resume without the override would restore it as if it had.
-				commit: promptCarriesMemoryBlock(customSystemPrompt, memoryInstructions) ? memoryCommit : undefined,
+				commit: stagedMemory?.commit(customSystemPrompt),
 			};
 		};
 

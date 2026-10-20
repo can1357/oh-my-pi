@@ -10,6 +10,7 @@ import {
 	pendingMemorySnapshotCommit,
 	refreshMemoryToolDeveloperInstructionsCacheAfterStartup,
 	saveLearnedLesson,
+	stagedMemorySnapshot,
 } from "@oh-my-pi/pi-coding-agent/memories";
 import { localBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/local-backend";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -36,6 +37,16 @@ function snapshotEntryIds(session: SessionManager): string[] {
 		ids.push(entry.id);
 	}
 	return ids;
+}
+
+/** The recorded memory content of the active branch. */
+function snapshotContent(session: SessionManager): { summary?: string; learned?: string }[] {
+	const content: { summary?: string; learned?: string }[] = [];
+	for (const entry of session.getBranchView()) {
+		if (entry.type !== "custom" || entry.customType !== MEMORY_SNAPSHOT_TYPE) continue;
+		content.push((entry.data ?? {}) as { summary?: string; learned?: string });
+	}
+	return content;
 }
 
 describe("memory snapshot across a resume", () => {
@@ -414,5 +425,72 @@ describe("memory snapshot across a resume", () => {
 		// files again instead of being restored from the snapshot.
 		const block = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
 		expect(block).toContain("Disk lesson");
+	});
+
+	it("cancels a staged snapshot the prompt dropped, so the next build reads the current memory", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const cwd = settings.getCwd();
+		await saveLearnedLesson(agentDir, cwd, { content: "Lesson at build time" });
+
+		const session = SessionManager.create(cwd, sessionsDir);
+		const staged = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		expect(staged).toContain("Lesson at build time");
+
+		// The prompt that carried the block was replaced, so the staged block is
+		// cancelled instead of recorded.
+		const commit = stagedMemorySnapshot(session)?.commit(["a prompt without the memory block"]);
+		expect(commit).toBeUndefined();
+		expect(snapshotRecords(session)).toHaveLength(0);
+
+		// Another session learns a lesson: the next build must read the current
+		// memory state instead of the cancelled block.
+		await saveLearnedLesson(agentDir, cwd, { content: "Learned after the replaced prompt" });
+		const rebuilt = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		expect(rebuilt).toContain("Learned after the replaced prompt");
+	});
+
+	it("does not record a snapshot when the memory files hold nothing injectable", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const cwd = settings.getCwd();
+
+		const session = SessionManager.create(cwd, sessionsDir);
+		const block = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		expect(block).toBeUndefined();
+
+		// The prompt commits: an empty memory store injects nothing, so the
+		// transcript must not claim a memory block.
+		pendingMemorySnapshotCommit(session)?.();
+		expect(snapshotRecords(session)).toHaveLength(0);
+
+		session.appendMessage({ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() });
+		session.appendMessage(createAssistantMessage("hello"));
+		await session.flush();
+
+		// Another session learns a lesson before this one is resumed: the
+		// resumed session picks it up instead of restoring an empty block.
+		await saveLearnedLesson(agentDir, cwd, { content: "Learned elsewhere" });
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const resumed = await SessionManager.open(sessionFile, sessionsDir);
+		const rebuilt = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, resumed);
+		expect(rebuilt).toContain("Learned elsewhere");
+	});
+
+	it("records only the memory content the prompt injects", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local", "memories.summaryInjectionTokenLimit": 100 });
+		const cwd = settings.getCwd();
+		const memoryRoot = getMemoryRoot(agentDir, cwd);
+		await fs.mkdir(memoryRoot, { recursive: true });
+		await fs.writeFile(path.join(memoryRoot, "learned.md"), `- ${"L".repeat(20_000)}\n`);
+
+		const session = SessionManager.create(cwd, sessionsDir);
+		const block = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		expect(block).toContain("LLLL");
+		pendingMemorySnapshotCommit(session)?.();
+
+		// The recorded content is the injected block's, not the whole file: a
+		// transcript must not grow with the memory store.
+		const recorded = snapshotContent(session)[0];
+		expect(recorded?.learned?.length ?? 0).toBeLessThan(1_000);
 	});
 });

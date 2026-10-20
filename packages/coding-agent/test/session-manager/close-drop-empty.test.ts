@@ -77,6 +77,30 @@ describe("SessionManager close() drops empty metadata-only sessions", () => {
 		expect(await fileExists(sessionFile)).toBe(false);
 	});
 
+	// The memory block a prompt was built from is startup state, not a
+	// conversation: a session that never produced a message holds nothing else,
+	// so its file must not outlive the draft it was created for.
+	it("drops the session file when only a memory snapshot precedes a cleared draft", async () => {
+		using tempDir = TempDir.createSync("@pi-session-close-drop-memory-snapshot-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		session.appendCustomEntry("memory-snapshot", {
+			summary: "summary",
+			learned: "learned",
+			scope: "scope",
+			token: "token",
+		});
+
+		await session.saveDraft("draft with a memory block");
+		await session.saveDraft("");
+
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persistent session file");
+
+		await session.close();
+
+		expect(await fileExists(sessionFile)).toBe(false);
+	});
+
 	it("drops a resumed draft-only session after consumeDraft removes the sidecar", async () => {
 		using tempDir = TempDir.createSync("@pi-session-close-drop-resumed-draft-");
 		const firstRun = SessionManager.create(tempDir.path(), tempDir.path());
