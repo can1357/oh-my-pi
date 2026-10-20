@@ -593,7 +593,7 @@ impl Host {
 			.as_ref()
 			.is_some_and(|stdout| {
 				stdout.is_file()
-					&& handle_metadata(self.stdin.file()).is_ok_and(|stdin| stdout.same_file(&stdin))
+					&& handle_metadata(self.stdin.file()).is_some_and(|stdin| stdout.same_file(&stdin))
 			})
 	}
 
