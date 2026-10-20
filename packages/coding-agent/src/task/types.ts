@@ -42,6 +42,9 @@ export interface SubagentEventPayload {
 
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
+const evalToolsField = type("string[]").describe(
+	"Names of eval-defined tools only; built-in tools come from the agent profile.",
+);
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
 
@@ -69,7 +72,7 @@ export const taskItemSchema = type({
 	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
+	"tools?": evalToolsField,
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -79,7 +82,7 @@ const taskItemSchemaIsolated = type({
 	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
+	"tools?": evalToolsField,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -91,7 +94,7 @@ export const taskSchema = type({
 	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
+	"tools?": evalToolsField,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -102,7 +105,7 @@ const taskSchemaNoIsolation = type({
 	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
-	"tools?": "string[]",
+	"tools?": evalToolsField,
 	"+": "delete",
 });
 function guardBatchAgent(schema: BaseType): BaseType {
@@ -165,7 +168,7 @@ function createTaskSchema(options: {
 	const schemaFields = options.structured
 		? { "outputSchema?": outputSchemaInputSchema, "schemaMode?": '"permissive" | "strict"' }
 		: {};
-	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
+	const toolsField = options.evalToolsEnabled ? { "tools?": evalToolsField } : {};
 	// `model` is declared only when the caller may send it: a per-call selector
 	// while `task.perCallModel` allows task calls. An
 	// undeclared `model` still reaches preflight (root keys survive lenient
