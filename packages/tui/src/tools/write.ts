@@ -96,6 +96,23 @@ interface WriteRenderArgs {
 const WRITE_PREVIEW_LINES = 6;
 /** Collapsed native write body: the first lines of the file (§7.3). */
 const NATIVE_WRITE_PREVIEW = { lines: 8 } as const;
+
+/**
+ * Tail window of the collapsed streaming write preview: the viewport-sized
+ * budget, capped at the shared preview limit.
+ *
+ * The streaming renderer and the first-result repaint predicate must agree on
+ * it. A pending card whose content outgrows the window is tail-anchored
+ * (`… (N earlier lines)` + the last rows); when the first result re-anchors
+ * that frame to the head of the file, the tail rows already committed to
+ * viewport/native scrollback survive as stale content above the new frame
+ * unless the predicate asks for a full replay. Using a different threshold
+ * than the renderer leaves exactly those stale rows behind.
+ */
+function writeStreamingPreviewBudget(): number {
+	return Math.min(PREVIEW_LIMITS.EXPANDED_LINES, previewWindowRows());
+}
+
 /**
  * Collapsed clamp of a write drawn as a figure: Tern's model figure (its head
  * over a 320px stage) clears the clamp's fade at 16px lines.
@@ -349,14 +366,18 @@ function formatStreamingContent(
 	argsComplete?: boolean,
 ): string {
 	if (!content) return "";
-	const bodyText = cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
+	// One viewport-sized budget for both streaming paths, so a short terminal
+	// caps them the same way.
+	const budget = writeStreamingPreviewBudget();
+	// The budget belongs in the cache salt: a row-only terminal resize leaves
+	// theme, expansion state, language and content untouched, so the memo would
+	// keep serving the old window instead of re-slicing to the new one (the
+	// edit renderer salts its viewport budget the same way).
+	const bodyText = cachedRenderedString(cache, uiTheme, expanded, `${language ?? ""}:${budget}`, content, () => {
 		const state = updateStreamingPreview(streamKey, content, language, uiTheme, argsComplete === true);
 		let totalLines: number;
 		let startIndex: number;
 		let visibleLines: string[];
-		// One viewport-sized budget for both streaming paths, so a short terminal
-		// caps them the same way.
-		const budget = Math.max(WRITE_PREVIEW_LINES, Math.min(PREVIEW_LIMITS.EXPANDED_LINES, previewWindowRows()));
 		if (state) {
 			totalLines = state.lineCount;
 			// The partial tail is not yet in `lineCount` (no newline), so budget
@@ -886,6 +907,9 @@ export const writeToolRenderer = {
 	// tail rows already committed to viewport/native scrollback would survive
 	// as stale content above the new frame without a full replay. Expanded and
 	// short previews stay top-anchored and skip the (scrollback-wiping) reset.
+	// The threshold is the renderer's own tail budget: a card that is already
+	// tail-anchored must be repainted, so a stricter threshold would leave the
+	// stale tail rows behind.
 	forceFirstResultViewportRepaint: (args: unknown, options: RenderResultOptions) =>
-		!options.expanded && exceedsLineCount(writeContentOf(args), PREVIEW_LIMITS.EXPANDED_LINES),
+		!options.expanded && exceedsLineCount(writeContentOf(args), writeStreamingPreviewBudget()),
 } satisfies ToolRenderer<WriteRenderArgs, WriteToolDetails>;
