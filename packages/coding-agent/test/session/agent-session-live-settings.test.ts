@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { setCfgApprovalHost } from "@oh-my-pi/pi-coding-agent/internal-urls/cfg-protocol";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -50,7 +51,7 @@ describe("AgentSession live settings", () => {
 
 	const start = async (
 		settings: Settings,
-		extra?: Pick<CreateAgentSessionOptions, "systemPrompt">,
+		extra?: Pick<CreateAgentSessionOptions, "systemPrompt" | "settingsApproval">,
 	): Promise<AgentSession> => {
 		const cwd = path.join(os.tmpdir(), `pi-live-settings-${Snowflake.next()}`);
 		tempDirs.push(cwd);
@@ -163,5 +164,33 @@ describe("AgentSession live settings", () => {
 		expect(builds).toBe(1);
 		expect(live.systemPrompt.join("\n")).not.toBe(before);
 		expect(live.systemPrompt.join("\n")).toContain("live-settings-tree-marker/");
+	});
+
+	it("republishes the prompt before an approved cfg:// write returns", async () => {
+		// Inline descriptors put the `read` tool's URL guidance in the prompt, so
+		// turning `fetch.enabled` off has to republish it. An approved `cfg://`
+		// write applies the setting and returns; the turn then continues with the
+		// next request, and that request must not carry the prompt the change
+		// replaced.
+		const settings = Settings.isolated({ inlineToolDescriptors: "on" });
+		const live = await start(settings, { settingsApproval: true });
+		expect(live.systemPrompt.join("\n")).toContain("reader text/markdown");
+
+		const writeTool = live.agent.state.tools.find(tool => tool.name === "write");
+		expect(writeTool).toBeDefined();
+		setCfgApprovalHost({
+			approve: async () => "once",
+			applied: () => {},
+			persistentSettings: settings,
+		});
+		try {
+			await writeTool!.execute("cfg-1", { path: "cfg://fetch/enabled", content: "false" });
+		} finally {
+			setCfgApprovalHost(null);
+		}
+
+		expect(cfgFetchEnabled.get(settings)).toBe(false);
+		expect(live.systemPrompt.join("\n")).not.toContain("reader text/markdown");
+		expect(live.systemPrompt.join("\n")).not.toContain("bare host:port");
 	});
 });
