@@ -152,7 +152,11 @@ pub(crate) struct Host {
 
 fn output_handle(file: &OpenFile) -> Option<OpenFile> {
 	match file {
-		OpenFile::File(_) | OpenFile::Vfs(_) | OpenFile::Stdout(_) => file.try_clone().ok(),
+		// A stderr-backed stdout is still the file the shell's error output
+		// lands in, so it has to survive for the identity check.
+		OpenFile::File(_) | OpenFile::Vfs(_) | OpenFile::Stdout(_) | OpenFile::Stderr(_) => {
+			file.try_clone().ok()
+		},
 		_ => None,
 	}
 }
@@ -202,6 +206,27 @@ fn handle_metadata(file: &OpenFile) -> Option<Metadata> {
 			#[cfg(not(any(unix, windows)))]
 			{
 				let _ = stdin;
+				None
+			}
+		},
+		// The shell's error output can be the file the utility writes to, so
+		// its identity has to be read from the descriptor it names.
+		OpenFile::Stderr(stderr) => {
+			#[cfg(unix)]
+			{
+				use std::os::fd::AsFd;
+				let handle = stderr.as_fd().try_clone_to_owned().ok()?;
+				Metadata::from_file(&std::fs::File::from(handle)).ok()
+			}
+			#[cfg(windows)]
+			{
+				use std::os::windows::io::AsHandle;
+				let handle = stderr.as_handle().try_clone_to_owned().ok()?;
+				Metadata::from_file(&std::fs::File::from(handle)).ok()
+			}
+			#[cfg(not(any(unix, windows)))]
+			{
+				let _ = stderr;
 				None
 			}
 		},
