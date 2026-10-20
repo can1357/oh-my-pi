@@ -23,7 +23,7 @@ use std::{
 };
 
 pub use cli::{COMMAND_TIMEOUT, NETWORK_TIMEOUT, OUTPUT_LIMIT_BYTES, SYNC_TIMEOUT, clone};
-pub use mutate::{DetachGitDirMode, detach_git_dir, detach_git_dir_with};
+pub use mutate::detach_git_dir;
 pub use patch::{join_patches, validate_hunk_selections};
 
 use crate::{
