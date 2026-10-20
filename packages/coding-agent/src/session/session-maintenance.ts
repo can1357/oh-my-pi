@@ -1516,6 +1516,9 @@ export class SessionMaintenance {
 							remoteSystemPrompt: this.#host.agent.state.systemPrompt,
 							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 							codexCompaction,
+							// Bill the summary requests against the branch that issued
+							// them, even when this compaction is later abandoned.
+							onUsage: this.#host.sessionManager.createUsageObserver(),
 						},
 						compactionCandidates,
 					);
@@ -2336,6 +2339,9 @@ export class SessionMaintenance {
 					// overlapping the live stream must never interleave with it.
 					sessionId: `${this.#host.sessionId()}:spec:${Snowflake.next()}`,
 					preferWebsockets: false,
+					// The speculation summarizes the snapshot, so its spend belongs
+					// to the branch the snapshot was taken on.
+					onUsage: this.#host.sessionManager.createUsageObserver(snapshotLeafId),
 				},
 				candidates,
 			);
@@ -5360,6 +5366,9 @@ export class SessionMaintenance {
 						options.phase ??
 						(reason === "threshold" ? "pre_turn" : reason === "idle" ? "standalone_turn" : "mid_turn"),
 				});
+				// Bill the summary requests against the branch that issued them,
+				// even when this compaction is later abandoned.
+				const usageObserver = this.#host.sessionManager.createUsageObserver();
 
 				for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
 					const candidate = candidates[candidateIndex];
@@ -5410,6 +5419,7 @@ export class SessionMaintenance {
 									// retry too — the budgets would multiply and each outer
 									// wait would stack on top of an inner backoff.
 									oneshotRetry: false,
+									onUsage: usageObserver,
 								},
 							);
 							break;

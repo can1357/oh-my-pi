@@ -163,6 +163,61 @@ export interface CompactionResult<T = unknown> {
 }
 
 // ============================================================================
+// Usage accounting
+// ============================================================================
+
+/**
+ * Ledger purposes for the local compaction-side provider requests.
+ *
+ * The shared prefix keeps compaction spend recognizable inside a session
+ * ledger that also records the live turn's own calls.
+ */
+export const COMPACTION_USAGE_PURPOSES = {
+	summary: "compaction:summary",
+	shortSummary: "compaction:short-summary",
+	turnPrefix: "compaction:turn-prefix",
+	handoff: "compaction:handoff",
+} as const;
+
+/**
+ * Billing metadata for one completed compaction-side provider request.
+ *
+ * Reported for every attempt the provider billed — including attempts a
+ * transient retry discarded and responses the provider rejected.
+ */
+export type CompactionRequestUsage = Pick<
+	AssistantMessage,
+	"api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
+> & { purpose: string };
+
+/** Extract the billing fields of one completed compaction-side provider request. */
+export function compactionRequestUsage(response: AssistantMessage, purpose: string): CompactionRequestUsage {
+	return {
+		purpose,
+		api: response.api,
+		provider: response.provider,
+		model: response.model,
+		usage: response.usage,
+		stopReason: response.stopReason,
+		errorMessage: response.errorMessage,
+	};
+}
+
+/**
+ * Build the per-attempt observer for one compaction-side request kind.
+ *
+ * Returns `undefined` when the host does not track usage, so the oneshot keeps
+ * its zero-overhead path.
+ */
+function usageObserver(
+	options: { onUsage?: (usage: CompactionRequestUsage) => void } | undefined,
+	purpose: string,
+): ((response: AssistantMessage) => void) | undefined {
+	if (!options?.onUsage) return undefined;
+	return response => options.onUsage?.(compactionRequestUsage(response, purpose));
+}
+
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -718,6 +773,14 @@ export interface SummaryOptions {
 	 */
 	telemetry?: AgentTelemetry;
 	/**
+	 * Observe every billed provider request of this compaction.
+	 *
+	 * The observer fires once per completed attempt — including attempts a
+	 * transient retry discarded and responses the provider rejected — so a host
+	 * can bill the spend even when the compaction itself is later abandoned.
+	 */
+	onUsage?: (usage: CompactionRequestUsage) => void;
+	/**
 	 * Active session thinking level. Threaded from `agent-session.ts` so
 	 * compaction honors the user's `/model` thinking selection instead of
 	 * silently overriding it with `Effort.High` (the historical default).
@@ -1051,6 +1114,7 @@ async function summarizeConversationWindow(
 			oneshotKind: "compaction_summary",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttemptCompleted: usageObserver(options, COMPACTION_USAGE_PURPOSES.summary),
 		},
 	);
 
@@ -1091,6 +1155,14 @@ export interface HandoffOptions {
 	 * `resolveCompactionEffort` for the conversion contract.
 	 */
 	thinkingLevel?: ThinkingLevel;
+	/**
+	 * Observe every billed provider request of this handoff.
+	 *
+	 * The observer fires once per completed attempt — including attempts a
+	 * transient retry discarded and responses the provider rejected — so a host
+	 * can bill the spend even when the handoff itself is later abandoned.
+	 */
+	onUsage?: (usage: CompactionRequestUsage) => void;
 }
 
 export function renderHandoffPrompt(customInstructions?: string): string {
@@ -1121,6 +1193,8 @@ export interface HandoffFromContextOptions {
 	telemetry?: AgentTelemetry;
 	/** See {@link HandoffOptions.thinkingLevel}. */
 	thinkingLevel?: ThinkingLevel;
+	/** See {@link HandoffOptions.onUsage}. */
+	onUsage?: (usage: CompactionRequestUsage) => void;
 }
 
 /**
@@ -1151,13 +1225,20 @@ export async function generateHandoffFromContext(
 		oneshotKind: "handoff",
 		completeImpl: options.completeImpl,
 		retry: {},
+		onAttemptCompleted: usageObserver(options, COMPACTION_USAGE_PURPOSES.handoff),
 	});
 	if (response.stopReason === "error" && shouldRetryHandoffWithAutoToolChoice(response)) {
 		response = await instrumentedCompleteSimple(
 			model,
 			context,
 			{ ...requestOptions, toolChoice: "auto" },
-			{ telemetry: options.telemetry, oneshotKind: "handoff", completeImpl: options.completeImpl, retry: {} },
+			{
+				telemetry: options.telemetry,
+				oneshotKind: "handoff",
+				completeImpl: options.completeImpl,
+				retry: {},
+				onAttemptCompleted: usageObserver(options, COMPACTION_USAGE_PURPOSES.handoff),
+			},
 		);
 	}
 
@@ -1201,6 +1282,7 @@ export async function generateHandoff(
 			},
 			telemetry: options.telemetry,
 			thinkingLevel: options.thinkingLevel,
+			onUsage: options.onUsage,
 		},
 	);
 }
@@ -1269,6 +1351,7 @@ async function generateShortSummary(
 			oneshotKind: "compaction_short_summary",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttemptCompleted: usageObserver(options, COMPACTION_USAGE_PURPOSES.shortSummary),
 		},
 	);
 
@@ -1686,6 +1769,9 @@ export async function compact(
 		// The caller's opt-out must reach every summarization oneshot, otherwise
 		// an outer retry loop multiplies with the inner one (see SummaryOptions).
 		oneshotRetry: options?.oneshotRetry,
+		// Every fan-out summarizer bills through the same observer, so the host
+		// sees each attempt of each request kind.
+		onUsage: options?.onUsage,
 	};
 
 	// An archive keeps the reasoning policy of the model it was rendered for;
@@ -2146,6 +2232,9 @@ export async function compact(
 					completeImpl: summaryOptions.completeImpl,
 					telemetry: summaryOptions.telemetry,
 					retry: summaryOneshotRetry(summaryOptions),
+					// The provider wrote the summary, but the request was still
+					// billed: report it like any other summary attempt.
+					onAttemptCompleted: usageObserver(summaryOptions, COMPACTION_USAGE_PURPOSES.summary),
 				},
 			);
 			nativeSummary = remote.content;
@@ -2330,6 +2419,7 @@ async function generateTurnPrefixSummary(
 			oneshotKind: "compaction_turn_prefix",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttemptCompleted: usageObserver(options, COMPACTION_USAGE_PURPOSES.turnPrefix),
 		},
 	);
 
