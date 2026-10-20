@@ -11,6 +11,7 @@ import { logger, prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { roleCandidatePool } from "../config/model-roles";
 import { resolveRoleChain } from "../config/model-resolver";
+import { resolveConfigValue } from "../config/resolve-config-value";
 import { type JudgmentUsageLedger, journalJudgmentUsage } from "../judgment";
 import type {
 	MemoryBackend,
@@ -553,13 +554,24 @@ async function resolveMnemopiProviderOptions(
 	sessionId: string,
 	usageLedger: Partial<JudgmentUsageLedger>,
 ): Promise<MnemopiProviderOptions> {
+	const configuredEmbeddingKey = config.providerOptions.embeddingApiKey;
 	const base: MnemopiProviderOptions = {
 		noEmbeddings: config.providerOptions.noEmbeddings,
 		embeddingModel: config.providerOptions.embeddingModel,
 		embeddingApiUrl: config.providerOptions.embeddingApiUrl,
+		// A configured key may name an environment variable (or a `!command`),
+		// exactly like a provider `apiKey` in models.yml. Resolve it through the
+		// same helper the provider path uses, so the endpoint receives the
+		// secret instead of the variable name (issue #16334).
 		embeddingApiKey:
-			config.providerOptions.embeddingApiKey ??
-			(await openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.embeddingApiUrl)),
+			configuredEmbeddingKey === undefined
+				? await openrouterKeyResolver(modelRegistry, sessionId, config.providerOptions.embeddingApiUrl)
+				: typeof configuredEmbeddingKey === "string"
+					? await resolveConfigValue(configuredEmbeddingKey)
+					: configuredEmbeddingKey,
+		// Mnemopi reads a missing `llm` option as "LLM enabled" and falls back to
+		// ambient MNEMOPI_LLM_* settings, so keep the explicit disable for every
+		// mode that does not configure its own LLM.
 		llm: false,
 	};
 
