@@ -608,9 +608,6 @@ const PICK_WATCH: Duration = Duration::from_secs(1);
 /// How often [`FrontApp::keep_in_front`] checks the front app; a keystroke
 /// typed between an activation and the next check goes to the activated app.
 const HOLD_POLL: Duration = Duration::from_millis(2);
-/// How far, in points, the pointer may move between a press and its release
-/// for [`ClickPlacer`] to count them as one click rather than a drag.
-const CLICK_SLOP: f64 = 4.0;
 
 /// The HID counters of `MOUSE_BUTTON_EVENTS`.
 fn hid_buttons() -> [u32; 6] {
@@ -733,6 +730,10 @@ struct ClickPlace {
 	buttons: [u32; 6],
 	hit:     Option<bool>,
 }
+
+/// How far, in points, the pointer may move between a press and its release
+/// for [`ClickPlacer`] to count them as one click rather than a drag.
+const CLICK_SLOP: f64 = 4.0;
 
 /// Places the user's clicks by the accessibility hit-test the pointer's
 /// position gets, on a thread of its own: the hit-test can block for an AX
