@@ -466,6 +466,8 @@ const SERVICE_NAME = type(/^(?:\s*|[A-Za-z0-9][A-Za-z0-9._-]{0,47})$/).describe(
 	"starts a long-lived supervised service under this name; omit for finite commands, async jobs included. 1-48 of [A-Za-z0-9._-]",
 );
 
+const BASH_ENV_DESCRIPTION = "extra environment variables for the command (finite and service commands alike)";
+
 const SERVICE_READY = type({
 	"log?": type("string").describe("regex an output line matches once the service is ready"),
 	"port?": type("number").describe("TCP port the service accepts connections on once ready"),
@@ -485,6 +487,7 @@ const bashSchemaWithAsync = type({
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
 	"cwd?": "string",
 	"pty?": "boolean",
+	"env?": type("Record<string,string>").describe(BASH_ENV_DESCRIPTION),
 	"async?": "boolean",
 	"notify?": "string",
 });
@@ -494,6 +497,7 @@ const bashSchemaWithService = type({
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
 	"cwd?": "string",
 	"pty?": "boolean",
+	"env?": type("Record<string,string>").describe(BASH_ENV_DESCRIPTION),
 	"notify?": "string",
 	"name?": SERVICE_NAME,
 	"ready?": SERVICE_READY,
@@ -504,6 +508,7 @@ const bashSchemaWithAsyncAndService = type({
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
 	"cwd?": "string",
 	"pty?": "boolean",
+	"env?": type("Record<string,string>").describe(BASH_ENV_DESCRIPTION),
 	"async?": "boolean",
 	"notify?": "string",
 	"name?": SERVICE_NAME,
@@ -536,6 +541,7 @@ export interface BashToolInput {
 	 */
 	notify?: string;
 	pty?: boolean;
+	env?: Record<string, string>;
 }
 
 const PTY_BOARD_COMMAND_MAX = 60;
@@ -573,6 +579,21 @@ function normalizeReady(ready: ServiceReady | undefined): ServiceReady | undefin
 	const host = blankToUndefined(ready.host);
 	const timeout = Number.isFinite(ready.timeout) ? ready.timeout : undefined;
 	return { log, host, port, timeout };
+}
+
+/**
+ * Drops env overlays that carry no variables. Some tool-call layers
+ * materialize every optional argument, spelling "not set" as `{}` (or an
+ * object whose values are not strings); an empty overlay must not count as
+ * caller env, and non-string values must not reach process spawn.
+ */
+function normalizeEnv(env: Record<string, unknown> | undefined): Record<string, string> | undefined {
+	if (!env || typeof env !== "object" || Array.isArray(env)) return undefined;
+	const out: Record<string, string> = {};
+	for (const [key, value] of Object.entries(env)) {
+		if (typeof value === "string") out[key] = value;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export interface BashToolOptions {}
@@ -1493,7 +1514,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		approvalTier: ToolTier;
 		/** Session the call started in; its shell, even if the session changes before the job runs. */
 		sessionId: string | undefined;
-		/** That session's identity for the command (see {@link BashTool.#sessionEnv}). */
+		/** Env overlay for the command: that session's identity (see {@link BashTool.#sessionEnv}) with the caller's `env` on top. */
 		sessionEnv: Record<string, string>;
 		/** The model's `i` intent on the call, for the job's widget author. */
 		intent?: string;
@@ -1789,6 +1810,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			async: rawAsync,
 			notify: rawNotify,
 			pty,
+			env: rawEnv,
 		}: BashToolInput,
 		ran: { cwd?: string; cdSeparator?: ";" },
 		signal?: AbortSignal,
@@ -1838,6 +1860,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// `notify` reports output while the command runs: a service does that as it is, and anything
 		// else starts in the background as `async` does.
 		const asyncRequested = rawAsync === true || (notifySource !== undefined && name === undefined);
+		const env = normalizeEnv(rawEnv as Record<string, unknown> | undefined);
+		// The caller's explicit env wins over the session identity variables.
+		const effectiveEnv = { ...sessionEnv, ...env };
 		const pendingNotices: string[] = [];
 		if (name !== undefined) {
 			if (!this.#launchEnabled) throw new ToolError("Service launch is disabled in this session.");
@@ -1976,7 +2001,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					pty: pty ?? true,
 					ready,
 					notify: notifySource,
-					env: { ...seed.env, ...sessionEnv },
+					env: { ...seed.env, ...effectiveEnv },
 					seed: (await shellMounts(sessionResolveContext(this.session), approvalTier)) + seed.script,
 				},
 				signal,
@@ -2051,7 +2076,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				foreground: false,
 				approvalTier,
 				sessionId,
-				sessionEnv,
+				sessionEnv: effectiveEnv,
 				intent: this.session.getToolCallIntent?.(toolCallId),
 				toolCallId,
 				notify,
@@ -2106,7 +2131,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				foreground: !startBackgrounded,
 				approvalTier,
 				sessionId,
-				sessionEnv,
+				sessionEnv: effectiveEnv,
 				intent: this.session.getToolCallIntent?.(toolCallId),
 				toolCallId,
 				toolCommands: toolCommandNameList,
@@ -2187,7 +2212,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					),
 					commandCwd,
 					{
-						callerEnv: sessionEnv,
+						callerEnv: effectiveEnv,
 						signal,
 						timeoutMs: cfgBashDirenvLoadTimeoutMs.get(this.session.settings),
 						callerTimeoutMs: timeoutMs,
@@ -2262,15 +2287,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				// direnv-transformed command (carries any `unset -v` prefix) + direnv
 				// env; falls back to the raw command when direnv is off/absent.
 				const bridgeCommand = backendPreflight?.command ?? command;
-				const bridgeEnv = backendPreflight?.env;
+				// The caller's explicit env wins over direnv values here, matching
+				// applyDirenvPreflight's merge contract for the other backends.
+				const bridgeEnv = { ...backendPreflight?.env, ...env };
 				const shellSpawn = wrapShellLineForClientTerminal(bridgeCommand, this.session.settings.getShellConfig());
 				const createP = clientBridge.createTerminal({
 					command: shellSpawn.command,
 					args: shellSpawn.args,
 					cwd: commandCwd,
-					env: bridgeEnv
-						? Object.entries(bridgeEnv).map(([name, value]) => ({ name, value: value as string }))
-						: undefined,
+					env:
+						Object.keys(bridgeEnv).length > 0
+							? Object.entries(bridgeEnv).map(([name, value]) => ({ name, value: value as string }))
+							: undefined,
 					outputByteLimit: DEFAULT_MAX_BYTES,
 				});
 				const createRaced = await Promise.race([
@@ -2508,16 +2536,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					hostCwd,
 					urlCwd: virtualCwd,
 					sessionId,
-					sessionEnv,
+					sessionEnv: effectiveEnv,
 					timeoutMs,
 					signal,
 					mounts: await shellMounts(sessionResolveContext(this.session, { signal }), approvalTier),
 				})
 			: // executeBash runs its OWN direnv preflight internally — pass the RAW
-				// command here so the unset prefix is not applied twice.
+				// command here so the unset prefix is not applied twice. The caller
+				// env rides `options.env` so it wins over direnv inside the executor.
 				await executeBash(command, {
 					cwd: commandCwd,
-					env: sessionEnv,
+					env: effectiveEnv,
 					sessionKey: sessionId,
 					minimize: !nativeShapingOff(this.session),
 					isSessionCurrent: () => (this.session.getSessionId?.() ?? undefined) === sessionId,
