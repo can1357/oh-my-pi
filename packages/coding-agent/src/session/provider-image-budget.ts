@@ -94,7 +94,8 @@ function sendsComputerScreenshotMetadata(model: Model): boolean {
  * the result's content images never travel, and a `file_id` screenshot costs nothing.
  */
 function sentScreenshotBytes(message: Message, metadataWire: boolean): number | undefined {
-	if (!metadataWire || message.role !== "toolResult" || message.providerMetadata?.type !== "computer") return undefined;
+	if (!metadataWire || message.role !== "toolResult" || message.providerMetadata?.type !== "computer")
+		return undefined;
 	const imageUrl = message.providerMetadata.screenshot.image_url;
 	return imageUrl?.slice(0, 5).toLowerCase() === "data:" ? imageUrl.length : 0;
 }

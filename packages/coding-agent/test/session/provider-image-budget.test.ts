@@ -715,7 +715,11 @@ describe("provider context image budgets", () => {
 			tools: [],
 			messages: [
 				{ role: "user", content: "use the computer", timestamp: 0 },
-				...computerTurn(0, screenshot, Array.from({ length: 6 }, () => image("p".repeat(100)))),
+				...computerTurn(
+					0,
+					screenshot,
+					Array.from({ length: 6 }, () => image("p".repeat(100))),
+				),
 			],
 		};
 		const hosted = factoryGptModel();
