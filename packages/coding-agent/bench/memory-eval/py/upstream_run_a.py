@@ -22,6 +22,7 @@ for name in sorted(os.environ):
 		sys.exit(f"upstream_run_a.py: refusing to run with {name} set; unset it so only the venv's code runs")
 
 import argparse  # noqa: E402
+import importlib.metadata  # noqa: E402
 import json  # noqa: E402
 import shutil  # noqa: E402
 import statistics  # noqa: E402
@@ -172,8 +173,11 @@ mean_recall = statistics.mean(result["recalls"])
 if loaded_model_digest() != MODEL_DIGEST:
 	sys.exit("embedding model files changed during Run A; dump not written")
 out_path.parent.mkdir(parents=True, exist_ok=True)
+# The numerical runtime behind the vectors can reorder near-ties; recorded under Run B's engineInfo names.
+runtime = {f"{name}_version": importlib.metadata.version(name) for name in ("fastembed", "onnxruntime")}
 out_path.write_text(
-	json.dumps({"questions": questions, "meanRecall": mean_recall, "embeddingModelSha256": MODEL_DIGEST}), encoding="utf-8"
+	json.dumps({"questions": questions, "meanRecall": mean_recall, "embeddingModelSha256": MODEL_DIGEST, "runtime": runtime}),
+	encoding="utf-8",
 )
 shutil.rmtree(data_dir, ignore_errors=True)
 print(f"evaluated {len(questions)} questions, mean recall {mean_recall:.6f}")
