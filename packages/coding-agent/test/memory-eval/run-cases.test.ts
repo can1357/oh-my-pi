@@ -25,13 +25,18 @@ afterAll(async () => {
 	await removeWithRetries(root);
 });
 
-/** A private cache holding the fixture and, unless `revision` is undefined, its revision marker. */
-async function fixtureCache(name: string, revision: string | undefined): Promise<string> {
+/**
+ * A private cache holding the fixture and, unless `revision` is undefined, its marker: the revision and the fixture's
+ * SHA-256 as `py/prepare_datasets.py` writes them, or `sha256` instead when given ("" leaves the digest out).
+ */
+async function fixtureCache(name: string, revision: string | undefined, sha256?: string): Promise<string> {
 	const dir = path.join(root, name);
 	const data = path.join(dir, "data");
 	await fs.mkdir(data, { recursive: true });
-	await fs.copyFile(path.join(FIXTURE_DATA, "beam-100k.json"), path.join(data, "beam-100k.json"));
-	if (revision !== undefined) await Bun.write(path.join(data, "beam-100k.json.revision"), `${revision}\n`);
+	const file = path.join(data, "beam-100k.json");
+	await fs.copyFile(path.join(FIXTURE_DATA, "beam-100k.json"), file);
+	const digest = sha256 ?? new Bun.CryptoHasher("sha256").update(await Bun.file(file).bytes()).digest("hex");
+	if (revision !== undefined) await Bun.write(`${file}.revision`, `${revision}\n${digest}\n`);
 	return dir;
 }
 
@@ -140,6 +145,21 @@ it("run refuses a cached dataset whose recorded revision is missing or not the p
 	expect(stale.stderr).toContain(`beam-100k.json.revision: revision deadbeef, expected ${BEAM_REVISION}`);
 	expect(bare.code).toBe(1);
 	expect(bare.stderr).toContain(`beam-100k.json.revision: missing, expected ${BEAM_REVISION}`);
+});
+
+it("run refuses a cached dataset whose marker records no digest or the digest of other data", async () => {
+	const [other, undigested] = await Promise.all([
+		fixtureCache("other-data", BEAM_REVISION, "0".repeat(64)).then(dir =>
+			runAt(dir, ["--engine", "oracle", "--protocol", "standard"]),
+		),
+		fixtureCache("undigested", BEAM_REVISION, "").then(dir =>
+			runAt(dir, ["--engine", "oracle", "--protocol", "standard"]),
+		),
+	]);
+	expect(other.code).toBe(1);
+	expect(other.stderr).toContain("beam-100k.json.revision: records a digest of other data");
+	expect(undigested.code).toBe(1);
+	expect(undigested.stderr).toContain("beam-100k.json.revision: records no data digest");
 });
 
 describe("pinnedCheckout", () => {

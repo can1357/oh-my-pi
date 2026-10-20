@@ -28,6 +28,17 @@ from prepare_datasets import publish, read_current
 out, text = Path(sys.argv[2]), json.loads(sys.argv[3])
 publish(out, text, "rev")
 assert read_current(out, "rev") == text
+# Marker contract, on a second file so the one checked below keeps its bytes.
+other = out.with_name("other.json")
+marker = other.with_name(other.name + ".revision")
+publish(other, text, "rev")
+# Another writer's data next to this marker, as two racing setups can leave them, is not taken for "rev".
+other.write_text(json.dumps(["other writer"]), encoding="utf-8")
+assert read_current(other, "rev") is None
+# A marker from before digests were recorded is upgraded to the data as it stands, then holds it.
+marker.write_text("rev\\n", encoding="utf-8")
+assert read_current(other, "rev") == json.dumps(["other writer"])
+assert len(marker.read_text(encoding="utf-8").split()) == 2
 `,
 			PY,
 			out,

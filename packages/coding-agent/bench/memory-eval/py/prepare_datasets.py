@@ -1,8 +1,9 @@
 """Download the pinned BEAM and LongMemEval files into ~/.cache/omp-memory-eval/data/.
 
-Run with venv-engine's python. Each output gets a `<file>.revision` marker holding the revision it was downloaded at;
-run.ts refuses data whose marker is missing or not its pinned revision. Idempotent: an output whose marker matches the
-pinned revision is skipped, any other is downloaded again.
+Run with venv-engine's python. Each output gets a `<file>.revision` marker holding the revision it was downloaded at and
+the SHA-256 of the file written; run.ts refuses data whose marker is missing, names another revision, or names other
+bytes. Idempotent: an output whose marker matches the pinned revision and the file is skipped, any other is downloaded
+again. A marker from before the digest was recorded is upgraded in place.
 """
 
 import os
@@ -15,6 +16,7 @@ for name in ("PYTHONPATH", "PYTHONHOME"):
 		sys.exit(f"prepare_datasets.py: refusing to run with {name} set; unset it so venv-engine's packages are imported")
 
 import ast  # noqa: E402
+import hashlib  # noqa: E402
 import json  # noqa: E402
 import tempfile  # noqa: E402
 from collections import Counter  # noqa: E402
@@ -60,10 +62,23 @@ def marker(out: Path) -> Path:
 	return out.with_name(f"{out.name}.revision")
 
 
+def digest(out: Path) -> str:
+	return hashlib.sha256(out.read_bytes()).hexdigest()
+
+
 def read_current(out: Path, revision: str) -> str | None:
-	"""The cached file's text when its marker records `revision`; None when either is missing or stale."""
+	"""The cached file's text when its marker records `revision` and the file's own SHA-256; None otherwise.
+
+	The marker is `<revision>\\n<sha256 of the data file>\\n`. A marker from before the digest was recorded names only
+	the revision; it is upgraded in place, attesting the pair as it stands, as the revision-only marker already did.
+	"""
 	try:
-		if marker(out).read_text(encoding="utf-8").strip() != revision:
+		lines = marker(out).read_text(encoding="utf-8").split()
+		if not lines or lines[0] != revision:
+			return None
+		if len(lines) == 1:
+			marker(out).write_text(f"{revision}\n{digest(out)}\n", encoding="utf-8")
+		elif lines[1] != digest(out):
 			return None
 		return out.read_text(encoding="utf-8")
 	except FileNotFoundError:
@@ -71,19 +86,21 @@ def read_current(out: Path, revision: str) -> str | None:
 
 
 def publish(out: Path, text: str, revision: str) -> None:
-	"""Replaces `out` with `text` and only then records `revision`.
+	"""Replaces `out` with `text` and only then records `revision` with the digest of the bytes now in `out`.
 
 	The old marker goes first, so neither an interrupted refresh nor a concurrent run can take the new
 	or partial data for the old revision; the data lands by atomic rename from a staging file of its own.
+	Two setups racing on one cache can still leave one's marker next to the other's data, but the marker
+	names the digest of the data its writer published, so `run` refuses that pair instead of trusting it.
 	"""
 	marker(out).unlink(missing_ok=True)
-	# shortcut: two setups racing on one cache can still leave the later marker over the earlier data; lock if that is ever run.
 	with tempfile.NamedTemporaryFile(
 		"w", encoding="utf-8", dir=out.parent, prefix=f".{out.name}.", delete=False
 	) as staging:
 		staging.write(text)
+	written = hashlib.sha256(Path(staging.name).read_bytes()).hexdigest()
 	os.replace(staging.name, out)
-	marker(out).write_text(revision + "\n", encoding="utf-8")
+	marker(out).write_text(f"{revision}\n{written}\n", encoding="utf-8")
 
 
 def write_beam(name: str, split: str) -> list[dict]:
