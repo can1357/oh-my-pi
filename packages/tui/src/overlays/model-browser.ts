@@ -183,12 +183,6 @@ export interface ModelBrowserRegistry {
 }
 
 /** One selectable row. `selector` is a canonical model key or host-specific virtual key. */
-/** Items the browser memoizes rows for: its own list and the last picker catalogue. */
-interface CreditItems {
-	list: readonly ModelBrowserItem[];
-	catalogue: readonly ModelBrowserItem[];
-}
-
 export interface ModelBrowserItem {
 	provider: string;
 	id: string;
@@ -1045,8 +1039,7 @@ export class ModelBrowser implements Component {
 		| undefined;
 	/** Theme-formatted catalog metric cells per item; rebuilt when the item's model or the theme changes. */
 	#metricCells = new WeakMap<ModelBrowserItem, MetricCells>();
-	/** Items whose credit promotions date the memoized rows, and the next start or end among them. */
-	#creditItems: CreditItems = { list: [], catalogue: [] };
+	/** Earliest credit promotion start or end among models whose rows are memoized; passing it rebuilds them. */
 	#nextCreditChange = Number.POSITIVE_INFINITY;
 	/** Non-separator items of the last ranked visible list, for {@link queryMatches}. */
 	#queryMatches: { visible: readonly ModelBrowserItem[]; matches: readonly ModelBrowserItem[] } | undefined;
@@ -1139,9 +1132,6 @@ export class ModelBrowser implements Component {
 
 	/** Replace the scope's base items; the live query re-applies and selection is pinned by selector. */
 	setItems(items: ModelBrowserItem[]): void {
-		// Invalidate a boundary already passed before retracking replaces it.
-		this.#syncCreditClock();
-		this.#trackCreditChanges({ ...this.#creditItems, list: items });
 		const selectedKey = this.getSelected()?.selector;
 		this.#menu.setItems(this.#insertSeparator(items), selectedKey);
 		this.onSelectionChange?.(this.getSelected());
@@ -1537,6 +1527,7 @@ export class ModelBrowser implements Component {
 	#metricCellsFor(item: ModelBrowserItem): MetricCells {
 		const cached = this.#metricCells.get(item);
 		if (cached?.model === item.model && cached.theme === theme) return cached;
+		this.#noteCreditChange(item.model);
 		const intelligence = formatIntelligence(item.model);
 		const ctx = formatContext(item.model);
 		const cost = formatCostPair(item.model);
@@ -1779,25 +1770,23 @@ export class ModelBrowser implements Component {
 
 	invalidate(): void {}
 
-	#trackCreditChanges(items: CreditItems): void {
-		this.#creditItems = items;
+	/** Called before a row of `model` is memoized: its credit rate changes at its promotion's next start or end. */
+	#noteCreditChange(model: Model): void {
+		const promotion = model.factoryDroidCreditPromotion;
+		if (!promotion) return;
 		const now = Date.now();
-		let next = Number.POSITIVE_INFINITY;
-		for (const item of [...items.list, ...items.catalogue]) {
-			const promotion = item.model.factoryDroidCreditPromotion;
-			if (!promotion) continue;
-			for (const at of [promotion.startsAt, promotion.endsAt]) if (at > now && at < next) next = at;
+		for (const at of [promotion.startsAt, promotion.endsAt]) {
+			if (at > now && at < this.#nextCreditChange) this.#nextCreditChange = at;
 		}
-		this.#nextCreditChange = next;
 	}
 
-	/** A credit promotion started or ended since rows were memoized: rebuild every price cell. */
+	/** A credit promotion started or ended since rows were memoized: rebuild every memoized row. */
 	#syncCreditClock(): void {
 		if (Date.now() < this.#nextCreditChange) return;
+		this.#nextCreditChange = Number.POSITIVE_INFINITY;
 		this.#metricCells = new WeakMap();
 		this.#pickerPreview = undefined;
 		this.#bumpPickerEpoch();
-		this.#trackCreditChanges(this.#creditItems);
 	}
 
 	#bumpNativeEpoch(): void {
@@ -1889,6 +1878,7 @@ export class ModelBrowser implements Component {
 		if (item.id === "separator") return node("rule", undefined, undefined, "separator");
 		const cached = this.#itemNodes.get(item.selector);
 		if (cached?.item === item) return cached.node;
+		this.#noteCreditChange(item.model);
 
 		const label: TspSpan[] = [];
 		if (this.#showProvider) label.push(span(`${item.provider}/`, "dim"));
@@ -1931,6 +1921,7 @@ export class ModelBrowser implements Component {
 			return prev.node;
 		}
 
+		if (selected) this.#noteCreditChange(selected.model);
 		const children: NativeChild[] = [];
 		if (selected) {
 			const model = selected.model;
@@ -2032,7 +2023,6 @@ export class ModelBrowser implements Component {
 	 */
 	pickerItems(catalogue: readonly ModelBrowserItem[]): ModelPickerCatalogue {
 		this.#syncCreditClock();
-		if (catalogue !== this.#creditItems.catalogue) this.#trackCreditChanges({ ...this.#creditItems, catalogue });
 		const memo = this.#pickerItems;
 		if (memo?.catalogue === catalogue && memo.epoch === this.#pickerEpoch && memo.roles === this.#roles) {
 			return memo.value;
@@ -2084,6 +2074,7 @@ export class ModelBrowser implements Component {
 		) {
 			return cached.value;
 		}
+		this.#noteCreditChange(model);
 		const facts: Record<string, TspText | number> = {};
 		const int = model.int != null && Number.isFinite(model.int) ? model.int : undefined;
 		if (int !== undefined) facts.int = String(Math.round(int));
@@ -2244,6 +2235,7 @@ export class ModelBrowser implements Component {
 		) {
 			return memo.children;
 		}
+		if (item) this.#noteCreditChange(item.model);
 		const children = item ? this.modelPreview(item, mode, current) : [];
 		this.#pickerPreview = { item, epoch: this.#pickerEpoch, roles: this.#roles, key, children };
 		return children;

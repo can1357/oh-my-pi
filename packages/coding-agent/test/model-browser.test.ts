@@ -670,6 +670,32 @@ describe("Factory Droid credit promotion over time", () => {
 			setSystemTime();
 		}
 	});
+
+	test("a row hidden while its promotion starts shows the discount when it comes back", () => {
+		try {
+			setSystemTime(new Date(startsAt - 1000));
+			const other: Model = { ...makeModel("factory-droid", "claude-opus-5"), factoryDroidCredits: 2 };
+			const browser = makeBrowser([], []);
+			const items = buildBrowserItems([promoted, other]);
+			const without = items.filter(item => item.model !== promoted);
+			browser.setItems(items);
+			expect(Bun.stripANSI(browser.render(120).join("\n"))).toContain("$1.25/10 2×");
+			expect(text(browser.describe())).toContain("$1.25/10 2×");
+			expect(text(browser.pickerItems(items))).toContain("$1.25·10 2×");
+
+			// `@role` mode and scope hops hide the row, then restore the same item objects.
+			browser.setItems(without);
+			expect(text(browser.describe())).not.toContain("gpt-5.6-sol");
+			browser.pickerItems(without);
+			setSystemTime(new Date(startsAt));
+			browser.setItems(items);
+			expect(Bun.stripANSI(browser.render(120).join("\n"))).toContain("$1.25/10 1.6×");
+			expect(text(browser.describe())).toContain("1.6×");
+			expect(text(browser.pickerItems(items))).toContain("1.6×");
+		} finally {
+			setSystemTime();
+		}
+	});
 });
 
 describe("serviceTierFor", () => {
