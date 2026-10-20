@@ -1924,6 +1924,12 @@ export class SessionAdvisors {
 		this.#advisors = [];
 		this.#advisorYieldQueueUnsubscribe?.();
 		this.#advisorYieldQueueUnsubscribe = undefined;
+		// The advisor agents are gone, so the transcripts the session-scoped
+		// provider transform may have memoized are discarded history. `dispose()`
+		// only aborts the loop, so without this the injector keeps the discarded
+		// provider transcript (including normalized images) reachable until the
+		// next provider transform or a whole-session disposal.
+		this.#onHistoryReplaced?.();
 	}
 
 	#recordAdvisorCost(advisor: ActiveAdvisor, message: AssistantMessage): void {

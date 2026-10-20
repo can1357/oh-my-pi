@@ -5,6 +5,9 @@
 ### Fixed
 
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))
+### Added
+
+- Added `AgentOptions.onHistoryReplaced`, notified after the live transcript or the steering/follow-up queues are replaced wholesale, so per-request caches can drop snapshots pinned to the discarded history ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.4] - 2026-10-20
 

@@ -873,20 +873,20 @@ describe("date/cwd reminder memo on advisor history discard", () => {
 			session: live,
 			advisor,
 			injector,
-	} = createAdvisorHarness(tempDir, (model, context, options) => {
-		// Admit the replay memo over the wire this failing build is sent, so the
-		// injector holds the batch tail strongly: two identical builds promote
-		// `#pending` to `#memo` (see `#inject`). Without the rollback release the
-		// memo keeps the discarded batch reachable, so the collectibility check
-		// below only passes when `rollbackTo` fires `onHistoryReplaced`.
-		injector.transform(context, REMINDER_DATE, REMINDER_CWD);
-		injector.transform(context, REMINDER_DATE, REMINDER_CWD);
-		// The wire is the last place the batch tail is observable; taking the
-		// reference here (and dropping the driver's own record below) leaves the
-		// injector's memo as the only holder.
-		tailRef ??= new WeakRef(context.messages.at(-1)!);
-		return advisorMock.stream(model, context, options);
-	});
+		} = createAdvisorHarness(tempDir, (model, context, options) => {
+			// Admit the replay memo over the wire this failing build is sent, so the
+			// injector holds the batch tail strongly: two identical builds promote
+			// `#pending` to `#memo` (see `#inject`). Without the rollback release the
+			// memo keeps the discarded batch reachable, so the collectibility check
+			// below only passes when `rollbackTo` fires `onHistoryReplaced`.
+			injector.transform(context, REMINDER_DATE, REMINDER_CWD);
+			injector.transform(context, REMINDER_DATE, REMINDER_CWD);
+			// The wire is the last place the batch tail is observable; taking the
+			// reference here (and dropping the driver's own record below) leaves the
+			// injector's memo as the only holder.
+			tailRef ??= new WeakRef(context.messages.at(-1)!);
+			return advisorMock.stream(model, context, options);
+		});
 
 		await live.prompt("first primary update");
 		expect(await live.waitForAdvisorCatchup(5_000)).toBe(true);
@@ -902,6 +902,23 @@ describe("date/cwd reminder memo on advisor history discard", () => {
 		advisorMock.reset();
 
 		expect(await becomesCollectible(tailRef!, 2_000)).toBe(true);
+		assertInjectorStillServes(injector);
+	});
+
+	it("releases the memo when the advisor runtime is stopped", async () => {
+		// Contract: `/advisor off` (and any model/config rebuild) tears the
+		// advisor agents down. `AdvisorRuntime.dispose()` only aborts the loop, so
+		// the teardown itself must reach the release callback — otherwise the
+		// session-scoped injector keeps the discarded provider transcript
+		// (including normalized images) reachable until the next provider
+		// transform or a whole-session disposal.
+		using tempDir = TempDir.createSync("@pi-date-cwd-reminder-advisor-");
+		const { session, advisor, injector } = createAdvisorHarness(tempDir);
+		const ref = pinAdvisorTranscript(advisor, injector);
+
+		expect(session.setAdvisorEnabled(false)).toBe(false);
+
+		expect(await becomesCollectible(ref, 2_000)).toBe(true);
 		assertInjectorStillServes(injector);
 	});
 });
