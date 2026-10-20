@@ -444,51 +444,22 @@ describe("ReadToolGroupComponent", () => {
 		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("Some **bold** text.");
 	});
 
-	it("keeps instruction URL reads compact without previewing their bodies", () => {
+	it("keeps the diagnostic of a failed instruction URL read in the compact row", () => {
 		const component = new ReadToolGroupComponent();
-		component.updateArgs({ path: "skill://chief-of-staff" }, "read-chief");
-		component.updateArgs({ path: "skill://i-have-adhd" }, "read-adhd");
-		component.updateArgs({ path: "rule://local-source-patches" }, "read-rule");
+		component.updateArgs({ path: "skill://no-such-skill" }, "read-missing");
 		component.updateResult(
 			{
-				content: [
-					{
-						type: "text",
-						text: "---\nname: chief-of-staff\ndescription: The one runbook\n---\n\n# chief-of-staff\n\nLong body",
-					},
-				],
+				content: [{ type: "text", text: "Unknown skill: no-such-skill\nAvailable: chief-of-staff" }],
+				isError: true,
 			},
 			false,
-			"read-chief",
-		);
-		component.updateResult(
-			{
-				content: [
-					{
-						type: "text",
-						text: "---\nname: i-have-adhd\ndescription: Shape output\n---\n\n# i-have-adhd\n\nLong body",
-					},
-				],
-			},
-			false,
-			"read-adhd",
-		);
-		component.updateResult(
-			{
-				content: [{ type: "text", text: "# local-source-patches\n\nLong body" }],
-			},
-			false,
-			"read-rule",
+			"read-missing",
 		);
 
 		const rendered = Bun.stripANSI(component.render(120).join("\n"));
 
-		expect(rendered).toContain("Read (3)");
-		expect(rendered).toContain(`${themeModule.theme.tree.branch} skill://chief-of-staff`);
-		expect(rendered).toContain(`${themeModule.theme.tree.branch} skill://i-have-adhd`);
-		expect(rendered).toContain(`${themeModule.theme.tree.last} rule://local-source-patches`);
-		expect(rendered).not.toContain("description: The one runbook");
-		expect(rendered).not.toContain("# chief-of-staff");
+		expect(rendered).toContain("skill://no-such-skill");
+		expect(rendered).toContain("Unknown skill: no-such-skill");
 	});
 });
 

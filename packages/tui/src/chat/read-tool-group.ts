@@ -744,6 +744,12 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		});
 	}
 
+	/** Plain-text row tail naming why a read failed; previews are off for errors, so the row must carry it. */
+	#errorSuffix(row: ReadSummaryRow): string {
+		if (this.#statusForTargets(row.targets) !== "error") return "";
+		return ` ${theme.fg("error", `— ${this.#errorFor(row).split("\n", 1)[0]}`)}`;
+	}
+
 	/** The failure message of a row's failed read (its result text, `Error:` prefix dropped). */
 	#errorFor(row: ReadSummaryRow): string {
 		const failed = row.targets.find(target => target.entry.status === "error")?.entry;
@@ -932,7 +938,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			if (!this.#shouldRenderPreviewRow(row)) {
 				const statusSymbol = this.#formatStatus(this.#statusForTargets(row.targets));
 				const pathDisplay = this.#formatRowPath(row, HEADER_PATH_PAINT);
-				const lines = [` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}`.trimEnd()];
+				const lines = [
+					` ${statusSymbol} ${theme.fg("toolTitle", theme.bold("Read"))} ${pathDisplay}${this.#errorSuffix(row)}`.trimEnd(),
+				];
 				const usageRows = this.#usageRowsBySummaryRow(displayRows).get(0) ?? [];
 				this.#appendUsageRows(lines, usageRows, "   ");
 				this.#text.setText(lines.join("\n"));
@@ -1048,7 +1056,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		usageRows: ReadUsageRow[],
 	): void {
 		const connector = index === total - 1 ? theme.tree.last : theme.tree.branch;
-		lines.push(`   ${theme.fg("dim", connector)} ${this.#formatRow(row)}`.trimEnd());
+		lines.push(`   ${theme.fg("dim", connector)} ${this.#formatRow(row)}${this.#errorSuffix(row)}`.trimEnd());
 
 		const connectorWidth = Bun.stringWidth(connector);
 		const continuation =
