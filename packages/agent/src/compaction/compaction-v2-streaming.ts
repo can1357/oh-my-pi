@@ -68,6 +68,16 @@ const CONTEXTUAL_USER_PREFIXES = [
 /** Token usage reported by the streamed V2 Responses completion. */
 export type CompactionV2Usage = RemoteCompactionUsage;
 
+/**
+ * Bills one V2 attempt.
+ *
+ * `failure` is set when the provider charged the request but the attempt
+ * produced nothing usable — a truncated or failed stream, or a terminal
+ * response whose compaction payload is unusable. The record then has to stay
+ * distinguishable from a successful request.
+ */
+export type CompactionV2UsageReporter = (usage: RemoteCompactionUsage, failure?: string) => void;
+
 /** Provider-ready Responses body and local state needed for V2 compaction. */
 export interface CompactionV2Request {
 	body: OpenAICodexCompactionBody;
@@ -259,7 +269,7 @@ export async function requestCompactionV2Streaming(
 		 * payload turns out to be unusable, so the usage is reported before
 		 * the payload is validated.
 		 */
-		onUsage?: (usage: RemoteCompactionUsage) => void;
+		onUsage?: CompactionV2UsageReporter;
 	},
 ): Promise<CompactionV2Response> {
 	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
@@ -336,7 +346,7 @@ async function attemptCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
-		onUsage?: (usage: RemoteCompactionUsage) => void;
+		onUsage?: CompactionV2UsageReporter;
 	},
 ): Promise<CompactionV2Response> {
 	// Faithful to Codex: append the compaction trigger as the final input item
@@ -477,25 +487,27 @@ function createCompactionV2CollectionState(): CompactionV2CollectionState {
  * Hand the billed usage to the observer exactly once.
  *
  * Two terminal events carry a usage object: a completed response and an
- * incomplete one (`max_output_tokens`, content filter). Both billed the
- * request, and the incomplete one is rejected — so its report has to happen
- * before the rejection, or the fallback underreports the abandoned attempt.
+ * unusable one (an incomplete or a failed stream). Both billed the request,
+ * and the unusable one is rejected — so its report has to happen before the
+ * rejection, or the fallback underreports the abandoned attempt. `failure`
+ * names the reason so the record stays distinguishable from a success.
  */
 function reportCompactionV2Usage(
 	state: CompactionV2CollectionState,
-	onUsage: ((usage: RemoteCompactionUsage) => void) | undefined,
+	onUsage: CompactionV2UsageReporter | undefined,
+	failure?: string,
 ): void {
 	if (state.usageReported) return;
 	const usage = state.usage;
 	if (!usage) return;
 	state.usageReported = true;
-	onUsage?.(usage);
+	onUsage?.(usage, failure);
 }
 
 async function collectCompactionV2Events(
 	events: AsyncIterable<Record<string, unknown>>,
 	request: CompactionV2Request,
-	onUsage?: (usage: RemoteCompactionUsage) => void,
+	onUsage?: CompactionV2UsageReporter,
 ): Promise<CompactionV2Response> {
 	const state = createCompactionV2CollectionState();
 	for await (const event of events) {
@@ -507,7 +519,7 @@ async function collectCompactionV2Events(
 async function collectCompactionV2Output(
 	response: Response,
 	request: CompactionV2Request,
-	onUsage?: (usage: RemoteCompactionUsage) => void,
+	onUsage?: CompactionV2UsageReporter,
 ): Promise<CompactionV2Response> {
 	const reader = response.body?.getReader();
 	if (!reader) {
@@ -567,7 +579,7 @@ async function collectCompactionV2Output(
 function finishCompactionV2Collection(
 	state: CompactionV2CollectionState,
 	request: CompactionV2Request,
-	onUsage?: (usage: RemoteCompactionUsage) => void,
+	onUsage?: CompactionV2UsageReporter,
 ): CompactionV2Response {
 	if (!state.sawCompleted) {
 		throw new Error("V2 compaction stream closed before response.completed");
@@ -575,11 +587,13 @@ function finishCompactionV2Collection(
 	// The provider billed this attempt whatever its payload turns out to be.
 	// Report the usage before the output-count validation, so an attempt that
 	// is abandoned here is still in the ledger when the fallback runs.
-	reportCompactionV2Usage(state, onUsage);
-	if (state.compactionItems.length !== 1) {
-		throw new Error(
-			`V2 compaction expected exactly one compaction output item, got ${state.compactionItems.length} from ${state.outputItemCount} output items`,
-		);
+	const payloadError =
+		state.compactionItems.length !== 1
+			? `V2 compaction expected exactly one compaction output item, got ${state.compactionItems.length} from ${state.outputItemCount} output items`
+			: undefined;
+	reportCompactionV2Usage(state, onUsage, payloadError);
+	if (payloadError !== undefined) {
+		throw new Error(payloadError);
 	}
 
 	const compactionItem = state.compactionItems[0];
@@ -601,7 +615,7 @@ function handleCompactionV2SseEvent(
 	data: string,
 	eventName: string | undefined,
 	state: CompactionV2CollectionState,
-	onUsage?: (usage: RemoteCompactionUsage) => void,
+	onUsage?: CompactionV2UsageReporter,
 ): void {
 	if (data === "[DONE]") return;
 	let event: Record<string, unknown>;
@@ -617,7 +631,7 @@ function handleCompactionV2Event(
 	event: Record<string, unknown>,
 	eventName: string | undefined,
 	state: CompactionV2CollectionState,
-	onUsage?: (usage: RemoteCompactionUsage) => void,
+	onUsage?: CompactionV2UsageReporter,
 ): void {
 	const type = typeof event.type === "string" ? event.type : eventName;
 	if (type === "response.output_item.done") {
@@ -635,21 +649,19 @@ function handleCompactionV2Event(
 		return;
 	}
 
-	if (type === "response.incomplete") {
+	if (type === "response.failed" || type === "response.incomplete") {
 		// The provider billed this attempt even though the stream ended
-		// incomplete (`max_output_tokens`, content filter). Report the terminal
-		// usage before rejecting the stream, so the fallback that follows bills
-		// the abandoned request instead of losing it.
+		// unusable — incomplete (`max_output_tokens`, content filter) or
+		// failed. Report the terminal usage before rejecting the stream, so
+		// the retry or the fallback that follows bills the abandoned request
+		// instead of losing it.
+		const message = formatCompactionV2Failure(event, type);
 		const usage = parseCompactionV2Usage(event);
 		if (usage) {
 			state.usage = usage;
-			reportCompactionV2Usage(state, onUsage);
+			reportCompactionV2Usage(state, onUsage, message);
 		}
-		throw new Error(formatCompactionV2Failure(event, type));
-	}
-
-	if (type === "response.failed") {
-		throw new Error(formatCompactionV2Failure(event, type));
+		throw new Error(message);
 	}
 
 	// A standalone `error` event terminates the stream. Keep its status so a

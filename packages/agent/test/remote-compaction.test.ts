@@ -3580,6 +3580,65 @@ describe("compact() provider-native compaction usage", () => {
 		// The abandoned V2 attempt is billed before the V1 fallback runs.
 		expect(observed).toHaveLength(1);
 		expect(observed[0].purpose).toBe(COMPACTION_USAGE_PURPOSES.remote);
+		// An unusable payload is a failed request, not a successful one.
+		expect(observed[0].stopReason).toBe("error");
+		expect(observed[0].errorMessage).toContain("V2 compaction expected exactly one compaction output item");
+		expect(observed[0].usage).toMatchObject({
+			input: 60,
+			output: 7,
+			cacheRead: 40,
+			cacheWrite: 0,
+			totalTokens: 107,
+		});
+	});
+
+	test("reports a failed V2 terminal event's usage before the stream is rejected", async () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-1",
+			messagesToSummarize: [{ role: "user", content: "long history", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled: true },
+		};
+		const model = makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: true } });
+		const observed: CompactionRequestUsage[] = [];
+		const fetchMock: FetchImpl = async input => {
+			if (String(input).endsWith("/responses/compact")) {
+				// The V1 fallback answers without a usage object.
+				return Response.json({ output: [{ type: "compaction", encrypted_content: "enc-v1" }] });
+			}
+			return sseResponse([
+				{
+					type: "response.failed",
+					response: {
+						status: "failed",
+						error: { code: "invalid_request_error", message: "compaction is not supported" },
+						usage: {
+							input_tokens: 100,
+							output_tokens: 7,
+							total_tokens: 107,
+							input_tokens_details: { cached_tokens: 40 },
+						},
+					},
+				},
+			]);
+		};
+
+		await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			onUsage: usage => observed.push(usage),
+		});
+
+		// The provider billed the failed attempt even though the stream never
+		// produced a compaction payload; the fallback must not hide that spend.
+		expect(observed).toHaveLength(1);
+		expect(observed[0].purpose).toBe(COMPACTION_USAGE_PURPOSES.remote);
+		// A failed request stays distinguishable from a successful one.
+		expect(observed[0].stopReason).toBe("error");
+		expect(observed[0].errorMessage).toContain("response.failed");
 		expect(observed[0].usage).toMatchObject({
 			input: 60,
 			output: 7,
@@ -3754,6 +3813,9 @@ describe("compact() remote summary usage", () => {
 		// The payload was rejected, but the provider still billed the request.
 		expect(observed).toHaveLength(1);
 		expect(observed[0].purpose).toBe(COMPACTION_USAGE_PURPOSES.summary);
+		// A rejected request stays distinguishable from a successful one.
+		expect(observed[0].stopReason).toBe("error");
+		expect(observed[0].errorMessage).toContain("missing choices[0].message.content");
 		expect(observed[0].usage).toMatchObject({
 			input: 120,
 			output: 30,
@@ -3817,6 +3879,9 @@ describe("compact() remote summary usage", () => {
 
 		expect(observed).toHaveLength(1);
 		expect(observed[0].purpose).toBe(COMPACTION_USAGE_PURPOSES.shortSummary);
+		// A rejected request stays distinguishable from a successful one.
+		expect(observed[0].stopReason).toBe("error");
+		expect(observed[0].errorMessage).toContain("missing choices[0].message.content");
 		expect(observed[0].usage).toMatchObject({
 			input: 120,
 			output: 30,

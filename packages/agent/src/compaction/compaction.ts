@@ -227,12 +227,18 @@ function usageObserver(
  * oneshot, so without this the session ledger would omit what the provider
  * billed. The attempt is billed as soon as the provider reports its usage —
  * including an attempt whose payload is later rejected.
+ *
+ * `failure` names the reason an attempt produced nothing usable. The record
+ * is then stored as a failed request rather than a successful one, so a
+ * rejected compaction stays distinguishable from a working one in the
+ * session's request log.
  */
 function reportRemoteCompactionUsage(
 	options: { onUsage?: (usage: CompactionRequestUsage) => void } | undefined,
 	model: Model,
 	reported: RemoteCompactionUsage | undefined,
 	purpose: string,
+	failure?: string,
 ): void {
 	if (!options?.onUsage || !reported) return;
 	// The Responses API counts cached input inside `input_tokens`; the ledger
@@ -254,7 +260,8 @@ function reportRemoteCompactionUsage(
 		provider: model.provider,
 		model: model.id,
 		usage,
-		stopReason: "stop",
+		stopReason: failure === undefined ? "stop" : "error",
+		...(failure === undefined ? {} : { errorMessage: failure }),
 	});
 }
 
@@ -1140,7 +1147,7 @@ async function summarizeConversationWindow(
 			// A payload the provider billed but we cannot use is an abandoned
 			// attempt: it still cost tokens.
 			if (err instanceof RemoteCompactionPayloadError) {
-				reportRemoteCompactionUsage(options, model, err.usage, COMPACTION_USAGE_PURPOSES.summary);
+				reportRemoteCompactionUsage(options, model, err.usage, COMPACTION_USAGE_PURPOSES.summary, err.message);
 			}
 			throw err;
 		}
@@ -1386,7 +1393,7 @@ async function generateShortSummary(
 			// A payload the provider billed but we cannot use is an abandoned
 			// attempt: it still cost tokens.
 			if (err instanceof RemoteCompactionPayloadError) {
-				reportRemoteCompactionUsage(options, model, err.usage, COMPACTION_USAGE_PURPOSES.shortSummary);
+				reportRemoteCompactionUsage(options, model, err.usage, COMPACTION_USAGE_PURPOSES.shortSummary, err.message);
 			}
 			throw err;
 		}
@@ -2061,9 +2068,17 @@ export async function compact(
 						// The provider billed this request; journal it like every
 						// other compaction-side request. The collector reports it
 						// as soon as the terminal event arrives, so an attempt
-						// whose payload is rejected is billed too.
-						onUsage: usage =>
-							reportRemoteCompactionUsage(summaryOptions, model, usage, COMPACTION_USAGE_PURPOSES.remote),
+						// whose payload is rejected is billed too. `failure` names
+						// the reason, so an unusable attempt is recorded as a
+						// failed request rather than a successful one.
+						onUsage: (usage, failure) =>
+							reportRemoteCompactionUsage(
+								summaryOptions,
+								model,
+								usage,
+								COMPACTION_USAGE_PURPOSES.remote,
+								failure,
+							),
 					}),
 				{ signal },
 			);
@@ -2143,7 +2158,13 @@ export async function compact(
 				// A payload the provider billed but we cannot use is an
 				// abandoned attempt: it still cost tokens.
 				if (err instanceof RemoteCompactionPayloadError) {
-					reportRemoteCompactionUsage(summaryOptions, model, err.usage, COMPACTION_USAGE_PURPOSES.remote);
+					reportRemoteCompactionUsage(
+						summaryOptions,
+						model,
+						err.usage,
+						COMPACTION_USAGE_PURPOSES.remote,
+						err.message,
+					);
 				}
 				throw err;
 			}
