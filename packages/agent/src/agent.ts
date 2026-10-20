@@ -1649,7 +1649,7 @@ export class Agent {
 			promptOptions = imagesOrOptions as AgentPromptOptions | undefined;
 		}
 
-		await this.#runLoop(msgs, promptOptions);
+		await this.#inLogContext(() => this.#runLoop(msgs, promptOptions));
 	}
 
 	/**
@@ -1673,7 +1673,12 @@ export class Agent {
 		return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 	}
 
-	async continue(signal?: AbortSignal) {
+	continue(signal?: AbortSignal): Promise<void> {
+		// Queued-message hooks run before the loop and are this agent's work too.
+		return this.#inLogContext(() => this.#continue(signal));
+	}
+
+	async #continue(signal?: AbortSignal) {
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
 		}
@@ -1755,26 +1760,21 @@ export class Agent {
 		}
 	}
 
+	/** Run `fn` with {@link logContext} on every record it logs. */
+	#inLogContext<T>(fn: () => T): T {
+		return this.logContext ? logger.withContext(this.logContext, fn) : fn();
+	}
+
 	/**
-	 * Run the agent loop with {@link logContext} on every record it logs.
+	 * Run the agent loop.
 	 * If messages are provided, starts a new conversation turn with those messages.
 	 * Otherwise, continues from existing context.
 	 */
-	#runLoop(
+	async #runLoop(
 		messages?: AgentMessage[],
 		options?: AgentPromptOptions & { skipInitialSteeringPoll?: boolean },
 		continuationSignal?: AbortSignal,
 		runStateClaimed = false,
-	): Promise<void> {
-		const run = () => this.#runLoopInContext(messages, options, continuationSignal, runStateClaimed);
-		return this.logContext ? logger.withContext(this.logContext, run) : run();
-	}
-
-	async #runLoopInContext(
-		messages: AgentMessage[] | undefined,
-		options: (AgentPromptOptions & { skipInitialSteeringPoll?: boolean }) | undefined,
-		continuationSignal: AbortSignal | undefined,
-		runStateClaimed: boolean,
 	) {
 		const model = this.#state.model;
 		if (!model) throw new Error("No model configured");

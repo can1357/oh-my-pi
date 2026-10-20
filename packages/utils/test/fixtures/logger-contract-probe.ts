@@ -86,16 +86,27 @@ switch (scenario) {
 		const { promise: parentLogged, resolve: parentDone } = Promise.withResolvers<void>();
 		// Two sessions interleave on one event loop: each record keeps its own
 		// session's fields across awaits and timers.
-		const parent = logger.withContext({ sessionId: "parent" }, async () => {
-			logger.info("parent-start");
-			await Bun.sleep(5);
-			logger.info("parent-after-timer");
-			logger.info("explicit-wins", { sessionId: "explicit" });
-			parentDone();
-		});
+		let parentId = "parent";
+		const parent = logger.withContext(
+			{
+				get sessionId() {
+					return parentId;
+				},
+			},
+			async () => {
+				logger.info("parent-start");
+				await Bun.sleep(5);
+				// A getter is read per record, so a re-keyed session is current at once.
+				parentId = "parent-rekeyed";
+				logger.info("parent-after-timer");
+				logger.info("explicit-wins", { sessionId: "explicit" });
+				logger.withoutContext(() => logger.info("shared-service"));
+				parentDone();
+			},
+		);
 		const child = logger.withContext({ sessionId: "child" }, async () => {
 			await parentLogged;
-			logger.withContext({ turn: 2 }, () => logger.info("child-nested", { ordinal: 1 }));
+			logger.withContext({ sessionId: "grandchild" }, () => logger.info("child-nested", { ordinal: 1 }));
 		});
 		logger.info("outside");
 		await Promise.all([parent, child]);

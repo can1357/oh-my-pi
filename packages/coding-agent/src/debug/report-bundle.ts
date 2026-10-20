@@ -10,6 +10,7 @@ import * as path from "node:path";
 import type { WorkProfile } from "@oh-my-pi/pi-natives";
 import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent, localDay, logger } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
+import { readSessionHeaderId } from "../session/session-loader";
 import type { CpuProfile, MemoryStats } from "./profiler";
 import { collectSystemInfo, sanitizeEnv } from "./system-info";
 
@@ -137,7 +138,7 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 	// the crashed process's log, so read all of today's files, not just our own.
 	// Every record those files hold for this session or its subagents goes to
 	// session-logs.txt, however far back in the file it sits.
-	const { tails, sessionLines } = await collectSameDayLogs(1000, collectSessionIds(data));
+	const { tails, sessionLines } = await collectSameDayLogs(1000, await collectSessionIds(data, options.sessionFile));
 	if (tails) {
 		data["logs.txt"] = tails;
 		files.push("logs.txt");
@@ -218,22 +219,21 @@ export async function getLogText(): Promise<string> {
 }
 
 /** Ids of the bundled transcripts: the session's own and its nested subagents'. */
-function collectSessionIds(data: Record<string, string | Uint8Array>): Set<string> {
+async function collectSessionIds(
+	data: Record<string, string | Uint8Array>,
+	sessionFile: string | undefined,
+): Promise<Set<string>> {
 	const ids = new Set<string>();
-	for (const [name, content] of Object.entries(data)) {
-		if (typeof content !== "string" || !name.endsWith(".jsonl")) continue;
-		if (name !== "session.jsonl" && !name.startsWith("artifacts/")) continue;
-		// The header is the first `session` entry; a title entry may precede it.
-		for (const line of content.split("\n", 4)) {
-			if (!line.includes('"type":"session"')) continue;
-			try {
-				const header = JSON.parse(line) as { type?: unknown; id?: unknown };
-				if (header.type === "session" && typeof header.id === "string") ids.add(header.id);
-			} catch {
-				// Not a header line.
-			}
-			break;
-		}
+	if (!sessionFile) return ids;
+	const artifactsDir = sessionFile.slice(0, -6);
+	for (const name of Object.keys(data)) {
+		if (!name.endsWith(".jsonl")) continue;
+		let filePath: string;
+		if (name === "session.jsonl") filePath = sessionFile;
+		else if (name.startsWith("artifacts/")) filePath = path.join(artifactsDir, name.slice("artifacts/".length));
+		else continue;
+		const id = await readSessionHeaderId(filePath).catch(() => undefined);
+		if (id) ids.add(id);
 	}
 	return ids;
 }
@@ -296,8 +296,10 @@ async function collectSameDayLogs(
 				// A torn last line of a live file.
 			}
 		}
+		// Keep only what can reach the archive, file by file.
+		if (sessionLines.length > MAX_LOG_LINES) sessionLines.splice(0, sessionLines.length - MAX_LOG_LINES);
 	}
-	return { tails: chunks.join("\n\n"), sessionLines: sessionLines.slice(-MAX_LOG_LINES).join("\n") };
+	return { tails: chunks.join("\n\n"), sessionLines: sessionLines.join("\n") };
 }
 
 const LOG_FILE_PATTERN = new RegExp(`^${APP_NAME}\\.(\\d{4}-\\d{2}-\\d{2})\\.\\d+\\.log(?:\\.\\d+)?$`);

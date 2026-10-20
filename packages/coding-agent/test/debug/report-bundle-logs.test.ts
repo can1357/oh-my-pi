@@ -125,11 +125,13 @@ describe("report bundle logs", () => {
 		const sessionFile = path.join(cleanupRoot, "session-main.jsonl");
 		await Bun.write(
 			sessionFile,
-			'{"type":"title","title":"t"}\n{"type":"session","version":3,"id":"main-session","cwd":"/"}\n',
+			'{"type":"title","v":1,"title":"t","updatedAt":"2026-01-01T00:00:00.000Z","pad":""}\n' +
+				'{"type":"session","version":3,"id":"main-session","cwd":"/"}\n',
 		);
+		// A header the session loader accepts need not be compactly serialized.
 		await Bun.write(
 			path.join(cleanupRoot, "session-main", "0-Worker.jsonl"),
-			'{"type":"session","version":3,"id":"sub-session","cwd":"/"}\n',
+			'{"type": "session", "version": 3, "id": "sub-session", "cwd": "/"}\n',
 		);
 		const record = (message: string, sessionId?: string) =>
 			JSON.stringify({ level: "warn", pid: 4242, message, ...(sessionId ? { sessionId } : {}) });

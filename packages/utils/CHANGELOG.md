@@ -10,7 +10,7 @@
 
 ### Added
 
-- Added `logger.withContext(fields, fn)`, which adds `fields` to every record logged while `fn` runs, including from the promises and timers it starts
+- Added `logger.withContext(fields, fn)`, which adds `fields` to every record logged while `fn` runs, including from the promises and timers it starts, and `logger.withoutContext(fn)` for process-wide work whose records belong to no caller
 
 ## [18.12.4] - 2026-10-20
 

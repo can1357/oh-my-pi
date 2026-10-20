@@ -187,15 +187,16 @@ describe("central logger byte contract", () => {
 		expect((await readSingleLog(result.primaryDir)).text).toBe(expected);
 	});
 
-	test("stamps each record with its own async context, which call fields override", async () => {
+	test("stamps each record with its own async context, read live, which call fields override", async () => {
 		const result = await runScenario("context");
 		expect(result.stderr).toBe("");
 		const expected = [
 			expectedLine(result.pid, "info", "parent-start", { sessionId: "parent" }),
 			expectedLine(result.pid, "info", "outside"),
-			expectedLine(result.pid, "info", "parent-after-timer", { sessionId: "parent" }),
+			expectedLine(result.pid, "info", "parent-after-timer", { sessionId: "parent-rekeyed" }),
 			expectedLine(result.pid, "info", "explicit-wins", { sessionId: "explicit" }),
-			expectedLine(result.pid, "info", "child-nested", { sessionId: "child", turn: 2, ordinal: 1 }),
+			expectedLine(result.pid, "info", "shared-service"),
+			expectedLine(result.pid, "info", "child-nested", { sessionId: "grandchild", ordinal: 1 }),
 		].join("");
 		expect((await readSingleLog(result.primaryDir)).text).toBe(expected);
 	});

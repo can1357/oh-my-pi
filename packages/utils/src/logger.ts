@@ -256,13 +256,23 @@ const FORMAT_TOKEN_PATTERN = /%[scdjifoO%]/;
 const logContextStorage = new AsyncLocalStorage<Readonly<Record<string, unknown>>>();
 
 /**
- * Run `fn` with `context` added to every record logged while it runs, including
- * from the promises, timers and callbacks it starts. A nested call extends the
- * enclosing context; a field passed to the log call itself wins over both.
+ * Run `fn` with `context`'s fields on every record logged while it runs,
+ * including from the promises, timers and callbacks it starts. A nested call
+ * replaces the enclosing context, as a subagent's session replaces its
+ * parent's; a field passed to the log call itself wins. Fields are read as each
+ * record is written, so a getter stays current.
  */
 export function withContext<T>(context: Readonly<Record<string, unknown>>, fn: () => T): T {
-	const outer = logContextStorage.getStore();
-	return logContextStorage.run(outer ? { ...outer, ...context } : context, fn);
+	return logContextStorage.run(context, fn);
+}
+
+/**
+ * Run `fn` outside any {@link withContext}: for process-wide work started on
+ * behalf of one caller, such as a shared server's read loop, whose later
+ * records belong to no single caller.
+ */
+export function withoutContext<T>(fn: () => T): T {
+	return logContextStorage.exit(fn);
 }
 
 /** Serialize one log record: timestamp, level, pid, message, then context fields. */
