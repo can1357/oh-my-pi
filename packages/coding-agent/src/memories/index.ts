@@ -522,6 +522,17 @@ export async function buildMemoryToolDeveloperInstructions(
 	const reusable =
 		state && state.sessionFile === sessionFile && state.scope === scope && state.token === token ? state : undefined;
 	if (reusable && reusable.recordedEntryId === recorded?.entryId) {
+		// The state still describes the branch it was staged on only while that
+		// branch holds the staged leaf. A leaf that moved onto another branch
+		// leaves it behind: the commit that would record the snapshot there is
+		// rejected as stale, and the state would stay non-pending forever, so
+		// the destination branch never records a snapshot of its own. The
+		// snapshot is re-staged on the current branch instead, keeping the
+		// content this process already built.
+		if (!stagedBranchStillHolds(transcript, reusable)) {
+			reusable.stagedLeafId = stagedLeafId;
+			if (reusable.snapshot !== undefined) reusable.pending = true;
+		}
 		return reusable.value;
 	}
 

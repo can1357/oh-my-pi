@@ -4275,7 +4275,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			});
 
 			if (typeof options.systemPrompt !== "function") {
-				return { ...defaultPrompt, commit: memoryCommit };
+				// The base prompt can drop the memory block as well — an empty
+				// prompt (`NULL_PROMPT`) carries none. Recording the snapshot
+				// then would pin memory this session never sent, and a later
+				// resume without the override would restore it as if it had.
+				return {
+					...defaultPrompt,
+					commit: promptCarriesMemoryBlock(defaultPrompt.systemPrompt, memoryInstructions)
+						? memoryCommit
+						: undefined,
+				};
 			}
 			const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
 			const customSystemPrompt = typeof customPrompt === "string" ? [customPrompt] : customPrompt;
