@@ -5,6 +5,7 @@
 ### Added
 
 - Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- Added Factory Droid's dated credit promotions: the credit rate is discounted while a promotion runs and returns to the base rate when it ends (currently GPT-5.6 Sol and Gemini 3.7/3.8 Flash) ([#16309](https://github.com/can1357/oh-my-pi/pull/16309) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -30,10 +31,6 @@
 - Updated the bundled Yolo-Auto catalog to its current models, `qwen3.8-27b` (now the default), `yolo`, `yolo-small`, and `yolo-128k`, and removed the retired `deepseek-flash-v4` and `qwen3.8-flash`
 
 ## [18.12.5] - 2026-10-21
-
-### Added
-
-- Added dated Factory Droid credit promotions (`credit-promotion` in the provider KDL): models carry the promotion window and `getFactoryDroidCreditRate` applies the discount only while it is in force, so cached models drop it once it ends; with droid 0.244's current discounts on GPT-5.6 Sol and Gemini 3.7/3.8 Flash ([#16309](https://github.com/can1357/oh-my-pi/pull/16309) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
