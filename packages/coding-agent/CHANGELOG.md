@@ -553,6 +553,7 @@
 - `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
 
 ### Fixed
+- Fixed MCP tool results dropping embedded binary resources: a supported image now reaches the model as an image block, and any other payload is saved under `local://` with its MIME type and size instead of only `[Resource: <uri>]` ([#14598](https://github.com/can1357/oh-my-pi/issues/14598), [#16451](https://github.com/can1357/oh-my-pi/pull/16451) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed subagents spawning at a caller-supplied `effort` (e.g. `hi` → `max`) while `task.enableEffort` is off; the field is now ignored and the agent's configured thinking level (including `:auto`) applies ([#16402](https://github.com/can1357/oh-my-pi/issues/16402))
 - Fixed `omp update --check` failing against JFrog Artifactory registries that add empty `dist-tags` to a tagged manifest; the update check now uses the registry's curated latest version ([#16375](https://github.com/can1357/oh-my-pi/issues/16375))
@@ -629,8 +630,6 @@
 - Fixed supported Bedrock Claude models falling back to soft instead of remote compaction ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Fixed browser `tab.run(fn, [url])` and `browser.open("https://…")` failing with a bare "expects an options object"; the errors now say to pass `{ args: [...] }` and `browser.open({ url, name })` ([#16236](https://github.com/can1357/oh-my-pi/pull/16236) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the built-in `ts-set-map`, `ts-import-type` and `ts-no-any` rules reminding you about code they allow: an empty or computed `Set`/`Map`, a runtime `await import()`, or the word "any" in a comment ([#16242](https://github.com/can1357/oh-my-pi/pull/16242) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed MCP tool results dropping embedded binary resources: a supported image now reaches the model as an image block, and any other payload is saved under `local://` with its MIME type and size instead of only `[Resource: <uri>]` ([#14598](https://github.com/can1357/oh-my-pi/issues/14598))
-- Fixed MCP tool results dropping embedded binary resources: a supported image now reaches the model as an image block, and any other payload is saved under `local://` with its MIME type and size instead of only `[Resource: <uri>]` ([#16451](https://github.com/can1357/oh-my-pi/pull/16451) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 
