@@ -281,8 +281,10 @@ class Cascade {
 					}
 					// A named file spends the whole passage budget on its own
 					// strongest windows; a directory file gets the shared
-					// per-file share of it.
-					const passages = selectWindows(all, singleFile ? FILE_WINDOWS : WINDOWS);
+					// per-file share of it. The larger budget refines the
+					// shared sample instead of replacing it, so a window the
+					// shared share covered is never dropped.
+					const passages = selectWindows(all, singleFile ? FILE_WINDOWS : WINDOWS, WINDOWS);
 					if (passages.length === 0) return undefined;
 					return {
 						node,

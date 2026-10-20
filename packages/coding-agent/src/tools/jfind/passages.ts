@@ -70,22 +70,52 @@ export function windows(
 /**
  * Keep the best lexical windows and, when no words match, distribute the
  * budget evenly through the file instead of always falling back to its
- * opening bytes. Returned in file order.
+ * opening bytes. `shared` is a smaller budget whose sample must survive: the
+ * even distribution refines that sample instead of replacing it, so a larger
+ * budget never drops a window the smaller one reached. Returned in file
+ * order.
  */
-export function selectWindows(passages: Passage[], limit: number): Passage[] {
+export function selectWindows(passages: Passage[], limit: number, shared = limit): Passage[] {
 	let selected = passages;
 	if (selected.length > limit) {
 		if (selected.every(passage => passage.score === 0)) {
-			const len = selected.length;
-			const step = Math.max(limit - 1, 1);
-			const keep = new Set<number>();
-			for (let k = 0; k < limit; k++) keep.add(Math.floor((k * (len - 1)) / step));
-			selected = selected.filter((_, index) => keep.has(index));
+			selected = evenSample(selected, limit, shared);
 		} else {
 			selected = [...selected].sort((a, b) => b.score - a.score || a.start - b.start).slice(0, limit);
 		}
 	}
 	return [...selected].sort((a, b) => a.start - b.start);
+}
+
+/**
+ * An evenly spread sample of `limit` windows that keeps the `shared` sample
+ * whole. The wider gaps between the shared windows are split first, so the
+ * refined sample covers more of the file than the shared one and never a
+ * different stretch of it.
+ */
+function evenSample(passages: Passage[], limit: number, shared: number): Passage[] {
+	const len = passages.length;
+	const base = Math.max(1, Math.min(shared, limit));
+	const keep = new Set<number>();
+	const step = Math.max(base - 1, 1);
+	for (let k = 0; k < base; k++) keep.add(Math.floor((k * (len - 1)) / step));
+	// Split the widest gap between two kept windows until the budget is spent.
+	let sorted = [...keep].sort((a, b) => a - b);
+	while (keep.size < limit) {
+		let at = -1;
+		let widest = 1;
+		for (let i = 0; i + 1 < sorted.length; i++) {
+			const gap = sorted[i + 1]! - sorted[i]!;
+			if (gap > widest) {
+				widest = gap;
+				at = i;
+			}
+		}
+		if (at < 0) break;
+		keep.add(Math.floor((sorted[at]! + sorted[at + 1]!) / 2));
+		sorted = [...keep].sort((a, b) => a - b);
+	}
+	return passages.filter((_, index) => keep.has(index));
 }
 
 /** Passage text with the generated `L<n>| ` tags stripped; the caller owns the line coordinates. */

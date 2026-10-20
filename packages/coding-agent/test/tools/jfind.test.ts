@@ -68,6 +68,20 @@ describe("jfind passages", () => {
 		expect(selectWindows(passages, 2).map(p => p.start)).toEqual([1, 3]);
 	});
 
+	it("refines the shared sample instead of replacing it when the budget grows", () => {
+		const passages: Passage[] = Array.from({ length: 60 }, (_, i) => ({
+			start: i + 1,
+			end: i + 1,
+			text: "",
+			score: 0,
+		}));
+		const shared = selectWindows(passages, 24).map(p => p.start);
+		const grown = selectWindows(passages, 40, 24).map(p => p.start);
+		expect(grown).toHaveLength(40);
+		// Every window the shared budget covered is still judged.
+		expect(grown.filter(start => shared.includes(start))).toEqual(shared);
+	});
+
 	it("sketches keep original line coordinates and deep evidence", () => {
 		const passage: Passage = {
 			start: 400,
@@ -393,6 +407,41 @@ describe("jfind cascade", () => {
 			// reported as partial coverage instead of a silent miss.
 			expect(result.hits[0]!.ranges).toEqual([expect.objectContaining({ start: 60, end: 60, p: 0.9 })]);
 			expect(result.hits[0]!.truncated).toBe(true);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("keeps judging the windows a shared per-file share covered when a named file outgrows the budget", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-nested-sample-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			// 60 windows of 8 KiB whose text shares no keyword with the query:
+			// the sample spreads through the file, and the answer sits in the
+			// third window, which the shared per-file share always covered.
+			const body = Array.from({ length: 60 }, (_, i) =>
+				i === 2
+					? "The Production Planning team signs off on the aeon release."
+					: `section ${i}: ${"x".repeat(8170)}`,
+			).join("\n");
+			await Bun.write(file, body);
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if ("file" in state) {
+					return (state.passages as Record<string, string>)[key]!.includes("Production Planning team") ? 0.9 : 0.1;
+				}
+				return 0.1;
+			});
+			const result = await runCascade({
+				root: { path: file, type: "file", size: Buffer.byteLength(body) },
+				filesystem: urlFs(dir),
+				query: "who is in charge of the quarterly rollout?",
+				extraKeywords: [],
+				judge,
+				includeHidden: false,
+			});
+			expect(result.hits.map(hit => hit.rel)).toEqual([file]);
+			expect(result.hits[0]!.ranges).toEqual([expect.objectContaining({ start: 3, end: 3, p: 0.9 })]);
 		} finally {
 			await removeWithRetries(dir);
 		}
