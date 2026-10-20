@@ -473,8 +473,11 @@
 - Fixed the `ts-set-map` rule stalling tool-call streaming for seconds on a long single-line `Map` literal, and missing `Map` entries written `["key", value] as const` ([#16242](https://github.com/can1357/oh-my-pi/pull/16242))
 - Fixed the `ts-import-type` rule missing inline type imports whose member name is non-ASCII, such as `import("./units").温度` ([#16242](https://github.com/can1357/oh-my-pi/pull/16242))
 ### Fixed
-
 - Fixed worktree creation with copy-on-write cloning into a destination inside the checkout recursing into the source tree: such a destination is now refused with an explicit error, and the copy keeps nested repositories, submodules and their remotes usable ([#16076](https://github.com/can1357/oh-my-pi/issues/16076), [#16097](https://github.com/can1357/oh-my-pi/pull/16097) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+
+- Fixed subagents spawning at a caller-supplied `effort` (e.g. `hi` → `max`) while `task.enableEffort` is off; the field is now ignored and the agent's configured thinking level (including `:auto`) applies ([#16402](https://github.com/can1357/oh-my-pi/issues/16402))
+- Fixed `omp update --check` failing against JFrog Artifactory registries that add empty `dist-tags` to a tagged manifest; the update check now uses the registry's curated latest version ([#16375](https://github.com/can1357/oh-my-pi/issues/16375))
 
 ## [18.12.4] - 2026-10-20
 
