@@ -104,6 +104,7 @@ import { cfgExternalThinking } from "../session/settings";
 import { cfgGoalEnabled } from "../goals/settings";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
+import { isReadOnlyToolNames } from "../task/read-only-policy";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
 export * from "../edit";
@@ -405,6 +406,15 @@ export interface ToolSession {
 	 * remains restricted until the activation commits.
 	 */
 	pendingFullWriteDescription?: boolean;
+	/**
+	 * Set when this session's `write` tool was granted only as the `agent://`
+	 * message transport: peer messages and `agent://all` broadcasts proceed,
+	 * every other target is rejected (enforced by WriteTool before the
+	 * {@link deviceOnlyWrite} gate). Granted by {@link createTools} to read-only
+	 * agents (explicit tool list a non-empty subset of READ_ONLY_TOOL_NAMES) so
+	 * they can reply to the lead and peers without any other write capability.
+	 */
+	agentOnlyWrite?: boolean;
 	/** Agent registry for IRC routing across live sessions. */
 	agentRegistry?: AgentRegistryApi;
 	/** Idle→parked→revive lifecycle owner; lets explicit cancellation stop a non-job-backed agent registration. Default: AgentLifecycleManager.global(). */
@@ -866,6 +876,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// device-only transport left by an earlier read-only call.
 	if (requestedTools === undefined || requestedTools.includes("write")) {
 		session.deviceOnlyWrite = undefined;
+		session.agentOnlyWrite = undefined;
 		session.pendingFullWriteDescription = undefined;
 	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
@@ -916,6 +927,35 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			builtInNames.add(wrapped.name);
 		} else {
 			session.deviceOnlyWrite = undefined;
+		}
+	}
+
+	// A read-only agent's explicit tool list (non-empty subset of
+	// READ_ONLY_TOOL_NAMES) gets `write` only as the agent:// message transport
+	// so it can reply to the lead and peers: `write agent://<id>` messages and
+	// `agent://all` broadcasts proceed (WriteTool's agent-only gate), every
+	// other write stays rejected. `deviceOnlyWrite` is set alongside so the
+	// shared restricted-transport bookkeeping (tool rebuilds, direct file
+	// mutation frames) treats the grant as synthetic.
+	// Classified on the caller's declared list (`toolNames`), not on
+	// `requestedTools`: resolveBuiltinToolPlan appends read-tier conveniences
+	// (e.g. `think` under externalThinking) that are not in READ_ONLY_TOOL_NAMES.
+	// Restricted sessions own an exact capability list and never get the grant.
+	if (requestedTools !== undefined && !restrictToolNames) {
+		const declaredTools = toolNames === undefined ? undefined : normalizeToolNames(toolNames);
+		const agentOnly = !requestedTools.includes("write") && isReadOnlyToolNames(declaredTools);
+		session.agentOnlyWrite = agentOnly ? true : undefined;
+		if (agentOnly) {
+			session.deviceOnlyWrite = true;
+			if (!tools.some(tool => tool.name === "write")) {
+				const writeTool = await logger.time("createTools:write:agent-transport", BUILTIN_TOOLS.write, session);
+				if (writeTool) {
+					const wrapped = wrapToolWithMetaNotice(writeTool);
+					tools.push(wrapped);
+					toolRegistry.set(wrapped.name, wrapped);
+					builtInNames.add(wrapped.name);
+				}
+			}
 		}
 	}
 

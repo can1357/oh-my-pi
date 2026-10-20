@@ -1094,14 +1094,17 @@ describe("device-only write transport for explicit lists omitting write", () => 
 		}
 	});
 
-	it("does not grant a transport write when read is also omitted", async () => {
+	it("keeps filesystem writes refused when an agent reply transport is granted without read", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-no-transport-"));
 		try {
 			const session = xdevSession(tempDir);
 			const tools = await createTools(session, ["grep", "glob"]);
-			expect(tools.some(entry => entry.name === "write")).toBe(false);
-			expect(session.deviceOnlyWrite).toBeUndefined();
-			expect(session.xdev).toBeUndefined();
+			const write = tools.find(entry => entry.name === "write")!;
+			const filePath = path.join(tempDir, "forbidden.txt");
+			await expect(write.execute("write-no-read-file", { path: filePath, content: "refused" })).rejects.toThrow(
+				"agent://",
+			);
+			expect(await Bun.file(filePath).exists()).toBe(false);
 		} finally {
 			await removeWithRetries(tempDir);
 		}

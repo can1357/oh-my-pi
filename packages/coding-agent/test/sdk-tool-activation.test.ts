@@ -505,7 +505,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			expect(session.getActiveToolNames()).not.toContain("write");
+			// A read-only list gets the agent:// reply transport active up front.
+			expect(session.getActiveToolNames()).toContain("write");
 			const runner = session.extensionRunner;
 			if (!runner) throw new Error("expected extension runner");
 			await runner.emit({ type: "session_start" });
@@ -1826,7 +1827,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
-	it("keeps an idle device-only write out of the active tool set", async () => {
+	it("keeps the agent:// reply write active for a read-only list", async () => {
 		const tempDir = makeTempDir();
 
 		const settings = Settings.isolated();
@@ -1839,9 +1840,9 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			// The dormant transport remains registered for later xd:// discovery,
-			// but does not add an inert schema to a pure read-only surface.
-			expect(session.getActiveToolNames()).not.toContain("write");
+			// A read-only list (subset of READ_ONLY_TOOL_NAMES) keeps `write` active
+			// as the agent:// reply transport; it is not an inert schema.
+			expect(session.getActiveToolNames()).toContain("write");
 			const write = session.getToolByName("write");
 			expect(write).toBeDefined();
 			await expect(
@@ -1862,6 +1863,34 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		try {
 			await session.setActiveToolsByName(["read"]);
 			expect(session.getActiveToolNames()).not.toContain("write");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps the agent:// reply write active for read-only lists and yields to a runtime full grant", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "grep"],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toContain("write");
+			const write = session.getToolByName("write");
+			expect(write?.description).toContain("agent://");
+			const filePath = path.join(tempDir, "agent-only-fs.txt");
+			await expect(write!.execute("agent-only-fs", { path: filePath, content: "x" })).rejects.toThrow(
+				"agent:// messages",
+			);
+
+			// A later explicit runtime grant is a real filesystem write: the
+			// agent-only presentation and gate must go with the device-only flag.
+			await session.setActiveToolsByName(["read", "grep", "write"]);
+			const full = session.getToolByName("write");
+			expect(full?.description).not.toContain("limited to");
+			await full!.execute("runtime-full-write-2", { path: filePath, content: "ok\n" });
+			expect(await Bun.file(filePath).text()).toBe("ok\n");
 		} finally {
 			await session.dispose();
 		}
