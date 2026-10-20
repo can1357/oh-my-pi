@@ -2051,14 +2051,11 @@ fn remove_nested_git_files(
 			})?;
 			if file_type.is_symlink() {
 				// A symlinked `.git` still addresses the source's metadata, and
-				// the copy must not share it.
-				if let Some(target) = fs::read_link(&path).ok() {
-					let joined = if target.is_absolute() {
-						target
-					} else {
-						source_dir.join(target)
-					};
-					let resolved = fs::canonicalize(&joined).unwrap_or_else(|_| normalize_path(&joined));
+				// the copy must not share it. The link may point at the
+				// metadata directory itself or at a pointer file that names
+				// it.
+				if let Some(target) = git_entry_target(&path, &source_dir) {
+					let resolved = fs::canonicalize(&target).unwrap_or_else(|_| normalize_path(&target));
 					if resolved.starts_with(&source_common) {
 						remove_existing(&path)?;
 					}
@@ -2137,6 +2134,31 @@ fn gitdir_pointer_target(path: &Path, base: &Path) -> Option<PathBuf> {
 	Some(normalize_path(&joined))
 }
 
+/// The metadata directory a `.git` entry addresses.
+///
+/// A `.git` entry is a pointer file that names the directory in its first
+/// line (`gitdir: <path>`), or a symlink to such a file or to the directory
+/// itself. A relative path is resolved against the directory the pointer was
+/// written in.
+fn git_entry_target(path: &Path, base: &Path) -> Option<PathBuf> {
+	let meta = fs::symlink_metadata(path).ok()?;
+	if !meta.file_type().is_symlink() {
+		return gitdir_pointer_target(path, base);
+	}
+	let link = fs::read_link(path).ok()?;
+	let linked = if link.is_absolute() {
+		link
+	} else {
+		base.join(link)
+	};
+	if linked.is_file() {
+		// The link points at a pointer file, which names the directory.
+		let parent = linked.parent()?;
+		return gitdir_pointer_target(&linked, parent);
+	}
+	Some(normalize_path(&linked))
+}
+
 /// What a nested `.git` entry of a copied tree refers to.
 enum NestedGit {
 	/// The source repository's own worktree metadata. A copy cannot use it:
@@ -2176,8 +2198,7 @@ fn classify_nested_git(target: &Path, source_common: &Path) -> NestedGit {
 				}
 			})
 			.map(|path| normalize_path(&path))
-			.map(|path| fs::canonicalize(&path).unwrap_or(path))
-			.unwrap_or_else(|| target.to_path_buf());
+			.map_or_else(|| target.to_path_buf(), |path| fs::canonicalize(&path).unwrap_or(path));
 		if common.starts_with(source_common) {
 			return NestedGit::SourceWorktree;
 		}
@@ -2435,17 +2456,14 @@ fn resolve_destination(path: &Path) -> Option<PathBuf> {
 ///
 /// A bind mount publishes a directory under a second path, which no
 /// comparison of path names can see. The directories are compared by their
-/// filesystem identity instead.
+/// filesystem identity instead: the destination is inside the source when
+/// the directory it would be created in *is* the source, however it is
+/// named.
 fn destination_aliases_source(dest: &Path, source: &Path) -> bool {
 	let Some(existing) = nearest_existing_ancestor(dest) else {
 		return false;
 	};
-	if same_directory(&existing, source) {
-		return true;
-	}
-	source
-		.ancestors()
-		.any(|ancestor| same_directory(&existing, ancestor))
+	same_directory(&existing, source)
 }
 
 /// The closest ancestor of `path` that exists.
@@ -3992,10 +4010,24 @@ mod tests {
 		// A nested checkout whose `.git` is a symlink into the source's
 		// metadata: the copy must not share it.
 		git(temp.path(), &["worktree", "add", "-q", "-b", "inner", ".worktrees/inner"]);
-		let admin = fs::canonicalize(temp.path().join(".worktrees/inner/.git")).unwrap();
-		let nested = temp.path().join("linked");
-		fs::create_dir_all(&nested).unwrap();
-		std::os::unix::fs::symlink(&admin, nested.join(".git")).unwrap();
+		// The admin directory the nested worktree's metadata lives in.
+		let pointer = temp.path().join(".worktrees/inner/.git");
+		let admin = PathBuf::from(
+			fs::read_to_string(&pointer)
+				.unwrap()
+				.trim()
+				.strip_prefix("gitdir: ")
+				.unwrap()
+				.to_owned(),
+		);
+		// A symlink to the admin directory itself, and one to the pointer
+		// file that names it: both address the source's metadata.
+		let direct = temp.path().join("linked");
+		fs::create_dir_all(&direct).unwrap();
+		std::os::unix::fs::symlink(&admin, direct.join(".git")).unwrap();
+		let indirect = temp.path().join("linked-pointer");
+		fs::create_dir_all(&indirect).unwrap();
+		std::os::unix::fs::symlink(&pointer, indirect.join(".git")).unwrap();
 
 		let outside = tempfile::tempdir().unwrap();
 		let clone = outside.path().join("clone");
@@ -4012,6 +4044,10 @@ mod tests {
 		assert!(
 			!clone.join("linked/.git").exists(),
 			"a symlinked .git that targets the source's metadata must be removed"
+		);
+		assert!(
+			!clone.join("linked-pointer/.git").exists(),
+			"a symlinked .git that names the source's metadata must be removed"
 		);
 	}
 
@@ -4447,6 +4483,20 @@ mod tests {
 			"a destination that collapses onto the source must be rejected"
 		);
 		assert!(destination_inside_source(&source, &source), "the source itself must be rejected");
+	}
+
+	#[test]
+	fn destination_inside_source_accepts_a_sibling_in_a_shared_parent() {
+		let (temp, _repo) = fixture();
+		let source = fs::canonicalize(temp.path()).unwrap();
+		// The destination shares the source's parent directory. That says
+		// nothing about the destination being inside the source: only the
+		// source's own identity counts.
+		let sibling = source.parent().unwrap().join("sibling-destination");
+		assert!(
+			!destination_inside_source(&sibling, &source),
+			"a sibling of the source must not be rejected"
+		);
 	}
 
 	#[test]
