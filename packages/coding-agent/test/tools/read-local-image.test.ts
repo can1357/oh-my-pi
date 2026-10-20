@@ -195,6 +195,14 @@ describe("read local:// images", () => {
 		const image = result.content.find(content => content.type === "image");
 		expect(image && "mimeType" in image ? image.mimeType : undefined).toBe("image/png");
 	});
+	it("reads raster bytes behind an .svg name through :img as the detected raster", async () => {
+		const imagePath = path.join(localRoot, "misnamed.svg");
+		await Bun.write(imagePath, TINY_PNG);
+		const result = await new ReadTool(makeSession(testDir)).execute("call", { path: `${imagePath}:img` });
+		const image = result.content.find(content => content.type === "image");
+		expect(image && "mimeType" in image ? image.mimeType : undefined).toBe("image/png");
+	});
+
 	it("rasterizes a local SVG into a PNG attachment when :img is selected", async () => {
 		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);
 		const tool = new ReadTool(makeSession(testDir));

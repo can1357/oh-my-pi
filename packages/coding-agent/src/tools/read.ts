@@ -2218,7 +2218,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const parsed: ParsedSelector = selectorFreeRaw ? { kind: "raw" } : parseSel(peeled.sel);
 			if (peeled.sel !== undefined && parsed.kind === "none") {
 				throw new ToolError(
-					`Invalid selector ':${peeled.sel}' on '${peeled.path}'. Use :N, :N-M, :N+K, :N- (open-ended), :-N (last N lines), a comma-separated list of ranges, :raw, :img for SVG rendering, or a range combined with raw (e.g. :raw:50-100).`,
+					`Invalid selector ':${peeled.sel}' on '${peeled.path}'. Use :N, :N-M, :N+K, :N- (open-ended), :-N (last N lines), a comma-separated list of ranges, :raw, :img for images (SVG is rasterized), or a range combined with raw (e.g. :raw:50-100).`,
 				);
 			}
 			// SSH owns arbitrary URL queries. Only a recognized read-only JSON selector
@@ -2693,7 +2693,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			return this.#readVideoFile(absolutePath, localTarget.sel, fileSize, suffixResolution, question, signal);
 		}
 		if (parsed.kind === "image") {
-			const isSvg = ext === ".svg" || ext === ".svgz";
+			// Detected raster bytes win over an .svg-looking name; the extension only decides when no raster format was detected.
+			const isSvg = imageMetadata === null && (ext === ".svg" || ext === ".svgz");
 			({ content, details, sourcePath } = await this.#loadImageContent({
 				readPath: localReadPath,
 				absolutePath,
