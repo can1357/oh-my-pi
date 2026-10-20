@@ -531,3 +531,63 @@ test("salvage charges a run of adjacent damaged leaves as one damaged region", a
 		db.close();
 	}
 });
+
+test("salvage falls back when an interior child link is duplicated", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-cross-link-");
+	const dbPath = dir.join("store.db");
+	const db = new Database(dbPath);
+	db.run("PRAGMA page_size = 512");
+	db.run("PRAGMA secure_delete = ON");
+	db.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+	const insert = db.prepare("INSERT INTO entries (id, value) VALUES (?, ?)");
+	db.transaction(() => {
+		for (let id = 1; id <= 24; id++) insert.run(id, `row-${String(id).padStart(2, "0")}-${"x".repeat(90)}`);
+	})();
+	insert.finalize();
+	const pageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()!.page_size;
+	const rootPage = db
+		.query<{ rootpage: number }, []>("SELECT rootpage FROM sqlite_schema WHERE name = 'entries'")
+		.get()!.rootpage;
+	db.close();
+	const bytes = Buffer.from(fs.readFileSync(dbPath));
+	const leaves: Array<{ page: number; ids: number[] }> = [];
+	for (let page = 1; page < bytes.length / pageSize; page++) {
+		const ids = leafPageIds(bytes, page, pageSize);
+		if (ids.length > 0) leaves.push({ page, ids });
+	}
+	leaves.sort((a, b) => a.ids[0]! - b.ids[0]!);
+	const leafOf = (id: number) => leaves.find(leaf => leaf.ids.includes(id))!;
+	// Repoint the `<= 8` child at the `21-24` leaf, so one leaf is reachable
+	// twice and the interior separators no longer bound the subtrees they name.
+	const header = (rootPage - 1) * pageSize + (rootPage === 1 ? 100 : 0);
+	const cells = bytes.readUInt16BE(header + 3);
+	let repointed = false;
+	for (let index = 0; index < cells; index++) {
+		const cell = (rootPage - 1) * pageSize + bytes.readUInt16BE(header + 12 + index * 2);
+		const key = bytes[cell + 4]!;
+		if (key < 0x80 && key === 8) {
+			bytes.writeUInt32BE(leafOf(24).page + 1, cell);
+			repointed = true;
+		}
+	}
+	expect(repointed).toBe(true);
+	// Damage the `1-4` and `13-16` leaves the scan must not fabricate rows from.
+	for (const id of [1, 13]) {
+		const page = leafOf(id).page;
+		bytes.fill(0xff, page * pageSize, (page + 1) * pageSize);
+	}
+	fs.writeFileSync(dbPath, bytes);
+
+	const reopened = new Database(dbPath, { readonly: true });
+	try {
+		const ids = readSalvageableRows<{ id: number }>(reopened, "entries", "id").map(row => row.id);
+		// The duplicated link must void every separator bound: the readable
+		// `17-24` rows survive via unbounded recovery instead of the scan
+		// resuming at the cross-linked `21` and dropping `17-20`.
+		expect(ids).toEqual(expect.arrayContaining([17, 18, 19, 20, 21, 22, 23, 24]));
+		expect(ids.filter(id => id <= 4 || (id >= 13 && id <= 16))).toEqual([]);
+		expect(new Set(ids).size).toBe(ids.length);
+	} finally {
+		reopened.close();
+	}
+});

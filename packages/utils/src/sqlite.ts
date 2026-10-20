@@ -367,7 +367,14 @@ function readSalvageRowidStarts(db: Database, table: string): number[] {
 		const page = pending.pop()!;
 		const start = (page - 1) * pageSize;
 		const end = start + pageSize;
-		if (start < 0 || end > image.length || visited.has(page)) continue;
+		// A child link that is out of range, or reaches a page an earlier link
+		// already visited, proves the tree structure itself is damaged: the
+		// separators along the path to it bound the wrong subtrees, so every
+		// bound is voided and the caller recovers unbounded.
+		if (start < 0 || end > image.length || visited.has(page)) {
+			trusted = false;
+			continue;
+		}
 		visited.add(page);
 		const header = start + (page === 1 ? 100 : 0);
 		if (image[header] !== 0x05) continue;
