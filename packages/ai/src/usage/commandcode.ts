@@ -272,12 +272,17 @@ export const commandCodeUsageProvider: UsageProvider = {
 	validatesCredentials: true,
 };
 
-/** Ranks Command Code accounts by the 5-hour and weekly credit windows. */
+/**
+ * Ranks Command Code accounts by the 5-hour and weekly credit windows. The
+ * monthly grant row is display-only: purchased and free credits keep serving
+ * once the grant is spent, so it must never hard-block the credential.
+ */
 export const commandCodeRankingStrategy: CredentialRankingStrategy = {
 	findWindowLimits: report => ({
 		primary: report.limits.find(limit => limit.window?.id === "5h"),
 		secondary: report.limits.find(limit => limit.window?.id === "7d"),
 	}),
+	scopeLimits: report => report.limits.filter(limit => limit.window?.id !== "monthly"),
 	windowDefaults: {
 		primaryMs: 5 * HOUR_MS,
 		secondaryMs: WEEK_MS,

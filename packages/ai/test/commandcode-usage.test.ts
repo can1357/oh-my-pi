@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 import { type } from "@oh-my-pi/omptype";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { isUsageLimitReached, scopedUsageLimits } from "../src/auth/usage-report";
 import {
 	type UsageFetchContext,
 	type UsageFetchParams,
@@ -288,6 +289,24 @@ describe("command code usage provider", () => {
 		});
 		expect(report!.metadata).toMatchObject({ accountId: "user_2" });
 		expect(report!.limits[0]!.scope).not.toHaveProperty("orgId");
+	});
+
+	it("keeps a spent monthly grant from hard-blocking a credential with purchased credits", async () => {
+		const report = await commandCodeUsageProvider.fetchUsage(
+			makeParams(),
+			makeCtx({
+				...WINDOWED_ROUTES,
+				"/alpha/billing/credits": {
+					body: {
+						credits: { monthlyCredits: 0, monthlyCreditsGranted: 70, purchasedCredits: 25 },
+						windowLimits: { fiveHour: { used: 4, cap: 10 }, weekly: { used: 3, cap: 100 } },
+					},
+				},
+			}),
+		);
+		const monthly = report!.limits.find(limit => limit.id === "commandcode:monthly");
+		expect(isUsageLimitReached(monthly ? [monthly] : [])).toBe(true);
+		expect(isUsageLimitReached(scopedUsageLimits(commandCodeRankingStrategy, report!, {}))).toBe(false);
 	});
 
 	it("throws on a revoked key so the cached report is purged", async () => {
