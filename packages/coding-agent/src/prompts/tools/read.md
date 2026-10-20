@@ -12,4 +12,4 @@ Sources:
 - Archives: ZIP/JAR/APK/WHL, compressed TAR, RAR/7z/ISO/CAB/DEB/RPM/CPIO/AR/LZH/ARJ/ASAR, compressed streams; member via archive.ext:member/path.
 - JSON/JSONL/NDJSON: file.json?q=<jq filter>; &raw=true unquoted strings, &compact=true one-line values, &offset=&limit= page results; `&` inside the filter → %26.
 {{#if BINARY_VIEWS}}- Executables (ELF/PE/Mach-O, extensionless ok): overview + function list; :<func|0xaddr> pseudocode, :<func>:asm, :imports, :exports, :strings, :xrefs:<func|0xaddr>; line ranges apply after the view (bin:main:10-40). Universal Mach-O: host-arch slice by default, bin:@<arch> picks another (bin:@x86_64:main).
-{{/if}}- PDF/documents: extracted text; notebooks: editable cells; images: decoded inline{{#if FETCH_ENABLED}}. URLs: reader text/markdown, :raw original HTML;{{else}};{{/if}} bare host:port needs trailing slash.
+{{/if}}- PDF/documents: extracted text; notebooks: editable cells; images: decoded inline{{#if FETCH_ENABLED}}. URLs: reader text/markdown, :raw original HTML; bare host:port needs trailing slash.{{else}}.{{/if}}

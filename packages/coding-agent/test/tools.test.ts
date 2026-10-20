@@ -775,6 +775,7 @@ describe("Coding Agent Tools", () => {
 
 			// URL reads work, so the prompt and the `path` schema advertise them.
 			expect(liveReadTool.description).toContain("reader text/markdown");
+			expect(liveReadTool.description).toContain("bare host:port needs trailing slash");
 			expect(JSON.stringify(liveReadTool.parameters.toJsonSchema())).toContain("or URL");
 
 			// The runtime gate now refuses URL reads, so the copy must stop steering the model there.
@@ -782,9 +783,10 @@ describe("Coding Agent Tools", () => {
 
 			expect(liveReadTool.description).not.toContain("reader text/markdown");
 			expect(liveReadTool.description).not.toContain("static web");
+			// The `host:port` escape is URL-selector guidance, so it goes with the rest of the URL copy.
+			expect(liveReadTool.description).not.toContain("bare host:port needs trailing slash");
 			expect(JSON.stringify(liveReadTool.parameters.toJsonSchema())).not.toContain("or URL");
-			// Internal URIs and the `host:port` escape still resolve, so their copy stays.
-			expect(liveReadTool.description).toContain("bare host:port needs trailing slash");
+			// Internal URIs still resolve, so their copy stays.
 			expect(JSON.stringify(liveReadTool.parameters.toJsonSchema())).toContain("internal URI");
 		});
 
