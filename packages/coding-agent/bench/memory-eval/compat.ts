@@ -27,6 +27,8 @@ export interface CalibrationDump {
 		recall: number;
 	}[];
 	meanRecall: number;
+	/** `corpusSha256` of the conversations upstream's loader produced (`py/model_digest.py`); absent in older dumps. */
+	corpusSha256?: string;
 	/** The model files Run A loaded (`py/model_digest.py`); absent in dumps from before it was recorded. */
 	embeddingModelSha256?: string;
 	/** `fastembed_version` and `onnxruntime_version` of Run A's venv, under Run B's `engineInfo` names; may be absent. */
@@ -117,15 +119,43 @@ export async function runUpstreamCompat(
 	}
 }
 
+/**
+ * SHA-256 over each conversation's message count, then each message as `<utf-8 byte length>\n<bytes>`, in order. Must
+ * match `corpus_digest` in py/model_digest.py, so Run A and Run B can show they ingested the same corpus.
+ */
+export function corpusSha256(conversations: readonly { messages: readonly string[] }[]): string {
+	const hasher = new Bun.CryptoHasher("sha256");
+	const encoder = new TextEncoder();
+	for (const { messages } of conversations) {
+		hasher.update(`${messages.length}\n`);
+		for (const message of messages) {
+			const bytes = encoder.encode(message);
+			hasher.update(`${bytes.length}\n`);
+			hasher.update(bytes);
+		}
+	}
+	return hasher.digest("hex");
+}
+
 // Means are averages of identical per-question floats; only summation order can differ.
 const MEAN_TOLERANCE = 1e-9;
 
 /** Mismatches between Run A's dump and Run B's result file, paired by position. Empty means calibrated. */
 export function compareCalibration(
 	a: CalibrationDump,
-	b: Pick<ResultFile, "questions" | "aggregate"> & { config: { engineInfo: Record<string, string> } },
+	b: Pick<ResultFile, "questions" | "aggregate"> & {
+		config: { engineInfo: Record<string, string>; corpusSha256?: string };
+	},
 ): string[] {
 	const mismatches: string[] = [];
+	// A store that differs only outside every top ten leaves rankings, recalls and gold equal: compare the corpus.
+	const corpusA = a.corpusSha256;
+	const corpusB = b.config.corpusSha256;
+	if (!corpusA || !corpusB) {
+		mismatches.push(`corpus: ${corpusA ? "B" : "A"} records no corpus digest; re-run it with this harness`);
+	} else if (corpusA !== corpusB) {
+		mismatches.push(`corpus: A ${corpusA.slice(0, 12)}, B ${corpusB.slice(0, 12)}`);
+	}
 	// Equal rankings from two different models would calibrate nothing: both runs must name the same model files.
 	const modelA = a.embeddingModelSha256;
 	const modelB = b.config.engineInfo.embedding_model_sha256;
