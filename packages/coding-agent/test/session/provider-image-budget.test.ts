@@ -128,10 +128,10 @@ function textData(context: Context): string[] {
 }
 
 /**
- * One OpenAI computer-use step: the call and its screenshot result, which carries the screenshot both as a content
- * image and as `providerMetadata`, as the agent loop records it.
+ * One OpenAI computer-use step: the call and its screenshot result, which carries the screenshot both as content
+ * (`shown`, by default the same image) and as `providerMetadata`.
  */
-function computerTurn(index: number, screenshot: string): Message[] {
+function computerTurn(index: number, screenshot: string, shown: ImageContent[] = [image(screenshot)]): Message[] {
 	const id = `call_${index}|cu_${index}`;
 	return [
 		{
@@ -168,7 +168,7 @@ function computerTurn(index: number, screenshot: string): Message[] {
 			role: "toolResult",
 			toolCallId: id,
 			toolName: "computer",
-			content: [text(`result-${index}`), image(screenshot)],
+			content: [text(`result-${index}`), ...shown],
 			isError: false,
 			timestamp: index * 2 + 2,
 			providerMetadata: {
@@ -601,6 +601,40 @@ describe("provider context image budgets", () => {
 		const body = await factoryRequestBody(hosted, clamped);
 		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
 		expect(body).toContain(fresh);
+	});
+
+	it("charges a computer result its metadata screenshot when that copy is larger than its content image", async () => {
+		const screenshot = "A".repeat(1_000_000);
+		const fresh = "C".repeat(3_600_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				...computerTurn(0, screenshot, [image("p".repeat(1_000))]),
+				{ role: "user", content: [text("look at this"), image(fresh)], timestamp: 3 },
+			],
+		};
+		const hosted = factoryGptModel();
+		const body = await factoryRequestBody(hosted, clampProviderContextImageBytes(context, hosted));
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		expect(body).toContain(fresh);
+		expect(body).not.toContain(screenshot);
+	});
+
+	it("evicts computer screenshots that only the metadata holds inline", async () => {
+		const screenshot = "A".repeat(1_000_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: "use the computer", timestamp: 0 },
+				...Array.from({ length: 5 }, (_, index) => computerTurn(index, screenshot, [])).flat(),
+			],
+		};
+		const hosted = factoryGptModel();
+		const body = await factoryRequestBody(hosted, clampProviderContextImageBytes(context, hosted));
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+		expect(body.split(screenshot)).toHaveLength(4);
 	});
 
 	it("keeps a fresh Factory image that alone fits the route, evicting older ones instead", () => {
