@@ -24,6 +24,8 @@
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
 
 ## [18.12.4] - 2026-10-20
+### Fixed
+- Fixed a display reset requested while the TUI was stopped being dropped instead of applied on the first frame after the next `start()`, which left the rows it should have cleared in scrollback ([#15336](https://github.com/can1357/oh-my-pi/pull/15336) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
