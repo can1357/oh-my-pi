@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `AssistantMessageComponent` accepts display-only assistant text renderers and redraws one reply with `rerenderMessage(timestamp)`; `splitAssistantMessageToolTimeline` reports each segment's `contentOffsets` ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
+- `setExtensionLinks()` makes markdown draw links with registered schemes without a URL suffix or openable hyperlink and draws their labels with a dotted underline, `Composer.viewportLinkAt(row, col)` finds the one under a click, `Composer.setHoveredLink()` highlights a hovered one, `Composer.startLinkHints()` / `typeLinkHint()` tag the ones on screen for picking by keyboard (new `app.links.hint` keybinding, Alt+O), `setExtensionLinkPicking()` / `extensionLinkClicksAvailable()` share whether they can be picked process-wide, and `TUI.setPointerShape()` sets the mouse pointer shape (OSC 22) on the normal screen ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
+- `LinkBrowserComponent` (`overlays/link-browser`) replays a transcript fullscreen with extension link hint tags that each link keeps while it stays in view; `LinkHints` / `viewportLinkTargets()` (`render/link-hints`) share tag assignment (preferring the letters a label starts with) and painting with `Composer`; `ChatTranscriptBuilder` accepts `textRenderers` ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
+
 ## [18.12.3] - 2026-10-19
 
 ### Added

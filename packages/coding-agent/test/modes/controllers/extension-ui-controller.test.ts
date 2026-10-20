@@ -72,6 +72,7 @@ function makeHarness() {
 		},
 		addAutocompleteProvider,
 		syncComposerShape: vi.fn(),
+		syncExtensionLinks: vi.fn(),
 		showStatus: vi.fn(),
 	} as unknown as InteractiveModeContext;
 

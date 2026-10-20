@@ -117,7 +117,7 @@ Core methods:
 
 - `on(event, handler)`
 - `registerTool`, `registerCommand`, `registerShortcut`, `registerFlag`
-- `registerMessageRenderer`, `registerAssistantThinkingRenderer`
+- `registerMessageRenderer`, `registerAssistantThinkingRenderer`, `registerAssistantTextRenderer`, `registerLinkScheme`
 - `registerComposerShape`
 - `setLabel`, `getFlag`
 - `sendMessage`, `sendUserMessage`, `appendEntry`, `exec`
@@ -574,6 +574,10 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 - `goal_updated`
 - `credential_disabled`
 
+### Link activation
+
+- `link_activate` — `{ url, scheme }` when the user picks a link whose scheme this extension claimed with [`registerLinkScheme`](#extension-link-schemes), by click or hint tag. Delivered to that extension only, without the handler timeout. `url` is untrusted: the model can write such a link, so validate it like user input.
+
 ### MCP notifications
 
 - `mcp_notification` — fired for every JSON-RPC notification received from a connected MCP server, AFTER the manager's own handling of known list/update methods (`notifications/tools/list_changed`, `notifications/resources/list_changed`, `notifications/resources/updated`, `notifications/prompts/list_changed`). Unknown or server-custom methods are also delivered. Payload: `{ server: string; method: string; params: unknown }`. Multiple extensions may subscribe; a handler that throws does not prevent other handlers from firing. Notifications received before any listener attaches are buffered (bounded FIFO, cap 100, drop-oldest) and drained into the first subscriber — so startup-time frames aren't lost even if the extension binds after MCP discovery.
@@ -879,6 +883,8 @@ Supported:
 - notifications/status/editor text/terminal input/custom overlays
 - theme listing/loading by name (`setTheme` supports string names)
 - tools expanded toggle
+- `rerenderMessage(timestamp)`: draws the assistant reply with that `message.timestamp` again, re-running the [assistant text renderers](#assistant-text-renderer); a no-op while `extensionRenderers.assistantText` is off
+- `getLinkClicksAvailable()`: whether picking a [claimed link](#extension-link-schemes), by its hint tag or a click, raises `link_activate` right now
 
 Current no-op methods in this controller:
 
@@ -1265,6 +1271,46 @@ pi.registerAssistantThinkingRenderer((context, theme) => {
 ```
 
 Used by interactive rendering to add display-only supplemental UI below each visible assistant thinking block. The renderer receives the already-visible thinking text, content/thinking indexes, theme, and a `requestRender()` callback for async renderers. All registered renderers that return a component are appended in registration order. Renderers must not mutate messages; the original thinking block remains the provider/session source of truth.
+
+## Assistant text renderer
+
+Opt-in: renderers run only while the `extensionRenderers.assistantText` setting is on (default off; **Tools → Extensions → Extension Reply Renderers**). Off, they are never called and replies draw exactly as without them.
+
+```ts
+pi.registerAssistantTextRenderer(({ message, contentIndex, text, streaming }) => {
+  // Return the markdown to draw for this text block, or undefined to draw `text` unchanged.
+  return streaming ? text.replace(/\{\{[^}]*$/, "") : text;
+});
+```
+
+A display-only transform of each assistant text block in the main transcript, used by both the terminal renderer and the native (TSP) view. The session, `/export` and the model context keep the text as written; the native Copy action copies it as written too.
+
+- **Context.** `message` is the message being drawn and `message.timestamp` identifies the reply. It is a deep copy: editing it, at any depth, cannot change the stored reply. `contentIndex` is the block's index in the full reply's `content`, also when the reply is drawn as segments around tool calls. For text after a tool call, `message` holds only that segment, so `message.content[contentIndex]` is not the block. `contentIndex` counts the reply's content as currently stored and replayed: when the transcript is rebuilt (for example on resume) and a reply holds tool calls that never got a result, those calls and any redacted thinking are dropped and later blocks move down, so the same block can get a smaller index. Key renderer state on `message.timestamp` and `contentIndex` only for the live session; do not persist the pair as a permanent key. `text` is the block's markdown so far, after any earlier renderer; renderers run in registration order.
+- **Streaming.** The renderer is called with the full text so far each time a streaming update is drawn (`streaming: true`), and once more when the text is final (`streaming: false`): at the end of the reply, or earlier when a tool call or any other block starts after it. Deltas that arrive within one frame are drawn, and rendered, once. A block whose text and `streaming` value are unchanged since its last render reuses that output without calling the renderers again (for example a block sealed at a tool call while the call's arguments stream). Replies stream without `display.smoothStreaming`'s typing reveal while renderers are active, so a renderer never sees a partly revealed prefix. Output may be shorter than the input and may change text drawn earlier, so a reply with renderers stays in the live viewport until its turn ends instead of retiring finished rows to terminal scrollback mid-stream.
+- **Failures.** `registerAssistantTextRenderer` throws for anything but a function, failing the extension's load. A renderer that throws leaves its input drawn; the failure is logged once per renderer.
+- **Redraw.** Call `ctx.ui.rerenderMessage(message.timestamp)` after state the renderer reads changes (for example a click) to draw that reply again in place; it calls the renderers again even for blocks whose text is unchanged. A reply still in the live viewport just repaints; in a plain terminal, a reply with rows already in scrollback rebuilds the scrollback (as toggling thinking visibility does), which is costly, so avoid animating such replies frame by frame.
+- **Links.** Links the renderer draws behave like any model-authored link. To get their clicks, give them a scheme the extension [claims](#extension-link-schemes). Relative link targets the renderer adds are not resolved against the session's working directory the way the model's own are, so Tern's native view opens them relative to its own; use absolute paths or URLs.
+
+## Extension link schemes
+
+Opt-in with the same setting as [assistant text renderers](#assistant-text-renderer) (`extensionRenderers.assistantText`, default off). Off, claimed schemes are ignored and links draw exactly as before.
+
+```ts
+pi.registerLinkScheme("cc-stretch");
+pi.on("link_activate", ({ url }) => {
+  // url is the link as drawn, e.g. "cc-stretch:open/1792/0/2"; validate it before acting on it
+});
+```
+
+- **Drawing.** In a plain terminal, a markdown link using a claimed scheme, in an assistant reply or anywhere else markdown is drawn, shows its label only, with a dotted underline (a plain underline in terminals without styled underlines) that sets it apart from web links: no ` (url)` suffix, and no hyperlink the terminal or a browser could open.
+- **Keyboard.** In a plain terminal, `app.links.hint` (`Alt+O` by default, see [keybindings](./keybindings.md)) tags each claimed link on screen with one or two letters drawn over the start of its label; a label wrapped across rows gets one tag. A tag prefers the letter it covers: the label's first letter, else its next free one, else the next free home-row letter; when no single letter is free it gets two letters, so no tag is the start of another, and more links than letters on screen all get two. Typing a whole tag raises `link_activate` for the claiming extension. `Esc` or any key that is not a lowercase letter cancels and is swallowed, except `Ctrl+C` and a paste, which cancel and keep their usual effect. Hint mode works while the prompt editor has focus and ends when an overlay or dialog takes it, or when a repaint moves or removes the tagged labels, as a streaming reply can, so a tag never picks a link no longer under it. Pressing the key again, or `Page Up`, while the tags are shown opens the link browser: the viewed transcript (a focused subagent's too) replayed fullscreen, starting at the bottom, where links already scrolled into terminal scrollback can be picked as well. It tags the claimed links in view the same way; a link keeps its tag while it stays in view, and only links scrolling in get new ones, except that when a newly shown link finds every single letter taken, all links in view are tagged afresh with two letters; type a tag or click a label (fullscreen views get clicks even with `tui.mouse` off) to raise `link_activate`, scroll with the arrows, `Page Up`/`Page Down`, `Home`/`End` or the wheel, and close it with `Esc`; other keys do nothing. It stays open after a pick, and `ctx.ui.rerenderMessage` redraws its copy of the reply in place, the rows above staying put; the main transcript's scrollback is rebuilt once, when the browser closes. A reply still streaming shows as far as it had come when the browser opened. In a long session the browser first replays the recent part of the transcript, as `/copy` does, and the rest once you scroll to its top, keeping the rows in view where they are. An extension dialog (`ctx.ui.confirm`, `select`, `input`, `editor` or `custom`, or an ask) closes the browser before it shows, so a `link_activate` handler can ask something. Turning `extensionRenderers.assistantText` off, or suspending or resuming an extension, also closes it, since its copy was drawn with the renderers and links of before. With no claimed link on screen the key opens the browser right away, or shows a status when the transcript draws none either, and with more links on one row than their tags can fit side by side it shows a status instead of tags. The first time a claimed link is drawn omp says which key picks it.
+- **Clicks.** With `tui.mouse` on, a left click on the label in a plain terminal does the same as typing its tag, instead of any other click action. Either way, while a subagent's transcript is focused, the event goes to that subagent's copy of the extension (the one whose renderers drew it), and the handler's `ctx.ui` is the interactive UI, so call `ctx.ui.rerenderMessage` from the handler's own context. Labels already in terminal scrollback cannot be clicked or tagged in place; pick them in the link browser (see **Keyboard**).
+- **Untrusted input.** `url` comes from whatever drew the link, not only from your renderer: the model, or tool output it repeats, can write `[Continue](cc-stretch:delete/all)`, and since the URL is hidden the user sees only `Continue`. Validate `url` and treat it like user input: parse it strictly, reject unknown operations, and confirm before anything destructive.
+- **Handler.** A `link_activate` handler runs like a command, without the event-handler timeout, so it may await a dialog (`ctx.ui.confirm`, `ctx.ui.select`, …). A handler that throws is reported as an extension error.
+- **Hover.** With `tui.mouse` on, the label under the pointer is highlighted (every row of a wrapped label), and terminals that support OSC 22 (kitty, foot, ghostty, …) show a hand pointer over it.
+- **Fallback.** `ctx.ui.getLinkClicksAvailable()` is true only while claimed links can be picked: interactive mode, a plain terminal, `extensionRenderers.assistantText` on, and the hint key bound or `tui.mouse` on. A subagent's copy of the extension gets the same answer, since its links are picked on the same screen. Changing the setting, `tui.mouse` while the hint key is unbound, Tern's native view opening or closing, or suspending or resuming an extension (a live `disabledExtensions` edit) re-runs the assistant text renderers, so a renderer can check it on each call and draw content inline instead of behind a link nobody can pick.
+- **Ownership.** Scheme names are case-insensitive and at least two characters long, so no scheme captures a Windows drive path such as `C:/notes.md`. When two extensions claim one scheme, the first loaded gets its clicks; a suspended extension's schemes are released until it resumes. Web, file and mail schemes (`http`, `https`, `file`, `mailto`, …) and omp's internal URL schemes (`local`, `skill`, `agent`, …) are reserved: claiming one throws and fails the extension's load. Only links omp draws itself are picked: a raw terminal hyperlink of a claimed scheme in tool output stays an ordinary hyperlink.
+- **Tern.** Tern's native view draws such links as its own links and does not route their clicks back to omp; handle them there with a Tern plugin.
 
 ## Tool call/result renderer
 

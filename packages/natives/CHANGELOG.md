@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `wrapTextWithAnsi` turning styled underlines into background colours: a wrapped `4:4` (dotted) or `4:3` (curly) underline now continues in the same style on the next row instead of as background `44`/`43`, `4:0` ends underlining instead of setting background `40`, and colon-form colours (`38:2::r:g:b`, `58:…`) are read as colours ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
+
 ### Changed
 
 - Reduced native Git diff allocation overhead ([#16349](https://github.com/can1357/oh-my-pi/pull/16349) by [@kyle-elliott](https://github.com/kyle-elliott))

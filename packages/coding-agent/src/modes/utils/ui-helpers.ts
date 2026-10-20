@@ -636,12 +636,14 @@ export class UiHelpers {
 				const errorPresentation = resolveAssistantErrorPresentation(message, this.ctx.viewSession.retryAttempt);
 				const hasErrorStop = errorPresentation.kind === "full";
 				const errorMessage = hasErrorStop ? errorPresentation.text : null;
-				const appendAssistantSegment = (segment: AssistantMessage | undefined) => {
+				const appendAssistantSegment = (toolCallId: string) => {
+					const segment = timeline.afterToolCalls.get(toolCallId);
 					if (!segment || !assistantHasVisibleContent(segment)) return;
 					const component = createAssistantMessageComponent(
 						this.ctx,
 						segment,
 						getAssistantMessageLinkTargets(this.ctx),
+						timeline.contentOffsets.get(toolCallId),
 					);
 					this.ctx.chatContainer.addChild(component);
 				};
@@ -653,7 +655,7 @@ export class UiHelpers {
 					}
 					const afterToolSegment = timeline.afterToolCalls.get(content.id);
 					if (options.preservedLiveToolCallIds?.has(content.id)) {
-						appendAssistantSegment(afterToolSegment);
+						appendAssistantSegment(content.id);
 						continue;
 					}
 					const tool = this.ctx.viewSession.getToolByName(content.name);
@@ -698,7 +700,7 @@ export class UiHelpers {
 								readToolCallAssistantComponents.set(content.id, assistantComponent);
 							}
 						}
-						appendAssistantSegment(afterToolSegment);
+						appendAssistantSegment(content.id);
 						continue;
 					}
 
@@ -742,7 +744,7 @@ export class UiHelpers {
 					} else {
 						this.ctx.pendingTools.set(content.id, component);
 					}
-					appendAssistantSegment(afterToolSegment);
+					appendAssistantSegment(content.id);
 				}
 				// Dangling toolCalls (no result on the resolved path — failed or
 				// retried turns, results on sibling branches) were stripped by the

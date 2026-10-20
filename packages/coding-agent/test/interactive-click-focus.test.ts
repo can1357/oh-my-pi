@@ -1,9 +1,14 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Extension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { cfgExtensionAssistantTextRenderers } from "@oh-my-pi/pi-coding-agent/extensibility/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { LinkBrowserComponent } from "@oh-my-pi/pi-tui/overlays/link-browser";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -17,6 +22,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
 import { cfgTuiMouse } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 
 function plainRows(rows: readonly string[]): string[] {
 	return rows.map(row => Bun.stripANSI(row).trimEnd());
@@ -29,6 +35,7 @@ describe("inline click-to-focus geometry", () => {
 	let mode: InteractiveMode;
 	let term: VirtualTerminal;
 	let eventBus: EventBus;
+	let modelRegistry: ModelRegistry;
 
 	beforeAll(() => {
 		initTheme();
@@ -39,7 +46,7 @@ describe("inline click-to-focus geometry", () => {
 		tempDir = TempDir.createSync("@pi-click-focus-e2e-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		const modelRegistry = new ModelRegistry(authStorage);
+		modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
 		session = new AgentSession({
@@ -54,6 +61,7 @@ describe("inline click-to-focus geometry", () => {
 		mode = new InteractiveMode(session, "test", undefined, () => {}, undefined, undefined, eventBus, composer);
 	});
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		mode?.stop();
 		await session?.dispose();
 		authStorage?.close();
@@ -265,5 +273,612 @@ describe("inline click-to-focus geometry", () => {
 		await clickRow("show less");
 		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("more — expand")));
 		expect(plainRows(term.getViewport()).some(row => row.includes("ToggleAgent3"))).toBe(false);
+	});
+
+	/**
+	 * Install a runner whose one extension claims `schemes` (`demo:` by default) and records each
+	 * `link_activate` URL.
+	 */
+	function installDemoLinkExtension(schemes: string[] = ["demo"]): {
+		activated: string[];
+		firstActivation: Promise<void>;
+		extension: Extension;
+		runner: ExtensionRunner;
+	} {
+		const activated: string[] = [];
+		const first = Promise.withResolvers<void>();
+		const handlers: Extension["handlers"] = new Map();
+		handlers.set("link_activate", [
+			async (...args: unknown[]) => {
+				const [event] = args;
+				if (event && typeof event === "object" && "url" in event && typeof event.url === "string") {
+					activated.push(event.url);
+				}
+				first.resolve();
+			},
+		]);
+		const extension: Extension = {
+			path: "/test/links.ts",
+			resolvedPath: "/test/links.ts",
+			handlers,
+			tools: new Map(),
+			assistantThinkingRenderers: [],
+			assistantTextRenderers: [],
+			linkSchemes: schemes,
+			fileWriteFallbackHandlers: [],
+			fileDeleteFallbackHandlers: [],
+			messageRenderers: new Map(),
+			composerShapes: new Map(),
+			commands: new Map(),
+			flags: new Map(),
+			shortcuts: new Map(),
+		};
+		const runner = new ExtensionRunner(
+			[extension],
+			new ExtensionRuntime(),
+			tempDir.path(),
+			session.sessionManager,
+			modelRegistry,
+			undefined,
+			mode.settings,
+		);
+		Object.defineProperty(session, "extensionRunner", { configurable: true, get: () => runner });
+		return { activated, firstActivation: first.promise, extension, runner };
+	}
+
+	function appendReply(text: string, timestamp = 1): void {
+		session.sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp,
+		});
+	}
+
+	/** Whether a hint tag (drawn in reverse video) covers the first cell of `label` on screen. */
+	function tagDrawnOver(label: string): boolean {
+		const rows = plainRows(term.getViewport());
+		const row = rows.findIndex(line => line.includes(label));
+		return row >= 0 && term.getViewportRowReverseColumns(row).includes(rows[row]!.indexOf(label));
+	}
+
+	/** Draw one assistant reply with `text` and wait until `visible` shows on screen. */
+	async function showReply(text: string, visible: string): Promise<void> {
+		appendReply(text);
+		await mode.renderInitialMessages();
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes(visible)));
+	}
+
+	it("leaves a link change before the startup replay to that replay, drawing the transcript once", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { extension } = installDemoLinkExtension([]);
+		appendReply("Open [the details](demo:open/7) now.");
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		// A startup notice (MCP, LSP) lands in the chat before the replay; then a scheme is claimed.
+		mode.showWarning("early notice");
+		extension.linkSchemes.push("demo");
+		mode.syncExtensionLinks();
+		// Any rebuild the change queued runs as a microtask, before this continuation.
+		await Promise.resolve();
+		await mode.renderInitialMessages({ preserveExistingChat: true });
+		const chat = plainRows(mode.chatContainer.render(120)).join("\n");
+		expect(chat.split("Open the details now.").length - 1).toBe(1);
+		expect(chat.split("early notice").length - 1).toBe(1);
+	});
+
+	it("hands a click on an extension-owned link to its extension with tui.mouse on, other links unchanged", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		cfgTuiMouse.set(mode.settings, true);
+		const { activated, firstActivation } = installDemoLinkExtension();
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+
+		const written: string[] = [];
+		const write = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation(data => {
+			written.push(data);
+			write(data);
+		});
+		await showReply("Open [the details](demo:open/7) or read [the docs](https://example.com/docs).", "the details");
+		// The terminal never receives the extension URL, so it has no hyperlink of its own to open.
+		expect(written.join("")).not.toContain("demo:open/7");
+		expect(written.join("")).toContain("https://example.com/docs");
+		const viewport = plainRows(term.getViewport());
+		const screenRow = viewport.findIndex(row => row.includes("the details"));
+		// The extension link draws without its URL; the web link keeps the suffix.
+		expect(viewport[screenRow]).not.toContain("demo:open/7");
+		expect(viewport[screenRow]).toContain("the docs (https://example.com/docs)");
+
+		const click = (label: string) =>
+			term.sendInput(`\x1b[<0;${viewport[screenRow]!.indexOf(label) + 2};${screenRow + 1}M`);
+		// A click on the web link raises nothing; the extension link's click reaches its extension.
+		click("the docs");
+		click("the details");
+		await firstActivation;
+		expect(activated).toEqual(["demo:open/7"]);
+
+		// Hovering the extension link asks for a hand pointer; moving off it restores the default.
+		const move = (col: number) => term.sendInput(`\x1b[<35;${col + 1};${screenRow + 1}M`);
+		written.length = 0;
+		move(viewport[screenRow]!.indexOf("the details") + 1);
+		await term.waitForRender();
+		expect(written.join("")).toContain("\x1b]22;pointer\x1b\\");
+		written.length = 0;
+		move(viewport[screenRow]!.indexOf("the docs") + 1);
+		await term.waitForRender();
+		expect(written.join("")).toContain("\x1b]22;\x1b\\");
+	});
+
+	it("picks an extension link by its hint tag with tui.mouse off; Esc cancels without picking", async () => {
+		const statuses: string[] = [];
+		const showStatus = mode.showStatus.bind(mode);
+		vi.spyOn(mode, "showStatus").mockImplementation((message, options) => {
+			statuses.push(message);
+			showStatus(message, options);
+		});
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { activated, firstActivation } = installDemoLinkExtension();
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		// Rebound, so the hint must name the key actually bound, not the default.
+		mode.keybindings.setUserBindings({ "app.links.hint": "alt+k" });
+		expect(cfgTuiMouse.get(mode.settings)).toBe(false);
+		expect(session.extensionRunner?.getUIContext()?.getLinkClicksAvailable()).toBe(true);
+
+		await showReply("Open [the details](demo:open/7) or read [the docs](https://example.com/docs).", "the details");
+		await term.waitForRender(() => statuses.some(message => message.includes("pick an extension link")));
+		expect(statuses.filter(message => message.includes("pick an extension link"))).toEqual([
+			"Press Alt+K to pick an extension link",
+		]);
+		// The tag is the letter it covers, `t`.
+		const tagged = () => tagDrawnOver("the details");
+		const hintKey = "\x1bk";
+
+		// Esc leaves hint mode untouched by any pick, and the next letter types into the editor again.
+		term.sendInput(hintKey);
+		await term.waitForRender(tagged);
+		term.sendInput("\x1b");
+		await term.waitForRender(() => !tagged());
+		term.sendInput("a");
+		await term.waitForRender();
+		expect(mode.editor.getText()).toBe("a");
+		expect(activated).toEqual([]);
+
+		// The tag drawn over the label picks it.
+		term.sendInput(hintKey);
+		await term.waitForRender(tagged);
+		term.sendInput("t");
+		await firstActivation;
+		expect(activated).toEqual(["demo:open/7"]);
+		await term.waitForRender(() => !tagged());
+		expect(mode.editor.getText()).toBe("a");
+
+		// An overlay opening mid-hint (e.g. an extension's custom UI) gets the keys; no link is picked.
+		term.sendInput(hintKey);
+		await term.waitForRender(tagged);
+		const overlayInput: string[] = [];
+		const overlay = mode.ui.showOverlay({
+			render: () => ["overlay"],
+			handleInput: (data: string) => overlayInput.push(data),
+			invalidate: () => {},
+		});
+		term.sendInput("a");
+		await term.waitForRender(() => !tagged());
+		expect(overlayInput).toEqual(["a"]);
+		expect(activated).toEqual(["demo:open/7"]);
+		overlay.hide();
+
+		// Same for a dialog that takes focus in the editor area (ask, selectors), which is no overlay.
+		term.sendInput(hintKey);
+		await term.waitForRender(tagged);
+		const dialogInput: string[] = [];
+		const dialog = {
+			render: () => [],
+			handleInput: (data: string) => dialogInput.push(data),
+			invalidate: () => {},
+		};
+		mode.ui.setFocus(dialog);
+		term.sendInput("a");
+		await term.waitForRender(() => !tagged());
+		expect(dialogInput).toEqual(["a"]);
+		expect(activated).toEqual(["demo:open/7"]);
+		// And the hint key does nothing while such a dialog has focus.
+		term.sendInput(hintKey);
+		await term.waitForRender();
+		expect(mode.linkHintsActive).toBe(false);
+		mode.ui.setFocus(mode.editor);
+
+		// A paste ends hint mode and still lands in the editor.
+		mode.editor.setText("");
+		term.sendInput(hintKey);
+		await term.waitForRender(tagged);
+		term.sendInput("\x1b[200~pasted\x1b[201~");
+		await term.waitForRender(() => !tagged());
+		await term.waitForRender(() => mode.editor.getText() === "pasted");
+		expect(mode.editor.getText()).toBe("pasted");
+		expect(mode.linkHintsActive).toBe(false);
+		expect(activated).toEqual(["demo:open/7"]);
+	});
+
+	it("reports links as unavailable with the hint key unbound until tui.mouse turns on", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		installDemoLinkExtension();
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		const ui = session.extensionRunner?.getUIContext();
+		expect(ui?.getLinkClicksAvailable()).toBe(true);
+		mode.keybindings.setUserBindings({ "app.links.hint": [] });
+		expect(ui?.getLinkClicksAvailable()).toBe(false);
+		cfgTuiMouse.set(mode.settings, true);
+		// The mode picks the change up from its settings listener, after `set` returns.
+		await term.waitForRender(() => ui?.getLinkClicksAvailable() === true);
+		expect(ui?.getLinkClicksAvailable()).toBe(true);
+	});
+
+	it("redraws a focused subagent's reply when its extension handles a click on its link", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		cfgTuiMouse.set(mode.settings, true);
+		const extension = (handlers: Extension["handlers"], renderers: Extension["assistantTextRenderers"]) => ({
+			path: "/test/links.ts",
+			resolvedPath: "/test/links.ts",
+			handlers,
+			tools: new Map(),
+			assistantThinkingRenderers: [],
+			assistantTextRenderers: renderers,
+			linkSchemes: ["demo"],
+			fileWriteFallbackHandlers: [],
+			fileDeleteFallbackHandlers: [],
+			messageRenderers: new Map(),
+			composerShapes: new Map(),
+			commands: new Map(),
+			flags: new Map(),
+			shortcuts: new Map(),
+		});
+		const runner = (ext: Extension) =>
+			new ExtensionRunner(
+				[ext],
+				new ExtensionRuntime(),
+				tempDir.path(),
+				session.sessionManager,
+				modelRegistry,
+				undefined,
+				mode.settings,
+			);
+		// The main session's copy of the extension: interactive UI, never sees the click.
+		const mainRunner = runner(extension(new Map(), []));
+		// The subagent's own copy: a headless runner, as the task executor builds it.
+		let opened = false;
+		const handled = Promise.withResolvers<void>();
+		const childHandlers: Extension["handlers"] = new Map();
+		childHandlers.set("link_activate", [
+			async (...args: unknown[]) => {
+				opened = true;
+				const ctx = args[1] as { ui: { rerenderMessage(timestamp: number): void } };
+				ctx.ui.rerenderMessage(1);
+				handled.resolve();
+			},
+		]);
+		const childRunner = runner(
+			extension(childHandlers, [
+				({ text }) => (opened ? text.replace("[the details](demo:toggle)", "OPENED") : undefined),
+			]),
+		);
+		Object.defineProperty(session, "extensionRunner", { configurable: true, get: () => mainRunner });
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		// Focus the subagent: its transcript, renderers and link schemes come from its runner.
+		const focused = new Proxy(session, {
+			get: (target, property) => {
+				if (property === "extensionRunner") return childRunner;
+				const value = Reflect.get(target, property, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		Object.defineProperty(mode, "viewSession", { configurable: true, get: () => focused });
+		session.sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "Open [the details](demo:toggle) now." }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 1,
+		});
+		await mode.renderInitialMessages();
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("the details")));
+		// The subagent's runner has no UI of its own, yet its links are picked here: it says so too.
+		expect(mainRunner.getUIContext()?.getLinkClicksAvailable()).toBe(true);
+		expect(childRunner.hasUI()).toBe(false);
+		expect(childRunner.getUIContext()?.getLinkClicksAvailable()).toBe(true);
+		const viewport = plainRows(term.getViewport());
+		const screenRow = viewport.findIndex(row => row.includes("the details"));
+		term.sendInput(`\x1b[<0;${viewport[screenRow]!.indexOf("the details") + 2};${screenRow + 1}M`);
+		await handled.promise;
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("OPENED")));
+		expect(plainRows(term.getViewport()).some(row => row.includes("Open OPENED now."))).toBe(true);
+
+		// Disabling the extension live suspends only the main copy; the subagent's copy stops drawing too.
+		mainRunner.setSuspendedExtensions(() => true);
+		await Promise.resolve();
+		const chat = plainRows(mode.chatContainer.render(120)).join("\n");
+		expect(chat).toContain("Open the details (demo:toggle) now.");
+		expect(await childRunner.emitLinkActivate("demo:toggle")).toBe(false);
+	});
+
+	it("re-runs assistant text renderers when Tern's native view takes the screen and hands it back", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { extension, runner } = installDemoLinkExtension();
+		// Draws the link only while it can be picked here, its target inline otherwise.
+		extension.assistantTextRenderers.push(({ text }) =>
+			runner.getUIContext()?.getLinkClicksAvailable()
+				? undefined
+				: text.replace("[the details](demo:open/7)", "INLINE"),
+		);
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		await showReply("Open [the details](demo:open/7) now.", "the details");
+		const chat = () => plainRows(mode.chatContainer.render(120)).join("\n");
+		expect(chat()).toContain("Open the details now.");
+		try {
+			setNativeRendering(true);
+			// The redraw's rebuild runs as a microtask, before this continuation.
+			await Promise.resolve();
+			expect(chat()).toContain("Open INLINE now.");
+		} finally {
+			setNativeRendering(false);
+		}
+		await Promise.resolve();
+		expect(chat()).toContain("Open the details now.");
+	});
+
+	it("drops a suspended extension's link scheme and renderers from the transcript, and restores them on resume", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { extension, runner } = installDemoLinkExtension();
+		extension.assistantTextRenderers.push(({ text }) => text.replace("now", "NOW"));
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		await showReply("Open [the details](demo:open/7) now.", "the details");
+		const chat = () => plainRows(mode.chatContainer.render(120)).join("\n");
+		expect(chat()).toContain("Open the details NOW.");
+
+		// A live `disabledExtensions` edit suspends it: its scheme is no longer claimed, its renderer gone.
+		runner.setSuspendedExtensions(() => true);
+		expect(runner.getLinkSchemes()).toEqual([]);
+		await Promise.resolve();
+		expect(chat()).toContain("Open the details (demo:open/7) now.");
+
+		runner.setSuspendedExtensions(() => false);
+		await Promise.resolve();
+		expect(chat()).toContain("Open the details NOW.");
+	});
+
+	it("browses to a link scrolled off the screen, picks it by tag, and redraws its reply in the browser", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { activated, extension } = installDemoLinkExtension();
+		// Opening the early link expands its reply; the handler asks omp to redraw it.
+		let expanded = false;
+		extension.assistantTextRenderers.push(({ text, message }) =>
+			expanded && message.timestamp === 1
+				? text.replace("here.", "here.\n\nEXPANDED one.\n\nEXPANDED two.")
+				: undefined,
+		);
+		const handled = Promise.withResolvers<void>();
+		extension.handlers.get("link_activate")!.push(async (...args: unknown[]) => {
+			expanded = true;
+			// The runner hands every link_activate handler its ExtensionContext as the second argument.
+			const ctx = args[1] as { ui: { rerenderMessage(timestamp: number): void } };
+			ctx.ui.rerenderMessage(1);
+			handled.resolve();
+		});
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		expect(cfgTuiMouse.get(mode.settings)).toBe(false);
+
+		appendReply("Early [the early link](demo:early) here.", 1);
+		for (let index = 0; index < 40; index++) appendReply(`Filler paragraph ${index}.`, 10 + index);
+		appendReply("Late [the late link](demo:late) here.", 2);
+		await mode.renderInitialMessages();
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("the late link")));
+		// The early link has scrolled into terminal scrollback, where no tag can reach it.
+		expect(plainRows(term.getViewport()).some(row => row.includes("the early link"))).toBe(false);
+
+		const resets = vi.spyOn(mode.ui, "resetDisplay");
+		const hintKey = "\x1bo";
+		const screen = () => plainRows(term.getViewport());
+		// The hint key tags the late link on screen; pressed again it opens the browser, at the bottom.
+		term.sendInput(hintKey);
+		await term.waitForRender(() => tagDrawnOver("the late link"));
+		term.sendInput(hintKey);
+		await term.waitForRender(() => screen().some(row => row.includes("Extension links")));
+		expect(screen().some(row => row.includes("Extension links"))).toBe(true);
+		expect(tagDrawnOver("the late link")).toBe(true);
+		expect(screen().some(row => row.includes("Early"))).toBe(false);
+
+		// Scrolled to the top, the early link is tagged; typing its tag raises link_activate for it.
+		term.sendInput("\x1b[H");
+		await term.waitForRender(() => tagDrawnOver("the early link"));
+		expect(tagDrawnOver("the early link")).toBe(true);
+		const above = screen().slice(0, screen().findIndex(row => row.includes("Early")) + 1);
+		term.sendInput("t");
+		await handled.promise;
+		expect(activated).toEqual(["demo:early"]);
+
+		// The browser's copy grows in place: the rows down to the reply's first stay where they were.
+		await term.waitForRender(() => screen().some(row => row.includes("EXPANDED one.")));
+		expect(screen().some(row => row.includes("EXPANDED one."))).toBe(true);
+		const strip = (rows: string[]) => rows.map(row => row.slice(0, 119).trimEnd());
+		expect(strip(screen().slice(0, above.length))).toEqual(strip(above));
+		// The main transcript's scrollback is rebuilt only once the browser closes.
+		expect(resets).not.toHaveBeenCalled();
+
+		term.sendInput("\x1b");
+		await term.waitForRender(() => !screen().some(row => row.includes("Extension links")));
+		expect(screen().some(row => row.includes("Extension links"))).toBe(false);
+		expect(resets).toHaveBeenCalledTimes(1);
+		expect(plainRows(mode.chatContainer.render(120)).join("\n")).toContain("EXPANDED two.");
+		expect(mode.ui.getFocused()).toBe(mode.editor);
+	});
+
+	it("opens the link browser from the hint key when no extension link is on screen", async () => {
+		const statuses: string[] = [];
+		const showStatus = mode.showStatus.bind(mode);
+		vi.spyOn(mode, "showStatus").mockImplementation((message, options) => {
+			statuses.push(message);
+			showStatus(message, options);
+		});
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		installDemoLinkExtension();
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		const screen = () => plainRows(term.getViewport());
+
+		// Nothing in the transcript draws a link: the status says so and nothing opens.
+		await showReply("Nothing to pick in this reply.", "Nothing to pick");
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => statuses.includes("No extension links on screen"));
+		expect(statuses).toContain("No extension links on screen");
+		expect(mode.ui.hasOverlay()).toBe(false);
+
+		appendReply("Early [the early link](demo:early) here.", 1);
+		for (let index = 0; index < 40; index++) appendReply(`Filler paragraph ${index}.`, 10 + index);
+		await mode.renderInitialMessages();
+		await term.waitForRender(() => screen().some(row => row.includes("Filler paragraph 39.")));
+		expect(screen().some(row => row.includes("the early link"))).toBe(false);
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => screen().some(row => row.includes("Extension links")));
+		expect(screen().some(row => row.includes("Extension links"))).toBe(true);
+	});
+
+	it("replays a transcript without extension links once, until a reply is redrawn with one", async () => {
+		const statuses: string[] = [];
+		const showStatus = mode.showStatus.bind(mode);
+		vi.spyOn(mode, "showStatus").mockImplementation((message, options) => {
+			statuses.push(message);
+			showStatus(message, options);
+		});
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { extension } = installDemoLinkExtension();
+		let linked = false;
+		extension.assistantTextRenderers.push(({ text, message }) =>
+			linked && message.timestamp === 1
+				? text.replace("Early reply", "Early [the early link](demo:early)")
+				: undefined,
+		);
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		const screen = () => plainRows(term.getViewport());
+		appendReply("Early reply here.", 1);
+		for (let index = 0; index < 40; index++) appendReply(`Filler paragraph ${index}.`, 10 + index);
+		await mode.renderInitialMessages();
+		await term.waitForRender(() => screen().some(row => row.includes("Filler paragraph 39.")));
+
+		const checks = vi.spyOn(LinkBrowserComponent.prototype, "hasLinks");
+		const misses = () => statuses.filter(status => status === "No extension links on screen").length;
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => misses() === 1);
+		// Nothing changed since: the second press answers without replaying the branch again.
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => misses() === 2);
+		expect(checks).toHaveBeenCalledTimes(1);
+
+		// The extension redraws the early reply, now with a link (in scrollback): the key finds it.
+		linked = true;
+		session.extensionRunner!.getUIContext().rerenderMessage(1);
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => screen().some(row => row.includes("Extension links")));
+		expect(screen().some(row => row.includes("Extension links"))).toBe(true);
+		expect(misses()).toBe(2);
+	});
+
+	it("closes the link browser when extension renderers are turned off or the extension is suspended", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { runner } = installDemoLinkExtension();
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		const screen = () => plainRows(term.getViewport());
+		await showReply("See [the late link](demo:late) here.", "the late link");
+		const openBrowser = async () => {
+			term.sendInput("\x1bo");
+			await term.waitForRender(() => tagDrawnOver("the late link"));
+			term.sendInput("\x1bo");
+			await term.waitForRender(() => screen().some(row => row.includes("Extension links")));
+			expect(mode.ui.hasOverlay()).toBe(true);
+		};
+		const expectClosed = async () => {
+			await term.waitForRender(() => !screen().some(row => row.includes("Extension links")));
+			expect(screen().some(row => row.includes("Extension links"))).toBe(false);
+			expect(mode.ui.hasOverlay()).toBe(false);
+			expect(mode.ui.getFocused()).toBe(mode.editor);
+		};
+
+		// Suspended live, its renderers and scheme are gone: the browser's copy would draw with them.
+		await openBrowser();
+		runner.setSuspendedExtensions(() => true);
+		await expectClosed();
+		runner.setSuspendedExtensions(() => false);
+		// Resumed, the reply is rebuilt with its link drawn as a label again.
+		await Promise.resolve();
+
+		await openBrowser();
+		cfgExtensionAssistantTextRenderers.set(mode.settings, false);
+		await expectClosed();
+	});
+
+	it("closes the link browser when a picked link's handler opens a dialog, so the dialog gets the keys", async () => {
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { extension } = installDemoLinkExtension();
+		const answered = Promise.withResolvers<boolean>();
+		extension.handlers.get("link_activate")!.push(async (...args: unknown[]) => {
+			const ctx = args[1] as { ui: { confirm(title: string, message: string): Promise<boolean> } };
+			answered.resolve(await ctx.ui.confirm("Open the link?", "It goes somewhere."));
+		});
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+		const screen = () => plainRows(term.getViewport());
+		await showReply("See [the late link](demo:late) here.", "the late link");
+
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => tagDrawnOver("the late link"));
+		term.sendInput("\x1bo");
+		await term.waitForRender(() => screen().some(row => row.includes("Extension links")));
+		term.sendInput("t");
+		await term.waitForRender(() => screen().some(row => row.includes("Open the link?")));
+		expect(screen().some(row => row.includes("Extension links"))).toBe(false);
+		expect(mode.ui.hasOverlay()).toBe(false);
+		// The keys reach the dialog: Enter takes its first choice.
+		term.sendInput("\r");
+		expect(await answered.promise).toBe(true);
 	});
 });

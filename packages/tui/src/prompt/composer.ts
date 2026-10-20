@@ -1,6 +1,8 @@
 import { getComposerStyle } from "../components/composer/registry";
 import { Spacer } from "../components/spacer";
 import type { StatusLineComponent } from "../status-line/component";
+import { extensionLinkLabels, restyleExtensionLinkLabel } from "../render/extension-links";
+import { LinkHints, type ViewportLink, viewportLinkTargets } from "../render/link-hints";
 import type { StatusLineSession } from "../status-line/host";
 import { createStartupStatusLine, type StatusLineStartupData } from "../status-line/startup";
 import { isInsideTerminalMultiplexer } from "../terminal-multiplexer";
@@ -178,6 +180,12 @@ export function routeViewportClick(spans: readonly ViewportClickSpan[], index: n
 }
 
 /**
+ * Called once when link-hint mode ends; `reason` is `"crowded"` when a row held more links than
+ * their tags could fit side by side, so no tags were drawn.
+ */
+export type LinkHintsEnd = (reason?: "crowded") => void;
+
+/**
  * Reserved click-candidate id for the pinned HUD expander row. Checked before
  * any registry lookup: its `@…:…` charset cannot collide with generated agent
  * ids (word names, numeric and `-N` suffixes, dotted nesting).
@@ -190,6 +198,22 @@ export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
  * matching closes stay and become band resumes via bgFill.
  */
 const NESTED_BG_OPEN_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[(?:4[0-7]|10[0-7]|48;[0-9;]*)m`, "g");
+
+/** Any SGR sequence; group 1 is its parameter list. */
+const SGR_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[([0-9:;]*)m`, "g");
+
+/**
+ * A hovered extension link label in inverse video. Unlike a background band it leaves the row's
+ * own background (a user-message bubble, the hover band) in place after the label.
+ */
+function inverseLabel(label: string): string {
+	const reopened = label.replace(SGR_PATTERN, (sequence: string, params: string) => {
+		const codes = params.split(";");
+		// A full reset (`m`, `0`, `0;…`) or an inverse-off (`27`) ends the highlight: re-enter it.
+		return codes[0] === "" || codes[0] === "0" || codes.includes("27") ? `${sequence}\x1b[7m` : sequence;
+	});
+	return `\x1b[7m${reopened}\x1b[27m`;
+}
 
 /**
  * Candidate resolver for a row-level click target, if the component is one.
@@ -260,8 +284,16 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#retiredHeaderRows: readonly string[] | undefined;
 	/** Click spans of the last `renderFrame` viewport, in viewport coordinates. */
 	#lastClickSpans: ViewportClickSpan[] = [];
+	/** Rows of the last `renderFrame` viewport, before the hover band; read to hit-test extension links. */
+	#lastViewportRows: readonly string[] = [];
 	/** Click-candidate id under the pointer, painted with the hover band. Id-anchored so it follows streaming rows. */
 	#hoveredClickId: string | undefined;
+	/** Extension link label under the pointer; only it (on every row it wraps across) is highlighted. */
+	#hoveredLink: ViewportLink | undefined;
+	/** Keyboard link-hint mode: its tags (assigned by the first frame after `startLinkHints`) and what to run when it ends. */
+	#linkHints: { hints: LinkHints; onEnd: LinkHintsEnd } | undefined;
+	/** Width of the last painted viewport, which `#lastViewportRows` was laid out for. */
+	#lastViewportWidth = 0;
 	// Hard-row prefix currently above the native viewport. The first resize
 	// frame may pull part of it down before the normal buffer is borrowed.
 	#retiredHeaderStart = 0;
@@ -403,6 +435,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) {
 			this.#lastClickSpans = [];
+			this.#lastViewportRows = [];
+			this.#syncLinkHints([], 0);
 			const viewport: string[] = [];
 			for (const root of roots) {
 				const rendered = root.render(width);
@@ -512,11 +546,77 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		for (const span of activeSpans) shift(span, before.length - drop);
 		for (const span of afterSpans) shift(span, slack + before.length + active.length - drop);
 		this.#lastClickSpans = spans;
+		this.#lastViewportRows = mutable;
+		this.#lastViewportWidth = width;
+		this.#syncLinkHints(mutable, width);
 		if (history !== undefined && this.#offeredHistory?.source === "header") {
 			const visibleHeaderRows = Math.max(0, rows - (mutable.length + drop));
 			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
 		}
-		return { history, viewport: this.#paintHoverBand(mutable, spans) };
+		const painted = this.#paintHoveredLink(this.#paintHoverBand(mutable, spans));
+		return { history, viewport: this.#linkHints?.hints.paint(painted, width) ?? painted };
+	}
+
+	/**
+	 * Keep link-hint tags on what `rows` show. The first frame after `startLinkHints` tags its
+	 * labels; later frames keep the tags while the tagged labels are still drawn first, in the same
+	 * order and columns (rows may scroll, links may be added below), and otherwise end the mode, so a
+	 * tag never picks a label no longer drawn under it. Every frame ends the mode as `"crowded"` when
+	 * some row has more tag cells than `width` (a resize can narrow it), since tags drawn side by
+	 * side could not all be read.
+	 */
+	#syncLinkHints(rows: readonly string[], width: number): void {
+		const state = this.#linkHints;
+		if (state === undefined) return;
+		const kept = state.hints.tagged ? state.hints.follow(rows) : state.hints.assign(rows) > 0;
+		if (!kept) this.#endLinkHints();
+		else if (state.hints.crowded(width)) this.#endLinkHints("crowded");
+	}
+
+	#endLinkHints(reason?: "crowded"): void {
+		const state = this.#linkHints;
+		if (state === undefined) return;
+		this.#linkHints = undefined;
+		state.onEnd(reason);
+	}
+
+	/**
+	 * Highlight the hovered extension link label. A wrapped label continues on the rows above and
+	 * below: while a part is the first label on its row, the previous row's last label belongs to it
+	 * when it carries the same marker id and ends that row; likewise downward. Other labels, even of
+	 * the same URL, stay plain.
+	 */
+	#paintHoveredLink(viewport: string[]): string[] {
+		const hovered = this.#hoveredLink;
+		if (hovered === undefined) return viewport;
+		const labelsAt = (index: number) => {
+			const line = viewport[index];
+			return line === undefined ? [] : extensionLinkLabels(line);
+		};
+		const hitLabels = labelsAt(hovered.row);
+		const hit = hitLabels.find(label => label.start === hovered.start && label.url === hovered.url);
+		if (hit === undefined) return viewport;
+		const painted = [...viewport];
+		painted[hovered.row] = restyleExtensionLinkLabel(viewport[hovered.row]!, hit, inverseLabel);
+		for (let index = hovered.row - 1, labels = hitLabels, part = hit; labels[0] === part; index--) {
+			labels = labelsAt(index);
+			const above = labels.at(-1);
+			if (above === undefined || above.id !== hit.id || !above.endsRow) break;
+			painted[index] = restyleExtensionLinkLabel(viewport[index]!, above, inverseLabel);
+			part = above;
+		}
+		for (
+			let index = hovered.row + 1, labels = hitLabels, part = hit;
+			part.endsRow && labels.at(-1) === part;
+			index++
+		) {
+			labels = labelsAt(index);
+			const below = labels[0];
+			if (below === undefined || below.id !== hit.id) break;
+			painted[index] = restyleExtensionLinkLabel(viewport[index]!, below, inverseLabel);
+			part = below;
+		}
+		return painted;
 	}
 
 	/**
@@ -636,11 +736,72 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	}
 
 	/**
+	 * The extension-owned link label drawn at cell `col` of a mutable-viewport line, or `undefined`.
+	 * Only links whose scheme an extension registered match; see `extensionLinkLabels`.
+	 */
+	viewportLinkAt(index: number, col: number): ViewportLink | undefined {
+		const line = this.#lastViewportRows[index];
+		if (line === undefined || col < 0) return undefined;
+		const label = extensionLinkLabels(line).find(label => col >= label.start && col < label.end);
+		return label && { url: label.url, row: index, start: label.start };
+	}
+
+	/**
 	 * Point the hover band at a click-candidate id (or clear it). Takes effect
 	 * on the next frame; callers repaint only when the target actually changes.
 	 */
 	setHoveredClickId(id: string | undefined): void {
 		this.#hoveredClickId = id;
+	}
+
+	/**
+	 * Point the link hover highlight at a label `viewportLinkAt` returned (or clear it). Takes effect
+	 * on the next frame; callers repaint only when the target actually changes.
+	 */
+	setHoveredLink(link: ViewportLink | undefined): void {
+		this.#hoveredLink = link;
+	}
+
+	/** How many extension link labels the last frame drew; a label wrapped across rows counts once. */
+	viewportLinkCount(): number {
+		return viewportLinkTargets(this.#lastViewportRows).length;
+	}
+
+	/**
+	 * Enter keyboard link-hint mode: the next frame draws a tag over each extension link label it
+	 * shows. `onEnd` runs once when the mode ends: a pick, a cancel, a key no tag starts with, a
+	 * repaint that no longer draws the tagged labels where they were, or (`"crowded"`) a row with
+	 * too many links for their tags to fit side by side.
+	 */
+	startLinkHints(onEnd: LinkHintsEnd): void {
+		this.#endLinkHints();
+		this.#linkHints = { hints: new LinkHints(), onEnd };
+	}
+
+	/** Whether link-hint mode is on. */
+	get linkHintsActive(): boolean {
+		return this.#linkHints !== undefined;
+	}
+
+	/**
+	 * Type one letter of a tag. Returns the link whose whole tag is now typed, `true` while the
+	 * letters still lead to several tags, and `false` when none starts with them. The mode ends on
+	 * a pick or a miss.
+	 */
+	typeLinkHint(letter: string): ViewportLink | boolean {
+		const state = this.#linkHints;
+		if (state === undefined) return false;
+		// A key typed before the tags were first painted picks among the labels last drawn.
+		if (!state.hints.tagged) this.#syncLinkHints(this.#lastViewportRows, this.#lastViewportWidth);
+		if (this.#linkHints !== state) return false;
+		const result = state.hints.type(letter);
+		if (result !== true) this.#endLinkHints();
+		return result;
+	}
+
+	/** Leave link-hint mode without picking a link. */
+	cancelLinkHints(): void {
+		this.#endLinkHints();
 	}
 
 	/** Acknowledges one accepted header, replay, or transcript batch. */

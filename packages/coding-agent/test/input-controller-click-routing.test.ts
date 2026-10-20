@@ -45,6 +45,9 @@ function makeHarness() {
 			extensionRunner: undefined,
 		},
 		resolveViewportClickCandidates: (index: number) => (index === 2 ? [PINNED_HUD_TOGGLE_ID] : []),
+		activateViewportLink: () => false,
+		viewportLinkAt: () => undefined,
+		setLinkHover: () => {},
 		focusedAgentId: undefined,
 		focusAgentSession: async (id: string) => {
 			focused.push(id);
