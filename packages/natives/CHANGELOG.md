@@ -15,6 +15,7 @@
 ## [18.12.5] - 2026-10-21
 
 ### Fixed
+- Fixed `grep` searching the file its own output is redirected into, including standard input redirected from that same file: that input is now refused with `input file is also the output`, and `--label` names standard input in the diagnostic ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed a macOS background action leaving its target in front of your app after you clicked another of your windows, when placing the click took longer than the click itself ([#16217](https://github.com/can1357/oh-my-pi/pull/16217))
 
@@ -32,19 +33,10 @@
 - Fixed `index.d.ts` drifting from the generated bindings, so building the natives no longer leaves the checkout modified ([#16306](https://github.com/can1357/oh-my-pi/pull/16306) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `cargo test` writing crash reports from panicking Rust tests into your real `~/.omp/logs`: they now go to a per-user `pi-natives-test-logs-<uid>/` under the OS temp dir ([#16386](https://github.com/can1357/oh-my-pi/pull/16386) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the bash tool's `rm -rf` reporting `No such file or directory` for entries another process removed first and leaving the parent directories behind; under `-f` an entry already gone now counts as removed, as in GNU rm ([#16433](https://github.com/can1357/oh-my-pi/pull/16433) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed `grep` searching the file its own output is redirected into, including standard input redirected from that same file: that input is now refused with `input file is also the output` instead of the matches being read back and matched again; the refusal follows the file that was actually opened, so a path replaced while `grep` runs cannot slip past it, and `--label` names standard input in the diagnostic ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed `grep` searching the file its own output is redirected into, including standard input redirected from that same file: that input is now refused with `input file is also the output`, and `--label` names standard input in the diagnostic ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
-- Fixed `index.d.ts` drifting from the generated bindings, so building the natives no longer leaves the checkout modified ([#16306](https://github.com/can1357/oh-my-pi/pull/16306) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed `cargo test` writing crash reports from panicking Rust tests into your real `~/.omp/logs`: they now go to a per-user `pi-natives-test-logs-<uid>/` under the OS temp dir ([#16386](https://github.com/can1357/oh-my-pi/pull/16386) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed the bash tool's `rm -rf` reporting `No such file or directory` for entries another process removed first and leaving the parent directories behind; under `-f` an entry already gone now counts as removed, as in GNU rm ([#16433](https://github.com/can1357/oh-my-pi/pull/16433) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the bash tool's `rg -c` and `rg --count-matches` printing `path:0` for every file without a match; zero counts are now printed only with `--include-zero`, as in ripgrep ([#16432](https://github.com/can1357/oh-my-pi/pull/16432) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `ln -s local://… <path>` in the bash tool creating a host symlink that holds the URL text, which nothing can follow; a symlink on the host to a file-backed URL now stores the file it stands for ([#16428](https://github.com/can1357/oh-my-pi/pull/16428) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background input leaving the target app in front of yours when it came forward just as you clicked another window of your app; your app comes back with the window you clicked ([#16217](https://github.com/can1357/oh-my-pi/pull/16217) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed omp sessions on macOS adding a terminal icon to the Dock after the `computer` tool listed displays ([#13455](https://github.com/can1357/oh-my-pi/pull/13455) by [@VelizarSeleznev](https://github.com/VelizarSeleznev))
-- Fixed `grep` searching the file its own output is redirected into: that input is now refused with `input file is also the output` instead of the matches being read back and matched again ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed `grep` searching the file its own output is redirected into, including standard input redirected from that same file: that input is now refused with `input file is also the output` instead of the matches being read back and matched again ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed `grep` searching the file its own output is redirected into, including standard input redirected from that same file: that input is now refused with `input file is also the output` instead of the matches being read back and matched again; the refusal follows the file that was actually opened, so a path replaced while `grep` runs cannot slip past it, and `--label` names standard input in the diagnostic ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 
@@ -2016,6 +2008,5 @@
 - Removed `terminateHtmlWorker` export from html module
 
 ### Fixed
-- Fixed `grep` searching the file its own output is redirected into, including standard input redirected from that same file: that input is now refused with `input file is also the output`, and `--label` names standard input in the diagnostic ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed potential crashes when updating native binaries by using safe copy strategy that avoids overwriting in-memory binaries
