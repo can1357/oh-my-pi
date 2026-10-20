@@ -115,6 +115,10 @@
 
 - Fixed a macOS background action leaving its target in front of your app after you clicked another of your windows, when placing the click took longer than the click itself ([#16217](https://github.com/can1357/oh-my-pi/pull/16217))
 
+### Fixed
+
+- Fixed macOS background input leaving the target app in front of yours when it came forward right after a quick click in your app that macOS was slow to hit-test
+
 ## [18.12.4] - 2026-10-20
 
 ### Changed
