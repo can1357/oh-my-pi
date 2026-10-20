@@ -19,13 +19,19 @@ function proxyLogTarget(proxyUrl: string): string {
 
 /**
  * Checks if a host is local or cloud metadata, which should always bypass the proxy
- * (e.g. localhost, 127/8, ::1, 169.254.169.254, metadata.google.internal).
+ * (e.g. localhost, 127/8, ::1, 169.254.169.254, metadata.google.internal, *.local).
  */
 export function isLocalOrMetadataHost(host: string): boolean {
 	const lowerHost = host.toLowerCase();
 
-	// Hostnames: localhost and the cloud metadata service.
-	if (lowerHost === "localhost" || lowerHost.endsWith(".localhost") || lowerHost === "metadata.google.internal") {
+	// Hostnames: localhost, the cloud metadata service, and `.local` mDNS names
+	// (home-LAN inference boxes such as gpu-box.local:8080).
+	if (
+		lowerHost === "localhost" ||
+		lowerHost.endsWith(".localhost") ||
+		lowerHost.endsWith(".local") ||
+		lowerHost === "metadata.google.internal"
+	) {
 		return true;
 	}
 
