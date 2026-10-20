@@ -204,6 +204,14 @@ interface TranscriptMemoryState {
 	scope: string;
 	/** Clear token the content was read under. */
 	token: string;
+	/**
+	 * Id of the branch entry the state was derived from.
+	 *
+	 * The active branch decides which snapshot the prompt carries: when the
+	 * leaf moves off that entry, the state no longer describes this branch and
+	 * the next build reselects the snapshot the branch holds.
+	 */
+	recordedEntryId: string | undefined;
 	/** The memory files' content the prompt block is built from. */
 	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined;
 	/** The rendered prompt block. */
@@ -230,15 +238,28 @@ function memoryClearTokenPath(memoryRoot: string): string {
 }
 
 async function readMemoryClearToken(memoryRoot: string): Promise<string> {
-	const file = Bun.file(memoryClearTokenPath(memoryRoot));
-	if (!(await file.exists())) return "";
-	return (await file.text()).trim();
+	try {
+		return (await Bun.file(memoryClearTokenPath(memoryRoot)).text()).trim();
+	} catch (error) {
+		// A missing token means no clear yet; a removal racing the read must
+		// not fail the prompt build.
+		if (isEnoent(error)) return "";
+		throw error;
+	}
 }
 
 async function writeMemoryClearToken(memoryRoot: string): Promise<void> {
-	const tokenPath = memoryClearTokenPath(memoryRoot);
-	await fs.mkdir(path.dirname(tokenPath), { recursive: true });
-	await Bun.write(tokenPath, crypto.randomUUID());
+	await Bun.write(memoryClearTokenPath(memoryRoot), crypto.randomUUID());
+}
+
+/**
+ * A memory snapshot recorded on a transcript's active branch.
+ */
+interface RecordedMemorySnapshot {
+	/** Id of the transcript entry holding it. */
+	entryId: string;
+	/** The memory files' content it holds. */
+	snapshot: MemoryToolDeveloperInstructionsSnapshot;
 }
 
 /**
@@ -253,7 +274,7 @@ function findRecordedMemorySnapshot(
 	transcript: MemoryTranscript,
 	scope: string,
 	token: string,
-): MemoryToolDeveloperInstructionsSnapshot | undefined {
+): RecordedMemorySnapshot | undefined {
 	const branch = transcript.getBranchView?.();
 	if (!branch) return undefined;
 	for (let index = branch.length - 1; index >= 0; index--) {
@@ -264,7 +285,7 @@ function findRecordedMemorySnapshot(
 		if (typeof data.summary !== "string" || typeof data.learned !== "string") return undefined;
 		if (typeof data.scope !== "string" || data.scope !== scope) return undefined;
 		if (typeof data.token !== "string" || data.token !== token) return undefined;
-		return { summary: data.summary, learned: data.learned };
+		return { entryId: entry.id, snapshot: { summary: data.summary, learned: data.learned } };
 	}
 	return undefined;
 }
@@ -339,16 +360,23 @@ export function pendingMemorySnapshotCommit(transcript: MemoryTranscript | undef
 	return () => {
 		if (!state.pending) return;
 		state.pending = false;
+		const staged = state.snapshot;
+		// The state this process holds may have moved on (the startup refresh
+		// adopts a newer summary); it keeps its own pending flag, so only the
+		// recorded entry is carried over.
+		const current = memoryStateByTranscript.get(transcript);
 		const recorded = findRecordedMemorySnapshot(transcript, state.scope, state.token);
-		if (recorded && recorded.summary === state.snapshot?.summary && recorded.learned === state.snapshot?.learned) {
+		if (recorded && recorded.snapshot.summary === staged?.summary && recorded.snapshot.learned === staged?.learned) {
+			if (current) current.recordedEntryId = recorded.entryId;
 			return;
 		}
-		transcript.appendCustomEntry?.(MEMORY_SNAPSHOT_CUSTOM_TYPE, {
-			summary: state.snapshot?.summary ?? "",
-			learned: state.snapshot?.learned ?? "",
+		const entryId = transcript.appendCustomEntry?.(MEMORY_SNAPSHOT_CUSTOM_TYPE, {
+			summary: staged?.summary ?? "",
+			learned: staged?.learned ?? "",
 			scope: state.scope,
 			token: state.token,
 		});
+		if (entryId && current) current.recordedEntryId = entryId;
 	};
 }
 
@@ -382,6 +410,10 @@ export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 	if (memoryConversationStarted(session)) return;
 	// A clear that raced the read retired the snapshot: keep the cleared state.
 	if ((await readMemoryClearToken(root)) !== token) return;
+	// The conversation may have started while the token was read: the turn
+	// that went out was built from the old prompt, so the consolidated
+	// snapshot belongs to the next session, not to this one.
+	if (memoryConversationStarted(session)) return;
 
 	const state = memoryStateByTranscript.get(transcript);
 	const pinned =
@@ -396,6 +428,9 @@ export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 		sessionFile,
 		scope,
 		token,
+		// The refreshed block still belongs to the branch the state was derived
+		// from: the branch decides whether the state still applies.
+		recordedEntryId: findRecordedMemorySnapshot(transcript, scope, token)?.entryId,
 		snapshot,
 		value: renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings),
 		pending: snapshot !== undefined,
@@ -432,18 +467,30 @@ export async function buildMemoryToolDeveloperInstructions(
 
 	const sessionFile = transcript.getSessionFile() ?? undefined;
 	const token = await readMemoryClearToken(root);
+	// The snapshot the active branch records decides what the prompt carries:
+	// a leaf that moved onto another branch must not keep the block of the
+	// branch it left.
+	const recorded = findRecordedMemorySnapshot(transcript, scope, token);
 	const state = memoryStateByTranscript.get(transcript);
-	if (state && state.sessionFile === sessionFile && state.scope === scope && state.token === token) {
-		return state.value;
+	const reusable =
+		state && state.sessionFile === sessionFile && state.scope === scope && state.token === token ? state : undefined;
+	if (reusable && reusable.recordedEntryId === recorded?.entryId) {
+		return reusable.value;
 	}
 
-	const recorded = findRecordedMemorySnapshot(transcript, scope, token);
-	const snapshot = recorded ?? (await readMemoryToolDeveloperInstructionsSnapshot(root, settings));
+	// The leaf moved off the entry the state was derived from. A branch that
+	// records a snapshot of its own wins; a branch that records none keeps the
+	// content this process already built and stages it again, so the next
+	// commit records it there and a later resume restores the same block
+	// instead of rereading the memory files.
+	const snapshot =
+		recorded?.snapshot ?? reusable?.snapshot ?? (await readMemoryToolDeveloperInstructionsSnapshot(root, settings));
 	const value = renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
 	memoryStateByTranscript.set(transcript, {
 		sessionFile,
 		scope,
 		token,
+		recordedEntryId: recorded?.entryId,
 		snapshot,
 		value,
 		pending: snapshot !== undefined,
@@ -464,8 +511,11 @@ export async function clearMemoryData(agentDir: string, cwd: string): Promise<vo
 		closeMemoryDb(db);
 	}
 	const memoryRoot = getMemoryRoot(agentDir, cwd);
-	await fs.rm(memoryRoot, { recursive: true, force: true });
+	// The fresh token retires the recorded snapshots before the memory files
+	// go: a clear that dies half-way then leaves the snapshots rejected
+	// instead of restoring memory that no longer exists on disk.
 	await writeMemoryClearToken(memoryRoot);
+	await fs.rm(memoryRoot, { recursive: true, force: true });
 }
 
 /**
