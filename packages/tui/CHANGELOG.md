@@ -216,7 +216,7 @@
 - Added Eval `mcp_progress` status events, updated in place per call and evictable under the status-event cap, plus `formatMCPProgress()` and `MCPToolDetails.progress` for MCP progress display ([#16431](https://github.com/can1357/oh-my-pi/pull/16431) by [@alphastorm](https://github.com/alphastorm))
 ### Fixed
 
-- Fixed the collapsed streaming `write` preview changing height line-by-line as tokens arrive, which shifted every row on screen; the partial trailing line is now budgeted into a viewport-sized tail window that re-slices on resize, and a write that still fits that window no longer asks for a scrollback-wiping repaint when its first result arrives, so the row count holds steady until the preview is expanded ([#16099](https://github.com/can1357/oh-my-pi/pull/16099) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed the collapsed streaming `write` preview changing height line-by-line as tokens arrive, which shifted every row on screen; the partial trailing line is now budgeted into a viewport-sized tail window that re-slices on resize, and only a filesystem write that outgrows that window asks for a scrollback-wiping repaint when its first result arrives — a write that still fits it, or an `agent://`/`proc://`/`cfg://` card that keeps its own head preview, no longer wipes the scrollback, so the row count holds steady until the preview is expanded ([#16033](https://github.com/can1357/oh-my-pi/issues/16033), [#16099](https://github.com/can1357/oh-my-pi/pull/16099) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
 

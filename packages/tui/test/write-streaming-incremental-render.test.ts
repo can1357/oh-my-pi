@@ -169,20 +169,32 @@ describe("write streaming preview incremental line tracking", () => {
 		expect(expected).toBe(budget + 2);
 	});
 
-	it("holds the collapsed height steady when a line's terminating newline lands", async () => {
+	it("holds the collapsed height steady when a line's terminating newline lands at the window edge", async () => {
 		// The regression (#16033): the unfinished trailing line was rendered as
 		// an extra row, so landing its newline grew the block by one row and
 		// moved every row on screen. The partial line is budgeted into the
 		// window instead, so the newline must not change the height.
+		//
+		// The three cases are the distinct transitions around the tail window's
+		// edge — the last line that still fits, the line that fills it, and the
+		// first line that overflows it — and they are ONE cumulative stream:
+		// each case's payload continues the previous one's, so the incremental
+		// render state is never reset and the height is measured across real
+		// streaming transitions instead of across independent renders.
 		const options = { expanded: false, isPartial: true, spinnerFrame: 0 };
-		const allLines = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`);
+		pinViewportRows(VIEWPORT_ROWS);
+		const budget = streamingBudget();
 
-		for (let count = 1; count <= 40; count++) {
-			const head = allLines.slice(0, count - 1).join("\n");
-			const partial = allLines[count - 1]!.slice(0, 4);
-			const before = await renderCollapsed(head.length > 0 ? `${head}\n${partial}` : partial, options);
-			const after = await renderCollapsed(`${head.length > 0 ? `${head}\n` : ""}${partial}\n`, options);
+		for (const count of [budget - 1, budget, budget + 1]) {
+			// The stream after `count` lines, the last of them not yet terminated.
+			const stream = Array.from({ length: count }, (_, i) => `line ${i + 1}`).join("\n");
+			const before = await renderCollapsed(stream, options);
+			const after = await renderCollapsed(`${stream}\n`, options);
+			// Landing the newline must not change the card's height.
 			expect(cardRows(after)).toBe(cardRows(before));
+			// The window only starts hiding rows once the stream outgrows it.
+			expect(stripAnsi(before.join("\n")).includes("earlier line")).toBe(count > budget);
+			expect(stripAnsi(after.join("\n")).includes("earlier line")).toBe(count > budget);
 		}
 	});
 
