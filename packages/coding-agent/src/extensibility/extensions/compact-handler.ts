@@ -6,12 +6,23 @@
  * union so the same adapter can be reused by print-mode, rpc-mode, and the executor.
  */
 import type { Model } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { CompactOptions } from "./types";
 
 interface CompactableSession {
 	compact(instructions?: string, options?: CompactOptions): Promise<unknown>;
 }
 
+/**
+ * Run `ctx.compact()` for an extension.
+ *
+ * The session reports a failed compaction through `CompactOptions.onError` and
+ * then rethrows, so awaiting `session.compact()` directly rejects even when
+ * the extension only wants the callback. Extensions commonly fire `ctx.compact()`
+ * without awaiting it, and a rejection with no handler is an unhandled
+ * rejection that tears down RPC hosts (issue #12041). Catch here, report the
+ * failure exactly once through the extension's own error path, and resolve.
+ */
 export async function runExtensionCompact(
 	session: CompactableSession,
 	instructionsOrOptions: string | CompactOptions | undefined,
@@ -19,7 +30,22 @@ export async function runExtensionCompact(
 	const instructions = typeof instructionsOrOptions === "string" ? instructionsOrOptions : undefined;
 	const options =
 		instructionsOrOptions && typeof instructionsOrOptions === "object" ? instructionsOrOptions : undefined;
-	await session.compact(instructions, options);
+	let reported = false;
+	const onError = options?.onError;
+	const reportError = (error: Error): void => {
+		if (reported) return;
+		reported = true;
+		if (onError) onError(error);
+		else logger.warn("Extension compaction failed", { error: error.message });
+	};
+	// The session calls `onError` itself before rethrowing; wrap it so the
+	// extension sees exactly one report even when the session reports twice.
+	const compactOptions = options ? { ...options, onError: (error: Error): void => reportError(error) } : undefined;
+	try {
+		await session.compact(instructions, compactOptions);
+	} catch (error) {
+		reportError(error instanceof Error ? error : new Error(String(error)));
+	}
 }
 
 interface SetModelCapableSession {
