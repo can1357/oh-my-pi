@@ -119,8 +119,8 @@ describe("UsageDashboardComponent.describe", () => {
 		expect(tabs?.p).toEqual(expect.objectContaining({ active: "detail" }));
 		// One row per account in the detail table, not the bucket mean.
 		const table = findAll(detail, n => n.k === "table")[0];
-		const used = table?.k === "table" ? table.p?.rows.map(row => row.cells.used) : undefined;
-		expect(used).toEqual([
+		const quota = table?.k === "table" ? table.p?.rows.map(row => row.cells.quota) : undefined;
+		expect(quota).toEqual([
 			[
 				{ t: "25%", s: "mono" },
 				{ t: " used", s: "dim" },
@@ -130,6 +130,42 @@ describe("UsageDashboardComponent.describe", () => {
 				{ t: " used", s: "dim" },
 			],
 		]);
+		// Every row counts quota used, so the column may say so.
+		expect(table?.k === "table" ? table.p?.cols.find(col => col.id === "quota")?.head : undefined).toBe("Used");
+	});
+
+	it("heads the detail table's quota column with the direction its rows carry", () => {
+		// Regression: the column was renamed "Used" while a prepaid-balance
+		// row still printed a remaining balance ("100 credits left") under it.
+		const balance = {
+			id: "charm-hyper:credits",
+			label: "Credit balance",
+			scope: { provider: "charm-hyper" as const, windowId: "balance", shared: true },
+			amount: { remaining: 100, unit: "credits" as const },
+		};
+		const detailTable = (component: UsageDashboardComponent): NativeNode | undefined => {
+			component.handleNativeEvent({ type: "select", key: "head/tabs", item: "detail" });
+			return findAll(component.describe(cx), n => n.k === "table")[0];
+		};
+		const headOf = (component: UsageDashboardComponent): unknown => {
+			const table = detailTable(component);
+			return table?.k === "table" ? table.p?.cols.find(col => col.id === "quota")?.head : undefined;
+		};
+		const cellsOf = (component: UsageDashboardComponent): unknown => {
+			const table = detailTable(component);
+			return table?.k === "table" ? table.p?.rows.map(row => row.cells.quota) : undefined;
+		};
+
+		const balanceOnly = dashboard([report("charm-hyper", "a@x.test", [balance])]);
+		expect(headOf(balanceOnly)).toBe("Left");
+		expect(cellsOf(balanceOnly)).toEqual([[{ t: "100 credits left", s: "muted" }]]);
+
+		// A table holding both directions cannot pick one, so it stays neutral.
+		const mixed = dashboard([
+			report("charm-hyper", "a@x.test", [balance]),
+			report("charm-hyper", "b@x.test", [limit("charm-hyper", "5h", "Claude 5h", 0.25, "ok")]),
+		]);
+		expect(headOf(mixed)).toBe("Quota");
 	});
 
 	it("leads with the tightest quota and the activity's headline figures", () => {
