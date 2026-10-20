@@ -8,6 +8,10 @@
 
 - Added `RpcConnection.requestCancellable()` and `Client.requestPermission(params, { signal })`; client connections abort a handler and answer `-32800` when the peer sends `$/cancel_request`, while agent connections keep running the request and return its real result ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
 
+### Added
+
+- Added `logger.withContext(fields, fn)`, which adds `fields` to every record logged while `fn` runs, including from the promises and timers it starts
+
 ## [18.12.4] - 2026-10-20
 
 ### Breaking Changes

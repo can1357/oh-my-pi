@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Agent.logContext`, fields added to every log record written during the agent's runs
+
 ## [18.12.4] - 2026-10-20
 
 ### Fixed

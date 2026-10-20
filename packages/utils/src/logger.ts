@@ -281,7 +281,7 @@ function formatLogRecord(
 		message: metadata?.message ? `${message} ${metadata.message}` : message,
 	};
 	const scoped = logContextStorage.getStore();
-	if (scoped) Object.assign(entry, scoped);
+	if (scoped) for (const key of Object.keys(scoped)) entry[key] = scoped[key];
 	if (metadata) {
 		for (const key of Object.keys(metadata)) {
 			if (key !== "level" && key !== "timestamp" && key !== "message") entry[key] = metadata[key];

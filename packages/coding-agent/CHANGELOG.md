@@ -36,6 +36,13 @@
 ### Added
 
 - `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
+### Added
+
+- `/debug` report bundles now include `session-logs.txt`: every log record written today by the reporting session and its subagents, including records older than the last 1,000 lines of each process log that `logs.txt` keeps
+
+### Changed
+
+- Log records written during a session's turns and compaction now carry its `sessionId`, so a subagent's records are told apart from its parent's in the same process log; title requests name their provider session `titleSessionId`
 
 ### Fixed
 
