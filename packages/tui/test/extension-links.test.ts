@@ -7,6 +7,7 @@ import { Markdown } from "@oh-my-pi/pi-tui/components/markdown";
 import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import {
 	extensionLinkLabels,
+	formatExtensionLink,
 	linkHintTags,
 	setExtensionLinks,
 	stripExtensionLinkMarkers,
@@ -91,8 +92,41 @@ describe("extension-owned links", () => {
 		expect(stripExtensionLinkMarkers(foreign)).toBe(foreign);
 		// Every marker form omp draws is stripped: numbered or not, BEL or ST terminated.
 		for (const params of ["id=omp-extension-link", "id=omp-extension-link-12"]) {
-			expect(stripExtensionLinkMarkers(`a\x1b]8;${params};demo:x\x07b\x1b]8;;\x07c`)).toBe("abc");
-			expect(stripExtensionLinkMarkers(`a\x1b]8;${params};demo:x\x1b\\b\x1b]8;;\x1b\\c`)).toBe("abc");
+			for (const end of ["\x07", "\x1b\\"]) {
+				const stripped = stripExtensionLinkMarkers(`a\x1b]8;${params};demo:x${end}b\x1b]8;;${end}c`);
+				expect(plain(stripped)).toBe("abc");
+				expect(stripped).not.toContain("\x1b]8");
+			}
+		}
+	});
+
+	it("draws each extension link label dotted-underlined on every row, kept across resets inside it", () => {
+		const [on, off] = TERMINAL.styledUnderlines ? ["\x1b[4:4m", "\x1b[4:0m"] : ["\x1b[4m", "\x1b[24m"];
+		// A truecolor `0` component is no reset; a full reset inside the label is followed by the underline again.
+		const drawn = formatExtensionLink("\x1b[38;2;0;136;250mb\x1b[0mc\x1b[39m", "demo:x", "k");
+		expect(stripExtensionLinkMarkers(drawn)).toBe(`${on}\x1b[38;2;0;136;250mb\x1b[0m${on}c\x1b[39m${off}`);
+
+		setExtensionLinks(["demo"]);
+		const rows = render("Some words before [a much longer link label](demo:open/8) then more words after it", 30);
+		const labelRows = rows.filter(row => extensionLinkLabels(row).length > 0);
+		expect(labelRows.length).toBe(2);
+		// The wrapper carries the styled underline onto the label's second row (possibly merged with the
+		// colour in one SGR) and ends it after the label.
+		const code = TERMINAL.styledUnderlines ? "4:4" : "4";
+		const underlined = new RegExp(`\\x1b\\[(?:[0-9:;]*;)?${code}[;m]`);
+		for (const row of labelRows) expect(row).toMatch(underlined);
+		const after = rows.slice(rows.indexOf(labelRows[1]!) + 1).join("");
+		expect(after).not.toMatch(underlined);
+		// No colon parameter is misread as a background colour (`4:4` → 44, `4:0` → 40).
+		expect(rows.join("")).not.toMatch(/\x1b\[(?:[0-9;]*;)?4[04](?:;[0-9;]*)?m/);
+	});
+
+	it("gives identical links on neighbouring rows distinct markers, also inside bold or list items", () => {
+		setExtensionLinks(["demo"]);
+		for (const text of ["[x](demo:open)  \n**[x](demo:open)**", "- [x](demo:open)\n- [x](demo:open)"]) {
+			const ids = render(text, 40).flatMap(row => extensionLinkLabels(row).map(label => label.id));
+			expect(ids.length).toBe(2);
+			expect(new Set(ids).size).toBe(2);
 		}
 	});
 

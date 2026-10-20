@@ -336,6 +336,7 @@ describe("always-ask-cached wrapper cycle", () => {
 				notify: () => {},
 				onTerminalInput: () => () => {},
 				rerenderMessage: () => {},
+				getLinkClicksAvailable: () => false,
 				setStatus: () => {},
 				setWorkingMessage: () => {},
 				setWidget: () => {},

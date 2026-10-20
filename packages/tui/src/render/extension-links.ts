@@ -6,6 +6,7 @@
  * never receives the link as a hyperlink it could open.
  */
 import { isNativeRendering, onNativeRenderingChange } from "../native/state";
+import { TERMINAL } from "../terminal-capabilities";
 import { visibleWidth } from "../utils";
 
 let schemes: ReadonlySet<string> = new Set();
@@ -88,18 +89,46 @@ export function extensionLinkScheme(href: string): string | undefined {
 	return schemes.has(scheme) ? scheme : undefined;
 }
 
+/** Dotted underline (`4:4`) where the terminal draws styled underlines, else the plain one. */
+const UNDERLINE = TERMINAL.styledUnderlines
+	? { on: "\x1b[4:4m", off: "\x1b[4:0m" }
+	: { on: "\x1b[4m", off: "\x1b[24m" };
+
+/** An SGR sequence; group 1 is its params. */
+const SGR_PATTERN = /\x1b\[([0-9:;]*)m/g;
+
+/** Whether an SGR with these params turns underlining off: a full reset, `24` or `4:0`. */
+function endsUnderline(params: string): boolean {
+	const codes = params.split(";");
+	for (let index = 0; index < codes.length; index++) {
+		const code = codes[index]!;
+		if (code === "" || code === "0" || code === "24" || code === "4:0") return true;
+		// Skip a color's arguments: `38;5;n` / `38;2;r;g;b` (also 48 and 58), whose `0`s are no reset.
+		if (code === "38" || code === "48" || code === "58") {
+			const mode = codes[index + 1];
+			index += mode === "5" ? 2 : mode === "2" ? 4 : 0;
+		}
+	}
+	return false;
+}
+
 /**
- * Draw an extension link's label: wrapped in the OSC 8 marker {@link extensionLinkLabels} reads back
- * in a plain terminal, plain in Tern's native view. Never followed by a ` (url)` suffix. `key` tells
- * apart links of one URL drawn near each other (e.g. the label and its position in the paragraph);
- * it must not change between renders of the same text, or rows rendered twice stop matching.
+ * Draw an extension link's label: dotted-underlined (plain underline where the terminal has no
+ * styled underlines, re-applied after any style reset inside it) and wrapped in the OSC 8 marker
+ * {@link extensionLinkLabels} reads back in a plain terminal; as given in Tern's native view. Never
+ * followed by a ` (url)` suffix. `key` tells apart links of one URL drawn near each other; it must
+ * not change between renders of the same text, or rows rendered twice stop matching.
  */
 export function formatExtensionLink(label: string, href: string, key: string): string {
 	if (isNativeRendering()) return label;
 	const safe = href.replaceAll("\x1b", "").replaceAll("\x07", "");
 	if (!safe) return label;
 	drawnListener?.();
-	return `${MARKER_OPEN}-${Bun.hash.crc32(`${safe}\0${key}`)};${safe}\x07${label}\x1b]8;;\x07`;
+	const body = label.replace(SGR_PATTERN, (sequence, params: string) =>
+		endsUnderline(params) ? sequence + UNDERLINE.on : sequence,
+	);
+	const id = Bun.hash.crc32(`${safe}\0${key}`);
+	return `${MARKER_OPEN}-${id};${safe}\x07${UNDERLINE.on}${body}${UNDERLINE.off}\x1b]8;;\x07`;
 }
 
 /** Hint tag letters, home row first. */
@@ -123,8 +152,8 @@ export function linkHintTags(count: number): string[] {
 }
 
 /**
- * `line` without omp's extension-link markers (the OSC 8 open and close around each), for terminal
- * output. Every other hyperlink is kept as is.
+ * `line` without omp's extension-link markers (the OSC 8 open and close around each label), for
+ * terminal output. Every other hyperlink is kept as is.
  */
 export function stripExtensionLinkMarkers(line: string): string {
 	if (!line.includes(MARKER_OPEN)) return line;

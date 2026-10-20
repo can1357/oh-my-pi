@@ -1360,6 +1360,15 @@ function inlineHasOpen(tokens: readonly Token[]): boolean {
 	return false;
 }
 
+/** True when the inline token stream holds a link whose scheme an extension claimed. */
+function hasExtensionLink(tokens: readonly Token[]): boolean {
+	for (const token of tokens) {
+		if (token.type === "link" && typeof token.href === "string" && extensionLinkScheme(token.href)) return true;
+		if ("tokens" in token && Array.isArray(token.tokens) && hasExtensionLink(token.tokens as Token[])) return true;
+	}
+	return false;
+}
+
 /** Isolated inline lex of a same-line delta. A single-line delta has no block
  * structure, so the isolated inline pass equals the full lex's inline pass
  * (marked's paragraph tokens run the same `inlineTokens` entry point). */
@@ -2320,6 +2329,9 @@ export class Markdown implements Component {
 	#fastTail?: FastTailRecipe; // undefined = disarmed
 	// B+ capture plumbing: #renderContentLines records the last rendered paragraph row.
 	#lastTailCapture?: { kind: "paragraph"; open: boolean; rowInput: string; rowRaw: string };
+	/** Top-level token index and running count of the extension links drawn in it; see `#renderContentLines`. */
+	#extensionLinkBlock = 0;
+	#extensionLinkOrdinal = 0;
 	#ignoreTight = false;
 	#native?: { text: string; stream: boolean; node: NativeNode };
 	setIgnoreTight(ignore: boolean): this {
@@ -2964,6 +2976,8 @@ export class Markdown implements Component {
 					// into a table on a marker-free delta (`| --` + `--- | -`).
 					!FAST_TABLE_DELIM_ROW_RE.test(grownLastLine) &&
 					(!markerDelta || (!this.#lastTailCapture?.open && !pairSeamHazard && !inlineHasOpen(deltaTokens!))) &&
+					// Extension link markers are numbered per block; a delta rendered alone can't continue that.
+					!(deltaTokens && hasExtensionLink(deltaTokens)) &&
 					!FAST_URL_ANYWHERE_RE.test(seamWindow) &&
 					// A link or math span the grown row leaves open renders speculatively closed: re-lex.
 					speculativeInlineClose(grownLastLine) === undefined
@@ -3371,6 +3385,10 @@ export class Markdown implements Component {
 			const token = tokens[i];
 			const nextToken = tokens[i + 1];
 			const tokenWrappedRowStart = wrappedLines.length;
+			// Extension links are numbered per top-level block, across its nested inline runs, so
+			// identical links on neighbouring rows draw distinct markers that every render repeats.
+			this.#extensionLinkBlock = i;
+			this.#extensionLinkOrdinal = 0;
 			const renderedTokenLines = this.#renderToken(token, contentWidth, nextToken?.type);
 			for (const renderedRow of renderedTokenLines) {
 				// Lists wrap while their structural prefixes are still available, so
@@ -4085,9 +4103,6 @@ export class Markdown implements Component {
 		const markHtmlItemWhenContent = (text: string): void => {
 			markCurrentHtmlItemContent(htmlState, text);
 		};
-		// Numbers extension links within this run, so same-URL neighbours draw distinct markers that
-		// stay identical across renders of the same text.
-		let extensionLinkIndex = 0;
 
 		for (const token of collapseInlineHtml(tokens)) {
 			const lineStart: boolean = trimLeadingWhitespace;
@@ -4145,14 +4160,15 @@ export class Markdown implements Component {
 						token.tokens || [],
 						this.#proseFgExemptContext(resolvedStyleContext),
 					);
-					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
 					const href = typeof token.href === "string" ? token.href : "";
 					// An extension owns this link: no suffix, and no hyperlink the terminal could open.
+					// Its label gets its own (dotted) underline instead of the web-link one.
 					if (href && extensionLinkScheme(href)) {
-						const key = `${token.text}\0${extensionLinkIndex++}`;
-						result += formatExtensionLink(styledLinkText, href, key) + stylePrefix;
+						const key = `${this.#extensionLinkBlock}\0${this.#extensionLinkOrdinal++}`;
+						result += formatExtensionLink(this.#theme.link(linkText), href, key) + stylePrefix;
 						break;
 					}
+					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
 					const target = (href && this.#theme.resolveLink?.(href)) || href;
 					const clickableLinkText = formatHyperlink(styledLinkText, target);
 					// If link text matches href, only show the link once. A missing
