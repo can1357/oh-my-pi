@@ -2835,6 +2835,18 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * The hard forced choice the next LLM call will carry, without serving it:
+	 * a queued force (which {@link nextToolChoiceDirective} serves first) or the
+	 * prompt's own `toolChoice`. A queued choice for an inactive tool is dropped
+	 * when served, so it falls through here too.
+	 */
+	#peekRequestToolChoice(promptToolChoice: ToolChoice | undefined): ToolChoice | undefined {
+		const queued = this.#toolChoiceQueue.peekToolChoice();
+		if (queued !== undefined && isToolChoiceActive(queued, this.agent.state.tools)) return queued;
+		return promptToolChoice;
+	}
+
+	/**
 	 * The per-turn tool-choice directive for the agent loop's `getToolChoice`. Priority:
 	 *   1. a HARD forced choice from the queue (genuine forces: user-force, eager-todo, …) —
 	 *      consuming (advances the queue generator);
@@ -8408,7 +8420,10 @@ export class AgentSession implements SettingsScope {
 			if (maintenanceMessages !== messages && previewXdevMountNotice?.notice) {
 				maintenanceMessages.splice(xdevMountNoticeIndex, 0, previewXdevMountNotice.notice);
 			}
-			await this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages, options?.toolChoice);
+			await this.#maintenance.runPrePromptCompactionIfNeeded(
+				maintenanceMessages,
+				this.#peekRequestToolChoice(options?.toolChoice),
+			);
 			if (this.#promptGeneration !== generation) {
 				return false;
 			}
