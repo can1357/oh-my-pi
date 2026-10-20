@@ -1685,7 +1685,7 @@ mod tests {
 
 	use super::*;
 	use brush_core::openfiles;
-	use crate::host::{Host, run_caught, run_util};
+	use crate::host::{Host, Utility, run_caught, run_util};
 
 	#[test]
 	fn path_separator_rewrites_the_native_separator_on_windows() {
@@ -1822,17 +1822,10 @@ mod tests {
 		let tree = tempfile::tempdir().unwrap();
 		let path = tree.path().join("out.txt");
 		std::fs::write(&path, "needle\n").unwrap();
-		let (code, capture) = run_with_stdout_file::<Grep>(
-			&["-m2", "needle", "out.txt"],
-			tree.path(),
-			&path,
-		);
-		assert_eq!(code, 2, "{}", capture.err());
-		assert!(
-			capture.err().contains("input file is also the output"),
-			"{}",
-			capture.err()
-		);
+		let (code, err) =
+			run_with_stdout_file::<Grep>(&["-m2", "needle", "out.txt"], tree.path(), &path);
+		assert_eq!(code, 2, "{err}");
+		assert!(err.contains("input file is also the output"), "{err}");
 		// The refused input is left exactly as it was.
 		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
 	}
@@ -1846,10 +1839,10 @@ mod tests {
 		let tree = tempfile::tempdir().unwrap();
 		let path = tree.path().join("out.txt");
 		std::fs::write(&path, "needle\n").unwrap();
-		let (code, capture) =
+		let (code, err) =
 			run_with_stdout_file::<Grep>(&["-s", "needle", "out.txt"], tree.path(), &path);
 		assert_eq!(code, 2);
-		assert_eq!(capture.err(), "");
+		assert_eq!(err, "");
 		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
 	}
 
@@ -1864,14 +1857,10 @@ mod tests {
 		std::fs::create_dir(&dir).unwrap();
 		let path = dir.join("out.txt");
 		std::fs::write(&path, "needle\n").unwrap();
-		let (code, capture) =
+		let (code, err) =
 			run_with_stdout_file::<Grep>(&["-r", "needle", "tree"], tree.path(), &path);
-		assert_eq!(code, 2, "{}", capture.err());
-		assert!(
-			capture.err().contains("tree/out.txt: input file is also the output"),
-			"{}",
-			capture.err()
-		);
+		assert_eq!(code, 2, "{err}");
+		assert!(err.contains("tree/out.txt: input file is also the output"), "{err}");
 		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
 	}
 
@@ -1896,14 +1885,9 @@ mod tests {
 			let tree = tempfile::tempdir().unwrap();
 			let path = tree.path().join("out.txt");
 			std::fs::write(&path, "needle\n").unwrap();
-			let (code, capture) = run_with_stdout_file::<Grep>(args, tree.path(), &path);
-			assert_eq!(code, expected_code, "{args:?}: {}", capture.err());
-			assert_eq!(
-				std::fs::read(&path).unwrap(),
-				*expected_file,
-				"{args:?}: {}",
-				capture.err()
-			);
+			let (code, err) = run_with_stdout_file::<Grep>(args, tree.path(), &path);
+			assert_eq!(code, expected_code, "{args:?}: {err}");
+			assert_eq!(std::fs::read(&path).unwrap(), *expected_file, "{args:?}: {err}");
 		}
 	}
 
