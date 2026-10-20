@@ -371,6 +371,51 @@ describe("worktree isolation helpers", () => {
 			}
 		});
 
+		it("keeps independent nested repositories and local commit identity in the clean source", async () => {
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-base-"));
+			tempDirs.push(worktreeBase);
+			setWorktreesDir(worktreeBase);
+			const previousName = await runGit(repo, ["config", "--get", "user.name"]).catch(() => "");
+			await runGit(repo, ["config", "user.name", "Local Only Identity"]);
+			const nested = path.join(repo, "vendor", "inner");
+			await fs.mkdir(nested, { recursive: true });
+			await runGit(nested, ["init", "-q"]);
+			await runGit(nested, ["config", "user.email", "inner@example.invalid"]);
+			await runGit(nested, ["config", "user.name", "Inner"]);
+			await fs.writeFile(path.join(nested, "inner.txt"), "committed\n");
+			await runGit(nested, ["add", "inner.txt"]);
+			await runGit(nested, ["commit", "-q", "-m", "inner"]);
+			await fs.writeFile(path.join(nested, "inner.txt"), "dirty nested edit\n");
+			await fs.appendFile(path.join(repo, ".git", "info", "exclude"), "vendor/\n");
+			vi.spyOn(natives, "isoResolve").mockResolvedValue({
+				kind: natives.IsoBackendKind.Rcopy,
+				candidates: [natives.IsoBackendKind.Rcopy],
+				fellBack: false,
+				reason: undefined,
+			});
+			vi.spyOn(natives, "isoStart").mockImplementation(async (_backend, source, merged) => {
+				await fs.cp(source, merged, { recursive: true });
+			});
+			try {
+				const handle = await ensureIsolation(repo, "nested-and-identity");
+				try {
+					const isolatedNested = path.join(handle.mergedDir, "vendor", "inner");
+					expect(await runGit(isolatedNested, ["rev-parse", "HEAD"])).toBe(
+						await runGit(nested, ["rev-parse", "HEAD"]),
+					);
+					expect(await fs.readFile(path.join(isolatedNested, "inner.txt"), "utf8")).toBe("committed\n");
+					expect(await runGit(handle.mergedDir, ["config", "user.name"])).toBe("Local Only Identity");
+				} finally {
+					await cleanupIsolation(handle);
+				}
+			} finally {
+				if (previousName) await runGit(repo, ["config", "user.name", previousName]);
+				else await runGit(repo, ["config", "--unset", "user.name"]);
+				await fs.rm(path.join(repo, "vendor"), { recursive: true, force: true });
+				setWorktreesDir(undefined);
+			}
+		});
+
 		// First mutator: runs on the pristine fixture, so no reset is needed. Leaves
 		// behind a stash that the next test's reset clears.
 		it("does not pop an unrelated pre-existing stash when the working tree is clean", async () => {
@@ -470,6 +515,53 @@ describe("worktree isolation helpers", () => {
 				} finally {
 					await cleanupTaskBranches(repo, [collisionBranch]);
 					await fs.rm(path.join(repo, "collision.txt"), { force: true });
+				}
+			});
+
+			it("lands branches ahead of an untracked collision and reports only the remainder", async () => {
+				const collisionBranch = "task/sequential-collision";
+				await runGit(repo, ["checkout", "-q", "-b", collisionBranch, initialSha]);
+				await fs.writeFile(path.join(repo, "collision.txt"), "task output\n");
+				await runGit(repo, ["add", "collision.txt"]);
+				await runGit(repo, ["commit", "-q", "-m", "add collision fixture"]);
+				await runGit(repo, ["checkout", "-q", BASE_BRANCH]);
+				await fs.writeFile(path.join(repo, "collision.txt"), "local untracked\n");
+				try {
+					const result = await mergeTaskBranches(repo, [
+						{ branchName: TASK_BRANCH, taskId: "task-1" },
+						{ branchName: collisionBranch, taskId: "task-2" },
+					]);
+					expect(result.merged).toEqual([TASK_BRANCH]);
+					expect(result.failed).toEqual([collisionBranch]);
+					expect(result.conflict).toContain("collision.txt");
+					expect(await fs.readFile(path.join(repo, "merged.txt"), "utf8")).toBe("task branch change\n");
+					expect(await fs.readFile(path.join(repo, "collision.txt"), "utf8")).toBe("local untracked\n");
+				} finally {
+					await cleanupTaskBranches(repo, [collisionBranch]);
+					await fs.rm(path.join(repo, "collision.txt"), { force: true });
+				}
+			});
+
+			it("without baseSha only the cherry-picked tip commit can collide", async () => {
+				const legacyBranch = "task/legacy-tip-only";
+				await runGit(repo, ["checkout", "-q", "-b", legacyBranch, initialSha]);
+				await fs.writeFile(path.join(repo, "older.txt"), "older commit\n");
+				await runGit(repo, ["add", "older.txt"]);
+				await runGit(repo, ["commit", "-q", "-m", "older commit"]);
+				await fs.writeFile(path.join(repo, "tip.txt"), "tip commit\n");
+				await runGit(repo, ["add", "tip.txt"]);
+				await runGit(repo, ["commit", "-q", "-m", "tip commit"]);
+				await runGit(repo, ["checkout", "-q", BASE_BRANCH]);
+				await fs.writeFile(path.join(repo, "older.txt"), "local untracked\n");
+				try {
+					const result = await mergeTaskBranches(repo, [{ branchName: legacyBranch, taskId: "task-1" }]);
+					expect(result).toEqual({ failed: [], merged: [legacyBranch] });
+					expect(await fs.readFile(path.join(repo, "older.txt"), "utf8")).toBe("local untracked\n");
+					expect(await fs.readFile(path.join(repo, "tip.txt"), "utf8")).toBe("tip commit\n");
+				} finally {
+					await cleanupTaskBranches(repo, [legacyBranch]);
+					await fs.rm(path.join(repo, "older.txt"), { force: true });
+					await fs.rm(path.join(repo, "tip.txt"), { force: true });
 				}
 			});
 
