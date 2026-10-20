@@ -597,6 +597,9 @@ const MOUSE_BUTTON_EVENTS: [u32; 6] = [1, 2, 3, 4, 25, 26];
 const SWITCH_MODIFIERS: u64 = 0x0010_0000 | 0x0004_0000;
 /// How soon after a click [`ClickPlacer`] still places it where the pointer is.
 const CLICK_PLACE: Duration = Duration::from_millis(30);
+/// How far, in points, the pointer may move between a press and its release
+/// for [`ClickPlacer`] to count them as one click rather than a drag.
+const CLICK_SLOP: f64 = 4.0;
 
 /// The HID counters of `MOUSE_BUTTON_EVENTS`.
 fn hid_buttons() -> [u32; 6] {
@@ -643,6 +646,10 @@ struct SwitchSignals {
 	/// placed it: menus and Dock tiles over a window count as theirs, not the
 	/// window's.
 	in_user_app: bool,
+	/// [`ClickPlacer`]'s hit-test placed the latest click outside the user's
+	/// app, so it cannot turn out to be theirs later; a click too old to
+	/// place, or not placed yet, is neither.
+	elsewhere:   bool,
 }
 
 impl SwitchSignals {
@@ -659,6 +666,7 @@ impl SwitchSignals {
 			key_focus,
 			last_send: None,
 			in_user_app: false,
+			elsewhere: false,
 		}
 	}
 
@@ -673,8 +681,14 @@ impl SwitchSignals {
 		Self { in_user_app: true, ..self }
 	}
 
-	/// Reads the signals at `now`, with whether `placer` has placed the latest
-	/// click in the user's own app. Nothing here waits on an AX probe.
+	/// These signals with their latest click placed outside the user's app.
+	#[cfg(test)]
+	const fn placed_elsewhere(self) -> Self {
+		Self { elsewhere: true, ..self }
+	}
+
+	/// Reads the signals at `now`, with where `placer` has placed the latest
+	/// click. Nothing here waits on an AX probe.
 	fn read(spi: &ForegroundSpi, now: Instant, placer: &ClickPlacer) -> Self {
 		let buttons = hid_buttons();
 		let last_click = since_last_click().and_then(|since| now.checked_sub(since));
@@ -689,7 +703,9 @@ impl SwitchSignals {
 			(unsafe { get_key_focus(&mut psn, &mut status) } == 0).then_some(psn)
 		});
 		let mut signals = Self::new(buttons, last_click, flags, key_focus);
-		signals.in_user_app = placer.in_user_app(buttons);
+		let hit = placer.hit(buttons);
+		signals.in_user_app = hit == Some(true);
+		signals.elsewhere = hit == Some(false);
 		let last_send = *LAST_SEND.lock();
 		match last_send {
 			Some(at) => signals.sent_at(at),
@@ -698,12 +714,13 @@ impl SwitchSignals {
 	}
 }
 
-/// The click that left the HID button counters at `buttons`, and whether it
-/// landed on the user's own app.
+/// The click that left the HID button counters at `buttons`, and where its
+/// hit-test placed it: in the user's own app or not, `None` when it was too
+/// old to place.
 #[derive(Clone, Copy)]
 struct ClickPlace {
-	buttons:     [u32; 6],
-	in_user_app: bool,
+	buttons: [u32; 6],
+	hit:     Option<bool>,
 }
 
 /// Places the user's clicks by the accessibility hit-test the pointer's
@@ -729,38 +746,54 @@ impl ClickPlacer {
 		let Some(user) = self.user else {
 			return;
 		};
-		self.place_at(hid_buttons, || {
-			since_last_click().is_some_and(|since| since <= CLICK_PLACE) && pointer_over(user)
+		self.place_at(hid_buttons, pointer, |at| {
+			since_last_click()
+				.is_some_and(|since| since <= CLICK_PLACE)
+				.then(|| point_over(at, user))
 		});
 	}
 
 	/// Places the click that left the HID button counters as `buttons` reads
-	/// them, by `hit_test`, unless it is placed already. A release while the
-	/// hit-test blocked is part of the click it placed in the user's app: the
+	/// them, by `hit_test` at the point `pointer` reads (`None`: too old to
+	/// place, so nowhere), unless it is placed already. A release while the
+	/// hit-test blocked takes the press's place, as the press is the click: the
 	/// release's own hit-test would come past [`CLICK_PLACE`] and place it
-	/// nowhere.
-	fn place_at(&self, buttons: impl Fn() -> [u32; 6], hit_test: impl FnOnce() -> bool) {
+	/// nowhere. A drag from the user's app that moved the pointer is the
+	/// exception: where it is released gets its own hit-test.
+	fn place_at(
+		&self,
+		buttons: impl Fn() -> [u32; 6],
+		pointer: impl Fn() -> Option<CGPoint>,
+		hit_test: impl FnOnce(CGPoint) -> Option<bool>,
+	) {
 		let at = buttons();
 		if self.latest.lock().is_some_and(|place| place.buttons == at) {
 			return;
 		}
-		let in_user_app = hit_test();
+		let pressed_at = pointer();
+		let hit = pressed_at.and_then(hit_test);
 		let after = buttons();
-		let buttons = if in_user_app && !pressed(at, after) {
-			after
-		} else {
-			at
-		};
-		*self.latest.lock() = Some(ClickPlace { buttons, in_user_app });
+		let released = after != at && !pressed(at, after);
+		let carried = released
+			&& match hit {
+				Some(false) => true,
+				Some(true) => pressed_at.zip(pointer()).is_some_and(|(from, to)| {
+					(to.x - from.x).abs() <= CLICK_SLOP && (to.y - from.y).abs() <= CLICK_SLOP
+				}),
+				None => false,
+			};
+		let buttons = if carried { after } else { at };
+		*self.latest.lock() = Some(ClickPlace { buttons, hit });
 	}
 
-	/// Whether the click that left the button counters at `buttons` has been
-	/// placed in the user's own app.
-	fn in_user_app(&self, buttons: [u32; 6]) -> bool {
-		self
-			.latest
-			.lock()
-			.is_some_and(|place| place.buttons == buttons && place.in_user_app)
+	/// Where the hit-test placed the click that left the button counters at
+	/// `buttons`: in the user's own app or not, `None` while it is not placed
+	/// or was too old to place.
+	fn hit(&self, buttons: [u32; 6]) -> Option<bool> {
+		let latest = *self.latest.lock();
+		latest
+			.filter(|place| place.buttons == buttons)
+			.and_then(|place| place.hit)
 	}
 }
 
@@ -779,7 +812,8 @@ enum UserSwitch {
 }
 
 /// Whether [`UserSwitchWatch`]'s latest button change, counted as a click
-/// outside the user's app, may still be placed in their app.
+/// outside the user's app, may still be placed in their app: not once
+/// [`ClickPlacer`] has placed it elsewhere.
 #[derive(Clone, Copy)]
 enum ClickPlacement {
 	Settled,
@@ -832,7 +866,7 @@ impl UserSwitchWatch {
 			click: signals
 				.last_click
 				.filter(|at| !signals.in_user_app && now.saturating_duration_since(*at) <= lookback),
-			placement: if signals.in_user_app {
+			placement: if signals.in_user_app || signals.elsewhere {
 				ClickPlacement::Settled
 			} else {
 				ClickPlacement::Pending {
@@ -872,6 +906,7 @@ impl UserSwitchWatch {
 				}
 			} else {
 				self.placement = match pending {
+					_ if signals.elsewhere => ClickPlacement::Settled,
 					// A release while its press still waits for placement is part
 					// of that click.
 					ClickPlacement::Pending { previous, press } if !pressed => {
@@ -889,6 +924,9 @@ impl UserSwitchWatch {
 			let pending = self.placement;
 			self.placement = ClickPlacement::Settled;
 			self.settle_in_user_app(pending);
+		} else if signals.elsewhere {
+			// Placed outside it: no later placement takes it back.
+			self.placement = ClickPlacement::Settled;
 		}
 		self.observe_held(signals, front, now);
 	}
@@ -1116,18 +1154,17 @@ impl BackgroundFocusLease {
 	}
 }
 
-/// Whether the pointer is over a surface of `pid`, hit-tested the way a click
+/// Where the pointer is now.
+fn pointer() -> Option<CGPoint> {
+	let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()?;
+	Some(CGEvent::new(source).ok()?.location())
+}
+
+/// Whether `point` is over a surface of `pid`, hit-tested the way a click
 /// there lands: a menu, the menu bar or a Dock tile over the target's window
 /// is not the target, while the pointer sprite and transparent overlays that
 /// let clicks through do not count.
-fn pointer_over(pid: pid_t) -> bool {
-	let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-		return false;
-	};
-	let Ok(event) = CGEvent::new(source) else {
-		return false;
-	};
-	let point = event.location();
+fn point_over(point: CGPoint, pid: pid_t) -> bool {
 	ax::point_owner(point.x, point.y).is_some_and(|owner| owner.pid == pid)
 }
 
@@ -2619,36 +2656,54 @@ mod tests {
 		assert_eq!(guard.observe(TARGET, None, placed, t0 + ms(60)), FocusDecision::Disarm);
 	}
 
-	#[test]
-	fn a_press_the_placer_places_after_its_release_still_sends_the_target_back() {
-		// The user presses in their own app and releases while the placer's
-		// hit-test for the press still blocks; the release's own hit-test then
-		// comes past `CLICK_PLACE` and places it nowhere.
-		let t0 = Instant::now();
-		let down = [1, 0, 0, 0, 0, 0];
-		let up = [1, 1, 0, 0, 0, 0];
-		let counters = std::cell::Cell::new(down);
+	const PRESSED: [u32; 6] = [1, 0, 0, 0, 0, 0];
+	const RELEASED: [u32; 6] = [1, 1, 0, 0, 0, 0];
+
+	/// The click placer's two passes over one click: the press's hit-test
+	/// returns `press` only after the release came in and the pointer moved
+	/// `moved` points; the next pass hit-tests the release as `release`.
+	fn place_blocked(press: Option<bool>, moved: f64, release: Option<bool>) -> ClickPlacer {
+		let counters = Cell::new(PRESSED);
+		let pointer = Cell::new(CGPoint::new(100.0, 100.0));
 		let placer = ClickPlacer::new(None);
 		placer.place_at(
 			|| counters.get(),
-			|| {
-				counters.set(up);
-				true
+			|| Some(pointer.get()),
+			|_| {
+				counters.set(RELEASED);
+				pointer.set(CGPoint::new(100.0 + moved, 100.0));
+				press
 			},
 		);
-		placer.place_at(|| counters.get(), || false);
-		let reading = |buttons, at: Instant, placer: &ClickPlacer| SwitchSignals {
-			in_user_app: placer.in_user_app(buttons),
+		placer.place_at(|| counters.get(), || Some(pointer.get()), |_| release);
+		placer
+	}
+
+	/// A reading of `buttons`, clicked last at `at`, placed as `placer` has.
+	fn placed_reading(buttons: [u32; 6], at: Instant, placer: &ClickPlacer) -> SwitchSignals {
+		let hit = placer.hit(buttons);
+		SwitchSignals {
+			in_user_app: hit == Some(true),
+			elsewhere: hit == Some(false),
 			..SwitchSignals::new(buttons, Some(at), NO_MODIFIERS, None)
-		};
+		}
+	}
+
+	#[test]
+	fn a_press_the_placer_places_after_its_release_still_sends_the_target_back() {
+		// The user clicks in their own app and releases while the placer's
+		// hit-test for the press still blocks; the release's own hit-test then
+		// comes past `CLICK_PLACE` and places it nowhere.
+		let t0 = Instant::now();
+		let placer = place_blocked(Some(true), 0.0, None);
 		let unplaced = ClickPlacer::new(None);
+		let pressed = placed_reading(PRESSED, t0 + ms(5), &unplaced);
+		let released = placed_reading(RELEASED, t0 + ms(60), &unplaced);
+		let placed = placed_reading(RELEASED, t0 + ms(60), &placer);
 		let mut guard = lease_at(t0, None);
-		let pressed = reading(down, t0 + ms(5), &unplaced);
 		assert_eq!(guard.observe(PREVIOUS, Some(42), pressed, t0 + ms(10)), FocusDecision::Observe);
-		let released = reading(up, t0 + ms(60), &unplaced);
 		assert_eq!(guard.observe(PREVIOUS, Some(42), released, t0 + ms(65)), FocusDecision::Observe);
 		// The placement arrives as the target activates itself: sent back.
-		let placed = reading(up, t0 + ms(60), &placer);
 		assert_eq!(guard.observe(TARGET, None, placed, t0 + ms(160)), FocusDecision::Restore);
 		// So is one the sampler first sees placed with the release, and the
 		// window the user clicked is kept.
@@ -2667,25 +2722,64 @@ mod tests {
 		let placed = own_up.in_user_app();
 		assert_eq!(guard.observe(PREVIOUS, Some(42), placed, t0 + ms(160)), FocusDecision::Observe);
 		assert_eq!(guard.observe(TARGET, None, placed, t0 + ms(170)), FocusDecision::Disarm);
-
 		// A release after the hit-test returned is placed by its own.
 		let placer = ClickPlacer::new(None);
-		placer.place_at(|| down, || true);
-		placer.place_at(|| up, || false);
-		assert!(!placer.in_user_app(up));
-		// So is one after a press placed elsewhere.
-		let counters = std::cell::Cell::new(down);
-		let placer = ClickPlacer::new(None);
-		placer.place_at(
-			|| counters.get(),
-			|| {
-				counters.set(up);
-				false
-			},
+		let at = || Some(CGPoint::new(100.0, 100.0));
+		placer.place_at(|| PRESSED, at, |_| Some(true));
+		placer.place_at(|| RELEASED, at, |_| None);
+		assert_eq!(placer.hit(RELEASED), None);
+	}
+
+	#[test]
+	fn a_drag_out_of_the_users_app_or_a_press_elsewhere_stays_the_users_pick() {
+		let t0 = Instant::now();
+		let unplaced = ClickPlacer::new(None);
+		let pressed = placed_reading(PRESSED, t0 + ms(5), &unplaced);
+		let released = placed_reading(RELEASED, t0 + ms(60), &unplaced);
+		let target_after = |placer: &ClickPlacer| {
+			let mut guard = lease_at(t0, None);
+			let placed = placed_reading(RELEASED, t0 + ms(60), placer);
+			assert_eq!(
+				guard.observe(PREVIOUS, Some(42), pressed, t0 + ms(10)),
+				FocusDecision::Observe
+			);
+			assert_eq!(
+				guard.observe(PREVIOUS, Some(42), released, t0 + ms(65)),
+				FocusDecision::Observe
+			);
+			assert_eq!(
+				guard.observe(PREVIOUS, Some(42), placed, t0 + ms(150)),
+				FocusDecision::Observe
+			);
+			guard.observe(TARGET, None, placed, t0 + ms(160))
+		};
+		// A drag from the user's app, released on the target while the press's
+		// hit-test blocked: the release is placed on its own, elsewhere or too
+		// late to place, and the target the user dropped on stays in front.
+		assert_eq!(
+			target_after(&place_blocked(Some(true), 40.0, Some(false))),
+			FocusDecision::Disarm
 		);
-		assert!(!placer.in_user_app(down));
-		placer.place_at(|| counters.get(), || true);
-		assert!(placer.in_user_app(up));
+		assert_eq!(target_after(&place_blocked(Some(true), 40.0, None)), FocusDecision::Disarm);
+		// A press on the target, dragged into the user's app and released there:
+		// the press placed elsewhere is the click, whichever reading sees it.
+		assert_eq!(
+			target_after(&place_blocked(Some(false), 40.0, Some(true))),
+			FocusDecision::Disarm
+		);
+		let mut guard = lease_at(t0, None);
+		let elsewhere = pressed.placed_elsewhere();
+		assert_eq!(guard.observe(PREVIOUS, Some(42), elsewhere, t0 + ms(10)), FocusDecision::Observe);
+		let own = released.in_user_app();
+		assert_eq!(guard.observe(PREVIOUS, Some(42), own, t0 + ms(65)), FocusDecision::Observe);
+		assert_eq!(guard.observe(TARGET, None, own, t0 + ms(160)), FocusDecision::Disarm);
+		// A press seen unplaced, then placed elsewhere, is not taken back by its
+		// release's placement in the user's app.
+		let mut guard = lease_at(t0, None);
+		assert_eq!(guard.observe(PREVIOUS, Some(42), pressed, t0 + ms(10)), FocusDecision::Observe);
+		assert_eq!(guard.observe(PREVIOUS, Some(42), elsewhere, t0 + ms(30)), FocusDecision::Observe);
+		assert_eq!(guard.observe(PREVIOUS, Some(42), own, t0 + ms(65)), FocusDecision::Observe);
+		assert_eq!(guard.observe(TARGET, None, own, t0 + ms(160)), FocusDecision::Disarm);
 	}
 
 	#[test]
