@@ -1332,8 +1332,15 @@ def _has_pip() -> bool:
 def _child_pids() -> dict[int, list[int]]:
     """Map each live pid to the pids of its children."""
     children: dict[int, list[int]] = {}
+    entries: list[str] | None = None
     if sys.platform.startswith("linux"):
-        for entry in os.listdir("/proc"):
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            # /proc unmounted or unlistable (some containers and chroots): ask ps.
+            pass
+    if entries is not None:
+        for entry in entries:
             if not entry.isdigit():
                 continue
             try:

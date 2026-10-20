@@ -59,12 +59,12 @@ const SLEEP = Bun.which("sleep") ?? "/bin/sleep";
 
 /**
  * Starts a kernel on a pip-less venv. `ensurepipMain` shadows the stdlib `ensurepip`'s
- * `__main__` and `uvScript` (POSIX sh) becomes `uv`; PATH holds nothing else, so a
- * system uv never runs.
+ * `__main__`, `sitecustomize` runs at interpreter startup, and `uvScript` (POSIX sh)
+ * becomes `uv`; PATH holds nothing else, so a system uv never runs.
  */
 async function startPiplessKernel(
 	dir: string,
-	fakes: { ensurepipMain?: string; uvScript?: string },
+	fakes: { ensurepipMain?: string; sitecustomize?: string; uvScript?: string },
 ): Promise<{ kernel: PythonKernel; python: string; sitePackages: string }> {
 	const python = await createPiplessVenv(dir);
 	const purelib = Bun.spawnSync([python, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"]);
@@ -76,12 +76,17 @@ async function startPiplessKernel(
 		await Bun.write(path.join(binDir, "uv"), `#!/bin/sh\nPATH=/usr/bin:/bin\n${fakes.uvScript}\n`);
 		await fs.chmod(path.join(binDir, "uv"), 0o755);
 	}
+	const fakeRoot = path.join(dir, "fake");
 	if (fakes.ensurepipMain !== undefined) {
-		const fakeDir = path.join(dir, "fake", "ensurepip");
+		const fakeDir = path.join(fakeRoot, "ensurepip");
 		await fs.mkdir(fakeDir, { recursive: true });
 		await Bun.write(path.join(fakeDir, "__init__.py"), "");
 		await Bun.write(path.join(fakeDir, "__main__.py"), fakes.ensurepipMain);
-		env.PYTHONPATH = path.dirname(fakeDir);
+		env.PYTHONPATH = fakeRoot;
+	}
+	if (fakes.sitecustomize !== undefined) {
+		await Bun.write(path.join(fakeRoot, "sitecustomize.py"), fakes.sitecustomize);
+		env.PYTHONPATH = fakeRoot;
 	}
 	const kernel = await PythonKernel.start({ cwd: dir, interpreter: python, env });
 	return { kernel, python, sitePackages };
@@ -89,6 +94,14 @@ async function startPiplessKernel(
 
 /** An `ensurepip` that fails the way Debian's disabled system copy does. */
 const DISABLED_ENSUREPIP = 'import sys\nprint("ensurepip is disabled")\nsys.exit(1)\n';
+
+/** Like the real `ensurepip`, runs pip in a child process; prints both pids for `cancelInstall`. */
+const CHILD_SPAWNING_ENSUREPIP = [
+	"import os, subprocess",
+	`child = subprocess.Popen([${JSON.stringify(SLEEP)}, "30"])`,
+	'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
+	"child.wait()",
+].join("\n");
 
 /** Running and not a zombie: a killed process may wait a moment for its reaper. */
 function isRunning(pid: number): boolean {
@@ -336,13 +349,32 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		"cancelling %pip during the ensurepip bootstrap stops ensurepip and the pip it spawned",
 		async () => {
 			using tempDir = TempDir.createSync("@python-runner-pip-cancel-ensurepip-");
-			// Like the real `ensurepip`, runs pip in a child process.
+			const { kernel } = await startPiplessKernel(tempDir.path(), { ensurepipMain: CHILD_SPAWNING_ENSUREPIP });
+			try {
+				const pids = await cancelInstall(kernel, "%pip install six");
+				expect(pids.filter(isRunning)).toEqual([]);
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		30_000,
+	);
+
+	it.skipIf(process.platform !== "linux")(
+		"cancelling %pip stops the installer tree when /proc cannot be listed",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-cancel-no-procfs-");
 			const { kernel } = await startPiplessKernel(tempDir.path(), {
-				ensurepipMain: [
-					"import os, subprocess",
-					`child = subprocess.Popen([${JSON.stringify(SLEEP)}, "30"])`,
-					'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
-					"child.wait()",
+				ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+				// Denies listing /proc the way some containers and chroots do.
+				sitecustomize: [
+					"import os",
+					"_listdir = os.listdir",
+					"def _denied(path='.'):",
+					"    if os.fspath(path) == '/proc':",
+					"        raise PermissionError(13, 'Permission denied', '/proc')",
+					"    return _listdir(path)",
+					"os.listdir = _denied",
 				].join("\n"),
 			});
 			try {
