@@ -182,4 +182,34 @@ describe("Agent — buildSideRequestContext", () => {
 		expect(transformSpy).toHaveBeenCalledTimes(1);
 		expect(context.systemPrompt).toEqual(["transformed-system"]);
 	});
+
+	it("reads a pinned side-request prompt after the before-side-request hooks ran", async () => {
+		// A host that refreshes the prompt in a hook (a pending system-prompt
+		// rebuild, say) must be seen by the request even when the caller pins a
+		// prompt of its own — so a pinned prompt provided by a callback is read
+		// after the hooks, not at call time.
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["system"],
+				tools: [tool],
+			},
+		});
+		let base: string[] = ["stale"];
+		agent.addBeforeSideRequestHook(async () => {
+			base = ["fresh"];
+		});
+
+		const pinned = await agent.buildSideRequestContext(
+			[{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() }],
+			["pinned"],
+		);
+		expect(pinned.systemPrompt).toEqual(["pinned"]);
+
+		const provided = await agent.buildSideRequestContext(
+			[{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() }],
+			() => base,
+		);
+		expect(provided.systemPrompt).toEqual(["fresh"]);
+	});
 });

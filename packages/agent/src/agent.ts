@@ -368,6 +368,14 @@ export interface AgentPromptOptions {
 	toolChoice?: ToolChoice;
 }
 
+/**
+ * The system prompt a side request sends: a fixed array, or a provider read after
+ * the {@link Agent.addBeforeSideRequestHook} hooks have run. A provider exists so a
+ * host that refreshes the prompt in a hook (a pending system-prompt rebuild, say)
+ * is seen by the request even when the caller pins a prompt of its own.
+ */
+export type SideRequestSystemPrompt = string[] | (() => string[] | Promise<string[]>);
+
 /** Buffered Cursor exec-channel tool result waiting to be emitted after the assistant message. */
 interface CursorToolResultEntry {
 	toolResult: ToolResultMessage;
@@ -913,11 +921,13 @@ export class Agent {
 	 * `systemPrompt` defaults to the live agent prompt so the side request hits the
 	 * same cached prefix as the main loop. Callers that must pin a different prompt
 	 * (e.g. handoff generation, which uses the base prompt rather than a per-turn
-	 * `before_agent_start` hook override) pass it explicitly. The live prompt is
-	 * read after the {@link Agent.addBeforeSideRequestHook} hooks run, so a host
-	 * that refreshes it (a pending system-prompt rebuild, say) is seen by the request.
+	 * `before_agent_start` hook override) pass it explicitly. The prompt is read
+	 * after the {@link Agent.addBeforeSideRequestHook} hooks run, so a host that
+	 * refreshes it (a pending system-prompt rebuild, say) is seen by the request —
+	 * pass a {@link SideRequestSystemPrompt} provider to have a pinned prompt read
+	 * at that same point instead of at call time.
 	 */
-	async buildSideRequestContext(llmMessages: Message[], systemPrompt?: string[]): Promise<Context> {
+	async buildSideRequestContext(llmMessages: Message[], systemPrompt?: SideRequestSystemPrompt): Promise<Context> {
 		for (const hook of this.#beforeSideRequestHooks) await hook();
 		const model = this.#state.model;
 		if (!model) throw new Error("No active model on agent");
@@ -931,7 +941,8 @@ export class Agent {
 					injectIntent: this.#intentTracing,
 					pruneDescriptions: this.#pruneToolDescriptions,
 				}) ?? []);
-		let context: Context = { systemPrompt: systemPrompt ?? this.#state.systemPrompt, messages, tools };
+		const pinned = typeof systemPrompt === "function" ? await systemPrompt() : systemPrompt;
+		let context: Context = { systemPrompt: pinned ?? this.#state.systemPrompt, messages, tools };
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
 		// Side requests reuse the main loop's sent definitions without recording their own.
 		if (context.tools?.length) {

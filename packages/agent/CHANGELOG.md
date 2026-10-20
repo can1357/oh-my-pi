@@ -15,6 +15,10 @@
 
 - `Agent.addBeforeSideRequestHook` registers a hook awaited before a side request's provider context is built (ephemeral turns, compaction, handoff); those requests bypass the main loop's pre-model-call hook, so a host that must refresh state before them (a pending system-prompt rebuild, say) registers there ([#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+### Changed
+
+- `Agent.buildSideRequestContext(llmMessages, systemPrompt?)` now accepts a callback for `systemPrompt`, read after the before-side-request hooks run, so a host that refreshes the prompt in a hook is seen by the request even when the caller pins a prompt of its own ([#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.12.3] - 2026-10-19
 
 ### Added
