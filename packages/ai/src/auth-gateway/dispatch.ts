@@ -173,7 +173,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		});
 		const outcome = switched
 			? "auth-gateway retrying provider request after usage-limit block"
-			: "auth-gateway usage-limit block with no other unblocked credential, returning the error";
+			: "auth-gateway usage-limit block, returning the error without retry";
 		logger.debug(outcome, {
 			format,
 			provider,

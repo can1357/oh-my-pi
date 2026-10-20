@@ -172,9 +172,10 @@ describe("auth-gateway auth retry", () => {
 			expect(usageLimitSessionId).toBe("gw-quota-rotation");
 			expect(usageLimitOptions?.apiKey).toBe(failedKey);
 			expect(invalidateSpy.mock.calls).toHaveLength(0);
-			expect(debugSpy.mock.calls.map(([logged]) => logged)).toContain(
-				"auth-gateway retrying provider request after usage-limit block",
-			);
+			const usageLimitLogs = debugSpy.mock.calls.filter(([logged]) => logged.includes("usage-limit block"));
+			expect(usageLimitLogs).toHaveLength(1);
+			expect(usageLimitLogs[0]?.[0]).toContain("retrying");
+			expect(usageLimitLogs[0]?.[1]).toMatchObject({ switched: true });
 			expect(store.listAuthCredentials("mock")).toHaveLength(2);
 			expect(await storage.keys.get("mock", "gw-quota-rotation")).toBe(retriedKey);
 		} finally {

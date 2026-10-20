@@ -21,7 +21,7 @@
 
 ### Fixed
 
-- Fixed the auth gateway's debug log saying it was retrying after a usage-limit error when no other credential was available and the error went back to the client
+- Fixed the auth gateway's debug log saying it was retrying after a usage-limit error when it returned the error to the client without retrying
 - Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
 
 ## [18.12.4] - 2026-10-20
