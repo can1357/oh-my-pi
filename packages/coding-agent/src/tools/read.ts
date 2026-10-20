@@ -1742,6 +1742,22 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			readPath = expandPath(readPath);
 		}
 		readPath = recoverConflictUriPrefix(readPath).path;
+		// Every read but a web URL reads local state: files, archives, SQLite,
+		// internal and MCP resources, views of an open IDA database. An earlier
+		// call of this message that may write (a `bash` before this read) runs
+		// beside it and may still be changing that state, and the model sees the
+		// batch's results only once every call ends, so read it as those calls
+		// leave it. A `;` list waits too, before it is split: the split looks its
+		// parts up on disk, so a part such a call is still creating changes how the
+		// list splits. A plain web URL reads nothing such a call writes and fetches
+		// at once.
+		const earlierEffects = toolContext?.toolCall?.earlierEffectsSettled;
+		if (
+			earlierEffects &&
+			(readPath.includes(";") || parseReadUrlTarget(splitImageQuestionTarget(readPath).path) === null)
+		) {
+			await untilAborted(signal, earlierEffects);
+		}
 		// A `;` list mixing URLs with local paths must split before URL detection
 		// claims the whole string as one fetch or one internal/MCP resource.
 		const mixedParts = await splitMixedUrlPathList(
@@ -1774,15 +1790,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			return executeReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal);
 		}
-
-		// Everything below reads local state: files, archives, SQLite, internal and
-		// MCP resources, views of an open IDA database. An earlier call of this
-		// message that may write (a `bash` before this read) runs beside it and may
-		// still be changing that state, and the model sees the batch's results only
-		// once every call ends, so read it as those calls leave it. Web URLs above
-		// read nothing such a call writes, so they do not wait.
-		const earlierEffects = toolContext?.toolCall?.earlierEffectsSettled;
-		if (earlierEffects) await untilAborted(signal, earlierEffects);
 
 		// Handle native OMP URLs and custom-scheme resources advertised by MCP servers.
 		const internalRouter = InternalUrlRouter.instance();
