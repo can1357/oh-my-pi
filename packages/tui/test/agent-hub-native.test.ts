@@ -86,6 +86,50 @@ function selectedRosterId(hub: AgentHubOverlayComponent): string | null | undefi
 	return undefined;
 }
 
+/** The section hints a rendered ANSI footer advertises (`1:agents`, `2:activity`). */
+function footerSectionHints(line: string): string[] {
+	return [...line.matchAll(/([12]):(agents|activity)/g)].map(match => `${match[1]}:${match[2]}`);
+}
+
+/** The native footer's hints, as key/label pairs. */
+function nativeFooterHints(hub: AgentHubOverlayComponent): { keys: string[]; label: string }[] {
+	const pending: NativeChild[] = [hub.describe(genericCx)];
+	while (pending.length > 0) {
+		const child = pending.pop()!;
+		if (!("k" in child)) continue;
+		const described: NativeNode = child;
+		if (described.p?.role === "omp.overlay.hints") {
+			return (described.c ?? []).map(hint => {
+				if (!("k" in hint)) throw new Error("expected a described hint row");
+				const keys: string[] = [];
+				let label = "";
+				for (const part of hint.c ?? []) {
+					if (!("k" in part)) continue;
+					const node: NativeNode = part;
+					if (node.k === "kbd") keys.push(...(node.p?.keys ?? []));
+					else if (node.k === "text") label = node.p?.spans?.[0]?.t ?? "";
+				}
+				return { keys, label };
+			});
+		}
+		pending.push(...(described.c ?? []));
+	}
+	return [];
+}
+
+/** The section the hub shows (`agents` or `activity`). */
+function activeSection(hub: AgentHubOverlayComponent): string | undefined {
+	const pending: NativeChild[] = [hub.describe(genericCx)];
+	while (pending.length > 0) {
+		const child = pending.pop()!;
+		if (!("k" in child)) continue;
+		const described: NativeNode = child;
+		if (described.k === "tabs" && described.key === "section") return described.p?.active;
+		pending.push(...(described.c ?? []));
+	}
+	return undefined;
+}
+
 function pickerProps(hub: AgentHubOverlayComponent): TspPickerProps {
 	const root = hub.describe(pickerCx);
 	if (root.k !== "picker" || !root.p) throw new Error(`expected a picker root, got ${root.k}`);
@@ -210,6 +254,57 @@ test("a follow-up turn does not age the previous turn's snapshot across the idle
 		emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...lifecycle, status: "started" });
 		hub.handleNativeEvent({ type: "select", key: "", item: "Idle" });
 		expect(pickerProps(hub).items?.find(item => item.id === "Worker")?.facts?.time).toBe(60_000);
+	} finally {
+		hub.dispose();
+	}
+});
+
+// The footer is the only place the roster view names the two sections, so the hints
+// must not change when the user switches: a section key that is advertised in one
+// view and missing in the other reads as a dead key.
+test("both sections' ANSI footers advertise the section keys that switch sections", () => {
+	const hub = createHub([agent("alpha", 3_000)]);
+	try {
+		expect(footerSectionHints(hub.render(120).at(-2) ?? "")).toEqual(["1:agents", "2:activity"]);
+
+		hub.handleInput("2");
+		expect(activeSection(hub)).toBe("activity");
+		expect(footerSectionHints(hub.render(120).at(-2) ?? "")).toEqual(["1:agents", "2:activity"]);
+
+		hub.handleInput("1");
+		expect(activeSection(hub)).toBe("agents");
+	} finally {
+		hub.dispose();
+	}
+});
+
+test("a narrow activity footer keeps the roster hint and the rest of the hints", () => {
+	const hub = createHub([agent("alpha", 3_000)]);
+	try {
+		hub.handleInput("2");
+		const footer = hub.render(90).at(-2) ?? "";
+		// The pair does not fit next to the other hints at this width, so only the
+		// roster key stays; the remaining hints must not be truncated away.
+		expect(footerSectionHints(footer)).toEqual(["1:agents"]);
+		expect(footer).toContain("close");
+	} finally {
+		hub.dispose();
+	}
+});
+
+test("both sections' native footers advertise the section keys that switch sections", () => {
+	const hub = createHub([agent("alpha", 3_000)]);
+	try {
+		expect(nativeFooterHints(hub).filter(hint => hint.label === "agents" || hint.label === "activity")).toEqual([
+			{ keys: ["1"], label: "agents" },
+			{ keys: ["2"], label: "activity" },
+		]);
+
+		hub.showSection("activity");
+		expect(nativeFooterHints(hub).filter(hint => hint.label === "agents" || hint.label === "activity")).toEqual([
+			{ keys: ["1"], label: "agents" },
+			{ keys: ["2"], label: "activity" },
+		]);
 	} finally {
 		hub.dispose();
 	}
