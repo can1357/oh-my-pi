@@ -72,6 +72,10 @@
 - Fixed the `ts-set-map` rule stalling tool-call streaming for seconds on a long single-line `Map` literal, and missing `Map` entries written `["key", value] as const` ([#16242](https://github.com/can1357/oh-my-pi/pull/16242))
 - Fixed the `ts-import-type` rule missing inline type imports whose member name is non-ASCII, such as `import("./units").温度` ([#16242](https://github.com/can1357/oh-my-pi/pull/16242))
 
+### Fixed
+
+- Fixed cancelling `%pip` in Python eval leaving the installer stopped but alive on Linux hosts where `/proc` cannot be listed (unmounted, or denied in some containers and chroots): the runner now asks `ps` for the installer's children there and always kills and reaps the installer
+
 ## [18.12.4] - 2026-10-20
 
 ### Added
