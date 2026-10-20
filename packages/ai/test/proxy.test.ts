@@ -492,6 +492,38 @@ describe("shouldBypassProxy NO_PROXY rules", () => {
 		Bun.env.NO_PROXY = "api.sakana.ai:443";
 		expect(shouldBypassProxy(new URL("wss://api.sakana.ai/v1"))).toBe(true);
 	});
+
+	it("normalizes the DNS root label on both the rule and the target", () => {
+		// `new URL(...).hostname` keeps the DNS root label, so the rule and the
+		// target have to be normalized the same way. Otherwise an absolute
+		// spelling on either side silently fails to match and the exempted host
+		// gets tunnelled through the proxy.
+		Bun.env.NO_PROXY = "api.internal.example.";
+		expect(shouldBypassProxy(new URL("https://api.internal.example./v1"))).toBe(true);
+		expect(shouldBypassProxy(new URL("https://api.internal.example/v1"))).toBe(true);
+
+		Bun.env.NO_PROXY = "api.internal.example";
+		expect(shouldBypassProxy(new URL("https://api.internal.example./v1"))).toBe(true);
+
+		Bun.env.NO_PROXY = "api.internal.example.:443";
+		expect(shouldBypassProxy(new URL("https://api.internal.example./v1"))).toBe(true);
+	});
+
+	it("normalizes the DNS root label on a leading-dot rule", () => {
+		Bun.env.NO_PROXY = ".internal.example.";
+		expect(shouldBypassProxy(new URL("https://api.internal.example./v1"))).toBe(true);
+		expect(shouldBypassProxy(new URL("https://api.internal.example/v1"))).toBe(true);
+	});
+
+	it("does not tunnel a dotted NO_PROXY exemption through the proxy", () => {
+		Bun.env.NO_PROXY = "api.internal.example.";
+		Bun.env.PI_PROXY = PROXY;
+
+		const init = withProxyInit("https://api.internal.example./v1", undefined, PROXY) as
+			| { proxy?: unknown }
+			| undefined;
+		expect(init?.proxy).toBe(false);
+	});
 });
 
 describe("wrapFetchForProxy", () => {
