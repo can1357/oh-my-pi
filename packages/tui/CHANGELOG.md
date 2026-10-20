@@ -5,6 +5,7 @@
 ### Added
 
 - Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Added optional runtime HUD/input allocation against rendered sibling rows in normal and resize Composer frames ([#16520](https://github.com/can1357/oh-my-pi/pull/16520) by [@Komzpa](https://github.com/Komzpa))
 
 ### Fixed
 

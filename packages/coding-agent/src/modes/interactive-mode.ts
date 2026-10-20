@@ -1425,6 +1425,21 @@ const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 const JOBS_SHEET_REFRESH_MS = 250;
 
 export class InteractiveMode implements InteractiveModeContext {
+	#todoHudAllocation: { terminalRows: number; panelRows: number } | undefined;
+
+	#preferredTodoHudPanelRows(terminalRows: number): number {
+		const rows = Number.isFinite(terminalRows) && terminalRows > 0 ? terminalRows : EDITOR_FALLBACK_ROWS;
+		return Math.max(TODO_COMPACT_TERMINAL_ROWS_THRESHOLD - EDITOR_RESERVED_ROWS, rows - EDITOR_RESERVED_ROWS);
+	}
+
+	/** Current Composer allocation; renderer topics can use this without owning editor geometry. */
+	getTodoHudPanelRows(): number {
+		const rows = this.ui.terminal.rows;
+		return this.#todoHudAllocation?.terminalRows === rows
+			? this.#todoHudAllocation.panelRows
+			: this.#preferredTodoHudPanelRows(rows);
+	}
+
 	#ownsStartedUi: boolean;
 	session: AgentSession;
 	sessionManager: SessionManager;
@@ -2802,6 +2817,48 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.hookWidgetContainerBelow,
 			],
 			{
+				allocation: {
+					hud: this.todoContainer,
+					input: this.editorContainer,
+					apply: (viewport, chromeRows, renderInput) => {
+						const active =
+							!this.todoExpanded &&
+							!this.#todoHudHidden &&
+							!this.isCompactTodoMode() &&
+							this.todoPhases.some(phase => phase.tasks.some(task => !isClosedTodo(task)));
+						const preferred = active
+							? Math.max(
+									0,
+									Math.min(
+										this.#preferredTodoHudPanelRows(viewport.rows),
+										viewport.rows - chromeRows - EDITOR_MIN_RENDERED_ROWS,
+									),
+								)
+							: 0;
+						this.editor.setMaxHeight(
+							active
+								? Math.max(
+										EDITOR_MIN_RENDERED_ROWS,
+										Math.min(computeEditorMaxHeight(viewport.rows), viewport.rows - chromeRows - preferred),
+									)
+								: computeEditorMaxHeight(viewport.rows),
+						);
+						const inputRows = renderInput();
+						this.#todoHudAllocation = {
+							terminalRows: viewport.rows,
+							panelRows: Math.max(
+								0,
+								Math.min(
+									this.#preferredTodoHudPanelRows(viewport.rows),
+									viewport.rows - chromeRows - inputRows,
+								),
+							),
+						};
+						// Renderer topics may consume the fresh allocation before the HUD is measured.
+						const renderer = this as InteractiveMode & { refreshTodoHud?: (width: number) => void };
+						renderer.refreshTodoHud?.(viewport.columns);
+					},
+				},
 				// Natively the HUD pills lead the dock, aboveEditor hook widgets sit
 				// over the working row (the tray's header, so nothing comes between
 				// the two), queued messages sit between the working row and the
