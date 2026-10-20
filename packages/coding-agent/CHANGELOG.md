@@ -142,9 +142,6 @@
 - Fixed browser `tab.run(fn, [url])` and `browser.open("https://…")` failing with a bare "expects an options object"; the errors now say to pass `{ args: [...] }` and `browser.open({ url, name })` ([#16236](https://github.com/can1357/oh-my-pi/pull/16236) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the built-in `ts-set-map`, `ts-import-type` and `ts-no-any` rules reminding you about code they allow: an empty or computed `Set`/`Map`, a runtime `await import()`, or the word "any" in a comment ([#16242](https://github.com/can1357/oh-my-pi/pull/16242) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the `read` tool still advertising web-URL reads in its prompt and `path` schema when `fetch.enabled` is off, steering the model into a refused call ([#11347](https://github.com/can1357/oh-my-pi/issues/11347))
-- Fixed the `read` tool still advertising web-URL reads in its prompt and `path` schema when `fetch.enabled` is off, steering the model into a refused call ([#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed the `read` tool still advertising web-URL reads in its prompt and `path` schema when `fetch.enabled` is off ([#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed the `read` tool still advertising web-URL reads in its prompt and `path` schema when `fetch.enabled` is off, including after turning it off mid-session ([#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed the `read`, `grep`, and `web_search` tool descriptions still advertising web-URL reads when `fetch.enabled` is off, including after turning it off mid-session and in a handoff request issued right after the toggle ([#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.3] - 2026-10-19
