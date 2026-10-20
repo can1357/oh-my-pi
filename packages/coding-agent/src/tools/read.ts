@@ -290,8 +290,8 @@ interface ReadLineWindow {
 	byteLimitLine?: { index: number; byteLength: number };
 	firstLinePreview?: { text: string; bytes: number };
 	firstLineByteLength?: number;
-	/** Some collected lines are prefixes that column-cap to their full line's display, not whole source lines. */
-	hasPrefixLines?: boolean;
+	/** Indices into `lines` of rows that are only the head of a column-capped line, not the whole source line. */
+	prefixLines?: number[];
 	/** Whether the fully scanned source ended in a newline. */
 	hasTrailingNewline: boolean;
 	/** False when `stopScanAfterCollect` cut the scan short — `totalFileLines` is then a lower bound. */
@@ -410,7 +410,9 @@ function collectLineWindowFromBuffer(
 			} else {
 				const lineText = rawSegments[index] ?? "";
 				const lineCost = lineBudgetBytes(lineText, lineByteLength, displayColumns);
-				if (window.lines.length === 0 && lineCost > maxBytes) {
+				// A first line is collected when its cut display or its source fits; if only its source
+				// fits (stray bytes widen on decode), the page ends after it.
+				if (window.lines.length === 0 && Math.min(lineCost, lineByteLength) > maxBytes) {
 					window.stoppedByByteLimit = true;
 					window.byteLimitLine = { index, byteLength: lineByteLength };
 					doneCollecting = true;
@@ -508,7 +510,7 @@ async function streamLinesFromFile(
 	let lineCaptureLimit = 0;
 	/** The current line is kept as a head long enough for its column-capped display, not whole. */
 	let capturedPrefix = false;
-	let hasPrefixLines = false;
+	let prefixLines: number[] | undefined;
 
 	const setupLineState = () => {
 		captureLine = !doneCollecting && lineIndex >= startLine;
@@ -578,7 +580,7 @@ async function streamLinesFromFile(
 					lineText === undefined
 						? currentLineLength
 						: lineBudgetBytes(lineText, currentLineLength, displayColumns);
-				if (collectedLines.length === 0 && lineCost > maxBytes) {
+				if (collectedLines.length === 0 && Math.min(lineCost, currentLineLength) > maxBytes) {
 					stoppedByByteLimit = true;
 					byteLimitLine = { index: lineIndex, byteLength: currentLineLength };
 					doneCollecting = true;
@@ -595,7 +597,7 @@ async function streamLinesFromFile(
 				} else {
 					collectedLines.push(lineText);
 					collectedBytes += separatorBytes + lineCost;
-					if (capturedPrefix) hasPrefixLines = true;
+					if (capturedPrefix) (prefixLines ??= []).push(collectedLines.length - 1);
 					if (firstLineByteLength === undefined) {
 						firstLineByteLength = currentLineLength;
 					}
@@ -709,7 +711,7 @@ async function streamLinesFromFile(
 		byteLimitLine,
 		firstLinePreview,
 		firstLineByteLength,
-		hasPrefixLines,
+		prefixLines,
 		reachedEof,
 		hasTrailingNewline: reachedEof && endedWithNewline,
 	};
@@ -2516,7 +2518,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						firstLinePreview,
 						firstLineByteLength,
 						reachedEof,
-						hasPrefixLines,
+						prefixLines,
 						hasTrailingNewline,
 					} = lineWindow;
 
@@ -2537,7 +2539,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					// counts the capped view, the bytes the page budget charged.
 					// Column truncation is display-only. `collectedLines` MUST stay
 					// byte-for-byte with the on-disk content (above the snapshot cap a
-					// cut line may be only the head its display needs: `hasPrefixLines`)
+					// cut line may be only the head its display needs: `prefixLines`)
 					// so the snapshot recorded below can be verified against the live
 					// file. Mutating it with ellipsis-truncated text made every long-line
 					// file uneditable on the next edit attempt.
@@ -2578,11 +2580,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 					const totalSelectedLines = totalFileLines - startLine;
 					const wasTruncated = reachedEof && (collectedLines.length < totalSelectedLines || stoppedByByteLimit);
-					// A source line over the budget is still collected when its capped display fits.
-					const firstLineExceedsLimit =
-						collectedLines.length === 0 &&
-						firstLineByteLength !== undefined &&
-						firstLineByteLength > maxBytesForRead;
+					// The collector rejects a first line only when neither its source nor its cut display fits.
+					const firstLineExceedsLimit = collectedLines.length === 0 && stoppedByByteLimit;
 					if (
 						bracketContextFullLines &&
 						buffered &&
@@ -2631,7 +2630,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						// buffered text is that whole file; above the snapshot cap only a
 						// non-truncated whole-file window of whole lines can supply it.
 						const isWholeFile =
-							reachedEof && offset === undefined && limit === undefined && !wasTruncated && !hasPrefixLines;
+							reachedEof &&
+							offset === undefined &&
+							limit === undefined &&
+							!wasTruncated &&
+							prefixLines === undefined;
 						const tag = buffered
 							? getEditStore(this.session).recordSnapshot(absolutePath, buffered.normalizedText)
 							: isWholeFile
@@ -2811,7 +2814,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 					// Immutable sources have no edit path, so their markers are content, not conflicts.
 					if (!immutable && !firstLineExceedsLimit && collectedLines.length > 0) {
-						const blocks = scanConflictLines(collectedLines, startLineDisplay);
+						// A block holding a line kept only as its display head would register a cut side.
+						const blocks = scanConflictLines(collectedLines, startLineDisplay).filter(
+							block =>
+								!prefixLines?.some(
+									index =>
+										block.startLine <= startLineDisplay + index && startLineDisplay + index <= block.endLine,
+								),
+						);
 						if (blocks.length > 0) {
 							onConflictMarkers?.();
 							const history = getConflictHistory(this.session);
