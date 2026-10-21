@@ -124,6 +124,15 @@
 ## [18.13.0] - 2026-10-26
 - Reduced the CPU spent preparing tool schemas on every model call, so requests with many tools start faster ([#16780](https://github.com/can1357/oh-my-pi/pull/16780) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed tool schema normalization modifying the caller's schema in place, which added the folded `const` value to a tool's own `enum` array ([#16780](https://github.com/can1357/oh-my-pi/pull/16780) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+### Fixed
+
+- Fixed provider in-flight lock cleanup failures being swallowed silently; they are now logged instead of ignored ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+## [18.12.5] - 2026-10-21
+
+### Added
+
+- Added OpenAI 12-hour prompt caching for GPT-5.6+ on the Responses API: `cacheRetention: "long"` now requests `prompt_cache_options.ttl: "12h"` (instead of the ignored legacy `prompt_cache_retention: "24h"`), and `promptCache.ttl` accepts `"12h"`
 
 
 ### Breaking Changes
@@ -183,7 +192,6 @@
 - Added OpenAI 12-hour prompt caching for GPT-5.6+ on the Responses API: `cacheRetention: "long"` now requests `prompt_cache_options.ttl: "12h"` (instead of the ignored legacy `prompt_cache_retention: "24h"`), and `promptCache.ttl` accepts `"12h"`
 
 ### Fixed
-- Fixed provider in-flight lock cleanup failures being swallowed silently — they are now logged instead of ignored ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
 
