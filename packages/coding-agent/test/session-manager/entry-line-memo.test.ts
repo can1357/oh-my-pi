@@ -2166,4 +2166,313 @@ describe("SessionManager entry-line memo", () => {
 		if (!sessionFile) throw new Error("Expected session file");
 		expect(storage.readTextSync(sessionFile)).toContain('"kept":"value"');
 	});
+
+	it("persists the truncated text of a block whose hidden signature stops signing it", async () => {
+		// The atomic classification reads the block's `textSignature` by key, so
+		// a hidden one still signs the block — and the projector then keeps its
+		// long text verbatim. The stamp enumerates own enumerable keys, so it
+		// never sees the hidden field: the atomic verdict flips while the stamp
+		// compares equal, and the memo reuses the line that kept the
+		// untruncated text.
+		const longText = "x".repeat(500_001);
+		const block: Record<string, unknown> = { type: "text", text: longText };
+		Object.defineProperty(block, "textSignature", {
+			value: "sig-hidden-fix15222",
+			enumerable: false,
+			writable: true,
+			configurable: true,
+		});
+
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content: [block] as unknown as AssistantMessage["content"],
+		});
+
+		// First rewrite: the block is signed, so the long text is preserved.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain(longText);
+
+		// The signature stops signing the block: the projector truncates the
+		// long text now, while a stamp blind to the hidden field still matches.
+		block.textSignature = "";
+
+		// Second rewrite: the persisted line carries the truncated text.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).not.toContain(longText);
+		expect(bodyAfterSecond).toContain("Session persistence truncated large content");
+	});
+
+	it("never consumes a stateful signature getter while probing the message", async () => {
+		// `isAtomicPersistenceNode` reads the block's `textSignature` by key, so
+		// a stateful getter would be consumed by the memo's probe — and the
+		// projection would then read a different value than the probe saw. The
+		// probe must answer through the property descriptor, never by reading the
+		// key.
+		let reads = 0;
+		const block: Record<string, unknown> = { type: "text", text: "kept" };
+		Object.defineProperty(block, "textSignature", {
+			get(): string {
+				reads += 1;
+				return "sig-stateful-fix15222";
+			},
+			enumerable: true,
+			configurable: true,
+		});
+
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content: [block] as unknown as AssistantMessage["content"],
+		});
+
+		// One atomic publish performs two full-body serializations (materialize,
+		// then commit), and each one reads the carrier twice — once in the
+		// projector's own scan, once in the serializer. A probe that reads the
+		// carrier adds a read per serialization.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(reads).toBe(4);
+		expect(storage.readTextSync(sessionFile)).toContain("sig-stateful-fix15222");
+	});
+
+	it("persists the current signature strip of an assistant turn whose reasoning item hides its encrypted content", async () => {
+		// `readReasoningItem` reads the item's `encrypted_content` by key, so a
+		// hidden one still covers the signature — while the stamp, which walks
+		// own enumerable keys only, never sees it. Dropping the hidden field
+		// turns the strip off without moving a stamped leaf.
+		const reasoningItem: Record<string, unknown> = { type: "reasoning", id: "resp-fix15222-hidden-enc" };
+		Object.defineProperty(reasoningItem, "encrypted_content", {
+			value: "enc-fix15222-hidden",
+			enumerable: false,
+			writable: true,
+			configurable: true,
+		});
+		const items = [reasoningItem];
+		const payload = { type: "openaiResponsesHistory" as const, items };
+		// The signature carries only the encrypted content, so the item's `id`
+		// cannot cover it once the hidden field is gone.
+		const thinkingSignature = JSON.stringify({ type: "reasoning", encrypted_content: "enc-fix15222-hidden" });
+		const persistedSignature = JSON.stringify(thinkingSignature).slice(1, -1);
+
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content: [{ type: "thinking" as const, thinking: "reason", thinkingSignature }],
+			providerPayload: payload,
+		});
+
+		// First rewrite: the payload covers the signature, so the line drops it.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(storage.readTextSync(sessionFile)).not.toContain(persistedSignature);
+
+		// The hidden encrypted content is gone: the payload no longer covers the
+		// signature, so the line must keep it.
+		delete reasoningItem.encrypted_content;
+		await session.appendEntriesAtomically(() => {});
+		expect(storage.readTextSync(sessionFile)).toContain(persistedSignature);
+	});
+
+	it("persists the current signature strip of an assistant turn whose reasoning item hides its id", async () => {
+		// The same hole on the fallback carrier: `readReasoningItem` reads the
+		// item's `id` by key, so a hidden one still matches the signature while
+		// the stamp never sees it.
+		const reasoningItem: Record<string, unknown> = { type: "reasoning", encrypted_content: "enc-fix15222-hidden-id" };
+		Object.defineProperty(reasoningItem, "id", {
+			value: "resp-fix15222-hidden-id",
+			enumerable: false,
+			writable: true,
+			configurable: true,
+		});
+		const items = [reasoningItem];
+		const payload = { type: "openaiResponsesHistory" as const, items };
+		const thinkingSignature = JSON.stringify({ type: "reasoning", id: "resp-fix15222-hidden-id" });
+		const persistedSignature = JSON.stringify(thinkingSignature).slice(1, -1);
+
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content: [{ type: "thinking" as const, thinking: "reason", thinkingSignature }],
+			providerPayload: payload,
+		});
+
+		// First rewrite: the payload covers the signature, so the line drops it.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(storage.readTextSync(sessionFile)).not.toContain(persistedSignature);
+
+		// The hidden id is gone: the payload no longer covers the signature, so
+		// the line must keep it.
+		delete reasoningItem.id;
+		await session.appendEntriesAtomically(() => {});
+		expect(storage.readTextSync(sessionFile)).toContain(persistedSignature);
+	});
+
+	it("persists the current output of an entry-level serializer hook", async () => {
+		// The cacheability gate probed the message, not the entry wrapper — so an
+		// entry-level `toJSON` went undetected, and the memo reused the line
+		// the previous hook call produced.
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "ok" }],
+			timestamp: Date.now(),
+		});
+		const entry = session.getEntries().find(e => e.type === "message");
+		if (!entry) throw new Error("Expected message entry");
+		let output = "hook-first-fix15222";
+		Object.defineProperty(entry, "toJSON", {
+			value: () => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text: output }] } }),
+			enumerable: false,
+			configurable: true,
+		});
+
+		// First rewrite: the persisted line is the hook's output.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(storage.readTextSync(sessionFile)).toContain("hook-first-fix15222");
+
+		// The hook now returns something else: the persisted line must follow.
+		output = "hook-second-fix15222";
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain("hook-second-fix15222");
+		expect(bodyAfterSecond).not.toContain("hook-first-fix15222");
+	});
+
+	it("persists the current shape of a content array that carries its own signature", async () => {
+		// The projector reads an array's own fields by key — the atomic
+		// classification among them — while the stamp records an array's indexed
+		// slots only. The array's own signature therefore decides whether its
+		// payload is persisted verbatim, without moving a stamped leaf.
+		const content: unknown[] = [{ type: "image", data: LARGE_BASE64, mimeType: "image/png" }];
+		Object.defineProperty(content, "type", {
+			value: "thinking",
+			enumerable: true,
+			writable: true,
+			configurable: true,
+		});
+		Object.defineProperty(content, "thinkingSignature", {
+			value: "sig-array-fix15222",
+			enumerable: true,
+			writable: true,
+			configurable: true,
+		});
+
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "user" as const,
+			content: content as unknown as AssistantMessage["content"],
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the array is signed, so it persists verbatim and its
+		// payload is not externalized.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain(LARGE_BASE64);
+		expect(persistedBlobRefs(bodyAfterFirst)).toHaveLength(0);
+
+		// The signature stops signing the array: the projector now rebuilds it,
+		// and its payload is externalized.
+		Object.defineProperty(content, "thinkingSignature", {
+			value: "",
+			enumerable: true,
+			writable: true,
+			configurable: true,
+		});
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(persistedBlobRefs(bodyAfterSecond)).toHaveLength(1);
+		expect(bodyAfterSecond).not.toContain(LARGE_BASE64);
+	});
+
+	it("persists the shape a replaced array species produces", async () => {
+		// `Array.prototype.map` builds its result through `ArraySpeciesCreate`,
+		// which reads `constructor[Symbol.species]` — so a replaced constructor
+		// changes the shape of the array the projection produces, while the
+		// stamp keeps recording the source array's indexed slots.
+		const reasoningItem = { type: "reasoning", encrypted_content: "enc-fix15222-species" };
+		const items = [reasoningItem];
+		const payload = { type: "openaiResponsesHistory" as const, items };
+		const thinkingSignature = JSON.stringify(reasoningItem);
+
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content: [{ type: "thinking" as const, thinking: "reason", thinkingSignature }],
+			providerPayload: payload,
+		});
+
+		// First rewrite: the strip rebuilds the content array.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(storage.readTextSync(sessionFile)).toContain('"content":[');
+
+		// Replace the array's species: the rebuilt content is no longer an
+		// array, so the projected line changes shape.
+		const entry = session.getEntries().find(e => e.type === "message");
+		if (!entry || entry.type !== "message") throw new Error("Expected message entry");
+		const content = entry.message.content;
+		if (!Array.isArray(content)) throw new Error("Expected array content");
+		function SpeciesArray(this: unknown, length: number): { length: number } {
+			return { length };
+		}
+		Object.defineProperty(content, "constructor", {
+			value: { [Symbol.species]: SpeciesArray },
+			enumerable: false,
+			writable: true,
+			configurable: true,
+		});
+
+		// Second rewrite: the persisted line follows the new shape.
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).not.toContain('"content":[');
+		expect(bodyAfterSecond).toContain('"content":{"0":');
+	});
+
+	it("externalizes a content image whose type is an accessor", async () => {
+		// An own enumerable `type` getter may yield `"image"`, and the projector
+		// cannot know without running it. Treating the block as a generic
+		// payload truncates its base64, and the resumed session then carries an
+		// undecodable image.
+		const base64 = "A".repeat(500_004);
+		const block: Record<string, unknown> = { data: base64, mimeType: "image/png" };
+		Object.defineProperty(block, "type", {
+			get: () => "image",
+			enumerable: true,
+			configurable: true,
+		});
+
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "user" as const,
+			content: [block] as unknown as AssistantMessage["content"],
+			timestamp: Date.now(),
+		});
+
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		const refs = persistedBlobRefs(body);
+		expect(refs).toHaveLength(1);
+		const ref = refs[0];
+		if (!ref) throw new Error("Expected blob reference");
+		expect(await blobBytesBase64(ref)).toBe(base64);
+		expect(body).not.toContain("Session persistence truncated large content");
+	});
 });
