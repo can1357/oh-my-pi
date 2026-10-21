@@ -19,7 +19,7 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
 `solutionSpace`: describe how open-ended the child's problem is: whether the fix or design is given, or which causes or designs remain open. Volume of work does not widen it; NEVER mention sibling agents or coordination. (`one fix: rename, names given`; `one fix: slice end in paginate`; `single-flight cache load; races easy to miss`; `several retry API shapes; error classes to choose`; `deadlock cause open, no repro`)
 {{#if seanceGuidance}}{{seanceGuidance}}{{/if}}
 {{#if evalToolsEnabled}}`tools`: eval-defined, run in your kernel.
-{{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
+{{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is, matching `solutionSpace`. Default `lo` for lookups, mechanical edits, and known fixes; `med` for ordinary implementation. Use `hi` only when `solutionSpace` names genuinely open choices (design or cause unknown, several competing approaches): on a given fix a high-effort implementer tends to over-engineer and widen scope.
 {{/if}}{{#if structured}}`schemaMode`: default permissive warns after retries; strict fails.
 {{/if}}{{#if isolationEnabled}}{{#if applyIsolatedChanges}}`isolated`: worktree; successful changes apply to parent.
 {{else}}`isolated`: worktree; changes retained, not applied.
