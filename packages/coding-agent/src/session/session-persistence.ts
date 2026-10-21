@@ -247,7 +247,7 @@ export function forgetExternalizedImages(blobStore: BlobStore): void {
 }
 
 /** True for the snapcompact archive slot, `preserveData[PRESERVE_KEY]`. */
-function isSnapcompactArchiveSlot(
+export function isSnapcompactArchiveSlot(
 	key: string | undefined,
 	childKey: string,
 	value: unknown,
