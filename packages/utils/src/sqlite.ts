@@ -347,6 +347,13 @@ export function checkpointWal(db: Database): void {
 const SALVAGE_MAX_DAMAGED_REGIONS = 1000;
 
 /**
+ * Largest damaged store a salvage may image in memory to bound its recovery; larger
+ * stores recover with the unbounded scan instead, because a second copy of the whole
+ * store can exceed what the process can spare and abort the best-effort salvage.
+ */
+export const SALVAGE_MAX_IMAGE_BYTES = 128 * 1024 * 1024;
+
+/**
  * Interior table keys bound individual subtrees even when readable and damaged leaves alternate.
  * One damaged interior page voids every bound, so the caller recovers unbounded instead.
  * A readable child page outside the interval its ancestors' separators establish proves a
@@ -357,6 +364,12 @@ function readSalvageRowidStarts(db: Database, table: string): number[] {
 		.query<{ rootpage: number }, [string]>("SELECT rootpage FROM sqlite_schema WHERE name = ?")
 		.get(table);
 	if (!root) return [];
+	// The image is a second copy of the whole store: past a cap the copy can
+	// exceed what the process can spare and abort the salvage, so oversized
+	// stores recover unbounded instead of imaging every page.
+	const pageCount = db.query<{ page_count: number }, []>("PRAGMA page_count").get()?.page_count ?? 0;
+	const pragmaPageSize = db.query<{ page_size: number }, []>("PRAGMA page_size").get()?.page_size ?? 0;
+	if (pageCount * pragmaPageSize > SALVAGE_MAX_IMAGE_BYTES) return [];
 	// Serialize through SQLite so committed WAL pages are included, without modifying the damaged store.
 	const image = db.serialize();
 	const encodedPageSize = image.readUInt16BE(16);
