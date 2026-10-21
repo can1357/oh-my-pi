@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Models now declare whether they hear audio: Gemini on Google's own transports and every OpenRouter model whose listing takes audio input ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed Cursor's DeepSeek V4.1 Flash 1017 reporting zero cost; every effort level now bills at Cursor's API rate of $0.30/$1.20 per million tokens, with cache reads at $0.006 ([#17390](https://github.com/can1357/oh-my-pi/pull/17390) by [@eggpeat](https://github.com/eggpeat))
@@ -113,10 +117,6 @@
 ### Changed
 
 - Updated the bundled Yolo-Auto catalog to its current models, `qwen3.8-27b` (now the default), `yolo`, `yolo-small`, and `yolo-128k`, and removed the retired `deepseek-flash-v4` and `qwen3.8-flash`
-
-### Added
-
-- Models now declare whether they hear audio: Gemini on Google's own transports and every OpenRouter model whose listing takes audio input
 
 ## [18.12.5] - 2026-10-21
 
