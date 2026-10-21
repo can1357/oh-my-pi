@@ -26,7 +26,7 @@ import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	abortReasonText,
 	agentLoop,
@@ -966,7 +966,12 @@ export class Agent {
 					injectIntent: this.#intentTracing,
 					pruneDescriptions: this.#pruneToolDescriptions,
 				}) ?? []);
-		const pinned = typeof systemPrompt === "function" ? await systemPrompt() : systemPrompt;
+		// A provider that supplies the prompt may await something slow, so the await
+		// races the caller's cancellation instead of blocking the context build
+		// indefinitely; the signal is rechecked afterwards so a provider that
+		// resolves after the cancellation does not run the transforms.
+		const pinned = typeof systemPrompt === "function" ? await untilAborted(signal, systemPrompt()) : systemPrompt;
+		signal?.throwIfAborted();
 		let context: Context = { systemPrompt: pinned ?? this.#state.systemPrompt, messages, tools };
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
 		// Side requests reuse the main loop's sent definitions without recording their own.

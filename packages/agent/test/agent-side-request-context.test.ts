@@ -268,6 +268,42 @@ describe("Agent — buildSideRequestContext", () => {
 		expect(hookRan).toBe(false);
 	});
 
+	it("aborts while awaiting a slow prompt provider and skips the transforms", async () => {
+		// A provider that supplies the side-request prompt may await something slow.
+		// When the caller cancels after the hooks ran, the build must not stay
+		// blocked on that promise, and a provider that resolves late must not run
+		// the provider transforms for a request the caller already gave up on.
+		const controller = new AbortController();
+		let transformRan = false;
+		const agentWithTransform = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["system"],
+				tools: [tool],
+			},
+			transformProviderContext: () => {
+				transformRan = true;
+				return { systemPrompt: ["transformed"], messages: [], tools: [] };
+			},
+		});
+
+		const promptPromise = new Promise<string[]>(resolve => {
+			setTimeout(() => resolve(["late"]), 5_000);
+		});
+
+		const build = agentWithTransform.buildSideRequestContext(
+			[{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() }],
+			() => promptPromise,
+			controller.signal,
+		);
+		controller.abort();
+
+		await expect(build).rejects.toThrow();
+		// The late provider must not have reached the transforms.
+		await Bun.sleep(20);
+		expect(transformRan).toBe(false);
+	});
+
 	it("keeps the call-time model when a before-side-request hook switches models", async () => {
 		// The caller converted its history for the model that was active when it
 		// called, so a `/model` change landing while the hook waits must not
