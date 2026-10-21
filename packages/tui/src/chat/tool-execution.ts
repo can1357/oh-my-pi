@@ -1380,6 +1380,11 @@ export class ToolExecutionComponent extends Container {
 
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible || this.#allocation === 0 || (this.#toolName === "wait" && this.#isBenignSkip())) {
+			// Nothing reaches the terminal on this path, so the per-paint repaint
+			// fact must not survive it: the tail window it recorded is gone, and
+			// the first result must not replay the viewport for a shape the user
+			// never saw.
+			this.#firstResultViewportRepaintShapePainted = false;
 			return [];
 		}
 		let lines = super.render(width);

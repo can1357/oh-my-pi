@@ -257,33 +257,42 @@ function writeContentOf(args: unknown): string {
  *    until the dispatch starts executing, so it paints no tail window before
  *    that — and only a delegation back to this renderer paints one, with the
  *    delegated payload rather than the dispatch's own.
+ *
+ * The delegation chain is walked iteratively and without a depth cap: the
+ * renderer (`renderXdevCall`) keeps delegating as deep as the payload nests,
+ * so a cap here would decide "no tail window" for a card the renderer does
+ * paint. Each nested payload is a JSON-encoded subset of the one above it, so
+ * the chain always ends.
  */
-function writeRendersTailWindow(args: unknown, options: RenderResultOptions, depth = 0): boolean {
-	if (depth > 4) return false;
-	const writeArgs = args as WriteRenderArgs | undefined;
-	// The renderer draws nothing without a path, so no preview reached the
-	// terminal.
-	if (writeArgs?.path === undefined && writeArgs?.file_path === undefined) return false;
-	const rawPath =
-		typeof writeArgs?.file_path === "string"
-			? writeArgs.file_path
-			: typeof writeArgs?.path === "string"
-				? writeArgs.path
-				: "";
-	if (writeUrlCard(rawPath)) return false;
-	if (rawPath !== "" && couldBecomeXdUrl(rawPath)) {
-		const xdev = parseXdUrl(rawPath);
-		if (!xdev?.name) return false;
-		// The delegated card stays queued until the dispatch starts executing.
-		if (options.executionStarted !== true) return false;
-		const renderContext = (options as RenderResultContextOptions).renderContext as WriteRenderContext | undefined;
-		const mounted = renderContext?.resolveXdevMounted?.(xdev.name);
-		// Only a delegation back to this renderer paints the tail window.
-		if (resolveXdevDelegatedRenderer(xdev.name, mounted) !== (writeToolRenderer as unknown as XdevMountedRenderer))
-			return false;
-		return writeRendersTailWindow(decodeInnerArgs(writeContentOf(args)), options, depth + 1);
+function writeRendersTailWindow(args: unknown, options: RenderResultOptions): boolean {
+	let current: unknown = args;
+	for (;;) {
+		const writeArgs = current as WriteRenderArgs | undefined;
+		// The renderer draws nothing without a path, so no preview reached the
+		// terminal.
+		if (writeArgs?.path === undefined && writeArgs?.file_path === undefined) return false;
+		const rawPath =
+			typeof writeArgs?.file_path === "string"
+				? writeArgs.file_path
+				: typeof writeArgs?.path === "string"
+					? writeArgs.path
+					: "";
+		if (writeUrlCard(rawPath)) return false;
+		if (rawPath !== "" && couldBecomeXdUrl(rawPath)) {
+			const xdev = parseXdUrl(rawPath);
+			if (!xdev?.name) return false;
+			// The delegated card stays queued until the dispatch starts executing.
+			if (options.executionStarted !== true) return false;
+			const renderContext = (options as RenderResultContextOptions).renderContext as WriteRenderContext | undefined;
+			const mounted = renderContext?.resolveXdevMounted?.(xdev.name);
+			// Only a delegation back to this renderer paints the tail window.
+			if (resolveXdevDelegatedRenderer(xdev.name, mounted) !== (writeToolRenderer as unknown as XdevMountedRenderer))
+				return false;
+			current = decodeInnerArgs(writeContentOf(current));
+			continue;
+		}
+		return exceedsLineCount(writeContentOf(current), writeStreamingPreviewBudget());
 	}
-	return exceedsLineCount(writeContentOf(args), writeStreamingPreviewBudget());
 }
 
 function formatLineCountSuffix(lineCount: number, uiTheme: Theme): string {
