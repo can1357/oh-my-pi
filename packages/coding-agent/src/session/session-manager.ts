@@ -1414,6 +1414,11 @@ function hasSerializerHook(
 			// override on purpose, so it never runs user code) reports the boxed
 			// value. Such a box is left uncached, like any other hooked graph.
 			if (hasBoxCoercionOverride(value, typeof unboxed as "number" | "string" | "boolean")) return true;
+			// A box with own enumerable fields is not a leaf for the projector:
+			// `truncateForPersistence` rebuilds it as a plain object and strips
+			// its transient keys, so the persisted bytes follow those fields
+			// while the stamp would record only the unboxed value.
+			if (Object.keys(value).length > 0) return true;
 			continue;
 		}
 		if (rawJsonPayload(value) !== undefined) continue;
@@ -1483,20 +1488,52 @@ function hasSerializerHook(
 			imageClassifierHiddenFromStamp(value, "mimeType")
 		)
 			return true;
-		// Same for an `image_generation_call` whose `result` rides an inherited or
-		// non-enumerable data descriptor: `truncateForPersistence` reads it via
-		// `"result" in obj` and rewrites it into an own blob ref, but the own-key
-		// stamp cannot see the backing field — and a longer inherited `result`
-		// chain could itself harbor an accessor the stamp would invoke. Leave the
-		// graph uncached so the line is always re-projected from the live input.
-		if (
-			Object.getOwnPropertyDescriptor(value, "type")?.value === "image_generation_call" &&
-			projectorGenerationResult(value) !== undefined &&
-			Object.getOwnPropertyDescriptor(value, "result") === undefined
-		)
+		// Same for an `image_generation_call` whose `result` the projector reads
+		// by key — `truncateForPersistence` reads it via `"result" in obj` and
+		// rewrites it into an own blob ref — while the own-key stamp cannot see
+		// the backing field. Any `result` that is not an own enumerable data
+		// descriptor (inherited, non-enumerable, or an accessor) therefore
+		// leaves the graph uncached, so the line is always re-projected from the
+		// live input.
+		if (Object.getOwnPropertyDescriptor(value, "type")?.value === "image_generation_call") {
+			const resultDescriptor = Object.getOwnPropertyDescriptor(value, "result");
+			if (resultDescriptor === undefined) {
+				if (projectorGenerationResult(value) !== undefined) return true;
+			} else if (!resultDescriptor.enumerable) {
+				return true;
+			} else if (typeof resultDescriptor.get === "function" || typeof resultDescriptor.set === "function") {
+				return true;
+			}
+		}
+		// The projector's rebuilds spread the object, and a spread copies own
+		// enumerable SYMBOL properties too — running an own enumerable symbol
+		// getter the own-key stamp never sees. An accessor-backed symbol leaves
+		// the graph uncached; a symbol data property is copied verbatim and
+		// `JSON.stringify` ignores it, so it moves no byte.
+		let ownSymbols: symbol[];
+		try {
+			ownSymbols = Object.getOwnPropertySymbols(value);
+		} catch {
 			return true;
+		}
+		for (const symbol of ownSymbols) {
+			const symbolDescriptor = Object.getOwnPropertyDescriptor(value, symbol);
+			if (symbolDescriptor === undefined) continue;
+			if (typeof symbolDescriptor.get === "function" || typeof symbolDescriptor.set === "function") return true;
+		}
 		for (const childKey of Object.keys(value)) {
-			if (skipStructuredContent && childKey === "structuredContent") continue;
+			if (skipStructuredContent && childKey === "structuredContent") {
+				// The field is stripped from the line, but the MCP spill strip
+				// copies the details object wholesale, and that copy runs an own
+				// enumerable getter — so an accessor-backed field leaves the
+				// graph uncached rather than shifting the siblings the line does
+				// record.
+				const stripped = Object.getOwnPropertyDescriptor(value, childKey);
+				if (stripped !== undefined && (typeof stripped.get === "function" || typeof stripped.set === "function")) {
+					return true;
+				}
+				continue;
+			}
 			// Never read through an accessor: the child lookup below would invoke
 			// the getter, and a stateful one then yields a different value when
 			// `#lineFor` serializes the node — so leave the graph uncached instead.
@@ -1890,6 +1927,10 @@ function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
  * payload", not "hidden".
  */
 function imageClassifierHiddenFromStamp(value: object, key: "data" | "mimeType" | "type"): boolean {
+	// An accessor anywhere on the chain: the projector reads the field by key
+	// — which runs the getter — while the stamp records own enumerable keys
+	// only, so the projected bytes can move without a stamped leaf moving.
+	if (readChainField(value, key) === OPAQUE_FIELD) return true;
 	if (projectorImageField(value, key) === undefined) return false;
 	const descriptor = Object.getOwnPropertyDescriptor(value, key);
 	return descriptor === undefined || !descriptor.enumerable;
