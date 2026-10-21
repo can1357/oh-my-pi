@@ -63,6 +63,11 @@ function createStatusContext(hookStatuses: readonly string[]): SegmentContext {
 	} as unknown as SegmentContext;
 }
 
+/** Render an ANSI escape visibly, so a failed assertion names the color it got. */
+function visibleAnsi(ansi: string | undefined): string {
+	return ansi === undefined ? "<none>" : ansi.replace(/\x1b/g, "<ESC>");
+}
+
 describe("status line extension status segment", () => {
 	it("paints the separator between statuses with the separator color", () => {
 		const content = renderSegment("status", createStatusContext(["A !", "B ?"])).content;
@@ -71,9 +76,16 @@ describe("status line extension status segment", () => {
 		// Without distinct foregrounds the assertions below would be vacuous.
 		expect(accentAnsi).not.toBe(separatorAnsi);
 
-		// The dot takes the separator's foreground, not the statuses' accent.
-		expect(content).toContain(`${separatorAnsi}${theme.sep.dot}`);
-		expect(content).not.toContain(`${accentAnsi}${theme.sep.dot}`);
+		// The dot carries the separator's own foreground, not the statuses' accent.
+		// Compare the escape sequences themselves: `muted` and `statusLineSep`
+		// share one ANSI color, so reverse-mapping a color back to a token
+		// cannot tell which token painted the dot.
+		const dotAt = content.indexOf(theme.sep.dot);
+		expect(dotAt).toBeGreaterThan(-1);
+		const dotForeground = /\x1b\[[0-9;:]*m$/.exec(content.slice(0, dotAt))?.[0];
+		expect(visibleAnsi(dotForeground)).toBe(visibleAnsi(separatorAnsi));
+		expect(visibleAnsi(dotForeground)).not.toBe(visibleAnsi(accentAnsi));
+
 		// The status text keeps the accent.
 		expect(content).toContain(`${accentAnsi}A !`);
 		expect(content).toContain(`${accentAnsi}B ?`);
