@@ -1704,6 +1704,26 @@ SiliconFlow (China) is the domestic China deployment of SiliconFlow's AI model p
 - **Dynamic-Only Model Discovery**: Deliberately omitted from `MODELS_DEV_PROVIDER_DESCRIPTORS` and static catalog generation (`scripts/generate-models.ts`), fetching available chat models live from `https://api.siliconflow.cn/v1/models`.
 - **Runtime Reference Hydration**: Live discovered models are cross-referenced with models.dev catalog entries (`SILICONFLOW_MODELS_DEV_DESCRIPTORS`) with a 5-second timeout (`SILICONFLOW_MODELS_DEV_REFERENCE_TIMEOUT_MS`) in `loadSiliconFlowModelsDevReferences` (`packages/catalog/src/provider-models/openai-compat.ts`) to hydrate pricing and limit metadata.
 
+## Munito (`munito`)
+Munito is an EU open-model inference host at `https://api.munito.ai/inference/v1`. Open models run under their canonical upstream ids on the OpenAI Chat Completions transport (`openai-completions`).
+
+### Special casings
+- **`max_tokens` Only**: The provider rule sets `max-tokens-field "max_tokens"` in `packages/catalog/src/compat/rules/providers/munito.kdl`. The endpoint documents `max_tokens` and rejects parameters outside its whitelist, so the OpenAI-baseline `max_completion_tokens` spelling never goes on the wire, and its class defaults would otherwise emit `store: false` on rows that reject any `store` parameter (`supports-store #false`).
+- **OCR Roster Filtering**: `/models` interleaves Munito's OCR SKUs (`munito/ocr-auto`, `munito/ocr-fast`, `lightonai/lightonocr-2-1b`) with the chat models; `isMunitoChatModelId` in `packages/catalog/src/provider-models/openai-compat.ts` drops them through the `exclude-models provider="munito"` rule in `packages/catalog/src/compat/rules/runtime/behavior.kdl`. The OCR models only serve the dedicated document API.
+- **Reasoning Dialect**: Reasoning rides a plain top-level `reasoning_effort`; the identity-derived qwen dialect (`enable_thinking` / `chat_template_kwargs`) 400s with "unknown parameter", so `providers/munito.kdl` pins `thinking-format "openai"` and `reasoning-content-field "reasoning"` (streams arrive under `reasoning`, not `reasoning_content`). Munito accepts `minimal` through `max` and refuses `none`, so reasoning has no wire off-switch.
+- **Effort-Unsupported Lanes**: `qwen/qwen3.6-35b-a3b` and `google/gemma-4-12b` answer 400 to any `reasoning_effort` ("not available for this model"): they carry an empty `thinking-efforts` ladder and `supports-reasoning-effort #false`, so the picker advertises no effort levels and the param never reaches the wire.
+- **Judge Lanes**: `perplexity-ai/pplx-decider-v1.2` and `blockbrain/cygnet` are decision models, not agent chat models. `providers/munito.kdl` corrects their exact selectors to `kind "judge"`, matching the decider's OpenRouter contract (`kind: "judge"`, no native tools) and Cygnet's one-token decision readout, so chat roles cannot send agent turns or native tool calls to them. Both stay selectable for the judge role, which reaches them through the chat-completions judge backend.
+- **Canonical Reference Hydration**: `/models` rows carry only `id`/`owned_by`, so unbundled discovered ids recover limits and reasoning from the bundled canonical reference index via `mapMunitoReferenceModel` (`packages/catalog/src/provider-models/openai-compat.ts`); the `recover-canonical-params "munito"` membership in `packages/catalog/src/compat/rules/taxonomy/_discovery.kdl` documents which providers recover params this way, and the mapping logic itself is TypeScript, not KDL. Munito publishes no per-model tariff yet, so pricing stays zeroed rather than borrowed from another host. Munito rows are on the `reference-isolated-providers` list (`runtime/behavior.kdl`) so the $0 tariff does not shadow priced references for the same upstream id elsewhere.
+
+### Auth & usage
+- **Environment Variable**: `MUNITO_API_KEY`.
+- **API Key Login**: Declared in `packages/catalog/src/compat/rules/auth/munito.kdl`; validation probes `/models`, which is public but answers 401 to an invalid key.
+- **Rate Limits**: The endpoint answers `429`/`503` with a `Retry-After` header; honor it before retrying.
+
+### Catalog model handling
+- **Provider entry (`munito`)**: `packages/catalog/src/compat/rules/providers/munito.kdl` declares default model `qwen/qwen3.8-27b`. Environment keys: `MUNITO_API_KEY`.
+- **Discovery replacement**: Successful authoritative discovery replaces bundled rows rather than retaining retired seed models; generation-time discovery runs keyless (`allow-unauthenticated`), with the one-model seed (`bundle="fallback"`) covering only a regen that could not reach the endpoint.
+
 ## StepFun (`stepfun`)
 StepFun is the OpenAI-compatible Open Platform endpoint at `https://api.stepfun.ai/v1` serving StepFun's own chat models (`step-5-preview`, `step-3.7-flash`, `step-3.5-flash`, `step-3.5-flash-2603`). It uses the OpenAI Chat Completions transport (`openai-completions`). StepFun's China deployment (`api.stepfun.com`) and Step Plan subscription endpoints (`/step_plan/v1`) are separate deployments whose API keys are not interchangeable with `.ai` keys.
 

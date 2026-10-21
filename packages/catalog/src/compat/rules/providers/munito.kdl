@@ -1,0 +1,69 @@
+// Munito (api.munito.ai): EU-hosted open-model inference; see https://docs.munito.ai.
+
+provider "munito" {
+	default-model "qwen/qwen3.8-27b"
+	env "MUNITO_API_KEY"
+	// A retired id would otherwise linger as a dead bundled row.
+	dynamic-models-authoritative #true
+	// /models is public, so discovery runs keyless.
+	discovery label="Munito" allow-unauthenticated=#true
+
+	// A regen without `/models` must still resolve the default at boot.
+	seed api="openai-completions" base-url="https://api.munito.ai/inference/v1" bundle="fallback" {
+		model "qwen/qwen3.8-27b" name="Qwen3.8 27B" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1001536 max-tokens=32768
+			supports-tools #true
+		}
+		model "google/gemma-4-12b" name="Gemma 4 12B" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #true
+		}
+	}
+
+	// The tier 400s fields outside its whitelist: `max_tokens` only (no
+	// `max_completion_tokens`) and no `store`, which class defaults emit for
+	// deepseek, glm, gemma, and kolibri rows.
+	max-tokens-field "max_tokens"
+	supports-store #false
+
+	// The qwen dialect (`enable_thinking`/`chat_template_kwargs`) 400s here
+	// ("unknown parameter"); `none` is refused, so there is no wire off-switch.
+	thinking-format "openai"
+	// Streams arrive under `reasoning`, not `reasoning_content`.
+	reasoning-content-field "reasoning"
+
+	// Munito documents minimal..max for every row, but reviewed class ladders
+	// (deepseek/glm flash families, glm-5.3 SKUs at priority=10) outrank a
+	// provider-wide axis, so `*` at priority=11 clears them; the no-effort
+	// lanes below override it again.
+	models "*" priority=11 {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+
+	// These lanes 400 any `reasoning_effort` ("not available for this model");
+	// reasoning keeps running at the template default.
+	models "qwen/qwen3.6-35b-a3b" "google/gemma-4-12b" {
+		thinking-efforts
+		supports-reasoning-effort #false
+	}
+	// Gemma 4 12B reasons at the template default (no non-reasoning mode) and
+	// has no canonical reference to supply `reasoning`; the exact selector opens
+	// the thinking gate so the neutral spec materializes reasoning-capable with
+	// no ladder.
+	models "google/gemma-4-12b" {
+		thinking-upgrade-neutral #true
+	}
+
+	// Decision lanes: OpenRouter catalogs the decider as `kind: "judge"` without
+	// native tools, and Cygnet is a one-token readout over frozen Gemma-4-12B-it.
+	// A chat kind would offer them agent turns and native tool calls.
+	models "perplexity-ai/pplx-decider-v1.2" "blockbrain/cygnet" {
+		kind "judge"
+	}
+}

@@ -1226,6 +1226,10 @@ export interface GmiCloudModelManagerConfig {
  * reference index. Pricing is deliberately never borrowed across providers:
  * GMI's per-model tariff is unknown for these ids, so cost stays zeroed rather
  * than inheriting another provider's rate.
+ *
+ * Unlike Munito, GMI keeps the reference's thinking ladder: only the seeded
+ * DeepSeek-V4-Flash is authored in KDL, so resold rows need the reference's
+ * exact tiers.
  */
 function mapGmiCloudModel(
 	entry: OpenAICompatibleModelRecord,
@@ -5437,6 +5441,87 @@ export function stepfunModelManagerOptions(
 		// Must live on the manager options, not only the KDL descriptor:
 		// `createModelManager()` prunes the bundled slice from this flag.
 		dynamicModelsAuthoritative: true,
+	});
+}
+
+// ---------------------------------------------------------------------------
+// 16.10 Munito
+// ---------------------------------------------------------------------------
+
+export interface MunitoModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/** OCR SKUs serve only the document API; `runtime/behavior.kdl` excludes them by provider. */
+export function isMunitoChatModelId(id: string): boolean {
+	const normalized = id.trim().toLowerCase();
+	if (!normalized) {
+		return false;
+	}
+	return !isExcludedModel("munito", normalized);
+}
+
+/**
+ * Munito reference recovery: `/models` rows carry only `id`/`owned_by`. An id
+ * bundled on Munito hydrates through {@link mapWithBundledReference}; anything
+ * else recovers intrinsic capabilities (context window, output limit,
+ * reasoning, input modalities) from the bundled canonical index. The
+ * `recover-canonical-params "munito"` membership in `taxonomy/_discovery.kdl`
+ * records that posture; this function is the mapping.
+ *
+ * Thinking stays unset: an inherited reference ladder would win
+ * `resolveThinkingPolicy` and defeat Munito's authored effort rules, so the
+ * provider KDL owns the ladder and wire dialect. Identity, pricing, and compat
+ * are never borrowed: Munito publishes no per-model tariff, so pricing stays
+ * zeroed.
+ */
+export function mapMunitoReferenceModel<TApi extends Api>(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<TApi>,
+	reference: ModelSpec<TApi> | undefined,
+): ModelSpec<TApi> {
+	if (reference) {
+		return mapWithBundledReference(entry, defaults, reference);
+	}
+	const canonical = resolveModelReference(defaults.id, getBundledModelReferenceIndex()) as ModelSpec<TApi> | undefined;
+	if (!canonical) {
+		return { ...defaults, name: toModelName(entry.name, defaults.name) };
+	}
+	const contextWindow = canonical.contextWindow ?? defaults.contextWindow;
+	const maxTokens =
+		canonical.maxTokens != null && contextWindow != null
+			? Math.min(canonical.maxTokens, contextWindow)
+			: (canonical.maxTokens ?? defaults.maxTokens);
+	return {
+		...defaults,
+		name: toModelName(entry.name, canonical.name ?? defaults.name),
+		reasoning: canonical.reasoning,
+		input: canonical.input,
+		contextWindow,
+		maxTokens,
+	};
+}
+
+const MUNITO_GLOBAL_BASE_URL = "https://api.munito.ai/inference/v1";
+
+/**
+ * Munito model-manager options. `/models` is public (invalid keys still 401),
+ * so discovery runs keyless; the key gates inference, not the roster probe.
+ * A successful snapshot is authoritative over the bundled seed rows.
+ */
+export function munitoModelManagerOptions(
+	config?: MunitoModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "munito",
+		defaultBaseUrl: MUNITO_GLOBAL_BASE_URL,
+		config,
+		dynamicModelsAuthoritative: true,
+		filterModel: (_entry, model) => isMunitoChatModelId(model.id),
+		mapModel: mapMunitoReferenceModel,
 	});
 }
 

@@ -51,6 +51,7 @@ export type KnownProvider =
 	| "minimax-code-cn"
 	| "mistral"
 	| "moonshot"
+	| "munito"
 	| "muse-code"
 	| "nanogpt"
 	| "novita"

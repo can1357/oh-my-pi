@@ -393,6 +393,10 @@
 - Relay mode: when Chrome detaches omp from a tab it drives (a password manager's inline menu loading in the page), the call fails at once saying why and omp reattaches to the same tab, instead of every later call timing out and reopening failing with `No page targets available` ([#15920](https://github.com/can1357/oh-my-pi/pull/15920) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the macOS `computer` tool letting the display sleep and lock in a turn that went 5 minutes without a desktop action; it now keeps the display awake until the turn ends or asks for your answer, then lets it sleep ([#15762](https://github.com/can1357/oh-my-pi/pull/15762) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Added
+
+- Added Munito as a `/login` API-key provider (`MUNITO_API_KEY`) ([#15546](https://github.com/can1357/oh-my-pi/pull/15546) by [@jpds](https://github.com/jpds))
+
 ## [18.11.1] - 2026-10-15
 
 ### Added
