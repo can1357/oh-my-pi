@@ -124,6 +124,7 @@ import {
 	MAX_PROTOTYPE_CHAIN_DEPTH,
 	prepareEntryForPersistence,
 	projectorImageField,
+	snapcompactArchiveStampable,
 	TRANSIENT_PERSISTENCE_KEYS,
 } from "./session-persistence";
 import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
@@ -1768,9 +1769,22 @@ function hasSerializerHook(
 			// The snapcompact archive is rebuilt by `persistSnapcompactArchive`,
 			// not by the generic path: every field but its frames is kept
 			// verbatim — including a field the generic path strips — and the
-			// frames are read by key. The own-key stamp describes neither, so a
-			// graph carrying an archive is left uncached and re-projected.
-			if (isSnapcompactArchiveSlot(key, childKey, descriptor.value)) return true;
+			// frames and the `withoutThinking` view are read by key. The stamp
+			// records the archive atomically (see `messageValueStamp`), so the
+			// fields the rebuild reads by key have to be ones the own-key stamp
+			// sees; a field it cannot see leaves the archive uncached and
+			// re-projected.
+			if (isSnapcompactArchiveSlot(key, childKey, descriptor.value)) {
+				if (!snapcompactArchiveStampable(descriptor.value)) return true;
+				pending.push({
+					kind: "value",
+					value: descriptor.value,
+					key: childKey,
+					isTopLevelToolResultDetails: isTopLevelMessageChild(value, key, childKey),
+					atomic: true,
+				});
+				continue;
+			}
 			if (!nodeAtomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
 			pending.push({
 				kind: "value",
@@ -2147,7 +2161,14 @@ function messageValueStamp(value: unknown, out: unknown[] = [], rootKey?: string
 				key: childKey,
 				keyed: true,
 				isTopLevelToolResultDetails: isTopLevelMessageChild(value, key, childKey),
-				atomic: atomicNode,
+				// The snapcompact archive is rebuilt by `persistSnapcompactArchive`,
+				// which keeps every field but its frames verbatim — so a transient
+				// key inside the archive reaches the line, and the stamp has to
+				// record it whole rather than by presence. The archive is
+				// therefore stamped like an atomic node (see
+				// `snapcompactArchiveStampable` for the fields the rebuild reads
+				// by key, which the own-key stamp has to see).
+				atomic: atomicNode || isSnapcompactArchiveSlot(key, childKey, fields[childKey]),
 			});
 		}
 		pending.push({ kind: "end" });
@@ -2359,7 +2380,11 @@ function stampMatches(stamp: readonly unknown[], value: unknown, rootKey?: strin
 					key: childKey,
 					keyed: true,
 					isTopLevelToolResultDetails: isTopLevelMessageChild(live, key, childKey),
-					atomic: nodeAtomic,
+					// The archive is stamped atomically (see
+					// {@link messageValueStamp}), so the matcher reads it the
+					// same way: the flag has to be derived identically or the two
+					// walks disagree about the archive's transient keys.
+					atomic: nodeAtomic || isSnapcompactArchiveSlot(key, childKey, fields[childKey]),
 				});
 			}
 			pending.push({ kind: "end", live });
