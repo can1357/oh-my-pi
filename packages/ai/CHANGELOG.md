@@ -194,6 +194,10 @@
 - Fixed Cursor X Subscription usage treating the weekly Grok/Composer pool as third-party budget; third-party models are now metered by prepaid credit ([#17048](https://github.com/can1357/oh-my-pi/pull/17048) by [@trukhinyuri](https://github.com/trukhinyuri))
 - Fixed Google models (`google-generative-ai`, `google-vertex`, `google-gemini-cli`/Antigravity) running out of output on small `maxTokens` requests with reasoning on, ending with thinking only and no answer; the requested `maxTokens` now leaves room for thinking on top, as on other providers ([#16943](https://github.com/can1357/oh-my-pi/pull/16943) by [@Mouriya-Emma](https://github.com/Mouriya-Emma))
 
+
+### Fixed
+
+- Fixed provider in-flight lock cleanup failures being swallowed silently; they are now logged instead of ignored ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ## [18.12.5] - 2026-10-21
 
 ### Added
