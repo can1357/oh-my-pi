@@ -19,6 +19,8 @@
 - `/mcp reauth <name>` now works over ACP, RPC, and print mode (`omp -p '/mcp reauth <name>'`): it opens the browser, prints the authorization URL, reconnects the server in the running session, and print mode exits 1 when reauthorization fails ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
 
 ### Changed
+- A launch evaluates fewer modules before its first prompt: the `@file` attachment processor, the `--from-claude`/`--from-opencode` resume importer, the python-eval startup probe and the warp-event bridge load on demand, and the extension, custom-tool, custom-command and hook loaders no longer pull the package barrel into the boot graph ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed the CLI evaluating the extension, custom-tool, custom-command and hook loader graphs - and the package barrel behind them - while it boots; they are now imported on demand, and the `@file` attachment processor, the `--from-claude`/`--from-opencode` resume importer and the python-eval startup probe load only when used ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - ACP `session/cancel` now also cancels prompts that are queued or still dispatching, and stops autonomous runs, instead of being ignored when no client turn is streaming ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
 - Idle compaction no longer runs on logged-in OpenAI Codex accounts, whose prompt cache never expires; compacting while idle only threw away a warm cache
@@ -35,14 +37,6 @@
 - Fixed releasing or reaping a browser tab returning while Chromium still listed the page; the close now waits until Chromium reports the tab destroyed ([#16680](https://github.com/can1357/oh-my-pi/pull/16680) by [@H4vC](https://github.com/H4vC))
 - Fixed the advisor prompt forbidding all repeated advice, including real escalations: advisors may now re-raise a prior nit or concern as a blocker once new evidence makes it one ([#13887](https://github.com/can1357/oh-my-pi/issues/13887), [#16484](https://github.com/can1357/oh-my-pi/pull/16484) by [@pjh890321](https://github.com/pjh890321))
 - Fixed Esc no longer interrupting in the TUI after a second MCP OAuth login replaced an unfinished first one ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
-### Fixed
-
-- Fixed the advisor prompt forbidding all repeated advice, including real escalations: advisors may now re-raise a prior nit or concern as a blocker once new evidence makes it one ([#13887](https://github.com/can1357/oh-my-pi/issues/13887), [#16484](https://github.com/can1357/oh-my-pi/pull/16484) by [@pjh890321](https://github.com/pjh890321))
-### Changed
-- A launch evaluates fewer modules before its first prompt: the `@file` attachment processor, the `--from-claude`/`--from-opencode` resume importer, the python-eval startup probe and the warp-event bridge load on demand, and the extension, custom-tool, custom-command and hook loaders no longer pull the package barrel into the boot graph ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed the CLI evaluating the extension, custom-tool, custom-command and hook loader graphs - and the package barrel behind them - while it boots; they are now imported on demand, and the `@file` attachment processor, the `--from-claude`/`--from-opencode` resume importer and the python-eval startup probe load only when used ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
-- Idle compaction no longer runs on logged-in OpenAI Codex accounts, whose prompt cache never expires; compacting while idle only threw away a warm cache
 
 ## [18.12.5] - 2026-10-21
 
