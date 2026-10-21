@@ -33,6 +33,7 @@ import {
 import { isCpuProfilePath } from "../utils/cpuprofile";
 import { isSampleProfilePath } from "../utils/sample-profile";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
+import { audioMimeForPath } from "../utils/media-transcript";
 import { cfgTaskSpeculativeLaunch } from "../task/settings";
 
 import {
@@ -180,14 +181,16 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 			CONVERTIBLE_EXTENSIONS.has(path.extname(resolved).toLowerCase()) ||
 			resolved.endsWith(".svg") ||
 			resolved.endsWith(".svgz") ||
-			// Video reads render viewer UI through a separate frame pipeline
-			// that has no lexical render path; a symlink could otherwise route
-			// a text file there with target-named output.
+			// Video reads render viewer UI through a separate frame pipeline, and audio
+			// reads call a model to transcribe; neither has a lexical render path, and a
+			// symlink could otherwise route a text file there with target-named output.
 			isVideoPath(resolved) ||
-			// The requested path itself may carry a video extension while the
+			audioMimeForPath(resolved) !== undefined ||
+			// The requested path itself may carry a media extension while the
 			// target does not (or vice versa): classification follows the
 			// lexical path exactly like an ordinary read, so decline either.
-			isVideoPath(resource.path)
+			isVideoPath(resource.path) ||
+			audioMimeForPath(resource.path) !== undefined
 		) {
 			return { authorization: { allowed: false, reason: "local read target is unsafe" } };
 		}

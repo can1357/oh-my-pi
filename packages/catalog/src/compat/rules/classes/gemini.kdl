@@ -174,3 +174,16 @@ class "gemini" {
 		}
 	}
 }
+
+// Gemini hears speech in inline audio, which Google's GenerateContent
+// transports carry; `read` transcribes recordings with it. Image-generation
+// rows take text and images only.
+// https://ai.google.dev/gemini-api/docs/audio
+class "gemini" {
+	on-api "google-generative-ai" "google-gemini-cli" "google-vertex" {
+		input-modalities "text" "image" "audio"
+		models token="image" {
+			input-modalities "text" "image"
+		}
+	}
+}
