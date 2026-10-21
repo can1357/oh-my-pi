@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Judge, JudgmentRequest, JudgmentResult, NoulAnswer, Questions } from "@oh-my-pi/pi-ai";
 import { tokenUsage } from "@oh-my-pi/pi-ai";
-import * as natives from "@oh-my-pi/pi-natives";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
@@ -400,22 +399,40 @@ describe("jfind cascade", () => {
 		}
 	});
 
-	it("never runs the native lexical scan for an explicitly named file", async () => {
+	it("does not report a lexical scan phase for an explicitly named file", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-noscan-"));
 		try {
 			const file = path.join(dir, "authority.md");
 			const body = "The Production Planning team owns coil reservation approvals.\n";
 			await Bun.write(file, body);
-			const scan = vi.spyOn(natives, "grep");
+			const query = "who owns coil reservation approvals?";
+			const extraKeywords = ["coil reservation"];
+			// The phase progress is what the user sees while the search runs, so
+			// it is the observable contract: a directory search reports the
+			// lexical scan, a named file reports none — it is the only
+			// candidate, so a lexical rank could not reject it.
+			const dirProgress: string[] = [];
+			await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query,
+				extraKeywords,
+				judge: new FakeJudge(() => 0.9),
+				includeHidden: false,
+				onProgress: message => dirProgress.push(message),
+			});
+			const fileProgress: string[] = [];
 			const result = await runCascade({
 				root: { path: file, type: "file", size: Buffer.byteLength(body) },
 				filesystem: urlFs(dir),
-				query: "who owns coil reservation approvals?",
-				extraKeywords: ["coil reservation"],
+				query,
+				extraKeywords,
 				judge: new FakeJudge(() => 0.9),
 				includeHidden: false,
+				onProgress: message => fileProgress.push(message),
 			});
-			expect(scan).not.toHaveBeenCalled();
+			expect(dirProgress).toContain("lexical scan");
+			expect(fileProgress).not.toContain("lexical scan");
 			expect(result.hits.map(hit => hit.rel)).toEqual([file]);
 		} finally {
 			await removeWithRetries(dir);

@@ -18,7 +18,7 @@
 The cascade follows the semantic-search strategy of [jegrep](https://github.com/can1357/jegrep): lexical pre-ranking, filename judgments, passage sketches, then full-passage verification.
 
 ## CLI
-`omp find "<query>" [path] [-k keyword]... [--hidden] [--json] [-q]` runs the same cascade from the shell (`packages/coding-agent/src/cli/find-cli.ts`): progress goes to stderr and the ranked digest (or JSON with hits and stats) to stdout. A host-directory scope supplies the settings/extensions used to resolve the `judge` role; file/URL scopes use the caller's cwd. Hits are cwd-relative within the cwd, absolute outside it, or internal URLs. Exits 1 for an invalid query/root or when every judgment request failed.
+`omp find "<query>" [path] [-k keyword]... [--hidden] [--json] [-q]` runs the same cascade from the shell (`packages/coding-agent/src/cli/find-cli.ts`): progress goes to stderr and the ranked digest (or JSON with hits and stats) to stdout. A host-directory scope supplies the settings/extensions used to resolve the `judge` role; file/URL scopes use the caller's cwd. Hits are cwd-relative within the cwd, absolute outside it, or internal URLs. Exits 1 for an invalid query/root, for a named file that cannot be searched in full, or when every judgment request failed.
 
 ## Inputs
 
@@ -48,15 +48,15 @@ Use `find` first when the implementing location is unknown. Use `grep` for known
 - Streaming: phase progress (`lexical scan`, `filename ranking 64/128`, `verifying 8 passages in 5 files`, …) is emitted through `onUpdate` and shown in the transcript header while the call runs.
 
 ## Flow
-1. **Lexical scan.** `listFiles()` walks the root (gitignore-aware, no hidden files, no symlinks) and drops build output, lockfiles, binary extensions, credential files, and empty files. A named file bypasses hidden-file exclusion but still must pass the credential/binary/empty-file filter. `grepIndex()` runs one native grep for all keywords and counts per-keyword occurrences on matching lines. Both run concurrently. `idf()` weights rare keywords higher (clamped to `[0.5, 6]`); `fileScore()` ranks every file by weighted log-frequency plus a bonus for keywords in the path.
+1. **Lexical scan.** `listFiles()` walks the root (gitignore-aware, no hidden files, no symlinks) and drops build output, lockfiles, binary extensions, credential files, and empty files. A named file bypasses hidden-file exclusion but still must pass the credential/binary/empty-file filter. `grepIndex()` runs one native grep for all keywords and counts per-keyword occurrences on matching lines. Both run concurrently. `idf()` weights rare keywords higher (clamped to `[0.5, 6]`); `fileScore()` ranks every file by weighted log-frequency plus a bonus for keywords in the path. A named file skips the lexical scan: it is the only candidate, so a lexical rank cannot reject it, and the scan would read the file a second time before the read limit refuses it.
 2. **Filename ranking.** The top 128 lexical candidates are judged by name in batches of 64: one noul per file over a prefix-folded tree listing (`# e017 name (size)`) and shared criteria.
-3. **Passage scoring.** Twenty files are read (the two strongest lexical candidates unconditionally, the rest by name score then lexical rank): up to 4 MB each, cut into 8 KB whole-line windows tagged `L<n>| `, keeping the 24 best-scoring windows (spread evenly through the file when no keyword matches). Each window becomes a 384-byte sketch of its most keyword-dense verbatim lines; sketches are packed 46 per request across files and judged.
+3. **Passage scoring.** Twenty files are read (the two strongest lexical candidates unconditionally, the rest by name score then lexical rank): up to 4 MB each, cut into 8 KB whole-line windows tagged `L<n>| `, keeping the 24 best-scoring windows (spread evenly through the file when no keyword matches). Each window becomes a 384-byte sketch of its most keyword-dense verbatim lines; sketches are packed 46 per request across files and judged. A named file skips the sketch stage and is judged from its windows alone: it is verified whole or refused, never sampled.
 4. **Verification.** Sketches scoring ≥ 0.45 (at most 40) are verified as complete passages, grouped per file three to a request. Only verified passages produce ranges; positive ranges (≥ τ = 0.20) that touch or overlap are merged, keeping the max probability. A file is a hit when its best verified passage reaches τ.
 
 Each judged phase drains through a dispatcher with 16 requests in flight before the next begins, so the critical path is three dependent waves.
 
 ## Side Effects
-- Filesystem: reads up to 20 candidate files (4 MB each); never writes.
+- Filesystem: reads up to 20 candidate files (4 MB each); a named file is read up to its whole-file budget (320 KB); never writes.
 - Network: judgment requests through the session's judge role; usage is summarized in the result footer.
 - Cancellation: the tool abort signal stops the native scan and in-flight judgments.
 
@@ -65,9 +65,11 @@ Each judged phase drains through a dispatcher with 16 requests in flight before 
 - Native lexical scan timeout: 30 s. Native judgments use `NativeJudge` (10 s per attempt, up to three attempts); the tool's 20 s wall budget can abort them earlier.
 - Per-call wall-clock budget: `20_000ms` (`FIND_TIMEOUT_MS` in `packages/coding-agent/src/tools/jfind/index.ts`); hitting it raises `find timed out after 20.0s` instead of blocking the turn. The `omp find` CLI is not bounded this way.
 - Files over 4 MB are scanned by the lexical pass only up to the native grep cap and read only up to 4 MB (trimmed to the last full line).
+- A named file is judged whole or refused: it may hold at most 320 KB (40 passages of 8 KB) and no line may exceed the 8 KB passage limit. A file past either limit is refused with an error instead of being searched in part, so `find` never reports "no hits" for a file it did not read.
 
 ## Errors
 - `ToolError` for an empty `query`, a `path` that does not exist (`Path not found: …`) or is neither a file nor a directory, a URL `:start-end` selector, or a session without a model registry.
+- `ToolError` for a named file that cannot be judged in full (`find cannot judge the whole explicit file: …`): the file is over the 320 KB whole-file budget, holds more than 40 passages, or has a line over the 8 KB passage limit. The CLI prints the message and exits 1.
 - Judge failures are not thrown: a failed request leaves its entries unjudged (filename and verification) or routes them onward as unknown (sketch scoring, so an outage never prunes). Failures are listed in the footer; the result becomes an error only when every request failed.
 - `find timed out after 20.0s` when the `FIND_TIMEOUT_MS` (20 s) wall-clock budget elapses; a caller abort is rethrown as-is, not converted.
 
