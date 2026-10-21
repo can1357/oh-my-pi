@@ -13,6 +13,7 @@
 ### Fixed
 
 - Factory Droid no longer hides a model when live routing's family default leaves it no upstream (an empty default, one naming none of its upstreams, or none serving the account's region); like Droid, it uses the model's registry upstream. An empty per-model route still hides the model ([#17862](https://github.com/can1357/oh-my-pi/pull/17862) by [@will-bogusz](https://github.com/will-bogusz))
+- Models now declare whether they hear audio: Gemini on Google's own transports and every OpenRouter model whose listing takes audio input ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -177,10 +178,6 @@
 ### Changed
 
 - Updated the bundled Yolo-Auto catalog to its current models, `qwen3.8-27b` (now the default), `yolo`, `yolo-small`, and `yolo-128k`, and removed the retired `deepseek-flash-v4` and `qwen3.8-flash`
-
-### Added
-
-- Models now declare whether they hear audio: Gemini on Google's own transports and every OpenRouter model whose listing takes audio input
 
 ## [18.12.5] - 2026-10-21
 
