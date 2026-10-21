@@ -377,6 +377,12 @@ export class ToolExecutionComponent extends Container {
 	#args: unknown;
 	#expanded = false;
 	#allocation = Number.POSITIVE_INFINITY;
+	/**
+	 * The next render only sizes the block: the transcript measures a block
+	 * before it decides whether to show it, and a block it then omits never
+	 * reaches the terminal. A measured render is not a paint.
+	 */
+	#measured = false;
 	#presentationFrame: AnimationFrame = { tick: 0, now: 0 };
 	#toolActivityVisible = true;
 	#showImages: boolean;
@@ -1311,9 +1317,10 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/** Apply the transcript allocator's current viewport reservation. */
-	setTranscriptAllocation(rows: number, frame: AnimationFrame): void {
+	setTranscriptAllocation(rows: number, frame: AnimationFrame, measured = false): void {
 		this.#allocation = Math.max(0, Math.trunc(rows));
 		this.#presentationFrame = frame;
+		this.#measured = measured;
 	}
 
 	setToolActivityVisible(visible: boolean): void {
@@ -1407,7 +1414,13 @@ export class ToolExecutionComponent extends Container {
 			}
 			lines = trimmed;
 		}
-		this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();
+		// The flag is a per-paint fact, and a measured render is not a paint:
+		// the transcript sizes a block before it decides whether to show it, and
+		// a block it then omits never reaches the terminal. Arming the flag here
+		// would ask for a viewport replay for a shape the user never saw.
+		if (!this.#measured) {
+			this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();
+		}
 		this.#partialResultShapePainted = this.#result !== undefined && this.#isPartial;
 		return lines;
 	}
