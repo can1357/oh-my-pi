@@ -20,6 +20,10 @@ import {
 	withAuth,
 } from "@oh-my-pi/pi-ai";
 import { buildAnthropicSystemBlocks, wrapFetchForCch } from "@oh-my-pi/pi-ai/providers/anthropic";
+import {
+	anthropicApiVersionAcceptsSamplingParams,
+	resolveAnthropicApiVersion,
+} from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { AnthropicApiResponse, AnthropicCitation } from "../../../web/search/types";
@@ -181,8 +185,13 @@ async function callSearch(
 		body.metadata = { user_id: metadataUserId };
 	}
 
-	// Opus 4.7+, Sonnet 5+, and Fable/Mythos 5 reject sampling parameters with a 400.
-	if (temperature !== undefined && !hasSamplingRestrictions(model)) {
+	// Opus 4.7+, Sonnet 5+, and Fable/Mythos 5 reject sampling parameters with a 400,
+	// and API version 2026-10-21 rejects them on every model.
+	if (
+		temperature !== undefined &&
+		!hasSamplingRestrictions(model) &&
+		anthropicApiVersionAcceptsSamplingParams(resolveAnthropicApiVersion(auth.baseUrl))
+	) {
 		body.temperature = temperature;
 	}
 

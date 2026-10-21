@@ -180,15 +180,15 @@ export function getRetryFallbackChains(settings: Settings): RetryFallbackChains 
 export interface RetryFallbackRole {
 	/** Selector the role is assigned (the chain's primary). */
 	primary: string;
-	/** Fallback selectors walked after the primary. */
+	/** Fallback selectors walked after the primary; empty explicitly disables fallbacks. */
 	chain: string[];
 }
 
-/** Reads the primary and non-empty chain installed for `role`, if any. */
+/** Reads the primary and chain installed for `role`, including an explicitly empty chain. */
 export function getRetryFallbackRole(settings: Settings, role: string): RetryFallbackRole | undefined {
 	const primary = settings.getModelRole(role);
 	const chain = cfgRetryFallbackChains.get(settings)[role];
-	if (!primary || !Array.isArray(chain) || chain.length === 0) return undefined;
+	if (!primary || !Array.isArray(chain)) return undefined;
 	return { primary, chain };
 }
 

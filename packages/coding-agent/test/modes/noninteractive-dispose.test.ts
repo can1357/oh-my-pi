@@ -41,6 +41,10 @@ describe("print mode disposes the session before terminating", () => {
 				onPersistenceError: () => () => {},
 				onPersistenceNotice: () => () => {},
 			},
+			// A prompt must be admitted for the persisted assistant error to count
+			// as this run's terminal failure; print mode no longer reuses the
+			// previous turn's outcome when every input was consumed locally.
+			prompt: async () => {},
 			state: { messages: [errorMsg] },
 			getLastAssistantMessage: () => errorMsg,
 			disableStopTimeTodoReminders: () => {},
@@ -69,13 +73,15 @@ describe("print mode disposes the session before terminating", () => {
 		try {
 			// No `process.exit` spy: the contract is that runPrintMode never exits
 			// the process itself, it returns the code for the caller to use.
-			expect(await runPrintMode(session, { mode: "text" })).toBe(1);
+			expect(await runPrintMode(session, { mode: "text", messages: ["continue"] })).toBe(1);
 		} finally {
 			stderrSpy.mockRestore();
 			flushSpy.mockRestore();
 		}
 
-		expect(order).toEqual(["catchup", "flush", "dispose", "stderr"]);
+		// "Working..." (the text-mode admission indicator) precedes the
+		// terminal error line; dispose still lands before the error stderr.
+		expect(order).toEqual(["stderr", "catchup", "flush", "dispose", "stderr"]);
 		expect(stderrLines.join("")).toContain("boom");
 	});
 

@@ -47,6 +47,7 @@ describe("/ratchet slash command", () => {
 		const h = acpRuntime({ tools: ["eval", "ask"] });
 		expect(await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/ratchet router", h.runtime])).toEqual({
 			consumed: true,
+			failed: true,
 		});
 		expect(cfgRatchetEnabled.get(h.settings)).toBe(false);
 		expect(h.output).toHaveBeenCalledWith("/ratchet needs the task tool active.");
@@ -56,6 +57,7 @@ describe("/ratchet slash command", () => {
 		const h = acpRuntime({ available: false });
 		expect(await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/ratchet router", h.runtime])).toEqual({
 			consumed: true,
+			failed: true,
 		});
 		expect(cfgRatchetEnabled.get(h.settings)).toBe(false);
 		expect(h.output).toHaveBeenCalledWith("The ratchet eval prelude is unavailable in this session.");

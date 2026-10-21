@@ -10,6 +10,7 @@ import {
 	isLikelyOpenAIResponsesId,
 	modelLimitsFor,
 } from "../compat/behavior";
+import { resolveAnthropicApiVersion } from "../compat/anthropic";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision } from "../compat/revision";
@@ -499,10 +500,10 @@ function mapAnthropicModelsDev(payload: unknown, baseUrl: string): ModelSpec<"an
 	return models;
 }
 
-function buildAnthropicDiscoveryHeaders(apiKey: string): Record<string, string> {
+function buildAnthropicDiscoveryHeaders(apiKey: string, baseUrl: string): Record<string, string> {
 	const oauthToken = isAnthropicOAuthToken(apiKey);
 	const headers: Record<string, string> = {
-		"anthropic-version": "2023-06-01",
+		"anthropic-version": resolveAnthropicApiVersion(baseUrl),
 		"anthropic-dangerous-direct-browser-access": "true",
 		"anthropic-beta": ANTHROPIC_OAUTH_BETA,
 	};
@@ -913,7 +914,7 @@ function createSimpleAnthropicProviderOptions(
 					api: "anthropic-messages",
 					provider: providerId,
 					baseUrl: discoveryBaseUrl,
-					headers: buildAnthropicDiscoveryHeaders(apiKey),
+					headers: buildAnthropicDiscoveryHeaders(apiKey, discoveryBaseUrl),
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						const model = mapWithBundledReference(entry, defaults, reference);
@@ -5312,8 +5313,8 @@ function mapYoloAutoModel(
 	};
 }
 /**
- * Yolo-Auto model manager: OpenAI-compatible chat completions at the
- * flat-rate `deepseek-flash-v4` endpoint. Live `/v1/models` discovery replaces the
+ * Yolo-Auto model manager: flat-rate OpenAI-compatible chat completions
+ * (`qwen3.8-27b`, `yolo`, ...). Live `/v1/models` discovery replaces the
  * bundled seed once a key is stored or present in `YOLO_AUTO_API_KEY`. Models
  * the provider adds later inherit metadata (reasoning, thinking, context)
  * from the global bundled reference index, so new ids work without a per-id
@@ -6869,7 +6870,7 @@ export function anthropicModelManagerOptions(
 						api: "anthropic-messages",
 						provider: "anthropic",
 						baseUrl: discoveryBaseUrl,
-						headers: buildAnthropicDiscoveryHeaders(apiKey),
+						headers: buildAnthropicDiscoveryHeaders(apiKey, discoveryBaseUrl),
 						mapModel: (
 							entry: OpenAICompatibleModelRecord,
 							defaults: ModelSpec<"anthropic-messages">,

@@ -1,6 +1,11 @@
 import * as fs from "node:fs";
 import * as tls from "node:tls";
-import { isAnthropicSigningProxyUrl, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import {
+	anthropicApiVersionAcceptsSamplingParams,
+	isAnthropicSigningProxyUrl,
+	isOfficialAnthropicApiUrl,
+	resolveAnthropicApiVersion,
+} from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { hostMatchesUrl, isVertexRawPredictUrl, modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -400,7 +405,6 @@ const sharedHeaders = {
 	"Accept-Encoding": "gzip, deflate, br, zstd",
 	Connection: "keep-alive",
 	"Content-Type": "application/json",
-	"anthropic-version": "2023-06-01",
 	"anthropic-dangerous-direct-browser-access": "true",
 	"x-app": "cli",
 };
@@ -428,6 +432,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			(oauthToken ? buildClaudeCodeBetas({ agentRequest: true, thinkingRequest: true }) : []),
 		extraBetas,
 	);
+	const apiVersion = resolveAnthropicApiVersion(options.baseUrl);
 	const acceptHeader = oauthToken ? "application/json" : stream ? "text/event-stream" : "application/json";
 	const isCloudflare = options.isCloudflareAiGateway ?? false;
 	const honorAuthorization = !oauthToken && !isCloudflare;
@@ -476,6 +481,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			...modelHeaders,
 			Accept: acceptHeader,
 			...sharedHeaders,
+			"anthropic-version": apiVersion,
 			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
 			"cf-aig-authorization": `Bearer ${options.apiKey}`,
@@ -493,7 +499,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			...claudeCodeHeaders,
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
 			"anthropic-dangerous-direct-browser-access": "true",
-			"anthropic-version": "2023-06-01",
+			"anthropic-version": apiVersion,
 			Authorization: `Bearer ${options.apiKey}`,
 			"x-app": "cli",
 			Connection: "keep-alive",
@@ -514,6 +520,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			Accept: acceptHeader,
 			...(bearer ? { Authorization: bearer } : {}),
 			...sharedHeaders,
+			"anthropic-version": apiVersion,
 			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
 			...(incomingApiKey ? { "X-Api-Key": incomingApiKey } : {}),
@@ -523,6 +530,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			...modelHeaders,
 			Accept: acceptHeader,
 			...sharedHeaders,
+			"anthropic-version": apiVersion,
 			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
 			...(incomingAuthorization ? { Authorization: incomingAuthorization } : {}),
@@ -4266,7 +4274,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			{
 				Accept: stream ? "text/event-stream" : "application/json",
 				"Content-Type": "application/json",
-				"anthropic-version": "2023-06-01",
+				"anthropic-version": resolveAnthropicApiVersion(baseUrl),
 				"Anthropic-Dangerous-Direct-Browser-Access": "true",
 				Authorization: `Bearer ${copilotApiKey}`,
 				...(betaFeatures.length > 0 ? { "anthropic-beta": buildBetaHeader([], betaFeatures) } : {}),
@@ -5692,10 +5700,13 @@ function buildParams(
 		stream: true,
 	};
 
-	// Opus 4.7+ and Fable/Mythos 5 reject non-default sampling parameters with 400 error.
+	// Opus 4.7+ and Fable/Mythos 5 reject non-default sampling parameters with 400 error,
+	// and API version 2026-10-21 rejects them on every model.
 	const thinkingType = params.thinking?.type;
 	const allowSamplingParams =
-		model.compat.supportsSamplingParams && (thinkingType === undefined || thinkingType === "disabled");
+		model.compat.supportsSamplingParams &&
+		anthropicApiVersionAcceptsSamplingParams(resolveAnthropicApiVersion(vertexRequestUrl)) &&
+		(thinkingType === undefined || thinkingType === "disabled");
 	if (allowSamplingParams && options?.temperature !== undefined) {
 		params.temperature = options.temperature;
 	}

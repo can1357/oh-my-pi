@@ -61,7 +61,7 @@ describe("/compact dispatch (ACP)", () => {
 		const h = acpRuntime();
 		const result = await executeAcpBuiltinSlashCommand("/compact snapcompact keep the diffs", h.runtime);
 		expect(h.compact).not.toHaveBeenCalled();
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect((h.output.mock.calls[0]?.[0] as string) ?? "").toContain("snapcompact");
 	});
 

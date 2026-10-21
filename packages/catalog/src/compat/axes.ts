@@ -560,6 +560,13 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * Unassigned: no known lookback bound.
 	 */
 	"prompt-cache-lookback": { key: "promptCacheLookback", set: "catalog", shape: "scalar" },
+	/**
+	 * The provider's own endpoint keeps prompt-cache entries indefinitely
+	 * (logged-in Codex subscriptions): an idle gap never cools the prefix, so
+	 * rewriting it while idle only discards a warm cache. Read through
+	 * `compat/prompt-cache-persistent.ts`. Unassigned: entries expire.
+	 */
+	"prompt-cache-persistent": { key: "promptCachePersistent", set: "catalog", shape: "scalar", values: [true, false] },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	/**

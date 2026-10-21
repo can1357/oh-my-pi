@@ -186,6 +186,198 @@ describe("ACP JSON-RPC transport", () => {
 			{ code: -32003, message: "Agent is already processing.", data: { reason: "session_busy" } },
 		]);
 	});
+
+	it("requestCancellable rejects the pending entry, notifies $/cancel_request, and ignores late responses", async () => {
+		const inbound = new TransformStream<AnyMessage, AnyMessage>();
+		const outbound = new TransformStream<AnyMessage, AnyMessage>();
+		const connection = new RpcConnection({ writable: outbound.writable, readable: inbound.readable }, async () => {
+			throw RequestError.methodNotFound("unused");
+		});
+		const reader = outbound.readable.getReader();
+		const writer = inbound.writable.getWriter();
+
+		const { promise, cancel } = connection.requestCancellable<{ outcome: unknown }>("session/request_permission", {
+			sessionId: "session-1",
+		});
+
+		// The request frame goes out with a fresh id.
+		const requestFrame = await reader.read();
+		expect(requestFrame.value).toMatchObject({ jsonrpc: "2.0", method: "session/request_permission" });
+		const requestId = (requestFrame.value as { id: number }).id;
+
+		cancel();
+
+		// The promise rejects as request-cancelled …
+		const error = await promise.then(
+			() => undefined,
+			(rejection: unknown) => rejection,
+		);
+		expect(error).toBeInstanceOf(RequestError);
+		expect((error as RequestError).code).toBe(-32800);
+
+		// … the peer is told via $/cancel_request …
+		const cancelFrame = await reader.read();
+		expect(cancelFrame.value).toEqual({
+			jsonrpc: "2.0",
+			method: "$/cancel_request",
+			params: { requestId },
+		});
+
+		// … and a late response for the dropped entry is ignored rather than
+		// rejecting anything or throwing on an unknown id.
+		await writer.write({
+			jsonrpc: "2.0",
+			id: requestId,
+			result: { outcome: { outcome: "selected", optionId: "x" } },
+		});
+		await Bun.sleep(0);
+		expect(connection.signal.aborted).toBe(false);
+
+		// A second cancel is a no-op — the entry is already gone.
+		cancel();
+		await Bun.sleep(0);
+		await connection.close();
+		reader.releaseLock();
+		writer.releaseLock();
+	});
+
+	it("requestPermissionWithCancel ends the client's inbound handler via its abort signal", async () => {
+		// The receiving half of a cancelled elicit: `cancel()` used to only
+		// drop the sender's pending entry and send `$/cancel_request` — the
+		// client-side handler (a dialog) never learned about it and held the
+		// clean-EOF drain until the 30 s timeout. The handler now receives the
+		// request's abort signal, ends on it, and its late response is
+		// suppressed on the agent side.
+		const pair = transportPair();
+		const handlerStarted = Promise.withResolvers<void>();
+		const handlerEnded = Promise.withResolvers<void>();
+		let handlerSignal: AbortSignal | undefined;
+		const client: Client = {
+			requestPermission(_params, options) {
+				handlerSignal = options?.signal;
+				handlerStarted.resolve();
+				const gate = Promise.withResolvers<void>();
+				if (options?.signal?.aborted) gate.resolve();
+				else options?.signal?.addEventListener("abort", () => gate.resolve(), { once: true });
+				return gate.promise.then(() => {
+					handlerEnded.resolve();
+					return { outcome: { outcome: "cancelled" as const } };
+				});
+			},
+			sessionUpdate: async () => {},
+		};
+		const _clientConnection = new ClientSideConnection(() => client, pair.left);
+		const agentConnection = new AgentSideConnection(
+			connection => ({
+				initialize: params => ({ protocolVersion: params.protocolVersion }),
+				newSession: async () => ({ sessionId: "session-1" }),
+				prompt: async () => {
+					void connection;
+					return { stopReason: "end_turn" };
+				},
+				cancel: async () => {},
+			}),
+			pair.right,
+		);
+
+		const { promise, cancel } = agentConnection.requestPermissionWithCancel({
+			sessionId: "session-1",
+			toolCall: { toolCallId: "tool-1" },
+			options: [],
+		});
+		await handlerStarted.promise;
+		expect(handlerSignal).toBeDefined();
+
+		// Agent-side cancellation must reach the handler through its signal…
+		cancel();
+		await handlerEnded.promise;
+
+		// …and reject the elicit as request-cancelled; the handler's late
+		// response for the dropped id is ignored (covered by the sender-side
+		// test above), so nothing throws on either side.
+		const error = await promise.then(
+			() => undefined,
+			(rejection: unknown) => rejection,
+		);
+		expect(error).toBeInstanceOf(RequestError);
+		expect((error as RequestError).code).toBe(-32800);
+	});
+
+	it("answers a peer $/cancel_request with -32800 on the wire when the dispatcher honors cancellation", async () => {
+		// ACP v1 spec: a cancelled inbound request must still receive a
+		// response. The transport aborts the handler and writes the
+		// `-32800` error itself, so a client that cancels its elicit is
+		// never left waiting on a handler that may never settle.
+		const inbound = new TransformStream<AnyMessage, AnyMessage>();
+		const outbound = new TransformStream<AnyMessage, AnyMessage>();
+		const handlerAborted = Promise.withResolvers<void>();
+		const connection = new RpcConnection(
+			{ writable: outbound.writable, readable: inbound.readable },
+			async (_method: string, _params: unknown, _notification: boolean, signal?: AbortSignal) => {
+				// A handler that parks until its abort signal fires: only the
+				// transport's own response can settle the exchange.
+				signal?.addEventListener("abort", () => handlerAborted.resolve(), { once: true });
+				await handlerAborted.promise;
+				return {};
+			},
+			{ honorsInboundCancellation: true },
+		);
+		const writer = inbound.writable.getWriter();
+		const reader = outbound.readable.getReader();
+		await writer.write({ jsonrpc: "2.0", id: 41, method: "session/request_permission" });
+		await writer.write({
+			jsonrpc: "2.0",
+			method: "$/cancel_request",
+			params: { requestId: 41 },
+		});
+		const response = (await reader.read()).value as { id: number; error?: { code: number } };
+		expect(response.id).toBe(41);
+		expect(response.error?.code).toBe(-32800);
+		// The handler was aborted by the cancellation, not just answered around.
+		await handlerAborted.promise;
+		await connection.close();
+		writer.releaseLock();
+		reader.releaseLock();
+	});
+
+	it("keeps an agent request running and answers with its real result after a peer $/cancel_request", async () => {
+		// The agent side's handlers never observe a cancel signal (prompts
+		// are cancelled through `session/cancel`). Answering `-32800` there
+		// would tell the client its prompt was cancelled while the turn kept
+		// streaming, and drop the real stop reason.
+		const inbound = new TransformStream<AnyMessage, AnyMessage>();
+		const outbound = new TransformStream<AnyMessage, AnyMessage>();
+		const finishPrompt = Promise.withResolvers<void>();
+		const promptStarted = Promise.withResolvers<void>();
+		const _agentConnection = new AgentSideConnection(
+			() => ({
+				initialize: params => ({ protocolVersion: params.protocolVersion }),
+				newSession: async () => ({ sessionId: "session-1" }),
+				prompt: async () => {
+					promptStarted.resolve();
+					await finishPrompt.promise;
+					return { stopReason: "end_turn" };
+				},
+				cancel: async () => {},
+			}),
+			{ writable: outbound.writable, readable: inbound.readable },
+		);
+		const writer = inbound.writable.getWriter();
+		const reader = outbound.readable.getReader();
+		await writer.write({
+			jsonrpc: "2.0",
+			id: 7,
+			method: "session/prompt",
+			params: { sessionId: "session-1", prompt: [{ type: "text", text: "hi" }] },
+		});
+		await promptStarted.promise;
+		await writer.write({ jsonrpc: "2.0", method: "$/cancel_request", params: { requestId: 7 } });
+		finishPrompt.resolve();
+		const response = (await reader.read()).value;
+		expect(response).toEqual({ jsonrpc: "2.0", id: 7, result: { stopReason: "end_turn" } });
+		writer.releaseLock();
+		reader.releaseLock();
+	});
 });
 
 describe("ACP runtime schemas", () => {

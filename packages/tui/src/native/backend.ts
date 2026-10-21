@@ -54,6 +54,7 @@ import { getNativeBlob, type NativeBlob } from "./blobs";
 import { node } from "./describe";
 import { encodeTspJson, encodeTspMessage, type TspHello, TspReader, splitTspMessage } from "./encode";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiEvent } from "./node";
+import { NARROW_SHEET_COLS } from "./overlay";
 import { nativeComponentId, Reconciler } from "./reconcile";
 import { setNativeRendering } from "./state";
 
@@ -939,7 +940,12 @@ export class NativeBackend {
 		if (overlay.component.nativeSheet?.(this.#cx)) return overlay.component;
 		const own = overlay.component.nativeOverlay;
 		const anchor = own?.anchor ?? overlayAnchor(overlay.options);
-		const size = own?.size ?? overlaySize(overlay.options, this.#cx.cols);
+		let size = own?.size ?? overlaySize(overlay.options, this.#cx.cols);
+		// A centered sheet in a narrow pane fills it instead of floating with margins: `lg`, and a component's own `md`
+		// sheet (an undeclared `md` is a generic dialog sized from its options).
+		if (anchor === "center" && this.#cx.cols < NARROW_SHEET_COLS && (size === "lg" || own?.size === "md")) {
+			size = "full";
+		}
 		const modal = overlay.focused || overlay.options?.fullscreen === true;
 		const role = own?.role;
 		const head = own?.head;

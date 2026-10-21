@@ -1,10 +1,10 @@
 import type { Model } from "@oh-my-pi/pi-ai";
+import { resolveAnthropicApiVersion } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import type { ProviderFileClient, ProviderFileHandle, ProviderFileUploadRequest } from "./provider-file-types";
 import type { FetchImpl } from "./uploader-runtime";
 
 const ANTHROPIC_FILES_URL = "https://api.anthropic.com/v1/files";
-const ANTHROPIC_VERSION = "2023-06-01";
 const ANTHROPIC_FILES_BETA = "files-api-2025-04-14";
 
 interface AnthropicFileMetadata {
@@ -39,7 +39,7 @@ function authHeaders(credential: string): Readonly<Record<string, string>> {
 function requestHeaders(credential: string): Readonly<Record<string, string>> {
 	return {
 		...authHeaders(credential),
-		"anthropic-version": ANTHROPIC_VERSION,
+		"anthropic-version": resolveAnthropicApiVersion(ANTHROPIC_FILES_URL),
 		"anthropic-beta": ANTHROPIC_FILES_BETA,
 	};
 }
@@ -104,10 +104,10 @@ export function createAnthropicFileClient(
 	}
 	if (credential.length === 0) throw new Error("Anthropic Files API credential is required");
 
-	const headers = requestHeaders(credential);
 	return {
 		provider: "anthropic",
 		async upload(request: ProviderFileUploadRequest): Promise<ProviderFileHandle> {
+			const headers = requestHeaders(credential);
 			const form = new FormData();
 			form.append("file", uploadedFile(request));
 			const response = await expectAnthropicOk(
@@ -133,6 +133,7 @@ export function createAnthropicFileClient(
 		async delete(handle: ProviderFileHandle): Promise<void> {
 			if (handle.provider !== "anthropic" || !handle.id)
 				throw new Error("Cannot delete an invalid Anthropic file handle");
+			const headers = requestHeaders(credential);
 			await expectAnthropicOk(
 				await fetchImpl(`${ANTHROPIC_FILES_URL}/${encodeURIComponent(handle.id)}`, {
 					method: "DELETE",

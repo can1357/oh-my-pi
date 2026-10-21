@@ -71,7 +71,7 @@ describe("/retry dispatch (ACP)", () => {
 		const h = acpRuntime({ isStreaming: true });
 		const result = await executeAcpBuiltinSlashCommand("/retry", h.runtime);
 		expect(h.retry).not.toHaveBeenCalled();
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect((h.output.mock.calls[0]?.[0] as string) ?? "").toContain("before retrying");
 	});
 
@@ -80,7 +80,7 @@ describe("/retry dispatch (ACP)", () => {
 		const result = await executeAcpBuiltinSlashCommand("/retry", h.runtime);
 		expect(h.output).toHaveBeenCalledWith("Nothing to retry.");
 		expect(h.keepTurnOpenUntilIdle).not.toHaveBeenCalled();
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 	});
 
 	it("announces the retry and holds the ACP turn open for the retried turn", async () => {

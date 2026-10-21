@@ -24,6 +24,9 @@ provider "openai-codex" {
 	// The backend decodes zstd request bodies, as the official client sends.
 	// Its rejection body is undocumented, so any 400/415 re-checks uncompressed.
 	request-encodings "zstd"
+	// Logged-in Codex accounts keep prompt-cache entries with no TTL, so
+	// idle compaction would only discard a prefix that stays warm.
+	prompt-cache-persistent #true
 
 	seed api="openai-codex-responses" base-url="https://chatgpt.com/backend-api" bundle="always" {
 		// Label only: the Codex backend ignores `tool.model` and runs gpt-image-2-codex.

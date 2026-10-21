@@ -4,6 +4,7 @@ import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Loader, TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { isPromptCachePersistent } from "@oh-my-pi/pi-catalog/compat/prompt-cache-persistent";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -2792,6 +2793,7 @@ export class EventController {
 
 		const idleSettings = cfgCompaction.get(this.ctx.settings);
 		if (!idleSettings.idleEnabled) return;
+		if (this.#promptCachePersistent()) return;
 
 		// Only if input is empty
 		if (this.ctx.editor.getText().trim()) return;
@@ -2826,10 +2828,21 @@ export class EventController {
 			if (this.ctx.viewSession.isStreaming) return;
 			if (this.ctx.viewSession.isCompacting) return;
 			if (this.ctx.editor.getText().trim()) return;
+			if (this.#promptCachePersistent()) return;
 			if (this.#currentContextTokens() < threshold) return;
 			void this.ctx.viewSession.runIdleCompaction();
 		}, timeoutMs);
 		this.#idleCompactionTimer.unref?.();
+	}
+
+	/**
+	 * A never-expiring prompt cache (logged-in Codex) stays warm across any idle
+	 * gap, so idle compaction would only discard it and force a cold prefix on
+	 * the next turn. Threshold compaction still runs.
+	 */
+	#promptCachePersistent(): boolean {
+		const model = this.ctx.viewSession.model;
+		return model !== undefined && isPromptCachePersistent(model);
 	}
 
 	#scheduleIdleRecap(): void {

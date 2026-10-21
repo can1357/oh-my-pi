@@ -5,7 +5,9 @@ import { Effort } from "../../catalog/src/effort";
 import { seedModels } from "../../catalog/src/compat/providers";
 import { streamOpenAICompletions } from "../src/providers/openai-completions";
 
-const model = buildModel(seedModels("yolo-auto")[0]) as Model<"openai-completions">;
+const seed = seedModels("yolo-auto").find(entry => entry.id === "qwen3.8-27b");
+if (!seed) throw new Error("Yolo-Auto qwen3.8-27b seed missing");
+const model = buildModel(seed) as Model<"openai-completions">;
 
 const context: Context = {
 	messages: [{ role: "user", content: "hello", timestamp: 0 }],
@@ -44,22 +46,16 @@ async function outgoingBody(options: {
 	return body;
 }
 
-describe("Yolo-Auto chat-template thinking wire format", () => {
-	test("enables thinking in chat_template_kwargs", async () => {
-		const body = await outgoingBody({ reasoning: Effort.Low });
-		expect(body.chat_template_kwargs).toEqual({ thinking: true, reasoning_effort: "low" });
+describe("Yolo-Auto Qwen chat-template thinking wire format", () => {
+	test("enables thinking and forwards the effort in chat_template_kwargs", async () => {
+		const body = await outgoingBody({ reasoning: Effort.XHigh });
+		expect(body.chat_template_kwargs).toEqual({ enable_thinking: true, reasoning_effort: "xhigh" });
 		expect(body).not.toHaveProperty("reasoning_effort");
 	});
 
 	test("disables thinking in chat_template_kwargs", async () => {
 		const body = await outgoingBody({ disableReasoning: true });
-		expect(body.chat_template_kwargs).toEqual({ thinking: false });
-		expect(body).not.toHaveProperty("reasoning_effort");
-	});
-
-	test("maps and forwards the selected effort in chat_template_kwargs", async () => {
-		const body = await outgoingBody({ reasoning: Effort.XHigh });
-		expect(body.chat_template_kwargs).toEqual({ thinking: true, reasoning_effort: "max" });
+		expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
 		expect(body).not.toHaveProperty("reasoning_effort");
 	});
 });

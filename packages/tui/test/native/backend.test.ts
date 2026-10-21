@@ -282,4 +282,37 @@ describe("native backend", () => {
 		expect(sent[1]!.body).toEqual({ id: surface, keep: true });
 		expect(h.terminal.rowBytes.slice(rows)).not.toContain("probe rows");
 	});
+
+	it("fills a narrow pane with centered lg and own-md sheets, follows resizes, and leaves anchored and option-sized sheets", async () => {
+		const sheet = (role: string, nativeOverlay?: Component["nativeOverlay"]): Component =>
+			Object.assign(new Probe(md(role)), nativeOverlay ? { nativeOverlay } : {});
+		harness = await TspHarness.start(
+			tui => {
+				tui.showOverlay(sheet("lg", { role: "lg", size: "lg" }));
+				tui.showOverlay(sheet("own-md", { role: "own-md", size: "md", anchor: "center" }));
+				tui.showOverlay(sheet("top-md", { role: "top-md", size: "md", anchor: "top" }));
+				// No sheet of its own: `md` comes from the overlay options, as for a generic dialog.
+				tui.showOverlay(sheet("dialog"), { width: "50%" });
+			},
+			{ cols: 99 },
+		);
+		const h = harness;
+		const sizes = (): Record<string, unknown> =>
+			Object.fromEntries(
+				h
+					.findAll(n => n.k === "overlay")
+					.map(n => [n.p?.role ?? "dialog", n.p && "size" in n.p ? n.p.size : undefined]),
+			);
+		const narrow = { lg: "full", "own-md": "full", "top-md": "md", dialog: "md" };
+		expect(sizes()).toEqual(narrow);
+
+		h.event({ ev: "resize", cols: 100 });
+		await h.render();
+		expect(sizes()).toEqual({ lg: "lg", "own-md": "md", "top-md": "md", dialog: "md" });
+
+		h.event({ ev: "resize", cols: 99 });
+		await h.render();
+		expect(sizes()).toEqual(narrow);
+		expect(h.errors).toEqual([]);
+	});
 });

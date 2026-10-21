@@ -5,6 +5,7 @@
 ### Added
 
 - Added `completionsDropsOwnThinking`, `completionsRequestDropsOwnThinking` and `isLiteLLMThinkingSignature`, which report whether a chat-completions request drops the model's own past thinking, so token estimates can match what is actually sent ([#15797](https://github.com/can1357/oh-my-pi/issues/15797), [#16498](https://github.com/can1357/oh-my-pi/pull/16498) by [@ghisguth](https://github.com/ghisguth))
+- Added `PI_ANTHROPIC_API_VERSION=2026-10-21` to send Anthropic API version 2026-10-21 to the official Anthropic API; sampling parameters are omitted under that version, which rejects them ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 
 ## [18.12.5] - 2026-10-21
 

@@ -969,6 +969,7 @@ describe("/mcp auth commands", () => {
 		});
 
 		const { controller, ctx, showError, showStatus, editor, oauthManualInput } = createController(authStorage);
+		const defaultOnEscape = editor.onEscape;
 		// Event-gate the claim instead of polling to a wall-clock deadline: on a
 		// loaded runner the old 1s budget could expire before the flow claimed the
 		// manual-input slot, and the assertion below then read `undefined` from a
@@ -996,6 +997,11 @@ describe("/mcp auth commands", () => {
 		expect(authStorage.credentials.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
 			access: "replacement-access",
 		});
+
+		// The replacement flow restored the session's default Esc handler, not
+		// the superseded flow's dead one: after both flows unwind the editor
+		// keeps interrupt/cancel-compaction semantics for the session.
+		expect(editor.onEscape).toBe(defaultOnEscape);
 	});
 
 	test("Esc cancels even when OAuth login has not registered its signal listener yet", async () => {

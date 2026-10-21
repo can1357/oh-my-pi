@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import { Database } from "bun:sqlite";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -11,6 +13,7 @@ import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import * as oauthFlowModule from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
 	AcpAgent,
@@ -22,7 +25,7 @@ import type {
 	AgentSessionEvent,
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
@@ -136,6 +139,35 @@ class FakeAgentSession {
 		return Settings.instance;
 	}
 	promptCalls: string[] = [];
+	steerCalls: Array<{ text: string; images: unknown[] }> = [];
+	followUpCalls: Array<{ text: string; images: unknown[] }> = [];
+	joinActiveTurnCalls: Array<{ text: string; images: unknown[]; queue: "steering" | "followUp" }> = [];
+	/** Extra refusal switch for the fake `joinActiveTurn`; `isStreaming` remains the busy gate. */
+	joinActiveTurnAdmitted = true;
+	async steer(text: string, images?: unknown[]): Promise<void> {
+		this.steerCalls.push({ text, images: images ?? [] });
+	}
+	async followUp(text: string, images?: unknown[]): Promise<void> {
+		this.followUpCalls.push({ text, images: images ?? [] });
+	}
+	async joinActiveTurn(
+		text: string,
+		images?: unknown[],
+		options?: { queue?: "steering" | "followUp" },
+	): Promise<boolean> {
+		const queue = options?.queue ?? "steering";
+		this.joinActiveTurnCalls.push({ text, images: images ?? [], queue });
+		const admitted = this.isStreaming && this.joinActiveTurnAdmitted;
+		if (!admitted) {
+			return false;
+		}
+		if (queue === "followUp") {
+			await this.followUp(text, images);
+		} else {
+			await this.steer(text, images);
+		}
+		return true;
+	}
 	customMessages: Array<{ customType: string; content: string; details?: unknown }> = [];
 	customMessageOptions: Array<{ streamingBehavior?: "steer" | "followUp"; queueChipText?: string } | undefined> = [];
 	skillsSettings = { enableSkillCommands: true };
@@ -151,6 +183,8 @@ class FakeAgentSession {
 	usageFallbackConfirmer: ((confirmation: UsageFallbackConfirmation) => Promise<boolean>) | undefined;
 	retryResult = false;
 	retryCalls = 0;
+	/** Backs `modelRegistry.authStorage` for `/mcp reauth` credential round-trips. */
+	authStorage?: AuthStorage;
 	#listeners = new Set<(event: AgentSessionEvent) => void>();
 
 	constructor(
@@ -172,9 +206,10 @@ class FakeAgentSession {
 		return this.sessionManager.getHeader()?.title ?? `Session ${this.sessionId}`;
 	}
 
-	get modelRegistry(): { getApiKey: (model: Model) => Promise<string> } {
+	get modelRegistry(): { getApiKey: (model: Model) => Promise<string>; authStorage?: AuthStorage } {
 		return {
 			getApiKey: async (_model: Model) => "test-key",
+			...(this.authStorage ? { authStorage: this.authStorage } : {}),
 		};
 	}
 
@@ -497,6 +532,8 @@ async function createHarness(
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
 		/** Gives each session the factory creates a real extension runner with no extensions. */
 		extensionRunners?: boolean;
+		/** Exposed to each created session's `modelRegistry` for MCP credential round-trips. */
+		authStorage?: AuthStorage;
 	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
@@ -533,6 +570,7 @@ async function createHarness(
 	sessions.push(initialSession);
 	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
 		const session = new FakeAgentSession(cwd);
+		if (options.authStorage) session.authStorage = options.authStorage;
 		if (options.extensionRunners) {
 			session.extensionRunner = new ExtensionRunner(
 				[],
@@ -1291,6 +1329,299 @@ describe("ACP agent", () => {
 		await expect(harness.agent.extMethod("omp/sessions/listAll", { limit: 2 })).rejects.toThrow(
 			"Unknown ACP ext method",
 		);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("steers a running turn through _session/steering", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.isStreaming = true;
+
+		const result = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [
+				{ type: "text", text: "use the existing parser" },
+				{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+				{ type: "resource_link", uri: "file:///plan.md", name: "plan" },
+			],
+		});
+
+		// Admission goes through AgentSession.joinActiveTurn — the atomic
+		// check+enqueue primitive — never a raw steer() plus bridge heuristics.
+		expect(result).toEqual({ outcome: "injected", queue: "steering" });
+		expect(session.joinActiveTurnCalls).toEqual([
+			{
+				text: "use the existing parser\n\nplan",
+				images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
+				queue: "steering",
+			},
+		]);
+		expect(session.steerCalls).toEqual([
+			{
+				text: "use the existing parser\n\nplan",
+				images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
+			},
+		]);
+		expect(session.followUpCalls).toEqual([]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("targets the follow-up queue when _meta.steering.queue is followUp", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.isStreaming = true;
+
+		// A bare string prompt is accepted defensively for off-spec clients.
+		const result = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: "then run the tests",
+			_meta: { steering: { queue: "followUp" } },
+		});
+
+		expect(result).toEqual({ outcome: "injected", queue: "followUp" });
+		expect(session.joinActiveTurnCalls).toEqual([{ text: "then run the tests", images: [], queue: "followUp" }]);
+		expect(session.followUpCalls).toEqual([{ text: "then run the tests", images: [] }]);
+		expect(session.steerCalls).toEqual([]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("steers a turn whose prompt is still dispatching instead of queueing a second prompt", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// Hold the turn inside AgentSession.prompt — the same window the real
+		// session occupies in flight (#beginInFlight at prompt entry), so
+		// joinActiveTurn classifies it live and the steer joins it.
+		const dispatchHeld = Promise.withResolvers<void>();
+		session.prompt = async (text: string) => {
+			session.promptCalls.push(text);
+			session.isStreaming = true;
+			await dispatchHeld.promise;
+			return true;
+		};
+
+		const clientPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "original task" }],
+		});
+		void clientPrompt.catch(() => undefined);
+		await Bun.sleep(1);
+
+		const result = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "use the existing parser" }],
+		});
+
+		expect(result).toEqual({ outcome: "injected", queue: "steering" });
+		expect(session.steerCalls).toEqual([{ text: "use the existing parser", images: [] }]);
+		// Only the client's own prompt was ever started — the steer joins that
+		// turn rather than queueing a second prompt behind it.
+		expect(session.promptCalls).toEqual(["original task"]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("hands a steer that outlives its turn back to the host instead of stranding it", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// The run settles while joinActiveTurn is still admitting the message
+		// (image preprocessing awaits real time before the enqueue): the
+		// message must classify as not-admitted and never reach an idle queue.
+		session.isStreaming = true;
+		const realJoin = session.joinActiveTurn.bind(session);
+		session.joinActiveTurn = async (
+			text: string,
+			images?: unknown[],
+			options?: { queue?: "steering" | "followUp" },
+		) => {
+			session.isStreaming = false;
+			return await realJoin(text, images, options);
+		};
+
+		const raced = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "use the existing parser" }],
+		});
+		const racedFollowUp = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "and then the tests" }],
+			_meta: { steering: { queue: "followUp" } },
+		});
+
+		expect(raced).toEqual({ outcome: "promptRequired", queue: "steering" });
+		expect(racedFollowUp).toEqual({ outcome: "promptRequired", queue: "followUp" });
+		expect(session.joinActiveTurnCalls).toEqual([
+			{ text: "use the existing parser", images: [], queue: "steering" },
+			{ text: "and then the tests", images: [], queue: "followUp" },
+		]);
+		// Nothing was enqueued on the now-idle session: no autonomous
+		// continuation can claim content the client still owns.
+		expect(session.steerCalls).toEqual([]);
+		expect(session.followUpCalls).toEqual([]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("leaves an idle prompt unconsumed whether or not idleBehavior is set", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		// agent-shell sends idleBehavior: "promptRequired"; a client that omits
+		// it must not get a detached startedNewTurn turn it cannot observe or
+		// cancel — idle steering is always the host's to submit.
+		const withMeta = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "fresh task" }],
+			_meta: { steering: { idleBehavior: "promptRequired" } },
+		});
+		const withoutMeta = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "another task" }],
+		});
+
+		expect(withMeta).toEqual({ outcome: "promptRequired", queue: "steering" });
+		expect(withoutMeta).toEqual({ outcome: "promptRequired", queue: "steering" });
+		expect(session.steerCalls).toEqual([]);
+		expect(session.followUpCalls).toEqual([]);
+		expect(session.promptCalls).toEqual([]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("reports a failed outcome when the session refuses the steer", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.isStreaming = true;
+		session.steer = async () => {
+			throw new Error("cannot steer");
+		};
+
+		const result = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "please" }],
+		});
+
+		expect(result).toEqual({ outcome: "failed", reason: "cannot steer" });
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("rejects _session/steering for unknown sessions and empty or malformed prompts", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+
+		// An unknown session is a client error, not a server fault: it must
+		// surface as -32602 invalid params, not the generic -32603 a plain
+		// Error becomes.
+		await expect(
+			harness.agent.extMethod("_session/steering", {
+				sessionId: "missing-session",
+				prompt: [{ type: "text", text: "hi" }],
+			}),
+		).rejects.toThrow("unknown session");
+		// Null/non-object params map to the method's -32602 contract, not the
+		// -32603 a TypeError dereference would surface as.
+		for (const badParams of [null, "steer", 42] as never[]) {
+			const error = await harness.agent.extMethod("_session/steering", badParams).then(
+				() => undefined,
+				(rejection: unknown) => rejection,
+			);
+			expect(error).toBeInstanceOf(RequestError);
+			expect((error as RequestError).code).toBe(-32602);
+		}
+		await expect(
+			harness.agent.extMethod("_session/steering", { sessionId: created.sessionId, prompt: 42 }),
+		).rejects.toThrow("Invalid params");
+		await expect(
+			harness.agent.extMethod("_session/steering", { sessionId: created.sessionId, prompt: [] }),
+		).rejects.toThrow("Invalid params");
+		await expect(
+			harness.agent.extMethod("_session/steering", { prompt: [{ type: "text", text: "hi" }] }),
+		).rejects.toThrow("Invalid params");
+
+		// Block-level malformations must surface as typed invalid-params errors
+		// on the wire (code -32602), not TypeErrors or silently queued
+		// undefined fields — including inherited names like `constructor`.
+		for (const prompt of [
+			[null],
+			[{ type: "image" }],
+			[{ type: "text" }],
+			[{ type: "resource" }],
+			[{ type: "resource", resource: { uri: "file:///x" } }],
+			[{ type: "resource", resource: { uri: "file:///x", mimeType: "text/plain" } }],
+			// A non-string arm that used to pass validation as long as the
+			// *other* arm was a string: the converter selects whichever arm
+			// it sees, so `text: 7` would have replaced the image blob with
+			// the raw number in model input. Each malformed arm rejects on
+			// its own row.
+			[{ type: "resource", resource: { uri: "file:///x", blob: "<base64>", mimeType: "image/png", text: 7 } }],
+			[{ type: "resource", resource: { uri: "file:///x", text: 7 } }],
+			// Optional resource.mimeType is typed string (never null): a
+			// present non-string value must reject instead of slipping into
+			// the converter's image arm.
+			[{ type: "resource", resource: { uri: "file:///x", blob: "<base64>", mimeType: 7 } }],
+			[{ type: "nope", text: "hi" }],
+			[{ type: "constructor" }],
+			[{ type: "resource_link", uri: "file:///x", title: 5 }],
+			// resource_link optional fields per the ACP schema: mimeType and
+			// description are string|null, size is number|null — anything
+			// else present rejects.
+			[{ type: "resource_link", uri: "file:///x", mimeType: 7 }],
+			[{ type: "resource_link", uri: "file:///x", description: 7 }],
+			[{ type: "resource_link", uri: "file:///x", size: "large" }],
+		] as unknown[]) {
+			const error = await harness.agent
+				.extMethod("_session/steering", { sessionId: created.sessionId, prompt })
+				.then(
+					() => undefined,
+					(rejection: unknown) => rejection,
+				);
+			expect(error).toBeInstanceOf(RequestError);
+			expect((error as RequestError).code).toBe(-32602);
+		}
+
+		// Both arms present and string is legal: only a malformed *selected*
+		// arm rejects — never simultaneous valid arms. The text arm wins
+		// conversion and the steer queues normally.
+		const bothArms = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "resource", resource: { uri: "file:///x", blob: "<base64>", text: "text wins" } }],
+		});
+		expect(bothArms).toEqual({ outcome: "promptRequired", queue: "steering" });
+		// A `resource_link` `title`/`name` of `null` is legal (the ACP schema
+		// types them `string | null`): treated exactly like an absent field,
+		// never rejected as malformed.
+		const nullTitle = await harness.agent.extMethod("_session/steering", {
+			sessionId: created.sessionId,
+			prompt: [{ type: "resource_link", uri: "file:///x", title: null }],
+		});
+		expect(nullTitle).toEqual({ outcome: "promptRequired", queue: "steering" });
+		const unknownSessionError = await harness.agent
+			.extMethod("_session/steering", {
+				sessionId: "missing-session",
+				prompt: [{ type: "text", text: "hi" }],
+			})
+			.then(
+				() => undefined,
+				(rejection: unknown) => rejection,
+			);
+		expect(unknownSessionError).toBeInstanceOf(RequestError);
+		expect((unknownSessionError as RequestError).code).toBe(-32602);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -2231,6 +2562,150 @@ describe("ACP agent", () => {
 		).rejects.toThrow("Unsupported ACP session");
 
 		finishPrompt();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+	it("resolves a prompt queued at cancel time as cancelled without starting it", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		// First abort (the live turn's cancel cleanup) parks until released;
+		// the queued prompt's own pre-start cleanup later reuses normal
+		// (immediately resolving) aborts.
+		let abortCalls = 0;
+		const firstAbortBlocked = Promise.withResolvers<void>();
+		session.abort = async () => {
+			abortCalls++;
+			if (abortCalls === 1) {
+				await firstAbortBlocked.promise;
+			}
+			session.isStreaming = false;
+		};
+		const finishPrompt = holdPromptStreaming(session);
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000048",
+			prompt: [{ type: "text", text: "long running" }],
+		} as PromptRequest);
+		for (let i = 0; i < 20 && session.promptCalls.length === 0; i++) {
+			await Bun.sleep(0);
+		}
+		expect(session.promptCalls).toEqual(["long running"]);
+
+		// Cancel the live turn: its wire response settles immediately, but its
+		// cleanup parks behind the blocked first abort.
+		const firstCancel = harness.agent.cancel({ sessionId: created.sessionId });
+		for (let i = 0; i < 20 && abortCalls === 0; i++) {
+			await Bun.sleep(0);
+		}
+		expect(abortCalls).toBe(1);
+
+		// A second prompt arrives while the first turn is settled but its
+		// cleanup is still in flight: the queue callback parks on
+		// `previousTurn.cleanup` before creating its turn slot.
+		const secondPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000049",
+			prompt: [{ type: "text", text: "queued behind the running turn" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		// The user cancels again while the first cleanup is still unwinding
+		// and that second prompt is still inside its dispatch window: the
+		// stop must mark the queued prompt, and it must REUSE the first
+		// cleanup's barrier (the turn is settled but still in flight) rather
+		// than starting a second, uncoalesced abort that could reset a
+		// replacement prompt.
+		const secondCancel = harness.agent.cancel({ sessionId: created.sessionId });
+		await Bun.sleep(20);
+		expect(abortCalls).toBe(1);
+
+		// Let the first cleanup finish; the queued prompt must resolve
+		// cancelled without ever starting a run.
+		firstAbortBlocked.resolve();
+		finishPrompt();
+		const firstResponse = await firstPrompt;
+		expect(firstResponse.stopReason).toBe("cancelled");
+		const secondResponse = await secondPrompt;
+		expect(secondResponse.stopReason).toBe("cancelled");
+		expect(session.promptCalls).toEqual(["long running"]);
+		await firstCancel;
+		await secondCancel;
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("aborts an autonomous run when cancel arrives with no client promptTurn", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const abortReasons: Array<string | undefined> = [];
+		session.abort = async (options?: { reason?: string }) => {
+			abortReasons.push(options?.reason);
+			session.isStreaming = false;
+		};
+
+		// Autonomous wake (steer-triggered follow-up, IRC, scheduler): streaming
+		// with no client promptTurn owning the run.
+		session.isStreaming = true;
+		await harness.agent.cancel({ sessionId: created.sessionId });
+
+		expect(abortReasons).toEqual([USER_INTERRUPT_LABEL]);
+		expect(session.isStreaming).toBe(false);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("closes the session when a cancelled pre-start prompt's cleanup times out", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		harness.agent.setCancelCleanupTimeoutForTesting(10);
+		// The live turn's cancel abort resolves so the queued prompt can
+		// start; the second abort — the queued prompt's own pre-start
+		// cleanup — hangs so its barrier rejects at the timeout.
+		let abortCalls = 0;
+		const neverSettles = Promise.withResolvers<void>();
+		session.abort = async () => {
+			abortCalls++;
+			session.isStreaming = false;
+			if (abortCalls >= 2) {
+				return neverSettles.promise;
+			}
+		};
+		const finishPrompt = holdPromptStreaming(session);
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000050",
+			prompt: [{ type: "text", text: "long running" }],
+		} as PromptRequest);
+		for (let i = 0; i < 20 && session.promptCalls.length === 0; i++) {
+			await Bun.sleep(0);
+		}
+		const secondPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000051",
+			prompt: [{ type: "text", text: "queued behind the running turn" }],
+		} as PromptRequest);
+
+		await harness.agent.cancel({ sessionId: created.sessionId });
+		finishPrompt();
+
+		const firstResponse = await firstPrompt;
+		expect(firstResponse.stopReason).toBe("cancelled");
+		const secondResponse = await secondPrompt;
+		expect(secondResponse.stopReason).toBe("cancelled");
+		// The pre-start cleanup's rejection is observed: the session closes
+		// instead of the rejection surfacing unhandled.
+		for (let i = 0; i < 40 && !session.disposed; i++) {
+			await Bun.sleep(5);
+		}
+		expect(session.disposed).toBe(true);
+
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
@@ -3638,4 +4113,216 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			refreshSpy.mockRestore();
 		}
 	}, 15_000);
+
+	it("keeps a client-declared server whose initial connect fails in a usable record", async () => {
+		// Regression: a client-declared server that fails inside the startup
+		// window (here: a command that cannot spawn) used to throw out of
+		// `#configureMcpServers`, so `session/new` failed and `/mcp reauth`
+		// could never reach the very server that needed authorization. The
+		// session must load, the failure must surface as a chunk, and a reauth
+		// prompt must resolve the kept manager entry (here answering with the
+		// stdio guidance) instead of "not found".
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({
+			cwd: harness.cwdA,
+			mcpServers: [{ name: "broken", command: "/nonexistent/omp-fixture-binary", args: [], env: [] }],
+		});
+		expectAcpStructure(zNewSessionResponse, created);
+
+		const chunkText = (notification: (typeof harness.updates)[number]): string => {
+			const update = notification.update as { content?: { text?: string } };
+			return update.content?.text ?? "";
+		};
+		// The failure chunk is queued during `#registerPreparedSession` —
+		// before the response has told the client this session id — and is
+		// flushed behind the bootstrap race guard (50 ms). Discriminator for
+		// the deferral: right after `newSession` resolves the chunk must NOT
+		// be in the log yet; a direct send from inside registration would
+		// already be here, addressed to a session the client does not know.
+		const hasFailureChunk = (): boolean =>
+			harness.updates.some(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					chunkText(notification).includes(`MCP server "broken" failed to connect`),
+			);
+		expect(hasFailureChunk()).toBe(false);
+		await pollUntil(hasFailureChunk);
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/mcp reauth broken" }],
+		});
+		const reauthText = harness.updates
+			.slice(updatesBefore)
+			.filter(notification => notification.sessionId === created.sessionId)
+			.map(chunkText)
+			.join("\n");
+		expect(reauthText).toContain("stdio servers manage their own credentials");
+	}, 15_000);
+
+	it("keeps an HTTP server with an expired client bearer reauthable through the real manager", async () => {
+		// The stdio spawn-failure test above does not prove the expired-bearer
+		// lifecycle: an HTTP 401 that settles inside MCPManager's 250 ms
+		// startup window must land the same way — the session loads, the
+		// failure chunk is delivered behind the bootstrap guard, and the kept
+		// manager entry stays reachable for `/mcp reauth` to resolve.
+		const server = Bun.serve({ port: 0, fetch: () => new Response("expired", { status: 401 }) });
+		try {
+			const harness = await createHarness();
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [
+					{
+						name: "expired",
+						type: "http",
+						url: `http://127.0.0.1:${server.port}/mcp`,
+						headers: [{ name: "Authorization", value: "Bearer stale" }],
+					},
+				],
+			});
+			expectAcpStructure(zNewSessionResponse, created);
+
+			const chunkText = (notification: (typeof harness.updates)[number]): string => {
+				const update = notification.update as { content?: { text?: string } };
+				return update.content?.text ?? "";
+			};
+			await pollUntil(() =>
+				harness.updates.some(
+					notification =>
+						notification.sessionId === created.sessionId &&
+						chunkText(notification).includes(`MCP server "expired" failed to connect`),
+				),
+			);
+
+			const updatesBefore = harness.updates.length;
+			await harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "/mcp reauth expired" }],
+			});
+			const reauthText = harness.updates
+				.slice(updatesBefore)
+				.filter(notification => notification.sessionId === created.sessionId)
+				.map(chunkText)
+				.join("\n");
+			// The manager entry resolved: the server is not reported missing,
+			// and the flow reached the probe (this 401 carries no OAuth
+			// metadata, so it ends in a refusal instead of a browser flow).
+			expect(reauthText).not.toContain("not found");
+			expect(reauthText.length).toBeGreaterThan(0);
+		} finally {
+			await server.stop(true);
+		}
+	}, 15_000);
+
+	it("binds recovered MCP tools before the reauth prompt completes", async () => {
+		// Regression: the reconnect hook resolved as soon as
+		// `reconnectMcpManagerServer` did, but the tools-changed callback
+		// fired during the reconnect only *enqueued* the session refresh on
+		// `record.mcpRefreshChain`. The reauth prompt could complete — and
+		// the client's immediately following prompt start — while the
+		// recovered tools were still unbound. The hook must await the chain.
+		//
+		// Real wire flow: the fixture answers 401 with OAuth metadata until
+		// the fresh url-keyed bearer arrives, then serves initialize and a
+		// tools/list entry the reauth reconnect registers.
+		const challenge = JSON.stringify({
+			authorization_url: "https://auth.example.com/authorize",
+			token_url: "https://auth.example.com/token",
+		});
+		const serveRpc = async (request: Request): Promise<Response> => {
+			// The transport's optional SSE listener GETs first; answer 405 so it
+			// treats server-initiated messages as unsupported and moves on.
+			if (request.method !== "POST") return new Response(null, { status: 405 });
+			if (request.headers.get("authorization") !== "Bearer fresh-access") {
+				return new Response(challenge, { status: 401 });
+			}
+			const body = (await request.json()) as { id?: number; method?: string };
+			if (body.method === "initialize") {
+				return Response.json({
+					jsonrpc: "2.0",
+					id: body.id,
+					result: {
+						protocolVersion: "2025-03-26",
+						capabilities: { tools: {} },
+						serverInfo: { name: "fixture", version: "0.0.0" },
+					},
+				});
+			}
+			if (body.method === "tools/list") {
+				return Response.json({
+					jsonrpc: "2.0",
+					id: body.id,
+					result: { tools: [{ name: "recovered_tool", inputSchema: { type: "object" } }] },
+				});
+			}
+			return Response.json({ jsonrpc: "2.0", id: body.id, error: { code: -32601, message: "no method" } });
+		};
+		const server = Bun.serve({ port: 0, fetch: serveRpc });
+		const database = new Database(":memory:");
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(database));
+		// No browser in CI: the flow's token exchange is stubbed at the login
+		// boundary, exactly like the dispatcher-level reauth tests.
+		const loginSpy = spyOn(oauthFlowModule.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+			access: "fresh-access",
+			refresh: "fresh-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		try {
+			const harness = await createHarness({ authStorage });
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [{ name: "expired", type: "http", url: `http://127.0.0.1:${server.port}/mcp`, headers: [] }],
+			});
+			expectAcpStructure(zNewSessionResponse, created);
+			const session = harness.findSession(created.sessionId)!;
+
+			// Gate non-empty refreshes so the completion order is observable:
+			// with the fix, the reauth prompt cannot settle while the
+			// (enqueued) refresh is still in flight.
+			const refreshGate = Promise.withResolvers<void>();
+			const events: string[] = [];
+			session.refreshMCPTools = async (tools: Array<{ name: string }>) => {
+				const names = tools.map(tool => tool.name);
+				if (names.length === 0) return;
+				events.push(`refresh:start:${names.join(",")}`);
+				await refreshGate.promise;
+				events.push("refresh:done");
+			};
+
+			let reauthSettled = false;
+			const reauth = harness.agent
+				.prompt({
+					sessionId: created.sessionId,
+					prompt: [{ type: "text", text: "/mcp reauth expired" }],
+				})
+				.then(response => {
+					reauthSettled = true;
+					return response;
+				});
+
+			// Wait for the recovered tool's refresh to start, then let pending
+			// work settle: the prompt must still be pending — the hook is
+			// holding it on the gated refresh chain.
+			await pollUntil(() => events.some(event => event.includes("mcp__expired_recovered_tool")));
+			await Bun.sleep(25);
+			expect(reauthSettled).toBe(false);
+			expect(events.some(event => event.includes("mcp__expired_recovered_tool"))).toBe(true);
+
+			refreshGate.resolve();
+			const response = await reauth;
+			events.push("prompt:done");
+			expect(response.stopReason).toBe("end_turn");
+			// The refresh completed before the prompt resolved.
+			expect(events.indexOf("refresh:done")).toBeLessThan(events.indexOf("prompt:done"));
+			// And the reauth truly reconnected the server through the manager.
+			expect(
+				authStorage.credentials.get(oauthFlowModule.mcpOAuthCredentialId(`http://127.0.0.1:${server.port}/mcp`)),
+			).toMatchObject({ access: "fresh-access" });
+		} finally {
+			loginSpy.mockRestore();
+			await server.stop(true);
+			database.close();
+		}
+	}, 20_000);
 });
