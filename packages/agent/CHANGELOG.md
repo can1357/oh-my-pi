@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added a system-prompt callback to `Agent.buildSideRequestContext()`, so a host can refresh the prompt before a side request; the model is snapshotted before the callback runs, so a `/model` change during it cannot swap the history or the tool roster ([#11347](https://github.com/can1357/oh-my-pi/issues/11347), [#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
@@ -16,7 +19,6 @@
 ## [18.12.3] - 2026-10-19
 
 ### Added
-- Added a system-prompt callback to `Agent.buildSideRequestContext()`, so a host can refresh the prompt before a side request; the model is snapshotted before the callback runs, so a `/model` change during it cannot swap the history or the tool roster ([#11347](https://github.com/can1357/oh-my-pi/issues/11347), [#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - `AgentTool` gained the optional `approvalCacheTargets` hook, which the `always-ask-cached` approval mode uses to check and record per-file grants ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
 
