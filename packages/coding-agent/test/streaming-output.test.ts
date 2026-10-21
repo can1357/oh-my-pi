@@ -446,6 +446,42 @@ describe("OutputSink", () => {
 		expect(calls).toBe(2);
 	});
 
+	test("dispose awaits an async chunk subscriber and swallows its rejection", async () => {
+		// The kernel/JS eval executors pass a promise-returning onChunk straight
+		// through. When that callback rejects while a backend failure triggers
+		// disposal, the rejection used to be left unhandled: the try/catch only
+		// covered synchronous throws, so the flushed tail's promise escaped as an
+		// unhandled rejection instead of being awaited by the cleanup path.
+		// Disposal must settle it and still close the artifact.
+		const chunks: string[] = [];
+		let rejectSubscriber: ((error: Error) => void) | undefined;
+		const sink = new OutputSink({
+			onChunk: (chunk: string) => {
+				chunks.push(chunk);
+				if (chunks.length === 2) {
+					return new Promise<void>((_resolve, reject) => {
+						rejectSubscriber = reject;
+					});
+				}
+				return undefined;
+			},
+			chunkThrottleMs: 60_000,
+		});
+		sink.push("first");
+		sink.push("second");
+		expect(chunks).toEqual(["first"]);
+
+		const disposal = sink.dispose();
+		// The pending tail is handed to the subscriber before disposal settles.
+		await Promise.resolve();
+		expect(chunks).toEqual(["first", "second"]);
+		rejectSubscriber?.(new Error("subscriber failed"));
+		// The rejection must not escape the cleanup call.
+		await disposal;
+		// The artifact is closed even though the subscriber failed.
+		expect((await sink.dump()).output).toBe("firstsecond");
+	});
+
 	test("replace cancels a throttled tail and discards its pending preview", () => {
 		vi.useFakeTimers();
 		const chunks: string[] = [];
