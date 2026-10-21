@@ -395,7 +395,9 @@ export function diagnosticsSection(
 /**
  * Head chip counting LSP diagnostics across files (`2 diagnostics`), or
  * undefined when there are none. A file no server judged shows
- * `diagnostics unavailable` instead of a clean chip.
+ * `diagnostics unavailable` instead of a clean chip; when other servers did
+ * report, the chip keeps an unavailable marker next to the count, so the
+ * incomplete verdict stays visible in a collapsed card (issue #15408).
  */
 export function diagnosticsBadge(
 	files: readonly (FileDiagnosticsResult | undefined)[],
@@ -412,5 +414,9 @@ export function diagnosticsBadge(
 	if (count === 0) {
 		return unjudged ? { text: "diagnostics unavailable", tone: "warning" } : undefined;
 	}
-	return { text: count === 1 ? "1 diagnostic" : `${count} diagnostics`, tone: errored ? "error" : "warning" };
+	const text = count === 1 ? "1 diagnostic" : `${count} diagnostics`;
+	const tone: TspTone = errored ? "error" : "warning";
+	// A server that published no verdict leaves the report incomplete: the
+	// head must say so even when the servers that did report found problems.
+	return unjudged ? { text: `${text} · unavailable`, tone } : { text, tone };
 }
