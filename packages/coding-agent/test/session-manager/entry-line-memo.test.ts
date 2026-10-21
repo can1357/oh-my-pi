@@ -1208,6 +1208,38 @@ describe("SessionManager entry-line memo", () => {
 		}
 	});
 
+	it("rewrites a deep acyclic details chain without a quadratic ancestor scan", async () => {
+		// The cycle check walked the whole ancestor chain, so a deep acyclic
+		// graph spent O(depth) per node: quadratic in the hook probe and in the
+		// projector's pre-scan alike. The active path answers the question in
+		// constant time, so the rewrite stays linear — four 25k-deep chains
+		// publish in a couple of seconds instead of running into the tens of
+		// seconds, and the budget below is what keeps that true.
+		const depth = 25_000;
+		const branches: Record<string, unknown> = {};
+		for (let branch = 0; branch < 4; branch++) {
+			let nested: unknown = { leaf: "fix15222-deep-chain" };
+			for (let level = 0; level < depth; level++) nested = { child: nested };
+			branches[`branch${branch}`] = nested;
+		}
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-deep-chain",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details: branches,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		expect(body.match(/"leaf":"fix15222-deep-chain"/g)).toHaveLength(4);
+	}, 6_000);
+
 	it("persists a details payload nested deeper than the recursive hook probe could walk", async () => {
 		// `details` is the tool result's opaque slot, and it can hold a graph
 		// nested far deeper than JS recursion reaches — an opaque extension
@@ -1880,6 +1912,37 @@ describe("SessionManager entry-line memo", () => {
 			timestamp: Date.now(),
 		});
 
+		await expect(session.appendEntriesAtomically(() => {})).rejects.toThrow(/cyclic/i);
+	}, 8_000);
+
+	it("surfaces a serialization error for a cycle that appears after the line was cached", async () => {
+		// The same back-reference, but it appears after the memo already holds
+		// the line. The matcher walks the stamp, which is bounded, so the cyclic
+		// graph fails the match instead of looping on it — and the projection
+		// then surfaces the serialization error rather than the write hanging.
+		const details: Record<string, unknown> = { status: "old" };
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-cached-cycle",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// First rewrite: the acyclic details are persisted and the line is cached.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(storage.readTextSync(sessionFile)).toContain('"status":"old"');
+
+		// The details now reference themselves.
+		details.self = details;
+
+		// Second rewrite: the cached line cannot be reused, and the projection
+		// surfaces the serialization error.
 		await expect(session.appendEntriesAtomically(() => {})).rejects.toThrow(/cyclic/i);
 	}, 8_000);
 

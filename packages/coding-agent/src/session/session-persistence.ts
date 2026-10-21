@@ -481,16 +481,22 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 	// Iterative, not recursive — one JS stack frame per level overflowed on a
 	// graph `details` can hold (see above).
-	const pending: Array<{ value: unknown; key: string | undefined; parent: PathNode | undefined }> = [
-		{ value: obj, key, parent: undefined },
-	];
-	// The objects currently on the walk path, each linked to its own parent so a
-	// node can be tested against its ancestors without a per-node copy of the
-	// path. A cycle re-encountering one of them is skipped rather than queued
-	// again (see above).
-	type PathNode = { readonly value: object; readonly parent: PathNode | undefined };
-	for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
-		const { value, key } = node;
+	type ScanFrame =
+		| { readonly kind: "value"; readonly value: unknown; readonly key: string | undefined }
+		/** Ends a container's visit and takes it off the active path. */
+		| { readonly kind: "exit"; readonly value: object };
+	const pending: ScanFrame[] = [{ kind: "value", value: obj, key }];
+	// The objects currently on the walk path. A cycle re-encountering one of
+	// them is skipped rather than queued again (see above). A set answers that
+	// question in constant time; walking the ancestor chain instead made a
+	// deep acyclic graph quadratic.
+	const activePath = new Set<object>();
+	for (let frame = pending.pop(); frame !== undefined; frame = pending.pop()) {
+		if (frame.kind === "exit") {
+			activePath.delete(frame.value);
+			continue;
+		}
+		const { value, key } = frame;
 		if (value === null || value === undefined) continue;
 		if (typeof value === "string") {
 			if (
@@ -505,24 +511,21 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 		}
 		// A node already on this path closes a cycle. Its subtree was scanned when
 		// it was first pushed, so re-walking it would only repeat work — and a
-		// self-reference would repeat it forever.
-		let ancestor = node.parent;
-		let onPath = false;
-		while (ancestor !== undefined) {
-			if (ancestor.value === value) {
-				onPath = true;
-				break;
-			}
-			ancestor = ancestor.parent;
+		// self-reference would repeat it forever. Only objects can close a cycle,
+		// so only they join the path.
+		if (typeof value === "object") {
+			if (activePath.has(value)) continue;
+			activePath.add(value);
 		}
-		if (onPath) continue;
-		const path: PathNode = { value, parent: node.parent };
 		if (Array.isArray(value)) {
 			// Indexed slots with a snapshotted length, the way `JSON.stringify` and
 			// the rebuild above read them — never the iterator protocol, which an
 			// overridden `Symbol.iterator` can hide slots from.
 			const length = value.length;
-			for (let index = 0; index < length; index++) pending.push({ value: value[index], key, parent: path });
+			pending.push({ kind: "exit", value });
+			for (let index = 0; index < length; index++) {
+				pending.push({ kind: "value", value: value[index], key });
+			}
 			continue;
 		}
 		if (typeof value === "object") {
@@ -546,10 +549,16 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 				}
 			}
 			if (shouldExternalizeImagePayload(value, key)) return true;
-			if (isAtomicPersistenceNode(value, key)) continue;
+			if (isAtomicPersistenceNode(value, key)) {
+				// The node persists verbatim: it is not descended into, so it
+				// leaves the active path again straight away.
+				activePath.delete(value);
+				continue;
+			}
 			// Own enumerable keys, enumerated directly — see the rebuild loop
 			// in `truncateForPersistence` for why `for..in`'s prototype walk
 			// is a step a thrown `getPrototypeOf` trap fails.
+			pending.push({ kind: "exit", value });
 			for (const childKey of Object.keys(value)) {
 				const childValue = (value as Record<string, unknown>)[childKey];
 				// The snapcompact archive is rebuilt by `persistSnapcompactArchive`,
@@ -558,7 +567,7 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 					if (snapcompactArchiveNeedsRewrite(childValue)) return true;
 					continue;
 				}
-				pending.push({ value: childValue, key: childKey, parent: path });
+				pending.push({ kind: "value", value: childValue, key: childKey });
 			}
 		}
 	}
