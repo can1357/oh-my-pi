@@ -237,13 +237,36 @@ describe("bash numbered file views mint edit tags", () => {
 		expect(getEditStore(session).headHash(path.join(cwd, "a.ts"))).toBeNull();
 	});
 
-	it("tags rows of the files a glob operand matches", async () => {
-		await fs.mkdir(path.join(cwd, "src"));
-		await Bun.write(path.join(cwd, "src", "a.ts"), "same\nx\n");
-		await Bun.write(path.join(cwd, "src", "b.ts"), "same\n");
-		const output = await bash("grep -rn same src/*.ts --include=*.ts");
-		expect(footerTag(output, "src/a.ts")).toBeDefined();
-		expect(footerTag(output, "src/b.ts")).toBeDefined();
+	it("tags only the files a glob operand matched", async () => {
+		// `2-victim` is no match of `./*.ts`, but `victim-1-same` reads as its row 1.
+		await fs.mkdir(path.join(cwd, "g"));
+		await Bun.write(path.join(cwd, "g", "a.ts"), "target\nvictim-1-same\n");
+		await Bun.write(path.join(cwd, "g", "b.ts"), "target\n");
+		await Bun.write(path.join(cwd, "g", "2-victim"), "same\n");
+		expect(await bash("cd g && grep -nh -A1 target ./*.ts")).toContain("2-victim-1-same");
+		expect(getEditStore(session).headHash(path.join(cwd, "g", "2-victim"))).toBeNull();
+		const output = await bash("cd g && grep -n target ./*.ts");
+		expect(footerTag(output, "g/a.ts")).toBeDefined();
+		expect(footerTag(output, "g/b.ts")).toBeDefined();
+	});
+
+	it("names no tag for file names or counts printed instead of rows", async () => {
+		// `grep -nl` prints only the name `1-target`, which reads as row 1 `target`.
+		await Bun.write(path.join(cwd, "1-target"), "target\n");
+		await Bun.write(path.join(cwd, "3"), "x\ny\nz\n");
+		expect((await bash("grep -nl target 1-target")).trim()).toBe("1-target");
+		for (const command of ["grep -nL x 1-target", "rg -nl target 1-target", "grep -nc x 3"]) {
+			expect(await planNumberedFileTags(session, command, cwd, "1-target\n")).toBeUndefined();
+		}
+		expect(getEditStore(session).headHash(path.join(cwd, "1-target"))).toBeNull();
+	});
+
+	it("keeps a redirection's quoted target attached to it", async () => {
+		// `-m1` stops each file at its first match: row 2 comes from b, not a.
+		await Bun.write(path.join(cwd, "a"), "target\ntarget\n");
+		await Bun.write(path.join(cwd, "b"), "x\ntarget\n");
+		expect(await bash('grep -nh -m1 target a 2>"err" b')).toContain("2:target");
+		expect(getEditStore(session).headHash(path.join(cwd, "a"))).toBeNull();
 	});
 
 	it("names no tag for rows a numberer prints that are not file lines", async () => {
@@ -280,24 +303,60 @@ describe("bash numbered file views mint edit tags", () => {
 			expect(textOf(await new BashTool(single).execute("bash", { command: "grep -nH same a.ts" }))).toContain(
 				"a.ts:1:b.ts:1:same",
 			);
+			// The second grep never runs once the first fails on `missing`.
+			expect(await bash("grep -nh same a.ts missing && grep -n same '1:b.ts'")).not.toContain(
+				"Edit tags for the numbered lines above:",
+			);
 			expect(getEditStore(single).headHash(path.join(cwd, "1:b.ts"))).toBeNull();
 			expect(getEditStore(single).headHash(path.join(cwd, "a.ts:1:b.ts"))).toBeNull();
 		},
 	);
 
-	it("names no tag when `CDPATH` may have moved a `cd`", async () => {
+	it("names no tag for a `cd` inside the command, which a function or `CDPATH` can send elsewhere", async () => {
 		await fs.mkdir(path.join(cwd, "sub"));
 		await Bun.write(path.join(cwd, "sub", "a.ts"), "same\nwrong\n");
-		const elsewhere = path.join(cwd, "outside", "sub");
-		// bash prints the directory a `CDPATH` entry led `cd` to.
+		for (const command of [
+			"cd sub; grep -n . a.ts",
+			"cd sub && grep -n . a.ts",
+			"cd sub > /dev/null; grep -n . a.ts",
+		]) {
+			expect(await planNumberedFileTags(session, command, cwd, "1:same\n2:wrong\n")).toBeUndefined();
+		}
+	});
+
+	it("names no tag for a numbering or pattern option after a file, which POSIX tools read as a file", async () => {
+		// Under `POSIXLY_CORRECT`, `-n` is a missing file and line 2 prints unnumbered as `a.ts:1:target`.
+		await Bun.write(path.join(cwd, "a.ts"), "target\n1:target\n");
+		expect(await planNumberedFileTags(session, "grep '^1:' a.ts -n", cwd, "a.ts:1:target\n")).toBeUndefined();
+		expect(await planNumberedFileTags(session, "cat a.ts -n", cwd, "target\n1:target\n")).toBeUndefined();
+		// There `a.ts` is the pattern, and `-e` and `target` the files.
+		expect(await planNumberedFileTags(session, "grep -nh a.ts -e target", cwd, "1:target\n")).toBeUndefined();
+		// ripgrep has no such mode; other options after a file only filter real rows.
+		expect(await planNumberedFileTags(session, "rg '^1:' a.ts -n", cwd, "2:1:target\n")).toBeDefined();
 		expect(
-			await planNumberedFileTags(session, "cd sub; grep -n . a.ts", cwd, `${elsewhere}\n1:same\n2:actual\n`),
-		).toBeUndefined();
-		// A redirected `cd` hides that line.
-		expect(
-			await planNumberedFileTags(session, "cd sub > /dev/null; grep -n . a.ts", cwd, "1:same\n"),
-		).toBeUndefined();
-		expect(await planNumberedFileTags(session, "cd sub; grep -n . a.ts", cwd, "1:same\n2:wrong\n")).toBeDefined();
+			await planNumberedFileTags(session, "grep -rn target . --include=a.ts", cwd, "./a.ts:1:target\n"),
+		).toBeDefined();
+	});
+
+	it("names no `git grep` tag below the repository's top, where `grep.fullName` re-roots its paths", async () => {
+		await fs.mkdir(path.join(cwd, "sub", "sub"), { recursive: true });
+		await Bun.write(path.join(cwd, "sub", "a"), "target\n");
+		await Bun.write(path.join(cwd, "sub", "sub", "a"), "target\n");
+		for (const args of [
+			["init", "-q"],
+			["config", "grep.fullName", "true"],
+			["add", "."],
+		]) {
+			expect(Bun.spawnSync(["git", ...args], { cwd }).exitCode).toBe(0);
+		}
+		const inner = makeSession(path.join(cwd, "sub"));
+		const output = textOf(await new BashTool(inner).execute("bash", { command: "git grep -n target -- a" }));
+		expect(output).toContain("sub/a:1:target");
+		expect(output).not.toContain("Edit tags for the numbered lines above:");
+		expect(getEditStore(inner).headHash(path.join(cwd, "sub", "sub", "a"))).toBeNull();
+
+		const top = textOf(await new BashTool(session).execute("bash", { command: "git grep -n target -- sub/a" }));
+		expect(footerTag(top, "sub/a")).toBeDefined();
 	});
 
 	it("names no tag when a later option takes the line numbers back", async () => {
@@ -399,7 +458,7 @@ describe("bash numbered file views mint edit tags", () => {
 		await Bun.write(path.join(cwd, "sub", "a.ts"), "target\n");
 		await Bun.write(path.join(cwd, "sub", "b.ts"), "target\n");
 		await Bun.write(path.join(cwd, "b.ts"), "target\n");
-		const output = await bash("cd sub; grep -n target a.ts b.ts");
+		const output = await bash("cd sub && grep -n target a.ts b.ts");
 		const tag = footerTag(output, "sub/a.ts");
 		expect(tag).toBeDefined();
 		expect(footerTag(output, "sub/b.ts")).toBeDefined();
@@ -410,7 +469,7 @@ describe("bash numbered file views mint edit tags", () => {
 		});
 		expect(result.isError).toBeFalsy();
 
-		// A `cd` that failed leaves the shell where it was, and the files it would lead to missing.
+		// A `cd` inside the command is not followed: it may fail, or run a function.
 		expect(await bash("cd missing; grep -n target b.ts")).not.toContain("Edit tags for the numbered lines above:");
 	});
 
