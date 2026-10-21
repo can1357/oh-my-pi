@@ -280,6 +280,11 @@ describe("bash numbered file views mint edit tags", () => {
 		await Bun.write(path.join(cwd, "page.ts"), "same\n\\:\\:\nsame\n");
 		expect(await bash("nl -ba page.ts | tail -n 1")).not.toContain("Edit tags for the numbered lines above:");
 		expect(getEditStore(session).headHash(path.join(cwd, "page.ts"))).toBeNull();
+
+		// `1:2:prefix` is line 2 of the file `1`, cut by `-o`; read bare it would be line 1.
+		await Bun.write(path.join(cwd, "1"), "2:prefix\nprefix suffix\n");
+		expect(await bash("grep -nHo '^prefix' 1")).toContain("1:2:prefix");
+		expect(getEditStore(session).headHash(path.join(cwd, "1"))).toBeNull();
 	});
 
 	// Windows file names cannot hold `:`.
