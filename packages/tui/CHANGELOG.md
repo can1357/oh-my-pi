@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
 
+### Fixed
 - Fixed SIXEL images from eval cells, `!` shell commands, and replay being cut, reordered, or drawn twice: payload rows are kept byte-for-byte in stream order, a frame is retained whole even past the inline budget, a frame already rendered raw no longer draws its decoded copy again, a frame now ends only at ST so a BEL inside it no longer closes the sequence early (a cancelled frame is dropped), and a frame emitted at a column the row already passed keeps that column ([#15327](https://github.com/can1357/oh-my-pi/pull/15327) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
@@ -23,9 +23,9 @@
 - In Tern, centered sheets (`/context`, reports, keyboard shortcuts, BTW history, session info, the pause screen) fill the pane when it is narrower than 100 columns instead of floating with margins ([#16676](https://github.com/can1357/oh-my-pi/pull/16676) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
+- Fixed SIXEL images from eval cells, `!` shell commands, and replay being cut, reordered, or drawn twice: payload rows are kept byte-for-byte in stream order, a frame is retained whole even past the inline budget, and a frame already rendered raw no longer draws its decoded copy again ([#15327](https://github.com/can1357/oh-my-pi/pull/15327) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
-- Fixed SIXEL images from eval cells, `!` shell commands, and replay being cut, reordered, or drawn twice: payload rows are kept byte-for-byte in stream order, a frame is retained whole even past the inline budget, and a frame already rendered raw no longer draws its decoded copy again ([#15327](https://github.com/can1357/oh-my-pi/pull/15327) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.4] - 2026-10-20
 
