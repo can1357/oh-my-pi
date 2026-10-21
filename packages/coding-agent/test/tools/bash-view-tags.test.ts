@@ -8,6 +8,7 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { planNumberedFileTags } from "@oh-my-pi/pi-coding-agent/tools/bash-view-tags";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 function makeSession(
@@ -181,6 +182,16 @@ describe("bash numbered file views mint edit tags", () => {
 			// Quoted or escaped `=`: a command named FOO=bar, not an assignment.
 			"'FOO=bar' cd sub; grep -n '^same$' a.ts",
 			"FOO\\=bar cd sub; grep -n '^same$' a.ts",
+			"F''OO=bar cd sub; grep -n '^same$' a.ts",
+			"F\\OO=bar cd sub; grep -n '^same$' a.ts",
+			"F\"\"OO=bar cd sub; grep -n '^same$' a.ts",
+			// An assignment that can move the `cd`.
+			"CDPATH=/ cd sub; grep -n '^same$' a.ts",
+			// The shell fails on `missing` or the file `2p` before it climbs back to sub.
+			"cd missing/../sub; grep -n '^same$' a.ts",
+			"cd 2p/../sub; grep -n '^same$' a.ts",
+			// The redirection fails, so the `cd` never runs.
+			"cd sub > missing/out; grep -n '^same$' a.ts",
 			// The rows come from `2p`, not from the numbered stream or view.
 			"cat -n a.ts | sed -n 1p 2p",
 			"cat -n a.ts | cat 2p",
@@ -201,6 +212,105 @@ describe("bash numbered file views mint edit tags", () => {
 		}
 		expect(getEditStore(session).headHash(path.join(cwd, "a.ts"))).toBeNull();
 		expect(getEditStore(session).headHash(path.join(cwd, "sub", "a.ts"))).toBeNull();
+	});
+
+	it("names no tag when the shell may read operands the command does not spell", async () => {
+		await Bun.write(path.join(cwd, "a.ts"), "same\nactual\n");
+		// `s*` expands to the pattern `same` and the file `same-input`.
+		await Bun.write(path.join(cwd, "same"), "");
+		await Bun.write(path.join(cwd, "same-input"), "same\n");
+		// Files named like options, read after `--`.
+		await Bun.write(path.join(cwd, "-x"), "same\n");
+		await Bun.write(path.join(cwd, "-n"), "1:same\n");
+		for (const command of [
+			"grep -nh s* a.ts | head -n 1",
+			"grep -nh -e s* a.ts | head -n 1",
+			"cat -n a.ts | grep s*",
+			// `*` matches `-n` and `-x`, which grep takes as options.
+			"grep -n same * | head -n 1",
+			"cat -n -- -x a.ts | head -n 1",
+			"cat -- -n a.ts | head -n 1",
+			"grep -nh -- same -x a.ts | head -n 1",
+		]) {
+			expect(await bash(command)).not.toContain("Edit tags for the numbered lines above:");
+		}
+		expect(getEditStore(session).headHash(path.join(cwd, "a.ts"))).toBeNull();
+	});
+
+	it("tags rows of the files a glob operand matches", async () => {
+		await fs.mkdir(path.join(cwd, "src"));
+		await Bun.write(path.join(cwd, "src", "a.ts"), "same\nx\n");
+		await Bun.write(path.join(cwd, "src", "b.ts"), "same\n");
+		const output = await bash("grep -rn same src/*.ts --include=*.ts");
+		expect(footerTag(output, "src/a.ts")).toBeDefined();
+		expect(footerTag(output, "src/b.ts")).toBeDefined();
+	});
+
+	it("names no tag for rows a numberer prints that are not file lines", async () => {
+		// A custom group separator spelled like a row of b.ts.
+		await Bun.write(path.join(cwd, "a.ts"), "target\nctx\ngap\ngap\ntarget\n");
+		await Bun.write(path.join(cwd, "b.ts"), "same\n");
+		expect(await bash("grep -n --group-separator=b.ts:1:same -A1 target a.ts")).toContain("b.ts:1:same");
+		expect(getEditStore(session).headHash(path.join(cwd, "b.ts"))).toBeNull();
+
+		// `nl` restarts at a logical-page delimiter: physical line 3 prints as 1.
+		await Bun.write(path.join(cwd, "page.ts"), "same\n\\:\\:\nsame\n");
+		expect(await bash("nl -ba page.ts | tail -n 1")).not.toContain("Edit tags for the numbered lines above:");
+		expect(getEditStore(session).headHash(path.join(cwd, "page.ts"))).toBeNull();
+	});
+
+	// Windows file names cannot hold `:`.
+	it.skipIf(process.platform === "win32")(
+		"tags only files the command read, and no line its output shows two ways",
+		async () => {
+			await Bun.write(path.join(cwd, "a.ts"), "b.ts:1:same\n");
+			await Bun.write(path.join(cwd, "1:b.ts"), "same\n");
+			await Bun.write(path.join(cwd, "a.ts:1:b.ts"), "same\n");
+			const store = getEditStore(session);
+			// `./a.ts:1:b.ts:1:same` is a line of a.ts and of `a.ts:1:b.ts`, printed twice.
+			expect(await bash("grep -rn same .")).toContain("./a.ts:1:b.ts:1:same");
+			expect(store.headHash(path.join(cwd, "a.ts"))).toBeNull();
+			expect(store.headHash(path.join(cwd, "a.ts:1:b.ts"))).toBeNull();
+			expect(store.seenLines(path.join(cwd, "1:b.ts"), store.headHash(path.join(cwd, "1:b.ts"))!)).toEqual([1]);
+
+			const single = makeSession(cwd);
+			expect(
+				footerTag(textOf(await new BashTool(single).execute("bash", { command: "grep -n same a.ts" })), "a.ts"),
+			).toBeDefined();
+			expect(textOf(await new BashTool(single).execute("bash", { command: "grep -nH same a.ts" }))).toContain(
+				"a.ts:1:b.ts:1:same",
+			);
+			expect(getEditStore(single).headHash(path.join(cwd, "1:b.ts"))).toBeNull();
+			expect(getEditStore(single).headHash(path.join(cwd, "a.ts:1:b.ts"))).toBeNull();
+		},
+	);
+
+	it("names no tag when `CDPATH` may have moved a `cd`", async () => {
+		await fs.mkdir(path.join(cwd, "sub"));
+		await Bun.write(path.join(cwd, "sub", "a.ts"), "same\nwrong\n");
+		const elsewhere = path.join(cwd, "outside", "sub");
+		// bash prints the directory a `CDPATH` entry led `cd` to.
+		expect(
+			await planNumberedFileTags(session, "cd sub; grep -n . a.ts", cwd, `${elsewhere}\n1:same\n2:actual\n`),
+		).toBeUndefined();
+		// A redirected `cd` hides that line.
+		expect(
+			await planNumberedFileTags(session, "cd sub > /dev/null; grep -n . a.ts", cwd, "1:same\n"),
+		).toBeUndefined();
+		expect(await planNumberedFileTags(session, "cd sub; grep -n . a.ts", cwd, "1:same\n2:wrong\n")).toBeDefined();
+	});
+
+	it("names no tag when a later option takes the line numbers back", async () => {
+		// Line 2 is `1:target`: printed without its number it reads as row 1.
+		await Bun.write(path.join(cwd, "a.ts"), "target\n1:target\n");
+		for (const command of [
+			"rg -n -N '^1:' a.ts",
+			"rg -n --no-line-number '^1:' a.ts",
+			"git grep -n --no-line-number '^1:' a.ts",
+		]) {
+			expect(await planNumberedFileTags(session, command, cwd, "1:target\n")).toBeUndefined();
+		}
+		expect(await planNumberedFileTags(session, "rg -n '^1:' a.ts", cwd, "2:1:target\n")).toBeDefined();
 	});
 
 	it("keeps quoted `>` and spaces in a file name", async () => {

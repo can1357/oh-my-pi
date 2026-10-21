@@ -14,8 +14,10 @@
  * a number.
  */
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { hashlineFileHash } from "@oh-my-pi/pi-natives";
+import { normalizeToLF, stripBom } from "../edit/normalize";
 import { getEditStore } from "../edit/store";
 import type { ToolSession } from "../sdk";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -40,6 +42,8 @@ const BARE_ROW = /^(\d+)[:-](.*)$/;
 const NAMED_ROW = /[:-](\d+)[:-]/g;
 
 interface Row {
+	/** The output line the row was read from; one line may give several readings. */
+	index: number;
 	/** File prefix as printed (grep/rg with several files), or undefined for single-file views. */
 	file?: string;
 	line: number;
@@ -56,20 +60,22 @@ export interface NumberedFileTags {
 
 function parseRows(output: string): Row[] {
 	const rows: Row[] = [];
-	for (const raw of output.split("\n")) {
+	for (const [index, raw] of output.split("\n").entries()) {
 		const row = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
 		const catN = CAT_N_ROW.exec(row);
 		if (catN) {
-			rows.push({ line: Number(catN[1]), text: catN[2] });
+			rows.push({ index, line: Number(catN[1]), text: catN[2] });
 			continue;
 		}
 		const bare = BARE_ROW.exec(row);
-		if (bare) rows.push({ line: Number(bare[1]), text: bare[2] });
+		if (bare) rows.push({ index, line: Number(bare[1]), text: bare[2] });
 		// `path:N:text` / `path-N-text`: every `:N:` split is a candidate; the
-		// content check below keeps only the reading that matches a real file.
+		// content check below keeps a line only when exactly one reading
+		// matches a file the command read.
 		for (const match of row.matchAll(NAMED_ROW)) {
 			if (match.index === 0) continue;
 			rows.push({
+				index,
 				file: row.slice(0, match.index),
 				line: Number(match[1]),
 				text: row.slice(match.index + match[0].length),
@@ -79,36 +85,209 @@ function parseRows(output: string): Row[] {
 	return rows;
 }
 
-/** Short-option letters that make a numberer's numbers stop being file line numbers. */
-const RENUMBERING: Record<string, RegExp> = {
-	grep: /[bz]/, // byte offsets, NUL-separated records
-	egrep: /[bz]/,
-	fgrep: /[bz]/,
-	rg: /[bz]/, // byte offsets, decompressed archives
-	git: /O/, // `git grep` into a pager
-	cat: /[bs]/, // non-blank numbering, squeezed blank lines
+/**
+ * The options a numberer may take: every other option, and every option
+ * abbreviation, gives no tags, so a flag that renumbers, relabels or adds
+ * synthetic rows (`-b`, `--label`, `--group-separator`) never slips through.
+ */
+interface OptionSpec {
+	/** Short options without a value. */
+	flags: string;
+	/** Short options that take a value: the rest of the cluster, or the next word. */
+	valued: string;
+	/** Short options whose value is the pattern. */
+	patternFlags: string;
+	/** `-5` sets the context. */
+	digits: boolean;
+	long: ReadonlySet<string>;
+	longValued: ReadonlySet<string>;
+	/** Long options whose value may only follow `=`. */
+	longOptional: ReadonlySet<string>;
+	/** The long options that number lines. */
+	numberLong: string;
+	/** Whether the first operand is the pattern unless an option gave it. */
+	pattern: boolean;
+}
+
+const GREP: OptionSpec = {
+	flags: "nivwxyEFGPrRHhcoqslLaIU",
+	valued: "ABCmef",
+	patternFlags: "ef",
+	digits: true,
+	long: new Set([
+		"line-number",
+		"ignore-case",
+		"no-ignore-case",
+		"word-regexp",
+		"line-regexp",
+		"invert-match",
+		"extended-regexp",
+		"fixed-strings",
+		"basic-regexp",
+		"perl-regexp",
+		"recursive",
+		"dereference-recursive",
+		"with-filename",
+		"no-filename",
+		"count",
+		"only-matching",
+		"quiet",
+		"silent",
+		"no-messages",
+		"files-with-matches",
+		"files-without-match",
+		"text",
+	]),
+	longValued: new Set([
+		"max-count",
+		"after-context",
+		"before-context",
+		"context",
+		"include",
+		"exclude",
+		"exclude-dir",
+		"binary-files",
+		"regexp",
+		"file",
+	]),
+	longOptional: new Set(["color", "colour"]),
+	numberLong: "line-number",
+	pattern: true,
 };
-/** Long options with the same effect, or that relabel or re-root the printed paths. */
-const RENUMBERING_LONG =
-	/^--(?:byte-offset|null-data|search-zip|pre\b|label|full-name|open-files-in-pager|number-nonblank|squeeze-blank)/;
+
+const NUMBERERS: Record<string, OptionSpec> = {
+	grep: GREP,
+	egrep: GREP,
+	fgrep: GREP,
+	rg: {
+		flags: "niSswxvFPHIcoqlLuU.",
+		valued: "ABCmefgtTjM",
+		patternFlags: "ef",
+		digits: false,
+		long: new Set([
+			"line-number",
+			"ignore-case",
+			"smart-case",
+			"case-sensitive",
+			"word-regexp",
+			"line-regexp",
+			"invert-match",
+			"fixed-strings",
+			"hidden",
+			"no-ignore",
+			"no-ignore-vcs",
+			"follow",
+			"no-heading",
+			"with-filename",
+			"no-filename",
+			"count",
+			"only-matching",
+			"quiet",
+			"files-with-matches",
+			"files-without-match",
+			"multiline",
+			"pcre2",
+			"text",
+			"unrestricted",
+		]),
+		longValued: new Set([
+			"max-count",
+			"after-context",
+			"before-context",
+			"context",
+			"glob",
+			"iglob",
+			"type",
+			"type-not",
+			"regexp",
+			"file",
+			"color",
+			"max-depth",
+			"max-filesize",
+			"max-columns",
+			"threads",
+		]),
+		longOptional: new Set(),
+		numberLong: "line-number",
+		pattern: true,
+	},
+	// `git grep`, after its `grep` word.
+	git: {
+		flags: "niwvEFGPhHcolLIaWr",
+		valued: "ABCmef",
+		patternFlags: "ef",
+		digits: true,
+		long: new Set([
+			"line-number",
+			"ignore-case",
+			"word-regexp",
+			"invert-match",
+			"extended-regexp",
+			"fixed-strings",
+			"basic-regexp",
+			"perl-regexp",
+			"untracked",
+			"cached",
+			"no-index",
+			"count",
+			"files-with-matches",
+			"files-without-match",
+			"only-matching",
+			"text",
+			"function-context",
+			"recursive",
+		]),
+		longValued: new Set(["max-count", "after-context", "before-context", "context", "max-depth", "threads"]),
+		longOptional: new Set(["color"]),
+		numberLong: "line-number",
+		pattern: true,
+	},
+	cat: {
+		flags: "nu",
+		valued: "",
+		patternFlags: "",
+		digits: false,
+		long: new Set(["number"]),
+		longValued: new Set(),
+		longOptional: new Set(),
+		numberLong: "number",
+		pattern: false,
+	},
+};
+
 /** A `sed` script that only selects lines (`3,4p`, `$p`, `40q`). */
 const SED_SELECT = /^(?:\d+|\$)(?:,(?:\d+|\$))?[pq]$/;
-/** `NAME=value` before a command, judged on its shell spelling. */
-const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
-/** Unquoted characters that expand a word into other words or paths. */
+/**
+ * `NAME=value` before a command, judged on its raw spelling (`F''OO=x` is a
+ * command name): only locale variables, which cannot move the shell or
+ * reconfigure a numberer (`CDPATH`, `RIPGREP_CONFIG_PATH`).
+ */
+const ASSIGNMENT = /^(?:LC_[A-Z]+|LANG|LANGUAGE)=/;
+/** Characters that expand a word into other words or paths. */
 const EXPANDING = /[$`*?[{~]/;
+/** Unquoted characters that make a word several words, or another one. */
+const GLOB = /[*?[{]/;
+/** An `nl` logical-page delimiter line, which restarts its numbering. */
+const NL_DELIMITER = /^(?:\\:){1,3}$/;
 
 interface Word {
 	value: string;
+	raw: string;
 	/** The characters of the word the shell interprets (see {@link unquoted}). */
 	bare: string;
+	/** The unquoted characters of the word, where globs and a leading `~` expand. */
+	active: string;
 }
 
+/** True when the shell may turn the word into other words: a glob, braces, or a leading `~`. */
+const expands = (word: Word): boolean => GLOB.test(word.active) || word.active.startsWith("~");
+
 /**
- * A word's shell spelling with quoted and escaped text dropped, except `$`
- * and backticks inside double quotes, which still expand.
+ * A word's shell spelling with quoted and escaped text dropped, except, when
+ * `keepQuotedExpansions`, `$` and backticks inside double quotes, which still
+ * expand (into one word).
  */
-function unquoted(raw: string): string {
+function unquoted(raw: string, keepQuotedExpansions: boolean): string {
 	let out = "";
 	let quote: string | undefined;
 	for (let i = 0; i < raw.length; i++) {
@@ -117,7 +296,7 @@ function unquoted(raw: string): string {
 			i++;
 		} else if (quote) {
 			if (ch === quote) quote = undefined;
-			else if (quote === '"' && (ch === "$" || ch === "`")) out += ch;
+			else if (keepQuotedExpansions && quote === '"' && (ch === "$" || ch === "`")) out += ch;
 		} else if (ch === "'" || ch === '"') {
 			quote = ch;
 		} else {
@@ -134,41 +313,73 @@ function unquoted(raw: string): string {
 const climbs = (spelling: string): boolean => spelling.split(/[/\\]/).includes("..");
 
 /**
- * The words naming the files a numberer reads (its pattern dropped), or
- * `undefined` when the command does not print those files' line numbers.
- * Option values stay in: an extra word only costs the single-file
- * attribution, while a dropped file name could misplace it.
+ * The words naming the files a numberer reads (its pattern and option values
+ * dropped), or `undefined` when the command does not print those files' line
+ * numbers or takes an option outside its {@link OptionSpec}.
  */
 function numbererFiles(name: string, args: Word[]): Word[] | undefined {
 	if (name === "git") {
 		if (args[0]?.value !== "grep") return undefined;
 		args = args.slice(1);
 	}
-	const flags = args.filter(arg => arg.value.startsWith("-")).map(arg => arg.value);
-	const positional = args.filter(arg => !arg.value.startsWith("-"));
 	if (name === "nl") {
 		// Only `-ba` numbers every line; the default skips blank ones.
+		const flags = args.filter(arg => arg.value.startsWith("-")).map(arg => arg.value);
+		const positional = args.filter(arg => !arg.value.startsWith("-"));
 		const options = flags.join(" ");
 		if (options === "-b") return positional[0]?.value === "a" ? positional.slice(1) : undefined;
 		return options === "-ba" || options === "--body-numbering=a" ? positional : undefined;
 	}
-	const renumbering = RENUMBERING[name];
-	if (!renumbering) return undefined;
-	const short = flags.filter(flag => !flag.startsWith("--")).map(flag => /^-([a-zA-Z]*)/.exec(flag)?.[1] ?? "");
-	const numbered =
-		short.some(letters => letters.includes("n")) || flags.includes("--line-number") || flags.includes("--number");
-	if (
-		!numbered ||
-		short.some(letters => renumbering.test(letters)) ||
-		flags.some(flag => RENUMBERING_LONG.test(flag))
-	) {
-		return undefined;
+	const spec = NUMBERERS[name];
+	if (!spec) return undefined;
+	let numbered = false;
+	let patternGiven = false;
+	let optionsEnded = false;
+	const operands: Word[] = [];
+	for (let i = 0; i < args.length; i++) {
+		const word = args[i].value;
+		if (optionsEnded || !word.startsWith("-")) {
+			operands.push(args[i]);
+			continue;
+		}
+		// `--include=*.ts` expands only to words that start `--include=`, if any.
+		if (expands(args[i]) && !/^--[a-z-]+=/.test(args[i].active)) return undefined;
+		if (word === "-") return undefined; // standard input
+		if (word === "--") {
+			optionsEnded = true;
+			continue;
+		}
+		if (word.startsWith("--")) {
+			const eq = word.indexOf("=");
+			const option = eq < 0 ? word.slice(2) : word.slice(2, eq);
+			if (spec.longValued.has(option)) {
+				if (eq < 0 && args[++i] && expands(args[i])) return undefined;
+				if (option === "regexp" || option === "file") patternGiven = true;
+			} else if (!spec.longOptional.has(option) && (eq >= 0 || !spec.long.has(option))) {
+				return undefined;
+			}
+			if (option === spec.numberLong) numbered = true;
+			continue;
+		}
+		for (let j = 1; j < word.length; j++) {
+			const letter = word[j];
+			if (spec.digits && /\d/.test(letter)) continue;
+			if (spec.valued.includes(letter)) {
+				if (j === word.length - 1 && args[++i] && expands(args[i])) return undefined;
+				if (spec.patternFlags.includes(letter)) patternGiven = true;
+				break;
+			}
+			if (!spec.flags.includes(letter)) return undefined;
+			if (letter === "n") numbered = true;
+		}
 	}
-	if (name === "cat") return positional;
-	// The first positional word is the pattern unless `-e`/`-f` supplied it.
-	const patternGiven =
-		short.some(letters => /[ef]/.test(letters)) || flags.some(flag => /^--(?:regexp|file)\b/.test(flag));
-	return patternGiven ? positional : positional.slice(1);
+	if (!numbered) return undefined;
+	const files = spec.pattern && !patternGiven ? operands.slice(1) : operands;
+	// An expanded pattern can turn into a pattern and files (`s*`), and a glob
+	// that starts a word can match a file named like an option (`-v`).
+	if (files.length < operands.length && expands(operands[0])) return undefined;
+	if (files.some(file => /^[*?[{]/.test(file.raw) || /^~[^/]/.test(file.active))) return undefined;
+	return files;
 }
 
 /** True when a pipeline stage reads only its input stream and keeps or drops whole rows. */
@@ -202,30 +413,41 @@ interface ParsedView {
 	dir: string;
 	/** The one file every view reads, owner of the rows printed without a path. */
 	sole?: string;
+	/** Files and directories the views read: a `path:N:` row names a file at or under one. */
+	roots: string[];
+	/** `cd` targets the shell may look up through `CDPATH`, normalized. */
+	searchedCds: string[];
+	/** Some view is `nl`, whose numbering restarts at a logical-page delimiter. */
+	nl: boolean;
 }
 
 /**
  * Parse a command of the one shape whose rows can be traced to files:
  *
  *     [cd DIR (; | && | newline)]... VIEW [(; | && | newline) VIEW]...
- *     VIEW = NUMBERER [OPTION | FILE]... [| FILTER]...
+ *     VIEW = [LC_*=… | LANG=…]... NUMBERER [OPTION | FILE]... [| FILTER]...
  *
  * A NUMBERER prints each file's own line numbers (`grep -n`, `rg -n`,
- * `git grep -n`, `cat -n`, `nl -ba`); a FILTER reads the stream and only keeps
- * or drops rows (`head`, `tail`, `grep PATTERN`, `sed -n 3,4p`). A `cd`
- * counts only before any view, where it runs unconditionally: if it fails,
- * the files it would lead to do not exist. Any other command, keyword,
- * subshell, comment, input redirection, or a numberer after a pipe (which
+ * `git grep -n`, `cat -n`, `nl -ba`) and takes only the options its
+ * {@link OptionSpec} lists; a FILTER reads the stream and only keeps or drops
+ * rows (`head`, `tail`, `grep PATTERN`, `sed -n 3,4p`). A `cd` counts only
+ * before any view, where it runs unconditionally, to a DIR that does not climb:
+ * if it fails, the files it would lead to do not exist. Any other command,
+ * keyword, subshell, comment, input redirection, unquoted `$` or backtick
+ * (which can split into words), glob where it could add a pattern or an
+ * option (see {@link numbererFiles}), or a numberer after a pipe (which
  * numbers a stream, as `tail -n 1 a.ts | cat -n` does) gives `undefined`.
  */
 function parseView(command: string, cwd: string): ParsedView | undefined {
 	const tokens = lexShellCommand(command);
 	const pipelines: Word[][][] = [[[]]];
+	/** Stages with an output redirection, by pipeline then stage index. */
+	const redirected = new Set<string>();
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i];
 		const stages = pipelines[pipelines.length - 1];
 		if (token.kind === "word") {
-			const bare = unquoted(token.raw);
+			const bare = unquoted(token.raw, true);
 			if (bare.startsWith("#") || bare.includes("<")) return undefined;
 			if (bare.includes(">")) {
 				// An output redirection: `2>/dev/null`, or `2>` then `&1` or a target.
@@ -236,9 +458,13 @@ function parseView(command: string, cwd: string): ParsedView | undefined {
 					if (tokens[i + 2]?.kind !== "word") return undefined;
 					i += 2;
 				}
+				redirected.add(`${pipelines.length - 1}:${stages.length - 1}`);
 				continue;
 			}
-			if (token.value.length > 0) stages[stages.length - 1].push({ value: token.value, bare });
+			const active = unquoted(token.raw, false);
+			if (/[$`]/.test(active)) return undefined;
+			if (token.value.length > 0)
+				stages[stages.length - 1].push({ value: token.value, raw: token.raw, bare, active });
 			continue;
 		}
 		const operator = token.raw.replace(/[ \t]/g, "");
@@ -250,10 +476,13 @@ function parseView(command: string, cwd: string): ParsedView | undefined {
 
 	let dir = cwd;
 	let views = 0;
+	let nl = false;
 	const soles = new Set<string | undefined>();
-	for (const stages of pipelines) {
+	const roots: string[] = [];
+	const searchedCds: string[] = [];
+	for (const [index, stages] of pipelines.entries()) {
 		const [first, ...filters] = stages.map(words => {
-			const start = words.findIndex(word => !ASSIGNMENT.test(word.bare));
+			const start = words.findIndex(word => !ASSIGNMENT.test(word.raw));
 			return start < 0 ? [] : words.slice(start);
 		});
 		const [name, ...args] = first;
@@ -263,17 +492,33 @@ function parseView(command: string, cwd: string): ParsedView | undefined {
 		}
 		if (name.value === "cd") {
 			const target = args[0];
-			if (views > 0 || filters.length > 0 || args.length !== 1 || EXPANDING.test(target.bare)) return undefined;
+			if (views > 0 || filters.length > 0 || args.length !== 1 || stages[0].length !== 2) return undefined;
+			// A redirected `cd` hides the directory `CDPATH` led it to.
+			if (redirected.has(`${index}:0`) || EXPANDING.test(target.bare) || climbs(target.value)) return undefined;
 			if (target.value.startsWith("-")) return undefined;
+			if (!path.isAbsolute(target.value) && !/^\.(?:[/\\]|$)/.test(target.value)) {
+				searchedCds.push(path.posix.normalize(target.value.replace(/\\/g, "/")).replace(/\/+$/, ""));
+			}
 			dir = path.resolve(dir, target.value);
 			continue;
 		}
 		const files = numbererFiles(name.value, args);
 		if (!files) return undefined;
 		for (const [stage, ...stageArgs] of filters) {
-			if (stage === undefined || !keepsRows(stage.value, stageArgs)) return undefined;
+			if (stage === undefined || stageArgs.some(expands) || !keepsRows(stage.value, stageArgs)) return undefined;
 		}
 		views++;
+		if (name.value === "nl") nl = true;
+		// `git grep` prints paths under the directory whatever its revisions and pathspecs.
+		if (name.value === "git" || files.length === 0) roots.push(dir);
+		for (const file of name.value === "git" ? [] : files) {
+			// A glob's matches lie under the directory its literal part names.
+			const spelled = file.active.startsWith("~") ? os.homedir() + file.value.slice(1) : file.value;
+			const glob = expands(file) ? spelled.search(GLOB) : -1;
+			roots.push(
+				path.resolve(dir, glob < 0 ? spelled : spelled.slice(0, spelled.lastIndexOf("/", glob) + 1) || "."),
+			);
+		}
 		const [only] = files;
 		soles.add(
 			files.length === 1 && !EXPANDING.test(only.bare) && !climbs(only.value)
@@ -283,7 +528,7 @@ function parseView(command: string, cwd: string): ParsedView | undefined {
 	}
 	if (views === 0) return undefined;
 	const [sole] = soles;
-	return { dir, sole: soles.size === 1 ? sole : undefined };
+	return { dir, sole: soles.size === 1 ? sole : undefined, roots, searchedCds, nl };
 }
 
 async function regularFiles(candidates: Iterable<string>): Promise<Set<string>> {
@@ -302,7 +547,7 @@ async function readLines(file: string): Promise<{ text: string; lines: string[] 
 		.text()
 		.catch(() => undefined);
 	if (raw === undefined || raw.includes("\0")) return undefined;
-	const text = (raw.startsWith("\uFEFF") ? raw.slice(1) : raw).replace(/\r\n?/g, "\n");
+	const text = normalizeToLF(stripBom(raw).text);
 	return { text, lines: text.split("\n") };
 }
 
@@ -325,9 +570,28 @@ export async function planNumberedFileTags(
 
 	const view = parseView(command, cwd);
 	if (!view) return undefined;
+	// A `cd` that `CDPATH` led elsewhere prints the directory it entered.
+	const printed = output.split("\n").map(line => line.replace(/\r$/, "").replace(/[/\\]+$/, ""));
+	if (
+		view.searchedCds.some(target =>
+			printed.some(line => path.isAbsolute(line) && line.replace(/\\/g, "/").endsWith(`/${target}`)),
+		)
+	) {
+		return undefined;
+	}
+	// A `path:N:` row names a file the command read, or one under a directory it searched.
+	const underRoot = (file: string): boolean =>
+		view.roots.some(root => {
+			const relative = path.relative(root, file);
+			return (
+				relative === "" ||
+				(relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+			);
+		});
 	const prefixes = new Set<string>();
 	for (const row of rows) {
 		if (row.file === undefined || /\s/.test(row.file) || climbs(row.file)) continue;
+		if (!underRoot(path.resolve(view.dir, row.file))) continue;
 		if (prefixes.size === MAX_PREFIXES && !prefixes.has(row.file)) break;
 		prefixes.add(row.file);
 	}
@@ -349,18 +613,36 @@ export async function planNumberedFileTags(
 	);
 	if (files.length > MAX_TAGGED_FILES) return undefined;
 
-	const verified: Array<{ file: string; text: string; tag: string; lines: number[] }> = [];
+	const contents = new Map<string, { text: string; lines: string[] }>();
+	/** Readings that match a file line, per output line. */
+	const matches = new Map<number, Array<{ file: string; line: number }>>();
 	for (const file of files) {
 		const content = await readLines(file);
 		if (!content) continue;
-		const seen = new Set<number>();
+		// `nl` restarts its numbers after a logical-page delimiter line.
+		if (view.nl && file === sole && content.lines.some(line => NL_DELIMITER.test(line))) continue;
+		contents.set(file, content);
 		for (const row of rows) {
 			const applies = row.file === undefined ? file === sole : named.get(row.file) === file;
-			if (applies && row.line >= 1 && content.lines[row.line - 1] === row.text) seen.add(row.line);
+			if (!applies || row.line < 1 || content.lines[row.line - 1] !== row.text) continue;
+			const readings = matches.get(row.index);
+			if (readings) readings.push({ file, line: row.line });
+			else matches.set(row.index, [{ file, line: row.line }]);
 		}
-		if (seen.size > 0) {
-			verified.push({ file, text: content.text, tag: hashlineFileHash(content.text), lines: [...seen] });
-		}
+	}
+	// An output line read two ways (`a.ts:1:b.ts:1:x`) vouches for neither.
+	const seenByFile = new Map<string, Set<number>>();
+	for (const readings of matches.values()) {
+		if (readings.length !== 1) continue;
+		const [{ file, line }] = readings;
+		const seen = seenByFile.get(file);
+		if (seen) seen.add(line);
+		else seenByFile.set(file, new Set([line]));
+	}
+	const verified: Array<{ file: string; text: string; tag: string; lines: number[] }> = [];
+	for (const [file, content] of contents) {
+		const seen = seenByFile.get(file);
+		if (seen) verified.push({ file, text: content.text, tag: hashlineFileHash(content.text), lines: [...seen] });
 	}
 	if (verified.length === 0) return undefined;
 
