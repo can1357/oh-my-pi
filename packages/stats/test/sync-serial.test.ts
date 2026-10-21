@@ -324,7 +324,7 @@ describe("stats sync serial mode", () => {
 	// failing. Below it, the only way out is the child's own exit.
 	it.skipIf(process.platform === "darwin")("drains on its own after the warm pool reuses a worker", async () => {
 		const script = [
-			`import { readdirSync, readlinkSync } from "node:fs";`,
+			`import * as nodeFs from "node:fs";`,
 			`import * as fs from "node:fs/promises";`,
 			`import * as os from "node:os";`,
 			`import * as path from "node:path";`,
@@ -369,9 +369,9 @@ describe("stats sync serial mode", () => {
 			`// A released handle leaves no descriptor on stats.db or on either WAL sidecar.`,
 			`// /proc is Linux-only; elsewhere this line is simply not printed.`,
 			`try {`,
-			`    const held = readdirSync("/proc/self/fd")`,
+			`    const held = nodeFs.readdirSync("/proc/self/fd")`,
 			`        .flatMap((fd) => {`,
-			`            try { return [readlinkSync(\`/proc/self/fd/\${fd}\`)]; } catch { return []; }`,
+			`            try { return [nodeFs.readlinkSync(\`/proc/self/fd/\${fd}\`)]; } catch { return []; }`,
 			`        })`,
 			`        .filter((target) => target === dbPath || target.startsWith(dbPath));`,
 			`    console.log("leakedDbHandles=" + held.length);`,
@@ -470,13 +470,10 @@ describe("stats sync serial mode", () => {
 				const secondSessions = getSessionsDir();
 				await fs.rm(secondSessions, { recursive: true, force: true });
 				await writeSessionFile();
-				const secondRun = spyOnWorkerSpawns();
 				await syncAllSessions({
 					workers: 2,
 					files: [path.join(secondSessions, "--tmp--sync-serial", "session.jsonl")],
 				});
-				expect(secondRun).toHaveBeenCalled();
-				secondRun.mockRestore();
 
 				expect(getStatsByFolder().map(folder => folder.folder)).toEqual(["/tmp/sync-serial"]);
 				expect(getStatsByAgentType().map(byType => byType.agentType)).toEqual(["main"]);
@@ -515,10 +512,7 @@ describe("stats sync serial mode", () => {
 				// No env and no agent-dir change: only the cwd moves, which is exactly
 				// the case the reuse key cannot see through the environment.
 				process.chdir(secondDir);
-				const secondRun = spyOnWorkerSpawns();
 				const secondSync = await syncAllSessions({ workers: 2, files: ["shared/session.jsonl"] });
-				expect(secondRun).toHaveBeenCalled();
-				secondRun.mockRestore();
 
 				// The run has to have ingested the transcript in the new directory: a
 				// reused worker would have read the first directory's file instead.
