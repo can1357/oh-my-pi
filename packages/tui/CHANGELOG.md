@@ -157,6 +157,7 @@
 - Command and eval output panes no longer re-style and re-join their whole output on every frame, so a long command's output stops costing frame time while it sits in the transcript ([#16779](https://github.com/can1357/oh-my-pi/pull/16779) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ### Fixed
 
+### Fixed
 - Fixed the `/usage` dashboard printing the remaining percentage next to bars filled by quota used; it now reads `N% used`, and the details table heads its quota column `Used`, `Left` or `Quota` to match the rows it holds ([#13971](https://github.com/can1357/oh-my-pi/issues/13971), [#16415](https://github.com/can1357/oh-my-pi/pull/16415) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
