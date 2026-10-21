@@ -154,6 +154,8 @@
 - Fixed Tern MCP tool cards showing only a clipped one-line summary of the arguments; the call and result cards now include a folded `Args` section with the full arguments ([#16765](https://github.com/can1357/oh-my-pi/issues/16765))
 - Fixed pasting an API key or redirect URL into the setup wizard's provider sign-in prompt silently doing nothing ([#16898](https://github.com/can1357/oh-my-pi/pull/16898) by [@camiloeferrera](https://github.com/camiloeferrera))
 - Fixed the usage dashboard averaging distinct quota buckets that share a label and window (Google Antigravity's Gemini and Gemini 4 Argon weeklies) into one row, which masked a drained bucket as "50% left"; buckets now group by quota identity, and shared Claude/GPT copies still merge ([#16790](https://github.com/can1357/oh-my-pi/issues/16790))
+- Command and eval output panes no longer re-style and re-join their whole output on every frame, so a long command's output stops costing frame time while it sits in the transcript ([#16779](https://github.com/can1357/oh-my-pi/pull/16779) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Changed the TUI to do less work per render while edit previews stream and streamed assistant tables grow, so the terminal stays responsive through long tool output ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -182,7 +184,6 @@
 ## [18.12.6] - 2026-10-21
 
 ### Changed
-- Changed the TUI to do less work per render while edit previews stream and streamed assistant tables grow, so the terminal stays responsive through long tool output ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - In Tern, centered sheets (`/context`, reports, keyboard shortcuts, BTW history, session info, the pause screen) fill the pane when it is narrower than 100 columns instead of floating with margins ([#16676](https://github.com/can1357/oh-my-pi/pull/16676) by [@H4vC](https://github.com/H4vC))
 
