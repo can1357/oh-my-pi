@@ -7,7 +7,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { getModelDbPath, isSqliteCorruptionError, logger, openSqliteDatabaseSync, VERSION } from "@oh-my-pi/pi-utils";
 import RULES from "./compat/rules.json" with { type: "json" };
-import type { Api, Model } from "./types";
+import { type Api, INPUT_MODALITIES, type Model } from "./types";
 
 // Rows persist fully materialized Models so compatible warm-cache reads do not
 // rerun the compat cascade. Request headers are intentionally omitted:
@@ -459,7 +459,10 @@ const MaterializedModel = type({
 	// configuration at request time, and their bundled rows carry "".
 	baseUrl: "string",
 	reasoning: "boolean",
-	input: "('text' | 'image')[] > 0",
+	input: type
+		.enumerated(...INPUT_MODALITIES)
+		.array()
+		.atLeastLength(1),
 	"headers?": "undefined",
 	supportsComputerUseConfig: "boolean | null",
 	contextWindow: "number > 0 | null",
