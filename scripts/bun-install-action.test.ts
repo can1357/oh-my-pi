@@ -8,6 +8,18 @@ const REPO_ROOT = path.join(import.meta.dir, "..");
 const ACTION_FILE = path.join(REPO_ROOT, ".github/actions/bun-install/action.yml");
 const GUARD_FILE = path.join(REPO_ROOT, "scripts/check-bun-floor.ts");
 
+/**
+ * Whether this host can run the action's shell step.
+ *
+ * The composite action's "Detect environment" step is a POSIX shell script, and
+ * the fixture's fake Bun is a `#!/usr/bin/env bash` shim, so those suites need
+ * a POSIX shell. A Windows checkout without Git Bash on `PATH` has none, and
+ * the spawn then fails before the suite reaches an assertion. The guard's own
+ * CLI test below runs the TypeScript guard directly, so it stays enabled
+ * everywhere.
+ */
+const HAS_POSIX_SHELL = process.platform !== "win32" && Bun.which("bash") !== null;
+
 interface ActionStep {
 	id?: string;
 	run?: string;
@@ -127,7 +139,7 @@ async function runGuard(args: string[]): Promise<number> {
 	return result.exitCode;
 }
 
-describe("bun-install setup decision", () => {
+describe.skipIf(!HAS_POSIX_SHELL)("bun-install setup decision", () => {
 	// A runner whose Bun satisfies the declared floor is reused as-is: installing
 	// a fresh Bun would only cost the job a download.
 	test("keeps a preloaded Bun that satisfies the declared floor", async () => {
@@ -194,7 +206,7 @@ describe("check-bun-floor --satisfies", () => {
 	});
 });
 
-describe("bun-install setup probe", () => {
+describe.skipIf(!HAS_POSIX_SHELL)("bun-install setup probe", () => {
 	// AGENTS.md bans inline imports, so the probe must reach the floor guard
 	// through the guard's CLI instead of pulling it in at runtime inside a
 	// `bun -e` module — the very form the repo forbids. The probe's own
