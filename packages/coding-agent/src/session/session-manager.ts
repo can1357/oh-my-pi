@@ -1516,20 +1516,26 @@ interface SerializerHookProbeNode {
 	key: string | undefined;
 	isTopLevelToolResultDetails: boolean | undefined;
 	atomic: boolean;
-	/** The object nodes on this node's path, innermost first, for cycle detection. */
-	parent: PathNode | undefined;
 }
 
-/** One object on a memo walk's path, linked to its own parent. */
-type PathNode = { readonly value: object; readonly parent: PathNode | undefined };
+/**
+ * One frame in the probe's worklist: a node to visit, or the marker that ends
+ * a container's visit and takes it off the active path.
+ */
+type SerializerHookProbeFrame =
+	| ({
+			readonly kind: "value";
+	  } & SerializerHookProbeNode)
+	| { readonly kind: "exit"; readonly value: object };
 
-/** Whether `value` already sits on `parent`'s path, closing a cycle. */
-function onWalkPath(parent: PathNode | undefined, value: object): boolean {
-	for (let node = parent; node !== undefined; node = node.parent) {
-		if (node.value === value) return true;
-	}
-	return false;
-}
+/**
+ * The objects on the current walk path, for the cycle check. A set answers
+ * "is this node already on the path?" in constant time; walking the ancestor
+ * chain instead made a deep acyclic graph quadratic — a 25k-deep `details`
+ * chain spent O(depth) per node in both this probe and the projector's
+ * pre-scan.
+ */
+type ActivePath = Set<object>;
 
 function hasSerializerHook(
 	value: unknown,
@@ -1541,9 +1547,15 @@ function hasSerializerHook(
 	// can hold a graph nested arbitrarily deep, and one JS frame per level
 	// overflowed the stack on such input — a persistence failure on a graph
 	// serialization handles fine.
-	const pending: SerializerHookProbeNode[] = [{ value, key, isTopLevelToolResultDetails, atomic, parent: undefined }];
-	for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
-		const { value, key, isTopLevelToolResultDetails, atomic, parent } = node;
+	const pending: SerializerHookProbeFrame[] = [{ kind: "value", value, key, isTopLevelToolResultDetails, atomic }];
+	const activePath: ActivePath = new Set();
+	for (let frame = pending.pop(); frame !== undefined; frame = pending.pop()) {
+		if (frame.kind === "exit") {
+			// The container's visit is over: it is no longer on the path.
+			activePath.delete(frame.value);
+			continue;
+		}
+		const { value, key, isTopLevelToolResultDetails, atomic } = frame;
 		// A bigint is the one primitive `JSON.stringify` routes through a hook:
 		// when an extension installs `BigInt.prototype.toJSON`, serialization
 		// invokes it — so a stateful hook's first output cannot be stamped as a
@@ -1610,9 +1622,11 @@ function hasSerializerHook(
 		// A node already on this path closes a cycle the projection does not
 		// strip: its hooks were probed when it was first visited, so re-entering
 		// it would repeat the walk forever. The projector surfaces the resulting
-		// serialization error.
-		if (onWalkPath(parent, value)) continue;
-		const path: PathNode = { value, parent };
+		// serialization error. The active path answers the question in constant
+		// time, where walking the ancestor chain made a deep acyclic graph
+		// quadratic.
+		if (activePath.has(value)) continue;
+		activePath.add(value);
 		if (Array.isArray(value)) {
 			// Indexed slots first pass through the accessor scan: a stateful or
 			// one-shot indexed getter must leave the graph uncached before the
@@ -1632,8 +1646,15 @@ function hasSerializerHook(
 			// classification below reads it, so a carrier that persists verbatim
 			// under `anthropicCompaction` must be probed as atomic, not have its
 			// transient keys skipped.
+			pending.push({ kind: "exit", value });
 			for (let index = 0; index < length; index++) {
-				pending.push({ value: value[index], key, isTopLevelToolResultDetails: undefined, atomic, parent: path });
+				pending.push({
+					kind: "value",
+					value: value[index],
+					key,
+					isTopLevelToolResultDetails: undefined,
+					atomic,
+				});
 			}
 			continue;
 		}
@@ -1713,6 +1734,9 @@ function hasSerializerHook(
 			if (symbolDescriptor === undefined) continue;
 			if (typeof symbolDescriptor.get === "function" || typeof symbolDescriptor.set === "function") return true;
 		}
+		// The container's visit ends after its children, so the exit marker sits
+		// below them on the worklist.
+		pending.push({ kind: "exit", value });
 		for (const childKey of Object.keys(value)) {
 			if (skipStructuredContent && childKey === "structuredContent") {
 				// The field is stripped from the line, but the MCP spill strip
@@ -1738,11 +1762,11 @@ function hasSerializerHook(
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
 			if (!nodeAtomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
 			pending.push({
+				kind: "value",
 				value: descriptor.value,
 				key: childKey,
 				isTopLevelToolResultDetails: isTopLevelMessageChild(value, key, childKey),
 				atomic: nodeAtomic,
-				parent: path,
 			});
 		}
 	}
@@ -2162,7 +2186,7 @@ type StampMatchPending =
 	/** Checks a stripped transient key's presence-only record. */
 	| { readonly kind: "transient"; readonly key: string }
 	/** Checks the closing marker of the container that scheduled it. */
-	| { readonly kind: "end" };
+	| { readonly kind: "end"; readonly live: object };
 
 function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 	let index = 0;
@@ -2180,9 +2204,15 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 			atomic: false,
 		},
 	];
+	// The live objects on the current path. The stamp is a tree, so a live
+	// graph that closes a cycle is deeper than the stamp and the match has
+	// already failed when the walk runs out of stamp — the check below answers
+	// the revisit directly, so a cyclic graph can never be walked twice.
+	const activePath = new Set<object>();
 	for (let frame = pending.pop(); frame !== undefined; frame = pending.pop()) {
 		if (frame.kind === "end") {
 			if (stamp[index++] !== STAMP_END) return false;
+			activePath.delete(frame.live);
 			continue;
 		}
 		if (frame.kind === "transient") {
@@ -2240,6 +2270,11 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 		if (expected === STAMP_OBJECT || expected === STAMP_ARRAY) {
 			if (live === null || typeof live !== "object") return false;
 			if (Array.isArray(live) !== (expected === STAMP_ARRAY)) return false;
+			// A live object already on the current path closes a cycle the stamp
+			// — a tree — cannot describe. The match fails here, so the line is
+			// re-projected and the projector surfaces the serialization error.
+			if (activePath.has(live)) return false;
+			activePath.add(live);
 			if (Array.isArray(live)) {
 				// Indexed slots with a snapshotted length, mirroring both
 				// `JSON.stringify` and {@link messageValueStamp} — never the
@@ -2249,7 +2284,7 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 				// caller's key to each element. It is not a stamp key — array
 				// slots record none (`keyed` below).
 				const length = live.length;
-				pending.push({ kind: "end" });
+				pending.push({ kind: "end", live });
 				for (let position = length - 1; position >= 0; position--) {
 					pending.push({
 						kind: "value",
@@ -2293,7 +2328,7 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 					atomic: nodeAtomic,
 				});
 			}
-			pending.push({ kind: "end" });
+			pending.push({ kind: "end", live });
 			for (let position = children.length - 1; position >= 0; position--) pending.push(children[position]);
 			continue;
 		}
