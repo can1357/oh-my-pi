@@ -39,6 +39,7 @@
 - The shell's built-in `jq` no longer slows down quadratically on repeated updates such as `reduce range(n) as $i ([]; . + [$i])`
 - `/tan` completion notices now quote the user's request and mark the result as the user's tangent, so the main agent no longer mistakes it for its own work
 - `omp zsh` with zsh-autosuggestions' `completion` strategy no longer echoes each typed key onto new lines: `vared` inside a `zpty` command now edits on the pty instead of the shell's terminal
+- `read` returns a timestamped transcript of audio files and of a video's soundtrack (`clip.mp4:transcript`) when you're logged in to a model that hears audio, such as Gemini through a Google login or an audio model on OpenRouter; its times are video frame selectors. Without one, an audio read shows its duration and codec instead of refusing it as binary ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -1047,10 +1048,6 @@
 - Fixed releasing or reaping a browser tab returning while Chromium still listed the page; the close now waits until Chromium reports the tab destroyed ([#16680](https://github.com/can1357/oh-my-pi/pull/16680) by [@H4vC](https://github.com/H4vC))
 - Fixed the advisor prompt forbidding all repeated advice, including real escalations: advisors may now re-raise a prior nit or concern as a blocker once new evidence makes it one ([#13887](https://github.com/can1357/oh-my-pi/issues/13887), [#16484](https://github.com/can1357/oh-my-pi/pull/16484) by [@pjh890321](https://github.com/pjh890321))
 - Fixed Esc no longer interrupting in the TUI after a second MCP OAuth login replaced an unfinished first one ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
-
-### Added
-
-- `read` returns a timestamped transcript of audio files and of a video's soundtrack (`clip.mp4:transcript`) when you're logged in to a model that hears audio, such as Gemini through a Google login or an audio model on OpenRouter; its times are video frame selectors. Without one, an audio read shows its duration and codec instead of refusing it as binary
 
 ## [18.12.5] - 2026-10-21
 

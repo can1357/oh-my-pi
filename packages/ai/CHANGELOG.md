@@ -121,6 +121,9 @@
 
 - Fixed Factory Droid Fable requests offering Opus 5 as the refusal fallback when your organization's model policy excludes Opus 5; Claude requests now offer only fallback models your account can use, and a request served by another organization's login than the one your model list came from offers none ([#17772](https://github.com/can1357/oh-my-pi/pull/17772) by [@will-bogusz](https://github.com/will-bogusz))
 
+- `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
+- Chat Completions and Responses requests (including OpenRouter) send `audio/*` content blocks as `input_audio` parts, so models that hear audio receive it
+- Chat Completions and Responses requests (including OpenRouter) send `audio/*` content blocks as `input_audio` parts, so models that hear audio receive it ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
@@ -284,10 +287,6 @@
 - Fixed Cursor GitHub and Google logins never getting an account email ([#17048](https://github.com/can1357/oh-my-pi/pull/17048) by [@trukhinyuri](https://github.com/trukhinyuri))
 - Fixed Cursor X Subscription usage treating the weekly Grok/Composer pool as third-party budget; third-party models are now metered by prepaid credit ([#17048](https://github.com/can1357/oh-my-pi/pull/17048) by [@trukhinyuri](https://github.com/trukhinyuri))
 - Fixed Google models (`google-generative-ai`, `google-vertex`, `google-gemini-cli`/Antigravity) running out of output on small `maxTokens` requests with reasoning on, ending with thinking only and no answer; the requested `maxTokens` now leaves room for thinking on top, as on other providers ([#16943](https://github.com/can1357/oh-my-pi/pull/16943) by [@Mouriya-Emma](https://github.com/Mouriya-Emma))
-
-### Added
-
-- Chat Completions and Responses requests (including OpenRouter) send `audio/*` content blocks as `input_audio` parts, so models that hear audio receive it
 
 ## [18.12.5] - 2026-10-21
 
