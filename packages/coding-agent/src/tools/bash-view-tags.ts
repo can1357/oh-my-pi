@@ -156,11 +156,16 @@ const NL_DELIMITER = /^(?:\\:){1,3}$/;
 
 interface Word {
 	value: string;
-	/** The unquoted characters of the word, where `$`, globs and a leading `~` expand. */
+	/** The unquoted characters of the word, where globs expand, plus `$` and backticks inside double quotes. */
 	active: string;
+	/** The word starts with an unquoted `~`, which the shell expands to the home directory. */
+	tilde: boolean;
 }
 
-/** A word's shell spelling with quoted and escaped text dropped. */
+/**
+ * A word's shell spelling with quoted and escaped text dropped, except `$`
+ * (not closing the quotes) and backticks inside double quotes, which still expand.
+ */
 function unquoted(raw: string): string {
 	let out = "";
 	let quote: string | undefined;
@@ -170,6 +175,7 @@ function unquoted(raw: string): string {
 			i++;
 		} else if (quote) {
 			if (ch === quote) quote = undefined;
+			else if (quote === '"' && (ch === "`" || (ch === "$" && raw[i + 1] !== '"'))) out += ch;
 		} else if (ch === "'" || ch === '"') {
 			quote = ch;
 		} else {
@@ -301,8 +307,9 @@ function parseView(command: string, cwd: string): ParsedView | undefined {
 			const active = unquoted(token.raw);
 			if (active.startsWith("#") || active.includes("<")) return undefined;
 			if (active.includes(">")) {
-				// An output redirection: `2>/dev/null`, `2>"err"`, or `2>` then `&1` or a target.
-				if (!/^\d*>>?/.test(active)) return undefined;
+				// An output redirection, spelled from the word's start: `2>/dev/null`,
+				// `2>"err"`, or `2>` then `&1` or a target. In `'2p'>out` the `2p` is an argument.
+				if (!/^\d*>>?/.test(token.raw)) return undefined;
 				if (/^\d*>>?$/.test(token.raw)) {
 					const next = tokens[i + 1];
 					if (next?.kind !== "separator" || (next.raw !== "&" && next.raw.trim() !== "")) return undefined;
@@ -311,7 +318,9 @@ function parseView(command: string, cwd: string): ParsedView | undefined {
 				}
 				continue;
 			}
-			if (token.value.length > 0) stages[stages.length - 1].push({ value: token.value, active });
+			if (token.value.length > 0) {
+				stages[stages.length - 1].push({ value: token.value, active, tilde: token.raw.startsWith("~") });
+			}
 			continue;
 		}
 		const operator = token.raw.replace(/[ \t]/g, "");
@@ -329,11 +338,13 @@ function parseView(command: string, cwd: string): ParsedView | undefined {
 	}
 	const files = new Map<string, string>();
 	for (const file of numbered.files) {
-		// A leading `~/` is one path; any other expansion can name other files.
-		if (EXPANDING.test(file.active) || /^~[^/]/.test(file.active) || file.value === "-") return undefined;
+		// A leading unquoted `~/` is one path; any other expansion can name other files.
+		if (EXPANDING.test(file.active) || (file.tilde && /^~[^/]/.test(file.value)) || file.value === "-") {
+			return undefined;
+		}
 		// `link/../a.ts` climbs out of the symlink's target; resolved by hand it would not.
 		if (file.value.split(/[/\\]/).includes("..")) return undefined;
-		const spelled = file.active.startsWith("~") ? os.homedir() + file.value.slice(1) : file.value;
+		const spelled = file.tilde ? os.homedir() + file.value.slice(1) : file.value;
 		files.set(file.value, path.resolve(cwd, spelled));
 	}
 	// `cat -n a.ts b.ts` numbers the joined stream.

@@ -237,6 +237,29 @@ describe("bash numbered file views mint edit tags", () => {
 		expect(getEditStore(session).headHash(path.join(cwd, "a.ts"))).toBeNull();
 	});
 
+	it("reads a quoted word the way the shell does", async () => {
+		await Bun.write(path.join(cwd, "a.ts"), "same\n");
+		await Bun.write(path.join(cwd, "2p"), "1:same\n");
+		// `$D` expands inside double quotes; the literal directory is a decoy.
+		await Bun.write(path.join(cwd, "$D", "a.ts"), "same\n");
+		expect(await planNumberedFileTags(session, 'grep -n same "$D/a.ts"', cwd, "1:same\n")).toBeUndefined();
+		// `'2p'>/dev/stdout` hands `2p` to head as a file: the row is from 2p.
+		expect(
+			await planNumberedFileTags(session, "grep -n missing a.ts | head '2p'>/dev/stdout", cwd, "1:same\n"),
+		).toBeUndefined();
+		// `''~/a.ts` does not start with `~`: the shell opens ./~/a.ts, not the home file.
+		await Bun.write(path.join(cwd, "home", "a.ts"), "same\n");
+		await Bun.write(path.join(cwd, "~", "a.ts"), "same\n");
+		const homeSpy = spyOn(os, "homedir").mockReturnValue(path.join(cwd, "home"));
+		try {
+			(await planNumberedFileTags(session, "grep -n same ''~/a.ts", cwd, "1:same\n"))?.commit();
+			expect(getEditStore(session).headHash(path.join(cwd, "home", "a.ts"))).toBeNull();
+			expect(getEditStore(session).headHash(path.join(cwd, "~", "a.ts"))).not.toBeNull();
+		} finally {
+			homeSpy.mockRestore();
+		}
+	});
+
 	it("names no tag for anything but one numberer reading the files it names", async () => {
 		await Bun.write(path.join(cwd, "a.ts"), "same\nx\nsame\n");
 		await Bun.write(path.join(cwd, "b.ts"), "same\n");
