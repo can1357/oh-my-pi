@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed `/review` diff links keeping the snapshot that built the request after the cached diff refreshes in the background, instead of opening whatever file now sits at the same index ([#16310](https://github.com/can1357/oh-my-pi/pull/16310) by [@tkossak](https://github.com/tkossak))
+- Fixed `/review` storing that snapshot when `github.cache.enabled` is off. The review uses the session's cache setting, fetches the diff, and does not write a generation or refresh one in the background ([#16310](https://github.com/can1357/oh-my-pi/pull/16310) by [@tkossak](https://github.com/tkossak))
 
 ## [18.12.5] - 2026-10-21
 

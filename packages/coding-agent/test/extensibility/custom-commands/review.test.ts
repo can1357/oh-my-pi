@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type 
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings, withActiveSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ReviewCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
 import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
@@ -306,6 +307,38 @@ describe("ReviewCommand", () => {
 			expect(result).toBeDefined();
 			expect(result!).toContain("PR owner/repo#123");
 			expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 123 });
+		}
+	});
+
+	it("does not retain a review snapshot when the GitHub cache is disabled", async () => {
+		const dir = createTempDir();
+		const previousToken = process.env.GH_TOKEN;
+		const previousCacheDb = process.env.OMP_GITHUB_CACHE_DB;
+		const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-cache-off-"));
+		process.env.GH_TOKEN = "review-cache-disabled";
+		process.env.OMP_GITHUB_CACHE_DB = path.join(cacheDir, "github-cache.db");
+		resetCacheForTests();
+		const settings = Settings.isolated({ "github.cache.enabled": false });
+		spyOn(github, "text").mockResolvedValue(SAMPLE_PR_DIFF);
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		try {
+			const result = await withActiveSettings(settings, () =>
+				command.execute(["https://github.com/owner/repo/pull/123"], {
+					hasUI: false,
+				} as unknown as HookCommandContext),
+			);
+			expect(retainGeneration).not.toHaveBeenCalled();
+			expect(result).toBeDefined();
+			expect(result!).toContain("pr://owner/repo/123/diff/");
+			expect(result!).not.toContain("?at=");
+		} finally {
+			resetCacheForTests();
+			if (previousToken === undefined) delete process.env.GH_TOKEN;
+			else process.env.GH_TOKEN = previousToken;
+			if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
+			else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
+			resetCacheForTests();
+			await removeWithRetries(cacheDir);
 		}
 	});
 

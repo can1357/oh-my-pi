@@ -1,5 +1,6 @@
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
+import { findScopedSettings } from "../../../../config/settings";
 import type { CustomCommand, CustomCommandAPI } from "../../../../extensibility/custom-commands/types";
 import type { HookCommandContext } from "../../../../extensibility/hooks/types";
 import { parseMrUrl } from "../../../../internal-urls/mr-protocol";
@@ -164,9 +165,18 @@ function extractReviewPrRefsFromText(text: string): ReviewPrRef[] {
 /** Fetch one PR/MR patch and freeze it before any overlay or LLM prompt is built; throws on fetch failure. */
 export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promise<ResolvedReviewTarget> {
 	const label = formatReviewRefLabel(ref);
+	// Session settings are the active scope (set around `/review`). Without them,
+	// `resolveCacheTtl(undefined)` uses the default enabled cache and a kill switch
+	// still stores a generation.
+	const settings = findScopedSettings(cwd);
 	if (ref.forge === "gitlab") {
 		try {
-			const lookup = await glab.getOrFetchMrDiff({ cwd, project: ref.repo, iid: ref.number });
+			const lookup = await glab.getOrFetchMrDiff({
+				cwd,
+				project: ref.repo,
+				iid: ref.number,
+				...(settings ? { settings } : {}),
+			});
 			return createResolvedReviewTarget(
 				"pr",
 				label,
@@ -183,7 +193,12 @@ export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promis
 		}
 	}
 	try {
-		const lookup = await gh.getOrFetchPrDiff({ cwd, repo: ref.repo, number: ref.number });
+		const lookup = await gh.getOrFetchPrDiff({
+			cwd,
+			repo: ref.repo,
+			number: ref.number,
+			...(settings ? { settings } : {}),
+		});
 		const generationAt =
 			lookup.status === "disabled"
 				? null
