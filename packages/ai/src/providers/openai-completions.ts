@@ -69,6 +69,7 @@ import type {
 	ChatCompletionChunk,
 	ChatCompletionContentPart,
 	ChatCompletionContentPartImage,
+	ChatCompletionContentPartInputAudio,
 	ChatCompletionContentPartText,
 	ChatCompletionMessageFunctionToolCall,
 	ChatCompletionMessageParam,
@@ -123,6 +124,8 @@ import {
 } from "./openai-shared";
 import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
 import {
+	inputAudioFormat,
+	isAudioContent,
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
 	NON_VISION_IMAGE_PLACEHOLDER,
@@ -2527,6 +2530,11 @@ export function convertMessages(
 							type: "text",
 							text,
 						} satisfies ChatCompletionContentPartText);
+					} else if (isAudioContent(item)) {
+						content.push({
+							type: "input_audio",
+							input_audio: { data: item.data, format: inputAudioFormat(item) },
+						} satisfies ChatCompletionContentPartInputAudio);
 					} else if (supportsImages) {
 						content.push({
 							type: "image_url",
