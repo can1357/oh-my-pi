@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `CustomEditor.onEscapeCancel`: it is called for a raw Escape that no configured action claims, so a host can keep Escape as a cancel key when `app.interrupt` is bound elsewhere ([#8952](https://github.com/can1357/oh-my-pi/issues/8952), [#16464](https://github.com/can1357/oh-my-pi/pull/16464) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -26,7 +29,6 @@
 ## [18.12.4] - 2026-10-20
 
 ### Added
-- Added `CustomEditor.onEscapeCancel`: it is called for a raw Escape that no configured action claims, so a host can keep Escape as a cancel key when `app.interrupt` is bound elsewhere ([#8952](https://github.com/can1357/oh-my-pi/issues/8952), [#16464](https://github.com/can1357/oh-my-pi/pull/16464) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Added `mergeLineRanges` and an optional `BareLineMode` argument to `parseLineRanges` (`"single"` reads a lone bare `N` as that one line) ([#16435](https://github.com/can1357/oh-my-pi/pull/16435) by [@will-bogusz](https://github.com/will-bogusz))
 
