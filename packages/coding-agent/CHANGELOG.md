@@ -1,12 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
-
-- Fixed soft, handoff and provider-native compaction requests being missing from the session's token and cost accounting when they were retried, rejected, discarded, or when a provider-native compaction kept no messages at all, when a transcript turn separated a compaction's own request from the compaction it produced, when an advisor's own overflow compaction billed a request, and a speculative compaction being thrown away when the branch ended on a usage record, and fixed a provider-native compaction's recorded usage dropping the cache-write and provider-side orchestration buckets the provider billed ([#16468](https://github.com/can1357/oh-my-pi/pull/16468) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
-
-## [18.12.4] - 2026-10-20
 
 ### Added
 
@@ -39,6 +33,10 @@
 - Fixed `history://<id>` failing with "has no transcript: session is gone" for a worker that is still running but has not created its session or transcript file yet; it now answers "No transcript has been written yet". ([#16645](https://github.com/can1357/oh-my-pi/pull/16645) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
 
+
+### Fixed
+
+- Fixed soft, handoff and provider-native compaction requests being missing from the session's token and cost accounting when they were retried, rejected, discarded, or when a provider-native compaction kept no messages at all, when a transcript turn separated a compaction's own request from the compaction it produced, when an advisor's own overflow compaction billed a request, and a speculative compaction being thrown away when the branch ended on a usage record, and fixed a provider-native compaction's recorded usage dropping the cache-write and provider-side orchestration buckets the provider billed ([#16468](https://github.com/can1357/oh-my-pi/pull/16468) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ## [18.12.6] - 2026-10-21
 
 ### Added
