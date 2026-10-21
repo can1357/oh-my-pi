@@ -7,6 +7,7 @@ import {
 	openSqliteDatabase,
 	openSqliteDatabaseSync,
 	readSalvageableRows,
+	SALVAGE_MAX_IMAGE_BYTES,
 } from "../src/sqlite";
 import { TempDir } from "../src/temp";
 
@@ -372,6 +373,61 @@ test("salvage keeps readable rows between separate damaged regions", async () =>
 		const rows = readSalvageableRows<{ id: number }>(db, "entries", "id");
 		const expected = leaves.filter(leaf => !damaged.includes(leaf)).flatMap(leaf => leaf.ids);
 		expect(rows.map(row => row.id)).toEqual(expected);
+	} finally {
+		db.close();
+	}
+});
+
+test("salvage recovers unbounded instead of imaging an oversized store", async () => {
+	await using dir = await TempDir.create("@omp-sqlite-salvage-oversize-");
+	const dbPath = dir.join("store.db");
+	const { pageSize, leaves } = seedLeaves(dbPath);
+	const damaged = [leaves[0]!, leaves[2]!, leaves[3]!];
+	const expected = leaves.filter(leaf => !damaged.includes(leaf)).flatMap(leaf => leaf.ids);
+	const damageLeaves = (target: string): void => {
+		const fd = fs.openSync(target, "r+");
+		try {
+			for (const leaf of damaged) {
+				fs.writeSync(fd, Buffer.alloc(pageSize, 0xff), 0, pageSize, leaf.page * pageSize);
+			}
+		} finally {
+			fs.closeSync(fd);
+		}
+	};
+	const boundedPath = dir.join("bounded.db");
+	fs.copyFileSync(dbPath, boundedPath);
+	damageLeaves(boundedPath);
+	// Grow the store past the image cap with pages the drop leaves on the
+	// freelist, so the entries pages keep their numbers while imaging the store
+	// would copy the whole file.
+	const grow = new Database(dbPath);
+	const chunk = Buffer.alloc(1024 * 1024, 0x61);
+	grow.run("CREATE TABLE junk (payload BLOB)");
+	const insertJunk = grow.prepare("INSERT INTO junk (payload) VALUES (?)");
+	grow.transaction(() => {
+		for (let index = 0; index < SALVAGE_MAX_IMAGE_BYTES / (1024 * 1024) + 2; index++) insertJunk.run(chunk);
+	})();
+	insertJunk.finalize();
+	grow.run("DROP TABLE junk");
+	grow.close();
+	damageLeaves(dbPath);
+
+	const bounded = new Database(boundedPath, { readonly: true });
+	try {
+		expect(readSalvageableRows<{ id: number }>(bounded, "entries", "id").map(row => row.id)).toEqual(expected);
+	} finally {
+		bounded.close();
+	}
+
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		expect(() => db.query("SELECT count(*) FROM entries").get()).toThrow();
+		const ids = readSalvageableRows<{ id: number }>(db, "entries", "id").map(row => row.id);
+		expect(ids.length).toBeGreaterThan(0);
+		for (const id of ids) expect(expected).toContain(id);
+		// Without the interior bounds the readable island between the damaged
+		// regions is lost again, which is exactly what firing the guard produces.
+		expect(ids).not.toEqual(expected);
 	} finally {
 		db.close();
 	}
