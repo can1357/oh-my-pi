@@ -169,6 +169,50 @@ describe("bash numbered file views mint edit tags", () => {
 		expect(getEditStore(session).headHash(path.join(cwd, "ends.ts"))).toBeNull();
 	});
 
+	it("names no tag when a row's file, line or source is uncertain", async () => {
+		await fs.mkdir(path.join(cwd, "sub"));
+		await Bun.write(path.join(cwd, "a.ts"), "same\nroot-only\nsame\nsame\nsame\n");
+		await Bun.write(path.join(cwd, "sub", "a.ts"), "same\nsub-only\nsame\n");
+		// A file whose text is a numbered row of a.ts.
+		await Bun.write(path.join(cwd, "2p"), "3:same\n");
+		for (const command of [
+			// The `cd` is skipped when the first grep fails.
+			"grep -q missing /dev/null && cd sub; grep -n '^same$' a.ts",
+			// Quoted or escaped `=`: a command named FOO=bar, not an assignment.
+			"'FOO=bar' cd sub; grep -n '^same$' a.ts",
+			"FOO\\=bar cd sub; grep -n '^same$' a.ts",
+			// The rows come from `2p`, not from the numbered stream or view.
+			"cat -n a.ts | sed -n 1p 2p",
+			"cat -n a.ts | cat 2p",
+			"grep -n -m1 same a.ts; cat 2p",
+			// A comment or heredoc hides what runs.
+			"cat -n a.ts # ; cd sub\ngrep -n '^same$' a.ts",
+			"cat -n << true\ncd sub\ntrue\ngrep -n '^same$' a.ts",
+			// Numbers that are not file line numbers, or text cut after numbering.
+			"grep -bm 2 same a.ts",
+			"nl -ba -v 5 a.ts | head -n 1",
+			"nl a.ts",
+			"cat -b a.ts",
+			"cat -ns a.ts",
+			"grep -n '^same$' a.ts | tail -n 1 | cut -c2-",
+			"grep -nH --label=a.ts same < sub/a.ts",
+		]) {
+			expect(await bash(command)).not.toContain("Edit tags for the numbered lines above:");
+		}
+		expect(getEditStore(session).headHash(path.join(cwd, "a.ts"))).toBeNull();
+		expect(getEditStore(session).headHash(path.join(cwd, "sub", "a.ts"))).toBeNull();
+	});
+
+	it("keeps quoted `>` and spaces in a file name", async () => {
+		await Bun.write(path.join(cwd, "a >suffix"), "same\nactual\n");
+		await Bun.write(path.join(cwd, "a  "), "same\nwrong\n");
+		const output = await bash("cat -n 'a >suffix'");
+		expect(output).toContain("Edit tags for the numbered lines above:");
+		expect(getEditStore(session).headHash(path.join(cwd, "a  "))).toBeNull();
+		const tag = getEditStore(session).headHash(path.join(cwd, "a >suffix"));
+		expect(getEditStore(session).seenLines(path.join(cwd, "a >suffix"), tag!)).toEqual([1, 2]);
+	});
+
 	it("tags a numbered view through redirections, assignments and row filters", async () => {
 		const output = await bash("LC_ALL=C grep -n limit retry.ts 2>/dev/null | grep -v attempt | head -5");
 		const tag = footerTag(output, "retry.ts");
@@ -240,24 +284,24 @@ describe("bash numbered file views mint edit tags", () => {
 		expect(result.isError).toBeFalsy();
 	});
 
-	it("resolves `path:` rows in the directory an inner `cd` moved to, and skips names both directories hold", async () => {
+	it("resolves rows in the directory a leading `cd` moved to", async () => {
 		await fs.mkdir(path.join(cwd, "sub"));
 		await Bun.write(path.join(cwd, "sub", "a.ts"), "target\n");
 		await Bun.write(path.join(cwd, "sub", "b.ts"), "target\n");
-		const output = await bash("true; cd sub; grep -n target a.ts b.ts");
+		await Bun.write(path.join(cwd, "b.ts"), "target\n");
+		const output = await bash("cd sub; grep -n target a.ts b.ts");
 		const tag = footerTag(output, "sub/a.ts");
 		expect(tag).toBeDefined();
 		expect(footerTag(output, "sub/b.ts")).toBeDefined();
+		expect(footerTag(output, "b.ts")).toBeUndefined();
+		expect(getEditStore(session).headHash(path.join(cwd, "b.ts"))).toBeNull();
 		const result = await new EditTool(session, "hashline").execute("edit", {
 			input: `[sub/a.ts#${tag}]\nPUT 1.=1:\n+changed\n`,
 		});
 		expect(result.isError).toBeFalsy();
 
-		await Bun.write(path.join(cwd, "b.ts"), "target\n");
-		const ambiguous = await bash("true; cd sub; grep -n target a.ts b.ts");
-		expect(footerTag(ambiguous, "sub/b.ts")).toBeUndefined();
-		expect(footerTag(ambiguous, "b.ts")).toBeUndefined();
-		expect(getEditStore(session).headHash(path.join(cwd, "b.ts"))).toBeNull();
+		// A `cd` that failed leaves the shell where it was, and the files it would lead to missing.
+		expect(await bash("cd missing; grep -n target b.ts")).not.toContain("Edit tags for the numbered lines above:");
 	});
 
 	it("tags every row of a long listing of short lines", async () => {

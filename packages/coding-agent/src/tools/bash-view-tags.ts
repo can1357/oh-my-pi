@@ -1,15 +1,17 @@
 /**
  * Edit tags for files a `bash` command printed with line numbers (`grep -n`,
- * `rg -n`, `cat -n`, `nl`).
+ * `rg -n`, `cat -n`, `nl -ba`).
  *
  * Agents locate code with `grep -n` and then edit it, but bash output carries
  * no `[path#tag]` header, so the edit that follows invents one or anchors on
- * lines no tagged view displayed. A numbered row counts here only when its
- * text equals the file's current line at that number: once the caller knows
- * the model receives the output whole, those lines are recorded as displayed
- * in the file's snapshot, exactly as a `search` hit records them, and the
- * result names the tag. Unnumbered output (`sed -n`, `head`) never counts: the
- * model would have to count lines to get a number.
+ * lines no tagged view displayed. A numbered row counts here only when the
+ * command has a shape whose rows can be traced to a file (see
+ * {@link parseView}) and the row's text equals the file's current line at
+ * that number: once the caller knows the model receives the output whole,
+ * those lines are recorded as displayed in the file's snapshot, exactly as a
+ * `search` hit records them, and the result names the tag. Unnumbered output
+ * (`sed -n`, `head`) never counts: the model would have to count lines to get
+ * a number.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -77,59 +79,53 @@ function parseRows(output: string): Row[] {
 	return rows;
 }
 
-/**
- * Commands a numbered view may start a pipeline with. None of them moves the
- * shell's directory except `cd`, which the parser follows, and none prints
- * paths relative to somewhere else. Any other command, keyword or subshell
- * (`pushd`, `if …; then cd …; fi`, `git -C`) leaves the files unknown.
- */
-const LEADING: Record<string, true> = {
-	cd: true,
-	grep: true,
-	egrep: true,
-	fgrep: true,
-	rg: true,
-	git: true, // `git grep` only
-	cat: true,
-	nl: true,
-	sed: true,
-	head: true,
-	tail: true,
-	ls: true,
-	wc: true,
-	echo: true,
-	printf: true,
-	pwd: true,
-	true: true,
+/** Short-option letters that make a numberer's numbers stop being file line numbers. */
+const RENUMBERING: Record<string, RegExp> = {
+	grep: /[bz]/, // byte offsets, NUL-separated records
+	egrep: /[bz]/,
+	fgrep: /[bz]/,
+	rg: /[bz]/, // byte offsets, decompressed archives
+	git: /O/, // `git grep` into a pager
+	cat: /[bs]/, // non-blank numbering, squeezed blank lines
 };
-
-/** Commands that may read a pipeline's stream: they keep or drop rows but must not number them. */
-const FILTERS: Record<string, true> = {
-	grep: true,
-	egrep: true,
-	fgrep: true,
-	rg: true,
-	cat: true,
-	head: true,
-	tail: true,
-	sort: true,
-	uniq: true,
-	cut: true,
-	wc: true,
-	less: true,
-	more: true,
-};
-
-/** Commands that number their output when given {@link NUMBERING_FLAG}; `nl` always does. */
-const NUMBERED_BY_FLAG: Record<string, true> = { grep: true, egrep: true, fgrep: true, rg: true, git: true, cat: true };
-/** `-n`, `-rn`, `-b`, `--line-number`, `--number`. */
-const NUMBERING_FLAG = /^-[a-zA-Z]*[nb]|^--(?:line-)?number/;
-/** A `sed` script that only selects lines (`3,4p`, `$p`, `40q`), so the rows keep their numbers. */
+/** Long options with the same effect, or that relabel or re-root the printed paths. */
+const RENUMBERING_LONG =
+	/^--(?:byte-offset|null-data|search-zip|pre\b|label|full-name|open-files-in-pager|number-nonblank|squeeze-blank)/;
+/** A `sed` script that only selects lines (`3,4p`, `$p`, `40q`). */
 const SED_SELECT = /^(?:\d+|\$)(?:,(?:\d+|\$))?[pq]$/;
-/** `NAME=value` before a command. */
+/** `NAME=value` before a command, judged on its shell spelling. */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
-/** `2>&1`, `>/dev/null`, `< in`, `&>log`: redirections, dropped before parsing. */
-const REDIRECTION = /(^|[\s;&|])(?:\d*(?:>>?|<)|&>>?)(?:&[\d-]+|\s*[^\s;&|()<>'"]+)/g;
+/** Unquoted characters that expand a word into other words or paths. */
+const EXPANDING = /[$`*?[{~]/;
+
+interface Word {
+	value: string;
+	/** The characters of the word the shell interprets (see {@link unquoted}). */
+	bare: string;
+}
+
+/**
+ * A word's shell spelling with quoted and escaped text dropped, except `$`
+ * and backticks inside double quotes, which still expand.
+ */
+function unquoted(raw: string): string {
+	let out = "";
+	let quote: string | undefined;
+	for (let i = 0; i < raw.length; i++) {
+		const ch = raw[i];
+		if (ch === "\\" && quote !== "'") {
+			i++;
+		} else if (quote) {
+			if (ch === quote) quote = undefined;
+			else if (quote === '"' && (ch === "$" || ch === "`")) out += ch;
+		} else if (ch === "'" || ch === '"') {
+			quote = ch;
+		} else {
+			out += ch;
+		}
+	}
+	return out;
+}
 
 /**
  * A `..` after a symlink is resolved by the filesystem, not lexically as
@@ -138,63 +134,156 @@ const REDIRECTION = /(^|[\s;&|])(?:\d*(?:>>?|<)|&>>?)(?:&[\d-]+|\s*[^\s;&|()<>'"
 const climbs = (spelling: string): boolean => spelling.split(/[/\\]/).includes("..");
 
 /**
- * The directories the command runs in (the start, then each `cd`) and the
- * absolute paths of the files its numbering commands read, resolved in the
- * directory in effect. Only a numbering command that reads files itself, first
- * in its pipeline, numbers their lines: `tail -n 1 a.ts | cat -n` numbers a
- * slice. `undefined` when the directory or the numbering is uncertain.
+ * The words naming the files a numberer reads (its pattern dropped), or
+ * `undefined` when the command does not print those files' line numbers.
+ * Option values stay in: an extra word only costs the single-file
+ * attribution, while a dropped file name could misplace it.
  */
-function commandWords(command: string, cwd: string): { dirs: string[]; words: string[] } | undefined {
-	const dirs = [cwd];
-	const words: string[] = [];
-	let dir = cwd;
-	let segment: string[] = [];
-	let stage = 0;
-	const numbers = (name: string, args: string[]): boolean =>
-		name === "nl" || (NUMBERED_BY_FLAG[name] === true && args.some(arg => NUMBERING_FLAG.test(arg)));
-	const close = (piped: boolean): boolean => {
-		const start = segment.findIndex(word => !ASSIGNMENT.test(word));
-		const [name, ...rest] = start < 0 ? [] : segment.slice(start);
-		segment = [];
-		if (name !== undefined) {
-			if (stage > 0) {
-				const keepsRows =
-					name === "sed"
-						? rest.every(arg => arg === "-n" || SED_SELECT.test(arg))
-						: FILTERS[name] === true && !numbers(name, rest);
-				if (!keepsRows) return false;
-			} else if (name === "cd") {
-				// `cd sub; …` and `cd sub && …` run what follows in `sub`.
-				if (rest.length !== 1 || piped || /^[-~]|\$/.test(rest[0])) return false;
-				dir = path.resolve(dir, rest[0]);
-				dirs.push(dir);
-			} else {
-				if (!LEADING[name] || (name === "git" && rest[0] !== "grep")) return false;
-				const args = name === "git" ? rest.slice(1) : rest;
-				if (numbers(name, args)) {
-					for (const word of args) {
-						if (!word.startsWith("-") && !climbs(word)) words.push(path.resolve(dir, word));
-					}
-				}
-			}
+function numbererFiles(name: string, args: Word[]): Word[] | undefined {
+	if (name === "git") {
+		if (args[0]?.value !== "grep") return undefined;
+		args = args.slice(1);
+	}
+	const flags = args.filter(arg => arg.value.startsWith("-")).map(arg => arg.value);
+	const positional = args.filter(arg => !arg.value.startsWith("-"));
+	if (name === "nl") {
+		// Only `-ba` numbers every line; the default skips blank ones.
+		const options = flags.join(" ");
+		if (options === "-b") return positional[0]?.value === "a" ? positional.slice(1) : undefined;
+		return options === "-ba" || options === "--body-numbering=a" ? positional : undefined;
+	}
+	const renumbering = RENUMBERING[name];
+	if (!renumbering) return undefined;
+	const short = flags.filter(flag => !flag.startsWith("--")).map(flag => /^-([a-zA-Z]*)/.exec(flag)?.[1] ?? "");
+	const numbered =
+		short.some(letters => letters.includes("n")) || flags.includes("--line-number") || flags.includes("--number");
+	if (
+		!numbered ||
+		short.some(letters => renumbering.test(letters)) ||
+		flags.some(flag => RENUMBERING_LONG.test(flag))
+	) {
+		return undefined;
+	}
+	if (name === "cat") return positional;
+	// The first positional word is the pattern unless `-e`/`-f` supplied it.
+	const patternGiven =
+		short.some(letters => /[ef]/.test(letters)) || flags.some(flag => /^--(?:regexp|file)\b/.test(flag));
+	return patternGiven ? positional : positional.slice(1);
+}
+
+/** True when a pipeline stage reads only its input stream and keeps or drops whole rows. */
+function keepsRows(name: string, args: Word[]): boolean {
+	const values = args.map(arg => arg.value);
+	switch (name) {
+		case "head":
+		case "tail":
+			return /^(?:-n ?\+?\d+|-\d+)?$/.test(values.join(" "));
+		case "grep":
+		case "egrep":
+		case "fgrep":
+		case "rg":
+			// One pattern, no files, and no flag that numbers, counts or cuts rows.
+			return (
+				values.filter(value => !value.startsWith("-")).length === 1 &&
+				values.every(value => !value.startsWith("-") || /^-[viEFwxP]+$/.test(value))
+			);
+		case "sed": {
+			const script = values.at(-1);
+			return script !== undefined && SED_SELECT.test(script) && values.slice(0, -1).every(value => value === "-n");
 		}
-		stage = piped ? stage + 1 : 0;
-		return true;
-	};
-	for (const token of lexShellCommand(command.replace(REDIRECTION, "$1 "))) {
+		default:
+			return false;
+	}
+}
+
+/** Where a command's numbered rows come from. */
+interface ParsedView {
+	/** The directory every view runs in. */
+	dir: string;
+	/** The one file every view reads, owner of the rows printed without a path. */
+	sole?: string;
+}
+
+/**
+ * Parse a command of the one shape whose rows can be traced to files:
+ *
+ *     [cd DIR (; | && | newline)]... VIEW [(; | && | newline) VIEW]...
+ *     VIEW = NUMBERER [OPTION | FILE]... [| FILTER]...
+ *
+ * A NUMBERER prints each file's own line numbers (`grep -n`, `rg -n`,
+ * `git grep -n`, `cat -n`, `nl -ba`); a FILTER reads the stream and only keeps
+ * or drops rows (`head`, `tail`, `grep PATTERN`, `sed -n 3,4p`). A `cd`
+ * counts only before any view, where it runs unconditionally: if it fails,
+ * the files it would lead to do not exist. Any other command, keyword,
+ * subshell, comment, input redirection, or a numberer after a pipe (which
+ * numbers a stream, as `tail -n 1 a.ts | cat -n` does) gives `undefined`.
+ */
+function parseView(command: string, cwd: string): ParsedView | undefined {
+	const tokens = lexShellCommand(command);
+	const pipelines: Word[][][] = [[[]]];
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i];
+		const stages = pipelines[pipelines.length - 1];
 		if (token.kind === "word") {
-			if (token.value.length > 0) segment.push(token.value);
+			const bare = unquoted(token.raw);
+			if (bare.startsWith("#") || bare.includes("<")) return undefined;
+			if (bare.includes(">")) {
+				// An output redirection: `2>/dev/null`, or `2>` then `&1` or a target.
+				if (!/^\d*>>?/.test(bare)) return undefined;
+				if (/^\d*>>?$/.test(bare)) {
+					const next = tokens[i + 1];
+					if (next?.kind !== "separator" || (next.raw !== "&" && next.raw.trim() !== "")) return undefined;
+					if (tokens[i + 2]?.kind !== "word") return undefined;
+					i += 2;
+				}
+				continue;
+			}
+			if (token.value.length > 0) stages[stages.length - 1].push({ value: token.value, bare });
 			continue;
 		}
 		const operator = token.raw.replace(/[ \t]/g, "");
 		if (operator.length === 0) continue;
-		// Only `;`, `&&`, newlines and `|` keep the order certain; `||`, `&`,
-		// `|&` and parentheses make a later directory or stream unknown.
-		if (/[()]|\|\|/.test(operator) || operator.replace(/&&/g, "").includes("&")) return undefined;
-		if (!close(operator.includes("|"))) return undefined;
+		if (/^\|\n*$/.test(operator)) stages.push([]);
+		else if (/^(?:;|&&|\n)+$/.test(operator)) pipelines.push([[]]);
+		else return undefined;
 	}
-	if (!close(false)) return undefined;
-	return { dirs: [...new Set(dirs)], words };
+
+	let dir = cwd;
+	let views = 0;
+	const soles = new Set<string | undefined>();
+	for (const stages of pipelines) {
+		const [first, ...filters] = stages.map(words => {
+			const start = words.findIndex(word => !ASSIGNMENT.test(word.bare));
+			return start < 0 ? [] : words.slice(start);
+		});
+		const [name, ...args] = first;
+		if (name === undefined) {
+			if (filters.length > 0 || stages[0].length > 0) return undefined;
+			continue;
+		}
+		if (name.value === "cd") {
+			const target = args[0];
+			if (views > 0 || filters.length > 0 || args.length !== 1 || EXPANDING.test(target.bare)) return undefined;
+			if (target.value.startsWith("-")) return undefined;
+			dir = path.resolve(dir, target.value);
+			continue;
+		}
+		const files = numbererFiles(name.value, args);
+		if (!files) return undefined;
+		for (const [stage, ...stageArgs] of filters) {
+			if (stage === undefined || !keepsRows(stage.value, stageArgs)) return undefined;
+		}
+		views++;
+		const [only] = files;
+		soles.add(
+			files.length === 1 && !EXPANDING.test(only.bare) && !climbs(only.value)
+				? path.resolve(dir, only.value)
+				: undefined,
+		);
+	}
+	if (views === 0) return undefined;
+	const [sole] = soles;
+	return { dir, sole: soles.size === 1 ? sole : undefined };
 }
 
 async function regularFiles(candidates: Iterable<string>): Promise<Set<string>> {
@@ -234,9 +323,8 @@ export async function planNumberedFileTags(
 	const rows = parseRows(output);
 	if (rows.length === 0) return undefined;
 
-	const parsed = commandWords(command, cwd);
-	if (!parsed) return undefined;
-	const { dirs, words } = parsed;
+	const view = parseView(command, cwd);
+	if (!view) return undefined;
 	const prefixes = new Set<string>();
 	for (const row of rows) {
 		if (row.file === undefined || /\s/.test(row.file) || climbs(row.file)) continue;
@@ -244,22 +332,18 @@ export async function planNumberedFileTags(
 		prefixes.add(row.file);
 	}
 	const [operands, existing] = await Promise.all([
-		regularFiles(words),
-		regularFiles([...prefixes].flatMap(prefix => dirs.map(dir => path.resolve(dir, prefix)))),
+		regularFiles(view.sole ? [view.sole] : []),
+		regularFiles([...prefixes].map(prefix => path.resolve(view.dir, prefix))),
 	]);
-	// A prefix names the file only when exactly one of the command's
-	// directories holds it; `cd sub; grep -n x a.ts` with an `a.ts` on both
-	// sides cannot say which one printed.
 	const named = new Map<string, string>();
 	for (const prefix of prefixes) {
-		const matches = new Set(dirs.map(dir => path.resolve(dir, prefix)).filter(file => existing.has(file)));
-		if (matches.size === 1) named.set(prefix, [...matches][0]);
+		const file = path.resolve(view.dir, prefix);
+		if (existing.has(file)) named.set(prefix, file);
 	}
-	const namedFiles = new Set(named.values());
-	// Unnumbered-prefix rows name no file: they belong to the command's one
-	// file operand, and `cat -n a.ts b.ts` numbers the joined stream.
-	const sole = operands.size === 1 ? [...operands][0] : undefined;
-	const files = [...new Set([...namedFiles, ...(sole ? [sole] : [])])].filter(
+	// Rows printed without a path belong to the one file every view reads;
+	// `cat -n a.ts b.ts` numbers the joined stream.
+	const [sole] = operands;
+	const files = [...new Set([...named.values(), ...(sole ? [sole] : [])])].filter(
 		// Notebooks edit as cell text, not the JSON these rows number.
 		file => !file.toLowerCase().endsWith(".ipynb"),
 	);
