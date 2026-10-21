@@ -1078,7 +1078,8 @@ export class ModelRegistry {
 				this.#internedStaticModels.delete(key);
 			}
 		}
-		this.#providerLookupSnapshots.delete(providerName);
+		// Lookup snapshots are keyed by the normalized provider id (see #modelsForProviderLookup).
+		this.#providerLookupSnapshots.delete(providerName.trim().toLowerCase());
 	}
 
 	/**
@@ -3056,7 +3057,11 @@ export class ModelRegistry {
 				provider => requested.has(provider.toLowerCase()) && isProviderAvailable(provider),
 			),
 		);
-		const models = this.#composeStaticModels(availableProviders);
+		// Per-provider snapshots are finalized one provider at a time; reapply the catalog-wide
+		// implicit-providers-last order so ties resolve the same before and after `getAll()`.
+		const models = this.#orderImplicitProvidersLast(
+			[...availableProviders].flatMap(provider => this.#modelsForProviderLookup(provider)),
+		);
 		return kind === "all" ? models : models.filter(model => modelKind(model) === kind);
 	}
 

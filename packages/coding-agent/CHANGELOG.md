@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reused cached provider model snapshots for scoped availability queries instead of recomposing the bundled catalog on every call ([#16511](https://github.com/can1357/oh-my-pi/pull/16511) by [@Komzpa](https://github.com/Komzpa))
+
 ### Fixed
 
 - Fixed the advisor prompt forbidding all repeated advice, including real escalations: advisors may now re-raise a prior nit or concern as a blocker once new evidence makes it one ([#13887](https://github.com/can1357/oh-my-pi/issues/13887), [#16484](https://github.com/can1357/oh-my-pi/pull/16484) by [@pjh890321](https://github.com/pjh890321))
