@@ -121,6 +121,42 @@ describe("expandAtImports", () => {
 		expect(expanded).toContain("@loop-a.md");
 	});
 
+	test("expands the same include every time it appears in one document", async () => {
+		await writeFile("shared.md", "SHARED CONTENT\n");
+		const root = await writeFile("root.md", "A\n@shared.md\nB\n@shared.md\n");
+
+		const expanded = await expandAtImports(await fs.readFile(root, "utf8"), root);
+
+		// A repeated include is not a cycle: both occurrences must carry the
+		// included content, and no literal @-token may survive.
+		expect(expanded).toBe("A\nSHARED CONTENT\n\nB\nSHARED CONTENT\n\n");
+		expect(expanded).not.toContain("@shared.md");
+	});
+
+	test("expands a shared include reached through two different files", async () => {
+		await writeFile("shared.md", "SHARED CONTENT\n");
+		await writeFile("left.md", "LEFT: @shared.md\n");
+		await writeFile("right.md", "RIGHT: @shared.md\n");
+		const root = await writeFile("root.md", "@left.md\n@right.md\n");
+
+		const expanded = await expandAtImports(await fs.readFile(root, "utf8"), root);
+
+		expect(expanded).toContain("LEFT: SHARED CONTENT");
+		expect(expanded).toContain("RIGHT: SHARED CONTENT");
+		expect(expanded).not.toContain("@shared.md");
+	});
+
+	test("terminates on a self-referencing include", async () => {
+		const a = await writeFile("self.md", "SELF: @self.md\n");
+
+		const expanded = await expandAtImports(await fs.readFile(a, "utf8"), a);
+
+		// The file points back into its own chain: expansion stops there and
+		// the token survives instead of recursing forever.
+		expect(expanded).toContain("SELF:");
+		expect(expanded).toContain("@self.md");
+	});
+
 	test("leaves the original token untouched when the file is missing", async () => {
 		const source = path.join(tmp, "AGENTS.md");
 		const input = "See @./does-not-exist.md and @./does-not\\ exist.md\n";
