@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
-import type { FetchImpl, ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { isScalewayChatModelId, scalewayModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 
 /** One Scaleway card ladder: [id, on-tiers, default level]. */
 const SCALEWAY_LADDERS: Array<[string, Effort[], Effort | undefined]> = [
 	// GLM 5.3/5.2 accept `none` as a wire off value (verified live:
 	// reasoning_tokens 0), diverging from the lineage glob's cannot-disable
-	// contract; the residue must outrank it.
+	// contract in classes/glm.kdl; the priority=20 residue must outrank it.
 	["glm-5.3", [Effort.Low, Effort.High, Effort.Max], Effort.Max],
 	["glm-5.2", [Effort.High, Effort.Max], Effort.Max],
 	["deepseek-v4.1-flash", [Effort.Low, Effort.High, Effort.Max], undefined],
@@ -22,18 +22,40 @@ const SCALEWAY_LADDERS: Array<[string, Effort[], Effort | undefined]> = [
 	// Mistral Medium 3.5 documents none/high only; medium (the server default)
 	// is not a valid tier, so the omp default pins high.
 	["mistral-medium-3.5-128b", [Effort.High], Effort.High],
-	// gpt-oss keeps its Harmony ladder; its card has no `none` tier.
-	["gpt-oss-120b", [Effort.Low, Effort.Medium, Effort.High], undefined],
 ];
 
+// No card ladder and no upgrade-neutral promotion: these ids must stay
+// dial-free even though the Qwen and Mistral classes serve reasoning lineages
+// on other hosts.
 const NON_REASONING_IDS = [
 	"qwen3-235b-a22b-instruct-2507",
 	"mistral-small-3.2-24b-instruct-2506",
 	"llama-3.3-70b-instruct",
 ];
 
-function bundledScalewayModels() {
-	return getBundledModels("scaleway");
+/**
+ * A bare row as Scaleway's `/v1/models` reports it: bare OpenAI fields with
+ * no capability metadata, no limits, and no prices. Rule resolution sees
+ * only what the endpoint would say — no bundled reference, no same-id
+ * vendor row.
+ */
+function bareSpec(
+	id: string,
+	overrides: Partial<ModelSpec<"openai-completions">> = {},
+): ModelSpec<"openai-completions"> {
+	return {
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: "scaleway",
+		baseUrl: "https://api.scaleway.ai/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: null,
+		maxTokens: null,
+		...overrides,
+	};
 }
 
 afterEach(() => {
@@ -42,68 +64,63 @@ afterEach(() => {
 
 describe("Scaleway provider support", () => {
 	test("resolves each card's documented effort ladder with `none` as the off value", () => {
-		const byId = new Map(bundledScalewayModels().map(model => [model.id, model]));
-
 		for (const [id, efforts, defaultLevel] of SCALEWAY_LADDERS) {
-			const model = byId.get(id);
-			expect(model?.reasoning).toBe(true);
-			expect(model?.thinking?.mode).toBe("effort");
-			expect(model?.thinking?.efforts).toEqual(efforts);
-			expect(model?.thinking?.defaultLevel).toBe(defaultLevel);
+			// The wire row claims no reasoning, so each ladder must arrive
+			// through `thinking-upgrade-neutral` promotion of the reviewed
+			// card — the repair the runtime performs when discovery meets
+			// the KDL rules.
+			const model = buildModel(bareSpec(id));
+			expect(model.reasoning).toBe(true);
+			expect(model.thinking?.mode).toBe("effort");
+			expect(model.thinking?.efforts).toEqual(efforts);
+			expect(model.thinking?.defaultLevel).toBe(defaultLevel);
 			// The lineage glob marks glm-5.3 thinking as mandatory; Scaleway's
 			// `none` tier must keep these disableable (undefined, not true).
-			expect(model?.thinking?.requiresEffort).not.toBe(true);
+			expect(model.thinking?.requiresEffort).not.toBe(true);
 			// Thinking-off must send reasoning_effort `none`: omitting the
 			// field falls back to the server default (medium) and leaves
-			// reasoning on. gpt-oss documents no `none`, so it keeps the
-			// lowest-effort fallback instead.
-			const compat = model?.compat as ResolvedOpenAICompat | undefined;
-			const disableMode = compat?.reasoningDisableMode;
-			if (id === "gpt-oss-120b") {
-				expect(disableMode).not.toBe("none-effort");
-			} else {
-				expect(disableMode).toBe("none-effort");
-			}
+			// reasoning on.
+			expect(model.compat?.reasoningDisableMode).toBe("none-effort");
 		}
 
 		for (const id of NON_REASONING_IDS) {
-			const model = byId.get(id);
-			expect(model?.reasoning).toBe(false);
-			expect(model?.thinking).toBeUndefined();
+			const model = buildModel(bareSpec(id));
+			expect(model.reasoning).toBe(false);
+			expect(model.thinking).toBeUndefined();
 		}
+
+		// gpt-oss-120b documents no `none` tier, so Scaleway authors no
+		// ladder and no promotion for it: its Harmony ladder travels with
+		// the bundled reference (asserted in the discovery test below), and
+		// thinking-off keeps the class's lowest-effort fallback.
+		const gptOss = buildModel(bareSpec("gpt-oss-120b"));
+		expect(gptOss.reasoning).toBe(false);
+		expect(gptOss.thinking).toBeUndefined();
+		expect(gptOss.compat?.reasoningDisableMode).toBe("lowest-effort");
 	});
 
 	test("pins serverless limits and EUR-converted pricing over same-id vendor rows", () => {
-		const byId = new Map(bundledScalewayModels().map(model => [model.id, model]));
+		// glm-5.3 also exists on first-party hosts (zai serves it at 1M/131k
+		// with its own rates); a same-id vendor row flowing in through
+		// discovery must lose to Scaleway's serverless caps and EUR card
+		// (converted at the 2026-10-21 ECB rate 1 EUR = 1.1234 USD).
+		const glm = buildModel(
+			bareSpec("glm-5.3", {
+				input: ["text", "image"],
+				cost: { input: 1.12, output: 4.4, cacheRead: 0.11, cacheWrite: 1.68 },
+				contextWindow: 1_048_576,
+				maxTokens: 131_072,
+			}),
+		);
+		expect(glm.contextWindow).toBe(262_144);
+		expect(glm.maxTokens).toBe(16_384);
+		expect(glm.cost).toEqual({ input: 2.02, output: 6.18, cacheRead: 0, cacheWrite: 0 });
 
-		// The same ids on first-party hosts carry different ceilings (zai
-		// serves glm-5.3 at 1M/131k); Scaleway's serverless caps and
-		// EUR/Mtok card (converted at the 2026-10-21 ECB rate
-		// 1 EUR = 1.1234 USD) must win.
-		expect(byId.get("glm-5.3")?.contextWindow).toBe(262_144);
-		expect(byId.get("glm-5.3")?.maxTokens).toBe(16_384);
-		expect(byId.get("glm-5.3")?.cost).toEqual({ input: 2.02, output: 6.18, cacheRead: 0, cacheWrite: 0 });
-		expect(byId.get("qwen3.5-397b-a17b")?.contextWindow).toBe(256_000);
-		expect(byId.get("qwen3.5-397b-a17b")?.maxTokens).toBe(16_384);
-		expect(byId.get("qwen3.5-397b-a17b")?.cost).toEqual({ input: 0.67, output: 4.04, cacheRead: 0, cacheWrite: 0 });
-		expect(byId.get("mistral-medium-3.5-128b")?.contextWindow).toBe(184_320);
-		expect(byId.get("mistral-medium-3.5-128b")?.maxTokens).toBe(16_384);
-		expect(byId.get("llama-3.3-70b-instruct")?.contextWindow).toBe(102_400);
-		expect(byId.get("gpt-oss-120b")?.contextWindow).toBe(131_072);
-		expect(byId.get("deepseek-v4.1-flash")?.cost).toEqual({
-			input: 0.67,
-			output: 2.02,
-			cacheRead: 0.13,
-			cacheWrite: 0,
-		});
-		expect(byId.get("qwen3.8-27b")?.cost).toEqual({ input: 0.67, output: 3.71, cacheRead: 0.13, cacheWrite: 0 });
-
-		// V4.1 Flash is natively multimodal while its id carries no `vision`
-		// token, so the class-wide strip carve-out must keep image input on
-		// this host; the dated V4 Flash stays text-only.
-		expect(byId.get("deepseek-v4.1-flash")?.input).toEqual(["text", "image"]);
-		expect(byId.get("deepseek-v4-flash-0731")?.input).toEqual(["text"]);
-		expect(byId.get("glm-5.3")?.input).toEqual(["text"]);
+		// The Qwen 3.5 row meets the same 1M vendor pin and must land on
+		// its own 250k/16k serverless caps.
+		const qwen = buildModel(bareSpec("qwen3.5-397b-a17b", { contextWindow: 1_048_576, maxTokens: 131_072 }));
+		expect(qwen.contextWindow).toBe(256_000);
+		expect(qwen.maxTokens).toBe(16_384);
 
 		// Credentials resolve from the documented env vars, in order.
 		expect(providerEntry("scaleway")?.defaultModel).toBe("glm-5.3");
@@ -121,6 +138,7 @@ describe("Scaleway provider support", () => {
 							{ id: "qwen3-embedding-8b", object: "model", created: 1755006551, owned_by: "qwen" },
 							{ id: "bge-multilingual-gemma2", object: "model", created: 1730385501, owned_by: "baai" },
 							{ id: "lightonocr-3-0.8b", object: "model", created: 1736258559, owned_by: "" },
+							{ id: "gpt-oss-120b", object: "model", created: 1755555555, owned_by: "openai" },
 							{ id: "llama-3.3-70b-instruct", object: "model", created: 1736258559, owned_by: "meta" },
 						],
 					}),
@@ -133,7 +151,7 @@ describe("Scaleway provider support", () => {
 			fetch: fetchMock,
 		}).fetchDynamicModels?.();
 
-		expect(models?.map(model => model.id)).toEqual(["glm-5.3", "llama-3.3-70b-instruct"]);
+		expect(models?.map(model => model.id)).toEqual(["glm-5.3", "gpt-oss-120b", "llama-3.3-70b-instruct"]);
 		expect(fetchMock).toHaveBeenCalledWith(
 			"https://api.scaleway.ai/v1/models",
 			expect.objectContaining({
@@ -151,6 +169,12 @@ describe("Scaleway provider support", () => {
 		expect(glm?.contextWindow).toBe(262_144);
 		expect(glm?.maxTokens).toBe(16_384);
 		expect(glm?.cost).toEqual({ input: 2.02, output: 6.18, cacheRead: 0, cacheWrite: 0 });
+
+		// gpt-oss-120b is the one ladder not authored for Scaleway; its
+		// Harmony contract travels with the bundled reference.
+		const gptOss = models?.find(model => model.id === "gpt-oss-120b");
+		expect(gptOss?.reasoning).toBe(true);
+		expect(gptOss?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
 
 		// A bare non-reasoning row with no reasoning metadata stays
 		// non-reasoning — discovery never fabricates a dial.

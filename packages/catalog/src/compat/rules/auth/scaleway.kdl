@@ -8,10 +8,10 @@ auth "scaleway" {
 		// console never issues.
 		prompt "Paste your Scaleway secret key" placeholder="..."
 		normalize "strip-bearer"
-		// A real auth rejection (401/403) is fatal; any other validation
-		// failure is non-fatal. llama-3.3-70b-instruct is the cheapest
-		// non-reasoning chat model on the roster, so the validation
-		// round-trip costs a fraction of a cent.
-		validate "chat-completions" label="Scaleway" base-url="https://api.scaleway.ai/v1" model="llama-3.3-70b-instruct" optional=#true
+		// `/v1/models` is key-protected: it answers 401 without a bearer key
+		// and 403 to a rejected one (verified 2026-10-21), so login validates
+		// the pasted key there. The probe bills nothing, unlike a
+		// chat-completions round-trip against a prepaid balance.
+		validate "models-endpoint" label="Scaleway" url="https://api.scaleway.ai/v1/models"
 	}
 }

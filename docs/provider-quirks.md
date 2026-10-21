@@ -2584,6 +2584,23 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 - **Authored seeds**: `muse-spark-1.1`, `muse-spark-1.2`, `muse-spark-1.2-contributor`, `muse-spark-1.3`, `muse-spark-1.3-contributor`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `museCodeModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
 
+## Scaleway (`scaleway`)
+
+### Special casings
+- Chat discovery uses `openai-completions` at `https://api.scaleway.ai/v1` (fr-par serverless Generative APIs). `/v1/models` returns bare OpenAI rows with no capability metadata, so effort ladders, limits, and prices are owned by the reviewed KDL rules in `packages/catalog/src/compat/rules/providers/scaleway.kdl`; runtime discovery only adds, retires, and names rows.
+- The roster interleaves non-chat SKUs (transcription `whisper-`, embeddings `qwen3-embedding-`/`bge-`, OCR `lightonocr-`); exclusion prefixes in `runtime/behavior.kdl` keep them out of the chat model list.
+- Reasoning traces stream back on the message `reasoning` field; the shared OpenAI-completions transport already parses both shapes. Verified wire quirk: `glm-5.3` at effort `low` genuinely emits no reasoning trace on Scaleway — a serving behavior, not a parsing gap.
+- `reasoning_effort` accepts `max` and `xhigh` on the wire even though the request-schema enum is stale; `none` fully disables reasoning (`reasoning_tokens: 0`).
+- Prices are EUR/Mtok list rates converted at the 2026-10-21 ECB reference rate (1 EUR = 1.1234 USD); cache rates Scaleway does not publish surface as `0`. Serverless context/output caps are pinned per model over same-id vendor rows (zai serves `glm-5.3` at 1M/131k; Scaleway caps it at 256k/16k).
+
+### Auth & usage
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/scaleway.kdl`. Environment keys: `SCW_SECRET_KEY`, then legacy `SCW_API_KEY`. Validation uses `models-endpoint`: `/v1/models` answers 401 without a bearer key and 403 to a rejected one (verified 2026-10-21), so the probe rejects bad keys and bills nothing.
+
+### Catalog model handling
+- **Provider entry (`scaleway`)**: `packages/catalog/src/compat/rules/providers/scaleway.kdl` declares default model `glm-5.3`. Environment keys: `SCW_SECRET_KEY`, then `SCW_API_KEY`.
+- **Thinking controls**: every reasoning card documents `none` as its off value, so thinking-off sends `reasoning_effort: "none"`; omitting the field falls back to the server default (`medium`) and keeps reasoning on. GLM 5.3/5.2 diverge from the lineage glob in `classes/glm.kdl` (thinking cannot be disabled): exact-id `priority=20` residues outrank it so the Scaleway cards keep their `none` tier. `gpt-oss-120b` is the exception — no `none` tier, its Harmony ladder travels with the bundled reference, and thinking-off keeps the lowest-effort fallback. Qwen 3.8 keeps its native `xhigh` tier; Mistral Medium 3.5 documents `high` only (its server default `medium` is not a valid tier, so the omp default pins `high`). `deepseek-v4.1-flash` is served with its native image input while the dated `-0731` row stays text-only.
+- Runtime manager: `scalewayModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
+
 ## SingularityAPI (`singularityapi-dev`)
 
 ### Special casings
