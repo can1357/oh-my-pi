@@ -663,7 +663,13 @@ impl GitRepo {
 		{
 			let source_root = fs::canonicalize(self.root())
 				.map_err(|e| Error::backend("git worktree add", format!("canonicalize source: {e}")))?;
-			if destination_inside_source(path, &source_root) {
+			// The policy only applies when a clone can actually run here.
+			// `pi_iso::clone_candidates` is a HOST-level probe: on Linux it
+			// reports reflink support even on a filesystem without FICLONE,
+			// where the clone fails with EOPNOTSUPP and the plain checkout
+			// would have handled the in-tree destination safely. Probing the
+			// real filesystem keeps the refusal for the case it exists for.
+			if destination_inside_source(path, &source_root) && clone_supported_on(path, candidates) {
 				return Err(Error::backend(
 					"git worktree add",
 					"destination is inside the source checkout; set worktree.clone=false to check out \
@@ -2379,6 +2385,38 @@ fn collect_gitlinks_into(
 		}
 	}
 	Ok(())
+}
+
+/// Whether a copy-on-write clone can actually run on the destination's
+/// filesystem.
+///
+/// `pi_iso::clone_candidates` is a HOST-level probe: on Linux it reports
+/// reflink support even on a filesystem without FICLONE, where the clone
+/// fails with EOPNOTSUPP and the plain checkout would have handled the
+/// destination safely. The probe here asks the filesystem itself, by
+/// cloning a throwaway tree next to the destination.
+fn clone_supported_on(destination: &Path, candidates: &[pi_iso::BackendKind]) -> bool {
+	// The probe must land on the same filesystem as the destination.
+	let Some(parent) = nearest_existing_ancestor(destination) else {
+		return false;
+	};
+	let probe_dir = parent.join(".omp-clone-probe");
+	if fs::create_dir_all(&probe_dir).is_err() {
+		return false;
+	}
+	let source = probe_dir.join("source");
+	let target = probe_dir.join("target");
+	let _ = fs::remove_dir_all(&source);
+	let _ = fs::remove_dir_all(&target);
+	let supported = fs::create_dir_all(&source).is_ok()
+		&& fs::write(source.join("file"), b"probe\n").is_ok()
+		&& candidates.iter().any(|kind| {
+			pi_iso::backend(*kind)
+				.clone_tree(&source, &target, &[])
+				.is_ok()
+		});
+	let _ = fs::remove_dir_all(&probe_dir);
+	supported
 }
 
 /// Whether a clone destination would land inside the source checkout.
@@ -4615,6 +4653,71 @@ mod tests {
 			git(&nested_dest, &["rev-parse", "HEAD"]),
 			git(temp.path(), &["rev-parse", "target"])
 		);
+		let _ = repo.worktree_remove(&nested_dest, true);
+	}
+
+	#[test]
+	fn clone_supported_on_follows_the_filesystem_not_the_host() {
+		// The host probe reports a Linux backend even on a filesystem without
+		// FICLONE, where the clone fails with EOPNOTSUPP and the plain
+		// checkout handles the destination safely. The filesystem probe must
+		// therefore answer "no" there, so the in-tree refusal never fires
+		// for a clone that cannot run.
+		let temp = tempfile::tempdir().unwrap();
+		let candidates = pi_iso::clone_candidates(None);
+		if candidates.is_empty() {
+			// No backend on this host at all: nothing can clone, so nothing
+			// supports a clone.
+			assert!(!clone_supported_on(temp.path(), &candidates));
+			return;
+		}
+		let supported = clone_supported_on(temp.path(), &candidates);
+		// The answer must match what the backend actually does on THIS
+		// filesystem — not what the host claims.
+		let probe = temp.path().join("probe-source");
+		let target = temp.path().join("probe-target");
+		let _ = fs::remove_dir_all(&probe);
+		let _ = fs::remove_dir_all(&target);
+		fs::create_dir_all(&probe).unwrap();
+		fs::write(probe.join("file"), b"probe\n").unwrap();
+		let backend_works = candidates.iter().any(|kind| {
+			pi_iso::backend(*kind)
+				.clone_tree(&probe, &target, &[])
+				.is_ok()
+		});
+		assert_eq!(
+			supported, backend_works,
+			"the filesystem probe must agree with what the backend does here"
+		);
+	}
+
+	#[test]
+	fn an_in_tree_destination_is_refused_only_where_a_clone_can_run() {
+		// The refusal exists for a clone that would recurse into the source.
+		// Where the filesystem cannot clone, the plain checkout handles the
+		// destination and the refusal must not fire.
+		let (temp, repo) = fixture();
+		git(temp.path(), &["branch", "target"]);
+		let nested_dest = temp.path().join("nested-dest");
+		let _ = fs::remove_dir_all(&nested_dest);
+		let candidates = pi_iso::clone_candidates(None);
+		let clone_runs = !candidates.is_empty() && clone_supported_on(&nested_dest, &candidates);
+		let result = repo.worktree_add(&nested_dest, "target", WorktreeAddOptions {
+			detach:       false,
+			clone:        WorktreeClone::Auto,
+			keep_changes: false,
+		});
+		if clone_runs {
+			let error = result.expect_err("a destination inside the source must be refused");
+			assert!(error.to_string().contains("inside the source"), "{error}");
+			assert!(!nested_dest.exists(), "the rejected destination must not be created");
+			return;
+		}
+		// No clone can run here, so the destination is checked out in place
+		// instead of being refused.
+		let result = result.expect("an in-tree destination must be checked out in place");
+		assert!(result.cloned_with.is_none());
+		assert!(nested_dest.join("a").exists(), "the plain checkout must materialize the tree");
 		let _ = repo.worktree_remove(&nested_dest, true);
 	}
 }
