@@ -168,7 +168,11 @@ export class EvalExecutionComponent extends Container {
 						// giving both children the full window let a collapsed card
 						// fill a normal terminal.
 						lead: [
-							code(this.#code, { lang: this.#highlightLang(), key: "code", preview: { lines: RUN_INPUT_PREVIEW_LINES } }),
+							code(this.#code, {
+								lang: this.#highlightLang(),
+								key: "code",
+								preview: { lines: RUN_INPUT_PREVIEW_LINES },
+							}),
 						],
 					});
 		});
