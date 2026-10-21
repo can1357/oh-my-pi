@@ -148,11 +148,32 @@ describe("bash numbered file views mint edit tags", () => {
 			"(cd sub); grep -n limit retry.ts",
 			"cd sub | true; grep -n limit retry.ts",
 			"pushd sub > /dev/null; grep -n limit retry.ts",
+			"if true; then cd sub; fi; grep -n limit retry.ts",
 		]) {
 			expect(await bash(command)).not.toContain("Edit tags for the numbered lines above:");
 		}
 		expect(getEditStore(session).headHash(path.join(cwd, "sub", "retry.ts"))).toBeNull();
 		expect(getEditStore(session).headHash(path.join(cwd, "retry.ts"))).toBeNull();
+	});
+
+	it("names no tag for rows numbered after the file was sliced or streamed", async () => {
+		// The last line repeats the first: `tail -n 1 | cat -n` prints it as line 1.
+		await Bun.write(path.join(cwd, "ends.ts"), "same\nmiddle\nsame\n");
+		for (const command of [
+			"tail -n 1 ends.ts | cat -n",
+			"sed -n 3p ends.ts | grep -n same",
+			"grep -n same ends.ts | nl",
+		]) {
+			expect(await bash(command)).not.toContain("Edit tags for the numbered lines above:");
+		}
+		expect(getEditStore(session).headHash(path.join(cwd, "ends.ts"))).toBeNull();
+	});
+
+	it("tags a numbered view through redirections, assignments and row filters", async () => {
+		const output = await bash("LC_ALL=C grep -n limit retry.ts 2>/dev/null | grep -v attempt | head -5");
+		const tag = footerTag(output, "retry.ts");
+		expect(tag).toBeDefined();
+		expect(getEditStore(session).seenLines(path.join(cwd, "retry.ts"), tag!)).toEqual([2, 3]);
 	});
 
 	it("names no tag for a path that climbs out of a symlink", async () => {
@@ -265,7 +286,7 @@ describe("bash numbered file views mint edit tags", () => {
 		expect(getEditStore(small).headHash(path.join(cwd, "list.txt"))).toBeNull();
 	});
 
-	it("records a job's rows only when its delivery carries them whole", async () => {
+	it("records rows only for the result the call returns itself, never a job's delivery", async () => {
 		const deliveries: string[] = [];
 		const manager = new AsyncJobManager({
 			onJobComplete: async (_id, text) => {
@@ -283,27 +304,19 @@ describe("bash numbered file views mint edit tags", () => {
 			expect(tag).toBeDefined();
 			expect(getEditStore(foreground).seenLines(path.join(cwd, "retry.ts"), tag!)).toEqual([2, 3]);
 
-			const job = async (session: ToolSession, command: string): Promise<string> => {
-				const started = await new BashTool(session).execute("bash", { command, async: true });
-				const jobId = started.details?.async?.jobId;
-				if (!jobId) throw new Error("expected a background job");
-				await manager.getJob(jobId)?.promise;
-				await manager.drainDeliveries();
-				return deliveries.at(-1) ?? "";
-			};
-			const small = makeSession(cwd, { "async.enabled": true }, manager);
-			const delivered = await job(small, "grep -n limit retry.ts");
-			const jobTag = footerTag(delivered, "retry.ts");
-			expect(jobTag).toBeDefined();
-			expect(getEditStore(small).seenLines(path.join(cwd, "retry.ts"), jobTag!)).toEqual([2, 3]);
-
-			// Past the async inline limit the delivery is a preview: no rows.
-			const rows = Array.from({ length: 400 }, (_, i) => `entry ${String(i).padStart(3, "0")} ${"x".repeat(30)}`);
-			await Bun.write(path.join(cwd, "long.txt"), `${rows.join("\n")}\n`);
-			const large = makeSession(cwd, { "async.enabled": true }, manager);
-			const preview = await job(large, "grep -n entry long.txt");
-			expect(preview).not.toContain("Edit tags for the numbered lines above:");
-			expect(getEditStore(large).headHash(path.join(cwd, "long.txt"))).toBeNull();
+			// A job's result reaches the model later, if at all: no tags, nothing recorded.
+			const background = makeSession(cwd, { "async.enabled": true }, manager);
+			const started = await new BashTool(background).execute("bash", {
+				command: "grep -n limit retry.ts",
+				async: true,
+			});
+			const jobId = started.details?.async?.jobId;
+			if (!jobId) throw new Error("expected a background job");
+			await manager.getJob(jobId)?.promise;
+			await manager.drainDeliveries();
+			expect(deliveries.at(-1)).toContain("2:\tconst limit");
+			expect(deliveries.at(-1)).not.toContain("Edit tags for the numbered lines above:");
+			expect(getEditStore(background).headHash(path.join(cwd, "retry.ts"))).toBeNull();
 		} finally {
 			await manager.dispose();
 		}

@@ -77,20 +77,59 @@ function parseRows(output: string): Row[] {
 	return rows;
 }
 
-/** Operators that make the next command conditional, piped, backgrounded or subshelled. */
-const UNSEQUENCED = /&|\||\(|\)/;
-
-/** Commands that can change the directory without a plain `cd` this parser follows. */
-const DIRECTORY_CHANGERS: Record<string, true> = {
-	pushd: true,
-	popd: true,
-	source: true,
-	".": true,
-	eval: true,
-	builtin: true,
-	command: true,
-	exec: true,
+/**
+ * Commands a numbered view may start a pipeline with. None of them moves the
+ * shell's directory except `cd`, which the parser follows, and none prints
+ * paths relative to somewhere else. Any other command, keyword or subshell
+ * (`pushd`, `if …; then cd …; fi`, `git -C`) leaves the files unknown.
+ */
+const LEADING: Record<string, true> = {
+	cd: true,
+	grep: true,
+	egrep: true,
+	fgrep: true,
+	rg: true,
+	git: true, // `git grep` only
+	cat: true,
+	nl: true,
+	sed: true,
+	head: true,
+	tail: true,
+	ls: true,
+	wc: true,
+	echo: true,
+	printf: true,
+	pwd: true,
+	true: true,
 };
+
+/** Commands that may read a pipeline's stream: they keep or drop rows but must not number them. */
+const FILTERS: Record<string, true> = {
+	grep: true,
+	egrep: true,
+	fgrep: true,
+	rg: true,
+	cat: true,
+	head: true,
+	tail: true,
+	sort: true,
+	uniq: true,
+	cut: true,
+	wc: true,
+	less: true,
+	more: true,
+};
+
+/** Commands that number their output when given {@link NUMBERING_FLAG}; `nl` always does. */
+const NUMBERED_BY_FLAG: Record<string, true> = { grep: true, egrep: true, fgrep: true, rg: true, git: true, cat: true };
+/** `-n`, `-rn`, `-b`, `--line-number`, `--number`. */
+const NUMBERING_FLAG = /^-[a-zA-Z]*[nb]|^--(?:line-)?number/;
+/** A `sed` script that only selects lines (`3,4p`, `$p`, `40q`), so the rows keep their numbers. */
+const SED_SELECT = /^(?:\d+|\$)(?:,(?:\d+|\$))?[pq]$/;
+/** `NAME=value` before a command. */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+/** `2>&1`, `>/dev/null`, `< in`, `&>log`: redirections, dropped before parsing. */
+const REDIRECTION = /(^|[\s;&|])(?:\d*(?:>>?|<)|&>>?)(?:&[\d-]+|\s*[^\s;&|()<>'"]+)/g;
 
 /**
  * A `..` after a symlink is resolved by the filesystem, not lexically as
@@ -100,44 +139,61 @@ const climbs = (spelling: string): boolean => spelling.split(/[/\\]/).includes("
 
 /**
  * The directories the command runs in (the start, then each `cd`) and the
- * absolute paths of its word arguments, resolved in the directory in effect;
- * `undefined` when a `cd` may not take effect for the commands after it
- * (`false && cd sub; …`, `(cd sub); …`, `cd sub | …`).
+ * absolute paths of the files its numbering commands read, resolved in the
+ * directory in effect. Only a numbering command that reads files itself, first
+ * in its pipeline, numbers their lines: `tail -n 1 a.ts | cat -n` numbers a
+ * slice. `undefined` when the directory or the numbering is uncertain.
  */
 function commandWords(command: string, cwd: string): { dirs: string[]; words: string[] } | undefined {
 	const dirs = [cwd];
 	const words: string[] = [];
 	let dir = cwd;
 	let segment: string[] = [];
-	let unsequenced = false;
-	const close = (operator: string): boolean => {
-		if (DIRECTORY_CHANGERS[segment[0] ?? ""]) return false;
-		if (segment[0] === "cd") {
-			// `cd sub && …` runs what follows only in `sub`; any other operator
-			// after it, or before it, leaves the later directory unknown.
-			if (unsequenced || segment.length !== 2 || (UNSEQUENCED.test(operator) && !/^&&$/.test(operator))) {
-				return false;
-			}
-			dir = path.resolve(dir, segment[1]);
-			dirs.push(dir);
-		} else {
-			for (const word of segment.slice(1)) {
-				if (!word.startsWith("-") && !climbs(word)) words.push(path.resolve(dir, word));
+	let stage = 0;
+	const numbers = (name: string, args: string[]): boolean =>
+		name === "nl" || (NUMBERED_BY_FLAG[name] === true && args.some(arg => NUMBERING_FLAG.test(arg)));
+	const close = (piped: boolean): boolean => {
+		const start = segment.findIndex(word => !ASSIGNMENT.test(word));
+		const [name, ...rest] = start < 0 ? [] : segment.slice(start);
+		segment = [];
+		if (name !== undefined) {
+			if (stage > 0) {
+				const keepsRows =
+					name === "sed"
+						? rest.every(arg => arg === "-n" || SED_SELECT.test(arg))
+						: FILTERS[name] === true && !numbers(name, rest);
+				if (!keepsRows) return false;
+			} else if (name === "cd") {
+				// `cd sub; …` and `cd sub && …` run what follows in `sub`.
+				if (rest.length !== 1 || piped || /^[-~]|\$/.test(rest[0])) return false;
+				dir = path.resolve(dir, rest[0]);
+				dirs.push(dir);
+			} else {
+				if (!LEADING[name] || (name === "git" && rest[0] !== "grep")) return false;
+				const args = name === "git" ? rest.slice(1) : rest;
+				if (numbers(name, args)) {
+					for (const word of args) {
+						if (!word.startsWith("-") && !climbs(word)) words.push(path.resolve(dir, word));
+					}
+				}
 			}
 		}
-		if (UNSEQUENCED.test(operator)) unsequenced = true;
-		segment = [];
+		stage = piped ? stage + 1 : 0;
 		return true;
 	};
-	for (const token of lexShellCommand(command)) {
+	for (const token of lexShellCommand(command.replace(REDIRECTION, "$1 "))) {
 		if (token.kind === "word") {
 			if (token.value.length > 0) segment.push(token.value);
 			continue;
 		}
 		const operator = token.raw.replace(/[ \t]/g, "");
-		if (operator.length > 0 && !close(operator)) return undefined;
+		if (operator.length === 0) continue;
+		// Only `;`, `&&`, newlines and `|` keep the order certain; `||`, `&`,
+		// `|&` and parentheses make a later directory or stream unknown.
+		if (/[()]|\|\|/.test(operator) || operator.replace(/&&/g, "").includes("&")) return undefined;
+		if (!close(operator.includes("|"))) return undefined;
 	}
-	if (!close("")) return undefined;
+	if (!close(false)) return undefined;
 	return { dirs: [...new Set(dirs)], words };
 }
 
