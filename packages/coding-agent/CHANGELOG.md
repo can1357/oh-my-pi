@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed an extension command's failed compaction never reaching `onError`: a compaction rejected because another one is already running now reports through the same once-only reporter as the shared adapter ([#12041](https://github.com/can1357/oh-my-pi/issues/12041), [#16460](https://github.com/can1357/oh-my-pi/pull/16460) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.5] - 2026-10-21
 
@@ -15,7 +18,6 @@
 - `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
 
 ### Fixed
-- Fixed an extension command's failed compaction never reaching `onError`: a compaction rejected because another one is already running now reports through the same once-only reporter as the shared adapter ([#12041](https://github.com/can1357/oh-my-pi/issues/12041), [#16460](https://github.com/can1357/oh-my-pi/pull/16460) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.5] - 2026-10-21
 
