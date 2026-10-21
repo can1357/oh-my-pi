@@ -19,6 +19,12 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { becomesCollectible } from "../../tui/test/gc";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
+/** Flatten a turn's text so reminder bytes can be matched regardless of part shape. */
+function reminderText(message: Message): string {
+	if (typeof message.content === "string") return message.content;
+	return message.content.flatMap(part => (part.type === "text" ? part.text : [])).join("\n");
+}
+
 describe("date-cwd-reminder", () => {
 	afterEach(() => {
 		clearCustomApis();
@@ -383,14 +389,8 @@ describe("date-cwd-reminder", () => {
 	});
 });
 
-describe("date-cwd reminder on the provider wire", () => {
+describe("date/cwd reminder on the provider wire", () => {
 	const sessions: Array<{ dispose(): Promise<void> }> = [];
-
-	/** Flatten a turn's text so reminder bytes can be matched regardless of part shape. */
-	function reminderText(message: Message): string {
-		if (typeof message.content === "string") return message.content;
-		return message.content.flatMap(part => (part.type === "text" ? part.text : [])).join("\n");
-	}
 
 	afterEach(async () => {
 		clearCustomApis();
@@ -700,12 +700,6 @@ describe("date/cwd reminder memo on advisor history discard", () => {
 	afterEach(async () => {
 		for (const session of sessions.splice(0)) await session.dispose();
 	});
-
-	/** Flatten a turn's text so reminder bytes can be matched regardless of part shape. */
-	function reminderText(message: Message): string {
-		if (typeof message.content === "string") return message.content;
-		return message.content.flatMap(part => (part.type === "text" ? part.text : [])).join("\n");
-	}
 
 	function createAdvisorHarness(
 		tempDir: TempDir,
