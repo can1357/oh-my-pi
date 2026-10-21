@@ -45,6 +45,34 @@ describe("resolveRelayKind", () => {
 	});
 });
 
+describe("resolveBrowserKind app.relay", () => {
+	const session = (settings: Record<string, unknown>): ToolSession =>
+		({ cwd: process.cwd(), settings: Settings.isolated(settings) }) as ToolSession;
+	const configured = { "browser.relayUrl": "http://127.0.0.1:10000" };
+
+	it("a relay URL picks that relay over browser.relayUrl, with the relay setting off", () => {
+		expect(
+			resolveBrowserKind({ action: "open", app: { relay: "http://127.0.0.1:11000/" } }, session(configured), {}),
+		).toEqual({ kind: "relay", cdpUrl: "http://127.0.0.1:11000" });
+	});
+
+	it("true keeps browser.relayUrl", () => {
+		expect(resolveBrowserKind({ action: "open", app: { relay: true } }, session(configured), {})).toEqual({
+			kind: "relay",
+			cdpUrl: "http://127.0.0.1:10000",
+		});
+	});
+
+	it("PI_BROWSER_RELAY=0 still disables a relay URL", () => {
+		const kind = resolveBrowserKind(
+			{ action: "open", app: { relay: "http://127.0.0.1:11000" } },
+			session(configured),
+			{ PI_BROWSER_RELAY: "0" },
+		);
+		expect(kind.kind).not.toBe("relay");
+	});
+});
+
 describe("browser prelude relay guidance", () => {
 	const ENV_KEYS = [
 		"PI_BROWSER_RELAY",

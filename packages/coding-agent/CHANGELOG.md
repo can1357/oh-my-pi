@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Browser `app.relay` now also accepts a relay URL (`app: { relay: "http://127.0.0.1:9225" }`), so one session can drive several relays, such as one per Chrome profile, without writing `browser.relayUrl` and answering a settings prompt for each switch
+
 ### Fixed
 
 - Fixed agents showing as idle in the Agent Hub while still running after a failed streaming edit preview (`edit.streamingAbort`) auto-recovered the turn ([#18790](https://github.com/can1357/oh-my-pi/pull/18790) by [@H4vC](https://github.com/H4vC))
