@@ -2422,17 +2422,26 @@ function emitGitLabDuoWorkflowCheckpoint(
 		const duplicateContent =
 			previousContent === undefined &&
 			(contentSignatures[contentSignature] === true || contentSignatures[contentOnlySignature] === true);
+		// A byte-identical replay is decided by the equality test above, so the
+		// prefix scan is skipped for it: `startsWith` would walk the whole entry
+		// a second time on every checkpoint, which is exactly the per-chunk O(n)
+		// work the content-hash cache exists to remove. The delta is empty
+		// either way (the slice of an identical string at its own length is
+		// empty), so the outcome is unchanged.
 		const rewroteExistingContent =
 			previousContent !== undefined &&
+			!replayedIdentically &&
 			!entry.content.startsWith(previousContent) &&
 			previousContent !== entry.content;
 		const delta = duplicateContent
 			? ""
-			: rewroteExistingContent
+			: replayedIdentically
 				? ""
-				: previousContent !== undefined
-					? entry.content.slice(previousContent.length)
-					: entry.content;
+				: rewroteExistingContent
+					? ""
+					: previousContent !== undefined
+						? entry.content.slice(previousContent.length)
+						: entry.content;
 
 		contentByKey[entry.messageKey] = entry.content;
 		contentSignatures[contentSignature] = true;
