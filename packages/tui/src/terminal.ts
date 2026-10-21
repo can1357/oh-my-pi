@@ -2419,6 +2419,16 @@ export class ProcessTerminal implements Terminal {
 			}
 			match = KITTY_STACK_OP_PATTERN.exec(data);
 		}
+		// A switch to a screen that carries no frame of omp's leaves that
+		// screen's keys legacy-encoded, so Shift+Enter submits instead of
+		// inserting a newline. Once the protocol is confirmed, arm the screen the
+		// terminal is on now — but only when this write did not already push a
+		// frame there, so the stack stays balanced (one push, one pop).
+		const active = this.#kittyStacks[this.#kittyScreen];
+		if (this.#kittyProtocolActive && active.frames === 0 && !active.popPending) {
+			active.armPending = true;
+			this.#flushKittyScreenState();
+		}
 	}
 
 	/**
