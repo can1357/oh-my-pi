@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
 
+### Fixed
 - Fixed the thinking-block visibility toggle and the prose-only format switch no longer clearing and replaying the whole terminal, which stalled a long transcript for a change that renders nothing, and hiding or showing thinking blocks mid-stream no longer losing or jumping the assistant's answer ([#15336](https://github.com/can1357/oh-my-pi/pull/15336) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.5] - 2026-10-21
