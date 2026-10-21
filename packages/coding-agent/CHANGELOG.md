@@ -1,6 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+### Breaking Changes
+- Raised the minimum required Bun version from >=1.3.14 to >=1.4.3; `omp` now exits at startup on an older Bun ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+
+## [18.12.5] - 2026-10-21
+
+### Added
+
+- `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
 
 ### Added
 
