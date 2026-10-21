@@ -390,12 +390,7 @@ function buildSingleResource({
 	};
 }
 
-function loadPinnedPrDiff(
-	repo: string,
-	number: number,
-	fetchedAt: number,
-	settings: ResolveContext["settings"],
-) {
+function loadPinnedPrDiff(repo: string, number: number, fetchedAt: number, settings: ResolveContext["settings"]) {
 	const pinned = getPinnedPrDiff({ repo, number, fetchedAt, settings });
 	if (!pinned) {
 		throw new Error(
