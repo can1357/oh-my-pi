@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import { ptree } from "@oh-my-pi/pi-utils";
-import { probeStdout, runBoundedProcess } from "@oh-my-pi/pi-coding-agent/utils/bounded-probe";
+import { probeStdout, PROBE_STDOUT_MAX_BYTES, runBoundedProcess } from "@oh-my-pi/pi-coding-agent/utils/bounded-probe";
 
 describe("runBoundedProcess", () => {
 	it("kills a probe that never exits instead of blocking startup (#8402)", async () => {
@@ -76,6 +76,34 @@ describe("runBoundedProcess", () => {
 		expect(result.exitCode).toBe(3);
 		expect(result.timedOut).toBe(false);
 		expect(result.aborted).toBe(false);
+	});
+
+	it("retains no stdout at all when the probe ignores it", async () => {
+		// A probe that only asks "does this interpreter start" must not keep
+		// whatever the interpreter writes: the pipe is drained, so the child
+		// never blocks, but nothing is accumulated for a child that writes
+		// continuously during the probe.
+		const result = await runBoundedProcess([process.execPath, "-e", "process.stdout.write('x'.repeat(512 * 1024))"], {
+			stdout: "ignore",
+		});
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toBe("");
+	});
+
+	it("caps the stdout it retains when the probe captures it", async () => {
+		// A capture probe keeps at most its cap, so a child that floods stdout
+		// cannot make the probe hold megabytes. The cap is far above any real
+		// probe answer, so a short answer still comes through whole.
+		const long = await runBoundedProcess([process.execPath, "-e", "process.stdout.write('x'.repeat(512 * 1024))"], {
+			stdout: "capture",
+		});
+		expect(long.exitCode).toBe(0);
+		expect(long.stdout.length).toBeLessThanOrEqual(PROBE_STDOUT_MAX_BYTES);
+
+		const short = await runBoundedProcess([process.execPath, "-e", "process.stdout.write('host-home')"], {
+			stdout: "capture",
+		});
+		expect(short.stdout).toBe("host-home");
 	});
 
 	it("reports an aborted probe without a result (#8402)", async () => {

@@ -12,6 +12,16 @@ import { ptree } from "@oh-my-pi/pi-utils";
  */
 export const DEFAULT_PROBE_TIMEOUT_MS = 500;
 
+/**
+ * Cap on the stdout a probe retains.
+ *
+ * A probe asks for one short answer (a path, a version line), so a few KiB is
+ * far more than any real answer needs. The cap bounds what a child that
+ * writes continuously can make the probe hold, and the pipe is still drained
+ * past it, so the child never blocks.
+ */
+export const PROBE_STDOUT_MAX_BYTES = 64 * 1024;
+
 /** What a bounded probe does with the child's stdout. */
 export type BoundedProbeStdout = "capture" | "ignore";
 
@@ -140,6 +150,12 @@ export async function runBoundedProcess(
 			allowNonZero: true,
 			allowAbort: true,
 			detached: options.detached ?? process.platform !== "win32",
+			// "ignore" drains the pipe without retaining a byte of it, so a
+			// child that writes continuously during the probe cannot grow the
+			// retained buffer. "capture" keeps at most the cap, so the retained
+			// stdout is bounded even when the child floods it.
+			stdout: options.stdout === "ignore" ? "ignore" : "capture",
+			maxStdoutBytes: PROBE_STDOUT_MAX_BYTES,
 		}),
 		timeoutMs,
 		options.signal,
