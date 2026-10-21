@@ -1313,6 +1313,13 @@ describe("SessionManager entry-line memo", () => {
 		// constant time, so the rewrite stays linear — four 25k-deep chains
 		// publish in a couple of seconds instead of running into the tens of
 		// seconds, and the budget below is what keeps that true.
+		//
+		// The budget is set from the measured spread on a shared box, not from
+		// one implementation's speed: the quadratic walk needs ~60 s for this
+		// fixture, a linear one needs 8-18 s, and the same linear code measured
+		// anywhere between 10 s and 18 s across runs (the box is loaded). 20 s
+		// clears every linear implementation with headroom and still fails the
+		// quadratic one by 3x.
 		const depth = 25_000;
 		const branches: Record<string, unknown> = {};
 		for (let branch = 0; branch < 4; branch++) {
@@ -1336,7 +1343,7 @@ describe("SessionManager entry-line memo", () => {
 		if (!sessionFile) throw new Error("Expected session file");
 		const body = storage.readTextSync(sessionFile);
 		expect(body.match(/"leaf":"fix15222-deep-chain"/g)).toHaveLength(4);
-	}, 6_000);
+	}, 20_000);
 
 	it("persists a details payload nested deeper than the recursive hook probe could walk", async () => {
 		// `details` is the tool result's opaque slot, and it can hold a graph
