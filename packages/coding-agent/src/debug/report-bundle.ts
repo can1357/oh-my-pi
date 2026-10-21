@@ -11,6 +11,7 @@ import type { WorkProfile } from "@oh-my-pi/pi-natives";
 import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent, localDay, logger } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import { readSessionHeaderId } from "../session/session-loader";
+import { collectSubSessions } from "../session/sub-sessions";
 import type { CpuProfile, MemoryStats } from "./profiler";
 import { collectSystemInfo, sanitizeEnv } from "./system-info";
 
@@ -138,7 +139,7 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 	// the crashed process's log, so read all of today's files, not just our own.
 	// Every record those files hold for this session or its subagents goes to
 	// session-logs.txt, however far back in the file it sits.
-	const { tails, sessionLines } = await collectSameDayLogs(1000, await collectSessionIds(data, options.sessionFile));
+	const { tails, sessionLines } = await collectSameDayLogs(1000, await collectSessionIds(options.sessionFile));
 	if (tails) {
 		data["logs.txt"] = tails;
 		files.push("logs.txt");
@@ -218,23 +219,17 @@ export async function getLogText(): Promise<string> {
 	return readLastLines(getLogPath(), MAX_LOG_LINES);
 }
 
-/** Ids of the bundled transcripts: the session's own and its nested subagents'. */
-async function collectSessionIds(
-	data: Record<string, string | Uint8Array>,
-	sessionFile: string | undefined,
-): Promise<Set<string>> {
+/**
+ * Ids of the session and its subagents, found the way `/export` finds subagent
+ * transcripts, so other JSONL artifacts never pull in an unrelated session.
+ */
+async function collectSessionIds(sessionFile: string | undefined): Promise<Set<string>> {
 	const ids = new Set<string>();
 	if (!sessionFile) return ids;
-	const artifactsDir = sessionFile.slice(0, -6);
-	for (const name of Object.keys(data)) {
-		if (!name.endsWith(".jsonl")) continue;
-		let filePath: string;
-		if (name === "session.jsonl") filePath = sessionFile;
-		else if (name.startsWith("artifacts/")) filePath = path.join(artifactsDir, name.slice("artifacts/".length));
-		else continue;
-		const id = await readSessionHeaderId(filePath).catch(() => undefined);
-		if (id) ids.add(id);
-	}
+	const ownId = await readSessionHeaderId(sessionFile).catch(() => undefined);
+	if (ownId) ids.add(ownId);
+	const subSessions = await collectSubSessions(sessionFile).catch(() => ({}));
+	for (const sub of Object.values(subSessions)) if (sub.header) ids.add(sub.header.id);
 	return ids;
 }
 
@@ -278,16 +273,22 @@ async function collectSameDayLogs(
 	const sessionLines: string[] = [];
 	for (const { name } of sameDay) {
 		const filePath = path.join(logsDir, name);
-		const text = await readLastLines(filePath, linesPerFile);
-		if (text) chunks.push(`===== ${name} =====\n${text}`);
-		if (sessionIds.size === 0) continue;
-		let content: string;
-		try {
-			content = await Bun.file(filePath).text();
-		} catch {
-			continue; // Rotated away since the tail read.
+		if (sessionIds.size === 0) {
+			const text = await readLastLines(filePath, linesPerFile);
+			if (text) chunks.push(`===== ${name} =====\n${text}`);
+			continue;
 		}
-		for (const line of content.split("\n")) {
+		// One read serves both files, so the tail and the session lines agree.
+		let lines: string[];
+		try {
+			lines = (await Bun.file(filePath).text()).split("\n");
+		} catch (err) {
+			if (isEnoent(err)) continue; // Rotated away since the listing.
+			throw err;
+		}
+		const text = lines.slice(-linesPerFile).join("\n");
+		if (text) chunks.push(`===== ${name} =====\n${text}`);
+		for (const line of lines) {
 			if (!line.includes('"sessionId":')) continue;
 			try {
 				const { sessionId } = JSON.parse(line) as { sessionId?: unknown };

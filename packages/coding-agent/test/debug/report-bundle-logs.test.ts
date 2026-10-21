@@ -133,12 +133,18 @@ describe("report bundle logs", () => {
 			path.join(cleanupRoot, "session-main", "0-Worker.jsonl"),
 			'{"type": "session", "version": 3, "id": "sub-session", "cwd": "/"}\n',
 		);
+		// A JSONL artifact that is no subagent transcript names a session that is not ours.
+		await Bun.write(
+			path.join(cleanupRoot, "session-main", "local", "copied.jsonl"),
+			'{"type":"session","version":3,"id":"copied-session","cwd":"/"}\n',
+		);
 		const record = (message: string, sessionId?: string) =>
 			JSON.stringify({ level: "warn", pid: 4242, message, ...(sessionId ? { sessionId } : {}) });
 		const lines = [
 			record("main early", "main-session"),
 			record("subagent early", "sub-session"),
 			record("other session", "other-session"),
+			record("copied artifact's session", "copied-session"),
 			record("nested only", undefined).replace("}", ',"detail":{"sessionId":"main-session"}}'),
 			...Array.from({ length: 1500 }, (_, i) => record(`filler ${i}`)),
 			record("main late", "main-session"),

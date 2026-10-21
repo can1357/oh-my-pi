@@ -110,6 +110,17 @@ switch (scenario) {
 		});
 		logger.info("outside");
 		await Promise.all([parent, child]);
+		// Context fields named like the record's own keep the record's level and message.
+		logger.withContext({ sessionId: "reserved", level: "error", message: "scoped", timestamp: "scoped" }, () =>
+			logger.info("reserved-kept"),
+		);
+		// Sinks see the context's fields under the call's own.
+		const sinkContexts: unknown[] = [];
+		const unregister = logger.registerLogSink(event => sinkContexts.push(event.context));
+		logger.withContext({ sessionId: "sink", turn: 1 }, () => logger.info("to-sink", { turn: 2 }));
+		logger.info("to-sink-outside");
+		unregister();
+		writeResult({ sinkContexts });
 		disableTransports();
 		break;
 	}

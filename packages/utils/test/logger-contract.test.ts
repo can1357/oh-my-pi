@@ -197,8 +197,13 @@ describe("central logger byte contract", () => {
 			expectedLine(result.pid, "info", "explicit-wins", { sessionId: "explicit" }),
 			expectedLine(result.pid, "info", "shared-service"),
 			expectedLine(result.pid, "info", "child-nested", { sessionId: "grandchild", ordinal: 1 }),
+			expectedLine(result.pid, "info", "reserved-kept", { sessionId: "reserved" }),
+			expectedLine(result.pid, "info", "to-sink", { sessionId: "sink", turn: 2 }),
+			expectedLine(result.pid, "info", "to-sink-outside"),
 		].join("");
 		expect((await readSingleLog(result.primaryDir)).text).toBe(expected);
+		const payload = JSON.parse(await fs.readFile(result.resultPath, "utf8")) as { sinkContexts: unknown[] };
+		expect(payload.sinkContexts).toEqual([{ sessionId: "sink", turn: 2 }, null]);
 	});
 
 	test("drops native JSON failures locally but sends original contexts to sinks", async () => {

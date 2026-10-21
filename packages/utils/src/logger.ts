@@ -50,7 +50,11 @@ export function registerLogSink(sink: LogSink): () => void {
 
 function emitToSinks(level: LogLevel, message: string, context: Record<string, unknown> | undefined): void {
 	if (logSinks.size === 0) return;
-	const event: LogEvent = { level, message, context, timestamp: new Date() };
+	// The enclosing {@link withContext} fields reach sinks as they reach the file;
+	// call-site fields win, and a record outside any context keeps its own object.
+	const scoped = logContextStorage.getStore();
+	const merged = scoped ? { ...scoped, ...context } : context;
+	const event: LogEvent = { level, message, context: merged, timestamp: new Date() };
 	for (const sink of logSinks) {
 		try {
 			sink(event);
@@ -291,7 +295,11 @@ function formatLogRecord(
 		message: metadata?.message ? `${message} ${metadata.message}` : message,
 	};
 	const scoped = logContextStorage.getStore();
-	if (scoped) for (const key of Object.keys(scoped)) entry[key] = scoped[key];
+	if (scoped) {
+		for (const key of Object.keys(scoped)) {
+			if (key !== "level" && key !== "timestamp" && key !== "message") entry[key] = scoped[key];
+		}
+	}
 	if (metadata) {
 		for (const key of Object.keys(metadata)) {
 			if (key !== "level" && key !== "timestamp" && key !== "message") entry[key] = metadata[key];
