@@ -101,6 +101,7 @@
 ### Fixed
 
 ### Fixed
+
 - Fixed the streaming `write` preview changing height on every line as the content arrives; the collapsed preview now holds a steady height while a write streams, and the first result clears the tail rows it left in the scrollback ([#16033](https://github.com/can1357/oh-my-pi/issues/16033), [#16099](https://github.com/can1357/oh-my-pi/pull/16099) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
@@ -134,7 +135,6 @@
 - In Tern, centered sheets (`/context`, reports, keyboard shortcuts, BTW history, session info, the pause screen) fill the pane when it is narrower than 100 columns instead of floating with margins ([#16676](https://github.com/can1357/oh-my-pi/pull/16676) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
-- Fixed the streaming `write` preview changing height on every line as the content arrives; the collapsed preview now holds a steady height while a write streams, and the first result clears the tail rows it left in the scrollback ([#16033](https://github.com/can1357/oh-my-pi/issues/16033), [#16099](https://github.com/can1357/oh-my-pi/pull/16099) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
 
