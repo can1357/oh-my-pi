@@ -58,6 +58,7 @@ import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { isColumnTruncationNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { recoverConflictUriPrefix } from "./conflict-detect";
 import { outputMeta } from "./output-meta";
 import { formatPathRelativeToCwd, probeLiteralPathExists, specialFileKind } from "./path-utils";
@@ -226,7 +227,7 @@ export type WriteToolInput = typeof writeSchema.infer;
  * notice of a page whose long lines are shown cut (`[Some lines truncated to 768 chars. …]`).
  */
 function isReadProjectionNotice(line: string): boolean {
-	return isReadTruncationNotice(line) || line.trim().startsWith("[Some lines truncated to ");
+	return isReadTruncationNotice(line) || isColumnTruncationNotice(line);
 }
 
 /**

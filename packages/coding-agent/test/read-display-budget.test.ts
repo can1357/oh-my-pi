@@ -8,7 +8,7 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool, SNAPSHOT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
-import { cfgToolsOutputMaxColumns } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgToolsArtifactSpillThreshold, cfgToolsOutputMaxColumns } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const WIDE_LINE = "H".repeat(80_000);
@@ -161,6 +161,16 @@ describe("read charges column-cut lines their displayed width", () => {
 		expect(rows(text).get(1)).toStartWith("z".repeat(8_500));
 		expect(text).not.toContain("Showing 0");
 		expect(text).toContain("Use :2 to continue");
+	});
+
+	it("drops a cut context line that leaves no room for the requested line", async () => {
+		// A 1 KB spill threshold fits the 80 KB context line's cut display but not line 2 after it.
+		const file = path.join(dir, "context.txt");
+		await fs.writeFile(file, `${WIDE_LINE}\n${"y".repeat(300)}\nr3\n`);
+		const session = createSession(dir);
+		cfgToolsArtifactSpillThreshold.set(session.settings, 1);
+		const shown = rows(await read(session, `${file}:2-2`));
+		expect(shown.get(2)).toBe("y".repeat(300));
 	});
 
 	it("keeps a conflict side kept only as its display head out of the conflict registry", async () => {

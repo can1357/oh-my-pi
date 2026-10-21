@@ -172,6 +172,14 @@ describe("write tool read projection guard", () => {
 		expect(await Bun.file(filePath).text()).toBe(original);
 	});
 
+	it("writes a file whose last line only starts like the column-cap notice", async () => {
+		const filePath = path.join(tmpDir, "notes.txt");
+		await Bun.write(filePath, "header\nbody line\n");
+		const content = "header\n[Some lines truncated to explain the format\n";
+		await new WriteTool(createSession(tmpDir)).execute("write-notes", { path: filePath, content });
+		expect(await Bun.file(filePath).text()).toBe(content);
+	});
+
 	it("rejects actual bounded archive-member output without changing the archive", async () => {
 		const archivePath = path.join(tmpDir, "bundle.zip");
 		const member = "member.txt";
