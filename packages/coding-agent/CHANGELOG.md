@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
 
+### Fixed
 - Fixed Escape no longer leaving the focused-subagent view when `app.interrupt` was remapped to another key; a raw Escape now clears the draft or returns to the main session ([#8952](https://github.com/can1357/oh-my-pi/issues/8952), [#16464](https://github.com/can1357/oh-my-pi/pull/16464) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.5] - 2026-10-21
