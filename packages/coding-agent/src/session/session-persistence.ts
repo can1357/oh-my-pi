@@ -166,7 +166,16 @@ export function isImageDataPayload(value: unknown): value is { data: string; mim
 	if (isImageBlock(value)) return true;
 	const mimeType = projectorImageFieldPresence(value, "mimeType");
 	if (mimeType === "opaque") return true;
-	return mimeType === "string" && isImageMimeType(mimeType);
+	if (mimeType !== "string") return false;
+	// The presence is not the value: a payload whose `mimeType` is an image
+	// type is an image payload even when it carries no `type` marker of its
+	// own — the snapcompact frames are exactly that shape, and their base64
+	// must externalize to the blob store instead of falling through to the
+	// generic string truncation, which corrupts the base64 the provider
+	// decodes on resume. The value is read through the descriptor, so an
+	// accessor is never run.
+	const mimeTypeValue = projectorImageField(value, "mimeType");
+	return mimeTypeValue !== undefined && isImageMimeType(mimeTypeValue);
 }
 
 /**
@@ -253,6 +262,75 @@ export function isSnapcompactArchiveSlot(
 	value: unknown,
 ): value is Record<string, unknown> {
 	return key === "preserveData" && childKey === SNAPCOMPACT_PRESERVE_KEY && isRecord(value);
+}
+
+/**
+ * One field of the archive, as the own-key stamp can see it: whether the
+ * field is stampable at all, and the value the stamp would record.
+ */
+interface ArchiveField {
+	readonly stampable: boolean;
+	readonly value: unknown;
+}
+
+const ARCHIVE_FIELD_ABSENT: ArchiveField = { stampable: true, value: undefined };
+const ARCHIVE_FIELD_HIDDEN: ArchiveField = { stampable: false, value: undefined };
+
+/**
+ * The archive field as the own-key stamp sees it: absent, or an own
+ * enumerable data property. A field that rides an inherited link, an own
+ * non-enumerable descriptor, or an accessor is read by the archive rebuild
+ * but never recorded by the stamp — so a change behind it would leave the
+ * stamp equal and the rewrite would reuse a line the next rebuild would not
+ * produce.
+ *
+ * Answered through descriptors, never by reading the key: a proxy's traps can
+ * throw, and a throw must not escape the probe into the persistence path.
+ */
+function archiveField(archive: Record<string, unknown>, key: string): ArchiveField {
+	let descriptor: PropertyDescriptor | undefined;
+	try {
+		descriptor = Object.getOwnPropertyDescriptor(archive, key);
+	} catch {
+		return ARCHIVE_FIELD_HIDDEN;
+	}
+	if (descriptor === undefined) {
+		// An inherited field is read by the rebuild (`archive.frames` follows
+		// the prototype chain) and never recorded by the own-key stamp.
+		let inherited: boolean;
+		try {
+			inherited = key in archive;
+		} catch {
+			return ARCHIVE_FIELD_HIDDEN;
+		}
+		return inherited ? ARCHIVE_FIELD_HIDDEN : ARCHIVE_FIELD_ABSENT;
+	}
+	if (!descriptor.enumerable) return ARCHIVE_FIELD_HIDDEN;
+	if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return ARCHIVE_FIELD_HIDDEN;
+	return { stampable: true, value: descriptor.value };
+}
+
+/**
+ * Whether the own-key stamp can describe the snapcompact archive.
+ *
+ * `persistSnapcompactArchive` keeps every field but the frames verbatim — so
+ * a transient key inside the archive reaches the line, and the stamp has to
+ * record it whole rather than by presence — and it reads the frames and the
+ * `withoutThinking` view by key, recursing into the nested archive the view
+ * carries. Every field that read has to be one the own-key stamp sees, at
+ * every level of the archive; a field it cannot see leaves the archive
+ * uncached, so the line is always re-projected from the live archive.
+ */
+export function snapcompactArchiveStampable(archive: Record<string, unknown>): boolean {
+	const frames = archiveField(archive, "frames");
+	if (!frames.stampable) return false;
+	const view = archiveField(archive, "withoutThinking");
+	if (!view.stampable) return false;
+	if (!isRecord(view.value)) return true;
+	const nested = archiveField(view.value, "archive");
+	if (!nested.stampable) return false;
+	if (!isRecord(nested.value)) return true;
+	return snapcompactArchiveStampable(nested.value);
 }
 
 /**
@@ -405,7 +483,13 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 		// change (jsonlEvents presence, oversized/image/signature strings).
 		// The common persisted entry is already clean and returns here with
 		// zero array/tuple allocation; only a dirty node pays for the rebuild.
-		if (!persistenceNodeNeedsRewrite(obj)) return obj;
+		//
+		// The scan gets the key the rebuild hands this node: the snapcompact
+		// archive is only recognized by the key it sits under, so a scan
+		// without it walked into the archive generically — and an archive
+		// whose frames ride a hidden field then looked clean, so the rebuild
+		// never ran and the frames were dropped from the line.
+		if (!persistenceNodeNeedsRewrite(obj, key)) return obj;
 		let changed = false;
 		const entries: Array<readonly [string, unknown]> = [];
 		// Own enumerable keys, enumerated directly instead of through
