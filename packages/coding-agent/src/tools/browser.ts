@@ -187,7 +187,13 @@ export function resolveBrowserKind(
 	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
 	// Explicit app.relay wins over every setting; PI_BROWSER_RELAY stays the
 	// final kill switch (a relay that is down would otherwise brick the tool).
-	// A URL picks the relay for this open, e.g. one per Chrome profile.
+	// A URL picks the relay for this open, e.g. one per Chrome profile. A blank one
+	// must not fall back to another relay: that is another signed-in profile.
+	if (typeof app?.relay === "string" && app.relay.trim() === "") {
+		throw new ToolError(
+			"app.relay is an empty URL; pass a relay URL such as http://127.0.0.1:9224, or true for browser.relayUrl.",
+		);
+	}
 	if (app?.relay) {
 		const url = typeof app.relay === "string" ? app.relay : relayUrl;
 		const relayKind = resolveRelayKind({ settingEnabled: true, url }, env);

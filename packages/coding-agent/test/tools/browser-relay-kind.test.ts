@@ -71,6 +71,18 @@ describe("resolveBrowserKind app.relay", () => {
 		);
 		expect(kind.kind).not.toBe("relay");
 	});
+
+	it("rejects a blank relay URL instead of falling back to another relay", () => {
+		for (const relay of ["", "   "]) {
+			expect(() =>
+				resolveBrowserKind(
+					{ action: "open", app: { relay } },
+					session({ ...configured, "browser.relay": true }),
+					{},
+				),
+			).toThrow("app.relay is an empty URL");
+		}
+	});
 });
 
 describe("browser prelude relay guidance", () => {
