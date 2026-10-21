@@ -11,7 +11,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { isSettingsInitialized, resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 /** Past both the 100-line streaming cap and the 20-line collapsed preview. */
@@ -31,14 +31,35 @@ function bashMessage(output: string): AgentMessage {
 	} as unknown as AgentMessage;
 }
 
+/**
+ * Take the process-wide settings singleton — the module-level `settings` proxy
+ * `UiHelpers.addMessageToChat()` reads throws without it — but only when no
+ * other test file owns it yet.
+ *
+ * `Settings.init()` is memoized: it adopts an existing instance instead of
+ * creating one, so an unconditional call here would silently run against
+ * another file's settings (and its cwd). `resetSettingsForTest()` empties the
+ * singleton for everyone, so a file that only adopted it must not clear it:
+ * the owner would then see "Settings not initialized" mid-run. The returned
+ * lease releases only what this file created.
+ */
+async function acquireSettings(): Promise<() => void> {
+	if (isSettingsInitialized()) return () => {};
+	await Settings.init({ inMemory: true, cwd: process.cwd() });
+	return () => resetSettingsForTest();
+}
+
 describe("UiHelpers bash replay seeding", () => {
+	let releaseSettings: (() => void) | undefined;
+
 	beforeAll(async () => {
-		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		releaseSettings = await acquireSettings();
 		await initTheme();
 	});
 
 	afterAll(() => {
-		resetSettingsForTest();
+		releaseSettings?.();
+		releaseSettings = undefined;
 	});
 
 	it("keeps every line of a >100-line result after expansion", () => {
@@ -61,5 +82,16 @@ describe("UiHelpers bash replay seeding", () => {
 		for (const line of REPLAY_LINES) {
 			expect(rendered).toContain(line);
 		}
+	});
+
+	it("leaves a settings singleton it did not create in place", async () => {
+		// Another test file may own the process-wide settings singleton. A lease
+		// that only adopted it must not clear it: `resetSettingsForTest()` empties
+		// the singleton for every file, and the owner would then fail with
+		// "Settings not initialized" — the cross-file leak this file used to
+		// cause by resetting unconditionally.
+		const foreignRelease = await acquireSettings();
+		foreignRelease();
+		expect(isSettingsInitialized()).toBe(true);
 	});
 });
