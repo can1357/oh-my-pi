@@ -5,6 +5,7 @@ import {
 	getCellDimensions,
 	getImageDimensions,
 	getKittyGraphics,
+	getTerminalBackgroundColor,
 	type ImageBudget,
 	ImageProtocol,
 	renderImage,
@@ -299,7 +300,8 @@ export class AttachmentChipsBand implements Component {
 	/** The cache entry for `image` at a fitted pixel size. A size change replaces the entry and starts its
 	 *  encode; `sequence` stays `undefined` until that encode settles. */
 	#sixelEntry(image: ImageContent, widthPx: number, heightPx: number): SixelThumb {
-		const key = `${widthPx}x${heightPx}`;
+		const backgroundRgb = getTerminalBackgroundColor();
+		const key = `${widthPx}x${heightPx}:${backgroundRgb}`;
 		const entry = kSixelThumbs.get(image);
 		if (entry !== undefined && entry.key === key) return entry;
 		const cell = getCellDimensions();
@@ -310,7 +312,7 @@ export class AttachmentChipsBand implements Component {
 			rows: Math.ceil(heightPx / cell.heightPx),
 		};
 		kSixelThumbs.set(image, pending);
-		encodeSixelAsync(new Uint8Array(Buffer.from(image.data, "base64")), widthPx, heightPx).then(
+		encodeSixelAsync(new Uint8Array(Buffer.from(image.data, "base64")), widthPx, heightPx, backgroundRgb).then(
 			sequence => this.#settleSixel(image, pending, sequence),
 			() => this.#settleSixel(image, pending, null),
 		);
