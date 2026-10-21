@@ -118,6 +118,7 @@ import {
 import {
 	forgetExternalizedImages,
 	isAtomicPersistenceNode,
+	MAX_PROTOTYPE_CHAIN_DEPTH,
 	prepareEntryForPersistence,
 	projectorImageField,
 	TRANSIENT_PERSISTENCE_KEYS,
@@ -888,35 +889,31 @@ interface CachedEntryLine {
  */
 function hasToJSONHook(value: object): boolean {
 	let current: object | null = value;
-	while (current !== null) {
-		const descriptor = Object.getOwnPropertyDescriptor(current, "toJSON");
+	for (let depth = 0; current !== null; depth++) {
+		if (depth >= MAX_PROTOTYPE_CHAIN_DEPTH) return true;
+		let descriptor: PropertyDescriptor | undefined;
+		try {
+			descriptor = Object.getOwnPropertyDescriptor(current, "toJSON");
+		} catch {
+			// A proxy trap controls the answer: the serializer would consult the
+			// same trap, so the hook's presence is unknowable here. Leave the
+			// graph uncached rather than stamp a hookless answer.
+			return true;
+		}
 		if (descriptor !== undefined) {
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
 			return typeof descriptor.value === "function";
 		}
-		current = Object.getPrototypeOf(current);
+		let next: object | null;
+		try {
+			next = Object.getPrototypeOf(current);
+		} catch {
+			return true;
+		}
+		current = next;
 	}
 	return false;
 }
-/**
- * Whether `JSON.stringify` routes bigint values through a `toJSON` hook. A
- * bigint carries no properties of its own — the primitive has no wrapper
- * object to hang a hook on — so the only hook serialization can consult is
- * one installed on `BigInt.prototype` itself (an extension hook, for example).
- * Answered through the property descriptor, never by reading the key: a
- * stateful `toJSON` getter on the prototype would otherwise run here and again
- * in `#lineFor`, shifting what serialization observes. Any accessor there —
- * or any callable data value, which the serializer invokes with the bigint as
- * its receiver — leaves a bigint-bearing graph uncached (see
- * {@link hasSerializerHook}).
- */
-function hasBigIntToJSONHook(): boolean {
-	const descriptor = Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON");
-	if (descriptor === undefined) return false;
-	if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
-	return typeof descriptor.value === "function";
-}
-
 /**
  * Whether any indexed slot of `value` resolves through an accessor — answered
  * through property descriptors along the prototype chain, never by reading a
@@ -931,13 +928,25 @@ function hasIndexedAccessorSlot(value: unknown[]): boolean {
 	for (let index = 0; index < length; index++) {
 		const slot = String(index);
 		let current: object | null = value;
-		while (current !== null) {
-			const descriptor = Object.getOwnPropertyDescriptor(current, slot);
+		for (let depth = 0; current !== null; depth++) {
+			if (depth >= MAX_PROTOTYPE_CHAIN_DEPTH) return true;
+			let descriptor: PropertyDescriptor | undefined;
+			try {
+				descriptor = Object.getOwnPropertyDescriptor(current, slot);
+			} catch {
+				return true;
+			}
 			if (descriptor !== undefined) {
 				if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
 				break;
 			}
-			current = Object.getPrototypeOf(current);
+			let next: object | null;
+			try {
+				next = Object.getPrototypeOf(current);
+			} catch {
+				return true;
+			}
+			current = next;
 		}
 	}
 	return false;
@@ -953,13 +962,25 @@ function hasIndexedAccessorSlot(value: unknown[]): boolean {
  */
 function projectorGenerationResult(value: object): string | undefined {
 	let current: object | null = value;
-	while (current !== null) {
-		const descriptor = Object.getOwnPropertyDescriptor(current, "result");
+	for (let depth = 0; current !== null; depth++) {
+		if (depth >= MAX_PROTOTYPE_CHAIN_DEPTH) return undefined;
+		let descriptor: PropertyDescriptor | undefined;
+		try {
+			descriptor = Object.getOwnPropertyDescriptor(current, "result");
+		} catch {
+			return undefined;
+		}
 		if (descriptor !== undefined) {
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return undefined;
 			return typeof descriptor.value === "string" ? descriptor.value : undefined;
 		}
-		current = Object.getPrototypeOf(current);
+		let next: object | null;
+		try {
+			next = Object.getPrototypeOf(current);
+		} catch {
+			return undefined;
+		}
+		current = next;
 	}
 	return undefined;
 }
@@ -1010,6 +1031,10 @@ const ATOMIC_CLASSIFIER_KEYS = ["type", "content"] as const;
  * a single key or leaf the stamp records.
  */
 function messageProjectionInputsUnstampable(message: object): boolean {
+	// The reasoning-signature strip collects the replayed ids and encrypted
+	// contents in a `Set`, so a replaced `Set` helper decides which signature
+	// the line drops — without moving a stamped leaf.
+	if (Set.prototype.add !== SET_ADD_INTRINSIC || Set.prototype.has !== SET_HAS_INTRINSIC) return true;
 	const fields = message as Record<string, unknown>;
 	for (const field of PROJECTOR_MESSAGE_KEYS) {
 		if (projectorKeyHiddenFromStamp(message, field)) return true;
@@ -1051,7 +1076,8 @@ function messageProjectionInputsUnstampable(message: object): boolean {
  */
 function projectorKeyHiddenFromStamp(node: object, key: string): boolean {
 	let current: object | null = node;
-	while (current !== null) {
+	for (let depth = 0; current !== null; depth++) {
+		if (depth >= MAX_PROTOTYPE_CHAIN_DEPTH) return true;
 		let descriptor: PropertyDescriptor | undefined;
 		try {
 			descriptor = Object.getOwnPropertyDescriptor(current, key);
@@ -1060,6 +1086,12 @@ function projectorKeyHiddenFromStamp(node: object, key: string): boolean {
 		}
 		if (descriptor !== undefined) {
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+			// A field the node inherits is as invisible to the own-key stamp as a
+			// non-enumerable one: the stamp enumerates own enumerable keys only,
+			// while the projector reads the key and so follows the chain. An
+			// inherited field that changes therefore moves the projected bytes
+			// without moving a stamped leaf.
+			if (current !== node) return true;
 			return !descriptor.enumerable;
 		}
 		let next: object | null;
@@ -1088,6 +1120,13 @@ const ARRAY_CONTENT_METHOD_INTRINSICS: Record<(typeof PROJECTOR_CONTENT_METHODS)
 };
 
 /**
+ * `Object.keys`, captured at module load. The stamp enumerates with it and the
+ * projection rebuilds a node with it, so a replacement changes which fields
+ * the line carries — while the stamp keeps recording the intrinsic's view.
+ */
+const OBJECT_KEYS_INTRINSIC = Object.keys;
+
+/**
  * Whether `array` is read by anything other than its indexed slots — an
  * overridden or accessor `Symbol.iterator`. `JSON.stringify` and the stamp both
  * read slots up to a snapshotted length; the projector's `for..of` follows the
@@ -1099,7 +1138,8 @@ const ARRAY_CONTENT_METHOD_INTRINSICS: Record<(typeof PROJECTOR_CONTENT_METHODS)
  */
 function nonDefaultArrayIterator(array: unknown[]): boolean {
 	let current: object | null = array;
-	while (current !== null) {
+	for (let depth = 0; current !== null; depth++) {
+		if (depth >= MAX_PROTOTYPE_CHAIN_DEPTH) return true;
 		let descriptor: PropertyDescriptor | undefined;
 		try {
 			descriptor = Object.getOwnPropertyDescriptor(current, Symbol.iterator);
@@ -1131,7 +1171,8 @@ function nonDefaultArrayIterator(array: unknown[]): boolean {
  */
 function nonDefaultArrayMethod(array: unknown[], method: (typeof PROJECTOR_CONTENT_METHODS)[number]): boolean {
 	let current: object | null = array;
-	while (current !== null) {
+	for (let depth = 0; current !== null; depth++) {
+		if (depth >= MAX_PROTOTYPE_CHAIN_DEPTH) return true;
 		let descriptor: PropertyDescriptor | undefined;
 		try {
 			descriptor = Object.getOwnPropertyDescriptor(current, method);
@@ -1154,35 +1195,83 @@ function nonDefaultArrayMethod(array: unknown[], method: (typeof PROJECTOR_CONTE
 }
 
 /**
- * Whether `value` is the top-level `details` of a `toolResult` message whose
- * `structuredContent` the persistence projection removes before serialization
- * — the mirror of `stripSpilledMcpStructuredContent` in
- * session-persistence.ts, which strips only that one node. A custom or hook
- * message — or any nested property merely named `details` — keeps its
- * `structuredContent` in the projected line, so the memo's three walks (hook
- * probe, stamp, matcher) must skip the field only here: the projected line
- * never contains it, so a hook or cycle beneath it can neither reach the
- * persisted bytes nor be allowed to overflow a walk of the live graph. The
- * `role` gate is answered through the own data descriptor of the message the
- * walk started from — never by reading a key — because the hook probe, which
- * runs before every stamp, already leaves any accessor-backed graph uncached.
- * Reads through property descriptors only where the answer must not invoke
- * user code; the `meta.truncation` spine is reached by key from a
- * descriptor-read root for the same reason.
+ * The value a field resolves to on `value` or its prototype chain, answered
+ * without running user code: the data descriptor's value, `undefined` when no
+ * descriptor exists, and {@link OPAQUE_FIELD} when the field resolves through
+ * an accessor or a throwing trap — the two cases where the runtime value is
+ * unknowable without invoking user code.
  */
-function isMcpSpillStrippedDetails(value: object, key?: string, isTopLevelToolResultDetails?: boolean): boolean {
-	if (key !== "details" || isTopLevelToolResultDetails !== true || !Object.hasOwn(value, "structuredContent")) {
-		return false;
+const OPAQUE_FIELD = Symbol("opaque-field");
+
+/** Every value a chain field can hold, plus the opaque marker. */
+type ChainFieldValue = null | undefined | string | number | boolean | bigint | symbol | object | typeof OPAQUE_FIELD;
+
+function readChainField(value: object, key: string): ChainFieldValue {
+	let current: object | null = value;
+	for (let depth = 0; current !== null; depth++) {
+		if (depth >= MAX_PROTOTYPE_CHAIN_DEPTH) return OPAQUE_FIELD;
+		let descriptor: PropertyDescriptor | undefined;
+		try {
+			descriptor = Object.getOwnPropertyDescriptor(current, key);
+		} catch {
+			return OPAQUE_FIELD;
+		}
+		if (descriptor !== undefined) {
+			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return OPAQUE_FIELD;
+			return descriptor.value as ChainFieldValue;
+		}
+		let next: object | null;
+		try {
+			next = Object.getPrototypeOf(current);
+		} catch {
+			return OPAQUE_FIELD;
+		}
+		current = next;
 	}
-	const serverName = Object.getOwnPropertyDescriptor(value, "serverName")?.value;
-	const mcpToolName = Object.getOwnPropertyDescriptor(value, "mcpToolName")?.value;
-	if (typeof serverName !== "string" || typeof mcpToolName !== "string") return false;
-	const meta = Object.getOwnPropertyDescriptor(value, "meta")?.value;
-	if (meta === null || typeof meta !== "object" || Array.isArray(meta)) return false;
-	const truncation = (meta as Record<string, unknown>).truncation;
-	if (truncation === null || typeof truncation !== "object" || Array.isArray(truncation)) return false;
-	const artifactId = (truncation as Record<string, unknown>).artifactId;
-	return typeof artifactId === "string" && artifactId.length > 0;
+	return undefined;
+}
+
+/**
+ * What the persistence projection does with this node's `structuredContent`:
+ * `"strip"` when `stripSpilledMcpStructuredContent` removes the field before
+ * serialization, `"keep"` when the field stays in the line, and `"opaque"`
+ * when the answer depends on a value only running user code can produce.
+ *
+ * The mirror of `stripSpilledMcpStructuredContent` in session-persistence.ts,
+ * which reads the marker fields by key — so it follows the prototype chain and
+ * runs an accessor. The memo must reach the same verdict without running any
+ * user code, which leaves three cases:
+ *
+ * - The marker fields resolve to plain data descriptors: the verdict is the
+ *   projector's, wherever the descriptors sit on the chain. A marker inherited
+ *   from a prototype strips the field exactly like an own one.
+ * - A marker resolves through an accessor: the projector's verdict depends on
+ *   what the getter returns, which the memo cannot know. The graph is left
+ *   uncached instead of stamped against the wrong verdict.
+ * - A marker is absent: the projector's read yields `undefined` and the field
+ *   stays in the line.
+ */
+function mcpSpillStripDecision(
+	value: object,
+	key: string | undefined,
+	isTopLevelToolResultDetails: boolean | undefined,
+): "strip" | "keep" | "opaque" {
+	if (key !== "details" || isTopLevelToolResultDetails !== true) return "keep";
+	if (!Object.hasOwn(value, "structuredContent")) return "keep";
+	const serverName = readChainField(value, "serverName");
+	if (serverName === OPAQUE_FIELD) return "opaque";
+	const mcpToolName = readChainField(value, "mcpToolName");
+	if (mcpToolName === OPAQUE_FIELD) return "opaque";
+	if (typeof serverName !== "string" || typeof mcpToolName !== "string") return "keep";
+	const meta = readChainField(value, "meta");
+	if (meta === OPAQUE_FIELD) return "opaque";
+	if (meta === null || typeof meta !== "object" || Array.isArray(meta)) return "keep";
+	const truncation = readChainField(meta, "truncation");
+	if (truncation === OPAQUE_FIELD) return "opaque";
+	if (truncation === null || typeof truncation !== "object" || Array.isArray(truncation)) return "keep";
+	const artifactId = readChainField(truncation, "artifactId");
+	if (artifactId === OPAQUE_FIELD) return "opaque";
+	return typeof artifactId === "string" && artifactId.length > 0 ? "strip" : "keep";
 }
 
 /**
@@ -1272,8 +1361,10 @@ function hasSerializerHook(
 		// A bigint is the one primitive `JSON.stringify` routes through a hook:
 		// when an extension installs `BigInt.prototype.toJSON`, serialization
 		// invokes it — so a stateful hook's first output cannot be stamped as a
-		// leaf. Leave the graph uncached exactly when such a hook exists (see
-		// `hasBigIntToJSONHook`); other primitives never consult one.
+		// leaf. The hook may also be installed between this probe and the write,
+		// and the fallback that serializes a bigint the serializer cannot handle
+		// reads `BigInt.prototype.toString`, a replaceable slot. A bigint-bearing
+		// graph is therefore left uncached as a whole.
 		if (typeof value === "bigint") return true;
 		if (value === null) continue;
 		// `JSON.stringify` invokes a `toJSON` hook on a callable value too, so a
@@ -1300,6 +1391,12 @@ function hasSerializerHook(
 		// leaves any proxy-backed message uncached, and before a walk that would
 		// otherwise answer through descriptor calls a proxy trap controls.
 		if (key === undefined && messageProjectionInputsUnstampable(value)) return true;
+		// The stamp enumerates own enumerable keys, and the projection rebuilds
+		// a node with the same `Object.keys` call — so a replaced `Object.keys`
+		// decides which fields the line carries while the stamp keeps recording
+		// the intrinsic's. The two can disagree about a field the line does
+		// depend on, so the message is left uncached while it is replaced.
+		if (key === undefined && Object.keys !== OBJECT_KEYS_INTRINSIC) return true;
 		if (hasToJSONHook(value)) return true;
 		// A callable value serializes through its hook alone (probed above) or is
 		// dropped by `JSON.stringify`; its own properties never reach the line, so
@@ -1307,14 +1404,15 @@ function hasSerializerHook(
 		if (typeof value === "function") continue;
 		// No hook on this node: a boxed primitive serializes as its unboxed value
 		// and a rawJSON node as its payload, neither of which can harbor a hook.
-		if (unboxedPrimitive(value) !== undefined) {
+		const unboxed = unboxedPrimitive(value);
+		if (unboxed !== undefined) {
 			// A box serializes through `ToPrimitive`, so an own or inherited
 			// `valueOf`/`toString`/`Symbol.toPrimitive` override — even a
 			// non-enumerable one — changes the emitted bytes while
 			// {@link unboxedPrimitive}'s intrinsic call (which bypasses the
 			// override on purpose, so it never runs user code) reports the boxed
 			// value. Such a box is left uncached, like any other hooked graph.
-			if (hasBoxCoercionOverride(value)) return true;
+			if (hasBoxCoercionOverride(value, typeof unboxed as "number" | "string" | "boolean")) return true;
 			continue;
 		}
 		if (rawJsonPayload(value) !== undefined) continue;
@@ -1348,8 +1446,12 @@ function hasSerializerHook(
 		// only there may the live graph be cyclic where the projection is not. A
 		// stateful `meta` getter would shift serialization if read, so the object
 		// loop below answers it through the descriptor and leaves the graph
-		// uncached.
-		const skipStructuredContent = isMcpSpillStrippedDetails(value, key, isTopLevelToolResultDetails);
+		// uncached. A marker the projector resolves through an accessor leaves
+		// the verdict unknowable, and an unknowable verdict is not a reason to
+		// walk a field the line may not contain: the graph stays uncached.
+		const spillDecision = mcpSpillStripDecision(value, key, isTopLevelToolResultDetails);
+		if (spillDecision === "opaque") return true;
+		const skipStructuredContent = spillDecision === "strip";
 		// Mirror the projection's stripping boundary: a hook beneath a stripped key
 		// cannot affect the persisted bytes — and the live value may be cyclic
 		// where the projection is not.
@@ -1394,13 +1496,17 @@ function hasSerializerHook(
 			return true;
 		for (const childKey of Object.keys(value)) {
 			if (skipStructuredContent && childKey === "structuredContent") continue;
-			if (!nodeAtomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
 			// Never read through an accessor: the child lookup below would invoke
 			// the getter, and a stateful one then yields a different value when
 			// `#lineFor` serializes the node — so leave the graph uncached instead.
+			// A transient key is skipped below, but its descriptor is checked
+			// first: the projection drops the field without reading it, yet the
+			// MCP spill strip copies the details object wholesale, and that copy
+			// runs an own enumerable getter.
 			const descriptor = Object.getOwnPropertyDescriptor(value, childKey);
 			if (descriptor === undefined) continue;
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+			if (!nodeAtomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
 			pending.push({
 				value: descriptor.value,
 				key: childKey,
@@ -1459,55 +1565,86 @@ const STAMP_TRANSIENT = Symbol("stamp.transient");
  */
 function unboxedPrimitive(value: object): number | string | boolean | undefined {
 	try {
-		return Number.prototype.valueOf.call(value);
+		return NUMBER_VALUE_OF.call(value);
 	} catch {
 		// Not a genuine Number wrapper: fall through to the next brand.
 	}
 	try {
-		return String.prototype.valueOf.call(value);
+		return STRING_VALUE_OF.call(value);
 	} catch {
 		// Not a genuine String wrapper: fall through to the next brand.
 	}
 	try {
-		return Boolean.prototype.valueOf.call(value);
+		return BOOLEAN_VALUE_OF.call(value);
 	} catch {
 		return undefined;
 	}
 }
 
 /**
- * `Object.prototype` viewed through the three keys `ToPrimitive` consults. The
- * `Object` interface declares `valueOf` and `toString` but no
- * `Symbol.toPrimitive` member, so the symbol lookup needs the key spelled out;
- * the optionality keeps the assertion a plain widening of `Object`.
+ * The `valueOf` intrinsics the unboxing brand checks call, captured at module
+ * load. Reading `Number.prototype.valueOf` at check time hands the brand check
+ * to whatever sits in that slot now: an extension that replaces it with a
+ * generic function would have it called for every object the probe walks, and
+ * its answer would be stamped as the box's value.
  */
-interface CoercionIntrinsicHost {
-	readonly [Symbol.toPrimitive]?: unknown;
-	readonly valueOf: unknown;
-	readonly toString: unknown;
-}
-
-const OBJECT_PROTOTYPE_INTRINSICS = Object.prototype as CoercionIntrinsicHost;
+const NUMBER_VALUE_OF = Number.prototype.valueOf;
+const STRING_VALUE_OF = String.prototype.valueOf;
+const BOOLEAN_VALUE_OF = Boolean.prototype.valueOf;
 
 /**
- * The coercion functions `JSON.stringify`'s `ToPrimitive` unboxing treats as
- * built-in, captured at module load. A prototype-level replacement must not
- * compare equal to itself, and a box built on `Number.prototype` unboxes
- * through `Number.prototype.valueOf` while a `String` box goes through
- * `String.prototype.toString`, so every intrinsic that can appear on a genuine
- * wrapper's chain is listed.
+ * The coercion functions each boxed primitive's own chain must resolve to.
+ * `JSON.stringify` unboxes a `Number` box through `Number.prototype.valueOf`,
+ * a `String` box through `String.prototype.valueOf`, and a `Boolean` box
+ * through `Boolean.prototype.valueOf`; the matching `toString` is the
+ * fallback the primitive-hint conversion consults next. The lists are
+ * brand-specific on purpose: a cross-brand list would accept
+ * `Object.prototype.toString` as a `Number` box's `valueOf`, while the
+ * serializer — which unboxes through the box's own chain — would read it as
+ * a string and emit `null` where the stamp records the number.
  */
-const BOX_COERCION_INTRINSICS: readonly unknown[] = [
-	OBJECT_PROTOTYPE_INTRINSICS[Symbol.toPrimitive],
-	OBJECT_PROTOTYPE_INTRINSICS.valueOf,
-	OBJECT_PROTOTYPE_INTRINSICS.toString,
-	Number.prototype.valueOf,
-	Number.prototype.toString,
-	String.prototype.valueOf,
-	String.prototype.toString,
-	Boolean.prototype.valueOf,
-	Boolean.prototype.toString,
-];
+const BOX_BRAND_INTRINSICS = {
+	number: { valueOf: NUMBER_VALUE_OF, toString: Number.prototype.toString },
+	string: { valueOf: STRING_VALUE_OF, toString: String.prototype.toString },
+	boolean: { valueOf: BOOLEAN_VALUE_OF, toString: Boolean.prototype.toString },
+} as const;
+
+/** Marks a coercion slot that has no built-in to compare against. */
+const NO_BUILT_IN = Symbol("no-built-in");
+
+/**
+ * Whether the coercion slot `key` resolves to something other than
+ * `expected` — an accessor, a throwing trap, or another function. Answered
+ * through property descriptors, never by reading the key (see
+ * {@link hasSerializerHook}). `expected` is {@link NO_BUILT_IN} for a slot no
+ * built-in defines: any callable there is an override, while an `undefined`
+ * one is not (`GetMethod` treats a non-callable `undefined` as absent).
+ */
+function chainCoercionOverride(value: object, key: PropertyKey, expected: unknown | typeof NO_BUILT_IN): boolean {
+	let current: object | null = value;
+	for (let depth = 0; current !== null; depth++) {
+		if (depth >= MAX_PROTOTYPE_CHAIN_DEPTH) return true;
+		let descriptor: PropertyDescriptor | undefined;
+		try {
+			descriptor = Object.getOwnPropertyDescriptor(current, key);
+		} catch {
+			return true;
+		}
+		if (descriptor !== undefined) {
+			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+			if (expected === NO_BUILT_IN) return descriptor.value !== undefined;
+			return descriptor.value !== expected;
+		}
+		let next: object | null;
+		try {
+			next = Object.getPrototypeOf(current);
+		} catch {
+			return true;
+		}
+		current = next;
+	}
+	return false;
+}
 
 /**
  * Whether a boxed primitive reaches its emitted value through an override
@@ -1519,32 +1656,28 @@ const BOX_COERCION_INTRINSICS: readonly unknown[] = [
  * {@link hasSerializerHook}); an accessor anywhere counts as an override, since
  * running it would invoke user code.
  */
-function hasBoxCoercionOverride(value: object): boolean {
-	for (const key of [Symbol.toPrimitive, "valueOf", "toString"] as const) {
-		let current: object | null = value;
-		while (current !== null) {
-			let descriptor: PropertyDescriptor | undefined;
-			try {
-				descriptor = Object.getOwnPropertyDescriptor(current, key);
-			} catch {
-				return true;
-			}
-			if (descriptor !== undefined) {
-				if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
-				if (!BOX_COERCION_INTRINSICS.includes(descriptor.value)) return true;
-				break;
-			}
-			let next: object | null;
-			try {
-				next = Object.getPrototypeOf(current);
-			} catch {
-				return true;
-			}
-			current = next;
-		}
-	}
-	return false;
+function hasBoxCoercionOverride(value: object, brand: "number" | "string" | "boolean"): boolean {
+	if (chainCoercionOverride(value, Symbol.toPrimitive, NO_BUILT_IN)) return true;
+	const intrinsics = BOX_BRAND_INTRINSICS[brand];
+	if (chainCoercionOverride(value, "valueOf", intrinsics.valueOf)) return true;
+	return chainCoercionOverride(value, "toString", intrinsics.toString);
 }
+
+/**
+ * The `JSON.isRawJSON` brand check, captured at module load. Reading it at
+ * check time hands the brand check to whatever sits in that slot now, and a
+ * replacement would have its answer taken for the brand.
+ */
+const IS_RAW_JSON = (JSON as { isRawJSON?: (value: unknown) => boolean }).isRawJSON;
+
+/**
+ * The `Set` helpers `stripReplayedReasoningSignatures` collects the
+ * replayed signature ids and encrypted contents with, captured at module load.
+ * A prototype-level replacement changes which items the strip matches without
+ * moving a stamped leaf.
+ */
+const SET_ADD_INTRINSIC = Set.prototype.add;
+const SET_HAS_INTRINSIC = Set.prototype.has;
 
 /**
  * The raw payload of a `JSON.rawJSON` branded value, or `undefined` for any
@@ -1556,9 +1689,7 @@ function hasBoxCoercionOverride(value: object): boolean {
  * key: the probe must not invoke user code (see {@link hasSerializerHook}).
  */
 function rawJsonPayload(value: object): string | undefined {
-	if (!("isRawJSON" in JSON) || typeof JSON.isRawJSON !== "function" || !JSON.isRawJSON(value)) {
-		return undefined;
-	}
+	if (IS_RAW_JSON === undefined || !IS_RAW_JSON.call(JSON, value)) return undefined;
 	const descriptor = Object.getOwnPropertyDescriptor(value, "rawJSON");
 	if (descriptor === undefined || typeof descriptor.get === "function" || typeof descriptor.value !== "string") {
 		return undefined;
@@ -1692,12 +1823,15 @@ function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
 		const atomicNode = atomic || isAtomicPersistenceNode(value, key);
 		// Only the top-level `details` of a `toolResult` message loses
 		// `structuredContent` before serialization (see
-		// `isMcpSpillStrippedDetails`), so only there is the field skipped
+		// `mcpSpillStripDecision`), so only there is the field skipped
 		// outright: unlike the transient keys below it forces no rebuild
 		// pass, and the live graph may be cyclic where the projection is
 		// not. Any other marker-shaped `details` keeps its field in the
-		// projected line and is stamped whole.
-		const skipStructuredContent = isMcpSpillStrippedDetails(value, key, isTopLevelToolResultDetails);
+		// projected line and is stamped whole. An unknowable verdict means the
+		// graph never reached this walk uncached (the hook probe leaves it
+		// uncached), so the field is skipped here as well — walking a cycle the
+		// line may not contain is what this skip exists to prevent.
+		const skipStructuredContent = mcpSpillStripDecision(value, key, isTopLevelToolResultDetails) !== "keep";
 		out.push(STAMP_OBJECT);
 		const children: StampPending[] = [];
 		for (const childKey of Object.keys(fields)) {
@@ -1891,7 +2025,7 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 			// matcher skips it too — the value was never recorded and may
 			// be cyclic. Any other marker-shaped `details` was stamped
 			// whole and is matched whole.
-			const skipStructuredContent = isMcpSpillStrippedDetails(live, key, isTopLevelToolResultDetails);
+			const skipStructuredContent = mcpSpillStripDecision(live, key, isTopLevelToolResultDetails) !== "keep";
 			const children: StampMatchPending[] = [];
 			for (const childKey of Object.keys(fields)) {
 				if (skipStructuredContent && childKey === "structuredContent") continue;
@@ -1929,7 +2063,11 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 
 /** Own enumerable field values of `obj`, for shallow change detection. */
 function shallowFieldValues(obj: object): Record<string, unknown> {
-	const values: Record<string, unknown> = {};
+	// A null-prototype snapshot: a field named `__proto__` would otherwise be
+	// written through the inherited setter, which drops the field from the
+	// snapshot — and the snapshot's key count would no longer match the live
+	// object's, so every change would look like a rewrite.
+	const values: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
 	for (const key of Object.keys(obj)) {
 		values[key] = (obj as Record<string, unknown>)[key];
 	}

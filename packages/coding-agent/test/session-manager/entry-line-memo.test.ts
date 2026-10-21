@@ -1986,4 +1986,184 @@ describe("SessionManager entry-line memo", () => {
 		await session.appendEntriesAtomically(() => {});
 		expect(storage.readTextSync(sessionFile)).toContain(persistedSignature);
 	});
+
+	it("does not walk a cyclic structuredContent the projection strips through inherited MCP markers", async () => {
+		// The MCP spill strip reads its marker fields by key, so it follows the
+		// prototype chain: markers a prototype carries strip `structuredContent`
+		// exactly like own ones. The memo's mirror has to reach the same verdict
+		// — when it does not, it walks the live cycle the line never contains,
+		// and the rewrite never returns.
+		const structuredContent: Record<string, unknown> = { kind: "payload" };
+		structuredContent.self = structuredContent;
+		const details = Object.create({
+			serverName: "mcp",
+			mcpToolName: "search",
+			meta: { truncation: { artifactId: "artifact-fix15222" } },
+		}) as Record<string, unknown>;
+		details.structuredContent = structuredContent;
+
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-mcp",
+			toolName: "search",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		// The stripped field is gone, so the cycle never reaches the line.
+		expect(body).not.toContain("structuredContent");
+	});
+
+	it("terminates the projection for a proxy whose prototype chain is its own", async () => {
+		// A proxy may fabricate its own ancestors: `getPrototypeOf` answers the
+		// proxy itself, so a prototype walk that follows the chain never ends.
+		// The target carries no `data`, so the image-classifier walk has to step
+		// up the chain to look for it.
+		const looping: Record<string, unknown> = new Proxy(
+			{ type: "text", text: "hi" },
+			{ getPrototypeOf: () => looping },
+		);
+
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "user" as const,
+			content: [looping as unknown as { type: "text"; text: string }],
+			timestamp: Date.now(),
+		});
+
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(storage.readTextSync(sessionFile)).toContain('"type":"text"');
+	});
+
+	it("externalizes an own enumerable accessor-backed image payload instead of truncating it", async () => {
+		// An own enumerable `data` getter is part of the serialized graph —
+		// `JSON.stringify` reads it — so the projector may read it too, and must
+		// externalize the bytes instead of leaving a truncated copy inline: a
+		// resumed session would replay a broken image.
+		const payload = "A".repeat(600_000);
+		let calls = 0;
+		const block = {
+			type: "image" as const,
+			mimeType: "image/png",
+			get data(): string {
+				calls++;
+				return payload;
+			},
+		};
+
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({ role: "user" as const, content: [block], timestamp: Date.now() });
+		await session.appendEntriesAtomically(() => {});
+
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const body = storage.readTextSync(sessionFile);
+		const refs = persistedBlobRefs(body);
+		expect(refs).toHaveLength(1);
+		const ref = refs[0];
+		if (!ref) throw new Error("Expected blob reference");
+		// The blob holds the whole payload: the line carries no truncated copy.
+		expect(await blobBytesBase64(ref)).toBe(payload);
+		expect(body).not.toContain("Session persistence truncated large content");
+		expect(calls).toBeGreaterThan(0);
+	});
+
+	it("re-projects a message when a replaced Number.prototype.valueOf hides a nested change", async () => {
+		// The boxed-primitive brand check must not read `Number.prototype.valueOf`
+		// at call time: a replacement would be called for every object the probe
+		// walks, and its answer would be stamped as the object's value — hiding
+		// every change beneath it.
+		const originalValueOf = Number.prototype.valueOf;
+		Number.prototype.valueOf = function replacementValueOf(): number {
+			return 42;
+		};
+		try {
+			const details = { nested: { count: 1 } };
+			const session = SessionManager.create(process.cwd(), sessionDir, storage);
+			session.appendMessage({
+				role: "user" as const,
+				content: [{ type: "text" as const, text: "ok" }],
+				details,
+				timestamp: Date.now(),
+			});
+			await session.appendEntriesAtomically(() => {});
+
+			const sessionFile = session.getSessionFile();
+			if (!sessionFile) throw new Error("Expected session file");
+			expect(storage.readTextSync(sessionFile)).toContain('"count":1');
+
+			details.nested.count = 2;
+			await session.appendEntriesAtomically(() => {});
+			expect(storage.readTextSync(sessionFile)).toContain('"count":2');
+		} finally {
+			Number.prototype.valueOf = originalValueOf;
+		}
+	});
+
+	it("does not read a transient key's value while projecting the message", async () => {
+		// `jsonlEvents` never reaches the line, so reading it would run a getter
+		// the persisted bytes do not depend on — and a stateful one would shift
+		// the sibling fields the line does record.
+		let calls = 0;
+		const details = {
+			kept: "value",
+			get jsonlEvents(): unknown[] {
+				calls++;
+				return [{ type: "stream" }];
+			},
+		};
+
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			timestamp: Date.now(),
+		});
+		await session.appendEntriesAtomically(() => {});
+
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(storage.readTextSync(sessionFile)).not.toContain("jsonlEvents");
+		expect(calls).toBe(0);
+	});
+
+	it("keeps a prototype whose descriptor trap throws out of the persistence failure path", async () => {
+		// The serializer hook probe walks the prototype chain, and a proxy in
+		// that chain can throw from its descriptor trap. The probe answers
+		// "unknown" there; an exception escaping it fails a write the
+		// serializer itself completes.
+		const hostile = new Proxy(
+			{},
+			{
+				getOwnPropertyDescriptor() {
+					throw new Error("descriptor trap");
+				},
+			},
+		);
+		const nested = Object.create(hostile) as Record<string, unknown>;
+		nested.kept = "value";
+
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "ok" }],
+			details: nested,
+			timestamp: Date.now(),
+		});
+		await session.appendEntriesAtomically(() => {});
+
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(storage.readTextSync(sessionFile)).toContain('"kept":"value"');
+	});
 });
