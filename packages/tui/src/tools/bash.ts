@@ -362,9 +362,14 @@ function bashStatsParts(
 	return statsParts;
 }
 
+/** Longest filter label a footer shows; native labels are short, a session or extension may carry anything. */
+const MAX_FILTER_LABEL = 32;
+
 /** `git 120.4KB → 3.2KB`: the minimizer filter that ran and the bytes it took the output from and to. */
 function formatMinimized(minimized: MinimizedMeta): string {
-	return `${minimized.filter} ${formatBytes(minimized.inputBytes)} → ${formatBytes(minimized.outputBytes)}`;
+	const label = minimized.filter.replace(/\s+/gu, " ").trim();
+	const filter = label.length > MAX_FILTER_LABEL ? `${label.slice(0, MAX_FILTER_LABEL - 1)}…` : label;
+	return `${filter} ${formatBytes(minimized.inputBytes)} → ${formatBytes(minimized.outputBytes)}`;
 }
 
 /**

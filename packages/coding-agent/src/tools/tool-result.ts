@@ -76,6 +76,7 @@ export class ToolResultBuilder<TDetails extends DetailsWithMeta> {
 		return this;
 	}
 
+	/** Record the bash minimizer's rewrite of this output, when there was one. */
 	minimized(value: MinimizedMeta | undefined): this {
 		this.#meta.minimized(value);
 		return this;
