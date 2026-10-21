@@ -39,9 +39,23 @@ export function isPersistenceTruncatedString(value: unknown): value is string {
 	return typeof value === "string" && value.endsWith(TRUNCATION_NOTICE);
 }
 
+/**
+ * The number of prototype hops a chain walk may take before it answers
+ * "unknown". A real prototype chain is a handful of links long; a longer one
+ * can only come from a proxy that fabricates its own ancestors — and a walk
+ * that keeps following such a chain never ends.
+ */
+export const MAX_PROTOTYPE_CHAIN_DEPTH = 64;
+
 export function isImageBlock(value: unknown): value is { type: "image"; data: string; mimeType?: string } {
 	if (typeof value !== "object" || value === null) return false;
-	return projectorImageField(value, "type") === "image" && projectorImageField(value, "data") !== undefined;
+	if (projectorImageField(value, "type") !== "image") return false;
+	// An accessor-backed `data` is still an image payload: the projector reads
+	// it once, when it externalizes the base64, exactly where the serializer
+	// would have read it. Leaving it inline would truncate the base64 and lose
+	// the image on resume.
+	const data = projectorImageFieldPresence(value, "data");
+	return data === "string" || data === "opaque";
 }
 
 /**
@@ -64,7 +78,8 @@ export function isImageBlock(value: unknown): value is { type: "image"; data: st
  */
 export function projectorImageField(value: object, key: "data" | "mimeType" | "type"): string | undefined {
 	let current: object | null = value;
-	while (current !== null) {
+	for (let depth = 0; current !== null; depth++) {
+		if (depth >= MAX_PROTOTYPE_CHAIN_DEPTH) return undefined;
 		let descriptor: PropertyDescriptor | undefined;
 		try {
 			descriptor = Object.getOwnPropertyDescriptor(current, key);
@@ -86,16 +101,63 @@ export function projectorImageField(value: object, key: "data" | "mimeType" | "t
 	return undefined;
 }
 
+/**
+ * Whether an image-shaped value carries `key`, and whether its value is
+ * knowable without running user code: `"string"` for a string-valued data
+ * descriptor anywhere on the chain, `"opaque"` for an accessor, `"absent"`
+ * otherwise.
+ *
+ * The projector externalizes an image payload by reading it, so an
+ * accessor-backed `data` is still an image payload — the getter runs once, at
+ * projection time, exactly where the serializer would have read it. The memo
+ * cannot read it, so it leaves such graphs uncached instead of stamping a
+ * value it never saw (see `hasSerializerHook` in session-manager.ts).
+ */
+export type ProjectorImageField = "absent" | "string" | "opaque";
+
+export function projectorImageFieldPresence(value: object, key: "data" | "mimeType" | "type"): ProjectorImageField {
+	let current: object | null = value;
+	for (let depth = 0; current !== null; depth++) {
+		if (depth >= MAX_PROTOTYPE_CHAIN_DEPTH) return "absent";
+		let descriptor: PropertyDescriptor | undefined;
+		try {
+			descriptor = Object.getOwnPropertyDescriptor(current, key);
+		} catch {
+			return "absent";
+		}
+		if (descriptor !== undefined) {
+			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") {
+				// An own enumerable accessor is part of the serialized graph —
+				// `JSON.stringify` reads it — so the projector may read it too.
+				// An inherited or non-enumerable one is not: reading it would run
+				// user code for a value no serialization observes.
+				return current === value && descriptor.enumerable ? "opaque" : "absent";
+			}
+			return typeof descriptor.value === "string" ? "string" : "absent";
+		}
+		let next: object | null;
+		try {
+			next = Object.getPrototypeOf(current);
+		} catch {
+			return "absent";
+		}
+		current = next;
+	}
+	return "absent";
+}
+
 function isImageMimeType(value: unknown): value is string {
 	return typeof value === "string" && value.toLowerCase().startsWith("image/");
 }
 
 export function isImageDataPayload(value: unknown): value is { data: string; mimeType?: string } {
 	if (typeof value !== "object" || value === null) return false;
-	if (projectorImageField(value, "data") === undefined) return false;
+	const data = projectorImageFieldPresence(value, "data");
+	if (data !== "string" && data !== "opaque") return false;
 	if (isImageBlock(value)) return true;
-	const mimeType = projectorImageField(value, "mimeType");
-	return mimeType !== undefined && isImageMimeType(mimeType);
+	const mimeType = projectorImageFieldPresence(value, "mimeType");
+	if (mimeType === "opaque") return true;
+	return mimeType === "string" && isImageMimeType(mimeType);
 }
 
 /**
@@ -118,7 +180,11 @@ function shouldExternalizeImagePayload(
 	key: string | undefined,
 ): value is { data: string; mimeType?: string } {
 	if (!isExternalizableImagePosition(value, key)) return false;
-	if (isBlobRef(value.data) || value.data.length < BLOB_EXTERNALIZE_THRESHOLD) return false;
+	// Read the payload once: an accessor-backed `data` is read by the getter,
+	// and a stateful one would hand the length check and the externalization
+	// two different values.
+	const data = value.data;
+	if (isBlobRef(data) || data.length < BLOB_EXTERNALIZE_THRESHOLD) return false;
 	return true;
 }
 
@@ -340,13 +406,17 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 		// `JSON.stringify`, which reads own keys only, stays quiet on the
 		// same value. A write the serializer completes must not fail here.
 		for (const childKey of Object.keys(obj)) {
-			const value = (obj as Record<string, unknown>)[childKey];
 			// Strip transient/redundant properties that shouldn't be persisted.
 			// - jsonlEvents: raw subprocess streaming events (already saved to artifact files)
+			// The key is tested before the value is read: the field never reaches
+			// the line, so reading it would run a getter the persisted bytes do
+			// not depend on — and a stateful one would shift the sibling fields
+			// the line does record.
 			if (TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) {
 				changed = true;
 				continue;
 			}
+			const value = (obj as Record<string, unknown>)[childKey];
 			const newValue = isSnapcompactArchiveSlot(key, childKey, value)
 				? persistSnapcompactArchive(value, blobStore)
 				: truncateForPersistence(value, blobStore, childKey);
