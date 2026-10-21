@@ -423,20 +423,25 @@ describe("bashToolRenderer", () => {
 		expect(expandedFinal).not.toContain("earlier line");
 	});
 
-	it("shows a minimizer filter label on one bounded footer line", () => {
-		const filter = `lint\tunsafe\nfooter ${"x".repeat(60)}`;
+	it("shows a minimizer filter label as one sanitized, width-bounded footer fact", () => {
+		const filter = `\x1b[31mlint\x1b[0m\tun\x07safe\nfooter ${"界".repeat(30)}`;
+		const label = `lint unsafe footer ${"界".repeat(10)}…`;
 		const result = {
 			content: [{ type: "text" as const, text: "1 error\n[raw output: artifact://2]" }],
 			details: { meta: { minimized: { filter, inputBytes: 1960, outputBytes: 27, artifactId: "2" } } },
 		};
 		const args = { command: "pnpm lint" };
 		const options = { expanded: false, isPartial: false };
-		const footer = Bun.stripANSI(bashToolRenderer.renderResult(result, options, uiTheme, args).render(200).join("\n"))
+		const rendered = bashToolRenderer.renderResult(result, options, uiTheme, args).render(200).join("\n");
+		expect(rendered).not.toContain("\x1b[31m");
+		expect(rendered).not.toContain("\x07");
+		const footer = Bun.stripANSI(rendered)
 			.split("\n")
 			.find(line => line.includes("Minimized:"));
-		expect(footer).toContain(`Minimized: lint unsafe footer ${"x".repeat(12)}… 1.9KB → 27B`);
+		expect(footer).toContain(`Minimized: ${label} 1.9KB → 27B`);
 		expect(footer).not.toContain("\t");
 		const view = JSON.stringify(bashToolRenderer.describeResult(result, options, args));
-		expect(view).toContain(`Minimized lint unsafe footer ${"x".repeat(12)}… 1.9KB → 27B`);
+		expect(view).toContain(`Minimized ${label} 1.9KB → 27B`);
+		expect(view).not.toContain("\\u001b[31m");
 	});
 });
