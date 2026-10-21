@@ -457,6 +457,28 @@ function memorySnapshotRecorder(transcript: MemoryTranscript, state: TranscriptM
 }
 
 /**
+ * Rebind the transcript's memory state to the session file it now writes to.
+ *
+ * A branch into a new session file replaces the file but keeps the base
+ * prompt — and with it the memory block that prompt carries. The staged
+ * snapshot still names the source file, so the recorder that would record it
+ * drops it as stale: the new session's transcript would claim no memory block
+ * at all, and a later resume rereads the memory files and rebuilds a
+ * different prompt.
+ */
+export function rebindMemorySnapshotSessionFile(transcript: MemoryTranscript | undefined): void {
+	if (!transcript) return;
+	const state = memoryStateByTranscript.get(transcript);
+	if (!state) return;
+	const sessionFile = transcript.getSessionFile() ?? undefined;
+	if (sessionFile === state.sessionFile) return;
+	state.sessionFile = sessionFile;
+	// The snapshot now belongs to the branch the new file holds.
+	state.stagedLeafId = activeBranchLeafId(transcript);
+	state.pending = state.snapshot !== undefined;
+}
+
+/**
  * The callback that records the memory block a prompt was built from.
  *
  * The transcript must not claim a memory block the session never sent: the
@@ -537,6 +559,27 @@ export function stagedMemorySnapshot(transcript: MemoryTranscript | undefined): 
 			return memorySnapshotRecorder(transcript, state);
 		},
 	};
+}
+
+/**
+ * Record the memory block a prompt carries on the transcript's current branch.
+ *
+ * A branch move — a rewind, an `ask` re-answer, a manual tool replay — leaves
+ * the prompt carrying the memory block while the branch the session continues
+ * on holds no snapshot of its own: a later resume rereads the memory files and
+ * rebuilds a different prompt. Recording the block on that branch keeps the
+ * transcript and the prompt in sync.
+ *
+ * Returns true when the branch recorded a snapshot.
+ */
+export function recordMemorySnapshotOnCurrentBranch(
+	transcript: MemoryTranscript | undefined,
+	promptParts: readonly string[],
+): boolean {
+	const recorder = stagedMemorySnapshot(transcript)?.commit(promptParts);
+	if (!recorder) return false;
+	recorder();
+	return true;
 }
 
 /**

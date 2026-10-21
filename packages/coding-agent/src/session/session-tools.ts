@@ -185,8 +185,14 @@ interface SystemPromptPreparation {
 	systemPrompt: string[];
 	/** Memory backend note to deliver with the turn ({@link MemoryPromptPreparation.notice}). */
 	memoryNotice?: MemoryPromptPreparation["notice"];
-	/** Publish staged state at validated delivery; false declines the prepared turn without mutation. */
-	commit?(): boolean;
+	/**
+	 * Publish staged state at validated delivery; false declines the prepared turn without mutation.
+	 *
+	 * `finalPrompt` is the prompt the turn actually sends: a `before_agent_start`
+	 * extension may have replaced the base prompt, and only the prompt that
+	 * reaches the provider may claim to carry a staged memory block.
+	 */
+	commit?(finalPrompt: readonly string[]): boolean;
 }
 
 export interface MountedMCPToolRouteSource {
@@ -545,6 +551,14 @@ export class SessionTools {
 	/** Current stable base system prompt. */
 	get baseSystemPrompt(): string[] {
 		return this.#baseSystemPrompt;
+	}
+
+	/**
+	 * The system prompt the agent sends right now: the per-turn override while
+	 * one is active, else the base.
+	 */
+	get effectiveSystemPrompt(): string[] {
+		return this.#turnSystemPromptOverride ?? this.#baseSystemPrompt;
 	}
 
 	/** Replaces the controller-owned base prompt without applying it to the agent. */
@@ -2270,7 +2284,9 @@ export class SessionTools {
 		return this.runToolRegistryMutation(async () => {
 			const prepared = await this.#prepareBaseSystemPrompt();
 			if (commitIf && !commitIf()) return;
-			prepared?.commit?.();
+			// The rebuilt base IS the prompt that goes live, so it is the prompt
+			// a staged memory block may be recorded against.
+			prepared?.commit?.(prepared.systemPrompt);
 		});
 	}
 
@@ -2352,17 +2368,18 @@ export class SessionTools {
 			// branch that moved off the staged snapshot — a `/tree` navigation
 			// or a checkpoint rewind — records a snapshot of its own when this
 			// turn's prompt commits.
-			const recorder = backend
-				.pendingInstructionsCommit?.(this.#host.sessionManager)
-				?.commit(this.#baseSystemPrompt);
+			//
+			// The recording waits for the prompt the turn actually sends: a
+			// `before_agent_start` extension may replace the base prompt with
+			// one that carries no memory block, and a transcript must not claim
+			// a block the provider never received.
 			return {
 				systemPrompt: this.#baseSystemPrompt,
-				commit: recorder
-					? () => {
-							recorder();
-							return true;
-						}
-					: undefined,
+				commit: finalPrompt => {
+					const recorder = backend.pendingInstructionsCommit?.(this.#host.sessionManager)?.commit(finalPrompt);
+					recorder?.();
+					return true;
+				},
 			};
 		}
 
@@ -2396,7 +2413,9 @@ export class SessionTools {
 				memoryNotice: memory.notice,
 				commit: () => {
 					if (!isCurrent() || !memory.commit()) return false;
-					refreshed?.commit?.();
+					// The refreshed base is the prompt that goes live, so it is
+					// the prompt a staged memory block may be recorded against.
+					refreshed?.commit?.(refreshed.systemPrompt);
 					// A handler may have refreshed tools or policy. Promote the recall onto
 					// that winning base, never replace it with the preparation's snapshot.
 					const currentBase = this.#baseSystemPrompt;
