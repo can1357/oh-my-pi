@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added a system-prompt callback to `Agent.buildSideRequestContext()`, so a host can refresh the prompt before a side request; the model is snapshotted before the callback runs, so a `/model` change during it cannot swap the history or the tool roster ([#11347](https://github.com/can1357/oh-my-pi/issues/11347), [#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
@@ -10,7 +13,6 @@
 ## [18.12.4] - 2026-10-20
 
 ### Fixed
-- `Agent.buildSideRequestContext(llmMessages, systemPrompt?, signal?)` now accepts a callback for `systemPrompt`, read after the before-side-request hooks run, and an `AbortSignal` forwarded to those hooks, so a host that refreshes the prompt in a hook is seen by the request even when the caller pins a prompt of its own, and a cancelled side request unwinds instead of waiting on the hook; the request keeps the model that was active when the call started, so a `/model` change while a hook runs cannot swap its history or tools ([#11347](https://github.com/can1357/oh-my-pi/issues/11347), [#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Enabled native compaction for supported Bedrock Claude models ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 
