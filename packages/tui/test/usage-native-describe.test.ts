@@ -143,6 +143,14 @@ describe("UsageDashboardComponent.describe", () => {
 			scope: { provider: "charm-hyper" as const, windowId: "balance", shared: true },
 			amount: { remaining: 100, unit: "credits" as const },
 		};
+		// Spend-to-date with no allowance: the other one-sided shape, whose
+		// cell reads "used" and so must not be headed "Left" either.
+		const spend = {
+			id: "charm-hyper:spend",
+			label: "Credits spent",
+			scope: { provider: "charm-hyper" as const, windowId: "spend" },
+			amount: { used: 250, unit: "credits" as const },
+		};
 		const detailTable = (component: UsageDashboardComponent): NativeNode | undefined => {
 			component.handleNativeEvent({ type: "select", key: "head/tabs", item: "detail" });
 			return findAll(component.describe(cx), n => n.k === "table")[0];
@@ -159,6 +167,12 @@ describe("UsageDashboardComponent.describe", () => {
 		const balanceOnly = dashboard([report("charm-hyper", "a@x.test", [balance])]);
 		expect(headOf(balanceOnly)).toBe("Left");
 		expect(cellsOf(balanceOnly)).toEqual([[{ t: "100 credits left", s: "muted" }]]);
+
+		// A spend-to-date row is the mirror image: the cell reads "used", so
+		// the heading must say so rather than "Left".
+		const spendOnly = dashboard([report("charm-hyper", "a@x.test", [spend])]);
+		expect(headOf(spendOnly)).toBe("Used");
+		expect(cellsOf(spendOnly)).toEqual([[{ t: "250 credits used", s: "muted" }]]);
 
 		// A table holding both directions cannot pick one, so it stays neutral.
 		const mixed = dashboard([
