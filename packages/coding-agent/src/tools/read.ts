@@ -2582,14 +2582,27 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					// Leading context is optional padding. If the byte budget stopped
 					// before any requested line, retry from the requested start so an
 					// oversized context line cannot hide the page that was asked for.
-					if (leadingContext > 0 && lineWindow.stoppedByByteLimit && lineWindow.lines.length < leadingContext) {
-						leadingContext = 0;
-						startLine = requestedStart;
-						startLineDisplay = startLine + 1;
-						maxLinesToCollect = Math.min(effectiveLimit + trailingContext, DEFAULT_MAX_LINES);
-						selectedLineLimit = effectiveLimit + trailingContext;
-						maxBytesForRead = budgetFor(startLine, maxLinesToCollect);
-						lineWindow = await collectWindow(startLine, maxLinesToCollect, maxBytesForRead, selectedLineLimit);
+					// When the context itself fit (a cut wide line can), keep it unless
+					// the retry shows the requested line: a requested line too large
+					// alone keeps its "could not fit after preceding context" notice.
+					if (leadingContext > 0 && lineWindow.stoppedByByteLimit && lineWindow.lines.length <= leadingContext) {
+						const retryLinesToCollect = Math.min(effectiveLimit + trailingContext, DEFAULT_MAX_LINES);
+						const retryBytes = budgetFor(requestedStart, retryLinesToCollect);
+						const retryWindow = await collectWindow(
+							requestedStart,
+							retryLinesToCollect,
+							retryBytes,
+							effectiveLimit + trailingContext,
+						);
+						if (lineWindow.lines.length < leadingContext || retryWindow.lines.length > 0) {
+							leadingContext = 0;
+							startLine = requestedStart;
+							startLineDisplay = startLine + 1;
+							maxLinesToCollect = retryLinesToCollect;
+							selectedLineLimit = effectiveLimit + trailingContext;
+							maxBytesForRead = retryBytes;
+							lineWindow = retryWindow;
+						}
 					}
 
 					const {

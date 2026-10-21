@@ -202,6 +202,12 @@ export function stripRawOutputArtifactNotice(text: string): { text: string; arti
 	return artifactId === undefined ? { text } : { text: stripped, artifactId };
 }
 
+/** Whether `line` is the column-cap notice {@link formatOutputNotice} emits (`[Some lines truncated to …]`). */
+export function isColumnTruncationNotice(line: string): boolean {
+	const trimmed = line.trim();
+	return trimmed.startsWith("[Some lines truncated to ") && trimmed.endsWith("]");
+}
+
 function isGeneratedOutputNoticeLine(line: string): boolean {
 	if (!line.startsWith("[") || !line.endsWith("]")) return false;
 	const body = line.slice(1, -1);
@@ -209,7 +215,7 @@ function isGeneratedOutputNoticeLine(line: string): boolean {
 		body.startsWith("Showing ") ||
 		/^\d+ matches limit reached\. Use limit=\d+ for more/u.test(body) ||
 		/^\d+ results limit reached(?:\.|$)/u.test(body) ||
-		body.startsWith("Some lines truncated to ")
+		isColumnTruncationNotice(line)
 	);
 }
 
