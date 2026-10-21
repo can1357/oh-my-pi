@@ -20,7 +20,10 @@
  * - Recursive imports are followed up to {@link MAX_AT_IMPORT_DEPTH} hops;
  *   cycles are broken silently. A file that is imported more than once is
  *   expanded at every occurrence — only an import pointing back into the
- *   current import chain counts as a cycle.
+ *   current import chain counts as a cycle. Output therefore grows with
+ *   fan-out raised to the depth: a file that imports the next one N times
+ *   per level yields up to N^{@link MAX_AT_IMPORT_DEPTH} copies of the
+ *   deepest file, and only the depth cap bounds it.
  * - When the referenced file cannot be read, the original `@token` is
  *   left untouched and a debug log is emitted.
  *
