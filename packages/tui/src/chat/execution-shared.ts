@@ -25,6 +25,13 @@ import { runBox, runFoot, runInput, runOutput, type RunState } from "../tools/na
 /** Output rows shown while an execution is collapsed. */
 export const PREVIEW_LINES = 20;
 
+/** The rows a raw output string draws, one per line plus the last partial one. */
+function countLines(output: string): number {
+	let lines = 1;
+	for (let index = output.indexOf("\n"); index >= 0; index = output.indexOf("\n", index + 1)) lines++;
+	return lines;
+}
+
 /** Maximum visible columns retained from an execution output line. */
 export const MAX_DISPLAY_LINE_CHARS = 4000;
 
@@ -220,16 +227,28 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	// collapsed group carries a drawn-height clamp; expansion delivers the
 	// untouched nodes.
 	const images = input.images ?? [];
-	const visibleImages = input.expanded ? images : images.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS);
+	let visibleImages = images;
 	if (input.expanded) {
-		children.push(...visibleImages);
+		children.push(...images);
 	} else {
-		// The collapsed image group shares ONE preview-height budget: every
-		// visible image takes an equal share of the card's preview window, so
+		// The collapsed body has ONE preview-height budget: the output child's
+		// tail and the image group draw from the same window. An independent
+		// allowance each let the body reach two windows and pushed the
+		// exit/dropped/truncation notes below a normal viewport. The output
+		// takes its rows first — it is the result the user came for — and the
+		// images share what is left of it.
+		const outputRows = input.output ? Math.min(PREVIEW_LINES, countLines(input.output)) : 0;
+		const imageBudget = Math.max(0, PREVIEW_LINES - outputRows);
+		// Each visible image needs a row of its own, so the remaining budget
+		// also caps how many of them the collapsed card shows; the rest are
+		// named by the notice below. At least one stays visible, so a run that
+		// emitted images still shows one of them.
+		visibleImages = images.slice(0, Math.min(PREVIEW_LIMITS.COLLAPSED_ITEMS, Math.max(1, imageBudget)));
+		// Every visible image takes an equal share of the remaining budget, so
 		// several tall emissions cannot fill screens behind a nominally
 		// collapsed command (a per-image maximum alone would allow the whole
 		// window per image).
-		const perImageLines = Math.max(1, Math.floor(PREVIEW_LINES / Math.max(1, visibleImages.length)));
+		const perImageLines = Math.max(1, Math.floor(imageBudget / Math.max(1, visibleImages.length)));
 		children.push(...visibleImages.map(child => clampCollapsedExecutionImage(child, perImageLines)));
 	}
 	if (running) {
