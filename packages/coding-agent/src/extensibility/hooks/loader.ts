@@ -8,13 +8,34 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { hookCapability } from "../../capability/hook";
 import type { Hook } from "../../discovery";
 import { loadCapability } from "../../discovery";
-// Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
-import * as PiCodingAgent from "../../index";
+// Runtime self-reference: type-only so the barrel's module graph is not
+// evaluated when this loader loads. `loadPiCodingAgent()` resolves the real
+// ESM namespace on first hook binding, which keeps the index.ts cycle safe
+// (same idiom as the extensions loader) while preserving object identity with
+// the statically imported host namespace.
+import type * as PiCodingAgent from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
 import * as typebox from "../legacy-typebox";
 import { resolvePath, withHostGuard } from "../utils";
 import { execCommand } from "./runner";
 import type { ExecOptions, HookAPI, HookFactory, HookMessageRenderer, RegisteredCommand } from "./types";
+
+/**
+ * Dereference the package barrel on first hook binding.
+ *
+ * First-use boundary: evaluating `../../index` at import time would pull the
+ * package barrel (and through it sdk/tools/modes/task-executor) into every
+ * graph that loads the hook loader. Bun's compiled ESM artifacts lower
+ * `require()` to a CommonJS wrapper around the namespace, so the namespace
+ * must resolve through a dynamic import to stay `===` with the statically
+ * imported host namespace.
+ */
+let piCodingAgentNamespace: typeof PiCodingAgent | undefined;
+
+async function loadPiCodingAgent(): Promise<typeof PiCodingAgent> {
+	piCodingAgentNamespace ??= await import("../../index");
+	return piCodingAgentNamespace;
+}
 
 /**
  * Generic handler function type.
@@ -124,7 +145,7 @@ async function createHookAPI(
 		typebox,
 		arktype: type,
 		zod,
-		pi: PiCodingAgent,
+		pi: await loadPiCodingAgent(),
 	} as HookAPI;
 
 	return {
