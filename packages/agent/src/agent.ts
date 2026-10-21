@@ -205,11 +205,20 @@ export interface AgentOptions {
 	 */
 	onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 	/**
-	 * Notified once after the live transcript or the steering/follow-up queues are
-	 * replaced wholesale (`replaceMessages`, `replaceQueues`). Queue-local updates
-	 * (enqueue, dequeue-on-delivery, live-steering adoption) never reach it.
+	 * Notified once after the live transcript or the steering/follow-up queues
+	 * change in a way that invalidates a per-request cache pinned to the previous
+	 * history: the transcript or the queues are replaced wholesale
+	 * (`replaceMessages`, `replaceQueues`, `replaceQueue`, the clear-one
+	 * methods), or the transcript grows or shrinks (`appendMessage`,
+	 * `popMessage`). A cache that replayed the previous wire must drop its
+	 * snapshot then — the admitted memo can never be replayed once the
+	 * transcript grew, and holding it would pin the discarded provider
+	 * transcript until the next request.
+	 *
+	 * Queue-local updates (enqueue, dequeue-on-delivery, live-steering
+	 * adoption) never reach it.
 	 */
-	onHistoryReplaced?: () => void;
+	onHistoryChanged?: () => void;
 	/**
 	 * Custom token budgets for thinking levels (token-based providers only).
 	 */
@@ -420,7 +429,7 @@ export class Agent {
 	#tokenizer = new Tokenizer(this.#state.model);
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#queueListeners = new Set<() => void>();
-	#historyReplaced: (() => void) | undefined;
+	#historyChanged: (() => void) | undefined;
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -603,7 +612,7 @@ export class Agent {
 		this.#getToolChoice = opts.getToolChoice;
 		this.#onToolChoiceUnavailable = opts.onToolChoiceUnavailable;
 		this.#onAssistantMessageEvent = opts.onAssistantMessageEvent;
-		this.#historyReplaced = opts.onHistoryReplaced;
+		this.#historyChanged = opts.onHistoryChanged;
 		this.#onHarmonyLeak = opts.onHarmonyLeak;
 		this.beforeToolCall = opts.beforeToolCall;
 		this.afterToolCall = opts.afterToolCall;
@@ -1299,7 +1308,7 @@ export class Agent {
 		// New array assignment is intentional: caller-owned `ms` may be mutated
 		// after handoff; snapshot it so external mutations cannot leak in.
 		this.#state.messages = ms.slice();
-		this.#emitHistoryReplaced();
+		this.#emitHistoryChanged();
 	}
 
 	/** Signal that the steering/follow-up queue contents may have changed. Every
@@ -1319,16 +1328,19 @@ export class Agent {
 		}
 	}
 
-	/** Signal that the live transcript or the queues were replaced wholesale.
-	 *  Per-request caches that pinned the previous history (a provider-context
-	 *  memo holding the discarded transcript) must drop their snapshot here. */
-	#emitHistoryReplaced(): void {
-		const listener = this.#historyReplaced;
+	/** Signal that the live transcript or the queues changed in a way that
+	 *  invalidates a per-request cache pinned to the previous history (a
+	 *  provider-context memo holding the discarded transcript). The cache must
+	 *  drop its snapshot here: once the transcript grew, an admitted memo can
+	 *  never be replayed, and holding it pins the provider transcript until the
+	 *  next request. */
+	#emitHistoryChanged(): void {
+		const listener = this.#historyChanged;
 		if (!listener) return;
 		try {
 			listener();
 		} catch (err) {
-			logger.warn("Agent history-replaced listener threw", {
+			logger.warn("Agent history-changed listener threw", {
 				error: err instanceof Error ? err.message : String(err),
 			});
 		}
@@ -1341,7 +1353,7 @@ export class Agent {
 		this.#cancelQueuedMessagePreparation("followUp");
 		this.#notifySteeringWaiters();
 		this.#emitQueueChanged();
-		this.#emitHistoryReplaced();
+		this.#emitHistoryChanged();
 	}
 
 	/**
@@ -1363,6 +1375,9 @@ export class Agent {
 			this.#cancelQueuedMessagePreparation("followUp");
 		}
 		this.#emitQueueChanged();
+		// One queue was replaced wholesale, so a per-request cache pinned to the
+		// previous history is stale exactly as it is for the two-queue path.
+		this.#emitHistoryChanged();
 	}
 
 	/**
@@ -1381,6 +1396,12 @@ export class Agent {
 
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
+		// The transcript grew, so a per-request cache pinned to the previous
+		// wire can never be replayed: the admitted memo's input snapshot no
+		// longer describes the transcript. Releasing it here drops the two O(n)
+		// arrays and the provider-normalized clones they pin, instead of
+		// holding them until the next request.
+		this.#emitHistoryChanged();
 		const live = this.#liveSteered.findIndex(entry => entry.message === m);
 		if (live >= 0) {
 			this.#liveSteered.splice(live, 1);
@@ -1401,6 +1422,9 @@ export class Agent {
 		if (removed && this.#state.streamMessage === removed) {
 			this.#state.streamMessage = null;
 		}
+		// The transcript shrank, so a per-request cache pinned to the previous
+		// wire describes messages that are no longer there.
+		if (removed !== undefined) this.#emitHistoryChanged();
 		return removed;
 	}
 
@@ -1442,12 +1466,16 @@ export class Agent {
 		this.#cancelQueuedMessagePreparation("steering");
 		this.#notifySteeringWaiters();
 		this.#emitQueueChanged();
+		// Clearing one queue wholesale is a replacement of that queue.
+		this.#emitHistoryChanged();
 	}
 
 	clearFollowUpQueue() {
 		this.#followUpQueue = [];
 		this.#cancelQueuedMessagePreparation("followUp");
 		this.#emitQueueChanged();
+		// Clearing one queue wholesale is a replacement of that queue.
+		this.#emitHistoryChanged();
 	}
 
 	/**
@@ -1468,6 +1496,8 @@ export class Agent {
 		this.#notifySteeringWaiters();
 		this.clearDeferredToolDirectives();
 		this.#emitQueueChanged();
+		// Both queues were replaced wholesale.
+		this.#emitHistoryChanged();
 	}
 
 	hasQueuedMessages(): boolean {
@@ -1573,7 +1603,7 @@ export class Agent {
 
 	clearMessages() {
 		this.#state.messages.length = 0;
-		this.#emitHistoryReplaced();
+		this.#emitHistoryChanged();
 	}
 
 	abort(reason?: unknown) {
@@ -1621,7 +1651,8 @@ export class Agent {
 		this.#state.pendingToolCalls.clear();
 		this.#state.error = undefined;
 		this.clearAllQueues();
-		this.#emitHistoryReplaced();
+		// `clearAllQueues` already notified: the reset dropped the transcript
+		// and both queues, which is one history change, not two.
 	}
 
 	/** Send a prompt with an AgentMessage */

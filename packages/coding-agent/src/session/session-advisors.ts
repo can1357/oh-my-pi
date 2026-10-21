@@ -451,14 +451,16 @@ export interface SessionAdvisorsOptions {
 	streamFn?: StreamFn;
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	/**
-	 * Called when this advisor's history is replaced wholesale. Advisors are
-	 * driven through the session's `transformProviderContext`, whose date/cwd
-	 * reminder injector is session-scoped: without this forward the replay memo
-	 * it admits over an advisor transcript outlives the discard (`reset()`, and
-	 * advisor compaction's `replaceMessages`) and keeps that transcript
-	 * reachable until the next primary request or session disposal.
+	 * Called when this advisor's history changes in a way that invalidates a
+	 * per-request cache pinned to the previous transcript (a wholesale
+	 * replacement, or the transcript growing or shrinking). Advisors are driven
+	 * through the session's `transformProviderContext`, whose date/cwd reminder
+	 * injector is session-scoped: without this forward the replay memo it
+	 * admits over an advisor transcript outlives the discard (`reset()`, advisor
+	 * compaction's `replaceMessages`, the committed turn) and keeps that
+	 * transcript reachable until the next primary request or session disposal.
 	 */
-	onHistoryReplaced?: () => void;
+	onHistoryChanged?: () => void;
 }
 
 /** Options accepted when an advisor injects a primary-session message. */
@@ -558,7 +560,7 @@ export class SessionAdvisors {
 	#advisorStreamFn: StreamFn | undefined;
 	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
 	/** Released session-scoped provider-transform state on an advisor history swap. */
-	#onHistoryReplaced: (() => void) | undefined;
+	#onHistoryChanged: (() => void) | undefined;
 	#advisors: ActiveAdvisor[] = [];
 	#advisorConfigs: AdvisorConfig[] | undefined;
 	#advisorConfigWarnings: string[];
@@ -634,7 +636,7 @@ export class SessionAdvisors {
 		this.#advisorConfigWarnings = options.configWarnings ?? [];
 		this.#advisorStreamFn = options.streamFn;
 		this.#transformProviderContext = options.transformProviderContext;
-		this.#onHistoryReplaced = options.onHistoryReplaced;
+		this.#onHistoryChanged = options.onHistoryChanged;
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
 	}
 
@@ -1460,7 +1462,7 @@ export class SessionAdvisors {
 				// Advisors share the session-scoped provider transform, so their
 				// history swaps (`reset`, advisor compaction) must reach its
 				// release seam exactly like the primary agent's do.
-				onHistoryReplaced: this.#onHistoryReplaced,
+				onHistoryChanged: this.#onHistoryChanged,
 				intentTracing: false,
 				transformAssistantMessage: message => {
 					quarantinedAdvisorOutput = quarantineAdvisorUnsafeOutput(
@@ -1559,14 +1561,14 @@ export class SessionAdvisors {
 					if (count < messages.length) {
 						messages.length = count;
 						// Truncating the array in place never reaches
-						// `Agent#emitHistoryReplaced`, so the session-scoped
+						// `Agent#emitHistoryChanged`, so the session-scoped
 						// provider transform would keep the discarded batch's
 						// last entry pinned until the next request re-derives it
 						// — and on the non-retriable drop path, where the batch
 						// is abandoned outright, until the next primary update
 						// schedules a review. `appendOnlyContext` below drops
 						// its own log the same way, so release here too.
-						this.#onHistoryReplaced?.();
+						this.#onHistoryChanged?.();
 					}
 					appendOnlyContext.resetSyncCursor();
 					advisorAgent.state.error = undefined;
@@ -1929,7 +1931,7 @@ export class SessionAdvisors {
 		// only aborts the loop, so without this the injector keeps the discarded
 		// provider transcript (including normalized images) reachable until the
 		// next provider transform or a whole-session disposal.
-		this.#onHistoryReplaced?.();
+		this.#onHistoryChanged?.();
 	}
 
 	#recordAdvisorCost(advisor: ActiveAdvisor, message: AssistantMessage): void {

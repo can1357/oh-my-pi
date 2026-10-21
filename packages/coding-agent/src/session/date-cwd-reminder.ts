@@ -59,6 +59,15 @@ export class DateCwdReminderInjector {
 	 */
 	#stateVersion = 0;
 	/**
+	 * Set when a replay check failed while the boundary signature still
+	 * matched: the wire's interior messages are rebuilt on every preparation,
+	 * so the boundary signature cannot tell two preparations apart. A memo
+	 * admitted from such a wire is never replayed — the admission only pays the
+	 * two O(n) copies it costs — so the injector stops admitting from it until
+	 * the root changes.
+	 */
+	#interiorRebuilt = false;
+	/**
 	 * O(1) signature of the wire the last build was handed (see `#memo`): its
 	 * length plus the identity of its boundary messages. The boundary refs are
 	 * weak because the wire is not the transcript — a provider transform can
@@ -133,10 +142,24 @@ export class DateCwdReminderInjector {
 				memo.root === this.#root &&
 				memo.reminder === reminder &&
 				memo.reminder === this.#currentReminder &&
-				memo.version === this.#stateVersion &&
-				this.#replayable(memo, messages)
+				memo.version === this.#stateVersion
 			) {
-				return memo.output.slice();
+				if (this.#replayable(memo, messages)) return memo.output.slice();
+				// The boundary signature still matched but the wire did not: an
+				// interior message was rebuilt (a provider transform that
+				// recreates the interior tool results does that on every
+				// preparation). The boundary signature cannot see it, so the
+				// next preparation would be admitted again and miss again —
+				// two O(n) copies per preparation for a memo that is never
+				// replayed. Remember that this wire is rebuilt and stop
+				// admitting from it.
+				if (
+					memo.refs.length === messages.length &&
+					memo.refs[0] === messages[0] &&
+					memo.refs[memo.refs.length - 1] === messages[messages.length - 1]
+				) {
+					this.#interiorRebuilt = true;
+				}
 			}
 			// The memo's inputs are gone — an ordinary turn appended messages or
 			// the transcript changed shape — so it can never hit again. Drop it
@@ -159,6 +182,9 @@ export class DateCwdReminderInjector {
 			this.#root = firstUser;
 			this.#currentReminder = reminder;
 			this.#stateVersion++;
+			// A new root is a new transcript: the wire it is built from may be
+			// stable again, so the previous verdict does not carry over.
+			this.#interiorRebuilt = false;
 			if (!this.#injections.has(firstUser) && !messageStartsWithReminder(firstUser, reminder)) {
 				this.#injections.set(firstUser, injectReminder(firstUser, reminder));
 				this.#stateVersion++;
@@ -211,10 +237,14 @@ export class DateCwdReminderInjector {
 		// same single array the parent path allocated — recording only the O(1)
 		// boundary signature. Ordinary turns (new messages appended) never match
 		// the signature, so they pay no snapshot and retain no transcript.
+		// A wire whose interior is rebuilt on every preparation never matches
+		// the memo it admitted, so it is not admitted again either (see
+		// `#interiorRebuilt`).
 		const root = this.#root;
 		const currentReminder = this.#currentReminder;
 		const pending = this.#pending;
 		if (
+			!this.#interiorRebuilt &&
 			root !== undefined &&
 			currentReminder !== undefined &&
 			pending !== undefined &&
@@ -247,7 +277,7 @@ export class DateCwdReminderInjector {
 			return out.slice();
 		}
 		this.#pending =
-			root === undefined || currentReminder === undefined
+			root === undefined || currentReminder === undefined || this.#interiorRebuilt
 				? undefined
 				: {
 						length: messages.length,

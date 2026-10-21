@@ -172,6 +172,93 @@ describe("date-cwd-reminder", () => {
 			expect(post.messages[0]).not.toBe(freshUser);
 		});
 
+		it("stops admitting a memo from a wire whose interior is rebuilt on every preparation", async () => {
+			// Contract: a provider transform that recreates the interior tool
+			// results (snapcompact.toolResults on a vision model) rebuilds the
+			// wire on every preparation while the first and last messages keep
+			// their identity. The boundary signature cannot see that, so the
+			// memo admitted from such a wire is never replayed: the admission
+			// only pays the two O(n) copies it costs, on exactly the long
+			// transcript path this injector exists to keep clean. The injector
+			// must notice the rebuilt interior and stop admitting from it.
+			const injector = new DateCwdReminderInjector();
+			const root: Message = { role: "user", content: "root", timestamp: 1 };
+			const last: Message = { role: "user", content: "last", timestamp: 3 };
+			// The interior is a fresh object on every preparation; the boundary
+			// messages are the same objects throughout.
+			const prepare = (): { ref: WeakRef<Message>; messages: Message[] } => {
+				const interior: Message = { role: "toolResult", content: "rebuilt", timestamp: 2 };
+				return { ref: new WeakRef(interior), messages: [root, interior, last] };
+			};
+			const build = (wire: Message[]): void => {
+				injector.transform({ systemPrompt: ["system"], messages: wire }, "2026-08-14", "/work/omp");
+			};
+			// The first preparation records the boundary signature, the second
+			// admits the memo, the third finds the interior rebuilt.
+			build(prepare().messages);
+			build(prepare().messages);
+			build(prepare().messages);
+			// The fourth preparation must not admit again: the memo it would
+			// admit is never replayable, so it would only pay its copies.
+			const fourth = prepare();
+			const out = injector.transform(
+				{ systemPrompt: ["system"], messages: fourth.messages },
+				"2026-08-14",
+				"/work/omp",
+			);
+			// Drop the frame's strong holds (the wire and the built output) so
+			// only an admitted memo could keep the interior alive.
+			fourth.messages.length = 0;
+			out.messages.length = 0;
+			expect(await becomesCollectible(fourth.ref, 2_000)).toBe(true);
+			// Liveness anchor: the injector must stay alive across the probe
+			// (otherwise the interior frees vacuously with its owner), so it is
+			// used again here — and it must still serve fresh transforms after.
+			const freshUser: Message = { role: "user", content: "fresh", timestamp: 4 };
+			const post = injector.transform(
+				{ systemPrompt: ["system"], messages: [freshUser] },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(post.messages[0]).not.toBe(freshUser);
+		});
+
+		it("releases the admitted memo when the agent commits the turn", async () => {
+			// Contract: a retry prepares the same request twice and admits the
+			// memo, then the turn commits through `Agent.appendMessage()` —
+			// which grows the history without replacing it. The memo can never
+			// be replayed after that, and it pins the whole provider wire, so
+			// the agent must release it when the transcript grows instead of
+			// holding it until the next request.
+			const injector = new DateCwdReminderInjector();
+			const agent = new Agent({ onHistoryChanged: () => injector.release() });
+			// The wire holds one turn that is never injected, so only the memo
+			// can keep it reachable.
+			const buildWire = (): { ref: WeakRef<Message>; messages: Message[] } => {
+				const root: Message = { role: "user", content: "root", timestamp: 1 };
+				const interior: Message = { role: "toolResult", content: "interior", timestamp: 2 };
+				return { ref: new WeakRef(interior), messages: [root, interior] };
+			};
+			const wire = buildWire();
+			// Two identical preparations admit the memo over this wire.
+			injector.transform({ systemPrompt: ["system"], messages: wire.messages }, "2026-08-14", "/work/omp");
+			injector.transform({ systemPrompt: ["system"], messages: [...wire.messages] }, "2026-08-14", "/work/omp");
+			// The turn commits: the assistant message is appended to the
+			// transcript, which grows the history the memo was pinned to.
+			agent.appendMessage({ role: "assistant", content: "ok", timestamp: 3 });
+			// The memo is released, so nothing pins the wire any more.
+			wire.messages.length = 0;
+			expect(await becomesCollectible(wire.ref, 2_000)).toBe(true);
+			// Liveness anchor: the injector must stay alive across the probe.
+			const freshUser: Message = { role: "user", content: "fresh", timestamp: 4 };
+			const post = injector.transform(
+				{ systemPrompt: ["system"], messages: [freshUser] },
+				"2026-08-14",
+				"/work/omp",
+			);
+			expect(post.messages[0]).not.toBe(freshUser);
+		});
+
 		it("does not pin a provider-normalized boundary message after the turn commits", async () => {
 			// Contract: the O(1) admission signature records the boundary messages
 			// of the wire it was handed, and that wire is not the transcript — a
@@ -672,13 +759,14 @@ describe("date/cwd reminder on the provider wire", () => {
 /**
  * Advisor half of the session-scoped reminder contract.
  *
- * The primary `Agent` is built with `onHistoryReplaced` so a committed
+ * The primary `Agent` is built with `onHistoryChanged` so a committed
  * `/compact` releases the injector's replay memo (sdk.ts). Every advisor is
  * driven through that same session-scoped `transformProviderContext`, so an
- * advisor-history discard — the runtime's `reset()`, or advisor compaction's
- * `agent.replaceMessages([summary, ...retained])` — must release it too. Both
- * sites discard history through `Agent#emitHistoryReplaced`, so the wired
- * callback covers them; without it the admitted memo keeps the discarded
+ * advisor-history discard — the runtime's `reset()`, advisor compaction's
+ * `agent.replaceMessages([summary, ...retained])`, or the committed turn that
+ * grows the advisor transcript — must release it too. All of those sites
+ * discard or extend the history through `Agent#emitHistoryChanged`, so the
+ * wired callback covers them; without it the admitted memo keeps the discarded
  * advisor transcript (and every provider-normalized clone it holds) reachable
  * for the rest of the session.
  */
@@ -738,7 +826,7 @@ describe("date/cwd reminder memo on advisor history discard", () => {
 			// it: the advisor's requests ride the same injector the primary uses,
 			// and a history swap releases the memo that injector admitted.
 			transformProviderContext: context => injector.transform(context, REMINDER_DATE, REMINDER_CWD),
-			onHistoryReplaced: () => injector.release(),
+			onHistoryChanged: () => injector.release(),
 		});
 		sessions.push(session);
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -849,7 +937,7 @@ describe("date/cwd reminder memo on advisor history discard", () => {
 		// Contract: `AdvisorRuntime` discards a failed advisor turn through this
 		// session's own `rollbackTo` facade, which truncates the advisor's
 		// `state.messages` in place rather than calling `Agent.reset()` — so it
-		// never reaches `Agent#emitHistoryReplaced`. The test admits the injector's
+		// never reaches `Agent#emitHistoryChanged`. The test admits the injector's
 		// replay memo over the failing build's own wire, which is the only state
 		// that holds the discarded batch strongly; without a release from
 		// `rollbackTo` the memo keeps it reachable. The terminal non-retriable
@@ -872,7 +960,7 @@ describe("date/cwd reminder memo on advisor history discard", () => {
 			// injector holds the batch tail strongly: two identical builds promote
 			// `#pending` to `#memo` (see `#inject`). Without the rollback release the
 			// memo keeps the discarded batch reachable, so the collectibility check
-			// below only passes when `rollbackTo` fires `onHistoryReplaced`.
+			// below only passes when `rollbackTo` fires `onHistoryChanged`.
 			injector.transform(context, REMINDER_DATE, REMINDER_CWD);
 			injector.transform(context, REMINDER_DATE, REMINDER_CWD);
 			// The wire is the last place the batch tail is observable; taking the
