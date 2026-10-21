@@ -553,6 +553,7 @@
 - `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
 
 ### Fixed
+- Fixed the `/usage` report's aggregate percentage reading `N% free` beside bars filled by quota used; it now reads `N% used`, matching the bars and the `omp usage` CLI ([#13971](https://github.com/can1357/oh-my-pi/issues/13971), [#16415](https://github.com/can1357/oh-my-pi/pull/16415) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed subagents spawning at a caller-supplied `effort` (e.g. `hi` → `max`) while `task.enableEffort` is off; the field is now ignored and the agent's configured thinking level (including `:auto`) applies ([#16402](https://github.com/can1357/oh-my-pi/issues/16402))
 - Fixed `omp update --check` failing against JFrog Artifactory registries that add empty `dist-tags` to a tagged manifest; the update check now uses the registry's curated latest version ([#16375](https://github.com/can1357/oh-my-pi/issues/16375))
