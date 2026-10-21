@@ -2,19 +2,39 @@ import { $env } from "@oh-my-pi/pi-utils";
 import type { Api, ImageContent, Model, TextContent } from "../types";
 
 export const NON_VISION_IMAGE_PLACEHOLDER = "[image omitted: model does not support vision]";
+
+/**
+ * Whether an inline block carries audio rather than an image. `ImageContent` is the inline-media
+ * block; Google sends any MIME type as inline data, and the OpenAI-style converters turn an
+ * `audio/*` block into an `input_audio` part. Only callers gated on {@link audioInputMimeType}
+ * create one.
+ */
+export function isAudioContent(block: ImageContent): boolean {
+	return block.mimeType.startsWith("audio/");
+}
+
+/** The `input_audio` format of an audio block: Chat Completions and Responses take mp3 and wav. */
+export function inputAudioFormat(block: ImageContent): "mp3" | "wav" {
+	return block.mimeType === "audio/wav" ? "wav" : "mp3";
+}
+
 export function partitionVisionContent(
 	content: ReadonlyArray<TextContent | ImageContent>,
 	supportsImages: boolean,
 ): {
 	textBlocks: TextContent[];
 	imageBlocks: ImageContent[];
+	audioBlocks: ImageContent[];
 	omittedImages: boolean;
 } {
 	const textBlocks = content.filter((block): block is TextContent => block.type === "text");
-	const imageBlocks = content.filter((block): block is ImageContent => block.type === "image");
+	const mediaBlocks = content.filter((block): block is ImageContent => block.type === "image");
+	const audioBlocks = mediaBlocks.filter(isAudioContent);
+	const imageBlocks = mediaBlocks.filter(block => !isAudioContent(block));
 	return {
 		textBlocks,
 		imageBlocks: supportsImages ? imageBlocks : [],
+		audioBlocks,
 		omittedImages: !supportsImages && imageBlocks.length > 0,
 	};
 }
@@ -65,4 +85,26 @@ export function sendsImageInputOnWire(model: Model<Api>): boolean {
 function isGuardedCompletionsTransport(model: Model<Api>): model is Model<"openai-completions" | "openrouter"> {
 	if (model.api === "openai-completions") return true;
 	return model.api === "openrouter" && $env.PI_OPENROUTER_RESPONSES === "0";
+}
+
+/**
+ * The audio encoding `model`'s transport carries inline in a user message, or undefined when
+ * the model hears no audio (`model.input`) or its transport carries none. Google's
+ * GenerateContent takes any audio MIME type as inline data, Opus being the smallest for speech;
+ * Chat Completions and Responses `input_audio` parts take mp3 or wav. A `pi-native` gateway
+ * encodes server-side with whatever version it runs, so it is left out.
+ */
+export function audioInputMimeType(model: Model<Api>): "audio/ogg" | "audio/mpeg" | undefined {
+	if (!model.input.includes("audio") || model.transport === "pi-native") return undefined;
+	switch (model.api) {
+		case "google-generative-ai":
+		case "google-gemini-cli":
+		case "google-vertex":
+			return "audio/ogg";
+		case "openai-completions":
+		case "openrouter":
+			return "audio/mpeg";
+		default:
+			return undefined;
+	}
 }
