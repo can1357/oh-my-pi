@@ -656,8 +656,13 @@ export async function buildMemoryToolDeveloperInstructions(
 	// content this process already built and stages it again, so the next
 	// commit records it there and a later resume restores the same block
 	// instead of rereading the memory files.
+	//
+	// A recorded snapshot was bounded by the budget in force when it was
+	// taken. The budget may have shrunk since, so it is bounded again here:
+	// a session resumed under a smaller budget must not inject the old,
+	// larger block.
 	const snapshot =
-		recorded?.snapshot ??
+		(recorded?.snapshot ? boundMemorySnapshot(recorded.snapshot, settings) : undefined) ??
 		reusable?.snapshot ??
 		boundMemorySnapshot(await readMemoryToolDeveloperInstructionsSnapshot(root, settings), settings);
 	const value = renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
@@ -692,6 +697,11 @@ export async function clearMemoryData(agentDir: string, cwd: string): Promise<vo
 	// instead of restoring memory that no longer exists on disk.
 	await writeMemoryClearToken(memoryRoot);
 	await fs.rm(memoryRoot, { recursive: true, force: true });
+	// A builder that read the token above while the files were still on disk
+	// persisted the old content under it. A second rotation retires those
+	// snapshots too, so a cleared memory cannot be resurrected by a build
+	// that overlapped the removal.
+	await writeMemoryClearToken(memoryRoot);
 }
 
 /**
