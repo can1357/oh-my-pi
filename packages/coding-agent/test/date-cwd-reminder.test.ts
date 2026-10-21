@@ -187,7 +187,14 @@ describe("date-cwd-reminder", () => {
 			// The interior is a fresh object on every preparation; the boundary
 			// messages are the same objects throughout.
 			const prepare = (): { ref: WeakRef<Message>; messages: Message[] } => {
-				const interior: Message = { role: "toolResult", content: "rebuilt", timestamp: 2 };
+				const interior: Message = {
+					role: "toolResult",
+					toolCallId: "call-rebuilt",
+					toolName: "test_tool",
+					content: [{ type: "text", text: "rebuilt" }],
+					isError: false,
+					timestamp: 2,
+				};
 				return { ref: new WeakRef(interior), messages: [root, interior, last] };
 			};
 			const build = (wire: Message[]): void => {
@@ -236,7 +243,14 @@ describe("date-cwd-reminder", () => {
 			// can keep it reachable.
 			const buildWire = (): { ref: WeakRef<Message>; messages: Message[] } => {
 				const root: Message = { role: "user", content: "root", timestamp: 1 };
-				const interior: Message = { role: "toolResult", content: "interior", timestamp: 2 };
+				const interior: Message = {
+					role: "toolResult",
+					toolCallId: "call-interior",
+					toolName: "test_tool",
+					content: [{ type: "text", text: "interior" }],
+					isError: false,
+					timestamp: 2,
+				};
 				return { ref: new WeakRef(interior), messages: [root, interior] };
 			};
 			const wire = buildWire();
@@ -245,7 +259,7 @@ describe("date-cwd-reminder", () => {
 			injector.transform({ systemPrompt: ["system"], messages: [...wire.messages] }, "2026-08-14", "/work/omp");
 			// The turn commits: the assistant message is appended to the
 			// transcript, which grows the history the memo was pinned to.
-			agent.appendMessage({ role: "assistant", content: "ok", timestamp: 3 });
+			agent.appendMessage(createAssistantMessage("ok"));
 			// The memo is released, so nothing pins the wire any more.
 			wire.messages.length = 0;
 			expect(await becomesCollectible(wire.ref, 2_000)).toBe(true);
