@@ -665,6 +665,10 @@ export async function planNumberedFileTags(
 	if (files.length > MAX_TAGGED_FILES) return undefined;
 
 	const contents = new Map<string, { text: string; lines: string[] }>();
+	// A line that starts with the name of a file the command read (`1:2:x`
+	// from a file named `1`) is that file's row, even when its text does not
+	// match (`grep -o`): its bare reading would pin it on another line.
+	const namedLines = new Set(rows.filter(row => row.file !== undefined && named.has(row.file)).map(row => row.index));
 	/** Readings that match a file line, per output line. */
 	const matches = new Map<number, Array<{ file: string; line: number }>>();
 	for (const file of files) {
@@ -674,7 +678,8 @@ export async function planNumberedFileTags(
 		if (view.nl && file === sole && content.lines.some(line => NL_DELIMITER.test(line))) continue;
 		contents.set(file, content);
 		for (const row of rows) {
-			const applies = row.file === undefined ? file === sole : named.get(row.file) === file;
+			const applies =
+				row.file === undefined ? file === sole && !namedLines.has(row.index) : named.get(row.file) === file;
 			if (!applies || row.line < 1 || content.lines[row.line - 1] !== row.text) continue;
 			const readings = matches.get(row.index);
 			if (readings) readings.push({ file, line: row.line });
