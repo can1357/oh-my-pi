@@ -133,7 +133,7 @@
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
 ### Changed
 
-- Reduced the work each render does while edit previews stream and streamed assistant tables grow, keeping the terminal responsive through long tool output ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Changed the TUI to do less work per render while edit previews stream and streamed assistant tables grow, so the terminal stays responsive through long tool output ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.4] - 2026-10-20
 
