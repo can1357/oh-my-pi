@@ -1,15 +1,15 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
-- Fixed a `Statement has been finalized` error when two vector stores shared one SQLite connection and closing one of them finalized the statement the other was still using ([#15437](https://github.com/can1357/oh-my-pi/pull/15437) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
 
 ### Fixed
 
 - Fixed polyphonic recall's graph voice finding no memories for non-English names (e.g. `Hà Nội`) or names of three or more words, and Vietnamese words like `tôi` being stored as the participant `i` ([#16723](https://github.com/can1357/oh-my-pi/issues/16723))
 
 ## [18.12.4] - 2026-10-20
+### Fixed
+- Fixed a `Statement has been finalized` error when two vector stores shared one SQLite connection and closing one of them finalized the statement the other was still using ([#15437](https://github.com/can1357/oh-my-pi/pull/15337) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 
 ### Fixed
 
