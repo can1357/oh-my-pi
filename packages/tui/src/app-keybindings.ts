@@ -35,6 +35,8 @@ interface AppKeybindings {
 	"app.model.cycleBackward": true;
 	"app.model.select": true;
 	"app.model.selectTemporary": true;
+	"app.model.cycleSort": true;
+	"app.model.toggleSortGrouping": true;
 	"app.tools.expand": true;
 	"app.tools.toggleVisibility": true;
 	"app.ask.hide": true;
@@ -131,6 +133,21 @@ export const KEYBINDINGS = {
 	"app.model.selectTemporary": {
 		defaultKeys: "alt+p",
 		description: "Select temporary model for current session",
+	},
+	"app.model.cycleSort": {
+		// A control chord, never a letter: the `/models` hub's picker keeps a
+		// search field, so a printable key belongs to the query. Option is also
+		// unusable as the modifier on macOS, where terminals send it as a text
+		// modifier (`alt+s` arrives as `ß`, not a key at all) unless the user
+		// turns on Option-as-Esc. A control byte arrives either way, so one
+		// binding covers every terminal — and a second would reach only the
+		// fallback input path, since a Tern picker action advertises one key.
+		defaultKeys: "ctrl+alt+s",
+		description: "Cycle the /models list order (intelligence, speed, price)",
+	},
+	"app.model.toggleSortGrouping": {
+		defaultKeys: "ctrl+alt+g",
+		description: "Rank /models by the active metric within each provider instead of across all",
 	},
 	"app.tools.expand": {
 		defaultKeys: "ctrl+o",
@@ -279,6 +296,8 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	cycleModelBackward: "app.model.cycleBackward",
 	selectModel: "app.model.select",
 	selectModelTemporary: "app.model.selectTemporary",
+	cycleModelSort: "app.model.cycleSort",
+	toggleModelSortGrouping: "app.model.toggleSortGrouping",
 	togglePlanMode: "app.plan.toggle",
 	historySearch: "app.history.search",
 	expandTools: "app.tools.expand",

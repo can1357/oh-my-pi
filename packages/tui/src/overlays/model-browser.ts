@@ -326,6 +326,122 @@ function computeModelRank(model: Model, roles: RoleAssignments): number {
 	return i;
 }
 
+export type ModelSortMetric = "int" | "tps" | "cost";
+
+/** An explicit metric order layered on top of the default role/MRU/provider order. */
+export interface ModelSort {
+	metric: ModelSortMetric;
+	/** `desc` puts the larger value first (best IQ, fastest); `asc` the smaller (cheapest). */
+	direction: "asc" | "desc";
+}
+
+/**
+ * The per-million price the `cost` order ranks on. Rows print separate input and
+ * output legs, so a single scalar needs a ratio; 3:1 matches the input-heavy mix
+ * a session sends and keeps a model ahead only while both legs stay cheap.
+ */
+const COST_INPUT_WEIGHT = 0.75;
+const COST_OUTPUT_WEIGHT = 0.25;
+
+/**
+ * The value `item` sorts on, or `undefined` when the catalog never scored it.
+ * `effectiveTps` resolves the session's measured speed, so a row never sorts
+ * against the number it displays.
+ */
+function sortMetricValue(
+	item: ModelBrowserItem,
+	metric: ModelSortMetric,
+	effectiveTps?: (item: ModelBrowserItem) => number | undefined,
+): number | undefined {
+	const model = item.model;
+	switch (metric) {
+		case "int": {
+			const int = model.int;
+			return int != null && Number.isFinite(int) ? int : undefined;
+		}
+		case "tps": {
+			// Measured first, exactly as the row's perf cell prints it, so a
+			// recorded speed outranks a bare `~` estimate.
+			const measured = effectiveTps?.(item);
+			if (measured !== undefined) return measured;
+			const tps = model.tps;
+			return tps != null && Number.isFinite(tps) && tps > 0 ? tps : undefined;
+		}
+		case "cost": {
+			const cost = model.cost;
+			if (!cost) return undefined;
+			// A negative leg is a sentinel, not a rate — the bundled
+			// `openrouter/auto` rows carry -1e6, and `isTokenCost` keeps finite
+			// negatives so a `models.yml` override can too. `formatCostLeg` prints
+			// such a leg as `?`, so an unknown leg means no known blended price.
+			const input = Number.isFinite(cost.input) && cost.input >= 0 ? cost.input : undefined;
+			const output = Number.isFinite(cost.output) && cost.output >= 0 ? cost.output : undefined;
+			if (input === undefined || output === undefined) return undefined;
+			const blended = input * COST_INPUT_WEIGHT + output * COST_OUTPUT_WEIGHT;
+			// A zero card is $0 only when the row really is free; a declared
+			// `unknown`/`variable`/`included` is an unpublished rate. Mirrors
+			// `isFreeModel`, minus the credit case (credits are $0 per token).
+			const declared = declaredPricingStatus(model);
+			if (blended === 0 && declared !== undefined && declared !== "free") return undefined;
+			return blended;
+		}
+	}
+}
+
+const MODEL_SORT_RING: readonly (ModelSort | undefined)[] = [
+	undefined,
+	{ metric: "int", direction: "desc" },
+	{ metric: "int", direction: "asc" },
+	{ metric: "tps", direction: "desc" },
+	{ metric: "tps", direction: "asc" },
+	{ metric: "cost", direction: "asc" },
+	{ metric: "cost", direction: "desc" },
+];
+
+/**
+ * The persisted `modelSort` value: `default`, or `<metric>[:<direction>]`.
+ * A bare metric uses the direction that puts the best model first (highest
+ * intelligence, fastest, cheapest). Anything unrecognised keeps the default
+ * order rather than failing — a typo in a config file must not break the hub.
+ */
+export function parseModelSort(value: string | undefined): ModelSort | undefined {
+	const raw = value?.trim().toLowerCase();
+	if (!raw || raw === "default") return undefined;
+	const parts = raw.split(":");
+	// A third segment is a typo, not a value to ignore: accepting
+	// `int:desc:junk` would run a different order than the setting spells out.
+	if (parts.length > 2) return undefined;
+	const [metric, direction] = parts;
+	if (metric !== "int" && metric !== "tps" && metric !== "cost") return undefined;
+	if (direction === undefined) return { metric, direction: metric === "cost" ? "asc" : "desc" };
+	if (direction !== "asc" && direction !== "desc") return undefined;
+	return { metric, direction };
+}
+
+export function formatModelSort(sort: ModelSort | undefined): string {
+	if (!sort) return "default";
+	return `${sort.metric}:${sort.direction}`;
+}
+
+function sameModelSort(left: ModelSort | undefined, right: ModelSort | undefined): boolean {
+	if (left === right) return true;
+	if (!left || !right) return false;
+	return left.metric === right.metric && left.direction === right.direction;
+}
+
+/** The sort state after `current`, wrapping at the end of the ring. */
+export function nextModelSort(current: ModelSort | undefined): ModelSort | undefined {
+	const index = MODEL_SORT_RING.findIndex(sort => sameModelSort(sort, current));
+	return MODEL_SORT_RING[(index + 1) % MODEL_SORT_RING.length];
+}
+
+/** Footer-length label for a sort state: `default`, `IQ ↓`, `price ↑`. */
+export function describeModelSort(sort: ModelSort | undefined): string {
+	if (!sort) return "default";
+	const label = sort.metric === "int" ? "IQ" : sort.metric === "tps" ? "speed" : "price";
+	return `${label} ${sort.direction === "asc" ? "↑" : "↓"}`;
+}
+
 /** Options for {@link sortModelItems}. */
 export interface SortModelItemsOptions {
 	roles?: RoleAssignments;
@@ -336,6 +452,21 @@ export interface SortModelItemsOptions {
 	 * defer to MRU/version instead so user affinity drives the order.
 	 */
 	skipRoleRank?: boolean;
+	/**
+	 * Explicit metric order. It leads, and the role/MRU/provider chain below it
+	 * becomes the tie-breaker, so equal scores keep the familiar grouping.
+	 */
+	sort?: ModelSort;
+	/**
+	 * Keep the role/MRU/provider blocks and rank by `sort` inside each one
+	 * instead of across all providers. Only consulted while `sort` is set.
+	 */
+	grouped?: boolean;
+	/**
+	 * The session's measured speed for a row, used by the `tps` order in place of
+	 * the catalog estimate so the order matches the number the row prints.
+	 */
+	effectiveTps?: (item: ModelBrowserItem) => number | undefined;
 }
 
 /**
@@ -347,13 +478,41 @@ export function sortModelItems(items: ModelBrowserItem[], options: SortModelItem
 }
 
 function modelItemComparator(options: SortModelItemsOptions): (a: ModelBrowserItem, b: ModelBrowserItem) => number {
-	const { roles = {}, mruOrder = [], skipRoleRank = false } = options;
+	const { roles = {}, mruOrder = [], skipRoleRank = false, sort, grouped } = options;
 	const mruIndex = new Map(mruOrder.map((key, i) => [key, i]));
 
 	const dateRe = /-(\d{8})$/;
 	const latestRe = /-latest$/;
 
+	const byMetric = (a: ModelBrowserItem, b: ModelBrowserItem): number => {
+		if (!sort) return 0;
+		const aMetric = sortMetricValue(a, sort.metric, options.effectiveTps);
+		const bMetric = sortMetricValue(b, sort.metric, options.effectiveTps);
+		// An unscored row sinks in both directions: a missing value is not a low one.
+		if (aMetric === bMetric) return 0;
+		if (aMetric === undefined) return 1;
+		if (bMetric === undefined) return -1;
+		return sort.direction === "asc" ? aMetric - bMetric : bMetric - aMetric;
+	};
+
 	return (a, b) => {
+		// Gate on an active metric: with no `sort` the flag would put provider
+		// ahead of role/MRU and drop the later provider tie-break, silently
+		// reordering the default list while the UI still reads `sort: default`.
+		const groupedOrder = grouped && sort !== undefined;
+		// Grouped ordering pins each provider's block and ranks the metric inside
+		// it. Only the provider comparison moves above role/MRU — which is what
+		// keeps a recent or role-assigned model from splitting the block.
+		if (groupedOrder) {
+			const providerCmp = a.provider.localeCompare(b.provider);
+			if (providerCmp !== 0) return providerCmp;
+			const metricCmp = byMetric(a, b);
+			if (metricCmp !== 0) return metricCmp;
+		} else {
+			const metricCmp = byMetric(a, b);
+			if (metricCmp !== 0) return metricCmp;
+		}
+
 		if (!skipRoleRank) {
 			const aRank = computeModelRank(a.model, roles);
 			const bRank = computeModelRank(b.model, roles);
@@ -366,8 +525,10 @@ function modelItemComparator(options: SortModelItemsOptions): (a: ModelBrowserIt
 		if (aMru !== bMru) return aMru - bMru;
 
 		// By provider, then recency within provider
-		const providerCmp = a.provider.localeCompare(b.provider);
-		if (providerCmp !== 0) return providerCmp;
+		if (!groupedOrder) {
+			const providerCmp = a.provider.localeCompare(b.provider);
+			if (providerCmp !== 0) return providerCmp;
+		}
 
 		// Priority field (lower = better, e.g. Codex priority values)
 		const aPri = a.model.priority ?? Number.MAX_SAFE_INTEGER;
@@ -613,6 +774,16 @@ export interface ModelRankOptions {
 	roles: RoleAssignments;
 	mruOrder: ReadonlyArray<string>;
 	affinity: SearchAffinity;
+	/**
+	 * Explicit metric order, applied after text relevance and user affinity.
+	 * A search for a model name must keep its best match on top, so the metric
+	 * only orders rows the query already ranked equally.
+	 */
+	sort?: ModelSort;
+	/** Rank within provider blocks rather than across all of them. */
+	grouped?: boolean;
+	/** Measured speed per row, so the search ranker orders like the list does. */
+	effectiveTps?: (item: ModelBrowserItem) => number | undefined;
 }
 
 /** Query-independent sort keys of one candidate, computed once per ranker. */
@@ -641,7 +812,14 @@ export class ModelItemRanker {
 		this.items = items;
 		this.options = options;
 		this.#corpus = new FuzzyCorpus(items, modelSearchText);
-		const compare = modelItemComparator({ roles: options.roles, mruOrder: options.mruOrder, skipRoleRank: true });
+		const compare = modelItemComparator({
+			roles: options.roles,
+			mruOrder: options.mruOrder,
+			skipRoleRank: true,
+			sort: options.sort,
+			grouped: options.grouped,
+			effectiveTps: options.effectiveTps,
+		});
 		const ordered = [...items].sort(compare);
 		let group = 0;
 		for (let i = 0; i < ordered.length; i++) {
@@ -998,6 +1176,10 @@ export class ModelBrowser implements Component {
 	});
 	#roles: RoleAssignments = {};
 	#mruOrder: ReadonlyArray<string> = [];
+	/** Explicit metric order applied to the base list; undefined keeps the default order. */
+	#sort: ModelSort | undefined;
+	/** Rank the metric within provider blocks instead of across all of them. */
+	#grouped = false;
 	#affinity: SearchAffinity = { models: new Map(), providers: new Map() };
 	/** Ranker for the menu's current item array; rebuilt when items or affinity change. */
 	#ranker?: { source: readonly ModelBrowserItem[]; ranker: ModelItemRanker };
@@ -1117,8 +1299,46 @@ export class ModelBrowser implements Component {
 		this.#syncAffinity();
 	}
 
+	/**
+	 * The metric order the base list and the search ranker use. Hosts own the
+	 * items themselves, so they re-sort and call {@link setItems} afterwards;
+	 * this only tells the ranker how to break equally-relevant matches.
+	 */
+	setSort(sort: ModelSort | undefined, grouped?: boolean): void {
+		const nextGrouped = grouped ?? this.#grouped;
+		if (sameModelSort(sort, this.#sort) && nextGrouped === this.#grouped) return;
+		this.#sort = sort;
+		this.#grouped = nextGrouped;
+		this.#ranker = undefined;
+		this.#bumpNativeEpoch();
+		this.#bumpPickerEpoch();
+	}
+
 	#syncAffinity(): void {
 		this.#affinity = buildSearchAffinity(this.#settings.modelProviderOrder, this.#roles, this.#mruOrder);
+	}
+
+	/**
+	 * The measured TPS a row's perf cell prints, or undefined when none is
+	 * recorded. The `tps` order reads this so a row never sorts against the
+	 * number it displays.
+	 */
+	measuredTps(item: ModelBrowserItem): number | undefined {
+		const tps = this.#perfFor(item)?.perf.tps;
+		return tps != null && Number.isFinite(tps) && tps > 0 ? tps : undefined;
+	}
+
+	/**
+	 * Whether the recent/role divider is drawn above the row at `index`. False
+	 * when those rows are not one contiguous block, so a metric order cannot
+	 * split a provider and strand a recent row under the divider.
+	 */
+	showsRecentDivider(index: number): boolean {
+		if (index <= 0) return false;
+		const visible = this.#menu.visibleItems;
+		if (index >= visible.length) return false;
+		if (!this.#isRecentOrRole(visible[index]!)) return false;
+		return !visible.slice(index).some(item => this.#isRecentOrRole(item) && !this.#isDisabled(item));
 	}
 
 	/** Measured TPS/TTFT averages keyed by `provider/id` selector (see AgentStorage.getModelPerf). */
@@ -1226,7 +1446,14 @@ export class ModelBrowser implements Component {
 				source: items,
 				ranker: new ModelItemRanker(
 					items.filter(item => !this.#isDisabled(item)),
-					{ roles: this.#roles, mruOrder: this.#mruOrder, affinity: this.#affinity },
+					{
+						roles: this.#roles,
+						mruOrder: this.#mruOrder,
+						affinity: this.#affinity,
+						sort: this.#sort,
+						grouped: this.#grouped,
+						effectiveTps: item => this.measuredTps(item),
+					},
 				),
 			};
 			this.#ranker = cached;
@@ -1280,7 +1507,17 @@ export class ModelBrowser implements Component {
 	#insertSeparator(items: ModelBrowserItem[]): ModelBrowserItem[] {
 		const filtered = items.filter(item => item.id !== "separator");
 		const firstNonRecentIndex = filtered.findIndex(item => !this.#isRecentOrRole(item));
-		if (firstNonRecentIndex > 0 && firstNonRecentIndex < filtered.length) {
+		// The divider only means something when the recent/role rows form one
+		// contiguous block. The default order guarantees that — role rank and MRU
+		// are both prefixes — but a metric order, and grouped mode's provider
+		// precedence, can scatter them. Cutting the first non-recent row would
+		// then split the block and leave a later recent row below the divider,
+		// unlabelled in the picker.
+		if (
+			firstNonRecentIndex > 0 &&
+			firstNonRecentIndex < filtered.length &&
+			!filtered.slice(firstNonRecentIndex).some(item => this.#isRecentOrRole(item))
+		) {
 			const separatorItem: ModelBrowserItem = {
 				id: "separator",
 				provider: "",

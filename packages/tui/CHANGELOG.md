@@ -197,6 +197,8 @@
 
 ### Added
 
+- Added a metric order to the `/models` hub: `ctrl+alt+s` cycles the rows through intelligence, output speed, and blended price (each direction), persisting the choice as the `modelSort` setting ([#15541](https://github.com/can1357/oh-my-pi/pull/15541) by [@omerdikyol](https://github.com/omerdikyol))
+- Added `ctrl+alt+g` in the `/models` hub to rank the active metric inside each provider instead of across all of them, persisted as `modelSortGrouped` ([#15541](https://github.com/can1357/oh-my-pi/pull/15541) by [@omerdikyol](https://github.com/omerdikyol))
 - Added `ApprovalDialogComponent` and the `app.approval.approve` keybinding (default `Ctrl+Enter`, `Ctrl+Q`) ([#15548](https://github.com/can1357/oh-my-pi/pull/15548) by [@H4vC](https://github.com/H4vC))
 - Plan review overlay can take a remote answer: it shows the remotely chosen execution tier and locks further input like a terminal approval ([#15552](https://github.com/can1357/oh-my-pi/pull/15552) by [@Shadorain](https://github.com/Shadorain))
 
