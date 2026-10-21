@@ -203,7 +203,8 @@ describe("central logger byte contract", () => {
 		].join("");
 		expect((await readSingleLog(result.primaryDir)).text).toBe(expected);
 		const payload = JSON.parse(await fs.readFile(result.resultPath, "utf8")) as { sinkContexts: unknown[] };
-		expect(payload.sinkContexts).toEqual([{ sessionId: "sink", turn: 2 }, null]);
+		// The throwing getter drops that record from the file; its sink still gets the call's own fields.
+		expect(payload.sinkContexts).toEqual([{ sessionId: "sink", turn: 2 }, null, { kept: true }]);
 	});
 
 	test("drops native JSON failures locally but sends original contexts to sinks", async () => {

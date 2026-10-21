@@ -20,6 +20,13 @@ const MAX_LOG_LINES = 5000;
 
 /** Maximum bytes to read from the tail of a log file (2 MB). */
 const MAX_LOG_BYTES = 2 * 1024 * 1024;
+/** The last `n` lines of `text`, dropping its first line when that line is cut. */
+function lastLines(text: string, startsMidLine: boolean, n: number): string {
+	const lines = text.split("\n");
+	if (startsMidLine) lines.shift();
+	return lines.slice(-n).join("\n");
+}
+
 /** Read last N lines from a file, reading at most `maxBytes` from the tail. */
 async function readLastLines(filePath: string, n: number, maxBytes = MAX_LOG_BYTES): Promise<string> {
 	try {
@@ -27,12 +34,7 @@ async function readLastLines(filePath: string, n: number, maxBytes = MAX_LOG_BYT
 		const size = file.size;
 		const start = Math.max(0, size - maxBytes);
 		const content = start > 0 ? await file.slice(start, size).text() : await file.text();
-		const lines = content.split("\n");
-		// If we sliced mid-file, drop the first (partial) line
-		if (start > 0 && lines.length > 0) {
-			lines.shift();
-		}
-		return lines.slice(-n).join("\n");
+		return lastLines(content, start > 0, n);
 	} catch (err) {
 		if (isEnoent(err)) return "";
 		throw err;
@@ -278,16 +280,20 @@ async function collectSameDayLogs(
 			if (text) chunks.push(`===== ${name} =====\n${text}`);
 			continue;
 		}
-		// One read serves both files, so the tail and the session lines agree.
-		let lines: string[];
+		// One read serves both files, so the tail and the session lines agree;
+		// the tail keeps the same byte cap as a tail read.
+		let bytes: Uint8Array;
 		try {
-			lines = (await Bun.file(filePath).text()).split("\n");
+			bytes = await Bun.file(filePath).bytes();
 		} catch (err) {
 			if (isEnoent(err)) continue; // Rotated away since the listing.
 			throw err;
 		}
-		const text = lines.slice(-linesPerFile).join("\n");
+		const tailStart = Math.max(0, bytes.length - MAX_LOG_BYTES);
+		const decoder = new TextDecoder();
+		const text = lastLines(decoder.decode(bytes.subarray(tailStart)), tailStart > 0, linesPerFile);
 		if (text) chunks.push(`===== ${name} =====\n${text}`);
+		const lines = decoder.decode(bytes).split("\n");
 		for (const line of lines) {
 			if (!line.includes('"sessionId":')) continue;
 			try {

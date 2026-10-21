@@ -119,6 +119,13 @@ switch (scenario) {
 		const unregister = logger.registerLogSink(event => sinkContexts.push(event.context));
 		logger.withContext({ sessionId: "sink", turn: 1 }, () => logger.info("to-sink", { turn: 2 }));
 		logger.info("to-sink-outside");
+		// A context getter that throws costs the record, never the caller.
+		const throwing = {
+			get sessionId(): string {
+				throw new Error("getter failed");
+			},
+		};
+		logger.withContext(throwing, () => logger.info("throwing-getter", { kept: true }));
 		unregister();
 		writeResult({ sinkContexts });
 		disableTransports();

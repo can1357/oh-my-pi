@@ -53,7 +53,14 @@ function emitToSinks(level: LogLevel, message: string, context: Record<string, u
 	// The enclosing {@link withContext} fields reach sinks as they reach the file;
 	// call-site fields win, and a record outside any context keeps its own object.
 	const scoped = logContextStorage.getStore();
-	const merged = scoped ? { ...scoped, ...context } : context;
+	let merged = context;
+	if (scoped) {
+		try {
+			merged = { ...scoped, ...context };
+		} catch {
+			// A throwing getter must not turn a log call into a failure; sinks get the call's own fields.
+		}
+	}
 	const event: LogEvent = { level, message, context: merged, timestamp: new Date() };
 	for (const sink of logSinks) {
 		try {

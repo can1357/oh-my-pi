@@ -164,4 +164,26 @@ describe("report bundle logs", () => {
 			"main late",
 		]);
 	});
+
+	it("keeps the 2 MB tail cap on logs.txt when it also collects session records", async () => {
+		cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-report-tail-cap-"));
+		await isolateLogsRoot(cleanupRoot);
+		const logsDir = getLogsDir();
+		await fs.mkdir(logsDir, { recursive: true });
+		const sessionFile = path.join(cleanupRoot, "session-main.jsonl");
+		await Bun.write(sessionFile, '{"type":"session","version":3,"id":"main-session","cwd":"/"}\n');
+		const big = JSON.stringify({ level: "warn", message: "big", pad: "x".repeat(3 * 1024 * 1024) });
+		const last = JSON.stringify({ level: "warn", message: "last", sessionId: "main-session" });
+		await Bun.write(path.join(logsDir, `omp.${localDay(new Date())}.4242.log`), `${big}\n${last}\n`);
+
+		const result = await createReportBundle({ sessionFile });
+
+		const archive = await new Bun.Archive(await Bun.file(result.path).bytes()).files();
+		await fs.rm(result.path, { force: true });
+		const logsText = (await archive.get("logs.txt")?.text()) ?? "";
+		// The 3 MB record starts before the tail window, so only the line after it remains.
+		expect(logsText).not.toContain('"message":"big"');
+		expect(logsText).toContain('"message":"last"');
+		expect((await archive.get("session-logs.txt")?.text()) ?? "").toBe(last);
+	});
 });
