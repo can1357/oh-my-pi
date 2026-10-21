@@ -454,15 +454,11 @@ describe("OutputSink", () => {
 		// unhandled rejection instead of being awaited by the cleanup path.
 		// Disposal must settle it and still close the artifact.
 		const chunks: string[] = [];
-		let rejectSubscriber: ((error: Error) => void) | undefined;
+		const subscriber = Promise.withResolvers<void>();
 		const sink = new OutputSink({
 			onChunk: (chunk: string) => {
 				chunks.push(chunk);
-				if (chunks.length === 2) {
-					return new Promise<void>((_resolve, reject) => {
-						rejectSubscriber = reject;
-					});
-				}
+				if (chunks.length === 2) return subscriber.promise;
 				return undefined;
 			},
 			chunkThrottleMs: 60_000,
@@ -475,11 +471,54 @@ describe("OutputSink", () => {
 		// The pending tail is handed to the subscriber before disposal settles.
 		await Promise.resolve();
 		expect(chunks).toEqual(["first", "second"]);
-		rejectSubscriber?.(new Error("subscriber failed"));
+		subscriber.reject(new Error("subscriber failed"));
 		// The rejection must not escape the cleanup call.
 		await disposal;
 		// The artifact is closed even though the subscriber failed.
 		expect((await sink.dump()).output).toBe("firstsecond");
+	});
+
+	test("dispose awaits every in-flight async chunk subscriber", async () => {
+		// Two async subscriber calls can overlap when the subscriber is slower
+		// than the next chunk. The earlier call used to clear the tracked call
+		// unconditionally, so a later call that was still pending was no longer
+		// awaited and the executor's cleanup could finish before the final
+		// output update ran.
+		const first = Promise.withResolvers<void>();
+		const second = Promise.withResolvers<void>();
+		let calls = 0;
+		const sink = new OutputSink({
+			onChunk: () => {
+				calls++;
+				return calls === 1 ? first.promise : calls === 2 ? second.promise : undefined;
+			},
+		});
+		sink.push("a");
+		sink.push("b");
+		expect(calls).toBe(2);
+		// The earlier call settles after the later one started.
+		first.resolve();
+		// The settled call's own handler must run before disposal looks at the
+		// tracked calls.
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		let disposed = false;
+		const disposal = sink.dispose().then(() => {
+			disposed = true;
+		});
+		// Drain the microtask queue: a disposal that does not track the pending
+		// call settles within a handful of turns.
+		for (let turn = 0; turn < 20 && !disposed; turn++) {
+			await Promise.resolve();
+		}
+		// The second subscriber call is still pending, so disposal must not have
+		// finished.
+		expect(disposed).toBe(false);
+		second.resolve();
+		await disposal;
+		expect(disposed).toBe(true);
 	});
 
 	test("replace cancels a throttled tail and discards its pending preview", () => {
