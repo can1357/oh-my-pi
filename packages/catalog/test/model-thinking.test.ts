@@ -886,6 +886,22 @@ describe("model thinking derivation", () => {
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
 	});
 
+	it("does not leak Anthropic-only thinking flags onto declared OpenAI-compatible ladders", () => {
+		const model = createModel({
+			id: "claude-fable-5-1",
+			api: "openai-completions",
+			provider: "litellm",
+			compat: {
+				reasoningEffortMapAuthoritative: true,
+				reasoningEffortMap: { [Effort.Low]: "low" },
+			},
+			thinking: { mode: "effort", efforts: [Effort.Low] },
+		});
+
+		expect(model.thinking?.supportsDisplay).toBeUndefined();
+		expect(model.thinking?.prefixBinding).toBeUndefined();
+	});
+
 	it("keeps Sonnet 5.5 binding controls and per-message effort off Vertex, which rejects both", () => {
 		const direct = createModel({ id: "claude-sonnet-5-5", api: "anthropic-messages", provider: "anthropic" });
 		const vertex = createModel({

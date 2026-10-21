@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	fetchLiteLLMRichModels,
 	litellmModelManagerOptions,
@@ -972,6 +973,9 @@ describe("LiteLLM provider discovery", () => {
 					],
 				});
 			}
+			if (url.endsWith("/model/info")) {
+				return new Response("{}", { status: 404 });
+			}
 			throw new Error(`Unexpected URL: ${url}`);
 		}) as FetchImpl;
 
@@ -982,7 +986,8 @@ describe("LiteLLM provider discovery", () => {
 			fetch: fetchMock,
 		});
 
-		expect(calls).toEqual(["http://primary:4000/model_group/info", "http://primary:4000/v2/model/info"]);
+		expect(calls).toContain("http://primary:4000/model_group/info");
+		expect(calls).toContain("http://primary:4000/v2/model/info");
 		expect(models?.map(model => model.id)).toEqual(["keep-chat"]);
 	});
 
@@ -1321,7 +1326,7 @@ describe("LiteLLM provider discovery", () => {
 				});
 			}
 			if (url === "http://primary:4000/v2/model/info") {
-				throw new Error("/v2/model/info should not be called when model_group info has a real model");
+				return new Response("{}", { status: 404 });
 			}
 			if (url === "http://primary:4000/v1/models") return Response.json({ data: [{ id: "example-real-model" }] });
 			throw new Error(`Unexpected URL: ${url}`);
@@ -1335,7 +1340,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(calls).toContain("http://primary:4000/model_group/info");
-		expect(calls).not.toContain("http://primary:4000/v2/model/info");
+		expect(calls).toContain("http://primary:4000/v2/model/info");
 		expect(models?.map(model => model.id)).toEqual(["example-real-model"]);
 		expect(models?.[0]).toMatchObject({
 			id: "example-real-model",
@@ -1724,6 +1729,9 @@ describe("LiteLLM provider discovery", () => {
 					data: [{ model_name: "legacy-gpt", model_info: { max_input_tokens: 96_000, supports_vision: false } }],
 				});
 			}
+			if (url === "http://primary:4000/v1/model/info") {
+				return new Response("{}", { status: 404 });
+			}
 			throw new Error(`Unexpected URL: ${url}`);
 		}) as FetchImpl;
 
@@ -1738,6 +1746,7 @@ describe("LiteLLM provider discovery", () => {
 			"http://primary:4000/model_group/info",
 			"http://primary:4000/v2/model/info",
 			"http://primary:4000/model/info",
+			"http://primary:4000/v1/model/info",
 		]);
 		expect(models?.[0]).toMatchObject({ id: "legacy-gpt", contextWindow: 96_000 });
 	});
@@ -2007,6 +2016,31 @@ describe("LiteLLM declared model capabilities", () => {
 			}
 			return new Response("{}", { status: 404 });
 		}) as FetchImpl;
+	const sequenceFetch = (
+		groupInfo: Record<string, unknown>,
+		v2Info: Record<string, unknown>,
+		deployInfo: Record<string, unknown>,
+		v1Info?: Record<string, unknown>,
+	): FetchImpl =>
+		vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) return Response.json({});
+			if (url === "http://primary:4000/v1/models") {
+				// Discovery resolves the selectable roster from `/v1/models`; the
+				// management endpoints only enrich those exact ids.
+				const ids = [groupInfo, v2Info, deployInfo, v1Info]
+					.flatMap(row => row?.model_group ?? row?.model_name ?? row?.id)
+					.filter((id): id is string => typeof id === "string");
+				return Response.json({ data: Array.from(new Set(ids)).map(id => ({ id })) });
+			}
+			if (url.endsWith("/model_group/info")) return Response.json({ data: [groupInfo] });
+			if (url.endsWith("/v2/model/info")) return Response.json({ data: [v2Info] });
+			if (url.endsWith("/v1/model/info")) {
+				return v1Info ? Response.json({ data: [v1Info] }) : new Response("{}", { status: 404 });
+			}
+			if (url.endsWith("/model/info")) return Response.json({ data: [deployInfo] });
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
 	const discover = async (fetchImpl: FetchImpl) => {
 		const options = litellmModelManagerOptions({
 			apiKey: "sk-rich",
@@ -2084,5 +2118,693 @@ describe("LiteLLM declared model capabilities", () => {
 		);
 
 		expect(effortOf(spec)).toBe(true);
+	});
+
+	test("lets a deployment-declared ladder replace the catalog ladder", async () => {
+		const declared = { ...limits, reasoning_effort_levels: ["low", "high"] };
+		const spec = await discover(richFetch(declared, declared));
+
+		expect(spec?.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
+	});
+
+	test("preserves a declared none state across endpoints", async () => {
+		const declared = { ...limits, reasoning_effort_levels: ["low", "high", "none"] };
+		const spec = await discover(richFetch(declared, declared));
+
+		expect(spec?.thinking?.requiresEffort).toBe(false);
+	});
+
+	test("intersects ladders declared by different endpoints", async () => {
+		const spec = await discover(
+			richFetch(
+				{ ...limits, reasoning_effort_levels: ["low", "high"] },
+				{ ...limits, reasoning_effort_levels: ["high", "max"] },
+			),
+		);
+
+		expect(spec?.thinking?.efforts).toEqual([Effort.High]);
+	});
+
+	test("publishes no ladder when declared ladders do not overlap", async () => {
+		const spec = await discover(
+			richFetch({ ...limits, reasoning_effort_levels: ["low"] }, { ...limits, reasoning_effort_levels: ["high"] }),
+		);
+		expect(spec?.thinking).toBeUndefined();
+		expect(spec?.reasoning).toBe(true);
+		expect((spec?.compat as { omitReasoningEffort?: boolean } | undefined)?.omitReasoningEffort).toBe(true);
+
+		const model = buildModel(spec as ModelSpec<"openai-completions">);
+		expect(model.thinking).toBeUndefined();
+		expect((model.compat as { omitReasoningEffort?: boolean } | undefined)?.omitReasoningEffort).toBe(true);
+	});
+
+	test("continues past a v2 row that omits the reasoning flag", async () => {
+		const base = {
+			model_name: "deepseek-v4.1-flash",
+			supports_vision: true,
+			max_input_tokens: 1_048_576,
+			max_output_tokens: 384_000,
+		};
+		const spec = await discover(
+			sequenceFetch({ ...base, supports_reasoning: true }, base, {
+				...base,
+				reasoning_effort_levels: ["low", "high"],
+			}),
+		);
+
+		expect(spec?.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
+	});
+
+	test("preserves an explicit non-reasoning verdict across later rows", async () => {
+		const base = { model_name: "deepseek-v4.1-flash" };
+		const spec = await discover(
+			sequenceFetch(
+				{ ...base, supports_reasoning: false, max_input_tokens: 1_048_576, max_output_tokens: 384_000 },
+				{ ...base, max_input_tokens: 1_048_576, max_output_tokens: 384_000 },
+				{
+					...base,
+					supports_vision: true,
+					max_input_tokens: 1_048_576,
+					max_output_tokens: 384_000,
+					reasoning_effort_levels: ["low"],
+				},
+			),
+		);
+
+		expect(spec?.reasoning).toBe(false);
+		expect(spec?.thinking).toBeUndefined();
+	});
+
+	test("preserves an explicitly empty declared ladder", async () => {
+		const declared = { ...limits, reasoning_effort_levels: [] };
+		const spec = await discover(richFetch(declared, declared));
+		expect(spec?.thinking).toBeUndefined();
+		expect(spec?.reasoning).toBe(true);
+
+		const model = buildModel(spec as ModelSpec<"openai-completions">);
+		expect(model.thinking).toBeUndefined();
+	});
+
+	test("probes deployment info for an unknown alias with no reasoning verdict", async () => {
+		const base = {
+			model_name: "custom-alias",
+			providers: ["openai"],
+			supports_vision: true,
+			max_input_tokens: 128_000,
+			max_output_tokens: 8_000,
+		};
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url.endsWith("/model_group/info")) return Response.json({ data: [base] });
+			if (url.endsWith("/model/info")) {
+				return Response.json({ data: [{ ...base, reasoning_effort_levels: ["low", "high"] }] });
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+		const models = await fetchLiteLLMRichModels({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+		const spec = models?.find(model => model.id === "custom-alias");
+
+		expect(spec?.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
+	});
+
+	test("probes deployment info when reasoning is inferred from the reference", async () => {
+		const base = {
+			model_name: "deepseek-v4.1-flash",
+			providers: ["openai"],
+			supports_vision: true,
+			max_input_tokens: 1_048_576,
+			max_output_tokens: 384_000,
+		};
+		const spec = await discover(sequenceFetch(base, base, { ...base, reasoning_effort_levels: ["low", "high"] }));
+
+		expect(spec?.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
+	});
+
+	test("false reasoning dominates duplicate deployments in one response", async () => {
+		const base = {
+			model_group: "duplicate-reasoning",
+			model_name: "duplicate-reasoning",
+			providers: ["openai"],
+			supports_vision: true,
+			max_input_tokens: 128_000,
+			max_output_tokens: 8_000,
+		};
+		const falseRow = { ...base, supports_reasoning: false };
+		const trueRow = { ...base, supports_reasoning: true, reasoning_effort_levels: ["low"] };
+		for (const rows of [
+			[falseRow, trueRow],
+			[trueRow, falseRow],
+		]) {
+			const fetchMock = vi.fn(async (input: string | URL | Request) => {
+				const url = inputUrl(input);
+				if (url.endsWith("/model_group/info")) return Response.json({ data: rows });
+				return new Response("{}", { status: 404 });
+			}) as FetchImpl;
+			const models = await fetchLiteLLMRichModels({
+				api: "openai-completions",
+				provider: "litellm",
+				baseUrl: "http://primary:4000/v1",
+				fetch: fetchMock,
+			});
+			const spec = models?.find(model => model.id === "duplicate-reasoning");
+			expect(spec?.reasoning).toBe(false);
+			expect(spec?.thinking).toBeUndefined();
+		}
+	});
+
+	test("preserves a lone explicit empty ladder through materialization", async () => {
+		const row = {
+			model_name: "empty-single",
+			providers: ["openai"],
+			supports_reasoning: true,
+			supports_vision: true,
+			max_input_tokens: 128_000,
+			max_output_tokens: 8_000,
+			reasoning_effort_levels: [],
+		};
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url.endsWith("/model_group/info")) return Response.json({ data: [row] });
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+		const models = await fetchLiteLLMRichModels({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+		const spec = models?.find(model => model.id === "empty-single");
+		expect(spec?.thinking).toBeUndefined();
+
+		const model = buildModel(spec as ModelSpec<"openai-completions">);
+		expect(model.thinking).toBeUndefined();
+	});
+
+	test("preserves rich rows when an optional probe times out", async () => {
+		const row = {
+			model_name: "ladder-complete",
+			providers: ["openai"],
+			supports_reasoning: true,
+			supports_vision: true,
+			max_input_tokens: 128_000,
+			max_output_tokens: 8_000,
+			supported_openai_params: ["reasoning_effort"],
+			reasoning_effort_levels: ["low", "high"],
+		};
+		const calls: string[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = inputUrl(input);
+			calls.push(url);
+			if (url.endsWith("/model_group/info")) return Response.json({ data: [row] });
+			if (url.endsWith("/v2/model/info")) {
+				const { promise, reject } = Promise.withResolvers<Response>();
+				init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+				return promise;
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+		const models = await fetchLiteLLMRichModels({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+		const spec = models?.find(model => model.id === "ladder-complete");
+
+		expect(calls).toEqual([
+			"http://primary:4000/model_group/info",
+			"http://primary:4000/v2/model/info",
+			"http://primary:4000/model/info",
+			"http://primary:4000/v1/model/info",
+		]);
+		expect(spec?.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
+	});
+
+	test("does not let one terminal row stop probing for another model", async () => {
+		const nonReasoner = {
+			model_group: "non-reasoner",
+			model_name: "non-reasoner",
+			providers: ["openai"],
+			supports_reasoning: false,
+			supports_vision: true,
+			max_input_tokens: 128_000,
+			max_output_tokens: 8_000,
+		};
+		const needsLadder = {
+			model_group: "needs-ladder",
+			model_name: "needs-ladder",
+			providers: ["openai"],
+			supports_vision: true,
+			max_input_tokens: 128_000,
+			max_output_tokens: 8_000,
+		};
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url.endsWith("/model_group/info")) return Response.json({ data: [nonReasoner, needsLadder] });
+			if (url.endsWith("/model/info")) {
+				return Response.json({
+					data: [{ ...needsLadder, reasoning_effort_levels: ["low", "high"] }],
+				});
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+		const models = await fetchLiteLLMRichModels({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+		const spec = models?.find(model => model.id === "needs-ladder");
+
+		expect(spec?.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
+	});
+
+	test("keeps reading after a partial deployment row to find the ladder", async () => {
+		const base = {
+			model_name: "deepseek-v4.1-flash",
+			providers: ["openai"],
+			supports_vision: true,
+			max_input_tokens: 1_048_576,
+			max_output_tokens: 384_000,
+		};
+		const spec = await discover(
+			sequenceFetch(base, base, base, { ...base, reasoning_effort_levels: ["low", "high"] }),
+		);
+
+		expect(spec?.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
+	});
+
+	test("keeps a declared ladder on the Responses route", async () => {
+		const declared = {
+			...limits,
+			providers: ["openai"],
+			supports_vision: true,
+			reasoning_effort_levels: ["low", "high"],
+		};
+		const spec = await discover(richFetch(declared, declared));
+		const model = buildModel({ ...spec, api: "openai-responses" } as ModelSpec<"openai-responses">);
+		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
+	});
+
+	test("keeps an explicit supported-parameter veto over a declared ladder", async () => {
+		const declared = {
+			...limits,
+			providers: ["openai"],
+			supports_vision: true,
+			supported_openai_params: ["tools"],
+			reasoning_effort_levels: ["low", "high"],
+		};
+		const spec = await discover(richFetch(declared, declared));
+		const compat = spec?.compat as { supportsReasoningEffort?: boolean; omitReasoningEffort?: boolean } | undefined;
+		expect(compat?.supportsReasoningEffort).toBe(false);
+		expect(compat?.omitReasoningEffort).toBe(true);
+
+		const model = buildModel({ ...spec, api: "openai-responses" } as ModelSpec<"openai-responses">);
+		expect(model.thinking).toBeUndefined();
+	});
+
+	test("lets a later explicit effort-support verdict win", async () => {
+		const base = {
+			model_name: "deepseek-v4.1-flash",
+			providers: ["openai"],
+			supports_reasoning: true,
+			supports_vision: true,
+			max_input_tokens: 1_048_576,
+			max_output_tokens: 384_000,
+		};
+		const spec = await discover(
+			sequenceFetch(
+				{ ...base, supported_openai_params: ["tools"] },
+				{ ...base, supported_openai_params: ["tools"] },
+				{ ...base, supported_openai_params: ["reasoning_effort"] },
+			),
+		);
+		const compat = spec?.compat as { supportsReasoningEffort?: boolean; omitReasoningEffort?: boolean } | undefined;
+		expect(compat?.supportsReasoningEffort).toBe(true);
+		expect(compat?.omitReasoningEffort).toBe(false);
+		expect(spec?.thinking).toBeDefined();
+
+		const model = buildModel(spec as ModelSpec<"openai-completions">);
+		expect(model.thinking).toBeDefined();
+	});
+
+	test("keeps the full budget while vision metadata is incomplete", async () => {
+		const row = {
+			model_name: "slow-vision",
+			providers: ["openai"],
+			supports_reasoning: true,
+			max_input_tokens: 128_000,
+			max_output_tokens: 8_000,
+			reasoning_effort_levels: ["low", "high"],
+		};
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = inputUrl(input);
+			if (url.endsWith("/model_group/info")) return Response.json({ data: [row] });
+			if (url.endsWith("/v2/model/info")) {
+				const { promise, resolve, reject } = Promise.withResolvers<Response>();
+				const timer = setTimeout(
+					() => resolve(Response.json({ data: [{ ...row, supports_vision: true }] })),
+					3_200,
+				);
+				init?.signal?.addEventListener("abort", () => {
+					clearTimeout(timer);
+					reject(new DOMException("Aborted", "AbortError"));
+				});
+				return promise;
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+		const models = await fetchLiteLLMRichModels({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			timeoutMs: 10_000,
+			fetch: fetchMock,
+		});
+		const spec = models?.find(model => model.id === "slow-vision");
+
+		expect(spec?.input).toContain("image");
+	});
+
+	test("effort veto dominates duplicate deployments in one response", async () => {
+		const base = {
+			model_group: "dup-effort-veto",
+			model_name: "dup-effort-veto",
+			providers: ["openai"],
+			supports_reasoning: true,
+			supports_vision: true,
+			max_input_tokens: 128_000,
+			max_output_tokens: 8_000,
+			reasoning_effort_levels: ["low"],
+		};
+		const support = { ...base, supported_openai_params: ["reasoning_effort"] };
+		const veto = { ...base, supported_openai_params: ["tools"] };
+		for (const rows of [
+			[support, veto],
+			[veto, support],
+		]) {
+			const fetchMock = vi.fn(async (input: string | URL | Request) => {
+				const url = inputUrl(input);
+				if (url.endsWith("/model_group/info")) return Response.json({ data: rows });
+				return new Response("{}", { status: 404 });
+			}) as FetchImpl;
+			const models = await fetchLiteLLMRichModels({
+				api: "openai-completions",
+				provider: "litellm",
+				baseUrl: "http://primary:4000/v1",
+				fetch: fetchMock,
+			});
+			const spec = models?.find(model => model.id === "dup-effort-veto");
+			const compat = spec?.compat as
+				| { supportsReasoningEffort?: boolean; omitReasoningEffort?: boolean }
+				| undefined;
+			expect(compat?.supportsReasoningEffort).toBe(false);
+			expect(compat?.omitReasoningEffort).toBe(true);
+		}
+	});
+
+	test("keeps explicit support through a later omitted params row", async () => {
+		const base = {
+			model_name: "deepseek-v4.1-flash",
+			providers: ["openai"],
+			supports_reasoning: true,
+			supports_vision: true,
+			max_input_tokens: 1_048_576,
+			max_output_tokens: 384_000,
+		};
+		const spec = await discover(
+			sequenceFetch(
+				{ ...base, supported_openai_params: ["tools"] },
+				{ ...base, supported_openai_params: ["reasoning_effort"] },
+				base,
+			),
+		);
+		const compat = spec?.compat as { supportsReasoningEffort?: boolean; omitReasoningEffort?: boolean } | undefined;
+		expect(compat?.supportsReasoningEffort).toBe(true);
+		expect(compat?.omitReasoningEffort).toBe(false);
+
+		const model = buildModel(spec as ModelSpec<"openai-completions">);
+		expect(model.thinking).toBeDefined();
+	});
+
+	test("keeps full probes while effort support is unknown", async () => {
+		const row = {
+			model_name: "unknown-effort-support",
+			providers: ["openai"],
+			supports_reasoning: true,
+			supports_vision: true,
+			max_input_tokens: 128_000,
+			max_output_tokens: 8_000,
+			reasoning_effort_levels: ["low", "high"],
+		};
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = inputUrl(input);
+			if (url.endsWith("/model_group/info")) return Response.json({ data: [row] });
+			if (url.endsWith("/v2/model/info")) {
+				const { promise, resolve, reject } = Promise.withResolvers<Response>();
+				const timer = setTimeout(
+					() => resolve(Response.json({ data: [{ ...row, supported_openai_params: ["tools"] }] })),
+					3_200,
+				);
+				init?.signal?.addEventListener("abort", () => {
+					clearTimeout(timer);
+					reject(new DOMException("Aborted", "AbortError"));
+				});
+				return promise;
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+		const models = await fetchLiteLLMRichModels({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			timeoutMs: 10_000,
+			fetch: fetchMock,
+		});
+		const spec = models?.find(model => model.id === "unknown-effort-support");
+		const compat = spec?.compat as { supportsReasoningEffort?: boolean; omitReasoningEffort?: boolean } | undefined;
+		expect(compat?.supportsReasoningEffort).toBe(false);
+		expect(compat?.omitReasoningEffort).toBe(true);
+		expect(spec?.thinking).toBeUndefined();
+	});
+
+	test("hides a vetoed ladder on chat-completions routes", async () => {
+		const declared = {
+			...limits,
+			providers: ["anthropic"],
+			supports_vision: true,
+			supported_openai_params: ["tools"],
+			reasoning_effort_levels: ["low", "high"],
+		};
+		const spec = await discover(richFetch(declared, declared));
+		expect(spec?.thinking).toBeUndefined();
+
+		const model = buildModel(spec as ModelSpec<"openai-completions">);
+		expect(model.thinking).toBeUndefined();
+	});
+
+	test("uses identity remaps for declared tiers over class remaps", async () => {
+		const declared = {
+			model_name: "kimi-k3",
+			providers: ["openai"],
+			supports_reasoning: true,
+			supports_vision: true,
+			max_input_tokens: 128_000,
+			max_output_tokens: 8_000,
+			reasoning_effort_levels: ["minimal", "xhigh"],
+		};
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url.endsWith("/model_group/info") || url.endsWith("/model/info")) {
+				return Response.json({ data: [declared] });
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+		const models = await fetchLiteLLMRichModels({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+		const spec = models?.find(model => model.id === "kimi-k3");
+		const model = buildModel(spec as ModelSpec<"openai-completions">);
+		const map = (model.compat as { reasoningEffortMap?: Record<string, string> } | undefined)?.reasoningEffortMap;
+
+		expect(map?.minimal).toBe("minimal");
+		expect(map?.xhigh).toBe("xhigh");
+		expect(Object.keys(map ?? {}).sort()).toEqual(["minimal", "xhigh"]);
+		expect(model.thinking?.defaultLevel).toBeUndefined();
+	});
+
+	test("keeps none-effort for declared ladders on openrouter", async () => {
+		const declared = {
+			model_name: "openrouter-none",
+			providers: ["openrouter"],
+			supports_reasoning: true,
+			supports_vision: true,
+			max_input_tokens: 128_000,
+			max_output_tokens: 8_000,
+			reasoning_effort_levels: ["low", "none"],
+		};
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url.endsWith("/model_group/info") || url.endsWith("/model/info")) {
+				return Response.json({ data: [declared] });
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+		const models = await fetchLiteLLMRichModels({
+			api: "openrouter",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+		const spec = models?.find(model => model.id === "openrouter-none");
+		const model = buildModel(spec as ModelSpec<"openrouter">);
+
+		expect((model.compat as { reasoningDisableMode?: string } | undefined)?.reasoningDisableMode).toBe("none-effort");
+		expect(model.thinking?.requiresEffort).toBe(false);
+	});
+
+	test("drops none-effort when only one deployment allows none", async () => {
+		const spec = await discover(
+			richFetch(
+				{ ...limits, reasoning_effort_levels: ["low", "none"] },
+				{ ...limits, reasoning_effort_levels: ["low"] },
+			),
+		);
+		expect(spec?.thinking?.efforts).toEqual([Effort.Low]);
+		expect((spec?.compat as { reasoningDisableMode?: string } | undefined)?.reasoningDisableMode).toBeUndefined();
+	});
+
+	test("omits effort serialization for a declared-empty ladder without none", async () => {
+		const declared = {
+			...limits,
+			providers: ["openai"],
+			supports_vision: true,
+			supported_openai_params: ["reasoning_effort"],
+			reasoning_effort_levels: [],
+		};
+		const spec = await discover(richFetch(declared, declared));
+		expect(spec?.thinking).toBeUndefined();
+		expect((spec?.compat as { omitReasoningEffort?: boolean } | undefined)?.omitReasoningEffort).toBe(true);
+
+		const model = buildModel(spec as ModelSpec<"openai-completions">);
+		expect((model.compat as { omitReasoningEffort?: boolean } | undefined)?.omitReasoningEffort).toBe(true);
+	});
+
+	test("counts a none-only declaration as effort support", async () => {
+		const declared = { ...limits, reasoning_effort_levels: ["none"] };
+		const spec = await discover(richFetch(declared, declared));
+		expect(spec?.thinking).toBeUndefined();
+		expect(spec?.reasoning).toBe(true);
+		const compat = spec?.compat as
+			| { supportsReasoningEffort?: boolean; omitReasoningEffort?: boolean; reasoningDisableMode?: string }
+			| undefined;
+		expect(compat?.supportsReasoningEffort).toBe(true);
+		expect(compat?.omitReasoningEffort).toBe(false);
+		expect(compat?.reasoningDisableMode).toBe("none-effort");
+	});
+
+	test("preserves shared none across mixed ladders", async () => {
+		const spec = await discover(
+			richFetch(
+				{ ...limits, reasoning_effort_levels: ["low", "none"] },
+				{ ...limits, reasoning_effort_levels: ["high", "none"] },
+			),
+		);
+		expect(spec?.thinking).toBeUndefined();
+		expect(spec?.reasoning).toBe(true);
+		expect((spec?.compat as { reasoningDisableMode?: string } | undefined)?.reasoningDisableMode).toBe("none-effort");
+	});
+
+	test("keeps inferred reasoning when only declared ladders conflict", async () => {
+		const base = {
+			model_name: "deepseek-v4.1-flash",
+			providers: ["openai"],
+			supports_vision: true,
+			max_input_tokens: 1_048_576,
+			max_output_tokens: 384_000,
+		};
+		const spec = await discover(
+			sequenceFetch(
+				{ ...base, reasoning_effort_levels: ["low"] },
+				{ ...base, reasoning_effort_levels: ["high"] },
+				base,
+			),
+		);
+		expect(spec?.reasoning).toBe(true);
+		expect(spec?.thinking).toBeUndefined();
+	});
+
+	test("keeps probing conflicts for a later explicit false verdict", async () => {
+		const base = {
+			model_name: "deepseek-v4.1-flash",
+			providers: ["openai"],
+			supports_vision: true,
+			max_input_tokens: 1_048_576,
+			max_output_tokens: 384_000,
+		};
+		const spec = await discover(
+			sequenceFetch(
+				{ ...base, reasoning_effort_levels: ["low"] },
+				{ ...base, reasoning_effort_levels: ["high"] },
+				{ ...base, supports_reasoning: false },
+			),
+		);
+		expect(spec?.reasoning).toBe(false);
+		expect(spec?.thinking).toBeUndefined();
+	});
+
+	test("keeps a carried empty intersection terminal", async () => {
+		const base = {
+			model_name: "deepseek-v4.1-flash",
+			providers: ["openai"],
+			supports_reasoning: true,
+			supports_vision: true,
+			max_input_tokens: 1_048_576,
+			max_output_tokens: 384_000,
+		};
+		const spec = await discover(
+			sequenceFetch(
+				{ ...base, reasoning_effort_levels: ["low"] },
+				{ ...base, reasoning_effort_levels: ["high"] },
+				base,
+			),
+		);
+		expect(spec?.thinking).toBeUndefined();
+
+		const model = buildModel(spec as ModelSpec<"openai-completions">);
+		expect(model.thinking).toBeUndefined();
+	});
+
+	test("keeps an explicit non-reasoning verdict over a declared ladder", async () => {
+		const declared = {
+			...limits,
+			supports_reasoning: false,
+			reasoning_effort_levels: ["low", "high"],
+		};
+		const spec = await discover(richFetch(declared, declared));
+
+		expect(spec?.reasoning).toBe(false);
+		expect(spec?.thinking).toBeUndefined();
+	});
+
+	test("reads deployment info after a complete group row to find the ladder", async () => {
+		// The group row is complete enough to stop early, but only `/model/info`
+		// carries the operator's per-deployment `reasoning_effort_levels`.
+		const spec = await discover(
+			richFetch(
+				{ ...limits, supports_vision: true },
+				{ ...limits, supports_vision: true, reasoning_effort_levels: ["low", "high"] },
+			),
+		);
+
+		expect(spec?.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
 	});
 });

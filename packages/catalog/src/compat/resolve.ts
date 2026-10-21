@@ -190,8 +190,12 @@ function overlayEffortMapAxis(
 	specCompat: OpenAICompat | undefined,
 ): void {
 	const axisMap = effortRecord(axes.wire.reasoningEffortMap);
-	if (axisMap && specCompat?.reasoningEffortMap) {
-		compat.reasoningEffortMap = { ...axisMap, ...specCompat.reasoningEffortMap };
+	if (specCompat?.reasoningEffortMap) {
+		compat.reasoningEffortMap = specCompat.reasoningEffortMapAuthoritative
+			? { ...specCompat.reasoningEffortMap }
+			: axisMap
+				? { ...axisMap, ...specCompat.reasoningEffortMap }
+				: compat.reasoningEffortMap;
 	}
 }
 
@@ -525,6 +529,7 @@ function detectOpenAICompat(
 		supportsSamplingParams: true,
 		supportsPenaltyAndStopParams: !(isGrok && reasoningCapable),
 		reasoningEffortMap: {},
+		reasoningEffortMapAuthoritative: undefined,
 		supportsUsageInStreaming: !isCerebrasHost,
 		alwaysSendMaxTokens: facts.is("kimi"),
 		disableReasoningOnForcedToolChoice: (facts.is("kimi") && !isMoonshotKimiK3) || isAnthropicModel,
@@ -770,6 +775,7 @@ function resolveOpenAIResponsesPolicy(
 		requiresReasoningOffJuiceInstruction: false,
 		stripImageInput: false,
 		reasoningEffortMap: {},
+		reasoningEffortMapAuthoritative: undefined,
 		supportsReasoningParams: true,
 		supportsSamplingParams: true,
 		supportsPenaltyAndStopParams: !isXaiHost,
@@ -1118,6 +1124,21 @@ function filterEffortMap(
 	return filtered;
 }
 
+function filterEffortBudgets(
+	budgets: Readonly<Partial<Record<Effort, number>>> | undefined,
+	efforts: readonly Effort[],
+): Partial<Record<Effort, number>> | undefined {
+	if (budgets === undefined) return undefined;
+	let filtered: Partial<Record<Effort, number>> | undefined;
+	for (const effort of efforts) {
+		const value = budgets[effort];
+		if (value === undefined) continue;
+		filtered ??= {};
+		filtered[effort] = value;
+	}
+	return filtered;
+}
+
 interface RuleThinking {
 	mode?: ThinkingConfig["mode"];
 	efforts?: readonly Effort[];
@@ -1292,32 +1313,42 @@ function fillExplicitThinking<TApi extends Api>(
 ): ThinkingConfig {
 	const effortMap =
 		thinking.effortMap === undefined ? mergeEffortMap(spec, rule.effortMap, compat, thinking.efforts) : undefined;
+	const anthropicThinking = spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream";
+	const declaredLadder =
+		(compat as { reasoningEffortMapAuthoritative?: boolean } | undefined)?.reasoningEffortMapAuthoritative === true;
 	const needsDisplay =
-		thinking.supportsDisplay === undefined && (rule.supportsDisplay ?? defaultSupportsDisplay(spec, facts));
+		thinking.supportsDisplay === undefined &&
+		(declaredLadder
+			? anthropicThinking && (rule.supportsDisplay ?? defaultSupportsDisplay(spec, facts))
+			: (rule.supportsDisplay ?? defaultSupportsDisplay(spec, facts)));
 	const needsRequiresEffort =
 		thinking.requiresEffort === undefined &&
 		(rule.requiresEffort ??
 			(impliesMandatoryReasoning(facts, spec.id) || isQwenTemplateReasoningEffortCompat(compat)));
-	const needsDefaultLevel = thinking.defaultLevel === undefined && rule.defaultLevel !== undefined;
-	const needsPrefixBinding = thinking.prefixBinding === undefined && rule.prefixBinding === true;
-	const needsEffortBudgets = thinking.effortBudgets === undefined && rule.effortBudgets !== undefined;
-	if (
-		effortMap === undefined &&
-		!needsDisplay &&
-		!needsRequiresEffort &&
-		!needsDefaultLevel &&
-		!needsPrefixBinding &&
-		!needsEffortBudgets
-	) {
-		return thinking;
-	}
+	const explicitDefault =
+		thinking.defaultLevel !== undefined && thinking.efforts.includes(thinking.defaultLevel)
+			? thinking.defaultLevel
+			: undefined;
+	const ruleDefault =
+		rule.defaultLevel !== undefined && thinking.efforts.includes(rule.defaultLevel) ? rule.defaultLevel : undefined;
+	const defaultLevel = declaredLadder
+		? (explicitDefault ?? ruleDefault)
+		: (thinking.defaultLevel ?? rule.defaultLevel);
+	const needsPrefixBinding =
+		thinking.prefixBinding === undefined &&
+		(declaredLadder ? anthropicThinking && rule.prefixBinding === true : rule.prefixBinding === true);
+	const effortBudgets = declaredLadder
+		? filterEffortBudgets(thinking.effortBudgets ?? rule.effortBudgets, thinking.efforts)
+		: (thinking.effortBudgets ?? rule.effortBudgets);
 	const filled: ThinkingConfig = { ...thinking };
 	if (effortMap !== undefined) filled.effortMap = effortMap;
 	if (needsDisplay) filled.supportsDisplay = true;
-	if (needsDefaultLevel && rule.defaultLevel !== undefined) filled.defaultLevel = rule.defaultLevel;
+	if (defaultLevel !== undefined) filled.defaultLevel = defaultLevel;
+	else delete filled.defaultLevel;
 	if (needsRequiresEffort) filled.requiresEffort = true;
 	if (needsPrefixBinding) filled.prefixBinding = true;
-	if (needsEffortBudgets) filled.effortBudgets = rule.effortBudgets;
+	if (effortBudgets !== undefined) filled.effortBudgets = effortBudgets;
+	else delete filled.effortBudgets;
 	return filled;
 }
 

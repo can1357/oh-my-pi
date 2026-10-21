@@ -334,6 +334,8 @@ export interface OpenAICompat {
 	trustExplicitThinkingOnly?: boolean;
 	/** Optional mapping from pi-ai reasoning levels to provider/model-specific `reasoning_effort` values. */
 	reasoningEffortMap?: Partial<Record<Effort, string>>;
+	/** When true, `reasoningEffortMap` is the complete accepted level set and must replace, not overlay, class remaps. */
+	reasoningEffortMapAuthoritative?: boolean;
 	/** Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
 	supportsUsageInStreaming?: boolean;
 	/** Which field to use for max tokens. Default: auto-detected from URL. */
@@ -965,6 +967,8 @@ export interface ResolvedOpenAISharedCompat {
 	supportsReasoningEffort: boolean;
 	trustExplicitThinkingOnly?: boolean;
 	reasoningEffortMap: Partial<Record<Effort, string>>;
+	/** True when the map is the complete declared level set, not a sparse overlay. */
+	reasoningEffortMapAuthoritative?: boolean;
 	supportsReasoningParams: boolean;
 	supportsSamplingParams: boolean;
 	supportsPenaltyAndStopParams: boolean;
@@ -1048,6 +1052,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsReasoningEffort"
 			| "trustExplicitThinkingOnly"
 			| "reasoningEffortMap"
+			| "reasoningEffortMapAuthoritative"
 			| "supportsReasoningParams"
 			| "supportsReasoningSummary"
 			| "statefulResponses"

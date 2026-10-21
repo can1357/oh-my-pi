@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed LiteLLM cached discovery retaining rows written before declared reasoning ladders were honored; the rich namespace moved to `litellm-rich-v8` ([#11353](https://github.com/can1357/oh-my-pi/issues/11353))
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes
