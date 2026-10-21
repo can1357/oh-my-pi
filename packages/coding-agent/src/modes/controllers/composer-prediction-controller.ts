@@ -43,7 +43,8 @@ export function parseComposerPrediction(reply: string): string | undefined {
 	let text = sanitizeText(reply).replace(/\s+/g, " ").trim();
 	const quoted = WRAPPING_QUOTES.exec(text);
 	if (quoted) text = (quoted[1] ?? quoted[2] ?? quoted[3] ?? "").trim();
-	if (!text || text.includes(SKIP_REPLY) || text.length > MAX_PREDICTION_LENGTH) return undefined;
+	// Characters as the prompt states the limit: code points, so an emoji is one, not two UTF-16 units.
+	if (!text || text.includes(SKIP_REPLY) || [...text].length > MAX_PREDICTION_LENGTH) return undefined;
 	return text;
 }
 

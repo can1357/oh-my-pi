@@ -21,8 +21,9 @@ describe("parseComposerPrediction", () => {
 		expect(parseComposerPrediction("NO_PREDICTION")).toBeUndefined();
 		expect(parseComposerPrediction("NO_PREDICTION.")).toBeUndefined();
 		expect(parseComposerPrediction(' "" ')).toBeUndefined();
-		expect(parseComposerPrediction("x".repeat(240))).toBe("x".repeat(240));
-		expect(parseComposerPrediction("x".repeat(241))).toBeUndefined();
+		const atLimit = `${"x".repeat(232)}${"😀".repeat(8)}`;
+		expect(parseComposerPrediction(atLimit)).toBe(atLimit);
+		expect(parseComposerPrediction(`${atLimit}x`)).toBeUndefined();
 	});
 });
 
