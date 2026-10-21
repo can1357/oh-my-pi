@@ -2319,8 +2319,8 @@ fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
 fn reset_detached_submodule(dir: &Path, commit: gix::hash::ObjectId) -> Result<()> {
 	let repo = GitRepo::require(dir)?;
 	if repo.info().is_reftable {
-		// gitoxide cannot read reftable repositories, so the checkout goes
-		// through the command line.
+		// gitoxide cannot read reftable repositories, so the checkout and the
+		// clean go through the command line.
 		let args = vec![
 			"checkout".to_owned(),
 			"--detach".to_owned(),
@@ -2328,11 +2328,26 @@ fn reset_detached_submodule(dir: &Path, commit: gix::hash::ObjectId) -> Result<(
 			commit.to_hex().to_string(),
 		];
 		super::cli::run_sync(dir, &args, super::cli::COMMAND_TIMEOUT)?.into_checked(&args)?;
+		// A checkout replaces the tracked files only, so the untracked files
+		// the copy carried along would still be reported; `git clean` removes
+		// them.
+		let args = vec!["clean".to_owned(), "-fd".to_owned()];
+		super::cli::run_sync_write(
+			dir,
+			&args,
+			super::cli::COMMAND_TIMEOUT,
+			&super::cli::SyncWrite { stdin: b"", env: &[] },
+		)?
+		.into_checked(&args)?;
 		return Ok(());
 	}
 	let gix_repo = repo.gix()?;
 	fs::write(dir.join(".git").join("HEAD"), format!("{}\n", commit.to_hex()))?;
 	checkout_tree(&repo, &gix_repo, commit, true)?;
+	// A checkout replaces the tracked files only, so the untracked files the
+	// copy carried along — the source's build artifacts, for instance — would
+	// still be reported and could be consumed by the new worktree.
+	repo.clean(&CleanOptions::default())?;
 	Ok(())
 }
 
@@ -4166,6 +4181,49 @@ mod tests {
 			"a nested repository's own .git directory must survive"
 		);
 		assert!(clone.join(".git").exists(), "the root .git belongs to the new worktree");
+	}
+
+	#[test]
+	fn remove_nested_git_files_cleans_the_untracked_files_a_copied_submodule_carried() {
+		let (temp, source, origin, repo) = fixture_with_submodule("sub");
+		// A build artifact the source's submodule was never told about: it is
+		// untracked, so the copy carries it along.
+		fs::write(source.join("sub/stray.bin"), "artifact\n").unwrap();
+		// The clone copies the source tree verbatim, minus the root `.git`.
+		let clone = temp.path().join("clone");
+		copy_tree(&source, &clone, true);
+		let clone_admin = repo.info().common_dir.join("worktrees/clone");
+		fs::create_dir_all(&clone_admin).unwrap();
+		fs::write(clone.join(".git"), format!("gitdir: {}\n", clone_admin.display())).unwrap();
+		// The superproject pins the submodule to the commit it recorded.
+		let mut gitlinks = BTreeMap::new();
+		gitlinks.insert(
+			"sub".to_owned(),
+			gix::hash::ObjectId::from_hex(git(&origin, &["rev-parse", "HEAD"]).trim().as_bytes())
+				.unwrap(),
+		);
+
+		remove_nested_git_files(&clone, &source, &repo.info().common_dir, &gitlinks, false).unwrap();
+
+		// The stray file would still be reported as untracked inside the
+		// submodule, and a build in the new worktree would consume it.
+		let submodule = clone.join("sub");
+		assert!(
+			!submodule.join("stray.bin").exists(),
+			"the untracked file the copy carried must not survive the reset"
+		);
+		assert_eq!(
+			git(&submodule, &["status", "--porcelain"]),
+			"",
+			"the reset submodule must report a clean tree"
+		);
+		// The submodule keeps its own repository: the clean must not take it.
+		assert!(submodule.join(".git").exists(), "the submodule's Git metadata must survive");
+		assert_eq!(
+			git(&submodule, &["rev-parse", "HEAD"]),
+			git(&origin, &["rev-parse", "HEAD"]),
+			"the detached submodule must keep the submodule's history"
+		);
 	}
 
 	#[test]
