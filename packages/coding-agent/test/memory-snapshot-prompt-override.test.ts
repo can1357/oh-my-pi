@@ -150,7 +150,7 @@ describe("memory snapshot with a replaced system prompt", () => {
 
 			const preparation = await tools.buildSystemPromptForAgentStart("hi", () => true);
 			expect(preparation.commit).toBeDefined();
-			preparation.commit?.();
+			preparation.commit?.(tools.baseSystemPrompt);
 
 			expect(snapshotCount(sessionManager)).toBe(1);
 		} finally {

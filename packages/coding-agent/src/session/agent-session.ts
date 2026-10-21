@@ -187,6 +187,7 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "../memory-backend/recall-entry";
+import { rebindMemorySnapshotSessionFile, recordMemorySnapshotOnCurrentBranch } from "../memories";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from "../modes/magic-keywords";
@@ -5313,6 +5314,12 @@ export class AgentSession implements SettingsScope {
 			if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
 				return { status: "skipped", reason: "session-unavailable" };
 			}
+			// The continuation sends the session's system prompt: the branch it
+			// runs on must record a snapshot of the memory block that prompt
+			// carries, or a later resume rereads the memory files and rebuilds a
+			// different prompt. A branch move — an `ask` re-answer, a manual tool
+			// replay — leaves the branch without a snapshot of its own.
+			this.#restageMemorySnapshotOnCurrentBranch();
 			for (;;) {
 				try {
 					if (!this.agent.state.isStreaming) onStart?.();
@@ -5357,6 +5364,19 @@ export class AgentSession implements SettingsScope {
 			});
 			return { status: "failed", error };
 		}
+	}
+
+	/**
+	 * Record the memory block the session's prompt carries on the branch the
+	 * session continues on.
+	 *
+	 * A branch move — a rewind, an `ask` re-answer, a manual tool replay — leaves
+	 * the prompt carrying the memory block while the branch holds no snapshot of
+	 * its own: a later resume rereads the memory files and rebuilds a different
+	 * prompt.
+	 */
+	#restageMemorySnapshotOnCurrentBranch(): void {
+		recordMemorySnapshotOnCurrentBranch(this.sessionManager, this.#tools.effectiveSystemPrompt);
 	}
 
 	#scheduleAgentContinue(options: ScheduledAgentContinueOptions): void {
@@ -8752,7 +8772,12 @@ export class AgentSession implements SettingsScope {
 				commit: () => {
 					// No await may separate ownership validation from publishing memory and policy.
 					if (!isCurrent() || !overrideIsCurrent()) return undefined;
-					if (basePreparation.commit?.() === false) return undefined;
+					// The prompt the turn actually sends decides whether a staged
+					// memory block may be recorded: an extension that replaced the
+					// base prompt may have dropped the block entirely, and a
+					// transcript must not claim memory the provider never received.
+					const finalPrompt = result?.systemPrompt ?? basePreparation.systemPrompt;
+					if (basePreparation.commit?.(finalPrompt) === false) return undefined;
 					if (result?.systemPrompt !== undefined) {
 						this.#tools.setTurnSystemPromptOverride(result.systemPrompt, basePreparation.systemPrompt);
 					} else {
@@ -13573,7 +13598,13 @@ export class AgentSession implements SettingsScope {
 				} else {
 					this.sessionManager.createBranchedSession(leafId, { copyArtifacts: options?.copyArtifacts });
 				}
-				this.#bash.markSessionTransition(bashTransition);
+				// The new file replaces the source file, but the base prompt — and
+				// with it the memory block it carries — is kept: the staged memory
+				// snapshot must move to the file that will carry it, or the branch's
+				// transcript records no snapshot and a later resume rereads the
+				// memory files and rebuilds a different prompt.
+				rebindMemorySnapshotSessionFile(this.sessionManager);
+				this.#bash.markSessionTransition(bashTransition, sessionTransitioned);
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
 			} finally {
