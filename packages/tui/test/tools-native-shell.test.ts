@@ -816,6 +816,26 @@ describe("user shell runs", () => {
 		expect(props(expanded[0]).max).toBeUndefined();
 	});
 
+	it("shares one preview-height budget across a collapsed card's images", () => {
+		// A per-image maximum alone lets every visible image take the whole
+		// preview window, so eight tall emissions fill 160 rows behind a
+		// nominally collapsed command and push the dropped-output notice far
+		// below the viewport. The collapsed group shares ONE budget instead.
+		const images = Array.from({ length: 8 }, () => ({ type: "image" as const, data: PNG, mimeType: "image/png" }));
+		const run = new BashExecutionComponent("plot", ui, false);
+		run.setComplete(0, false, { output: "done", images });
+		const card = run.describe(cx(["card", "ansi"]));
+		expect(card.k).toBe("card");
+		const collapsed = nodes(card.c).filter(child => child.k === "image");
+		expect(collapsed).toHaveLength(8);
+		const share = Math.floor(PREVIEW_LINES / collapsed.length);
+		for (const image of collapsed) {
+			expect(props(image).max).toMatchObject({ h: `${share}lines` });
+		}
+		// The group as a whole stays inside the card's preview window.
+		expect(collapsed.length * share).toBeLessThanOrEqual(PREVIEW_LINES);
+	});
+
 	it("withholds the dropped-lines notice until the run settles", () => {
 		const run = new BashExecutionComponent("seq 1 250", ui, false);
 		run.appendOutput(Array.from({ length: 250 }, (_, i) => `line-${i}`).join("\n"));
