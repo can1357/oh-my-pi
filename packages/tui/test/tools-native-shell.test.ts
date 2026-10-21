@@ -692,4 +692,14 @@ describe("user shell runs", () => {
 		expect(image?.k).toBe("text");
 		expect(run.describe(cx(["card", "ansi"])).k).toBe("card");
 	});
+
+	it("show the minimizer's filter and byte counts in both footers", () => {
+		const run = new BashExecutionComponent("git diff", ui, false);
+		run.appendOutput("diff --git a/x b/x");
+		run.setComplete(0, false, {
+			minimized: { filter: "git", inputBytes: 28_213, outputBytes: 9_720, artifactId: "2" },
+		});
+		expect(JSON.stringify(run.describe(cx(["tool", "ansi", "code"])))).toContain("Minimized git 27.6KB → 9.5KB");
+		expect(Bun.stripANSI(run.render(120).join("\n"))).toContain("Minimized: git 27.6KB → 9.5KB");
+	});
 });

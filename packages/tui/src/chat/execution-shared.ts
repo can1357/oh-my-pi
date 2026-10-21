@@ -12,7 +12,13 @@ import { Text } from "../components/text";
 import { Container, type TUI } from "../tui";
 import { getSymbolTheme, theme } from "../theme/theme";
 import type { OutputArtifactError } from "../tools/streaming-output";
-import { formatArtifactErrorNotice, formatTruncationMetaNotice, type TruncationMeta } from "../tools/output-meta";
+import {
+	formatArtifactErrorNotice,
+	formatMinimizedMeta,
+	formatTruncationMetaNotice,
+	type MinimizedMeta,
+	type TruncationMeta,
+} from "../tools/output-meta";
 import { DynamicBorder } from "../chrome/dynamic-border";
 import { Ellipsis, truncateToWidth, visibleWidth } from "../utils";
 import { interruptKey } from "../chrome/keybinding-hints";
@@ -83,6 +89,7 @@ export function buildStatusFooter(opts: {
 	exitCode: number | undefined;
 	truncation: TruncationMeta | undefined;
 	artifactError?: OutputArtifactError;
+	minimized?: MinimizedMeta;
 	hiddenLineCount: number;
 	/** Suppress the "… N more lines" hint (used when sixel passthrough renders the full output). */
 	suppressHiddenCount?: boolean;
@@ -102,6 +109,9 @@ export function buildStatusFooter(opts: {
 	}
 	if (opts.artifactError) {
 		parts.push(theme.fg("warning", formatArtifactErrorNotice(opts.artifactError)));
+	}
+	if (opts.minimized) {
+		parts.push(theme.fg("dim", `Minimized: ${formatMinimizedMeta(opts.minimized)}`));
 	}
 
 	if (parts.length === 0) return undefined;
@@ -207,6 +217,7 @@ export interface ExecutionToolInput {
 	readonly exitCode: number | undefined;
 	readonly truncation: TruncationMeta | undefined;
 	readonly artifactError?: OutputArtifactError;
+	readonly minimized?: MinimizedMeta;
 }
 
 const EXECUTION_RUN_STATE: Record<ExecutionStatus, RunState> = {
@@ -244,6 +255,7 @@ export function describeExecutionTool(input: ExecutionToolInput): NativeNode {
 				state,
 				exitCode: input.exitCode,
 				elapsedMs: ms,
+				facts: input.minimized ? [`Minimized ${formatMinimizedMeta(input.minimized)}`] : undefined,
 				meta: { truncation: input.truncation, artifactError: input.artifactError },
 			}),
 		],
