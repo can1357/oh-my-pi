@@ -135,13 +135,6 @@
 
 - Added OpenAI 12-hour prompt caching for GPT-5.6+ on the Responses API: `cacheRetention: "long"` now requests `prompt_cache_options.ttl: "12h"` (instead of the ignored legacy `prompt_cache_retention: "24h"`), and `promptCache.ttl` accepts `"12h"`
 
-
-## [18.12.5] - 2026-10-21
-
-### Added
-
-- Added OpenAI 12-hour prompt caching for GPT-5.6+ on the Responses API: `cacheRetention: "long"` now requests `prompt_cache_options.ttl: "12h"` (instead of the ignored legacy `prompt_cache_retention: "24h"`), and `promptCache.ttl` accepts `"12h"`
-
 ### Fixed
 
 ## [18.12.5] - 2026-10-21
