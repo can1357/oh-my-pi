@@ -2,7 +2,7 @@
 //! `sloppy`: Levenshtein similarity, whole-block fuzzy search,
 //! line-sequence placement, and context-line placement.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use crate::{
 	error::EditError,
@@ -1331,16 +1331,25 @@ fn boundary_difference_hint(position: &str, expected: &str, actual: &str) -> Vec
 	} else {
 		return hints;
 	};
-	let mut counts: BTreeMap<char, usize> = BTreeMap::new();
-	for ch in leftover {
-		*counts.entry(*ch).or_insert(0) += 1;
+	// The codepoints in the order the line holds them: the renderer replaces
+	// a tab with spaces, so a hint that sorted them would leave the caller
+	// unable to reproduce the line. Consecutive equal codepoints are grouped,
+	// so a run of three spaces still reads as one entry.
+	let mut codepoints: Vec<String> = Vec::new();
+	let mut offset = 0;
+	while offset < leftover.len() {
+		let ch = leftover[offset];
+		let mut count = 1;
+		while offset + count < leftover.len() && leftover[offset + count] == ch {
+			count += 1;
+		}
+		codepoints.push(format!("U+{:04X} x{count}", ch as u32));
+		offset += count;
 	}
-	let codepoints = counts
-		.iter()
-		.map(|(ch, count)| format!("U+{:04X} x{count}", *ch as u32))
-		.collect::<Vec<_>>()
-		.join(", ");
-	hints.push(format!("  differs at the {position}: {codepoints} only in the {side} line"));
+	hints.push(format!(
+		"  differs at the {position}: {} only in the {side} line",
+		codepoints.join(", ")
+	));
 	hints
 }
 
@@ -2148,6 +2157,29 @@ mod tests {
 				 high-confidence matches."
 			)
 		);
+	}
+
+	#[test]
+	fn match_error_names_the_boundary_codepoints_in_the_order_the_line_holds_them() {
+		// The renderer replaces a tab with spaces, so the printed pair cannot
+		// recover the order of the boundary whitespace: the hint has to name
+		// the codepoints in the order the line holds them.
+		let error = exact_edit_error("foo \t ", "foo", "x");
+		assert!(
+			error
+				.contains("  differs at the end: U+0020 x1, U+0009 x1, U+0020 x1 only in the + line\n"),
+			"{error}"
+		);
+	}
+
+	#[test]
+	fn match_error_names_the_run_codepoints_in_the_order_the_line_holds_them() {
+		// The same for a run inside the line: the codepoints the file has in
+		// excess are named one position at a time, so the caller can write
+		// them back in the order the file holds them.
+		let error = exact_edit_error("foo \t bar", "foo bar", "x");
+		assert!(error.contains("  differs at char 5: U+0009 x1 only in the + line\n"), "{error}");
+		assert!(error.contains("  differs at char 6: U+0020 x1 only in the + line\n"), "{error}");
 	}
 
 	#[test]

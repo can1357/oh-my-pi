@@ -5,8 +5,6 @@
 //! Ports `packages/hashline/src/normalize.ts` and
 //! `packages/coding-agent/src/edit/normalize.ts`.
 
-use std::collections::BTreeMap;
-
 use xutf::IntoUnicodeNormalized;
 
 /// Line-ending style of a file.
@@ -581,7 +579,10 @@ fn run_differences(
 		});
 	}
 	// The codepoints the longer run has in excess: the matcher charges for
-	// none of them, but an exact match charges for all of them.
+	// none of them, but an exact match charges for all of them. They are
+	// reported in the order the run holds them — the renderer expands a tab
+	// into spaces, so a hint that sorted them would leave the caller unable
+	// to reproduce the line.
 	let (leftover, index, in_expected) = if expected_chars.len() > actual_chars.len() {
 		(&expected_chars[common..], expected.index + common, true)
 	} else if actual_chars.len() > expected_chars.len() {
@@ -589,17 +590,20 @@ fn run_differences(
 	} else {
 		return differences;
 	};
-	let mut counts: BTreeMap<char, usize> = BTreeMap::new();
-	for ch in leftover {
-		*counts.entry(*ch).or_insert(0) += 1;
-	}
-	for (ch, count) in counts {
+	let mut offset = 0;
+	while offset < leftover.len() {
+		let ch = leftover[offset];
+		let mut count = 1;
+		while offset + count < leftover.len() && leftover[offset + count] == ch {
+			count += 1;
+		}
 		differences.push(FoldedDifference {
-			index,
+			index: index + offset,
 			expected: in_expected.then_some(ch),
 			actual: (!in_expected).then_some(ch),
 			count,
 		});
+		offset += count;
 	}
 	differences
 }
