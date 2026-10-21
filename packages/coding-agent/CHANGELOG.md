@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Added
+
 - Added `/advisor on`/`off` and the bare toggle to the focused-subagent view: they now flip the advisor of the agent you are looking at instead of the main session's ([#15055](https://github.com/can1357/oh-my-pi/issues/15055), [#15171](https://github.com/can1357/oh-my-pi/pull/15171) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.5] - 2026-10-21
