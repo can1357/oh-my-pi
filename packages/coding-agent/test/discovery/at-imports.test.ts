@@ -115,8 +115,9 @@ describe("expandAtImports", () => {
 
 		const expanded = await expandAtImports(await fs.readFile(a, "utf8"), a);
 
-		// The second hop sees the original importer in `visited` and bails,
-		// leaving its literal @-token but emitting all earlier text.
+		// The second hop points back at an ancestor of the current import
+		// chain and bails, leaving its literal @-token but emitting all
+		// earlier text.
 		expect(expanded).toContain("A: B:");
 		expect(expanded).toContain("@loop-a.md");
 	});
