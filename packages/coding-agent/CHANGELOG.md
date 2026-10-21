@@ -45,7 +45,7 @@
 - `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
 
 ### Fixed
-- Fixed a startup that evaluated the extension, custom-tool, custom-command and hook loader graphs - and with them the whole package barrel - before the first prompt; the `@file` attachment processor, the `--from-claude`/`--from-opencode` resume importer and the python-eval startup probe now load on demand instead of at boot ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed the CLI evaluating the extension, custom-tool, custom-command and hook loader graphs - and the package barrel behind them - while it boots; they are now imported on demand, and the `@file` attachment processor, the `--from-claude`/`--from-opencode` resume importer and the python-eval startup probe load only when used ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed subagents spawning at a caller-supplied `effort` (e.g. `hi` → `max`) while `task.enableEffort` is off; the field is now ignored and the agent's configured thinking level (including `:auto`) applies ([#16402](https://github.com/can1357/oh-my-pi/issues/16402))
 - Fixed `omp update --check` failing against JFrog Artifactory registries that add empty `dist-tags` to a tagged manifest; the update check now uses the registry's curated latest version ([#16375](https://github.com/can1357/oh-my-pi/issues/16375))
