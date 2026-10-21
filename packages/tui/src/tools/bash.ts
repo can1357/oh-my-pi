@@ -1,6 +1,5 @@
 import type { Component } from "../tui";
-import { formatBytes, getProjectDir, jsonContainerEnd, sanitizeText } from "@oh-my-pi/pi-utils";
-import { truncateToWidth } from "../utils";
+import { getProjectDir, jsonContainerEnd } from "@oh-my-pi/pi-utils";
 import { highlightCode, type Theme } from "../theme/theme";
 import { renderStatusLine } from "../render/status-line";
 import { framedToolCard, type ToolCardSnapshot } from "../render/tool-card";
@@ -12,11 +11,10 @@ import {
 	formatToolWorkingDirectory,
 	previewWindowRows,
 	replaceTabs,
-	TRUNCATE_LENGTHS,
 } from "../render/render-utils";
 import {
+	formatMinimizedMeta,
 	formatStyledTruncationWarning,
-	type MinimizedMeta,
 	type OutputMeta,
 	stripOutputNotice,
 	stripRawOutputArtifactNotice,
@@ -356,23 +354,12 @@ function bashStatsParts(
 	}
 	const minimized = details?.meta?.minimized;
 	if (minimized) {
-		statsParts.push(`Minimized: ${formatMinimized(minimized)}`);
+		statsParts.push(`Minimized: ${formatMinimizedMeta(minimized)}`);
 	}
 	if (isError && typeof details?.exitCode === "number") {
 		statsParts.push(`Exit: ${details.exitCode}`);
 	}
 	return statsParts;
-}
-
-/**
- * `git 120.4KB → 3.2KB`: the minimizer filter that ran and the bytes it took the output from and to.
- * Native labels are short words; a rehydrated session or extension may carry any text, so the label
- * is sanitized to one plain line and width-bounded.
- */
-function formatMinimized(minimized: MinimizedMeta): string {
-	const label = sanitizeText(minimized.filter).replace(/\s+/gu, " ").trim();
-	const filter = truncateToWidth(label, TRUNCATE_LENGTHS.SHORT);
-	return `${filter} ${formatBytes(minimized.inputBytes)} → ${formatBytes(minimized.outputBytes)}`;
 }
 
 /**
@@ -419,7 +406,7 @@ function shellFootParts(details: BashToolDetails | undefined, artifactId: string
 	}
 	if (artifactId) parts.push(`Artifact ${artifactId}`);
 	const minimized = details?.meta?.minimized;
-	if (minimized) parts.push(`Minimized ${formatMinimized(minimized)}`);
+	if (minimized) parts.push(`Minimized ${formatMinimizedMeta(minimized)}`);
 	return parts;
 }
 
