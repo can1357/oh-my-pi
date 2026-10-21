@@ -700,6 +700,7 @@ describe("user shell runs", () => {
 			minimized: { filter: "git", inputBytes: 28_213, outputBytes: 9_720, artifactId: "2" },
 		});
 		expect(JSON.stringify(run.describe(cx(["tool", "ansi", "code"])))).toContain("Minimized git 27.6KB → 9.5KB");
+		expect(JSON.stringify(run.describe(cx(["card", "ansi"])))).toContain("Minimized: git 27.6KB → 9.5KB");
 		expect(Bun.stripANSI(run.render(120).join("\n"))).toContain("Minimized: git 27.6KB → 9.5KB");
 	});
 });
