@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -74,6 +74,12 @@ const FINDING: Diagnostic = {
 };
 
 describe("issue #15408: diagnostics that never arrive are not a clean file", () => {
+	// Restore in a hook, not at the end of a test body: an expectation that
+	// fails must not leave `getOrCreateClient` mocked for the next test.
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("refuses the wait when the server published nothing for the document", async () => {
 		const client = silentClient("silent-push", "/tmp/issue-15408", {
 			command: "silent-push",
@@ -89,7 +95,7 @@ describe("issue #15408: diagnostics that never arrive are not a clean file", () 
 		);
 	});
 
-	it("still accepts a published report, including an empty one", async () => {
+	it("still accepts a published report", async () => {
 		const client = silentClient("push-lsp", "/tmp/issue-15408", {
 			command: "push-lsp",
 			fileTypes: ["toml"],
@@ -100,6 +106,22 @@ describe("issue #15408: diagnostics that never arrive are not a clean file", () 
 		client.diagnosticsVersion += 1;
 
 		expect(await waitForDiagnostics(client, uri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([FINDING]);
+	});
+
+	it("accepts an empty published report instead of refusing it", async () => {
+		const client = silentClient("push-lsp", "/tmp/issue-15408", {
+			command: "push-lsp",
+			fileTypes: ["toml"],
+			rootMarkers: [],
+		});
+		const uri = "file:///tmp/issue-15408/wrangler.toml";
+		// The server published a report and it was empty: that is a verdict
+		// (a clean file), not a missing one. Only a missing report is refused,
+		// so this case must not be confused with the one above.
+		client.diagnostics.set(uri, { diagnostics: [], version: null });
+		client.diagnosticsVersion += 1;
+
+		expect(await waitForDiagnostics(client, uri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([]);
 	});
 
 	it("reports a file no server judged as unjudged instead of clean", async () => {
@@ -120,8 +142,6 @@ describe("issue #15408: diagnostics that never arrive are not a clean file", () 
 		expect(result?.messages).toEqual([]);
 		expect(result?.errored).toBe(false);
 		expect(result?.unjudgedServers).toEqual(["silent-lsp"]);
-
-		vi.restoreAllMocks();
 	});
 
 	it("keeps the findings of a server that judged the file and names the silent one", async () => {
@@ -153,8 +173,6 @@ describe("issue #15408: diagnostics that never arrive are not a clean file", () 
 		expect(result?.summary).toContain("1 error(s)");
 		expect(result?.summary).toContain("diagnostics unavailable from silent-lsp");
 		expect(result?.unjudgedServers).toEqual(["silent-lsp"]);
-
-		vi.restoreAllMocks();
 	});
 
 	it("fails the `lsp diagnostics` tool instead of reporting a clean file", async () => {
@@ -194,7 +212,6 @@ describe("issue #15408: diagnostics that never arrive are not a clean file", () 
 			expect(output).toContain("no diagnostics available");
 			expect(output).toContain("silent-lsp");
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	}, 15_000);
