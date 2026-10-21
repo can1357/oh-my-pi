@@ -7,8 +7,11 @@ import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import {
 	type CellDimensions,
 	getCellDimensions,
+	getTerminalBackgroundColor,
 	ImageProtocol,
+	renderImage,
 	setCellDimensions,
+	setTerminalBackgroundColor,
 	TERMINAL,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -19,6 +22,9 @@ const terminal = TERMINAL as unknown as MutableTerminalInfo;
 // 2x2 red PNG (same fixture as attachment-chips.test.ts): the header probe decodes it to 2x2.
 const TINY_PNG =
 	"iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP8z8DwnwEKmBhQAAA9+AQBHYLp7wAAAABJRU5ErkJggg==";
+// Interior bounds of an image card (INNER_COLS x INNER_ROWS in attachment-chips.ts).
+const CARD_INNER_COLS = 12;
+const CARD_INNER_ROWS = 4;
 const FAKE_SIXEL = "\x1bPq#0;2;0;0;0#0~\x1b\\";
 
 const ORIGINAL_PROTOCOL = TERMINAL.imageProtocol;
@@ -113,6 +119,37 @@ describe("AttachmentChipsBand SIXEL thumbnail", () => {
 			encode.mockRestore();
 		}
 	});
+	it("re-encodes with the new terminal background when it changes", async () => {
+		let encoding: Promise<string> | undefined;
+		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => {
+			encoding = Promise.resolve(FAKE_SIXEL);
+			return encoding;
+		});
+		try {
+			setTerminalBackgroundColor(0x112233);
+			const { editor, band } = makeBand();
+			stageImage(editor);
+			band.render(80);
+			await encoding;
+			expect(encode).toHaveBeenCalledTimes(1);
+			expect(encode.mock.calls[0]?.[3]).toBe(getTerminalBackgroundColor());
+			const first = encode.mock.calls[0]?.[3];
+
+			band.render(80);
+			expect(encode).toHaveBeenCalledTimes(1);
+
+			setTerminalBackgroundColor(0xeeddcc);
+			band.render(80);
+			await encoding;
+			expect(encode).toHaveBeenCalledTimes(2);
+			expect(encode.mock.calls[1]?.[3]).toBe(getTerminalBackgroundColor());
+			expect(encode.mock.calls[1]?.[3]).not.toBe(first);
+		} finally {
+			setTerminalBackgroundColor(undefined);
+			encode.mockRestore();
+		}
+	});
+
 	it("repaints the former chip rows once when the last attachment is cleared", async () => {
 		let encoding: Promise<string> | undefined;
 		const encode = spyOn(natives, "encodeSixelAsync").mockImplementation(() => {
@@ -356,8 +393,7 @@ describe("AttachmentChipsBand SIXEL thumbnail", () => {
 			return encoding;
 		});
 		try {
-			// Wide header-only PNG: probe yields 560x100. Shared fit is 108x36;
-			// the removed local sixelThumbFit produced 101x18 for the same source.
+			// Wide header-only PNG: probe yields 560x100.
 			const wide = Buffer.alloc(33);
 			wide.write("\x89PNG\r\n\x1a\n", 0, "binary");
 			wide.writeUInt32BE(13, 8);
@@ -373,7 +409,29 @@ describe("AttachmentChipsBand SIXEL thumbnail", () => {
 			editor.insertAtom(chipLabel("image", 1), "[Image #1, 560x100]");
 			band.render(80);
 			await encoding;
-			expect(encode).toHaveBeenCalledWith(expect.any(Uint8Array), 108, 36);
+			// The fit is whatever renderImage computes for the same source and bounds, not a number
+			// pinned here; it must differ from the removed local sixelThumbFit (101x18).
+			let fitted: [number, number] | undefined;
+			renderImage(
+				wide.toString("base64"),
+				{ widthPx: 560, heightPx: 100 },
+				{
+					maxWidthCells: CARD_INNER_COLS,
+					maxHeightCells: CARD_INNER_ROWS,
+					sixel: (widthPx, heightPx) => {
+						fitted = [widthPx, heightPx];
+						return FAKE_SIXEL;
+					},
+				},
+			);
+			expect(fitted).toBeDefined();
+			expect(fitted).not.toEqual([101, 18]);
+			expect(encode).toHaveBeenCalledWith(
+				expect.any(Uint8Array),
+				fitted![0],
+				fitted![1],
+				getTerminalBackgroundColor(),
+			);
 			expect(band.render(80)[5]).toContain(FAKE_SIXEL);
 		} finally {
 			encode.mockRestore();
