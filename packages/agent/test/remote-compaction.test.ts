@@ -9,6 +9,7 @@ import {
 	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 	NativeCompactionError,
+	parseChatCompletionsUsage,
 	prepareCompaction,
 	type SessionEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
@@ -3996,4 +3997,73 @@ describe("compact() remote summary usage", () => {
 			totalTokens: 230,
 		});
 	});
+});
+
+describe("remote compaction usage parsing", () => {
+	test("reads the warm cache from a gateway's top-level cached_tokens", () => {
+		// A gateway can report the warm cache top-level instead of in
+		// `prompt_tokens_details`; reading only the nested field would charge
+		// the whole prompt as fresh input.
+		const usage = parseChatCompletionsUsage({
+			prompt_tokens: 100,
+			completion_tokens: 10,
+			cached_tokens: 40,
+		});
+
+		expect(usage?.accounting.cacheRead).toBe(40);
+		expect(usage?.accounting.input).toBe(60);
+	});
+
+	test("reads the warm cache from Vertex's cachedContentTokenCount", () => {
+		const usage = parseChatCompletionsUsage({
+			prompt_tokens: 100,
+			completion_tokens: 10,
+			cachedContentTokenCount: 25,
+		});
+
+		expect(usage?.accounting.cacheRead).toBe(25);
+		expect(usage?.accounting.input).toBe(75);
+	});
+
+	test("keeps the cost a provider reported for the request", () => {
+		const usage = parseChatCompletionsUsage({
+			prompt_tokens: 100,
+			completion_tokens: 10,
+			cost: 0.0042,
+			cost_details: { upstream_inference_cost: 0.0031 },
+		});
+
+		expect(usage?.providerCost?.total).toBe(0.0042);
+		expect(usage?.providerCost?.upstreamInferenceCost).toBe(0.0031);
+	});
+
+	test("reports no provider cost when the provider reported none", () => {
+		const usage = parseChatCompletionsUsage({ prompt_tokens: 100, completion_tokens: 10 });
+
+		expect(usage?.providerCost).toBeUndefined();
+	});
+});
+
+test("carries the usage through a V1 compact response whose output is not an array", async () => {
+	// A malformed response carries a non-array `output`; the unchecked
+	// `.filter` threw a bare TypeError, which lost the usage the provider had
+	// already billed.
+	const fetchMock: FetchImpl = async () =>
+		new Response(
+			JSON.stringify({
+				output: {},
+				usage: { input_tokens: 120, output_tokens: 30 },
+			}),
+		);
+
+	await expect(
+		requestOpenAiRemoteCompaction(
+			makeOpenAiModel({ contextWindow: 1_000 }),
+			"test-key",
+			[{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+			"instructions",
+			undefined,
+			{ fetch: fetchMock },
+		),
+	).rejects.toThrow("Remote compaction response missing compaction item");
 });

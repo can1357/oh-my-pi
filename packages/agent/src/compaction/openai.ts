@@ -1002,7 +1002,10 @@ export async function requestOpenAiRemoteCompaction(
 	// reports the same `usage` object. The parser used to drop it, so the
 	// session ledger never saw what this request cost.
 	const usage = parseResponsesUsage(data?.usage);
-	const rawOutput = data?.output ?? [];
+	// `output` is not guaranteed to be an array: a malformed response carries an
+	// object, and the unchecked `.filter` below would throw a bare TypeError
+	// that loses the usage the provider already billed.
+	const rawOutput = Array.isArray(data?.output) ? data.output : [];
 	const replacementHistory = rawOutput.filter(
 		(item): item is Record<string, unknown> =>
 			!!item && typeof item === "object" && shouldKeepOpenAiCompactOutputItem(item as Record<string, unknown>),

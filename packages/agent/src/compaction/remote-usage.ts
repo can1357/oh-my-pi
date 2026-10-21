@@ -35,6 +35,20 @@ export interface RemoteCompactionUsage {
 	outputTokens: number;
 	/** The billed bucket split. */
 	accounting: OpenAIUsageAccounting;
+	/**
+	 * Cost the provider reported for the request, when it reported one.
+	 *
+	 * A gateway (OpenRouter and BYOK providers) can bill the request itself
+	 * and return the amount in `usage.cost` or in
+	 * `usage.cost_details.upstream_inference_cost`. Returning only token
+	 * accounting would discard what the provider charged.
+	 */
+	providerCost?: {
+		/** Total cost the provider reported for the request. */
+		total?: number;
+		/** Upstream inference cost, for a BYOK request billed by the gateway. */
+		upstreamInferenceCost?: number;
+	};
 }
 
 function numberField(source: Record<string, unknown>, field: string): number | undefined {
@@ -109,18 +123,40 @@ export function parseChatCompletionsUsage(raw: unknown): RemoteCompactionUsage |
 	if (inputTokens === undefined || outputTokens === undefined) return undefined;
 	const inputDetails = detailsField(raw, "prompt_tokens_details");
 	const outputDetails = detailsField(raw, "completion_tokens_details");
-	const cachedTokens = inputDetails ? numberField(inputDetails, "cached_tokens") : undefined;
+	// A gateway can report the warm cache through any of three fields: the
+	// OpenAI `prompt_tokens_details.cached_tokens`, a top-level `cached_tokens`,
+	// or Vertex's `cachedContentTokenCount`. Reading only the first would
+	// charge the whole prompt as fresh input.
+	const cachedTokens =
+		(inputDetails ? numberField(inputDetails, "cached_tokens") : undefined) ??
+		numberField(raw, "cached_tokens") ??
+		numberField(raw, "cachedContentTokenCount");
 	const cacheWriteTokens = inputDetails ? numberField(inputDetails, "cache_write_tokens") : undefined;
 	const cacheHitTokens = numberField(raw, "prompt_cache_hit_tokens");
 	const cacheMissTokens = numberField(raw, "prompt_cache_miss_tokens");
 	const accounting = calculateOpenAIUsageAccounting({
 		promptTokens: inputTokens,
-		outputTokens,
+		outputTokens: outputTokens,
 		cachedTokens: cachedTokens ?? 0,
 		reasoningTokens: (outputDetails ? numberField(outputDetails, "reasoning_tokens") : undefined) ?? 0,
 		cacheWriteOpenRouter: cacheWriteTokens,
 		cacheWriteDeepSeek: cacheMissTokens,
 		hasDeepSeekCacheHitAndMiss: cacheHitTokens !== undefined && cacheMissTokens !== undefined,
 	});
-	return { inputTokens, outputTokens, accounting };
+	return { inputTokens, outputTokens, accounting, ...parseProviderCost(raw) };
+}
+
+/**
+ * The cost the provider reported for the request, if it reported one.
+ *
+ * A gateway bills the request itself and returns the amount either as
+ * `usage.cost` (total) or as `usage.cost_details.upstream_inference_cost`
+ * (the upstream inference part of a BYOK request).
+ */
+function parseProviderCost(raw: Record<string, unknown>): { providerCost?: RemoteCompactionUsage["providerCost"] } {
+	const total = numberField(raw, "cost");
+	const costDetails = detailsField(raw, "cost_details");
+	const upstreamInferenceCost = costDetails ? numberField(costDetails, "upstream_inference_cost") : undefined;
+	if (total === undefined && upstreamInferenceCost === undefined) return {};
+	return { providerCost: { total, upstreamInferenceCost } };
 }

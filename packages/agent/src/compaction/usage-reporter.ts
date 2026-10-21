@@ -135,6 +135,14 @@ export function reportRemoteCompactionUsage(
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	calculateCost(model, usage);
+	// A gateway that bills the request itself reports what it charged; the
+	// locally computed cost would contradict it, so the reported amount wins.
+	if (reported.providerCost) {
+		const total = reported.providerCost.total;
+		if (total !== undefined) {
+			usage.cost = { ...usage.cost, total };
+		}
+	}
 	options.onUsage(
 		compactionUsageRecord(
 			{ api: model.api, provider: model.provider, model: model.id, usage, stopReason: "stop" },
