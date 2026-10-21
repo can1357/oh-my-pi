@@ -6,11 +6,11 @@
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))
 
 - Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed a cursor tool result transform failure being swallowed silently; it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.4] - 2026-10-20
 
 ### Fixed
-- Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Enabled native compaction for supported Bedrock Claude models ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 
