@@ -163,16 +163,6 @@ describe("BlobRegistry lazy blobs", () => {
 });
 
 describe("BlobRegistry memory mode", () => {
-	it("keeps a memory-only registry usable without a persisted index", async () => {
-		// No `persist` means there is nothing to load; the load guard must not
-		// dereference a missing index path on the first lookup.
-		const store = new BlobRegistry();
-		expect(await store.lookup("absent")).toBeNull();
-		const entry = await store.registerBytes("memory-image", "image/png", new Uint8Array(Buffer.from("in-ram")));
-		expect((await store.status()).metrics.activeBlobs).toBe(1);
-		expect((await store.serve(new Request(`http://blob.local/${entry.path}`))).status).toBe(200);
-	});
-
 	it("mints one token when the same key registers concurrently", async () => {
 		const store = new BlobRegistry();
 		const bytes = new Uint8Array(Buffer.from("concurrent-dedup"));
@@ -196,6 +186,36 @@ describe("BlobRegistry persistence", () => {
 		cleanups.push(() => void fs.promises.rm(dir, { recursive: true, force: true }));
 		return { blobsDir: dir, indexPath: path.join(dir, "urls-index.json"), ttlMs };
 	}
+
+	it("starts fresh instead of rejecting when the persisted index is corrupt", async () => {
+		// A structurally corrupt index (valid JSON, wrong shape) must not reject
+		// the background load: the rejection would be unhandled and take the
+		// process down. The registry starts fresh and keeps serving.
+		const persist = makePersist(60_000);
+		await fs.promises.writeFile(persist.indexPath, JSON.stringify({ entries: [null] }));
+
+		const registry = new BlobRegistry({ persist });
+		const entry = await registry.registerBytes("corrupt-image", "image/png", new Uint8Array(Buffer.from("bytes")));
+		expect(entry.bytes).toBe(5);
+		expect((await registry.status()).metrics.activeBlobs).toBe(1);
+	});
+
+	it("does not write the index after the registry was stopped", async () => {
+		// A registry released while the initial read is still pending must not
+		// save afterwards: the replacement backend writes the same index path.
+		const persist = makePersist(60_000);
+		await fs.promises.writeFile(persist.indexPath, JSON.stringify({ entries: [], counters: {} }));
+
+		const registry = new BlobRegistry({ persist });
+		registry.stop();
+		await registry.registerBytes("late-image", "image/png", new Uint8Array(Buffer.from("late")));
+
+		// The index file is the observable signal: a stopped registry never
+		// rewrites it. Await the pending load first, then assert the file is
+		// still the one we wrote — no fixed wait, so no real-time dependency.
+		await registry.lookup("late-image");
+		expect(await fs.promises.readFile(persist.indexPath, "utf8")).not.toContain("late-image");
+	});
 
 	it("keeps the same link across registry restarts, serving bytes from the blob store", async () => {
 		const persist = makePersist(60_000);

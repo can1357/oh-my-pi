@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+
+## [18.12.5] - 2026-10-21
 ### Fixed
 - Fixed blob URL index loading blocking startup ([#16132](https://github.com/can1357/oh-my-pi/pull/16132) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
