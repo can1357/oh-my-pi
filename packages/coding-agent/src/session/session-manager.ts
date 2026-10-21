@@ -121,6 +121,7 @@ import {
 	atomicPersistenceCarrierKeys,
 	forgetExternalizedImages,
 	isAtomicPersistenceNodeOwnFields,
+	isSnapcompactArchiveSlot,
 	MAX_PROTOTYPE_CHAIN_DEPTH,
 	prepareEntryForPersistence,
 	projectorImageField,
@@ -1760,6 +1761,12 @@ function hasSerializerHook(
 			const descriptor = Object.getOwnPropertyDescriptor(value, childKey);
 			if (descriptor === undefined) continue;
 			if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+			// The snapcompact archive is rebuilt by `persistSnapcompactArchive`,
+			// not by the generic path: every field but its frames is kept
+			// verbatim — including a field the generic path strips — and the
+			// frames are read by key. The own-key stamp describes neither, so a
+			// graph carrying an archive is left uncached and re-projected.
+			if (isSnapcompactArchiveSlot(key, childKey, descriptor.value)) return true;
 			if (!nodeAtomic && TRANSIENT_PERSISTENCE_KEYS.includes(childKey)) continue;
 			pending.push({
 				kind: "value",
