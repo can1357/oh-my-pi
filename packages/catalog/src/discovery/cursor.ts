@@ -9,7 +9,7 @@ import { Effort, THINKING_EFFORTS } from "../effort";
 import { getBundledModels } from "../models";
 import { datedCost, parseDatedCostCards } from "../pricing";
 import { toModelSpec } from "../provider-models/bundled-references";
-import type { CursorModelRoute, Model, ModelCost, ModelSpec, TokenCost } from "../types";
+import type { CursorModelRoute, InputModality, Model, ModelCost, ModelSpec, TokenCost } from "../types";
 import {
 	CURSOR_AVAILABLE_MODELS_PATH,
 	CURSOR_DEFAULT_BASE_URL,
@@ -826,7 +826,7 @@ function buildRichCursorLane(
 		const discoveredContextWindow =
 			contextLimit ?? details.autoContextExtendedMaxTokens ?? details.autoContextMaxTokens;
 		const fallbackContext = reference?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
-		const input: ("text" | "image")[] =
+		const input: InputModality[] =
 			details.supportsImages === undefined
 				? resolveCursorInput(entry.id, reference?.input)
 				: details.supportsImages
@@ -1156,7 +1156,7 @@ function pickModelDisplayName(model: CursorModelDetailsValue, fallbackId: string
  * Without a reference, families whose native catalogs are multimodal
  * (anthropic, gemini, openai) fall back to id classification.
  */
-export function resolveCursorInput(id: string, referenceInput?: ("text" | "image")[]): ("text" | "image")[] {
+export function resolveCursorInput(id: string, referenceInput?: InputModality[]): InputModality[] {
 	if (referenceInput) {
 		return referenceInput;
 	}

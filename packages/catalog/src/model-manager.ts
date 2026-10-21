@@ -6,7 +6,7 @@ import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
 import { TimeBasedCostShape } from "./pricing";
-import { type Api, type Model, modelKind, type ModelSpec, type Provider } from "./types";
+import { type Api, INPUT_MODALITIES, type Model, modelKind, type ModelSpec, type Provider } from "./types";
 import { isRecord } from "./utils";
 
 const DEFAULT_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
@@ -705,9 +705,12 @@ function mergeDynamicModel<TApi extends Api>(
 	// images to a now text-only route.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
 	const dynamicInputAuthoritative = endpointChanged || authority.input;
-	const supportsImage = dynamicInputAuthoritative
-		? dynamicModel.input.includes("image")
-		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
+	const input = INPUT_MODALITIES.filter(
+		modality =>
+			modality === "text" ||
+			dynamicModel.input.includes(modality) ||
+			(!dynamicInputAuthoritative && existingModel.input.includes(modality)),
+	);
 	// Providers with authoritative reasoning metadata must not regain a
 	// stale bundled dial after explicitly reporting no reasoning. Others
 	// retain the additive fallback for discovery that omits capabilities.
@@ -748,7 +751,7 @@ function mergeDynamicModel<TApi extends Api>(
 			preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
 		...(trustsOwnThinking ? { thinking: dynamicModel.thinking } : {}),
-		input: supportsImage ? ["text", "image"] : ["text"],
+		input,
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input, authority.cost),
 			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output, authority.cost),
@@ -852,7 +855,10 @@ const ModelSpecShape = type({
 	provider: "string > 0",
 	baseUrl: "string > 0",
 	reasoning: "boolean",
-	input: "('text' | 'image')[] > 0",
+	input: type
+		.enumerated(...INPUT_MODALITIES)
+		.array()
+		.atLeastLength(1),
 	cost: FiniteTokenCost.and({
 		"timeBased?": TimeBasedCostShape.or("undefined"),
 		"longContext?": FiniteTokenCost.and({ inputThreshold: "number > 0" }).or("undefined"),

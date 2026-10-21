@@ -43,7 +43,7 @@ import type {
 	UsageMetadata,
 } from "./google-types";
 import { transformMessages } from "./transform-messages";
-import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+import { isAudioContent, NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export type {
 	Content,
@@ -244,7 +244,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						const text = item.text.toWellFormed();
 						if (text.trim().length === 0) continue;
 						parts.push({ text });
-					} else if (supportsImages) {
+					} else if (supportsImages || isAudioContent(item)) {
 						parts.push(convertGoogleImagePart(item));
 					} else {
 						omittedImages = true;

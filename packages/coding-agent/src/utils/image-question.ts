@@ -31,6 +31,39 @@ export interface ImageQuestionResult {
 	usage: Usage;
 }
 
+function patternResolver(
+	session: ToolSession,
+	availableModels: Model<Api>[],
+): (pattern: string | undefined) => Model<Api> | undefined {
+	const matchPreferences = getModelMatchPreferences(session.settings);
+	return pattern =>
+		pattern
+			? resolveModelFromString(expandRoleAlias(pattern, session.settings), availableModels, matchPreferences)
+			: undefined;
+}
+
+/**
+ * The model that perceives media for `read`: `@vision`, `@default` or the active model when it
+ * accepts the media, else the active provider's first model that does, else any available one.
+ */
+export function findPerceptionModel(
+	session: ToolSession,
+	accepts: (model: Model<Api>) => boolean,
+): ResolvedImageQuestionModel | undefined {
+	const availableModels = session.modelRegistry?.getAvailable() ?? [];
+	const resolvePattern = patternResolver(session, availableModels);
+	const activeModelPattern = session.getActiveModelString?.() ?? session.getModelString?.();
+	for (const pattern of ["@vision", "@default", activeModelPattern]) {
+		const resolved = resolvePattern(pattern);
+		if (resolved && accepts(resolved)) return { model: resolved, selectedPattern: pattern };
+	}
+	const activeProvider = resolvePattern(activeModelPattern)?.provider;
+	const model =
+		availableModels.find(candidate => candidate.provider === activeProvider && accepts(candidate)) ??
+		availableModels.find(accepts);
+	return model ? { model, selectedPattern: undefined } : undefined;
+}
+
 /** Resolve the vision model used by `read <image>?q=<question>`. */
 export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQuestionModel {
 	const modelRegistry = session.modelRegistry;
@@ -43,39 +76,15 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 		throw new ToolError("No models available for image questions.");
 	}
 
-	const matchPreferences = getModelMatchPreferences(session.settings);
-	const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {
-		if (!pattern) return undefined;
-		const expanded = expandRoleAlias(pattern, session.settings);
-		return resolveModelFromString(expanded, availableModels, matchPreferences);
-	};
-
+	const found = findPerceptionModel(session, sendsImageInputOnWire);
+	if (found) return found;
+	const resolvePattern = patternResolver(session, availableModels);
 	const activeModelPattern = session.getActiveModelString?.() ?? session.getModelString?.();
-	let model: Model<Api> | undefined;
-	let selectedPattern: string | undefined;
-	for (const pattern of ["@vision", "@default", activeModelPattern]) {
-		const resolved = resolvePattern(pattern);
-		if (resolved && sendsImageInputOnWire(resolved)) {
-			model = resolved;
-			selectedPattern = pattern;
-			break;
-		}
-	}
-
-	const activeProvider = resolvePattern(activeModelPattern)?.provider;
-	model ??= availableModels.find(
-		candidate => candidate.provider === activeProvider && sendsImageInputOnWire(candidate),
+	const textOnly = resolvePattern("@vision") ?? resolvePattern("@default") ?? resolvePattern(activeModelPattern);
+	if (!textOnly) throw new ToolError("Unable to resolve a model for image questions.");
+	throw new ToolError(
+		`Resolved model ${textOnly.provider}/${textOnly.id} does not support image input. Configure a vision-capable model for modelRoles.vision.`,
 	);
-	model ??= availableModels.find(candidate => sendsImageInputOnWire(candidate));
-	if (!model) {
-		const textOnly = resolvePattern("@vision") ?? resolvePattern("@default") ?? resolvePattern(activeModelPattern);
-		if (!textOnly) throw new ToolError("Unable to resolve a model for image questions.");
-		throw new ToolError(
-			`Resolved model ${textOnly.provider}/${textOnly.id} does not support image input. Configure a vision-capable model for modelRoles.vision.`,
-		);
-	}
-
-	return { model, selectedPattern };
 }
 
 /** Ask the resolved vision model a question about an already-loaded image. */
