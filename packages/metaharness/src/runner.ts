@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { MIN_BUN_VERSION } from "@oh-my-pi/pi-utils";
 /**
  * Harbor benchmark runner for the local `omp` build.
  *
@@ -1085,14 +1086,10 @@ function repoBunVersion(): string {
  * exits on at startup.
  */
 function minimumBunVersion(): string {
-	const utils = readJson(path.join(REPO_ROOT, "packages", "utils", "package.json"));
-	if (utils !== null && typeof utils === "object" && "engines" in utils) {
-		const engines = utils.engines;
-		if (engines !== null && typeof engines === "object" && "bun" in engines && typeof engines.bun === "string") {
-			return engines.bun.replace(/^[^0-9]*/, "");
-		}
-	}
-	return repoBunVersion();
+	// The floor the installed `omp` enforces, taken from the same exported
+	// constant the CLI guard reads, so the benchmark container can never install
+	// a runtime the CLI would exit on.
+	return MIN_BUN_VERSION.replace(/^[^0-9]*/, "") || repoBunVersion();
 }
 
 /** Native arch of the docker daemon (what non-emulated task containers run as). */
