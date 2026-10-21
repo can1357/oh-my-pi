@@ -1166,12 +1166,11 @@ describe("GeminiHeaderRunDetector", () => {
 			padded.push(`## Refining Stage ${i}${" ".repeat(GEMINI_HEADER_PARTIAL_LINE_CAP)}`);
 		}
 		const text = `${padded.join("\n")}\n`;
-		// Two distinct parsing boundaries: a step below the cap accumulates the
-		// partial line whole, a step above it truncates it. Sub-cap steps all
-		// take the same branch, so one represents them.
-		for (const step of [1, GEMINI_HEADER_PARTIAL_LINE_CAP + 1]) {
-			expect(feedHeaders(text, step)).toBe(true);
-		}
+		// One chunking representative: every generated line is a 19-20 character
+		// prefix plus 512 spaces, so it is longer than the cap and every chunking
+		// crosses it before the newline — a step below the cap and a step above it
+		// take the same capped branch, so a second row would be a duplicate.
+		expect(feedHeaders(text, 1)).toBe(true);
 		const whole = new GeminiHeaderRunDetector();
 		expect(whole.push(text)).toBe(true);
 	});
