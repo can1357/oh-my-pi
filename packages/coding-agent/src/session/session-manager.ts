@@ -864,13 +864,18 @@ interface CachedEntryLine {
 	line: string;
 	/** UTF-8 byte length of `line`, cached with it so the body sum never re-measures. */
 	bytes: number;
-	/** The entry's own field values when the line was produced. */
-	fields: Record<string, unknown>;
+	/**
+	 * Deep value stamps of the entry's own fields, by field name, when the line
+	 * was produced (see {@link entryFieldsValueStamp}). The message is not among
+	 * them — it has its own stamp. Absent on the direct, uncached path, for
+	 * entries whose graph no stamp can describe.
+	 */
+	fields?: Map<string, unknown[]>;
 	/**
 	 * Deep value stamp of `entry.message` when the line was produced (see
-	 * {@link messageValueStamp}). Absent on the direct, uncached path for
-	 * non-message entries — which never reach the WeakMap — and for
-	 * hook-backed messages, whose serializer output no stamp can describe.
+	 * {@link messageValueStamp}). Absent for an entry without a message — the
+	 * non-message entry types — and for hook-backed messages, whose serializer
+	 * output no stamp can describe.
 	 */
 	message?: unknown[];
 	/** {@link messageEstimateVersion} of the entry's message, or 0 when it has none. */
@@ -2024,13 +2029,29 @@ type StampPending =
 	/** Emits the closing marker of the container that scheduled it. */
 	| { readonly kind: "end" };
 
-function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
+/**
+ * The deep value stamp of `value`: a flat list of markers, keys and leaves
+ * that describes the graph the projector serializes.
+ *
+ * `rootKey` is the key `value` sits under, when it is not the walk root — the
+ * projection hands every field the key it was read under, and the atomic
+ * classification and the MCP spill strip both read it, so a field stamped
+ * without its key would answer a different question than the projector does.
+ */
+function messageValueStamp(value: unknown, out: unknown[] = [], rootKey?: string): unknown[] {
 	// Iterative, not recursive — one JS stack frame per level overflowed on a
 	// graph `details` can hold (see above). Children are queued below their
 	// container's own closing marker and popped in queue order, so the
 	// worklist emits exactly the order the recursive walk did.
 	const pending: StampPending[] = [
-		{ kind: "value", value, key: undefined, keyed: false, isTopLevelToolResultDetails: undefined, atomic: false },
+		{
+			kind: "value",
+			value,
+			key: rootKey,
+			keyed: false,
+			isTopLevelToolResultDetails: undefined,
+			atomic: false,
+		},
 	];
 	for (let frame = pending.pop(); frame !== undefined; frame = pending.pop()) {
 		if (frame.kind === "end") {
@@ -2194,7 +2215,14 @@ type StampMatchPending =
 	/** Checks the closing marker of the container that scheduled it. */
 	| { readonly kind: "end"; readonly live: object };
 
-function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
+/**
+ * Whether `stamp` (from {@link messageValueStamp}) still describes `value`.
+ *
+ * `rootKey` is the key `value` sits under, when it is not the walk root — the
+ * same key the stamp was taken with, so the atomic classification and the MCP
+ * spill strip answer the question the projection answers.
+ */
+function stampMatches(stamp: readonly unknown[], value: unknown, rootKey?: string): boolean {
 	let index = 0;
 	// Iterative, not recursive — one JS stack frame per level overflowed on a
 	// graph `details` can hold (see above). Children are queued below their
@@ -2204,7 +2232,7 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 		{
 			kind: "value",
 			live: value,
-			key: undefined,
+			key: rootKey,
 			keyed: false,
 			isTopLevelToolResultDetails: undefined,
 			atomic: false,
@@ -2349,29 +2377,84 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 	return index === stamp.length;
 }
 
-/** Own enumerable field values of `obj`, for shallow change detection. */
-function shallowFieldValues(obj: object): Record<string, unknown> {
-	// A null-prototype snapshot: a field named `__proto__` would otherwise be
-	// written through the inherited setter, which drops the field from the
-	// snapshot — and the snapshot's key count would no longer match the live
-	// object's, so every change would look like a rewrite.
-	const values: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-	for (const key of Object.keys(obj)) {
-		values[key] = (obj as Record<string, unknown>)[key];
+/**
+ * The entry field the message lives under. The message keeps its own stamp —
+ * taken with the message as the walk root, because the MCP spill strip and
+ * the reasoning-signature strip only apply there — so the entry's own field
+ * stamps skip it.
+ */
+const ENTRY_MESSAGE_FIELD = "message";
+
+/**
+ * The entry's own field values, stamped by value: one deep value stamp per
+ * own enumerable field, each rooted at the key the field sits under.
+ *
+ * A shallow snapshot (own enumerable values compared by identity) cannot see
+ * a field mutated in place: `entry.runtime.version = "..."` keeps the same
+ * object, so the snapshot compares equal and the rewrite reuses the line the
+ * mutation invalidated — a reload then restores the old metadata. The value
+ * stamp compares the leaves, so the mutation is a miss and the line is
+ * re-projected.
+ *
+ * The message is skipped: it has its own stamp (see {@link ENTRY_MESSAGE_FIELD}),
+ * and stamping it here would walk it with the entry as the walk root — the
+ * wrong root for the MCP spill strip, whose boundary would then walk a
+ * `structuredContent` cycle the projection strips.
+ */
+function entryFieldsValueStamp(entry: object): Map<string, unknown[]> {
+	const stamps = new Map<string, unknown[]>();
+	const fields = entry as Record<string, unknown>;
+	for (const key of Object.keys(entry)) {
+		if (key === ENTRY_MESSAGE_FIELD) continue;
+		stamps.set(key, messageValueStamp(fields[key], [], key));
 	}
-	return values;
+	return stamps;
 }
 
-/** Whether a snapshot from {@link shallowFieldValues} still describes `obj`. */
-function shallowFieldsUnchanged(snapshot: Record<string, unknown>, obj: object): boolean {
-	const next = obj as Record<string, unknown>;
-	const keys = Object.keys(snapshot);
-	const live = Object.keys(next);
-	if (keys.length !== live.length) return false;
+/**
+ * Whether the stamps from {@link entryFieldsValueStamp} still describe the
+ * entry's own fields. The key sets must match — a field added or removed
+ * changes the line — and every field's value must still match its stamp.
+ */
+function entryFieldsUnchanged(stamps: Map<string, unknown[]>, entry: object): boolean {
+	const fields = entry as Record<string, unknown>;
+	const keys = Object.keys(entry);
+	let own = 0;
 	for (const key of keys) {
-		if (snapshot[key] !== next[key]) return false;
+		if (key === ENTRY_MESSAGE_FIELD) continue;
+		own++;
+		const stamp = stamps.get(key);
+		if (stamp === undefined) return false;
+		if (!stampMatches(stamp, fields[key], key)) return false;
 	}
-	return true;
+	return own === stamps.size;
+}
+
+/**
+ * Whether one of the entry's own field graphs would change the projected line
+ * in a way the value stamp cannot see: a `toJSON` hook, or an accessor.
+ *
+ * The message is probed on its own (see {@link hasSerializerHook}); the
+ * wrapper's own accessors are covered by {@link entryWrapperUncacheable}. The
+ * entry's other fields carry their own graphs — a `runtime` identity, a
+ * compaction's `preserveData` archive, an extension's `data` — and a hook or
+ * an accessor inside one of them moves the persisted bytes without moving a
+ * stamped leaf, so those graphs are probed too.
+ */
+function entryFieldsUncacheable(entry: object): boolean {
+	// The stamp enumerates the fields with `Object.keys` and the projection
+	// rebuilds the node with it, so a replacement decides which fields the
+	// line carries while the stamp keeps recording the intrinsic's view.
+	if (Object.keys !== OBJECT_KEYS_INTRINSIC) return true;
+	const fields = entry as Record<string, unknown>;
+	for (const key of Object.keys(entry)) {
+		if (key === ENTRY_MESSAGE_FIELD) continue;
+		// The field's own key rides along: the atomic classification and the
+		// MCP spill strip both read it, exactly as the projection does when it
+		// hands the field's key to the field's value.
+		if (hasSerializerHook(fields[key], key, false, false)) return true;
+	}
+	return false;
 }
 
 /** Whether `text` is exactly the concatenation of `lines`, compared without building it. */
@@ -3139,28 +3222,39 @@ export class SessionManager {
 	 * revision-keyed memo would miss on every rewrite. Each entry validates its
 	 * own cache record instead — see {@link CachedEntryLine}.
 	 *
-	 * Only message entries are memoized: they carry the file's bytes, while the
-	 * small metadata entries (compaction, label, branch_summary, …) cost less
-	 * to re-serialize than to validate and cache. Hook-backed messages — whose
-	 * graph passes through a `toJSON` serializer (see {@link hasSerializerHook})
-	 * — are left uncached: a stateful hook's next call can emit bytes no stamp
-	 * of an earlier call describes.
+	 * Every entry type is memoized, not just the message ones: a large
+	 * non-message record — a compaction's archive, an extension's custom data,
+	 * a `session_init` system prompt — costs the same to re-serialize on every
+	 * rewrite as a message does, and re-serializing it keeps the quadratic
+	 * hot path this memo exists to remove. What decides reuse is the entry's
+	 * own value stamp (see {@link entryFieldsValueStamp}) and, for a message
+	 * entry, the message's own stamp.
+	 *
+	 * An entry whose graph no stamp can describe is left uncached: a hook-backed
+	 * message — whose graph passes through a `toJSON` serializer (see
+	 * {@link hasSerializerHook}) — can emit bytes no stamp of an earlier call
+	 * describes, and a field graph carrying a hook or an accessor (see
+	 * {@link entryFieldsUncacheable}) moves the persisted bytes without moving
+	 * a stamped leaf.
 	 */
 	#bodyLineFor(entry: SessionEntry): CachedEntryLine {
-		// Non-message entries hold no bytes worth memoizing, and some of them
-		// (compaction, label) are mutated in place after their first write.
 		const message = entry.type === "message" ? entry.message : undefined;
-		if (message === undefined || entryWrapperUncacheable(entry) || hasSerializerHook(message)) {
+		if (
+			entryWrapperUncacheable(entry) ||
+			entryFieldsUncacheable(entry) ||
+			(message !== undefined && hasSerializerHook(message))
+		) {
 			const line = this.#lineFor(entry);
-			return { line, bytes: Buffer.byteLength(line, "utf8"), fields: {}, version: 0 };
+			return { line, bytes: Buffer.byteLength(line, "utf8"), version: 0 };
 		}
+		const version = message === undefined ? 0 : messageEstimateVersion(message);
 		const cached = this.#entryLines.get(entry);
 		if (
 			cached !== undefined &&
-			cached.version === messageEstimateVersion(message) &&
-			shallowFieldsUnchanged(cached.fields, entry) &&
-			cached.message !== undefined &&
-			stampMatches(cached.message, message)
+			cached.version === version &&
+			cached.fields !== undefined &&
+			entryFieldsUnchanged(cached.fields, entry) &&
+			(message === undefined || (cached.message !== undefined && stampMatches(cached.message, message)))
 		) {
 			return cached;
 		}
@@ -3168,9 +3262,9 @@ export class SessionManager {
 		const memo: CachedEntryLine = {
 			line,
 			bytes: Buffer.byteLength(line, "utf8"),
-			fields: shallowFieldValues(entry),
-			message: messageValueStamp(message),
-			version: messageEstimateVersion(message),
+			fields: entryFieldsValueStamp(entry),
+			message: message === undefined ? undefined : messageValueStamp(message),
+			version,
 		};
 		this.#entryLines.set(entry, memo);
 		return memo;
