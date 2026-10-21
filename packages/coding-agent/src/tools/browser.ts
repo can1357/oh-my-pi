@@ -98,8 +98,8 @@ const BROWSER_RUN_SCOPE: readonly string[] = ["tab", "page", "browser", "wait", 
 const appSchema = type({
 	"path?": type("string").describe("binary path to spawn"),
 	"cdp_url?": type("string").describe("existing cdp endpoint"),
-	"relay?": type("boolean").describe(
-		"true drives the user's own tabs via the omp browser relay; false skips a relay the settings enable",
+	"relay?": type("boolean | string").describe(
+		"true drives the user's own tabs via the omp browser relay; a relay URL (http://127.0.0.1:<port>) does the same through that relay instead of browser.relayUrl; false skips a relay the settings enable",
 	),
 	"tern?": type("boolean").describe("inside Tern: true forces a Tern picture-in-picture, false opts out"),
 	"args?": type("string[]").describe("extra cli args"),
@@ -187,8 +187,10 @@ export function resolveBrowserKind(
 	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
 	// Explicit app.relay wins over every setting; PI_BROWSER_RELAY stays the
 	// final kill switch (a relay that is down would otherwise brick the tool).
+	// A URL picks the relay for this open, e.g. one per Chrome profile.
 	if (app?.relay) {
-		const relayKind = resolveRelayKind({ settingEnabled: true, url: relayUrl }, env);
+		const url = typeof app.relay === "string" ? app.relay : relayUrl;
+		const relayKind = resolveRelayKind({ settingEnabled: true, url }, env);
 		if (relayKind) return relayKind;
 	}
 	if (app?.tern === true) {
