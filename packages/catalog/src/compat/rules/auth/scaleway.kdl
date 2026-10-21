@@ -1,0 +1,17 @@
+auth "scaleway" {
+	name "Scaleway"
+	login "api-key" {
+		auth-url "https://console.scaleway.com/iam/api-keys"
+		instructions "Create an API key on the Scaleway console and paste its Secret Key (SCW_SECRET_KEY)"
+		// Scaleway secret keys are UUID-shaped opaque strings with no `sk-`
+		// prefix, so the placeholder must not teach a credential shape the
+		// console never issues.
+		prompt "Paste your Scaleway secret key" placeholder="..."
+		normalize "strip-bearer"
+		// A real auth rejection (401/403) is fatal; any other validation
+		// failure is non-fatal. llama-3.3-70b-instruct is the cheapest
+		// non-reasoning chat model on the roster, so the validation
+		// round-trip costs a fraction of a cent.
+		validate "chat-completions" label="Scaleway" base-url="https://api.scaleway.ai/v1" model="llama-3.3-70b-instruct" optional=#true
+	}
+}

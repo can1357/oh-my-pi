@@ -1,0 +1,249 @@
+// Provider-wire compat for "scaleway": Scaleway Generative APIs, an
+// OpenAI-compatible gateway at https://api.scaleway.ai/v1 serving serverless
+// open-weight chat models. Verified live 2026-10-21: /v1/models returns bare
+// OpenAI rows with no capability metadata, reasoning traces stream back on
+// the message `reasoning` field, and reasoning_effort accepts `max`, `xhigh`,
+// and `none` (the request-schema enum is stale; `none` answers with
+// reasoning_tokens 0), so the ladders below follow the model cards, not the
+// schema.
+// Docs: https://www.scaleway.com/en/docs/generative-apis/reference-content/supported-models/
+// Pricing (EUR/Mtok, pre-tax): https://www.scaleway.com/en/pricing/model-as-a-service/
+
+provider "scaleway" {
+	default-model "glm-5.3"
+	env "SCW_SECRET_KEY" "SCW_API_KEY"
+	discovery label="Scaleway"
+
+	thinking-mode "effort"
+
+	// Scaleway takes OpenAI reasoning_effort on every lineage it serves —
+	// never Qwen-native enable_thinking — and documents `none` as the off
+	// value on every reasoning model except gpt-oss-120b, so thinking-off must
+	// send `none`: omitting the field would fall back to the server default
+	// (medium) and keep reasoning on. gpt-oss keeps its class contract (no
+	// `none` tier, low/medium/high inherited from classes/gpt-oss.kdl).
+	class "qwen" {
+		thinking-format "openai"
+		reasoning-disable-mode "none-effort"
+	}
+	class "glm" {
+		reasoning-disable-mode "none-effort"
+	}
+	class "deepseek" {
+		reasoning-disable-mode "none-effort"
+	}
+	class "gemma" {
+		reasoning-disable-mode "none-effort"
+	}
+	class "mistral" {
+		reasoning-disable-mode "none-effort"
+	}
+
+	// GLM 5.3 diverges from the lineage glob (classes/glm.kdl priority=10:
+	// low/high/max, thinking cannot be disabled): Scaleway's card documents
+	// none/low/high/max and `none` is verified to disable reasoning, so this
+	// residue outranks the glob; the default effort stays the lineage's `max`.
+	models "glm-5.3" priority=20 {
+		thinking-upgrade-neutral #true
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #false
+	}
+	// GLM 5.2 (served until 2026-11-16, then routed to glm-5.3) documents
+	// none/high/max, dropping the lineage's minimal/low/medium tiers.
+	models "glm-5.2" priority=20 {
+		thinking-upgrade-neutral #true
+		thinking-efforts "high" "max"
+		thinking-default-level "max"
+		thinking-requires-effort #false
+	}
+	// DeepSeek Flash ladders match the lineage's wire-exact low/high/max;
+	// `none` is documented on both cards. Restated here because the
+	// vendor-suffixed -v4.1-flash and dated -0731 ids have no same-id census
+	// row the family ladder could ride in on.
+	models "deepseek-v4.1-flash" "deepseek-v4-flash-0731" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "low" "high" "max"
+	}
+	// Qwen cards: 3.8 keeps its native xhigh tier; 3.6 and 3.5 stop at high.
+	models "qwen3.8-27b" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "low" "medium" "xhigh"
+	}
+	models "qwen3.6-35b-a3b" "qwen3.5-397b-a17b" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "low" "medium" "high"
+	}
+	// Gemma 4 documents none/low/medium/high.
+	models "gemma-4-26b-a4b-it" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "low" "medium" "high"
+	}
+	// Mistral Medium 3.5 documents none/high only; the server default
+	// (medium) is not a valid tier, so the omp default pins high.
+	models "mistral-medium-3.5-128b" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "high"
+		thinking-default-level "high"
+	}
+
+	// EUR/Mtok list prices converted at the 2026-10-21 ECB reference rate
+	// (1 EUR = 1.1234 USD, api.frankfurter.dev); cache rates Scaleway does
+	// not publish surface as 0. Limits are the serverless context/output
+	// caps; k values are 1024-multiples.
+	// GLM 5.3 and 5.2: EUR 1.80 in / 5.50 out; 256k context / 16k output.
+	models "glm-5.3" "glm-5.2" {
+		cost-patch {
+			input 2.02
+			output 6.18
+			cache-read 0
+			cache-write 0
+		}
+		limits-patch {
+			context-window 262144
+			max-tokens 16384
+		}
+	}
+	// DeepSeek V4.1 Flash: EUR 0.60 in / 1.80 out / 0.12 cached; 256k / 32k.
+	models "deepseek-v4.1-flash" {
+		cost-patch {
+			input 0.67
+			output 2.02
+			cache-read 0.13
+			cache-write 0
+		}
+		limits-patch {
+			context-window 262144
+			max-tokens 32768
+		}
+	}
+	// DeepSeek V4 Flash (0731): EUR 0.40 in / 0.80 out / 0.08 cached; 256k / 32k.
+	models "deepseek-v4-flash-0731" {
+		cost-patch {
+			input 0.45
+			output 0.90
+			cache-read 0.09
+			cache-write 0
+		}
+		limits-patch {
+			context-window 262144
+			max-tokens 32768
+		}
+	}
+	// Qwen 3.8 27B: EUR 0.60 in / 3.30 out / 0.12 cached; 256k / 32k.
+	models "qwen3.8-27b" {
+		cost-patch {
+			input 0.67
+			output 3.71
+			cache-read 0.13
+			cache-write 0
+		}
+		limits-patch {
+			context-window 262144
+			max-tokens 32768
+		}
+	}
+	// Qwen 3.6 35B A3B: EUR 0.25 in / 1.50 out; 256k / 32k.
+	models "qwen3.6-35b-a3b" {
+		cost-patch {
+			input 0.28
+			output 1.69
+			cache-read 0
+			cache-write 0
+		}
+		limits-patch {
+			context-window 262144
+			max-tokens 32768
+		}
+	}
+	// Qwen 3.5 397B A17B: EUR 0.60 in / 3.60 out; 250k / 16k.
+	models "qwen3.5-397b-a17b" {
+		cost-patch {
+			input 0.67
+			output 4.04
+			cache-read 0
+			cache-write 0
+		}
+		limits-patch {
+			context-window 256000
+			max-tokens 16384
+		}
+	}
+	// Qwen 3 235B A22B Instruct (2507): EUR 0.75 in / 2.25 out; 250k / 16k.
+	models "qwen3-235b-a22b-instruct-2507" {
+		cost-patch {
+			input 0.84
+			output 2.53
+			cache-read 0
+			cache-write 0
+		}
+		limits-patch {
+			context-window 256000
+			max-tokens 16384
+		}
+	}
+	// Gemma 4 26B A4B IT: EUR 0.25 in / 0.50 out; 256k / 32k.
+	models "gemma-4-26b-a4b-it" {
+		cost-patch {
+			input 0.28
+			output 0.56
+			cache-read 0
+			cache-write 0
+		}
+		limits-patch {
+			context-window 262144
+			max-tokens 32768
+		}
+	}
+	// GPT-OSS 120B: EUR 0.15 in / 0.60 out; 128k / 32k.
+	models "gpt-oss-120b" {
+		cost-patch {
+			input 0.17
+			output 0.67
+			cache-read 0
+			cache-write 0
+		}
+		limits-patch {
+			context-window 131072
+			max-tokens 32768
+		}
+	}
+	// Mistral Medium 3.5: EUR 1.50 in / 7.50 out; 180k / 16k.
+	models "mistral-medium-3.5-128b" {
+		cost-patch {
+			input 1.69
+			output 8.43
+			cache-read 0
+			cache-write 0
+		}
+		limits-patch {
+			context-window 184320
+			max-tokens 16384
+		}
+	}
+	// Mistral Small 3.2 (2506): EUR 0.15 in / 0.35 out; 128k / 32k.
+	models "mistral-small-3.2-24b-instruct-2506" {
+		cost-patch {
+			input 0.17
+			output 0.39
+			cache-read 0
+			cache-write 0
+		}
+		limits-patch {
+			context-window 131072
+			max-tokens 32768
+		}
+	}
+	// Llama 3.3 70B Instruct: EUR 0.90 in / 0.90 out; 100k / 16k.
+	models "llama-3.3-70b-instruct" {
+		cost-patch {
+			input 1.01
+			output 1.01
+			cache-read 0
+			cache-write 0
+		}
+		limits-patch {
+			context-window 102400
+			max-tokens 16384
+		}
+	}
+}

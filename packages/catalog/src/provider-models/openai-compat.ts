@@ -8202,3 +8202,52 @@ export function singularityApiTechModelManagerOptions(
 ): ModelManagerOptions<Api> {
 	return singularityApiModelManagerOptions("singularityapi-tech", SINGULARITYAPI_TECH_API_BASE_URL, config);
 }
+
+// ---------------------------------------------------------------------------
+// Scaleway
+// ---------------------------------------------------------------------------
+
+/**
+ * Scaleway discovery configuration: the API key plus optional base-URL and
+ * fetch overrides. Consumed by {@link scalewayModelManagerOptions}, and
+ * exported for extensions and tests that construct the manager directly.
+ */
+export interface ScalewayModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Whether a Scaleway `/v1/models` id is a chat model omp can route. Scaleway's
+ * roster interleaves transcription (`whisper-`), embedding (`qwen3-embedding-`,
+ * `bge-`), and OCR (`lightonocr-`) SKUs with the chat models; the exclusion
+ * policy itself lives in `runtime/behavior.kdl` (`exclude-models
+ * provider="scaleway"`), not here.
+ */
+export function isScalewayChatModelId(id: string): boolean {
+	const normalized = id.trim().toLowerCase();
+	if (!normalized) return false;
+	return !isExcludedModel("scaleway", normalized);
+}
+
+/**
+ * Scaleway model manager: plain OpenAI-compatible chat completions at
+ * `api.scaleway.ai/v1` (fr-par serverless Generative APIs). `/v1/models`
+ * returns bare OpenAI rows with no capability metadata, so the reviewed KDL
+ * rules in `providers/scaleway.kdl` own each model's effort ladder, limits,
+ * and pricing; runtime discovery only adds, retires, and names rows.
+ */
+export function scalewayModelManagerOptions(
+	config?: ScalewayModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "scaleway",
+		defaultBaseUrl: "https://api.scaleway.ai/v1",
+		config,
+		requireApiKey: true,
+		filterModel: (_entry, model) => isScalewayChatModelId(model.id),
+		mapModel: (entry, defaults, reference) => mapWithBundledReference(entry, defaults, reference),
+	});
+}
