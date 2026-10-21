@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed the `read`, `grep`, and `web_search` tool descriptions still advertising web-URL reads when `fetch.enabled` is off, including after turning it off mid-session and in a handoff request issued right after the toggle ([#11347](https://github.com/can1357/oh-my-pi/issues/11347), [#16453](https://github.com/can1357/oh-my-pi/pull/16453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
