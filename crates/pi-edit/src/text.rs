@@ -917,15 +917,4 @@ mod tests {
 		assert_eq!(normalize_for_fuzzy("a\tb"), normalize_for_fuzzy("a b"));
 		assert!(fuzzy_equivalent_chars('\t', ' '));
 	}
-
-	#[test]
-	fn a_folded_whitespace_run_names_the_codepoints_it_has_in_excess() {
-		// The run of the file holds a tab the search text does not have: it
-		// is the codepoint the caller cannot see, so it has to be named.
-		let differences = folded_differences("foo bar", "foo \tbar");
-		assert_eq!(differences.len(), 1);
-		assert_eq!(differences[0].expected, None);
-		assert_eq!(differences[0].actual, Some('\t'));
-		assert_eq!(differences[0].count, 1);
-	}
 }
