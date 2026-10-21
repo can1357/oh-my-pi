@@ -970,7 +970,11 @@ export class Agent {
 		// races the caller's cancellation instead of blocking the context build
 		// indefinitely; the signal is rechecked afterwards so a provider that
 		// resolves after the cancellation does not run the transforms.
-		const pinned = typeof systemPrompt === "function" ? await untilAborted(signal, systemPrompt()) : systemPrompt;
+		// The provider is handed to `untilAborted` as a thunk: the prompt source may
+		// return the array synchronously, and a lazy call keeps the (possibly slow)
+		// read from starting at all once the signal is already aborted.
+		const pinned =
+			typeof systemPrompt === "function" ? await untilAborted(signal, async () => systemPrompt()) : systemPrompt;
 		signal?.throwIfAborted();
 		let context: Context = { systemPrompt: pinned ?? this.#state.systemPrompt, messages, tools };
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
