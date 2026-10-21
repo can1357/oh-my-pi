@@ -35,6 +35,31 @@ describe("ModelRegistry runtime source cleanup", () => {
 		authStorage.close();
 	});
 
+	test("batch cleanup removes every selected source and preserves an unrelated provider", () => {
+		const registry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+		for (const provider of ["batch-a", "batch-b", "batch-keep"]) {
+			registry.registerProvider(
+				provider,
+				{
+					baseUrl: "https://runtime.example.com/v1",
+					apiKey: "FIXTURE_KEY",
+					api: "openai-completions",
+					models: [baseModel],
+				},
+				`ext://${provider}`,
+			);
+		}
+		registry.clearSourceRegistrations(["ext://batch-a", "ext://batch-b", "ext://batch-a", "ext://absent"]);
+		for (const provider of ["batch-a", "batch-b"]) {
+			expect(registry.find(provider, baseModel.id)).toBeUndefined();
+			expect(registry.authStorage.keys.source(provider)).toBeUndefined();
+		}
+		expect(registry.find("batch-keep", baseModel.id)).toBeDefined();
+		expect(registry.authStorage.keys.source("batch-keep")).toBeDefined();
+		registry.clearSourceRegistrations([]);
+		expect(registry.find("batch-keep", baseModel.id)).toBeDefined();
+	});
+
 	test("clearSourceRegistrations removes runtime overlays and fallback auth for that source", () => {
 		const registry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 		const config: ProviderConfigInput = {

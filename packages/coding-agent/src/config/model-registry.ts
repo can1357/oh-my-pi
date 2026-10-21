@@ -3411,25 +3411,25 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Remove custom API/OAuth registrations for a specific extension source.
+	 * Remove custom API/OAuth registrations, rebuilding the catalog once per batch.
 	 */
-	clearSourceRegistrations(sourceId: string): void {
-		unregisterCustomApis(sourceId);
-		unregisterOAuthProviders(sourceId);
-		const sourceProviders = this.#runtimeProvidersBySource.get(sourceId);
-		if (!sourceProviders || sourceProviders.size === 0) {
-			return;
-		}
-		this.#ensureFullSnapshot();
-		this.#runtimeProvidersBySource.delete(sourceId);
-		for (const providerName of sourceProviders) {
-			if (this.#runtimeProviderSourceByName.get(providerName) !== sourceId) {
-				continue;
+	clearSourceRegistrations(sourceIds: string | readonly string[]): void {
+		let changed = false;
+		for (const sourceId of new Set(typeof sourceIds === "string" ? [sourceIds] : sourceIds)) {
+			unregisterCustomApis(sourceId);
+			unregisterOAuthProviders(sourceId);
+			const sourceProviders = this.#runtimeProvidersBySource.get(sourceId);
+			if (!sourceProviders?.size) continue;
+			if (!changed) this.#ensureFullSnapshot();
+			changed = true;
+			this.#runtimeProvidersBySource.delete(sourceId);
+			for (const providerName of sourceProviders) {
+				if (this.#runtimeProviderSourceByName.get(providerName) !== sourceId) continue;
+				this.#runtimeProviderSourceByName.delete(providerName);
+				this.#clearRuntimeProviderState(providerName);
 			}
-			this.#runtimeProviderSourceByName.delete(providerName);
-			this.#clearRuntimeProviderState(providerName);
 		}
-		this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
+		if (changed) this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 	}
 
 	/**
@@ -3456,13 +3456,15 @@ export class ModelRegistry {
 	 */
 	syncExtensionSources(activeSourceIds: string[]): void {
 		const activeSources = new Set(activeSourceIds);
+		const removedSources: string[] = [];
 		for (const sourceId of this.#registeredProviderSources) {
 			if (activeSources.has(sourceId)) {
 				continue;
 			}
-			this.clearSourceRegistrations(sourceId);
+			removedSources.push(sourceId);
 			this.#registeredProviderSources.delete(sourceId);
 		}
+		this.clearSourceRegistrations(removedSources);
 	}
 
 	/**
