@@ -9,7 +9,7 @@ use crate::{
 	text::{
 		FoldedDifference, adjust_indentation, count_leading_indent, folded_differences,
 		is_non_empty_line, js_trim, js_trim_end, js_trim_start, normalize_for_fuzzy, normalize_to_lf,
-		normalize_unicode, utf16_len,
+		normalize_unicode, strip_comment_prefix, utf16_len,
 	},
 };
 
@@ -784,28 +784,6 @@ fn norm_includes(line: &str, pattern: &str) -> bool {
 	pattern_len >= PARTIAL_MATCH_MIN_LENGTH
 		&& line.contains(pattern)
 		&& pattern_len as f64 / line_len.max(1) as f64 >= PARTIAL_MATCH_MIN_RATIO
-}
-
-fn strip_comment_prefix(line: &str) -> &str {
-	let trimmed = js_trim_start(line);
-	let without = if let Some(rest) = trimmed.strip_prefix("/*") {
-		rest
-	} else if let Some(rest) = trimmed.strip_prefix("*/") {
-		rest
-	} else if let Some(rest) = trimmed.strip_prefix("//") {
-		rest
-	} else if let Some(rest) = trimmed.strip_prefix('*') {
-		rest
-	} else if let Some(rest) = trimmed.strip_prefix('#') {
-		rest
-	} else if let Some(rest) = trimmed.strip_prefix(';') {
-		rest
-	} else if let Some(rest) = trimmed.strip_prefix("/ ") {
-		rest
-	} else {
-		trimmed
-	};
-	js_trim_start(without)
 }
 
 fn run_sequence_passes(

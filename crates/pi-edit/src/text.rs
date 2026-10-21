@@ -676,6 +676,40 @@ fn without_whitespace(line: &str) -> String {
 	line.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
+/// The line without its comment prefix.
+///
+/// The matcher matches a line the author spelled without the marker the
+/// file spells it with, so the same line can be written two ways: `* text`
+/// in the file and `/ text` in the hunk.
+pub fn strip_comment_prefix(line: &str) -> &str {
+	let trimmed = js_trim_start(line);
+	let without = if let Some(rest) = trimmed.strip_prefix("/*") {
+		rest
+	} else if let Some(rest) = trimmed.strip_prefix("*/") {
+		rest
+	} else if let Some(rest) = trimmed.strip_prefix("//") {
+		rest
+	} else if let Some(rest) = trimmed.strip_prefix('*') {
+		rest
+	} else if let Some(rest) = trimmed.strip_prefix('#') {
+		rest
+	} else if let Some(rest) = trimmed.strip_prefix(';') {
+		rest
+	} else if let Some(rest) = trimmed.strip_prefix("/ ") {
+		rest
+	} else {
+		trimmed
+	};
+	js_trim_start(without)
+}
+
+/// True when the two lines are the same line written two ways: the author
+/// addressed the line by its text, and the file spells it with a comment
+/// marker the author left out.
+fn same_line_up_to_comment_prefix(left: &str, right: &str) -> bool {
+	js_trim(strip_comment_prefix(left)) == js_trim(strip_comment_prefix(right))
+}
+
 /// The authored line's boundary whitespace with the file's body.
 ///
 /// A rewrite that asks for a change to the line's boundary whitespace only
@@ -684,7 +718,15 @@ fn without_whitespace(line: &str) -> String {
 /// rewrite never touched. The interior whitespace is the file's as well — the
 /// ideographic space folds onto an ASCII one, and the authored interior would
 /// rewrite it.
+///
+/// A line the author addressed without the file's comment marker is the
+/// exception: the marker is part of the line's own text, so the file's body
+/// here would keep the file's marker and drop the change the rewrite asks
+/// for.
 pub fn merge_file_line_body(authored: &str, file_line: &str) -> String {
+	if same_line_up_to_comment_prefix(authored, file_line) {
+		return authored.to_owned();
+	}
 	let (leading, trailing) = boundary_whitespace(authored);
 	format!("{leading}{}{trailing}", js_trim(file_line))
 }
@@ -891,6 +933,30 @@ mod tests {
 				"  foo(bar)abcdefghijklmn"
 			),
 			"  foo（baz）abcdefghijklmn"
+		);
+	}
+
+	#[test]
+	fn indentation_only_rewrite_keeps_the_authors_comment_marker() {
+		// The matcher matches a line the author spelled without the file's
+		// comment marker, so the marker is part of the line's own text: the
+		// file's body must not swallow the change the rewrite asks for.
+		assert_eq!(
+			adjust_indentation(
+				"/ LICENSE file in the root directory.",
+				" * LICENSE file in the root directory.",
+				" / LICENSE file in the root directory."
+			),
+			" / LICENSE file in the root directory."
+		);
+		// The line spelled the way the file spells it keeps the file's body.
+		assert_eq!(
+			adjust_indentation(
+				" * LICENSE file in the root directory.",
+				" * LICENSE file in the root directory.",
+				"  * LICENSE file in the root directory."
+			),
+			"  * LICENSE file in the root directory."
 		);
 	}
 
