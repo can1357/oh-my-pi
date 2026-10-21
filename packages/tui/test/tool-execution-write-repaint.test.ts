@@ -190,6 +190,19 @@ describe("ToolExecutionComponent write repaint seam", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
+	it("does not repaint a pending card that was only measured, never shown", () => {
+		// The transcript measures a block before it decides whether to show it:
+		// a block it then omits never reaches the terminal, so its first result
+		// must not replay the viewport for a shape the user never saw.
+		const { component, requestRender } = makeComponent(writeArgs(20));
+		component.setTranscriptAllocation(Number.MAX_SAFE_INTEGER, { tick: 0, now: 0 }, true);
+		component.render(80);
+
+		component.updateResult(partialWriteResult(), true);
+
+		expect(requestRender).not.toHaveBeenCalled();
+	});
+
 	it("does not repaint when the tool activity was hidden before the first result", () => {
 		// The tail window is painted, then the user hides the tool activity: the
 		// component renders its empty path, so the tail window is no longer on

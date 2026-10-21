@@ -17,7 +17,14 @@ export interface AnimationFrame {
 
 /** Lets an active block adapt its presentation to its allocated viewport rows. */
 export interface TranscriptPresentationTarget {
-	setTranscriptAllocation?(rows: number, frame: AnimationFrame): void;
+	/**
+	 * The block's viewport allocation. `measured` marks a render that only
+	 * sizes the block — the transcript measures a block before it decides
+	 * whether to show it, and a block it then omits never reaches the
+	 * terminal. A measured render is not a paint, so a block must not treat it
+	 * as one.
+	 */
+	setTranscriptAllocation?(rows: number, frame: AnimationFrame, measured?: boolean): void;
 }
 
 /** Presentation declaration captured permanently when a block is added. */
@@ -531,7 +538,7 @@ export class TranscriptContainer extends Container {
 	 */
 	#measuredRows(entry: TranscriptEntry, width: number): readonly string[] {
 		if (this.#openFrame === undefined) {
-			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame, true);
 			return this.#renderEntry(entry, width);
 		}
 		if (this.#frameRowsWidth !== width) {
@@ -540,7 +547,7 @@ export class TranscriptContainer extends Container {
 		}
 		let rows = this.#frameRows.get(entry);
 		if (rows === undefined) {
-			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame, true);
 			rows = this.#renderEntry(entry, width);
 			this.#frameRows.set(entry, rows);
 		}
@@ -1496,8 +1503,8 @@ export class TranscriptContainer extends Container {
 		return visibleOutput;
 	}
 
-	#setAllocation(component: Component, rows: number, frame: AnimationFrame): void {
-		(component as Component & TranscriptPresentationTarget).setTranscriptAllocation?.(rows, frame);
+	#setAllocation(component: Component, rows: number, frame: AnimationFrame, measured = false): void {
+		(component as Component & TranscriptPresentationTarget).setTranscriptAllocation?.(rows, frame, measured);
 	}
 
 	#settleFinalized(): void {
