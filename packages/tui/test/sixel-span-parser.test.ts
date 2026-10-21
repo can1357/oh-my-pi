@@ -15,8 +15,8 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 const SEVEN_BIT = "\x1bPq#0;2;100;0;0#0~~\x1b\\";
 /** 8-bit C1 DCS: `0x90 [params] q`, terminated by the 8-bit ST. */
 const EIGHT_BIT = "\x90q#0;2;100;0;0#0~~\x9c";
-/** The other two legal terminators, on the 7-bit introducer. */
-const BELL_TERMINATED = "\x1bPq#0~~\x07";
+/** BEL is not a sixel terminator: it ends an OSC string, not a DCS. */
+const BELL_INSIDE = "\x1bPq#0~~\x07";
 
 const originalForceProtocol = Bun.env.PI_FORCE_IMAGE_PROTOCOL;
 const originalAllowPassthrough = Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH;
@@ -106,10 +106,8 @@ describe("SIXEL introducer recognition", () => {
 describe("SIXEL terminator forms", () => {
 	const cases: Array<[string, string]> = [
 		["ST", SEVEN_BIT],
-		["BEL", BELL_TERMINATED],
 		["8-bit ST on a 7-bit introducer", "\x1bPq#0~~\x9c"],
 		["8-bit ST on an 8-bit introducer", EIGHT_BIT],
-		["BEL on an 8-bit introducer", "\x90q#0~~\x07"],
 	];
 
 	for (const [label, stream] of cases) {
@@ -120,6 +118,24 @@ describe("SIXEL terminator forms", () => {
 		});
 	}
 
+	it("keeps a BEL inside the payload until the frame's own ST arrives", () => {
+		// BEL ends an OSC string, not a DCS. A frame closed at BEL hands the
+		// host an unterminated DCS, and the terminal swallows everything the
+		// TUI prints after it, so the frame stays open until its real ST.
+		const stream = `${BELL_INSIDE}#0~~\x1b\\`;
+		const spans = splitSixelSpans(stream);
+		expect(spans).toEqual([{ kind: "sixel", payload: stream }]);
+		expect(joinSpans(spans)).toBe(stream);
+	});
+
+	it("does not close a frame at a BEL, so the text after the real ST stays text", () => {
+		const spans = splitSixelSpans(`${BELL_INSIDE}tail\x1b\\after`);
+		expect(spans).toEqual([
+			{ kind: "sixel", payload: `${BELL_INSIDE}tail\x1b\\` },
+			{ kind: "text", text: "after" },
+		]);
+	});
+
 	it("keeps text on both sides of a frame intact", () => {
 		for (const stream of [SEVEN_BIT, EIGHT_BIT]) {
 			const spans = splitSixelSpans(`before\n${stream}\nafter`);
@@ -129,6 +145,34 @@ describe("SIXEL terminator forms", () => {
 				{ kind: "text", text: "\nafter" },
 			]);
 		}
+	});
+});
+
+describe("SIXEL DCS cancellation", () => {
+	it("discards a frame cancelled by CAN and keeps the rest as text", () => {
+		// CAN cancels the DCS: the terminal drops the sequence and returns to
+		// the ground state, so the frame never reached it. The bytes after the
+		// cancellation are ordinary text and have to travel as text.
+		const spans = splitSixelSpans("\x1bPq#0~~\x18\x1b[2Jtail");
+		expect(spans).toEqual([{ kind: "text", text: "\x1b[2Jtail" }]);
+	});
+
+	it("discards a frame cancelled by SUB and keeps the rest as text", () => {
+		const spans = splitSixelSpans("\x1bPq#0~~\x1atail");
+		expect(spans).toEqual([{ kind: "text", text: "tail" }]);
+	});
+
+	it("routes a cancelled frame's trailing bytes through the sanitizer", () => {
+		// The passthrough sanitizer preserves a sixel sequence byte for byte, so
+		// a cancelled sequence must not be preserved: the terminal command that
+		// follows the cancellation would then bypass the sanitizer and run in
+		// the host terminal.
+		enableSixelPassthrough();
+		const sanitized = sanitizeWithOptionalSixelPassthrough("\x1bPq#0~~\x18\x1b[2J\x1b\\tail", sanitizeText);
+		expect(sanitized).not.toContain("\x1bPq");
+		expect(sanitized).not.toContain("\x18");
+		expect(sanitized).not.toContain("\x1b[2J");
+		expect(sanitized).toContain("tail");
 	});
 });
 

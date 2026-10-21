@@ -454,7 +454,17 @@ export class BashExecutionComponent extends Container {
 			// color, and the segment's own runs still override it.
 			let carry = "";
 			for (const span of spans) {
-				const offset = span.offset - consumed;
+				let offset = span.offset - consumed;
+				// A frame emitted at a column this row has already passed — the
+				// PTY moved the cursor back between the two frames — cannot be
+				// placed by the text that follows it: the offset would be
+				// negative, the split would collapse to the start of the
+				// remaining text, and the host would draw the frame in the
+				// wrong column. The row carries the cursor positioning
+				// explicitly instead, so the frame lands on the column it was
+				// emitted on.
+				const cursorBack = offset < 0 ? `\x1b[${-offset}D` : "";
+				if (offset < 0) offset = 0;
 				const [head, tail] = splitTerminalRowAt(remaining, offset);
 				// A row renders up to its last non-blank cell, but the anchor
 				// counts every column the cursor advanced — trailing spaces leave
@@ -469,7 +479,7 @@ export class BashExecutionComponent extends Container {
 				// from `head` alone drops a run that opened before an earlier
 				// frame and was never reset.
 				carry = activeStyleAtRowEnd(carry + head);
-				emitted += `${styleTerminalRow(carry + head + blanks, base)}${span.payload}`;
+				emitted += `${styleTerminalRow(carry + head + blanks, base)}${cursorBack}${span.payload}`;
 				consumed = span.offset;
 				remaining = tail;
 			}

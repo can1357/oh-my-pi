@@ -148,6 +148,31 @@ describe("BashExecutionComponent PTY SIXEL", () => {
 		expect(plain).toBe(`a${SIXEL}b${second}c`);
 	});
 
+	it("carries the cursor positioning when a frame was emitted before an earlier one", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		// The PTY moved the cursor back between the two frames, so the second
+		// frame was emitted at a column the row had already passed. The frames
+		// keep their stream order, and the row carries the cursor positioning
+		// that puts the second frame back on its own column: a negative offset
+		// collapses the split to the start of the remaining text, so the frame
+		// would be drawn at the row's end instead.
+		const second = "\x1bPq#1;2;0;100;0#1~~\x1b\\";
+		const component = new BashExecutionComponent("img", ui, false);
+		component.appendPtyChunk(`abc${SIXEL}\x1b[1D${second}\r\n`);
+		component.setComplete(0, false);
+
+		await renderUntil(component, () => component.isTranscriptBlockFinalized());
+
+		const output = component.getOutput();
+		const row = output.split("\n").find(line => line.includes(SIXEL));
+		expect(row).toBeDefined();
+		const plain = row!.replace(/\x1b\[[0-9;]*m/gu, "");
+		expect(plain).toBe(`abc${SIXEL}\x1b[1D${second}`);
+	});
+
 	it("carries the row's style across two frames on one row", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";

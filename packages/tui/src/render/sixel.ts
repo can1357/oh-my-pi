@@ -2,12 +2,19 @@ import { $env, $flag } from "@oh-my-pi/pi-utils";
 
 /** A sixel introducer: `ESC P [0-9;]* q` (7-bit DCS) or `0x90 [0-9;]* q` (8-bit C1 DCS). */
 const SIXEL_START_REGEX = /(?:\x1bP|\x90)(?:[0-9;]*)q/u;
-/** A complete frame: introducer, payload, then ST, BEL, or the 8-bit ST. */
-const SIXEL_SEQUENCE_REGEX = /(?:\x1bP|\x90)(?:[0-9;]*)q[\s\S]*?(?:\x1b\\|\x07|\x9c)/gu;
+/**
+ * A complete frame: introducer, payload, then ST (7-bit `ESC \` or the 8-bit
+ * `0x9c`). BEL is not a terminator: it ends an OSC string, not a DCS, so a
+ * BEL-terminated sixel is a malformed sequence that keeps the terminal inside
+ * the DCS until the real ST arrives. A DCS cancelled by CAN/SUB never reaches
+ * a terminator at all, so the payload may not contain those bytes either.
+ */
+const SIXEL_SEQUENCE_REGEX = /(?:\x1bP|\x90)(?:[0-9;]*)q[^\x18\x1a]*?(?:\x1b\\|\x9c)/gu;
 const SIXEL_PLACEHOLDER_PREFIX = "__OMP_SIXEL_SEQUENCE_";
 
 const BACKSLASH = 0x5c;
-const BEL = 0x07;
+const CAN = 0x18;
+const SUB = 0x1a;
 const C1_DCS = 0x90;
 const C1_ST = 0x9c;
 
@@ -28,14 +35,22 @@ export function containsSixelSequence(text: string): boolean {
 }
 
 /**
- * Finds the first sixel terminator at or after `start`, with its byte length.
- * `ESC \` is two bytes, BEL and the 8-bit ST are one; a backslash not preceded
- * by ESC is payload, so the two-byte form has to be recognised as a pair.
+ * Finds the first byte at or after `start` that ends the sixel sequence, with
+ * its byte length. `ESC \` is two bytes, the 8-bit ST is one; a backslash not
+ * preceded by ESC is payload, so the two-byte form has to be recognised as a
+ * pair.
+ *
+ * Only ST ends a DCS. BEL does not: it terminates an OSC string, so treating
+ * it as a sixel terminator closes the frame early and hands the host an
+ * unterminated DCS, which swallows everything the TUI prints next. CAN and SUB
+ * cancel the sequence instead of completing it — the terminal returns to the
+ * ground state there — so they end the sequence too, but the frame itself is
+ * discarded rather than emitted.
  */
-function findSixelTerminator(row: string, start: number): { index: number; length: number } | undefined {
+function findSixelSequenceEnd(row: string, start: number): { index: number; length: number } | undefined {
 	for (let index = start; index < row.length; index++) {
 		const code = row.charCodeAt(index);
-		if (code === BEL || code === C1_ST) return { index, length: 1 };
+		if (code === C1_ST || code === CAN || code === SUB) return { index, length: 1 };
 		if (code === 0x1b && row.charCodeAt(index + 1) === BACKSLASH) return { index, length: 2 };
 	}
 	return undefined;
@@ -64,9 +79,9 @@ export function classifySixelRow(
 	let index = 0;
 	while (index < row.length) {
 		if (open) {
-			const terminator = findSixelTerminator(row, index);
-			if (terminator === undefined) return { isSixel: true, inSequenceAtExit: true };
-			index = terminator.index + terminator.length;
+			const end = findSixelSequenceEnd(row, index);
+			if (end === undefined) return { isSixel: true, inSequenceAtExit: true };
+			index = end.index + end.length;
 			open = false;
 			continue;
 		}
@@ -194,6 +209,8 @@ export class SixelSpanParser {
 	#frameEsc = false;
 	/** Set once the held frame outgrew the hold bound and was dropped. */
 	#discarded = false;
+	/** Set when the held frame was cancelled by CAN/SUB and must not be emitted. */
+	#cancelled = false;
 
 	/**
 	 * Whether bytes are being held for a frame whose terminator has not arrived
@@ -226,8 +243,12 @@ export class SixelSpanParser {
 				if (consumed < 0) break;
 				input = input.slice(consumed);
 				const payload = this.#frame;
+				const cancelled = this.#cancelled;
 				this.#closeFrame();
-				if (!this.#discarded && payload.length > 0) segments.push({ kind: "sixel", payload });
+				// A cancelled frame is not a frame: the terminal returned to the
+				// ground state on CAN/SUB, so the payload never reached it and
+				// the bytes after the cancellation are ordinary text.
+				if (!cancelled && !this.#discarded && payload.length > 0) segments.push({ kind: "sixel", payload });
 				continue;
 			}
 
@@ -294,9 +315,17 @@ export class SixelSpanParser {
 		}
 		while (cursor < input.length) {
 			const code = input.charCodeAt(cursor);
-			if (code === BEL || code === C1_ST) {
+			if (code === C1_ST) {
 				this.#appendFrame(input.slice(0, cursor));
 				this.#appendFrame(String.fromCharCode(code));
+				return cursor + 1;
+			}
+			if (code === CAN || code === SUB) {
+				// CAN/SUB cancel the DCS: the terminal drops the sequence and
+				// returns to the ground state, so the frame is discarded and the
+				// bytes that follow are text again.
+				this.#appendFrame(input.slice(0, cursor));
+				this.#cancelled = true;
 				return cursor + 1;
 			}
 			if (code === 0x1b) {
@@ -332,6 +361,7 @@ export class SixelSpanParser {
 	#closeFrame(): void {
 		this.#frame = "";
 		this.#frameEsc = false;
+		this.#cancelled = false;
 		this.#mode = "ground";
 	}
 }
