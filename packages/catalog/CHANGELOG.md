@@ -5,6 +5,7 @@
 ### Added
 
 - Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- Models now declare whether they hear audio: Gemini on Google's own transports and every OpenRouter model whose listing takes audio input ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -28,10 +29,6 @@
 ### Changed
 
 - Updated the bundled Yolo-Auto catalog to its current models, `qwen3.8-27b` (now the default), `yolo`, `yolo-small`, and `yolo-128k`, and removed the retired `deepseek-flash-v4` and `qwen3.8-flash`
-
-### Added
-
-- Models now declare whether they hear audio: Gemini on Google's own transports and every OpenRouter model whose listing takes audio input
 
 ## [18.12.5] - 2026-10-21
 
