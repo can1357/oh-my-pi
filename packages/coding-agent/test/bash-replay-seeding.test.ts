@@ -5,13 +5,17 @@
  * feeding it the persisted output truncated every resumed session's bash block
  * to its tail permanently — Ctrl+O could not expand it back and the footer's
  * hidden-line count was computed from the capped array.
+ *
+ * The suite drives the mode context's OWN settings, never the process-wide
+ * settings singleton: installing or resetting that singleton would leak state
+ * into (and out of) the other test files.
  */
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
-import { isSettingsInitialized, resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { isSettingsInitialized } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 /** Past both the 100-line streaming cap and the 20-line collapsed preview. */
@@ -31,40 +35,13 @@ function bashMessage(output: string): AgentMessage {
 	} as unknown as AgentMessage;
 }
 
-/**
- * Take the process-wide settings singleton — the module-level `settings` proxy
- * `UiHelpers.addMessageToChat()` reads throws without it — but only when no
- * other test file owns it yet.
- *
- * `Settings.init()` is memoized: it adopts an existing instance instead of
- * creating one, so an unconditional call here would silently run against
- * another file's settings (and its cwd). `resetSettingsForTest()` empties the
- * singleton for everyone, so a file that only adopted it must not clear it:
- * the owner would then see "Settings not initialized" mid-run. Only what this
- * file created is released.
- */
-let ownsSettings = false;
-
-async function acquireSettings(): Promise<void> {
-	if (isSettingsInitialized()) return;
-	await Settings.init({ inMemory: true, cwd: process.cwd() });
-	ownsSettings = true;
-}
-
-function releaseSettings(): void {
-	if (!ownsSettings) return;
-	ownsSettings = false;
-	resetSettingsForTest();
-}
-
 describe("UiHelpers bash replay seeding", () => {
-	beforeAll(async () => {
-		await acquireSettings();
-		await initTheme();
-	});
+	/** Whether the process-wide settings singleton existed before this suite. */
+	let singletonBefore = false;
 
-	afterAll(() => {
-		releaseSettings();
+	beforeAll(async () => {
+		singletonBefore = isSettingsInitialized();
+		await initTheme();
 	});
 
 	it("keeps every line of a >100-line result after expansion", () => {
@@ -89,27 +66,11 @@ describe("UiHelpers bash replay seeding", () => {
 		}
 	});
 
-	it("releases the settings singleton it created and leaves one it did not create", async () => {
-		// The file owns the singleton only when it created it. Releasing it
-		// then clears the process-wide state — an observable ownership
-		// transition.
-		const owned = ownsSettings;
-		if (owned) {
-			expect(isSettingsInitialized()).toBe(true);
-			releaseSettings();
-			expect(isSettingsInitialized()).toBe(false);
-		}
-		// A second owner now installs the singleton. This file does not own
-		// that instance, so releasing must NOT clear it: `resetSettingsForTest()`
-		// empties the singleton for every file, and the owner would then fail
-		// with "Settings not initialized" — the cross-file leak this file used
-		// to cause by resetting unconditionally.
-		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		releaseSettings();
-		expect(isSettingsInitialized()).toBe(true);
-		// Hand the ownership back so the suite's own teardown still releases
-		// what this file created.
-		ownsSettings = owned;
-		if (owned) resetSettingsForTest();
+	it("leaves the process-wide settings singleton alone", () => {
+		// The suite reads the mode context's own settings, so it neither
+		// installs nor clears the process-wide singleton: a file that resets it
+		// takes the settings away from whichever file owns it, and one that
+		// installs it hands its in-memory cwd and settings to every later file.
+		expect(isSettingsInitialized()).toBe(singletonBefore);
 	});
 });
