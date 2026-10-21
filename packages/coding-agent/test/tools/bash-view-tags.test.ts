@@ -31,7 +31,7 @@ function makeSession(
 		}),
 		enableLsp: false,
 		getClientBridge: () => undefined,
-	} as unknown as ToolSession;
+	};
 }
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -129,6 +129,38 @@ describe("bash numbered file views mint edit tags", () => {
 		expect(survey).toContain("e.ts:1:const limit = 1;");
 		expect(survey).not.toContain("Edit tags for the numbered lines above:");
 		expect(getEditStore(session).headHash(path.join(cwd, "a.ts"))).toBeNull();
+	});
+
+	it("names no tag for unprefixed rows of several files, whose numbers run across the joined stream", async () => {
+		await Bun.write(path.join(cwd, "a.ts"), "shared\n");
+		await Bun.write(path.join(cwd, "b.ts"), "shared\nsecond\n");
+		const joined = await bash("cat -n a.ts b.ts");
+		expect(joined).toContain("2\tshared");
+		expect(joined).not.toContain("Edit tags for the numbered lines above:");
+		expect(getEditStore(session).headHash(path.join(cwd, "b.ts"))).toBeNull();
+	});
+
+	it("names no tag when a `cd` may not apply to the commands after it", async () => {
+		await fs.mkdir(path.join(cwd, "sub"));
+		await Bun.write(path.join(cwd, "sub", "retry.ts"), SOURCE);
+		for (const command of [
+			"false && cd sub; grep -n limit retry.ts",
+			"(cd sub); grep -n limit retry.ts",
+			"cd sub | true; grep -n limit retry.ts",
+		]) {
+			expect(await bash(command)).not.toContain("Edit tags for the numbered lines above:");
+		}
+		expect(getEditStore(session).headHash(path.join(cwd, "sub", "retry.ts"))).toBeNull();
+	});
+
+	it("names no tag when edits do not take hashline anchors, or for notebooks", async () => {
+		const replace = makeSession(cwd, { "edit.mode": "replace" });
+		const output = textOf(await new BashTool(replace).execute("bash", { command: "grep -n limit retry.ts" }));
+		expect(output).toContain("2:\tconst limit");
+		expect(output).not.toContain("Edit tags for the numbered lines above:");
+
+		await Bun.write(path.join(cwd, "nb.ipynb"), '{\n "cells": [],\n "nbformat": 4\n}\n');
+		expect(await bash("grep -n cells nb.ipynb")).not.toContain("Edit tags for the numbered lines above:");
 	});
 
 	it("keeps a full read's unrestricted snapshot unrestricted", async () => {
