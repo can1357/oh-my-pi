@@ -8,8 +8,8 @@ import type { InteractiveModeContext } from "../types";
 
 /** Reply the prediction prompt asks for when the model has no confident guess. */
 const SKIP_REPLY = "NO_PREDICTION";
-/** Longer replies are rambling, not a message the user would type; drop them. */
-const MAX_PREDICTION_LENGTH = 500;
+/** The prompt's own one-line limit; a longer reply broke it and is rambling, not a message the user would type. */
+const MAX_PREDICTION_LENGTH = 240;
 /**
  * Output cap for the side turn. Providers key prompt caches on reasoning parameters, so the
  * prediction runs at the lowest effort only where that change rides a per-message control (see
@@ -107,7 +107,7 @@ export class ComposerPredictionController {
 	async #run(source: PredictionSource, abort: AbortController): Promise<void> {
 		try {
 			const { replyText, assistantMessage } = await source.session.runEphemeralTurn({
-				promptText: prompt.render(composerPredictionPrompt, { skip: SKIP_REPLY }),
+				promptText: prompt.render(composerPredictionPrompt, { skip: SKIP_REPLY, maxLength: MAX_PREDICTION_LENGTH }),
 				maxTokens: source.session.ephemeralMaxTokensPreservesRequest() ? PREDICTION_MAX_TOKENS : undefined,
 				minimizeEffort: true,
 				signal: AbortSignal.any([abort.signal, AbortSignal.timeout(this.#deadlineMs)]),
