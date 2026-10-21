@@ -49,6 +49,7 @@ import { isFindEnabled } from "./jfind";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { resolveArtifactSpillThreshold, resolveInlineByteCapBudget } from "./output-meta";
+import { ASYNC_INLINE_RESULT_MAX_CHARS } from "../session/async-job-delivery";
 import { resolveToCwd } from "./path-utils";
 import { extractLeadingCdTarget, extractLiteralAndChainSegments, tokenizeShellSegments } from "./shell-tokenize";
 import { ToolAbortError } from "./tool-errors";
@@ -425,8 +426,6 @@ type ManagedBashJobCompletion =
 	| {
 			kind: "completed";
 			result: AgentToolResult<BashToolDetails>;
-			/** Records the result's tagged rows; the waiter runs it when it returns the result itself. */
-			commitView?: () => void;
 	  }
 	| {
 			kind: "failed";
@@ -736,10 +735,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			replies?: readonly string[];
 			/**
 			 * The command and its working directory, to tag the numbered file rows
-			 * it printed. The rows are recorded here, or by `deferCommit`'s caller
-			 * once the result is known to reach the model.
+			 * it printed. `maxChars` bounds a result delivered later as a job, which
+			 * arrives whole only up to that length.
 			 */
-			view?: { command: string; cwd: string; deferCommit?: (commit: () => void) => void };
+			view?: { command: string; cwd: string; maxChars?: number };
 		},
 	): Promise<AgentToolResult<BashToolDetails>> {
 		const exitCode = result.exitCode;
@@ -774,10 +773,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						)
 					: undefined;
 			const tagged = tags && [outputLines[0], "", tags.notice, ...outputLines.slice(1)].join("\n");
-			if (tags && tagged && Buffer.byteLength(tagged) <= spillThreshold) {
+			const { maxChars } = options.view;
+			const deliveredWhole =
+				maxChars === undefined ||
+				(tagged !== undefined && tagged.length <= maxChars && !result.truncated && !result.artifactError);
+			if (tags && tagged && Buffer.byteLength(tagged) <= spillThreshold && deliveredWhole) {
 				outputText = tagged;
-				if (options.view.deferCommit) options.view.deferCommit(tags.commit);
-				else tags.commit();
+				tags.commit();
 			}
 		}
 
@@ -997,9 +999,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					});
 					if (result.artifactError) latestProgressDetails = { meta: { artifactError: result.artifactError } };
 					const wallTimeMs = performance.now() - wallTimeStart;
-					// A backgrounded job is delivered later, maybe as a preview, so only
-					// a result the foreground waiter returns may record its rows.
-					let commitView: (() => void) | undefined;
 					const finalResult = await this.#buildCompletedResult(result, options.timeoutSec, {
 						command: options.command,
 						cwd: options.commandCwd,
@@ -1007,15 +1006,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						notices,
 						wallTimeMs,
 						replies: backgrounded ? undefined : replies,
-						view: backgrounded
-							? undefined
-							: {
-									command: options.command,
-									cwd: options.commandCwd,
-									deferCommit: commit => {
-										commitView = commit;
-									},
-								},
+						// The waiter may return this result or hand it to async delivery.
+						view: { command: options.command, cwd: options.commandCwd, maxChars: ASYNC_INLINE_RESULT_MAX_CHARS },
 					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
@@ -1027,7 +1019,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					// Hand the detailed result to the foreground auto-background
 					// waiter (which renders it, footer included) before deciding
 					// the job's terminal state.
-					completion.resolve({ kind: "completed", result: finalResult, commitView });
+					completion.resolve({ kind: "completed", result: finalResult });
 					if (finalResult.isError === true) {
 						// A non-zero exit is a completed command that failed. Re-enter
 						// the failure path so the job manager records it as failed and
@@ -1346,7 +1338,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			);
 			if (waitResult.kind === "completed") {
 				autoBgManager.releaseForegroundJob(job.jobId);
-				waitResult.commitView?.();
 				return waitResult.result;
 			}
 			if (waitResult.kind === "failed") {

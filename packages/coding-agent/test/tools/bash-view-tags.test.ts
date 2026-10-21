@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -147,10 +147,44 @@ describe("bash numbered file views mint edit tags", () => {
 			"false && cd sub; grep -n limit retry.ts",
 			"(cd sub); grep -n limit retry.ts",
 			"cd sub | true; grep -n limit retry.ts",
+			"pushd sub > /dev/null; grep -n limit retry.ts",
 		]) {
 			expect(await bash(command)).not.toContain("Edit tags for the numbered lines above:");
 		}
 		expect(getEditStore(session).headHash(path.join(cwd, "sub", "retry.ts"))).toBeNull();
+		expect(getEditStore(session).headHash(path.join(cwd, "retry.ts"))).toBeNull();
+	});
+
+	it("names no tag for a path that climbs out of a symlink", async () => {
+		// `link/../retry.ts` opens outside/retry.ts; read lexically it would be ./retry.ts.
+		await fs.mkdir(path.join(cwd, "outside", "sub"), { recursive: true });
+		await Bun.write(path.join(cwd, "outside", "retry.ts"), SOURCE);
+		await fs.symlink(path.join(cwd, "outside", "sub"), path.join(cwd, "link"));
+		expect(await bash("grep -n limit link/../retry.ts")).not.toContain("Edit tags for the numbered lines above:");
+		expect(await bash("grep -n limit link/../retry.ts /dev/null")).not.toContain(
+			"Edit tags for the numbered lines above:",
+		);
+		expect(getEditStore(session).headHash(path.join(cwd, "retry.ts"))).toBeNull();
+	});
+
+	it("names a file under the home directory with `~`, and edit accepts it", async () => {
+		const homeSpy = spyOn(os, "homedir").mockReturnValue(cwd);
+		try {
+			await fs.mkdir(path.join(cwd, "inner"));
+			const inner = makeSession(path.join(cwd, "inner"));
+			const output = textOf(
+				await new BashTool(inner).execute("bash", { command: `grep -n limit ${path.join(cwd, "retry.ts")}` }),
+			);
+			expect(output).toContain("[~/retry.ts#");
+			expect(output).not.toContain(`[${cwd}`);
+			const tag = footerTag(output, "~/retry.ts");
+			const result = await new EditTool(inner, "hashline").execute("edit", {
+				input: `[~/retry.ts#${tag}]\nPUT 2.=2:\n+\tconst limit = times * 3;\n`,
+			});
+			expect(result.isError).toBeFalsy();
+		} finally {
+			homeSpy.mockRestore();
+		}
 	});
 
 	it("names no tag when edits do not take hashline anchors, or for notebooks", async () => {
@@ -231,8 +265,13 @@ describe("bash numbered file views mint edit tags", () => {
 		expect(getEditStore(small).headHash(path.join(cwd, "list.txt"))).toBeNull();
 	});
 
-	it("records rows only for a job result the call returns itself", async () => {
-		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+	it("records a job's rows only when its delivery carries them whole", async () => {
+		const deliveries: string[] = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: async (_id, text) => {
+				deliveries.push(text);
+			},
+		});
 		try {
 			const foreground = makeSession(
 				cwd,
@@ -244,16 +283,27 @@ describe("bash numbered file views mint edit tags", () => {
 			expect(tag).toBeDefined();
 			expect(getEditStore(foreground).seenLines(path.join(cwd, "retry.ts"), tag!)).toEqual([2, 3]);
 
-			const background = makeSession(cwd, { "async.enabled": true }, manager);
-			const started = await new BashTool(background).execute("bash", {
-				command: "grep -n limit retry.ts",
-				async: true,
-			});
-			const jobId = started.details?.async?.jobId;
-			if (!jobId) throw new Error("expected a background job");
-			await manager.getJob(jobId)?.promise;
-			await manager.drainDeliveries();
-			expect(getEditStore(background).headHash(path.join(cwd, "retry.ts"))).toBeNull();
+			const job = async (session: ToolSession, command: string): Promise<string> => {
+				const started = await new BashTool(session).execute("bash", { command, async: true });
+				const jobId = started.details?.async?.jobId;
+				if (!jobId) throw new Error("expected a background job");
+				await manager.getJob(jobId)?.promise;
+				await manager.drainDeliveries();
+				return deliveries.at(-1) ?? "";
+			};
+			const small = makeSession(cwd, { "async.enabled": true }, manager);
+			const delivered = await job(small, "grep -n limit retry.ts");
+			const jobTag = footerTag(delivered, "retry.ts");
+			expect(jobTag).toBeDefined();
+			expect(getEditStore(small).seenLines(path.join(cwd, "retry.ts"), jobTag!)).toEqual([2, 3]);
+
+			// Past the async inline limit the delivery is a preview: no rows.
+			const rows = Array.from({ length: 400 }, (_, i) => `entry ${String(i).padStart(3, "0")} ${"x".repeat(30)}`);
+			await Bun.write(path.join(cwd, "long.txt"), `${rows.join("\n")}\n`);
+			const large = makeSession(cwd, { "async.enabled": true }, manager);
+			const preview = await job(large, "grep -n entry long.txt");
+			expect(preview).not.toContain("Edit tags for the numbered lines above:");
+			expect(getEditStore(large).headHash(path.join(cwd, "long.txt"))).toBeNull();
 		} finally {
 			await manager.dispose();
 		}
