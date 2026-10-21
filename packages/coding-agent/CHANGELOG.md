@@ -1,7 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Fixed
 - Fixed soft, handoff and provider-native compaction requests being missing from the session's token and cost accounting when they were retried, rejected, discarded, or when a provider-native compaction kept no messages at all, when a transcript turn separated a compaction's own request from the compaction it produced, when an advisor's own overflow compaction billed a request, and a speculative compaction being thrown away when the branch ended on a usage record, and fixed a provider-native compaction's recorded usage dropping the cache-write and provider-side orchestration buckets the provider billed ([#16468](https://github.com/can1357/oh-my-pi/pull/16468) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
