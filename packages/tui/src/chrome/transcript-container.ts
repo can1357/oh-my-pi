@@ -25,6 +25,14 @@ export interface TranscriptPresentationTarget {
 	 * as one.
 	 */
 	setTranscriptAllocation?(rows: number, frame: AnimationFrame, measured?: boolean): void;
+	/**
+	 * The block's measured render became the viewport output, so it reached
+	 * the terminal after all. A block that keeps per-paint facts (a pending
+	 * shape that must be replayed when its first result arrives) has to learn
+	 * that the shape it measured was painted, or it treats a visible shape as
+	 * one the user never saw.
+	 */
+	notifyMeasuredPaint?(): void;
 }
 
 /** Presentation declaration captured permanently when a block is added. */
@@ -678,6 +686,14 @@ export class TranscriptContainer extends Container {
 					output.push(line);
 					owners.push(component);
 				}
+			}
+			// The whole live tail fits, so these blocks' measured rows ARE the
+			// viewport output: they reached the terminal. A block that keeps a
+			// per-paint fact (a pending shape that must be replayed when its
+			// first result arrives) has to learn that the shape it measured was
+			// painted, or it treats a visible shape as one the user never saw.
+			for (const candidate of shown) {
+				(candidate.entry.component as Component & TranscriptPresentationTarget).notifyMeasuredPaint?.();
 			}
 			this.#commitViewportSpans(owners, output.length);
 			return output;
