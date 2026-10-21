@@ -28,6 +28,7 @@ const TEST_ADAPTER: DapResolvedAdapter = {
 	attachDefaults: {},
 	connectMode: "stdio",
 	acceptsDirectoryProgram: false,
+	requiresExecutableProgram: false,
 };
 
 it("rejects pending DAP work and terminates an adapter with invalid framing", async () => {
@@ -763,6 +764,93 @@ describe("DebugTool launch validation", () => {
 			}
 		} finally {
 			launchSpy.mockRestore();
+		}
+	});
+
+	it("rejects source-file launches into native debuggers before spawning the adapter", async () => {
+		const gdbAdapter: DapResolvedAdapter = {
+			...TEST_ADAPTER,
+			name: "gdb",
+			command: "gdb",
+			resolvedCommand: "gdb",
+			fileTypes: [".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".rs", ".ha"],
+			requiresExecutableProgram: true,
+		};
+		const launchSpy = spyOn(dapModule, "selectLaunchAdapter").mockReturnValue({
+			kind: "adapter",
+			adapter: gdbAdapter,
+		});
+		const sessionLaunchSpy = spyOn(dapModule.dapSessionManager, "launch");
+		try {
+			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-source-"));
+			try {
+				await fs.writeFile(
+					path.join(cwd, "main.ha"),
+					'use fmt;\n\nexport fn main() void = {\n\tfmt::println("hi")!;\n};\n',
+				);
+				const session: ToolSession = {
+					cwd,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated({ "debug.enabled": true }),
+				};
+				const tool = new DebugTool(session);
+
+				// The adapter must never be spawned for a source file it matched by
+				// extension; the tool fails upfront with build guidance instead.
+				await expect(tool.execute("call", { action: "launch", program: "main.ha" })).rejects.toThrow(
+					/launch program is a source file.*main\.ha.*'gdb'.*compiled executable/,
+				);
+				expect(sessionLaunchSpy).not.toHaveBeenCalled();
+			} finally {
+				await removeWithRetries(cwd);
+			}
+		} finally {
+			launchSpy.mockRestore();
+			sessionLaunchSpy.mockRestore();
+		}
+	});
+
+	it("lets adapters that debug source files reach the adapter for the same extension (dlv on .go)", async () => {
+		const dlvAdapter: DapResolvedAdapter = {
+			...TEST_ADAPTER,
+			name: "dlv",
+			command: "dlv",
+			resolvedCommand: "dlv",
+			fileTypes: [".go"],
+			requiresExecutableProgram: false,
+		};
+		const launchSpy = spyOn(dapModule, "selectLaunchAdapter").mockReturnValue({
+			kind: "adapter",
+			adapter: dlvAdapter,
+		});
+		const sessionLaunchSpy = spyOn(dapModule.dapSessionManager, "launch").mockImplementation(async opts => {
+			throw Object.assign(new Error("captured launch"), { capturedOptions: opts });
+		});
+		try {
+			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-dlv-source-"));
+			try {
+				await fs.writeFile(path.join(cwd, "main.go"), "package main\n\nfunc main() {}\n");
+				const session: ToolSession = {
+					cwd,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated({ "debug.enabled": true }),
+				};
+				const tool = new DebugTool(session);
+
+				// Validation must pass so dlv receives the source file it debugs itself.
+				await expect(tool.execute("call", { action: "launch", program: "main.go" })).rejects.toThrow(
+					/captured launch/,
+				);
+			} finally {
+				await removeWithRetries(cwd);
+			}
+		} finally {
+			launchSpy.mockRestore();
+			sessionLaunchSpy.mockRestore();
 		}
 	});
 

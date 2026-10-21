@@ -22,6 +22,7 @@ const TEST_ADAPTER: DapResolvedAdapter = {
 	attachDefaults: { request: "attach", type: "pwa-node" },
 	connectMode: "tcp",
 	acceptsDirectoryProgram: false,
+	requiresExecutableProgram: false,
 };
 
 type EventHandler = (body: unknown, event: DapEventMessage) => void | Promise<void>;

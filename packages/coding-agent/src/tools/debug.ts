@@ -1,5 +1,6 @@
 import { type DebugToolDetails, formatLocation, formatSessionSnapshot } from "@oh-my-pi/pi-tui/tools/debug";
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -504,11 +505,21 @@ function validateLaunchProgram(
 	programKind: LaunchProgramKind,
 	adapter: DapResolvedAdapter,
 ): void {
-	if (programKind !== "directory" || adapter.acceptsDirectoryProgram) return;
-	const displayPath = formatPathRelativeToCwd(program, cwd, { trailingSlash: true });
-	throw new ToolError(
-		`launch program resolves to a directory: ${displayPath}. Pass an executable file path or choose an adapter that supports package directories.`,
-	);
+	if (programKind === "directory" && !adapter.acceptsDirectoryProgram) {
+		const displayPath = formatPathRelativeToCwd(program, cwd, { trailingSlash: true });
+		throw new ToolError(
+			`launch program resolves to a directory: ${displayPath}. Pass an executable file path or choose an adapter that supports package directories.`,
+		);
+	}
+	if (adapter.requiresExecutableProgram && programKind === "file") {
+		const extension = path.extname(program).toLowerCase();
+		if (extension.length > 0 && adapter.fileTypes.includes(extension)) {
+			const displayPath = formatPathRelativeToCwd(program, cwd);
+			throw new ToolError(
+				`launch program is a source file: ${displayPath}. The '${adapter.name}' adapter requires a compiled executable; build the program first and launch the binary.`,
+			);
+		}
+	}
 }
 
 function getActiveSessionSnapshot(): DapSessionSummary {

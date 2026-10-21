@@ -43,6 +43,7 @@ function normalizeAdapterConfig(config: unknown): DapAdapterConfig | null {
 		launchDefaults: normalizeObject(config.launchDefaults),
 		attachDefaults: normalizeObject(config.attachDefaults),
 		acceptsDirectoryProgram: config.acceptsDirectoryProgram === true,
+		requiresExecutableProgram: config.requiresExecutableProgram === true,
 		...(connectMode ? { connectMode } : {}),
 	};
 }
@@ -167,6 +168,7 @@ function resolveDefaultJsDebugAdapter(
 		attachDefaults: config.attachDefaults ?? {},
 		connectMode: "tcp",
 		acceptsDirectoryProgram: config.acceptsDirectoryProgram === true,
+		requiresExecutableProgram: false,
 	};
 }
 
@@ -201,6 +203,7 @@ function resolveAdapterFromConfig(
 		attachDefaults: config.attachDefaults ?? {},
 		connectMode: config.connectMode ?? "stdio",
 		acceptsDirectoryProgram: config.acceptsDirectoryProgram === true,
+		requiresExecutableProgram: config.requiresExecutableProgram === true,
 	};
 }
 

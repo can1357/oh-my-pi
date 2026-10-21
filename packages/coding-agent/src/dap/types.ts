@@ -495,6 +495,10 @@ export interface DapAdapterConfig {
 	 *  (e.g. dlv treats it as a Go package path). When false/undefined, the
 	 *  debug tool rejects directory programs upfront. */
 	acceptsDirectoryProgram?: boolean;
+	/** When true, the adapter's launch `program` must be a compiled binary.
+	 *  Source-file launches are rejected upfront with build guidance instead
+	 *  of surfacing the adapter's own loader error. */
+	requiresExecutableProgram?: boolean;
 }
 
 export interface DapResolvedAdapter {
@@ -509,6 +513,7 @@ export interface DapResolvedAdapter {
 	attachDefaults: DapAttachDefaults;
 	connectMode: "stdio" | "socket" | "tcp";
 	acceptsDirectoryProgram: boolean;
+	requiresExecutableProgram: boolean;
 }
 
 export interface DapBreakpointRecord {

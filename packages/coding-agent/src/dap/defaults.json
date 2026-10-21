@@ -2,9 +2,10 @@
 	"gdb": {
 		"command": "gdb",
 		"args": ["-i", "dap"],
-		"languages": ["c", "cpp", "rust"],
-		"fileTypes": [".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".rs"],
+		"languages": ["c", "cpp", "rust", "hare"],
+		"fileTypes": [".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".rs", ".ha"],
 		"rootMarkers": ["Makefile", "CMakeLists.txt", "Cargo.toml", "compile_commands.json"],
+		"requiresExecutableProgram": true,
 		"launchDefaults": {
 			"request": "launch",
 			"stopOnEntry": true,
@@ -20,6 +21,7 @@
 		"languages": ["c", "cpp", "objc", "swift", "rust", "zig"],
 		"fileTypes": [".c", ".cc", ".cpp", ".cxx", ".m", ".mm", ".swift", ".rs", ".zig"],
 		"rootMarkers": ["Package.swift", "Cargo.toml", "Makefile", "CMakeLists.txt", "build.zig"],
+		"requiresExecutableProgram": true,
 		"launchDefaults": {
 			"request": "launch",
 			"stopOnEntry": true
@@ -34,6 +36,7 @@
 		"languages": ["c", "cpp", "rust", "zig"],
 		"fileTypes": [".c", ".cc", ".cpp", ".cxx", ".rs", ".zig"],
 		"rootMarkers": ["Cargo.toml", "CMakeLists.txt", "Makefile", "compile_commands.json", "build.zig"],
+		"requiresExecutableProgram": true,
 		"launchDefaults": {
 			"request": "launch",
 			"stopOnEntry": true
