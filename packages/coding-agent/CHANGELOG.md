@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
 
+### Fixed
 - Fixed `write` handing back a tag whose edits applied at any line number: the written lines are now numbered in the write result, so the model anchors on the line numbers it just saw, and an anchor the write did not display is rejected like an unread line ([#15666](https://github.com/can1357/oh-my-pi/issues/15666), [#16455](https://github.com/can1357/oh-my-pi/pull/16455) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.5] - 2026-10-21
