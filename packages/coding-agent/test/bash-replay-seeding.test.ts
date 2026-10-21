@@ -40,26 +40,31 @@ function bashMessage(output: string): AgentMessage {
  * creating one, so an unconditional call here would silently run against
  * another file's settings (and its cwd). `resetSettingsForTest()` empties the
  * singleton for everyone, so a file that only adopted it must not clear it:
- * the owner would then see "Settings not initialized" mid-run. The returned
- * lease releases only what this file created.
+ * the owner would then see "Settings not initialized" mid-run. Only what this
+ * file created is released.
  */
-async function acquireSettings(): Promise<() => void> {
-	if (isSettingsInitialized()) return () => {};
+let ownsSettings = false;
+
+async function acquireSettings(): Promise<void> {
+	if (isSettingsInitialized()) return;
 	await Settings.init({ inMemory: true, cwd: process.cwd() });
-	return () => resetSettingsForTest();
+	ownsSettings = true;
+}
+
+function releaseSettings(): void {
+	if (!ownsSettings) return;
+	ownsSettings = false;
+	resetSettingsForTest();
 }
 
 describe("UiHelpers bash replay seeding", () => {
-	let releaseSettings: (() => void) | undefined;
-
 	beforeAll(async () => {
-		releaseSettings = await acquireSettings();
+		await acquireSettings();
 		await initTheme();
 	});
 
 	afterAll(() => {
-		releaseSettings?.();
-		releaseSettings = undefined;
+		releaseSettings();
 	});
 
 	it("keeps every line of a >100-line result after expansion", () => {
@@ -84,14 +89,27 @@ describe("UiHelpers bash replay seeding", () => {
 		}
 	});
 
-	it("leaves a settings singleton it did not create in place", async () => {
-		// Another test file may own the process-wide settings singleton. A lease
-		// that only adopted it must not clear it: `resetSettingsForTest()` empties
-		// the singleton for every file, and the owner would then fail with
-		// "Settings not initialized" — the cross-file leak this file used to
-		// cause by resetting unconditionally.
-		const foreignRelease = await acquireSettings();
-		foreignRelease();
+	it("releases the settings singleton it created and leaves one it did not create", async () => {
+		// The file owns the singleton only when it created it. Releasing it
+		// then clears the process-wide state — an observable ownership
+		// transition.
+		const owned = ownsSettings;
+		if (owned) {
+			expect(isSettingsInitialized()).toBe(true);
+			releaseSettings();
+			expect(isSettingsInitialized()).toBe(false);
+		}
+		// A second owner now installs the singleton. This file does not own
+		// that instance, so releasing must NOT clear it: `resetSettingsForTest()`
+		// empties the singleton for every file, and the owner would then fail
+		// with "Settings not initialized" — the cross-file leak this file used
+		// to cause by resetting unconditionally.
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		releaseSettings();
 		expect(isSettingsInitialized()).toBe(true);
+		// Hand the ownership back so the suite's own teardown still releases
+		// what this file created.
+		ownsSettings = owned;
+		if (owned) resetSettingsForTest();
 	});
 });
