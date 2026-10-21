@@ -1,6 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed `lsp rename_file` reporting a plain move when no language server could update the references: the preview now names the servers that did not take part and predicts the abort instead of claiming the rename was checked ([#15526](https://github.com/can1357/oh-my-pi/issues/15526), [#16411](https://github.com/can1357/oh-my-pi/pull/16411) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+## [18.12.5] - 2026-10-21
+
+### Added
+
+- `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
 
 ## [18.14.1] - 2026-10-31
 
