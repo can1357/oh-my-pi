@@ -23,7 +23,7 @@ import {
 	createCachedComponent,
 	type ConfiguredThinkingLevel,
 } from "../render/render-utils";
-import type { StructuredSubagentOutput } from "./task";
+import type { StructuredSubagentOutput, TaskModelFallback } from "./task";
 import { describeJobTiles, type JobTile, type JobWidgetView, renderJobTileLines } from "./job-widget";
 import type { RenderResultOptions, ToolRenderer, ToolActivitySummary } from "./renderer";
 import type { IrcDeliveryReceipt, IrcMessage } from "./irc";
@@ -56,6 +56,10 @@ export interface JobSnapshot {
 	exitCode?: number;
 	/** Effective task model selector, including an explicit reasoning suffix when configured. */
 	resolvedModel?: string;
+	/** Model on the first assistant attempt, including a failed request. */
+	firstTurnModel?: string;
+	/** Retry switches with their triggering provider error or usage preflight. */
+	fallbacks?: TaskModelFallback[];
 	/** Provider/id including routing, with no added thinking suffix. */
 	resolvedModelIdentity?: string;
 	/** Explicit thinking metadata, independent of the model identity. */

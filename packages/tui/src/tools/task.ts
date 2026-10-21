@@ -2389,6 +2389,10 @@ export interface AgentProgress {
 	resolvedThinkingLevel?: ConfiguredThinkingLevel;
 	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */
 	resolvedModelIsFallback?: boolean;
+	/** Model on the first assistant attempt, including a failed request. */
+	firstTurnModel?: string;
+	/** Retry switches with their triggering provider error or usage preflight. */
+	fallbacks?: TaskModelFallback[];
 	/** Extension routing note (e.g. model-pools) explaining why {@link resolvedModel} was chosen. */
 	resolvedModelRoute?: string;
 	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
@@ -2443,6 +2447,20 @@ export interface AgentProgress {
 	inflightTaskDetails?: TaskToolDetails;
 }
 
+export interface TaskFallbackReason {
+	class: "quota" | "auth" | "other";
+	status?: number;
+	message: string;
+	source: "provider-error" | "usage-preflight";
+}
+
+export interface TaskModelFallback {
+	from: string;
+	to: string;
+	at: string;
+	reason?: TaskFallbackReason;
+}
+
 /** Result from a single agent execution */
 export interface SingleResult {
 	index: number;
@@ -2482,6 +2500,10 @@ export interface SingleResult {
 	resolvedThinkingLevel?: ConfiguredThinkingLevel;
 	/** True when {@link resolvedModel} is the target of an active retry fallback. Mirrors {@link AgentProgress.resolvedModelIsFallback} onto the settled result. */
 	resolvedModelIsFallback?: boolean;
+	/** Model on the first assistant attempt, including a failed request. */
+	firstTurnModel?: string;
+	/** Retry switches with their durable triggering provider error or usage preflight. */
+	fallbacks?: TaskModelFallback[];
 	/** Mirrors {@link AgentProgress.resolvedModelRoute} onto the settled result. */
 	resolvedModelRoute?: string;
 	/** Retains {@link AgentProgress.advisor} after the advised session is disposed. */

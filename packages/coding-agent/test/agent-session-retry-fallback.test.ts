@@ -285,6 +285,32 @@ describe("AgentSession retry fallback", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("persists provider auth trigger on fallback before asynchronous error persistence", async () => {
+		const primary = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const requested: string[] = [];
+		const agent = createFallbackAgent(primary, requested, {
+			firstError: Object.assign(new Error("401 Invalid API Key\nprovider detail"), { status: 401 }),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: ["openai/gpt-4o-mini"] },
+		});
+		settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+		const manager = SessionManager.inMemory();
+		session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry });
+		await session.prompt("Recover from the historical invalid key trigger");
+		await session.waitForIdle();
+		const change = manager.getBranch().find(entry => entry.type === "model_change" && entry.resolvedModelIsFallback);
+		expect(change?.type === "model_change" ? change.fallback : undefined).toEqual({
+			from: "anthropic/claude-sonnet-4-5",
+			reason: { class: "auth", status: 401, message: "401 Invalid API Key", source: "provider-error" },
+		});
+		expect(requested).toEqual(["anthropic/claude-sonnet-4-5", "openai/gpt-4o-mini"]);
+		expect(modelRegistry.isSelectorSuppressed("anthropic/claude-sonnet-4-5")).toBe(true);
+		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o-mini")).toBe(false);
+	});
+
 	it("advances through a role-keyed fallback chain across retries", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const firstFallback = getBundledModel("openai", "gpt-4o-mini");

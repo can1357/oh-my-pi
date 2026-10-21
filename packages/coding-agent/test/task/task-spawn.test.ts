@@ -449,6 +449,78 @@ describe("task spawn routing", () => {
 		}
 	});
 
+	it("forwards exact fallback attribution in running job snapshots before settle", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
+		const gate = deferred();
+		const firstTurnModel = "custom/primary";
+		const fallbacks: NonNullable<AgentProgress["fallbacks"]> = [
+			{
+				from: "custom/primary",
+				to: "custom/fallback",
+				at: "2026-01-01T00:00:00.000Z",
+				reason: { class: "quota", status: 429, message: "Quota exceeded", source: "provider-error" },
+			},
+		];
+		let publishProgress: ((metadata: Partial<AgentProgress>) => void) | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const progress: AgentProgress = {
+				...makeResult(options.id ?? "?"),
+				status: "running",
+				resolvedModel: "custom/fallback",
+				firstTurnModel,
+				fallbacks,
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 0,
+				cost: 0,
+			};
+			options.onProgress?.(progress);
+			publishProgress = metadata => options.onProgress?.({ ...progress, ...metadata });
+			await gate.promise;
+			return makeResult(options.id ?? "?", { firstTurnModel, fallbacks });
+		});
+		const manager = createManager();
+		const session = createSession({ manager });
+		const tool = await TaskTool.create(session);
+		const result = await tool.execute("tc-attribution", {
+			agent: "task",
+			name: "Attribution",
+			task: "work",
+		} as TaskParams);
+		const job = manager.getJob(result.details!.async!.jobId)!;
+		try {
+			await pollUntil(
+				() => publishProgress !== undefined && getJobProgress(job)?.resolvedModel === "custom/fallback",
+			);
+			const running = snapshotJobs(session, [job])[0];
+			expect(running?.status).toBe("running");
+			expect(job.resultText).toBeUndefined();
+			expect(running?.firstTurnModel).toBe("custom/primary");
+			expect(running?.fallbacks).toEqual([
+				{
+					from: "custom/primary",
+					to: "custom/fallback",
+					at: "2026-01-01T00:00:00.000Z",
+					reason: { class: "quota", status: 429, message: "Quota exceeded", source: "provider-error" },
+				},
+			]);
+
+			// Sparse updates must retain attribution already received from the executor.
+			publishProgress!({ tokens: 2, firstTurnModel: undefined, fallbacks: undefined });
+			await pollUntil(() => getJobProgress(job)?.tokens === 2);
+			const sparse = snapshotJobs(session, [job])[0];
+			expect(sparse?.status).toBe("running");
+			expect(sparse?.firstTurnModel).toBe("custom/primary");
+			expect(sparse?.fallbacks).toEqual(running?.fallbacks);
+		} finally {
+			gate.resolve();
+			await job.promise;
+		}
+		expect(snapshotJobs(session, [job])[0]?.status).toBe("completed");
+		expect(snapshotJobs(session, [job])[0]?.firstTurnModel).toBe("custom/primary");
+		expect(snapshotJobs(session, [job])[0]?.fallbacks).toEqual(fallbacks);
+	});
+
 	it("clears stale model metadata and fallback state from detached progress", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 		const gate = deferred();

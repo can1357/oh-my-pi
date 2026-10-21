@@ -74,6 +74,7 @@ import { describeUsageFallback } from "./retry-fallback-reason";
 import { getLatestCompactionEntry } from "./session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
+import { providerFallbackReason } from "./retry-fallback-reason";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { journalJudgmentUsage } from "../judgment";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
@@ -2119,7 +2120,13 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; reason?: string },
+		options?: {
+			pinFallback?: boolean;
+			apiKey?: string;
+			signal?: AbortSignal;
+			reason?: string;
+			providerError?: AssistantMessage;
+		},
 	): Promise<boolean> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -2175,7 +2182,18 @@ export class TurnRecovery {
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
 			return false;
 		}
-		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true, {
+			from: currentSelector,
+			reason: options?.providerError
+				? providerFallbackReason(options.providerError)
+				: options?.reason
+					? {
+							class: "quota",
+							message: options.reason.slice(0, 400),
+							source: "usage-preflight",
+						}
+					: undefined,
+		});
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
 		this.#host.setThinkingLevel(nextThinkingLevel);
 		if (!this.#activeRetryFallback) {
@@ -2297,6 +2315,7 @@ export class TurnRecovery {
 				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
+					providerError: failedMessage,
 				});
 				// Redemption replays the refused request's frozen `system` and `tools`. If the
 				// swap rebuilt either, the fallback model would be prompted with, and call tools
@@ -2410,7 +2429,7 @@ export class TurnRecovery {
 	 * fallback that makes Fast a safe default. Returns false when the current
 	 * model is not a fast variant, the base id is missing, or it has no key.
 	 */
-	async #tryFireworksFastFallback(currentSelector: string): Promise<boolean> {
+	async #tryFireworksFastFallback(currentSelector: string, failedMessage: AssistantMessage): Promise<boolean> {
 		const model = this.#activeFireworksFastModel();
 		if (!model) return false;
 		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
@@ -2423,7 +2442,10 @@ export class TurnRecovery {
 		// chain: the base model must not be reported as the configured primary.
 		this.#markFallbackRouted();
 		await this.#host.setModelWithProviderSessionReset(baseModel);
-		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true, {
+			from: currentSelector,
+			reason: providerFallbackReason(failedMessage),
+		});
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
 		await this.#host.syncAfterModelChange(previousEditMode);
 		await this.#host.emitSessionEvent({
@@ -2830,7 +2852,7 @@ export class TurnRecovery {
 			// best-effort, degrade to Standard on failure) and triggers on hard router
 			// errors the generic retry classifier would otherwise reject.
 			if (!switchedModel && allowModelFallback && options?.fireworksFastFallback) {
-				switchedModel = await this.#tryFireworksFastFallback(currentSelector);
+				switchedModel = await this.#tryFireworksFastFallback(currentSelector, message);
 			}
 			if (switchedModel) {
 				delayMs = 0;

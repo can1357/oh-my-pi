@@ -7,7 +7,7 @@ import type {
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
-import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { StructuredSubagentSchemaMode, TaskFallbackReason } from "@oh-my-pi/pi-tui/tools/task";
 import type { CompactionMethod } from "./compaction-methods";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
@@ -134,6 +134,8 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	role?: string;
 	/** True when this transition selected a retry-fallback model rather than the configured model. */
 	resolvedModelIsFallback?: boolean;
+	/** Causal trigger; persisted at the switch even when error persistence completes later. */
+	fallback?: { from: string; reason?: TaskFallbackReason };
 }
 
 export interface ServiceTierChangeEntry extends SessionEntryBase {
