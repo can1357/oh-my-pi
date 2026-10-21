@@ -10,6 +10,7 @@ import { ToolExecutionComponent } from "../src/chat/tool-execution";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { bashToolRenderer, formatExitCodeNotice, formatWallTimeNotice } from "../src/tools/bash";
 import { type EvalCellResult, evalToolRenderer } from "../src/tools/eval";
+import { RUN_INPUT_PREVIEW_LINES } from "../src/tools/native-view";
 import type { RenderResultOptions } from "../src/tools/renderer";
 import { getThemeByName, setThemeInstance } from "../src/theme";
 import type { TUI } from "../src/tui";
@@ -37,6 +38,17 @@ function collect(children: readonly NativeChild[] | undefined, kind: string): Na
 
 function props(n: NativeNode | undefined): Record<string, unknown> {
 	return (n?.p ?? {}) as Record<string, unknown>;
+}
+
+/** The `lines` a node's own preview clamp allows. */
+function previewLines(n: NativeNode | undefined): number {
+	const preview = props(n).preview;
+	if (typeof preview !== "object" || preview === null || !("lines" in preview)) {
+		throw new Error("Expected a node with a preview");
+	}
+	const { lines } = preview;
+	if (typeof lines !== "number") throw new Error("Expected a numeric preview line count");
+	return lines;
 }
 
 function role(n: NativeNode | undefined): string | undefined {
@@ -761,14 +773,23 @@ describe("user shell runs", () => {
 	});
 	it("bounds a long eval cell's collapsed card source to the preview window", () => {
 		// The eval card body is unclamped, so the source carries its own
-		// preview: without it a long cell fills screens while collapsed.
+		// preview: without it a long cell fills screens while collapsed. It
+		// takes the tool view's input allowance, not the whole output
+		// allowance — the output child has its own preview, and giving both
+		// children the full window let a collapsed card fill a normal terminal.
 		const cell = new EvalExecutionComponent(Array.from({ length: 60 }, (_, i) => `x${i} = ${i}`).join("\n"), ui);
 		cell.setComplete(0, false, { output: "done" });
 		const card = cell.describe(cx(["card", "ansi"]));
 		expect(card.k).toBe("card");
 		const code = nodes(card.c).find(child => child.k === "code");
 		expect(code).toBeDefined();
-		expect(props(code)).toMatchObject({ preview: { lines: PREVIEW_LINES } });
+		expect(props(code)).toMatchObject({ preview: { lines: RUN_INPUT_PREVIEW_LINES } });
+		// The source and the output share one body budget: the source's
+		// allowance is strictly smaller than the output's, so the two children
+		// cannot each take the whole window.
+		const output = nodes(card.c).find(child => child.key === "output");
+		expect(props(output)).toMatchObject({ preview: { lines: PREVIEW_LINES } });
+		expect(previewLines(code)).toBeLessThan(previewLines(output));
 	});
 
 	it("bounds a collapsed card's image collection and names the hidden rest", () => {
