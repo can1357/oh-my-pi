@@ -22,6 +22,7 @@ import {
 	PREVIEW_LINES,
 	resolveExecutionStatus,
 } from "./execution-shared";
+import { RUN_INPUT_PREVIEW_LINES } from "../tools/native-view";
 import { code, span } from "../native/describe";
 import { type DescribeContext, type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
 import { Memo } from "../native/memo";
@@ -161,9 +162,13 @@ export class EvalExecutionComponent extends Container {
 						head: [span(title, `${this.#excludeFromContext ? "dim" : "pythonMode"} strong`)],
 						muted: this.#excludeFromContext,
 						// The card body is not clamped, so the source carries its own
-						// preview to keep a long cell bounded while collapsed.
+						// preview to keep a long cell bounded while collapsed. It takes
+						// the tool view's input allowance, not the whole output
+						// allowance: the output child below has its own preview, and
+						// giving both children the full window let a collapsed card
+						// fill a normal terminal.
 						lead: [
-							code(this.#code, { lang: this.#highlightLang(), key: "code", preview: { lines: PREVIEW_LINES } }),
+							code(this.#code, { lang: this.#highlightLang(), key: "code", preview: { lines: RUN_INPUT_PREVIEW_LINES } }),
 						],
 					});
 		});
