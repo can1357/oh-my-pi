@@ -7,7 +7,6 @@
  * `[m:ss.s] text` line per sentence.
  */
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
@@ -16,8 +15,12 @@ import { audioInputMimeType } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { resolveThinkingLevelForModel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { prompt } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import { extractTextContent } from "../commit/utils";
 import { cfgImagesBlockImages } from "../modes/settings";
+import transcribeInstruction from "../prompts/tools/media-transcript.md" with { type: "text" };
+import transcribeSystemPrompt from "../prompts/tools/media-transcript-system.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { findPerceptionModel } from "./image-question";
 import { runFfmpeg } from "./video";
@@ -73,9 +76,6 @@ export interface MediaTranscript {
 // Gemini's 20 MB inline limit, and its sentence lines stay well inside the model's output limit.
 const WINDOW_SEC = 3600;
 
-const TRANSCRIBE_INSTRUCTION =
-	"Transcribe all speech in this recording verbatim, without skipping or summarizing anything. Write one line per sentence (split a sentence longer than about 10 seconds at a clause), never one line per word, formatted exactly as `[m:ss.s] text` where the time is when that line starts in this recording. Output only those lines; if there is no speech, output only `(no speech)`.";
-
 /**
  * Transcribe the first audio stream of `absolutePath` with `model`, one request per hour of audio.
  * A failed request throws a {@link ToolError} naming the model.
@@ -101,13 +101,13 @@ export async function transcribeRecording(
 		const response = await instrumentedCompleteSimple(
 			model,
 			{
-				systemPrompt: ["You transcribe recordings. Report only what is said in them."],
+				systemPrompt: [prompt.render(transcribeSystemPrompt)],
 				messages: [
 					{
 						role: "user",
 						content: [
 							{ type: "image", data: audio, mimeType },
-							{ type: "text", text: TRANSCRIBE_INSTRUCTION },
+							{ type: "text", text: prompt.render(transcribeInstruction) },
 						],
 						timestamp: Date.now(),
 					},
@@ -152,16 +152,13 @@ async function extractSpeechAudio(
 	window: { start: number; end: number } | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<string> {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-transcript-"));
+	const tmp = await TempDir.create("@omp-transcript-");
 	const opus = mimeType === "audio/ogg";
-	const out = path.join(dir, opus ? "speech.ogg" : "speech.mp3");
+	const out = tmp.join(opus ? "speech.ogg" : "speech.mp3");
 	try {
 		const range = window ? ["-ss", window.start.toFixed(3), "-to", window.end.toFixed(3)] : [];
 		await runFfmpeg(
 			[
-				"-v",
-				"error",
-				"-y",
 				...range,
 				"-i",
 				absolutePath,
@@ -179,9 +176,9 @@ async function extractSpeechAudio(
 			],
 			signal,
 		);
-		return Buffer.from(await Bun.file(out).arrayBuffer()).toBase64();
+		return (await fs.readFile(out)).toBase64();
 	} finally {
-		await fs.rm(dir, { recursive: true, force: true });
+		await tmp.remove();
 	}
 }
 
