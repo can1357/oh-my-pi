@@ -13644,7 +13644,7 @@ export class AgentSession implements SettingsScope {
 				// transcript records no snapshot and a later resume rereads the
 				// memory files and rebuilds a different prompt.
 				rebindMemorySnapshotSessionFile(this.sessionManager);
-				this.#bash.markSessionTransition(bashTransition, sessionTransitioned);
+				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
 			} finally {
