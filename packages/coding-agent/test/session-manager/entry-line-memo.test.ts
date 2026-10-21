@@ -2480,9 +2480,10 @@ describe("SessionManager entry-line memo", () => {
 	it("persists the current value of a snapcompact archive's own field", async () => {
 		// The snapcompact archive is rebuilt by `persistSnapcompactArchive`,
 		// which keeps every field but its frames verbatim — including a field
-		// the generic path strips — and reads the frames by key. The own-key
-		// stamp describes neither, so a graph carrying an archive is left
-		// uncached and re-projected.
+		// the generic path strips — and reads the frames by key. The stamp
+		// records the archive whole, so a transient-named field inside it is
+		// recorded by value rather than by presence: a change behind it must
+		// reach the line.
 		const archive: Record<string, unknown> = {
 			frames: [],
 			jsonlEvents: [{ seq: 1 }],
@@ -2509,6 +2510,84 @@ describe("SessionManager entry-line memo", () => {
 		const bodyAfterSecond = storage.readTextSync(sessionFile);
 		expect(bodyAfterSecond).toContain('"seq":2');
 		expect(bodyAfterSecond).not.toContain('"seq":1');
+	});
+
+	it("persists the current bytes of a snapcompact archive's frames", async () => {
+		// The archive's frames are externalized to the blob store, so the
+		// persisted line carries a ref whose bytes are the frames' payload. The
+		// stamp records the frames, so a payload changed in place mints a new
+		// ref and a reload restores the current frames.
+		const frames = [{ data: LARGE_BASE64, mimeType: "image/png" }];
+		const archive: Record<string, unknown> = { frames, marker: "fix15222-archive-frames" };
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content: [{ type: "text" as const, text: "ok" }],
+			preserveData: { snapcompact: archive },
+		} as unknown as AssistantMessage);
+
+		// First rewrite: the frames are externalized into the blob store.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const refsAfterFirst = persistedBlobRefs(storage.readTextSync(sessionFile));
+		expect(refsAfterFirst).toHaveLength(1);
+		const originalRef = refsAfterFirst[0];
+		if (!originalRef) throw new Error("Expected blob reference");
+		expect(await blobBytesBase64(originalRef)).toBe(LARGE_BASE64);
+
+		// The frames' payload changes in place: the persisted line must carry a
+		// new ref, and a reload must restore the new bytes.
+		frames[0].data = "B".repeat(2048);
+		await session.appendEntriesAtomically(() => {});
+		const refsAfterSecond = persistedBlobRefs(storage.readTextSync(sessionFile));
+		expect(refsAfterSecond).toHaveLength(1);
+		const mutatedRef = refsAfterSecond[0];
+		if (!mutatedRef) throw new Error("Expected blob reference");
+		expect(mutatedRef).not.toBe(originalRef);
+		expect(await blobBytesBase64(mutatedRef)).toBe("B".repeat(2048));
+	});
+
+	it("persists the current bytes of a snapcompact archive whose frames hide behind a hidden field", async () => {
+		// The archive rebuild reads the frames by key, so a frames field that is
+		// an own non-enumerable data property still decides the persisted bytes
+		// — while the own-key stamp never sees it. Such an archive must stay
+		// uncached, so the line is always re-projected from the live archive.
+		const frames = [{ data: LARGE_BASE64, mimeType: "image/png" }];
+		const archive: Record<string, unknown> = { marker: "fix15222-hidden-frames" };
+		Object.defineProperty(archive, "frames", {
+			value: frames,
+			enumerable: false,
+			writable: true,
+			configurable: true,
+		});
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content: [{ type: "text" as const, text: "ok" }],
+			preserveData: { snapcompact: archive },
+		} as unknown as AssistantMessage);
+
+		// First rewrite: the hidden frames are externalized into the blob store.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const refsAfterFirst = persistedBlobRefs(storage.readTextSync(sessionFile));
+		expect(refsAfterFirst).toHaveLength(1);
+		const originalRef = refsAfterFirst[0];
+		if (!originalRef) throw new Error("Expected blob reference");
+
+		// The hidden frames' payload changes in place: the persisted line must
+		// carry a new ref — a stamp that cannot see the frames would compare
+		// equal and reuse the line the change invalidated.
+		frames[0].data = "B".repeat(2048);
+		await session.appendEntriesAtomically(() => {});
+		const refsAfterSecond = persistedBlobRefs(storage.readTextSync(sessionFile));
+		expect(refsAfterSecond).toHaveLength(1);
+		const mutatedRef = refsAfterSecond[0];
+		if (!mutatedRef) throw new Error("Expected blob reference");
+		expect(mutatedRef).not.toBe(originalRef);
+		expect(await blobBytesBase64(mutatedRef)).toBe("B".repeat(2048));
 	});
 
 	it("persists the current output of an entry-level serializer hook", async () => {
