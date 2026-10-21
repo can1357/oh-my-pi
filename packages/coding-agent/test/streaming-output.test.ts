@@ -274,7 +274,11 @@ describe("OutputSink", () => {
 	});
 	test("normalizes carriage-return progress frames across chunk boundaries", async () => {
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk) });
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+		});
 
 		sink.push("start\r");
 		sink.push("one\r");
@@ -291,7 +295,11 @@ describe("OutputSink", () => {
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
 		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk) });
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+		});
 		await sink.push(`before\n${sixel}\nafter`);
 		const dumped = await sink.dump();
 		expect(chunks).toHaveLength(1);
@@ -366,7 +374,12 @@ describe("OutputSink", () => {
 
 	test("throttled onChunk coalesces held-back chunks instead of dropping them", async () => {
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 60_000 });
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+			chunkThrottleMs: 60_000,
+		});
 		sink.push("a");
 		// Inside the throttle window: buffered, not dropped.
 		sink.push("b");
@@ -381,7 +394,12 @@ describe("OutputSink", () => {
 	test("throttled onChunk emits a quiet tail at the throttle boundary", () => {
 		vi.useFakeTimers();
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 20 });
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+			chunkThrottleMs: 20,
+		});
 
 		sink.push("a");
 		sink.push("b");
@@ -395,7 +413,12 @@ describe("OutputSink", () => {
 	test("dump flushes a throttled tail once and cancels its timer", async () => {
 		vi.useFakeTimers();
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 20 });
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+			chunkThrottleMs: 20,
+		});
 
 		sink.push("a");
 		sink.push("b");
@@ -415,7 +438,12 @@ describe("OutputSink", () => {
 		// ended one chunk early with a zero skipped count. Dispose must deliver
 		// what the shell produced, exactly as dump()'s flush does.
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 60_000 });
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+			chunkThrottleMs: 60_000,
+		});
 		sink.push("first");
 		sink.push("second");
 		expect(chunks).toEqual(["first"]);
@@ -557,7 +585,12 @@ describe("OutputSink", () => {
 	test("replace cancels a throttled tail and discards its pending preview", () => {
 		vi.useFakeTimers();
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 20 });
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+			chunkThrottleMs: 20,
+		});
 
 		sink.push("a");
 		sink.push("superseded");
@@ -1049,7 +1082,9 @@ describe("OutputSink head-retain mode", () => {
 		const sink: OutputSink = new OutputSink({
 			spillThreshold: 64,
 			headBytes: 16,
-			onChunk: () => previews.push(sink.preview()),
+			onChunk: () => {
+				previews.push(sink.preview());
+			},
 		});
 		for (let i = 0; i < 40; i++) sink.push(`row ${i}\n`);
 		expect(previews.at(-1)).toEndWith("row 39\n");
