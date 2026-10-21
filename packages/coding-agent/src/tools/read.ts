@@ -1056,13 +1056,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	};
 	readonly label = "Read";
 	readonly loadMode = "essential";
-	/** Rendered per access so the hashline guidance follows a live `edit.mode` change, and the
-	 * transcript line a login that adds or removes a model hearing audio. */
+	/**
+	 * Whether the prompt names transcripts, fixed at the first render: model availability changes
+	 * on login and when discovery finishes, and each flip would rewrite the cached tool block.
+	 * A read still resolves its model when it runs.
+	 */
+	#transcribesAudio: boolean | undefined;
+	/** Rendered per access so the hashline guidance follows a live `edit.mode` change. */
 	get description(): string {
+		this.#transcribesAudio ??= resolveTranscriptModel(this.session) !== undefined;
 		return prompt.render(readDescription, {
 			IS_HL_MODE: resolveFileDisplayMode(this.session).hashLines,
 			BINARY_VIEWS: cfgIdaAvailable.get(this.session.settings),
-			TRANSCRIBES_AUDIO: resolveTranscriptModel(this.session) !== undefined,
+			TRANSCRIBES_AUDIO: this.#transcribesAudio,
 		});
 	}
 	readonly parameters = readSchema;

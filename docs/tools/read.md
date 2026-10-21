@@ -179,8 +179,8 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 - Audio files (`.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, `.ogg`, `.oga`, `.opus`, `.wma`, `.aif`, `.aiff`, `.caf`) and `clip.mp4:transcript` read as a timestamped transcript, one `[m:ss.s-m:ss.s] text` line per sentence. The times are valid video frame selectors.
 - Requires `ffmpeg`/`ffprobe` and an available chat model that hears audio: its catalog `input` includes `audio` (Gemini on Google's own transports, OpenRouter models whose listing takes audio) and its transport carries it (`audioInputMimeType()` in `packages/ai/src/providers/vision-guard.ts`: Google's GenerateContent gets mono Opus inline, Chat Completions and Responses get an mp3 `input_audio` part). The model is chosen like an image question's (`@vision`, `@default`, the active model, then the active provider's, then any), runs at minimal reasoning, and gets one request per hour of audio.
-- With no such model, a bare audio read returns duration, codec and size plus how to get a transcript; `:transcript` on a video fails with the same hint. The tool prompt names transcripts only while a model is available.
-- A transcript cut short by the model's output limit says where it stops. A large transcript spills to an artifact like any tool result. Selectors on an audio file keep their usual meaning (`:raw` reads bytes).
+- With no such model, or with `images.blockImages` on, a bare audio read returns duration, codec and size plus why there is no transcript; `:transcript` on a video fails with the same text. The tool prompt names transcripts when a model was available at its first render in the session; later logins don't change it, and a read resolves its model when it runs.
+- An empty answer, or one without timestamped lines, fails naming the model; the model answers `(no speech)` for a silent recording. A transcript cut short by the model's output limit drops its unfinished last line and says where it stops. A large transcript spills to an artifact like any tool result. Selectors on an audio file keep their usual meaning (`:raw` reads bytes).
 
 ### Profiler reports
 
