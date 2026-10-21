@@ -5,7 +5,7 @@ import { describe, expect, it } from "bun:test";
 import { convertMessages as convertGoogleMessages } from "@oh-my-pi/pi-ai/providers/google-shared";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { convertResponsesInputContent } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { audioInputMimeType } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import { audioInputMimeType, NON_AUDIO_PLACEHOLDER } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { Api, Context, FetchImpl, Model, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
@@ -39,25 +39,32 @@ describe("audio input", () => {
 		expect(audioInputMimeType(hearing({ ...gemini, transport: "pi-native" }))).toBeUndefined();
 	});
 
-	it("google sends the audio as inline data", () => {
+	it("google sends the audio as inline data only to a model that hears it", () => {
 		const contents = convertGoogleMessages(hearing(gemini), { messages: [audioMessage("audio/ogg")] });
-
 		expect(contents[0].parts).toContainEqual({ inlineData: { mimeType: "audio/ogg", data: AUDIO_B64 } });
+
+		const deaf = convertGoogleMessages(
+			{ ...gemini, input: ["text", "image"] },
+			{ messages: [audioMessage("audio/ogg")] },
+		);
+		expect(deaf[0].parts).toEqual([{ text: "Transcribe this." }, { text: NON_AUDIO_PLACEHOLDER }]);
 	});
 
-	it("responses sends an input_audio part even when the model takes no images", () => {
+	it("responses sends an input_audio part to a model that hears audio, images or not", () => {
 		const message = audioMessage("audio/mpeg");
 		if (!Array.isArray(message.content)) throw new Error("expected array content");
 
-		const converted = convertResponsesInputContent(message.content, false, false);
-
-		expect(converted).toEqual([
+		expect(convertResponsesInputContent(message.content, false, false, false, true)).toEqual([
 			{ type: "input_text", text: "Transcribe this." },
 			{ type: "input_audio", input_audio: { data: AUDIO_B64, format: "mp3" } },
 		]);
+		expect(convertResponsesInputContent(message.content, true, false)).toEqual([
+			{ type: "input_text", text: "Transcribe this." },
+			{ type: "input_text", text: NON_AUDIO_PLACEHOLDER },
+		]);
 	});
 
-	it("completions sends an input_audio part instead of an image_url", async () => {
+	it("completions sends an input_audio part to a model that hears audio, a placeholder otherwise", async () => {
 		const model = hearing({ ...gpt, api: "openai-completions" }) satisfies Model<"openai-completions">;
 		let captured: { messages?: Array<{ content: unknown }> } | undefined;
 		const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
@@ -75,6 +82,15 @@ describe("audio input", () => {
 		expect(captured?.messages?.at(-1)?.content).toEqual([
 			{ type: "input_audio", input_audio: { data: AUDIO_B64, format: "mp3" } },
 			{ type: "text", text: "Transcribe this." },
+		]);
+
+		await streamOpenAICompletions({ ...model, input: ["text", "image"] }, context, {
+			apiKey: "test",
+			fetch: fetchImpl,
+		}).result();
+		expect(captured?.messages?.at(-1)?.content).toEqual([
+			{ type: "text", text: "Transcribe this." },
+			{ type: "text", text: NON_AUDIO_PLACEHOLDER },
 		]);
 	});
 });
