@@ -121,6 +121,15 @@ export class BlockUnitCounter {
 	}
 }
 
+/** Raw content length of a block, independent of the display format: a block
+ *  that only changed FORMAT keeps the length it had, while one the provider
+ *  grew while it was hidden does not. */
+function rawLengthOf(block: AssistantContentBlock): number {
+	if (block.type === "text") return block.text.length;
+	if (block.type === "thinking") return block.thinking.length;
+	return 0;
+}
+
 function sliceGraphemes(text: string, units: number): string {
 	if (units <= 0 || text.length === 0) return "";
 	let count = 0;
@@ -290,7 +299,17 @@ export class StreamingRevealController {
 	// keeps its slot until the message is replaced (begin → stop clears it).
 	// Without it a hide/show round trip loses the reveal-shaped prefix and the
 	// show pass credits the whole regenerated block.
-	#hiddenBlockSpend = new Map<number, { spent: number; before: number }>();
+	// `rawLength` is the block's raw content length when the spend was earned:
+	// a block that only changed FORMAT keeps the length it had, while one the
+	// provider grew while it was hidden does not — the two need different
+	// outcomes when it is shown again.
+	#hiddenBlockSpend = new Map<number, { spent: number; before: number; rawLength: number }>();
+	// Reveal budget a block earned under the OTHER thinking format, keyed by
+	// block index. A raw fenced block and its prose rendering have different
+	// lengths, so one scalar budget cannot describe both: a raw → prose → raw
+	// round trip must restore the prefix the user watched in the raw layout
+	// instead of the shorter prose layout's clamp (#15336).
+	#formatSpend = new Map<number, { raw?: number; prose?: number }>();
 	#hideThinkingBlock = false;
 	#proseOnlyThinking = true;
 	#smoothStreaming = true;
@@ -327,14 +346,34 @@ export class StreamingRevealController {
 
 	/** Grow the per-block budgets to the live content length (a new block
 	 *  starts unrevealed) and drop budgets past it, then clamp every budget to
-	 *  the block's current units so a shrinking block cannot stay over-drawn. */
-	#alignBlocks(message: AssistantMessage): void {
+	 *  the block's current units so a shrinking block cannot stay over-drawn.
+	 *
+	 *  A block that just became INVISIBLE must not lose the reveal it had
+	 *  earned: a provider that streams reasoning as text and then closes the
+	 *  implied thinking replaces the streamed text block with a thinking block
+	 *  at the same index, and while thinking is hidden the replacement has no
+	 *  visible units. Parking the spend keeps the prefix the user watched, so
+	 *  showing thinking again restores it instead of crediting the whole
+	 *  regenerated block. */
+	#alignBlocks(message: AssistantMessage, previousContent?: AssistantMessage["content"]): void {
 		const live = message.content.length;
 		if (this.#blockRevealed.length > live) this.#blockRevealed.length = live;
 		for (let i = this.#blockRevealed.length; i < live; i++) this.#blockRevealed.push(0);
 		for (let i = 0; i < live; i++) {
 			const units = this.#blockUnits(message.content[i]!, this.#hideThinkingBlock, this.#proseOnlyThinking, i);
-			if (this.#blockRevealed[i]! > units) this.#blockRevealed[i] = units;
+			const granted = this.#blockRevealed[i]!;
+			if (granted > units) {
+				const previous = previousContent?.[i];
+				if (units === 0 && granted > 0 && previous !== undefined) {
+					const before = this.#blockUnits(previous, this.#hideThinkingBlock, this.#proseOnlyThinking, i);
+					this.#hiddenBlockSpend.set(i, {
+						spent: granted,
+						before: before > 0 ? before : granted,
+						rawLength: rawLengthOf(previous),
+					});
+				}
+				this.#blockRevealed[i] = units;
+			}
 		}
 	}
 
@@ -399,11 +438,14 @@ export class StreamingRevealController {
 
 	setTarget(message: AssistantMessage, hasToolCalls: boolean): void {
 		message = presentNarrationAsAnswer(message);
+		// The previous content tells #alignBlocks which block a spend belongs to
+		// when the provider replaces a streamed text block with a thinking one.
+		const previous = this.#target;
 		this.#target = message;
 		this.#hideThinkingBlock = this.#getHideThinkingBlock();
 		this.#proseOnlyThinking = this.#getProseOnlyThinking();
 		this.#smoothStreaming = this.#getSmoothStreaming();
-		this.#alignBlocks(message);
+		this.#alignBlocks(message, previous?.content);
 		if (!this.#component) return;
 		if (!this.#smoothStreaming) {
 			// Switching to non-smooth streaming finalizes the leading segment whole
@@ -474,6 +516,7 @@ export class StreamingRevealController {
 		this.#blockRevealed = [];
 		this.#targetDirty = false;
 		this.#hiddenBlockSpend.clear();
+		this.#formatSpend.clear();
 		this.#snappedToolBoundaryContent = undefined;
 		this.#snappedToolBoundaryBlocks = undefined;
 		this.#unitCounter.reset();
@@ -555,12 +598,35 @@ export class StreamingRevealController {
 		const blocks: number[] = [];
 		for (let i = 0; i < sizes.length; i++) {
 			const { before, after, spent } = sizes[i]!;
+			// A block whose visible size depends on the thinking format keeps one
+			// budget per format: the prose rendering of a fenced block is much
+			// shorter than the raw one, so the budget earned in one layout says
+			// nothing about the other. Remember what this layout earned before
+			// leaving it, and restore the budget the block already earned in the
+			// layout it is entering.
+			const formatSensitive = before !== after;
+			let own: number | undefined;
+			if (formatSensitive) {
+				const slot = this.#formatSpend.get(i) ?? {};
+				if (proseBefore) slot.prose = this.#blockRevealed[i] ?? 0;
+				else slot.raw = this.#blockRevealed[i] ?? 0;
+				this.#formatSpend.set(i, slot);
+				own = this.#proseOnlyThinking ? slot.prose : slot.raw;
+			}
 			if (before > 0 && after > 0) {
-				// Fully consumed under the old size: consume it whole under the
-				// new one, so the prose-mode expansion of a fence is not funded by
-				// the answer's saved units. Partially revealed: keep the position,
-				// clamped to the new length.
-				blocks.push(spent >= before ? after : Math.min(spent, after));
+				if (own !== undefined) {
+					// The block already earned a budget in this format: restore it
+					// instead of folding the other format's budget into this size,
+					// so a raw → prose → raw round trip keeps the prefix the user
+					// watched in the raw layout.
+					blocks.push(Math.min(own, after));
+				} else {
+					// Fully consumed under the old size: consume it whole under the
+					// new one, so the prose-mode expansion of a fence is not funded by
+					// the answer's saved units. Partially revealed: keep the position,
+					// clamped to the new length.
+					blocks.push(spent >= before ? after : Math.min(spent, after));
+				}
 			} else if (before === 0 && after > 0) {
 				// Newly visible. A block the hide pass took away keeps the reveal
 				// it had earned: restoring that spend keeps the user's watched
@@ -570,11 +636,16 @@ export class StreamingRevealController {
 				const latent = this.#hiddenBlockSpend.get(i);
 				if (latent !== undefined) {
 					this.#hiddenBlockSpend.delete(i);
-					// The saved spend is the last point the user watched. The block may
-					// have grown while it was hidden, and crediting the grown size
-					// would flash every unit generated while hidden at once instead
-					// of letting the reveal resume from the watched point.
-					blocks.push(Math.min(latent.spent, after));
+					// A block the user watched WHOLE keeps that shape under the new
+					// size when only the format changed: the raw text is the same, so
+					// the shorter layout it was watched in must not cut the longer
+					// one back — the completed thought would be truncated and the
+					// reveal timer would retype the rest. A block the provider grew
+					// while it was hidden resumes from the watched point instead:
+					// the reasoning generated in the meantime must not flash in at
+					// once.
+					const grew = rawLengthOf(target.content[i]!) !== latent.rawLength;
+					blocks.push(latent.spent >= latent.before && !grew ? after : Math.min(latent.spent, after));
 				} else if (frontier < 0 || frontier >= i) {
 					// Never revealed while hidden: snap it whole only if the old
 					// frontier lies at or past it, or the old budget covered the
@@ -587,7 +658,7 @@ export class StreamingRevealController {
 				// Just hidden: retain the reveal it had earned for a later show
 				// pass, which restores the shaped prefix instead of restarting
 				// the block from zero.
-				this.#hiddenBlockSpend.set(i, { spent, before });
+				this.#hiddenBlockSpend.set(i, { spent, before, rawLength: rawLengthOf(target.content[i]!) });
 				blocks.push(0);
 			} else {
 				blocks.push(0);
