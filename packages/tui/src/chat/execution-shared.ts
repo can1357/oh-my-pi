@@ -176,11 +176,15 @@ export interface ExecutionCardInput {
  * without this a single tall emission fills screens behind a nominally
  * collapsed card. Expansion describes the untouched node, revealing it whole.
  * Reuses the image `max` bound convention (not a second mechanism).
+ *
+ * `maxLines` is the image's SHARE of the collapsed group's preview-height
+ * budget: a per-image maximum alone would let every visible image take the
+ * whole window.
  */
-function clampCollapsedExecutionImage(child: NativeChild): NativeChild {
+function clampCollapsedExecutionImage(child: NativeChild, maxLines: number): NativeChild {
 	if (typeof child !== "object" || child === null || !("k" in child)) return child;
 	if (child.k !== "image") return child;
-	return { ...child, p: { ...child.p, max: { ...child.p?.max, h: `${PREVIEW_LINES}lines` } } };
+	return { ...child, p: { ...child.p, max: { ...child.p?.max, h: `${maxLines}lines` } } };
 }
 
 /**
@@ -213,11 +217,21 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	// first COLLAPSED_ITEMS and names the rest — otherwise up to 32 decoded
 	// images fill screens behind a nominally collapsed command.
 	// Each visible image also keeps its intrinsic pixel height unbounded, so the
-	// collapsed group carries the drawn-height clamp per image; expansion
-	// delivers the untouched nodes.
+	// collapsed group carries a drawn-height clamp; expansion delivers the
+	// untouched nodes.
 	const images = input.images ?? [];
 	const visibleImages = input.expanded ? images : images.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS);
-	children.push(...(input.expanded ? visibleImages : visibleImages.map(clampCollapsedExecutionImage)));
+	if (input.expanded) {
+		children.push(...visibleImages);
+	} else {
+		// The collapsed image group shares ONE preview-height budget: every
+		// visible image takes an equal share of the card's preview window, so
+		// several tall emissions cannot fill screens behind a nominally
+		// collapsed command (a per-image maximum alone would allow the whole
+		// window per image).
+		const perImageLines = Math.max(1, Math.floor(PREVIEW_LINES / Math.max(1, visibleImages.length)));
+		children.push(...visibleImages.map(child => clampCollapsedExecutionImage(child, perImageLines)));
+	}
 	if (running) {
 		children.push(
 			node("spinner", { label: [span(`Running… (${interruptKey()} to cancel)`, "muted")] }, undefined, "running"),
