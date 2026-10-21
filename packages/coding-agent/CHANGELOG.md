@@ -1,17 +1,9 @@
 # Changelog
 
 ## [Unreleased]
-### Added
 
+### Added
 - Added `/advisor on`/`off` and the bare toggle to the focused-subagent view: they now flip the advisor of the agent you are looking at instead of the main session's ([#15055](https://github.com/can1357/oh-my-pi/issues/15055), [#15171](https://github.com/can1357/oh-my-pi/pull/15171) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
-## [18.12.5] - 2026-10-21
-
-### Added
-
-- `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
-
-### Added
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
