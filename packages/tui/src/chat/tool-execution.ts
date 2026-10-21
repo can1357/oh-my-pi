@@ -1323,6 +1323,20 @@ export class ToolExecutionComponent extends Container {
 		this.#measured = measured;
 	}
 
+	/**
+	 * The transcript's measurement of this block became the viewport output, so
+	 * the shape reached the terminal.
+	 *
+	 * A measured render is not a paint, so it deliberately leaves the per-paint
+	 * repaint fact alone. But when the whole live tail fits, the measured rows
+	 * ARE the rows the terminal shows, and the shape the first result has to
+	 * re-anchor is the one the user is looking at. The fact is recomputed here
+	 * exactly as a painted render would compute it.
+	 */
+	notifyMeasuredPaint(): void {
+		this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();
+	}
+
 	setToolActivityVisible(visible: boolean): void {
 		this.#toolActivityVisible = visible;
 		super.invalidate();
