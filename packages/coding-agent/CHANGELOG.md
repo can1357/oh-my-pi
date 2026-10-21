@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
 
+### Fixed
 - Fixed `find` on a single named file: it now searches the whole file instead of a sketch of it, and reports an error instead of "no hits" when the file is too large to search in full ([#16027](https://github.com/can1357/oh-my-pi/issues/16027), [#16114](https://github.com/can1357/oh-my-pi/pull/16114) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
