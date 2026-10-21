@@ -2164,7 +2164,11 @@ mod tests {
 		// The renderer replaces a tab with spaces, so the printed pair cannot
 		// recover the order of the boundary whitespace: the hint has to name
 		// the codepoints in the order the line holds them.
-		let error = exact_edit_error("foo \t ", "foo", "x");
+		//
+		// The search is a block: a search that is a prefix of the file's line
+		// is a substring of it, and the exact match succeeds - the error path
+		// is never reached.
+		let error = exact_edit_error("foo \t \nbar", "foo\nbar", "x");
 		assert!(
 			error
 				.contains("  differs at the end: U+0020 x1, U+0009 x1, U+0020 x1 only in the + line\n"),
