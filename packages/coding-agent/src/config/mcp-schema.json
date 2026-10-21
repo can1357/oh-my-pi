@@ -105,6 +105,10 @@
         "prompt": {
           "type": "string",
           "description": "OAuth `prompt` parameter sent during authorization (default: omit unless the requested scope contains `offline_access`, which sends \"consent\"; set to \"\" to always omit)."
+        },
+        "clientName": {
+          "type": "string",
+          "description": "`client_name` sent during dynamic client registration (default: \"oh-my-pi\"), for servers that only accept known clients."
         }
       },
       "description": "Explicit OAuth client settings for servers that need them during /mcp reauth or initial connect."

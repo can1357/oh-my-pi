@@ -314,6 +314,8 @@ export interface MCPOAuthConfig {
 	clientSecret?: string;
 	/** OAuth scopes (space-separated) */
 	scopes?: string;
+	/** RFC 7591 `client_name` sent during dynamic client registration (default: `oh-my-pi`). */
+	clientName?: string;
 	/**
 	 * `prompt` parameter for the authorization request. By default the parameter
 	 * is omitted, matching the reference MCP SDK, except for `offline_access`
@@ -626,7 +628,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 
 		try {
 			const registrationBody: Record<string, unknown> = {
-				client_name: "oh-my-pi",
+				client_name: this.config.clientName?.trim() || "oh-my-pi",
 				redirect_uris: [redirectUri],
 				grant_types: ["authorization_code", "refresh_token"],
 				response_types: ["code"],

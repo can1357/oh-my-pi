@@ -222,6 +222,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 							callbackPort?: number;
 							callbackPath?: string;
 							prompt?: string;
+							clientName?: string;
 					  }
 					| undefined,
 				transport: serverConfig.type as "stdio" | "sse" | "http" | undefined,

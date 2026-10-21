@@ -789,6 +789,7 @@ export class MCPCommandController {
 									callbackPath: finalConfig.oauth?.callbackPath,
 									redirectUri: finalConfig.oauth?.redirectUri,
 									prompt: finalConfig.oauth?.prompt,
+									clientName: finalConfig.oauth?.clientName,
 									registrationUrl: oauth.registrationUrl,
 									issuerUrl: oauth.issuerUrl,
 									serverUrl: finalConfig.url,
@@ -872,6 +873,7 @@ export class MCPCommandController {
 			callbackPath?: string;
 			redirectUri?: string;
 			prompt?: string;
+			clientName?: string;
 			serverUrl?: string;
 			registrationUrl?: string;
 			issuerUrl?: string;
@@ -945,6 +947,7 @@ export class MCPCommandController {
 					clientSecret: resolvedClientSecret,
 					scopes: scopes || undefined,
 					prompt: opts?.prompt,
+					clientName: opts?.clientName,
 					redirectUri: opts?.redirectUri,
 					callbackPort: opts?.callbackPort,
 					callbackPath: opts?.callbackPath,
@@ -2078,6 +2081,7 @@ export class MCPCommandController {
 					callbackPath: found.config.oauth?.callbackPath,
 					redirectUri: found.config.oauth?.redirectUri,
 					prompt: found.config.oauth?.prompt,
+					clientName: found.config.oauth?.clientName,
 					registrationUrl: oauth.registrationUrl,
 					issuerUrl: oauth.issuerUrl,
 					serverUrl,

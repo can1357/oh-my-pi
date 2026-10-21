@@ -49,6 +49,7 @@ interface MCPConfigFile {
 				callbackPort?: number;
 				callbackPath?: string;
 				prompt?: string;
+				clientName?: string;
 			};
 		}
 	>;

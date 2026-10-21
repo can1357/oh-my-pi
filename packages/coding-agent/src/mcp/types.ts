@@ -100,6 +100,8 @@ interface MCPServerConfigBase {
 		clientId?: string;
 		clientSecret?: string;
 		scope?: string;
+		/** `client_name` sent during dynamic client registration (default "oh-my-pi") */
+		clientName?: string;
 		redirectUri?: string;
 		callbackPort?: number;
 		callbackPath?: string;

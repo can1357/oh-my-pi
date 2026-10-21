@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `oauth.clientName` for MCP servers to change the `client_name` sent during dynamic client registration, for servers that only accept known clients (e.g. Figma) ([#16473](https://github.com/can1357/oh-my-pi/pull/16473) by [@ravshansbox](https://github.com/ravshansbox))
+
 ### Fixed
 
 - Fixed the advisor prompt forbidding all repeated advice, including real escalations: advisors may now re-raise a prior nit or concern as a blocker once new evidence makes it one ([#13887](https://github.com/can1357/oh-my-pi/issues/13887), [#16484](https://github.com/can1357/oh-my-pi/pull/16484) by [@pjh890321](https://github.com/pjh890321))

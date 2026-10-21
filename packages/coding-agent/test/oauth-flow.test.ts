@@ -84,6 +84,26 @@ describe("mcp oauth flow", () => {
 		expect(authUrl.searchParams.get("state")).toBe("test-state");
 	});
 
+	it("sends the configured clientName for dynamic client registration", async () => {
+		let registrationPayload: Record<string, unknown> | null = null;
+
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://www.figma.com/oauth/mcp",
+				tokenUrl: "https://api.figma.com/v1/oauth/token",
+				clientName: "Claude Code",
+				fetch: mockFigmaRegistration(payload => {
+					registrationPayload = payload;
+				}),
+			},
+			{},
+		);
+
+		await flow.generateAuthUrl("test-state", "http://127.0.0.1:53172/callback");
+
+		expect((registrationPayload as { client_name?: string } | null)?.client_name).toBe("Claude Code");
+	});
+
 	it("uses the issuer rather than the authorization endpoint to discover DCR metadata", async () => {
 		const calls: string[] = [];
 		const fetchImpl: FetchImpl = async input => {

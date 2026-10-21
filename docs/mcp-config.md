@@ -266,7 +266,8 @@ profile for untrusted checkouts.
   "redirectUri": "...",
   "callbackPort": 3334,
   "callbackPath": "/oauth/callback",
-  "prompt": "consent"
+  "prompt": "consent",
+  "clientName": "oh-my-pi"
 }
 ```
 
@@ -277,6 +278,8 @@ During `/mcp reauth`, scopes advertised by the protected resource or its authent
 Scopes from resource-server-hosted `/oauth/metadata` and `/.mcp/auth` documents are also preserved, including nested `oauth`, `authorization`, and `auth` blocks. Their `scopes_supported` arrays are not treated as resource requirements when those paths are probed on an explicitly identified authorization server.
 
 `prompt` controls the OAuth `prompt` authorization parameter. By default OMP omits it, except that a requested `offline_access` scope defaults to `"consent"` so the provider can issue refresh access. Set it explicitly to a provider-supported value such as `"consent"` or `"select_account"`, or to `""` to force omission.
+
+`clientName` sets the `client_name` OMP sends during dynamic client registration (default `"oh-my-pi"`). Some servers only accept registrations from known clients; set it to a name they accept. It only affects new registrations: when a client ID is already configured or stored for the server, OMP reuses it and does not register again.
 
 Example:
 

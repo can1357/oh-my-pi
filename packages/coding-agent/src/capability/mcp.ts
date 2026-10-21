@@ -66,6 +66,7 @@ export interface MCPServer {
 		callbackPort?: number;
 		callbackPath?: string;
 		prompt?: string;
+		clientName?: string;
 	};
 	/** Transport type */
 	transport?: "stdio" | "sse" | "http";
