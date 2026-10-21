@@ -651,9 +651,24 @@ pub fn merge_file_characters(authored: &str, file_line: &str) -> String {
 		// Only the whitespace differs: that is the hunk's own change.
 		return authored.to_owned();
 	}
-	let leading = &authored[..authored.len() - js_trim_start(authored).len()];
-	let trailing = &authored[js_trim_end(authored).len()..];
+	let (leading, trailing) = boundary_whitespace(authored);
 	format!("{leading}{file_body}{trailing}")
+}
+
+/// The authored line's leading and trailing whitespace, as two ranges that
+/// never overlap.
+///
+/// A line that holds nothing but whitespace has no body: the leading and
+/// trailing ranges would cover the same characters, and the merged line would
+/// carry that whitespace twice. The whole line is the leading part there, so
+/// the merged line keeps the whitespace the author asked for exactly once.
+fn boundary_whitespace(authored: &str) -> (&str, &str) {
+	if js_trim(authored).is_empty() {
+		return (authored, "");
+	}
+	let start = authored.len() - js_trim_start(authored).len();
+	let end = js_trim_end(authored).len();
+	(&authored[..start], &authored[end..])
 }
 
 /// The characters of a line that are not whitespace.
@@ -670,8 +685,7 @@ fn without_whitespace(line: &str) -> String {
 /// ideographic space folds onto an ASCII one, and the authored interior would
 /// rewrite it.
 pub fn merge_file_line_body(authored: &str, file_line: &str) -> String {
-	let leading = &authored[..authored.len() - js_trim_start(authored).len()];
-	let trailing = &authored[js_trim_end(authored).len()..];
+	let (leading, trailing) = boundary_whitespace(authored);
 	format!("{leading}{}{trailing}", js_trim(file_line))
 }
 
@@ -907,6 +921,16 @@ mod tests {
 		assert_eq!(normalize_for_fuzzy("｀"), "'");
 		assert_eq!(normalize_for_fuzzy("｀"), normalize_for_fuzzy("'"));
 		assert!(fuzzy_equivalent_chars('｀', '\''));
+	}
+
+	#[test]
+	fn an_all_whitespace_line_keeps_its_whitespace_once() {
+		// A line that holds nothing but whitespace has no body, so its leading
+		// and trailing ranges would cover the same characters and the merged
+		// line would carry that whitespace twice: the author asked for two
+		// spaces and the formatter wrote four.
+		assert_eq!(merge_file_line_body("  ", "    "), "  ");
+		assert_eq!(adjust_indentation("  ", "    ", "  "), "  ");
 	}
 
 	#[test]

@@ -24,8 +24,8 @@ use crate::{
 	stream_json::{ArgSnapshot, EditEntry},
 	text::{
 		adjust_indentation, convert_leading_tabs_to_spaces, count_leading_indent, get_leading_indent,
-		indent_has_space, indent_has_tab, js_trim, merge_file_characters, normalize_for_fuzzy,
-		strip_leading_indent,
+		indent_has_space, indent_has_tab, js_trim, merge_file_characters, merge_file_line_body,
+		normalize_for_fuzzy, strip_leading_indent,
 	},
 };
 
@@ -246,7 +246,12 @@ fn adjust_lines_indentation(
 					return line.clone();
 				};
 				if normalize_for_fuzzy(pattern_line) != normalize_for_fuzzy(file_line) {
-					return line.clone();
+					// The width fold leaves a residual difference between the
+					// authored line and the file's, but the hunk changes the
+					// boundary whitespace only: the body is still the file's,
+					// and the authored boundaries are the hunk's own change.
+					// Returning the authored line would rewrite the file's text.
+					return merge_file_line_body(line, file_line);
 				}
 				merge_file_characters(line, file_line)
 			})
@@ -2212,6 +2217,37 @@ mod tests {
 			.0,
 			"\u{3000}foo（bar）\nchanged\n"
 		);
+	}
+
+	#[test]
+	fn a_whitespace_only_hunk_keeps_the_files_body_on_a_residual_difference() {
+		// The width fold leaves a residual difference between the authored line
+		// and the file's, but the hunk changes the boundary whitespace only:
+		// the body is still the file's, and the authored boundaries are the
+		// hunk's own change. Returning the authored line would rewrite the
+		// file's text.
+		let pattern = vec!["foo(bar)abcdefghijklmn".to_owned()];
+		let actual = vec!["foo\u{ff08}baz\u{ff09}abcdefghijklmn".to_owned()];
+		let new_lines = vec!["  foo(bar)abcdefghijklmn".to_owned()];
+		let expected = vec!["  foo\u{ff08}baz\u{ff09}abcdefghijklmn".to_owned()];
+		assert_eq!(adjust_lines_indentation(&pattern, &actual, &new_lines, None), expected);
+	}
+
+	#[test]
+	fn a_parsed_hunk_keeps_the_files_own_context_line() {
+		// The hunk is parsed from a real diff, so the context lines the parser
+		// recorded are the ones the application uses: a hand-built hunk stays
+		// green when the parser stops recording (or misindexes) the
+		// space-prefixed context lines.
+		let hunks = parse_diff_hunks("@@\n foo(bar)\n-keep\n+changed\n").unwrap();
+		assert_eq!(hunks.len(), 1);
+		let hunk = &hunks[0];
+		assert!(hunk.has_context_lines);
+		assert_eq!(hunk.context_pairs, vec![(0, 0)]);
+		let file_text = "foo\u{ff08}bar\u{ff09}\nkeep\n";
+		let expected = "foo\u{ff08}bar\u{ff09}\nchanged\n";
+		let applied = apply_hunks(file_text, "a.txt", std::slice::from_ref(hunk), 0.95, true, false);
+		assert_eq!(applied.unwrap().0, expected);
 	}
 
 	#[test]
