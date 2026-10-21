@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+- Fixed Shift+Enter submitting the prompt instead of inserting a newline in terminals that support the kitty keyboard protocol ([#16458](https://github.com/can1357/oh-my-pi/pull/16458) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 
 ### Added
 
