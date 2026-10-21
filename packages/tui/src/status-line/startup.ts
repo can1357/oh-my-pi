@@ -82,6 +82,7 @@ export function createStartupStatusLine(data: StatusLineStartupData): StatusLine
 		getSettings: () => data.settings,
 		gitEnabled: () => data.gitEnabled,
 		codexResetFireworksEnabled: () => false,
+		petsEnabled: () => false,
 		getSettingsRevision: () => 0,
 		getSessionSettingsIdentity: () => undefined,
 		getSessionSettingsRevision: () => 0,

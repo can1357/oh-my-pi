@@ -274,6 +274,18 @@ export const cfgStatusLineShowHookStatus = register({
 	},
 });
 
+export const cfgStatusLinePets = register({
+	id: "statusLine.pets",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Status Line",
+		label: "Pets",
+		description: "Show the Code Cat companion below the status line (/pets on|off)",
+	},
+});
+
 export const cfgStatusLineLeftSegments = register({
 	id: "statusLine.leftSegments",
 	type: "array",

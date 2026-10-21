@@ -4,8 +4,20 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import {
+	cfgGitEnabled,
+	cfgStatusLineContextLine,
+	cfgStatusLineLeftSegments,
+	cfgStatusLinePets,
+	cfgStatusLinePreset,
+	cfgStatusLineRightSegments,
+	cfgStatusLineSegmentOptions,
+} from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { statusLineHost, type StatusLineHostSession } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { StatusLineComponent, type StatusLineSettings } from "@oh-my-pi/pi-tui/status-line";
-import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
 import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-tui/status-line/presets";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
@@ -13,13 +25,6 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeSyncWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 import { StatusLineTestComponents } from "./helpers/status-line";
-
-import {
-	cfgGitEnabled,
-	cfgStatusLineLeftSegments,
-	cfgStatusLinePreset,
-	cfgStatusLineRightSegments,
-} from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 let settingsState: SettingsTestState | undefined;
 let projectDir = "";
@@ -78,7 +83,7 @@ function makeSession(sessionName = "Cache Session") {
 			}),
 		},
 		getContextUsage: () => undefined,
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
+	} as unknown as StatusLineHostSession;
 }
 
 function makeComponent(statusLineSettings: StatusLineSettings): StatusLineComponent {
@@ -88,6 +93,78 @@ function makeComponent(statusLineSettings: StatusLineSettings): StatusLineCompon
 }
 
 describe("StatusLineComponent effective settings cache", () => {
+	it.each(["off", "percentage", "annotated"] as const)(
+		"preserves the rendered %s context line when Pets changes in settings",
+		contextLine => {
+			const settings = Settings.instance;
+			cfgStatusLinePreset.set(settings, "custom");
+			cfgStatusLineLeftSegments.set(settings, ["context_pct"]);
+			cfgStatusLineRightSegments.set(settings, []);
+			cfgStatusLineContextLine.set(settings, contextLine);
+			const component = statusLines.track(new StatusLineComponent(makeSession(), statusLineHost));
+			const controller = new SelectorController({
+				statusLine: component,
+				ui: { requestRender: () => {} },
+			} as unknown as InteractiveModeContext);
+			const before = component.getTopBorder(120).content;
+
+			cfgStatusLinePets.set(settings, true);
+			controller.handleSettingChange("statusLine.pets", true);
+			expect(component.getTopBorder(120).content).toBe(before);
+			cfgStatusLinePets.set(settings, false);
+			controller.handleSettingChange("statusLine.pets", false);
+			expect(component.getTopBorder(120).content).toBe(before);
+		},
+	);
+
+	it("preserves custom path rendering while toggling Pets in the menu and after closing it", async () => {
+		const settings = Settings.instance;
+		cfgGitEnabled.set(settings, false);
+		cfgStatusLinePreset.set(settings, "custom");
+		cfgStatusLineLeftSegments.set(settings, ["path"]);
+		cfgStatusLineRightSegments.set(settings, []);
+		cfgStatusLineSegmentOptions.set(settings, {
+			path: { abbreviate: false, maxLength: 200, stripWorkPrefix: false },
+		});
+		const session = Object.assign(makeSession(), {
+			getAvailableThinkingLevels: () => [],
+			getAvailableModels: () => [],
+		});
+		const component = statusLines.track(new StatusLineComponent(session, statusLineHost));
+		const before = component.getTopBorder(240).content;
+		expect(stripVTControlCharacters(before)).toContain(projectDir);
+		const shown = Promise.withResolvers<SettingsSelectorComponent>();
+		let closed = false;
+		const controller = new SelectorController({
+			session,
+			statusLine: component,
+			editor: { getTopBorderAvailableWidth: (width: number) => width },
+			editorContainer: { children: [] },
+			ui: {
+				terminal: { columns: 240, rows: 40 },
+				requestRender: () => {},
+				setFocus: () => {},
+				showOverlay: (selector: SettingsSelectorComponent) => {
+					shown.resolve(selector);
+					return { hide: () => (closed = true) };
+				},
+			},
+		} as unknown as InteractiveModeContext);
+		controller.showSettingsSelector();
+		const selector = await shown.promise;
+		for (const char of "statusLine.pets") selector.handleInput(char);
+		selector.handleInput("\n");
+		expect(cfgStatusLinePets.get(settings)).toBe(true);
+		expect(component.getTopBorder(240).content).toBe(before);
+		selector.handleInput("\n");
+		expect(cfgStatusLinePets.get(settings)).toBe(false);
+		expect(component.getTopBorder(240).content).toBe(before);
+		selector.handleInput("\x1b"); // Leave search.
+		selector.handleInput("\x1b"); // Close settings.
+		expect(closed).toBe(true);
+		expect(component.getTopBorder(240).content).toBe(before);
+	});
+
 	it("skips the entire segment pipeline until a visible input invalidates it", () => {
 		const session = makeSession();
 		let snapshotCalls = 0;

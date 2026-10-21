@@ -36,6 +36,7 @@ import {
 	detectCodexResetFireworks,
 } from "../overlays/codex-reset-fireworks";
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
+import { renderPetStatus } from "./pets";
 import { summarizeUsageResetCredits } from "../overlays/usage-display";
 import { getPreset } from "./presets";
 import { describeSegment, renderSegment, type SegmentContext } from "./segments";
@@ -718,6 +719,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#pricingTimer: NodeJS.Timeout | undefined;
 	#pricingTimerCost: ModelCost | undefined;
 	#pricingTransition: number | undefined;
+	#petTimer: NodeJS.Timeout | undefined;
+	#petLine: string | undefined;
 	#hookStatuses: Map<string, string> = new Map();
 	#sortedHookStatuses: readonly string[] = [];
 	#subagentCount: number = 0;
@@ -978,6 +981,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#invalidateStatusLineRenderCache();
 		if (this.#onBranchChange) this.#setupGitWatcher();
 		this.#syncPricingTimer();
+		this.#syncPetTimer();
 	}
 
 	getEffectiveSettingsForTest(): EffectiveStatusLineSettings {
@@ -1257,6 +1261,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#onBranchChange = onBranchChange;
 		this.#setupGitWatcher();
 		this.#syncPricingTimer();
+		this.#syncPetTimer();
 	}
 
 	#setupGitWatcher(): void {
@@ -1308,6 +1313,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#stopBrandFadeTimer();
 		this.#stopActiveWindowRepaint();
 		this.#stopPricingTimer();
+		this.#stopPetTimer();
 		this.#clearUsageStartTimer();
 		this.#unwatchNativeRendering?.();
 		this.#unwatchNativeRendering = undefined;
@@ -1501,6 +1507,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	invalidate(): void {
 		this.#renderRevision++;
 		this.#syncPricingTimer();
+		this.#syncPetTimer();
 		// Generic repaint invalidation (theme change, message event, model
 		// switch, …). Must NOT abort or restart a live reftable HEAD/PR resolve:
 		// the render path self-invalidates via cwd/context cache-miss checks, so
@@ -3584,6 +3591,49 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		return lines;
 	}
 
+	#getPetLine(): string {
+		const collabState = this.#collabStatus?.stateOverride;
+		let contextPercent = collabState?.contextUsage?.percent;
+		if (contextPercent == null) {
+			const { usedTokens, contextWindow } = this.getCachedContextBreakdown();
+			contextPercent = contextWindow > 0 ? (usedTokens / contextWindow) * 100 : 0;
+		}
+		return renderPetStatus(
+			this.session.sessionManager.getSessionId(),
+			this.session.sessionManager.getHeader?.()?.timestamp,
+			contextPercent,
+			collabState?.isStreaming ?? this.session.isStreaming,
+		);
+	}
+
+	#stopPetTimer(): void {
+		clearInterval(this.#petTimer);
+		this.#petTimer = undefined;
+		this.#petLine = undefined;
+	}
+
+	#syncPetTimer(): void {
+		if (this.#disposed || !this.host.petsEnabled() || !this.#onBranchChange) {
+			this.#stopPetTimer();
+			return;
+		}
+		if (this.#petTimer) return;
+		this.#petTimer = setInterval(() => {
+			if (!this.host.petsEnabled()) {
+				this.#stopPetTimer();
+				return;
+			}
+			// State changes already repaint through agent events. Only repaint an
+			// idle terminal when the fresh window expires or the message rotates.
+			const line = this.#getPetLine();
+			if (line === this.#petLine) return;
+			this.#petLine = line;
+			this.invalidate();
+			this.#onBranchChange?.();
+		}, 15_000);
+		this.#petTimer.unref();
+	}
+
 	/**
 	 * The composer's facts on a TSP terminal, which draws no status strip: the
 	 * context hairline, the model chip label, the usage text, and every other
@@ -3698,6 +3748,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				facts.push(describeSeg(`hook-${index}`, props, { spans: [span(text)] }, dim));
 			});
 		}
+		const pet = this.#nativePetText();
+		if (pet) facts.push(describeSeg("pet", { role: "omp.composer.fact", priority: 0 }, { spans: [span(pet)] }, dim));
 
 		const pct = ctx.contextPercent;
 		const window = ctx.contextWindow;
@@ -3863,25 +3915,31 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			"bar",
 		);
 		const showHooks = this.#settings.showHookStatus ?? true;
-		if (!showHooks || this.#sortedHookStatuses.length === 0) return bar;
-		return col(
-			[
-				bar,
-				...this.#sortedHookStatuses.map((status, index) =>
-					node(
-						"text",
-						{ text: sanitizeStatusText(status), wrap: "none", role: "omp.status.hook" },
-						undefined,
-						`hook-${index}`,
-					),
-				),
-			],
-			{ role: "omp.status.panel" },
+		const hookLines = showHooks ? this.#sortedHookStatuses : [];
+		const pet = this.#nativePetText();
+		if (hookLines.length === 0 && !pet) return bar;
+		const rows = hookLines.map((status, index) =>
+			node(
+				"text",
+				{ text: sanitizeStatusText(status), wrap: "none", role: "omp.status.hook" },
+				undefined,
+				`hook-${index}`,
+			),
 		);
+		if (pet) rows.push(node("text", { text: pet, wrap: "none", role: "omp.status.pet" }, undefined, "pet"));
+		return col([bar, ...rows], { role: "omp.status.panel" });
 	}
 
+	/** Plain pet line for native (TSP) surfaces, which carry no ANSI; undefined while pets are off. */
+	#nativePetText(): string | undefined {
+		this.#syncPetTimer();
+		if (this.#disposed || !this.host.petsEnabled()) return undefined;
+		this.#petLine = this.#getPetLine();
+		return sanitizeStatusText(this.#petLine) || undefined;
+	}
 	render(width: number): readonly string[] {
 		const lines: string[] = [];
+		this.#syncPetTimer();
 		if (this.#standalone && !this.#autocompleteActiveProbe?.()) {
 			const content = this.renderBottomBar(width, this.#standalone === "left-only" ? "left" : "full");
 			if (content) {
@@ -3892,6 +3950,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const showHooks = this.#settings.showHookStatus ?? true;
 		if (showHooks && this.#sortedHookStatuses.length > 0) {
 			lines.push(...this.#sortedHookStatuses.map(text => truncateToWidth(sanitizeHookStatusText(text), width)));
+		}
+		if (!this.#disposed && this.host.petsEnabled()) {
+			this.#petLine = this.#getPetLine();
+			lines.push(truncateToWidth(this.#petLine, width));
 		}
 		return lines;
 	}
