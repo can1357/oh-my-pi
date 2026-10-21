@@ -112,7 +112,7 @@ describe("bash numbered file views mint edit tags", () => {
 		expect(footerTag(grep, "other.ts")).toBeDefined();
 		expect(getEditStore(session).seenLines(path.join(cwd, "retry.ts"), footerTag(grep, "retry.ts")!)).toEqual([2, 3]);
 
-		const catN = await bash("cat -n retry.ts | sed -n 3,4p");
+		const catN = await bash("cat -n retry.ts | head -n 4 | tail -n 2");
 		expect(footerTag(catN, "retry.ts")).toBeDefined();
 	});
 
@@ -237,17 +237,28 @@ describe("bash numbered file views mint edit tags", () => {
 		expect(getEditStore(session).headHash(path.join(cwd, "a.ts"))).toBeNull();
 	});
 
-	it("tags only the files a glob operand matched", async () => {
-		// `2-victim` is no match of `./*.ts`, but `victim-1-same` reads as its row 1.
-		await fs.mkdir(path.join(cwd, "g"));
-		await Bun.write(path.join(cwd, "g", "a.ts"), "target\nvictim-1-same\n");
-		await Bun.write(path.join(cwd, "g", "b.ts"), "target\n");
-		await Bun.write(path.join(cwd, "g", "2-victim"), "same\n");
-		expect(await bash("cd g && grep -nh -A1 target ./*.ts")).toContain("2-victim-1-same");
-		expect(getEditStore(session).headHash(path.join(cwd, "g", "2-victim"))).toBeNull();
-		const output = await bash("cd g && grep -n target ./*.ts");
-		expect(footerTag(output, "g/a.ts")).toBeDefined();
-		expect(footerTag(output, "g/b.ts")).toBeDefined();
+	it("names no tag for anything but one numberer reading the files it names", async () => {
+		await Bun.write(path.join(cwd, "a.ts"), "same\nx\nsame\n");
+		await Bun.write(path.join(cwd, "b.ts"), "same\n");
+		for (const command of [
+			"grep -n same ./*.ts",
+			"grep -n same a.ts; grep -n same b.ts",
+			"grep -n same a.ts && grep -n same b.ts",
+			"git grep --no-index -n same -- a.ts",
+			"grep -n -A1 same a.ts",
+			"grep -nh same a.ts b.ts",
+			"grep -rn same .",
+			"rg -n same",
+			"grep -n same a.ts | grep -v x",
+			"grep -n same a.ts | sed -n 1p",
+			"LC_ALL=C grep -n same a.ts",
+			"grep -n same < a.ts",
+			"cat a.ts | grep -n same",
+		]) {
+			expect(await bash(command)).not.toContain("Edit tags for the numbered lines above:");
+		}
+		expect(getEditStore(session).headHash(path.join(cwd, "a.ts"))).toBeNull();
+		expect(getEditStore(session).headHash(path.join(cwd, "b.ts"))).toBeNull();
 	});
 
 	it("names no tag for file names or counts printed instead of rows", async () => {
@@ -289,54 +300,25 @@ describe("bash numbered file views mint edit tags", () => {
 
 	// Windows file names cannot hold `:`.
 	it.skipIf(process.platform === "win32")(
-		"tags only files the command read, and no line its output shows two ways",
+		"tags only files the command names, and no line its output shows two ways",
 		async () => {
 			await Bun.write(path.join(cwd, "a.ts"), "b.ts:1:same\n");
 			await Bun.write(path.join(cwd, "1:b.ts"), "same\n");
 			await Bun.write(path.join(cwd, "a.ts:1:b.ts"), "same\n");
 			const store = getEditStore(session);
-			// `./a.ts:1:b.ts:1:same` is a line of a.ts and of `a.ts:1:b.ts`, printed twice.
-			expect(await bash("grep -rn same .")).toContain("./a.ts:1:b.ts:1:same");
-			expect(store.headHash(path.join(cwd, "a.ts"))).toBeNull();
+			// Text of a.ts spelled like a row of `1:b.ts` or of `a.ts:1:b.ts`.
+			expect(footerTag(await bash("grep -n same a.ts"), "a.ts")).toBeDefined();
+			expect(await bash("grep -nH same a.ts")).toContain("a.ts:1:b.ts:1:same");
+			expect(store.headHash(path.join(cwd, "1:b.ts"))).toBeNull();
 			expect(store.headHash(path.join(cwd, "a.ts:1:b.ts"))).toBeNull();
-			expect(store.seenLines(path.join(cwd, "1:b.ts"), store.headHash(path.join(cwd, "1:b.ts"))!)).toEqual([1]);
 
-			const single = makeSession(cwd);
-			expect(
-				footerTag(textOf(await new BashTool(single).execute("bash", { command: "grep -n same a.ts" })), "a.ts"),
-			).toBeDefined();
-			expect(textOf(await new BashTool(single).execute("bash", { command: "grep -nH same a.ts" }))).toContain(
-				"a.ts:1:b.ts:1:same",
+			// `a.ts:1:b.ts:1:same`, printed for both files, reads as a row of each.
+			const both = makeSession(cwd);
+			const output = textOf(
+				await new BashTool(both).execute("bash", { command: "grep -n same a.ts 'a.ts:1:b.ts'" }),
 			);
-			// The second grep never runs once the first fails on `missing`.
-			expect(await bash("grep -nh same a.ts missing && grep -n same '1:b.ts'")).not.toContain(
-				"Edit tags for the numbered lines above:",
-			);
-			expect(getEditStore(single).headHash(path.join(cwd, "1:b.ts"))).toBeNull();
-			expect(getEditStore(single).headHash(path.join(cwd, "a.ts:1:b.ts"))).toBeNull();
-		},
-	);
-
-	// Windows file names cannot hold `:`.
-	it.skipIf(process.platform === "win32")(
-		"reads no `path:N:` rows out of a view that prints rows without file names",
-		async () => {
-			// Text of a.ts spelled like rows of files the view never read: one its
-			// --include skips, an untracked one `git grep` skips, one a skipped
-			// view would read, one reached through a symlink `-r` does not follow.
-			await Bun.write(path.join(cwd, "a.ts"), "x\n");
-			await Bun.write(path.join(cwd, "1:victim.js"), "same\n");
-			await fs.mkdir(path.join(cwd, "outside"));
-			await Bun.write(path.join(cwd, "outside", "victim"), "same\n");
-			await fs.symlink(path.join(cwd, "outside"), path.join(cwd, "1:link"));
-			for (const [command, output] of [
-				["grep -rnh --include='*.ts' same .", "1:victim.js:1:same\n"],
-				["git grep -nh same", "1:victim.js:1:same\n"],
-				["grep -nh same a.ts missing; grep -n same '1:victim.js'", "1:victim.js:1:same\n"],
-				["grep -rnh same .", "1:link/victim:1:same\n"],
-			]) {
-				expect(await planNumberedFileTags(session, command, cwd, output)).toBeUndefined();
-			}
+			expect(output).toContain("a.ts:1:b.ts:1:same");
+			expect(output).not.toContain("Edit tags for the numbered lines above:");
 		},
 	);
 
@@ -361,30 +343,7 @@ describe("bash numbered file views mint edit tags", () => {
 		expect(await planNumberedFileTags(session, "grep -nh a.ts -e target", cwd, "1:target\n")).toBeUndefined();
 		// ripgrep has no such mode; other options after a file only filter real rows.
 		expect(await planNumberedFileTags(session, "rg '^1:' a.ts -n", cwd, "2:1:target\n")).toBeDefined();
-		expect(
-			await planNumberedFileTags(session, "grep -rn target . --include=a.ts", cwd, "./a.ts:1:target\n"),
-		).toBeDefined();
-	});
-
-	it("names no `git grep` tag below the repository's top, where `grep.fullName` re-roots its paths", async () => {
-		await fs.mkdir(path.join(cwd, "sub", "sub"), { recursive: true });
-		await Bun.write(path.join(cwd, "sub", "a"), "target\n");
-		await Bun.write(path.join(cwd, "sub", "sub", "a"), "target\n");
-		for (const args of [
-			["init", "-q"],
-			["config", "grep.fullName", "true"],
-			["add", "."],
-		]) {
-			expect(Bun.spawnSync(["git", ...args], { cwd }).exitCode).toBe(0);
-		}
-		const inner = makeSession(path.join(cwd, "sub"));
-		const output = textOf(await new BashTool(inner).execute("bash", { command: "git grep -n target -- a" }));
-		expect(output).toContain("sub/a:1:target");
-		expect(output).not.toContain("Edit tags for the numbered lines above:");
-		expect(getEditStore(inner).headHash(path.join(cwd, "sub", "sub", "a"))).toBeNull();
-
-		const top = textOf(await new BashTool(session).execute("bash", { command: "git grep -n target -- sub/a" }));
-		expect(footerTag(top, "sub/a")).toBeDefined();
+		expect(await planNumberedFileTags(session, "grep -n target a.ts --max-count=1", cwd, "1:target\n")).toBeDefined();
 	});
 
 	it("names no tag when a later option takes the line numbers back", async () => {
@@ -410,8 +369,8 @@ describe("bash numbered file views mint edit tags", () => {
 		expect(getEditStore(session).seenLines(path.join(cwd, "a >suffix"), tag!)).toEqual([1, 2]);
 	});
 
-	it("tags a numbered view through redirections, assignments and row filters", async () => {
-		const output = await bash("LC_ALL=C grep -n limit retry.ts 2>/dev/null | grep -v attempt | head -5");
+	it("tags a numbered view through redirections and row filters", async () => {
+		const output = await bash("grep -n limit retry.ts 2>/dev/null | head -5 | tail -n 2");
 		const tag = footerTag(output, "retry.ts");
 		expect(tag).toBeDefined();
 		expect(getEditStore(session).seenLines(path.join(cwd, "retry.ts"), tag!)).toEqual([2, 3]);
