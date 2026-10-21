@@ -126,6 +126,7 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 				...exitRows,
 				{ keys: [act("app.suspend")], action: "Suspend to background" },
 				{ keys: [act("app.display.reset")], action: "Reset terminal display" },
+				{ keys: [act("app.settings.open")], action: "Open settings" },
 				{ keys: [act("app.thinking.cycle")], action: "Cycle thinking level" },
 				{ keys: [act("app.model.cycleForward")], action: "Cycle role models (slow/default/smol)" },
 				{ keys: [act("app.model.cycleBackward")], action: "Cycle role models (backward)" },

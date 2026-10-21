@@ -32,6 +32,7 @@ type FakeEditor = {
 	onRetry?: () => void;
 	onChange?: (text: string) => void;
 	onSubmit?: (text: string) => Promise<void>;
+	onOpenSettings?: () => void;
 	setText(text: string): void;
 	getText(): string;
 	getExpandedText(): string;
@@ -78,6 +79,7 @@ async function createContext() {
 		"app.clipboard.pasteImage": ["ctrl+v"],
 		"app.tools.toggleVisibility": ["ctrl+shift+o"],
 		"app.tools.expand": ["ctrl+o"],
+		"app.settings.open": ["ctrl+shift+s"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -90,6 +92,7 @@ async function createContext() {
 	const resetDisplay = vi.fn();
 	const clearInlineImages = vi.fn();
 	const showModelSelector = vi.fn();
+	const showSettingsSelector = vi.fn();
 	const requestRender = vi.fn();
 	const showError = vi.fn();
 	let focused: unknown;
@@ -248,6 +251,7 @@ async function createContext() {
 		handleBtwCopyKey,
 		canFollowUpBtw,
 		handleBtwFollowUpKey,
+		showSettingsSelector,
 		showError,
 		showStatus: vi.fn(),
 		isGuidedGoalInterviewActive,
@@ -270,6 +274,7 @@ async function createContext() {
 		spies: {
 			setActionKeys,
 			showModelSelector,
+			showSettingsSelector,
 			prompt,
 			updatePendingMessagesDisplay,
 			requestRender,
@@ -392,6 +397,18 @@ describe("InputController keybinding setup", () => {
 
 		expect(spies.retry).toHaveBeenCalledTimes(1);
 		expect(editor.getText()).toBe("");
+	});
+
+	it("registers the settings-open action on the composer", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.settings.open", ["ctrl+shift+s"]);
+		expect(editor.onOpenSettings).toBeDefined();
+		editor.onOpenSettings?.();
+		expect(spies.showSettingsSelector).toHaveBeenCalledTimes(1);
 	});
 
 	it("retries the focused view session instead of the main session", async () => {
