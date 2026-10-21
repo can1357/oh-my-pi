@@ -981,12 +981,14 @@ export class OutputSink {
 	readonly #headLimit: number;
 	readonly #onChunk?: (chunk: string) => void | Promise<void>;
 	/**
-	 * The in-flight subscriber call, when the subscriber is async. Its rejection
-	 * is handled here so it never surfaces as an unhandled rejection, and
-	 * disposal awaits it so the flushed tail is delivered before the artifact
-	 * is closed.
+	 * The in-flight subscriber calls, when the subscriber is async. Their
+	 * rejections are handled here so they never surface as an unhandled
+	 * rejection, and disposal awaits them so the flushed tail is delivered
+	 * before the artifact is closed. Every call is tracked: two can overlap
+	 * when the subscriber is slower than the next chunk, and disposal must
+	 * wait for the newest one, not whichever a stale handler cleared.
 	 */
-	#onChunkCall: Promise<void> | undefined;
+	readonly #onChunkCalls = new Set<Promise<void>>();
 	readonly #chunkThrottleMs: number;
 	readonly #maxColumns: number;
 
@@ -1538,15 +1540,14 @@ export class OutputSink {
 		// command's own error. Keep the failure here — disposal awaits the call
 		// and reports it — instead of letting it escape.
 		if (result !== undefined && typeof result.then === "function") {
-			this.#onChunkCall = result.then(
-				() => {
-					this.#onChunkCall = undefined;
-				},
+			const call = result.then(
+				() => {},
 				(error: unknown) => {
-					this.#onChunkCall = undefined;
 					logger.warn("Output chunk subscriber rejected", { error: String(error) });
 				},
 			);
+			this.#onChunkCalls.add(call);
+			void call.then(() => this.#onChunkCalls.delete(call));
 		}
 	}
 
@@ -1771,10 +1772,10 @@ export class OutputSink {
 	async dispose(): Promise<void> {
 		try {
 			this.#flushPendingChunk();
-			// An async subscriber's call is awaited here: the flushed tail must
-			// be delivered before the artifact is closed, and its rejection must
-			// not replace the command's own error.
-			await this.#onChunkCall;
+			// Every in-flight async subscriber call is awaited here: the flushed
+			// tail must be delivered before the artifact is closed, and a
+			// rejection must not replace the command's own error.
+			await Promise.all(this.#onChunkCalls);
 		} catch {
 			// A throwing subscriber must not turn a cleanup call into a failure.
 		} finally {
