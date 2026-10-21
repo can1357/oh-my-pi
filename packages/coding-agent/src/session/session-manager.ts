@@ -1564,6 +1564,19 @@ const STAMP_TRANSIENT = Symbol("stamp.transient");
  * intrinsic calls instead — a local cost that runs no user code.
  */
 function unboxedPrimitive(value: object): number | string | boolean | undefined {
+	// Fast path: the brand checks below each cost a caught exception, and the
+	// ordinary nodes of a session graph are plain objects, arrays or
+	// null-prototype values — never wrappers, whose prototype is
+	// `Number.prototype`, `String.prototype`, `Boolean.prototype` or a
+	// foreign realm's own. A trap here answers "keep probing", so a proxy
+	// still takes the slow path.
+	let proto: object | null | undefined;
+	try {
+		proto = Object.getPrototypeOf(value);
+	} catch {
+		proto = undefined;
+	}
+	if (proto === null || proto === Object.prototype || proto === Array.prototype) return undefined;
 	try {
 		return NUMBER_VALUE_OF.call(value);
 	} catch {
