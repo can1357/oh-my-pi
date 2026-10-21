@@ -521,6 +521,39 @@ describe("OutputSink", () => {
 		expect(disposed).toBe(true);
 	});
 
+	test("dispose awaits the tracked callbacks even when the tail flush throws", async () => {
+		// A subscriber can return a still-pending promise for an earlier chunk
+		// and throw synchronously for the throttled tail. The throw must not
+		// skip the tracked calls: the earlier callback is still in flight, and
+		// the executor's teardown must not finish before it does.
+		const first = Promise.withResolvers<void>();
+		const chunks: string[] = [];
+		const sink = new OutputSink({
+			onChunk: (chunk: string) => {
+				chunks.push(chunk);
+				if (chunks.length === 1) return first.promise;
+				throw new Error("subscriber failed");
+			},
+			chunkThrottleMs: 60_000,
+		});
+		sink.push("first");
+		sink.push("second");
+
+		let disposed = false;
+		const disposal = sink.dispose().then(() => {
+			disposed = true;
+		});
+		// Drain the microtask queue: a disposal that skips the tracked calls
+		// settles within a handful of turns.
+		for (let turn = 0; turn < 20 && !disposed; turn++) {
+			await Promise.resolve();
+		}
+		expect(disposed).toBe(false);
+		first.resolve();
+		await disposal;
+		expect(disposed).toBe(true);
+	});
+
 	test("replace cancels a throttled tail and discards its pending preview", () => {
 		vi.useFakeTimers();
 		const chunks: string[] = [];
