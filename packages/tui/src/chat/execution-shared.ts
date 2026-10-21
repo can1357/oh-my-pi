@@ -143,6 +143,7 @@ export interface ExecutionCardInput {
 	readonly exitCode: number | undefined;
 	readonly truncation: TruncationMeta | undefined;
 	readonly artifactError?: OutputArtifactError;
+	readonly minimized?: MinimizedMeta;
 }
 
 /**
@@ -180,6 +181,7 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	if (input.status === "cancelled") note("(cancelled)", "warning");
 	else if (input.status === "error") note(`(exit ${input.exitCode})`, "error");
 	if (input.truncation) note(formatTruncationMetaNotice(input.truncation), "warning");
+	if (input.minimized) note(`Minimized: ${formatMinimizedMeta(input.minimized)}`, "muted");
 	if (input.artifactError) note(formatArtifactErrorNotice(input.artifactError), "warning");
 	if (notes.length > 0) children.push(text(notes, { wrap: "word", key: "notes" }));
 	return card(
