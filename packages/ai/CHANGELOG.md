@@ -1,6 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added an optional abort message to `raceWithSignal`, so it reports the same abort reason as the published `raceSignal` alias that already took one ([#15308](https://github.com/can1357/oh-my-pi/pull/15308) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+## [18.12.5] - 2026-10-21
 
 ### Added
 
@@ -20,7 +25,7 @@
 - Added OpenAI 12-hour prompt caching for GPT-5.6+ on the Responses API: `cacheRetention: "long"` now requests `prompt_cache_options.ttl: "12h"` (instead of the ignored legacy `prompt_cache_retention: "24h"`), and `promptCache.ttl` accepts `"12h"`
 ### Added
 
-- `raceWithSignal` now takes the abort message that the published `raceSignal` alias already accepted, so both import paths produce the same `AbortError` text ([#15308](https://github.com/can1357/oh-my-pi/pull/15308) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Added OpenAI 12-hour prompt caching for GPT-5.6+ on the Responses API: `cacheRetention: "long"` now requests `prompt_cache_options.ttl: "12h"` (instead of the ignored legacy `prompt_cache_retention: "24h"`), and `promptCache.ttl` accepts `"12h"`
 
 ### Fixed
 
