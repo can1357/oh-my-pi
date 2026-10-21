@@ -465,9 +465,16 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
  * The walk is an explicit worklist, not recursion: `details` is the tool
  * result's opaque slot and can hold a graph nested arbitrarily deep, and one
  * JS frame per level overflowed the stack on such input (~20k levels) — a
- * persistence failure on a graph serialization handles fine. Every step reads
- * only own data, so the order the worklist visits nodes in changes nothing a
- * caller can observe.
+ * persistence failure on a graph serialization handles fine.
+ *
+ * The children are read one at a time, in the order the rebuild pass reads
+ * them, and the scan stops at the first dirty child — the semantics the
+ * former recursive scan had. Reading them eagerly instead (every sibling
+ * before any child is tested) runs a later sibling's own enumerable getter
+ * even when an earlier child already decided the answer, so the getter runs
+ * once more than the single rebuild serialization it belongs to, and the
+ * persisted details advance twice. So the order the worklist visits nodes in
+ * IS observable, and the walk keeps the rebuild's order.
  *
  * A back-reference that the projection does NOT strip (`jsonlEvents` and the
  * spilled `structuredContent` are stripped before this walk, so their cycles
@@ -483,6 +490,27 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 	// graph `details` can hold (see above).
 	type ScanFrame =
 		| { readonly kind: "value"; readonly value: unknown; readonly key: string | undefined }
+		/**
+		 * A container's own children, walked one at a time. The child is read
+		 * when the frame reaches it, not when the siblings are queued: the
+		 * value read is a getter run, and a getter that only the rebuild
+		 * serialization should run must not run here as well.
+		 */
+		| {
+				readonly kind: "children";
+				readonly container: object;
+				readonly keys: readonly string[];
+				index: number;
+				readonly key: string | undefined;
+		  }
+		/** An array's indexed slots, walked one at a time, in index order. */
+		| {
+				readonly kind: "slots";
+				readonly container: readonly unknown[];
+				readonly length: number;
+				index: number;
+				readonly key: string | undefined;
+		  }
 		/** Ends a container's visit and takes it off the active path. */
 		| { readonly kind: "exit"; readonly value: object };
 	const pending: ScanFrame[] = [{ kind: "value", value: obj, key }];
@@ -494,6 +522,41 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 	for (let frame = pending.pop(); frame !== undefined; frame = pending.pop()) {
 		if (frame.kind === "exit") {
 			activePath.delete(frame.value);
+			continue;
+		}
+		if (frame.kind === "children") {
+			if (frame.index >= frame.keys.length) {
+				// The container's visit is over: take it off the active path.
+				pending.push({ kind: "exit", value: frame.container });
+				continue;
+			}
+			const childKey = frame.keys[frame.index++];
+			// The value is read HERE — when this child is about to be tested —
+			// not when the siblings were queued. A sibling after a dirty child
+			// is never read at all, so its own enumerable getter does not run
+			// before the rebuild serialization that owns it.
+			const childValue = (frame.container as Record<string, unknown>)[childKey];
+			// The snapcompact archive is rebuilt by `persistSnapcompactArchive`,
+			// not the generic path, so only its frames decide a rewrite.
+			if (isSnapcompactArchiveSlot(frame.key, childKey, childValue)) {
+				if (snapcompactArchiveNeedsRewrite(childValue)) return true;
+				continue;
+			}
+			// The container's remaining children wait below this child's own
+			// subtree, so the walk stays in key order.
+			pending.push(frame);
+			pending.push({ kind: "value", value: childValue, key: childKey });
+			continue;
+		}
+		if (frame.kind === "slots") {
+			if (frame.index >= frame.length) {
+				pending.push({ kind: "exit", value: frame.container as object });
+				continue;
+			}
+			const index = frame.index++;
+			const slotValue = frame.container[index];
+			pending.push(frame);
+			pending.push({ kind: "value", value: slotValue, key: frame.key });
 			continue;
 		}
 		const { value, key } = frame;
@@ -520,12 +583,11 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 		if (Array.isArray(value)) {
 			// Indexed slots with a snapshotted length, the way `JSON.stringify` and
 			// the rebuild above read them — never the iterator protocol, which an
-			// overridden `Symbol.iterator` can hide slots from.
+			// overridden `Symbol.iterator` can hide slots from. The slots are read
+			// one at a time, in index order, so a slot after a dirty one is never
+			// read by this scan.
 			const length = value.length;
-			pending.push({ kind: "exit", value });
-			for (let index = 0; index < length; index++) {
-				pending.push({ kind: "value", value: value[index], key });
-			}
+			pending.push({ kind: "slots", container: value, length, index: 0, key });
 			continue;
 		}
 		if (typeof value === "object") {
@@ -557,18 +619,9 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 			}
 			// Own enumerable keys, enumerated directly — see the rebuild loop
 			// in `truncateForPersistence` for why `for..in`'s prototype walk
-			// is a step a thrown `getPrototypeOf` trap fails.
-			pending.push({ kind: "exit", value });
-			for (const childKey of Object.keys(value)) {
-				const childValue = (value as Record<string, unknown>)[childKey];
-				// The snapcompact archive is rebuilt by `persistSnapcompactArchive`,
-				// not the generic path, so only its frames decide a rewrite.
-				if (isSnapcompactArchiveSlot(key, childKey, childValue)) {
-					if (snapcompactArchiveNeedsRewrite(childValue)) return true;
-					continue;
-				}
-				pending.push({ kind: "value", value: childValue, key: childKey });
-			}
+			// is a step a thrown `getPrototypeOf` trap fails. The keys are
+			// listed here, but each value is read when its frame reaches it.
+			pending.push({ kind: "children", container: value, keys: Object.keys(value), index: 0, key });
 		}
 	}
 	return false;

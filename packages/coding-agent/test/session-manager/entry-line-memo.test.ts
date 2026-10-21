@@ -233,6 +233,63 @@ describe("SessionManager entry-line memo", () => {
 		expect(bodyAfterSecond).not.toContain("claude-sonnet-4-5");
 	});
 
+	it("persists a message entry's runtime metadata changed in place", async () => {
+		// Every entry carries the build identity that wrote it, and the identity
+		// is an object: changing it in place keeps the same object, so a
+		// shallow snapshot of the entry's own field values compares equal and
+		// the rewrite reuses the line the change invalidated — a reload then
+		// restores the old metadata.
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "ok" }],
+			timestamp: Date.now(),
+		});
+		const entry = session.getEntries().find(e => e.type === "message");
+		if (!entry) throw new Error("Expected message entry");
+		entry.runtime = { version: "fix15222-runtime-v1" };
+
+		// First rewrite: the persisted body carries the original identity.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(storage.readTextSync(sessionFile)).toContain('"version":"fix15222-runtime-v1"');
+
+		// Change the identity in place: the field keeps its object, so only a
+		// value stamp notices.
+		entry.runtime.version = "fix15222-runtime-v2";
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"version":"fix15222-runtime-v2"');
+		expect(bodyAfterSecond).not.toContain('"version":"fix15222-runtime-v1"');
+	});
+
+	it("persists a custom entry's payload changed in place", async () => {
+		// An extension stores its own payload on a custom entry, and the memo
+		// now covers that entry type: a payload mutated in place must still
+		// reach the line, so the entry's own fields need a value stamp rather
+		// than a snapshot compared by identity.
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		const payload = { rows: [{ id: 1 }] };
+		const entryId = session.appendCustomEntry("fix15222-custom", payload);
+		const entry = session.getEntries().find(e => e.id === entryId);
+		if (!entry || entry.type !== "custom") throw new Error("Expected custom entry");
+
+		// First rewrite: the persisted body carries the original payload.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(storage.readTextSync(sessionFile)).toContain('"id":1');
+
+		// Change the payload in place: the field keeps its object, so only a
+		// value stamp notices.
+		payload.rows[0].id = 2;
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"id":2');
+		expect(bodyAfterSecond).not.toContain('"id":1');
+	});
+
 	it("persists the new value of a boxed-primitive detail changed in place", async () => {
 		const session = SessionManager.create(process.cwd(), sessionDir, storage);
 		const messageId = session.appendMessage(makeToolResultWithBoxedDetails());
@@ -641,6 +698,47 @@ describe("SessionManager entry-line memo", () => {
 		expect(calls).toBe(2);
 		const body = storage.readTextSync(sessionFile);
 		expect(body).toContain('"content":"payload-2"');
+	});
+
+	it("does not run a stateful sibling getter the projector pre-scan reads before a dirty child", async () => {
+		// The opaque `details` slot can hold a plain object whose first child
+		// already requires a rewrite (a string over the persistence limit)
+		// and whose later child is an own enumerable stateful getter. The
+		// projector's pre-scan must not read every sibling before it tests
+		// one: the later getter belongs to the rebuild serialization alone, so
+		// a pre-scan that reads it too advances the payload twice and
+		// persists a value no single serialization produced.
+		let calls = 0;
+		const details: Record<string, unknown> = { oversized: "x".repeat(500_001) };
+		Object.defineProperty(details, "later", {
+			enumerable: true,
+			configurable: true,
+			get() {
+				calls++;
+				return `sibling-${calls}`;
+			},
+		});
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-lazy-scan",
+			toolName: "bash",
+			content: [{ type: "text" as const, text: "ok" }],
+			details,
+			isError: false,
+			timestamp: Date.now(),
+		});
+
+		// One atomic publish performs two full-body serializations (materialize,
+		// then commit), so the getter runs exactly twice — once per rebuild. A
+		// pre-scan that read every sibling first would run it four times and
+		// persist the fourth payload.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		expect(calls).toBe(2);
+		const body = storage.readTextSync(sessionFile);
+		expect(body).toContain('"later":"sibling-2"');
 	});
 
 	it("rewrites a session whose details is a Number-prototype object without latching a persistence failure", async () => {
