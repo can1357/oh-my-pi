@@ -4275,7 +4275,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					commit: stagedMemory?.commit(defaultPrompt.systemPrompt),
 				};
 			}
-			const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
+			let customPrompt: string | string[];
+			try {
+				customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
+			} catch (error) {
+				// The build failed before any prompt carried the staged block, so
+				// the staging must be cancelled: the next build reads the current
+				// memory state instead of a block no prompt ever sent.
+				stagedMemory?.commit([]);
+				throw error;
+			}
 			const customSystemPrompt = typeof customPrompt === "string" ? [customPrompt] : customPrompt;
 			return {
 				systemPrompt: customSystemPrompt,

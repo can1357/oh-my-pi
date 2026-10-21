@@ -186,6 +186,76 @@ describe("memory snapshot across a resume", () => {
 		expect(block).toBeUndefined();
 	});
 
+	it("does not restore a snapshot whose read raced the clear", async () => {
+		// A build that read the memory files while the clear was removing them
+		// persisted the old content under the token the clear had already
+		// written. The clear rotates the token again afterwards, so that
+		// snapshot no longer validates and the cleared memory stays cleared.
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const cwd = settings.getCwd();
+		await saveLearnedLesson(agentDir, cwd, { content: "Raced lesson" });
+
+		const session = SessionManager.create(cwd, sessionsDir);
+		await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		pendingMemorySnapshotCommit(session)?.();
+		const recorded = snapshotRecords(session)[0];
+		expect(recorded?.token).toBeDefined();
+
+		// The clear writes a fresh token, removes the files, and then rotates
+		// the token again.
+		const memoryRoot = getMemoryRoot(agentDir, cwd);
+		const clearTokenPath = `${memoryRoot}.clear-token`;
+		const tokenDuringClear = "token-written-mid-clear";
+		await fs.mkdir(memoryRoot, { recursive: true });
+		await fs.writeFile(clearTokenPath, tokenDuringClear);
+		await fs.rm(memoryRoot, { recursive: true, force: true });
+		await clearMemoryData(agentDir, cwd);
+
+		// The snapshot the racing build persisted carries the mid-clear token.
+		session.appendCustomEntry(MEMORY_SNAPSHOT_TYPE, {
+			summary: "",
+			learned: "Raced lesson",
+			scope: recorded?.scope,
+			token: tokenDuringClear,
+		});
+
+		const block = await buildMemoryToolDeveloperInstructions(agentDir, cwd, settings, session);
+		expect(block).toBeUndefined();
+	});
+
+	it("re-applies the injection budget to a restored snapshot", async () => {
+		// The snapshot was recorded under a generous budget. Resuming the
+		// session under a smaller one must not inject the old, larger block.
+		const generous = Settings.isolated({
+			"memory.backend": "local",
+			"memories.summaryInjectionTokenLimit": 5000,
+		});
+		const cwd = generous.getCwd();
+		await saveLearnedLesson(agentDir, cwd, { content: `- ${"L".repeat(20_000)}` });
+
+		const session = SessionManager.create(cwd, sessionsDir);
+		const block = await buildMemoryToolDeveloperInstructions(agentDir, cwd, generous, session);
+		expect(block).toContain("LLLL");
+		pendingMemorySnapshotCommit(session)?.();
+		await session.flush();
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const recorded = snapshotContent(session)[0];
+		expect((recorded?.learned?.length ?? 0) / 4).toBeLessThanOrEqual(5000);
+
+		// The same transcript, resumed in a fresh process under a much smaller
+		// budget: the restored snapshot is re-bounded before it is injected.
+		const tight = Settings.isolated({
+			"memory.backend": "local",
+			"memories.summaryInjectionTokenLimit": 100,
+		});
+		const resumed = await SessionManager.open(sessionFile, sessionsDir);
+		const tightBlock = await buildMemoryToolDeveloperInstructions(agentDir, cwd, tight, resumed);
+		expect(tightBlock).toContain("LLLL");
+		const injected = (tightBlock?.match(/L+/)?.[0].length ?? 0) / 4;
+		expect(injected).toBeLessThanOrEqual(100);
+	});
+
 	it("does not restore a snapshot recorded for another project scope", async () => {
 		const settings = Settings.isolated({ "memory.backend": "local" });
 		const projectA = path.join(tmp, "project-a");
