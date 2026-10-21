@@ -101,6 +101,7 @@ import { SKILL_PROMPT_MESSAGE_TYPE, usageContextTokens } from "../session/messag
 import type { CompletionJournal } from "../session/model-usage-journal";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { type Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import {
 	AUTO_THINKING,
 	assertModelSupportsEffortCeiling,
@@ -160,6 +161,7 @@ import { yieldSectionShapes } from "./yield-assembly";
 import { assertPerCallModelApproved, PerCallModelError, type PerCallModelGrants } from "./model-approval";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import {
+	cfgTaskAgentMaxEffort,
 	cfgTaskPrewalk,
 	cfgTaskAgentPrewalk,
 	cfgTaskAgentPrewalkAuto,
@@ -4662,6 +4664,29 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 }
 
 /**
+ * Effort ceiling for one agent: the lower of the spawn ceiling (`task.maxEffort`,
+ * set when the caller supplied `effort` or a per-call model) and the agent's `task.agentMaxEffort`
+ * entry. Applies on any model or provider; unknown or non-effort entries are ignored.
+ */
+export function resolveAgentEffortCeiling(
+	agentName: string,
+	spawnCeiling: Effort | undefined,
+	agentMaxEffort: Readonly<Record<string, unknown>> | undefined,
+): Effort | undefined {
+	const configured =
+		agentMaxEffort !== undefined && Object.hasOwn(agentMaxEffort, agentName) ? agentMaxEffort[agentName] : undefined;
+	const perAgent = THINKING_EFFORTS.find(candidate => candidate === configured);
+	if (perAgent === undefined) return spawnCeiling;
+	if (spawnCeiling === undefined) return perAgent;
+	return THINKING_EFFORTS.indexOf(perAgent) < THINKING_EFFORTS.indexOf(spawnCeiling) ? perAgent : spawnCeiling;
+}
+
+/** Current `task.agentMaxEffort` map (agent name to maximum effort level). */
+export function readAgentMaxEffort(settings: Settings): Readonly<Record<string, unknown>> {
+	return cfgTaskAgentMaxEffort.get(settings);
+}
+
+/**
  * Run a single agent. On the main thread with worker mode on, the pool places the whole run
  * on this thread or in a pooled subagent worker (the child session is homed where it runs),
  * by how many subagents run at once; otherwise — worker mode off, or already inside a
@@ -5080,9 +5105,15 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// A per-call `model` is caller-chosen too, so its `:level` is held to the same
 			// ceiling, and a model whose lowest effort is above it fails the spawn
 			// exactly as an `effort` hint does.
-			const spawnEffortCeiling =
+			const callerEffortCeiling =
 				options.effort !== undefined || options.perCallModelGrants ? cfgTaskMaxEffort.get(settings) : undefined;
-			if (model && spawnEffortCeiling) assertModelSupportsEffortCeiling(model, spawnEffortCeiling);
+			if (model && callerEffortCeiling) assertModelSupportsEffortCeiling(model, callerEffortCeiling);
+			// `task.agentMaxEffort` lowers the ceiling further, on any model or provider.
+			const spawnEffortCeiling = resolveAgentEffortCeiling(
+				agent.name,
+				callerEffortCeiling,
+				readAgentMaxEffort(settings),
+			);
 			const effortLevel =
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
@@ -5103,8 +5134,14 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
 			// model pattern > agent-definition default (e.g. task's `auto`) >
 			// pattern-derived level.
-			const effectiveThinkingLevel =
+			// A `task.agentMaxEffort` cap also snaps a level that came from the model
+			// pattern or the agent definition down to the model's highest supported
+			// effort at or below the cap.
+			const unclampedThinkingLevel =
 				effortLevel ?? (explicitThinkingLevel ? explicitLevel : (thinkingLevel ?? resolvedThinkingLevel));
+			const effectiveThinkingLevel = THINKING_EFFORTS.includes(unclampedThinkingLevel as Effort)
+				? clampThinkingLevelToCeiling(model, unclampedThinkingLevel as Effort, spawnEffortCeiling)
+				: unclampedThinkingLevel;
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
 			const sessionManagerPromise = sessionFile
