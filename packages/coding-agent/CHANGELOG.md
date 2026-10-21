@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed the edit tool failing to match a line written with fullwidth characters, the match error now names the differing codepoints instead of printing two lines that look identical, a whitespace-only patch keeps the file's own body when the width fold leaves a residual difference, and a line that holds nothing but whitespace keeps its whitespace once ([#16113](https://github.com/can1357/oh-my-pi/issues/16113), [#16466](https://github.com/can1357/oh-my-pi/pull/16466) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -65,7 +68,6 @@
 - `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
 
 ### Fixed
-- Fixed the edit tool failing to match a line written with fullwidth characters, the match error now names the differing codepoints instead of printing two lines that look identical, a whitespace-only patch keeps the file's own body when the width fold leaves a residual difference, and a line that holds nothing but whitespace keeps its whitespace once ([#16113](https://github.com/can1357/oh-my-pi/issues/16113), [#16466](https://github.com/can1357/oh-my-pi/pull/16466) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed subagents spawning at a caller-supplied `effort` (e.g. `hi` → `max`) while `task.enableEffort` is off; the field is now ignored and the agent's configured thinking level (including `:auto`) applies ([#16402](https://github.com/can1357/oh-my-pi/issues/16402))
 - Fixed `omp update --check` failing against JFrog Artifactory registries that add empty `dist-tags` to a tagged manifest; the update check now uses the registry's curated latest version ([#16375](https://github.com/can1357/oh-my-pi/issues/16375))
