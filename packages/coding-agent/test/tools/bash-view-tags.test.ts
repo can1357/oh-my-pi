@@ -312,6 +312,29 @@ describe("bash numbered file views mint edit tags", () => {
 		},
 	);
 
+	// Windows file names cannot hold `:`.
+	it.skipIf(process.platform === "win32")(
+		"reads no `path:N:` rows out of a view that prints rows without file names",
+		async () => {
+			// Text of a.ts spelled like rows of files the view never read: one its
+			// --include skips, an untracked one `git grep` skips, one a skipped
+			// view would read, one reached through a symlink `-r` does not follow.
+			await Bun.write(path.join(cwd, "a.ts"), "x\n");
+			await Bun.write(path.join(cwd, "1:victim.js"), "same\n");
+			await fs.mkdir(path.join(cwd, "outside"));
+			await Bun.write(path.join(cwd, "outside", "victim"), "same\n");
+			await fs.symlink(path.join(cwd, "outside"), path.join(cwd, "1:link"));
+			for (const [command, output] of [
+				["grep -rnh --include='*.ts' same .", "1:victim.js:1:same\n"],
+				["git grep -nh same", "1:victim.js:1:same\n"],
+				["grep -nh same a.ts missing; grep -n same '1:victim.js'", "1:victim.js:1:same\n"],
+				["grep -rnh same .", "1:link/victim:1:same\n"],
+			]) {
+				expect(await planNumberedFileTags(session, command, cwd, output)).toBeUndefined();
+			}
+		},
+	);
+
 	it("names no tag for a `cd` inside the command, which a function or `CDPATH` can send elsewhere", async () => {
 		await fs.mkdir(path.join(cwd, "sub"));
 		await Bun.write(path.join(cwd, "sub", "a.ts"), "same\nwrong\n");

@@ -108,6 +108,8 @@ interface OptionSpec {
 	longOptional: ReadonlySet<string>;
 	/** The long options that number lines. */
 	numberLong: string;
+	/** The short option that prints rows without their file names. */
+	hideNames?: string;
 	/** Whether the first operand is the pattern unless an option gave it. */
 	pattern: boolean;
 	/**
@@ -157,6 +159,7 @@ const GREP: OptionSpec = {
 	]),
 	longOptional: new Set(["color", "colour"]),
 	numberLong: "line-number",
+	hideNames: "h",
 	pattern: true,
 	permutes: false,
 };
@@ -211,6 +214,7 @@ const NUMBERERS: Record<string, OptionSpec> = {
 		]),
 		longOptional: new Set(),
 		numberLong: "line-number",
+		hideNames: "I",
 		pattern: true,
 		permutes: true,
 	},
@@ -240,6 +244,7 @@ const NUMBERERS: Record<string, OptionSpec> = {
 		longValued: new Set(["max-count", "after-context", "before-context", "context", "max-depth", "threads"]),
 		longOptional: new Set(["color"]),
 		numberLong: "line-number",
+		hideNames: "h",
 		pattern: true,
 		permutes: false,
 	},
@@ -314,12 +319,18 @@ function unquoted(raw: string, keepQuotedExpansions: boolean): string {
  */
 const climbs = (spelling: string): boolean => spelling.split(/[/\\]/).includes("..");
 
+/** The files a numberer reads, and whether it was told to print rows without their file names. */
+interface Numbered {
+	files: Word[];
+	hidesNames: boolean;
+}
+
 /**
  * The words naming the files a numberer reads (its pattern and option values
  * dropped), or `undefined` when the command does not print those files' line
  * numbers or takes an option outside its {@link OptionSpec}.
  */
-function numbererFiles(name: string, args: Word[]): Word[] | undefined {
+function numbererFiles(name: string, args: Word[]): Numbered | undefined {
 	if (name === "git") {
 		if (args[0]?.value !== "grep") return undefined;
 		args = args.slice(1);
@@ -331,12 +342,17 @@ function numbererFiles(name: string, args: Word[]): Word[] | undefined {
 		const flags = args.filter(arg => arg.value.startsWith("-")).map(arg => arg.value);
 		const positional = args.filter(arg => !arg.value.startsWith("-"));
 		const options = flags.join(" ");
-		if (options === "-b") return positional[0]?.value === "a" ? positional.slice(1) : undefined;
-		return options === "-ba" || options === "--body-numbering=a" ? positional : undefined;
+		if (options === "-b") {
+			return positional[0]?.value === "a" ? { files: positional.slice(1), hidesNames: false } : undefined;
+		}
+		return options === "-ba" || options === "--body-numbering=a"
+			? { files: positional, hidesNames: false }
+			: undefined;
 	}
 	const spec = NUMBERERS[name];
 	if (!spec) return undefined;
 	let numbered = false;
+	let hidesNames = false;
 	let patternGiven = false;
 	let optionsEnded = false;
 	const operands: Word[] = [];
@@ -368,6 +384,7 @@ function numbererFiles(name: string, args: Word[]): Word[] | undefined {
 			} else if (!spec.longOptional.has(option) && (eq >= 0 || !spec.long.has(option))) {
 				return undefined;
 			}
+			hidesNames ||= option === "no-filename";
 			if (option === spec.numberLong) {
 				if (!early) return undefined;
 				numbered = true;
@@ -386,6 +403,7 @@ function numbererFiles(name: string, args: Word[]): Word[] | undefined {
 				break;
 			}
 			if (!spec.flags.includes(letter)) return undefined;
+			hidesNames ||= letter === spec.hideNames;
 			if (letter === "n") {
 				if (!early) return undefined;
 				numbered = true;
@@ -403,7 +421,7 @@ function numbererFiles(name: string, args: Word[]): Word[] | undefined {
 		if (/^~[^/]/.test(file.active) || file.value.includes("**")) return undefined;
 		if (file.value.match(/[*?[{]/g)?.length !== file.active.match(/[*?[{]/g)?.length) return undefined;
 	}
-	return files;
+	return { files, hidesNames };
 }
 
 /** True when a pipeline stage reads only its input stream and keeps or drops whole rows. */
@@ -443,6 +461,11 @@ interface ParsedView {
 	nl: boolean;
 	/** Some view is `git grep`, which prints paths from the top of the repository under `grep.fullName`. */
 	git: boolean;
+	/**
+	 * Some view prints rows without file names (`grep -h`): its row text then
+	 * reads as `path:N:` rows of files the view may never have read.
+	 */
+	hidesNames: boolean;
 }
 
 /**
@@ -502,13 +525,16 @@ function parseView(command: string, cwd: string): ParsedView | undefined {
 	const globs: string[] = [];
 	let nl = false;
 	let git = false;
+	let hidesNames = false;
 	for (const stages of pipelines) {
 		if (stages.length === 1 && stages[0].length === 0) continue;
 		const start = stages[0].findIndex(word => !ASSIGNMENT.test(word.raw));
 		if (start < 0) return undefined;
 		const [name, ...args] = stages[0].slice(start);
-		const files = numbererFiles(name.value, args);
-		if (!files) return undefined;
+		const numbered = numbererFiles(name.value, args);
+		if (!numbered) return undefined;
+		const { files } = numbered;
+		hidesNames ||= numbered.hidesNames;
 		for (const [stage, ...stageArgs] of stages.slice(1)) {
 			if (stage === undefined || stageArgs.some(expands) || !keepsRows(stage.value, stageArgs)) return undefined;
 		}
@@ -532,7 +558,7 @@ function parseView(command: string, cwd: string): ParsedView | undefined {
 	}
 	if (soles.size === 0) return undefined;
 	const [sole] = soles;
-	return { sole: soles.size === 1 ? sole : undefined, roots, globs, nl, git };
+	return { sole: soles.size === 1 ? sole : undefined, roots, globs, nl, git, hidesNames };
 }
 
 async function regularFiles(candidates: Iterable<string>): Promise<Set<string>> {
@@ -615,7 +641,7 @@ export async function planNumberedFileTags(
 		});
 	const prefixes = new Set<string>();
 	for (const row of rows) {
-		if (row.file === undefined || /\s/.test(row.file) || climbs(row.file)) continue;
+		if (view.hidesNames || row.file === undefined || /\s/.test(row.file) || climbs(row.file)) continue;
 		if (!underRoot(path.resolve(cwd, row.file))) continue;
 		if (prefixes.size === MAX_PREFIXES && !prefixes.has(row.file)) break;
 		prefixes.add(row.file);
