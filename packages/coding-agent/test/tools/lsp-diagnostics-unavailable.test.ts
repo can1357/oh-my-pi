@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, AgentToolResult, ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { createLspWritethrough, LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
@@ -13,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
 import { DeferredDiagnostics } from "@oh-my-pi/pi-coding-agent/lsp/deferred-diagnostics";
 import type { Diagnostic, LspClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { DeferredDiagnosticsEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -67,6 +68,32 @@ function makeWriteSession(cwd: string): ToolSession {
 			return version;
 		},
 		getFileMutationVersion: target => mutationVersions.get(target) ?? 0,
+	};
+}
+
+/**
+ * The context a tool receives.
+ *
+ * `packages/coding-agent/src/tools/context.ts` augments `AgentToolContext` with
+ * the custom-tool members, so the context carries six REQUIRED ones on top of
+ * the optional agent-core ones. They are all present here — a typed stub, not
+ * a cast — so the context fails the typecheck the day the interface grows a
+ * member, instead of silently drifting away from what production builds. The
+ * shape is the one `packages/coding-agent/test/tools.test.ts` already compiles.
+ */
+function makeToolContext(toolCall: ToolCallContext, cwd: string): AgentToolContext {
+	return {
+		sessionManager: SessionManager.inMemory(cwd),
+		modelRegistry: {
+			find: () => undefined,
+			getAll: () => [],
+			getApiKey: async () => undefined,
+		} as unknown as AgentToolContext["modelRegistry"],
+		model: undefined,
+		isIdle: () => true,
+		hasQueuedMessages: () => false,
+		abort: () => {},
+		toolCall,
 	};
 }
 
@@ -389,14 +416,14 @@ describe("issue #15408: diagnostics that never arrive are not a clean file", () 
 				{ path: "a.ts", content: "export const a: number = 1;\n" },
 				undefined,
 				undefined,
-				{ toolCall: { batchId: "batch-1", index: 0, total: 2, toolCalls } },
+				makeToolContext({ batchId: "batch-1", index: 0, total: 2, toolCalls }, tempDir.path()),
 			);
 			const result = await tool.execute(
 				"write-b",
 				{ path: "b.ts", content: "export const b: number = 2;\n" },
 				undefined,
 				undefined,
-				{ toolCall: { batchId: "batch-1", index: 1, total: 2, toolCalls } },
+				makeToolContext({ batchId: "batch-1", index: 1, total: 2, toolCalls }, tempDir.path()),
 			);
 
 			expect(result.isError).not.toBe(true);
