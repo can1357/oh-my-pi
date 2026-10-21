@@ -2106,11 +2106,43 @@ mod tests {
 	/// standard output redirected to that error output (`>&2`), leaves grep
 	/// writing into the file it reads. GNU grep rejects that with exit
 	/// status 2 and "input file is also the output".
+	///
+	/// The refusal is decided from the identity of the descriptor the
+	/// shell's error output names, so the case needs the error descriptor to
+	/// BE the searched file. Pointing this process's descriptor 2 at that
+	/// file would hold it there for every test running alongside, so their
+	/// diagnostics would land in the searched file and their own stderr
+	/// would go missing; the case therefore runs in a child process whose
+	/// descriptor 2 is the searched file from the start.
 	#[cfg(unix)]
 	#[test]
 	fn a_stderr_backed_stdout_is_refused_as_the_output_file() {
-		use std::os::fd::AsRawFd;
+		/// The case directory, set on the child process.
+		const CASE_DIR: &str = "PI_BUILTINS_GREP_STDERR_CASE_DIR";
 
+		if let Some(case_dir) = std::env::var_os(CASE_DIR) {
+			// The child: its error descriptor is the searched file from the
+			// moment it starts, the way a shell's `>&2` redirect leaves it.
+			let dir = std::path::PathBuf::from(case_dir);
+			let (mut host, capture) = Host::for_test("grep", "", &dir);
+			host.set_test_stdout(openfiles::OpenFile::Stderr(std::io::stderr()));
+			let parsed = Grep::try_parse_from(["grep", "needle", "out.txt"]).unwrap();
+			let code = run_caught(parsed, &mut host);
+
+			assert_eq!(code, 2, "{}", capture.err());
+			assert!(
+				capture.err().contains("out.txt: input file is also the output"),
+				"{}",
+				capture.err()
+			);
+			// The refused input is left exactly as it was: grep wrote no
+			// match into the file it was reading.
+			assert_eq!(std::fs::read(dir.join("out.txt")).unwrap(), b"needle\n");
+			return;
+		}
+
+		// The parent: the searched file is the child's error descriptor, so
+		// the child sees the identity a `>&2` redirect produces.
 		let tree = tempfile::tempdir().unwrap();
 		let path = tree.path().join("out.txt");
 		std::fs::write(&path, "needle\n").unwrap();
@@ -2119,42 +2151,60 @@ mod tests {
 			.open(&path)
 			.expect("stderr file");
 
-		// The shell's error output is the searched file; `>&2` then makes it
-		// grep's output too.
-		let saved = unsafe { libc::dup(libc::STDERR_FILENO) };
-		assert!(saved >= 0, "dup stderr");
-		let _restore = StderrDescriptor(saved);
-		let swapped = unsafe { libc::dup2(stderr_file.as_raw_fd(), libc::STDERR_FILENO) };
-		assert_eq!(swapped, libc::STDERR_FILENO, "dup2 stderr");
-
-		let (mut host, capture) = Host::for_test("grep", "", tree.path());
-		host.set_test_stdout(openfiles::OpenFile::Stderr(std::io::stderr()));
-		let parsed = Grep::try_parse_from(["grep", "needle", "out.txt"]).unwrap();
-		let code = run_caught(parsed, &mut host);
-
-		assert_eq!(code, 2, "{}", capture.err());
-		assert!(
-			capture.err().contains("out.txt: input file is also the output"),
-			"{}",
-			capture.err()
+		let name = format!(
+			"{}::a_stderr_backed_stdout_is_refused_as_the_output_file",
+			module_path!()
+				.split_once("::")
+				.expect("crate-qualified module path")
+				.1
 		);
-		// The refused input is left exactly as it was.
-		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
+		let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+			.args(["--exact", &name, "--nocapture", "--test-threads=1"])
+			.env(CASE_DIR, tree.path())
+			// The searched file is the child's error descriptor, so whatever
+			// the child writes there is that file's own content.
+			.stderr(std::process::Stdio::from(stderr_file))
+			.output()
+			.expect("re-exec the case in a child process");
+		assert!(
+			child.status.success(),
+			"the case failed in the child:\n{}\n{}",
+			String::from_utf8_lossy(&child.stdout),
+			String::from_utf8_lossy(&std::fs::read(&path).unwrap_or_default())
+		);
+
+		// The case must not have retargeted this process's error descriptor:
+		// it still names the harness's own output, not the searched file.
+		let searched = std::fs::metadata(&path).unwrap();
+		let searched_identity = {
+			use std::os::unix::fs::MetadataExt;
+			(searched.dev(), searched.ino())
+		};
+		assert_ne!(
+			error_descriptor_identity().expect("the process's error descriptor"),
+			searched_identity,
+			"the case retargeted the process's error descriptor"
+		);
 	}
 
-	/// Restores the process's error descriptor when the test ends, so that a
-	/// failed assertion cannot leave it pointing at a temporary file.
+	/// The identity of the file the process's error descriptor names.
 	#[cfg(unix)]
-	struct StderrDescriptor(libc::c_int);
+	fn error_descriptor_identity() -> Option<(u64, u64)> {
+		use std::os::{
+			fd::{FromRawFd, OwnedFd},
+			unix::fs::MetadataExt,
+		};
 
-	#[cfg(unix)]
-	impl Drop for StderrDescriptor {
-		fn drop(&mut self) {
-			unsafe {
-				libc::dup2(self.0, libc::STDERR_FILENO);
-				libc::close(self.0);
-			}
+		// SAFETY: plain `dup` of a live descriptor.
+		let duplicate = unsafe { libc::dup(libc::STDERR_FILENO) };
+		if duplicate < 0 {
+			return None;
 		}
+		// SAFETY: `duplicate` is a fresh descriptor this function owns, and
+		// the owned descriptor closes it when it goes out of scope.
+		let owned = unsafe { OwnedFd::from_raw_fd(duplicate) };
+		let metadata = std::fs::File::from(owned).metadata().ok()?;
+		Some((metadata.dev(), metadata.ino()))
 	}
 
 	/// Runs a utility whose standard input and stdout are the same file, the
