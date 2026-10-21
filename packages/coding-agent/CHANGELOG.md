@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
 
+### Fixed
 - Fixed `wait` and `proc://<id>/kill` reporting a settled job as "not auto-delivered; recovered by this snapshot" when the call itself handed the result over, when the snapshot superseded the job's queued completion push, or when the result was genuinely late; the delivery line now says which of the three it is ([#16052](https://github.com/can1357/oh-my-pi/issues/16052), [#16134](https://github.com/can1357/oh-my-pi/pull/16134) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.5] - 2026-10-21
