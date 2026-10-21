@@ -170,4 +170,56 @@ describe("memory snapshot with a replaced system prompt", () => {
 			else process.env.NULL_PROMPT = previous;
 		}
 	}, 30_000);
+
+	it("records no snapshot when the prompt build throws", async () => {
+		// A build that never produced a prompt must not leave the staged
+		// block pending: the next build would reuse a block no prompt ever
+		// sent, and a later resume would restore it as if it had.
+		const tempDir = TempDir.createSync("@omp-memory-snapshot-override-");
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected built-in anthropic model to exist");
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		await settings.reloadForCwd(tempDir.path());
+		await saveLearnedLesson(tempDir.path(), tempDir.path(), { content: "Override lesson" });
+
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		try {
+			await expect(
+				createAgentSession({
+					cwd: tempDir.path(),
+					agentDir: tempDir.path(),
+					sessionManager,
+					agentRegistry: new AgentRegistry(),
+					authStorage,
+					modelRegistry,
+					settings,
+					model,
+					systemPrompt: () => {
+						throw new Error("the replacement prompt failed");
+					},
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					workspaceTree: {
+						rootPath: tempDir.path(),
+						rendered: "",
+						truncated: false,
+						totalLines: 0,
+						agentsMdFiles: [],
+					},
+					promptTemplates: [],
+					slashCommands: [],
+					enableMCP: false,
+					enableLsp: false,
+				}),
+			).rejects.toThrow("the replacement prompt failed");
+			expect(snapshotCount(sessionManager)).toBe(0);
+		} finally {
+			authStorage.close();
+			await tempDir.remove();
+		}
+	}, 30_000);
 });
