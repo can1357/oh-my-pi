@@ -1771,13 +1771,17 @@ export class OutputSink {
 	 */
 	async dispose(): Promise<void> {
 		try {
-			this.#flushPendingChunk();
+			try {
+				this.#flushPendingChunk();
+			} catch {
+				// A throwing subscriber must not turn a cleanup call into a failure —
+				// and it must not skip the tracked calls below, which may still be
+				// in flight from an earlier chunk.
+			}
 			// Every in-flight async subscriber call is awaited here: the flushed
 			// tail must be delivered before the artifact is closed, and a
 			// rejection must not replace the command's own error.
 			await Promise.all(this.#onChunkCalls);
-		} catch {
-			// A throwing subscriber must not turn a cleanup call into a failure.
 		} finally {
 			await this.#finalizeFile();
 		}
