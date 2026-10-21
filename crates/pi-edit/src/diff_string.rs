@@ -793,6 +793,14 @@ pub struct DiffHunk {
 	pub new_start_line:    Option<u32>,
 	/// Whether the hunk contains unchanged context.
 	pub has_context_lines: bool,
+	/// The lines the hunk left unchanged, as (old index, new index) pairs.
+	///
+	/// A context line appears in the hunk's old and new block alike, so the
+	/// pair is where the same line sits on each side. The correspondence
+	/// cannot be recovered from the two blocks alone: a line that was deleted
+	/// and re-added is textually equal to a context line, and inferring it
+	/// from equality would rewrite the added line with the file's.
+	pub context_pairs:     Vec<(usize, usize)>,
 	/// Expected old-file lines.
 	pub old_lines:         Vec<String>,
 	/// Replacement new-file lines.
@@ -1100,11 +1108,17 @@ fn parse_one_hunk(
 				hunk.has_context_lines = true;
 				hunk.old_lines.push(String::new());
 				hunk.new_lines.push(String::new());
+				hunk
+					.context_pairs
+					.push((hunk.old_lines.len() - 1, hunk.new_lines.len() - 1));
 			},
 			Some(b' ') => {
 				hunk.has_context_lines = true;
 				hunk.old_lines.push(line[1..].to_owned());
 				hunk.new_lines.push(line[1..].to_owned());
+				hunk
+					.context_pairs
+					.push((hunk.old_lines.len() - 1, hunk.new_lines.len() - 1));
 			},
 			Some(b'+') => hunk.new_lines.push(line[1..].to_owned()),
 			Some(b'-') => hunk.old_lines.push(line[1..].to_owned()),
@@ -1112,6 +1126,9 @@ fn parse_one_hunk(
 				hunk.has_context_lines = true;
 				hunk.old_lines.push(line.to_owned());
 				hunk.new_lines.push(line.to_owned());
+				hunk
+					.context_pairs
+					.push((hunk.old_lines.len() - 1, hunk.new_lines.len() - 1));
 			},
 			_ if parsed_lines == 0 => {
 				return Err(parse_error(

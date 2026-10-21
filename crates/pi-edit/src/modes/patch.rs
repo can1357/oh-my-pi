@@ -148,16 +148,23 @@ fn apply_indent_delta(lines: &[String], delta: isize, indent: char) -> Vec<Strin
 /// matches a file line that holds the fullwidth form — writing the authored
 /// line would silently rewrite text the hunk marked unchanged.
 ///
-/// The correspondence comes from the diff of the two blocks, so a context line
-/// between two edits is mapped as well as the ones at the edges.
+/// The correspondence comes from the diff body the parser read, so a context
+/// line between two edits is mapped as well as the ones at the edges — and a
+/// line that was deleted and re-added is not: it is textually equal to a
+/// context line, but the hunk changed it.
 fn context_lines(
-	pattern: &[String],
+	context_pairs: &[(usize, usize)],
 	actual: &[String],
 	new_lines: &[String],
 ) -> Vec<Option<String>> {
 	let mut mapping: Vec<Option<String>> = vec![None; new_lines.len()];
-	for (pattern_index, new_index) in shared_lines(pattern, new_lines) {
-		mapping[new_index] = actual.get(pattern_index).cloned();
+	for (pattern_index, new_index) in context_pairs {
+		if *new_index >= mapping.len() {
+			continue;
+		}
+		if let Some(file_line) = actual.get(*pattern_index) {
+			mapping[*new_index] = Some(file_line.clone());
+		}
 	}
 	mapping
 }
@@ -196,14 +203,25 @@ fn adjust_lines_indentation(
 	pattern: &[String],
 	actual: &[String],
 	new_lines: &[String],
+	context_pairs: Option<&[(usize, usize)]>,
 ) -> Vec<String> {
 	if pattern.is_empty() || actual.is_empty() || new_lines.is_empty() || pattern == actual {
 		return new_lines.to_vec();
 	}
-	// The file's own line for every line the hunk left unchanged.
-	let context = context_lines(pattern, actual, new_lines);
-	// The authored lines with the file's characters: the whitespace the hunk
-	// changed stays the authored one.
+	// The file's own line for every line the hunk left unchanged. The parsed
+	// correspondence is authoritative; the shared lines of the two blocks are
+	// the fallback for a hunk that was narrowed to a variant, whose blocks are
+	// no longer the ones the parser read.
+	let derived_pairs: Vec<(usize, usize)> = match context_pairs {
+		Some(pairs) => pairs.to_vec(),
+		None => shared_lines(pattern, new_lines),
+	};
+	let context = context_lines(&derived_pairs, actual, new_lines);
+	// The authored lines with the file's own line: a context line is one the
+	// hunk left unchanged, so the file's line is the one to keep — the
+	// matcher folds a fullwidth character and the ideographic space onto
+	// their ASCII counterparts, and the authored line would rewrite text the
+	// hunk marked unchanged.
 	let with_file_characters = |lines: Vec<String>| -> Vec<String> {
 		lines
 			.into_iter()
@@ -211,7 +229,7 @@ fn adjust_lines_indentation(
 			.map(|(line, file_line)| {
 				file_line
 					.as_ref()
-					.map_or_else(|| line.clone(), |file_line| merge_file_characters(&line, file_line))
+					.map_or_else(|| line.clone(), |file_line| file_line.clone())
 			})
 			.collect()
 	};
@@ -1401,6 +1419,13 @@ fn compute_replacements(
 					.map(|line| (*line).to_owned())
 					.collect::<Vec<_>>(),
 				&new_lines,
+				// A narrowed variant's blocks are not the ones the parser read,
+				// so its correspondence is inferred from the blocks instead.
+				if from_variant {
+					None
+				} else {
+					Some(hunk.context_pairs.as_slice())
+				},
 			),
 		});
 		line_index = found + pattern.len();
@@ -2031,6 +2056,7 @@ mod tests {
 			old_start_line:    None,
 			new_start_line:    None,
 			has_context_lines: false,
+			context_pairs:     vec![],
 			old_lines:         vec!["one".into()],
 			new_lines:         vec!["two".into()],
 			is_end_of_file:    false,
@@ -2060,6 +2086,7 @@ mod tests {
 			old_start_line:    None,
 			new_start_line:    None,
 			has_context_lines: true,
+			context_pairs:     vec![(0, 0)],
 			old_lines:         vec!["foo(bar)".into(), "keep".into()],
 			new_lines:         vec!["foo(bar)".into(), "changed".into()],
 			is_end_of_file:    false,
@@ -2082,6 +2109,7 @@ mod tests {
 			old_start_line:    None,
 			new_start_line:    None,
 			has_context_lines: true,
+			context_pairs:     vec![(1, 1)],
 			old_lines:         vec!["old1".into(), "foo(bar)".into(), "old2".into()],
 			new_lines:         vec!["new1".into(), "foo(bar)".into(), "new2".into()],
 			is_end_of_file:    false,
@@ -2111,6 +2139,7 @@ mod tests {
 			old_start_line:    None,
 			new_start_line:    None,
 			has_context_lines: true,
+			context_pairs:     vec![(0, 0)],
 			old_lines:         vec!["foo(bar)x".into(), "keep".into()],
 			new_lines:         vec!["foo(bar)x".into(), "changed".into()],
 			is_end_of_file:    false,
@@ -2141,6 +2170,7 @@ mod tests {
 			old_start_line:    None,
 			new_start_line:    None,
 			has_context_lines: true,
+			context_pairs:     vec![],
 			old_lines:         vec![" foo(x)".into()],
 			new_lines:         vec![" bar(x)".into()],
 			is_end_of_file:    false,
@@ -2150,6 +2180,61 @@ mod tests {
 				.unwrap()
 				.0,
 			" bar(x)\n"
+		);
+	}
+
+	#[test]
+	fn a_fuzzy_patch_keeps_the_files_indentation_on_a_context_line() {
+		// The hunk's context line is indented with a tab and the file's with
+		// the ideographic space: the context line is one the hunk left
+		// unchanged, so the file's own indentation is the one to keep — the
+		// tab-to-space conversion applies to the lines the hunk changed.
+		let hunk = DiffHunk {
+			change_context:    None,
+			old_start_line:    None,
+			new_start_line:    None,
+			has_context_lines: true,
+			context_pairs:     vec![(0, 0)],
+			old_lines:         vec!["\tfoo(bar)".into(), "old".into()],
+			new_lines:         vec!["\tfoo(bar)".into(), "changed".into()],
+			is_end_of_file:    false,
+		};
+		assert_eq!(
+			apply_hunks(
+				"\u{3000}foo（bar）\nold\n",
+				"a.txt",
+				std::slice::from_ref(&hunk),
+				0.95,
+				true,
+				false
+			)
+			.unwrap()
+			.0,
+			"\u{3000}foo（bar）\nchanged\n"
+		);
+	}
+
+	#[test]
+	fn a_fuzzy_patch_keeps_a_re_added_line_the_hunk_asked_for() {
+		// The hunk deleted a line and re-added the same text, so the added
+		// line is not a context line: it is textually equal to the deleted
+		// one, but the hunk asked for it explicitly and the file's line must
+		// not be written over it.
+		let hunk = DiffHunk {
+			change_context:    None,
+			old_start_line:    None,
+			new_start_line:    None,
+			has_context_lines: false,
+			context_pairs:     vec![],
+			old_lines:         vec!["foo".into(), "old".into()],
+			new_lines:         vec!["new".into(), "foo".into()],
+			is_end_of_file:    false,
+		};
+		assert_eq!(
+			apply_hunks("ｆｏｏ\nold\n", "a.txt", std::slice::from_ref(&hunk), 0.95, true, false)
+				.unwrap()
+				.0,
+			"new\nfoo\n"
 		);
 	}
 }

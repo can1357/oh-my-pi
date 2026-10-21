@@ -657,11 +657,27 @@ fn without_whitespace(line: &str) -> String {
 	line.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
+/// The authored line's boundary whitespace with the file's body.
+///
+/// A rewrite that asks for a change to the line's boundary whitespace only
+/// leaves the body to the file: the matcher folds a fullwidth character onto
+/// its ASCII counterpart, and the authored body would transliterate text the
+/// rewrite never touched. The interior whitespace is the file's as well — the
+/// ideographic space folds onto an ASCII one, and the authored interior would
+/// rewrite it.
+pub fn merge_file_line_body(authored: &str, file_line: &str) -> String {
+	let leading = &authored[..authored.len() - js_trim_start(authored).len()];
+	let trailing = &authored[js_trim_end(authored).len()..];
+	format!("{leading}{}{trailing}", js_trim(file_line))
+}
+
 /// The replacement with the characters the file holds, line by line.
 ///
 /// The rewrite changes the whitespace only, so the body of every line is the
 /// file's: the matcher folds a fullwidth character onto its ASCII
 /// counterpart, and the authored body would transliterate the file's text.
+/// The interior whitespace is the file's too — the ideographic space folds
+/// onto an ASCII one, and the authored interior would rewrite it.
 fn merge_file_body(actual_text: &str, new_text: &str) -> String {
 	let actual_lines = actual_text.split('\n').collect::<Vec<_>>();
 	let new_lines = new_text.split('\n').collect::<Vec<_>>();
@@ -671,7 +687,7 @@ fn merge_file_body(actual_text: &str, new_text: &str) -> String {
 	new_lines
 		.iter()
 		.zip(actual_lines)
-		.map(|(new_line, actual_line)| merge_file_characters(new_line, actual_line))
+		.map(|(new_line, actual_line)| merge_file_line_body(new_line, actual_line))
 		.collect::<Vec<_>>()
 		.join("\n")
 }
@@ -840,6 +856,24 @@ mod tests {
 		assert_eq!(adjust_indentation("\u{3000}foo", "  foo", " bar"), "  bar");
 		// A line the anchor did not indent still is indented by the file.
 		assert_eq!(adjust_indentation("foo", "\u{3000}foo", "bar"), " bar");
+	}
+
+	#[test]
+	fn indentation_only_rewrite_keeps_the_files_body() {
+		// The rewrite asks for an indentation change only, so the body is the
+		// file's: the matcher folds the ideographic space onto an ASCII one, and
+		// the authored interior would rewrite the file's whitespace.
+		assert_eq!(adjust_indentation("foo bar", "foo\u{3000}bar", "  foo bar"), "  foo\u{3000}bar");
+		// A residual difference the matcher accepted is the file's text too: the
+		// rewrite never asked for the body to change.
+		assert_eq!(
+			adjust_indentation(
+				"foo(bar)abcdefghijklmn",
+				"foo（baz）abcdefghijklmn",
+				"  foo(bar)abcdefghijklmn"
+			),
+			"  foo（baz）abcdefghijklmn"
+		);
 	}
 
 	#[test]
