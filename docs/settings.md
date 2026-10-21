@@ -621,6 +621,7 @@ tools:
 | `tools.xdevInlineDevices` | array | `[]` | Dynamic-device name globs to inline in `builtins` mode; ignored in `catalog` mode. |
 | `async.enabled` | boolean | `true` | Enable async bash commands and background task execution. |
 | `async.maxJobs` | number | `100` | Running background-job cap, floored to at least 1; parked/queued jobs do not consume execution slots. |
+| `async.printWake` | boolean | `false` | Print mode (`-p`, `--mode json`) waits for the run's background jobs instead of cancelling them at exit, and starts another turn in the same session with each result; same as `--wait-async`. |
 | `async.widgets` | boolean | `true` | Live widgets for running background jobs (charts, bars, status grids derived from the job's output) in the `wait` card, the jobs pill and its hover card, and the jobs sheet. The `widget` model role writes one spec per job; every later update is computed locally without model calls. Off: plain job rows. |
 
 Mounting still follows the session's explicit tool allow-list. A session that permits `read` but omits `write` can receive a device-only write transport; this does not grant filesystem writes.

@@ -945,6 +945,22 @@ export const cfgAsyncMaxJobs = register({
 	default: 100,
 });
 
+// Print mode is single-shot by default: it disposes after the last prompt, cancelling the
+// run's background jobs. Opting in keeps `-p` alive so each job's async-result wakes the same
+// session, as the TUI does, before exiting (issue #10363).
+export const cfgAsyncPrintWake = register({
+	id: "async.printWake",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Wake Print Mode on Job Results",
+		description:
+			"In print mode (-p, --mode json), keep running after the last prompt while this run's background jobs are active, and start another turn in the same session with each job's result; exits once no job or result is pending. Off: print mode exits after its prompts and cancels running jobs",
+	},
+});
+
 export const cfgAsyncWidgets = register({
 	id: "async.widgets",
 	type: "boolean",
