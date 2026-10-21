@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
 import { $which, isWsl, logger } from "@oh-my-pi/pi-utils";
-import { runBoundedProbe } from "./bounded-probe";
+import { probeStdout } from "./bounded-probe";
 
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
 
@@ -93,7 +93,7 @@ export function openPath(urlOrPath: string): void {
 			// pipe (issue #8402) can no longer block the calling thread. The
 			// fallback is the same `xdg-open` decision the other failure paths
 			// produce.
-			void runBoundedProbe(["wslpath", "-w", localPath]).then(
+			void probeStdout(["wslpath", "-w", localPath]).then(
 				wslPath => spawnOpener(wslPath ? ["wslview", wslPath] : ["xdg-open", urlOrPath], urlOrPath),
 				() => spawnOpener(["xdg-open", urlOrPath], urlOrPath),
 			);

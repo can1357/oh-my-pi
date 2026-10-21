@@ -16,7 +16,7 @@ import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type SystemPrompt, systemPromptCapability } from "../capability/system-prompt";
 import type { LoadContext, LoadResult } from "../capability/types";
-import { runBoundedProbe } from "../utils/bounded-probe";
+import { probeStdout } from "../utils/bounded-probe";
 import {
 	discoverRuleFromMarkdown,
 	calculateDepth,
@@ -38,11 +38,11 @@ interface UserPathCandidateOptions {
 }
 
 async function resolveWithWslPath(windowsPath: string): Promise<string | undefined> {
-	return runBoundedProbe(["wslpath", "-u", windowsPath]);
+	return probeStdout(["wslpath", "-u", windowsPath]);
 }
 
 async function resolveWindowsUserProfile(): Promise<string | undefined> {
-	const resolved = await runBoundedProbe(["cmd.exe", "/d", "/c", "echo", "%USERPROFILE%"]);
+	const resolved = await probeStdout(["cmd.exe", "/d", "/c", "echo", "%USERPROFILE%"]);
 	return resolved && resolved !== "%USERPROFILE%" ? resolved : undefined;
 }
 
