@@ -6,6 +6,10 @@
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 
+### Changed
+
+- `bash` output that prints file lines with their numbers (`grep -n`, `rg -n`, `cat -n`, `nl`) now ends with those files' edit tags, so `edit` can change the printed lines without a `read` first ([#16576](https://github.com/can1357/oh-my-pi/pull/16576) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.12.6] - 2026-10-21
 
 ### Added
@@ -36,10 +40,6 @@
 ### Added
 
 - `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
-
-### Changed
-
-- `bash` output that prints file lines with their numbers (`grep -n`, `rg -n`, `cat -n`, `nl`) now ends with those files' edit tags, so `edit` can change the printed lines without a `read` first ([#16576](https://github.com/can1357/oh-my-pi/pull/16576) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
