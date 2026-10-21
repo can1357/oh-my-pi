@@ -116,8 +116,10 @@ import {
 	writeTerminalBreadcrumb,
 } from "./session-paths";
 import {
+	ANTHROPIC_SERVER_TOOL_BLOCK_FIELDS,
+	atomicPersistenceCarrierKeys,
 	forgetExternalizedImages,
-	isAtomicPersistenceNode,
+	isAtomicPersistenceNodeOwnFields,
 	MAX_PROTOTYPE_CHAIN_DEPTH,
 	prepareEntryForPersistence,
 	projectorImageField,
@@ -1007,15 +1009,81 @@ const RESPONSES_PAYLOAD_KEYS = ["type", "items"] as const;
  * stamped leaf.
  */
 const PROJECTOR_CONTENT_METHODS = ["some", "map"] as const;
+
 /**
- * Keys {@link isAtomicPersistenceNode} and the projection's early returns read
- * by key: `type` for every typed carrier, and `content` for the typeless
- * `anthropicCompaction` slot. A `type`/`content` the own-key stamp cannot see —
- * inherited, non-enumerable, or an accessor — flips the atomic classification
- * while moving no stamped leaf, so the projected line can gain or lose a
- * stripped `thinkingSignature` without the memo noticing.
+ * The reasoning-item fields `readReasoningItem` reads by key: the item's own
+ * `type` marker, the `encrypted_content` blob, and the item `id` a signature
+ * falls back to. The strip keeps a `thinkingSignature` only when the payload
+ * carries the reasoning item that produced it, so all three decide whether
+ * the projected line drops the signature — and a field the own-key stamp
+ * cannot see (inherited, own non-enumerable, or an accessor) decides it
+ * without moving a stamped leaf.
  */
-const ATOMIC_CLASSIFIER_KEYS = ["type", "content"] as const;
+const PROJECTOR_REASONING_ITEM_KEYS = ["type", "encrypted_content", "id"] as const;
+
+/**
+ * The fields the projector reads by key on an array itself: the image
+ * classifiers (`type`, `data`, `mimeType`), the `image_generation_call`
+ * result, and the typeless `anthropicCompaction` carrier's `content`. The
+ * stamp records an array's indexed slots only, so a field the array carries
+ * decides the projected bytes without moving a stamped leaf.
+ */
+const PROJECTOR_ARRAY_CARRIER_KEYS = ["type", "data", "mimeType", "result", "content"] as const;
+
+/**
+ * Whether every field the atomic classification consults for `value` is one
+ * the own-key stamp can see.
+ *
+ * The classification decides whether the node persists verbatim, so each
+ * carrier it reads decides whether a long string inside it is preserved or
+ * truncated. A carrier the stamp cannot see — inherited, own non-enumerable,
+ * or an accessor — therefore flips the atomic verdict while moving no
+ * stamped leaf, and the memo would reuse a line the projector no longer
+ * produces.
+ *
+ * The carriers are brand-specific (see `atomicPersistenceCarrierKeys`): a
+ * `thinking` block is signed by `thinkingSignature`, a `text` block by
+ * `textSignature`, a `toolCall` by `thoughtSignature`, a `redactedThinking`
+ * by `data`, a `reasoning` item by `encrypted_content`, an
+ * `anthropicServerTool` by its nested `block`, and the typeless
+ * `anthropicCompaction` carrier by its `content`. The `type` marker itself
+ * selects the brand, so it is consulted on every node.
+ */
+function atomicCarriersVisibleToStamp(value: object, key: string | undefined): boolean {
+	if (projectorKeyHiddenFromStamp(value, "type")) return false;
+	const type = ownEnumerableFieldValue(value, "type");
+	for (const carrier of atomicPersistenceCarrierKeys(type, key)) {
+		if (projectorKeyHiddenFromStamp(value, carrier)) return false;
+	}
+	// The `anthropicServerTool` classification reads the nested block's own
+	// fields, and they decide the verdict exactly like the node's own carriers
+	// do.
+	if (type === "anthropicServerTool") {
+		const block = ownEnumerableFieldValue(value, "block");
+		if (typeof block !== "object" || block === null) return true;
+		for (const field of ANTHROPIC_SERVER_TOOL_BLOCK_FIELDS) {
+			if (projectorKeyHiddenFromStamp(block, field)) return false;
+		}
+	}
+	return true;
+}
+
+/**
+ * The value of `value`'s own `type` marker, or `undefined` when the field is
+ * absent or is not an own data descriptor. Read through the descriptor, never
+ * by key: the probe must not invoke user code.
+ */
+function ownEnumerableFieldValue(value: object, key: string): unknown {
+	let descriptor: PropertyDescriptor | undefined;
+	try {
+		descriptor = Object.getOwnPropertyDescriptor(value, key);
+	} catch {
+		return undefined;
+	}
+	if (descriptor === undefined) return undefined;
+	if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return undefined;
+	return descriptor.value;
+}
 
 /**
  * Whether the projector can reach a message-level projection input the stamp
@@ -1045,6 +1113,11 @@ function messageProjectionInputsUnstampable(message: object): boolean {
 		for (const method of PROJECTOR_CONTENT_METHODS) {
 			if (nonDefaultArrayMethod(content, method)) return true;
 		}
+		// `map` builds its result through `ArraySpeciesCreate`, so a replaced
+		// `constructor[Symbol.species]` changes the shape of the array the
+		// projection produces — a shape the stamp, which records the source
+		// array's indexed slots, no longer describes.
+		if (arraySpeciesReplaced(content)) return true;
 	}
 	const payload = fields.providerPayload;
 	if (payload === null || typeof payload !== "object") return false;
@@ -1053,7 +1126,21 @@ function messageProjectionInputsUnstampable(message: object): boolean {
 	}
 	if ((payload as Record<string, unknown>).type !== "openaiResponsesHistory") return false;
 	const items = (payload as Record<string, unknown>).items;
-	return Array.isArray(items) && nonDefaultArrayIterator(items);
+	if (!Array.isArray(items)) return false;
+	if (nonDefaultArrayIterator(items)) return true;
+	// The reasoning items the payload carries decide whether the projected line
+	// keeps a `thinkingSignature`: `readReasoningItem` reads each item's own
+	// `type`, `encrypted_content` and `id` by key, so a field the own-key
+	// stamp cannot see decides the strip without moving a stamped leaf.
+	if (hasIndexedAccessorSlot(items)) return true;
+	for (let index = 0; index < items.length; index++) {
+		const item = items[index];
+		if (item === null || typeof item !== "object") continue;
+		for (const field of PROJECTOR_REASONING_ITEM_KEYS) {
+			if (projectorKeyHiddenFromStamp(item, field)) return true;
+		}
+	}
+	return false;
 }
 
 /**
@@ -1206,7 +1293,7 @@ const OPAQUE_FIELD = Symbol("opaque-field");
 /** Every value a chain field can hold, plus the opaque marker. */
 type ChainFieldValue = null | undefined | string | number | boolean | bigint | symbol | object | typeof OPAQUE_FIELD;
 
-function readChainField(value: object, key: string): ChainFieldValue {
+function readChainField(value: object, key: PropertyKey): ChainFieldValue {
 	let current: object | null = value;
 	for (let depth = 0; current !== null; depth++) {
 		if (depth >= MAX_PROTOTYPE_CHAIN_DEPTH) return OPAQUE_FIELD;
@@ -1230,6 +1317,78 @@ function readChainField(value: object, key: string): ChainFieldValue {
 	}
 	return undefined;
 }
+
+/**
+ * Whether `value` carries any of `keys` on its own or anywhere on its
+ * prototype chain. One chain walk for the whole set: the projector reads
+ * these fields by key, and a field the own-key stamp cannot see — or, on an
+ * array, a field the stamp never records at all — moves the projected bytes
+ * without moving a stamped leaf.
+ *
+ * A throw answers "carries": the trap controls the answer, so the memo
+ * cannot know what the projector will read.
+ */
+function chainCarriesAnyField(value: object, keys: readonly string[]): boolean {
+	let current: object | null = value;
+	for (let depth = 0; current !== null; depth++) {
+		if (depth >= MAX_PROTOTYPE_CHAIN_DEPTH) return true;
+		for (const key of keys) {
+			let descriptor: PropertyDescriptor | undefined;
+			try {
+				descriptor = Object.getOwnPropertyDescriptor(current, key);
+			} catch {
+				return true;
+			}
+			if (descriptor !== undefined) return true;
+		}
+		let next: object | null;
+		try {
+			next = Object.getPrototypeOf(current);
+		} catch {
+			return true;
+		}
+		current = next;
+	}
+	return false;
+}
+
+/**
+ * Whether `array`'s `constructor[Symbol.species]` would replace the array the
+ * projector's own `map` call creates.
+ *
+ * `Array.prototype.map` builds its result through `ArraySpeciesCreate`, which
+ * reads `constructor[Symbol.species]` — so a replaced constructor changes the
+ * shape of the array the projection produces, and the stamp, which records
+ * the source array's indexed slots, no longer describes the bytes. Only the
+ * intrinsic `Array` and its intrinsic `Symbol.species` getter build the
+ * default array; anything else — a subclass, a replaced constructor, a
+ * replaced getter — may build something that is not an array at all. Answered
+ * through descriptors, never by reading the key: the probe must not invoke
+ * user code.
+ */
+function arraySpeciesReplaced(array: unknown[]): boolean {
+	const constructor = readChainField(array, "constructor");
+	if (constructor === OPAQUE_FIELD) return true;
+	// `ArraySpeciesCreate` uses the default array when the constructor is
+	// absent or is not an object.
+	if (constructor === null || constructor === undefined) return false;
+	if (typeof constructor !== "object" && typeof constructor !== "function") return false;
+	if (constructor !== ARRAY_INTRINSIC) return true;
+	const descriptor = Object.getOwnPropertyDescriptor(ARRAY_INTRINSIC, Symbol.species);
+	if (descriptor === undefined) return false;
+	// The intrinsic getter yields the constructor itself, so the result is the
+	// default array.
+	if (typeof descriptor.get === "function") return descriptor.get !== ARRAY_SPECIES_GETTER;
+	return descriptor.value !== undefined && descriptor.value !== null;
+}
+
+/**
+ * The intrinsic `Array` and its intrinsic `Symbol.species` getter, captured at
+ * module load. Reading them at check time hands the comparison to whatever
+ * sits in those slots now.
+ */
+const ARRAY_INTRINSIC = Array;
+const ARRAY_SPECIES_GETTER = Object.getOwnPropertyDescriptor(Array, Symbol.species)?.get;
 
 /**
  * What the persistence projection does with this node's `structuredContent`:
@@ -1285,6 +1444,32 @@ function mcpSpillStripDecision(
 function isTopLevelMessageChild(value: object, key: string | undefined, childKey: string): boolean {
 	if (key !== undefined || childKey !== "details") return false;
 	return Object.getOwnPropertyDescriptor(value, "role")?.value === "toolResult";
+}
+
+/**
+ * Whether the entry wrapper itself would change the projected line in a way
+ * the memo cannot see: a `toJSON` hook on the wrapper, or an accessor on one
+ * of the wrapper's own fields.
+ *
+ * The memo stamps the message graph, but the projected line is the whole
+ * entry — so a wrapper-level hook, whose output is a function call rather
+ * than a field value, moves every byte of the line, and an accessor-backed
+ * wrapper field moves the field the memo would otherwise reuse. The message
+ * itself is probed on its own (see {@link hasSerializerHook}), so this probe
+ * only covers the wrapper.
+ */
+function entryWrapperUncacheable(entry: object): boolean {
+	// A proxy's own descriptors can hide a stateful `toJSON`; its stateful
+	// hook is invisible to descriptor probing, so conservatively leave any
+	// proxy-backed entry uncached.
+	if (util.types.isProxy(entry)) return true;
+	if (hasToJSONHook(entry)) return true;
+	for (const key of Object.keys(entry)) {
+		const descriptor = Object.getOwnPropertyDescriptor(entry, key);
+		if (descriptor === undefined) continue;
+		if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return true;
+	}
+	return false;
 }
 
 /**
@@ -1432,6 +1617,13 @@ function hasSerializerHook(
 			// one-shot indexed getter must leave the graph uncached before the
 			// loop below pushes any slot.
 			if (hasIndexedAccessorSlot(value)) return true;
+			// The projector reads an array's own fields by key — the image
+			// classifiers (`type`, `data`, `mimeType`), the `image_generation_call`
+			// result, and the typeless `anthropicCompaction` carrier — while the
+			// stamp records an array's indexed slots only. A field the array
+			// carries therefore moves the projected bytes without moving a
+			// stamped leaf, so such an array leaves the graph uncached.
+			if (chainCarriesAnyField(value, PROJECTOR_ARRAY_CARRIER_KEYS)) return true;
 			const length = value.length;
 			// The array's own key rides along to every slot, mirroring
 			// `truncateForPersistence`'s array branch (which hands the caller's
@@ -1460,16 +1652,16 @@ function hasSerializerHook(
 		// Mirror the projection's stripping boundary: a hook beneath a stripped key
 		// cannot affect the persisted bytes — and the live value may be cyclic
 		// where the projection is not.
-		// `isAtomicPersistenceNode` reads `type` and the typeless carrier's
-		// `content` by key, which runs an accessor. A stateful getter would be
-		// consumed here and again inside the projection, shifting what `#lineFor`
-		// serializes, so a hidden or accessor-backed classifier key leaves the
-		// graph uncached before the classifier is consulted — the descriptor loop
-		// below would otherwise never see the key it hides.
-		for (const classifierKey of ATOMIC_CLASSIFIER_KEYS) {
-			if (projectorKeyHiddenFromStamp(value, classifierKey)) return true;
-		}
-		const nodeAtomic = atomic || isAtomicPersistenceNode(value, key);
+		// `isAtomicPersistenceNode` reads the node's `type` marker and the
+		// brand's signature carrier by key, which runs an accessor. A stateful
+		// getter would be consumed here and again inside the projection,
+		// shifting what `#lineFor` serializes, so a hidden or accessor-backed
+		// carrier leaves the graph uncached before the classifier is consulted —
+		// the descriptor loop below would otherwise never see the key it hides.
+		// The carrier list is brand-specific: only the carrier this node's own
+		// `type` selects decides the atomic verdict.
+		if (!atomicCarriersVisibleToStamp(value, key)) return true;
+		const nodeAtomic = atomic || isAtomicPersistenceNodeOwnFields(value, key);
 		// An image-shaped value whose projector classifiers ride somewhere the
 		// own-key stamp below cannot see — an inherited link, or an own
 		// non-enumerable descriptor — is projector-accepted
@@ -1870,7 +2062,7 @@ function messageValueStamp(value: unknown, out: unknown[] = []): unknown[] {
 		// Atomic nodes persist verbatim: `truncateForPersistence` returns before
 		// its key-stripping loop, so transient keys inside one reach the line and
 		// must be stamped. Only non-atomic containers strip them.
-		const atomicNode = atomic || isAtomicPersistenceNode(value, key);
+		const atomicNode = atomic || isAtomicPersistenceNodeOwnFields(value, key);
 		// Only the top-level `details` of a `toolResult` message loses
 		// `structuredContent` before serialization (see
 		// `mcpSpillStripDecision`), so only there is the field skipped
@@ -2073,7 +2265,7 @@ function stampMatches(stamp: readonly unknown[], value: unknown): boolean {
 			// Mirror the stamp side: transient keys were recorded whole
 			// inside atomic nodes (persistence keeps them) and as
 			// presence-only markers elsewhere.
-			const nodeAtomic = atomic || isAtomicPersistenceNode(live, key);
+			const nodeAtomic = atomic || isAtomicPersistenceNodeOwnFields(live, key);
 			// The stamp skipped the top-level toolResult's MCP-stripped
 			// field outright (see {@link messageValueStamp}), so the
 			// matcher skips it too — the value was never recorded and may
@@ -2916,7 +3108,7 @@ export class SessionManager {
 		// Non-message entries hold no bytes worth memoizing, and some of them
 		// (compaction, label) are mutated in place after their first write.
 		const message = entry.type === "message" ? entry.message : undefined;
-		if (message === undefined || hasSerializerHook(message)) {
+		if (message === undefined || entryWrapperUncacheable(entry) || hasSerializerHook(message)) {
 			const line = this.#lineFor(entry);
 			return { line, bytes: Buffer.byteLength(line, "utf8"), fields: {}, version: 0 };
 		}
