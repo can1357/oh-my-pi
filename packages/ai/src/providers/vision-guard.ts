@@ -2,12 +2,13 @@ import { $env } from "@oh-my-pi/pi-utils";
 import type { Api, ImageContent, Model, TextContent } from "../types";
 
 export const NON_VISION_IMAGE_PLACEHOLDER = "[image omitted: model does not support vision]";
+export const NON_AUDIO_PLACEHOLDER = "[audio omitted: model does not hear audio]";
 
 /**
  * Whether an inline block carries audio rather than an image. `ImageContent` is the inline-media
  * block; Google sends any MIME type as inline data, and the OpenAI-style converters turn an
- * `audio/*` block into an `input_audio` part. Only callers gated on {@link audioInputMimeType}
- * create one.
+ * `audio/*` block into an `input_audio` part. Converters send it only to a model whose `input`
+ * has `audio` and put {@link NON_AUDIO_PLACEHOLDER} in its place otherwise.
  */
 export function isAudioContent(block: ImageContent): boolean {
 	return block.mimeType.startsWith("audio/");
@@ -21,11 +22,13 @@ export function inputAudioFormat(block: ImageContent): "mp3" | "wav" {
 export function partitionVisionContent(
 	content: ReadonlyArray<TextContent | ImageContent>,
 	supportsImages: boolean,
+	supportsAudio = false,
 ): {
 	textBlocks: TextContent[];
 	imageBlocks: ImageContent[];
 	audioBlocks: ImageContent[];
 	omittedImages: boolean;
+	omittedAudio: boolean;
 } {
 	const textBlocks = content.filter((block): block is TextContent => block.type === "text");
 	const mediaBlocks = content.filter((block): block is ImageContent => block.type === "image");
@@ -34,8 +37,9 @@ export function partitionVisionContent(
 	return {
 		textBlocks,
 		imageBlocks: supportsImages ? imageBlocks : [],
-		audioBlocks,
+		audioBlocks: supportsAudio ? audioBlocks : [],
 		omittedImages: !supportsImages && imageBlocks.length > 0,
+		omittedAudio: !supportsAudio && audioBlocks.length > 0,
 	};
 }
 

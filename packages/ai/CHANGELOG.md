@@ -19,6 +19,7 @@
 - Fixed xAI speech requests failing with `422 missing field language`: `xai-tts` now sends `language`, which xAI's `/v1/tts` requires, defaulting to `auto` (automatic detection) when the caller passes none, as the auth gateway's `/v1/audio/speech` does ([#17992](https://github.com/can1357/oh-my-pi/pull/17992) by [@Mirceone](https://github.com/Mirceone))
 - Fixed Codex WebSocket turns sending a delta `input` after a pooled socket reconnected (closed, idle eviction, token refresh, or prewarm routing-hint change) or when `onPayload` deleted `previous_response_id` (including when it also rewrote the input), and skipped late prewarm while a socket is busy or holding accepted steering ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
 - API-key logins now honor the auth rule's `store-as` provider instead of storing the key under the auth id ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+- Chat Completions and Responses requests (including OpenRouter) send `audio/*` content blocks as `input_audio` parts, so models that hear audio receive it ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -53,9 +54,6 @@
 
 - Fixed Factory Droid Fable requests offering Opus 5 as the refusal fallback when your organization's model policy excludes Opus 5; Claude requests now offer only fallback models your account can use, and a request served by another organization's login than the one your model list came from offers none ([#17772](https://github.com/can1357/oh-my-pi/pull/17772) by [@will-bogusz](https://github.com/will-bogusz))
 
-- `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
-- Chat Completions and Responses requests (including OpenRouter) send `audio/*` content blocks as `input_audio` parts, so models that hear audio receive it
-- Chat Completions and Responses requests (including OpenRouter) send `audio/*` content blocks as `input_audio` parts, so models that hear audio receive it ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
