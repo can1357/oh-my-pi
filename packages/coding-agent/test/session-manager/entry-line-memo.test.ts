@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, type Mock } from "bun:test";
 import * as path from "node:path";
 import * as vm from "node:vm";
-import type { AssistantMessage, OpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, OpenAIResponsesHistoryPayload, UserMessage } from "@oh-my-pi/pi-ai";
 import { TempDir, __resetDirsFromEnvForTests, getBlobsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { parseBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -2257,9 +2257,12 @@ describe("SessionManager entry-line memo", () => {
 			const details = { nested: { count: 1 } };
 			const session = SessionManager.create(process.cwd(), sessionDir, storage);
 			session.appendMessage({
-				role: "user" as const,
+				role: "toolResult" as const,
+				toolCallId: "call-fix15222-valueof",
+				toolName: "bash",
 				content: [{ type: "text" as const, text: "ok" }],
 				details,
+				isError: false,
 				timestamp: Date.now(),
 			});
 			await session.appendEntriesAtomically(() => {});
@@ -2291,9 +2294,12 @@ describe("SessionManager entry-line memo", () => {
 
 		const session = SessionManager.create(process.cwd(), sessionDir, storage);
 		session.appendMessage({
-			role: "user" as const,
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-transient",
+			toolName: "bash",
 			content: [{ type: "text" as const, text: "ok" }],
 			details,
+			isError: false,
 			timestamp: Date.now(),
 		});
 		await session.appendEntriesAtomically(() => {});
@@ -2322,9 +2328,12 @@ describe("SessionManager entry-line memo", () => {
 
 		const session = SessionManager.create(process.cwd(), sessionDir, storage);
 		session.appendMessage({
-			role: "user" as const,
+			role: "toolResult" as const,
+			toolCallId: "call-fix15222-prototype",
+			toolName: "bash",
 			content: [{ type: "text" as const, text: "ok" }],
 			details: nested,
+			isError: false,
 			timestamp: Date.now(),
 		});
 		await session.appendEntriesAtomically(() => {});
@@ -2651,7 +2660,7 @@ describe("SessionManager entry-line memo", () => {
 		const session = SessionManager.create(process.cwd(), sessionDir, storage);
 		session.appendMessage({
 			role: "user" as const,
-			content: content as unknown as AssistantMessage["content"],
+			content: content as unknown as UserMessage["content"],
 			timestamp: Date.now(),
 		});
 
@@ -2705,6 +2714,7 @@ describe("SessionManager entry-line memo", () => {
 		// array, so the projected line changes shape.
 		const entry = session.getEntries().find(e => e.type === "message");
 		if (!entry || entry.type !== "message") throw new Error("Expected message entry");
+		if (entry.message.role !== "assistant") throw new Error("Expected assistant message");
 		const content = entry.message.content;
 		if (!Array.isArray(content)) throw new Error("Expected array content");
 		function SpeciesArray(this: unknown, length: number): { length: number } {
@@ -2740,7 +2750,7 @@ describe("SessionManager entry-line memo", () => {
 		const session = SessionManager.create(process.cwd(), sessionDir, storage);
 		session.appendMessage({
 			role: "user" as const,
-			content: [block] as unknown as AssistantMessage["content"],
+			content: [block] as unknown as UserMessage["content"],
 			timestamp: Date.now(),
 		});
 
