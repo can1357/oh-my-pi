@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Changed
 
 - Reduced the work done when a provider request is prepared again, so long sessions use less CPU and allocate less on retries and side requests, and the cache behind it is released as soon as the conversation changes ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
