@@ -2379,6 +2379,40 @@ describe("SessionManager entry-line memo", () => {
 		expect(storage.readTextSync(sessionFile)).toContain(persistedSignature);
 	});
 
+	it("persists the current value of a snapcompact archive's own field", async () => {
+		// The snapcompact archive is rebuilt by `persistSnapcompactArchive`,
+		// which keeps every field but its frames verbatim — including a field
+		// the generic path strips — and reads the frames by key. The own-key
+		// stamp describes neither, so a graph carrying an archive is left
+		// uncached and re-projected.
+		const archive: Record<string, unknown> = {
+			frames: [],
+			jsonlEvents: [{ seq: 1 }],
+			marker: "fix15222-snapcompact",
+		};
+		const session = SessionManager.create(process.cwd(), sessionDir, storage);
+		session.appendMessage({
+			...makeAssistantMessage(),
+			content: [{ type: "text" as const, text: "ok" }],
+			preserveData: { snapcompact: archive },
+		} as unknown as AssistantMessage);
+
+		// First rewrite: the archive's own field reaches the line.
+		await session.appendEntriesAtomically(() => {});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const bodyAfterFirst = storage.readTextSync(sessionFile);
+		expect(bodyAfterFirst).toContain('"seq":1');
+
+		// The archive's own field changes in place: the persisted line must
+		// follow it.
+		archive.jsonlEvents = [{ seq: 2 }];
+		await session.appendEntriesAtomically(() => {});
+		const bodyAfterSecond = storage.readTextSync(sessionFile);
+		expect(bodyAfterSecond).toContain('"seq":2');
+		expect(bodyAfterSecond).not.toContain('"seq":1');
+	});
+
 	it("persists the current output of an entry-level serializer hook", async () => {
 		// The cacheability gate probed the message, not the entry wrapper — so an
 		// entry-level `toJSON` went undetected, and the memo reused the line
