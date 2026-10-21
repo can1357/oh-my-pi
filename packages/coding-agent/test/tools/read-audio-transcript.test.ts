@@ -274,6 +274,19 @@ describe.skipIf(!hasFfmpeg)("read audio transcripts", () => {
 		expect(new ReadTool(makeSession(testDir, [claude, gemini])).description).toContain("Audio (mp3/wav/m4a");
 		expect(new ReadTool(makeSession(testDir, [claude])).description).not.toContain("Audio (mp3/wav/m4a");
 	});
+
+	it("keeps the tool prompt fixed when a model that hears audio appears mid-session", async () => {
+		const available: Model[] = [claude];
+		const model = stubModel("[0:00.5] Late login.");
+		const tool = new ReadTool(makeSession(testDir, available), model.fn);
+		const before = tool.description;
+
+		available.push(gemini);
+
+		expect(tool.description).toBe(before);
+		expect(before).not.toContain("Audio (mp3/wav/m4a");
+		expect(textOf(await tool.execute("call", { path: audioPath }))).toContain("[0:00.5-0:06.0] Late login.");
+	});
 });
 
 describe("parseTranscriptLines", () => {

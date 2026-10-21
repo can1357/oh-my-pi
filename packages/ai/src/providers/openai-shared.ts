@@ -130,6 +130,7 @@ import { isValidToolCallId, transformMessages } from "./transform-messages";
 import {
 	inputAudioFormat,
 	joinTextWithImagePlaceholder,
+	NON_AUDIO_PLACEHOLDER,
 	NON_VISION_IMAGE_PLACEHOLDER,
 	partitionVisionContent,
 } from "./vision-guard";
@@ -1863,6 +1864,7 @@ export function convertResponsesInputContent(
 	supportsImages: boolean,
 	supportsImageDetailOriginal: boolean,
 	escapeControlTokens = false,
+	supportsAudio = false,
 ): ResponseInputContent[] | undefined {
 	if (typeof content === "string") {
 		if (content.trim().length === 0) return undefined;
@@ -1875,7 +1877,11 @@ export function convertResponsesInputContent(
 		];
 	}
 
-	const { textBlocks, imageBlocks, audioBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
+	const { textBlocks, imageBlocks, audioBlocks, omittedImages, omittedAudio } = partitionVisionContent(
+		content,
+		supportsImages,
+		supportsAudio,
+	);
 	const normalizedContent: ResponseInputContent[] = [];
 	for (const item of textBlocks) {
 		const raw = item.text.toWellFormed();
@@ -1900,6 +1906,9 @@ export function convertResponsesInputContent(
 			type: "input_text",
 			text: NON_VISION_IMAGE_PLACEHOLDER,
 		} satisfies ResponseInputText);
+	}
+	if (omittedAudio) {
+		normalizedContent.push({ type: "input_text", text: NON_AUDIO_PLACEHOLDER } satisfies ResponseInputText);
 	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
 }
@@ -2223,6 +2232,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				options.model.input.includes("image"),
 				supportsImageDetailOriginal,
 				escapeControlTokens,
+				options.model.input.includes("audio"),
 			);
 			if (!content) continue;
 			const developerText =
