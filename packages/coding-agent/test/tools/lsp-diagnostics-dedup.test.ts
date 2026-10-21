@@ -18,13 +18,14 @@ const NEW_ERROR =
 
 function makeDiagnostics(
 	messages: string[],
-	options: { summary?: string; errored?: boolean; server?: string } = {},
+	options: { summary?: string; errored?: boolean; server?: string; unjudgedServers?: string[] } = {},
 ): FileDiagnosticsResult {
 	return {
 		server: options.server ?? "pyright",
 		messages,
 		summary: options.summary ?? (messages.length === 0 ? "OK" : `${messages.length} diagnostic(s)`),
 		errored: options.errored ?? messages.some(message => message.includes("[error]")),
+		unjudgedServers: options.unjudgedServers,
 	};
 }
 
@@ -48,6 +49,29 @@ describe("DiagnosticsLedger", () => {
 		expect(reduced.messages).toEqual([]);
 		expect(reduced.summary).toBe("no issues");
 		expect(reduced.errored).toBe(false);
+	});
+
+	// A file whose server published no verdict is not a clean file. The
+	// reduction recomputes the summary from the fresh findings alone, so the
+	// unavailable status has to be re-composed with it — otherwise the file
+	// comes back as "no issues" (issue #15408).
+	it("re-composes the unavailable status after the reduction drops a repeated finding", () => {
+		const ledger = new DiagnosticsLedger();
+		const reported = makeDiagnostics([TYPE_ERROR], {
+			summary: "1 error(s); diagnostics unavailable from silent-lsp",
+			errored: true,
+			unjudgedServers: ["silent-lsp"],
+		});
+		ledger.reduce(FILE_A, reported);
+
+		// The same finding arrives again: the reduction drops it, and the
+		// summary must not fall back to "no issues" — the file was never
+		// fully checked.
+		const reduced = ledger.reduce(FILE_A, reported);
+
+		expect(reduced.messages).toEqual([]);
+		expect(reduced.summary).toBe("diagnostics unavailable from silent-lsp");
+		expect(reduced.unjudgedServers).toEqual(["silent-lsp"]);
 	});
 
 	it("returns only genuinely new messages and recomputes summary state", () => {
