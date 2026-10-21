@@ -150,6 +150,10 @@
 - Fixed Cursor X Subscription usage treating the weekly Grok/Composer pool as third-party budget; third-party models are now metered by prepaid credit ([#17048](https://github.com/can1357/oh-my-pi/pull/17048) by [@trukhinyuri](https://github.com/trukhinyuri))
 - Fixed Google models (`google-generative-ai`, `google-vertex`, `google-gemini-cli`/Antigravity) running out of output on small `maxTokens` requests with reasoning on, ending with thinking only and no answer; the requested `maxTokens` now leaves room for thinking on top, as on other providers ([#16943](https://github.com/can1357/oh-my-pi/pull/16943) by [@Mouriya-Emma](https://github.com/Mouriya-Emma))
 
+
+### Fixed
+
+- Fixed `.local` LAN hosts being tunnelled through `PI_PROXY`; they now bypass the egress proxy like the other local hosts, and a `NO_PROXY` exemption written with a trailing DNS root label matches the dotted host too ([#13591](https://github.com/can1357/oh-my-pi/issues/13591), [#16457](https://github.com/can1357/oh-my-pi/pull/16457) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ## [18.12.5] - 2026-10-21
 
 ### Added
