@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+- LSP diagnostics cards show an `unavailable` marker next to the diagnostic count when a language server published no report for the file, including reports that arrive after the edit has returned, instead of counting the file as clean ([#15408](https://github.com/can1357/oh-my-pi/issues/15408), [#16463](https://github.com/can1357/oh-my-pi/pull/16463) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 

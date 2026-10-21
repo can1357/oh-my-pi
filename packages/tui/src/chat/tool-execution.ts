@@ -30,7 +30,7 @@ import {
 	rootToggleExpanded,
 } from "../native/node";
 import { plainText } from "../native/spans";
-import { diagnosticsSection, displayPath, toolHead } from "../tools/native-view";
+import { diagnosticsBadge, diagnosticsSection, displayPath, toolHead } from "../tools/native-view";
 import type { FileDiagnosticsResult } from "../tools/lsp";
 import { NativeImageCache, readMediaPath, shownMedia } from "../native/blobs";
 import { imageLinksEnabled, linkedImageText } from "../prompt/image-references";
@@ -1065,16 +1065,20 @@ export class ToolExecutionComponent extends Container {
 		const files = this.#lateDiagnostics;
 		if (!files || files.length === 0) return {};
 		const sections = files.map(file => diagnosticsSection(file)).filter((n): n is NativeNode => n !== undefined);
-		const count = files.reduce((sum, file) => sum + file.messages.length, 0);
-		const errored = files.some(file => file.errored);
+		// The availability-aware badge: a file no server judged must never read
+		// as a clean one, so the head keeps the incomplete-verdict marker next
+		// to the count (issue #15408). The badge has no chip for an empty
+		// report; the late path still shows the count for a file that was
+		// checked and came back clean.
+		const chip: { text: string; tone: TspTone } = diagnosticsBadge(files) ?? {
+			text: "0 diagnostics",
+			tone: "warning",
+		};
 		const section =
 			sections.length === 1
 				? sections[0]
 				: node("col", { gap: "sm", role: "omp.tool.diagnostics" }, sections, "late");
-		return {
-			section,
-			chip: { text: count === 1 ? "1 diagnostic" : `${count} diagnostics`, tone: errored ? "error" : "warning" },
-		};
+		return { section, chip };
 	}
 
 	/**

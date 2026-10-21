@@ -51,6 +51,10 @@ export class DeferredDiagnostics {
 			summary: effective.summary ?? "",
 			messages: effective.messages ?? [],
 			errored: effective.errored,
+			// The servers that published no verdict travel with the entry: a
+			// zero-message result that only carries `unjudgedServers` must not
+			// reach the renderer as a clean file (issue #15408).
+			unjudgedServers: effective.unjudgedServers,
 			isStale: () => this.#version(path) !== mutationVersion,
 		};
 		this.session.queueDeferredDiagnostics?.(entry);

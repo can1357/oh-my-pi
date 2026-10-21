@@ -10,8 +10,9 @@ import {
 	getDiagnosticsForFile,
 	waitForDiagnostics,
 } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
+import { DeferredDiagnostics } from "@oh-my-pi/pi-coding-agent/lsp/deferred-diagnostics";
 import type { Diagnostic, LspClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { DeferredDiagnosticsEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { type LspToolDetails } from "@oh-my-pi/pi-tui/tools/lsp";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -197,4 +198,32 @@ describe("issue #15408: diagnostics that never arrive are not a clean file", () 
 			tempDir.removeSync();
 		}
 	}, 15_000);
+
+	// A post-write diagnostics request that misses the inline window is
+	// delivered later, as a deferred entry. The entry has to name the servers
+	// that published no verdict: the late renderer counts the messages only,
+	// so an entry without them reads as a clean file (issue #15408).
+	it("carries the unjudged servers into the deferred entry", () => {
+		const queued: DeferredDiagnosticsEntry[] = [];
+		const session = {
+			cwd: "/tmp/issue-15408",
+			settings: Settings.isolated({ "lsp.diagnosticsDeduplicate": true }),
+			queueDeferredDiagnostics: (entry: DeferredDiagnosticsEntry) => queued.push(entry),
+		} as unknown as ToolSession;
+
+		const deferred = new DeferredDiagnostics(session);
+		const handle = deferred.begin("/tmp/issue-15408/wrangler.toml");
+		// The server published no verdict: the result carries no messages, only
+		// the names of the servers that never answered.
+		handle.onDeferredDiagnostics({
+			messages: [],
+			summary: "diagnostics unavailable from silent-lsp",
+			errored: false,
+			unjudgedServers: ["silent-lsp"],
+		});
+
+		expect(queued).toHaveLength(1);
+		expect(queued[0]?.messages).toEqual([]);
+		expect(queued[0]?.unjudgedServers).toEqual(["silent-lsp"]);
+	});
 });

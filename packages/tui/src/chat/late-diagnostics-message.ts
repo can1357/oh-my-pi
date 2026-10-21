@@ -8,6 +8,7 @@ import { card, span, text, withHidden } from "../native/describe";
 import { type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
 import { plainText } from "../native/spans";
 import { Memo } from "../native/memo";
+import { DIAGNOSTICS_UNAVAILABLE_SUMMARY, type FileDiagnosticsResult } from "../tools/lsp";
 
 /** Diagnostics shown by the collapsed native card, matching the ANSI tree's collapsed count. */
 const COLLAPSED_DIAGNOSTICS = 5;
@@ -20,13 +21,16 @@ export interface LateDiagnosticsFile {
 	summary?: string;
 	errored?: boolean;
 	messages?: string[];
+	/**
+	 * Servers that published no verdict for the file. A file no server judged
+	 * is not a clean file: it was never checked (issue #15408).
+	 */
+	unjudgedServers?: string[];
 }
 
 /** A tool frame (edit/write) that takes late diagnostics for its own paths. */
 interface LateDiagnosticsTarget {
-	attachLateDiagnostics(
-		files: readonly { path: string; summary: string; errored: boolean; messages: string[] }[],
-	): boolean;
+	attachLateDiagnostics(files: readonly (FileDiagnosticsResult & { readonly path: string })[]): boolean;
 }
 
 /**
@@ -52,6 +56,10 @@ export function routeLateDiagnostics(
 					summary: file.summary ?? "",
 					errored: file.errored === true,
 					messages: file.messages ?? [],
+					// The servers that published no verdict travel with the file:
+					// a zero-message result is a file nobody checked, not a
+					// clean one (issue #15408).
+					unjudgedServers: file.unjudgedServers,
 				}
 			: undefined;
 		const routed =
@@ -156,13 +164,21 @@ export class LateDiagnosticsMessageComponent extends Container {
 	#diagnosticInput(): { errored: boolean; summary: string; messages: string[] } | undefined {
 		const messages: string[] = [];
 		const summaries: string[] = [];
+		const unjudged: string[] = [];
 		let errored = false;
 		for (const file of this.#files) {
 			if (file.messages?.length) messages.push(...file.messages);
 			if (file.summary) summaries.push(file.summary);
 			if (file.errored) errored = true;
+			for (const server of file.unjudgedServers ?? []) {
+				if (!unjudged.includes(server)) unjudged.push(server);
+			}
 		}
-		if (messages.length === 0) return undefined;
+		if (messages.length === 0 && unjudged.length === 0) return undefined;
+		// A file no server judged is not a clean file: name the servers that
+		// published no verdict, so the report never reads as "no diagnostics"
+		// (issue #15408).
+		if (unjudged.length > 0) messages.push(`${DIAGNOSTICS_UNAVAILABLE_SUMMARY} from ${unjudged.join(", ")}`);
 		return { errored, summary: summaries.join(", "), messages };
 	}
 
