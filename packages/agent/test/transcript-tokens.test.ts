@@ -73,6 +73,20 @@ describe("findTranscriptUsageAnchor", () => {
 		expect(findTranscriptUsageAnchor([empty])).toBeUndefined();
 	});
 
+	test("skips rejected billing usage and keeps the earlier context anchor", () => {
+		const good = assistant("provider-held context", { usage: usage({ contextTokens: 264_400 }) });
+		const rejected = assistant("latest reply", {
+			usage: usage({ input: 6_374, output: 2_828, cacheRead: 882_816, totalTokens: 892_018, contextTokens: 0 }),
+		});
+		const tail = [user("next request"), rejected];
+		const messages = [user("earlier request"), good, ...tail];
+
+		expect(isTranscriptUsageAnchor(rejected)).toBe(false);
+		expect(findTranscriptUsageAnchor(messages)?.message).toBe(good);
+		expect(estimateTranscriptTokens(messages, tokenizer)).toBe(264_400 + tokenizer.countMessages(tail));
+		expect(estimateTranscriptTokens(tail, tokenizer)).toBe(tokenizer.countMessages(tail));
+	});
+
 	test("fromIndex hides stale pre-compaction usage from the scan", () => {
 		const stale = assistant("summarized away");
 		const messages = [stale, user("kept")];

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { calculateContextTokens, calculatePromptTokens } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	calculateContextTokens,
+	calculatePromptTokens,
+	hasContextTokenUsage,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import type { Usage } from "@oh-my-pi/pi-ai";
 
 function usage(overrides: Partial<Usage>): Usage {
@@ -33,5 +37,12 @@ describe("calculateContextTokens", () => {
 	it("keeps native totalTokens when no orchestration sidecar is present", () => {
 		const u = usage({ input: 10, output: 5, cacheRead: 100, cacheWrite: 0, totalTokens: 115 });
 		expect(calculateContextTokens(u)).toBe(115);
+	});
+
+	it("does not reuse rejected context usage as a billable fallback", () => {
+		const u = usage({ input: 6_374, output: 2_828, cacheRead: 882_816, totalTokens: 892_018, contextTokens: 0 });
+		expect(calculateContextTokens(u)).toBe(0);
+		expect(calculatePromptTokens(u)).toBe(0);
+		expect(hasContextTokenUsage(u)).toBe(false);
 	});
 });

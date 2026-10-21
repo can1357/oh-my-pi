@@ -8,7 +8,6 @@ import {
 	compactionContextTokens,
 	DEFAULT_COMPACTION_SETTINGS,
 	findCutPoint,
-	getLastAssistantUsage,
 	hasContextTokenUsage,
 	prepareCompaction,
 	resolveThresholdTokens,
@@ -196,42 +195,6 @@ describe("Token calculation", () => {
 		const responseOnly = createMockUsage(0, 29, 0, 0);
 		expect(hasContextTokenUsage(responseOnly)).toBe(false);
 		expect(hasContextTokenUsage({ ...responseOnly, totalTokens: 120_000 })).toBe(true);
-	});
-});
-
-describe("getLastAssistantUsage", () => {
-	it("should find the last non-aborted assistant message usage", () => {
-		const entries: SessionEntry[] = [
-			createMessageEntry(createUserMessage("Hello")),
-			createMessageEntry(createAssistantMessage("Hi", createMockUsage(100, 50))),
-			createMessageEntry(createUserMessage("How are you?")),
-			createMessageEntry(createAssistantMessage("Good", createMockUsage(200, 100))),
-		];
-
-		const usage = getLastAssistantUsage(entries);
-		expect(usage!.input).toBe(200);
-	});
-
-	it("should skip aborted messages", () => {
-		const abortedMsg: AssistantMessage = {
-			...createAssistantMessage("Aborted", createMockUsage(300, 150)),
-			stopReason: "aborted",
-		};
-
-		const entries: SessionEntry[] = [
-			createMessageEntry(createUserMessage("Hello")),
-			createMessageEntry(createAssistantMessage("Hi", createMockUsage(100, 50))),
-			createMessageEntry(createUserMessage("How are you?")),
-			createMessageEntry(abortedMsg),
-		];
-
-		const usage = getLastAssistantUsage(entries);
-		expect(usage!.input).toBe(100);
-	});
-
-	it("should return undefined if no assistant messages", () => {
-		const entries: SessionEntry[] = [createMessageEntry(createUserMessage("Hello"))];
-		expect(getLastAssistantUsage(entries)).toBeUndefined();
 	});
 });
 

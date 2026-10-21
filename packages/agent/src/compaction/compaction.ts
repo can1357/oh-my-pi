@@ -88,6 +88,7 @@ import compactionTurnPrefixPrompt from "./prompts/compaction-turn-prefix.md" wit
 import compactionUpdateSummaryPrompt from "./prompts/compaction-update-summary.md" with { type: "text" };
 import handoffDocumentPrompt from "./prompts/handoff-document.md" with { type: "text" };
 import snapcompactArchiveContextPrompt from "./prompts/snapcompact-archive-context.md" with { type: "text" };
+import { findTranscriptUsageAnchor } from "./transcript-tokens";
 
 import {
 	computeFileLists,
@@ -280,39 +281,8 @@ export function calculatePromptTokens(usage: Usage): number {
 }
 
 export function hasContextTokenUsage(usage: Usage): boolean {
-	return (
-		(usage.contextTokens ?? 0) > 0 ||
-		usage.input + usage.cacheRead + usage.cacheWrite > 0 ||
-		calculateContextTokens(usage) > usage.output
-	);
-}
-
-/**
- * Get usage from an assistant message if available.
- * Skips aborted and error messages as they don't have valid usage data.
- */
-function getAssistantUsage(msg: AgentMessage): Usage | undefined {
-	if (msg.role === "assistant" && "usage" in msg) {
-		const assistantMsg = msg as AssistantMessage;
-		if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
-			return assistantMsg.usage;
-		}
-	}
-	return undefined;
-}
-
-/**
- * Find the last non-aborted assistant message usage from session entries.
- */
-export function getLastAssistantUsage(entries: SessionEntry[]): Usage | undefined {
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i];
-		if (entry.type === "message") {
-			const usage = getAssistantUsage(entry.message);
-			if (usage) return usage;
-		}
-	}
-	return undefined;
+	if (usage.contextTokens !== undefined) return usage.contextTokens > 0;
+	return usage.input + usage.cacheRead + usage.cacheWrite > 0 || calculateContextTokens(usage) > usage.output;
 }
 
 /**
@@ -1410,7 +1380,8 @@ export function prepareCompaction(
 	}
 	const previousCompaction =
 		prevCompactionIndex >= 0 ? (pathEntries[prevCompactionIndex] as CompactionEntry) : undefined;
-	let boundaryStart = Math.max(prevCompactionIndex, resetBoundaryIndex) + 1;
+	const usageBoundaryIndex = Math.max(prevCompactionIndex, resetBoundaryIndex);
+	let boundaryStart = usageBoundaryIndex + 1;
 	if (
 		previousCompaction &&
 		(getCompactionV2PreserveData(previousCompaction.preserveData) ||
@@ -1449,24 +1420,32 @@ export function prepareCompaction(
 	// and all three output regions share one sequence without journal metadata.
 	const compactionEntries: SessionEntry[] = [];
 	const compactionMessages: AgentMessage[] = [];
+	let anchorFromIndex = 0;
 	for (let i = boundaryStart; i < pathEntries.length; i++) {
 		const entry = pathEntries[i];
 		const message = getMessageFromEntry(entry);
 		if (!message) continue;
 		compactionEntries.push(entry);
 		compactionMessages.push(message);
+		if (i <= usageBoundaryIndex) anchorFromIndex = compactionMessages.length;
 	}
 
-	const lastUsage = getLastAssistantUsage(pathEntries);
-	const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;
-	let keepRecentTokens = settings.keepRecentTokens;
-	if (lastUsage) {
-		const estimatedTokens = tokenizer.countMessages(compactionMessages);
-		const promptTokens = calculatePromptTokens(lastUsage);
-		const ratio = estimatedTokens > 0 ? promptTokens / estimatedTokens : 0;
-		if (Number.isFinite(ratio) && ratio > 1) {
-			keepRecentTokens = Math.max(1, Math.floor(keepRecentTokens / ratio));
+	const anchor = findTranscriptUsageAnchor(compactionMessages, anchorFromIndex, { skipPrunedAnchors: true });
+	let tokensBefore = anchor?.tokens ?? 0;
+	let promptTokens = anchor ? calculatePromptTokens(anchor.message.usage) : 0;
+	let estimatedTokens = 0;
+	for (let i = 0; i < compactionMessages.length; i++) {
+		const messageTokens = tokenizer.countMessage(compactionMessages[i]);
+		estimatedTokens += messageTokens;
+		if (!anchor || i > anchor.index) {
+			tokensBefore += messageTokens;
+			promptTokens += messageTokens;
 		}
+	}
+	let keepRecentTokens = settings.keepRecentTokens;
+	const ratio = estimatedTokens > 0 ? promptTokens / estimatedTokens : 0;
+	if (Number.isFinite(ratio) && ratio > 1) {
+		keepRecentTokens = Math.max(1, Math.floor(keepRecentTokens / ratio));
 	}
 
 	const cutPoint = findCutPoint(compactionEntries, tokenizer, 0, compactionEntries.length, keepRecentTokens);

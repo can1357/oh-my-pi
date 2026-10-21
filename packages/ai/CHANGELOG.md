@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed premature compaction and missed context growth in Cursor sessions with inflated cached-token billing ([#16065](https://github.com/can1357/oh-my-pi/pull/16065) by [@iFwu](https://github.com/iFwu))
+
 ## [18.12.5] - 2026-10-21
 
 ### Added
