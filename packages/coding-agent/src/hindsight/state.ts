@@ -144,7 +144,7 @@ export class HindsightRetainQueue {
 			// Session went away before we could flush. We can't notify anyone, so
 			// log and drop — these are best-effort facts, not transactional writes.
 			logger.warn("Hindsight retain queue: session vanished, dropping batch", {
-				sessionId,
+				providerSessionId: sessionId,
 				items: items.length,
 			});
 			return;
@@ -162,7 +162,7 @@ export class HindsightRetainQueue {
 			await state.client.retainBatch(state.bankId, batch, { async: true });
 			if (state.config.debug) {
 				logger.debug("Hindsight retain queue: batch flushed", {
-					sessionId,
+					providerSessionId: sessionId,
 					bankId: state.bankId,
 					items: items.length,
 				});
@@ -170,7 +170,7 @@ export class HindsightRetainQueue {
 		} catch (err) {
 			const errorText = err instanceof Error ? err.message : String(err);
 			logger.warn("Hindsight retain queue: batch flush failed", {
-				sessionId,
+				providerSessionId: sessionId,
 				bankId: state.bankId,
 				items: items.length,
 				error: errorText,
@@ -394,7 +394,7 @@ export class HindsightSessionState {
 			this.lastRetainedTurn = userTurns;
 			if (this.config.debug) {
 				logger.debug("Hindsight: auto-retain succeeded", {
-					sessionId: this.sessionId,
+					providerSessionId: this.sessionId,
 					bankId: this.bankId,
 					userTurns,
 					messages: messages.length,
@@ -402,7 +402,7 @@ export class HindsightSessionState {
 			}
 		} catch (err) {
 			logger.warn("Hindsight: auto-retain failed", {
-				sessionId: this.sessionId,
+				providerSessionId: this.sessionId,
 				bankId: this.bankId,
 				error: String(err),
 			});
@@ -425,7 +425,7 @@ export class HindsightSessionState {
 			this.lastRetainedTurn = messages.filter(m => m.role === "user").length;
 		} catch (err) {
 			logger.warn("Hindsight: forced retain failed", {
-				sessionId: this.sessionId,
+				providerSessionId: this.sessionId,
 				bankId: this.bankId,
 				error: String(err),
 			});
