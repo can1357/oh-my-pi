@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed inline code spans dropping a backslash before the closing backtick and closing on longer backtick runs ([#16491](https://github.com/can1357/oh-my-pi/pull/16491) by [@iFwu](https://github.com/iFwu))
+
 ## [18.12.4] - 2026-10-20
 
 ### Breaking Changes

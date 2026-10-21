@@ -10,6 +10,23 @@ import {
 import goldens from "./fixtures/marked/goldens.json";
 
 describe("marked compatibility", () => {
+	test("preserves backslashes before code-span closing delimiters", () => {
+		expect(new Marked().parseInline("`Ctrl+\\`")).toBe("<code>Ctrl+\\</code>");
+		expect(new Marked().parseInline("``literal ` and \\``")).toBe("<code>literal ` and \\</code>");
+	});
+
+	test("does not close code spans on longer backtick runs", () => {
+		expect(new Marked().parseInline("`a``b`")).toBe("<code>a``b</code>");
+	});
+
+	test("keeps ordinary backslash escapes outside code spans", () => {
+		expect(new Marked().parseInline("\\`plain\\` and `x`")).toBe("`plain` and <code>x</code>");
+	});
+
+	test("preserves code-span backslashes inside nested Markdown", () => {
+		expect(new Marked().parseInline("**Press `Ctrl+\\`**")).toBe("<strong>Press <code>Ctrl+\\</code></strong>");
+	});
+
 	test("treats backtick-containing info strings as prose without interrupting a paragraph", () => {
 		const source = "lead\n``` `literal`\nprose\n";
 		const tokens = Lexer.lex(source);
@@ -513,21 +530,9 @@ describe("marked compatibility", () => {
 		expect(shape(Lexer.lexInline("*a ***a**"))).toEqual([["em", "*a ***a**", [["text", "a ***a*"]]]]);
 	});
 
-	// A code span closes at the first run of as many backticks after its opener that no backslash escapes, and the
-	// search goes on that many backticks past an escaped one. A URL autolink ends at the first " " or ">" after its
-	// scheme, past any "<". Inside emphasis or a link label, a closer past its end closes nothing.
-	test("closes code spans and autolinks past escaped runs and other openers, and not past a nested end", () => {
-		expect(shape(Lexer.lexInline("``a\\```b`` c\\````d``"))).toEqual([
-			["codespan", "``a\\```b``"],
-			["text", " c"],
-			["escape", "\\`"],
-			["text", "`"],
-			["codespan", "``d``"],
-		]);
-		expect(shape(Lexer.lexInline("`a\\``b` c"))).toEqual([
-			["codespan", "`a\\``"],
-			["text", "b` c"],
-		]);
+	// A URL autolink ends at the first " " or ">" after its scheme, past any "<".
+	// Inside emphasis or a link label, a closer past its end closes nothing.
+	test("closes autolinks past other openers and bounds code spans by the nested end", () => {
 		expect(shape(Lexer.lexInline("*a `b* c`"))).toEqual([
 			["em", "*a `b*", [["text", "a `b"]]],
 			["text", " c`"],
