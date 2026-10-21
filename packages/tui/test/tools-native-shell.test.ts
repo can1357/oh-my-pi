@@ -814,6 +814,34 @@ describe("user shell runs", () => {
 		expect(fallbacks(open.c)).toHaveLength(10);
 		expect(spansText(nodes(open.c).find(child => props(child).key === "notes"))).not.toContain("more images");
 	});
+	it("shares one collapsed body budget between the output tail and the image group", () => {
+		// The collapsed card body is not clamped (the notes must stay visible),
+		// so the output child's tail and the image group each carried their own
+		// full allowance: a long output plus a tall image put the body at two
+		// windows and pushed the exit/dropped/truncation notes below a normal
+		// viewport. The image group is sized from what the output leaves of the
+		// one budget.
+		const tall = Buffer.from(PNG, "base64");
+		tall.writeUInt32BE(4000, 20);
+		const run = new BashExecutionComponent("plot", ui, false);
+		run.setComplete(0, false, {
+			output: Array.from({ length: 12 }, (_, i) => `line-${i}`).join("\n"),
+			images: [{ type: "image" as const, data: tall.toString("base64"), mimeType: "image/png" }],
+		});
+		const card = run.describe(cx(["card", "ansi"]));
+		expect(card.k).toBe("card");
+		const output = nodes(card.c).find(child => child.key === "output");
+		const outputRows = 12;
+		const image = nodes(card.c).find(child => child.k === "image");
+		expect(image).toBeDefined();
+		// The image gets the rows the output left, not a second full window.
+		const maxLines = Number(/(\d+)lines/.exec(JSON.stringify(props(image).max) ?? "")?.[1] ?? "0");
+		expect(maxLines).toBe(PREVIEW_LINES - outputRows);
+		expect(maxLines).toBeLessThan(PREVIEW_LINES);
+		// The output child keeps its own tail allowance.
+		expect(props(output)).toMatchObject({ preview: { lines: PREVIEW_LINES } });
+	});
+
 	it("clamps one tall image's drawn height while collapsed and reveals it whole on expansion", () => {
 		// A single tall emission keeps its intrinsic pixel height with no max,
 		// so without a drawn-height clamp the collapsed card fills screens.
@@ -828,7 +856,9 @@ describe("user shell runs", () => {
 		expect(card.k).toBe("card");
 		const collapsed = nodes(card.c).filter(child => child.k === "image");
 		expect(collapsed).toHaveLength(1);
-		expect(props(collapsed[0]).max).toMatchObject({ h: `${PREVIEW_LINES}lines` });
+		// The image group shares the card's one preview window with the output
+		// child's tail: the one output row leaves the image the rest of it.
+		expect(props(collapsed[0]).max).toMatchObject({ h: `${PREVIEW_LINES - 1}lines` });
 		// Expansion delivers the untouched node with no clamp.
 		run.setExpanded(true);
 		const open = run.describe(cx(["card", "ansi"]));
