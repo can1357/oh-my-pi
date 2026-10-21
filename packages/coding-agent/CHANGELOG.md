@@ -1,23 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
-
-- Fixed `lsp diagnostics` reporting a file as clean when no language server judged it; an unjudged file is now reported as a failure instead of `OK`, and a file with findings from one server but no report from another shows an `unavailable` marker next to the diagnostic count and names the servers that published no verdict in its summary, whether the report arrives right away or after the edit has returned; the tool output now names the file that was left unchecked, for a multi-file edit as well as for a batched write ([#15408](https://github.com/can1357/oh-my-pi/issues/15408), [#16463](https://github.com/can1357/oh-my-pi/pull/16463) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
-## [18.12.5] - 2026-10-21
-
-### Added
-
-- `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
-
-### Fixed
-
-## [18.12.5] - 2026-10-21
-
-### Added
-
-- `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
 
 ### Added
 
@@ -50,6 +33,10 @@
 - Fixed `history://<id>` failing with "has no transcript: session is gone" for a worker that is still running but has not created its session or transcript file yet; it now answers "No transcript has been written yet". ([#16645](https://github.com/can1357/oh-my-pi/pull/16645) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
 
+
+### Fixed
+
+- Fixed `lsp diagnostics` reporting a file as clean when no language server judged it; an unjudged file is now reported as a failure instead of `OK`, and a file with findings from one server but no report from another shows an `unavailable` marker next to the diagnostic count and names the servers that published no verdict in its summary, whether the report arrives right away or after the edit has returned; the tool output now names the file that was left unchecked, for a multi-file edit as well as for a batched write ([#15408](https://github.com/can1357/oh-my-pi/issues/15408), [#16463](https://github.com/can1357/oh-my-pi/pull/16463) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ## [18.12.6] - 2026-10-21
 
 ### Added
