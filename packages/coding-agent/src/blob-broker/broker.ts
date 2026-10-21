@@ -214,6 +214,10 @@ export class LocalBlobBackend implements BlobBackend {
 		const baseUrl = await this.ensureStarted();
 		if (!baseUrl || this.#dead) return null;
 		const existing = await this.#store.lookup(key);
+		// The lookup awaits the (asynchronous) index load, so the backend can be
+		// stopped while it is pending: re-check liveness before publishing a URL
+		// whose server is already gone.
+		if (this.#dead) return null;
 		if (existing) return await this.#publish(key, baseUrl, existing);
 		const bytes = getBytes();
 		if (bytes.byteLength === 0) return null;
@@ -426,7 +430,7 @@ export class LocalBlobBackend implements BlobBackend {
 	/** Stop serving and flush persistent registry state. */
 	stop(): void {
 		this.#dead = true;
-		this.#store.flush();
+		this.#store.stop();
 		this.#exposure?.stop();
 		this.#server?.stop(true);
 	}

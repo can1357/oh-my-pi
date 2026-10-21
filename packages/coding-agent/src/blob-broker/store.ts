@@ -143,6 +143,8 @@ export class BlobRegistry {
 	#lastSweep = 0;
 	#indexLoaded = false;
 	#indexLoadPromise: Promise<void> | undefined;
+	/** Set once the registry is released: no load may write the index afterwards. */
+	#stopped = false;
 	#bytesServed = 0;
 	#hits = 0;
 	#misses = 0;
@@ -171,9 +173,10 @@ export class BlobRegistry {
 
 	async #loadIndex(indexPath: string): Promise<void> {
 		try {
+			if (this.#stopped) return;
 			let parsed: PersistedIndex;
 			try {
-				parsed = JSON.parse(await fs.promises.readFile(indexPath, "utf8")) as PersistedIndex;
+				parsed = JSON.parse(await Bun.file(indexPath).text()) as PersistedIndex;
 			} catch (error) {
 				if (!isEnoent(error)) {
 					logger.warn("blob-broker: unreadable url index; starting fresh", {
@@ -193,6 +196,7 @@ export class BlobRegistry {
 			}
 			const entries = Array.isArray(parsed.entries) ? parsed.entries : [];
 			for (const persisted of entries) {
+				if (!persisted || typeof persisted !== "object") continue;
 				if (!persisted.key || !persisted.token) continue;
 				if (this.#tokenByKey.has(persisted.key)) continue;
 				this.#adopt(persisted.key, {
@@ -211,9 +215,19 @@ export class BlobRegistry {
 					publication: persisted.publication,
 				});
 			}
+		} catch (error) {
+			// A structurally corrupt index must not reject the fire-and-forget
+			// load: the rejection would be unhandled and take the process down.
+			// The registry simply starts fresh.
+			logger.warn("blob-broker: unreadable url index; starting fresh", {
+				indexPath,
+				error: error instanceof Error ? error.message : String(error),
+			});
 		} finally {
 			this.#indexLoaded = true;
-			this.#sweep();
+			// A registry released while the load was pending must not sweep and
+			// schedule a save: the replacement backend writes the same index path.
+			if (!this.#stopped) this.#sweep();
 		}
 	}
 
@@ -225,7 +239,7 @@ export class BlobRegistry {
 
 	#scheduleSave(): void {
 		const persist = this.#persist;
-		if (!persist) return;
+		if (!persist || this.#stopped) return;
 		if (this.#saveTimer) return;
 		this.#saveTimer = setTimeout(() => {
 			this.#saveTimer = undefined;
@@ -714,5 +728,15 @@ export class BlobRegistry {
 		clearTimeout(this.#saveTimer);
 		this.#saveTimer = undefined;
 		this.#saveIndexSync(this.#persist);
+	}
+
+	/**
+	 * Release the registry: stop the background load and forbid any later
+	 * index write, so a pending load cannot overwrite the replacement
+	 * backend's index at the same path.
+	 */
+	stop(): void {
+		this.#stopped = true;
+		this.flush();
 	}
 }
