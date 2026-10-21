@@ -113,6 +113,7 @@ import {
 	loadSystemPromptTemplateFile,
 	resolvePromptInput,
 } from "./system-prompt";
+import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { type RestoreOutcome, restoreSession } from "./task/restore";
 import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
@@ -2565,9 +2566,9 @@ export async function runRootCommand(
 			// its persisted JSONL (see persisted-revive.ts). Scoped to the non-ACP
 			// bootstrap: ACP keeps several concurrent top-level sessions and a single
 			// process-global factory must not be clobbered by the most recent one.
-			// First-use boundary: the factory runs only when a parked ref is revived,
-			// so the subagent-rebuild graph stays out of module evaluation.
-			const { createPersistedSubagentReviverFactory } = await import("./task/persisted-revive");
+			// The factory runs only when a parked ref is revived; the module is a
+			// static import because `task/restore.ts` already pulls it onto the
+			// boot path, so a dynamic import here buys nothing.
 			AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
 				createPersistedSubagentReviverFactory({
 					session,

@@ -294,16 +294,22 @@ import {
 	warmupLspServers,
 	xdevEntries,
 } from "./tools";
+import { resolveYieldReportText } from "./tools/yield";
 import { createModelJobWidgetAuthor, type JobWidgetAuthor, JobWidgets, resolveToolCallIntent } from "./job-widgets";
+import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
+import { createComputerPrelude } from "./tools/computer";
+import { createRatchetPrelude } from "./ratchet/prelude-definition";
 import { createArchivePrelude } from "./archive/prelude-definition";
-import { isIrcEnabled } from "./irc/messaging";
 import { ToolContextStore } from "./tools/context";
+import { isIrcEnabled } from "./irc/messaging";
+import { imageGenTool } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isFilesystemSourcePath } from "./tools/path-utils";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
 import { queueResolveHandler } from "./tools/resolve";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "./tools/todo";
+import { ttsTool } from "./tools/tts";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { normalizeProviderContextImagesForModel } from "./utils/image-loading";
@@ -398,26 +404,6 @@ import {
 	cfgWorkspaceAdditionalDirectories,
 } from "./session/context-settings";
 import { cfgTaskBatch, cfgTaskDisabledAgents, cfgTaskEager, cfgTaskMaxConcurrency } from "./task/settings";
-
-/**
- * First-use boundary for the default-off eval prelude definitions.
- *
- * The browser, computer, and ratchet gates default off, and every consumer of
- * `getEvalPreludes()` is synchronous (`getEvalPreludes` itself, the
- * prompt/policy callbacks, the `/computer` + `/ratchet` slash toggles), so the
- * prelude modules resolve through Bun's synchronous CommonJS bridge on first
- * use rather than through a static import that would evaluate the
- * browser/computer/ratchet graphs for every session, enabled or not.
- * Memoized per process because `getEvalPreludes` runs on every prompt build.
- * The archive prelude stays a static import: `archive.enabled` defaults on and
- * the initial prompt build advertises it, so it is on the boot path.
- */
-type PreludeFactory = (session: ToolSession) => EvalPreludeDefinition;
-const preludeFactories: {
-	browser?: PreludeFactory;
-	computer?: PreludeFactory;
-	ratchet?: PreludeFactory;
-} = {};
 
 /** Agent-level tool-call switches, snapshotted by the agent loop per prompt run. */
 const cfgToolCallSwitches = combine({
@@ -2499,10 +2485,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			persistTodoPhases: phases => sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases }),
 			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
 			getLastAssistantText: () => session?.getLastAssistantText(),
-			// First-use boundary: the yield tool graph is not needed to evaluate this
-			// module, and the callback stays synchronous for its tools/index.ts callers.
-			getYieldReportText: toolCallId =>
-				require("./tools/yield").resolveYieldReportText(session?.messages ?? [], toolCallId),
+			getYieldReportText: toolCallId => resolveYieldReportText(session?.messages ?? [], toolCallId),
 			getToolCallIntent: toolCallId => resolveToolCallIntent(session?.messages ?? [], toolCallId),
 			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
 			getCheckpointState: () => session.getCheckpointState(),
@@ -2551,19 +2534,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (restrictToolNames || !toolRegistry.has("eval") || !activeToolNames.has("eval")) return [];
 			const builtins: EvalPreludeDefinition[] = [];
 			if (cfgBrowserEnabled.get(settings)) {
-				const loadBrowser: () => PreludeFactory = () => require("./tools/browser").createBrowserPrelude;
-				browserPrelude ??= (preludeFactories.browser ??= loadBrowser())(toolSession);
+				browserPrelude ??= createBrowserPrelude(toolSession);
 				builtins.push(browserPrelude);
 			}
 			if (cfgComputerEnabled.get(settings)) {
-				const loadComputer: () => PreludeFactory = () => require("./tools/computer").createComputerPrelude;
-				computerPrelude ??= (preludeFactories.computer ??= loadComputer())(toolSession);
+				computerPrelude ??= createComputerPrelude(toolSession);
 				builtins.push(computerPrelude);
 			}
 			if (cfgRatchetEnabled.get(settings)) {
-				const loadRatchet: () => PreludeFactory = () =>
-					require("./ratchet/prelude-definition").createRatchetPrelude;
-				ratchetPrelude ??= (preludeFactories.ratchet ??= loadRatchet())(toolSession);
+				ratchetPrelude ??= createRatchetPrelude(toolSession);
 				builtins.push(ratchetPrelude);
 			}
 			if (cfgArchiveEnabled.get(settings)) {
@@ -3663,16 +3642,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// force-activated, so `--no-tools` or a list without `generate_image` must
 			// keep it out (issue #5305).
 			const imageGenRequested = !options.toolNames || options.toolNames.includes("generate_image");
-			// First-use boundary: both generators sit behind default-off settings and
-			// must not drag their provider/model graphs into module evaluation.
 			if (cfgGenerateImageEnabled.get(settings) && imageGenRequested) {
-				const { imageGenTool } = await import("./tools/image-gen");
 				wanted.push(imageGenTool as unknown as CustomTool);
 			}
-			if (cfgSpeechgenEnabled.get(settings)) {
-				const { ttsTool } = await import("./tools/tts");
-				wanted.push(ttsTool as unknown as CustomTool);
-			}
+			if (cfgSpeechgenEnabled.get(settings)) wanted.push(ttsTool as unknown as CustomTool);
 			const wantedNames = new Set(wanted.map(tool => tool.name));
 			for (const [name, entry] of settingsGatedCustomEntries) {
 				if (wantedNames.has(name)) continue;
