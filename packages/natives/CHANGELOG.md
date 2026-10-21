@@ -1,6 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed `grep` searching the file its own output is redirected into, including standard input redirected from that same file: that input is now refused with `input file is also the output` ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+## [18.12.5] - 2026-10-21
 
 ### Fixed
 
@@ -15,7 +20,6 @@
 ## [18.12.5] - 2026-10-21
 
 ### Fixed
-- Fixed `grep` searching the file its own output is redirected into, including standard input redirected from that same file: that input is now refused with `input file is also the output`, and `--label` names standard input in the diagnostic ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed a macOS background action leaving its target in front of your app after you clicked another of your windows, when placing the click took longer than the click itself ([#16217](https://github.com/can1357/oh-my-pi/pull/16217))
 
