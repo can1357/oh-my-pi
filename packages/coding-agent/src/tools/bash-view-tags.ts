@@ -18,6 +18,7 @@ import { getEditStore } from "../edit/store";
 import type { ToolSession } from "../sdk";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { formatPathRelativeToCwd } from "./path-utils";
+import { formatReadHashlineHeader } from "./read-format";
 import { lexShellCommand } from "./shell-tokenize";
 
 /**
@@ -79,6 +80,24 @@ function parseRows(output: string): Row[] {
 /** Operators that make the next command conditional, piped, backgrounded or subshelled. */
 const UNSEQUENCED = /&|\||\(|\)/;
 
+/** Commands that can change the directory without a plain `cd` this parser follows. */
+const DIRECTORY_CHANGERS: Record<string, true> = {
+	pushd: true,
+	popd: true,
+	source: true,
+	".": true,
+	eval: true,
+	builtin: true,
+	command: true,
+	exec: true,
+};
+
+/**
+ * A `..` after a symlink is resolved by the filesystem, not lexically as
+ * `path.resolve` does, so paths that climb are left unresolved.
+ */
+const climbs = (spelling: string): boolean => spelling.split(/[/\\]/).includes("..");
+
 /**
  * The directories the command runs in (the start, then each `cd`) and the
  * absolute paths of its word arguments, resolved in the directory in effect;
@@ -92,6 +111,7 @@ function commandWords(command: string, cwd: string): { dirs: string[]; words: st
 	let segment: string[] = [];
 	let unsequenced = false;
 	const close = (operator: string): boolean => {
+		if (DIRECTORY_CHANGERS[segment[0] ?? ""]) return false;
 		if (segment[0] === "cd") {
 			// `cd sub && …` runs what follows only in `sub`; any other operator
 			// after it, or before it, leaves the later directory unknown.
@@ -102,7 +122,7 @@ function commandWords(command: string, cwd: string): { dirs: string[]; words: st
 			dirs.push(dir);
 		} else {
 			for (const word of segment.slice(1)) {
-				if (!word.startsWith("-")) words.push(path.resolve(dir, word));
+				if (!word.startsWith("-") && !climbs(word)) words.push(path.resolve(dir, word));
 			}
 		}
 		if (UNSEQUENCED.test(operator)) unsequenced = true;
@@ -163,7 +183,7 @@ export async function planNumberedFileTags(
 	const { dirs, words } = parsed;
 	const prefixes = new Set<string>();
 	for (const row of rows) {
-		if (row.file === undefined || /\s/.test(row.file)) continue;
+		if (row.file === undefined || /\s/.test(row.file) || climbs(row.file)) continue;
 		if (prefixes.size === MAX_PREFIXES && !prefixes.has(row.file)) break;
 		prefixes.add(row.file);
 	}
@@ -204,7 +224,9 @@ export async function planNumberedFileTags(
 	}
 	if (verified.length === 0) return undefined;
 
-	const headers = verified.map(({ file, tag }) => `[${formatPathRelativeToCwd(file, session.cwd)}#${tag}]`);
+	const headers = verified.map(({ file, tag }) =>
+		formatReadHashlineHeader(formatPathRelativeToCwd(file, session.cwd), tag),
+	);
 	return {
 		notice: `Edit tags for the numbered lines above: ${headers.join(" ")}`,
 		commit() {
