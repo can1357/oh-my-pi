@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { acquireBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
@@ -153,18 +153,15 @@ describe("Tern block adoption", () => {
 });
 
 describe("Tern open result", () => {
-	const saved = {
-		socket: process.env.TERN_PANE_SOCKET,
-		pane: process.env.TERN_PANE,
-		flag: process.env.PI_BROWSER_TERN,
-	};
+	const envKeys = ["TERN_PANE_SOCKET", "TERN_PANE", "PI_BROWSER_TERN"];
+	let savedEnv: Map<string, string | undefined>;
+
+	beforeEach(() => {
+		savedEnv = new Map(envKeys.map(key => [key, process.env[key]]));
+	});
 
 	afterEach(() => {
-		for (const [key, value] of [
-			["TERN_PANE_SOCKET", saved.socket],
-			["TERN_PANE", saved.pane],
-			["PI_BROWSER_TERN", saved.flag],
-		] as const) {
+		for (const [key, value] of savedEnv) {
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;
 		}

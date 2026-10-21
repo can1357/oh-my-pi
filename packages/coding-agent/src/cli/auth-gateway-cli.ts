@@ -38,6 +38,7 @@ import {
 	parseAuthGatewayClients,
 	startAuthGateway,
 } from "@oh-my-pi/pi-ai/auth-gateway";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { type GeneratedProvider, getBundledModels, getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
@@ -628,17 +629,6 @@ export async function runAuthGatewayCommand(cmd: AuthGatewayCommandArgs): Promis
 }
 
 /**
- * Providers whose chat endpoint expects a JSON-serialized credential blob
- * (`{ token, projectId, refreshToken, expiresAt, … }`) rather than the raw
- * access token. Mirrors `getOAuthApiKey` in `packages/ai/src/registry/oauth`.
- */
-const STRUCTURED_API_KEY_PROVIDERS: ReadonlySet<string> = new Set([
-	"github-copilot",
-	"google-gemini-cli",
-	"google-antigravity",
-]);
-
-/**
  * Provider API types that strict-mode chat probes intentionally skip:
  * - `bedrock-converse-stream` resolves credentials from the AWS env/profile, not the broker bearer.
  * - `google-vertex` uses Application Default Credentials; the broker bearer is not the right key.
@@ -705,7 +695,8 @@ function pickProbeCandidates(provider: string): Model<Api>[] {
  */
 function composeProbeApiKey(provider: string, credential: CompletionProbeInput["credential"]): string {
 	if (credential.type === "api_key") return credential.apiKey;
-	if (!STRUCTURED_API_KEY_PROVIDERS.has(provider)) return credential.accessToken;
+	// Structured providers expect a JSON credential blob (`{ token, projectId, … }`) rather than the raw token.
+	if (authPolicyFor(provider)?.apiKeyFormat !== "structured") return credential.accessToken;
 	return JSON.stringify({
 		token: credential.accessToken,
 		enterpriseUrl: credential.enterpriseUrl,
@@ -763,7 +754,7 @@ async function probeOneModel(
  * Stops as soon as one model returns a successful response (the credential
  * authenticated against at least one model in the catalog).
  */
-function createStrictCompletionProbe(): CompletionProbe {
+export function createStrictCompletionProbe(): CompletionProbe {
 	return async (input: CompletionProbeInput): Promise<CredentialCompletionResult> => {
 		const candidates = pickProbeCandidates(input.provider).slice(0, STRICT_PROBE_MAX_CANDIDATES);
 		if (candidates.length === 0) {

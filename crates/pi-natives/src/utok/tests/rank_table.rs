@@ -1,4 +1,4 @@
-use crate::utok::bpe::RankTable;
+use crate::utok::bpe::{PieceMemo, RankTable};
 
 #[test]
 fn parses_empty_slots_duplicate_entries_and_short_long_boundaries() {
@@ -27,7 +27,28 @@ fn parses_empty_slots_duplicate_entries_and_short_long_boundaries() {
 	let mut encoded = Vec::new();
 	table.encode_piece(b"abca", &mut encoded);
 	assert_eq!(encoded, [abc_rank, u32::from(b'a')]);
-	assert_eq!(table.count_piece(b"abca"), 2);
+	assert_eq!(PieceMemo::with(|memo| table.count_piece(b"abca", memo)), 2);
+}
+
+/// The per-thread piece memo is shared by every table a thread counts with
+/// (o200k and Jev's base table merge the same pieces): one table's count
+/// must never answer for another's.
+#[test]
+fn piece_memo_keeps_tables_apart() {
+	let bytes: Vec<Vec<u8>> = (0..=255).map(|byte| vec![byte]).collect();
+	let mut with_ab = bytes.clone();
+	with_ab.push(b"ab".to_vec());
+	let merges = RankTable::parse(&encode_tokens(&with_ab));
+	let bytes_only = RankTable::parse(&encode_tokens(&bytes));
+
+	PieceMemo::with(|memo| {
+		for _ in 0..2 {
+			assert_eq!(merges.count_piece(b"abab", memo), 2);
+			assert_eq!(bytes_only.count_piece(b"abab", memo), 4);
+			assert_eq!(merges.count_merged(b"ab", memo), 1);
+			assert_eq!(bytes_only.count_merged(b"ab", memo), 2);
+		}
+	});
 }
 
 fn encode_tokens(tokens: &[Vec<u8>]) -> Vec<u8> {

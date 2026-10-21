@@ -109,6 +109,34 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		}
 	});
 
+	it("repaints a running bash call once a second so its elapsed time advances", () => {
+		vi.useFakeTimers();
+		const requestRender = vi.fn();
+		const requestComponentRender = vi.fn();
+		const component = new ToolExecutionComponent(
+			"bash",
+			{ command: "sleep 600" },
+			{},
+			undefined,
+			{ requestRender, requestComponentRender } as unknown as TUI,
+			process.cwd(),
+		);
+
+		try {
+			component.setExecutionStarted();
+			requestComponentRender.mockClear();
+			vi.advanceTimersByTime(3_000);
+			// One repaint per second, not the 30fps spinner cadence.
+			expect(requestComponentRender).toHaveBeenCalledTimes(3);
+			component.seal();
+			requestComponentRender.mockClear();
+			vi.advanceTimersByTime(3_000);
+			expect(requestComponentRender).not.toHaveBeenCalled();
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
 	it("does not tick detached async bash result snapshots", () => {
 		vi.useFakeTimers();
 		const requestRender = vi.fn();

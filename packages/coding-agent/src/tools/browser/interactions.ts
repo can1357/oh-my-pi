@@ -14,6 +14,7 @@ import type {
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { splitKeyCombo, ternKey } from "./tern/keys";
 import { devtoolsFrameId } from "./frames";
+import { untilAbortedOrReleased } from "./op-timeouts";
 import {
 	createFilePicker,
 	openUploadSources,
@@ -1151,21 +1152,6 @@ async function releaseDropReadWatch(watch: JSHandle<DropReadWatch>): Promise<voi
 	} finally {
 		await watch.dispose();
 	}
-}
-
-/**
- * Wait for `pending` under `signal`. An abort does not stop the call behind it, so a result that arrives after the
- * abort is handed to `release`.
- */
-async function untilAbortedOrReleased<T>(
-	signal: AbortSignal | undefined,
-	pending: Promise<T>,
-	release: (late: T) => Promise<unknown>,
-): Promise<T> {
-	return await untilAborted(signal, () => pending).catch(error => {
-		void pending.then(release).catch(() => undefined);
-		throw error;
-	});
 }
 
 /**

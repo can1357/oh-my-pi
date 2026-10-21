@@ -401,7 +401,7 @@ impl<M: Matcher> StreamingCollector<'_, M> {
 		}
 		let collected = std::mem::take(&mut self.collector.matches);
 		let mut batch = Vec::with_capacity(collected.len());
-		push_content_matches(&mut batch, self.path.to_owned(), collected);
+		push_content_matches(&mut batch, self.path.to_owned(), collected.into_iter());
 		self.sink.deliver(batch).map_err(|err| {
 			let stopped = io::Error::other(err.reason.clone());
 			self.failure = Some(err);
@@ -1011,11 +1011,11 @@ fn to_grep_match(path: String, matched: CollectedMatch) -> GrepMatch {
 fn push_content_matches(
 	matches: &mut Vec<GrepMatch>,
 	path: String,
-	collected_matches: Vec<CollectedMatch>,
+	collected_matches: impl ExactSizeIterator<Item = CollectedMatch>,
 ) {
 	let last_index = collected_matches.len().saturating_sub(1);
 	let mut path = Some(path);
-	for (index, matched) in collected_matches.into_iter().enumerate() {
+	for (index, matched) in collected_matches.enumerate() {
 		let match_path = if index == last_index {
 			path.take().expect("path is available for final match")
 		} else {
@@ -2123,23 +2123,27 @@ fn aggregate_parallel_results(
 
 		match mode {
 			OutputMode::Content => {
-				let mut selected_matches = Vec::new();
-				for matched in result.matches {
-					if skipped < offset {
-						skipped += 1;
-						continue;
-					}
-					if let Some(max) = max_count
-						&& emitted >= max
-					{
-						limit_reached = true;
-						break;
-					}
-					selected_matches.push(matched);
-					emitted += 1;
+				let skipped_in_file = offset
+					.saturating_sub(skipped)
+					.min(result.matches.len() as u64) as usize;
+				skipped += skipped_in_file as u64;
+				let available = result.matches.len() - skipped_in_file;
+				let selected = max_count
+					.map_or(available, |max| max.saturating_sub(emitted).min(available as u64) as usize);
+				if selected < available {
+					limit_reached = true;
 				}
-				if !selected_matches.is_empty() {
-					push_content_matches(&mut matches, result.relative_path, selected_matches);
+				if selected > 0 {
+					push_content_matches(
+						&mut matches,
+						result.relative_path,
+						result
+							.matches
+							.into_iter()
+							.skip(skipped_in_file)
+							.take(selected),
+					);
+					emitted += selected as u64;
 				}
 				if result.limit_reached && skipped >= offset {
 					limit_reached = true;
@@ -2471,7 +2475,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 		let mut matches = Vec::new();
 		match output_mode {
 			OutputMode::Content => {
-				push_content_matches(&mut matches, path_string, search.matches);
+				push_content_matches(&mut matches, path_string, search.matches.into_iter());
 			},
 			OutputMode::Count => {
 				matches.push(GrepMatch {
@@ -3531,6 +3535,44 @@ mod tests {
 		assert_eq!(result.matches[0].line, "needle a2");
 		assert_eq!(result.matches[1].path, "b.txt");
 		assert_eq!(result.matches[1].line, "needle b1");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn grep_content_pages_preserve_context_and_totals_across_files() {
+		let root = TempDirGuard::new();
+		write_file(&root.path().join("a.txt"), "before a\nneedle a\nafter a\n");
+		write_file(&root.path().join("b.txt"), "before b\nneedle b\nafter b\n");
+		// Nonzero offsets exercise aggregation after the complete directory scan.
+		for (offset, max_count, expected, limited) in [
+			(1, Some(0), None, true),
+			(1, Some(1), Some("b.txt"), true),
+			(1, Some(2), Some("b.txt"), false),
+			(2, Some(1), None, false),
+			(3, None, None, false),
+		] {
+			let mut config = base_grep_config(root.path());
+			config.offset = Some(offset);
+			config.max_count = max_count;
+			config.context = Some(1);
+			let result = grep_sync(config, None, task::CancelToken::default())
+				.expect("paginated content search succeeds");
+			assert_eq!(result.total_matches, 2);
+			assert_eq!(result.files_with_matches, 2);
+			assert_eq!(result.files_searched, 2);
+			assert_eq!(result.limit_reached, limited.then_some(true));
+			assert_eq!(result.matches.len(), usize::from(expected.is_some()));
+			if let Some(path) = expected {
+				let matched = &result.matches[0];
+				assert_eq!(matched.path, path);
+				assert_eq!(matched.line_number, 2);
+				assert_eq!(matched.line, "needle b");
+				let before = matched.context_before.as_ref().expect("before context");
+				let after = matched.context_after.as_ref().expect("after context");
+				assert_eq!((before[0].line_number, before[0].line.as_str()), (1, "before b"));
+				assert_eq!((after[0].line_number, after[0].line.as_str()), (3, "after b"));
+			}
+		}
 	}
 
 	#[cfg(unix)]

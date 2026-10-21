@@ -6,6 +6,7 @@ import {
 	extractMcpAuthServerUrl,
 	extractOAuthChallengeScopes,
 	fetchResourceMetadataScopes,
+	OAuthIssuerMismatchError,
 	rfc9728ProtectedResourceMetadataUrl,
 } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
 import { type FetchInput, mockFetch } from "./helpers/fetch-mock";
@@ -22,22 +23,111 @@ describe("mcp oauth discovery", () => {
 		expect(auth.authServerUrl).toBe("https://www.figma.com/");
 	});
 
-	it("discovers oauth endpoints from auth server metadata", async () => {
+	it.each(["standard", "nested"])(
+		"retains scopes from protected-resource metadata with %s inline endpoints",
+		async format => {
+			const fetchImpl = mockFetch((input: FetchInput) => {
+				if (String(input) !== "https://mcp.example.com/.well-known/oauth-protected-resource/mcp") {
+					return new Response("not found", { status: 404 });
+				}
+				const endpoints =
+					format === "standard"
+						? {
+								authorization_endpoint: "https://auth.example.com/authorize",
+								token_endpoint: "https://auth.example.com/token",
+							}
+						: {
+								oauth: {
+									authorization_url: "https://auth.example.com/authorize",
+									token_url: "https://auth.example.com/token",
+								},
+							};
+				return Response.json({
+					resource: "https://mcp.example.com/mcp",
+					scopes_supported: ["mcp.read"],
+					...endpoints,
+				});
+			});
+
+			const oauth = await discoverOAuthEndpoints("https://mcp.example.com/mcp", undefined, undefined, {
+				fetch: fetchImpl,
+			});
+
+			expect(oauth?.scopes).toBe("mcp.read");
+		},
+	);
+
+	it.each([
+		["/oauth/metadata", "standard"],
+		["/oauth/metadata", "oauth"],
+		["/oauth/metadata", "authorization"],
+		["/oauth/metadata", "auth"],
+		["/.mcp/auth", "standard"],
+		["/.mcp/auth", "oauth"],
+		["/.mcp/auth", "authorization"],
+		["/.mcp/auth", "auth"],
+	] as const)("keeps resource scopes but not issuer catalogues at %s (%s)", async (metadataPath, format) => {
+		const authorizationUrl = "https://issuer.example.com/authorize";
+		const tokenUrl = "https://issuer.example.com/token";
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			if (String(input) !== `https://legacy.example.com${metadataPath}`) {
+				return new Response("not found", { status: 404 });
+			}
+			return Response.json(
+				format === "standard"
+					? {
+							authorization_endpoint: authorizationUrl,
+							token_endpoint: tokenUrl,
+							scopes_supported: ["mcp.read"],
+						}
+					: {
+							[format]: {
+								authorization_url: authorizationUrl,
+								token_url: tokenUrl,
+								scopes_supported: ["mcp.read"],
+							},
+						},
+			);
+		});
+
+		const resource = await discoverOAuthEndpoints("https://legacy.example.com/mcp", undefined, undefined, {
+			fetch: fetchImpl,
+		});
+		expect(resource?.scopes).toBe("mcp.read");
+
+		const issuer = await discoverOAuthEndpoints(
+			"https://other-resource.example.com/mcp",
+			"https://legacy.example.com",
+			undefined,
+			{ fetch: fetchImpl },
+		);
+		expect(issuer).toMatchObject({ authorizationUrl, tokenUrl, scopes: undefined });
+	});
+
+	it.each(["standard", "nested"])("does not request the %s authorization server's scope catalogue", async format => {
 		const calls: string[] = [];
 		const fetchImpl = mockFetch((input: FetchInput) => {
 			const url = String(input);
 			calls.push(url);
 
 			if (url === "https://www.figma.com/.well-known/oauth-authorization-server") {
-				return new Response(
-					JSON.stringify({
-						authorization_endpoint: "https://www.figma.com/oauth",
-						token_endpoint: "https://api.figma.com/v1/oauth/token",
-						client_id: "figma-client-id",
-						scopes_supported: ["file_read", "file_write"],
-					}),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
-				);
+				const metadata =
+					format === "standard"
+						? {
+								authorization_endpoint: "https://www.figma.com/oauth",
+								token_endpoint: "https://api.figma.com/v1/oauth/token",
+								client_id: "figma-client-id",
+								scopes_supported: ["file_read", "file_write"],
+							}
+						: {
+								oauth: {
+									authorization_url: "https://www.figma.com/oauth",
+									token_url: "https://api.figma.com/v1/oauth/token",
+									client_id: "figma-client-id",
+									scopes_supported: ["file_read", "file_write"],
+								},
+							};
+				return Response.json(metadata);
 			}
 
 			return new Response("not found", { status: 404 });
@@ -51,7 +141,7 @@ describe("mcp oauth discovery", () => {
 			authorizationUrl: "https://www.figma.com/oauth",
 			tokenUrl: "https://api.figma.com/v1/oauth/token",
 			clientId: "figma-client-id",
-			scopes: "file_read file_write",
+			scopes: undefined,
 		});
 		expect(calls[0]).toBe("https://www.figma.com/.well-known/oauth-authorization-server");
 	});
@@ -655,6 +745,84 @@ describe("RFC 9728 path-inserted protected resource", () => {
 		expect(calls[0]).toBe(pathfulPr);
 		expect(calls).toContain(tenantOidc);
 		expect(calls).not.toContain(originAs);
+	});
+
+	it("uses an authorization server advertised at the resource's own URL", async () => {
+		const serverUrl = "https://host.example";
+		const metadataUrl = `${serverUrl}/.well-known/oauth-protected-resource`;
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			if (String(input) === metadataUrl) {
+				return Response.json({ resource: serverUrl, authorization_servers: [serverUrl] });
+			}
+			if (String(input) === `${serverUrl}/.well-known/oauth-authorization-server`) {
+				return Response.json({
+					issuer: serverUrl,
+					authorization_endpoint: `${serverUrl}/authorize`,
+					token_endpoint: `${serverUrl}/token`,
+				});
+			}
+			return new Response("not found", { status: 404 });
+		});
+
+		for (const resourceMetadataUrl of [undefined, metadataUrl]) {
+			const oauth = await discoverOAuthEndpoints(serverUrl, undefined, resourceMetadataUrl, { fetch: fetchImpl });
+			expect(oauth).toMatchObject({
+				authorizationUrl: `${serverUrl}/authorize`,
+				tokenUrl: `${serverUrl}/token`,
+				issuerUrl: serverUrl,
+				resource: serverUrl,
+			});
+		}
+	});
+
+	it("reports the advertised AS issuer mismatch instead of falling back to an unadvertised origin-root AS", async () => {
+		// LiteLLM-style gateway: `/slack/mcp` advertises `https://gw.example/slack`,
+		// whose AS metadata wrongly claims the origin as issuer. The origin-root
+		// protected-resource metadata advertises the gateway's generic AS, which
+		// validates but was never listed for this resource.
+		const gw = "https://gw.example";
+		const slackAs = {
+			issuer: gw,
+			authorization_endpoint: `${gw}/slack/authorize`,
+			token_endpoint: `${gw}/slack/token`,
+		};
+		const rootAs = {
+			issuer: gw,
+			authorization_endpoint: `${gw}/v1/mcp/oauth/authorize`,
+			token_endpoint: `${gw}/v1/mcp/oauth/token`,
+		};
+		const routes: Record<string, unknown> = {
+			[`${gw}/.well-known/oauth-protected-resource/slack/mcp`]: { authorization_servers: [`${gw}/slack`] },
+			[`${gw}/.well-known/oauth-authorization-server/slack`]: slackAs,
+			[`${gw}/slack/.well-known/oauth-authorization-server`]: slackAs,
+			[`${gw}/.well-known/oauth-protected-resource`]: { resource: gw, authorization_servers: [gw] },
+			[`${gw}/.well-known/oauth-authorization-server`]: rootAs,
+			[`${gw}/.well-known/openid-configuration`]: rootAs,
+		};
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const body = routes[String(input)];
+			return body
+				? new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } })
+				: new Response("not found", { status: 404 });
+		});
+		const serverUrl = `${gw}/slack/mcp`;
+
+		// Advertised via the 401 resource_metadata hint, and found by resource-server probing.
+		for (const resourceMetadataUrl of [rfc9728ProtectedResourceMetadataUrl(serverUrl), undefined]) {
+			const discovery = discoverOAuthEndpoints(serverUrl, undefined, resourceMetadataUrl, { fetch: fetchImpl });
+			await expect(discovery).rejects.toBeInstanceOf(OAuthIssuerMismatchError);
+			await expect(discovery).rejects.toThrow(
+				"Could not discover OAuth endpoints: authorization server https://gw.example/slack " +
+					"(advertised by https://gw.example/.well-known/oauth-protected-resource/slack/mcp) " +
+					"returned metadata with issuer https://gw.example (RFC 8414 §3.3 requires an exact match).",
+			);
+		}
+
+		// A challenge naming both the resource metadata and an `Mcp-Auth-Server` hint for the
+		// valid but unadvertised origin AS: the advertised list wins, so the hint is not a way around it.
+		await expect(
+			discoverOAuthEndpoints(serverUrl, gw, rfc9728ProtectedResourceMetadataUrl(serverUrl), { fetch: fetchImpl }),
+		).rejects.toBeInstanceOf(OAuthIssuerMismatchError);
 	});
 });
 

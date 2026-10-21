@@ -198,6 +198,8 @@ export interface EditRenderContext {
 	editStreamingFallback?: string;
 	/** Function to render diff text with syntax highlighting */
 	renderDiff?: (diffText: string, options?: { filePath?: string }) => string;
+	/** Unsanitized result metadata, used only for filesystem link targets. */
+	rawDetails?: unknown;
 }
 
 /**
@@ -297,7 +299,7 @@ function truncateEditTitlePath(displayPath: string, maxWidth: number | undefined
 }
 
 function formatEditTitlePath(pathValue: string, maxWidth?: number): string {
-	return truncateEditTitlePath(replaceTabs(shortenPath(pathValue)), maxWidth);
+	return truncateEditTitlePath(replaceTabs(shortenPath(sanitizeText(pathValue))), maxWidth);
 }
 
 function formatEditPathDisplay(
@@ -357,6 +359,7 @@ function renderEditHeader(
 		rename?: string;
 		firstChangedLine?: number;
 		linkPath?: string;
+		renameLinkPath?: string;
 		statsSuffix?: string;
 		extraSuffix?: string;
 		title?: string;
@@ -367,6 +370,7 @@ function renderEditHeader(
 		rename: options.rename,
 		firstChangedLine: options.firstChangedLine,
 		linkPath: options.linkPath,
+		renameLinkPath: options.renameLinkPath,
 	};
 	const formatted = formatEditDescription(options.rawPath, uiTheme, descriptionOptions);
 	const suffix = `${options.statsSuffix ?? ""}${options.extraSuffix ?? ""}`;
@@ -402,7 +406,14 @@ function renderEditHeader(
  */
 function renderInlineEditRow(
 	uiTheme: Theme,
-	opts: { op?: Operation; rename?: string; rawPath: string; linkPath?: string; pending: boolean },
+	opts: {
+		op?: Operation;
+		rename?: string;
+		rawPath: string;
+		linkPath?: string;
+		renameLinkPath?: string;
+		pending: boolean;
+	},
 ): Component {
 	const isDelete = opts.op === "delete";
 	return new WidthAwareText(
@@ -417,6 +428,7 @@ function renderInlineEditRow(
 				rawPath: opts.rawPath,
 				rename: opts.rename,
 				linkPath: opts.linkPath,
+				renameLinkPath: opts.renameLinkPath,
 			}),
 		0,
 		0,
@@ -1210,7 +1222,7 @@ export const editToolRenderer = {
 				diffText = args.previewDiff ?? args.diff ?? "";
 				body.push(editDiff(diffText, rawPath));
 			} else if (args.diff || args.newText || args.patch) {
-				body.push(code(args.diff ?? args.newText ?? args.patch ?? "", { lang: getLanguageFromPath(rawPath) }));
+				body.push(code(args.diff ?? args.newText ?? args.patch ?? "", { path: rawPath || undefined }));
 			} else if (renderContext?.editDiffPreview) {
 				const preview = renderContext.editDiffPreview;
 				if ("error" in preview && preview.error) body.push(errorText(preview.error));
@@ -1248,8 +1260,18 @@ export const editToolRenderer = {
 			let added = 0;
 			let removed = 0;
 			// Files are borderless sections inside the one tool frame.
-			const body: NativeChild[] = perFileResults.map(fileResult => {
-				const file = editFileParts({ content: [], details: fileResult, isError: fileResult.isError }, options);
+			const body: NativeChild[] = perFileResults.map((fileResult, index) => {
+				const rawDetails = options.renderContext?.rawDetails;
+				const rawPerFile =
+					rawDetails && typeof rawDetails === "object" && "perFileResults" in rawDetails
+						? rawDetails.perFileResults
+						: undefined;
+				const file = editFileParts(
+					{ content: [], details: fileResult, isError: fileResult.isError },
+					options,
+					undefined,
+					Array.isArray(rawPerFile) ? rawPerFile[index] : undefined,
+				);
 				added += file.added;
 				removed += file.removed;
 				return fileDiffSection(file, file.body, {
@@ -1322,13 +1344,13 @@ function editToolHead(facts: EditHeadFacts): NativeToolHead {
 	const multi = (facts.files ?? 0) > 1;
 	const meta = compact([
 		diffStatsMeta(facts.added, facts.removed),
-		!multi && facts.rename ? `→ ${displayPath(facts.rename)}` : undefined,
+		!multi && facts.rename ? `→ ${displayPath(sanitizeText(facts.rename))}` : undefined,
 	]);
 	const badge = facts.diagnostics && diagnosticsBadge(facts.diagnostics);
 	const target = multi
 		? `${facts.files} files`
 		: facts.path
-			? `${displayPath(facts.path)}${facts.line ? `:${facts.line}` : ""}`
+			? `${displayPath(sanitizeText(facts.path))}${facts.line ? `:${facts.line}` : ""}`
 			: undefined;
 	return {
 		title: multi ? "Edit" : getOperationTitle(facts.op),
@@ -1340,9 +1362,9 @@ function editToolHead(facts: EditHeadFacts): NativeToolHead {
 	};
 }
 
-/** A file's diff: hunks highlighted by the path's language, no path header (the head or section names the file). */
+/** A file's diff: Tern highlights the hunks by the file's grammar and draws no path header (the head or section names the file). */
 function editDiff(diffText: string, filePath: string): NativeNode {
-	return nativeDiff(diffText, { lang: filePath ? getLanguageFromPath(filePath) : undefined });
+	return nativeDiff(diffText, { path: filePath || undefined });
 }
 
 /** One file's edit result for native views: head facts plus its body (diff or error, then diagnostics). */
@@ -1355,6 +1377,15 @@ interface EditFileParts extends Omit<EditHeadFacts, "diagnostics"> {
 	body: NativeChild[];
 }
 
+/** Raw metadata paths are reserved for link targets; visible content comes from sanitized details. */
+function rawEditPaths(value: unknown): { path?: string; sourcePath?: string } {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
+	return {
+		path: "path" in value && typeof value.path === "string" ? value.path : undefined,
+		sourcePath: "sourcePath" in value && typeof value.sourcePath === "string" ? value.sourcePath : undefined,
+	};
+}
+
 function editFileParts(
 	result: {
 		content: Array<{ type: string; text?: string }>;
@@ -1363,8 +1394,10 @@ function editFileParts(
 	},
 	options: RenderResultOptions & { renderContext?: EditRenderContext },
 	args?: EditRenderArgs,
+	rawFileDetails?: unknown,
 ): EditFileParts {
 	const details = result.details;
+	const rawPaths = rawEditPaths(rawFileDetails ?? options.renderContext?.rawDetails);
 	const isError = result.isError ?? (details && "isError" in details ? details.isError : false) ?? false;
 	const firstEdit = Array.isArray(args?.edits) ? args.edits[0] : undefined;
 	const firstHashlineInputEntry = getHashlineInputRenderSummary(args ?? {}, options.renderContext?.editMode)
@@ -1391,7 +1424,7 @@ function editFileParts(
 	const firstChangedLine =
 		(editDiffPreview && "firstChangedLine" in editDiffPreview ? editDiffPreview.firstChangedLine : undefined) ||
 		(details && !isError ? details.firstChangedLine : undefined);
-	const shownPath = displayPath(detailPath ?? rawPath);
+	const shownPath = displayPath(sanitizeText(detailPath ?? rawPath));
 	const body: NativeChild[] = [];
 	if (isError) {
 		const displayErrorText = details && "displayErrorText" in details ? details.displayErrorText : undefined;
@@ -1410,10 +1443,10 @@ function editFileParts(
 	const stats = diffText ? getDiffStats(diffText) : undefined;
 	return {
 		op,
-		path: rawPath,
+		path: sanitizeText(rawPath),
 		line: firstChangedLine,
-		rename,
-		resolvedPath: detailPath,
+		rename: rename === undefined ? undefined : sanitizeText(rename),
+		resolvedPath: rawPaths.path ?? detailPath,
 		added: stats?.added ?? 0,
 		removed: stats?.removed ?? 0,
 		isError: Boolean(isError),
@@ -1433,6 +1466,7 @@ function renderSingleFileResult(
 	args?: EditRenderArgs,
 ): Component {
 	const details = result.details;
+	const rawPaths = rawEditPaths(options.renderContext?.rawDetails);
 	const isError = result.isError ?? (details && "isError" in details ? details.isError : false);
 	const edits = Array.isArray(args?.edits) ? args.edits : undefined;
 	const firstEdit = edits?.[0];
@@ -1467,8 +1501,17 @@ function renderSingleFileResult(
 	// container. Errors, no-ops, creates, move-with-edits, and anything with
 	// diagnostics keep the framed block below.
 	if (!isError && !details?.diff && !details?.diagnostics && (op === "delete" || rename)) {
-		const linkPath = details && "path" in details ? details.path : undefined;
-		return renderInlineEditRow(uiTheme, { op, rename, rawPath, linkPath, pending: false });
+		const linkPath = rename
+			? (rawPaths.sourcePath ?? moveSource ?? rawPaths.path ?? detailPath)
+			: (rawPaths.path ?? detailPath);
+		return renderInlineEditRow(uiTheme, {
+			op,
+			rename,
+			rawPath,
+			linkPath,
+			renameLinkPath: rename ? (rawPaths.path ?? detailPath) : undefined,
+			pending: false,
+		});
 	}
 
 	const renderFallbackDiff = (diffText: string, diffOptions?: { filePath?: string }): string =>
@@ -1499,7 +1542,9 @@ function renderSingleFileResult(
 			const firstChangedLine =
 				(editDiffPreview && "firstChangedLine" in editDiffPreview ? editDiffPreview.firstChangedLine : undefined) ||
 				(details && !isError ? details.firstChangedLine : undefined);
-			const linkPath = details && "path" in details ? details.path : undefined;
+			const linkPath = rename
+				? (rawPaths.sourcePath ?? moveSource ?? rawPaths.path ?? detailPath)
+				: (rawPaths.path ?? detailPath);
 
 			// Change stats ride inline on the header bar next to the path.
 			const previewDiff = editDiffPreview && !("error" in editDiffPreview) ? editDiffPreview.diff : undefined;
@@ -1517,6 +1562,7 @@ function renderSingleFileResult(
 				rename,
 				firstChangedLine,
 				linkPath,
+				renameLinkPath: rename ? (rawPaths.path ?? detailPath) : undefined,
 				statsSuffix,
 			});
 			const innerWidth = Math.max(1, width - 2);
@@ -1541,7 +1587,11 @@ function renderSingleFileResult(
 				// (Delete / `src → dst`); only a true no-op needs an explanatory
 				// body so an empty card isn't mistaken for a stalled edit.
 				if (op !== "delete" && op !== "create" && !rename) {
-					const noChangePath = linkPath ? shortenPath(linkPath) : rawPath ? shortenPath(rawPath) : "";
+					const noChangePath = detailPath
+						? shortenPath(detailPath)
+						: rawPath
+							? shortenPath(sanitizeText(rawPath))
+							: "";
 					body = uiTheme.fg("dim", `No changes were made${noChangePath ? ` to ${noChangePath}` : ""}.`);
 				}
 			} else if (editDiffPreview) {
@@ -1593,8 +1643,19 @@ function renderMultiFileResult(
 	options: RenderResultOptions & { renderContext?: EditRenderContext },
 	uiTheme: Theme,
 ): Component {
-	const fileComponents = perFileResults.map(fileResult =>
-		renderSingleFileResult({ content: [], details: fileResult, isError: fileResult.isError }, options, uiTheme),
+	const rawDetails = options.renderContext?.rawDetails;
+	const rawPerFile =
+		rawDetails && typeof rawDetails === "object" && "perFileResults" in rawDetails
+			? rawDetails.perFileResults
+			: undefined;
+	const fileComponents = perFileResults.map((fileResult, index) =>
+		renderSingleFileResult(
+			{ content: [], details: fileResult, isError: fileResult.isError },
+			Array.isArray(rawPerFile)
+				? { ...options, renderContext: { ...options.renderContext, rawDetails: rawPerFile[index] } }
+				: options,
+			uiTheme,
+		),
 	);
 	const remaining = Math.max(0, totalFiles - perFileResults.length);
 

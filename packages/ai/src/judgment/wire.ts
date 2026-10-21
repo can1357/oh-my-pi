@@ -4,6 +4,7 @@
  * judgment module; `native.ts` maps every judgment API to its dialect.
  */
 import type { ImageContent, Usage } from "../types";
+import type { JudgmentImageInput } from "@oh-my-pi/pi-catalog/compat/judgment-images";
 import type { JudgmentRequest } from "./types";
 
 /** Where one attempt posts and which bearer token it sends. */
@@ -22,38 +23,6 @@ export interface DecodedJudgment {
 	refused: readonly string[];
 	usage: Usage;
 }
-
-/**
- * Image input one judgment dialect accepts. Every cap is optional; {@link NativeJudge}
- * rejects a request exceeding one locally instead of spending an upstream call on it.
- */
-export interface JudgmentImageInput {
-	/** Accepted lowercase MIME types; unset accepts any image type. */
-	mimeTypes?: readonly string[];
-	/** Images per request. */
-	maxCount?: number;
-	/** Decoded bytes per image. */
-	maxBytes?: number;
-	/** Decoded bytes across all images. */
-	maxTotalBytes?: number;
-	/** Pixels per image, when the image header reports dimensions. */
-	maxPixels?: number;
-	/** Minimum pixels per image, when the image header reports dimensions. */
-	minPixels?: number;
-	/** Inclusive bounds on each side, when the image header reports dimensions. */
-	minSide?: number;
-	maxSide?: number;
-}
-
-/** Shared TypeSafe Jev/OpenRouter image limits (https://docs.typesafe.ai/images#limits); out-of-range images are rejected upstream, never resized. */
-export const JEV_IMAGE_INPUT = {
-	mimeTypes: ["image/png", "image/jpeg"],
-	maxBytes: 16 * 1024 * 1024,
-	minPixels: 78_400,
-	maxPixels: 2_458_624,
-	minSide: 280,
-	maxSide: 1568,
-} as const satisfies JudgmentImageInput;
 
 /** Image assets kept separately from judgment state for asset-aware native wires. */
 export type JudgmentImageAssets = Readonly<Record<string, ImageContent>>;
@@ -75,6 +44,10 @@ export interface JudgmentWire {
 	supportsImageAssets?: boolean;
 	/** Whether image support must be enabled explicitly for direct NativeJudge construction. */
 	imagesRequireOptIn?: boolean;
+	/** Whether this wire drops per-image detail metadata. */
+	ignoresImageDetail?: boolean;
+	/** Whether this dialect forwards `box` questions; others reject them before sending. */
+	boxes?: boolean;
 	/** The response's answers and usage; `undefined` when the payload is not this API's response shape. */
 	decode(payload: unknown): DecodedJudgment | undefined;
 }

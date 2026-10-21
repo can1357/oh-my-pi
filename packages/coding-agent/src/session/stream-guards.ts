@@ -11,6 +11,7 @@ import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import geminiToolReminderTemplate from "../prompts/system/gemini-tool-call-reminder.md" with { type: "text" };
+import streamingEditRecoveryTemplate from "../prompts/system/streaming-edit-recovery.md" with { type: "text" };
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 import {
@@ -30,6 +31,17 @@ import {
 
 const GEMINI_HEADER_INTERRUPT_REASON = "Interrupted: emit a tool call instead of more planning";
 const GEMINI_TOOL_REMINDER_TYPE = "gemini-tool-call-reminder";
+/** Abort reason (and aborted-message `errorMessage`) for a failed streamed edit preview. */
+const STREAMING_EDIT_ABORT_REASON = "Streaming edit preview failed";
+const STREAMING_EDIT_RECOVERY_TYPE = "streaming-edit-recovery";
+/**
+ * Recovery continuations allowed per user prompt. Each failed preview spends
+ * one; when the budget is spent the guard stops and warns instead of looping
+ * on a patch the model keeps re-emitting.
+ */
+const STREAMING_EDIT_RECOVERY_LIMIT = 2;
+/** Notice `source` label for streaming-edit guard messages. */
+const STREAMING_EDIT_NOTICE_SOURCE = "streaming-edit";
 // Prefix of the native no-op diagnostic emitted by the Rust edit engine when a
 // preview produces byte-identical content. Kept in sync with
 // crates/pi-edit/src/modes/replace.rs and crates/pi-edit/src/hashline/preview.rs
@@ -45,6 +57,8 @@ export interface StreamGuardsHost {
 	model(): Model | undefined;
 	isDisposed(): boolean;
 	promptGeneration(): number;
+	/** Monotonic per-prompt counter; changes on each user/agent prompt start. */
+	promptSequence(): number;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	schedulePostPromptTask(task: (signal: AbortSignal) => Promise<void>): void;
 	discardAssistantTurn(message: AssistantMessage): void;
@@ -54,6 +68,10 @@ export interface StreamGuardsHost {
 export class StreamingEditGuard {
 	readonly #host: StreamGuardsHost;
 	#abortTriggered = false;
+	/** Prompt sequence the recovery budget below belongs to. */
+	#recoverySequence = -1;
+	/** Recovery continuations already spent for {@link #recoverySequence}. */
+	#recoveryCount = 0;
 
 	constructor(host: StreamGuardsHost) {
 		this.#host = host;
@@ -102,20 +120,79 @@ export class StreamingEditGuard {
 				file.error.length > 0 &&
 				!file.error.startsWith(NO_CHANGES_PREVIEW_PREFIX),
 		);
-		if (failed) this.#abortPatch(event.toolCallId, failed.path, failed.error);
+		if (failed) this.#abortPatch({ toolCallId: event.toolCallId, filePath: failed.path, error: failed.error });
 	}
 
-	#abortPatch(toolCallId: string, filePath: string, error: string): void {
+	#abortPatch(opts: { toolCallId: string; filePath: string; error: string }): void {
+		const { toolCallId, filePath, error } = opts;
 		this.#abortTriggered = true;
 		logger.warn("Streaming edit aborted due to patch preview failure", { toolCallId, path: filePath, error });
-		const diagnostic = `Streaming edit preview failed for ${filePath}: ${error}`;
+		const diagnostic = `${STREAMING_EDIT_ABORT_REASON} for ${filePath}: ${error}`;
 		this.#host.agent.abort(
 			createToolScopedAbortReason(
-				"Streaming edit preview failed",
+				STREAMING_EDIT_ABORT_REASON,
 				{ [toolCallId]: diagnostic },
-				"Streaming edit preview failed",
+				STREAMING_EDIT_ABORT_REASON,
 			),
 		);
+		this.#scheduleRecovery({ diagnostic });
+	}
+
+	/**
+	 * Re-drives the run after a failed streamed edit preview so the model can
+	 * correct the patch instead of losing the turn. One recovery message (with
+	 * the preview diagnostic) is appended per failure; the budget is shared per
+	 * user prompt and a spent budget stops with a warning instead of looping.
+	 */
+	#scheduleRecovery(opts: { diagnostic: string }): void {
+		const sequence = this.#host.promptSequence();
+		if (this.#recoverySequence !== sequence) {
+			this.#recoverySequence = sequence;
+			this.#recoveryCount = 0;
+		}
+		this.#recoveryCount++;
+		if (this.#recoveryCount > STREAMING_EDIT_RECOVERY_LIMIT) {
+			logger.warn("Streaming edit recovery budget exhausted", {
+				sequence,
+				recoveries: this.#recoveryCount - 1,
+			});
+			this.#host.emitNotice(
+				"warning",
+				`Streaming edit preview failed ${this.#recoveryCount} times; stopped auto-recovery for this prompt.`,
+				STREAMING_EDIT_NOTICE_SOURCE,
+			);
+			return;
+		}
+		const diagnostic = opts.diagnostic;
+		const attempt = this.#recoveryCount;
+		const generation = this.#host.promptGeneration();
+		this.#host.schedulePostPromptTask(async signal => {
+			if (signal.aborted || this.#host.isDisposed()) return;
+			if (this.#host.promptGeneration() !== generation || this.#host.promptSequence() !== sequence) return;
+			await this.#host.agent.waitForIdle();
+			if (signal.aborted || this.#host.isDisposed()) return;
+			if (this.#host.promptGeneration() !== generation || this.#host.promptSequence() !== sequence) return;
+			const content = prompt.render(streamingEditRecoveryTemplate, { diagnostic });
+			this.#host.agent.appendMessage({
+				role: "custom",
+				customType: STREAMING_EDIT_RECOVERY_TYPE,
+				content,
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+			this.#host.sessionManager.appendCustomMessageEntry(STREAMING_EDIT_RECOVERY_TYPE, content, false);
+			this.#host.emitNotice(
+				"info",
+				`Streaming edit preview failed; retrying with the error context (attempt ${attempt}/${STREAMING_EDIT_RECOVERY_LIMIT}).`,
+				STREAMING_EDIT_NOTICE_SOURCE,
+			);
+			try {
+				await this.#host.agent.continue();
+			} catch (error) {
+				logger.warn("streaming edit recovery continue failed", { error: String(error) });
+			}
+		});
 	}
 }
 
@@ -136,6 +213,7 @@ export class LoopGuards {
 		const detection = this.#activeToolCallLoopGuard()?.recordTurn({
 			message: context.message,
 			toolResults: context.toolResults,
+			injectedContext: (context.additionalMessages?.length ?? 0) > 0,
 		});
 		if (detection) this.#injectToolCallLoopRedirect(messages, detection);
 	}

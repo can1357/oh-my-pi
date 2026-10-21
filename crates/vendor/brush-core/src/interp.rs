@@ -17,6 +17,7 @@ use crate::{
 	env::{EnvironmentLookup, EnvironmentScope, valid_variable_name},
 	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles,
 	openfiles::{OpenFile, OpenFiles},
+	pipetap::{self, PipeTap},
 	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
 	shell::Shell,
 	sys, timing,
@@ -106,6 +107,8 @@ pub struct ExecutionParameters {
 	pub suppress_errexit:     bool,
 	/// Optional hook reporting spawned external children for scoped teardown.
 	spawn_observer:           Option<Arc<dyn SpawnObserver>>,
+	/// Optional hook mirroring the bytes that cross pipeline pipes.
+	pipe_tap:                 Option<Arc<dyn PipeTap>>,
 	/// Optional flag a command raises when it reports an error yet goes on,
 	/// so its exit status does not show the failure.
 	reported_error:           Option<Arc<AtomicBool>>,
@@ -157,6 +160,16 @@ impl ExecutionParameters {
 	/// Returns the active spawn-observer hook, if any.
 	pub fn spawn_observer(&self) -> Option<&Arc<dyn SpawnObserver>> {
 		self.spawn_observer.as_ref()
+	}
+
+	/// Assigns a hook that mirrors every pipeline pipe of this execution.
+	pub fn set_pipe_tap(&mut self, tap: Arc<dyn PipeTap>) {
+		self.pipe_tap = Some(tap);
+	}
+
+	/// Returns the active pipe-tap hook, if any.
+	pub fn pipe_tap(&self) -> Option<&Arc<dyn PipeTap>> {
+		self.pipe_tap.as_ref()
 	}
 
 	/// Assigns the flag commands raise when they report an error yet go on.
@@ -778,12 +791,19 @@ async fn spawn_pipeline_processes(
 	let mut process_group_id: Option<i32> = None;
 
 	// Create pipes to use between commands, but only bother doing so if there's
-	// more than one command.
+	// more than one command. Pipe `i` carries stage `i` into stage `i + 1`
+	// (opened in that order, so a tap sees the stages left to right); the
+	// stage loop pops both lists from the back.
 	if pipeline_len > 1 {
-		for _ in 0..(pipeline_len - 1) {
-			let (reader, writer) = std::io::pipe()?;
-			pipe_readers.push(Some(reader.into()));
-			pipe_writers.push(Some(writer.into()));
+		let pipes = pipeline
+			.seq
+			.iter()
+			.tuple_windows()
+			.map(|(producer, consumer)| pipetap::pipe(params.pipe_tap(), producer, consumer))
+			.collect::<Result<Vec<_>, _>>()?;
+		for (reader, writer) in pipes.into_iter().rev() {
+			pipe_readers.push(Some(reader));
+			pipe_writers.push(Some(writer));
 		}
 		// Push `None` to the readers; it will be popped off by the *first* command,
 		// which will mean that command gets its stdin from the execution parameters'

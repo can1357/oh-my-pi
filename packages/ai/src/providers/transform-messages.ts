@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
@@ -345,35 +346,54 @@ function deduplicateToolCallIds(
 	return { messages: transformed, realToolResultsById, validToolUseIds };
 }
 
+/** Default for providers without an authored tool-name policy and native OpenAI Responses history. */
 const MAX_TOOL_CALL_NAME_LENGTH = 128;
-const TOOL_CALL_NAME_SEPARATOR_RE = /[\s\p{Cc}]/u;
+const STRICT_TOOL_CALL_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+const GOOGLE_TOOL_CALL_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_.:-]*$/;
+/** Any character some provider accepts in a declared tool name, for checks with no target. */
+const ANY_PROVIDER_TOOL_CALL_NAME_RE = /^[a-zA-Z0-9_.:-]+$/;
 
 /**
- * Whether a tool-call name cannot belong to any declared tool: missing, empty,
- * longer than OpenAI's 128-character replay limit, or containing whitespace or
- * control characters (tool schemas never allow them; their presence means the
- * name slot carries invocation text).
+ * Charset and length a tool-call name must meet to replay to `model`. Without a
+ * target, a name passes when any provider could declare it.
  */
-export function isMalformedToolCallName(name: unknown): boolean {
-	return (
-		typeof name !== "string" ||
-		name.length === 0 ||
-		name.length > MAX_TOOL_CALL_NAME_LENGTH ||
-		TOOL_CALL_NAME_SEPARATOR_RE.test(name)
-	);
+function toolCallNameLimits(model: Model | undefined): { allowedName: RegExp; maxLength: number } {
+	if (!model) return { allowedName: ANY_PROVIDER_TOOL_CALL_NAME_RE, maxLength: MAX_TOOL_CALL_NAME_LENGTH };
+	const policy = resolveCatalogPolicy(model);
+	return {
+		allowedName: policy.toolCallNameCharset === "google" ? GOOGLE_TOOL_CALL_NAME_RE : STRICT_TOOL_CALL_NAME_RE,
+		maxLength:
+			typeof policy.toolCallNameMaxLength === "number" ? policy.toolCallNameMaxLength : MAX_TOOL_CALL_NAME_LENGTH,
+	};
+}
+
+/**
+ * Whether a tool-call name cannot be replayed to the target: missing, empty,
+ * longer than its declaration limit, or containing a character outside its
+ * declaration charset. Models emit such names when the name slot carries
+ * invocation text (whitespace, NULs) or an invented internal URL (`proc://*`).
+ *
+ * Without a target, use the OpenAI Responses native-history constraints.
+ */
+export function isMalformedToolCallName(
+	name: unknown,
+	allowedName = STRICT_TOOL_CALL_NAME_RE,
+	maxLength = MAX_TOOL_CALL_NAME_LENGTH,
+): boolean {
+	return typeof name !== "string" || name.length > maxLength || !allowedName.test(name);
 }
 
 function isMalformedToolCallId(id: string | undefined): boolean {
 	return !id || id.trim().length === 0;
 }
 
-function isMalformedToolCall(block: { id: string; name: string }): boolean {
-	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name);
+function isMalformedToolCall(block: { id: string; name: string }, allowedName: RegExp, maxLength: number): boolean {
+	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name, allowedName, maxLength);
 }
 
 /**
  * Drop assistant `toolCall` blocks with an empty / whitespace-only `id` or a `name`
- * no provider could have declared (see {@link isMalformedToolCallName}),
+ * the target provider cannot declare (see {@link isMalformedToolCallName}),
  * the `toolResult` messages they point at, and any assistant turn that has no
  * replayable content left.
  *
@@ -392,16 +412,17 @@ function isMalformedToolCall(block: { id: string; name: string }): boolean {
  * 128 characters with `string_above_max_length`.
  *
  * Run before any other transform so the rest of the pipeline never sees a
- * malformed call. Idempotent: a re-run on an already-sanitized list returns
- * the input untouched. Provider-agnostic — any wire model could surface this.
+ * malformed call. Idempotent for the same target: a re-run on an already-sanitized
+ * list returns the input untouched.
  */
-function sanitizeMalformedToolCalls(messages: Message[]): Message[] {
+function sanitizeMalformedToolCalls(messages: Message[], model: Model): Message[] {
+	const { allowedName, maxLength } = toolCallNameLimits(model);
 	// Fast path: skip the rewrite entirely when nothing is malformed.
 	let hasMalformed = false;
 	outer: for (const msg of messages) {
 		if (msg.role !== "assistant") continue;
 		for (const block of msg.content) {
-			if (block.type === "toolCall" && isMalformedToolCall(block)) {
+			if (block.type === "toolCall" && isMalformedToolCall(block, allowedName, maxLength)) {
 				hasMalformed = true;
 				break outer;
 			}
@@ -427,7 +448,7 @@ function sanitizeMalformedToolCalls(messages: Message[]): Message[] {
 			const filtered: AssistantMessage["content"] = [];
 			for (const block of msg.content) {
 				if (block.type === "toolCall") {
-					const malformed = isMalformedToolCall(block);
+					const malformed = isMalformedToolCall(block, allowedName, maxLength);
 					const queue = dropQueues.get(block.id);
 					if (queue) queue.push(malformed);
 					else dropQueues.set(block.id, [malformed]);
@@ -469,20 +490,24 @@ export function shouldDropTruncatedThinkingOnlyAssistant(msg: AssistantMessage):
  * surviving one: {@link sanitizeMalformedToolCalls} drops its malformed tool
  * calls, then {@link shouldDropTruncatedThinkingOnlyAssistant} a truncated
  * turn left with no text and no tool call. On an already sanitized list this
- * is `!shouldDropTruncatedThinkingOnlyAssistant(msg)`.
+ * is `!shouldDropTruncatedThinkingOnlyAssistant(msg)`. Pass the target `model`
+ * to apply its tool-name limits; without one, any provider-declarable name survives.
  */
-export function isSurvivingAssistant(msg: AssistantMessage): boolean {
+export function isSurvivingAssistant(msg: AssistantMessage, model?: Model): boolean {
 	const isTruncatedStop = msg.stopReason === "length" || msg.stopReason === "error" || msg.stopReason === "aborted";
 	if (msg.content.length === 0) return !isTruncatedStop;
+	const { allowedName, maxLength } = toolCallNameLimits(model);
 	return msg.content.some(block =>
-		block.type === "toolCall" ? !isMalformedToolCall(block) : !isTruncatedStop || block.type === "text",
+		block.type === "toolCall"
+			? !isMalformedToolCall(block, allowedName, maxLength)
+			: !isTruncatedStop || block.type === "text",
 	);
 }
 
-function getLatestSurvivingAssistantIndex(messages: readonly Message[]): number {
+function getLatestSurvivingAssistantIndex(messages: readonly Message[], model: Model): number {
 	for (let index = messages.length - 1; index >= 0; index -= 1) {
 		const msg = messages[index]!;
-		if (msg.role === "assistant" && isSurvivingAssistant(msg)) {
+		if (msg.role === "assistant" && isSurvivingAssistant(msg, model)) {
 			return index;
 		}
 	}
@@ -491,6 +516,14 @@ function getLatestSurvivingAssistantIndex(messages: readonly Message[]): number 
 
 export function isAnthropicMessagesModel(model: Model): model is Model<"anthropic-messages"> {
 	return model.api === "anthropic-messages";
+}
+
+/** Whether `turn` came from `model` itself: its own turns replay their native reasoning unchanged. */
+export function isSameModelTurn(
+	turn: Pick<AssistantMessage, "provider" | "api" | "model">,
+	model: Pick<Model, "provider" | "api" | "id">,
+): boolean {
+	return turn.provider === model.provider && turn.api === model.api && turn.model === model.id;
 }
 
 /**
@@ -791,11 +824,10 @@ export function transformMessages<TApi extends Api>(
 	// block errors from LLM providers (e.g. invalid_prompt).
 	messages = redactSensitiveCredentialsInMessages(messages);
 
-	// Drop assistant `toolCall` blocks with empty/whitespace `id` or `name`
+	// Drop assistant `toolCall` blocks whose id or name the target cannot replay
 	// (and their matched `toolResult` messages) before anything else looks at
-	// the history. Replays of these would 400 every provider — see
-	// `sanitizeMalformedToolCalls`.
-	messages = sanitizeMalformedToolCalls(messages);
+	// the history. Replaying them would 400 the target provider.
+	messages = sanitizeMalformedToolCalls(messages, model);
 
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();
@@ -806,7 +838,7 @@ export function transformMessages<TApi extends Api>(
 	// Completions ids pair by raw equality and must never be canonicalized).
 	const responsesCompositeIdMap = new Map<string, string>();
 
-	const latestSurvivingAssistantIndex = getLatestSurvivingAssistantIndex(messages);
+	const latestSurvivingAssistantIndex = getLatestSurvivingAssistantIndex(messages, model);
 	const invalidBoundThinkingAssistantIndexes = new Set<number>();
 	if (model.thinking?.prefixBinding) {
 		let latestRewriteAt: number | undefined;
@@ -859,10 +891,7 @@ export function transformMessages<TApi extends Api>(
 		// Assistant messages need transformation check
 		if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
-			const isSameModel =
-				assistantMsg.provider === model.provider &&
-				assistantMsg.api === model.api &&
-				assistantMsg.model === model.id;
+			const isSameModel = isSameModelTurn(assistantMsg, model);
 			// The same model on another host (or another id of the same model):
 			// its full plaintext reasoning replays natively where the target has
 			// a native slot, exactly as the target replays its own turns. Errored

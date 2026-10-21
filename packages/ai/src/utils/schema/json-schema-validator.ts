@@ -12,6 +12,7 @@
  * Compared to AJV this is single-pass, synchronous, dependency-free, and
  * tolerates non-standard shapes (`nullable`) that LLM-emitted schemas carry.
  */
+import { parseLocalRefPointer } from "@oh-my-pi/omptype";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { areJsonValuesEqual } from "./equality";
 
@@ -163,18 +164,11 @@ function schemaTypes(schema: Record<string, unknown>): string[] {
 
 /** Extract the effective `type` list from a schema, treating `nullable: true` as adding `"null"`. */
 
-function decodePointerToken(token: string): string {
-	return token.replace(/~1/g, "/").replace(/~0/g, "~");
-}
-
-/** RFC 6901 token decode: `~1` → `/`, `~0` → `~`. */
-
 function resolveLocalRef(root: unknown, ref: string): unknown | undefined {
-	if (ref === "#") return root;
-	if (!ref.startsWith("#/")) return undefined;
+	const pointer = parseLocalRefPointer(ref);
+	if (pointer === undefined) return undefined;
 	let current: unknown = root;
-	for (const rawToken of ref.slice(2).split("/")) {
-		const token = decodePointerToken(rawToken);
+	for (const token of pointer) {
 		if (!isRecord(current) && !Array.isArray(current)) return undefined;
 		current = (current as Record<string, unknown>)[token];
 	}

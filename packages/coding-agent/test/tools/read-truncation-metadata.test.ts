@@ -103,8 +103,9 @@ describe("read truncation metadata", () => {
 			firstLineExceedsLimit: true,
 			lastLinePartial: false,
 			totalBytes: DEFAULT_MAX_BYTES + 1,
-			outputBytes: DEFAULT_MAX_BYTES,
 		});
+		// The budget reserves row-prefix bytes, so the preview stops at or below the shared cap.
+		expect(result.details?.truncation?.outputBytes).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
 		expect(result.details?.meta?.truncation).toMatchObject({ partialLine: true, shownRange: { start: 1, end: 1 } });
 		expect(result.details?.meta?.truncation?.nextOffset).toBeUndefined();
 	});

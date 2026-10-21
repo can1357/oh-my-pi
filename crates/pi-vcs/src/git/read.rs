@@ -544,7 +544,7 @@ impl GitRepo {
 		}
 		let repo = self.gix()?;
 		let mut out = Vec::new();
-		for id in self.walk_commit_ids("HEAD")?.into_iter().take(count) {
+		for id in self.walk_commit_ids("HEAD", count)? {
 			let commit = repo
 				.find_commit(id)
 				.map_err(|err| Error::backend("git log", err))?;
@@ -565,7 +565,7 @@ impl GitRepo {
 		}
 		let mut out = Vec::new();
 		let repo = self.gix()?;
-		for id in self.walk_commit_ids("HEAD")?.into_iter().take(count) {
+		for id in self.walk_commit_ids("HEAD", count)? {
 			let commit = repo
 				.find_commit(id)
 				.map_err(|err| Error::backend("git log", err))?;
@@ -657,7 +657,7 @@ impl GitRepo {
 		}
 		let mut out = Vec::new();
 		let repo = self.gix()?;
-		for id in self.walk_commit_ids(rev)? {
+		for id in self.walk_commit_ids(rev, usize::MAX)? {
 			let commit = repo
 				.find_commit(id)
 				.map_err(|err| Error::backend("git rev-list", err))?;
@@ -1017,7 +1017,10 @@ impl GitRepo {
 		Ok(None)
 	}
 
-	fn walk_commit_ids(&self, rev: &str) -> Result<Vec<gix::ObjectId>> {
+	/// The first `limit` commits reachable from `rev`, newest first. Like
+	/// `git log -n<limit>`, the walk stops there, so older history is never
+	/// read.
+	fn walk_commit_ids(&self, rev: &str, limit: usize) -> Result<Vec<gix::ObjectId>> {
 		let repo = self.gix()?;
 		let id = repo
 			.rev_parse_single(rev)
@@ -1030,6 +1033,7 @@ impl GitRepo {
 			))
 			.all()
 			.map_err(|err| Error::backend("git rev-list", err))?
+			.take(limit)
 			.map(|item| {
 				item
 					.map(|info| info.id)
@@ -1364,6 +1368,42 @@ mod tests {
 		fs::write(cwd.join(name), contents)?;
 		git(cwd, &["add", name])?;
 		git(cwd, &["commit", "-m", subject])?;
+		Ok(())
+	}
+
+	#[test]
+	fn bounded_logs_read_only_the_requested_prefix_like_git_log() -> TestResult {
+		let (dir, repo) = repo()?;
+		commit(dir.path(), "one", "one\n", "first")?;
+		let first = repo.head_sha()?.ok_or("missing HEAD")?;
+		commit(dir.path(), "two", "two\n", "second")?;
+		commit(dir.path(), "three", "three\n", "third")?;
+		assert_eq!(repo.log_subjects(1)?, ["third"]);
+		assert!(repo.log_subjects(0)?.is_empty());
+		assert!(repo.log_onelines(0)?.is_empty());
+		assert_eq!(
+			repo.log_onelines(1)?,
+			git(dir.path(), &["log", "-1", "--oneline", "--no-decorate"])?
+				.lines()
+				.map(str::to_owned)
+				.collect::<Vec<_>>()
+		);
+		fs::remove_file(
+			dir.path()
+				.join(".git/objects")
+				.join(&first[..2])
+				.join(&first[2..]),
+		)?;
+		// A fresh handle cannot satisfy the missing ancestor from an object
+		// cache. A prefix that stops before it never reads it, as `git log -1`
+		// does not; a walk that reaches it reports it.
+		let repo = GitRepo::require(dir.path())?;
+		assert_eq!(repo.log_subjects(1)?, ["third"]);
+		assert_eq!(repo.log_onelines(1)?.len(), 1);
+		assert!(repo.log_subjects(0)?.is_empty());
+		for result in [repo.log_subjects(3), repo.log_onelines(3)] {
+			assert!(matches!(result, Err(Error::Backend { context: "git rev-list", .. })));
+		}
 		Ok(())
 	}
 

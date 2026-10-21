@@ -61,7 +61,8 @@ export function buildArgumentCompletions(
  * offer only what the active model exposes: suggesting a tier the model lacks
  * (e.g. `xhigh` on a model capped at `high`) would make the handler answer the
  * accepted completion with `Unknown thinking level`. Returns null for a model
- * with no reasoning dial — there is nothing to pick.
+ * with no reasoning dial — there is nothing to pick. Reads the viewed session,
+ * which `/effort` targets from a focused subagent.
  */
 export function buildEffortArgumentCompletions(
 	runtime: TuiSlashCommandRuntime,
@@ -69,8 +70,9 @@ export function buildEffortArgumentCompletions(
 	return (argumentPrefix: string) => {
 		if (argumentPrefix.includes(" ")) return null;
 		const lower = argumentPrefix.toLowerCase();
-		const current = runtime.ctx.session.configuredThinkingLevel();
-		const matches = runtime.ctx.session
+		const session = runtime.ctx.viewSession;
+		const current = session.configuredThinkingLevel();
+		const matches = session
 			.getAvailableEffortSelectors()
 			.filter(level => level.startsWith(lower))
 			.map(level => {
@@ -93,7 +95,7 @@ export function buildEffortInlineHint(runtime: TuiSlashCommandRuntime): (argumen
 	return (argumentText: string) => {
 		const prefix = argumentText.trimStart().toLowerCase();
 		if (prefix.length === 0 || prefix.includes(" ")) return null;
-		const match = runtime.ctx.session.getAvailableEffortSelectors().find(level => level.startsWith(prefix));
+		const match = runtime.ctx.viewSession.getAvailableEffortSelectors().find(level => level.startsWith(prefix));
 		return match && match !== prefix ? match.slice(prefix.length) : null;
 	};
 }
@@ -311,40 +313,39 @@ export function buildModelSelectorCompletions(
 	};
 }
 
+/** Trailing path separator: `/` everywhere, `\` too on Windows. */
+const TRAILING_SEPARATOR = process.platform === "win32" ? /[\\/]$/ : /\/$/;
+/** A path whose last segment is `.` or `..` (or a bare `~`) names a directory without listing it. */
+const UNTERMINATED_DIRECTORY = process.platform === "win32" ? /(?:^|[\\/])\.{1,2}$|^~$/ : /(?:^|\/)\.{1,2}$|^~$/;
+
 /**
  * Build getArgumentCompletions that suggests directories relative to the
  * current project directory. Used by /move so users can Tab-complete the
  * destination directory.
+ *
+ * Tab accepts the highlighted suggestion, so only a prefix that ends in a
+ * separator lists the directory's children. A prefix naming a directory
+ * without one (`..`, `~`, `foo/.`) completes the separator first; otherwise
+ * Tab would jump straight into the first child.
  */
 export function buildDirectoryArgumentCompletions(): (prefix: string) => Promise<AutocompleteItem[] | null> {
 	return async (argumentPrefix: string) => {
 		const prefix = argumentPrefix.trim();
+		if (UNTERMINATED_DIRECTORY.test(prefix)) return [{ value: `${prefix}/`, label: `${prefix}/` }];
 
 		const cwd = getProjectDir();
 		const expandedPrefix = expandTilde(prefix);
 		const isAbsolute = path.isAbsolute(expandedPrefix);
+		const resolvedPrefix = isAbsolute ? expandedPrefix : path.join(cwd, expandedPrefix);
 
 		let searchDir: string;
 		let searchPrefix: string;
-		if (
-			prefix === "" ||
-			prefix === "." ||
-			prefix === "./" ||
-			prefix === ".." ||
-			prefix === "../" ||
-			prefix === "~" ||
-			prefix === "~/" ||
-			prefix === "/"
-		) {
-			searchDir = isAbsolute ? expandedPrefix : path.join(cwd, expandedPrefix);
-			searchPrefix = "";
-		} else if (expandedPrefix.endsWith("/")) {
-			searchDir = isAbsolute ? expandedPrefix : path.join(cwd, expandedPrefix);
+		if (prefix === "" || TRAILING_SEPARATOR.test(prefix)) {
+			searchDir = resolvedPrefix;
 			searchPrefix = "";
 		} else {
-			const dir = path.dirname(expandedPrefix);
-			searchDir = isAbsolute ? dir : path.join(cwd, dir);
-			searchPrefix = path.basename(expandedPrefix);
+			searchDir = path.dirname(resolvedPrefix);
+			searchPrefix = path.basename(resolvedPrefix);
 		}
 
 		try {
@@ -365,7 +366,7 @@ export function buildDirectoryArgumentCompletions(): (prefix: string) => Promise
 				if (!isDirectory) continue;
 
 				const absoluteValue = path.join(searchDir, entry.name);
-				const displayValue = buildDirectoryCompletionDisplayValue(prefix, absoluteValue, cwd);
+				const displayValue = buildDirectoryCompletionDisplayValue(prefix, isAbsolute, absoluteValue, cwd);
 				suggestions.push({ value: displayValue, label: `${entry.name}/` });
 			}
 			suggestions.sort((a, b) => a.label.localeCompare(b.label));
@@ -375,38 +376,26 @@ export function buildDirectoryArgumentCompletions(): (prefix: string) => Promise
 		}
 	};
 }
-function buildDirectoryCompletionDisplayValue(prefix: string, absoluteValue: string, cwd: string): string {
+function buildDirectoryCompletionDisplayValue(
+	prefix: string,
+	isAbsolute: boolean,
+	absoluteValue: string,
+	cwd: string,
+): string {
 	// Preserve the user's prefix style where possible, but always return a
 	// value that /move can resolve (absolute or relative) without escaping.
 	const normalized = path.normalize(absoluteValue);
 
-	if (prefix.startsWith("~/")) {
-		const home = os.homedir();
-		const homeRelative = path.relative(home, normalized);
+	if (prefix === "~" || prefix.startsWith("~/")) {
+		const homeRelative = path.relative(os.homedir(), normalized);
 		return `~/${homeRelative.replaceAll("\\", "/")}/`;
 	}
-	if (prefix === "~") {
-		const home = os.homedir();
-		const homeRelative = path.relative(home, normalized);
-		return `~/${homeRelative.replaceAll("\\", "/")}/`;
-	}
-	if (prefix.startsWith("/")) {
+	// Absolute stays absolute, including Windows drive paths (`C:/…`, `C:\…`).
+	if (isAbsolute) {
 		return `${normalized.replaceAll("\\", "/")}/`;
 	}
-	if (prefix.startsWith("./")) {
-		const relative = path.relative(cwd, normalized);
-		return `./${relative.replaceAll("\\", "/")}/`;
-	}
-	if (prefix.startsWith("../")) {
-		const relative = path.relative(cwd, normalized);
-		return `${relative.replaceAll("\\", "/")}/`;
-	}
-	if (prefix === "..") {
-		const relative = path.relative(cwd, normalized);
-		return `${relative.replaceAll("\\", "/")}/`;
-	}
-
-	// Default: relative to cwd.
-	const relative = path.relative(cwd, normalized);
-	return `${relative.replaceAll("\\", "/")}/`;
+	const relative = path.relative(cwd, normalized).replaceAll("\\", "/");
+	// The project directory itself: `""` would render as `/`, the filesystem root.
+	if (relative === "") return "./";
+	return prefix.startsWith("./") ? `./${relative}/` : `${relative}/`;
 }

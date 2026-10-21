@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { networkFailureMessage } from "@oh-my-pi/pi-ai/error";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -15,6 +16,7 @@ import {
 	modelsAreEqual,
 } from "@oh-my-pi/pi-catalog/models";
 import { Type as TypeBoxShimType } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-typebox";
+import { isRetryableAssistantError } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-ai-shim";
 import {
 	__resetLegacyPiResolutionCache,
 	installLegacyPiSpecifierShim,
@@ -467,5 +469,58 @@ it("runs the legacy pi-ai compat `complete` export with SoL-Pi's reducer call sh
 		cacheRetention: "none",
 		maxTokens: 321,
 		sessionId: "sol-pi-run",
+	});
+});
+
+describe("legacy isRetryableAssistantError network-failure wording", () => {
+	function erroredTurn(errorMessage: string): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			errorMessage,
+			timestamp: Date.now(),
+		};
+	}
+
+	// Each row is a distinct transport failure family; a legacy extension that
+	// stops restarting any of them regressed against the old `Connection error.`.
+	it.each([
+		[
+			"offline",
+			new TypeError("fetch failed", {
+				cause: Object.assign(new Error("connect ENETUNREACH 1.2.3.4:443"), { code: "ENETUNREACH" }),
+			}),
+		],
+		["unreachable", Object.assign(new Error("Was there a typo in the url or port?"), { code: "FailedToOpenSocket" })],
+		[
+			"refused",
+			new TypeError("fetch failed", {
+				cause: new AggregateError([
+					Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8080"), { code: "ECONNREFUSED" }),
+				]),
+			}),
+		],
+		[
+			"tls",
+			Object.assign(new Error("unable to verify the first certificate"), {
+				code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+			}),
+		],
+	])("restarts a turn that failed with the %s sentence", (kind, cause) => {
+		const message = networkFailureMessage(cause, "https://api.anthropic.com/v1/messages");
+		if (message === undefined) throw new Error(`Expected a ${kind} network-failure sentence`);
+		expect(isRetryableAssistantError(erroredTurn(message))).toBe(true);
 	});
 });

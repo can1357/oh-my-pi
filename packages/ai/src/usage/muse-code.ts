@@ -1,11 +1,25 @@
 import * as AIError from "../error";
 import { parseMuseCodeCredential, requestMuseCodeKey, type MuseCodeKeyResponse } from "../registry/oauth/muse-code";
-import type { UsageAmount, UsageFetchParams, UsageLimit, UsageProvider, UsageReport, UsageWindow } from "../usage";
+import {
+	resolveUsedFraction,
+	type UsageAmount,
+	type UsageFetchParams,
+	type UsageLimit,
+	type UsageProvider,
+	type UsageReport,
+	type UsageWindow,
+} from "../usage";
 import { parseIsoTimestamp, parsePositiveTimestamp, usageStatus, WEEK_MS } from "./shared";
 
 const PROVIDER = "muse-code";
 const SOURCE = "api.meta.ai/muse-code/key";
 const FAILURE_BACKOFF_MS = 5 * 60_000;
+const WEEKLY_ID = "1w";
+/** Limit ids `rollingWindow()` produces: `<minutes>m`, or `rolling` when Meta names no duration. */
+const ROLLING_ID = /^(?:rolling|\d+m)$/;
+/** Meta's documented rolling window, used when no earlier report names one. */
+const DEFAULT_ROLLING_MINUTES = 300;
+type MuseCodeSubscriptionUsage = NonNullable<MuseCodeKeyResponse["subs_usage"]>;
 
 function parseResetTimestamp(value: string | number | undefined): number | undefined {
 	return typeof value === "string" ? parseIsoTimestamp(value) : parsePositiveTimestamp(value);
@@ -24,6 +38,27 @@ function percentAmount(usedPercent: number): UsageAmount {
 	};
 }
 
+function percentLimit(
+	id: string,
+	label: string,
+	usedPercent: number,
+	window: UsageWindow,
+	tier: string | undefined,
+	accountId: string | undefined,
+	notes?: string[],
+): UsageLimit {
+	const amount = percentAmount(usedPercent);
+	return {
+		id,
+		label,
+		scope: { provider: PROVIDER, accountId, tier, windowId: window.id, shared: true },
+		window,
+		amount,
+		status: usageStatus(amount.usedFraction),
+		...(notes ? { notes } : {}),
+	};
+}
+
 function buildLimit(
 	id: string,
 	label: string,
@@ -33,15 +68,7 @@ function buildLimit(
 	accountId: string | undefined,
 ): UsageLimit | undefined {
 	if (typeof usedPercent !== "number" || !Number.isFinite(usedPercent) || usedPercent < 0) return undefined;
-	const amount = percentAmount(usedPercent);
-	return {
-		id,
-		label,
-		scope: { provider: PROVIDER, accountId, tier, windowId: window.id, shared: true },
-		window,
-		amount,
-		status: usageStatus(amount.usedFraction),
-	};
+	return percentLimit(id, label, usedPercent, window, tier, accountId);
 }
 
 function formatRollingWindowLabel(minutes: number | undefined): string {
@@ -53,29 +80,27 @@ function formatRollingWindowLabel(minutes: number | undefined): string {
 	return `${minutes} ${minutes === 1 ? "Minute" : "Minutes"}`;
 }
 
-function buildLimits(payload: MuseCodeKeyResponse, accountId: string | undefined): UsageLimit[] {
-	const usage = payload.subs_usage;
-	if (!usage) return [];
-	const tier = payload.subs_tier_name?.trim() || payload.subs_tier_id?.trim() || undefined;
+function rollingWindow(minutes: number | undefined): UsageWindow {
+	const valid = typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0;
+	const durationMs = valid ? minutes * 60_000 : undefined;
+	const label = formatRollingWindowLabel(valid ? Math.round(minutes) : undefined);
+	const id = durationMs === undefined ? "rolling" : `${Math.round(durationMs / 60_000)}m`;
+	return { id, label, durationMs };
+}
+
+function buildLimits(
+	usage: MuseCodeSubscriptionUsage,
+	tier: string | undefined,
+	accountId: string | undefined,
+): UsageLimit[] {
 	const limits: UsageLimit[] = [];
 	if (usage.window) {
-		const minutes = usage.window.window_duration_mins;
-		const durationMs =
-			typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : undefined;
-		const label = formatRollingWindowLabel(
-			typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0 ? Math.round(minutes) : undefined,
-		);
-		const id = durationMs === undefined ? "rolling" : `${Math.round(durationMs / 60_000)}m`;
+		const window = rollingWindow(usage.window.window_duration_mins);
 		const limit = buildLimit(
-			id,
-			label,
+			window.id,
+			window.label,
 			usage.window.used_percent,
-			{
-				id,
-				label,
-				durationMs,
-				resetsAt: parseResetTimestamp(usage.window.resets_at),
-			},
+			{ ...window, resetsAt: parseResetTimestamp(usage.window.resets_at) },
 			tier,
 			accountId,
 		);
@@ -83,11 +108,11 @@ function buildLimits(payload: MuseCodeKeyResponse, accountId: string | undefined
 	}
 	if (usage.weekly) {
 		const limit = buildLimit(
-			"1w",
+			WEEKLY_ID,
 			"Weekly",
 			usage.weekly.used_percent,
 			{
-				id: "1w",
+				id: WEEKLY_ID,
 				label: "Weekly",
 				durationMs: WEEK_MS,
 				resetsAt: parseResetTimestamp(usage.weekly.resets_at),
@@ -97,6 +122,54 @@ function buildLimits(payload: MuseCodeKeyResponse, accountId: string | undefined
 		);
 		if (limit) limits.push(limit);
 	}
+	return limits;
+}
+
+/**
+ * Limits for a key response that omits `subs_usage`, which Meta does while the
+ * rolling window is idle: no request has opened one, so it is unused. Weekly
+ * usage only accrues inside a rolling window, so the previous report's weekly
+ * figure holds until its reset and is zero after it. The carried figure is a
+ * lower bound: usage after that report (late in its window, or from another
+ * client on the same subscription) is not visible. Meta's weekly reset is a
+ * fixed weekly boundary (observed at Monday 00:00 UTC), so a passed reset rolls
+ * forward by whole weeks. Without a previous weekly figure and its reset the
+ * weekly limit stays unreported: an unbounded carry would present old usage as
+ * current forever.
+ */
+function buildIdleLimits(
+	previous: UsageReport | undefined,
+	tier: string | undefined,
+	accountId: string | undefined,
+	now: number,
+): UsageLimit[] {
+	const previousRolling = previous?.limits.find(limit => ROLLING_ID.test(limit.id));
+	const shape = previousRolling?.window ?? rollingWindow(DEFAULT_ROLLING_MINUTES);
+	const window: UsageWindow = { id: shape.id, label: shape.label, durationMs: shape.durationMs };
+	const limits = [
+		percentLimit(window.id, window.label, 0, window, tier, accountId, ["Idle: no request has opened this window"]),
+	];
+	const previousWeekly = previous?.limits.find(limit => limit.id === WEEKLY_ID);
+	const usedFraction = previousWeekly ? resolveUsedFraction(previousWeekly) : undefined;
+	let resetsAt = previousWeekly?.window?.resetsAt;
+	if (usedFraction === undefined || resetsAt === undefined) return limits;
+	const reset = resetsAt <= now;
+	if (reset) resetsAt += (Math.floor((now - resetsAt) / WEEK_MS) + 1) * WEEK_MS;
+	limits.push(
+		percentLimit(
+			WEEKLY_ID,
+			"Weekly",
+			reset ? 0 : usedFraction * 100,
+			{ id: WEEKLY_ID, label: "Weekly", durationMs: WEEK_MS, resetsAt },
+			tier,
+			accountId,
+			[
+				reset
+					? "Reset since the last reported usage"
+					: "Carried from the last reported usage; later usage not visible",
+			],
+		),
+	);
 	return limits;
 }
 
@@ -137,14 +210,27 @@ export const museCodeUsageProvider: UsageProvider = {
 		}
 		const email = payload.user_email?.trim().toLowerCase() || params.credential.email;
 		const accountId = payload.user_id?.trim() || params.credential.accountId || email;
-		const limits = buildLimits(payload, accountId);
+		const tier = payload.subs_tier_name?.trim() || payload.subs_tier_id?.trim() || undefined;
+		const now = Date.now();
+		// Payment-required responses omit `subs_usage` too; only an explicitly
+		// active subscription with no payment demand or action means an idle window.
+		const idle =
+			payload.is_subs_active === true &&
+			payload.require_payment !== true &&
+			!payload.require_payment_action_url?.trim() &&
+			!payload.action_url?.trim();
+		const limits = payload.subs_usage
+			? buildLimits(payload.subs_usage, tier, accountId)
+			: idle
+				? buildIdleLimits(ctx.previousReport, tier, accountId, now)
+				: [];
 		if (limits.length === 0) return null;
 		const raw = { ...payload };
 		delete raw.api_key;
 
 		return {
 			provider: PROVIDER,
-			fetchedAt: Date.now(),
+			fetchedAt: now,
 			limits,
 			metadata: {
 				source: SOURCE,

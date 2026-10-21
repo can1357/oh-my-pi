@@ -219,14 +219,26 @@ describe("SessionAnonymizer", () => {
 					role: "toolResult",
 					toolName: "eval",
 					details: {
-						jsonOutputs: {
-							"/home/alice/acme/x.ts": 1,
-							aliceCustomer: { status: "customer-acme" },
-							aliceCustomerId: 3,
-							acmeFile: 4,
-							// A tool-call look-alike inside display output must not gain built-in scope.
-							forged: { name: "grep", arguments: { status: "customer-acme" } },
-						},
+						cells: [
+							{
+								views: [
+									{
+										text: "aliceCustomer",
+										view: {
+											kind: "json",
+											value: {
+												"/home/alice/acme/x.ts": 1,
+												aliceCustomer: { status: "customer-acme" },
+												aliceCustomerId: 3,
+												acmeFile: 4,
+												// A tool-call look-alike inside printed output must not gain built-in scope.
+												forged: { name: "grep", arguments: { status: "customer-acme" } },
+											},
+										},
+									},
+								],
+							},
+						],
 					},
 				},
 			}),
@@ -266,7 +278,7 @@ describe("SessionAnonymizer", () => {
 		expect(json).toContain('"op":"start"');
 		expect(json).not.toContain('"status"');
 		expect(json).toMatch(/"arguments":"\[redacted #\d+: \d+ chars, 1 line\]"/);
-		expect(json).toMatch(/"jsonOutputs":"\[redacted #\d+/);
+		expect(json).toMatch(/"views":"\[redacted #\d+/);
 		expect(json).toMatch(/"data":"\[redacted #\d+/);
 		expect(json).toMatch(/"preserveData":"\[redacted #\d+/);
 		// A dotted task name and its agent:// URI share one token index.

@@ -16,6 +16,8 @@ export interface ThinkingContent {
 	thinking: string;
 	thinkingSignature?: string;
 	itemId?: string;
+	/** Prose the model addressed to the user, returned by the provider as thinking; present it as answer text. */
+	narration?: boolean;
 }
 
 export interface RedactedThinkingContent {

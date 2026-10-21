@@ -12,6 +12,10 @@ provider "xai-oauth" {
 	// api.x.ai rejects a body over 50 MiB and counts images only against the
 	// context window; 60 images at the 500 KiB resize target stay near 41 MB.
 	image-count-budget 60
+	// Public xAI prices are API-equivalent estimates for stats; SuperGrok
+	// requests stay subscription-backed, so the estimated long-context tier
+	// must not cap the runtime context window.
+	long-context-window-uncapped #true
 
 	// Source of truth for the xai-oauth chat picker. Declaration order is headline order.
 	// Context windows from hermes-agent/agent/model_metadata.py:205-220

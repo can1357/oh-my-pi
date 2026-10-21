@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { applyHyperlinkSetting } from "../src/render/hyperlink";
@@ -283,5 +284,31 @@ describe("readToolRenderer success-path sanitization", () => {
 		expect(raw).not.toContain("\t");
 		expect(raw).not.toContain("\r");
 		expect(Bun.stripANSI(raw)).toContain("a");
+	});
+
+	it("shortens the home directory in resolved path notices", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+
+		const notesPath = path.join(os.homedir(), "notes.txt");
+		const component = readToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "note contents" }],
+				details: {
+					resolvedPath: notesPath,
+					displayContent: { text: "note contents", startLine: 1 },
+					contentType: "text/plain",
+				},
+			},
+			{ expanded: false, isPartial: false },
+			theme!,
+			{ path: "local://notes.txt" },
+		);
+
+		const rendered = Bun.stripANSI(component.render(100).join("\n"));
+		// `shortenPath` normalizes separators to `/`, so the notice reads the same
+		// on Windows.
+		expect(rendered).toContain("Resolved path: ~/notes.txt");
+		expect(rendered).not.toContain(os.homedir());
 	});
 });

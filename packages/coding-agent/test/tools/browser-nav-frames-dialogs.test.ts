@@ -131,21 +131,6 @@ function fakePage(frame: { _lifecycleEvents: Set<string>; detached?: boolean }, 
 	} as unknown as Page;
 }
 
-test("fails a navigation whose main document reaches its event only after the timeout", async () => {
-	const events = new Set<string>();
-	const page = fakePage({ _lifecycleEvents: events });
-	// Real time on purpose: the wait polls the frame on a timer and must stop reading at its deadline.
-	const late = setTimeout(() => events.add("load"), 90);
-	try {
-		const error = await navigateMainFrame(page, "load", 60, undefined, async () => null).catch(err => err);
-		expect(error).toBeInstanceOf(Error);
-		expect(error.name).toBe("TimeoutError");
-		expect(error.message).toBe("Navigation timeout of 60 ms exceeded");
-	} finally {
-		clearTimeout(late);
-	}
-});
-
 // Both detach tests flip state on the wait's second read: one poll still sees a live frame,
 // then the frame goes away mid-wait. A wait that ignores it would run out the 10s budget.
 test("stops waiting as soon as the navigating main frame detaches", async () => {

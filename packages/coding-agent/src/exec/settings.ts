@@ -79,6 +79,9 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 
 export const cfgShellPath = register({ id: "shellPath", type: "string", default: undefined });
 
+/** Pi shell command prefix forwarded to legacy extensions; OMP's native shell does not apply it. */
+export const cfgLegacyShellCommandPrefix = register({ id: "shellCommandPrefix", type: "string", default: undefined });
+
 export const cfgBashEnabled = register({
 	id: "bash.enabled",
 	type: "boolean",

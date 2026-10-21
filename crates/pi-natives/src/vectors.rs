@@ -206,14 +206,14 @@ const fn is_js_whitespace(c: char) -> bool {
 /// Returned sorted and deduplicated for merge-based intersection counting.
 fn word_set(text: &str) -> Vec<Box<str>> {
 	let lower = text.to_lowercase();
-	let mut words: Vec<Box<str>> = lower
+	let mut words: Vec<&str> = lower
 		.split(is_js_whitespace)
 		.filter(|w| !w.is_empty())
-		.map(Box::from)
 		.collect();
 	words.sort_unstable();
 	words.dedup();
-	words
+	// Only distinct words need owned storage after `lower` is dropped.
+	words.into_iter().map(Box::from).collect()
 }
 
 /// Jaccard similarity of two sorted, deduplicated word sets. Matches the TS

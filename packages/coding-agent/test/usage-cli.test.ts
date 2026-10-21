@@ -10,6 +10,7 @@ import {
 	type UsageResetCredit,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, RemoteAuthCredentialStore, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir, withFileLock } from "@oh-my-pi/pi-utils";
 import {
 	buildRedactionMap,
@@ -569,7 +570,7 @@ describe("formatUsageBreakdown", () => {
 		expect(text).not.toContain("policy:");
 	});
 
-	it("shows an explicit priority and reserve override with the observed eligibility reason", () => {
+	it("shows an explicit priority, reserve override and reclaim line with the observed eligibility reason", () => {
 		const report = makeReport("openai-codex", "protected@example.test", [
 			makeLimit({
 				id: "5h",
@@ -588,6 +589,7 @@ describe("formatUsageBreakdown", () => {
 							account: { email: "protected@example.test" },
 							priority: 100,
 							reservePct: 50,
+							reclaimAbovePct: 70,
 						}
 					: undefined,
 		};
@@ -596,7 +598,9 @@ describe("formatUsageBreakdown", () => {
 			formatUsageBreakdown([report], [], Date.now(), undefined, [], policyOptions),
 		);
 
-		expect(text).toContain("policy: priority 100 · reserve 50% (override) · eligible · 80.0% left");
+		expect(text).toContain(
+			"policy: priority 100 · reserve 50% (override) · reclaim above 70% · eligible · 80.0% left",
+		);
 	});
 
 	it("shows the inherited global reserve for an unconfigured sibling in a policy-enabled provider", () => {
@@ -1824,6 +1828,8 @@ describe("omp usage reset", () => {
 			else process.env[key] = value;
 		}
 		__resetDirsFromEnvForTests();
+		// The command's ModelRegistry opened `<agentDir>/models.db`; Windows cannot delete it while open.
+		closeModelCache();
 		tempDir.removeSync();
 	});
 

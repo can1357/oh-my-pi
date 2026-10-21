@@ -85,8 +85,10 @@ pub struct DesktopCapabilities {
 	pub menus: bool,
 	pub held_input: bool,
 	pub spaces: bool,
-	/// Native global Escape cancellation while input/control ownership is held.
-	/// Wayland requires the host interrupt action instead.
+	/// Native global Escape cancellation of takeover input (`takeover: true`,
+	/// held control, desktop/display-level input, raises, activating launches).
+	/// Without held control, background window input never watches the user's
+	/// keys; it and Wayland stop only through the host interrupt.
 	pub global_escape: bool,
 	pub capture_permission: String,
 	pub input_permission: String,
@@ -151,7 +153,10 @@ impl ScreenState {
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct DesktopSessionOptions {
-	pub display: Option<String>,
+	pub display:         Option<String>,
+	/// Sessions created with the same key share one physical-Escape stop
+	/// count, which `desktopEscapeStops` reads after they close.
+	pub escape_stop_key: Option<String>,
 }
 
 #[napi(object)]
@@ -174,24 +179,58 @@ pub struct CaptureRegion {
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct PointerOptions {
-	pub button:    Option<String>,
-	pub count:     Option<u32>,
-	pub modifiers: Option<Vec<String>>,
+	pub button:       Option<String>,
+	pub count:        Option<u32>,
+	pub modifiers:    Option<Vec<String>>,
 	/// Arbitrary keys held for the duration of a drag.
-	pub keys:      Option<Vec<String>>,
+	pub keys:         Option<Vec<String>>,
 	/// Briefly activate the target window and post real input instead of the
 	/// default background delivery.
-	pub takeover:  Option<bool>,
+	pub takeover:     Option<bool>,
+	/// With `takeover`, hand focus back to the user's app even if they typed
+	/// or clicked during the action; only a third app they switched to keeps
+	/// it. The host sets this when it reruns a refused background action.
+	pub return_focus: Option<bool>,
+	/// Item path to choose in the menu a click opens, matched like a menu-bar
+	/// path, e.g. a context menu's `["Add to", "Fonts"]`; the call opens the
+	/// menu, presses the item and returns with the menu closed.
+	pub menu:         Option<Vec<String>>,
+	/// Refuse a background left click that lands on a control that opens a
+	/// menu (on macOS a menu button or popup button), or a drag that starts on
+	/// one, with `BackgroundUnavailable` before anything is sent. The host sets
+	/// this when the user refuses foreground takeover: an open menu takes their
+	/// keyboard.
+	pub refuse_menu:  Option<bool>,
 }
 
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct HoldOptions {
 	/// Duration in seconds, from zero through 100.
-	pub duration: f64,
-	pub button:   Option<String>,
-	pub keys:     Option<Vec<String>>,
-	pub takeover: Option<bool>,
+	pub duration:     f64,
+	pub button:       Option<String>,
+	pub keys:         Option<Vec<String>>,
+	pub takeover:     Option<bool>,
+	/// With `takeover`, hand focus back to the user's app even after their
+	/// input during the hold; see `PointerOptions.returnFocus`.
+	pub return_focus: Option<bool>,
+	/// Refuse a background left hold that starts on a control that opens a
+	/// menu; see `PointerOptions.refuseMenu`.
+	pub refuse_menu:  Option<bool>,
+}
+
+/// Where focus ended after a takeover input call, as `WindowServer` reports
+/// it. Input calls resolve to it on macOS when they took over; other
+/// backends and background delivery resolve to `null`.
+#[napi(object)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopFocusReturn {
+	/// Whether the takeover handed focus back to the app front before it.
+	pub handed_back:  bool,
+	/// The process front before the takeover.
+	pub previous_pid: Option<u32>,
+	/// The process front once the takeover ended; absent when unreadable.
+	pub front_pid:    Option<u32>,
 }
 
 #[napi(object)]
@@ -256,6 +295,31 @@ pub struct AxQuery {
 	pub title: Option<String>,
 	pub value: Option<String>,
 	pub limit: Option<u32>,
+}
+
+/// Where `axSelectText` looks for its text and what it selects there.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct AxSelectTextOptions {
+	/// Text that must directly precede the match.
+	pub prefix: Option<String>,
+	/// Text that must directly follow the match.
+	pub suffix: Option<String>,
+	/// `text` (default) selects the match; `start` and `end` place a caret.
+	pub select: Option<String>,
+}
+
+/// The selection read back after `axSelectText`, in UTF-16 code units.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct AxTextSelection {
+	pub start:   u32,
+	pub length:  u32,
+	/// The selected text, empty for a caret.
+	pub text:    String,
+	/// Whether the element is focused in its app: typing and AX insertion
+	/// act on the focused element.
+	pub focused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

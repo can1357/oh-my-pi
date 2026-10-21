@@ -10,7 +10,7 @@ async function runPrelude(
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
 	const prelude = PYTHON_PRELUDE.replace(
 		"from __future__ import annotations",
-		"from __future__ import annotations\n__omp_display = lambda *args, **kwargs: None",
+		"from __future__ import annotations\n__omp_emit_status = __omp_emit_image = lambda *args, **kwargs: None",
 	);
 	const script = `${prelude}\n${code}`;
 	// The full prelude exceeds Windows' ~32k `python -c` command-line limit

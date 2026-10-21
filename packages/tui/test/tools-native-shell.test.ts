@@ -575,7 +575,7 @@ describe("eval native run boxes", () => {
 		expect(preview?.k).toBe("code");
 		expect(props(preview)).toMatchObject({
 			role: "omp.tool.eval.status.preview",
-			lang: "typescript",
+			path: "src/rollup.ts",
 			wrap: false,
 			preview: { lines: 3 },
 		});
@@ -586,32 +586,72 @@ describe("eval native run boxes", () => {
 		expect(spansText(log)).toBe("log message=first second");
 	});
 
-	it("renders console.table values without losing surrounding output", () => {
-		const table = [
-			"┌─────────┬────┬─────┐",
-			"│ (index) │ a  │  b  │",
-			"├─────────┼────┼─────┤",
-			"│    0    │ 1  │ 'x' │",
-			"│    1    │ 22 │     │",
-			"└─────────┴────┴─────┘",
-		].join("\n");
+	it("shows a table view in place of its printed text, numeric columns aligned to the end", () => {
+		const dfText = "   name  n\n0  a     1\n1  bb   22";
 		const view = evalToolRenderer.describeResult(
 			{
 				content: [{ type: "text", text: "" }],
 				details: {
-					cells: [cell({ code: "console.table(rows)", language: "js", output: `before\n${table}\nafter` })],
+					cells: [
+						cell({
+							code: "print('rows:'); print(df); print('done')",
+							output: `rows:\n${dfText}\ndone\n`,
+							views: [
+								{
+									text: dfText,
+									view: {
+										kind: "table",
+										columns: [{ head: "" }, { head: "name" }, { head: "n", numeric: true }],
+										rows: [
+											["0", "a", "1"],
+											["1", "bb", "22"],
+										],
+									},
+								},
+							],
+						}),
+					],
 				},
 			},
 			done,
 		);
-		expect(collect(view.body, "ansi").map(output => props(output).text)).toEqual(["before", "after"]);
-		const tableNode = collect(view.body, "table")[0];
+		const [box] = nodes(view.body);
+		const outputs = nodes(box?.c).filter(child => child.k === "ansi" || child.k === "table");
+		expect(outputs.map(child => child.k)).toEqual(["ansi", "table", "ansi"]);
+		expect(props(outputs[0]).text).toBe("rows:");
+		expect(props(outputs[2]).text).toBe("done");
+		const tableNode = outputs[1];
 		if (tableNode?.k !== "table") throw new Error("Expected a native table");
-		expect(tableNode.p?.cols.map(col => col.head)).toEqual(["", "a", "b"]);
-		expect(tableNode.p?.rows.map(row => Object.values(row.cells))).toEqual([
-			["0", "1", "'x'"],
-			["1", "22", ""],
+		expect(tableNode.p?.cols.map(col => [col.head, col.align])).toEqual([
+			["", undefined],
+			["name", undefined],
+			["n", "end"],
 		]);
+		expect(tableNode.p?.rows.map(row => Object.values(row.cells))).toEqual([
+			["0", "a", "1"],
+			["1", "bb", "22"],
+		]);
+	});
+
+	it("shows a json view as a tree in place of its printed text", () => {
+		const printed = "{'alpha': 1, 'beta': [1, 2, 3]}";
+		const view = evalToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					cells: [
+						cell({
+							output: `${printed}\n`,
+							views: [{ text: printed, view: { kind: "json", value: { alpha: 1, beta: [1, 2, 3] } } }],
+						}),
+					],
+				},
+			},
+			done,
+		);
+		const [box] = nodes(view.body);
+		expect(collect(box?.c, "ansi")).toHaveLength(0);
+		expect(collect(box?.c, "tree")).toHaveLength(1);
 	});
 });
 

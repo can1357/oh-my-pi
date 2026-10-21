@@ -6,6 +6,100 @@
 
 - Added `PI_LINK_SCHEME` and `PI_LINK_HOST` environment variables for host-qualified OSC 8 file links in remote terminal sessions ([#15497](https://github.com/can1357/oh-my-pi/issues/15497), [#15855](https://github.com/can1357/oh-my-pi/pull/15855) by [@KunoLu](https://github.com/KunoLu)).
 
+## [18.12.4] - 2026-10-20
+
+### Added
+
+- Added `mergeLineRanges` and an optional `BareLineMode` argument to `parseLineRanges` (`"single"` reads a lone bare `N` as that one line) ([#16435](https://github.com/can1357/oh-my-pi/pull/16435) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- `selectorLineRanges()` reads a bare `N` compounded with `raw` (`17:raw`, `raw:17`) as the single line `N`; `parseLineRanges()` takes an optional `"single"` mode for the same rule ([#16438](https://github.com/can1357/oh-my-pi/pull/16438) by [@will-bogusz](https://github.com/will-bogusz))
+- Collapsed `wait` cards show one row per finished job (or a single "waiting on N jobs" line) instead of re-printing the whole job tree on every poll; Ctrl+O shows the full tree ([#16486](https://github.com/can1357/oh-my-pi/pull/16486) by [@H4vC](https://github.com/H4vC))
+- Bash cards show the elapsed time while a command runs, and wall time, timeout and backgrounded job in the bottom border instead of a separate `⟨…⟩` line ([#16486](https://github.com/can1357/oh-my-pi/pull/16486) by [@H4vC](https://github.com/H4vC))
+- The terminal `/jobs` sheet shows the selected job's full command ([#16486](https://github.com/can1357/oh-my-pi/pull/16486) by [@H4vC](https://github.com/H4vC))
+- Grep, glob, find, IRC message, and `proc://`/`agent://`/`cfg://` result rows start at the same column as other tool rows ([#16486](https://github.com/can1357/oh-my-pi/pull/16486) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed Tern sessions logging `TSP: terminal stopped acknowledging frames` every 5 seconds for as long as the terminal stops acknowledging frames; it now warns once per stall and logs the stall's length when acknowledgements resume ([#16393](https://github.com/can1357/oh-my-pi/pull/16393) by [@will-bogusz](https://github.com/will-bogusz))
+- `splitPathAndSel` and `splitInternalUrlSel` peel comma line lists that include a tail chunk (`:1-12,-15`) or repeat the colon after a comma (`:1-30,:-30`, also beside `:raw`); `splitPathAndSel(path, { foldListColons: false })` keeps the repeated colon in the path ([#16435](https://github.com/can1357/oh-my-pi/pull/16435) by [@will-bogusz](https://github.com/will-bogusz))
+- Generic tool cards now reveal the complete result when expanded ([#15335](https://github.com/can1357/oh-my-pi/pull/15335) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Added `footerMeta` to `OutputBlockOptions` and `ToolCardSnapshot` to draw short facts inside a frame's bottom border ([#16486](https://github.com/can1357/oh-my-pi/pull/16486) by [@H4vC](https://github.com/H4vC))
+- Fixed markdown table rows shattering at narrow widths when a wide glyph sat in a one-cell column; the glyph is now clamped to its column instead of re-wrapping the row ([#16479](https://github.com/can1357/oh-my-pi/pull/16479) by [@adi-IL](https://github.com/adi-IL)).
+- Fixed charts in answers drawing as blank bands, on screen and in scrollback, when iTerm2 drew them in a background tab; inline images now carry an explicit height in rows ([#16471](https://github.com/can1357/oh-my-pi/pull/16471) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
+- Fixed an inline image (such as a table's chart) disappearing in iTerm2 when new output pushed it past the top of the screen; it now moves to scrollback whole ([#16467](https://github.com/can1357/oh-my-pi/pull/16467) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
+- Fixed inline images, hyperlinks, notifications and styled underlines staying off in iTerm2 sessions reached over SSH, where the forwarded `LC_TERMINAL` marker was ignored ([#16450](https://github.com/can1357/oh-my-pi/pull/16450) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Added Eval `mcp_progress` status events, updated in place per call and evictable under the status-event cap, plus `formatMCPProgress()` and `MCPToolDetails.progress` for MCP progress display ([#16431](https://github.com/can1357/oh-my-pi/pull/16431) by [@alphastorm](https://github.com/alphastorm))
+
+## [18.12.3] - 2026-10-19
+
+### Added
+
+- Added `IrcMessage.broadcast`, set on each copy of an `agent://all` broadcast so recipients can tell it from a direct message ([#16312](https://github.com/can1357/oh-my-pi/pull/16312) by [@will-bogusz](https://github.com/will-bogusz))
+- `AutocompleteItem.descriptionMatch` marks a slash command matched only through its description; `Editor` Enter no longer applies such a row unless the user moved the selection onto it ([#16265](https://github.com/can1357/oh-my-pi/issues/16265))
+- `ApprovalDialogComponent` accepts `grants` and `onGrant`: grant choices above **Approve Once**, led by a toggle that keeps them across sessions ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
+- Added `describeJobWidget`/`renderJobWidgetLines` to draw a background job's widget natively and as terminal lines, `describeJobTiles`/`renderJobTileLines` to draw jobs as tiles (status, title, figure, widget), and `renderSparkline` (with `peakBuckets`/`fitSparkValues`) for one-row block sparklines
+
+### Fixed
+
+- Fixed transparent images with empty top rows disappearing inside Zellij ([#16346](https://github.com/can1357/oh-my-pi/pull/16346) by [@Bouska](https://github.com/Bouska))
+- Fixed bash output rewritten by the output minimizer skipping the per-line column cap (`tools.outputMaxColumns`), so a line wider than the cap reached the model whole; the raw output stays in its artifact ([#16314](https://github.com/can1357/oh-my-pi/pull/16314) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the composer caret drifting one cell left per pasted image or video chip in terminals that draw the chip icon as a wide emoji (JetBrains terminal); the `unicode` preset now uses `📷`/`🎬` chip icons ([#16270](https://github.com/can1357/oh-my-pi/issues/16270))
+- Fixed Tern hiding user text sent with `/skill:<name>` inside a collapsed skill card; only the loaded skill prompt is hidden ([#16311](https://github.com/can1357/oh-my-pi/issues/16311))
+- Fixed SIXEL charts and images overlapping following content when their top rows scroll out of the viewport ([#16245](https://github.com/can1357/oh-my-pi/pull/16245) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
+
+## [18.12.2] - 2026-10-18
+
+### Added
+
+- Added `ComposerPreferences.completeScrollback` (default `false`): rows a growing HUD or dialog pushes off screen go straight to scrollback instead of being held back until it shrinks ([#15692](https://github.com/can1357/oh-my-pi/pull/15692) by [@Ilm-Alan](https://github.com/Ilm-Alan))
+
+### Fixed
+
+- Fixed table charts picking the wrong label and measure columns when numbers group thousands with spaces (`1 988`, `17 083`); they now read like `1,988` ([#16175](https://github.com/can1357/oh-my-pi/issues/16175))
+- Fixed terminal capability replies relayed through win32-input-mode appearing as typed input in WSL terminals ([#16137](https://github.com/can1357/oh-my-pi/issues/16137))
+- Fixed the status-bar activity spinner and turn timer freezing until the next keypress when the working-row loader is stopped mid-turn; an open turn window now repaints the status line on its own timer ([#16109](https://github.com/can1357/oh-my-pi/pull/16109) by [@tommymorgan](https://github.com/tommymorgan)).
+- Fixed pasting sometimes inserting a block of base64 text instead of the pasted text in terminals that deliver pastes through the Kitty clipboard protocol (OSC 5522), most often with dictation apps that paste for you; a slow paste now arrives whole, and keys typed while a paste never finishes are given back instead of lost ([#16170](https://github.com/can1357/oh-my-pi/pull/16170) by [@H4vC](https://github.com/H4vC))
+- Fixed a streaming table bouncing everything below it up and down while its last cell was still being written ([#16116](https://github.com/can1357/oh-my-pi/pull/16116) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
+- Fixed inline images in iTerm2 being sized for the wrong cell shape, which left charts smeared or offset ([#16118](https://github.com/can1357/oh-my-pi/pull/16118) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
+
+## [18.12.1] - 2026-10-17
+
+### Breaking Changes
+
+- `numberedCode`, `readContentCode` and `nativeDiff` take the file's path (`path`) instead of a language, and `describeGroupedOutput` drops its `lang` option: Tern picks the grammar of file contents from their path
+
+### Changed
+
+- Advisor notes in Tern read as a callout tinted by their worst severity: its icon and a tally (`Concern`, `1 blocker · 2 concerns`) head the card with the advisor's name at the end, and several notes each lead with their own severity icon
+
+### Fixed
+
+- Fixed images rendering blank inside tmux on Kitty-capable terminals when tmux's `allow-passthrough` is off (the default); omp now falls back to SIXEL or the text placeholder instead of sending Kitty graphics tmux drops
+- Fixed Tern drawing tool cards' file contents (write, read, edit, grep, find, ast-grep, ast-edit) plain or in the wrong language when omp did not know the file's extension (`.ptx`) or mapped it to a neighbor (`.cu` as C++); omp now sends the file's path and Tern picks the grammar
+
+## [18.12.0] - 2026-10-17
+
+### Breaking Changes
+
+- `FindStats.errors` is replaced by `failed` (judge requests that failed) and `unanswered` (unusable answers), and `FindToolDetails` requires a `coverage` status; the find renderer shows `N/M requests failed` ([#15744](https://github.com/can1357/oh-my-pi/issues/15744))
+
+### Added
+
+- Added `pi.showProfile` to `StatusLineSegmentOptions`: `false` keeps the `pi` segment's bare glyph under a named profile, in the rendered bar and in `describe` ([#16063](https://github.com/can1357/oh-my-pi/pull/16063) by [@shgew](https://github.com/shgew))
+
+### Fixed
+
+- Fixed sessions run inside tmux silently falling back to the terminal's true-color profile when the client terminal-type probe answered slowly on a loaded machine ([#16020](https://github.com/can1357/oh-my-pi/pull/16020) by [@CharleoYang](https://github.com/CharleoYang))
+- Fixed the `read` result notice printing the absolute resolved path, so a file under the home directory reads `Resolved path: ~/notes.txt` instead of `/home/you/notes.txt` ([#16055](https://github.com/can1357/oh-my-pi/pull/16055) by [@adi-IL](https://github.com/adi-IL)).
+- Fixed grep/read previews and other tool cards passing raw escape sequences from file contents to the terminal, which could switch it to the alternate screen with mouse reporting on, live and again on every resume ([#15963](https://github.com/can1357/oh-my-pi/issues/15963))
+- Fixed a final status-line render after shutdown scheduling another usage refresh ([#15845](https://github.com/can1357/oh-my-pi/issues/15845)).
+- Fixed Ctrl+O on LSP status and other plain LSP responses still clipping every row at 80 columns; expanded rows now wrap to show the full text ([#15824](https://github.com/can1357/oh-my-pi/issues/15824))
+- Fixed Ctrl+O leaving long rows clipped in expanded LSP, debug, MCP, web search fallback, yield, task and custom-tool results; expanded rows now wrap to show the full text, expanded LSP references list every location, and the LSP expand hint no longer appears when nothing is hidden ([#15824](https://github.com/can1357/oh-my-pi/issues/15824))
+- Fixed jagged text and disappearing translucent details in SIXEL images, including re-encoding when the terminal reports a changed background color ([#15891](https://github.com/can1357/oh-my-pi/pull/15891) by [@Bouska](https://github.com/Bouska)).
+- Fixed stale SIXEL backgrounds after terminal restarts, native appearance changes, and failed TSP handshakes, including background changes during the handshake, fixed themes, missing or invalid startup themes, or identical light/dark mappings ([#15891](https://github.com/can1357/oh-my-pi/pull/15891) by [@Bouska](https://github.com/Bouska)).
+
 ## [18.11.3] - 2026-10-16
 
 ### Added
@@ -18,8 +112,6 @@
 
 ### Fixed
 
-- Fixed jagged text and disappearing translucent details in SIXEL images, including re-encoding when the terminal reports a changed background color ([#15891](https://github.com/can1357/oh-my-pi/pull/15891) by [@Bouska](https://github.com/Bouska)).
-- Fixed stale SIXEL backgrounds after terminal restarts, native appearance changes, and failed TSP handshakes, including background changes during the handshake, fixed themes, missing or invalid startup themes, or identical light/dark mappings ([#15891](https://github.com/can1357/oh-my-pi/pull/15891) by [@Bouska](https://github.com/Bouska)).
 - Fixed a streamed Markdown list keeping every item out of native scrollback until the turn ended, so rows that scrolled off screen were unreachable mid-stream; items in front of the newest one now retire as soon as it begins ([#13676](https://github.com/can1357/oh-my-pi/issues/13676), [#15993](https://github.com/can1357/oh-my-pi/pull/15993) by [@shgew](https://github.com/shgew))
 - Fixed SIXEL charts and SVG figures being resampled before display, which softened their text, on terminals whose cell height is not a multiple of 6 such as Windows Terminal ([#16007](https://github.com/can1357/oh-my-pi/issues/16007))
 
@@ -2385,208 +2477,4 @@
 - Fixed `@` file mention autocomplete stalling for seconds when the query references something outside the project root (e.g. `@../`, `@~/`, `@/abs/`). `CombinedAutocompleteProvider` now short-circuits to plain immediate-directory prefix listing in those cases instead of dispatching a recursive `fuzzyFind` walk over a sibling directory full of unrelated projects. Inside-cwd queries keep the existing fuzzy-then-prefix behavior. ([#1395](https://github.com/can1357/oh-my-pi/issues/1395))
 - Gated the Hangul Compatibility Jamo width correction (U+3131..U+318E → 1 cell, originally landed in 15.0.1 for the IME / hardware-cursor displacement bug) behind `process.platform === "darwin"` in the TS path and `cfg!(target_os = "macos")` in the `pi-natives` Rust path. macOS terminals (Ghostty / Terminal.app / iTerm2) render jamo as 1 cell despite UAX#11 classifying them as Wide, but WezTerm and most Linux terminals honor UAX#11 and render them as 2 cells. The unconditional correction therefore desynced the TUI's column bookkeeping from the terminal's actual rendering off-darwin, producing corrupted layout and broken Korean input on Linux. On non-darwin the helpers now defer entirely to `Bun.stringWidth` / `UnicodeWidthStr` (also a small perf win on the multi-char-grapheme path). ([#1410](https://github.com/can1357/oh-my-pi/issues/1410))
 
-## [15.4.0] - 2026-05-26
-
-### Fixed
-
-- Fixed terminal scrollback gaining duplicate copies of the welcome screen (and any other header content) when the bottom tool cell mutated across the previous viewport boundary. Once a row scrolls into terminal history it cannot be retracted, so a subsequent shrink that would re-expose that row in the repainted viewport now clears stale scrollback and replays the transcript, then suppresses one immediate suffix-scroll frame so live status/editor chrome is not deposited twice. Multiplexer panes ignore `\x1b[3J`, so the recovery is gated on `!isMultiplexerSession()`.
-- Fixed the IME / hardware cursor sticking to the bottom of the terminal after a resize that grew the viewport taller than the rendered transcript. `#emitViewportRepaint` always writes one row per screen line (padding empty rows past the content), so the post-write hardware cursor sits at screen row `height - 1`. The bookkeeping previously clamped the tracked cursor row to `lines.length - 1`, making `#cursorControlSequence`'s relative `rowDelta` underestimate the upward move by `(height - lines.length)` rows and pinning the cursor at the viewport bottom even though the focused component's `CURSOR_MARKER` was on a content row.
-
-## [15.3.2] - 2026-05-25
-
-### Fixed
-
-- Fixed `matchesKey(data, "ctrl+m")` (and the other named-key collisions: `ctrl+h`/`ctrl+i`/`ctrl+j`/`ctrl+[`) returning true for the bare `\r`/`\x08`/`\t`/`\n`/`\x1b` byte terminals send for Enter/Backspace/Tab/Escape in legacy mode. Binding a command to `Ctrl+M` no longer fires when the user presses Enter — the named key wins, and `ctrl+<colliding-letter>` matches only when the terminal disambiguates via the Kitty keyboard protocol or `modifyOtherKeys`. ([#1354](https://github.com/can1357/oh-my-pi/issues/1354))
-
-## [15.2.3] - 2026-05-22
-
-### Added
-
-- Added `SettingsList#setItems` to replace the entire settings list with a new items array while automatically clamping selection to a valid index
-
-### Changed
-
-- Updated `Loader` to drive renders at ~60fps (16ms tick) while keeping spinner-frame advancement at 80ms so shimmer/animated message colorizers update smoothly without altering spinner cadence
-
-## [15.1.9] - 2026-05-21
-
-### Fixed
-
-- Fixed terminal probe responses (DA1, kitty keyboard, Mode 2031) leaking into the prompt as keystrokes when the response is split across stdin reads. `ProcessTerminal` now reassembles `\x1b[?<digits>...` private CSI fragments and dispatches the complete response through the existing pattern handlers. ([#1238](https://github.com/can1357/oh-my-pi/issues/1238))
-
-## [15.1.4] - 2026-05-19
-
-### Fixed
-
-- Fixed `renderInlineMarkdown` crashing with `TypeError: undefined is not an object (evaluating 'e.replace')` when called with a non-string value during streaming — partial JSON parsing leaves option label fields temporarily unpopulated, causing the ask tool renderer to fail. ([#1176](https://github.com/can1357/oh-my-pi/issues/1176))
-
-## [15.0.2] - 2026-05-15
-
-### Added
-
-- Restored the `Key` runtime helper on `@oh-my-pi/pi-tui` to mirror upstream `@mariozechner/pi-tui`'s surface. `Key.enter`, `Key.escape`, `Key.tab`, … return the canonical key-name strings; modifier methods (`Key.ctrl(k)`, `Key.shift(k)`, `Key.ctrlShift(k)`, etc.) build precisely-typed `KeyId` literals like `"ctrl+c"`. Pure runtime convenience for typed key-id construction — plugins built against the upstream package surface that import `Key` (e.g. `@plannotator/pi-extension`, `@juicesharp/rpiv-ask-user-question`) load again now that the specifier shim remaps them onto this package.
-
-## [15.0.1] - 2026-05-14
-
-### Breaking Changes
-
-- Increased the minimum required Bun version for the TUI package from >=1.3.7 to >=1.3.14
-
-## [14.9.8] - 2026-05-12
-
-### Added
-
-- Added `Terminal.setProgress(active)` to emit OSC 9;4 progress sequences with a ~1s keepalive interval so Ghostty does not clear the indicator during long-running work (ports pi-mono `a900d251` + `76bc605a`)
-- Added optional `argumentHint?: string` to `SlashCommand`; rendered before the description in the autocomplete dropdown (ports pi-mono `aa25726e`)
-- Added `VirtualTerminal.waitForRender()` test helper for the throttled render pipeline (ports pi-mono `41377ee8`)
-
-### Changed
-
-- `ProcessTerminal` `columns`/`rows` getters consult `Bun.env.COLUMNS` / `Bun.env.LINES` before falling back to 80×24, so piped/non-TTY runs honour environment-provided dimensions (ports pi-mono `32f7fc6a`)
-- `requestRender()` non-force calls are coalesced to a ~16ms frame budget; `requestRender(true)` still flushes immediately via `process.nextTick` (ports pi-mono `6f5f37f8`)
-- `KNOWN_TERMINALS.base` / `KNOWN_TERMINALS.trueColor` default `hyperlinks: false`; tmux and screen (`TMUX` env or `TERM` starts with `tmux`/`screen`) force `hyperlinks: false` even when the outer terminal would advertise OSC 8 (adapts pi-mono `30a8a41f`)
-- `SlashCommand.getArgumentCompletions()` may return a `Promise`; results are now awaited and non-array returns are ignored (ports pi-mono `a1e10789`)
-- Fuzzy `@` autocomplete now follows symlinked directories via `ScanOptions.follow_links` plumbed through the native walker (ports pi-mono `780d5367`)
-- Plain `@<query>` (no slash) fuzzy matches by basename only, so `@plan` no longer surfaces every file whose ancestor directories contain `plan` (ports pi-mono `968430f6`)
-- Changed slash-command autocomplete list rendering to combine command hint and description in a single displayed suggestion text
-- Changed render scheduling to throttle `requestRender` calls to roughly 60fps by batching updates
-- Changed terminal input handling to process complete cell-size responses without buffering partial input
-- Changed `KeyId` to accept super-modifier combinations and improve typed key-id validation
-
-### Fixed
-
-- Fixed editor corruption on Thai Sara Am (U+0E33) and Lao AM (U+0EB3) vowels by normalizing to their compatibility decompositions on the terminal-write path while keeping editor content logically unchanged (ports pi-mono `bc668826` + `338ce3a3` + `20ca45d5`)
-- Fixed cell-size detection (`CSI 6;h;w t` response) to consume only exact replies, so a bare `Escape` keystroke is no longer swallowed while waiting for terminal image metadata (ports pi-mono `49c0d860`)
-- Fixed Kitty CSI-u printable input duplicating on layouts (e.g. Italian) where the terminal also emits the raw character: the immediately-following matching codepoint is now suppressed (ports pi-mono `bdb416cb`)
-- Fixed bracketed-paste CSI-u `Ctrl+<letter>` re-encoding (tmux popup with `extended-keys-format=csi-u`) leaking literal `[<code>;5u` into the editor; control bytes are decoded back to their literal byte before per-char filtering (ports pi-mono `d06db09a`)
-- Fixed xterm `modifyOtherKeys` shifted printable input so uppercase letters inserted via `CSI 27;mod;codepoint~` reach the editor correctly (ports pi-mono `6b55d685`)
-- Fixed `super`-modified Kitty shortcuts (`super+k`, `ctrl+super+enter`, …) to parse and match via the new `KITTY_MOD_SUPER` mask (ports pi-mono `ddb8454c` + `5ed46003`)
-- Fixed `ctrl+alt+<letter>` in tmux falling through to CSI-u / `modifyOtherKeys` when the legacy `ESC<ctrl-char>` form does not match (ports pi-mono `6cf5098f`)
-- Fixed Markdown strikethrough requiring strict `~~text~~` delimiters with non-whitespace boundaries; single tildes no longer render strikethrough (ports pi-mono `db5274b4`)
-- Allowed `SlashCommand.getArgumentCompletions` to return asynchronous results by accepting Promise-based completions
-- Added `argumentHint` support to slash command definitions and displayed it in command suggestion descriptions
-- Added support for xterm `modifyOtherKeys` printable key sequences by decoding `CSI 27;mod;key~` into text input
-- Normalized line output during rendering to correct Thai/Lao AM glyph composition for displayed text
-- Fixed duplicated Kitty key input emissions by dropping the matching unmodified follow-up sequence after a Kitty CSI-u printable-key event
-
-## [14.9.5] - 2026-05-12
-
-### Fixed
-
-- Fixed rapidly blinking cursor artifact during task execution by consolidating cursor control sequences into the synchronized output buffer ([#992](https://github.com/can1357/oh-my-pi/issues/992))
-
-## [14.5.7] - 2026-04-29
-
-### Fixed
-
-- Fixed editor Ctrl+Enter handling to recognize NumLock and keypad Enter variants.
-
-## [14.3.0] - 2026-04-25
-
-### Fixed
-
-- Fixed shared Markdown Mermaid fenced-block rendering to resolve diagrams from fenced source text instead of external prerender state
-
-## [14.1.1] - 2026-04-14
-
-### Breaking Changes
-
-- Removed the `searchDb` constructor argument from `CombinedAutocompleteProvider`, requiring callers to use the built-in search behavior
-
-### Changed
-
-- Changed truncation debug logging to run only when `debugRedraw` is enabled
-
-## [14.0.5] - 2026-04-11
-
-### Changed
-
-- Updated hash computation to use `Bun.hash()` instead of `Bun.hash.xxHash64()`, which may return `number` in addition to `bigint`
-- Simplified cache key computation in Box component by removing intermediate hash updates and consolidating hash operations
-- Wrapped native text utility functions (`sliceWithWidth`, `truncateToWidth`, `wrapTextWithAnsi`, `extractSegments`) to automatically pass the current default tab width, simplifying the API for consumers
-- Added `getIndentationNoescape` wrapper that uses `process.cwd()` as the project root for relative file paths
-- Re-export `getDefaultTabWidth`, `getIndentation`, and `setDefaultTabWidth` from `@oh-my-pi/pi-utils`; native text helpers still receive tab width via wrappers that read the JS default
-
-## [13.16.1] - 2026-03-27
-
-### Added
-
-- Support for optional SearchDb parameter in CombinedAutocompleteProvider constructor for improved fuzzy search performance
-- Fuzzy matching filter for autocomplete suggestions to improve relevance of results
-
-### Changed
-
-- Fuzzy discovery now applies fuzzy matching filter to results for improved relevance of autocomplete suggestions
-- Autocomplete fuzzy discovery now accepts optional SearchDb instance for faster searches
-
-## [13.16.0] - 2026-03-27
-
-### Changed
-
-- Updated tab replacement in editor text sanitization to respect configured tab width setting
-
-## [13.15.0] - 2026-03-23
-
-### Added
-
-- Added `renderInlineMarkdown()` function to render inline markdown (bold, italic, code, links, strikethrough) to styled strings
-
-### Fixed
-
-- Fixed editor consuming user-rebound copy keys, preventing custom keybindings from working in the editor
-
-## [13.14.1] - 2026-03-21
-
-### Added
-
-- Added Ctrl+_ as an additional default shortcut for undo
-
-### Fixed
-
-- Ensured undo functionality respects user-configured keybindings
-
-## [13.12.0] - 2026-03-14
-
-### Added
-
-- Added `moveToMessageStart()` and `moveToMessageEnd()` methods to move cursor to the beginning and end of the entire message
-
-### Fixed
-
-- Fixed autocomplete to preserve `./` prefix when completing relative file and directory paths
-- Fixed paste marker expansion to handle special regex replacement tokens ($1, $2, $&, $$, $`, $') literally in pasted content
-
-## [13.11.0] - 2026-03-12
-
-### Fixed
-
-- Fixed OSC 11 background color detection to correctly handle partial escape sequences that arrive mid-buffer, preventing user input from being swallowed
-- Fixed race condition where overlapping OSC 11 queries would be incorrectly cancelled by DA1 sentinels from previous queries
-
-## [13.7.5] - 2026-03-04
-
-### Changed
-
-- Extracted word navigation logic into reusable `moveWordLeft` and `moveWordRight` utility functions for consistent cursor movement across components
-
-## [13.6.2] - 2026-03-03
-
-### Fixed
-
-- Fixed cursor positioning when content shrinks to empty without clearOnShrink enabled
-
-## [13.5.4] - 2026-03-01
-
-### Fixed
-
-- Fixed viewport repaint scrollback accounting during resize oscillation to avoid double-scrolling on height shrink and added exact-row scrollback assertions in overlay regression coverage ([#228](https://github.com/can1357/oh-my-pi/issues/228), [#234](https://github.com/can1357/oh-my-pi/issues/234))
-
-## [13.5.3] - 2026-03-01
-
-### Fixed
-
-- Fixed append rendering logic to correctly handle offscreen header changes during content overflow growth, preserving scroll history integrity
-- Fixed visible tail line updates when appending new content during viewport overflow conditions
-- Fixed cursor positioning instability when appending content under external cursor relocation by using absolute screen addressing instead of relative cursor movement
-
-Older entries are archived in [packages/tui/CHANGELOG.md@20c388be2131](https://github.com/can1357/oh-my-pi/blob/20c388be2131e06f731a8759ec3ab6121d6ada1c/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@ec051608a87a](https://github.com/can1357/oh-my-pi/blob/ec051608a87ad78d4930a46af7f5582192005ada/packages/tui/CHANGELOG.md).

@@ -551,6 +551,84 @@ describe("Editor slash autocomplete acceptance", () => {
 		expect(submitted).toBe("/xyz");
 	});
 
+	describe("a command listed only because its description matches the typed text", () => {
+		// `not-a-command` is a subsequence of this description, never of the name `loop` (#16265).
+		const commands = [
+			{ name: "loop", description: "Toggle loop mode, not a re-run: gate a re-check on command status" },
+		];
+		const loopEditor = (): { editor: Editor; submitted: () => string } => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setAutocompleteProvider(new CombinedAutocompleteProvider(commands, "/tmp"));
+			let submitted = "";
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			return { editor, submitted: () => submitted };
+		};
+		const typed = async (): Promise<{ editor: Editor; submitted: () => string }> => {
+			const typing = loopEditor();
+			typing.editor.handleInput("/");
+			await untilAutocompleteShown(typing.editor);
+			for (const char of "not-a-command") typing.editor.handleInput(char);
+			await untilAutocompleteShown(typing.editor);
+			expect(typing.editor.render(80).join("\n")).toContain("loop");
+			return typing;
+		};
+
+		it("submits the typed command on Enter instead of running the listed one", async () => {
+			const { editor, submitted } = await typed();
+			editor.handleInput("\r");
+			expect(submitted()).toBe("/not-a-command");
+		});
+
+		it("runs the listed command once the user moves the selection onto it", async () => {
+			const { editor, submitted } = await typed();
+			editor.handleInput("\x1b[B");
+			editor.handleInput("\r");
+			expect(submitted()).toBe("/loop");
+		});
+
+		it("submits the typed command on an Enter that outruns the popup", () => {
+			const { editor, submitted } = loopEditor();
+			editor.setText("/not-a-command");
+			editor.handleInput("\r");
+			expect(submitted()).toBe("/not-a-command");
+		});
+	});
+
+	it("applies a matching alias on Enter even when the description ranks higher", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "x", aliases: ["abcd"], description: "ace" }], "/tmp"),
+		);
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.setText("/ac");
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/x");
+	});
+
+	it("applies a matching alias from the slash popup on Enter", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "x", aliases: ["abcd"], description: "ace" }], "/tmp"),
+		);
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.handleInput("/ac");
+		await untilAutocompleteShown(editor);
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/x");
+	});
+
 	it("never completes Enter to the bare skill namespace row", () => {
 		const editor = new Editor(defaultEditorTheme);
 		editor.setAutocompleteProvider(

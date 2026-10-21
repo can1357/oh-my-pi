@@ -2,7 +2,7 @@ import { diffWords } from "@oh-my-pi/pi-natives";
 import { DEFAULT_TAB_WIDTH, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { TspDiffHunk, TspProps } from "@oh-my-pi/pi-wire";
 import { theme as activeTheme, getLanguageFromPath, highlightCode, type Theme } from "../theme/index";
-import { type CodeFrameMarker, formatCodeFrameLine, replaceTabs, shortenPath } from "../render/render-utils";
+import { type CodeFrameMarker, formatCodeFrameLine, replaceTabs } from "../render/render-utils";
 import { node } from "../native/describe";
 import type { NativeNode } from "../native/node";
 /** SGR dim on / normal intensity — additive, preserves fg/bg colors. */
@@ -106,9 +106,9 @@ function renderIntraLineDiff(
  * becomes one hunk; the terminal draws gutters, word emphasis and highlighting.
  * Removed rows carry old line numbers, added rows new ones and context rows
  * old ones, so the other side is derived from the running line delta.
+ * Tern picks the grammar from `path`.
  */
-export function nativeDiff(diffText: string, options: { filePath?: string } & TspProps<"diff"> = {}): NativeNode {
-	const { filePath, ...props } = options;
+export function nativeDiff(diffText: string, props: TspProps<"diff"> = {}): NativeNode {
 	const hunks: TspDiffHunk[] = [];
 	let lines: string[] = [];
 	let oldStart = 0;
@@ -148,12 +148,7 @@ export function nativeDiff(diffText: string, options: { filePath?: string } & Ts
 		lines.push(`${parsed.prefix}${parsed.content}`);
 	}
 	close();
-	return node("diff", {
-		...props,
-		hunks,
-		path: props.path ?? (filePath ? shortenPath(filePath) : undefined),
-		lang: props.lang ?? (filePath ? getLanguageFromPath(filePath) : undefined),
-	});
+	return node("diff", { ...props, hunks });
 }
 
 export interface RenderDiffOptions {

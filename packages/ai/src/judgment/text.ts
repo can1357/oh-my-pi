@@ -265,6 +265,8 @@ export function parseAnswer(id: string, question: Question, reply: string): Answ
 			}
 			return { type: "score", score: level, probabilities, confidence: 1 };
 		}
+		case "box":
+			throw new AIError.ValidationError(`judgment "${id}": text judges cannot answer box questions`);
 	}
 }
 
@@ -287,6 +289,10 @@ export class TextJudge implements Judge {
 		if (ids.length === 0) throw new Error("judgment request has no questions");
 		if (request.images?.length && this.#backend.supportsImages !== true) {
 			throw new AIError.ValidationError(`Text judgment backend ${this.label} does not support image inputs`);
+		}
+		for (const id of ids) {
+			if (request.questions[id].type !== "box") continue;
+			throw new AIError.ValidationError(`Text judgment backend ${this.label} does not answer box questions`);
 		}
 		const rendered = renderJudgmentPrompt(request, { guardState: this.#backend.guardState });
 		const retries = this.#backend.parseRetries ?? 0;

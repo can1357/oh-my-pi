@@ -2106,6 +2106,52 @@ describe("Tool argument coercion", () => {
 		expect(result.op).toBe("fix");
 	});
 
+	it("keeps unknown root keys a closed schema would drop only when keepUnknownRootKeys is set", () => {
+		// Regression (#16317): a lenient tool (yield) lost root fields the model sent beside
+		// `data` because the unrecognized-key repair deleted them and validation then passed.
+		const tool: Tool = {
+			name: "t-keep-root",
+			description: "",
+			parameters: {
+				type: "object",
+				properties: {
+					count: { type: "number" },
+					nested: { type: "object", properties: { inner: { type: "string" } }, additionalProperties: false },
+				},
+				additionalProperties: false,
+			},
+		};
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "call-keep-root",
+			name: "t-keep-root",
+			arguments: { count: "3", nested: { inner: "v", stray: 1 }, findings: ["a", "b"] },
+		};
+
+		expect(validateToolArguments(tool, toolCall)).toEqual({ count: 3, nested: { inner: "v" } });
+		// Root extra survives; nested extras and type repairs still apply.
+		expect(validateToolArguments(tool, toolCall, { keepUnknownRootKeys: true })).toEqual({
+			count: 3,
+			nested: { inner: "v" },
+			findings: ["a", "b"],
+		});
+
+		// Names that shadow Object.prototype come back as own fields, never as a prototype swap.
+		const special = JSON.parse('{"count":1,"constructor":"c","__proto__":{"polluted":true}}') as Record<
+			string,
+			unknown
+		>;
+		const kept = validateToolArguments(
+			tool,
+			{ ...toolCall, arguments: special },
+			{ keepUnknownRootKeys: true },
+		) as Record<string, unknown>;
+		expect(Object.getOwnPropertyDescriptor(kept, "constructor")?.value).toBe("c");
+		expect(Object.hasOwn(kept, "__proto__")).toBe(true);
+		expect(Object.getPrototypeOf(kept)).toBe(Object.prototype);
+		expect("polluted" in kept).toBe(false);
+	});
+
 	describe("string|array union (regression: #1788)", () => {
 		// `search` and `gh` tools declare `paths`/`pr` as `union(string, array<string>)`
 		// so the LLM can pass a single path or many. Some providers (Z.AI / GLM)

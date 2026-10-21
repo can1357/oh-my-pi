@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
@@ -101,6 +101,9 @@ export class OAuthRefresher {
 	#oauthCredentialRefreshInFlight: Map<number, Promise<OAuthCredentials>> = new Map();
 	/** Access token this process last minted per credential id. */
 	#recentMints = new Map<number, { provider: string; access: string; at: number }>();
+	#pendingRefreshes = new Set<Promise<unknown>>();
+	#cancelRefreshCleanup?: () => void;
+	#shuttingDown = false;
 
 	constructor(deps: OAuthRefresherDeps) {
 		this.#deps = deps;
@@ -148,7 +151,33 @@ export class OAuthRefresher {
 	/**
 	 * Refresh one stored OAuth credential under durable row ownership.
 	 */
-	async refreshStored<T extends OAuthCredential = OAuthCredential>(
+	refreshStored<T extends OAuthCredential = OAuthCredential>(
+		provider: string,
+		options: StoredOAuthRefreshOptions<T>,
+	): Promise<StoredOAuthRefreshResult<T>> {
+		if (this.#shuttingDown) return Promise.reject(new AIError.AbortError("OAuth refresh stopped during shutdown"));
+		this.#cancelRefreshCleanup ??= postmortem.register("oauth-refresh", () => this.#drainRefreshes(), {
+			exitOnly: true,
+		});
+		const pending = this.#refreshStored(provider, options);
+		this.#pendingRefreshes.add(pending);
+		const settled = () => {
+			this.#pendingRefreshes.delete(pending);
+			if (this.#pendingRefreshes.size === 0 && !this.#shuttingDown) {
+				this.#cancelRefreshCleanup?.();
+				this.#cancelRefreshCleanup = undefined;
+			}
+		};
+		void pending.then(settled, settled);
+		return pending;
+	}
+
+	async #drainRefreshes(): Promise<void> {
+		this.#shuttingDown = true;
+		await Promise.allSettled(this.#pendingRefreshes);
+	}
+
+	async #refreshStored<T extends OAuthCredential = OAuthCredential>(
 		provider: string,
 		options: StoredOAuthRefreshOptions<T>,
 	): Promise<StoredOAuthRefreshResult<T>> {
@@ -158,6 +187,7 @@ export class OAuthRefresher {
 		let leasedCredentialId: number | undefined;
 
 		while (leaseStore) {
+			if (this.#shuttingDown) throw new AIError.AbortError("OAuth refresh stopped during shutdown");
 			if (options.signal?.aborted) throw new AIError.AbortError("OAuth refresh ownership aborted by caller");
 			const rows = this.#deps.store.listAuthCredentials(provider);
 			this.#deps.pool.replace(
@@ -239,6 +269,9 @@ export class OAuthRefresher {
 			}
 			if (options.canRefresh && !options.canRefresh(current)) {
 				return { credential: current, refreshed: false, removed: false };
+			}
+			if (this.#shuttingDown || options.signal?.aborted) {
+				throw new AIError.AbortError("OAuth refresh stopped before token exchange");
 			}
 			const serialized = serializeCredential(provider, current);
 			if (!serialized) return { credential: current, refreshed: false, removed: false };
@@ -495,13 +528,7 @@ export class OAuthRefresher {
 				forceRefresh,
 				signal,
 				refresh: (current, refreshSignal) =>
-					this.#requestOAuthCredentialRefresh(
-						provider,
-						current,
-						credentialId,
-						signal && refreshSignal ? AbortSignal.any([signal, refreshSignal]) : (signal ?? refreshSignal),
-						reason,
-					),
+					this.#requestOAuthCredentialRefresh(provider, current, credentialId, refreshSignal, reason),
 				isDefinitiveFailure: error => AIError.isDefinitiveOAuthFailure(String(error)),
 				disabledCause: error => `oauth refresh failed: ${String(error)}`,
 			});
@@ -564,9 +591,9 @@ export class OAuthRefresher {
 				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential, signal);
 			}
 		}
-		// Bound the refresh so a slow/hanging token endpoint cannot stall credential selection.
-		// Caller-driven abort jumps the gun on the timeout — the agent's ESC must
-		// take priority over the floor timeout.
+		// The caller may stop awaiting a refresh, but the leased token exchange
+		// must finish and persist any rotated token. Only the operation timeout
+		// aborts the exchange itself.
 		const cancellation = Promise.withResolvers<never>();
 		let onAbort: (() => void) | undefined;
 		const timeout = setTimeout(

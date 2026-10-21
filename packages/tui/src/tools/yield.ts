@@ -9,7 +9,7 @@ import { compact, md } from "../native/describe";
 import { OwnerMemo } from "../native/memo";
 import type { NativeChild } from "../native/node";
 import { formatOutputPaneLines, styleToolOutputLine } from "../render/output-pane";
-import { formatExpandHint, sanitizeDisplayLines, truncateToWidth } from "../render/render-utils";
+import { clipCollapsed, formatExpandHint, sanitizeDisplayLines } from "../render/render-utils";
 import type { StatusLineOptions } from "../render/status-line";
 import { plainToolCard, type ToolCardPhase } from "../render/tool-card";
 import type { Theme } from "../theme/theme";
@@ -134,7 +134,7 @@ function dataLines(data: unknown, expanded: boolean, width: number, theme: Theme
 					lines: sanitizeText(data).trimEnd().split("\n"),
 					expanded,
 					collapsedMaxLines: TEXT_ROWS_COLLAPSED,
-					styleLine: line => truncateToWidth(styleToolOutputLine(line, theme), width),
+					styleLine: line => clipCollapsed(styleToolOutputLine(line, theme), width, expanded),
 				},
 				theme,
 			).lines,

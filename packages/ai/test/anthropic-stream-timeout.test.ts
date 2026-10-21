@@ -702,6 +702,31 @@ describe("anthropic provider retry delays", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "recovered from 502" }]);
 	});
+
+	it("retries a local TLS certificate-verification rejection instead of failing the turn", async () => {
+		let attempt = 0;
+		// Bun/Node surface a proxy MITM / untrusted CA this way; the old wording
+		// was a bare `Connection error.`, which this loop retried.
+		const certError = Object.assign(new TypeError("unable to verify the first certificate"), {
+			code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+		});
+		const fetchImpl: FetchImpl = async () => {
+			attempt += 1;
+			if (attempt === 1) throw certError;
+			return createAnthropicSseResponse("recovered from tls certificate retry");
+		};
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 0, fetch: fetchImpl });
+		const providerRetryWait = vi.fn(async (_delayMs: number, _signal: AbortSignal | undefined) => {});
+
+		const result = await streamAnthropic(model, context, { client, providerRetryWait }).result();
+
+		expect(attempt).toBe(2);
+		expect(providerRetryWait).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("stop");
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([
+			{ type: "text", text: "recovered from tls certificate retry" },
+		]);
+	});
 });
 
 describe("anthropic retry-after cap (maxRetryDelayMs)", () => {

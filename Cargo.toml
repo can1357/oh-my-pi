@@ -25,7 +25,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "18.11.3"
+version = "18.12.5"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -392,7 +392,7 @@ syntect = { version = "5.3", default-features = false, features = [
 # Markup Conversion
 # ──────────────────────────────────────────────────────────────────────────────
 html-escape = "0.2.15"
-html-to-markdown-rs = { version = "3.12.4", default-features = false }
+html-to-markdown-rs = { version = "3.18.3", default-features = false }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tokenization

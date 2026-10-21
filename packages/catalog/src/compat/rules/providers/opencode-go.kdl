@@ -4,6 +4,10 @@ provider "opencode-go" {
 	default-model "kimi-k2.7-code"
 	env "OPENCODE_API_KEY"
 	dynamic-models-authoritative #true
+	// Replaces the provider check that disabled forced tool choice on Responses.
+	on-api "openai-responses" {
+		supports-forced-tool-choice #false
+	}
 
 	// The Flash lanes accept images despite their IDs lacking a vision suffix;
 	// verified against the gateway (unguessable pixel-rendered text read back

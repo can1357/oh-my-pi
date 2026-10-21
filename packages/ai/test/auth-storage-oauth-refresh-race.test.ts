@@ -995,4 +995,76 @@ describe("AuthStorage OAuth refresh race", () => {
 		).resolves.toBeUndefined();
 		expect(refreshCalls).toBe(1);
 	});
+	test("persists a rotated token when the requesting usage call is canceled", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		oauthUtils.registerOAuthProvider({
+			id: "unit-oauth-caller-abort",
+			name: "Unit OAuth Caller Abort",
+			sourceId: "auth-storage-oauth-refresh-race-test",
+			async login() {
+				return { access: "unused", refresh: "unused", expires: 0 };
+			},
+			async refreshToken(current) {
+				started.resolve();
+				await release.promise;
+				return { ...current, access: "new-access", refresh: "new-refresh", expires: Date.now() + 3_600_000 };
+			},
+			getApiKey(current) {
+				return current.access;
+			},
+		});
+		await authStorage.credentials.set("unit-oauth-caller-abort", [
+			{ type: "oauth", access: "old-access", refresh: "old-refresh", expires: 0 },
+		]);
+		const credentialId = store.listAuthCredentials("unit-oauth-caller-abort")[0]?.id;
+		if (credentialId === undefined) throw new Error("missing stored credential");
+		const controller = new AbortController();
+		const request = authStorage.oauth.refresh(credentialId, controller.signal);
+		await started.promise;
+		controller.abort();
+		await expect(request).rejects.toThrow();
+		release.resolve();
+		// A second consumer must see the rotated token rather than replaying the consumed grant.
+		expect(await authStorage.keys.get("unit-oauth-caller-abort", "next-session")).toBe("new-access");
+		expect(store.listAuthCredentials("unit-oauth-caller-abort")[0]?.credential).toMatchObject({
+			type: "oauth",
+			refresh: "new-refresh",
+		});
+	});
+
+	test.skipIf(process.platform === "win32")("SIGTERM waits for a rotated token to reach SQLite", async () => {
+		if (!store || !tempDir) throw new Error("test setup failed");
+		const release = path.join(tempDir, "release-response");
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				path.join(import.meta.dir, "fixtures/oauth-sigterm-child.ts"),
+				path.join(tempDir, "agent.db"),
+				release,
+			],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+		try {
+			const first = await Promise.race([
+				child.stdout.getReader().read(),
+				child.exited.then(() => {
+					throw new Error("OAuth child exited before the provider rotated its token");
+				}),
+			]);
+			expect(new TextDecoder().decode(first.value)).toContain("rotated");
+			child.kill("SIGTERM");
+			await Bun.write(release, "complete");
+			expect(await child.exited).toBe(143);
+			expect(store.listAuthCredentials("anthropic")[0]?.credential).toMatchObject({
+				type: "oauth",
+				access: "new",
+				refresh: "new-refresh",
+			});
+		} finally {
+			if (child.exitCode === null) child.kill();
+			await child.exited;
+		}
+	});
 });

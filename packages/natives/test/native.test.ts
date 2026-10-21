@@ -1126,6 +1126,27 @@ try {
 			// Navigation/footer may or may not be removed depending on preprocessing
 		});
 
+		it("keeps collapsed sections only with hiddenContent reachable, never template content", async () => {
+			const html = `<main>
+<h2>Product information</h2>
+<button aria-expanded="false">Item details</button>
+<div style="display:none"><p>Country of Origin: India</p></div>
+<template><p>Template-only claim</p></template>
+</main>`;
+
+			const dropped = await htmlToMarkdown(html);
+			const reachable = await htmlToMarkdown(html, { hiddenContent: "reachable" });
+
+			expect(dropped).toContain("Product information");
+			expect(dropped).not.toContain("Country of Origin: India");
+			expect(reachable).toContain("Country of Origin: India");
+			expect(reachable).not.toContain("Template-only claim");
+		});
+
+		it("rejects an unknown hiddenContent value", async () => {
+			expect(() => htmlToMarkdown("<p>text</p>", { hiddenContent: "visible" })).toThrow(/hiddenContent/);
+		});
+
 		it("should reject depth-truncated HTML", async () => {
 			const html = `${"<div>".repeat(90)}<p>deep-content</p>${"</div>".repeat(90)}`;
 

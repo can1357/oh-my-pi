@@ -28,7 +28,8 @@ import {
 } from "../render/render-utils";
 import { renderStatusLine } from "../render";
 import { framedToolCard } from "../render/tool-card";
-import { wrapPrefixedLine } from "../render/hanging-wrap";
+import { wrapGuidedLine, wrapPrefixedLine } from "../render/hanging-wrap";
+import { visibleWidth } from "../utils";
 import { ansi, code, col, compact, keyed, md, node, row, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { OwnerMemo } from "../native/memo";
@@ -264,12 +265,16 @@ export function renderResult(
 			: formatStatusIcon(isPartial ? "running" : "error", theme, spinnerFrame);
 		const header = `${icon} LSP ${actionLabel}`;
 
+		// Hover code hangs under its rail; expanded rows hang under their tree
+		// connector or guide rails so Ctrl+O reveals full text instead of clipping.
 		const rail = ` ${theme.fg("mdCodeBlockBorder", theme.boxRound.vertical)} `;
 		const contentLines = codeBlockMatch
 			? bodyLines.flatMap(line =>
 					line.startsWith(rail) ? wrapPrefixedLine(rail, rail, line.slice(rail.length), contentWidth) : [line],
 				)
-			: bodyLines;
+			: expanded
+				? bodyLines.flatMap(line => wrapGuidedLine(line, contentWidth, theme))
+				: bodyLines;
 		return {
 			header,
 			phase: isPartial ? "partial" : state,
@@ -420,10 +425,7 @@ function renderDiagnostics(
 			)}`;
 			const message = formatDiagnosticMessage(item);
 			if (message) {
-				output += `\n ${theme.fg("dim", detailPrefix)}${theme.fg(
-					"muted",
-					truncateToWidth(message, TRUNCATE_LENGTHS.LINE),
-				)}`;
+				output += `\n ${theme.fg("dim", detailPrefix)}${theme.fg("muted", message)}`;
 			}
 		}
 		return output.split("\n");
@@ -434,7 +436,10 @@ function renderDiagnostics(
 		parsedDiagnostics.length > 0 ? parsedDiagnostics.slice(0, 3) : fallbackDiagnostics.slice(0, 3);
 	const remaining =
 		(parsedDiagnostics.length > 0 ? parsedDiagnostics.length : fallbackDiagnostics.length) - previewItems.length;
-	const expandHint = formatExpandHint(theme, expanded, remaining > 0);
+	const clipped = previewItems.some(
+		item => !("raw" in item) && visibleWidth(formatDiagnosticMessage(item)) > TRUNCATE_LENGTHS.CONTENT,
+	);
+	const expandHint = formatExpandHint(theme, expanded, remaining > 0 || clipped);
 	let output = `${icon} ${theme.fg("dim", meta.join(theme.sep.dot))}${expandHint}`;
 	for (let i = 0; i < previewItems.length; i++) {
 		const item = previewItems[i];
@@ -486,8 +491,9 @@ function renderReferences(refMatch: RegExpMatchArray, lines: string[], expanded:
 
 	const files = Array.from(byFile.keys());
 
-	const renderGrouped = (maxFiles: number, maxLocsPerFile: number, showHint: boolean): string => {
-		const expandHint = formatExpandHint(theme, undefined, showHint);
+	const renderGrouped = (maxFiles: number, maxLocsPerFile: number): string => {
+		const hidden = files.length > maxFiles || files.some(file => byFile.get(file)!.length > maxLocsPerFile);
+		const expandHint = formatExpandHint(theme, expanded, hidden);
 		let output = `${icon} ${theme.fg("dim", `${refCount} found`)}${expandHint}`;
 
 		const filesToShow = files.slice(0, maxFiles);
@@ -513,10 +519,9 @@ function renderReferences(refMatch: RegExpMatchArray, lines: string[], expanded:
 						`line ${line}, col ${col}`,
 					)}`;
 					if (expanded) {
-						const context = `at ${file}:${line}:${col}`;
 						output += `\n ${theme.fg("dim", fileCont)}${theme.fg("dim", locCont)}${theme.fg(
 							"muted",
-							truncateToWidth(context, TRUNCATE_LENGTHS.LINE),
+							`at ${file}:${line}:${col}`,
 						)}`;
 					}
 				}
@@ -539,11 +544,7 @@ function renderReferences(refMatch: RegExpMatchArray, lines: string[], expanded:
 		return output;
 	};
 
-	if (expanded) {
-		return renderGrouped(files.length, 3, false).split("\n");
-	}
-
-	return renderGrouped(3, 1, true).split("\n");
+	return (expanded ? renderGrouped(files.length, Number.POSITIVE_INFINITY) : renderGrouped(3, 1)).split("\n");
 }
 
 // =============================================================================
@@ -665,13 +666,17 @@ function renderGeneric(text: string, lines: string[], expanded: boolean, theme: 
 		for (let i = 0; i < lines.length; i++) {
 			const isLast = i === lines.length - 1;
 			const branch = isLast ? theme.tree.last : theme.tree.branch;
-			output += `\n ${theme.fg("dim", branch)} ${truncateToWidth(replaceTabs(lines[i]), TRUNCATE_LENGTHS.CONTENT)}`;
+			output += `\n ${theme.fg("dim", branch)} ${replaceTabs(lines[i])}`;
 		}
 		return output.split("\n");
 	}
 
 	const firstLine = lines[0] || "No output";
-	const expandHint = formatExpandHint(theme, expanded, lines.length > 1);
+	const expandHint = formatExpandHint(
+		theme,
+		expanded,
+		lines.length > 1 || visibleWidth(firstLine) > TRUNCATE_LENGTHS.TITLE,
+	);
 	let output = `${icon} ${theme.fg("dim", truncateToWidth(firstLine, TRUNCATE_LENGTHS.TITLE))}${expandHint}`;
 
 	if (lines.length > 1) {

@@ -422,25 +422,30 @@ export interface TypeSafeModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
-/** Discover account-visible judge models while keeping the bundled offline seed. */
+/**
+ * Discover account-visible judge models while keeping the bundled offline seed. `GET /v1/models` lists
+ * only aliases, yet TypeSafe accepts versioned ids whether or not they are listed, so a successful
+ * discovery is extended with the seed rows it omits (the pinned default judge, `jev-1.14.0`) instead of
+ * pruning them as `dynamicModelsAuthoritative` otherwise would.
+ */
 export function typesafeModelManagerOptions(config: TypeSafeModelManagerConfig = {}): ModelManagerOptions<"typesafe"> {
 	const { apiKey } = config;
 	const envBaseUrl = Bun.env.TYPESAFE_BASE_URL?.trim();
 	const baseUrl = (config.baseUrl ?? (envBaseUrl || TYPESAFE_DEFAULT_BASE_URL)).replace(/\/+$/, "");
-	const staticModels = seedModels<"typesafe">("typesafe");
+	const staticModels = seedModels<"typesafe">("typesafe").map(model => ({ ...model, baseUrl }));
 	return {
 		providerId: "typesafe",
 		cacheProviderId: resolveModelCacheProviderId("typesafe"),
-		staticModels: staticModels.map(model => ({ ...model, baseUrl })),
+		staticModels,
 		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
 		...(apiKey
 			? {
-					fetchDynamicModels: () =>
-						fetchTypeSafeModels({
-							apiKey,
-							baseUrl,
-							fetch: config.fetch,
-						}),
+					fetchDynamicModels: async () => {
+						const discovered = await fetchTypeSafeModels({ apiKey, baseUrl, fetch: config.fetch });
+						if (!discovered) return discovered;
+						const listed = new Set(discovered.map(model => model.id));
+						return [...discovered, ...staticModels.filter(model => !listed.has(model.id))];
+					},
 				}
 			: undefined),
 	};

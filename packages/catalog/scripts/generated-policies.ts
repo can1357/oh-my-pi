@@ -259,8 +259,4 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 		const reference = seedModels("alibaba-token-plan").find(candidate => candidate.id === model.id);
 		if (reference) model.name = reference.name;
 	}
-
-	if (model.provider === "ollama-cloud") {
-		model.omitMaxOutputTokens = true;
-	}
 }

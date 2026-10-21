@@ -9,7 +9,7 @@ use super::{
 	clipboard::resolve_clipboard_edits,
 	input::{Patch, PatchSection, contains_recognizable_hashline_operations},
 	parser::parse_patch_streaming,
-	patcher::{apply_with_recovery, recover_target},
+	patcher::{apply_with_recovery, mismatch, recover_target},
 	types::{Cursor, Edit, FileOp},
 };
 use crate::{
@@ -176,9 +176,7 @@ fn preview_section(
 		}
 		let parsed = target.parse()?;
 		if target.file_hash.is_none() {
-			return Err(crate::error::EditError::apply(
-				super::messages::missing_snapshot_tag_message(&target.path),
-			));
+			return Err(mismatch(target, &read.canonical, &read.text, "", store));
 		}
 		let edits = if matches!(parsed.file_op, Some(FileOp::Rem)) {
 			&[][..]
@@ -186,7 +184,7 @@ fn preview_section(
 			parsed.edits.as_slice()
 		};
 		let applied =
-			apply_with_recovery(target, &read.canonical, &read.text, edits, clipboard, store, false)?;
+			apply_with_recovery(target, &read.canonical, &read.text, edits, clipboard, store, None)?;
 		result.op = Some(if matches!(parsed.file_op, Some(FileOp::Rem)) {
 			EngineFileOp::Delete
 		} else {

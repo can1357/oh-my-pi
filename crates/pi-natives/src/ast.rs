@@ -1338,6 +1338,7 @@ mod tests {
 	use std::{
 		fs,
 		path::PathBuf,
+		sync::atomic::{self, AtomicUsize},
 		time::{SystemTime, UNIX_EPOCH},
 	};
 
@@ -1354,11 +1355,16 @@ mod tests {
 	}
 
 	fn make_temp_tree() -> TempTree {
-		let unique = SystemTime::now()
+		// macOS clocks tick in microseconds, so parallel tests can share a
+		// timestamp; the counter keeps each tree distinct.
+		static COUNTER: AtomicUsize = AtomicUsize::new(0);
+		let nanos = SystemTime::now()
 			.duration_since(UNIX_EPOCH)
 			.expect("system time should be after UNIX_EPOCH")
 			.as_nanos();
-		let root = std::env::temp_dir().join(format!("pi-ast-glob-test-{unique}"));
+		let seq = COUNTER.fetch_add(1, atomic::Ordering::Relaxed);
+		let pid = std::process::id();
+		let root = std::env::temp_dir().join(format!("pi-ast-glob-test-{pid}-{nanos}-{seq}"));
 		fs::create_dir_all(root.join("nested")).expect("temp nested dir should be created");
 		fs::write(root.join("a.ts"), "const a = 1;\n").expect("temp file a.ts should be written");
 		fs::write(root.join("nested").join("b.ts"), "const b = 2;\n")

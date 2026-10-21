@@ -15,6 +15,7 @@ use super::{
 		after_insert_opener_escape_warning, ambiguous_boundary_echo_message,
 		ambiguous_boundary_placement_message, block_insert_landing_shift_warning,
 		boundary_variant_repair_warning, edit_broke_parse_warning, textual_boundary_echo_warning,
+		trailing_comma_replacement_message,
 	},
 	syntax::{enclosing_boundaries, node_chain, parses_cleanly},
 	types::{Anchor, ApplyResult, BlockResolution, Cursor, Edit},
@@ -87,16 +88,18 @@ fn validate_bounds(edits: &[Edit], lines: &[&str]) -> Result<(), EditError> {
 	Ok(())
 }
 
+/// One `PUT N.=M:` as lowered by the parser: its replacement inserts, then one
+/// delete per consumed line, all carrying the op's payload line.
 #[derive(Clone)]
-struct ReplacementGroup {
-	insert_indices: Vec<usize>,
-	delete_indices: Vec<usize>,
-	payload:        Vec<String>,
-	start:          u32,
-	end:            u32,
+pub(super) struct ReplacementGroup {
+	insert_indices:            Vec<usize>,
+	pub(super) delete_indices: Vec<usize>,
+	pub(super) payload:        Vec<String>,
+	pub(super) start:          u32,
+	pub(super) end:            u32,
 }
 
-fn replacement_group(edits: &[Edit], start: usize) -> Option<ReplacementGroup> {
+pub(super) fn replacement_group(edits: &[Edit], start: usize) -> Option<ReplacementGroup> {
 	let Edit::Insert { cursor: Cursor::BeforeAnchor(anchor), line_num, replacement: true, .. } =
 		edits.get(start)?
 	else {
@@ -449,13 +452,39 @@ struct Variant {
 	dropped: usize,
 }
 
+/// Why a replacement group cannot be applied as written or repaired.
+#[derive(Clone, Copy)]
+enum Undecided {
+	/// A syntax-essential selected row could belong on either side of the body.
+	Placement,
+	/// The replacement fails to parse only because its last row ends in a comma.
+	TrailingComma,
+}
+
+/// Whether `replaced` parses once the trailing comma of its last non-blank
+/// inserted row is removed (whatever follows the comma stays).
+fn parses_without_trailing_comma(replaced: &[Edit], lines: &[&str], path: &str) -> bool {
+	let mut stripped = replaced.to_vec();
+	let Some(text) = stripped.iter_mut().rev().find_map(|edit| match edit {
+		Edit::Insert { text, .. } if has_content(text) => Some(text),
+		_ => None,
+	}) else {
+		return false;
+	};
+	let Some(comma) = text.trim_end().strip_suffix(',').map(str::len) else {
+		return false;
+	};
+	text.remove(comma);
+	parses_cleanly(Some(path), &materialize(lines, &stripped).0)
+}
+
 fn group_variants(
 	group: &ReplacementGroup,
 	edits: &[Edit],
 	lines: &[&str],
 	path: &str,
 	baseline: bool,
-) -> (Vec<Variant>, bool) {
+) -> (Vec<Variant>, Option<Undecided>) {
 	let inserts = group_inserts(group, edits);
 	let deletes = group_deletes(group, edits);
 	let trailing = effective_trailing(group, edits, lines);
@@ -474,7 +503,7 @@ fn group_variants(
 	let leading_drops: Vec<_> = if drop_j > 0 { vec![0, drop_j] } else { vec![0] };
 	let trailing_drops: Vec<_> = if drop_k > 0 { vec![0, drop_k] } else { vec![0] };
 	let mut variants = Vec::new();
-	let mut ambiguous = false;
+	let mut ambiguous = None;
 	for drop_l in leading_drops {
 		for &drop_t in &trailing_drops {
 			let dropped = drop_l + drop_t;
@@ -496,20 +525,23 @@ fn group_variants(
 				let fits = previous.is_none_or(|line| indent_columns(line) == indent_columns(trail));
 				if first_essential && fits && indent_columns(trail) > indent_columns(first) {
 					plans.push((None, Some(group.start), 1));
-				} else if baseline
-					&& first_essential
-					&& indent_columns(trail) == indent_columns(first)
-					&& !parses_cleanly(
-						Some(path),
-						&materialize(lines, &[inserts.clone(), deletes.clone()].concat()).0,
-					) {
-					// Only a replacement that breaks the file on its own leaves the
-					// row's position in question (e.g. a closer
-					// swapped for a statement). Swapping an `if`
-					// opener, `case` label, or signature for another of
-					// the same shape parses fine alone, so a parse failure elsewhere
-					// in the batch must not reject it.
-					ambiguous = true;
+				} else if baseline && first_essential && indent_columns(trail) == indent_columns(first)
+				{
+					let replaced = [inserts.clone(), deletes.clone()].concat();
+					if !parses_cleanly(Some(path), &materialize(lines, &replaced).0) {
+						// Only a replacement that breaks the file on its own leaves
+						// the row's position in question (e.g. a closer swapped for a
+						// statement). Swapping an `if` opener, `case` label, or
+						// signature for another of the same shape parses fine alone,
+						// so a parse failure elsewhere in the batch must not reject
+						// it. A body that parses once its trailing comma is gone (the
+						// last element of a JSON array) asks no placement question.
+						ambiguous = Some(if parses_without_trailing_comma(&replaced, lines, path) {
+							Undecided::TrailingComma
+						} else {
+							Undecided::Placement
+						});
+					}
 				}
 			} else {
 				let next = nearest_content(lines, group.start as isize, 1);
@@ -547,7 +579,7 @@ fn group_variants(
 					&& before_first.is_some_and(|line| indent_columns(first) < indent_columns(line))
 					&& indent_columns(lead) > indent_columns(first)
 				{
-					ambiguous = true;
+					ambiguous = Some(Undecided::Placement);
 				}
 			}
 			for (before, after, kept) in plans {
@@ -621,6 +653,13 @@ fn splice_variants(
 
 type RepairedEdits = (Vec<Edit>, Vec<String>);
 
+fn undecided_error(start: u32, end: u32, reason: Undecided) -> EditError {
+	EditError::apply(match reason {
+		Undecided::Placement => ambiguous_boundary_placement_message(start, end),
+		Undecided::TrailingComma => trailing_comma_replacement_message(start, end),
+	})
+}
+
 fn repair_boundaries(
 	edits: &[Edit],
 	lines: &[&str],
@@ -633,9 +672,11 @@ fn repair_boundaries(
 	let mut i = 0;
 	while i < edits.len() {
 		if let Some(group) = replacement_group(edits, i) {
-			let (variants, is_ambiguous) = group_variants(&group, edits, lines, path, baseline);
-			if is_ambiguous && ambiguous.is_none() {
-				ambiguous = Some((group.start, group.end));
+			let (variants, group_ambiguity) = group_variants(&group, edits, lines, path, baseline);
+			if let Some(kind) = group_ambiguity
+				&& ambiguous.is_none()
+			{
+				ambiguous = Some((group.start, group.end, kind));
 			}
 			if !variants.is_empty() {
 				groups.push((group.clone(), variants));
@@ -646,8 +687,8 @@ fn repair_boundaries(
 		}
 	}
 	if groups.is_empty() {
-		if let Some((start, end)) = ambiguous {
-			return Err(EditError::apply(ambiguous_boundary_placement_message(start, end)));
+		if let Some((start, end, kind)) = ambiguous {
+			return Err(undecided_error(start, end, kind));
 		}
 		return Ok(None);
 	}
@@ -695,8 +736,10 @@ fn repair_boundaries(
 		}
 		if let Some((_, best_text)) = &best {
 			if *best_text != text {
-				if let Some((start, end)) = ambiguous {
-					return Err(EditError::apply(ambiguous_boundary_placement_message(start, end)));
+				// Two repairs parse differently: placement, not the body, is in
+				// question.
+				if let Some((start, end, _)) = ambiguous {
+					return Err(undecided_error(start, end, Undecided::Placement));
 				}
 				return Ok(None);
 			}
@@ -705,8 +748,8 @@ fn repair_boundaries(
 		}
 	}
 	let Some((combo, _)) = best else {
-		if let Some((start, end)) = ambiguous {
-			return Err(EditError::apply(ambiguous_boundary_placement_message(start, end)));
+		if let Some((start, end, kind)) = ambiguous {
+			return Err(undecided_error(start, end, kind));
 		}
 		return Ok(None);
 	};

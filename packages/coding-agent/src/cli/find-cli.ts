@@ -36,9 +36,13 @@ function gauge(p: number): string {
 }
 
 function printReport(cmd: FindCommandArgs, rel: string, result: CascadeResult, elapsedMs: number): void {
-	const { hits, stats, threshold } = result;
+	const { hits, stats, threshold, coverage } = result;
 	console.log("");
-	if (hits.length === 0) {
+	if (coverage === "unavailable") {
+		console.log(
+			`${chalk.red("find unavailable")} ${chalk.dim(`for "${cmd.query}" in ${rel}: all ${stats.requests} judge requests failed, nothing was judged; use grep`)}`,
+		);
+	} else if (hits.length === 0) {
 		console.log(
 			`${chalk.yellow("no hits")} ${chalk.dim(`for "${cmd.query}" in ${rel} · τ ${threshold.toFixed(2)}`)}`,
 		);
@@ -60,16 +64,19 @@ function printReport(cmd: FindCommandArgs, rel: string, result: CascadeResult, e
 			}
 		}
 	}
+	if (coverage === "partial") {
+		console.log(chalk.yellow(`partial: ${stats.failed} of ${stats.requests} judge requests failed`));
+	}
 	console.log("");
 	console.log(
 		chalk.dim(
-			`listed ${stats.listed} · judged ${stats.judged} · read ${stats.filesRead} files (${formatBytes(stats.fileBytes)}) · ${stats.requests} requests · ${formatNumber(stats.inputTokens)} tokens · $${stats.cost.toFixed(4)} · ${formatDuration(elapsedMs)} wall / ${formatDuration(stats.apiMs)} api`,
+			`listed ${stats.listed} · judged ${stats.judged} · read ${stats.filesRead} files (${formatBytes(stats.fileBytes)}) · ${stats.requests} requests${stats.unanswered > 0 ? ` · ${stats.unanswered} unanswered` : ""} · ${formatNumber(stats.inputTokens)} tokens · $${stats.cost.toFixed(4)} · ${formatDuration(elapsedMs)} wall / ${formatDuration(stats.apiMs)} api`,
 		),
 	);
 	for (const failure of stats.failures) console.log(chalk.yellow(failure));
 }
 
-/** Run one search and print it. Exits non-zero on a bad root or when every judgment failed. */
+/** Run one search and print it. Exits non-zero on a bad root or when every judge request failed. */
 export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 	if (!cmd.query.trim()) {
 		console.error(chalk.red("Error: query is required"));
@@ -119,7 +126,7 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 			printReport(cmd, formatPathRelativeToCwd(root.path, cwd), result, elapsedMs);
 		}
 		// `exitCode`, not `exit`: process.exit skips the finally below, and with it close().
-		if (result.stats.requests > 0 && result.stats.errors === result.stats.requests) process.exitCode = 1;
+		if (result.coverage === "unavailable") process.exitCode = 1;
 	} finally {
 		close();
 	}

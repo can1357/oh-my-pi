@@ -1,9 +1,24 @@
 import * as path from "node:path";
-
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { escapeXmlText, prompt } from "@oh-my-pi/pi-utils";
 import evalStateContextPrompt from "../prompts/system/eval-state-context.md" with { type: "text" };
+import type { CustomMessage } from "../session/messages";
 import type { ToolSession } from "../tools";
 import { defaultEvalSessionId } from "./session-id";
+
+/**
+ * `customType` of the hidden eval runtime snapshot `AgentSession` appends after the
+ * transcript at startup and on display-context rebuilds ({@link formatEvalStateContext}).
+ */
+export const EVAL_STATE_CONTEXT_TYPE = "eval-state-context";
+
+/**
+ * Whether `message` is an eval runtime snapshot: context for the next request, not
+ * part of any conversation turn, so it may trail a finished or failed turn.
+ */
+export function isEvalStateContext(message: AgentMessage | undefined): message is CustomMessage {
+	return message?.role === "custom" && message.customType === EVAL_STATE_CONTEXT_TYPE;
+}
 
 const MAX_SESSION_BUCKETS = 256;
 const MAX_LOADED_PATHS = 12;

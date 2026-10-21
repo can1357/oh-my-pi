@@ -24,10 +24,11 @@ import {
 	type ConfiguredThinkingLevel,
 } from "../render/render-utils";
 import type { StructuredSubagentOutput } from "./task";
+import { describeJobTiles, type JobTile, type JobWidgetView, renderJobTileLines } from "./job-widget";
 import type { RenderResultOptions, ToolRenderer, ToolActivitySummary } from "./renderer";
 import type { IrcDeliveryReceipt, IrcMessage } from "./irc";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { card as cardNode, compact, elapsed, md, node, row, span, text } from "../native/describe";
+import { card as cardNode, compact, elapsed, keyed, md, node, row, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { OwnerMemo } from "../native/memo";
 import { plainText } from "../native/spans";
@@ -63,6 +64,10 @@ export interface JobSnapshot {
 	advisor?: boolean;
 	/** The task agent's latest self-estimated completion (0–100); see `AgentProgress.completionPercent`. */
 	completionPercent?: number;
+	/** The task agent's latest stage in its own words; see `AgentProgress.stage`. */
+	stage?: string;
+	/** The job's live widget, while one is being drawn; frozen at its last state once the job settles. */
+	widget?: JobWidgetView;
 	resultText?: string;
 	errorText?: string;
 	/** Source-output metadata retained for per-job warnings and persisted row rendering. */
@@ -194,6 +199,40 @@ function flattenStructuredPreview(text: string): string {
 	return text.slice(0, PREVIEW_LINES_EXPANDED * PREVIEW_LINE_WIDTH * 2).replace(/\s+/g, " ");
 }
 
+/** The row label: a running task's own stage line when it reports one, else the job's label. */
+function jobRowLabel(job: JobSnapshot): string {
+	return job.type === "task" && job.status === "running" && job.stage?.trim() ? job.stage : job.label;
+}
+
+/** A job as its tile; `live` while the card's clocks run. */
+function jobTile(job: JobSnapshot, live: boolean): JobTile {
+	return {
+		id: job.id,
+		type: job.type,
+		status: job.status,
+		label: job.label,
+		durationMs: job.durationMs,
+		live: live && job.status === "running",
+		...(job.widget ? { widget: job.widget } : {}),
+		...(job.status === "running" && job.completionPercent !== undefined
+			? { completionPercent: job.completionPercent }
+			: {}),
+		...(job.stage ? { stage: job.stage } : {}),
+		...(job.exitCode === undefined ? {} : { exitCode: job.exitCode }),
+	};
+}
+
+/** Identity of the widgets a job list draws: changes whenever any widget's data or state does. */
+function widgetStamp(jobs: readonly JobSnapshot[] | undefined): string {
+	if (!jobs) return "";
+	let stamp = "";
+	for (const job of jobs) if (job.widget) stamp += `${job.id}:${job.widget.updatedAt}:${job.widget.state};`;
+	return stamp;
+}
+
+/** Tiles a native wait card shows before it counts the rest. */
+const TILES_SHOWN = 9;
+
 /** Pending wait frame. */
 function waitRenderCall(_args: object, _options: RenderResultOptions, uiTheme: Theme): Component {
 	return new Text(renderStatusLine({ icon: "pending", title: "Wait" }, uiTheme), 0, 0);
@@ -201,7 +240,11 @@ function waitRenderCall(_args: object, _options: RenderResultOptions, uiTheme: T
 
 /** Result frame for wait snapshots and the agents roster. */
 function jobsRenderResult(
-	result: { content: Array<{ type: string; text?: string }>; details?: CoordinationDetails; isError?: boolean },
+	result: {
+		content: Array<{ type: string; text?: string }>;
+		details?: CoordinationDetails;
+		isError?: boolean;
+	},
 	options: RenderResultOptions,
 	uiTheme: Theme,
 ): Component {
@@ -308,6 +351,87 @@ function jobsRenderResult(
 		previewRows.set(job, { expanded, width: continuationWidth, lines });
 		return lines;
 	};
+	// Collapsed card: one line per settled job, or the bare "waiting on N jobs"
+	// header while nothing has settled. Repeated polls then read as a short
+	// completion log instead of a re-printed (and shrinking) job tree; Ctrl+O
+	// restores the full tree with output previews. A running job's live widget
+	// still draws its tile: that chart is the job's progress, not a copy of it.
+	const settledJobs = sortedJobs.filter(job => job.status !== "running");
+	const widgetJobs = sortedJobs.filter(job => job.status === "running" && job.widget?.state === "live");
+	const compactJobLines = (width: number, live: boolean): string[] => {
+		const lines: string[] = [];
+		const indent = " ".repeat(visibleWidth(formatStatusIcon("done", uiTheme)) + 1);
+		// Failures sort first, so the cap never hides one behind successes;
+		// Ctrl+O lists the rest.
+		for (const job of settledJobs.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)) {
+			const icon = formatStatusIcon(statusToIcon(job.status), uiTheme);
+			const word = job.status === "completed" ? "done" : job.status;
+			const exit =
+				job.exitCode !== undefined && job.exitCode !== 0
+					? `${uiTheme.sep.dot}${uiTheme.fg("error", `exit ${job.exitCode}`)}`
+					: "";
+			// The outcome (status, exit, duration) is reserved first; a long id
+			// gives way so a failure is never cut off the row.
+			const outcome = ` ${uiTheme.fg(statusToColor(job.status), word)}${exit}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
+			const id = truncateToWidth(
+				replaceTabs(job.id).replace(/\s+/g, " "),
+				Math.max(1, width - visibleWidth(`${icon} `) - visibleWidth(outcome)),
+				Ellipsis.Unicode,
+			);
+			let line = `${icon} ${uiTheme.fg("accent", id)}${outcome}`;
+			const label = replaceTabs(jobRowLabel(job).split(/\r?\n/)[0] ?? "").trim();
+			const labelBudget = width - visibleWidth(line) - 2;
+			if (label && label !== job.id && labelBudget >= 8) {
+				line += `  ${uiTheme.fg("muted", truncateToWidth(label, labelBudget, Ellipsis.Unicode))}`;
+			}
+			lines.push(line);
+			// A failure says why on the collapsed row; the rest of its output
+			// stays behind Ctrl+O.
+			const reason =
+				job.status === "failed"
+					? stripOutputNotice(job.errorText ?? "", job.meta)
+							.split(/\r?\n/)
+							.find(part => part.trim())
+							?.trim()
+					: undefined;
+			if (reason) {
+				lines.push(
+					`${indent}${uiTheme.fg("error", truncateToWidth(replaceTabs(reason), Math.max(1, width - indent.length), Ellipsis.Unicode))}`,
+				);
+			}
+			// The root warning is suppressed when a row owns the failure, so the
+			// compact row carries it too — otherwise it only shows after Ctrl+O.
+			const artifactError = job.meta?.artifactError ?? job.artifactError;
+			if (artifactError) {
+				lines.push(uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(artifactError), width)));
+			}
+		}
+		const hiddenSettled = settledJobs.length - PREVIEW_LIMITS.COLLAPSED_ITEMS;
+		if (hiddenSettled > 0) lines.push(`${indent}${uiTheme.fg("dim", `… ${hiddenSettled} more settled`)}`);
+		const shownWidgetJobs = widgetJobs.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS);
+		for (const job of shownWidgetJobs) {
+			const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
+			const icon = formatStatusIcon("running", uiTheme, live ? options.spinnerFrame : undefined);
+			const meta = compact([
+				job.completionPercent !== undefined ? uiTheme.fg("accent", `${job.completionPercent}%`) : undefined,
+				uiTheme.fg("dim", formatDuration(job.durationMs)),
+			]).join(" ");
+			lines.push(
+				...renderJobTileLines(jobTile(job, live), width, uiTheme, {
+					lead: `${icon} ${typeBadge} `,
+					meta,
+					full: false,
+				}),
+			);
+		}
+		// Running jobs without a drawn tile (no widget, or past the cap) collapse
+		// into one count; the header already carries it while nothing settled.
+		const quietRunning = counts.running - shownWidgetJobs.length;
+		if (quietRunning > 0 && (settledJobs.length > 0 || shownWidgetJobs.length < widgetJobs.length)) {
+			lines.push(`${indent}${uiTheme.fg("dim", `${quietRunning} still running`)}`);
+		}
+		return lines;
+	};
 	return {
 		render(width: number): readonly string[] {
 			const expanded = options.expanded;
@@ -326,96 +450,125 @@ function jobsRenderResult(
 				.u32(spinnerFrame)
 				.bool(shimmerActive)
 				.bool(showModelBadge)
+				.str(widgetStamp(jobs))
 				.digest();
 			if (!shimmerActive && cached?.key === key) return cached.lines;
 
-			const itemLines = renderTreeList<JobSnapshot>(
-				{
-					items: sortedJobs,
-					expanded,
-					maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
-					itemType: "job",
-					renderItem: (job, context) => {
-						const rowWidth = Math.max(0, width - (context.prefixWidth ?? 0));
-						const lines: string[] = [];
-						const icon = `${formatStatusIcon(
-							statusToIcon(job.status),
-							uiTheme,
-							job.status === "running" ? options.spinnerFrame : undefined,
-						)}${job.exitCode === undefined ? "" : `${uiTheme.sep.dot}${uiTheme.fg(job.exitCode === 0 ? "muted" : "error", `exit ${job.exitCode}`)}`}`;
-						const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
-						const completion =
-							job.status === "running" && job.completionPercent !== undefined
-								? `${uiTheme.sep.dot}${uiTheme.fg("accent", `${job.completionPercent}%`)}`
-								: "";
-						const durationSuffix = `${completion}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
-						const displayId = truncateToWidth(
-							replaceTabs(job.id).replace(/\s+/g, " "),
-							Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${durationSuffix}`)),
-							Ellipsis.Unicode,
-						);
-						const rawLabelLines = (job.label || "(no label)").split(/\r?\n/);
-						const maxLabelLines = expanded ? LABEL_LINES_EXPANDED : LABEL_LINES_COLLAPSED;
-						const visibleLabelLines = rawLabelLines
-							.slice(0, maxLabelLines)
-							.map(l => truncateToWidth(replaceTabs(l), LABEL_MAX_WIDTH, Ellipsis.Unicode));
-						if (rawLabelLines.length > maxLabelLines && visibleLabelLines.length > 0) {
-							const last = visibleLabelLines[visibleLabelLines.length - 1]!;
-							visibleLabelLines[visibleLabelLines.length - 1] = `${last} …`;
-						}
-						const rowPrefix = `${icon} ${typeBadge} `;
-						const modelIdentity = job.resolvedModelIdentity ?? job.resolvedModel;
-						const modelBadge =
-							job.type === "task" && showModelBadge && typeof modelIdentity === "string"
-								? formatFeedModelBadge(
-										modelIdentity,
-										job.resolvedThinkingLevel,
-										job.advisor === true,
-										uiTheme,
-										Math.min(
-											FEED_MODEL_BADGE_WIDTH,
-											Math.max(0, rowWidth - visibleWidth(`${rowPrefix}${displayId}${durationSuffix}`) - 1),
+			const compactView = !expanded && jobs.length > 0;
+			const itemLines = compactView
+				? compactJobLines(width, counts.running > 0 && options.spinnerFrame !== undefined)
+				: renderTreeList<JobSnapshot>(
+						{
+							items: sortedJobs,
+							expanded,
+							maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
+							itemType: "job",
+							renderItem: (job, context) => {
+								const rowWidth = Math.max(0, width - (context.prefixWidth ?? 0));
+								const lines: string[] = [];
+								const icon = `${formatStatusIcon(
+									statusToIcon(job.status),
+									uiTheme,
+									job.status === "running" ? options.spinnerFrame : undefined,
+								)}${job.exitCode === undefined ? "" : `${uiTheme.sep.dot}${uiTheme.fg(job.exitCode === 0 ? "muted" : "error", `exit ${job.exitCode}`)}`}`;
+								const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
+								const completion =
+									job.status === "running" && job.completionPercent !== undefined
+										? `${uiTheme.sep.dot}${uiTheme.fg("accent", `${job.completionPercent}%`)}`
+										: "";
+								const durationSuffix = `${completion}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
+								const displayId = truncateToWidth(
+									replaceTabs(job.id).replace(/\s+/g, " "),
+									Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${durationSuffix}`)),
+									Ellipsis.Unicode,
+								);
+								const rowLabel = jobRowLabel(job);
+								const rawLabelLines = (rowLabel || "(no label)").split(/\r?\n/);
+								const maxLabelLines = expanded ? LABEL_LINES_EXPANDED : LABEL_LINES_COLLAPSED;
+								const visibleLabelLines = rawLabelLines
+									.slice(0, maxLabelLines)
+									.map(l => truncateToWidth(replaceTabs(l), LABEL_MAX_WIDTH, Ellipsis.Unicode));
+								if (rawLabelLines.length > maxLabelLines && visibleLabelLines.length > 0) {
+									const last = visibleLabelLines[visibleLabelLines.length - 1]!;
+									visibleLabelLines[visibleLabelLines.length - 1] = `${last} …`;
+								}
+								const rowPrefix = `${icon} ${typeBadge} `;
+								const live = job.status === "running" && options.spinnerFrame !== undefined;
+								const continuationWidth = Math.max(0, rowWidth - visibleWidth("  "));
+								if (job.widget?.state === "live") {
+									const meta = compact([
+										job.status === "running" && job.completionPercent !== undefined
+											? uiTheme.fg("accent", `${job.completionPercent}%`)
+											: undefined,
+										uiTheme.fg("dim", formatDuration(job.durationMs)),
+									]).join(" ");
+									lines.push(
+										...renderJobTileLines(jobTile(job, live), rowWidth, uiTheme, {
+											lead: rowPrefix,
+											meta,
+											full: expanded,
+										}),
+									);
+								} else {
+									const modelIdentity = job.resolvedModelIdentity ?? job.resolvedModel;
+									const modelBadge =
+										job.type === "task" && showModelBadge && typeof modelIdentity === "string"
+											? formatFeedModelBadge(
+													modelIdentity,
+													job.resolvedThinkingLevel,
+													job.advisor === true,
+													uiTheme,
+													Math.min(
+														FEED_MODEL_BADGE_WIDTH,
+														Math.max(
+															0,
+															rowWidth - visibleWidth(`${rowPrefix}${displayId}${durationSuffix}`) - 1,
+														),
+													),
+												)
+											: "";
+									const modelLead = modelBadge ? `${modelBadge} ` : "";
+									const headRaw = displayId;
+									// Running rows in a live block shimmer their label; once the block
+									// stops animating (sealed, or a settled snapshot — spinnerFrame
+									// cleared) they render static so scrollback never keeps a mid-sweep
+									// shimmer band.
+									const headLabel = live
+										? shimmerEnabled()
+											? shimmerText(headRaw, uiTheme)
+											: uiTheme.fg("accent", headRaw)
+										: uiTheme.fg("toolOutput", headRaw);
+									let row = `${rowPrefix}${modelLead}${headLabel}`;
+									const distinctLabel = rowLabel.trim() !== job.id;
+									const label = visibleLabelLines[0] ?? "";
+									const inlineLabel =
+										distinctLabel && visibleWidth(`${row} ${label}${durationSuffix}`) <= rowWidth;
+									if (inlineLabel) row += ` ${uiTheme.fg("toolOutput", label)}`;
+									row += durationSuffix;
+									lines.push(truncateToWidth(row, rowWidth, ""));
+									for (let i = distinctLabel && !inlineLabel ? 0 : 1; i < visibleLabelLines.length; i++) {
+										lines.push(
+											`  ${uiTheme.fg("toolOutput", truncateToWidth(visibleLabelLines[i]!, continuationWidth))}`,
+										);
+									}
+								}
+								const artifactError = job.meta?.artifactError ?? job.artifactError;
+								if (artifactError) {
+									lines.push(
+										uiTheme.fg(
+											"warning",
+											truncateToWidth(formatArtifactErrorNotice(artifactError), rowWidth),
 										),
-									)
-								: "";
-						const modelLead = modelBadge ? `${modelBadge} ` : "";
-						const headRaw = displayId;
-						// Running rows in a live block shimmer their label; once the block
-						// stops animating (sealed, or a settled snapshot — spinnerFrame
-						// cleared) they render static so scrollback never keeps a mid-sweep
-						// shimmer band.
-						const live = job.status === "running" && options.spinnerFrame !== undefined;
-						const headLabel = live
-							? shimmerEnabled()
-								? shimmerText(headRaw, uiTheme)
-								: uiTheme.fg("accent", headRaw)
-							: uiTheme.fg("toolOutput", headRaw);
-						let row = `${rowPrefix}${modelLead}${headLabel}`;
-						const distinctLabel = job.label.trim() !== job.id;
-						const label = visibleLabelLines[0] ?? "";
-						const inlineLabel = distinctLabel && visibleWidth(`${row} ${label}${durationSuffix}`) <= rowWidth;
-						if (inlineLabel) row += ` ${uiTheme.fg("toolOutput", label)}`;
-						row += durationSuffix;
-						lines.push(truncateToWidth(row, rowWidth, ""));
-						const continuationWidth = Math.max(0, rowWidth - visibleWidth("  "));
-						for (let i = distinctLabel && !inlineLabel ? 0 : 1; i < visibleLabelLines.length; i++) {
-							lines.push(
-								`  ${uiTheme.fg("toolOutput", truncateToWidth(visibleLabelLines[i]!, continuationWidth))}`,
-							);
-						}
-						const artifactError = job.meta?.artifactError ?? job.artifactError;
-						if (artifactError) {
-							lines.push(
-								uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(artifactError), rowWidth)),
-							);
-						}
+									);
+								}
 
-						for (const previewLine of jobPreviewRows(job, expanded, continuationWidth)) lines.push(previewLine);
-						return lines;
-					},
-				},
-				uiTheme,
-			);
+								for (const previewLine of jobPreviewRows(job, expanded, continuationWidth))
+									lines.push(previewLine);
+								return lines;
+							},
+						},
+						uiTheme,
+					);
 
 			// Agents run outside job control; render them as their own tree so
 			// they never skew the job counts or the "waiting on N jobs" title.
@@ -458,7 +611,7 @@ function jobsRenderResult(
 							uiTheme,
 						);
 
-			const all = [header];
+			const all = compactView && settledJobs.length > 0 ? [] : [header];
 			if (aggregateArtifactError) {
 				all.push(uiTheme.fg("warning", formatArtifactErrorNotice(aggregateArtifactError)));
 			}
@@ -498,7 +651,11 @@ function bodyLines(
 	body: string,
 	expanded: boolean,
 	theme: Theme,
-	options: { indent?: string; tone?: "dim" | "toolOutput"; collapsedLines?: number } = {},
+	options: {
+		indent?: string;
+		tone?: "dim" | "toolOutput";
+		collapsedLines?: number;
+	} = {},
 ): string[] {
 	const indent = options.indent ?? "";
 	const tone = options.tone ?? "toolOutput";
@@ -556,17 +713,18 @@ export function createIrcMessageCard(
 	if (card.replyTo) meta.push("reply");
 	const age = messageAge(card.timestamp);
 	if (age) meta.push(age);
-	const component = createCachedComponent(
-		getExpanded,
-		(width, expanded) => {
-			const lines = [renderStatusLine({ iconOverride: ircGlyph(uiTheme), title, meta }, uiTheme)];
-			if (body.trim()) {
-				lines.push(...bodyLines(body, expanded, uiTheme, { indent: "  ", collapsedLines: 3 }));
-			}
-			return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode));
-		},
-		{ paddingX: 1 },
-	);
+	const component = createCachedComponent(getExpanded, (width, expanded) => {
+		const lines = [renderStatusLine({ iconOverride: ircGlyph(uiTheme), title, meta }, uiTheme)];
+		if (body.trim()) {
+			lines.push(
+				...bodyLines(body, expanded, uiTheme, {
+					indent: "  ",
+					collapsedLines: 3,
+				}),
+			);
+		}
+		return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode));
+	});
 	// Terminal-local collapse replaces `getExpanded`; the node never changes after creation.
 	const described = cardNode(
 		{
@@ -587,47 +745,6 @@ export function createIrcMessageCard(
 		]),
 	);
 	return Object.assign(component, { describe: () => described });
-}
-
-/**
- * One job row on one line: type badge, id + label, terminal-clocked duration
- * (live while running). The job's output and errors fill the card of the call
- * that started it (`parksAsBackground`), so the row carries no preview.
- */
-function describeJob(job: JobSnapshot, isPartial: boolean): NativeNode {
-	const running = job.status === "running" && isPartial;
-	const label = job.label.trim() !== job.id ? plainText(job.label.split(/\r?\n/)[0] ?? "") : "";
-	const spans: TspSpan[] = [
-		span(plainText(job.id), running ? "accent" : "toolOutput", running ? { fx: "shimmer" } : undefined),
-	];
-	if (label) spans.push(span(` ${label}`, "toolOutput"));
-	if (job.exitCode !== undefined) spans.push(span(` exit ${job.exitCode}`, job.exitCode === 0 ? "muted" : "error"));
-	const tone =
-		job.status === "completed"
-			? "success"
-			: job.status === "failed"
-				? "error"
-				: job.status === "cancelled"
-					? "warning"
-					: "accent";
-	return node(
-		"row",
-		{ role: "omp.wait.job", tone, gap: "sm" },
-		compact([
-			node("badge", { text: job.type, tone }),
-			text(spans, { truncate: "end", grow: 1 }),
-			job.status === "running" && job.completionPercent !== undefined
-				? node("progress", {
-						value: job.completionPercent / 100,
-						label: `${job.completionPercent}%`,
-						tone: "accent",
-						title: "Agent's own completion estimate",
-					})
-				: undefined,
-			elapsed(job.durationMs, !running),
-		]),
-		job.id,
-	);
 }
 
 function describeJobsResult(
@@ -658,9 +775,23 @@ function describeJobsResult(
 	if (counts.completed > 0) head.push(span(` ${counts.completed} done`, "success"));
 	if (counts.failed > 0) head.push(span(` ${counts.failed} failed`, "error"));
 	if (counts.cancelled > 0) head.push(span(` ${counts.cancelled} cancelled`, "warning"));
-	const order: Record<JobSnapshot["status"], number> = { running: 0, failed: 1, cancelled: 2, completed: 3 };
+	const order: Record<JobSnapshot["status"], number> = {
+		running: 0,
+		failed: 1,
+		cancelled: 2,
+		completed: 3,
+	};
 	const sorted = [...jobs].sort((a, b) => order[a.status] - order[b.status] || b.durationMs - a.durationMs);
-	const body: NativeNode[] = sorted.map(job => describeJob(job, isPartial));
+	// One frame of tiles: each job's status, title, figure and widget together. The job's output
+	// and errors fill the card of the call that started it (`parksAsBackground`), so no previews.
+	const body: NativeNode[] = [];
+	if (sorted.length > 0) {
+		body.push(keyed(describeJobTiles(sorted.slice(0, TILES_SHOWN).map(job => jobTile(job, isPartial))), "tiles"));
+	}
+	if (sorted.length > TILES_SHOWN) {
+		const rest = sorted.length - TILES_SHOWN;
+		body.push(text([span(`+${rest} more ${rest === 1 ? "job" : "jobs"} · /jobs`, "dim")], { role: "omp.wait.more" }));
+	}
 	for (const agent of agents) {
 		const spans: TspSpan[] = [span(plainText(agent.id), "muted")];
 		if (agent.activity) spans.push(span(` ${plainText(agent.activity)}`, "toolOutput"));
@@ -684,6 +815,8 @@ function describeJobsResult(
 	return {
 		head,
 		tone: counts.failed > 0 ? "warning" : counts.running > 0 || agents.length > 0 ? "info" : "success",
+		// The tiles are what a wait shows: clamping the body by lines would cut them.
+		preview: "children",
 		body,
 	};
 }
@@ -729,11 +862,15 @@ export const waitToolRenderer = {
 		result: ToolRenderResult<CoordinationDetails>,
 		options: RenderResultOptions,
 	): NativeToolView | undefined {
-		return waitResultMemo.get(result, [options.isPartial], () => {
+		return waitResultMemo.get(result, [options.isPartial, widgetStamp(result.details?.jobs)], () => {
 			if (result.isError) return errorView("Wait", resultText(result));
 			const details = result.details;
 			if (details?.interrupted) {
-				return { head: toolHead("Wait", "interrupted by message"), tone: "info", inline: true };
+				return {
+					head: toolHead("Wait", "interrupted by message"),
+					tone: "info",
+					inline: true,
+				};
 			}
 			const waited = details?.waited;
 			if (!waited) return describeJobsResult(result, options.isPartial);
@@ -741,7 +878,11 @@ export const waitToolRenderer = {
 		});
 	},
 	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: CoordinationDetails; isError?: boolean },
+		result: {
+			content: Array<{ type: string; text?: string }>;
+			details?: CoordinationDetails;
+			isError?: boolean;
+		},
 		options: RenderResultOptions,
 		uiTheme: Theme,
 	): Component {

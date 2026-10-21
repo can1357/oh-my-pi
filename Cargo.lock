@@ -4323,23 +4323,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
 
 [[package]]
-name = "html-to-markdown-rs"
-version = "3.14.3"
+name = "html-escape"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03602615945d9872da947326d6054d51f891c1b42d611461eff35c0565be03e8"
+checksum = "491194d601b4fa9fac3c9571e014070a0ad1bc3392d1bc10419695196a8b3cc3"
+
+[[package]]
+name = "html-to-markdown-rs"
+version = "3.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33c13755d519d3e22e42732d3173695e445bbd1761444ae1de075e1e1ac5965c"
 dependencies = [
  "ahash",
  "astral-tl",
  "base64 0.23.1",
  "bitflags 2.13.2",
- "html-escape",
+ "html-escape 0.3.0",
  "html5ever",
  "memchr",
  "once_cell",
  "phf 0.14.0",
  "regex",
+ "serde_json",
  "thiserror 2.0.21",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -6816,7 +6824,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.11.3"
+version = "18.12.5"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6851,7 +6859,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.11.3"
+version = "18.12.5"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6939,11 +6947,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.11.3"
+version = "18.12.5"
 
 [[package]]
 name = "pi-edit"
-version = "18.11.3"
+version = "18.12.5"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6963,7 +6971,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.11.3"
+version = "18.12.5"
 dependencies = [
  "async-trait",
  "libc",
@@ -6975,7 +6983,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.11.3"
+version = "18.12.5"
 dependencies = [
  "anyhow",
  "arboard",
@@ -7001,7 +7009,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "heapless 0.9.3",
- "html-escape",
+ "html-escape 0.2.15",
  "html-to-markdown-rs",
  "icy_sixel",
  "ignore",
@@ -7067,7 +7075,7 @@ dependencies = [
 
 [[package]]
 name = "pi-predict"
-version = "18.11.3"
+version = "18.12.5"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -7085,7 +7093,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.11.3"
+version = "18.12.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7116,7 +7124,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.11.3"
+version = "18.12.5"
 dependencies = [
  "futures",
  "gix",
@@ -7132,7 +7140,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vfs"
-version = "18.11.3"
+version = "18.12.5"
 dependencies = [
  "async-trait",
  "libc",
@@ -7145,7 +7153,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.11.3"
+version = "18.12.5"
 dependencies = [
  "bytes",
  "flume",
@@ -7159,7 +7167,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.11.3"
+version = "18.12.5"
 dependencies = [
  "globset",
  "ignore",

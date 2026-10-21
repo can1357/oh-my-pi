@@ -1,7 +1,8 @@
 /**
  * Tool-approval prompt in the composer's place, presented like the ask
  * dialog: the approval title and its details over a list of choices —
- * Approve, an optional "approve for this session", and Deny — and an action
+ * optional grants (led by a toggle that keeps them across sessions), Approve,
+ * an optional "approve for this session", and Deny — and an action
  * bar. The arrows move between the choices and Enter takes the highlighted
  * one; `app.approval.approve` (Ctrl+Enter by default) approves this call
  * outright and Esc denies. Enter and the approve chord only arm
@@ -45,7 +46,8 @@ export const APPROVE_ARM_MS = 500;
 /** The Deny row while a composer draft holds Enter: sending it denies the call and steers the turn. */
 const DENY_AND_SEND_LABEL = "Deny and send message";
 
-type ApprovalAnswer = "once" | "session" | "deny";
+/** `grant<N>` takes the Nth of {@link ApprovalDialogOptions.grants}; `remember` toggles their lifetime. */
+type ApprovalAnswer = "once" | "session" | "deny" | "remember" | `grant${number}`;
 
 interface ApprovalChoice {
 	readonly label: string;
@@ -55,6 +57,14 @@ interface ApprovalChoice {
 interface ApprovalDialogCallbacks {
 	onApprove(): void;
 	onDeny(): void;
+}
+
+/** A choice that approves the call and remembers more than it: a folder, or the exact target. */
+export interface ApprovalDialogGrant {
+	/** Label while the grant is remembered for this session. */
+	readonly label: string;
+	/** Label once the remember toggle keeps it across sessions. */
+	readonly alwaysLabel: string;
 }
 
 /** The composer mounted beneath the dialog: it receives every key the dialog does not own. */
@@ -80,6 +90,12 @@ interface ApprovalDialogOptions {
 	draft?: ApprovalDialogDraft;
 	/** Offer to approve this and later like calls for the rest of the session, as the row between Approve and Deny. */
 	session?: { label: string; onApprove(): void };
+	/**
+	 * Grants to offer above Approve, led by a toggle that keeps them across sessions; Approve then
+	 * reads "Approve Once". `onGrant` gets the chosen grant and whether the toggle was on.
+	 */
+	grants?: readonly ApprovalDialogGrant[];
+	onGrant?(grant: ApprovalDialogGrant, always: boolean): void;
 }
 
 /** A prompt's detail rows: every line after the title, trailing blanks dropped. */
@@ -100,9 +116,11 @@ export class ApprovalDialogComponent implements Component {
 	readonly #footer = new PanelRows();
 	#scrollOffset = 0;
 	#bodyRows = MAX_DETAIL_ROWS;
-	/** In list order; the first (Approve) is highlighted on mount and Deny is last. */
-	readonly #choices: readonly ApprovalChoice[];
+	/** In list order: the remember toggle and grants (when offered), Approve (highlighted on mount), the session row, Deny last. */
+	#choices: readonly ApprovalChoice[];
 	#choice = 0;
+	/** The remember toggle: grants are kept across sessions while it is on. */
+	#rememberAlways = false;
 	#closed = false;
 	#native: NativeNode | undefined;
 	/** Whether a draft held the keys when {@link #native} was described: it moves the highlight. */
@@ -122,11 +140,8 @@ export class ApprovalDialogComponent implements Component {
 		this.#summary = promptDetails(lines);
 		this.#full =
 			options.fullPrompt === undefined ? undefined : promptDetails(sanitizeDisplayLines(options.fullPrompt));
-		this.#choices = [
-			{ label: "Approve", answer: "once" },
-			...(options.session ? [{ label: options.session.label, answer: "session" as const }] : []),
-			{ label: "Deny", answer: "deny" },
-		];
+		this.#choices = this.#buildChoices();
+		this.#choice = this.#choices.findIndex(choice => choice.answer === "once");
 		this.#panel = new OverlayPanel(title, "omp.overlay.approval");
 		this.#footer.setHeight(1);
 		this.#panel.addChild(this.#body);
@@ -147,6 +162,33 @@ export class ApprovalDialogComponent implements Component {
 				},
 			);
 		}
+	}
+
+	#buildChoices(): ApprovalChoice[] {
+		const grants = this.options.grants ?? [];
+		const glyph = this.#rememberAlways ? theme.checkbox.checked : theme.checkbox.unchecked;
+		return [
+			...(grants.length > 0 ? [{ label: `${glyph} Remember across sessions`, answer: "remember" as const }] : []),
+			...grants.map((grant, index) => ({
+				label: this.#rememberAlways ? grant.alwaysLabel : grant.label,
+				answer: `grant${index}` as const,
+			})),
+			{ label: grants.length > 0 ? "Approve Once" : "Approve", answer: "once" },
+			...(this.options.session ? [{ label: this.options.session.label, answer: "session" as const }] : []),
+			{ label: "Deny", answer: "deny" },
+		];
+	}
+
+	/** Run a choice: the remember toggle flips the grants' lifetime in place, every other choice answers. */
+	#take(answer: ApprovalAnswer): void {
+		if (answer !== "remember") {
+			this.#finish(answer);
+			return;
+		}
+		this.#rememberAlways = !this.#rememberAlways;
+		this.#choices = this.#buildChoices();
+		this.#native = undefined;
+		this.options.tui?.requestRender();
 	}
 
 	invalidate(): void {
@@ -191,7 +233,7 @@ export class ApprovalDialogComponent implements Component {
 		else if (matchesSelectPageUp(keyData)) this.#scroll(-page);
 		else if (matchesSelectPageDown(keyData)) this.#scroll(page);
 		else if (getKeybindings().matches(keyData, "tui.select.confirm")) {
-			if (performance.now() >= this.#armedAt) this.#finish(this.#choices[this.#choice]!.answer);
+			if (performance.now() >= this.#armedAt) this.#take(this.#choices[this.#choice]!.answer);
 		}
 		// Enter never reaches an empty composer: it would submit nothing, or interrupt the run.
 		else if (draft && !getKeybindings().matches(keyData, "tui.input.submit")) this.#editDraft(draft, keyData);
@@ -295,7 +337,7 @@ export class ApprovalDialogComponent implements Component {
 			tone: "error",
 			title: `Deny this call${cancelKey ? `  ${formatTooltipKey(cancelKey)}` : ""}`,
 		});
-		const approve = actionButton("Approve", "approve", {
+		const approve = actionButton(this.options.grants?.length ? "Approve Once" : "Approve", "approve", {
 			...(approveKey ? { keys: approveKey } : {}),
 			tone: "accent",
 			title: `Approve this call${approveKey ? `  ${formatTooltipKey(approveKey)}` : ""}`,
@@ -350,7 +392,7 @@ export class ApprovalDialogComponent implements Component {
 		}
 		if ((event.type !== "select" && event.type !== "activate") || leafKey(event.key) !== "choices") return;
 		const choice = this.#choices.find(candidate => candidate.answer === event.item);
-		if (choice) this.#finish(choice.answer);
+		if (choice) this.#take(choice.answer);
 	}
 
 	/** Detail rows at `width`: one clipped row per detail, or wrapped rows once expanded. */
@@ -384,6 +426,10 @@ export class ApprovalDialogComponent implements Component {
 		this.#countdown?.dispose();
 		if (answer === "once") this.callbacks.onApprove();
 		else if (answer === "session") this.options.session?.onApprove();
-		else this.callbacks.onDeny();
+		else if (answer.startsWith("grant")) {
+			const grant = this.options.grants?.[Number(answer.slice("grant".length))];
+			if (grant) this.options.onGrant?.(grant, this.#rememberAlways);
+			else this.callbacks.onDeny();
+		} else this.callbacks.onDeny();
 	}
 }

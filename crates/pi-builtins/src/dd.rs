@@ -753,7 +753,15 @@ fn open_flags(flags: u32, input: bool) -> i32 {
 		let _ = input;
 		open
 	}
-	#[cfg(not(unix))]
+	// POSIX opens a directory for reading and fails the first read (EISDIR);
+	// Win32 refuses to open one at all unless asked for backup semantics.
+	#[cfg(windows)]
+	{
+		use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+		let _ = flags;
+		if input { FILE_FLAG_BACKUP_SEMANTICS as i32 } else { 0 }
+	}
+	#[cfg(not(any(unix, windows)))]
 	{
 		let _ = (flags, input);
 		0
@@ -1093,7 +1101,20 @@ impl<'h> Copier<'h> {
 
 	fn read_input(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		match self.input.as_mut() {
-			Some(file) => file.read(buf),
+			Some(file) => {
+				let result = file.read(buf);
+				// Reading a directory handle fails with ERROR_INVALID_FUNCTION
+				// ("Incorrect function"); POSIX reports EISDIR.
+				#[cfg(windows)]
+				if let Err(error) = &result
+					&& error.raw_os_error()
+						== Some(windows_sys::Win32::Foundation::ERROR_INVALID_FUNCTION as i32)
+					&& file.metadata().is_ok_and(|meta| meta.is_dir())
+				{
+					return Err(pi_vfs::is_a_directory());
+				}
+				result
+			},
 			None => self.host.stdin.read(buf),
 		}
 	}
@@ -2371,7 +2392,7 @@ mod tests {
 		let (_dir, root) = tempdir();
 		let outcome = run(&["if=."], b"", &root);
 		assert_eq!(outcome.code, 1);
-		assert!(outcome.err.starts_with("dd: error reading '.': "), "{}", outcome.err);
+		assert!(outcome.err.starts_with("dd: error reading '.': Is a directory\n"), "{}", outcome.err);
 		assert!(outcome.stats().ends_with("0+0 records in\n0+0 records out\n0 bytes copied, T, R\n"));
 	}
 

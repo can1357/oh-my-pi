@@ -1170,7 +1170,7 @@ export interface AgentTool<
 	 * before ordinary dispatch commits its result.
 	 */
 	speculation?: ToolSpeculationPolicy;
-	/** If true, schema validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. Malformed argument JSON still returns the parse error. */
+	/** If true, schema validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM, and unknown root keys a closed schema would drop stay on the args. Malformed argument JSON still returns the parse error. */
 	lenientArgValidation?: boolean;
 	/**
 	 * Whether the agent loop may abort this tool mid-execution — or skip it
@@ -1228,6 +1228,13 @@ export interface AgentTool<
 
 	/** Lines appended after the standard approval prompt header. */
 	formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
+
+	/**
+	 * Remembered-approval keys for `tools.approvalMode: always-ask-cached`: the files (or URL
+	 * targets) this call touches. When every key is already granted the call skips its prompt;
+	 * approving the call can record them. Omit it (or return `undefined`) and the call prompts by tier.
+	 */
+	approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
 
 	/** The main execution callback for this tool. */
 	execute: AgentToolExecFn<TParameters, TDetails, TTheme>;

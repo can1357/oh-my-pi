@@ -144,7 +144,11 @@ export class CredentialSelector {
 	/**
 	 * Selects a credential of the specified type for a provider.
 	 * Returns both the credential and its index in the original array (for updates/removal).
-	 * Uses deterministic hashing for session stickiness and skips blocked credentials when possible.
+	 * With `sessionId` the scan starts at the session's hashed index; without one it starts at the
+	 * first stored credential and never advances round-robin. Model discovery peeks through this,
+	 * and credential-scoped catalogs (e.g. GitHub Copilot) key their cache rows on the credential
+	 * picked, so a rotating pick would read another account's cache namespace on every pass.
+	 * Blocked credentials are skipped when possible.
 	 */
 	selectByType<T extends AuthCredential["type"]>(
 		provider: string,
@@ -171,7 +175,9 @@ export class CredentialSelector {
 		if (credentials.length === 1) return credentials[0];
 
 		const providerKey = providerTypeKey(provider, type);
-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+		const order = sessionId
+			? this.#getCredentialOrder(providerKey, sessionId, credentials.length)
+			: credentials.map((_, index) => index);
 		const fallback = credentials[order[0]];
 
 		for (const idx of order) {
@@ -483,6 +489,11 @@ export class CredentialSelector {
 				reserveMeasured: reserveFraction !== undefined && remainingFraction !== undefined,
 				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
 				allowanceSpent: remainingFraction === 0,
+				reclaimReady:
+					!blocked &&
+					policy?.reclaimAbovePct !== undefined &&
+					remainingFraction !== undefined &&
+					remainingFraction * 100 >= policy.reclaimAbovePct,
 				usageMeasured,
 				hasPriorityBoost: strategy?.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: planPriority(args.planGate, usage),
@@ -683,13 +694,26 @@ export class CredentialSelector {
 				candidate.selection.index === sessionPreferredIndex,
 		);
 		const preferredCandidate = sessionPreferredCandidate === -1 ? undefined : candidates[sessionPreferredCandidate];
-		// A warm automatic pin normally wins. Two policies may evict it, each only
+		// A warm automatic pin normally wins. Three policies may evict it, each only
 		// while a sibling is confirmed better: reserve (sibling measured outside
-		// reserve) and spent allowance (unblocked sibling with allowance left).
-		const automaticPinWouldBeEvicted = (excludePreflightFailures: boolean): boolean =>
-			!sessionPinIsExplicit &&
-			preferredCandidate !== undefined &&
-			candidates.some(candidate => {
+		// reserve), spent allowance (unblocked sibling with allowance left), and
+		// opt-in reclaim (the sibling ranking picks next has higher priority and is
+		// measured at or above its `reclaimAbovePct`).
+		const automaticPinWouldBeEvicted = (excludePreflightFailures: boolean): boolean => {
+			if (sessionPinIsExplicit || preferredCandidate === undefined) return false;
+			const rankedWinner = candidates.find(
+				candidate =>
+					candidate !== preferredCandidate &&
+					!(excludePreflightFailures && preflightFailures.has(candidate)) &&
+					!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes),
+			);
+			if (
+				rankedWinner?.reclaimReady === true &&
+				(rankedWinner.accountPriority ?? 0) > (preferredCandidate.accountPriority ?? 0)
+			) {
+				return true;
+			}
+			return candidates.some(candidate => {
 				if (candidate === preferredCandidate) return false;
 				if (excludePreflightFailures && preflightFailures.has(candidate)) return false;
 				if (
@@ -706,6 +730,7 @@ export class CredentialSelector {
 					!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes)
 				);
 			});
+		};
 		const pinEvictedBeforePreflight = automaticPinWouldBeEvicted(false);
 		if (
 			!hasPlanRequirement &&

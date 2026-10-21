@@ -131,7 +131,7 @@ describe("serializeConversation — useless pairs", () => {
 		expect(out).toBe("");
 	});
 
-	test("strips assistant reasoning from Anthropic-dialect summary input but keeps text and tool calls", () => {
+	test("strips assistant reasoning when the reader's classifier refuses CoT but keeps text and tool calls", () => {
 		const reasoning = "PRIVATE chain of thought that must not be replayed to Claude";
 		const out = serializeConversation(
 			[
@@ -142,6 +142,7 @@ describe("serializeConversation — useless pairs", () => {
 				]),
 			],
 			"anthropic",
+			true,
 		);
 
 		expect(out).not.toContain(reasoning);
@@ -150,7 +151,7 @@ describe("serializeConversation — useless pairs", () => {
 		expect(out).toContain("<function_calls>");
 	});
 
-	test("keeps assistant reasoning for non-Anthropic dialects", () => {
+	test("keeps assistant reasoning when the reader accepts replayed CoT", () => {
 		const reasoning = "reasoning kept for the XML transcript";
 		const out = serializeConversation(
 			[

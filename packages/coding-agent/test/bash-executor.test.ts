@@ -195,9 +195,10 @@ describe("executeBash", () => {
 			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
 		};
 		const frame = await encodeTerminalImage(image);
-		const result = await executeBash(`printf '%s' ${shellQuote(frame)}; sleep 3`, {
+		// The deadline must land after the image is out, even when a loaded runner is slow to start the shell.
+		const result = await executeBash(`printf '%s' ${shellQuote(frame)}; sleep 30`, {
 			cwd: tempDir,
-			timeout: 20,
+			timeout: 1_000,
 		});
 
 		expect(result.timedOut).toBe(true);

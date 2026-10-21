@@ -416,7 +416,11 @@ function wrapNetworkError(error: unknown): Error {
 			return new Error("Request was aborted");
 		}
 		if (error.message === "fetch failed" && error.cause instanceof Error) {
-			return new Error(`Network error: ${error.cause.message}`);
+			// Keep the original rejection as `cause`: undici nests the errno under
+			// `fetch failed` (often through an AggregateError), and
+			// classifyNetworkCause (packages/ai/src/error/network-cause.ts) walks
+			// `cause`/`errors` off this error. Flattening to text alone loses it.
+			return new Error(`Network error: ${error.cause.message}`, { cause: error });
 		}
 		return error;
 	}

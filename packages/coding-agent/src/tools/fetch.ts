@@ -23,7 +23,7 @@ import { decodeBody } from "../web/response-body";
 import { findFirecrawlApiKey, scrapeWithFirecrawl } from "../web/firecrawl";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
 import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
-import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
+import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES } from "../web/scrapers/types";
 import { type BinaryFetchResult, convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { findCredential } from "../web/search/providers/utils";
 import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
@@ -156,21 +156,19 @@ export function parseReadUrlTarget(readPath: string): ParsedReadUrlTarget | null
 		return null;
 	}
 
-	let raw = false;
+	const tokens = embedded?.sels ?? [];
+	const raw = tokens.some(token => token.toLowerCase() === "raw");
 	let ranges: [LineRange, ...LineRange[]] | undefined;
 	let tail: number | undefined;
-	for (const token of embedded?.sels ?? []) {
-		if (token.toLowerCase() === "raw") {
-			raw = true;
-			continue;
-		}
+	for (const token of tokens) {
+		if (token.toLowerCase() === "raw") continue;
 		if (ranges !== undefined || tail !== undefined) {
 			// Two range groups on the same URL (`…:5-10:20-30`) — combine with commas instead.
 			throw new ToolError(
 				`URL selector has multiple range groups; combine them with commas (e.g. \`:5-10,20-30\`).`,
 			);
 		}
-		ranges = parseLineRanges(token) ?? undefined;
+		ranges = parseLineRanges(token, raw ? "single" : "onward") ?? undefined;
 		if (ranges !== undefined) continue;
 		const count = parseTailCount(token);
 		if (count === null) {
@@ -251,7 +249,11 @@ function isInlineImageMimeTypeSupported(mimeType: string): boolean {
 /**
  * Try fetching URL with .md appended (llms.txt convention)
  */
-async function tryMdSuffix(url: string, timeout: number, signal?: AbortSignal): Promise<string | null> {
+async function tryMdSuffix(
+	url: string,
+	timeout: number,
+	signal?: AbortSignal,
+): Promise<{ content: string; truncated: boolean } | null> {
 	const candidates: string[] = [];
 
 	try {
@@ -282,7 +284,7 @@ async function tryMdSuffix(url: string, timeout: number, signal?: AbortSignal): 
 		}
 		const result = await loadPage(candidate, { timeout, signal });
 		if (result.ok && result.content.trim().length > 100 && !looksLikeHtml(result.content)) {
-			return result.content;
+			return { content: result.content, truncated: Boolean(result.truncated) };
 		}
 	}
 
@@ -296,7 +298,7 @@ async function tryLlmEndpoints(
 	url: string,
 	timeout: number,
 	signal?: AbortSignal,
-): Promise<{ content: string; endpoint: string } | null> {
+): Promise<{ content: string; endpoint: string; truncated: boolean } | null> {
 	const endpoints = buildLlmEndpointCandidates(url);
 
 	if (signal?.aborted || endpoints.length === 0) {
@@ -309,7 +311,7 @@ async function tryLlmEndpoints(
 		}
 		const result = await loadPage(endpoint, { timeout: Math.min(timeout, 5), signal });
 		if (result.ok && result.content.trim().length > 100 && !looksLikeHtml(result.content)) {
-			return { content: result.content, endpoint };
+			return { content: result.content, endpoint, truncated: Boolean(result.truncated) };
 		}
 	}
 	return null;
@@ -322,7 +324,7 @@ async function tryContentNegotiation(
 	url: string,
 	timeout: number,
 	signal?: AbortSignal,
-): Promise<{ content: string; type: string } | null> {
+): Promise<{ content: string; type: string; truncated: boolean } | null> {
 	if (signal?.aborted) {
 		return null;
 	}
@@ -337,7 +339,7 @@ async function tryContentNegotiation(
 
 	const mime = normalizeMime(result.contentType);
 	if ((mime.includes("markdown") || mime === "text/plain") && !looksLikeHtml(result.content)) {
-		return { content: result.content, type: result.contentType };
+		return { content: result.content, type: result.contentType, truncated: Boolean(result.truncated) };
 	}
 
 	return null;
@@ -622,7 +624,7 @@ export async function renderHtmlToText(
 	const runners: Record<FetchProvider, () => Promise<string | null>> = {
 		// Purely local, no network/subprocess: still works on already-loaded HTML
 		// even after remote/subprocess attempts are aborted by the budget.
-		native: () => htmlToMarkdown(html, { cleanContent: true }),
+		native: () => htmlToMarkdown(html, { cleanContent: true, hiddenContent: "reachable" }),
 		trafilatura: async () => {
 			if (overallSignal?.aborted) return null;
 			const trafilatura = await ensureTool("trafilatura", { signal: overallSignal, silent: true });
@@ -850,15 +852,14 @@ function buildBinaryPayloadResult(
 	fetchedAt: string,
 	notes: string[],
 ): FetchRenderResult {
-	const output = finalizeOutput(content);
 	return {
 		url,
 		finalUrl,
 		contentType: binaryContentType(mime),
 		method,
-		content: output.content,
+		content: finalizeOutput(content),
 		fetchedAt,
-		truncated: output.truncated,
+		truncated: false,
 		notes,
 	};
 }
@@ -1174,9 +1175,7 @@ async function renderUrl(
 
 	const { finalUrl } = response;
 	let rawContent = response.content;
-	if (response.truncated) {
-		notes.push(`Response body exceeded ${formatBytes(MAX_BYTES)} and was cut mid-stream; content is incomplete`);
-	}
+	const truncated = Boolean(response.truncated);
 	const mime = normalizeMime(response.contentType);
 	const extHint = getExtensionHint(finalUrl);
 
@@ -1206,9 +1205,9 @@ async function renderUrl(
 						finalUrl,
 						contentType: imageMimeType,
 						method: "image-too-large",
-						content: output.content,
+						content: output,
 						fetchedAt,
-						truncated: output.truncated,
+						truncated: false,
 						notes,
 					};
 				}
@@ -1229,9 +1228,9 @@ async function renderUrl(
 						finalUrl,
 						contentType: imageMimeType,
 						method: "image-invalid",
-						content: output.content,
+						content: output,
 						fetchedAt,
-						truncated: output.truncated,
+						truncated,
 						notes,
 					};
 				}
@@ -1247,9 +1246,9 @@ async function renderUrl(
 						finalUrl,
 						contentType: imageMimeType,
 						method: "image-too-large",
-						content: output.content,
+						content: output,
 						fetchedAt,
-						truncated: output.truncated,
+						truncated: false,
 						notes,
 					};
 				}
@@ -1265,9 +1264,9 @@ async function renderUrl(
 					finalUrl,
 					contentType: resized.mimeType,
 					method: "image",
-					content: output.content,
+					content: output,
 					fetchedAt,
-					truncated: output.truncated,
+					truncated: false,
 					notes,
 					image: {
 						data: resized.data,
@@ -1298,9 +1297,9 @@ async function renderUrl(
 						finalUrl,
 						contentType: mime,
 						method: "markit",
-						content: output.content,
+						content: output,
 						fetchedAt,
-						truncated: output.truncated,
+						truncated: false,
 						notes,
 					};
 				}
@@ -1353,9 +1352,9 @@ async function renderUrl(
 			finalUrl,
 			contentType: mime,
 			method: "raw",
-			content: output.content,
+			content: output,
 			fetchedAt,
-			truncated: output.truncated,
+			truncated,
 			notes,
 		};
 	}
@@ -1366,9 +1365,9 @@ async function renderUrl(
 			finalUrl,
 			contentType: mime,
 			method: "json",
-			content: output.content,
+			content: output,
 			fetchedAt,
-			truncated: output.truncated,
+			truncated,
 			notes,
 		};
 	}
@@ -1381,9 +1380,9 @@ async function renderUrl(
 			finalUrl,
 			contentType: mime,
 			method: "feed",
-			content: output.content,
+			content: output,
 			fetchedAt,
-			truncated: output.truncated,
+			truncated,
 			notes,
 		};
 	}
@@ -1395,9 +1394,9 @@ async function renderUrl(
 			finalUrl,
 			contentType: mime,
 			method: "text",
-			content: output.content,
+			content: output,
 			fetchedAt,
-			truncated: output.truncated,
+			truncated,
 			notes,
 		};
 	}
@@ -1418,9 +1417,9 @@ async function renderUrl(
 					finalUrl,
 					contentType: "text/markdown",
 					method: "alternate-markdown",
-					content: output.content,
+					content: output,
 					fetchedAt,
-					truncated: output.truncated,
+					truncated: Boolean(altResult.truncated),
 					notes,
 				};
 			}
@@ -1430,15 +1429,15 @@ async function renderUrl(
 		const mdSuffix = await tryMdSuffix(finalUrl, timeout, signal);
 		if (mdSuffix) {
 			notes.push("Found .md suffix version");
-			const output = finalizeOutput(mdSuffix);
+			const output = finalizeOutput(mdSuffix.content);
 			return {
 				url,
 				finalUrl,
 				contentType: "text/markdown",
 				method: "md-suffix",
-				content: output.content,
+				content: output,
 				fetchedAt,
-				truncated: output.truncated,
+				truncated: mdSuffix.truncated,
 				notes,
 			};
 		}
@@ -1453,9 +1452,9 @@ async function renderUrl(
 				finalUrl,
 				contentType: normalizeMime(negotiated.type),
 				method: "content-negotiation",
-				content: output.content,
+				content: output,
 				fetchedAt,
-				truncated: output.truncated,
+				truncated: negotiated.truncated,
 				notes,
 			};
 		}
@@ -1474,9 +1473,9 @@ async function renderUrl(
 					finalUrl,
 					contentType: "application/feed",
 					method: "alternate-feed",
-					content: output.content,
+					content: output,
 					fetchedAt,
-					truncated: output.truncated,
+					truncated: Boolean(altResult.truncated),
 					notes,
 				};
 			}
@@ -1509,9 +1508,9 @@ async function renderUrl(
 					finalUrl,
 					contentType: "text/plain",
 					method: "llms.txt",
-					content: output.content,
+					content: output,
 					fetchedAt,
-					truncated: output.truncated,
+					truncated: llmResult.truncated,
 					notes,
 				};
 			}
@@ -1522,9 +1521,9 @@ async function renderUrl(
 				finalUrl,
 				contentType: mime,
 				method: "raw-html",
-				content: output.content,
+				content: output,
 				fetchedAt,
-				truncated: output.truncated,
+				truncated,
 				notes,
 			};
 		}
@@ -1546,9 +1545,9 @@ async function renderUrl(
 							finalUrl,
 							contentType: "application/document",
 							method: "extracted-document",
-							content: output.content,
+							content: output,
 							fetchedAt,
-							truncated: output.truncated,
+							truncated: false,
 							notes,
 						};
 					}
@@ -1569,9 +1568,9 @@ async function renderUrl(
 					finalUrl,
 					contentType: "text/plain",
 					method: "llms.txt",
-					content: output.content,
+					content: output,
 					fetchedAt,
-					truncated: output.truncated,
+					truncated: llmResult.truncated,
 					notes,
 				};
 			}
@@ -1585,9 +1584,9 @@ async function renderUrl(
 			finalUrl,
 			contentType: mime,
 			method: htmlResult.method,
-			content: output.content,
+			content: output,
 			fetchedAt,
-			truncated: output.truncated,
+			truncated,
 			notes,
 		};
 	}
@@ -1599,9 +1598,9 @@ async function renderUrl(
 		finalUrl,
 		contentType: mime,
 		method: "raw",
-		content: output.content,
+		content: output,
 		fetchedAt,
-		truncated: output.truncated,
+		truncated,
 		notes,
 	};
 }
@@ -1690,7 +1689,7 @@ export async function fetchReadUrl(
 	}
 
 	const storage = session.settings.getStorage();
-	const result = await renderUrl(
+	let result = await renderUrl(
 		url,
 		effectiveTimeout,
 		raw,
@@ -1701,6 +1700,11 @@ export async function fetchReadUrl(
 		session.fetch,
 		webpExclusionForModel(session.getActiveModel?.()),
 	);
+	if (result.truncated) {
+		// Covers special handlers and every renderUrl branch, whichever response supplied the content.
+		const cutNote = `Response body exceeded ${formatBytes(MAX_BYTES)} and was cut mid-stream; content is incomplete`;
+		result = { ...result, notes: [...result.notes, cutNote] };
+	}
 	const output = buildUrlReadOutput(result, result.content);
 	const artifact = options?.ensureArtifact ? await persistReadUrlArtifact(session, output) : undefined;
 
@@ -1777,17 +1781,6 @@ export async function executeReadUrl(
 	const resultBuilder = toolResult(details).content(contentBlocks).sourceUrl(details.finalUrl);
 	if (needsArtifact) {
 		resultBuilder.truncation(truncation, { direction: "head", artifactId: entry.artifactId });
-	} else if (entry.details.truncated) {
-		const outputLines = entry.output.split("\n").length;
-		const outputBytes = Buffer.byteLength(entry.output, "utf-8");
-		const totalBytes = Math.max(outputBytes + 1, MAX_OUTPUT_CHARS + 1);
-		const totalLines = outputLines + 1;
-		resultBuilder.truncationFromText(entry.output, {
-			direction: "tail",
-			totalLines,
-			totalBytes,
-			maxBytes: MAX_OUTPUT_CHARS,
-		});
 	}
 
 	return resultBuilder.done();

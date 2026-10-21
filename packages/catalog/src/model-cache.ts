@@ -145,6 +145,13 @@ export interface CacheEntry<TApi extends Api = Api> {
 	models: Model<TApi>[];
 	fresh: boolean;
 	authoritative: boolean;
+	/**
+	 * `authoritative` of the payload row itself, ignoring the
+	 * `model_cache_refresh` side row. A failed refresh flips only the side row
+	 * (freshness plus retry backoff), so this keeps answering "were `models`
+	 * written by an authoritative discovery result?" after such a write.
+	 */
+	payloadAuthoritative: boolean;
 	updatedAt: number;
 	/** Model ids whose live headers were intentionally omitted from disk. */
 	headerOmittedModelIds: readonly string[];
@@ -596,6 +603,7 @@ function parseCacheRow<TApi extends Api>(
 		models,
 		fresh,
 		authoritative,
+		payloadAuthoritative: row.authoritative === 1,
 		updatedAt,
 		headerOmittedModelIds,
 		unrestorableHeaderModelIds,

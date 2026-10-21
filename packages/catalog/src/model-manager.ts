@@ -266,7 +266,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			: undefined;
 	const cache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
 	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
-	const isAuthoritativeDynamicCache = dynamicModelsAuthoritative && (cache?.authoritative ?? false);
+	const isAuthoritativeDynamicCache = dynamicModelsAuthoritative && (cache?.payloadAuthoritative ?? false);
 	const cacheAdditiveStaticModelIds = isAuthoritativeDynamicCache ? undefined : modelsDevAdditiveStaticModelIds;
 	const restoredCache = restoreCachedModelHeaders(
 		cache?.models ?? [],

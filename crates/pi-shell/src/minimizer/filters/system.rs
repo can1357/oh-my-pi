@@ -889,12 +889,12 @@ fn compact_ssh_output(input: &str) -> String {
 		if is_ssh_noise(line) {
 			continue;
 		}
-		out.push_str(&primitives::truncate_line(line, 120));
+		out.push_str(line);
 		out.push('\n');
 	}
 	if out.lines().count() > 200 {
 		primitives::head_tail_lines(&out, 100, 80)
-	} else if out.is_empty() {
+	} else if out.trim().is_empty() {
 		input.to_string()
 	} else {
 		out
@@ -903,8 +903,7 @@ fn compact_ssh_output(input: &str) -> String {
 
 fn is_ssh_noise(line: &str) -> bool {
 	let trimmed = line.trim();
-	trimmed.is_empty()
-		|| trimmed.starts_with("Warning: Permanently added")
+	trimmed.starts_with("Warning: Permanently added")
 		|| trimmed.starts_with("Connection to ") && trimmed.ends_with(" closed.")
 		|| trimmed.starts_with("Authenticated to ")
 		|| trimmed.starts_with("debug1:")

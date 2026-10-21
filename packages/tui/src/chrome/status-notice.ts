@@ -42,6 +42,11 @@ export class StatusNotice extends Container {
 		this.addChild(this.#text);
 	}
 
+	/** The text the notice currently shows. */
+	get message(): string {
+		return this.#message;
+	}
+
 	setMessage(message: string, options: StatusNoticeOptions = {}): void {
 		const toast = options.toast ?? true;
 		this.#text.setStyleFn(options.styleFn);

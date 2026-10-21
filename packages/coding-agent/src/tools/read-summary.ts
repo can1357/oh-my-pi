@@ -117,7 +117,8 @@ export async function trySummarize(
 	}
 }
 
-/** Read session display preferences and format a structural summary. */
+/** Read session display preferences and format a structural summary; `rowPrefixes` records whether its rows carry `N:`/`N|` prefixes. */
 export function renderSummary(session: ToolSession, summary: SummaryResult) {
-	return formatReadSummary(resolveFileDisplayMode(session), summary);
+	const displayMode = resolveFileDisplayMode(session);
+	return { ...formatReadSummary(displayMode, summary), rowPrefixes: displayMode.lineNumbers };
 }

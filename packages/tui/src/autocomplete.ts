@@ -226,6 +226,12 @@ export interface AutocompleteItem {
 	state?: string;
 	/** Dim hint text shown inline after cursor when this item is selected */
 	hint?: string;
+	/**
+	 * Slash command matched only through its description, not its name or an alias:
+	 * a browse hit, so Enter submits the typed text instead of running it unless the
+	 * user moved the selection onto it.
+	 */
+	descriptionMatch?: boolean;
 }
 
 type Awaitable<T> = T | Promise<T>;
@@ -437,6 +443,7 @@ function buildSlashCommandCompletions(
 						...(cmd.iconName && { iconName: cmd.iconName }),
 						...(fullDesc && { description: fullDesc }),
 						...nativeTextMemo,
+						...(nameScore === 0 && { descriptionMatch: true }),
 					};
 				}
 
@@ -444,7 +451,11 @@ function buildSlashCommandCompletions(
 					for (const alias of getCommandAliases(cmd)) {
 						if (alias === name) continue;
 						const aliasScore = scoreCommandTextMatch(lowerPrefix, alias.toLowerCase());
-						if (aliasScore === 0 || (best && aliasScore <= best.score)) continue;
+						if (aliasScore === 0) continue;
+						// An alias can match even when the description outranks it; Enter
+						// must still accept the command rather than submit the raw query.
+						if (best?.descriptionMatch) delete best.descriptionMatch;
+						if (best && aliasScore <= best.score) continue;
 						const fullDesc = resolveFullDesc();
 						best = {
 							value: alias,

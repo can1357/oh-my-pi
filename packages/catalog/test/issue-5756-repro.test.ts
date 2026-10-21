@@ -15,6 +15,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { moonshotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -48,7 +49,7 @@ function encodeSseChunks(chunks: ReadonlyArray<Record<string, unknown>>): string
 describe("issue #5756 — moonshot kimi-k3 pricing and wire format", () => {
 	it("discovery mapper stamps K3 pricing, limits, vision, and reasoning", async () => {
 		const k3 = await discoverKimiK3();
-		expect(k3.cost).toEqual({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
+		expect(k3.cost).toEqual({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 });
 		expect(k3.contextWindow).toBe(1_048_576);
 		expect(k3.maxTokens).toBe(131_072);
 		expect(k3.input).toEqual(["text", "image"]);
@@ -65,6 +66,22 @@ describe("issue #5756 — moonshot kimi-k3 pricing and wire format", () => {
 		expect(model.compat.thinkingFormat).toBe("openai");
 		expect(model.compat.reasoningDisableMode).toBe("lowest-effort");
 		expect(model.compat.supportsReasoningEffort).toBe(true);
+	});
+
+	it("prices K3 cache-write tokens at the 5min TTL rate (#16508)", async () => {
+		// A source row reporting no cache-write fee must not zero the cost: the
+		// moonshot.kdl cost-patch owns Moonshot's separately billed cache writes.
+		const spec = { ...(await discoverKimiK3()), cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 } };
+		const cost = calculateCost(buildModel(spec), {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 1_000_000,
+			totalTokens: 1_000_000,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		});
+		expect(cost.cacheWrite).toBe(3);
+		expect(cost.total).toBe(3);
 	});
 
 	it("wire body carries reasoning_effort=max and omits the thinking block", async () => {
@@ -188,7 +205,7 @@ describe("unbundled Moonshot variants (no reference row)", () => {
 		if (!k3) throw new Error("kimi-k3-turbo not discovered");
 		// Raw spec: live/seed facts only — modalities and the ladder stay unset.
 		expect(k3.reasoning).toBe(true);
-		expect(k3.cost).toEqual({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
+		expect(k3.cost).toEqual({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 });
 		expect(k3.contextWindow).toBe(1_048_576);
 		expect(k3.maxTokens).toBe(131_072);
 		expect(k3.input).toEqual(["text"]);

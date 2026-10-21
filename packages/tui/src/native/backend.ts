@@ -244,6 +244,10 @@ class Surface {
 	acked = 0;
 	/** Send times of unacknowledged frames, oldest first. */
 	unacked: number[] = [];
+	/** Send time of the oldest frame left unanswered when the current stall began; cleared by the next ack. */
+	stalledSince: number | undefined;
+	/** Credit resets since {@link stalledSince}. */
+	stallResets = 0;
 	focus: string | null = null;
 	dirty = false;
 
@@ -456,6 +460,8 @@ export class NativeBackend {
 		surface.reconciler.detachLive();
 		surface.unacked = [];
 		surface.acked = surface.seq;
+		surface.stalledSince = undefined;
+		surface.stallResets = 0;
 		surface.focus = null;
 		surface.dirty = false;
 		this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: SESSION_ROLE, adopt: true });
@@ -612,11 +618,16 @@ export class NativeBackend {
 		if (surface.unacked.length < this.#credits) return true;
 		const oldest = surface.unacked[0]!;
 		if (this.#scheduler.now() - oldest < STALLED_ACK_MS) return false;
-		logger.warn("TSP: terminal stopped acknowledging frames; resuming without credits", {
-			sf: surface.id,
-			s: surface.seq,
-			acked: surface.acked,
-		});
+		// One warning per stall: a terminal that never acks would otherwise log one every `STALLED_ACK_MS`.
+		if (surface.stalledSince === undefined) {
+			surface.stalledSince = oldest;
+			logger.warn("TSP: terminal stopped acknowledging frames; resuming without credits", {
+				sf: surface.id,
+				s: surface.seq,
+				acked: surface.acked,
+			});
+		}
+		surface.stallResets++;
 		surface.unacked = [];
 		surface.acked = surface.seq;
 		return true;
@@ -801,6 +812,15 @@ export class NativeBackend {
 				const newly = Math.min(event.s, surface.seq) - surface.acked;
 				surface.acked = Math.min(event.s, surface.seq);
 				surface.unacked.splice(0, newly);
+				if (surface.stalledSince !== undefined) {
+					logger.debug("TSP: terminal acknowledging frames again", {
+						sf: surface.id,
+						stalledMs: this.#scheduler.now() - surface.stalledSince,
+						resets: surface.stallResets,
+					});
+					surface.stalledSince = undefined;
+					surface.stallResets = 0;
+				}
 				this.#clearStallTimer();
 				if (surface.dirty) this.#host.requestRender();
 				return;

@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import * as os from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -85,6 +86,12 @@ function restoreAutoQaEnv(): void {
 		return;
 	}
 	Bun.env.PI_AUTO_QA = originalPiAutoQa;
+}
+
+/** Pin the home directory and login name the redaction reads. */
+function stubIdentity(home: string, username: string): void {
+	vi.spyOn(os, "homedir").mockReturnValue(home);
+	vi.spyOn(os, "userInfo").mockReturnValue({ username, uid: 501, gid: 20, shell: "/bin/zsh", homedir: home });
 }
 
 describe("flushGrievances", () => {
@@ -435,10 +442,34 @@ describe("flushGrievances", () => {
 		expect(selectPushedIds(db).length).toBe(firstBatch);
 		expect(selectUnpushedIds(db).length).toBe(secondBatch);
 	});
+
+	it("redacts the home directory from rows recorded before record-time redaction", async () => {
+		stubIdentity("/Users/jdoe", "jdoe");
+		insertGrievance(db, "read /Users/jdoe/notes.md", "selector dropped /Users/jdoe/notes.md:4");
+
+		let sentBody: unknown;
+		const fetchSpy = vi.fn(async (_input: string | URL | Request, init: RequestInit | undefined) => {
+			sentBody = JSON.parse(String(init?.body));
+			return new Response("", { status: 200 });
+		});
+
+		const result = await flushGrievances(db, pushSettings(), { fetch: mockFetch(fetchSpy) });
+
+		expect(result).toEqual({ pushed: 1, ok: true });
+		expect(sentBody).toMatchObject({
+			entries: [{ tool: "read ~/notes.md", report: "selector dropped ~/notes.md:4" }],
+		});
+	});
 });
 
 describe("dispatchReportIssueDevice", () => {
+	beforeEach(() => {
+		// Fixture words (`read`, `glob`, …) must not depend on the host's login name.
+		stubIdentity("/home/omp-test-user", "omp-test-user");
+	});
+
 	afterEach(() => {
+		vi.restoreAllMocks();
 		__resetAutoQaConsentForTests();
 	});
 
@@ -496,6 +527,43 @@ describe("dispatchReportIssueDevice", () => {
 		}
 	});
 
+	it.each([
+		[
+			"xd://tui: start fails because kitty-vt-wasm is missing",
+			"xd://tui",
+			"start fails because kitty-vt-wasm is missing",
+		],
+		["write xd://tui: start fails before executing bun", "write xd://tui", "start fails before executing bun"],
+		[
+			'write conflict://*: per-id content "2:\ttext" was read as a hashline prefix',
+			"write conflict://*",
+			'per-id content "2:\ttext" was read as a hashline prefix',
+		],
+	])("keeps the URI in the tool name of %p", async (text, tool, report) => {
+		Bun.env.PI_AUTO_QA = "1";
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = { settings: consentedSettings() } as ToolSession;
+			await dispatchReportIssueDevice(session, text);
+			await settlePipeline();
+			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
+			expect(row).toEqual({ tool, report });
+		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	});
+
+	it.each([
+		"read agent://ReviewLifecycleLever returned an empty response",
+		"browser.open({name:'jio-terms',url:'https://www.jio.com/'}) navigated the attached relay tab",
+	])("rejects %p, which has no `: ` separator, instead of splitting inside it", async text => {
+		Bun.env.PI_AUTO_QA = "1";
+		const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
+		await expect(dispatchReportIssueDevice(session, text)).rejects.toThrow("Invalid report format");
+	});
+
 	it("clamps a prose first line so the stored tool stays within the collector limit", async () => {
 		Bun.env.PI_AUTO_QA = "1";
 		const db = openTempDb();
@@ -511,6 +579,63 @@ describe("dispatchReportIssueDevice", () => {
 			expect(prose.startsWith(row.tool)).toBe(true);
 			// The sentence is preserved in the report, not dropped on the floor.
 			expect(row.report).toBe(`${prose}\nglob threw instead of returning empty`);
+		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	});
+
+	/** Record `bash: <report>` as user `will` and return the stored report text. */
+	async function recordAsWill(report: string): Promise<string> {
+		Bun.env.PI_AUTO_QA = "1";
+		stubIdentity("/Users/will", "will");
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = { settings: consentedSettings() } as ToolSession;
+			await dispatchReportIssueDevice(session, `bash: ${report}`);
+			await settlePipeline();
+			const row = db.prepare("SELECT report FROM grievances").get() as { report: string };
+			return row.report;
+		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	}
+
+	it.each([
+		[
+			"launchctl print gui/501/com.will.agent failed in /Users/will/code (not /Users/willa)",
+			"launchctl print gui/501/com.<user>.agent failed in ~/code (not /Users/willa)",
+		],
+		["see /Users/will. Then ssh will@build-host", "see ~. Then ssh <user>@build-host"],
+		[
+			"transcript -Users-will-codebases-app/x.jsonl and /c/Users/will/AppData",
+			"transcript -Users-<user>-codebases-app/x.jsonl and /c/Users/<user>/AppData",
+		],
+	])("redacts the user's identity from %p", async (report, expected) => {
+		expect(await recordAsWill(report)).toBe(expected);
+	});
+
+	it("leaves the login name alone where it is a word or an unrelated path segment", async () => {
+		const report = "Ask will. It will-do: will/max under ./will_modules/x and /srv/will/test";
+		expect(await recordAsWill(report)).toBe(report);
+	});
+
+	it("redacts a Windows home written in another case", async () => {
+		Bun.env.PI_AUTO_QA = "1";
+		stubIdentity("C:\\Users\\Will", "Will");
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = { settings: consentedSettings() } as ToolSession;
+			await dispatchReportIssueDevice(
+				session,
+				"read: c:\\users\\will\\secret.txt and C:/USERS/WILL/x and -users-will-proj",
+			);
+			await settlePipeline();
+			const row = db.prepare("SELECT report FROM grievances").get() as { report: string };
+			expect(row.report).toBe("~\\secret.txt and ~/x and -users-<user>-proj");
 		} finally {
 			openSpy.mockRestore();
 			db.close();

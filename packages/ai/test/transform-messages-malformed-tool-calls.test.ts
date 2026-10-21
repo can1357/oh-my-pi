@@ -24,6 +24,32 @@ const model: Model<"anthropic-messages"> = buildModel({
 	reasoning: true,
 });
 
+const googleModel: Model<"google-generative-ai"> = buildModel({
+	api: "google-generative-ai",
+	provider: "google",
+	id: "gemini-2.5-pro",
+	name: "Gemini 2.5 Pro",
+	baseUrl: "https://generativelanguage.googleapis.com",
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	maxTokens: 8192,
+	contextWindow: 200000,
+	reasoning: false,
+});
+
+const googleCliModel: Model<"google-gemini-cli"> = buildModel({
+	api: "google-gemini-cli",
+	provider: "google-gemini-cli",
+	id: "gemini-2.5-pro",
+	name: "Gemini 2.5 Pro",
+	baseUrl: "https://cloudcode-pa.googleapis.com",
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	maxTokens: 8192,
+	contextWindow: 200000,
+	reasoning: false,
+});
+
 function assistant(content: AssistantMessage["content"], timestamp: number): AssistantMessage {
 	return {
 		role: "assistant",
@@ -221,6 +247,70 @@ describe("transformMessages drops malformed (empty-name) tool calls", () => {
 		expect(transformed.flatMap(message => (message.role === "toolResult" ? [message.toolCallId] : []))).toEqual([
 			"call_longest",
 			"call_real",
+		]);
+	});
+
+	// Regression for #15839: models invent tool names from internal URL schemes
+	// (`proc://*`) while polling background work. Strict targets reject replayed
+	// names with `.` or `:`, while Google accepts them.
+	it("drops invalid tool names and results for the target's charset", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "wait for the background job", timestamp: 1 },
+			assistant(
+				[
+					{ type: "toolCall", id: "call_proc", name: "proc://*", arguments: {} },
+					{ type: "toolCall", id: "call_history", name: "history://0-Sub", arguments: {} },
+					{ type: "toolCall", id: "call_unicode", name: "lées", arguments: {} },
+					{ type: "toolCall", id: "call_google", name: "ns.tool:v1", arguments: {} },
+					{ type: "toolCall", id: "call_digit", name: "2invalid", arguments: {} },
+				],
+				2,
+			),
+			toolResult("call_proc", "Tool proc://* not found", 3),
+			toolResult("call_history", "Tool history://0-Sub not found", 4),
+			toolResult("call_unicode", "Tool lées not found", 5),
+			toolResult("call_google", "google result", 6),
+			toolResult("call_digit", "Tool 2invalid not found", 7),
+			{ role: "user", content: "continue", timestamp: 7 },
+		];
+
+		const googleHistory = transformMessages(messages, googleModel);
+		expect(getToolCalls(googleHistory).map(call => call.id)).toEqual(["call_google"]);
+		expect(googleHistory.flatMap(message => (message.role === "toolResult" ? [message.toolCallId] : []))).toEqual([
+			"call_google",
+		]);
+
+		const strictHistory = transformMessages(messages, model);
+		expect(getToolCalls(strictHistory).map(call => call.id)).toEqual(["call_digit"]);
+		expect(strictHistory.flatMap(message => (message.role === "toolResult" ? [message.toolCallId] : []))).toEqual([
+			"call_digit",
+		]);
+	});
+
+	it("keeps function names only within the selected Google endpoint's length limit", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "inspect the file", timestamp: 1 },
+			assistant(
+				[
+					{ type: "toolCall", id: "call_64", name: "t".repeat(64), arguments: {} },
+					{ type: "toolCall", id: "call_65", name: "t".repeat(65), arguments: {} },
+					{ type: "toolCall", id: "call_129", name: "t".repeat(129), arguments: {} },
+				],
+				2,
+			),
+			toolResult("call_64", "ok", 3),
+			toolResult("call_65", "ok", 4),
+			toolResult("call_129", "Tool not found", 5),
+		];
+
+		expect(getToolCalls(transformMessages(messages, googleModel)).map(call => call.id)).toEqual([
+			"call_64",
+			"call_65",
+		]);
+		const cliHistory = transformMessages(messages, googleCliModel);
+		expect(getToolCalls(cliHistory).map(call => call.id)).toEqual(["call_64"]);
+		expect(cliHistory.flatMap(message => (message.role === "toolResult" ? [message.toolCallId] : []))).toEqual([
+			"call_64",
 		]);
 	});
 

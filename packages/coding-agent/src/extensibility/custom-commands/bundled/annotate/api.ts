@@ -65,7 +65,7 @@ async function resolveDiffTarget(ctx: AnnotationContext, source: AnnotationDiffS
 			break;
 		case "pr": {
 			const ref = parseReviewPrRef(source.ref);
-			if (!ref) throw new Error(`Not a GitHub pull request reference: ${source.ref}`);
+			if (!ref) throw new Error(`Not a GitHub pull request or GitLab merge request reference: ${source.ref}`);
 			target = await fetchPrReviewTarget(cwd, ref);
 			break;
 		}

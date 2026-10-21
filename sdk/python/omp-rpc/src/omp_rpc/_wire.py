@@ -212,6 +212,8 @@ class ThinkingContent(TypedDict):
     thinking: str
     thinkingSignature: NotRequired[str]
     itemId: NotRequired[str]
+    narration: NotRequired[bool]
+    """Prose the model addressed to the user, returned by the provider as thinking; present it as answer text."""
 
 
 class RedactedThinkingContent(TypedDict):

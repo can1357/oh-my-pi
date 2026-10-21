@@ -653,38 +653,39 @@ fn word_parts(text: &[u16]) -> Vec<&[u16]> {
 }
 
 /// jsdiff `WordDiff.tokenize`: stitch whitespace runs onto adjacent word or
-/// punctuation parts, duplicating interior whitespace into both neighbors.
-fn word_tokens(text: &[u16]) -> Vec<Vec<u16>> {
+/// punctuation parts. Overlapping slices share interior whitespace without
+/// copying it into both neighbors.
+fn word_tokens(text: &[u16]) -> Vec<&[u16]> {
 	let parts = word_parts(text);
-	let mut tokens: Vec<Vec<u16>> = Vec::with_capacity(parts.len());
+	let mut tokens: Vec<&[u16]> = Vec::with_capacity(parts.len());
 	let mut prev_part: Option<&[u16]> = None;
+	let mut offset = 0;
 	for part in parts {
+		let end = offset + part.len();
 		let part_is_ws = part.first().is_some_and(|&unit| is_ws_unit(unit));
 		if part_is_ws {
 			if prev_part.is_none() {
-				tokens.push(part.to_vec());
+				tokens.push(part);
 			} else {
 				let last = tokens
 					.last_mut()
 					.expect("tokens non-empty after first part");
-				last.extend_from_slice(part);
+				*last = &text[offset - last.len()..end];
 			}
 		} else if let Some(prev) =
 			prev_part.filter(|p| p.first().is_some_and(|&unit| is_ws_unit(unit)))
 		{
-			if tokens.last().is_some_and(|last| last.as_slice() == prev) {
-				let last = tokens.last_mut().expect("checked non-empty");
-				last.extend_from_slice(part);
+			let token = &text[offset - prev.len()..end];
+			if tokens.last().is_some_and(|last| *last == prev) {
+				*tokens.last_mut().expect("checked non-empty") = token;
 			} else {
-				let mut token = Vec::with_capacity(prev.len() + part.len());
-				token.extend_from_slice(prev);
-				token.extend_from_slice(part);
 				tokens.push(token);
 			}
 		} else {
-			tokens.push(part.to_vec());
+			tokens.push(part);
 		}
 		prev_part = Some(part);
+		offset = end;
 	}
 	tokens
 }
@@ -883,10 +884,8 @@ fn word_post_process(changes: &mut [Change<Vec<u16>>]) {
 
 /// Word diff with jsdiff `diffWords` semantics over UTF-16 code units.
 pub fn diff_words_u16(old_text: &[u16], new_text: &[u16]) -> Vec<Change<Vec<u16>>> {
-	let old_tokens = word_tokens(old_text);
-	let new_tokens = word_tokens(new_text);
-	let old_refs: Vec<&[u16]> = old_tokens.iter().map(Vec::as_slice).collect();
-	let new_refs: Vec<&[u16]> = new_tokens.iter().map(Vec::as_slice).collect();
+	let old_refs = word_tokens(old_text);
+	let new_refs = word_tokens(new_text);
 	// Equality is whitespace-insensitive: intern by trimmed text.
 	let old_keys: Vec<&[u16]> = old_refs.iter().map(|token| js_trim(token)).collect();
 	let new_keys: Vec<&[u16]> = new_refs.iter().map(|token| js_trim(token)).collect();

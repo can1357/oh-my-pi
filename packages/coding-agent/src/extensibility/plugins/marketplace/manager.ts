@@ -12,7 +12,7 @@ import * as path from "node:path";
 
 import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { expandTilde } from "../../../tools/path-utils";
-import { normalizePluginRuntimeConfig } from "../runtime-config";
+import { normalizePluginRuntimeConfig, writePluginRuntimeConfig } from "../runtime-config";
 import type { PluginRuntimeConfig, PluginRuntimeState } from "../types";
 
 import { cachePlugin, getCachedPluginPath, isValidVersionForCache } from "./cache";
@@ -935,7 +935,7 @@ export class MarketplaceManager {
 	}
 
 	async #writeRuntimeConfig(scope: "user" | "project", config: PluginRuntimeConfig): Promise<void> {
-		await Bun.write(this.#runtimeLockPath(scope), JSON.stringify(config, null, 2));
+		await writePluginRuntimeConfig(this.#runtimeLockPath(scope), config);
 	}
 
 	async #resolvePluginPackageName(installPath: string, fallbackName: string): Promise<string> {

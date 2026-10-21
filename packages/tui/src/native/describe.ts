@@ -9,7 +9,7 @@
  *   ]);
  * }
  */
-import type { TspKind, TspProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
+import type { TspKind, TspPropNode, TspProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeChild, NativeNode } from "./node";
 
 /** A node of any kind. */
@@ -74,6 +74,23 @@ export function keyed(described: NativeNode, key: string): NativeNode {
 export function withHidden(described: NativeNode, hidden: boolean): NativeNode {
 	if (!hidden) return described;
 	return node(described.k, { ...described.p, hidden: true } as TspProps, described.c, described.key);
+}
+
+/**
+ * A described tree as the node tree a prop carries (a `hovercard`): plain
+ * nodes only, since nothing reconciles inside a prop; component children
+ * (which describe themselves per frame) are left out.
+ */
+export function propNode(described: NativeNode): TspPropNode {
+	const out: { k: TspKind; p?: TspProps; c?: TspPropNode[]; key?: string } = { k: described.k };
+	if (described.p !== undefined) out.p = described.p;
+	if (described.c !== undefined) {
+		const children: TspPropNode[] = [];
+		for (const child of described.c) if ("k" in child) children.push(propNode(child));
+		out.c = children;
+	}
+	if (described.key !== undefined) out.key = described.key;
+	return out as TspPropNode;
 }
 
 /** Stable node key for an arbitrary identity string; keys join into `/` keypaths, so identities are hashed. */

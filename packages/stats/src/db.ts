@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import type { ServiceTier, Usage } from "@oh-my-pi/pi-ai";
+import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import {
 	calculateUncachedInputCost,
 	calculateUsageCost,
@@ -386,9 +387,16 @@ function getCatalogCost(provider: string, modelId: string): ModelCost | null {
 		return primaryCost;
 	}
 
-	const fallbackProvider = provider === "openai-codex" ? "openai" : provider === "xai-oauth" ? "xai" : null;
-	if (fallbackProvider) {
-		const fallbackCost = getBundledModelCost(fallbackProvider, modelId);
+	// openai-codex has no catalog pricing-peer row (its bundled rows carry
+	// their own prices); keep its first-party fallback here.
+	const peer = pricingPeerFor(provider, modelId);
+	const fallbacks = peer
+		? peer.peers.map(peerProvider => [peerProvider, peer.peerId] as const)
+		: provider === "openai-codex"
+			? [["openai", modelId] as const]
+			: [];
+	for (const [fallbackProvider, fallbackId] of fallbacks) {
+		const fallbackCost = getBundledModelCost(fallbackProvider, fallbackId);
 		if (fallbackCost && hasBillableCost(fallbackCost)) {
 			return fallbackCost;
 		}

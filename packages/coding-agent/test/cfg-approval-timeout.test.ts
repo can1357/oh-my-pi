@@ -20,7 +20,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
-import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
+import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -62,7 +62,7 @@ describe("cfg:// approval prompt wiring", () => {
 		setProjectDir(originalProject);
 		AgentStorage.close();
 		HistoryStorage.close();
-		resetSessionIndexForTests();
+		closeSessionIndex();
 		closeModelCache();
 		await fs.rm(tmp, { recursive: true, force: true });
 	});

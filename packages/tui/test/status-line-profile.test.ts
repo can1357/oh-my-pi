@@ -79,4 +79,14 @@ describe("status line pi segment profile tag", () => {
 		activeProfile.mockReturnValue(undefined);
 		expect(describeSegment("pi", createContext())?.spans).toEqual([]);
 	});
+
+	it("drops the tag everywhere when segmentOptions.pi.showProfile is false", () => {
+		vi.spyOn(piUtils, "getActiveProfile").mockReturnValue("work");
+		const options = { pi: { showProfile: false } };
+
+		expect(Bun.stripANSI(renderSegment("pi", createContext({ options })).content)).toBe(theme.icon.omp);
+		const active = renderSegment("pi", createContext({ options, now: new Date(0), turnElapsedMs: 92_000 }));
+		expect(Bun.stripANSI(active.content)).toBe(`${theme.getSpinnerFrames("activity")[0]} 1m`);
+		expect(describeSegment("pi", createContext({ options }))?.spans).toEqual([]);
+	});
 });

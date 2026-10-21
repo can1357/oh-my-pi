@@ -346,6 +346,14 @@ pub(crate) struct Rg {
 	#[arg(long = "count-matches")]
 	count_matches: bool,
 
+	/// With -c/--count-matches, also print files with zero matches.
+	#[arg(long = "include-zero", overrides_with = "no_include_zero")]
+	include_zero: bool,
+
+	/// Print counts only for files with matches.
+	#[arg(long = "no-include-zero", overrides_with = "include_zero", hide = true)]
+	no_include_zero: bool,
+
 	/// Print only matching spans.
 	#[arg(short = 'o', long = "only-matching")]
 	only_matching: bool,
@@ -501,6 +509,7 @@ struct SearchOptions {
 	byte_offset:         bool,
 	count:               bool,
 	count_matches:       bool,
+	include_zero:        bool,
 	files_with_matches:  bool,
 	files_without_match: bool,
 	only_matching:       bool,
@@ -749,7 +758,9 @@ impl<M: Matcher, W: Write> Sink for RgSink<'_, M, W> {
 			} else {
 				self.line_count
 			};
-			self.opts.record.write_count_record(self.out, self.display, count)?;
+			if count > 0 || self.opts.include_zero {
+				self.opts.record.write_count_record(self.out, self.display, count)?;
+			}
 		}
 		Ok(())
 	}
@@ -962,6 +973,7 @@ fn search_options(cli: &Rg) -> SearchOptions {
 		byte_offset: cli.byte_offset,
 		count: cli.count && !count_matches,
 		count_matches,
+		include_zero: cli.include_zero,
 		files_with_matches: cli.files_with_matches && !cli.files_without_match,
 		files_without_match: cli.files_without_match,
 		only_matching: cli.only_matching,
@@ -1931,6 +1943,23 @@ mod tests {
 	}
 
 	#[test]
+	fn count_skips_files_without_matches_unless_include_zero() {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("a"), "hit\nhit\n").unwrap();
+		std::fs::write(tree.path().join("b"), "miss\n").unwrap();
+		let count = |args: &[&str]| {
+			let (code, capture) = run_util::<Rg>(args, "", tree.path());
+			(code, capture.out())
+		};
+
+		assert_eq!(count(&["-c", "hit", "a", "b"]), (0, "a:2\n".to_owned()));
+		assert_eq!(count(&["--count-matches", "hit", "a", "b"]), (0, "a:2\n".to_owned()));
+		assert_eq!(count(&["-c", "hit", "b"]), (1, String::new()));
+		assert_eq!(count(&["-c", "--include-zero", "hit", "a", "b"]), (0, "a:2\nb:0\n".to_owned()));
+		assert_eq!(count(&["-c", "--include-zero", "--no-include-zero", "hit", "a", "b"]), (0, "a:2\n".to_owned()));
+	}
+
+	#[test]
 	fn pcre2_supports_lookbehind() {
 		let (code, out, err) = run(&["--pcre2", "(?<=foo)bar", "-"], "foobar\nbar\n");
 		assert_eq!(code, 0, "{err}");
@@ -2115,6 +2144,16 @@ mod tests {
 			run_util::<Rg>(&["--path-separator", "::", "hit", "."], "", tree.path());
 		assert_eq!(code, 2);
 		assert!(capture.err().contains("exactly one byte"));
+		// An explicit operand is printed as spelled (`-H`: a lone file operand
+		// prints no path otherwise); on Windows its native `\` separators are
+		// rewritten too, so displayed paths stay uniform.
+		let (code, capture) = run_util::<Rg>(
+			&["--path-separator", "|", "-H", "hit", if cfg!(windows) { "sub\\a.txt" } else { "sub/a.txt" }],
+			"",
+			tree.path(),
+		);
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "sub|a.txt:hit\n");
 	}
 }
 

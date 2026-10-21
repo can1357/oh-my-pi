@@ -5897,8 +5897,8 @@ export interface ResponseCreateParamsBase {
 	 *   `prompt_cache_retention` is not specified.
 	 */
 	prompt_cache_retention?: "in_memory" | "24h" | null;
-	/** Explicit prompt-cache mode and minimum lifetime for GPT-5.6+ models. */
-	prompt_cache_options?: { mode: "implicit" | "explicit"; ttl?: "30m" } | null;
+	/** Explicit prompt-cache mode and minimum lifetime (`12h` is Responses-only) for GPT-5.6+ models. */
+	prompt_cache_options?: { mode: "implicit" | "explicit"; ttl?: "30m" | "12h" } | null;
 	/**
 	 * **gpt-5 and o-series models only**
 	 *

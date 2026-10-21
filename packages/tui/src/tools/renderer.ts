@@ -28,8 +28,9 @@ export interface RenderResultOptions {
 	executionStarted?: boolean;
 	/**
 	 * Milliseconds since this call began executing (`tool_execution_start`),
-	 * or its total once settled; undefined before it starts. Native describe
-	 * hooks only.
+	 * or its total once settled; undefined before it starts. The terminal
+	 * transcript's options object computes it on read, so a render-time read
+	 * is live while the block's spinner ticks.
 	 */
 	elapsedMs?: number;
 	/** The call was abandoned without a final result (turn aborted, sealed). Native describe hooks only. */
@@ -195,6 +196,11 @@ export interface ToolRenderer<TArgs = unknown, TDetails = unknown> {
 	 * `options.spinnerFrame`.
 	 */
 	animatedPartialResult?: boolean | ((args: TArgs) => boolean);
+	/**
+	 * Repaint the block once a second while its call executes, for renderers
+	 * that show live `options.elapsedMs` without consuming the spinner frame.
+	 */
+	tickElapsed?: boolean;
 	/**
 	 * Whether replacing a pending call render with the first result requires a
 	 * full viewport repaint. Use for merged renderers whose pending rows can be

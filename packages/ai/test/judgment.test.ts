@@ -5,6 +5,7 @@ import {
 	type ApiKeyResolveContext,
 	chatTextBackend,
 	createNativeJudge,
+	nativeJudgmentAcceptsImages,
 	JudgmentApiError,
 	JudgmentParseError,
 	NativeJudge,
@@ -31,6 +32,13 @@ const IMAGE_REFS: readonly ImageContent[] = [
 const JEV_PNG =
 	"iVBORw0KGgoAAAANSUhEUgAAAUAAAAFACAAAAADo+/p2AAAAeklEQVR42u3BgQAAAADDoPlTH+ECVQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMA3kU8AAamZiz8AAAAASUVORK5CYII=";
 
+/** Valid 1x1 RGBA PNG; accepted by the TypeSafe wire but below Jev's catalog bounds. */
+const TINY_PNG: ImageContent = {
+	type: "image",
+	data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==",
+	mimeType: "image/png",
+};
+
 /** A PNG signature and IHDR declaring `width`x`height`; enough for header-based dimension checks. */
 function pngHeader(width: number, height: number): ImageContent {
 	const header = Buffer.alloc(33);
@@ -42,6 +50,37 @@ function pngHeader(width: number, height: number): ImageContent {
 	header[24] = 8;
 	header[25] = 6;
 	return { type: "image", data: header.toString("base64"), mimeType: "image/png" };
+}
+
+function typesafeVisionModel(id: string, provider: string, requestModelId?: string) {
+	return buildModel({
+		id,
+		...(requestModelId === undefined ? {} : { requestModelId }),
+		name: id,
+		api: "typesafe",
+		provider,
+		baseUrl: "https://api.typesafe.ai",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: null,
+	});
+}
+
+function openrouterVisionModel(id: string) {
+	return buildModel({
+		id,
+		name: id,
+		api: "openrouter-decisions",
+		provider: "openrouter",
+		baseUrl: "https://openrouter.ai/api/alpha",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: null,
+	});
 }
 
 function backend(reply: string | ((prompt: { system: string; user: string }) => string)): TextBackend {
@@ -320,6 +359,146 @@ describe("NativeJudge", () => {
 		expect(error).toBeInstanceOf(ValidationError);
 		expect(calls).toBe(0);
 	});
+
+	it("accepts a valid 1x1 PNG for an explicitly enabled unknown TypeSafe model", async () => {
+		let calls = 0;
+		const judge = new NativeJudge({
+			api: "typesafe",
+			provider: "self-hosted",
+			model: "custom-vision-model",
+			supportsImages: true,
+			apiKey: "ts-key",
+			fetch: async () => {
+				calls++;
+				return answered();
+			},
+		});
+
+		const result = await judge.judge({ ...request, images: [TINY_PNG] });
+
+		expect(result.answers.urgent.noul).toBe(0.92);
+		expect(calls).toBe(1);
+	});
+
+	it("enforces an aggregate-only image byte limit at the exact boundary", async () => {
+		let calls = 0;
+		const judge = new NativeJudge({
+			api: "typesafe",
+			provider: "self-hosted",
+			model: "custom-total-limit",
+			supportsImages: true,
+			imageInput: { maxTotalBytes: 6 },
+			apiKey: "ts-key",
+			fetch: async () => {
+				calls++;
+				return answered();
+			},
+		});
+
+		await judge.judge({ ...request, images: IMAGE_REFS });
+		const overflow = await judge
+			.judge({ ...request, images: [...IMAGE_REFS, IMAGE_REFS[0]] })
+			.catch((caught: unknown) => caught);
+
+		expect(overflow).toBeInstanceOf(ValidationError);
+		expect(calls).toBe(1);
+	});
+
+	it("enforces dimension-only image bounds before fetching", async () => {
+		let calls = 0;
+		const cases = [
+			{
+				imageInput: { minSide: 2 },
+				image: TINY_PNG,
+			},
+			{
+				imageInput: { maxSide: 300 },
+				image: { ...TINY_PNG, data: JEV_PNG },
+			},
+		] as const;
+		for (const { imageInput, image } of cases) {
+			const judge = new NativeJudge({
+				api: "typesafe",
+				provider: "self-hosted",
+				model: "custom-dimension-limit",
+				supportsImages: true,
+				imageInput,
+				apiKey: "ts-key",
+				fetch: async () => {
+					calls++;
+					return answered();
+				},
+			});
+			const error = await judge.judge({ ...request, images: [image] }).catch((caught: unknown) => caught);
+
+			expect(error).toBeInstanceOf(ValidationError);
+		}
+		expect(calls).toBe(0);
+	});
+
+	it("filters Jev candidates by catalog bounds, not their request model id", () => {
+		const jev = typesafeVisionModel("jev-1.14.0", "typesafe", "custom-wire-model");
+		const unlisted = typesafeVisionModel("custom-vision-model", "self-hosted");
+		const openrouterJev = openrouterVisionModel("typesafe/jev-1.14");
+		const unlistedOpenRouter = openrouterVisionModel("custom-openrouter-vision");
+
+		expect(nativeJudgmentAcceptsImages(jev, [TINY_PNG])).toBe(false);
+		expect(nativeJudgmentAcceptsImages(unlisted, [TINY_PNG])).toBe(true);
+		expect(nativeJudgmentAcceptsImages(openrouterJev, [TINY_PNG])).toBe(false);
+		expect(nativeJudgmentAcceptsImages(unlistedOpenRouter, [TINY_PNG])).toBe(true);
+	});
+
+	it("filters OpenRouter Jev candidates at the inclusive 280-pixel side boundary", () => {
+		const openrouterJev = openrouterVisionModel("typesafe/jev-1.14");
+
+		expect(nativeJudgmentAcceptsImages(openrouterJev, [pngHeader(270, 300)])).toBe(false);
+		expect(nativeJudgmentAcceptsImages(openrouterJev, [pngHeader(280, 300)])).toBe(true);
+	});
+
+	it("rejects tiny PNGs for TypeSafe and OpenRouter catalog Jev models before fetching", async () => {
+		let calls = 0;
+		const models = [
+			typesafeVisionModel("jev-1.14.0", "typesafe", "custom-wire-model"),
+			openrouterVisionModel("typesafe/jev-1.14"),
+		];
+		for (const model of models) {
+			const judge = createNativeJudge(model, {
+				apiKey: "test-key",
+				fetch: async () => {
+					calls++;
+					return answered();
+				},
+			});
+			const error = await judge.judge({ ...request, images: [TINY_PNG] }).catch((caught: unknown) => caught);
+
+			expect(error).toBeInstanceOf(ValidationError);
+			expect(String(error)).toContain("at least 78400 pixels");
+		}
+		expect(calls).toBe(0);
+	});
+
+	it("does not let a model image policy relax TypeSafe's encoding MIME constraint", async () => {
+		let calls = 0;
+		const judge = new NativeJudge({
+			api: "typesafe",
+			provider: "self-hosted",
+			model: "custom-vision-model",
+			supportsImages: true,
+			imageInput: { mimeTypes: ["image/webp"] },
+			apiKey: "ts-key",
+			fetch: async () => {
+				calls++;
+				return answered();
+			},
+		});
+		const error = await judge
+			.judge({ ...request, images: [{ ...TINY_PNG, mimeType: "image/webp" }] })
+			.catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(ValidationError);
+		expect(String(error)).toContain("does not accept image/webp images");
+		expect(calls).toBe(0);
+	});
 	it("encodes TypeSafe images as referenced assets with canonical base64 and the opt-in header", async () => {
 		const state = { ticket: "Inspect the caller's unchanged state." };
 		const originalState = structuredClone(state);
@@ -592,9 +771,8 @@ describe("NativeJudge", () => {
 
 	it("validates separate assets against combined Jev image limits before fetching", async () => {
 		let calls = 0;
-		const judge = new NativeJudge({
+		const judge = createNativeJudge(typesafeVisionModel("jev-1.14.0", "typesafe", "custom-wire-model"), {
 			apiKey: "ts-key",
-			supportsImages: true,
 			fetch: async () => {
 				calls++;
 				return answered();
@@ -640,9 +818,8 @@ describe("NativeJudge", () => {
 
 	it("rejects images outside Jev's per-side bounds before fetching", async () => {
 		let calls = 0;
-		const judge = new NativeJudge({
+		const judge = createNativeJudge(typesafeVisionModel("jev-1.14.0", "typesafe", "custom-wire-model"), {
 			apiKey: "ts-key",
-			supportsImages: true,
 			fetch: async () => {
 				calls++;
 				return answered();
@@ -715,6 +892,35 @@ describe("NativeJudge", () => {
 			`Native judgment backend ${judge.label} does not support image inputs`,
 		);
 		expect(calls).toBe(0);
+	});
+
+	it("transports small and non-Jev image data URLs through a direct OpenRouter wire", async () => {
+		const images: readonly ImageContent[] = [TINY_PNG, { ...TINY_PNG, mimeType: "image/webp" }];
+		const calls: Array<{ body: Record<string, unknown> }> = [];
+		const judge = new NativeJudge({
+			apiKey: "or-key",
+			supportsImages: true,
+			api: "openrouter-decisions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/alpha",
+			model: "custom-openrouter-vision",
+			fetch: async (_url, init) => {
+				calls.push({ body: JSON.parse(String(init?.body)) });
+				return answered();
+			},
+		});
+
+		await judge.judge({ ...request, images });
+
+		expect(calls).toHaveLength(1);
+		const body = calls[0].body as { state: unknown[] };
+		expect(body.state).toEqual([
+			request.state,
+			...images.map(image => ({
+				type: "image_url",
+				image_url: { url: `data:${image.mimeType};base64,${image.data}` },
+			})),
+		]);
 	});
 
 	it("keeps estimated judge cost finite when a successful response omits token counts", async () => {

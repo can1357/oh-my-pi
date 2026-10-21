@@ -234,7 +234,8 @@ export async function extractArchive(
 				// privilege; skip the entry so the rest still extracts.
 				const extracted = await archive.readFile(link.path).catch(() => undefined);
 				if (!extracted) continue;
-				await Bun.write(outputPath, extracted.bytes);
+				// Keep symlink creation's exclusive destination semantics.
+				await fs.writeFile(outputPath, extracted.bytes, { flag: "wx" });
 				const permissions = (extracted.mode ?? 0) & 0o777;
 				if (permissions) await fs.chmod(outputPath, permissions);
 			}

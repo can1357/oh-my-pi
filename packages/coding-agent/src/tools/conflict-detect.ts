@@ -123,18 +123,25 @@ export function scanConflictLines(lines: readonly string[], firstLineNumber: num
 
 const SCAN_FILE_DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 
+/** Result of {@link scanFileForConflicts}. */
+export interface ConflictFileScan {
+	blocks: ConflictBlock[];
+	/** First line the byte cap left unscanned (possibly partial); unset when the whole file was scanned. */
+	truncatedAtLine?: number;
+}
+
 /**
  * Scan a whole file for unresolved conflict blocks.
  *
  * Reads at most `maxBytes` (default 10 MB) so this stays cheap on
- * pathological files. Files truncated by the cap report
- * `scanTruncated: true`; only complete blocks within the scanned prefix
- * are returned, so trailing partial markers never invent fake blocks.
+ * pathological files. Files truncated by the cap report the line the scan
+ * stopped at; only complete blocks within the scanned prefix are returned,
+ * so trailing partial markers never invent fake blocks.
  */
 export async function scanFileForConflicts(
 	absolutePath: string,
 	options: { maxBytes?: number } = {},
-): Promise<{ blocks: ConflictBlock[]; scanTruncated: boolean }> {
+): Promise<ConflictFileScan> {
 	const maxBytes = options.maxBytes ?? SCAN_FILE_DEFAULT_MAX_BYTES;
 	const file = Bun.file(absolutePath);
 	const size = file.size;
@@ -144,7 +151,16 @@ export async function scanFileForConflicts(
 	// `split("\n")` over a truncated read may leave a partial last line; the
 	// scanner already tolerates an unclosed opener, so no extra trimming.
 	const lines = text.split("\n");
-	return { blocks: scanConflictLines(lines, 1), scanTruncated: truncated };
+	const blocks = scanConflictLines(lines, 1);
+	return truncated ? { blocks, truncatedAtLine: lines.length } : { blocks };
+}
+
+/**
+ * Note for a scan the byte cap stopped at `line`: `:conflicts` cannot list or
+ * register blocks from there on, but a ranged read that shows them registers them.
+ */
+export function formatScanCapNote(displayPath: string, line: number): string {
+	return `- note: the conflict scan stopped at the byte cap at line ${line}; blocks from there on are not counted or registered here — range-read \`${displayPath}:${line}-\` to show and register them.`;
 }
 
 /**
@@ -593,8 +609,8 @@ export interface FormatConflictWarningOptions {
 	totalInFile?: number;
 	/** Display path used inside the `:conflicts` hint. */
 	displayPath?: string;
-	/** Whether the underlying file scan hit its byte cap. */
-	scanTruncated?: boolean;
+	/** Line where the underlying file scan hit its byte cap, if it did. */
+	truncatedAtLine?: number;
 }
 
 export function formatConflictWarning(
@@ -610,13 +626,13 @@ export function formatConflictWarning(
 	if (partial) {
 		const hintPath = options.displayPath ?? "<file>";
 		out.push(
-			`⚠ ${entries.length} of ${total} unresolved ${word} visible in this window (read \`${hintPath}:conflicts\` for the full list).`,
+			`⚠ ${entries.length} of ${total} unresolved ${word} visible in this window; this read registered only the blocks below, so don't infer ids for the others — read \`${hintPath}:conflicts\` to list and register the file's blocks.`,
 		);
 	} else {
 		out.push(`⚠ ${total} unresolved ${word} detected`);
 	}
-	if (options.scanTruncated) {
-		out.push("- note: file scan hit the byte cap; additional conflicts may exist beyond the scanned prefix.");
+	if (options.truncatedAtLine !== undefined) {
+		out.push(formatScanCapNote(options.displayPath ?? "<file>", options.truncatedAtLine));
 	}
 
 	const oursLabel = pickLabel(entries, e => e.oursLabel);
@@ -679,14 +695,14 @@ export function formatConflictWarning(
  */
 export function formatConflictSummary(
 	entries: readonly ConflictEntry[],
-	options: { displayPath: string; scanTruncated?: boolean } = { displayPath: "" },
+	options: { displayPath: string; truncatedAtLine?: number } = { displayPath: "" },
 ): string {
 	const lines: string[] = [];
 	const total = entries.length;
 	const word = total === 1 ? "conflict" : "conflicts";
 	lines.push(`⚠ ${total} unresolved ${word} in ${options.displayPath || "<file>"}`);
-	if (options.scanTruncated) {
-		lines.push("- note: file scan hit the byte cap; additional conflicts may exist beyond the scanned prefix.");
+	if (options.truncatedAtLine !== undefined) {
+		lines.push(formatScanCapNote(options.displayPath || "<file>", options.truncatedAtLine));
 	}
 	const oursLabel = pickLabel(entries, e => e.oursLabel);
 	const theirsLabel = pickLabel(entries, e => e.theirsLabel);

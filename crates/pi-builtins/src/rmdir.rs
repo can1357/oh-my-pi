@@ -138,7 +138,37 @@ fn verbose(host: &mut Host, dir: &OsStr) {
 }
 
 fn rmdir(host: &Host, dir: &OsStr) -> io::Result<()> {
+	#[cfg(windows)]
+	reject_dot_component(host, dir)?;
 	host.fs().remove_dir(host.resolve(dir))
+}
+
+/// POSIX `rmdir(2)` refuses a final `.` (EINVAL) or `..` (ENOTEMPTY) once the
+/// directory holding it resolves. Win32 folds those components away instead,
+/// so `rmdir e/.` would remove `e` and `rmdir x/..` the working directory.
+#[cfg(windows)]
+fn reject_dot_component(host: &Host, dir: &OsStr) -> io::Result<()> {
+	let is_separator = |byte: &u8| matches!(byte, b'/' | b'\\');
+	let bytes = dir.as_encoded_bytes();
+	let end = bytes.iter().rposition(|byte| !is_separator(byte)).map_or(0, |i| i + 1);
+	let trimmed = &bytes[..end];
+	let start = trimmed.iter().rposition(is_separator).map_or(0, |i| i + 1);
+	let refusal = match &trimmed[start..] {
+		b"." => pi_vfs::invalid_argument(),
+		b".." => io::Error::new(io::ErrorKind::DirectoryNotEmpty, "Directory not empty"),
+		_ => return Ok(()),
+	};
+	let parent = if start == 0 {
+		OsStr::new(".")
+	} else {
+		// SAFETY: `trimmed[..start]` ends just after an ASCII separator, a valid
+		// encoded-bytes boundary.
+		unsafe { OsStr::from_encoded_bytes_unchecked(&trimmed[..start]) }
+	};
+	if !host.fs().metadata(host.resolve(parent))?.is_dir() {
+		return Err(pi_vfs::not_a_directory());
+	}
+	Err(refusal)
 }
 
 fn remove_operand(host: &mut Host, dir: &OsStr, opts: &Opts) {
@@ -358,5 +388,25 @@ mod tests {
 			run(&root, &["e/."]),
 			(1, String::new(), "rmdir: failed to remove 'e/.': Invalid argument\n".into())
 		);
+		assert!(root.join("e").exists());
+	}
+
+	/// Linux refuses a final `..` with ENOTEMPTY; Windows must not fold it away
+	/// and remove the parent (here the empty working directory).
+	#[cfg(any(target_os = "linux", windows))]
+	#[test]
+	fn dot_dot_operand_is_refused() {
+		let (_d, root) = tempdir();
+		assert_eq!(
+			run(&root, &["x/.."]),
+			(1, String::new(), "rmdir: failed to remove 'x/..': No such file or directory\n".into())
+		);
+		fs::create_dir(root.join("e")).unwrap();
+		assert_eq!(
+			run(&root, &["e/.."]),
+			(1, String::new(), "rmdir: failed to remove 'e/..': Directory not empty\n".into())
+		);
+		assert_eq!(run(&root, &["--ignore-fail-on-non-empty", "e/.."]), (0, String::new(), String::new()));
+		assert!(root.join("e").exists());
 	}
 }

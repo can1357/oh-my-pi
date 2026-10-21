@@ -43,6 +43,8 @@ export interface ToolCardSnapshot {
 	/** Structured status header, rendered by the shared status-line primitive. */
 	status?: StatusLineOptions;
 	headerMeta?: string;
+	/** Short facts drawn inside the frame's bottom border (framed); a trailing row otherwise. */
+	footerMeta?: string;
 	phase?: ToolCardPhase;
 	body?: ToolCardContent;
 	sections?: readonly ToolCardSection[];
@@ -219,6 +221,7 @@ export class ToolCard implements Component {
 				previousOptions?.width === width &&
 				previousOptions.header === header &&
 				previousOptions.headerMeta === snapshot.headerMeta &&
+				previousOptions.footerMeta === snapshot.footerMeta &&
 				previousOptions.state === state &&
 				previousOptions.applyBg === snapshot.applyBg &&
 				previousOptions.contentPaddingLeft === snapshot.contentPaddingLeft &&
@@ -230,6 +233,7 @@ export class ToolCard implements Component {
 			const blockOptions: OutputBlockOptions = reusableOptions ?? {
 				header,
 				headerMeta: snapshot.headerMeta,
+				footerMeta: snapshot.footerMeta,
 				state,
 				sections,
 				width,
@@ -251,6 +255,7 @@ export class ToolCard implements Component {
 			if (section.label) lines.push(section.label);
 			lines.push(...section.lines);
 		}
+		if (snapshot.footerMeta) lines.push(snapshot.footerMeta);
 		const text = lines.join("\n");
 		const key = `${width}:${text.length}:${Bun.hash(text).toString(36)}:${state ?? "info"}:${snapshot.applyBg ?? true}`;
 		if (key !== this.#plainKey) {
@@ -279,6 +284,7 @@ export class ToolCard implements Component {
 		}
 		if (snapshot.footer)
 			slotInputs.push({ label: undefined, separator: slotInputs.length > 0, content: snapshot.footer });
+		if (snapshot.footerMeta) slotInputs.push({ label: undefined, separator: false, content: [snapshot.footerMeta] });
 
 		const nextChildren: Component[] = [];
 		const slots = slotInputs.map((input, index) => {

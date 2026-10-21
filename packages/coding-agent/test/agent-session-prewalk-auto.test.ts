@@ -174,7 +174,7 @@ describe("AgentSession auto-prewalk", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"prewalk.enabled": false,
-			modelRoles: { judge: "typesafe/jev-latest" },
+			modelRoles: { judge: "typesafe/jev-1.14.0" },
 			...(options.auto ? { "prewalk.auto": options.auto } : {}),
 			...(options.todoEager ? { "todo.eager": options.todoEager } : {}),
 		});

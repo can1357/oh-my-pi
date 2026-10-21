@@ -287,6 +287,43 @@ describe("snapcompact frame persistence", () => {
 		expect(unresolved).toHaveLength(0);
 	});
 
+	it("keeps archive source text whole while externalizing frames of both views", () => {
+		using tempDir = TempDir.createSync("@snapcompact-archive-text-persistence-");
+		const blobStore = new BlobStore(tempDir.path());
+		const frame = { data: Buffer.alloc(4_000, 7).toString("base64"), mimeType: "image/png", cols: 100, rows: 100 };
+		const archiveText = "kept archive source ".repeat(30_000);
+		const archive: Archive = {
+			frames: [{ ...frame, chars: 5000 }],
+			totalChars: archiveText.length,
+			truncatedChars: 0,
+			text: archiveText,
+			textTail: archiveText,
+			withoutThinking: {
+				summary: "summary",
+				archive: { frames: [{ ...frame, chars: 5000 }], totalChars: 1, truncatedChars: 0, text: archiveText },
+			},
+		};
+		const entry: CompactionEntry = {
+			type: "compaction",
+			id: "compaction-1",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			summary: "summary",
+			firstKeptEntryId: "entry-1",
+			tokensBefore: 5000,
+			preserveData: { [snapcompact.PRESERVE_KEY]: archive },
+		};
+
+		const persisted = prepareEntryForPersistence(entry, blobStore) as CompactionEntry;
+		const persistedArchive = persisted.preserveData![snapcompact.PRESERVE_KEY] as Archive;
+		expect(persistedArchive.text).toBe(archiveText);
+		expect(persistedArchive.textTail).toBe(archiveText);
+		expect(persistedArchive.withoutThinking!.archive.text).toBe(archiveText);
+		expect(isBlobRef(persistedArchive.frames[0]!.data)).toBe(true);
+		expect(isBlobRef(persistedArchive.withoutThinking!.archive.frames[0]!.data)).toBe(true);
+		expect(archive.frames[0]!.data).toBe(frame.data);
+	});
+
 	it("marks a missing frame blob in place instead of claiming a budget omission", () => {
 		const archive: Archive = {
 			frames: [{ data: "blob:sha256:missing", mimeType: "image/png", cols: 100, rows: 100, chars: 5000 }],

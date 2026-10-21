@@ -18,7 +18,7 @@ import { updateEvalState } from "../state";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import type { ShadowPlan } from "../speculation/types";
-import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
+import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
 import { projectJavaScriptShadowPlan } from "./speculation";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
@@ -26,7 +26,6 @@ import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
 import type {
 	EvalPreludeSource,
-	JsDisplayOutput,
 	JsToolRequest,
 	RunErrorPayload,
 	SessionSnapshot,
@@ -35,12 +34,11 @@ import type {
 } from "./worker-protocol";
 
 export { rewriteImports, wrapCode } from "./shared/rewrite-imports";
-export type { JsDisplayOutput } from "./worker-protocol";
 
 export interface VmRunState {
 	signal?: AbortSignal;
 	onText?: (chunk: string) => void;
-	onDisplay?: (output: JsDisplayOutput) => void;
+	onDisplay?: (output: EvalDisplayOutput) => void;
 }
 
 /** Isolated runtime transport used by the context manager and startup regression fixtures. */
@@ -233,12 +231,7 @@ export async function invokeJsTool(
 	let envelope: unknown;
 	const pending: PendingRun = {
 		runId,
-		runState: {
-			signal: options.signal,
-			onDisplay: output => {
-				if (output.type === "json") envelope = output.data;
-			},
-		},
+		runState: { signal: options.signal },
 		toolSession: options.session,
 		resolve,
 		reject,
@@ -262,7 +255,7 @@ export async function invokeJsTool(
 
 	try {
 		if (!pending.settled) safeSend(session, { type: "tool", runId, ...request });
-		await promise;
+		envelope = (await promise).value;
 	} catch (error) {
 		return { ok: false, error: error instanceof Error ? error.message : String(error) };
 	} finally {
@@ -844,7 +837,7 @@ function finishPending(pending: PendingRun, msg: Extract<WorkerOutbound, { type:
 	pending.settled = true;
 	pending.heldResult = undefined;
 	if (msg.ok) {
-		pending.resolve({ value: undefined });
+		pending.resolve({ value: msg.value });
 		return;
 	}
 	pending.reject(errorFromPayload(msg.error));

@@ -399,6 +399,82 @@ Average Latency: 1,240 ms
 			}
 		});
 
+		it("keeps a streaming table's height while its last row's open cell grows, then shows it whole", () => {
+			const table = "| # | Name | Score |\n| --- | --- | --- |\n| 1 | black | 1.1 |\n| 2 | bright";
+			const label = "green with a long label that wraps";
+			const markdown = new Markdown(table, 0, 0, defaultMarkdownTheme);
+			markdown.transientRenderCache = true;
+			const frame = (tail: string): string[] => {
+				clearRenderCache();
+				markdown.setText(table + tail);
+				return markdown.render(40).map(line => stripVTControlCharacters(line));
+			};
+			const open = [" gr", " green", ` ${label}`].map(frame);
+			const closed = frame(` ${label} | 2.2 |`);
+			clearRenderCache();
+			// Rows below the table would move by the difference between any two frames.
+			const height = open[0]!.length;
+			expect(open.map(lines => lines.length)).toEqual([height, height, height]);
+			// The held-back tail of the open cell reads as hidden.
+			expect(open[2]!.some(line => line.includes("…"))).toBe(true);
+			// Closing the cell never shrinks the table, and every word of the label shows.
+			expect(closed.length).toBeGreaterThanOrEqual(height);
+			const shown = closed
+				.join(" ")
+				.replace(/[│|]/g, " ")
+				.split(/\s+/);
+			expect(label.split(" ").every(word => shown.includes(word))).toBe(true);
+		});
+
+		it("marks a held streaming cell's hidden lines even when they came from explicit breaks", () => {
+			const table = "| # | Description of the row |\n| --- | --- |\n| 1 | short |\n| 2 | First<br><br>Second";
+			const markdown = new Markdown(table, 0, 0, defaultMarkdownTheme);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(60).map(line => stripVTControlCharacters(line));
+			clearRenderCache();
+			const row = lines.filter(line => line.includes("First"));
+			// The row keeps its settled single line and says lines are held back.
+			expect(row.length).toBe(1);
+			expect(row[0]).toContain("…");
+			expect(lines.some(line => line.includes("Second"))).toBe(false);
+		});
+
+		it("keeps a held streaming cell's visible lines when its column is one cell wide", () => {
+			const markdown = new Markdown(
+				"| a | b |\n| --- | --- |\n| 1 | 2 |\n| x<br>y<br>z | defgh",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(12).map(line => stripVTControlCharacters(line).trimEnd());
+			clearRenderCache();
+			// Only the last held line gives way to the marker; the lines above it fit and stay.
+			expect(lines.slice(-4, -1)).toEqual(["| x | d |", "| y | e |", "| z | … |"]);
+		});
+
+		it("keeps a held streaming cell's marker inside a two-cell column holding wide glyphs", () => {
+			const markdown = new Markdown(
+				"| a | bb |\n| --- | --- |\n| 1 | 22 |\n| x<br>y | 漢字漢",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(12);
+			clearRenderCache();
+			const widths = new Set(lines.map(line => visibleWidth(line)));
+			// Every row, the held one included, keeps the table's border column.
+			expect(widths.size).toBe(1);
+			expect(lines.map(line => stripVTControlCharacters(line).trimEnd()).slice(-3, -1)).toEqual([
+				"| x | 漢 |",
+				"| y | …  |",
+			]);
+		});
+
 		it("measures a streaming table's finished last row even without its trailing newline", () => {
 			// Assistant text reaches Markdown trimmed, so a finished row is told apart by its closing `|`.
 			const text =
@@ -1564,6 +1640,23 @@ bar`,
 
 			return { visible, targets };
 		}
+
+		it("keeps a held streaming cell's link from spilling into the marker and borders", () => {
+			// The link fills the open cell's first wrapped line, so holding the row
+			// at one line cuts the cell inside the link.
+			const table = "| # | Link |\n| --- | --- |\n| 1 | a |\n| 2 | [documentation](https://example.com/x) more";
+			const markdown = new Markdown(table, 0, 0, defaultMarkdownTheme);
+			markdown.transientRenderCache = true;
+			clearRenderCache();
+			const lines = markdown.render(24);
+			clearRenderCache();
+			const row = lines.map(inspectHyperlinks).filter(line => line.visible.includes("…"));
+			expect(row.length).toBe(1);
+			// Only the link text itself may carry the target; the marker and the
+			// table borders after it must not become clickable.
+			const { visible, targets } = row[0]!;
+			for (let i = visible.indexOf("…"); i < visible.length; i++) expect(targets[i]).toBeNull();
+		});
 
 		it("should not duplicate URL for autolinked emails", () => {
 			const markdown = new Markdown("Contact user@example.com for help", 0, 0, defaultMarkdownTheme);
@@ -2885,12 +2978,22 @@ describe("large documents", () => {
 	for (const [name, doc] of displayMathScans) {
 		it(`lexes ${name} in time proportional to the document`, () => {
 			// CPU time, not wall time: a parallel run deschedules this process,
-			// which stretches wall time without adding work.
+			// which stretches wall time without adding work. Some platforms
+			// (Windows) account CPU time in ~16ms ticks, coarser than one lex of
+			// the small document, so each sample repeats the lex until it spans
+			// many ticks and reports the cost of one pass.
+			const minSampleMicros = 100_000;
 			const cost = (text: string): number => {
 				const start = process.cpuUsage();
-				extractMarkdownLinks(text);
-				const { user, system } = process.cpuUsage(start);
-				return user + system;
+				let passes = 0;
+				let elapsed = 0;
+				do {
+					extractMarkdownLinks(text);
+					passes++;
+					const { user, system } = process.cpuUsage(start);
+					elapsed = user + system;
+				} while (elapsed < minSampleMicros);
+				return elapsed / passes;
 			};
 			const small = doc(32 * 1024);
 			const large = doc(512 * 1024);

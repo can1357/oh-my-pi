@@ -168,6 +168,20 @@ describe.skipIf(!hasFfmpeg)("read video", () => {
 		expect(String(error?.message ?? error)).toContain(":<frame>");
 	});
 
+	it("resolves timestamp selectors through unique workspace suffixes", async () => {
+		const nestedDir = path.join(testDir, "assets");
+		await fs.mkdir(nestedDir, { recursive: true });
+		await fs.copyFile(clipPath, path.join(nestedDir, "nested-clip.mp4"));
+		const tool = new ReadTool(makeSession(testDir));
+
+		const result = await tool.execute("call", { path: "nested-clip.mp4:2s" });
+
+		const text = textOf(result);
+		expect(text).toContain("Video frame");
+		expect(text).toContain("via suffix match");
+		expect(result.content.find(c => c.type === "image")).toBeDefined();
+	});
+
 	it("returns metadata without pixels for text-only models", async () => {
 		const tool = new ReadTool(makeSession(testDir, true));
 
@@ -183,5 +197,39 @@ describe.skipIf(!hasFfmpeg)("read video", () => {
 		await expect(tool.execute("call", { path: `${clipPath}?q=Describe this video` })).rejects.toThrow(
 			"The ?q= selector only supports images",
 		);
+	});
+});
+
+// Routing errors surface before any ffmpeg/ffprobe call, so these run everywhere.
+describe("read video target routing", () => {
+	let testDir: string;
+
+	beforeEach(async () => {
+		testDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-video-routing-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(testDir);
+	});
+
+	it("names the video path, not a colon-mangled one, when a timestamp target is missing", async () => {
+		const tool = new ReadTool(makeSession(testDir));
+
+		const error = await tool.execute("call", { path: "missing.mp4:01:23" }).catch(e => e);
+		const message = String(error?.message ?? error);
+		expect(message).toContain("missing.mp4");
+		expect(message).not.toContain("missing.mp4:01");
+	});
+
+	it("names the video path, not a colon-mangled one, when a timestamp target is not a video", async () => {
+		const nestedDir = path.join(testDir, "assets");
+		await fs.mkdir(nestedDir, { recursive: true });
+		await fs.writeFile(path.join(nestedDir, "nested-clip.mp4"), "not a video");
+		const tool = new ReadTool(makeSession(testDir));
+
+		const error = await tool.execute("call", { path: "nested-clip.mp4:2s" }).catch(e => e);
+		const message = String(error?.message ?? error);
+		expect(message).not.toContain(":2s");
+		expect(message).toMatch(/ffprobe|nested-clip\.mp4/);
 	});
 });

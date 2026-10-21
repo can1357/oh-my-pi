@@ -10,7 +10,13 @@ export function wrapTmuxPassthroughIfNeeded(payload: string, env: NodeJS.Process
 }
 
 const CLIENT_TERMTYPE_NAME = /^([A-Za-z][A-Za-z0-9._+-]*)(?=\s|\(|$)/u;
-const CLIENT_TERMINAL_TIMEOUT_MS = 500;
+// One `tmux display-message` round trip over the server socket, which answers in
+// single-digit milliseconds when healthy. 500ms kept losing the race on a loaded
+// machine (fork/exec of the tmux client alone can exceed it on a saturated box),
+// and a lost race is indistinguishable from "not tmux": the process then falls
+// back to the true-color profile for the whole session. 2s bounds the startup
+// stall only when tmux is genuinely wedged.
+const CLIENT_TERMINAL_TIMEOUT_MS = 2_000;
 /** Client `TERM` values that name their emulator; tmux records this on every version. */
 const CLIENT_TERMNAME_PROGRAMS: ReadonlyArray<readonly [RegExp, string]> = [
 	[/^xterm-kitty$/u, "kitty"],
@@ -143,4 +149,34 @@ export function tmuxClientRendersSixel(env: NodeJS.ProcessEnv = Bun.env): boolea
 	if (!tmux) return false;
 	if (cachedClientSixel?.tmux !== tmux) cachedClientSixel = { tmux, renders: queryTmuxClientRendersSixel(env) };
 	return cachedClientSixel.renders;
+}
+
+let cachedPanePassthrough: { key: string; allowed: boolean } | undefined;
+
+function queryTmuxPaneAllowsPassthrough(env: NodeJS.ProcessEnv): boolean {
+	const pane = env.TMUX_PANE;
+	const target = pane ? ["-t", pane] : [];
+	const value = runTmux(["show-options", "-Apqv", ...target, "allow-passthrough"], env)?.trim();
+	if (value === undefined) return false;
+	// tmux before 3.3 has no `allow-passthrough` option (`-q` prints nothing)
+	// and always forwards DCS passthrough.
+	return value === "" || value === "on" || value === "all";
+}
+
+/**
+ * Whether tmux forwards this pane's `\x1bPtmux;…\x1b\\` passthrough envelopes
+ * to the attached client. tmux 3.3+ defaults `allow-passthrough` to `off` and
+ * then silently drops every wrapped sequence, so Kitty graphics sent through
+ * the envelope never reach a Kitty-capable outer terminal. Resolves the
+ * effective pane value (pane → window → global). Queried once per pane;
+ * `false` outside tmux or when the query fails.
+ */
+export function tmuxPaneAllowsPassthrough(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	const tmux = env.TMUX;
+	if (!tmux) return false;
+	const key = `${tmux}\0${env.TMUX_PANE ?? ""}`;
+	if (cachedPanePassthrough?.key !== key) {
+		cachedPanePassthrough = { key, allowed: queryTmuxPaneAllowsPassthrough(env) };
+	}
+	return cachedPanePassthrough.allowed;
 }

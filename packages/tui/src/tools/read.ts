@@ -4,10 +4,12 @@ import { LINE_RANGE_CHUNK_SOURCE, parseLineRanges } from "./line-ranges";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseArchivePathCandidates } from "@oh-my-pi/pi-utils/ar";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import type {
 	NativeToolHead,
+	RenderResultContextOptions,
 	NativeToolView,
 	RenderResultOptions,
 	ToolActivityContext,
@@ -15,7 +17,7 @@ import type {
 	ToolRenderer,
 } from "./renderer";
 import { ansi, compact, md } from "../native/describe";
-import { base64ImageNode, nativeMediaNode } from "../native/blobs";
+import { base64ImageNode, nativeMediaNode, readMediaPath } from "../native/blobs";
 import type { NativeChild, NativeNode } from "../native/node";
 import { fileHref, footnoteText, inlineErrorView, resultText } from "./native-view";
 import { numberedCode } from "./grouped-file-output";
@@ -71,6 +73,11 @@ export interface ReadToolDetails {
 	fileSize?: number;
 	/** Full source line count when the read reached EOF and the count is exact. */
 	totalLines?: number;
+	/**
+	 * Whether the text's rows carry line-number prefixes (`N:` hashline, `N|` line numbers). Set where a
+	 * file read is formatted; a raw read sets `false`. Snapcompact reads it to tell a `12:` prefix from content.
+	 */
+	rowPrefixes?: boolean;
 	/** Raw text + start line for user-visible TUI rendering, set when content is text-like.
 	 * Mirrors the same lines the model receives but without hashline/line-number prefixes,
 	 * so the TUI can render the file content with its own gutter without re-parsing the formatted text. */
@@ -82,7 +89,10 @@ export interface ReadToolDetails {
 	summary?: { lines: number; elidedSpans: number; elidedLines: number };
 	/** Number of unresolved git conflicts surfaced by this read (TUI uses for inline `⚠ N` badge). */
 	conflictCount?: number;
-	/** Paths recovered from a delimited read argument; used only by the TUI to render one call as multiple read rows. */
+	/**
+	 * Paths recovered from a delimited read argument. The TUI renders one call as multiple read rows; snapcompact
+	 * keeps such a composite result as text.
+	 */
 	displayReadTargets?: string[];
 	/**
 	 * Resolved filesystem link target for each {@link displayReadTargets} entry, aligned by index; `null` when a
@@ -94,11 +104,13 @@ export interface ReadToolDetails {
 // Parsing also recognizes incomplete counts to explain their errors; path splitting
 // only peels complete selectors (not a trailing `+` or `L`).
 const RANGE_SELECTOR_CHUNK = `${LINE_RANGE_CHUNK_SOURCE}(?<=[\\d.-])`;
-const RANGE_LIST_SRC = `${RANGE_SELECTOR_CHUNK}(?:,${RANGE_SELECTOR_CHUNK})*`;
 // A tail selector: `-N` reads the last N lines. Keep in sync with TAIL_SELECTOR_RE.
 const TAIL_CHUNK_SRC = String.raw`-\d+`;
-const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC}|raw|conflicts|img)$`, "i");
-const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC})$`, "i");
+// A comma list may mix ranges and tails (`1-12,-15`); a lone tail is a one-chunk list.
+const LIST_CHUNK_SRC = `(?:${RANGE_SELECTOR_CHUNK}|${TAIL_CHUNK_SRC})`;
+const RANGE_LIST_SRC = `${LIST_CHUNK_SRC}(?:,${LIST_CHUNK_SRC})*`;
+const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts|img)$`, "i");
+const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^(?:${RANGE_LIST_SRC})$`, "i");
 const FILE_RAW_ONLY_RE = /^raw$/i;
 // Permissive selector chunk for internal URLs — accepts well-formed selectors
 // plus common malformed shapes (e.g. `:-N-M`) so the read tool peels the entire
@@ -107,8 +119,33 @@ const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
 	String.raw`^(?:raw|conflicts|img|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
 	"i",
 );
-/** Split a filesystem path from its trailing read selector. */
-export function splitPathAndSel(rawPath: string): { path: string; sel?: string } {
+
+/**
+ * Fold the list chunks that repeat the selector colon after a comma (`a:1-30,:-30`)
+ * into the `list` that follows them, so the pair reads as `a:1-30,-30`. Only
+ * colons at or after `minColon` count. Each chunk is tested once.
+ */
+function foldRepeatedListColons(basePath: string, list: string, minColon: number): { basePath: string; list: string } {
+	const chunks = [list];
+	while (basePath.endsWith(",")) {
+		const colon = basePath.lastIndexOf(":");
+		const chunk = basePath.slice(colon + 1, -1);
+		if (colon < minColon || !FILE_LINE_RANGE_ONLY_RE.test(chunk)) break;
+		chunks.push(chunk);
+		basePath = basePath.slice(0, colon);
+	}
+	return { basePath, list: chunks.reverse().join(",") };
+}
+
+/**
+ * Split a filesystem path from its trailing read selector. `foldListColons: false`
+ * keeps a colon repeated inside a list as part of the path (`a:1-30,:-30` peels
+ * only `:-30`), for callers checking whether that shorter split names a real file.
+ */
+export function splitPathAndSel(
+	rawPath: string,
+	options?: { foldListColons?: boolean },
+): { path: string; sel?: string } {
 	const colon = rawPath.lastIndexOf(":");
 	if (colon <= 0) return { path: rawPath };
 
@@ -116,25 +153,33 @@ export function splitPathAndSel(rawPath: string): { path: string; sel?: string }
 	if (!FILE_LINE_RANGE_RE.test(candidate)) return { path: rawPath };
 
 	let basePath = rawPath.slice(0, colon);
-	let sel = candidate;
-
 	// Allow a compound trailing selector: `path:1-50:raw`, `path:raw:1-50`, or
-	// `path:raw:-60`. The two chunks must be one line-range (or tail) plus one
-	// `raw`, in either order.
-	const innerColon = basePath.lastIndexOf(":");
-	if (innerColon > 0) {
+	// `path:raw:-60`. The two chunks must be one line list (ranges and tails)
+	// plus one `raw`, in either order.
+	let list: string | undefined;
+	let rawSuffix = "";
+	if (FILE_LINE_RANGE_ONLY_RE.test(candidate)) {
+		list = candidate;
+	} else if (FILE_RAW_ONLY_RE.test(candidate)) {
+		const innerColon = basePath.lastIndexOf(":");
 		const innerCandidate = basePath.slice(innerColon + 1);
-		const innerIsRaw = FILE_RAW_ONLY_RE.test(innerCandidate);
-		const outerIsRaw = FILE_RAW_ONLY_RE.test(candidate);
-		const innerIsRange = FILE_LINE_RANGE_ONLY_RE.test(innerCandidate);
-		const outerIsRange = FILE_LINE_RANGE_ONLY_RE.test(candidate);
-		if ((innerIsRaw && outerIsRange) || (innerIsRange && outerIsRaw)) {
-			sel = `${innerCandidate}:${candidate}`;
+		if (innerColon > 0 && FILE_LINE_RANGE_ONLY_RE.test(innerCandidate)) {
+			list = innerCandidate;
+			rawSuffix = `:${candidate}`;
 			basePath = basePath.slice(0, innerColon);
 		}
 	}
+	if (list === undefined) return { path: basePath, sel: candidate };
 
-	return { path: basePath, sel };
+	if (options?.foldListColons !== false) ({ basePath, list } = foldRepeatedListColons(basePath, list, 1));
+	if (!rawSuffix) {
+		const innerColon = basePath.lastIndexOf(":");
+		const innerCandidate = basePath.slice(innerColon + 1);
+		if (innerColon > 0 && FILE_RAW_ONLY_RE.test(innerCandidate)) {
+			return { path: basePath.slice(0, innerColon), sel: `${innerCandidate}:${list}` };
+		}
+	}
+	return { path: basePath, sel: `${list}${rawSuffix}` };
 }
 
 /**
@@ -179,9 +224,17 @@ export function splitInternalUrlSel(
 		// Stop before crossing into the scheme separator `://`.
 		if (colon < schemeEnd) break;
 		const tail = path.slice(colon + 1);
-		if (!INTERNAL_URL_SELECTOR_PART_RE.test(tail)) break;
-		chunks.unshift(tail);
-		path = path.slice(0, colon);
+		if (INTERNAL_URL_SELECTOR_PART_RE.test(tail)) {
+			chunks.unshift(tail);
+			path = path.slice(0, colon);
+			continue;
+		}
+		// `artifact://7:1-30,:-30`: a list chunk ending in a comma joins the list peeled after it.
+		if (chunks.length === 0 || !FILE_LINE_RANGE_ONLY_RE.test(chunks[0])) break;
+		const folded = foldRepeatedListColons(path, chunks[0], schemeEnd);
+		if (folded.basePath === path) break;
+		chunks[0] = folded.list;
+		path = folded.basePath;
 	}
 	if (chunks.length === 0) return { path: rawPath };
 	return { path, sel: chunks.join(":") };
@@ -302,9 +355,17 @@ function firstReadSelectorLine(sel: string | undefined): number | undefined {
  * target when the structured `resolvedPath` isn't set (the common plain-file and
  * image reads only record the path in `meta.source`). URL/internal sources are
  * not fs paths, so only `type: "path"` qualifies. */
-export function readSourceFsPath(details: ReadToolDetails | undefined): string | undefined {
-	const source = details?.meta?.source;
-	return source?.type === "path" && typeof source.value === "string" ? source.value : undefined;
+export function readSourceFsPath(details: unknown): string | undefined {
+	if (!isRecord(details) || !isRecord(details.meta) || !isRecord(details.meta.source)) return undefined;
+	const source = details.meta.source;
+	return source.type === "path" && typeof source.value === "string" ? source.value : undefined;
+}
+
+function readLinkTarget(details: unknown): string | undefined {
+	if (!isRecord(details)) return undefined;
+	if (typeof details.resolvedPath === "string") return details.resolvedPath;
+	if (typeof details.displayTarget === "string") return details.displayTarget;
+	return readSourceFsPath(details);
 }
 
 function formatReadPathLink(
@@ -320,9 +381,11 @@ function formatReadPathLink(
 	const split = splitReadRenderPath(rawPath);
 	const basePath = split.path || rawPath;
 	const selectorSuffix = split.sel ? `:${split.sel}` : "";
-	const plainDisplayPath = options.suffixResolution
-		? shortenPath(options.suffixResolution.to)
-		: shortenPath(basePath || options.resolvedPath || options.fallbackLabel || rawPath);
+	const plainDisplayPath = sanitizeText(
+		options.suffixResolution
+			? shortenPath(options.suffixResolution.to)
+			: shortenPath(basePath || options.resolvedPath || options.fallbackLabel || rawPath),
+	);
 	// Calls render before the tool has resolved a filesystem target. Preserve
 	// protocol resources as plain text, but resolve direct relative file paths
 	// so terminals receive an explicit file: link rather than guessing HTTPS.
@@ -358,7 +421,12 @@ export function readResultIsMarkdown(details: ReadToolDetails | undefined, args:
  * target (shortened, plus the selector / legacy offset range), a `file://`
  * link when the fs path is known, and a suffix correction as meta.
  */
-function readNativeHead(rawPath: string, args: ReadRenderArgs | undefined, details?: ReadToolDetails): NativeToolHead {
+function readNativeHead(
+	rawPath: string,
+	args: ReadRenderArgs | undefined,
+	details?: ReadToolDetails,
+	linkPath?: string,
+): NativeToolHead {
 	const split = splitReadRenderPath(rawPath);
 	const suffix = details?.suffixResolution;
 	let target = suffix ? shortenPath(suffix.to) : shortenPath(split.path || rawPath);
@@ -377,9 +445,9 @@ function readNativeHead(rawPath: string, args: ReadRenderArgs | undefined, detai
 	const conflicts = details?.conflictCount ?? 0;
 	return {
 		title: "Read",
-		target: target || "…",
+		target: sanitizeText(target) || "…",
 		targetKind: "path",
-		href: fileHref(details?.resolvedPath ?? details?.displayTarget ?? readSourceFsPath(details)),
+		href: fileHref(linkPath ?? details?.resolvedPath ?? details?.displayTarget ?? readSourceFsPath(details)),
 		meta,
 		badges:
 			conflicts > 0 ? [{ text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}`, tone: "warning" }] : undefined,
@@ -406,12 +474,12 @@ export function readContentCode(
 	content: string,
 	start: number,
 	numbers: readonly (number | null)[] | undefined,
-	lang: string | undefined,
+	path: string | undefined,
 ): NativeNode[] {
 	const lines = content.split("\n");
 	return numberedCode(
 		lines.map((text, i) => ({ n: numbers && numbers.length === lines.length ? numbers[i]! : start + i, text })),
-		{ lang, wrap: true },
+		{ path, wrap: true },
 	);
 }
 
@@ -454,7 +522,7 @@ export const readToolRenderer = {
 			typeof input?.file_path === "string" ? input.file_path : typeof input?.path === "string" ? input.path : "";
 		const routed = readUrlCard(rawPath);
 		if (routed) return { label: routed.card.label, detail: routed.target || routed.card.rootDetail };
-		return { label: "Read", detail: shortenPath(rawPath) };
+		return { label: "Read", detail: sanitizeText(shortenPath(rawPath)) };
 	},
 	renderCall(args: ReadRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const rawPath =
@@ -481,10 +549,11 @@ export const readToolRenderer = {
 
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: ReadToolDetails; isError?: boolean },
-		options: RenderResultOptions,
+		options: RenderResultContextOptions,
 		uiTheme: Theme,
 		args?: ReadRenderArgs,
 	): Component {
+		const linkPath = readLinkTarget(options.renderContext?.rawDetails);
 		const urlDetails = result.details as ReadUrlToolDetails | undefined;
 		const baseRawPathForKind =
 			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
@@ -511,8 +580,8 @@ export const readToolRenderer = {
 			const filePath =
 				formatReadPathLink(rawPath, {
 					offset: args?.offset,
-					sourcePath: result.details?.displayTarget ?? readSourceFsPath(result.details),
-				}) || shortenPath(rawPath);
+					sourcePath: linkPath ?? result.details?.displayTarget ?? readSourceFsPath(result.details),
+				}) || sanitizeText(shortenPath(rawPath));
 			let title = filePath ? `Read ${filePath}` : "Read";
 			if (args?.offset !== undefined || args?.limit !== undefined) {
 				const startLine = args.offset ?? 1;
@@ -544,7 +613,9 @@ export const readToolRenderer = {
 		const truncation = details?.meta?.truncation;
 		const fallback = details?.truncation;
 		if (details?.resolvedPath) {
-			warningLines.push(uiTheme.fg("dim", wrapBrackets(`Resolved path: ${details.resolvedPath}`, uiTheme)));
+			warningLines.push(
+				uiTheme.fg("dim", wrapBrackets(`Resolved path: ${shortenPath(details.resolvedPath)}`, uiTheme)),
+			);
 		}
 		if (truncation) {
 			if (fallback?.firstLineExceedsLimit) {
@@ -562,7 +633,7 @@ export const readToolRenderer = {
 		if (imageContent) {
 			const suffix = details?.suffixResolution;
 			const displayPath = formatReadPathLink(rawPath, {
-				resolvedPath: details?.resolvedPath,
+				resolvedPath: linkPath ?? details?.resolvedPath,
 				sourcePath: details?.displayTarget ?? readSourceFsPath(details),
 				suffixResolution: suffix,
 				fallbackLabel: "image",
@@ -594,7 +665,7 @@ export const readToolRenderer = {
 		// reads only record the absolute path in meta.source, so fall back to that
 		// to keep the title clickable.
 		const displayPath = formatReadPathLink(rawPath, {
-			resolvedPath: details?.resolvedPath,
+			resolvedPath: linkPath ?? details?.resolvedPath,
 			sourcePath: details?.displayTarget ?? readSourceFsPath(details),
 			suffixResolution: suffix,
 			offset: args?.offset,
@@ -676,9 +747,10 @@ export const readToolRenderer = {
 	 */
 	describeResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: ReadToolDetails; isError?: boolean },
-		options: RenderResultOptions,
+		options: RenderResultContextOptions,
 		args?: ReadRenderArgs,
 	): NativeToolView {
+		const linkPath = readLinkTarget(options.renderContext?.rawDetails);
 		const details = result.details;
 		const rawPath = readRawPath(args);
 		const routed = readUrlCard(rawPath, details);
@@ -694,11 +766,11 @@ export const readToolRenderer = {
 
 		if (result.isError) {
 			const message = (resultText(result) || "Unknown error").replace(/^Error:\s*/, "");
-			return inlineErrorView(readNativeHead(rawPath, args, details), message);
+			return inlineErrorView(readNativeHead(rawPath, args, details, linkPath), message);
 		}
 
 		const suffix = details?.suffixResolution;
-		const head = readNativeHead(rawPath, args, details);
+		const head = readNativeHead(rawPath, args, details, linkPath);
 		const truncation = details?.meta?.truncation;
 		const fallback = details?.truncation;
 		const firstLineTooLong = truncation !== undefined && fallback?.firstLineExceedsLimit === true;
@@ -713,7 +785,8 @@ export const readToolRenderer = {
 
 		const contentText = details?.displayContent?.text ?? stripOutputNotice(resultText(result), details?.meta);
 		// A file Tern's media viewer shows (image, model, PDF, video, audio): the host loads it by path.
-		const media = options.media && details?.mediaPath ? nativeMediaNode(details.mediaPath, "media") : undefined;
+		const mediaPath = readMediaPath(options.renderContext?.rawDetails) ?? details?.mediaPath;
+		const media = options.media && mediaPath ? nativeMediaNode(mediaPath, "media") : undefined;
 		const imageBlock = result.content?.find(isImageBlock);
 		if (imageBlock) {
 			const detailText = contentText.trim();
@@ -736,7 +809,7 @@ export const readToolRenderer = {
 					contentText,
 					details?.displayContent?.startLine ?? readRangeStart(rawPath, args),
 					details?.displayContent?.lineNumbers,
-					getLanguageFromPath(renderPath.path),
+					renderPath.path,
 				);
 		return { tool: head, inline: true, body: compact<NativeChild>([media, ...content, foot]) };
 	},

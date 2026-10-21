@@ -61,6 +61,11 @@ export type ExtToRelayMessage =
 			 * latest-wins socket replacement.
 			 */
 			instanceId?: string;
+			/**
+			 * Identity of this browser run (`chrome.storage.session`), new after a browser restart, when Chrome
+			 * reuses tab ids: target ids embed it, so an old target id never names a new tab. Absent on older extensions.
+			 */
+			browserSession?: string;
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
 	| { t: "detached"; tabId: number; reason: string; relayInitiated?: boolean }

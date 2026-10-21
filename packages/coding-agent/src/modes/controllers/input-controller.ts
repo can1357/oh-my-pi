@@ -165,18 +165,22 @@ const SHELL_PROMPT_OPERATOR_RE = /(?:^|\s)(?:&&|\|\||\||2>&1|[<>]{1,2})(?:\s|$)/
 const OMP_STATUS_LINE_RE = /^\s*in:\s+\d+\s+out:\s+\d+(?:\s+cache\s+\S+)?\s+t:\s+\S+\s+tok\/s:\s+\S+/m;
 
 /**
- * Read-only slash commands that also run from a focused subagent view, keyed by name to
- * a check on their arguments; every other command (and mutating forms such as
- * `/usage reset`, which spends a saved rate-limit reset, or `/jobs kill`, which cancels
+ * Slash commands that also run from a focused subagent view, keyed by canonical name to
+ * a check on their arguments: viewer-scoped reads, plus the model and effort controls,
+ * which act on the focused agent's session. Every other command (and mutating forms such
+ * as `/usage reset`, which spends a saved rate-limit reset, or `/jobs kill`, which cancels
  * a running job) still needs the main session.
  */
 const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
 	btw: () => true,
+	effort: () => true,
 	export: () => true,
 	jobs: args => {
 		const { verb, rest } = parseSubcommand(args);
 		return !verb || (verb === "full" && !rest);
 	},
+	model: () => true,
+	switch: () => true,
 	usage: args => {
 		const { verb, rest } = parseSubcommand(args);
 		return !verb || (verb === "show" && !rest);
@@ -1442,10 +1446,12 @@ export class InputController {
 		}
 		if (text?.startsWith("/")) {
 			const parsed = parseSlashCommand(text);
-			if (parsed && FOCUSED_VIEW_COMMANDS[parsed.name]?.(parsed.args)) {
+			const name = parsed && lookupBuiltinSlashCommand(parsed.name)?.name;
+			if (parsed && name && FOCUSED_VIEW_COMMANDS[name]?.(parsed.args)) {
 				// Viewer-scoped commands: /btw asks about the focused transcript, /export
 				// writes it (with its own subagents), /jobs lists the focused agent's jobs
-				// without a way to cancel them, /usage reports account-wide limits.
+				// without a way to cancel them, /usage reports account-wide limits, and
+				// /model, /switch, /effort change the focused agent's model and thinking.
 				this.#recordSlashCommandUsage(text);
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx })) === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
@@ -2676,13 +2682,7 @@ export class InputController {
 	}
 
 	cycleThinkingLevel(): void {
-		if (this.ctx.focusedAgentId) {
-			this.ctx.showStatus(
-				`Model/thinking apply to the main session — press ${formatDoubleTap("left")} to return first`,
-			);
-			return;
-		}
-		const newLevel = this.ctx.session.cycleThinkingLevel();
+		const newLevel = this.ctx.viewSession.cycleThinkingLevel();
 		if (newLevel === undefined) {
 			this.ctx.showStatus("Current model does not support thinking");
 		} else {
@@ -2692,15 +2692,9 @@ export class InputController {
 	}
 
 	async cycleRoleModel(direction: "forward" | "backward" = "forward"): Promise<void> {
-		if (this.ctx.focusedAgentId) {
-			this.ctx.showStatus(
-				`Model/thinking apply to the main session — press ${formatDoubleTap("left")} to return first`,
-			);
-			return;
-		}
 		try {
 			const cycleOrder = cfgCycleOrder.get(settings);
-			const result = await this.ctx.session.cycleRoleModels(cycleOrder, direction);
+			const result = await this.ctx.viewSession.cycleRoleModels(cycleOrder, direction);
 			if (!result) {
 				this.ctx.showStatus("Only one role model available");
 				return;

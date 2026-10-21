@@ -56,10 +56,16 @@ export declare class DesktopSession {
    * outside a turn keeps its grace. An agent calls this when its turn ends.
    */
   releaseDisplayAwake(): void
+  /**
+   * How many times the user's physical Escape has stopped takeover input in
+   * this session, or under its `escapeStopKey`. Host cancels, retirement and
+   * release never count, so a rise tells the host the user stopped the work.
+   */
+  get escapeStops(): number
   listDisplays(): Promise<Array<DesktopDisplay>>
   listWindows(): Promise<Array<DesktopWindow>>
   listApplications(options?: ApplicationQuery | undefined | null): Promise<Array<Application>>
-  openApplication(id: string, options?: ApplicationOpenOptions | undefined | null): Promise<Application>
+  openApplication(id: string, options?: ApplicationOpenOptions | undefined | null): Promise<OpenedApplication>
   /**
    * Capture and accessibility share one serialized request. Neither a failed
    * snapshot nor an abandoned reply replaces the last delivered input frame.
@@ -68,8 +74,8 @@ export declare class DesktopSession {
   menuItems(target: string, path?: Array<string> | undefined | null): Promise<Array<DesktopMenuItem>>
   menuSelect(target: string, path: Array<string>): Promise<undefined>
   bringToCurrentSpace(windowId: string): Promise<undefined>
-  holdKeys(target: string, keys: Array<string>, options: HoldOptions): Promise<undefined>
-  holdMouse(target: string, x: number, y: number, options: HoldOptions): Promise<undefined>
+  holdKeys(target: string, keys: Array<string>, options: HoldOptions): Promise<DesktopFocusReturn | undefined | null>
+  holdMouse(target: string, x: number, y: number, options: HoldOptions): Promise<DesktopFocusReturn | undefined | null>
   /**
    * Native ownership only. Human approval is required by the host before
    * calling this method.
@@ -79,18 +85,24 @@ export declare class DesktopSession {
   controlState(): DesktopControlState
   /** Retire queued work from a completed helper without revoking task control. */
   retire(): void
+  /**
+   * Sets when the current run ends, `remaining_ms` from now; each run sets
+   * it before its first call. On macOS, input waiting for the user to pause
+   * in its app gives up shortly before it.
+   */
+  setRunDeadline(remainingMs: number): void
   capture(target: string, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
   /**
    * Capture a fresh native-detail region without replacing the full input
    * coordinate frame.
    */
   captureRegion(target: string, region: CaptureRegion, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
-  click(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<undefined>
-  moveMouse(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<undefined>
-  drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<undefined>
-  scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | undefined | null): Promise<undefined>
-  typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<undefined>
-  keyChord(target: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<undefined>
+  click(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  moveMouse(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  keyChord(target: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   raiseWindow(windowId: string): Promise<undefined>
   axSnapshot(target: string, opts?: AxSnapshotOptions | undefined | null): Promise<AxSnapshot>
   axQuery(target: string, query: AxQuery): Promise<Array<AxNode>>
@@ -104,10 +116,26 @@ export declare class DesktopSession {
   axAttributes(reference: string): Promise<Array<[string, string]>>
   axChildren(reference: string): Promise<Array<AxNode>>
   axParent(reference: string): Promise<AxNode | undefined | null>
-  axPerform(reference: string, action: string): Promise<undefined>
+  /**
+   * Performs `action` on the element; with `menu`, chooses that item path
+   * in the menu the action opens, which closes it.
+   */
+  axPerform(reference: string, action: string, menu?: Array<string> | undefined | null): Promise<undefined>
   axSetValue(reference: string, value: string): Promise<undefined>
+  /**
+   * Selects `text` in the element's value by accessibility, or places a
+   * caret at its start or end, without focus change or keystrokes.
+   */
+  axSelectText(reference: string, text: string, opts?: AxSelectTextOptions | undefined | null): Promise<AxTextSelection>
   axFocus(reference: string): Promise<undefined>
-  axClick(reference: string, opts?: PointerOptions | undefined | null): Promise<undefined>
+  axClick(reference: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  /**
+   * Types `text` into the element: native text fields take it by AX
+   * insertion, other elements as keystrokes once they hold keyboard focus.
+   */
+  axType(reference: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  /** Presses a key chord in the element once it holds keyboard focus. */
+  axKeyChord(reference: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   /**
    * Immediately cancel operations submitted before this call. Later
    * operations may proceed.
@@ -327,6 +355,29 @@ export declare class IpcServer {
   unref(): void
 }
 
+/** Native multi-pattern line matcher returning named captures per line. */
+export declare class LineMatcher {
+  /**
+   * Throws when a pattern fails to compile; message names the failing index
+   * and the regex error, e.g. `pattern 2: regex parse error: ...`.
+   *
+   * # Errors
+   * Returns an error when any pattern fails to compile.
+   */
+  constructor(patterns: Array<string>)
+  /**
+   * Named groups of each pattern, in pattern order: the layout of a match's
+   * `start, end` pairs in [`LineMatches::spans`].
+   */
+  groupNames(): Array<Array<string>>
+  /**
+   * Matches every line (split on `
+  `) against every pattern; first match
+   * per line per pattern; ordered by line then pattern index.
+   */
+  matchLines(text: string): LineMatches
+}
+
 /** WebRTC peer that accepts 16 kHz mono PCM and renders remote Opus audio. */
 export declare class LiveWebRtcPeer {
   /**
@@ -384,6 +435,27 @@ export declare class NativeOAuthCallback {
   waitForCallback(timeoutMs?: number | undefined | null): Promise<string>
   /** Restore prior OS state and release ownership. Safe to call repeatedly. */
   dispose(): Promise<undefined>
+}
+
+/**
+ * The bytes crossing one shell run's pipeline pipes, during and after the run.
+ *
+ * For `cargo build 2>&1 | tail -5`, stream 1 holds what `cargo` has written
+ * so far while `tail` still holds it back. Create one per run and pass it as
+ * [`ShellRunOptions::streams`]. Streams are numbered from 1 in the order the
+ * run opened its pipes; each keeps its most recent 1 MiB, and a run keeps its
+ * 4 newest finished streams.
+ */
+export declare class PipeStreams {
+  constructor()
+  /** The run's retained streams, oldest first. */
+  list(): Array<PipeStreamInfo>
+  /**
+   * Retained bytes of stream `id` from stream offset `from` on (all of them
+   * without it), or `null` for a stream the run never opened or no longer
+   * keeps.
+   */
+  read(id: number, from?: number | undefined | null): PipeStreamChunk | null
 }
 
 /**
@@ -1184,6 +1256,16 @@ export interface AxQuery {
   limit?: number
 }
 
+/** Where `axSelectText` looks for its text and what it selects there. */
+export interface AxSelectTextOptions {
+  /** Text that must directly precede the match. */
+  prefix?: string
+  /** Text that must directly follow the match. */
+  suffix?: string
+  /** `text` (default) selects the match; `start` and `end` place a caret. */
+  select?: string
+}
+
 export interface AxSnapshot {
   text: string
   nodeCount: number
@@ -1194,6 +1276,19 @@ export interface AxSnapshotOptions {
   maxDepth?: number
   maxNodes?: number
   all?: boolean
+}
+
+/** The selection read back after `axSelectText`, in UTF-16 code units. */
+export interface AxTextSelection {
+  start: number
+  length: number
+  /** The selected text, empty for a caret. */
+  text: string
+  /**
+   * Whether the element is focused in its app: typing and AX insertion
+   * act on the focused element.
+   */
+  focused: boolean
 }
 
 export interface BlockParseOptions {
@@ -1252,6 +1347,16 @@ export interface ClipboardImage {
   /** MIME type for the encoded image payload. */
   mimeType: string
 }
+
+/**
+ * Invalidates this process's event taps before it exits.
+ *
+ * No desktop session here sees the user's input again afterwards. A macOS tap
+ * that dies with its process while the user types makes `WindowServer`
+ * deliver their key again; Bun's `process.exit` runs no native exit hook, so
+ * the host calls this from its exit handler.
+ */
+export declare function closeDesktopEventTaps(): void
 
 /** A context line (before or after a match). */
 export interface ContextLine {
@@ -1332,8 +1437,10 @@ export interface DesktopCapabilities {
   heldInput: boolean
   spaces: boolean
   /**
-   * Native global Escape cancellation while input/control ownership is held.
-   * Wayland requires the host interrupt action instead.
+   * Native global Escape cancellation of takeover input (`takeover: true`,
+   * held control, desktop/display-level input, raises, activating launches).
+   * Without held control, background window input never watches the user's
+   * keys; it and Wayland stop only through the host interrupt.
    */
   globalEscape: boolean
   capturePermission: string
@@ -1407,6 +1514,26 @@ export interface DesktopDisplay {
 }
 
 /**
+ * Physical-Escape stops counted under `key` by every desktop session created
+ * with it, including closed ones, until the key is forgotten.
+ */
+export declare function desktopEscapeStops(key: string): number
+
+/**
+ * Where focus ended after a takeover input call, as `WindowServer` reports
+ * it. Input calls resolve to it on macOS when they took over; other
+ * backends and background delivery resolve to `null`.
+ */
+export interface DesktopFocusReturn {
+  /** Whether the takeover handed focus back to the app front before it. */
+  handedBack: boolean
+  /** The process front before the takeover. */
+  previousPid?: number
+  /** The process front once the takeover ended; absent when unreadable. */
+  frontPid?: number
+}
+
+/**
  * One immediate child of a native application menu. Paths contain the actual
  * native labels, including ellipses; selection accepts normalized labels.
  */
@@ -1440,6 +1567,11 @@ export interface DesktopScreenState {
 
 export interface DesktopSessionOptions {
   display?: string
+  /**
+   * Sessions created with the same key share one physical-Escape stop
+   * count, which `desktopEscapeStops` reads after they close.
+   */
+  escapeStopKey?: string
 }
 
 /** One capturable top-level window in global logical desktop coordinates. */
@@ -1695,6 +1827,12 @@ export interface EditPolicy {
   allowFuzzy: boolean
   fuzzyThreshold: number
   enforceSeenLines: boolean
+  /**
+   * Narrowest per-line display cap any tool applies, in UTF-8 bytes (0: no
+   * tool cuts lines). Without recorded read provenance, hashline anchors on
+   * longer lines are rejected.
+   */
+  maxColumns: number
   blockAutoGenerated: boolean
   planActive: boolean
   /** Registered internal URL schemes (router spec keys). */
@@ -1901,6 +2039,9 @@ export declare enum FileType {
   /** Symbolic link. */
   Symlink = 3
 }
+
+/** Drops the stop count kept under `key` once no session will use it again. */
+export declare function forgetDesktopEscapeStops(key: string): void
 
 /** Fuzzy file path search for autocomplete. */
 export declare function fuzzyFind(options: FuzzyFindOptions): Promise<FuzzyFindResult>
@@ -2256,6 +2397,16 @@ export interface HoldOptions {
   button?: string
   keys?: Array<string>
   takeover?: boolean
+  /**
+   * With `takeover`, hand focus back to the user's app even after their
+   * input during the hold; see `PointerOptions.returnFocus`.
+   */
+  returnFocus?: boolean
+  /**
+   * Refuse a background left hold that starts on a control that opens a
+   * menu; see `PointerOptions.refuseMenu`.
+   */
+  refuseMenu?: boolean
 }
 
 /**
@@ -2272,6 +2423,12 @@ export interface HtmlToMarkdownOptions {
   cleanContent?: boolean
   /** Skip images during conversion. */
   skipImages?: boolean
+  /**
+   * Hidden content to keep: "drop" (default) omits it, "reachable" keeps
+   * content the page can reveal (collapsed sections, inactive tab panels),
+   * "all" also keeps `<template>` and `<noscript>` content.
+   */
+  hiddenContent?: string
 }
 
 /** One stray sloppy payload region inside prose (UTF-16 offsets). */
@@ -2445,6 +2602,25 @@ export declare enum KeyEventType {
   Repeat = 2,
   /** Key release event. */
   Release = 3
+}
+
+/**
+ * Matches of one [`LineMatcher::match_lines`] call, column-wise.
+ *
+ * Match `i` is on line `lines[i]` for pattern `rules[i]`, and its named
+ * groups (in [`LineMatcher::group_names`] order for that pattern) are the
+ * next `start, end` pairs of `spans`.
+ */
+export interface LineMatches {
+  /** 0-based line index per match. */
+  lines: Uint32Array
+  /** Pattern index per match. */
+  rules: Uint32Array
+  /**
+   * Per match and named group: UTF-16 start and end within the line, `-1, -1`
+   * when the group did not participate.
+   */
+  spans: Int32Array
 }
 
 export interface LineRange {
@@ -2738,8 +2914,28 @@ export interface NodeSpan {
   kind: string
 }
 
+/**
+ * Truncate and clamp dimensions to the same limits used by PTY start and
+ * resize.
+ */
+export declare function normalizePtyDimensions(cols: number, rows: number): PtyDimensions
+
 /** Decode notebook JSON into the editable cell-marker text. */
 export declare function notebookToEditableText(json: string, displayPath: string): string
+
+/**
+ * An opened application: its [`Application`] fields and the window it
+ * shows. On macOS `window` is its frontmost window once one is on screen;
+ * other platforms report none.
+ */
+export interface OpenedApplication {
+  id: string
+  name: string
+  path: string
+  running: boolean
+  pid?: number
+  window?: DesktopWindow
+}
 
 /** Check syntax through the shared parse cache without constructing a summary. */
 export declare function parseCodeStatus(options: ParseStatusOptions): ParseStatus
@@ -2832,6 +3028,35 @@ export interface PdfMarkdownResult {
  */
 export declare function pdfToMarkdown(input: Uint8Array): Promise<PdfMarkdownResult>
 
+/** Retained bytes of a stream, as stream offsets `start..end`. */
+export interface PipeStreamChunk {
+  /**
+   * Stream offset of `data`'s first byte; past 0 once older bytes were
+   * dropped.
+   */
+  start: number
+  /** Stream offset just past `data`: the next read's `from`. */
+  end: number
+  /** The bytes `start..end`. */
+  data: Buffer
+  /** Whether bytes may still arrive. */
+  open: boolean
+}
+
+/** A tapped pipe of a run. */
+export interface PipeStreamInfo {
+  /** Stream number, from 1. */
+  id: number
+  /** Source text of the stage writing into the pipe. */
+  producer: string
+  /** Source text of the stage reading from it. */
+  consumer: string
+  /** Bytes written so far, including those no longer retained. */
+  total: number
+  /** Whether bytes may still arrive. */
+  open: boolean
+}
+
 export interface PointerOptions {
   button?: string
   count?: number
@@ -2843,6 +3068,26 @@ export interface PointerOptions {
    * default background delivery.
    */
   takeover?: boolean
+  /**
+   * With `takeover`, hand focus back to the user's app even if they typed
+   * or clicked during the action; only a third app they switched to keeps
+   * it. The host sets this when it reruns a refused background action.
+   */
+  returnFocus?: boolean
+  /**
+   * Item path to choose in the menu a click opens, matched like a menu-bar
+   * path, e.g. a context menu's `["Add to", "Fonts"]`; the call opens the
+   * menu, presses the item and returns with the menu closed.
+   */
+  menu?: Array<string>
+  /**
+   * Refuse a background left click that lands on a control that opens a
+   * menu (on macOS a menu button or popup button), or a drag that starts on
+   * one, with `BackgroundUnavailable` before anything is sent. The host sets
+   * this when the user refuses foreground takeover: an open menu takes their
+   * keyboard.
+   */
+  refuseMenu?: boolean
 }
 
 /**
@@ -2926,6 +3171,12 @@ export interface PtyArgvStartOptions {
   cols?: number
   /** PTY row count. */
   rows?: number
+}
+
+/** Effective terminal dimensions shared by PTY sessions and screen emulators. */
+export interface PtyDimensions {
+  cols: number
+  rows: number
 }
 
 /** Result of a PTY command run. */
@@ -3455,6 +3706,8 @@ export interface ShellRunOptions {
    * filesystem applies again to later runs.
    */
   filesystem?: ShellFilesystem
+  /** Receives a copy of every byte crossing the run's pipeline pipes. */
+  streams?: PipeStreams
 }
 
 /** Result of running a shell command. */

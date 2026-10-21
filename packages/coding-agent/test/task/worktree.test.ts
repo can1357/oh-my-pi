@@ -1007,6 +1007,32 @@ describe("detachGitDir", () => {
 	});
 });
 
+describe("captureIsolationBaseline", () => {
+	// #16068: a copy backend clones in-tree linked worktrees along with the
+	// checkout; baselining each as a nested repo re-hashed every file and froze the host.
+	it("skips copied in-tree linked worktrees but keeps independent nested repos", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, ".gitignore"), ".claude/worktrees/\nvendor/\n");
+		await runGit(repo, ["add", ".gitignore"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		await runGit(repo, ["worktree", "add", "-q", ".claude/worktrees/wt", "-b", "wt"]);
+		await fs.writeFile(path.join(repo, ".claude/worktrees/wt/dirty.txt"), "wt\n");
+		const vendor = path.join(repo, "vendor/lib");
+		await fs.mkdir(vendor, { recursive: true });
+		await initRepo(vendor);
+
+		const iso = await fs.mkdtemp(path.join(os.tmpdir(), "omp-nested-iso-"));
+		tempDirs.push(iso);
+		await fs.cp(repo, iso, { recursive: true });
+		await vcs.detachGitDir(iso, vcs.requireGit(repo).info().commonDir);
+
+		const baseline = await captureIsolationBaseline(iso, repo);
+		expect(baseline.nested.map(n => n.relativePath)).toEqual([path.join("vendor", "lib")]);
+	});
+});
+
 describe("applyNestedPatches", () => {
 	const nestedRel = "sub";
 	let fixtureParent: string;

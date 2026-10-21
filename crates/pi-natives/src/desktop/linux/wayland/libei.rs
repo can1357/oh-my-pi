@@ -123,8 +123,9 @@ fn pace_drag(
 		control::wait(DRAG_STEP_DELAY)?;
 		send_motion(x, y)?;
 	}
-	// Keep the final motion observable before the button release.
-	control::wait(DRAG_STEP_DELAY)?;
+	// Keep the final motion observable before the button release, which
+	// always follows: a cancel now stops the next call.
+	control::settle(DRAG_STEP_DELAY);
 	Ok(())
 }
 
@@ -606,7 +607,8 @@ impl Libei {
 							device.device.device().frame(serial, time);
 							time = time.saturating_add(1);
 							self.flush()?;
-							control::check()?;
+							// A press is always released: a cancel stops the
+							// next press.
 							interface.button(code, ei::button::ButtonState::Released);
 							device.device.device().frame(serial, time);
 							time = time.saturating_add(1);
@@ -668,11 +670,21 @@ impl Libei {
 		gesture_result.and(released)
 	}
 
+	/// Presses `keys` and releases them. A shortcut fires on its last press,
+	/// so a cancel once every key is down no longer fails the call.
 	pub(super) fn key_chord(&mut self, keys: &[KeyName]) -> CoreResult<()> {
-		self.hold_keys(keys, Duration::ZERO)
+		self.with_keys(keys, || Ok(()))
 	}
 
 	pub(super) fn hold_keys(&mut self, keys: &[KeyName], duration: Duration) -> CoreResult<()> {
+		self.with_keys(keys, || control::wait(duration))
+	}
+
+	fn with_keys(
+		&mut self,
+		keys: &[KeyName],
+		hold: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
 		self.refresh_devices()?;
 		let device = self
 			.devices
@@ -699,7 +711,7 @@ impl Libei {
 				Self::send_key(device, &interface, code, true, serial, &mut time)?;
 			}
 			flush_context(&self.context)?;
-			control::wait(duration)?;
+			hold()?;
 			time = Self::timestamp()?.max(time);
 			Ok(())
 		})();

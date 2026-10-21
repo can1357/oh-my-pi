@@ -21,6 +21,9 @@ provider "openai-codex" {
 	inline-image-byte-budget 24000000
 	image-count-budget 200
 	official-image-count-budget 2000
+	// The backend decodes zstd request bodies, as the official client sends.
+	// Its rejection body is undocumented, so any 400/415 re-checks uncompressed.
+	request-encodings "zstd"
 
 	seed api="openai-codex-responses" base-url="https://chatgpt.com/backend-api" bundle="always" {
 		// Label only: the Codex backend ignores `tool.model` and runs gpt-image-2-codex.
@@ -223,4 +226,10 @@ provider "openai-codex" {
 	models "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra" {
 		context-window-floor 1000000
 	}
+}
+
+// The Codex backend rejects every sampling control (`temperature`, `top_p`,
+// penalties, stop sequences), whichever model it serves (#3117).
+on-api "openai-codex-responses" {
+	supports-sampling-params #false
 }

@@ -155,6 +155,8 @@ export interface InteractiveModeContext {
 	// Session access
 	session: AgentSession;
 	sessionManager: SessionManager;
+	/** Re-resolve the CLI/settings model scope after a successful OAuth login. */
+	refreshScopedModelsAfterLogin?: () => Promise<void>;
 	/** The current session display name / title. */
 	readonly sessionName: string | undefined;
 	/** Session the transcript/editor/status are attached to: the focused agent's, else `session`. */

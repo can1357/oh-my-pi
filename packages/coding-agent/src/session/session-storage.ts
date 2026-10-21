@@ -36,6 +36,26 @@ export function sessionStagingPath(target: string): string {
 	return path.join(path.dirname(target), `.${path.basename(target)}.${Snowflake.next()}.tmp`);
 }
 
+/**
+ * The file a rewrite must land in: the referent when `fpath` is a symlink.
+ *
+ * A rewrite stages a body beside the path and renames it over it, which
+ * replaces a symlink rather than the transcript it points at. A transcript
+ * staged into `--session-dir` as a symlink would then stop being one: the
+ * staged file would keep every turn before the rewrite while a new regular
+ * file beside it took the rest, and losing the staging directory would lose
+ * them (#15878). Appends need none of this — they write through an open
+ * descriptor, which follows the link.
+ */
+export function sessionPublishTarget(fpath: string): string {
+	try {
+		if (fs.lstatSync(fpath).isSymbolicLink()) return fs.realpathSync(fpath);
+	} catch {
+		// Not there, or not readable: the publish's own checks report that.
+	}
+	return fpath;
+}
+
 export interface SessionStorageStat {
 	size: number;
 	mtimeMs: number;
@@ -953,30 +973,34 @@ export class FileSessionStorage implements SessionStorage {
 		stage: (tempPath: string) => void,
 		options: SessionStorageWriteOptions | undefined,
 	): void {
-		const dir = path.dirname(fpath);
+		// A symlinked transcript is rewritten through its referent: the rename
+		// below would otherwise replace the link and strand the transcript it
+		// points at.
+		const target = sessionPublishTarget(fpath);
+		const dir = path.dirname(target);
 		this.ensureDirSync(dir);
-		const tempPath = sessionStagingPath(fpath);
+		const tempPath = sessionStagingPath(target);
 		try {
 			stage(tempPath);
 		} catch (err) {
-			this.#discardTemp(tempPath, fpath);
+			this.#discardTemp(tempPath, target);
 			throw toError(err);
 		}
 		// The freshness check through the final rename runs under the
 		// cross-process publish lock: no cooperating writer can slip an
 		// append between the size check and the rename.
 		try {
-			this.#withPublishLock(fpath, () => {
-				this.#assertExpectedSize(fpath, options?.expectedSize);
+			this.#withPublishLock(target, () => {
+				this.#assertExpectedSize(target, options?.expectedSize);
 				try {
-					this.renameSync(tempPath, fpath);
+					this.renameSync(tempPath, target);
 				} catch (err) {
 					if (!hasFsCode(err, "EPERM")) throw toError(err);
-					this.#replaceSessionFileAfterEpermSync(tempPath, fpath, err);
+					this.#replaceSessionFileAfterEpermSync(tempPath, target, err);
 				}
 			});
 		} catch (err) {
-			this.#discardTemp(tempPath, fpath);
+			this.#discardTemp(tempPath, target);
 			throw toError(err);
 		}
 	}
@@ -1007,6 +1031,9 @@ export class FileSessionStorage implements SessionStorage {
 
 	listFilesSync(dir: string, pattern: string): string[] {
 		try {
+			// Bun.Glob walks no symlink unless asked, and a transcript placed in
+			// a session directory as one — a launcher's, a supervisor's — is a
+			// transcript like any other (#15878)
 			return Array.from(new Bun.Glob(pattern).scanSync({ cwd: dir, followSymlinks: true })).map(name =>
 				path.join(dir, name),
 			);
@@ -1078,13 +1105,16 @@ export class FileSessionStorage implements SessionStorage {
 		stage: (tempPath: string) => Promise<void>,
 		options: WriteTextAtomicOptions | undefined,
 	): Promise<void> {
-		const dir = path.resolve(fpath, "..");
-		const tempPath = sessionStagingPath(fpath);
+		// As {@link #publishSync}: a symlinked transcript is rewritten through
+		// its referent, so the rename does not replace the link.
+		const target = sessionPublishTarget(fpath);
+		const dir = path.resolve(target, "..");
+		const tempPath = sessionStagingPath(target);
 		await fs.promises.mkdir(dir, { recursive: true });
 		try {
 			await stage(tempPath);
 		} catch (err) {
-			this.#discardTemp(tempPath, fpath);
+			this.#discardTemp(tempPath, target);
 			throw toError(err);
 		}
 		// Guard-check + rename MUST NOT be separated by an await. A concurrent
@@ -1092,25 +1122,25 @@ export class FileSessionStorage implements SessionStorage {
 		// publish a fresh body between the check and the rename, and this stale
 		// staged body would overwrite it. Sync rename closes that window.
 		if (options?.commitGuard && !options.commitGuard()) {
-			this.#discardTemp(tempPath, fpath);
+			this.#discardTemp(tempPath, target);
 			return;
 		}
 		try {
 			// The publish lock spans the freshness check through the rename (and
 			// its EPERM fallback): a cooperating appender or rewrite cannot
 			// interleave, and appenders re-open a replaced path before writing.
-			this.#withPublishLock(fpath, () => {
-				this.#assertExpectedSize(fpath, options?.expectedSize);
+			this.#withPublishLock(target, () => {
+				this.#assertExpectedSize(target, options?.expectedSize);
 				try {
-					this.renameSync(tempPath, fpath);
+					this.renameSync(tempPath, target);
 					return;
 				} catch (err) {
 					if (!hasFsCode(err, "EPERM")) throw toError(err);
-					this.#replaceSessionFileAfterEpermSync(tempPath, fpath, err, options?.commitGuard);
+					this.#replaceSessionFileAfterEpermSync(tempPath, target, err, options?.commitGuard);
 				}
 			});
 		} catch (err) {
-			this.#discardTemp(tempPath, fpath);
+			this.#discardTemp(tempPath, target);
 			throw toError(err);
 		}
 	}

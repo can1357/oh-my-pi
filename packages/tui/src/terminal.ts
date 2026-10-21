@@ -856,6 +856,8 @@ export class ProcessTerminal implements Terminal {
 	// Releases a relayed lone ESC the decoder held for a sequence tail that never came.
 	#win32PendingFlushTimer?: Timer;
 	#stdinBuffer?: StdinBuffer;
+	/** Parsed input path shared by direct VT and win32-input-mode relayed text. */
+	#stdinSequenceHandler?: (sequence: string) => void;
 	#stdinDataHandler?: (data: string) => void;
 	#disconnectHandler?: () => void;
 	#stdinEndHandler = () => {
@@ -1387,7 +1389,30 @@ export class ProcessTerminal implements Terminal {
 		// skip the subparameter tail instead of dropping the whole report.
 		const inBandResizePattern = /^\x1b\[48;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?t$/;
 
-		this.#stdinBuffer.on("data", (sequence: string) => {
+		this.#stdinSequenceHandler = (sequence: string) => {
+			const decoder = this.#win32InputDecoder;
+			const win32Keys = decoder?.decode(sequence);
+			if (decoder && win32Keys !== undefined) {
+				clearTimeout(this.#win32PendingFlushTimer);
+				this.#win32PendingFlushTimer = undefined;
+				// The record is ESC-led, so it interrupts any direct reply still being
+				// reassembled, just as a raw escape does below. Decoded keys carry no ESC
+				// of their own and would otherwise be appended to that fragment.
+				this.#privateCsiResponseBuffer = "";
+				this.#inBandResizeBuffer = "";
+				this.#osc11ResponseBuffer = "";
+				this.#osc99ResponseBuffer = "";
+				this.#glyphProtocolReplyBuffer = "";
+				this.#tspReplyBuffer = "";
+				for (const key of win32Keys) this.#stdinSequenceHandler?.(key);
+				if (decoder.hasPendingSequence) {
+					this.#win32PendingFlushTimer = setTimeout(
+						() => this.#releaseWin32PendingSequence(),
+						WIN32_RELAYED_ESCAPE_TIMEOUT_MS,
+					);
+				}
+				return;
+			}
 			// Fast path for plain-text bytes: every escape-probe regex below
 			// anchors on `^\x1b…`, so a byte that is not ESC can never match. A
 			// non-bracketed paste of N printable chars arrives as N per-scalar
@@ -1719,20 +1744,6 @@ export class ProcessTerminal implements Terminal {
 				return;
 			}
 			if (this.#inputHandler) {
-				const decoder = this.#win32InputDecoder;
-				const win32Keys = decoder?.decode(sequence);
-				if (decoder && win32Keys !== undefined) {
-					clearTimeout(this.#win32PendingFlushTimer);
-					this.#win32PendingFlushTimer = undefined;
-					for (const key of win32Keys) this.#inputHandler(key);
-					if (decoder.hasPendingSequence) {
-						this.#win32PendingFlushTimer = setTimeout(
-							() => this.#releaseWin32PendingSequence(),
-							WIN32_RELAYED_ESCAPE_TIMEOUT_MS,
-						);
-					}
-					return;
-				}
 				// Windows console hosts drop AltGr text under kitty (AltGr+F → `CSI 102;3u`);
 				// recover it from the active layout before any keybinding sees an Alt chord.
 				const altGrText =
@@ -1741,7 +1752,8 @@ export class ProcessTerminal implements Terminal {
 						: undefined;
 				this.#inputHandler(altGrText ?? sequence);
 			}
-		});
+		};
+		this.#stdinBuffer.on("data", this.#stdinSequenceHandler);
 
 		// Re-wrap paste content with bracketed paste markers for existing editor
 		// handling. An Enter that shared the paste's stdin read rides along so
@@ -2104,7 +2116,7 @@ export class ProcessTerminal implements Terminal {
 		clearTimeout(this.#win32PendingFlushTimer);
 		this.#win32PendingFlushTimer = undefined;
 		const pending = this.#win32InputDecoder?.flushPendingSequence() ?? [];
-		for (const key of pending) this.#inputHandler?.(key);
+		for (const key of pending) this.#stdinSequenceHandler?.(key);
 	}
 
 	#disableWin32InputMode(): void {
@@ -2442,6 +2454,7 @@ export class ProcessTerminal implements Terminal {
 			this.#stdinBuffer.destroy();
 			this.#stdinBuffer = undefined;
 		}
+		this.#stdinSequenceHandler = undefined;
 
 		// Remove event handlers
 		if (this.#stdinDataHandler) {

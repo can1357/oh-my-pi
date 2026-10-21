@@ -343,6 +343,75 @@ export function checkpointWal(db: Database): void {
 	db.run("PRAGMA wal_checkpoint(PASSIVE)");
 }
 
+/** Damaged regions one {@link readSalvageableRows} scan skips before abandoning the rest of the table. */
+const SALVAGE_MAX_DAMAGED_REGIONS = 1000;
+
+/**
+ * Reads every row of a rowid table that SQLite can still decode, to salvage a
+ * damaged store. A full scan aborts at the first unreadable page, so this walks
+ * rowids with indexed seeks instead: when a seek hits damage it doubles its
+ * stride past it, then bisects back to the first rowid from which seeking
+ * works again, losing only rows on the damaged pages. Cross-linked pages can
+ * still decode rows with foreign column types, so callers validate types;
+ * rows returned out of rowid order count as damage. Only corruption errors are
+ * treated as damage; anything else is thrown.
+ */
+export function readSalvageableRows<T extends object>(db: Database, table: string, columns: string): T[] {
+	type Row = T & { salvage_rowid: number };
+	using seek = db.prepare<Row, [number]>(
+		`SELECT rowid AS salvage_rowid, ${columns} FROM ${table} WHERE rowid > ? ORDER BY rowid LIMIT 1`,
+	);
+	using exact = db.prepare<Row, [number]>(`SELECT rowid AS salvage_rowid, ${columns} FROM ${table} WHERE rowid = ?`);
+	// The row found, null when there is none, or undefined when the read hit damage.
+	const probe = (after: number, at?: number): Row | null | undefined => {
+		try {
+			const row = at === undefined ? seek.get(after) : exact.get(at);
+			if (!row) return null;
+			const valid = Number.isSafeInteger(row.salvage_rowid) && row.salvage_rowid === (at ?? row.salvage_rowid);
+			return valid && row.salvage_rowid > after ? row : undefined;
+		} catch (error) {
+			if (isSqliteCorruptionError(error)) return undefined;
+			throw error;
+		}
+	};
+
+	const rows: T[] = [];
+	const keep = (row: Row): void => {
+		const { salvage_rowid: _, ...values } = row;
+		rows.push(values as unknown as T);
+	};
+	let after = Number.MIN_SAFE_INTEGER;
+	let damaged = 0;
+	while (after < Number.MAX_SAFE_INTEGER) {
+		const row = probe(after);
+		if (row === null) break;
+		if (row) {
+			keep(row);
+			after = row.salvage_rowid;
+			continue;
+		}
+		if (++damaged > SALVAGE_MAX_DAMAGED_REGIONS) break;
+		// An end-of-table result counts as clear: the gap below it may still hold readable rows.
+		let bad = after;
+		let clear = Number.MAX_SAFE_INTEGER;
+		for (let step = 1; after + step < clear; step *= 2) {
+			if (probe(after + step) !== undefined) clear = after + step;
+			else bad = after + step;
+		}
+		while (clear - bad > 1) {
+			const mid = bad + Math.floor((clear - bad) / 2);
+			if (probe(mid) === undefined) bad = mid;
+			else clear = mid;
+		}
+		// An interior key bounds its left subtree inclusively, so seeking past the last
+		// damaged rowid descends into the damage again and `clear` itself is skipped.
+		const boundary = probe(bad, clear);
+		if (boundary) keep(boundary);
+		after = clear;
+	}
+	return rows;
+}
+
 /**
  * SQLite's busy result-code family — base `SQLITE_BUSY` plus the extended
  * variants `SQLITE_BUSY_RECOVERY` (concurrent WAL recovery), `SQLITE_BUSY_SNAPSHOT`,

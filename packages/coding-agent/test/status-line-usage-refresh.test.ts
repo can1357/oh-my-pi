@@ -25,6 +25,7 @@ function makeSession(
 		state: { messages, model: { contextWindow: 200_000 } },
 		model: { contextWindow: 200_000 },
 		isStreaming: false,
+		isFastModeActive: () => false,
 		sessionManager: {
 			getUsageStatistics: () => ({
 				input: 0,
@@ -189,6 +190,22 @@ describe("StatusLineComponent usage refresh", () => {
 		await flushMicrotasks();
 
 		expect(calls).toBe(1);
+	});
+
+	it("does not queue a usage refresh from the final render after disposal", async () => {
+		let calls = 0;
+		const component = new StatusLineComponent(
+			makeSession(async () => {
+				calls++;
+				return [];
+			}),
+			statusLineHost,
+		);
+		component.dispose();
+		component.getTopBorder(120);
+		vi.advanceTimersByTime(0);
+		await flushMicrotasks();
+		expect(calls).toBe(0);
 	});
 
 	it("passes a startup timeout signal to the background usage fetch", async () => {

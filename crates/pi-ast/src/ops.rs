@@ -91,7 +91,7 @@ pub fn is_supported_file(file_path: &Path, explicit_lang: Option<&str>) -> bool 
 	if explicit_lang.is_some() {
 		return true;
 	}
-	resolve_language(None, file_path).is_ok()
+	SupportLang::from_path(file_path).is_some()
 }
 
 pub fn compile_pattern(

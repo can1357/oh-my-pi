@@ -1,0 +1,37 @@
+// Tool names in replayed history must meet the target wire's declaration limits.
+// Anthropic tool definitions: https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools
+on-api "anthropic-messages" "openai-responses" "azure-openai-responses" "openai-codex-responses" {
+	tool-call-name-charset "ascii"
+	tool-call-name-max-length 128
+}
+
+// Bedrock ToolUseBlockStart.name: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolUseBlockStart.html
+on-api "bedrock-converse-stream" {
+	tool-call-name-charset "ascii"
+	tool-call-name-max-length 64
+}
+
+// Chat Completions uses the shorter tool-name bound; OpenRouter can select it
+// at request time. Factory Droid encodes caller names into this shape.
+on-api "openai-completions" "openrouter" "factory-droid-agent" {
+	tool-call-name-charset "ascii"
+	tool-call-name-max-length 64
+}
+
+// Google FunctionDeclaration.name: https://googleapis.github.io/js-genai/release_docs/interfaces/types.FunctionDeclaration.html
+on-api "google-generative-ai" {
+	tool-call-name-charset "google"
+	tool-call-name-max-length 128
+}
+
+// Vertex uses the Google FunctionDeclaration shape, independently of the public Gemini API.
+on-api "google-vertex" {
+	tool-call-name-charset "google"
+	tool-call-name-max-length 128
+}
+
+// Code Assist's Gemini CLI proxy gets the conservative 64-character wire bound.
+on-api "google-gemini-cli" {
+	tool-call-name-charset "google"
+	tool-call-name-max-length 64
+}

@@ -14,10 +14,10 @@ use super::{
 	clipboard::validate_clipboard_sequence,
 	input::{Parsed, Patch, PatchSection},
 	messages::{
-		HEADTAIL_DRIFT_WARNING, RevealedLine, UnseenLinesReveal, missing_snapshot_tag_message,
-		path_recovered_from_tag_message, unseen_lines_message, wide_unseen_lines_message,
+		HEADTAIL_DRIFT_WARNING, RevealedLine, UnseenLinesReveal, path_recovered_from_tag_message,
+		unseen_lines_message, unverified_wide_lines_message, wide_unseen_lines_message,
 	},
-	mismatch::{MismatchDetails, mismatch_error},
+	mismatch::{MismatchDetails, format_header_only_message, mismatch_error},
 	parser::{ParseFailure, parse_patch},
 	recovery::{RecoveryArgs, try_recover},
 	types::{ApplyResult, BlockOpKind, BlockResolution, Edit, FileOp},
@@ -94,7 +94,7 @@ fn has_anchor_scoped_edit(edits: &[Edit]) -> bool {
 	})
 }
 
-fn mismatch(
+pub(crate) fn mismatch(
 	section: &PatchSection,
 	canonical: &Path,
 	normalized: &str,
@@ -102,7 +102,27 @@ fn mismatch(
 	store: &EditStore,
 ) -> EditError {
 	let actual = file_hash(normalized);
-	store.record(canonical, normalized, None);
+	let file_lines: Vec<String> = normalized.split('\n').map(str::to_owned).collect();
+	let anchor_lines = section.collect_anchor_lines().unwrap_or_default();
+	// The reply hands back the current tag and prints the rows around each
+	// anchor in full, so those rows count as seen for a resend under it.
+	// Content no snapshot holds starts from them (recording it with no seen set
+	// would let the guard accept every line), and a read's seen set gains
+	// them. Line 0, never an anchor, keeps the set restrictive when the reply
+	// printed no rows (anchors past a shrunken file, head/tail-only ops), as
+	// `store.ts` does for a read whose every row was cut. Content already
+	// unrestricted (no seen set, or an empty one as a `write` records) stays so.
+	let restricted = store
+		.by_content(canonical, normalized)
+		.is_none_or(|snapshot| snapshot.seen_lines.is_some_and(|seen| !seen.is_empty()));
+	if restricted {
+		let displayed: Vec<u32> = std::iter::once(0)
+			.chain(super::messages::anchored_context_lines(&anchor_lines, file_lines.len()))
+			.collect();
+		store.record(canonical, normalized, Some(&displayed));
+	} else {
+		store.record(canonical, normalized, None);
+	}
 	// When the tag isn't from this exact path, list the other paths in this
 	// session that *did* issue the same tag — so the rejection can name the
 	// file the tag was actually for and the model doesn't follow a wrong-tree
@@ -117,11 +137,29 @@ fn mismatch(
 		path: Some(section.path.clone()),
 		expected_file_hash: expected.to_owned(),
 		actual_file_hash: actual,
-		file_lines: normalized.split('\n').map(str::to_owned).collect(),
-		anchor_lines: section.collect_anchor_lines().unwrap_or_default(),
+		file_lines,
+		anchor_lines,
 		hash_recognized: store.has_hash(canonical, expected),
 		tag_origin_paths,
 	})
+}
+
+/// Answer input that is only a section header (no ops) with the file's
+/// current tag, as an unknown tag would get.
+pub fn header_only_error(path: &str, files: &mut dyn FileSource) -> EditError {
+	let resolved = match files.resolve(path, false) {
+		Ok(resolved) => resolved,
+		Err(err) => return err,
+	};
+	match files.try_read(&resolved) {
+		Ok(Some(read)) => {
+			EditError::matched(format_header_only_message(path, &file_hash(&read.text)))
+		},
+		Ok(None) => EditError::apply(format!(
+			"File not found: {path}. Use the write tool to create new files."
+		)),
+		Err(err) => err,
+	}
 }
 
 /// Minimum trimmed length, in chars, for a current-content line to count as
@@ -346,15 +384,66 @@ fn rescue_shifted_anchors(
 	Ok(rescued)
 }
 
+/// Lines the seen-line guard checks: the section's authored anchors plus every
+/// line a resolved `PUT N*:`/`CUT N*` replaces or removes. Block inserts and
+/// pastes after a block leave its lines intact, so they keep only their anchor.
+fn guarded_lines(
+	section: &PatchSection,
+	blocks: &[BlockResolution],
+) -> Result<Vec<u32>, EditError> {
+	let mut lines: BTreeSet<u32> = section.collect_anchor_lines()?.into_iter().collect();
+	for block in blocks {
+		if matches!(block.op, BlockOpKind::Replace | BlockOpKind::Cut) {
+			lines.extend(block.start..=block.end);
+		}
+	}
+	Ok(lines.into_iter().collect())
+}
+
+/// Guarded lines longer than `max_columns` bytes, which some display path
+/// may have cut, so the model may never have seen them whole.
+fn possibly_cut_anchors(
+	section: &PatchSection,
+	blocks: &[BlockResolution],
+	text: &str,
+	max_columns: usize,
+) -> Result<Vec<u32>, EditError> {
+	if max_columns == 0 {
+		return Ok(Vec::new());
+	}
+	let mut anchors = guarded_lines(section, blocks)?.into_iter().peekable();
+	let mut wide = Vec::new();
+	for (number, line) in (1u32..).zip(text.split('\n')) {
+		while anchors.next_if(|&anchor| anchor < number).is_some() {}
+		if anchors.peek().is_none() {
+			break;
+		}
+		if anchors.next_if_eq(&number).is_some() && line.len() > max_columns {
+			wide.push(number);
+		}
+	}
+	Ok(wide)
+}
+
 fn assert_seen_lines(
 	section: &PatchSection,
+	blocks: &[BlockResolution],
 	expected: &str,
 	canonical: &Path,
 	store: &EditStore,
 	text: &str,
+	max_columns: usize,
 ) -> Result<(), EditError> {
 	let Some(snapshot) = store.by_content(canonical, text) else {
-		return Ok(());
+		// No retained read (restart, store eviction): the tag still matches the
+		// file, but which rows were displayed whole is unknown. Lines within
+		// every display cap were shown whole wherever they were shown; a longer
+		// one may have been cut, and replacing it from a cut view drops its tail.
+		let wide = possibly_cut_anchors(section, blocks, text, max_columns)?;
+		if wide.is_empty() {
+			return Ok(());
+		}
+		return Err(EditError::matched(unverified_wide_lines_message(section.path.as_str(), &wide)));
 	};
 	let Some(seen) = snapshot.seen_lines else {
 		return Ok(());
@@ -362,8 +451,7 @@ fn assert_seen_lines(
 	if seen.is_empty() {
 		return Ok(());
 	}
-	let mut unseen = section
-		.collect_anchor_lines()?
+	let mut unseen = guarded_lines(section, blocks)?
 		.into_iter()
 		.filter(|line| !seen.contains(line))
 		.collect::<Vec<_>>();
@@ -422,6 +510,8 @@ fn assert_seen_lines(
 	)))
 }
 
+/// `seen_line_guard` enables the displayed-line guard with its column cap
+/// (see [`crate::session::SessionConfig::max_columns`]); `None` disables it.
 pub(crate) fn apply_with_recovery(
 	section: &PatchSection,
 	canonical: &Path,
@@ -429,7 +519,7 @@ pub(crate) fn apply_with_recovery(
 	edits: &[Edit],
 	clipboard: &mut Clipboard,
 	store: &EditStore,
-	enforce_seen_lines: bool,
+	seen_line_guard: Option<usize>,
 ) -> Result<ApplyResult, EditError> {
 	let expected = section.file_hash.as_deref().unwrap_or_default();
 	let live_matches = file_hash(normalized).eq_ignore_ascii_case(expected);
@@ -457,8 +547,16 @@ pub(crate) fn apply_with_recovery(
 	};
 	validate_clipboard_sequence(&resolved, clipboard)?;
 	if live_matches {
-		if enforce_seen_lines {
-			assert_seen_lines(section, expected, canonical, store, normalized)?;
+		if let Some(max_columns) = seen_line_guard {
+			assert_seen_lines(
+				section,
+				&block_resolutions,
+				expected,
+				canonical,
+				store,
+				normalized,
+				max_columns,
+			)?;
 		}
 		let mut result = apply_edits(normalized, &resolved, ApplyOptions {
 			clipboard:      Some(clipboard),
@@ -469,6 +567,11 @@ pub(crate) fn apply_with_recovery(
 		resolve_warnings.extend(result.warnings);
 		result.warnings = resolve_warnings;
 		return Ok(result);
+	}
+	// A bare `MV`/`REM` has no content edit to stand on; the tag is its only
+	// evidence the caller saw this file.
+	if resolved.is_empty() {
+		return Err(mismatch(section, canonical, normalized, expected, store));
 	}
 	if !has_anchor_scoped_edit(&resolved) {
 		let mut result = apply_edits(normalized, &resolved, ApplyOptions {
@@ -593,6 +696,7 @@ pub fn stage_patch(
 	patch: &Patch,
 	raw_input: &str,
 	enforce_seen_lines: bool,
+	max_columns: usize,
 	files: &mut dyn FileSource,
 	store: &EditStore,
 ) -> Result<Vec<StagedFile>, EditError> {
@@ -601,9 +705,7 @@ pub fn stage_patch(
 	let mut canonical_paths = HashMap::<std::path::PathBuf, String>::new();
 	for original in &patch.sections {
 		let parsed = parse_with_range_diagnostics(original, files)?;
-		let Some(tag) = original.file_hash.as_deref() else {
-			return Err(EditError::apply(missing_snapshot_tag_message(&original.path)));
-		};
+		let tag = original.file_hash.as_deref();
 		let initial = files.resolve(&original.path, false)?;
 		let recovered = recover_target(original, &initial, files, store);
 		let (section, resolved) = recovered
@@ -611,14 +713,16 @@ pub fn stage_patch(
 			.map_or((original, &initial), |(section, resolved)| (section, resolved));
 		// Whole-file delete needs existence, not text, so an undecodable file
 		// stages without its content; anything else still rejects.
-		let undecodable_delete = matches!(parsed.file_op, Some(FileOp::Rem));
+		let undecodable_delete = tag.filter(|_| matches!(parsed.file_op, Some(FileOp::Rem)));
 		let read = match files.try_read(resolved) {
 			Ok(read) => read,
-			Err(err) if err.is_invalid_utf8() && undecodable_delete => None,
+			Err(err) if err.is_invalid_utf8() && undecodable_delete.is_some() => None,
 			Err(err) => return Err(err),
 		};
 		let Some(read) = read else {
-			if undecodable_delete && files.exists(&resolved.absolute) {
+			if let Some(tag) = undecodable_delete
+				&& files.exists(&resolved.absolute)
+			{
 				staged.push(undecodable_delete_staged(
 					section,
 					resolved,
@@ -634,6 +738,11 @@ pub fn stage_patch(
 				"File not found: {}. Use the write tool to create new files.",
 				section.path
 			)));
+		};
+		// A section with no tag (missing, or a placeholder like `#AUTO`) never
+		// applies; like an unknown tag, it gets the current tag and context.
+		let Some(tag) = tag else {
+			return Err(mismatch(section, &read.canonical, &read.text, "", store));
 		};
 		if section.path != original.path {
 			// Warning is attached below once parser/apply warnings are collected.
@@ -667,7 +776,7 @@ pub fn stage_patch(
 			edits,
 			&mut clipboard,
 			store,
-			enforce_seen_lines,
+			enforce_seen_lines.then_some(max_columns),
 		)?;
 		let mut warnings = parsed.warnings.clone();
 		if section.path != original.path {
@@ -801,6 +910,9 @@ mod lifecycle {
 		store::EditStore,
 	};
 
+	/// The host's default: grep's 512-byte cap, under read's 768 columns.
+	const MAX_COLUMNS: usize = 512;
+
 	struct DiskWriter;
 
 	#[async_trait]
@@ -868,6 +980,12 @@ mod lifecycle {
 			self.store.head(&self.canonical(file)).unwrap().hash
 		}
 
+		/// A resumed process: the on-disk tag still matches, read provenance is
+		/// gone.
+		fn forget_reads(&mut self) {
+			self.store = EditStore::new();
+		}
+
 		async fn edit(&self, patch: &str) -> Result<(), String> {
 			let mut session = Session::new(
 				SessionConfig {
@@ -876,6 +994,7 @@ mod lifecycle {
 					allow_fuzzy:        false,
 					fuzzy_threshold:    0.0,
 					enforce_seen_lines: true,
+					max_columns:        MAX_COLUMNS,
 					raw_input:          true,
 				},
 				self.store.clone(),
@@ -1138,5 +1257,65 @@ mod lifecycle {
 			.await
 			.unwrap();
 		assert_eq!(ctx.text("wide.txt"), full);
+	}
+
+	/// After a restart, a replace of a line wider than the display cap may come
+	/// from a cut view: it rejects until a full read records the line.
+	#[tokio::test]
+	async fn resumed_wide_anchor_requires_full_read() {
+		let mut ctx = Lifecycle::new("resumed.txt", 1);
+		let wide = format!("note: {} END-OF-LINE-TAIL", "abcdefghij".repeat(80));
+		let original = format!("first\n{wide}\n");
+		ctx.write_text("resumed.txt", &original);
+		let tag = ctx.read("resumed.txt", &[1]);
+		ctx.forget_reads();
+		let err = ctx
+			.edit(&format!("[resumed.txt#{tag}]\nPUT 2.=2:\n+NOTE: {}\n", &wide[6..MAX_COLUMNS]))
+			.await
+			.unwrap_err();
+		assert!(err.contains("resumed.txt:2:raw"), "unexpected error: {err}");
+		assert_eq!(ctx.text("resumed.txt"), original);
+
+		ctx.read("resumed.txt", &[2]);
+		ctx.edit(&format!(
+			"[resumed.txt#{tag}]\nPUT 2.=2:\n+{}\n",
+			wide.replacen("note:", "NOTE:", 1)
+		))
+		.await
+		.unwrap();
+		assert_eq!(ctx.text("resumed.txt"), original.replacen("note:", "NOTE:", 1));
+	}
+
+	/// A resumed block op guards every line it replaces, not just its anchor:
+	/// a wide interior line may have been shown cut.
+	#[tokio::test]
+	async fn resumed_block_over_wide_line_requires_full_read() {
+		let mut ctx = Lifecycle::new("block.ts", 1);
+		let wide = format!("note: {} END-OF-LINE-TAIL", "abcdefghij".repeat(80));
+		let original = format!("function f() {{\n\tconst x = \"{wide}\";\n\treturn x;\n}}\n");
+		ctx.write_text("block.ts", &original);
+		let tag = ctx.read("block.ts", &[1]);
+		ctx.forget_reads();
+		let err = ctx
+			.edit(&format!("[block.ts#{tag}]\nCUT 1*\n"))
+			.await
+			.unwrap_err();
+		assert!(err.contains("block.ts:2:raw"), "unexpected error: {err}");
+		assert_eq!(ctx.text("block.ts"), original);
+	}
+
+	/// Lines within the display cap were shown whole wherever they were shown,
+	/// so a resumed edit anchored on them applies even beside a wide line.
+	#[tokio::test]
+	async fn resumed_short_anchor_applies() {
+		let mut ctx = Lifecycle::new("short.txt", 1);
+		let wide = "x".repeat(MAX_COLUMNS + 1);
+		ctx.write_text("short.txt", &format!("first\n{wide}\nlast\n"));
+		let tag = ctx.read("short.txt", &[1, 3]);
+		ctx.forget_reads();
+		ctx.edit(&format!("[short.txt#{tag}]\nPUT 3.=3:\n+LAST\nPUT <1:\n+head\n"))
+			.await
+			.unwrap();
+		assert_eq!(ctx.text("short.txt"), format!("head\nfirst\n{wide}\nLAST\n"));
 	}
 }

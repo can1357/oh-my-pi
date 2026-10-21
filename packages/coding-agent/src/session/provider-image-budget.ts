@@ -10,9 +10,9 @@ import type {
 	ToolResultProviderMetadata,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { reachesOfficialEndpoint } from "@oh-my-pi/pi-ai";
+import { reachesBudgetedHost } from "@oh-my-pi/pi-ai";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
-import { resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
+import { resolveInlineImageByteBudget, resolveRequestBodyByteLimit } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { capFrameDataBytes, frameDataBytesBudget, providerImageBudget } from "@oh-my-pi/snapcompact";
@@ -23,6 +23,12 @@ const IMAGE_OMISSION: TextContent = {
 	type: "text",
 	text: "[image omitted: provider image limit]",
 };
+
+/**
+ * Body bytes added after the clamp sees the context: injected reminders, the provider's own system prompt, and
+ * request fields (model, limits, thinking, stream). Reserved before protecting images against a body limit.
+ */
+const REQUEST_ENVELOPE_BYTES = 64_000;
 
 /**
  * Images the clamp below is actually able to remove, and therefore the only
@@ -60,6 +66,8 @@ interface ImageBudgetState {
 	inlineBytes: number;
 	byteBudget: number;
 	model: Model;
+	/** Messages whose images the byte clamp must not evict. */
+	kept?: ReadonlySet<Message>;
 }
 
 function needsImageDrop(state: ImageBudgetState): boolean {
@@ -109,6 +117,7 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetSt
 
 function clampImages(context: Context, state: ImageBudgetState): Context {
 	const messages = context.messages.map(message => {
+		if (state.kept?.has(message)) return message;
 		switch (message.role) {
 			case "user":
 				return clampUserMessage(message, state);
@@ -140,23 +149,73 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 }
 
 /**
+ * Messages whose inline images a host with a `request-body-byte-limit` keeps past the byte budget: the newest user
+ * message (summary archives excluded) and the newest tool result carrying inline image bytes, newest first, each only
+ * while the kept images still fit `imageRoom`, the limit less the request's other serialized bytes. The clamp evicts
+ * everything else oldest-first, as on other hosts.
+ */
+function newestImageMessages(context: Context, model: Model, imageRoom: number | undefined): Set<Message> {
+	const kept = new Set<Message>();
+	if (imageRoom === undefined || imageRoom <= 0) return kept;
+	let user: Message | undefined;
+	let toolResult: Message | undefined;
+	let bytes = 0;
+	for (let index = context.messages.length - 1; index >= 0 && !(user && toolResult); index--) {
+		const message = context.messages[index];
+		if (!Array.isArray(message.content)) continue;
+		const isUser = !user && message.role === "user" && message.historyRewriteAt === undefined;
+		if (!isUser && (toolResult || message.role !== "toolResult")) continue;
+		let messageBytes = 0;
+		for (const part of message.content) {
+			if (part.type === "image") messageBytes += inlineImageBytes(part, model);
+		}
+		if (isUser) user = message;
+		else if (messageBytes > 0) toolResult = message;
+		else continue;
+		if (messageBytes === 0 || bytes + messageBytes > imageRoom) continue;
+		bytes += messageBytes;
+		kept.add(message);
+	}
+	return kept;
+}
+
+/**
  * Drops oldest inline image blocks so their base64 fits the deployment's request-body budget.
  * Runs after URL/provider-file decoration: blocks the provider receives as references carry no inline bytes.
  */
 export function clampProviderContextImageBytes(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
-	const byteBudget = resolveInlineImageByteBudget(model, reachesOfficialEndpoint(model));
+	const budgetedHost = reachesBudgetedHost(model);
+	const byteBudget = resolveInlineImageByteBudget(model, budgetedHost);
 	if (byteBudget === undefined) return context;
 	let inlineBytes = 0;
+	// Assistant images are model outputs no serializer replays (see countImages): never charged or reserved.
+	let unsentBytes = 0;
 	for (const message of context.messages) {
-		// Assistant images are model outputs no serializer replays (see countImages).
-		if (message.role === "assistant" || !Array.isArray(message.content)) continue;
+		if (!Array.isArray(message.content)) continue;
 		for (const part of message.content) {
-			if (part.type === "image") inlineBytes += inlineImageBytes(part, model);
+			if (part.type !== "image") continue;
+			if (message.role === "assistant") unsentBytes += part.data.length;
+			else inlineBytes += inlineImageBytes(part, model);
 		}
 	}
 	if (inlineBytes <= byteBudget) return context;
-	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model });
+	const bodyLimit = resolveRequestBodyByteLimit(model, budgetedHost);
+	// Text, tools and the system prompt ride in the same body, as UTF-8: only what they leave may hold protected
+	// images. Base64 is ASCII, so its characters are its bytes. Never sent: tool-result `details` (UI-only) and
+	// another provider's native payload (assistant turns, compaction summaries), which this request does not replay.
+	const wire = context.messages.map(message => {
+		if (message.role === "toolResult") return { ...message, details: undefined };
+		const payload = message.providerPayload;
+		if (!payload) return message;
+		const owner =
+			message.role === "assistant" ? message.provider : "provider" in payload ? payload.provider : undefined;
+		return owner !== undefined && owner !== model.provider ? { ...message, providerPayload: undefined } : message;
+	});
+	const otherBytes = Buffer.byteLength(JSON.stringify({ ...context, messages: wire })) - inlineBytes - unsentBytes;
+	const imageRoom = bodyLimit === undefined ? undefined : bodyLimit - REQUEST_ENVELOPE_BYTES - otherBytes;
+	const kept = newestImageMessages(context, model, imageRoom);
+	return clampImages(context, { remainingDrops: 0, inlineBytes, byteBudget, model, kept });
 }
 
 /**

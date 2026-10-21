@@ -5,7 +5,7 @@
 ## Source
 - Entry: `packages/coding-agent/src/tools/tts.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/tts.md`
-- Speech role selection: `packages/coding-agent/src/config/model-resolver.ts`, `packages/coding-agent/src/priority.json`
+- Speech role selection: `packages/coding-agent/src/config/model-resolver.ts`, role default chains in `packages/catalog/src/compat/rules/runtime/behavior.kdl` (`roleDefaultModels()`)
 - Cloud transports: `packages/ai/src/speech/`
 - Local voice catalog: `packages/coding-agent/src/tts/models.ts`
 - Local worker client: `packages/coding-agent/src/tts/tts-client.ts`

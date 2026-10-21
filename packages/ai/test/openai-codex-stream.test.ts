@@ -3021,6 +3021,25 @@ describe("openai-codex streaming", () => {
 		}
 	});
 
+	it("names the host and cause when the Codex SSE transport rejects", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const fetchMock: FetchImpl = async () => {
+			throw Object.assign(new TypeError("getaddrinfo ETIMEOUT chatgpt.com"), { code: "ETIMEOUT" });
+		};
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: token,
+			fetch: fetchMock,
+			codexSseMaxAttempts: 1,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("No internet connection: couldn't reach chatgpt.com");
+	});
+
 	it("does not retry a caller abort before response headers", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

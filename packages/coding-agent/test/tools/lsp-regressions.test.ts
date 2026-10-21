@@ -1803,19 +1803,27 @@ describe("lsp regressions", () => {
 		expect(resultText.replace(/\s+/g, " ")).toContain("too many arguments in call");
 	});
 
-	it("sanitizes expanded generic error output (#7041)", async () => {
+	it("hang-wraps expanded generic output without tabs or lost text (#7041, #15824)", async () => {
 		const theme = await getThemeByName("dark");
+		const note =
+			"note: 'configured, not started' means the binary resolves on PATH but no request has spawned it yet";
 		const result = renderLocalResult(
 			{
-				content: [{ type: "text", text: `Error:\nserver\tstderr ${"x".repeat(200)}` }],
+				content: [{ type: "text", text: `Error:\nserver\tstderr ${"x".repeat(200)}\n  ${note}` }],
 			},
 			{ expanded: true, isPartial: false },
 			theme!,
 		);
 
-		const lines = sanitizeText(result.render(300).join("\n")).split("\n");
-		expect(lines.join("\n")).not.toContain("\t");
-		expect(lines.join("\n")).not.toContain("x".repeat(100));
+		const width = 80;
+		const lines = sanitizeText(result.render(width).join("\n")).split("\n");
+		const text = lines.join("\n");
+		expect(text).not.toContain("\t");
+		expect(lines.every(line => Bun.stringWidth(line) <= width)).toBe(true);
+		expect(text.match(/x/g)?.length).toBe(200);
+		expect(text).not.toContain("…");
+		const rowContents = lines.map(line => line.replace(/^│\s+[├└│]?─?\s*/, "").replace(/\s*│$/, ""));
+		expect(rowContents.join(" ").replace(/\s+/g, " ")).toContain(note);
 	});
 
 	for (const dynamicRegistration of [false, true]) {

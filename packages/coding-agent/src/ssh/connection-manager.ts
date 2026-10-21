@@ -184,11 +184,19 @@ async function validateKeyPermissions(keyPath?: string, platform: SshPlatform = 
 	}
 }
 
-function buildCommonArgs(host: SSHConnectionTarget, options?: SSHArgsOptions): string[] {
+/**
+ * Who owns the ControlPath socket for a host: omp's private control directory,
+ * or the user's ssh_config (see {@link resolveControlPathOwner}).
+ */
+type ControlPathOwner = "omp" | "config";
+
+function buildCommonArgs(host: SSHConnectionTarget, owner: ControlPathOwner, options?: SSHArgsOptions): string[] {
 	const args = options?.allowStdin ? [] : ["-n"];
 
 	if (supportsSshControlMaster(options?.platform)) {
-		args.push("-o", "ControlMaster=auto", "-o", `ControlPath=${CONTROL_PATH}`, "-o", "ControlPersist=3600");
+		args.push("-o", "ControlMaster=auto");
+		// A config-owned socket keeps the user's ControlPath and ControlPersist.
+		if (owner === "omp") args.push("-o", `ControlPath=${CONTROL_PATH}`, "-o", "ControlPersist=3600");
 	}
 
 	args.push("-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new");
@@ -254,6 +262,52 @@ export const _sshHelpersForTests = { runSshSync, runSshCaptureSync };
 function ensureSshBinary(): void {
 	if (!$which("ssh")) {
 		throw new Error("ssh binary not found on PATH");
+	}
+}
+
+/** Per `user@host:port`: pending or settled {@link resolveControlPathOwner} lookup. */
+const controlPathOwners = new Map<string, Promise<ControlPathOwner>>();
+
+/**
+ * Decide whose ControlPath socket `host` uses.
+ *
+ * When the user's ssh_config resolves a `ControlPath` (`ssh -G` reports one
+ * other than `none`), omp defers to it instead of injecting its own, so a
+ * master the user already authenticated — e.g. interactively on an MFA host
+ * that `BatchMode=yes` can never reach — serves omp too (#15974). Cached per
+ * destination for the process lifetime; a failed lookup keeps omp's socket.
+ *
+ * Throws when the username or host would be parsed as an ssh option.
+ */
+function resolveControlPathOwner(host: SSHConnectionTarget, platform?: SshPlatform): Promise<ControlPathOwner> {
+	if (!supportsSshControlMaster(platform)) return Promise.resolve("omp");
+	const target = buildSshTarget(host.username, host.host);
+	const key = `${target}:${host.port ?? ""}`;
+	let owner = controlPathOwners.get(key);
+	if (!owner) {
+		owner = lookupControlPathOwner(target, host.port);
+		controlPathOwners.set(key, owner);
+	}
+	return owner;
+}
+
+async function lookupControlPathOwner(target: string, port?: number): Promise<ControlPathOwner> {
+	const args = port ? ["-G", "-p", String(port), target] : ["-G", target];
+	try {
+		const { exitCode, stdout, stderr } = await runSshCaptureSync(args);
+		if (exitCode !== 0) {
+			logger.debug("ssh -G failed; using omp ControlPath", { target, error: stderr });
+			return "omp";
+		}
+		for (const line of stdout.split("\n")) {
+			if (!line.startsWith("controlpath ")) continue;
+			const value = line.slice("controlpath ".length).trim();
+			return value && value !== "none" ? "config" : "omp";
+		}
+		return "omp";
+	} catch (err) {
+		logger.debug("ssh -G failed; using omp ControlPath", { target, error: String(err) });
+		return "omp";
 	}
 }
 
@@ -649,7 +703,9 @@ export async function buildRemoteCommand(
 	options?: SSHArgsOptions,
 ): Promise<string[]> {
 	await validateKeyPermissions(host.keyPath, options?.platform);
-	return [...buildCommonArgs(host, options), buildSshTarget(host.username, host.host), command];
+	const target = buildSshTarget(host.username, host.host);
+	const owner = await resolveControlPathOwner(host, options?.platform);
+	return [...buildCommonArgs(host, owner, options), target, command];
 }
 
 let registered = false;
@@ -709,8 +765,12 @@ export async function ensureConnection(host: SSHConnectionTarget): Promise<void>
 			return;
 		}
 
-		const check = await runSshSync(["-O", "check", ...buildCommonArgs(host), target]);
-		if (check.exitCode === 0) {
+		const owner = await resolveControlPathOwner(host);
+		const commonArgs = buildCommonArgs(host, owner);
+		const check = await runSshSync(["-O", "check", ...commonArgs, target]);
+		if (check.exitCode === 0 || owner === "config") {
+			// Only omp-owned sockets need an explicit master. Configured sockets
+			// use ssh_config's normal connection and ControlPersist policy.
 			activeHosts.set(key, host);
 			if (!hostInfoCache.has(key) && !(await loadHostInfoFromDisk(host))) {
 				await probeHostInfo(host);
@@ -718,7 +778,7 @@ export async function ensureConnection(host: SSHConnectionTarget): Promise<void>
 			return;
 		}
 
-		const start = await runSshSync(["-M", "-N", "-f", ...buildCommonArgs(host), target]);
+		const start = await runSshSync(["-M", "-N", "-f", ...commonArgs, target]);
 		if (start.exitCode !== 0) {
 			const detail = start.stderr ? `: ${start.stderr}` : "";
 			throw new Error(`Failed to start SSH master for ${target}${detail}`);
@@ -760,7 +820,11 @@ export async function invalidateHostMetadata(hostNames: Iterable<string>): Promi
 async function closeConnectionInternal(host: SSHConnectionTarget): Promise<void> {
 	if (!supportsSshControlMaster()) return;
 	const target = buildSshTarget(host.username, host.host);
-	await runSshSync(["-O", "exit", ...buildCommonArgs(host), target]);
+	const owner = await resolveControlPathOwner(host);
+	// Configured sockets may have been replaced by a user's master since the
+	// last check. Never exit a socket that omp doesn't own.
+	if (owner === "config") return;
+	await runSshSync(["-O", "exit", ...buildCommonArgs(host, owner), target]);
 }
 
 export async function closeConnection(hostName: string): Promise<void> {

@@ -1,5 +1,5 @@
 import { inflateSync } from "node:zlib";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { BoxEdges, ImageContent } from "@oh-my-pi/pi-ai";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { encodeRawPng } from "./png-encode";
 
@@ -545,6 +545,103 @@ export async function resizeImage(
 			},
 		};
 	}
+}
+
+/** Inclusive bounds {@link fitImage} sizes an image into; an unset field does not constrain. */
+export interface ImageFitBounds {
+	minSide?: number;
+	maxSide?: number;
+	minPixels?: number;
+	maxPixels?: number;
+	/** Encoded bytes. */
+	maxBytes?: number;
+}
+
+/** An image re-encoded by {@link fitImage}. */
+export interface FittedImage {
+	image: ImageContent;
+	/** The source's edges on `image`, as fractions of its size; padding lies outside them. Maps answers that locate things on `image` back to the source. */
+	content: BoxEdges;
+}
+
+/** JPEG qualities {@link fitImage} steps through when the PNG exceeds its byte cap. */
+const FIT_JPEG_QUALITIES = [90, 80, 70, 60, 50, 40];
+
+/**
+ * Re-encode `img` within `bounds` without distorting it, for APIs that reject out-of-bounds images
+ * instead of resizing them (TypeSafe Jev). It scales down past a maximum, or up toward a minimum as far
+ * as the maximums allow, then pads with its top-left pixel when an extreme aspect ratio still leaves a
+ * side or the area short: under 280–1568 px sides, a 401x41 toolbar strip becomes 1568x160 centered on
+ * 1568x280, whose content edges are top 60/280 and bottom 220/280. Output is PNG, or JPEG when the PNG
+ * exceeds `maxBytes`.
+ *
+ * @throws when the image cannot be decoded or no encoding fits `maxBytes`.
+ */
+export async function fitImage(img: ImageContent, bounds: ImageFitBounds): Promise<FittedImage> {
+	const { minSide = 1, maxSide = Infinity, minPixels = 1, maxPixels = Infinity, maxBytes = Infinity } = bounds;
+	const input = Buffer.from(img.data, "base64");
+	const { width, height } = await new Bun.Image(input).metadata();
+	const area = width * height;
+	const ceiling = Math.min(maxSide / Math.max(width, height), Math.sqrt(maxPixels / area));
+	const floor = Math.max(minSide / Math.min(width, height), Math.sqrt(minPixels / area));
+	// Reaching a minimum never crosses a maximum; padding below covers what scaling leaves short.
+	const scale = floor > 1 ? Math.min(floor, ceiling) : Math.min(1, ceiling);
+	let scaledWidth = Math.min(maxSide, Math.max(1, Math.round(width * scale)));
+	let scaledHeight = Math.min(maxSide, Math.max(1, Math.round(height * scale)));
+	// Rounding both sides up can overshoot the area cap by a sliver; trim the longer side.
+	if (scaledWidth * scaledHeight > maxPixels) {
+		if (scaledWidth >= scaledHeight) scaledWidth = Math.floor(maxPixels / scaledHeight);
+		else scaledHeight = Math.floor(maxPixels / scaledWidth);
+	}
+
+	let canvasWidth = Math.max(scaledWidth, minSide);
+	let canvasHeight = Math.max(scaledHeight, minSide);
+	if (canvasWidth * canvasHeight < minPixels) {
+		if (canvasWidth >= canvasHeight) canvasHeight = Math.ceil(minPixels / canvasWidth);
+		else canvasWidth = Math.ceil(minPixels / canvasHeight);
+	}
+	const left = (canvasWidth - scaledWidth) >> 1;
+	const top = (canvasHeight - scaledHeight) >> 1;
+
+	const resized = new Bun.Image(input).resize(scaledWidth, scaledHeight);
+	let png: Uint8Array;
+	if (canvasWidth === scaledWidth && canvasHeight === scaledHeight) {
+		png = await resized.png().bytes();
+	} else {
+		const source = await readRgba(resized);
+		if (!source) throw new Error("fitImage: the resized image did not read back as RGBA");
+		png = padRgba(source, canvasWidth, canvasHeight, left, top);
+	}
+
+	let encoded = png;
+	let mimeType = "image/png";
+	for (const quality of FIT_JPEG_QUALITIES) {
+		if (encoded.length <= maxBytes) break;
+		encoded = await new Bun.Image(png).jpeg({ quality }).bytes();
+		mimeType = "image/jpeg";
+	}
+	if (encoded.length > maxBytes) throw new Error(`fitImage: no encoding fits ${maxBytes} bytes`);
+	return {
+		image: { ...img, data: encoded.toBase64(), mimeType },
+		content: {
+			top: top / canvasHeight,
+			bottom: (top + scaledHeight) / canvasHeight,
+			left: left / canvasWidth,
+			right: (left + scaledWidth) / canvasWidth,
+		},
+	};
+}
+
+/** `source` at (`left`, `top`) on a `width`×`height` canvas filled with its top-left pixel, as PNG. */
+function padRgba(source: RgbaPixels, width: number, height: number, left: number, top: number): Uint8Array {
+	const canvas = new Uint8Array(width * height * 4);
+	// Both views use platform byte order, so the fill keeps the pixel's channel order.
+	new Uint32Array(canvas.buffer).fill(new Uint32Array(source.pixels.slice(0, 4).buffer)[0]);
+	const stride = source.width * 4;
+	for (let y = 0; y < source.height; y++) {
+		canvas.set(source.pixels.subarray(y * stride, (y + 1) * stride), ((top + y) * width + left) * 4);
+	}
+	return encodeRawPng(canvas, width, height, 4);
 }
 
 /**

@@ -100,6 +100,30 @@ describe("InteractiveMode.showStatus", () => {
 		expect(renderLastLine(ctx.chatContainer)).not.toContain("STATUS_ONE");
 	});
 
+	test("a repeated identical status swaps in a fresh notice so native terminals re-toast it", () => {
+		const ctx = {
+			chatContainer: new Container(),
+			ui: { requestRender: vi.fn() },
+			present: (content: Component | readonly Component[]) => {
+				const items = Array.isArray(content) ? content : [content];
+				for (const item of items) ctx.chatContainer.addChild(item);
+				ctx.ui.requestRender();
+			},
+			lastStatus: undefined,
+		} as unknown as InteractiveModeContext;
+		const helpers = new UiHelpers(ctx);
+
+		helpers.showStatus("Objective: ship it");
+		const first = ctx.chatContainer.children[0];
+		helpers.showStatus("Objective: ship it");
+		// One line in the transcript, but a new component: the reconciler only
+		// sends a toast for a node it has not seen, never for identical props.
+		expect(ctx.chatContainer.children).toHaveLength(1);
+		expect(ctx.chatContainer.children[0]).not.toBe(first);
+		expect(ctx.lastStatus).toBe(ctx.chatContainer.children[0] as typeof ctx.lastStatus);
+		expect(renderLastLine(ctx.chatContainer)).toContain("Objective: ship it");
+	});
+
 	test("appends a new status line if something else was added in between", () => {
 		const ctx = {
 			chatContainer: new Container(),

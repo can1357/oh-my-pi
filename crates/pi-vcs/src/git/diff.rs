@@ -43,10 +43,14 @@ impl GitRepo {
 			options.binary,
 			options.max_bytes,
 		)?;
-		// Size the joined patch once: growing it by doubling would hold up to
-		// twice the output during the copy, on top of the per-change strings
-		// that are released as they are consumed.
-		let mut text = String::with_capacity(rendered.iter().map(|item| item.text.len()).sum());
+		// Reuse the first patch's allocation; single-file requests need no
+		// joining copy. Reserve the remaining bytes once for multi-file patches.
+		let mut rendered = rendered.into_iter();
+		let Some(first) = rendered.next() else {
+			return Ok(String::new());
+		};
+		let mut text = first.text;
+		text.reserve_exact(rendered.as_slice().iter().map(|item| item.text.len()).sum());
 		for item in rendered {
 			text.push_str(&item.text);
 		}

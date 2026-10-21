@@ -1406,9 +1406,9 @@ mod tests {
 
 	#[tokio::test]
 	async fn assignments_reach_builtin_commands() {
-		let (code, out, _) = sh("env FOO=bar env | /usr/bin/grep '^FOO='").await;
+		let (code, out, _) = sh("env FOO=bar env | grep '^FOO='").await;
 		assert_eq!((code, out.as_str()), (0, "FOO=bar\n"));
-		let (code, out, _) = sh("export X=1; env -u X env | /usr/bin/grep -c '^X=' ; true").await;
+		let (code, out, _) = sh("export X=1; env -u X env | grep -c '^X=' ; true").await;
 		assert_eq!((code, out.as_str()), (0, "0\n"));
 	}
 
@@ -1539,8 +1539,10 @@ mod tests {
 		assert_eq!(err, "");
 		assert_eq!(code, 0);
 		assert_eq!(out, format!("{}\n{}\n", target.display(), dir.path().display()));
-		// As `chdir` does, -C leaves PWD as it was.
-		let (code, out, _) = sh_in("env -C sub env | /usr/bin/grep '^PWD='", dir.path()).await;
+		// As `chdir` does, -C leaves PWD as it was. Literal style: a Windows
+		// path's backslashes would otherwise print shell-quoted.
+		let script = "export QUOTING_STYLE=literal; env -C sub env | grep '^PWD='";
+		let (code, out, _) = sh_in(script, dir.path()).await;
 		assert_eq!((code, out), (0, format!("PWD={}\n", dir.path().display())));
 	}
 

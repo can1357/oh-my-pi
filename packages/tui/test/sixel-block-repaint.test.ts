@@ -42,7 +42,13 @@ function trackSixelRaster(term: VirtualTerminal): { stale: number; paints: numbe
 			const raster = /"\d+;\d+;(\d+);(\d+)/.exec(match[0]);
 			if (!raster) continue;
 			const columns = Math.ceil(Number(raster[1]) / CELL.widthPx);
-			const rows = Math.ceil(Number(raster[2]) / CELL.heightPx);
+			// Terminals can allocate complete six-pixel bands even when the
+			// raster header declares a smaller height.
+			const body = match[0].slice(match[0].indexOf("q") + 1, -2).replace(/["#][0-9;]+|!\d+/g, "");
+			const bandExtent = body
+				.split("-")
+				.reduce((extent, band, index) => (/[?-~]/.test(band) ? (index + 1) * 6 : extent), 0);
+			const rows = Math.ceil(Math.max(Number(raster[2]), bandExtent) / CELL.heightPx);
 			const cursor = term.getCursor();
 			const screen = term.getViewport();
 			for (let row = cursor.row; row < cursor.row + rows; row++) {
@@ -124,6 +130,94 @@ describe("SIXEL block repaint", () => {
 			// Back on rows 1..4: exactly one raster, nothing left behind.
 			const rasterRows = term.getViewport().flatMap((line, row) => (line.includes(RASTER) ? [row] : []));
 			expect(rasterRows).toEqual([1, 2, 3, 4]);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	for (const clippedRows of [1, 2, 3]) {
+		it(`keeps a real Image within its ${4 - clippedRows} visible rows after top clipping`, async () => {
+			const encodeSixel = spyOn(natives, "encodeSixelAsync");
+			const term = new VirtualTerminal(40, 8);
+			const raster = trackSixelRaster(term);
+			const tui = new TUI(term);
+			const graphic = new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: text => text },
+				{ maxWidthCells: 4, maxHeightCells: 4, budget: tui.imageBudget, imageKey: `clipped-${clippedRows}` },
+				{ widthPx: 40, heightPx: 80 },
+			);
+			let clip = false;
+			let repaint = false;
+			tui.setFrameProvider({
+				renderFrame: size => ({
+					viewport: [
+						...graphic
+							.render(size.columns)
+							.slice(clip ? clippedRows : 0)
+							.map((line, index, lines) => (repaint && index === lines.length - 1 ? `${line}\x1b[0m` : line)),
+						"following text",
+						"another untouched line",
+					],
+				}),
+				acknowledgeHistory() {},
+			});
+			try {
+				tui.start();
+				await settle(term);
+				await encodeSixel.mock.results[0]?.value;
+				await settle(term);
+				expect(raster.paints).toBeGreaterThan(0);
+				expect(term.getViewport()[4]?.trimEnd()).toBe("following text");
+
+				clip = true;
+				tui.requestRender();
+				await settle(term);
+				const paints = raster.paints;
+				expect(paints).toBeGreaterThan(1);
+				// Change only a harmless suffix on the real Image line so it is
+				// repainted while following text stays byte-identical and skipped.
+				// An uncropped raster now overwrites that previously painted text.
+				repaint = true;
+				tui.requestRender();
+				await settle(term);
+				expect(raster.paints).toBeGreaterThan(paints);
+				const viewport = term.getViewport();
+				expect(viewport.flatMap((line, row) => (line.includes(RASTER) ? [row] : []))).toEqual(
+					Array.from({ length: 4 - clippedRows }, (_, row) => row),
+				);
+				expect(viewport[4 - clippedRows]?.trimEnd()).toBe("following text");
+				expect(viewport[5 - clippedRows]?.trimEnd()).toBe("another untouched line");
+			} finally {
+				tui.stop();
+			}
+		});
+	}
+
+	it("drops a top-clipped SIXEL the cropper cannot parse instead of failing the frame", async () => {
+		const term = new VirtualTerminal(40, 8);
+		const raster = trackSixelRaster(term);
+		const tui = new TUI(term);
+		// A palette definition after drawing is outside the cropper's grammar.
+		const foreign = '\x1bP0;1;0q"1;1;40;80#1;2;100;0;0#1!40~#2;2;0;100;0#2!40~\x1b\\';
+		const block = ["", "", "", `\x1b7\x1b[3A${foreign}\x1b8`];
+		let clip = false;
+		tui.setFrameProvider({
+			renderFrame: () => ({ viewport: [...block.slice(clip ? 2 : 0), "following text"] }),
+			acknowledgeHistory() {},
+		});
+		try {
+			tui.start();
+			await settle(term);
+			const paints = raster.paints;
+			expect(paints).toBeGreaterThan(0);
+
+			clip = true;
+			tui.requestRender();
+			await settle(term);
+			expect(raster.paints).toBe(paints);
+			expect(term.getViewport()[2]?.trimEnd()).toBe("following text");
 		} finally {
 			tui.stop();
 		}

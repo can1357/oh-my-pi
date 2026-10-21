@@ -1,20 +1,20 @@
 /**
- * A user prompt typed into a focused, kept-alive subagent (HITL steering from
- * the TUI) runs a turn no task executor drives. Its accepted `yield` must still
- * reach the parent like an IRC wake turn's: the `<id>.md` artifact is rewritten
- * and the parent's delivery sink receives the completion (#14428).
+ * Undriven kept-alive subagent turns: focused-user yields reach the parent
+ * (#14428), and an IRC parent follow-up consumed during a peer wake replaces
+ * the accepted plain result without turning peer-only replies into completions.
  */
 import { afterEach, beforeEach, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, registerMockApi, type MockHandler } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -50,6 +50,7 @@ beforeEach(async () => {
 	setAgentDir(path.join(home, ".omp", "agent"));
 	AgentRegistry.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
 	registerMockApi(MOCK_API_SOURCE);
 	manager = new AsyncJobManager({ maxRunningJobs: 4 });
 	AsyncJobManager.setInstance(manager);
@@ -59,6 +60,7 @@ afterEach(async () => {
 	await AgentLifecycleManager.global().dispose();
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
 	AsyncJobManager.setInstance(undefined);
 	await manager.dispose({ timeoutMs: 1_000 });
 	unregisterCustomApis(MOCK_API_SOURCE);
@@ -94,8 +96,8 @@ function resultForLatestPrompt(messages: ReadonlyArray<{ role: string; content: 
 	return "initial result";
 }
 
-/** Runs `AGENT_ID` to a kept-alive idle state that yielded `initial result`, with the parent's delivery sink recording completions. */
-async function spawnKeptAliveChild() {
+/** Starts an idle child with an accepted result and records subsequent parent deliveries. */
+async function spawnKeptAliveChild(options?: { handler?: MockHandler; structured?: boolean; enableIrc?: boolean }) {
 	// Under the isolated HOME: project discovery walks up from cwd and stops at os.homedir(). On Windows
 	// os.tmpdir() lives under the real home, so a cwd outside the fake HOME would walk into the real
 	// ~/.omp and load the developer's installed plugins as project plugins.
@@ -108,13 +110,15 @@ async function spawnKeptAliveChild() {
 	authStorage.keys.setRuntime("mock", "test-key");
 	const modelRegistry = new ModelRegistry(authStorage);
 	const mock = createMockModel({
-		handler: context => {
-			if (!(context.tools ?? []).some(tool => tool.name === "yield")) return { content: ["label"] };
-			// A turn that already yielded ends on the tool result; answer it with prose.
-			if (context.messages.at(-1)?.role === "toolResult") return { content: ["ok"] };
-			const data = resultForLatestPrompt(context.messages);
-			return { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data } }] };
-		},
+		handler:
+			options?.handler ??
+			(context => {
+				if (!(context.tools ?? []).some(tool => tool.name === "yield")) return { content: ["label"] };
+				// A turn that already yielded ends on the tool result; answer it with prose.
+				if (context.messages.at(-1)?.role === "toolResult") return { content: ["ok"] };
+				const data = resultForLatestPrompt(context.messages);
+				return { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data } }] };
+			}),
 	});
 	const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
 	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [mock, ...catalogAvailable(kind)]);
@@ -139,6 +143,7 @@ async function spawnKeptAliveChild() {
 			id: AGENT_ID,
 			parentAgentId: PARENT_ID,
 			asyncJobManager: manager,
+			structured: options?.structured,
 			modelOverride: "mock/mock-model",
 			authStorage,
 			modelRegistry,
@@ -153,7 +158,7 @@ async function spawnKeptAliveChild() {
 			}),
 			enableLsp: false,
 			enableMCP: false,
-			enableIrc: false,
+			enableIrc: options?.enableIrc ?? false,
 		});
 		expect(result.exitCode).toBe(0);
 	} catch (error) {
@@ -161,13 +166,14 @@ async function spawnKeptAliveChild() {
 		throw error;
 	}
 	const artifact = path.join(artifactsDir, `${AGENT_ID}.md`);
-	expect(await Bun.file(artifact).text()).toContain("initial result");
+	if (options?.structured === false) expect(await Bun.file(artifact).text()).toContain("INITIAL_FINAL");
+	else expect(await Bun.file(artifact).text()).toContain("initial result");
 	const session = AgentRegistry.global().get(AGENT_ID)?.session;
 	if (!session) {
 		close();
 		throw new Error("kept-alive subagent has no live session");
 	}
-	return { session, artifact, deliveries, firstDelivery: firstDelivery.promise, close };
+	return { session, artifact, deliveries, firstDelivery: firstDelivery.promise, close, mock };
 }
 
 it("a focused manual prompt's yield rewrites the artifact and notifies the parent", async () => {
@@ -215,6 +221,69 @@ it("a prompt typed while the previous turn awaits owned background work reports 
 		expect(manual[0]).not.toContain("final result");
 		expect(await Bun.file(child.artifact).text()).toContain("final result");
 	} finally {
+		child.close();
+	}
+}, 15_000);
+
+it("publishes a consumed parent injection during a peer wake without publishing peer-only replies", async () => {
+	const peerStarted = Promise.withResolvers<void>();
+	const releasePeer = Promise.withResolvers<void>();
+	let request = 0;
+	const child = await spawnKeptAliveChild({
+		structured: false,
+		enableIrc: true,
+		handler: async () => {
+			request++;
+			if (request === 1) return { content: ["INITIAL_FINAL"] };
+			if (request === 2) return { content: ["POSITIVE_FINAL"] };
+			if (request === 3) {
+				peerStarted.resolve();
+				await releasePeer.promise;
+				return { content: ["PEER_INTERMEDIATE"] };
+			}
+			return { content: [request === 4 ? "NEGATIVE_FINAL" : "PEER_ONLY_FINAL"] };
+		},
+	});
+	try {
+		const bus = IrcBus.global();
+		const positive = await bus.send({ from: PARENT_ID, to: AGENT_ID, body: "First follow-up" });
+		expect(positive.outcome).toBe("woken");
+		await child.session.waitForIdle();
+		await child.session.waitForIrcReplies();
+		await manager.waitForOwnerJobs(PARENT_ID);
+		await manager.drainDeliveries({ filter: { ownerId: PARENT_ID } });
+		expect(await Bun.file(child.artifact).text()).toContain("POSITIVE_FINAL");
+		expect(child.deliveries.filter(text => text.includes("POSITIVE_FINAL"))).toHaveLength(1);
+		const peer = await bus.send({ from: "Peer", to: AGENT_ID, body: "Can you check?" });
+		expect(peer.outcome).toBe("woken");
+		await peerStarted.promise;
+		const parent = await bus.send({ from: PARENT_ID, to: AGENT_ID, body: "Publish the follow-up" });
+		expect(parent.outcome).toBe("injected");
+		// Receiving the request is not consumption; the prior result is still authoritative.
+		expect(await Bun.file(child.artifact).text()).toContain("POSITIVE_FINAL");
+		expect(child.deliveries).toHaveLength(1);
+		expect(manager.getAllJobs({ ownerId: PARENT_ID })).toHaveLength(1);
+		releasePeer.resolve();
+		await child.session.waitForIdle();
+		await child.session.waitForIrcReplies();
+		await manager.waitForOwnerJobs(PARENT_ID);
+		await manager.drainDeliveries({ filter: { ownerId: PARENT_ID } });
+		expect(JSON.stringify(child.mock.calls.at(-1)?.context.messages)).toContain("Publish the follow-up");
+		expect(await Bun.file(child.artifact).text()).toContain("NEGATIVE_FINAL");
+		expect(child.deliveries.filter(text => text.includes("NEGATIVE_FINAL"))).toHaveLength(1);
+		expect(
+			manager.getAllJobs({ ownerId: PARENT_ID }).filter(job => job.resultText?.includes("NEGATIVE_FINAL")),
+		).toHaveLength(1);
+		const peerOnly = await bus.send({ from: "Peer", to: AGENT_ID, body: "One more check?" });
+		expect(peerOnly.outcome).toBe("woken");
+		await child.session.waitForIdle();
+		await child.session.waitForIrcReplies();
+		await manager.waitForOwnerJobs(PARENT_ID);
+		expect(await Bun.file(child.artifact).text()).toContain("NEGATIVE_FINAL");
+		expect(child.deliveries).toHaveLength(2);
+		expect(manager.getAllJobs({ ownerId: PARENT_ID })).toHaveLength(2);
+	} finally {
+		releasePeer.resolve();
 		child.close();
 	}
 }, 15_000);

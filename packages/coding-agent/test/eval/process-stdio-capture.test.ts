@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { JsRuntime, type RuntimeHooks } from "@oh-my-pi/pi-coding-agent/eval/js/shared/runtime";
-import type { JsDisplayOutput } from "@oh-my-pi/pi-coding-agent/eval/js/shared/types";
+import type { EvalDisplayOutput } from "@oh-my-pi/pi-coding-agent/eval/types";
 
 function makeRuntime(): { runtime: JsRuntime; hooks: RuntimeHooks; texts: string[] } {
 	const texts: string[] = [];
@@ -9,7 +9,7 @@ function makeRuntime(): { runtime: JsRuntime; hooks: RuntimeHooks; texts: string
 		onText: (chunk: string) => {
 			texts.push(chunk);
 		},
-		onDisplay: (_output: JsDisplayOutput) => {},
+		onDisplay: (_output: EvalDisplayOutput) => {},
 		callTool: async () => undefined,
 	};
 	return { runtime, hooks, texts };

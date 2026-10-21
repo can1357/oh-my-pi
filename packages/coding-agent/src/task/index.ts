@@ -48,7 +48,7 @@ import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSche
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { AsyncJobError, type AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
-import { AgentRegistry } from "../registry/agent-registry";
+import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { generateTaskName } from "./name-generator";
@@ -64,6 +64,9 @@ import {
 } from "./structured-subagent";
 import { SpawnRun, type SpawnPermit } from "./spawn-run";
 import { type TaskLauncher, TaskLaunchSession } from "./speculative-launch";
+import type { TextTap } from "../job-widgets/text-tap";
+import type { SubagentToolResult } from "./executor";
+import { appendToolResult, createTaskWidgetInputs } from "./widget-inputs";
 
 import { cfgAsyncEnabled } from "../tools/settings";
 import {
@@ -226,6 +229,9 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
 function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
 	if (Object.hasOwn(params, "schema")) {
 		return "The task tool uses `outputSchema`; rename the stale `schema` field.";
+	}
+	if (batchEnabled && params.tasks !== undefined && Object.hasOwn(params, "agent")) {
+		return "Top-level `agent` is not part of the batch shape. Set `tasks[].agent` instead.";
 	}
 	if (!batchEnabled) {
 		const disallowed = (["tasks", "context"] as const).filter(field => params[field] !== undefined);
@@ -786,6 +792,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		};
 	}
 
+	/**
+	 * Thinking override for a spawn. `task.enableEffort` gates the caller's
+	 * `effort` at runtime, not only in the advertised schema: stale transcripts
+	 * and lenient argument fallbacks still deliver the field, and honoring it
+	 * would override the agent's configured thinking selector.
+	 */
+	#effortParams(params: TaskParams): Pick<StructuredSubagentRequest, "effort"> {
+		if (params.effort === undefined || !cfgTaskEnableEffort.get(this.session.settings)) return {};
+		return { effort: params.effort };
+	}
+
 	#seanceSchemaFields() {
 		const spawnPolicy = resolveSpawnPolicy(this.session.getSessionSpawns());
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
@@ -844,6 +861,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					spawn.detached,
 					run.timing,
 					spawn.detached ? run.onArtifactsRetained : undefined,
+					run.tools,
 				),
 			{ agentId: spawn.agentId, detached: spawn.detached },
 		);
@@ -904,7 +922,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			sourceSession: params.sourceSession,
 			model: params.model,
 			...this.#resultParams(params),
-			...(params.effort !== undefined ? { effort: params.effort } : {}),
+			...this.#effortParams(params),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
@@ -1366,6 +1384,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			onUpdate,
 			onSettled,
 		} = options;
+		// A queued job launches (or adopts) its run when it starts; until then
+		// its widget has no tool tap to read.
+		let spawnRun: SpawnRun | undefined = run;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			// Isolated runs are parked without a reviver once the run ends
 			// (`finalizeSubagentLifecycle`), so "message it" would point the
@@ -1379,7 +1400,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				aborted,
 				isolated,
 				ircEnabled,
-				resumable: !isolated && (ref?.status === "idle" || ref?.status === "parked"),
+				resumable: !isolated && isResumable(ref),
 				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
 			})}`;
 		};
@@ -1405,6 +1426,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 							: undefined;
 						progress.advisor = nextProgress.advisor ?? progress.advisor;
 						progress.completionPercent = nextProgress.completionPercent ?? progress.completionPercent;
+						progress.stage = nextProgress.stage ?? progress.stage;
+						progress.watch = nextProgress.watch ?? progress.watch;
 						progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
 						progress.tokens = nextProgress.tokens;
 						progress.requests = nextProgress.requests;
@@ -1427,9 +1450,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;
 					await reportProgress(updateText, buildDetails() as unknown as Record<string, unknown>);
 				};
-				const spawnRun =
-					run ?? this.#launch({ toolCallId, params: spawnParams, index: progress.index, agentId, detached: true });
-				spawnRun.attach({
+				const activeRun = (spawnRun ??= this.#launch({
+					toolCallId,
+					params: spawnParams,
+					index: progress.index,
+					agentId,
+					detached: true,
+				}));
+				activeRun.attach({
 					signal: runSignal,
 					onUpdate: forwardSyncProgress,
 					onArtifactsRetained: cleanup => {
@@ -1449,7 +1477,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				// path: progress + onSettled have to fire even when the spawn
 				// never reached the executor, otherwise the batch aggregate state
 				// stays "running" forever.
-				const permitHeld = await spawnRun.started.then(
+				const permitHeld = await activeRun.started.then(
 					() => true,
 					() => false,
 				);
@@ -1465,7 +1493,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						`Running background task ${agentId}...`,
 						buildDetails() as unknown as Record<string, unknown>,
 					);
-					const result = await spawnRun.result;
+					const result = await activeRun.result;
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
 					// A missing result means the sync path failed at the tool level
@@ -1536,6 +1564,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				agentId,
 				queued: true,
 				ownerId: this.session.getAgentId?.() ?? undefined,
+				widgetInputs: createTaskWidgetInputs({
+					manager,
+					agentId,
+					tools: () => spawnRun?.tools,
+					progress,
+					intent: this.session.getToolCallIntent?.(toolCallId),
+				}),
 				onProgress: text => {
 					onUpdate?.({ content: [{ type: "text", text }], details: buildDetails() });
 				},
@@ -1698,6 +1733,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		detached = false,
 		launchTiming?: { invokedAt: number; acquiredAt: number },
 		onArtifactsRetained?: (cleanup: () => Promise<void>) => void,
+		tools?: TextTap,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const assignment = (params.task ?? "").trim();
@@ -1713,7 +1749,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				sourceSession: params.sourceSession,
 				model: params.model,
 				...this.#resultParams(params),
-				...(params.effort !== undefined ? { effort: params.effort } : {}),
+				...this.#effortParams(params),
 				solutionSpace: params.solutionSpace,
 				...(params.tools?.length
 					? {
@@ -1744,6 +1780,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 				maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 				signal,
+				...(tools ? { onToolResult: (result: SubagentToolResult) => appendToolResult(tools, result) } : {}),
 				onProgress: progress => {
 					latestProgress = { ...progress, recentTools: progress.recentTools.slice() };
 					onUpdate?.({

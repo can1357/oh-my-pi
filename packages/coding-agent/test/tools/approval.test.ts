@@ -12,6 +12,9 @@ import {
 	truncateForPrompt,
 } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { DeferredMCPTool, MCPTool } from "../../src/mcp/tool-bridge";
+import type { MCPServerConnection, MCPToolDefinition } from "../../src/mcp/types";
 import { Settings } from "../../src/config/settings";
 import { EditTool } from "../../src/edit";
 import type { ToolSession } from "../../src/tools";
@@ -282,6 +285,109 @@ describe("MCP fallback and prompt formatting", () => {
 	it("does not add MCP origin for annotated MCP tools", () => {
 		const subject = tool("mcp__server__safe", "read");
 		expect(formatApprovalPrompt(subject, {}, undefined)).toBe("Allow tool: mcp__server__safe");
+	});
+
+	it("shows decoded manifests through MCP registrations, MCP fallback, and device writes", () => {
+		const args = {
+			context: "some-context",
+			resource: "apiVersion: v1\nkind: Pod\nmetadata:\n  name: probe\n  namespace: probe-ns",
+		};
+		const definition: MCPToolDefinition = { name: "apply", inputSchema: { type: "object" } };
+		const connection = { name: "kubernetes" } as MCPServerConnection;
+		const eager = new MCPTool(connection, definition);
+		const deferred = new DeferredMCPTool("kubernetes", definition, async () => connection);
+		const writeTool = new WriteTool({ cwd: "." } as ToolSession);
+		const expected = [
+			"Arguments:",
+			"{",
+			'  "context": "some-context",',
+			'  "resource": "',
+			"    apiVersion: v1",
+			"    kind: Pod",
+			"    metadata:",
+			"      name: probe",
+			"      namespace: probe-ns",
+			'  "',
+			"}",
+		].join("\n");
+		const cases: { subject: ApprovalTool; args: unknown }[] = [
+			{ subject: eager, args },
+			{ subject: deferred, args },
+			{ subject: tool(eager.name), args },
+			{ subject: writeTool, args: { path: `xd://${eager.name}`, content: JSON.stringify(args) } },
+		];
+		for (const entry of cases) {
+			expect(formatApprovalPrompt(entry.subject, entry.args)).toContain(expected);
+		}
+	});
+
+	it("keeps multiline array strings distinct from numbers and their commas outside the body", () => {
+		const subject = tool("mcp__server__run");
+		const prompt = formatApprovalPrompt(subject, { scripts: ["1\n", "2\n"], enabled: true });
+		expect(prompt).toContain('  "scripts": [\n    "\n      1\n      \n    ",\n    "\n      2\n      \n    "\n  ],');
+		expect(prompt).not.toBe(formatApprovalPrompt(subject, { scripts: [1, 2], enabled: true }));
+		expect(prompt).toContain('  "enabled": true');
+	});
+
+	it("normalizes CRLF and CR, expands tabs, and keeps terminal controls escaped in string blocks", () => {
+		const prompt = formatApprovalPrompt(tool("mcp__server__run"), {
+			script: "first\r\n\tsecond\rthird\u001b[2J\b\nlast",
+		});
+		expect(prompt).toContain("first\n       second\n    third\\u001b[2J\\b\n    last");
+		expect(prompt).not.toMatch(/[\r\t\u001b\b]/);
+	});
+
+	it("retains explicit MCP approval detail formatters, including suppressed details", () => {
+		const args = { hidden: "custom formatter owns disclosure" };
+		expect(
+			formatApprovalPrompt(
+				tool("mcp__server__run", undefined, () => []),
+				args,
+			),
+		).not.toContain("Arguments:");
+		expect(
+			formatApprovalPrompt(
+				tool("mcp__server__run", undefined, () => "Custom details"),
+				args,
+			),
+		).toContain("Custom details");
+	});
+
+	it("shows empty and null JSON device payloads while omitting absent direct MCP arguments", () => {
+		const writeTool = new WriteTool({ cwd: "." } as ToolSession);
+		for (const content of ["{}", "[]", "null"]) {
+			expect(formatApprovalPrompt(writeTool, { path: "XD://run", content })).toContain(`Arguments:\n${content}`);
+		}
+		expect(formatApprovalPrompt(tool("mcp__server__run"), undefined)).not.toContain("Arguments:");
+	});
+
+	it("regular file write keeps Path and Content lines unchanged", () => {
+		const session = { cwd: "." } as ToolSession;
+		const writeTool = new WriteTool(session);
+		const details = writeTool.formatApprovalDetails({
+			path: "src/main.ts",
+			content: '{"script":"first\\nsecond"}',
+		});
+		expect(details).toEqual(["Path: src/main.ts", 'Content:\n{"script":"first\\nsecond"}']);
+	});
+
+	it("falls back to raw Content for xd:// write with non-JSON content", () => {
+		const session = { cwd: "." } as ToolSession;
+		const writeTool = new WriteTool(session);
+		const details = writeTool.formatApprovalDetails({
+			path: "xd://some_device",
+			content: "not-json-content",
+		});
+		expect(details).toEqual(["Path: xd://some_device", "Content:\nnot-json-content"]);
+	});
+
+	it("caps large device argument payloads at prompt truncation limit", () => {
+		const longScript = "echo test\n".repeat(300);
+		const subject = tool("mcp__server__eval");
+		const prompt = formatApprovalPrompt(subject, { script: longScript });
+		const displayed = prompt.split("Arguments:\n")[1]!;
+		expect(displayed).toMatch(/^.{2000}\[…\d+ch elided…\]$/s);
+		expect(displayed).toContain('  "script": "\n    echo test');
 	});
 
 	it("truncates prompt details without touching short strings", () => {

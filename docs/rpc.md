@@ -702,7 +702,7 @@ fallback when enabling fails.
 
 ### `set_todos` payload
 
-Replaces the in-memory todo state for the current session and returns `{ todoPhases }`.
+Replaces the todo state for the current session and returns `{ todoPhases }`. The list is recorded on the current session branch and restored when that branch is reloaded, compacted, or resumed, like an interactive `/todo` edit.
 Phases use `{ name, tasks }`; tasks retain `{ content, status, blocker? }`. There
 are no phase or task IDs. Status is `"pending"`, `"in_progress"`, `"completed"`,
 `"abandoned"`, or `"blocked"`. Snapshot cloning drops extra fields, including
@@ -1018,7 +1018,9 @@ reports `reset: true`.
 (foreground or background, at any nesting depth) without aborting the parent
 turn. It uses the same path as the Agent Hub kill: the subagent's live turn is
 aborted and its registry entry becomes an `aborted` tombstone, so the owning
-`task` call settles with an aborted result and the subagent cannot be revived.
+`task` call settles with an aborted result. The kill stops the subagent without
+discarding it: a later `write agent://<id>` message or Agent Hub revive brings it
+back from its transcript.
 When `set_subagent_subscription` is `"progress"` or `"events"`, a
 `subagent_lifecycle` frame with `status: "aborted"` follows.
 

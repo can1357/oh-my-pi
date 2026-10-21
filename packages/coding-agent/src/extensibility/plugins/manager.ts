@@ -22,7 +22,7 @@ import { resolvePluginManifestEntries } from "./loader";
 import { getInstalledPluginsRegistryPath, readInstalledPluginsRegistry } from "./marketplace/registry";
 import { parsePluginId } from "./marketplace/types";
 import { extractPackageName, parsePluginSpec } from "./parser";
-import { normalizePluginRuntimeConfig } from "./runtime-config";
+import { normalizePluginRuntimeConfig, writePluginRuntimeConfig } from "./runtime-config";
 import type {
 	DoctorCheck,
 	DoctorOptions,
@@ -179,8 +179,8 @@ export class PluginManager {
 	}
 
 	async #saveRuntimeConfig(): Promise<void> {
-		await this.#ensureConfigLoaded();
-		await Bun.write(getPluginsLockfile(), JSON.stringify(this.#runtimeConfig, null, 2));
+		const config = await this.#ensureConfigLoaded();
+		await writePluginRuntimeConfig(getPluginsLockfile(), config);
 	}
 
 	async #loadProjectOverrides(): Promise<ProjectPluginOverrides> {

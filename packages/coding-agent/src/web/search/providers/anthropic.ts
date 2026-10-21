@@ -256,12 +256,16 @@ function parsePageAge(pageAge: string | null | undefined): number | undefined {
  * @returns Normalized response with answer, sources, citations, and usage
  */
 function parseResponse(response: AnthropicApiResponse): SearchResponse {
-	const answerParts: string[] = [];
+	// Citations split continuous text into adjacent text blocks; insert a paragraph
+	// break only when non-empty text resumes after a non-text block.
+	let answer = "";
+	let previousWasText = false;
 	const searchQueries: string[] = [];
 	const sources: SearchSource[] = [];
 	const citations: SearchCitation[] = [];
 
 	for (const block of response.content) {
+		if (block.type !== "text") previousWasText = false;
 		if (
 			block.type === "server_tool_use" &&
 			block.name &&
@@ -286,7 +290,9 @@ function parseResponse(response: AnthropicApiResponse): SearchResponse {
 			}
 		} else if (block.type === "text" && block.text) {
 			// Synthesized answer with citations
-			answerParts.push(block.text);
+			if (answer && !previousWasText) answer += "\n\n";
+			answer += block.text;
+			previousWasText = true;
 			if (block.citations) {
 				for (const c of block.citations as AnthropicCitation[]) {
 					citations.push({
@@ -301,7 +307,7 @@ function parseResponse(response: AnthropicApiResponse): SearchResponse {
 
 	return {
 		provider: "anthropic",
-		answer: answerParts.join("\n\n") || undefined,
+		answer: answer || undefined,
 		sources,
 		citations: citations.length > 0 ? citations : undefined,
 		searchQueries: searchQueries.length > 0 ? searchQueries : undefined,

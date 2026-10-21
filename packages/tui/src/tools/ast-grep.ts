@@ -1,3 +1,4 @@
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import type { Theme } from "../theme/theme";
@@ -13,12 +14,11 @@ import {
 	toPathList,
 } from "../render/render-utils";
 import { classifyGroupedLines, describeGroupedOutput, groupLineIndicesByBlank } from "./grouped-file-output";
-import { getLanguageFromPath } from "../lang-from-path";
 import { code, compact, node, span } from "../native/describe";
 import type { NativeChild } from "../native/node";
 import { errorText, noteText, resultText, toolHead } from "./native-view";
 import type { OutputMeta } from "./output-meta";
-import type { NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
+import type { NativeToolView, RenderResultContextOptions, RenderResultOptions, ToolRenderer } from "./renderer";
 
 /** Display metadata returned by ast-grep. */
 export interface AstGrepToolDetails {
@@ -70,7 +70,7 @@ export const astGrepToolRenderer = {
 
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: AstGrepToolDetails; isError?: boolean },
-		options: RenderResultOptions,
+		options: RenderResultContextOptions,
 		uiTheme: Theme,
 		args?: AstGrepRenderArgs,
 	): Component {
@@ -123,6 +123,20 @@ export const astGrepToolRenderer = {
 		// Resolve hyperlinks over the whole output so nested directory headers
 		// reconstruct across the blank-line groups the tree list collapses by.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
+		// The displayed lines are sanitized, but OSC 8 destinations must retain the
+		// original path bytes. Only substitute targets for headers already linked
+		// by the sanitized output; never let raw text create additional links.
+		const rawDetails = options.renderContext?.rawDetails;
+		const rawContent =
+			isRecord(rawDetails) && typeof rawDetails.displayContent === "string" ? rawDetails.displayContent : undefined;
+		const rawLines = rawContent?.split("\n");
+		const rawCwd = isRecord(rawDetails) && typeof rawDetails.cwd === "string" ? rawDetails.cwd : undefined;
+		const rawSearchPath =
+			isRecord(rawDetails) && typeof rawDetails.searchPath === "string" ? rawDetails.searchPath : undefined;
+		const rawContexts =
+			rawContent !== undefined && rawLines?.length === allLines.length && sanitizeText(rawContent) === textContent
+				? classifyGroupedLines(rawLines, rawCwd ?? rawSearchPath, rawSearchPath)
+				: undefined;
 		// Style lazily: the collapsed tree list only renders the first few groups,
 		// so a large result never styles/hyperlinks rows nobody sees.
 		const styledLines: (string | undefined)[] = Array.from({ length: allLines.length }, () => undefined);
@@ -131,13 +145,18 @@ export const astGrepToolRenderer = {
 			if (cached !== undefined) return cached;
 			const line = allLines[index]!;
 			const ctx = contexts[index]!;
+			const rawContext = rawContexts?.[index];
+			const target =
+				ctx.headerPath && rawContext?.kind === ctx.kind && rawContext.depth === ctx.depth
+					? (rawContext.headerPath ?? ctx.headerPath)
+					: ctx.headerPath;
 			let styled: string;
 			if (ctx.kind === "dir") {
 				const accent = uiTheme.fg("accent", line);
-				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, accent) : accent;
+				styled = target ? fileHyperlink(target, accent) : accent;
 			} else if (ctx.kind === "file") {
 				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", line);
-				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, tinted) : tinted;
+				styled = target ? fileHyperlink(target, tinted) : tinted;
 			} else {
 				styled = uiTheme.fg(line.startsWith("  meta:") ? "dim" : "toolOutput", line);
 			}
@@ -259,7 +278,7 @@ export const astGrepToolRenderer = {
 		return {
 			head,
 			body: compact<NativeChild>([
-				...describeGroupedOutput(kept, { lang: getLanguageFromPath }),
+				...describeGroupedOutput(kept),
 				limitReached && noteText("limit reached; narrow path or use skip", "warning"),
 				parseNote,
 			]),

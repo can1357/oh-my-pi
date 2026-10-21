@@ -9,7 +9,7 @@ use std::{
 
 use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFString, CFType};
 
-use super::skylight;
+use super::{route, skylight};
 use crate::desktop::{
 	control,
 	error::{CoreResult, DesktopError, ErrorCode},
@@ -41,19 +41,19 @@ struct SpaceSpi {
 }
 
 static SPI: LazyLock<Option<SpaceSpi>> = LazyLock::new(|| {
-	skylight::ensure_skylight_loaded()?;
+	route::load_skylight()?;
 	Some(SpaceSpi {
-		connection:     skylight::symbol(c"SLSMainConnectionID")
-			.or_else(|| skylight::symbol(c"CGSMainConnectionID"))?,
-		active:         skylight::symbol(c"SLSGetActiveSpace")
-			.or_else(|| skylight::symbol(c"CGSGetActiveSpace"))?,
-		copy_spaces:    skylight::symbol(c"SLSCopySpacesForWindows")?,
-		move_windows:   skylight::symbol(c"SLSMoveWindowsToManagedSpace")?,
-		window_owner:   skylight::symbol(c"SLSGetWindowOwner")?,
-		connection_pid: skylight::symbol(c"SLSConnectionGetPID")?,
-		space_type:     skylight::symbol(c"SLSSpaceGetType")?,
-		copy_displays:  skylight::symbol(c"SLSCopyManagedDisplays")?,
-		display_space:  skylight::symbol(c"SLSManagedDisplayGetCurrentSpace")?,
+		connection:     route::symbol(c"SLSMainConnectionID")
+			.or_else(|| route::symbol(c"CGSMainConnectionID"))?,
+		active:         route::symbol(c"SLSGetActiveSpace")
+			.or_else(|| route::symbol(c"CGSGetActiveSpace"))?,
+		copy_spaces:    route::symbol(c"SLSCopySpacesForWindows")?,
+		move_windows:   route::symbol(c"SLSMoveWindowsToManagedSpace")?,
+		window_owner:   route::symbol(c"SLSGetWindowOwner")?,
+		connection_pid: route::symbol(c"SLSConnectionGetPID")?,
+		space_type:     route::symbol(c"SLSSpaceGetType")?,
+		copy_displays:  route::symbol(c"SLSCopyManagedDisplays")?,
+		display_space:  route::symbol(c"SLSManagedDisplayGetCurrentSpace")?,
 	})
 });
 
@@ -153,6 +153,71 @@ pub(super) fn bring_to_current_space(id: &str) -> CoreResult<()> {
 		)));
 	}
 	result
+}
+
+/// Whether `pid` has a normal window on a Space no display shows now, which
+/// on-screen window lists leave out. `None` when the window list or a
+/// window's Space membership cannot be read.
+pub(in crate::desktop) fn window_on_another_space(pid: libc::pid_t) -> Option<bool> {
+	let windows = super::capture::normal_window_ids(pid)?;
+	let spi = SPI.as_ref()?;
+	// SAFETY: The runtime symbol has the exact no-argument connection ABI.
+	let connection = unsafe { (spi.connection)() };
+	if connection <= 0 {
+		return None;
+	}
+	// With "Displays have separate Spaces", each display shows its own.
+	let shown: Vec<u64> = display_spaces(spi, connection)
+		.ok()?
+		.into_iter()
+		.map(|(_, space)| space)
+		.collect();
+	on_another_space(
+		&shown,
+		windows
+			.iter()
+			.map(|&wid| window_spaces(spi, connection, wid)),
+	)
+}
+
+/// Whether one of the windows whose Space memberships are `memberships`
+/// belongs only to Spaces no display shows (`shown`); a window
+/// `WindowServer` keeps ordered out belongs to none, and one on every Space
+/// belongs to a shown one too. `None` once a membership is unknown and none
+/// seen so far is elsewhere.
+fn on_another_space(
+	shown: &[u64],
+	memberships: impl IntoIterator<Item = Option<Vec<u64>>>,
+) -> Option<bool> {
+	for spaces in memberships {
+		let spaces = spaces?;
+		if !spaces.is_empty() && !spaces.iter().any(|space| shown.contains(space)) {
+			return Some(true);
+		}
+	}
+	Some(false)
+}
+
+/// Window `wid`'s Space memberships, empty for none; `None` when
+/// `WindowServer` does not say.
+fn window_spaces(spi: &SpaceSpi, connection: i32, wid: u32) -> Option<Vec<u64>> {
+	let number = CFNumber::new_i64(i64::from(wid));
+	let window = CFArray::from_objects(&[&*number]);
+	// SAFETY: The window array remains alive; selector 7 includes all Spaces.
+	let spaces = retain_array(
+		unsafe { (spi.copy_spaces)(connection, 7, window.as_opaque()) },
+		"window Space memberships",
+	)
+	.ok()?;
+	spaces
+		.iter()
+		.map(|space| {
+			space
+				.downcast_ref::<CFNumber>()
+				.and_then(CFNumber::as_i64)
+				.and_then(|id| u64::try_from(id).ok())
+		})
+		.collect()
 }
 
 fn verified_move(current: u64, observed: &[u64]) -> bool {
@@ -269,7 +334,7 @@ fn display_spaces(spi: &SpaceSpi, connection: i32) -> CoreResult<Vec<(String, u6
 
 #[cfg(test)]
 mod tests {
-	use super::verified_move;
+	use super::{on_another_space, verified_move};
 
 	#[test]
 	fn ignored_or_partial_native_move_is_not_success() {
@@ -278,5 +343,26 @@ mod tests {
 		assert!(!verified_move(9, &[]));
 		assert!(!verified_move(0, &[0]));
 		assert!(verified_move(9, &[9]));
+	}
+
+	#[test]
+	fn an_unknown_space_membership_is_not_proof_of_no_window_elsewhere() {
+		// Space 9 is current. A window on Space 4 is elsewhere; one kept
+		// ordered out belongs to no Space.
+		assert_eq!(on_another_space(&[9], [Some(vec![9]), Some(vec![4])]), Some(true));
+		assert_eq!(on_another_space(&[9], [Some(vec![9]), Some(vec![])]), Some(false));
+		assert_eq!(on_another_space(&[9], []), Some(false));
+		// A window whose membership WindowServer did not give may be elsewhere.
+		assert_eq!(on_another_space(&[9], [Some(vec![9]), None]), None);
+	}
+
+	#[test]
+	fn a_window_on_any_displays_shown_space_is_not_elsewhere() {
+		// Displays have separate Spaces: the main display shows 9, the second
+		// 4, so a window on 4 is on screen there, not on another Space.
+		assert_eq!(on_another_space(&[9, 4], [Some(vec![4])]), Some(false));
+		// A window on every Space belongs to a shown one too.
+		assert_eq!(on_another_space(&[9, 4], [Some(vec![3, 9])]), Some(false));
+		assert_eq!(on_another_space(&[9, 4], [Some(vec![3])]), Some(true));
 	}
 }

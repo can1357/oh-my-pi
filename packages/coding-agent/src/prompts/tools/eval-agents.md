@@ -6,6 +6,8 @@ workpool(agent?=None, name?=None, context?=None{{#if evalTools}}, tools?=None{{/
     {{#if eagerDelegation}}Default for 2+ independent items.{{else}}Keep-alive worker pool for a batch of independent items.{{/if}} `.push(*items)`; `.status()`; `.peek()`; `.close()`. Pool name = async job id; results auto-deliver.{{#if waitTool}} Completely blocked? Leave `eval` and call `wait`;{{/if}} NEVER poll. `eval.workpool.freshAgents=true` uses a new agent per item.
 ```
 
+The cell `timeout` counts only the cell's own work, not waits on `agent()`/`wait()`/`tool.task(...)`, so a subagent can outlast it.
+
 <dag>
 Acyclic waves of handles:
 - **Name nodes.** `h = agent(…)` returns at once; `h.handle` is `agent://<id>`.

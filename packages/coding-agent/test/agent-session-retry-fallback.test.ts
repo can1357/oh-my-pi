@@ -22,6 +22,8 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -6598,6 +6600,153 @@ describe("AgentSession retry fallback", () => {
 				session = undefined;
 			}
 			descriptorAuthStorage.close();
+		}
+	});
+
+	/** A Copilot base model plus its synthesized `-1m` variant, which only discovery supplies. */
+	function copilotLongContextPair(baseId: string): [Model<Api>, Model<Api>] {
+		const base = getBundledModel("github-copilot", baseId);
+		if (!base) {
+			throw new Error(`Expected bundled Copilot ${baseId} model to exist`);
+		}
+		const variant = buildModel({
+			...(base as ModelSpec<"openai-responses">),
+			id: `${baseId}-1m`,
+			name: `${base.name} (1M)`,
+			requestModelId: base.id,
+			contextWindow: 1_050_000,
+		});
+		return [base, variant];
+	}
+
+	/**
+	 * Startup shape behind the spurious Copilot `-1m` warnings: credential-scoped
+	 * hydration replays a cache row (status `cached`) that lacks an id the online
+	 * refresh supplies. `publishVariant` stands in for that refresh writing the row.
+	 */
+	async function hydrateCopilotCacheWithoutVariant(dir: TempDir, auth: AuthStorage) {
+		const cachedPair = copilotLongContextPair("gpt-5.6-terra");
+		const laterPair = copilotLongContextPair("gpt-5.6-sol");
+		auth.keys.setRuntime("github-copilot", "ghp_startup_validation_token");
+		const cacheDbPath = path.join(dir.path(), "models.db");
+		const cacheProviderId = resolveModelCacheProviderId("github-copilot", { apiKey: "ghp_startup_validation_token" });
+		writeModelCache(cacheProviderId, Date.now(), cachedPair, true, "", cacheDbPath, [cachedPair[0]]);
+		const registry = new ModelRegistry(auth, path.join(dir.path(), "models.yml"));
+		await registry.hydrateCredentialScopedModelCaches();
+		return {
+			registry,
+			variantSelector: `github-copilot/${laterPair[1].id}`,
+			publishVariant: () =>
+				writeModelCache(cacheProviderId, Date.now(), [...cachedPair, ...laterPair], true, "", cacheDbPath, [
+					cachedPair[0],
+					laterPair[0],
+				]),
+		};
+	}
+
+	/** `deferValidation` mirrors the CLI, which validates once the background refresh is in flight. */
+	function createChainSession(registry: ModelRegistry, chain: string[], deferValidation = true): AgentSession {
+		const primaryModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel) {
+			throw new Error("Expected bundled OpenAI test model to exist");
+		}
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": { default: chain },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				throw new Error("Not exercised");
+			},
+		});
+		return new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: registry,
+			deferRetryFallbackValidation: deferValidation,
+		});
+	}
+
+	it("does not warn at startup for a cached provider whose online refresh supplies the selector", async () => {
+		using dir = TempDir.createSync("@omp-fallback-cached-pending-");
+		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		try {
+			const { registry, variantSelector, publishVariant } = await hydrateCopilotCacheWithoutVariant(dir, auth);
+			expect(registry.getProviderDiscoveryState("github-copilot")?.status).toBe("cached");
+			expect(registry.find("github-copilot", "gpt-5.6-sol-1m")).toBeUndefined();
+			const warning = `Fallback chain for role 'default' references unknown model: ${variantSelector}`;
+
+			session = createChainSession(registry, [variantSelector]);
+			publishVariant();
+			registry.refreshInBackground("offline");
+			session.validateRetryFallbackChains();
+			expect(session.configWarnings).not.toContain(warning);
+
+			await registry.awaitInitialBackgroundRefresh();
+			// Let the session's post-discovery revalidation (armed by validation) run.
+			await scheduler.wait(0);
+
+			expect(registry.find("github-copilot", "gpt-5.6-sol-1m")).toBeDefined();
+			expect(session.configWarnings).not.toContain(warning);
+		} finally {
+			await session?.dispose();
+			session = undefined;
+			auth.close();
+		}
+	});
+
+	it("warns once, after discovery settles, for a selector the cached provider never supplies", async () => {
+		using dir = TempDir.createSync("@omp-fallback-cached-unknown-");
+		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		try {
+			const { registry } = await hydrateCopilotCacheWithoutVariant(dir, auth);
+			const warning = "Fallback chain for role 'default' references unknown model: github-copilot/no-such-model";
+
+			session = createChainSession(registry, ["github-copilot/no-such-model"]);
+			const { promise: warningsChanged, resolve } = Promise.withResolvers<void>();
+			session.subscribe(event => {
+				if (event.type === "config_warnings_changed") resolve();
+			});
+			registry.refreshInBackground("offline");
+			session.validateRetryFallbackChains();
+			expect(session.configWarnings).not.toContain(warning);
+
+			await Promise.race([
+				warningsChanged,
+				scheduler.wait(5_000).then(() => {
+					throw new Error("config_warnings_changed was not emitted after discovery settled");
+				}),
+			]);
+
+			expect(session.configWarnings.filter(message => message === warning)).toHaveLength(1);
+		} finally {
+			await session?.dispose();
+			session = undefined;
+			auth.close();
+		}
+	});
+
+	it("warns at construction for a cached provider when no background refresh will run", async () => {
+		// An embedder that passes its own registry and manages discovery itself
+		// never starts a background refresh, so nothing would ever lift a deferral.
+		using dir = TempDir.createSync("@omp-fallback-cached-embedder-");
+		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		try {
+			const { registry } = await hydrateCopilotCacheWithoutVariant(dir, auth);
+
+			session = createChainSession(registry, ["github-copilot/no-such-model"], false);
+
+			expect(session.configWarnings).toContain(
+				"Fallback chain for role 'default' references unknown model: github-copilot/no-such-model",
+			);
+		} finally {
+			await session?.dispose();
+			session = undefined;
+			auth.close();
 		}
 	});
 

@@ -10,6 +10,7 @@ import {
 	replaceTabs,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
+	clipCollapsed,
 } from "../render/render-utils";
 import type { NativeToolView, RenderResultOptions, ToolRenderer, ToolRenderResult } from "./renderer";
 import { ansi, kv } from "../native/describe";
@@ -210,7 +211,7 @@ export const debugToolRenderer = {
 			const previewLimit = options.expanded ? PREVIEW_LIMITS.EXPANDED_LINES : PREVIEW_LIMITS.COLLAPSED_LINES;
 			const displayedLines = rawLines
 				.slice(0, previewLimit)
-				.map(line => truncateToWidth(line, TRUNCATE_LENGTHS.LINE));
+				.map(line => clipCollapsed(line, TRUNCATE_LENGTHS.LINE, options.expanded));
 			const remaining = rawLines.length - displayedLines.length;
 			if (remaining > 0) {
 				displayedLines.push(

@@ -7,31 +7,25 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { ElementHandle } from "puppeteer-core";
 
-// Regression coverage for the invisible-output failure mode: `display("string")`,
-// `console.log`, and `print` reach the runtime as `onText` chunks, which the browser
+// Regression coverage for the invisible-output failure mode: `console.log` and
+// `print` reach the runtime as `onText` chunks, which the browser
 // embedders used to route to the debug log only — the tool result showed a bare
 // "Ran code on tab" while the displayed text vanished.
 describe("browser run output — stream text reaches the tool result", () => {
 	it("surfaces buffered stream text as a display entry on finish", () => {
 		const output = new RunOutput();
-		output.pushText("plain string via display()\n");
+		output.pushText("plain string via print()\n");
 		output.pushText("console.log line\n");
 
-		expect(output.finish()).toEqual([{ type: "text", text: "plain string via display()\nconsole.log line" }]);
+		expect(output.finish()).toEqual([{ type: "text", text: "plain string via print()\nconsole.log line" }]);
 	});
 
-	it("keeps stream text ordered around display() payloads", () => {
+	it("adds nothing for views, whose text is already in the stream", () => {
 		const output = new RunOutput();
-		output.pushText("before\n");
-		output.pushDisplay({ type: "json", data: { a: 1 } });
-		output.pushText("after\n");
+		output.pushText("{ a: 1 }\n");
+		output.pushDisplay({ type: "view", text: "{ a: 1 }\n", view: { kind: "json", value: { a: 1 } } });
 
-		const entries = output.finish();
-		expect(entries.map(e => (e.type === "text" ? e.text : e.type))).toEqual([
-			"before",
-			JSON.stringify({ a: 1 }, null, 2),
-			"after",
-		]);
+		expect(output.finish()).toEqual([{ type: "text", text: "{ a: 1 }" }]);
 	});
 
 	it("flushes pending text before pre-built entries (screenshot captions) and emits images verbatim", () => {

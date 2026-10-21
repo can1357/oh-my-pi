@@ -33,6 +33,7 @@ import { handleSecurityCommand } from "./helpers/security";
 import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
 
 import {
+	cfgComputerBackgroundFallback,
 	cfgComputerDisplay,
 	cfgComputerEnabled,
 	cfgComputerMaxHeight,
@@ -216,11 +217,12 @@ function formatComputerUseStatus(session: AgentSession): string {
 		display: cfgComputerDisplay.get(session.settings),
 		maxWidth: cfgComputerMaxWidth.get(session.settings),
 		maxHeight: cfgComputerMaxHeight.get(session.settings),
+		backgroundFallback: cfgComputerBackgroundFallback.get(session.settings),
 	};
 	return [
 		`Computer use: ${enabled ? "enabled" : "disabled"}`,
 		`prelude: ${active ? "active" : "inactive"}`,
-		`configured: display=${configured.display}, maxWidth=${configured.maxWidth}, maxHeight=${configured.maxHeight}`,
+		`configured: display=${configured.display}, maxWidth=${configured.maxWidth}, maxHeight=${configured.maxHeight}, backgroundFallback=${configured.backgroundFallback}`,
 	].join(" · ");
 }
 
@@ -457,7 +459,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Switch model for this session",
 		acpDescription: "Show current model selection",
 		getTuiAutocompleteDescription: runtime => {
-			const model = runtime.ctx.session.model;
+			const model = runtime.ctx.viewSession.model;
 			return model ? `Model: ${model.provider}/${model.id}` : "Model: none selected";
 		},
 		handle: async (command, runtime) => {
@@ -505,7 +507,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "[model]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			const model = runtime.ctx.session.model;
+			const model = runtime.ctx.viewSession.model;
 			return model ? `Model: ${model.provider}/${model.id}` : "Model: none selected";
 		},
 		handle: async (command, runtime) => {
@@ -891,7 +893,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			description: getConfiguredThinkingLevelMetadata(level).description,
 		})),
 		getTuiAutocompleteDescription: runtime =>
-			`Thinking: ${runtime.ctx.session.configuredThinkingLevel() ?? "model default"}`,
+			`Thinking: ${runtime.ctx.viewSession.configuredThinkingLevel() ?? "model default"}`,
 		handle: async (command, runtime) => {
 			const session = runtime.session;
 			if (!command.args.trim()) {
@@ -914,18 +916,19 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: (command, runtime) => {
 			clearSubmittedText(runtime);
 			const { ctx } = runtime;
+			const session = ctx.viewSession;
 			if (!command.args.trim()) {
-				if (ctx.session.model?.reasoning) ctx.showThinkingSelector();
-				else ctx.showStatus(noThinkingMessage(ctx.session));
+				if (session.model?.reasoning) ctx.showThinkingSelector();
+				else ctx.showStatus(noThinkingMessage(session));
 				return;
 			}
-			const resolved = resolveThinkingArgument(ctx.session, command.args);
+			const resolved = resolveThinkingArgument(session, command.args);
 			if ("error" in resolved) {
 				ctx.showError(resolved.error);
 				return;
 			}
 			// thinking_level_changed refreshes the status line and editor border.
-			ctx.session.setThinkingLevel(resolved.level);
+			session.setThinkingLevel(resolved.level);
 			ctx.showStatus(`Thinking set to ${resolved.level}.`);
 		},
 	},

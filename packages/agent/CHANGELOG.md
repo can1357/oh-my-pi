@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+## [18.12.4] - 2026-10-20
+
+### Fixed
+
+- Enabled native compaction for supported Bedrock Claude models ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+
+## [18.12.3] - 2026-10-19
+
+### Added
+
+- `AgentTool` gained the optional `approvalCacheTargets` hook, which the `always-ask-cached` approval mode uses to check and record per-file grants ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
+
+### Changed
+
+- Tools with `lenientArgValidation` now receive unknown root arguments that their closed schema would otherwise drop, so they can reject them ([#16317](https://github.com/can1357/oh-my-pi/issues/16317))
+
+## [18.12.2] - 2026-10-18
+
+### Changed
+
+- The failed-tool-call correction sent to DeepSeek models now also covers chat-template tool-call tokens written out as text, not only malformed DSML ([#16216](https://github.com/can1357/oh-my-pi/pull/16216) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed Ollama chat history estimates counting stripped native thinking and missing foreign thinking replayed as text, which skewed compaction after model switches ([#16164](https://github.com/can1357/oh-my-pi/issues/16164))
+
+## [18.12.0] - 2026-10-17
+
+### Fixed
+
+- Fixed Cursor turns failing with `PROVIDER_ERROR` when a follow-up (a finished background job, a late diagnostic, a reminder) arrived while the previous turn was still streaming ([#15821](https://github.com/can1357/oh-my-pi/pull/15821) by [@robfeldmann](https://github.com/robfeldmann))
+
 ## [18.11.3] - 2026-10-16
 
 ### Added

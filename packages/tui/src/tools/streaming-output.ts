@@ -1432,6 +1432,7 @@ export class OutputSink {
 	 * Replace the in-memory buffer with the given text. Used when an upstream
 	 * minimizer rewrites the captured output after the raw bytes have already
 	 * been streamed.
+	 * The replacement is held to the per-line column cap like streamed output.
 	 *
 	 * After this call the buffer is authoritative: streaming counters realign
 	 * to the replacement, the retained head window is cleared, and head
@@ -1442,23 +1443,24 @@ export class OutputSink {
 	 */
 	replace(text: string): void {
 		this.#clearPendingChunkTimer();
-		this.#buffer = text;
-		this.#bufferBytes = Buffer.byteLength(text, "utf-8");
-		this.#tailUntrimmed = false;
-		this.#head = "";
-		this.#headBytes = 0;
-		this.#headLines = 0;
-		this.#headRetentionDisabled = true;
-		this.#totalBytes = this.#bufferBytes;
-		this.#totalLines = countNewlines(text);
-		this.#sawData = text.length > 0;
-		this.#truncated = false;
 		this.#currentLineBytes = 0;
 		this.#columnEllipsisAdded = false;
 		this.#columnDroppedBytes = 0;
 		this.#columnTruncatedLines = 0;
 		// The artifact keeps the replaced stream, so later line numbers no longer match it.
 		this.#columnCutLinesUnmapped = true;
+		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(text, 0) : text;
+		this.#buffer = capped;
+		this.#bufferBytes = Buffer.byteLength(capped, "utf-8");
+		this.#tailUntrimmed = false;
+		this.#head = "";
+		this.#headBytes = 0;
+		this.#headLines = 0;
+		this.#headRetentionDisabled = true;
+		this.#totalBytes = Buffer.byteLength(text, "utf-8");
+		this.#totalLines = countNewlines(text);
+		this.#sawData = text.length > 0;
+		this.#truncated = false;
 		this.#pendingChunk = "";
 		this.#pendingCarriageReturn = false;
 	}

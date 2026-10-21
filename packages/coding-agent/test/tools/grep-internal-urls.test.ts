@@ -257,6 +257,40 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).not.toContain("INFO");
 	});
 
+	it("searches every artifact named in a semicolon-delimited artifact:// list (issue #14091)", async () => {
+		await Bun.write(path.join(artifactsDir, "44.python.log"), "alpha needle\n");
+		await Bun.write(path.join(artifactsDir, "43.python.log"), "beta needle\n");
+
+		const session = createSession();
+		const tool = new GrepTool(session);
+
+		const result = await tool.execute("artifact-list", {
+			pattern: "needle",
+			path: "artifact://44;artifact://43",
+		});
+
+		const text = getResultText(result);
+		// Both artifacts are searched — the list is two resources, not one URI.
+		expect(text).toContain("artifact://44");
+		expect(text).toContain("artifact://43");
+		expect(text).toContain("alpha needle");
+		expect(text).toContain("beta needle");
+	});
+
+	it("keeps a single internal URL whose name ends in a semicolon whole", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		await Bun.write(path.join(localRoot, "report;"), "semicolon needle\n");
+		await Bun.write(path.join(localRoot, "report"), "plain needle\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+
+		const text = getResultText(
+			await new GrepTool(createSession()).execute("semicolon", { pattern: "needle", path: "local://report;" }),
+		);
+		expect(text).toContain("semicolon needle");
+		expect(text).not.toContain("plain needle");
+	});
+
 	it("searches virtual internal URL content without a backing file", async () => {
 		registerVirtualDocs(new Map([["doc.md", "alpha line\nneedle in virtual content\ngamma line\n"]]));
 

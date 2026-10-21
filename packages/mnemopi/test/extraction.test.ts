@@ -5,6 +5,7 @@ import {
 	extractFacts,
 	extractFactsSafe,
 	heuristicExtractFacts,
+	parseExtractedFactCategories,
 	parseFacts,
 } from "@oh-my-pi/pi-mnemopi/core/extraction";
 import { getExtractionStats, resetExtractionStats } from "@oh-my-pi/pi-mnemopi/core/extraction/diagnostics";
@@ -79,6 +80,14 @@ describe("structured extraction", () => {
 		expect(
 			parseFacts('```json\n{"facts": [], "instructions": [], "preferences": [], "timelines": [], "kg": []}\n```'),
 		).toEqual([]);
+	});
+
+	it("keeps plain-line facts up to the JSON path's total of 20", () => {
+		const lines = Array.from({ length: 25 }, (_, index) => `Detail ${index + 1} of the memory is kept`);
+		const output = lines.join("\n");
+
+		expect(parseExtractedFactCategories(output).facts).toEqual(lines.slice(0, 20));
+		expect(parseFacts(output)).toEqual(lines.slice(0, 5));
 	});
 
 	it("uses deterministic heuristic extraction when no LLM is configured", async () => {

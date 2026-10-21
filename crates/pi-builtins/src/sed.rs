@@ -6189,8 +6189,10 @@ mod tests {
 	}
 
 	/// Truncating an input file after sed opened it must not fault the host
-	/// process; the reader keeps serving the bytes captured at open.
+	/// process; the reader keeps serving the bytes captured at open. Unix only:
+	/// the snapshot is the `SliceInput` path; Windows always streams.
 	#[test]
+	#[cfg(unix)]
 	fn test_file_truncated_after_open() -> io::Result<()> {
 		let mut tmp = NamedTempFile::new()?;
 		for _ in 0..4 {

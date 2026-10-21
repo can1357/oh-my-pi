@@ -21,11 +21,10 @@ import {
 	pickElectronTarget,
 	probeCdpStatus,
 	resolveSpawnArgs,
-	shouldPreserveConnectedBrowserFocus,
 	waitForCdp,
 	waitForMainFrame,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
-import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import { ensureChromiumExecutable, loadPuppeteer } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
 	acquireBrowser,
 	type BrowserHandle,
@@ -34,7 +33,14 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { acquireTab, getTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
-import type { Browser, HTTPRequest, Page, Target } from "puppeteer-core";
+import {
+	type Browser,
+	type ConnectionTransport,
+	type HTTPRequest,
+	type Page,
+	type Target,
+	TimeoutError,
+} from "puppeteer-core";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
@@ -323,11 +329,6 @@ describe("pickElectronTarget", () => {
 		} as unknown as Browser;
 
 		await expect(pickElectronTarget(browser, { preferVisible: true })).resolves.toBe(first);
-	});
-
-	test("preserves connected-browser focus only for automatic target selection", () => {
-		expect(shouldPreserveConnectedBrowserFocus()).toBe(true);
-		expect(shouldPreserveConnectedBrowserFocus("example.com")).toBe(false);
 	});
 
 	test("rejects websocket cdp_url values with an actionable diagnostic", () => {
@@ -900,17 +901,35 @@ describe("pickElectronTarget relay path", () => {
 		expect(await pickElectronTarget(browser, { relayJson, matcher: "whole foods" })).toBe(cartPage);
 	});
 
-	it("tells the model to retry when Puppeteer never sees the selected tab", async () => {
-		const browser = Object.assign(makeBrowser([]), {
-			waitForTarget: async () => {
-				throw Object.assign(new Error("Waiting for target failed"), { name: "TimeoutError" });
+	it("tells the model to retry when Puppeteer never sees the selected tab, with release-build class names", async () => {
+		// A connected browser with no targets, so Puppeteer's own wait times out and builds its own error.
+		const transport: ConnectionTransport = {
+			send(message) {
+				const { id, method } = JSON.parse(message) as { id: number; method: string };
+				const result = method === "Target.getBrowserContexts" ? { browserContextIds: [] } : {};
+				queueMicrotask(() => transport.onmessage?.(JSON.stringify({ id, result })));
 			},
-		});
+			close() {
+				transport.onclose?.();
+			},
+		};
+		const puppeteerBrowser = await (await loadPuppeteer()).connect({ transport, defaultViewport: null });
+		const nameDescriptor = Object.getOwnPropertyDescriptor(TimeoutError, "name")!;
+		// Release builds minify class names, so Puppeteer names its timeout like this there.
+		Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
+		try {
+			const browser = Object.assign(makeBrowser([]), {
+				waitForTarget: (predicate: (target: Target) => boolean) =>
+					puppeteerBrowser.waitForTarget(predicate, { timeout: 50 }),
+			});
 
-		const error = await rejectionOf(pickElectronTarget(browser, { relayJson, matcher: "whole foods" }));
+			const error = await rejectionOf(pickElectronTarget(browser, { relayJson, matcher: "whole foods" }));
 
-		expect(error).toBeInstanceOf(Error);
-		expect((error as Error).message).toMatch(/^Selected tab did not become available.*retry, or reopen it/);
+			expect((error as Error).message).toMatch(/^Selected tab did not become available.*retry, or reopen it/);
+		} finally {
+			Object.defineProperty(TimeoutError, "name", nameDescriptor);
+			await puppeteerBrowser.disconnect();
+		}
 	});
 
 	it("falls back to target enumeration at once when /json lists no pages", async () => {

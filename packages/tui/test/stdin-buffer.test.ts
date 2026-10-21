@@ -5,7 +5,7 @@
  * MIT License - Copyright (c) 2025 opentui
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { StdinBuffer } from "@oh-my-pi/pi-tui/stdin-buffer";
 
@@ -816,56 +816,183 @@ describe("StdinBuffer", () => {
 		});
 	});
 
-	describe("Torn String Sequences (kitty OSC 5522 paste spam)", () => {
-		it("swallows a torn kitty OSC 5522 packet instead of typing its base64 tail", async () => {
-			// Regression: a stall past the incomplete-sequence flush window mid
-			// packet during a kitty OSC 5522 clipboard read (image paste) tore
-			// the packet — the flushed head reached the editor as an unknown
-			// escape and the packet's remaining base64 was typed into the
-			// composer as plain text, while the read state machine still
-			// completed and inserted the corrupt image: image chip + base64
-			// spam.
-			setKittyProtocolActive(true);
-			buffer.destroy();
-			buffer = new StdinBuffer({ timeout: 5, partialHoldTimeout: 5 });
-			buffer.on("data", (sequence: string) => {
-				emittedSequences.push(sequence);
-			});
+	describe("Stalled String Sequences (OSC 5522 paste)", () => {
+		const head = "\x1b]5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;SGVsbG8s";
 
-			const okPacket = "\x1b]5522;type=read:status=OK\x1b\\";
-			processInput(`${okPacket}\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n;${"A".repeat(512)}`);
-			expect(emittedSequences).toEqual([okPacket]);
-
-			// Stall past timeout + partial hold: the torn head is dropped, not
-			// delivered as a key.
-			await waitUntil(() => buffer.getBuffer().length === 0);
-			expect(emittedSequences).toEqual([okPacket]);
-
-			// The packet tail (base64 + ST) arrives after the stall: swallowed,
-			// not typed. The next packet is delivered intact.
-			processInput(`${"B".repeat(512)}\x1b\\`);
-			const donePacket = "\x1b]5522;type=read:status=DONE\x1b\\";
-			processInput(donePacket);
-			expect(emittedSequences).toEqual([okPacket, donePacket]);
+		afterEach(() => {
+			vi.useRealTimers();
 		});
 
-		it("detects a split ST terminator while discarding a torn string tail", async () => {
-			setKittyProtocolActive(true);
-			buffer.destroy();
-			buffer = new StdinBuffer({ timeout: 5, partialHoldTimeout: 5 });
-			buffer.on("data", (sequence: string) => {
-				emittedSequences.push(sequence);
-			});
-
-			processInput("\x1b]5522;type=read:status=DATA:mime=Lg==;partial");
-			await waitUntil(() => buffer.getBuffer().length === 0);
+		it("completes an OSC 5522 packet whose payload stalls for seconds", () => {
+			// Regression: a packet stalled past the flush window (a dictation
+			// app serving the clipboard slowly) was torn, and its base64 payload
+			// was typed into the composer as text. A tail within the
+			// abandonment plus dormant window (15 s) still completes it.
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(14_000);
 			expect(emittedSequences).toEqual([]);
 
-			// Terminator split across reads: trailing ESC held, backslash in
-			// the next chunk completes ST and what follows resumes as keys.
-			processInput("tail\x1b");
-			processInput("\\ok");
-			expect(emittedSequences).toEqual(["o", "k"]);
+			processInput("IHdvcmxkIQ==\x1b");
+			processInput("\\");
+			expect(emittedSequences).toEqual([`${head}IHdvcmxkIQ==\x1b\\`]);
+		});
+
+		it.each([
+			["Enter", "\r"],
+			["Up arrow", "\x1b[A"],
+			["space in a base64 payload", " "],
+		])("drops an abandoned string head when %s arrives and delivers that key", (_name, key) => {
+			processInput(head);
+			processInput(`${key}a`);
+			expect(emittedSequences).toEqual([key, "a"]);
+			expect(buffer.getBuffer()).toBe("");
+		});
+
+		it("keeps a one-byte read inside the packet when chunking splits the payload", () => {
+			// SSH/tmux chunking does not follow terminal writes: a lone payload
+			// byte arriving right after the head is still part of the packet.
+			vi.useFakeTimers();
+			processInput(head);
+			processInput("I");
+			processInput("HdvcmxkIQ==\x1b\\");
+			expect(emittedSequences).toEqual([`${head}IHdvcmxkIQ==\x1b\\`]);
+		});
+
+		it("replays keys typed into a stalled head once a control key abandons it", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(200);
+			processInput("h");
+			vi.advanceTimersByTime(200);
+			processInput("i");
+			processInput("\r");
+			expect(emittedSequences).toEqual(["h", "i", "\r"]);
+			expect(buffer.getBuffer()).toBe("");
+		});
+
+		it("abandons a head with no reads for the bound and replays the keys typed into it", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(200);
+			processInput("h");
+			vi.advanceTimersByTime(200);
+			processInput("i");
+			vi.advanceTimersByTime(4000);
+			expect(emittedSequences).toEqual([]);
+
+			vi.advanceTimersByTime(1000);
+			expect(emittedSequences).toEqual(["h", "i"]);
+			expect(buffer.getBuffer()).toBe("");
+
+			// The terminal's late tail still completes the packet, not typed.
+			processInput("IHdvcmxkIQ==\x1b\\");
+			expect(emittedSequences).toEqual(["h", "i", `${head}IHdvcmxkIQ==\x1b\\`]);
+		});
+
+		it.each([
+			["Alt+]", ["\x1b]a"]],
+			["Alt+P", ["\x1bPa"]],
+			["Alt+_", ["\x1b_a"]],
+			["Alt+_ diverging from a TSP opener", ["\x1b_t", "x"]],
+		])("keeps legacy %s batched with keys on the key timer without the kitty keyboard protocol", (_name, reads) => {
+			// Terminal replies open a known way (a numeric OSC command, a DCS or
+			// APC reply prefix); a chord plus keys that diverges is not a string.
+			vi.useFakeTimers();
+			for (const read of reads) processInput(read);
+			vi.advanceTimersByTime(100);
+			expect(emittedSequences).toEqual([reads.join("")]);
+			expect(buffer.getBuffer()).toBe("");
+		});
+
+		it("keeps ECMA-48 format effectors inside a DCS reply", () => {
+			const reply = "\x1bP1+r544e\r\n=787465726d\x1b\\";
+			processInput(reply);
+			expect(emittedSequences).toEqual([reply]);
+		});
+
+		it("starts fresh tracking for a head that follows a flushed one", () => {
+			// Stale tracking from the flushed head made a payload byte that
+			// arrived right after the new head look like typing after a stall.
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(1000);
+			expect(buffer.flush()).toEqual([]);
+			processInput(head);
+			processInput("I");
+			processInput("\r");
+			expect(emittedSequences).toEqual(["\r"]);
+		});
+
+		it("delivers a non-payload key typed into a stalled head exactly once", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(200);
+			processInput(" ");
+			expect(emittedSequences).toEqual([" "]);
+		});
+
+		it("keeps a slow transfer alive while its chunks keep arriving", () => {
+			// Regression: chunks spaced past the flush window over a slow link
+			// stopped refreshing the abandonment bound, and the abandoned
+			// payload was replayed as typed base64.
+			vi.useFakeTimers();
+			processInput(head);
+			for (let i = 0; i < 20; i++) {
+				vi.advanceTimersByTime(1000);
+				processInput("QUJD");
+			}
+			processInput("\x1b\\");
+			expect(emittedSequences).toEqual([`${head}${"QUJD".repeat(20)}\x1b\\`]);
+		});
+
+		it("never types multi-byte payload when a stalled transfer dies", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(200);
+			processInput("QUJDREVG");
+			vi.advanceTimersByTime(5000);
+			expect(emittedSequences).toEqual([]);
+			expect(buffer.getBuffer()).toBe("");
+		});
+
+		it("lets an abandoned head expire so later bursts are delivered", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(5000 + 10_000);
+			processInput("hello");
+			expect(emittedSequences).toEqual(["h", "e", "l", "l", "o"]);
+		});
+
+		it("drops a resumed head for good when it is abandoned again", () => {
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(5000);
+			processInput("QUJD");
+			vi.advanceTimersByTime(5000);
+			processInput("hello");
+			expect(emittedSequences).toEqual(["h", "e", "l", "l", "o"]);
+		});
+
+		it.each([
+			["BEL", "", "\x07"],
+			["split-ST backslash", "\x1b", "\\"],
+		])("completes an abandoned head when a late lone %s arrives", (_name, tail, terminator) => {
+			vi.useFakeTimers();
+			processInput(`${head}${tail}`);
+			vi.advanceTimersByTime(5000);
+			processInput(terminator);
+			expect(emittedSequences).toEqual([`${head}${tail}${terminator}`]);
+		});
+
+		it("completes an abandoned head when a late ST arrives split under the kitty keyboard protocol", () => {
+			setKittyProtocolActive(true);
+			vi.useFakeTimers();
+			processInput(head);
+			vi.advanceTimersByTime(5000);
+			processInput("\x1b");
+			processInput("\\");
+			expect(emittedSequences).toEqual([`${head}\x1b\\`]);
 		});
 	});
 

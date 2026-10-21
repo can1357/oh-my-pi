@@ -10,6 +10,7 @@ import { CompactionSummaryMessageComponent } from "@oh-my-pi/pi-tui/chat/compact
 import { CustomMessageComponent } from "@oh-my-pi/pi-tui/chat/custom-message";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { LateDiagnosticsMessageComponent } from "@oh-my-pi/pi-tui/chat/late-diagnostics-message";
+import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
 import { stopSharedSpinnerTicker, ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import type { TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
@@ -210,6 +211,44 @@ describe("native transcript", () => {
 				"",
 				`[log]: ${wt}/logs/run.txt`,
 			].join("\n"),
+		});
+		expect(h.errors).toEqual([]);
+	});
+
+	it("keeps submitted skill text visible when the prompt is collapsed", async () => {
+		const component = new SkillMessageComponent({
+			role: "custom",
+			customType: "skill-prompt",
+			content: "Loaded SKILL.md instructions",
+			display: true,
+			attribution: "user",
+			timestamp: 1,
+			details: {
+				name: "grill-with-docs",
+				path: "/tmp/SKILL.md",
+				lineCount: 3,
+				prompt: "/skill:grill-with-docs Organize the project foundation",
+			},
+		});
+		const h = await startWith(h => h.tui.addChild(component));
+		const card = h.find(node => node.p?.role === "omp.skill");
+		expect(card?.p).not.toHaveProperty("collapsible");
+		expect(card?.c?.find(child => child.k === "md")?.p).toMatchObject({
+			text: "Organize the project foundation",
+		});
+		const prompt = h.find(node => node.p?.role === "omp.skill.prompt");
+		expect(prompt?.p).toMatchObject({ collapsible: true, collapsed: true });
+		expect(prompt?.c).toBeUndefined();
+
+		h.event({ ev: "toggle", sf: h.terminal.surface!, id: prompt!.id, collapsed: false });
+		expect(h.byId(prompt!.id)?.p).toMatchObject({ collapsed: false });
+		expect(h.byId(prompt!.id)?.c?.[0]?.p).toMatchObject({ text: "Loaded SKILL.md instructions" });
+
+		h.event({ ev: "toggle", sf: h.terminal.surface!, id: prompt!.id, collapsed: true });
+		expect(h.byId(prompt!.id)?.p).toMatchObject({ collapsed: true });
+		expect(h.byId(prompt!.id)?.c).toBeUndefined();
+		expect(h.byId(card!.id)?.c?.find(child => child.k === "md")?.p).toMatchObject({
+			text: "Organize the project foundation",
 		});
 		expect(h.errors).toEqual([]);
 	});

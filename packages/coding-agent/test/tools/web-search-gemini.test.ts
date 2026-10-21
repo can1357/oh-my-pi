@@ -413,4 +413,15 @@ describe("searchGemini tools serialization", () => {
 			}),
 		).rejects.toThrow("Gemini API returned an empty grounded response");
 	});
+
+	it("does not tag Antigravity search requests with the requestType that draws false 429 quota errors", async () => {
+		const fetchMock = mockGeminiFetch();
+		await searchGemini({
+			...makeParams("antigravity search", getBundledModel("google-antigravity", "gemini-3.8-flash")),
+			fetch: fetchMock,
+		});
+
+		expect(capturedRequest?.body?.userAgent).toBe("antigravity");
+		expect(capturedRequest?.body?.requestType).toBeUndefined();
+	});
 });

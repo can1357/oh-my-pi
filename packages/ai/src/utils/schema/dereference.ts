@@ -9,6 +9,7 @@
  *
  * After dereferencing, `$defs` and `definitions` are stripped from the root.
  */
+import { parseLocalRefPointer } from "@oh-my-pi/omptype";
 import { isJsonObject, type JsonObject } from "./types";
 
 // Only schema-valued keywords may contain references; literal JSON is opaque.
@@ -54,14 +55,13 @@ function dereferenceKeyword(key: string, value: unknown, root: JsonObject, visit
  */
 function resolveLocalRef(ref: string, root: JsonObject): JsonObject | undefined {
 	// Only handle local refs: #/$defs/Name or #/definitions/Name
-	const match = /^#\/(\$defs|definitions)\/(.+)$/.exec(ref);
-	if (!match) return undefined;
-
-	const [, defsKey, name] = match;
-	const defs = root[defsKey!];
+	const pointer = parseLocalRefPointer(ref);
+	if (pointer === undefined || pointer.length !== 2) return undefined;
+	const defsKey = pointer[0];
+	if (defsKey !== "$defs" && defsKey !== "definitions") return undefined;
+	const defs = root[defsKey];
 	if (!isJsonObject(defs)) return undefined;
-
-	const resolved = defs[name!];
+	const resolved = defs[pointer[1]!];
 	return isJsonObject(resolved) ? resolved : undefined;
 }
 

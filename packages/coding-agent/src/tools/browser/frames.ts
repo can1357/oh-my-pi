@@ -11,6 +11,7 @@ import { type AriaSnapshotOptions, buildAriaSnapshotScript } from "./aria/aria-s
 import { clickElement, fillViaHandle, focusTextEntryTarget, pressKey } from "./interactions";
 import { readPageViewport } from "./launch";
 import { RunOutput } from "./run-output";
+import { whileDrawing } from "./screenshot";
 import type { ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
 /** JSON-safe metadata for one document frame. */
@@ -389,7 +390,9 @@ export async function captureFrameScreenshot(
 		).catch(() => undefined);
 		captureScale = (await readPageViewport(frame.page(), signal)).deviceScaleFactor ?? 1;
 		const screenshotOptions: ElementScreenshotOptions = { type: "png", scrollIntoView: false };
-		buffer = (await untilAborted(signal, () => handle.screenshot(screenshotOptions))) as Buffer;
+		buffer = (await whileDrawing(frame.page(), signal, () =>
+			untilAborted(signal, () => handle.screenshot(screenshotOptions)),
+		)) as Buffer;
 	} finally {
 		await handle.dispose().catch(() => undefined);
 	}

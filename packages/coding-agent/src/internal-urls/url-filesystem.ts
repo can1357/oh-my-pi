@@ -467,21 +467,24 @@ export class InternalUrlFilesystem {
 
 	/**
 	 * Host path backing `input` (URL symlinks followed), for `realpath`/`readlink -f`
-	 * to canonicalize natively; undefined for rendered resources. A missing entry
-	 * backs onto its parent's backing path plus its name, so missing-path modes
-	 * work without creating anything.
+	 * to canonicalize natively and for external programs to receive; undefined for
+	 * rendered resources and for URLs no file-backed handler serves (`https://`,
+	 * MCP resources), which alias nothing. A missing entry backs onto its parent's
+	 * backing path plus its name, so missing-path modes work without creating
+	 * anything; one with no backed parent (an unknown skill) is the caller's error.
 	 */
 	async #backingPath(input: string): Promise<string | undefined> {
+		if (isUrlPath(input) && this.#router.getHandler(schemeOf(input))?.spec.backing !== "file") return undefined;
 		let node: FsNode;
 		try {
 			node = await this.#node(input, true, false);
 		} catch (error) {
 			if (this.#errno(error).code !== "ENOENT") throw error;
-			const route = this.#route(input);
-			const target = parseUrlPath(input, route.spec);
-			if (route.spec.backing !== "file" || target.segments.length === 0) return undefined;
+			const target = parseUrlPath(input, this.#route(input).spec);
+			if (target.segments.length === 0) throw error;
 			const parent = await this.#backingPath(formatUrlPath({ ...target, segments: target.segments.slice(0, -1) }));
-			return parent && path.join(parent, decodeSegment(target.segments[target.segments.length - 1]));
+			if (parent === undefined) throw error;
+			return path.join(parent, decodeSegment(target.segments[target.segments.length - 1]));
 		}
 		return node.kind === "virtual" ? undefined : node.path;
 	}

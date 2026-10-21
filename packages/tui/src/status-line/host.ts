@@ -1,6 +1,7 @@
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Tool, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+import type { JobWidgetEntry } from "../tools/job-widget";
 import type { CompactionBoundaries } from "./context-usage";
 import type { StatusLineSettings, StatusResetExpiry } from "./types";
 
@@ -59,6 +60,8 @@ export interface StatusLineSession {
 	getAnthropicSlowModeLabel?(): string | undefined;
 	getPrewalkState?(): unknown;
 	getAsyncJobSnapshot(): { running: readonly { type: string; agentId?: string }[] } | null | undefined;
+	/** Widgets of the running background jobs, in job order; the jobs segment appends the freshest one's glance. */
+	getRunningJobWidgets?(): readonly JobWidgetEntry[];
 	getGoalModeState(): { goal?: { status: string; tokensUsed: number; tokenBudget?: number } } | undefined;
 	getAdvisorStatusOverview?(): { configured: boolean; advisors: readonly { status: string; yielded: boolean }[] };
 	getAdvisorCost?(): number;

@@ -1,11 +1,17 @@
 /**
- * Bytes of a request body as the server reads them: `Content-Encoding: gzip`
- * (applied by the Anthropic transport to large official-API bodies) is undone,
- * any other encoding is returned untouched.
+ * Bytes of a request body as the server reads them: the `gzip`/`zstd`
+ * `Content-Encoding` applied by request compression is undone, any other
+ * encoding is returned untouched.
  */
 export function decodeRequestBodyBytes(bytes: Uint8Array, contentEncoding: string | null): Uint8Array {
-	if (contentEncoding?.trim().toLowerCase() !== "gzip") return bytes;
-	return Bun.gunzipSync(bytes as Uint8Array<ArrayBuffer>);
+	switch (contentEncoding?.trim().toLowerCase()) {
+		case "gzip":
+			return Bun.gunzipSync(bytes as Uint8Array<ArrayBuffer>);
+		case "zstd":
+			return Bun.zstdDecompressSync(bytes);
+		default:
+			return bytes;
+	}
 }
 
 /**

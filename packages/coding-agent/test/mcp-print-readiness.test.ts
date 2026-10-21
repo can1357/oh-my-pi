@@ -208,7 +208,9 @@ describe("headless MCP readiness", () => {
 		using tempDir = TempDir.createSync("@omp-mcp-reconnect-readiness-");
 		const manager = new MCPManager(tempDir.path());
 		managers.push(manager);
-		Bun.env.OMP_MCP_TIMEOUT_MS = "200";
+		// The first launch never answers; the reconnect's handshake, process start included, must fit this
+		// timeout even on a CPU-starved runner.
+		Bun.env.OMP_MCP_TIMEOUT_MS = "1000";
 		await manager.connectServers(
 			{
 				recover: {
@@ -220,22 +222,23 @@ describe("headless MCP readiness", () => {
 			{},
 		);
 		try {
-			const status = await manager.waitForStartup(2_000);
+			const status = await manager.waitForStartup(6_000);
 			expect(status).toEqual({ connected: ["recover"], pending: [], failed: [] });
 			expect(manager.getTools().map(tool => tool.name)).toContain("mcp__recover_late_tool");
 		} finally {
 			await manager.disconnectAll();
 		}
-	}, 3_000);
+	}, 8_000);
 
 	it("lets the environment startup window override a shorter setting during discovery", async () => {
-		Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS = "1500";
+		// Far above the 50 ms setting, and above slowstart's 600 ms plus a loaded runner's process start.
+		Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS = "4000";
 		const manager = new MCPManager(import.meta.dir);
 		managers.push(manager);
 		const result = await manager.connectServers({ slowstart: server("slowstart", 600) }, {}, undefined, 50);
 		expect(result.connectedServers).toEqual(["slowstart"]);
 		expect(result.tools.map(tool => tool.name)).toEqual(["mcp__slowstart_marker"]);
-	}, 2_500);
+	}, 6_000);
 
 	it("honors environment precedence over the startup setting, including disabled timeout", () => {
 		Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS = "0";

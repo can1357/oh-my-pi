@@ -576,7 +576,7 @@ describe("browser run cancellation", () => {
 
 		const run = Promise.race([
 			runtime.run(
-				'try { await wait(60); } catch {} await tab.goto("https://late.example"); display("late display");',
+				'try { await wait(60); } catch {} await tab.goto("https://late.example"); print("late print");',
 				"browser-run-cancellation-test.js",
 				hooks,
 			),

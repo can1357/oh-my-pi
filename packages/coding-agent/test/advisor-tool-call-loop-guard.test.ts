@@ -259,27 +259,40 @@ describe("advisor tool-call loop guard", () => {
 		expect(messages[0]?.role).toBe("user");
 	});
 
-	it("preserves terminal-boundary notes as cards instead of steering a new turn", async () => {
-		const { reviewStarts } = createAdvisor({ "advisor.syncBacklog": "1" }, 0, undefined, 0, "looks fine");
-		if (!session) throw new Error("Expected live session");
+	it.each([
+		{ severity: "nit", settings: {} },
+		{ severity: "concern", settings: { "advisor.continueSeverity": "blocker" } },
+	] as const)(
+		"preserves terminal-boundary notes below advisor.continueSeverity as cards %j",
+		async ({ severity, settings }) => {
+			const { reviewStarts } = createAdvisor(
+				{ "advisor.syncBacklog": "1", ...settings },
+				0,
+				undefined,
+				0,
+				"looks fine",
+				severity,
+			);
+			if (!session) throw new Error("Expected live session");
 
-		await session.prompt("only update");
-		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
-		expect(reviewStarts).toHaveLength(1);
+			await session.prompt("only update");
+			expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+			expect(reviewStarts).toHaveLength(1);
 
-		// The nit delivered while the terminal boundary was open is preserved as
-		// a visible card: it must not steer an advisor-triggered turn against
-		// completed work (stale "keep going" advice causes spurious tool calls).
-		const messages = session.agent.state.messages;
-		const completions = messages.filter(
-			message => message.role === "assistant" && JSON.stringify(message.content).includes("primary complete"),
-		);
-		expect(completions).toHaveLength(1);
-		const cards = messages.filter(
-			message => message.role === "custom" && JSON.stringify(message).includes("looks fine"),
-		);
-		expect(cards).toHaveLength(1);
-	});
+			// A note below the continue threshold delivered while the terminal boundary
+			// was open is preserved as a visible card: it must not steer an
+			// advisor-triggered turn against completed work.
+			const messages = session.agent.state.messages;
+			const completions = messages.filter(
+				message => message.role === "assistant" && JSON.stringify(message.content).includes("primary complete"),
+			);
+			expect(completions).toHaveLength(1);
+			const cards = messages.filter(
+				message => message.role === "custom" && JSON.stringify(message).includes("looks fine"),
+			);
+			expect(cards).toHaveLength(1);
+		},
+	);
 
 	it("lets a terminal blocker steer one continuation that schedules no review of its own", async () => {
 		const { reviewStarts } = createAdvisor(
@@ -382,41 +395,25 @@ describe("advisor tool-call loop guard", () => {
 		expect(merged).toContain("aggregated review from other models");
 	});
 
-	it("steers one continuation turn when an agent-end advisor raises a concern at a terminal boundary", async () => {
-		// An agent-end advisor reviews the complete run at the final boundary.
+	it("steers one continuation turn for a terminal-boundary concern at the default advisor.continueSeverity", async () => {
 		// A concern means a material issue in finished work — it deserves one
 		// steering turn, not a silent preserved card; that continuation schedules
-		// no review of its own. A turn-mode concern at the same boundary preserves
-		// as a card instead (work was reviewed per-turn).
-		createAdvisor(
-			{ "advisor.syncBacklog": "1" },
-			0,
-			{ name: "Final reviewer", reviewMode: "agent-end", reviewInterval: 1 },
-			0,
-			"finished work has a null deref",
-			"concern",
-		);
+		// no review of its own.
+		createAdvisor({ "advisor.syncBacklog": "1" }, 0, undefined, 0, "finished work has a null deref", "concern");
 		if (!session) throw new Error("Expected live session");
 
 		await session.prompt("only update");
 		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
 
-		// The agent-end concern steered exactly one continuation turn.
+		// The concern steered exactly one continuation turn.
 		const completions = session.agent.state.messages.filter(
 			message => message.role === "assistant" && JSON.stringify(message.content).includes("primary complete"),
 		);
 		expect(completions).toHaveLength(2);
 	});
 
-	it("steers one continuation for an agent-end concern that lands after the boundary with catch-up off", async () => {
-		createAdvisor(
-			{ "advisor.syncBacklog": "off" },
-			0,
-			{ name: "Final reviewer", reviewMode: "agent-end" },
-			0,
-			"finished work has a null deref",
-			"concern",
-		);
+	it("steers one continuation for a concern that lands after the boundary with catch-up off", async () => {
+		createAdvisor({ "advisor.syncBacklog": "off" }, 0, undefined, 0, "finished work has a null deref", "concern");
 		if (!session) throw new Error("Expected live session");
 		const live = session;
 		const continuationEnded = Promise.withResolvers<void>();

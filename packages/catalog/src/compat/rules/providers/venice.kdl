@@ -47,4 +47,11 @@ provider "venice" {
 	models "qwen3-235b" {
 		thinking-format "qwen"
 	}
+	// Kimi K2.7 Code's documented recommended output budget; Venice discovery
+	// reports the context-sized `max_completion_tokens` instead.
+	class "kimi" {
+		family "k2.7-code" {
+			max-tokens-ceiling 32768
+		}
+	}
 }

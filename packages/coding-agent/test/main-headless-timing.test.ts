@@ -51,6 +51,7 @@ describe("startup timing after a headless runner starts", () => {
 			subscribe: () => {},
 			addDisposer: () => {},
 			getAllToolNames: () => [],
+			validateRetryFallbackChains: () => {},
 			getLastAssistantMessage: () => undefined,
 			disableStopTimeTodoReminders: () => {},
 			prepareForHeadlessAdvisorDrain: () => {},

@@ -87,6 +87,8 @@ function stripFence(raw: string): string {
 const FLAT_FACT_LIMIT = 5;
 const STRUCTURED_CATEGORY_LIMIT = 5;
 const STRING_CATEGORY_KEYS = ["facts", "instructions", "preferences", "timelines"] as const;
+/** Plain-line output gets the same total as the JSON path's string categories. */
+const PLAIN_LINE_FACT_LIMIT = STRING_CATEGORY_KEYS.length * STRUCTURED_CATEGORY_LIMIT;
 const FACT_TEXT_FIELD_KEYS = ["fact", "text", "content", "value", "statement"] as const;
 const INSTRUCTION_TEXT_FIELD_KEYS = ["instruction", "rule", ...FACT_TEXT_FIELD_KEYS] as const;
 const PREFERENCE_TEXT_FIELD_KEYS = ["preference", ...FACT_TEXT_FIELD_KEYS] as const;
@@ -268,7 +270,7 @@ export function parseExtractedFactCategories(rawOutput: string | null | undefine
 					cleaned.push(normalized);
 				}
 			}
-			if (cleaned.length >= FLAT_FACT_LIMIT) break;
+			if (cleaned.length >= PLAIN_LINE_FACT_LIMIT) break;
 		}
 		return { ...emptyFactCategories(), facts: cleaned };
 	});

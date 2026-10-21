@@ -480,6 +480,8 @@ export interface ToolSession {
 	getLastAssistantText?: () => string | undefined;
 	/** Resolve a terminal yield's current or immediately preceding report, bound to its call ID. */
 	getYieldReportText?: (toolCallId: string) => string | undefined;
+	/** The `i` intent the model wrote on a tool call of the current turn, by call ID. */
+	getToolCallIntent?: (toolCallId: string) => string | undefined;
 	/** Replace the active workpool item contract and refresh its provider-facing prompt. */
 	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => Promise<void>;
 	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */

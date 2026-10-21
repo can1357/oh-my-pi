@@ -68,9 +68,12 @@ impl UInputDevice {
 		Ok(Self { file, created: true })
 	}
 
-	/// Press or release X button 1..=3.
+	/// Press or release X button 1..=3. A release always goes out: a cancel
+	/// stops only the next press.
 	pub(super) fn button(&mut self, button: u8, press: bool) -> CoreResult<()> {
-		control::check()?;
+		if press {
+			control::check()?;
+		}
 		let code = match button {
 			1 => BTN_LEFT,
 			2 => BTN_MIDDLE,
@@ -106,9 +109,12 @@ impl UInputDevice {
 		self.sync()
 	}
 
-	/// Press or release the key at X keycode `keycode`.
+	/// Press or release the key at X keycode `keycode`. A release always goes
+	/// out: a cancel stops only the next press.
 	pub(super) fn key(&mut self, keycode: u8, press: bool) -> CoreResult<()> {
-		control::check()?;
+		if press {
+			control::check()?;
+		}
 		let code = evdev_code(keycode).ok_or_else(|| {
 			DesktopError::input_failed(format!("X keycode {keycode} has no evdev counterpart"))
 		})?;
@@ -261,5 +267,27 @@ fn ioctl_ptr(fd: libc::c_int, request: libc::Ioctl, setup: &UInputSetup) -> Core
 		)))
 	} else {
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::desktop::error::ErrorCode;
+
+	#[test]
+	fn a_cancel_stops_presses_but_never_releases() {
+		let file = OpenOptions::new().write(true).open("/dev/null").unwrap();
+		let mut device = UInputDevice { file, created: false };
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		source.cancel();
+		control::with_token_for_test(&token, || {
+			assert_eq!(device.key(38, true).unwrap_err().code, ErrorCode::Cancelled);
+			assert_eq!(device.button(1, true).unwrap_err().code, ErrorCode::Cancelled);
+			// The chord's last press is out: its releases still go.
+			device.key(38, false).unwrap();
+			device.button(1, false).unwrap();
+		});
 	}
 }

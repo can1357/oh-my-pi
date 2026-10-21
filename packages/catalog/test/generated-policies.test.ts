@@ -663,7 +663,7 @@ describe("generated model policies", () => {
 	});
 
 	it("marks Ollama Cloud generated rows to omit max output tokens", () => {
-		const models: ModelSpec<Api>[] = [
+		const models = [
 			createSpec({
 				id: "deepseek-v4-flash",
 				api: "ollama-chat",
@@ -678,9 +678,7 @@ describe("generated model policies", () => {
 				contextWindow: 1048576,
 				maxTokens: 1048576,
 			}),
-		];
-
-		applyGeneratedModelPolicies(models);
+		].map(model => buildGenerated(model));
 
 		expect(models[0]?.omitMaxOutputTokens).toBe(true);
 		expect(models[1]?.omitMaxOutputTokens).toBeUndefined();
@@ -982,25 +980,27 @@ describe("applyPricingPeerFallback", () => {
 		expect(result[3]?.cost).toEqual(pricedCost);
 	});
 
-	it("prices MiniMax Token Plan rows at pay-as-you-go peers, M3.1 Flash Preview at the M3 rate", () => {
+	it("prices MiniMax Token Plan rows at pay-as-you-go peers", () => {
 		const m3Cost = { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 };
 		const m27Cost = { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 };
+		const flashCost = { input: 0.15, output: 0.6, cacheRead: 0.015, cacheWrite: 0 };
 		const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 		const models: ModelSpec<Api>[] = [
 			createSpec({ id: "MiniMax-M3", api: "anthropic-messages", provider: "minimax", cost: m3Cost }),
 			createSpec({ id: "MiniMax-M2.7", api: "anthropic-messages", provider: "minimax", cost: m27Cost }),
-			createSpec({ id: "MiniMax-M3.1-Flash-Preview", api: "anthropic-messages", provider: "minimax-code" }),
+			createSpec({ id: "MiniMax-M3.1-Flash", api: "anthropic-messages", provider: "minimax", cost: flashCost }),
+			createSpec({ id: "MiniMax-M3.1-Flash", api: "anthropic-messages", provider: "minimax-code" }),
 			createSpec({ id: "MiniMax-M2.7", api: "anthropic-messages", provider: "minimax-code" }),
 			createSpec({ id: "MiniMax-M2.1-lightning", api: "anthropic-messages", provider: "minimax-code" }),
 			// No minimax-cn row: the China plan falls back to the international peer.
-			createSpec({ id: "MiniMax-M3.1-Flash-Preview", api: "anthropic-messages", provider: "minimax-code-cn" }),
+			createSpec({ id: "MiniMax-M3.1-Flash", api: "anthropic-messages", provider: "minimax-code-cn" }),
 		];
 
 		const result = applyPricingPeerFallback(models);
 
-		expect(result[2]?.cost).toEqual(m3Cost);
-		expect(result[3]?.cost).toEqual(m27Cost);
-		expect(result[4]?.cost).toEqual(zeroCost);
-		expect(result[5]?.cost).toEqual(m3Cost);
+		expect(result[3]?.cost).toEqual(flashCost);
+		expect(result[4]?.cost).toEqual(m27Cost);
+		expect(result[5]?.cost).toEqual(zeroCost);
+		expect(result[6]?.cost).toEqual(flashCost);
 	});
 });

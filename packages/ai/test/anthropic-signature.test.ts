@@ -164,3 +164,93 @@ describe("anthropic stream served-model recovery", () => {
 		expect(message.upstreamModel).toBe("claude-opus-5");
 	});
 });
+
+function varint(value: number): number[] {
+	const bytes: number[] = [];
+	while (value > 0x7f) {
+		bytes.push((value & 0x7f) | 0x80);
+		value >>>= 7;
+	}
+	bytes.push(value);
+	return bytes;
+}
+
+/**
+ * A v4 signature (`CAQS…`) with header kind `kind`, shaped like the ones
+ * api.anthropic.com returned for claude-opus-5-5: `{1: 18, 3: 2, 7: 1, 8: kind}`,
+ * followed by `ciphertextBytes` of opaque payload.
+ */
+function v4Signature(kind: string, ciphertextBytes = 4): string {
+	const kindBytes = Buffer.from(kind);
+	const header = [0x08, 0x12, 0x18, 0x02, 0x38, 0x01, 0x42, kindBytes.length, ...kindBytes];
+	const envelope = [
+		0x0a,
+		header.length,
+		...header,
+		0x12,
+		...varint(ciphertextBytes),
+		...new Array<number>(ciphertextBytes).fill(0xab),
+	];
+	return Buffer.from([0x08, 0x04, 0x12, ...varint(envelope.length), ...envelope]).toString("base64");
+}
+
+describe("anthropic stream narration", () => {
+	it("marks only the thinking block whose signature names it narration", async () => {
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+			() =>
+				createMockRequest([
+					{
+						type: "message_start",
+						message: { id: "msg_x", model: "claude-sonnet-5", usage: { input_tokens: 10, output_tokens: 0 } },
+					},
+					{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+					{ type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "Check the log." } },
+					{
+						type: "content_block_delta",
+						index: 0,
+						delta: { type: "signature_delta", signature: v4Signature("thinking") },
+					},
+					{ type: "content_block_stop", index: 0 },
+					{ type: "content_block_start", index: 1, content_block: { type: "thinking", thinking: "" } },
+					{
+						type: "content_block_delta",
+						index: 1,
+						delta: { type: "thinking_delta", thinking: "The build is running." },
+					},
+					{
+						// A long reply's signature: past 13k characters on the wire.
+						type: "content_block_delta",
+						index: 1,
+						delta: { type: "signature_delta", signature: v4Signature("narration", 10_000) },
+					},
+					{ type: "content_block_stop", index: 1 },
+					{
+						type: "content_block_start",
+						index: 2,
+						content_block: { type: "tool_use", id: "toolu_1", name: "wait", input: {} },
+					},
+					{ type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: "{}" } },
+					{ type: "content_block_stop", index: 2 },
+					{ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 4 } },
+					{ type: "message_stop" },
+				]) as never,
+		);
+
+		const s = streamAnthropic(sonnetModel, context, { apiKey: "sk-ant-test" });
+		for await (const _ of s) {
+			// drain
+		}
+		const message = await s.result();
+
+		const [reasoning, narration] = message.content;
+		expect(reasoning).toMatchObject({ type: "thinking", thinking: "Check the log." });
+		expect(reasoning).not.toHaveProperty("narration");
+		// Stays a signed thinking block so replay sends it back unchanged.
+		expect(narration).toMatchObject({
+			type: "thinking",
+			thinking: "The build is running.",
+			thinkingSignature: v4Signature("narration", 10_000),
+			narration: true,
+		});
+	});
+});

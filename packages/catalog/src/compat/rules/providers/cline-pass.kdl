@@ -10,4 +10,20 @@ provider "cline-pass" {
 	wire-model-id-mode "cline-pass"
 	// Replaces the Cline Pass thinking-format branch.
 	thinking-format "openai"
+	// Replaces the Cline Pass completions baseline branches: the reasoning
+	// field, the disable shape, and reasoning kept on under tool choice.
+	reasoning-content-field "reasoning"
+	reasoning-disable-mode "cline-enabled-false"
+	disable-reasoning-on-forced-tool-choice #false
+	disable-reasoning-on-tool-choice #false
+	// Discovery reports each row's thinking ladder; a row without one
+	// (`supportsReasoningEffort: false`) has no reasoning control at all.
+	trust-explicit-thinking-only #true
+	class "qwen" {
+		supports-forced-tool-choice #false
+		cache-control-format "anthropic"
+	}
+	class "anthropic" {
+		cache-control-format "anthropic"
+	}
 }

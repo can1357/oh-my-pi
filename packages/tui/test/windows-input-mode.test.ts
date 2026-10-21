@@ -218,6 +218,35 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		expect(matchesKey(recorder.received[2]!, "shift+enter")).toBe(true);
 	});
 
+	it("keeps relayed terminal replies out of the WSL composer while decoding keys", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;0c");
+
+		const reply = [..."\x1b[?1;0c"].map(char => `\x1b[0;0;${char.charCodeAt(0)};1;0;1_`);
+		await harness.feed(...reply, "\x1b[65;30;97;1;0;1_", "\x1b[8;14;8;1;0;1_", "\x1b[67;46;3;1;8;1_");
+
+		expect(recorder.received).toEqual(["a", "\x7f", "\x03"]);
+	});
+
+	it("delivers a key record that interrupts a partial direct terminal reply", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;0c");
+
+		// The OSC 11 reply stalls past the flush window, so its head is buffered as a fragment.
+		await harness.feed("\x1b]11;rgb:1111/2222");
+		await harness.feed("\x1b[65;30;97;1;0;1_", "\x1b[66;48;98;1;0;1_");
+
+		expect(recorder.received).toEqual(["a", "b"]);
+	});
+
 	it("prefers a late kitty reply and turns win32-input-mode back off", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
 		await harness.settle();

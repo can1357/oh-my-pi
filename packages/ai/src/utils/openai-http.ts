@@ -98,24 +98,31 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
-	const response = await fetchWithRetry(init.url, {
-		method: "POST",
-		headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...init.headers },
-		body: JSON.stringify(init.body),
-		signal: init.signal,
-		fetch: init.fetch,
-		maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
-		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
-		// surfaces immediately instead of being slept-and-retried here; session
-		// recovery owns its backoff/fallback (issue #8854).
-		shouldRetryResponse: async (response, bodyText) =>
-			!isConcurrencyAdmissionRejection(response, bodyText) &&
-			(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
-		// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
-		// Cold large-context streams legitimately exceed it; the caller's
-		// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.
-		timeout: false,
-	});
+	let response: Response;
+	try {
+		response = await fetchWithRetry(init.url, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...init.headers },
+			body: JSON.stringify(init.body),
+			signal: init.signal,
+			fetch: init.fetch,
+			maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+			// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
+			// surfaces immediately instead of being slept-and-retried here; session
+			// recovery owns its backoff/fallback (issue #8854).
+			shouldRetryResponse: async (response, bodyText) =>
+				!isConcurrencyAdmissionRejection(response, bodyText) &&
+				(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
+			// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
+			// Cold large-context streams legitimately exceed it; the caller's
+			// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.
+			timeout: false,
+		});
+	} catch (error) {
+		// Transport rejection after the retry budget: name the host and the cause
+		// instead of surfacing the runtime's bare `getaddrinfo …` text.
+		throw AIError.networkFailureError(error, init.url);
+	}
 	if (!response.ok) {
 		throw await captureOpenAIHttpError(response);
 	}

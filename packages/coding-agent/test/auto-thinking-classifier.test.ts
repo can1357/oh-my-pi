@@ -290,6 +290,13 @@ describe("auto thinking classifier helpers", () => {
 		});
 	});
 
+	it("rejects judge answers the target model does not support", async () => {
+		const model = buildLadderModel("mock-medium-high", [Effort.Medium, Effort.High]);
+		const fixture = createOnlineFixture(model, "low");
+
+		await expect(classifyDifficulty({ request: "choose a retry policy" }, fixture.deps)).rejects.toThrow();
+	});
+
 	it("resolves max only when opted in, and rejects it as off-ladder otherwise", async () => {
 		const optedIn = createOnlineFixture(buildLadderModel("mock-max", MAX_LADDER), "max", "max");
 		expect(await classifyDifficulty({ request: "untangle this cross-service race" }, optedIn.deps)).toBe(Effort.Max);
@@ -310,6 +317,17 @@ describe("auto thinking classifier helpers", () => {
 		expect(await classifyDifficulty({ request: "cut over the storage layer" }, fixture.deps)).toBe(Effort.Max);
 	});
 
+	it("keeps the judge prompt free of tiers the sparse ladder does not offer", async () => {
+		// Without `xhigh` on the ladder, `max` must still be decidable from its own rubric.
+		const fixture = createOnlineFixture(
+			buildLadderModel("mock-low-high-max", [Effort.Low, Effort.High, Effort.Max]),
+			"max",
+			"max",
+		);
+		expect(await classifyDifficulty({ request: "cut over the storage layer" }, fixture.deps)).toBe(Effort.Max);
+		expect(JSON.stringify(fixture.completeSimpleMock.mock.calls[0]?.[1])).not.toContain("xhigh");
+	});
+
 	it("takes the first label when the classifier echoes several", async () => {
 		// `earliest()` is deliberately conservative: an echoed list resolves to the
 		// lowest-positioned label rather than the model's final word.
@@ -322,11 +340,13 @@ describe("auto thinking classifier helpers", () => {
 	});
 
 	it("resolves no level on a max-only ladder without opt-in", async () => {
-		// `["max"]` has nothing at or below the default ceiling, so the model clamp
-		// must not snap the request back up — auto yields nothing and the session
-		// keeps its current level.
+		// `["max"]` has nothing at or below the default ceiling, so auto yields
+		// nothing without consulting the judge (or needing its credential) and the
+		// session keeps its current level.
 		const defaulted = createOnlineFixture(buildLadderModel("mock-max-only", [Effort.Max]), "xhigh");
-		expect(await classifyDifficulty({ request: "cut over the storage layer" }, defaulted.deps)).toBeUndefined();
+		const keyless = { ...defaulted.deps, registry: createRegistry([defaulted.classifierModel]) };
+		expect(await classifyDifficulty({ request: "cut over the storage layer" }, keyless)).toBeUndefined();
+		expect(defaulted.completeSimpleMock).not.toHaveBeenCalled();
 
 		vi.restoreAllMocks();
 
@@ -338,9 +358,22 @@ describe("auto thinking classifier helpers", () => {
 		expect(resolveProvisionalAutoLevel(buildLadderModel("mock-max-only", [Effort.Max]))).toBeUndefined();
 	});
 
-	it("stops at the highest tier under the ceiling on a sparse ladder", async () => {
-		const fixture = createOnlineFixture(buildLadderModel("mock-hm", [Effort.High, Effort.Max]), "xhigh");
-		expect(await classifyDifficulty({ request: "cut over the storage layer" }, fixture.deps)).toBe(Effort.High);
+	it("resolves the only tier under the ceiling without a judge credential or request", async () => {
+		const fixture = createOnlineFixture(buildLadderModel("mock-hm", [Effort.High, Effort.Max]), "low");
+		const keyless = { ...fixture.deps, registry: createRegistry([fixture.classifierModel]) };
+
+		expect(await classifyDifficulty({ request: "cut over the storage layer" }, keyless)).toBe(Effort.High);
+		expect(fixture.completeSimpleMock).not.toHaveBeenCalled();
+	});
+
+	it("resolves a below-low ladder to its own tier without a judge credential or request", async () => {
+		// The ladder question never offers `minimal`, yet auto must still land on the
+		// model's only tier rather than leave a previous model's level in place.
+		const fixture = createOnlineFixture(buildLadderModel("mock-minimal-only", [Effort.Minimal]), "low");
+		const keyless = { ...fixture.deps, registry: createRegistry([fixture.classifierModel]) };
+
+		expect(await classifyDifficulty({ request: "rename a helper" }, keyless)).toBe(Effort.Minimal);
+		expect(fixture.completeSimpleMock).not.toHaveBeenCalled();
 	});
 
 	it("keeps the provisional auto level below max even when the model defaults to it", () => {

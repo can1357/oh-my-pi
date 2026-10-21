@@ -38,4 +38,19 @@ provider "firepass" {
 		thinking-mode "effort"
 		thinking-efforts "low" "high" "max"
 	}
+	// The Fire Pass router shares Fireworks' 32,768 Kimi K2 output cap (#1849).
+	class "kimi" {
+		family "k2" {
+			max-tokens-ceiling 32768
+		}
+		family "k2.5" {
+			max-tokens-ceiling 32768
+		}
+		family "k2.6" {
+			max-tokens-ceiling 32768
+		}
+		family "k2-thinking" {
+			max-tokens-ceiling 32768
+		}
+	}
 }

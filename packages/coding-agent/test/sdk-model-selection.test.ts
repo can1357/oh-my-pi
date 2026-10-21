@@ -12,7 +12,11 @@ import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { buildSessionOptions as buildCliSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
+import {
+	buildSessionOptions as buildCliSessionOptions,
+	rebuildScopedModels,
+	resolveScopedModels,
+} from "@oh-my-pi/pi-coding-agent/main";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -2414,6 +2418,77 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			exitSpy.mockRestore();
 		}
 	});
+
+	test("adds extension models named by enabledModels to the session scope without waiting for background discovery (issue #6694)", async () => {
+		const configuredModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!configuredModel) {
+			throw new Error("Expected bundled anthropic configured model");
+		}
+		const configuredSelector = `${configuredModel.provider}/${configuredModel.id}`;
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime(configuredModel.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "scope-extension-models.yml"));
+		const settings = Settings.isolated({ enabledModels: ["runtime-provider/*", configuredSelector] });
+		const parsed = parseArgs([]);
+		const scopeIds = (scope: ReadonlyArray<{ model: { provider: string; id: string } }> | undefined) =>
+			scope?.map(scoped => `${scoped.model.provider}/${scoped.model.id}`);
+
+		// main.ts snapshots the scope before extensions register their providers.
+		const scopedModels = await resolveScopedModels(parsed, modelRegistry, settings);
+		expect(scopeIds(scopedModels)).toEqual([configuredSelector]);
+
+		const cliOptions = await buildCliSessionOptions(
+			parsed,
+			scopedModels,
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+		const { session } = await createAgentSession({
+			...cliOptions,
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			disableExtensionDiscovery: true,
+			extensions: [providerExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+
+		try {
+			// The provider is registered now, but the scoped /models list and the
+			// Ctrl+P cycle still hold the startup snapshot.
+			expect(scopeIds(session.scopedModels)).toEqual([configuredSelector]);
+
+			// A slow catalog refresh is still in flight; the extension models must
+			// not wait for it.
+			vi.spyOn(modelRegistry, "awaitBackgroundRefresh").mockReturnValue(Promise.withResolvers<void>().promise);
+			const rebuilt = await rebuildScopedModels(session, parsed, modelRegistry, settings);
+
+			const expected = [
+				"runtime-provider/runtime-model",
+				"runtime-provider/runtime-fallback-model",
+				configuredSelector,
+			];
+			expect(scopeIds(session.scopedModels)).toEqual(expected);
+			// main.ts announces the startup scope from the returned list.
+			expect(scopeIds(rebuilt)).toEqual(expected);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("pins the first CLI --models scoped model even when the saved default role is out of scope", async () => {
 		const scopedTarget = getBundledModel("openai", "gpt-4o-mini");
 		const savedDefault = getBundledModel("anthropic", "claude-sonnet-4-5");

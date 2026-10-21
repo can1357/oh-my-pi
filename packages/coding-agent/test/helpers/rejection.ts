@@ -16,3 +16,22 @@ export async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
 	}
 	throw new Error("Expected promise to reject, but it resolved");
 }
+
+/**
+ * Record `unhandledRejection` events until `release()`. `capture()` reads the
+ * events seen so far; `release()` detaches the listener and returns them.
+ */
+export function trackUnhandled(): { release: () => unknown[]; capture: () => unknown[] } {
+	const seen: unknown[] = [];
+	const listener = (reason: unknown) => {
+		seen.push(reason);
+	};
+	process.on("unhandledRejection", listener);
+	return {
+		release: () => {
+			process.off("unhandledRejection", listener);
+			return seen.slice();
+		},
+		capture: () => seen.slice(),
+	};
+}

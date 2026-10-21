@@ -321,6 +321,47 @@ describe("dialogs under a native surface", () => {
 		}
 	});
 
+	it("approval: grants sit above Approve Once, the toggle keeps them across sessions, Enter or a Tern click takes one", () => {
+		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+		try {
+			const callbacks = { onApprove: vi.fn(), onDeny: vi.fn() };
+			const onGrant = vi.fn();
+			const folder = { label: "Approve Directory: ~/src", alwaysLabel: "Always Approve Directory: ~/src" };
+			const file = { label: "Approve File", alwaysLabel: "Always Approve File" };
+			const dialog = new ApprovalDialogComponent("Allow tool: write\nPath: a.ts", callbacks, {
+				grants: [folder, file],
+				onGrant,
+			});
+			const rows = () =>
+				stripVTControlCharacters(dialog.render(80).join("\n"))
+					.split("\n")
+					.filter(line => /Approve|Deny|Remember/.test(line))
+					.map(line => line.replace(/[│❯>\s]+/g, " ").trim());
+			expect(rows().slice(1)).toEqual(["Approve Directory: ~/src", "Approve File", "Approve Once", "Deny"]);
+			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
+			// Approve Once is highlighted on mount: the least the call can be granted.
+			for (let step = 0; step < 3; step++) dialog.handleInput(UP);
+			dialog.handleInput(ENTER);
+			expect(rows().slice(1, 3)).toEqual(["Always Approve Directory: ~/src", "Always Approve File"]);
+			dialog.handleInput(DOWN);
+			dialog.handleInput(DOWN);
+			dialog.handleInput(ENTER);
+			expect(onGrant).toHaveBeenCalledWith(file, true);
+			expect(callbacks.onApprove).not.toHaveBeenCalled();
+
+			const clicked = vi.fn();
+			const pointed = new ApprovalDialogComponent("Allow tool: write\nPath: a.ts", callbacks, {
+				grants: [folder, file],
+				onGrant: clicked,
+			});
+			const list = find(pointed.describe(), node => node.p?.role === "omp.approval.choices")!;
+			pointed.handleNativeEvent({ type: "select", key: list.path, item: "grant0" });
+			expect(clicked).toHaveBeenCalledWith(folder, false);
+		} finally {
+			now.mockRestore();
+		}
+	});
+
 	it("approval: while a draft holds Enter, the highlight sits on Deny, relabeled to say Enter sends, and returns once cleared", () => {
 		let draft = "";
 		const dialog = new ApprovalDialogComponent(

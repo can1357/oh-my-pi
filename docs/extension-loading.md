@@ -284,6 +284,8 @@ Each candidate path is loaded via `loadLegacyPiModule()` (`src/extensibility/plu
 - factory is selected by `getExtensionFactory(module)`: the module itself if it is a function, otherwise `module.default`
 - factory must be a function (`ExtensionFactory`) and may return `void` or a promise; loading awaits it before continuing to the next path
 
+Custom tools (`docs/custom-tools.md`) load through the same function with `reload: false`: the entry and its relative imports are imported without the `?mtime` tag, so each is evaluated once per process and shared between tools and sessions, while host-package rewriting still applies.
+
 If export is not a function, that path fails with a structured error and loading continues.
 
 ---

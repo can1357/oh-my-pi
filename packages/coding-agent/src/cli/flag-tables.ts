@@ -239,13 +239,15 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.skills = value.split(",").map(s => s.trim());
 	},
 	"--approval-mode": (result, value) => {
-		if (value !== "always-ask" && value !== "write" && value !== "yolo") {
+		// The values mirror `ApprovalMode` in ../tools/approval, which this module
+		// may only import as a type: that module reaches pi-utils at runtime.
+		if (value === "always-ask" || value === "always-ask-cached" || value === "write" || value === "yolo") {
+			result.approvalMode = value;
+		} else {
 			result.invalidFlagValues.push(
-				`Invalid --approval-mode value: ${JSON.stringify(value)}. Expected one of: always-ask, write, yolo.`,
+				`Invalid --approval-mode value: ${JSON.stringify(value)}. Expected one of: always-ask, always-ask-cached, write, yolo.`,
 			);
-			return;
 		}
-		result.approvalMode = value;
 	},
 };
 
@@ -397,11 +399,11 @@ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
 
 /**
  * Rewrite the launch argv for a relaunch of this session (`/restart`, and
- * `/fork pane|window` with `resumeSessionId` undefined).
+ * `/fork pane|window` with `resumeSessionSource` undefined).
  *
  * Keeps every configuration flag as launched, but drops:
  * - one-shot selectors ({@link ONE_SHOT_LAUNCH_FLAGS}, including inline
- *   `--resume=<id>` forms) — the relaunch resumes `resumeSessionId` instead;
+ *   `--resume=<source>` forms) - the relaunch resumes `resumeSessionSource` instead;
  * - flags in `drop`, which the caller re-supplies with current values;
  * - positionals (prompt messages, `@file` args, subcommand tokens) — their
  *   effect is already in the resumed transcript, so replaying them would
@@ -409,12 +411,12 @@ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
  *
  * Value consumption mirrors {@link flagConsumesValue}, so a dropped flag takes
  * its value token with it and an unknown extension flag keeps its value.
- * `resumeSessionId` is omitted for a session that never materialized on disk;
- * the relaunch then starts fresh with the same configuration.
+ * `resumeSessionSource` is a session ID or file path, omitted for a session that
+ * never materialized on disk; the relaunch then starts fresh with the same configuration.
  */
 export function restartArgv(
 	argv: string[],
-	resumeSessionId: string | undefined,
+	resumeSessionSource: string | undefined,
 	drop?: Readonly<Record<string, true>>,
 ): string[] {
 	const kept: string[] = [];
@@ -431,6 +433,6 @@ export function restartArgv(
 		kept.push(arg);
 		if (consumesNext) kept.push(argv[++i]);
 	}
-	if (resumeSessionId !== undefined) kept.push("--resume", resumeSessionId);
+	if (resumeSessionSource !== undefined) kept.push("--resume", resumeSessionSource);
 	return kept;
 }

@@ -1,36 +1,89 @@
+use std::time::{Duration, Instant};
+
 use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFString, CFType};
 
 use super::{
-	MacAx, copy_attribute, copy_attribute_result, copy_bool, copy_element, copy_required_string,
-	copy_string, copy_strings_from_action_names, create_application, element_pid, focused_window_id,
-	mac_handle, perform_action, set_timeout, skylight, window_id,
+	super::input::{
+		EntryFront, attached_under, await_key_window, make_key_in_background, recheck_background,
+		source,
+	},
+	FocusedWindow, KeyFocus, MacAx, copy_attribute, copy_attribute_result, copy_bool, copy_element,
+	copy_required_string, copy_string, copy_strings_from_action_names, create_application,
+	element_pid, key_focus, mac_handle, perform_action, reports_active, set_timeout, skylight,
+	window_id,
 };
 use crate::desktop::{
 	control,
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	menus::{DesktopMenuItem, match_index, require_command, require_enabled, validate_path},
 	types::DesktopWindow,
 };
 
 const MAX_MENU_CHILDREN: usize = 4096;
+/// How long a menu read or command waits for its application to revalidate
+/// its menus. `AppKit` does that on its own schedule after an activation or an
+/// edit: Font Book's File > New Collection read enabled 0.4 to 1.2 s after the
+/// activation on a loaded test machine, whatever input followed it.
+const MENU_SETTLE_TIMEOUT: Duration = Duration::from_millis(1500);
+const MENU_SETTLE_POLL: Duration = Duration::from_millis(100);
 
 pub(crate) fn items(window: &DesktopWindow, path: &[String]) -> CoreResult<Vec<DesktopMenuItem>> {
 	validate_path(path, true)?;
-	let (app, pid, _) = window_menu_context(window)?;
-	let (menu, actual_path) = resolve_menu(&app, path, pid)?;
-	let (_, items) = children(&menu, &actual_path, pid)?;
-	Ok(items)
+	with_window_menu(window, MenuAccess::Read, |app, pid, _, activated| {
+		let (menu, actual_path) = resolve_menu(app, path, pid)?;
+		let read = || children(&menu, &actual_path, pid).map(|(_, items)| items);
+		let first = read()?;
+		if !may_be_stale(activated, &first) {
+			return Ok(first);
+		}
+		// The listing still shows the inactive state until the app revalidates.
+		let enabled =
+			|items: &[DesktopMenuItem]| items.iter().map(|item| item.enabled).collect::<Vec<_>>();
+		settle(
+			first,
+			MENU_SETTLE_TIMEOUT,
+			read,
+			|first, now| enabled(first) != enabled(now),
+			|| control::wait(MENU_SETTLE_POLL),
+		)
+	})
+}
+
+/// Whether a menu listing read right after this call activated the
+/// application (`activated`) may still show the inactive state: an inactive
+/// application's menus show commands disabled that it enables once it
+/// revalidates, so a listing without a disabled item has nothing to catch up.
+fn may_be_stale(activated: bool, items: &[DesktopMenuItem]) -> bool {
+	activated && items.iter().any(|item| !item.enabled)
 }
 
 pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> {
 	validate_path(path, false)?;
-	with_window_menu(window, |app, pid, wid| {
+	with_window_menu(window, MenuAccess::Dispatch, |app, pid, context_holds, _| {
 		let (menu, actual_path) = resolve_menu(app, &path[..path.len() - 1], pid)?;
 		let (elements, items) = children(&menu, &actual_path, pid)?;
 		let index = match_index(&items, &path[path.len() - 1])?;
-		require_command(&items[index])?;
 		let element = &elements[index];
+		let reread = || {
+			describe(element, &actual_path, pid)?.ok_or_else(|| {
+				DesktopError::ax_failed("menu command lost its title; nothing was dispatched")
+			})
+		};
+		// A disabled command may be stale rather than unavailable, as TextEdit's
+		// File > Save right after background typing was.
+		let item = if items[index].enabled {
+			items[index].clone()
+		} else {
+			settle(
+				items[index].clone(),
+				MENU_SETTLE_TIMEOUT,
+				reread,
+				|_, now| now.enabled,
+				|| control::wait(MENU_SETTLE_POLL),
+			)?
+		};
+		require_command(&item)?;
 		let actions = copy_strings_from_action_names(element)?;
 		if !actions.iter().any(|action| action == "AXPress") {
 			return Err(DesktopError::ax_failed(
@@ -39,12 +92,9 @@ pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> 
 		}
 		// Re-read the chosen command after all path/provider queries. A menu may
 		// validate itself in response to a key-window change.
-		let item = describe(element, &actual_path, pid)?.ok_or_else(|| {
-			DesktopError::ax_failed("menu command lost its title; nothing was dispatched")
-		})?;
+		let item = reread()?;
 		require_command(&item)?;
-		require_key_context(pid, wid)?;
-		control::check()?;
+		ready_to_dispatch(context_holds)?;
 		perform_action(element, "AXPress").map_err(|error| {
 			DesktopError::ax_failed(format!(
 				"{error}; the menu command may already have taken effect; inspect the target before \
@@ -52,6 +102,39 @@ pub(crate) fn select(window: &DesktopWindow, path: &[String]) -> CoreResult<()> 
 			))
 		})
 	})
+}
+
+/// Before a menu command is pressed: its context still holds, the call is not
+/// cancelled, and the user has not pressed a key or clicked in the app since
+/// the call was admitted ([`control::intervention::check_press`]), since the
+/// command can wait seconds for its menu to revalidate.
+fn ready_to_dispatch(context_holds: &dyn Fn() -> CoreResult<()>) -> CoreResult<()> {
+	context_holds()?;
+	control::check()?;
+	control::intervention::check_press()
+}
+
+/// Reads again through `read`, waiting through `wait` before each read, until
+/// `settled` accepts a value against `first` or `timeout` passes; returns the
+/// accepted or the last value read.
+fn settle<T>(
+	first: T,
+	timeout: Duration,
+	mut read: impl FnMut() -> CoreResult<T>,
+	settled: impl Fn(&T, &T) -> bool,
+	mut wait: impl FnMut() -> CoreResult<()>,
+) -> CoreResult<T> {
+	let deadline = Instant::now() + timeout;
+	let mut last = None;
+	while Instant::now() < deadline {
+		wait()?;
+		let now = read()?;
+		if settled(&first, &now) {
+			return Ok(now);
+		}
+		last = Some(now);
+	}
+	Ok(last.unwrap_or(first))
 }
 
 fn window_menu_context(
@@ -76,25 +159,110 @@ fn window_menu_context(
 	Ok((app, pid, wid))
 }
 
+/// What a menu call needs from the window's menu context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuAccess {
+	/// Lists items. An application that does not consider itself active
+	/// validates its menus without a key window, so commands acting on the
+	/// window's content read as disabled; the read prepares the same context
+	/// a command gets, and reads anyway when that context is refused.
+	Read,
+	/// Presses a command, which dispatches through the key window.
+	Dispatch,
+}
+
+/// Runs `prepare`, which makes the window key within its application; a read
+/// still goes ahead, with `prepare`'s default answer, when it is refused as
+/// unavailable in the background.
+fn enter_menu_context<T: Default>(
+	access: MenuAccess,
+	prepare: impl FnOnce() -> CoreResult<T>,
+) -> CoreResult<T> {
+	match prepare() {
+		Err(error)
+			if access == MenuAccess::Read && error.code == ErrorCode::BackgroundUnavailable =>
+		{
+			Ok(T::default())
+		},
+		result => result,
+	}
+}
+
+/// Runs `action` in the window's menu context. Its third argument checks that
+/// the context still holds: the window is still key and, when it was made key
+/// behind the user's app, the application is still behind it, since a command
+/// can wait seconds for its menu to revalidate while the user brings the app
+/// forward. Its last argument says whether the application reported itself
+/// inactive before this call activated it, so its menus may still show the
+/// inactive state.
 fn with_window_menu<T>(
 	window: &DesktopWindow,
-	action: impl FnOnce(&AXUIElement, libc::pid_t, u32) -> CoreResult<T>,
+	access: MenuAccess,
+	action: impl FnOnce(&AXUIElement, libc::pid_t, &dyn Fn() -> CoreResult<()>, bool) -> CoreResult<T>,
 ) -> CoreResult<T> {
-	let (app, pid, wid) = window_menu_context(window)?;
-	// Application menus dispatch through the key window, not their AX parent.
-	// Focus records change only this app's key context, never activate it or
-	// switch Spaces; the existing guards restore the user's keyboard context.
-	skylight::with_background_guard(pid, || {
-		skylight::with_focus_without_raise(pid, wid, || {
-			require_key_context(pid, wid)?;
-			action(&app, pid, wid)
-		})
+	let (entry_front, (app, pid, wid, activated)) = EntryFront::before(skylight::front_pid, || {
+		let (app, pid, wid) = window_menu_context(window)?;
+		Ok((app, pid, wid, reports_active(pid) == Some(false)))
+	})?;
+	// Application menus validate and dispatch through the key window, not their
+	// AX parent.
+	skylight::with_background_watch(pid, |visit| {
+		let overlay = access == MenuAccess::Read
+			&& read_leaves_focus(key_focus(pid), wid, skylight::window_parent);
+		let prepared = enter_menu_context(access, || {
+			let prepared =
+				make_key_in_background(&source()?, pid, wid, window, entry_front, overlay, visit)?;
+			// The user may have brought the app forward while its key window
+			// settled.
+			recheck_background(
+				prepared,
+				pid,
+				wid,
+				skylight::front_pid,
+				|| visit.happened(),
+				|| key_context(pid, wid, overlay),
+			)?;
+			Ok(prepared)
+		})?;
+		let context_holds = || {
+			recheck_background(
+				prepared,
+				pid,
+				wid,
+				skylight::front_pid,
+				|| visit.happened(),
+				|| key_context(pid, wid, overlay),
+			)
+		};
+		action(&app, pid, &context_holds, activated)
 	})
+}
+
+/// Whether a menu read of window `wid` leaves the keyboard focus where it is
+/// (`focus`): in an overlay attached to `wid`, such as a popover, an inline
+/// editor, or a sheet like Finder's Go to Folder that is itself the focused
+/// window. The press that makes `wid` key would close a popover or end the
+/// editing; the menus then validate against the overlay, as the user's own
+/// menu bar would show them.
+fn read_leaves_focus(focus: KeyFocus, wid: u32, parent_of: impl Fn(u32) -> Option<u32>) -> bool {
+	focus.in_overlay_of(wid, &parent_of)
+		|| matches!(focus.window, FocusedWindow::Id(id)
+			if id != wid && attached_under(id, &parent_of, |parent| parent == wid))
+}
+
+/// The key-window context a menu call needs: `wid` key, or, for a read that
+/// left focus in an overlay attached to it ([`read_leaves_focus`]), nothing
+/// more.
+fn key_context(pid: libc::pid_t, wid: u32, overlay: bool) -> CoreResult<()> {
+	if overlay {
+		return control::check();
+	}
+	require_key_context(pid, wid)
 }
 
 fn require_key_context(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
 	control::check()?;
-	if focused_window_id(pid) != Some(wid) {
+	if !await_key_window(pid, wid)? {
 		return Err(DesktopError::background_unavailable(format!(
 			"menu dispatch requires window {wid} to be the exact key window of process {pid}; macOS \
 			 did not establish that context, so no command was dispatched"
@@ -151,7 +319,7 @@ fn children(
 	Ok((elements, items))
 }
 
-fn bounded_children(
+pub(super) fn bounded_children(
 	element: &AXUIElement,
 	optional: bool,
 ) -> CoreResult<Vec<CFRetained<AXUIElement>>> {
@@ -271,11 +439,118 @@ fn shortcut(element: &AXUIElement) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-	use objc2_application_services::AXError;
-	use objc2_core_foundation::{CFNumber, CFRetained, CFString, CFType};
+	use std::cell::Cell;
 
-	use super::title;
-	use crate::desktop::error::ErrorCode;
+	use super::*;
+
+	#[test]
+	fn a_menu_read_leaves_a_focused_attached_sheet_alone() {
+		// Finder's Go to Folder sheet 41740 on window 41732 is the focused
+		// window: the press that makes 41732 key would end its editing.
+		let attached = |id| (id == 41740).then_some(41732);
+		let sheet = KeyFocus {
+			window:         FocusedWindow::Id(41740),
+			element_window: Some(41740),
+			element_mapped: true,
+		};
+		assert!(read_leaves_focus(sheet, 41732, attached));
+		// The window itself or an unrelated window focused: the read makes 41732
+		// key as before.
+		let own = KeyFocus { window: FocusedWindow::Id(41732), element_window: Some(41732), ..sheet };
+		assert!(!read_leaves_focus(own, 41732, attached));
+		let other = KeyFocus { window: FocusedWindow::Id(5), element_window: Some(5), ..sheet };
+		assert!(!read_leaves_focus(other, 41732, attached));
+	}
+
+	#[test]
+	fn a_menu_read_waits_for_revalidation_only_while_an_item_shows_disabled() {
+		let item = |enabled| DesktopMenuItem {
+			title: "New Collection".into(),
+			path: vec!["File".into(), "New Collection".into()],
+			enabled,
+			checked: false,
+			has_submenu: false,
+			shortcut: None,
+		};
+		// Every command already enabled: nothing to wait for.
+		assert!(!may_be_stale(true, &[item(true), item(true)]));
+		// Font Book's New Collection read disabled right after the activation.
+		assert!(may_be_stale(true, &[item(true), item(false)]));
+		// An application that was already active shows its real state.
+		assert!(!may_be_stale(false, &[item(false)]));
+	}
+
+	#[test]
+	fn a_menu_read_prepares_the_key_window_and_reads_even_when_that_is_refused() {
+		// Font Book's File > New Collection read as disabled while the app was
+		// in the background, so the model activated it.
+		let prepared = Cell::new(false);
+		let ready = enter_menu_context(MenuAccess::Read, || {
+			prepared.set(true);
+			Ok(())
+		});
+		assert!(ready.is_ok());
+		assert!(prepared.get());
+		let refused = || -> CoreResult<()> {
+			Err(DesktopError::background_unavailable("the target came forward"))
+		};
+		assert!(enter_menu_context(MenuAccess::Read, refused).is_ok());
+		assert_eq!(
+			enter_menu_context(MenuAccess::Dispatch, refused)
+				.unwrap_err()
+				.code,
+			ErrorCode::BackgroundUnavailable
+		);
+		let cancelled = || -> CoreResult<()> { Err(DesktopError::cancelled("cancelled")) };
+		assert_eq!(
+			enter_menu_context(MenuAccess::Read, cancelled)
+				.unwrap_err()
+				.code,
+			ErrorCode::Cancelled
+		);
+	}
+
+	#[test]
+	fn a_menu_read_waits_until_the_app_revalidates_its_menus() {
+		// Right after the activation, New Collection still read disabled for up
+		// to 1.2 s; the read waits for the change instead of returning that.
+		let reads = Cell::new(0);
+		let read = || {
+			reads.set(reads.get() + 1);
+			Ok(reads.get() >= 3)
+		};
+		let changed = |first: &bool, now: &bool| first != now;
+		let settled = settle(false, Duration::from_secs(5), read, changed, || Ok(()));
+		assert!(settled.unwrap());
+		assert_eq!(reads.get(), 3);
+		// A listing that never changes is returned once the bound passes.
+		let pause = || {
+			std::thread::sleep(Duration::from_millis(5));
+			Ok(())
+		};
+		assert!(!settle(false, Duration::from_millis(30), || Ok(false), changed, pause).unwrap());
+		let cancelled = || Err(DesktopError::cancelled("cancelled"));
+		assert_eq!(
+			settle(false, Duration::from_secs(5), || Ok(false), changed, cancelled)
+				.unwrap_err()
+				.code,
+			ErrorCode::Cancelled
+		);
+	}
+
+	#[test]
+	fn a_menu_command_is_not_pressed_once_the_user_used_the_app_during_the_call() {
+		// A disabled command waits up to 1.5 s for its menu to revalidate; the
+		// user types into the same window meanwhile.
+		let listener = control::intervention::Listener::simulated();
+		listener.touch(7, None, || "TextEdit".to_string());
+		let token = control::CancellationSource::default().token();
+		let _watch = listener.admit(7, &token).unwrap();
+		let holds = || Ok(());
+		assert!(ready_to_dispatch(&holds).is_ok());
+		listener.record_for_test(7, Instant::now());
+		assert_eq!(ready_to_dispatch(&holds).unwrap_err().code, ErrorCode::UserIntervened);
+	}
 
 	#[test]
 	fn items_without_a_title_read_as_untitled_instead_of_failing_the_menu() {

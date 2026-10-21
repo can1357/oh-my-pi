@@ -19,6 +19,7 @@ export interface RenderResult {
 	method: string;
 	content: string;
 	fetchedAt: string;
+	/** True when the response body was cut mid-stream at {@link MAX_BYTES}. */
 	truncated: boolean;
 	notes: string[];
 }
@@ -35,7 +36,7 @@ export type SpecialHandler = (
 	modelRegistry?: ModelRegistry,
 ) => Promise<RenderResult | null>;
 
-export const MAX_OUTPUT_CHARS = 500_000;
+/** Network read bound for a fetched body; the only size limit on rendered URL content. */
 export const MAX_BYTES = 50 * 1024 * 1024;
 
 const USER_AGENTS = [
@@ -60,15 +61,11 @@ function isBotBlocked(status: number, content: string): boolean {
 }
 
 /**
- * Truncate and cleanup output
+ * Collapse blank-line runs and trim. Never shortens content: URL reads page the preview
+ * themselves, and selectors, artifacts, and URL search must see the whole body.
  */
-export function finalizeOutput(content: string): { content: string; truncated: boolean } {
-	const cleaned = content.replace(/\n{3,}/g, "\n\n").trim();
-	const truncated = cleaned.length > MAX_OUTPUT_CHARS;
-	return {
-		content: cleaned.slice(0, MAX_OUTPUT_CHARS),
-		truncated,
-	};
+export function finalizeOutput(content: string): string {
+	return content.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 export interface LoadPageOptions {
@@ -249,17 +246,25 @@ export async function htmlToBasicMarkdown(html: string): Promise<string> {
  */
 export function buildResult(
 	md: string,
-	opts: { url: string; finalUrl?: string; method: string; fetchedAt: string; notes?: string[]; contentType?: string },
+	opts: {
+		url: string;
+		finalUrl?: string;
+		method: string;
+		fetchedAt: string;
+		notes?: string[];
+		contentType?: string;
+		/** Pass the source `LoadPageResult.truncated` when `md` embeds a fetched body verbatim. */
+		truncated?: boolean;
+	},
 ): RenderResult {
-	const output = finalizeOutput(md);
 	return {
 		url: opts.url,
 		finalUrl: opts.finalUrl ?? opts.url,
 		contentType: opts.contentType ?? "text/markdown",
 		method: opts.method,
-		content: output.content,
+		content: finalizeOutput(md),
 		fetchedAt: opts.fetchedAt,
-		truncated: output.truncated,
+		truncated: opts.truncated ?? false,
 		notes: opts.notes ?? [],
 	};
 }

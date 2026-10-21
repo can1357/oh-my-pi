@@ -207,6 +207,8 @@ describe("ModelRegistry", () => {
 		const refreshSpy = vi.spyOn(registry, "refresh").mockReturnValue(promise);
 
 		registry.refreshInBackground();
+		// The refresh body starts on a microtask (see refreshInBackground).
+		await Promise.resolve();
 		expect(refreshSpy).toHaveBeenCalledTimes(1);
 
 		let settled = false;
@@ -279,6 +281,7 @@ describe("ModelRegistry", () => {
 		registry.refreshInBackground();
 		registry.refreshInBackground();
 
+		await Promise.resolve();
 		expect(refreshSpy).toHaveBeenCalledTimes(1);
 
 		resolve();
@@ -289,6 +292,7 @@ describe("ModelRegistry", () => {
 		const { promise: secondPromise, resolve: secondResolve } = Promise.withResolvers<void>();
 		refreshSpy.mockReturnValue(secondPromise);
 		registry.refreshInBackground();
+		await Promise.resolve();
 		expect(refreshSpy).toHaveBeenCalledTimes(2);
 
 		secondResolve();

@@ -11,6 +11,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { initDb, isScheduledCatalogModel } from "./db";
@@ -393,11 +394,13 @@ function scanTranscript(
 			if (totalTokens > 0 && (costTotal === undefined || costTotal === 0)) {
 				const provider = typeof msg.provider === "string" ? msg.provider : "";
 				const model = typeof msg.model === "string" ? msg.model : "";
-				if (provider === "xai-oauth" && model) {
-					const ref = getBundledModel("xai" as GeneratedProvider, model)?.cost;
-					if (!(ref && (ref.input !== 0 || ref.output !== 0 || ref.cacheRead !== 0 || ref.cacheWrite !== 0))) {
-						unpricedRequests++;
-					}
+				const peer = provider && model ? pricingPeerFor(provider, model) : undefined;
+				if (peer) {
+					const priced = peer.peers.some(peerProvider => {
+						const ref = getBundledModel(peerProvider as GeneratedProvider, peer.peerId)?.cost;
+						return ref && (ref.input !== 0 || ref.output !== 0 || ref.cacheRead !== 0 || ref.cacheWrite !== 0);
+					});
+					if (!priced) unpricedRequests++;
 				} else if (costObj == null && provider && model) {
 					const hasTimestamp =
 						(typeof msg.timestamp === "number" && Number.isFinite(msg.timestamp) && msg.timestamp > 0) ||

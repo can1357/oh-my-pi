@@ -33,16 +33,20 @@ import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@o
 import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
 import {
+	escapeXmlText,
 	getAgentDbPath,
 	getAgentDir,
 	getProjectDir,
 	isCompiledBinary,
 	parseFrontmatter as parseOmpFrontmatter,
+	prompt,
 } from "@oh-my-pi/pi-utils";
+import legacyAvailableSkillsTemplate from "./legacy-pi-available-skills.md" with { type: "text" };
 import { getPackageDir as getOmpPackageDir } from "../config";
 import { formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
 import { findScopedSettings, Settings } from "../config/settings";
+import { cfgLegacyShellCommandPrefix, cfgShellPath } from "../exec/settings";
 import { EditTool } from "../edit";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult, LoadExtensionsResult } from "../sdk";
 import {
@@ -67,7 +71,7 @@ import { GrepTool } from "../tools/grep";
 import { ReadTool } from "../tools/read";
 import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { WriteTool } from "../tools/write";
-import { resolveToCwd } from "../tools/path-utils";
+import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { EventBus } from "../utils/event-bus";
 import { convertImageToPng } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { discoverExtensionPaths, loadExtensionFromFactory, loadExtensions } from "./extensions";
@@ -474,6 +478,7 @@ export function createReadToolDefinition(cwd: string, options?: ReadToolOptions)
 		description: tool.description,
 		parameters: legacyReadSchema,
 		approval: "read",
+		approvalCacheTargets: params => tool.approvalCacheTargets?.({ path: stringField(params, "path") ?? "" }),
 		renderCall: (params, options, themeArg) => {
 			const theme = renderTheme(options, themeArg);
 			const readPath = stringField(params, "path") ?? "";
@@ -580,6 +585,7 @@ export function createGrepToolDefinition(cwd: string, options?: GrepToolOptions)
 		description: "Search file contents for a pattern.",
 		parameters: legacyGrepSchema,
 		approval: "read",
+		approvalCacheTargets: params => tool.approvalCacheTargets?.({ path: stringField(params, "path") ?? "." }),
 		renderCall: (params, optionsArg, themeArg) => {
 			const theme = renderTheme(optionsArg, themeArg);
 			const pattern = stringField(params, "pattern") ?? "";
@@ -638,6 +644,10 @@ export function createFindToolDefinition(cwd: string, options?: FindToolOptions)
 		description: "Find files by glob pattern.",
 		parameters: legacyFindSchema,
 		approval: "read",
+		approvalCacheTargets: params =>
+			tool.approvalCacheTargets?.({
+				path: piJoinPath(stringField(params, "path") ?? ".", stringField(params, "pattern") ?? "*"),
+			}),
 		renderCall: (params, optionsArg, themeArg) => {
 			const theme = renderTheme(optionsArg, themeArg);
 			const pattern = stringField(params, "pattern") ?? "";
@@ -693,6 +703,9 @@ export function createLsToolDefinition(cwd: string, options?: LsToolOptions): To
 		description: "List directory entries.",
 		parameters: legacyLsSchema,
 		approval: "read",
+		// Listing a directory reads it, so it needs the grant a `read` of that directory would.
+		approvalCacheTargets: params =>
+			createRegistryTool(cwd, "read").approvalCacheTargets?.({ path: stringField(params, "path") ?? "." }),
 		renderCall: (params, optionsArg, themeArg) => {
 			const theme = renderTheme(optionsArg, themeArg);
 			return new Text(`${themedTitle(theme, "ls")} ${themedMuted(theme, stringField(params, "path") ?? ".")}`, 0, 0);
@@ -783,22 +796,48 @@ export function createReadOnlyTools(cwd: string): ToolDefinition[] {
  * Legacy pi `SettingsManager` shim.
  *
  * Upstream Pi's `SettingsManager.create(cwd)` is **synchronous** and returns a
- * manager exposing `getGlobalSettings()`/`getProjectSettings()` (plus the typed
- * `get(path)`). OMP's `Settings` is that manager, so the shim resolves the
- * active extension session's instance first, then falls back to a live instance
- * matching the requested `cwd`/`agentDir`, or an isolated instance when nothing
- * matches. Returning the promise from `Settings.init()` here broke every pi
- * extension that read settings synchronously — e.g. pi-vim's `session_start`
- * handler (#10397); selecting a process-global instance would leak one session's
- * settings into another.
+ * manager exposing `getGlobalSettings()`/`getProjectSettings()`, shell
+ * accessors, and the typed `get(path)`. OMP's `Settings` backs that manager;
+ * the shim resolves the active extension session's instance first, then falls
+ * back to a live instance matching the requested `cwd`/`agentDir`, or an
+ * isolated instance when nothing matches. Returning the promise from
+ * `Settings.init()` here broke extensions that read settings synchronously —
+ * e.g. pi-vim's `session_start` handler (#10397); selecting a process-global
+ * instance would leak one session's settings into another.
  */
+interface LegacyShellAccessors {
+	getShellPath(): string | undefined;
+	getShellCommandPrefix(): string | undefined;
+}
+
+function hasLegacyShellAccessors(settings: Settings): settings is Settings & LegacyShellAccessors {
+	return (
+		"getShellPath" in settings &&
+		typeof settings.getShellPath === "function" &&
+		"getShellCommandPrefix" in settings &&
+		typeof settings.getShellCommandPrefix === "function"
+	);
+}
+
+function withLegacyShellAccessors(settings: Settings): Settings & LegacyShellAccessors {
+	if (hasLegacyShellAccessors(settings)) return settings;
+	return Object.assign(settings, {
+		// Upstream Pi expands `~` before returning; spawn APIs take the path literally.
+		getShellPath: () => {
+			const shellPath = cfgShellPath.get(settings);
+			return shellPath ? expandTilde(shellPath) : shellPath;
+		},
+		getShellCommandPrefix: () => cfgLegacyShellCommandPrefix.get(settings),
+	});
+}
+
 export const SettingsManager = {
-	create(cwd?: string, agentDir?: string): Settings {
-		return findScopedSettings(cwd, agentDir) ?? Settings.isolated();
+	create(cwd?: string, agentDir?: string): Settings & LegacyShellAccessors {
+		return withLegacyShellAccessors(findScopedSettings(cwd, agentDir) ?? Settings.isolated());
 	},
 
-	inMemory(): Settings {
-		return Settings.isolated();
+	inMemory(): Settings & LegacyShellAccessors {
+		return withLegacyShellAccessors(Settings.isolated());
 	},
 } as const;
 
@@ -1687,4 +1726,32 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 		content: match[3],
 		userMessage: match[4]?.trim() || undefined,
 	};
+}
+
+/**
+ * Render the `<available_skills>` system-prompt block, ported from upstream
+ * pi-coding-agent 1.x (`src/core/skills.ts`). omp renders skills through its
+ * own prompt templates and never exports the formatter, so legacy extensions
+ * importing it from the package root fail Bun's static named-export check
+ * (observed consumer: `pi-claude-bridge`, which forwards the block to Claude
+ * Code). Skills hidden from the prompt are skipped, whether hidden through
+ * upstream's `disableModelInvocation` or omp's `hide`.
+ */
+export function formatSkillsForPrompt(
+	skills: readonly (Skill & { disableModelInvocation?: boolean })[],
+	fileReadTool: "read" | "bash" | (string & {}) = "read",
+): string {
+	const visibleSkills = skills.filter(skill => !skill.disableModelInvocation && !skill.hide);
+	if (visibleSkills.length === 0) return "";
+	const block = prompt.render(legacyAvailableSkillsTemplate, {
+		readTool: fileReadTool === "read",
+		bashTool: fileReadTool === "bash",
+		skills: visibleSkills.map(skill => ({
+			name: escapeXmlText(skill.name),
+			description: escapeXmlText(skill.description),
+			location: escapeXmlText(skill.filePath),
+		})),
+	});
+	// Upstream returns the block with two leading newlines to append to a system prompt.
+	return `\n\n${block.trimEnd()}`;
 }

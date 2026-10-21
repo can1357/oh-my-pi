@@ -2,7 +2,7 @@
 
 > Execute one Python or JavaScript cell in a persistent language runtime. One tool call is one cell; state survives later calls.
 
-> **Notice:** Do not shell out to `python -c`, `bun -e`, or `node -e` through `bash` for ad-hoc code. `eval` provides retained state, structured `display()` capture, tool/subagent bridges, streaming, cancellation, and artifact-backed truncation.
+> **Notice:** Do not shell out to `python -c`, `bun -e`, or `node -e` through `bash` for ad-hoc code. `eval` provides retained state, rich `print` rendering, tool/subagent bridges, streaming, cancellation, and artifact-backed truncation.
 
 ## Source
 - Entry and dynamic schema: `packages/coding-agent/src/tools/eval.ts`
@@ -35,11 +35,11 @@ Example across three calls:
 ```
 
 ```json
-{"language":"py","title":"load config","code":"data = json.loads(read('package.json'))\ndisplay(data)"}
+{"language":"py","title":"load config","code":"data = json.loads(read('package.json'))\nprint(data)"}
 ```
 
 ```json
-{"language":"py","title":"reuse state","code":"display(sorted(data['dependencies']))"}
+{"language":"py","title":"reuse state","code":"print(sorted(data['dependencies']))"}
 ```
 
 ## Scripts and dependencies
@@ -52,7 +52,7 @@ Save reusable setup in a file, then load it once:
 
 Later cells reuse its definitions. Calling `%load` again executes the current file again; editing it alone does not reload it. The host reads the file (quote paths containing spaces; `local://` files are supported) and runs it with its filename: Python sets `__file__`, puts the script directory on `sys.path`, and reports tracebacks against the script; JavaScript/TypeScript resolves relative imports from the script while eval keeps its working directory.
 
-Python dependencies install with `%pip install pillow`: the runner's pip magic runs `python -m pip` for the kernel's own interpreter, pauses the cell watchdog while it runs, and keeps kernel variables. A missing-module error reminds that distribution names can differ from import names (`PIL` belongs to `pillow`).
+Python dependencies install with `%pip install pillow`: the runner's pip magic runs `python -m pip` for the kernel's own interpreter (in an interpreter without pip, such as a `uv venv` env, it first installs pip with `ensurepip`, or with `uv` when that fails and `uv` is on `PATH`), pauses the cell watchdog while it runs, and keeps kernel variables. A missing-module error reminds that distribution names can differ from import names (`PIL` belongs to `pillow`).
 
 JavaScript dependencies install with `%bun add csv-parse` into an OMP-managed package environment shared by sessions in the same project; each worker keeps its own variables. Installation does not restart the worker; already imported modules stay cached until an explicit reset. Lifecycle scripts are disabled; packages needing native builds/postinstall must be prepared explicitly. `%environment project` selects the repository itself for package/lockfile changes; `%environment managed` returns to OMP-managed dependencies. The selection persists for later calls through that eval tool.
 
@@ -79,16 +79,16 @@ When at least one runtime is enabled, disabled runtimes are removed from the ses
 
 `execute()` returns one text content block plus any image blocks. `onUpdate` streams the active cell's output and details while it runs, coalesced at 50 ms intervals.
 
-- Text is stdout/stderr plus model-visible JSON `display()` values and image dimension notes.
+- Text is stdout/stderr (exactly what `print` and the trailing-expression echo wrote) plus image dimension notes.
 - Image-only success reports `(displayed N image(s); no text output)`; a cell with no visible output reports `(no output)`.
 - A nonzero backend exit appends `Command exited with code N`, marks the cell `error`, and sets `details.isError`.
 - Cancellation returns the captured output or `Command aborted`, with `details.isError=true`.
 
 `EvalToolDetails`:
 
-- `cells`: a one-element `EvalCellResult[]` with `index`, `title?`, `code`, backend `language`, `output`, `status`, `durationMs?`, `exitCode?`, `statusEvents?`, and `hasMarkdown?`. File-backed cells retain the original `%load` command for display rather than duplicating the script source.
+- `cells`: a one-element `EvalCellResult[]` with `index`, `title?`, `code`, backend `language`, `output`, `status`, `durationMs?`, `exitCode?`, `statusEvents?`, and `views?`. File-backed cells retain the original `%load` command for display rather than duplicating the script source.
 - `language`: the backend used; `languages`: the distinct backend list. These retain the historical multi-cell-compatible shape, but a current call has one backend.
-- `jsonOutputs`: structured display values. Oversized values normally become `{ preview, truncated: true, totalBytes }` while their full JSON is written to the output artifact; without confirmed artifact persistence, the full value is retained here.
+- `cells[].views`: pretty views of printed values, in print order, as `{ text, view }` where `text` is the exact span of `output` the value printed and `view` is a `table` (data frames, `console.table`), `json` (dicts/lists/plain objects printing longer than 80 chars or multiple lines), or `markdown` (Python objects with `_repr_markdown_`). Renderers show the view in place of the matching text; the model only sees the text. At most 16 views per cell are kept, and a view whose JSON exceeds 32 KiB is dropped; dropped views show as their text.
 - `images`: present on live updates when images have arrived; final images are content blocks.
 - `statusEvents`: deduplicated helper/tool status events.
 - `notice`: optional backend notice.
@@ -96,7 +96,9 @@ When at least one runtime is enabled, disabled runtimes are removed from the ses
 - `async`: present when the cell was auto-backgrounded as an async job (`{ state, jobId, type: "eval" }`).
 - `isError`: set for backend failure or cancellation.
 
-The renderer merges call and result inline, syntax-highlights from the declared language, renders markdown and JSON trees specially, and shows timeout/truncation metadata. `session.allocateOutputArtifact?.("eval")` backs spilled output; `artifact://...` in `meta` reaches the full capture.
+`mcp_progress` status lines show an MCP tool's name and its latest progress while an awaited call is running: the server's message with `progress/total` when a total exists, or the bare progress value when there is no message. Updates for one call replace one another, including after Eval auto-backgrounds; old MCP snapshots can be evicted under the status-log cap. Internal call ids are not displayed.
+
+The renderer merges call and result inline, syntax-highlights from the declared language, renders cell views as tables, JSON trees, and Markdown in place of their text, and shows timeout/truncation metadata. `session.allocateOutputArtifact?.("eval")` backs spilled output; `artifact://...` in `meta` reaches the full capture.
 
 ## Execution flow
 
@@ -104,9 +106,9 @@ The renderer merges call and result inline, syntax-highlights from the declared 
 2. `execute()` maps `py/js` to `python/js`, resolves availability, reads file-backed source once, and wraps the input in the renderer-compatible cell list. Runtime probing is bounded by the requested timeout and abort signal. The JS backend installs requested packages inside the cancellation/background lifecycle.
 3. It obtains the retained executor id from `session.getEvalSessionId?.()` or `defaultEvalSessionId(session)`, allocates the output sink/artifact, and registers the run through `trackEvalExecution?.(...)`.
 4. The timeout defaults to 30 seconds. `0` creates no watchdog. Otherwise `IdleTimeout` is combined with tool and session abort signals.
-5. Waiting on agent/completion handles, `judge()`, judgment-batch drains, and package installation pause the watchdog. Resuming starts a fresh timeout window. Compute, output, status helpers, and ordinary `tool.*` calls count against it.
+5. Agent/completion handle waits, `judge()`, judgment-batch drains, package installation, delegated `tool.task()`/`tool.wait()`, and browser/computer preludes pause the watchdog. Resuming starts a fresh timeout window. Compute, output, status helpers, and ordinary `tool.*` calls, including MCP tools that report progress, count against it.
 6. The selected backend receives cwd, retained session id, session file, kernel owner, reset flag, callbacks, and cancellation signal.
-7. Output chunks stream into an artifact-aware `OutputSink` and live tail. Rich displays are separated into JSON, image, markdown, and status channels.
+7. Output chunks stream into an artifact-aware `OutputSink` and live tail. Runtime display outputs are separated into view, image, and status channels.
 8. Success, nonzero exit, and cancellation are assembled into the result shapes above. The output sink is finalized even when execution fails.
 
 ## Auto-backgrounding
@@ -114,7 +116,7 @@ The renderer merges call and result inline, syntax-highlights from the declared 
 With `eval.autoBackground.enabled` (default `false`), a cell that outlives `eval.autoBackground.thresholdMs` (default 60000 ms) is converted into a managed async job instead of blocking the turn:
 
 - The tool foreground-waits for `resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs)`: the threshold, clamped down to the cell's own clamped timeout minus a 1 s buffer so a deadline expiry resolves inline rather than backgrounding moments before it fires. Raising `timeout` therefore does not extend foreground execution beyond the threshold. A threshold of `0` backgrounds immediately.
-- On backgrounding, the tool returns the live output tail plus `Backgrounded as job <id> (killed once it has run <n>s in total; …)` — or `(no deadline)` under `timeout: 0` — and the no-polling instruction (`formatBackgroundNotice`), stating the cell's clamped timeout, with `details.async = { state: "running", jobId, type: "eval" }`. The deadline is the cell's runtime budget, counted from cell start (including the foreground wait) and paused across `agent()`/tool bridge calls, so it is not a wall-clock time left. The job's completion is delivered later like a backgrounded bash command.
+- On backgrounding, the tool returns the live output tail plus `Backgrounded as job <id> (killed once it has run <n>s in total; …)` — or `(no deadline)` under `timeout: 0` — and the no-polling instruction (`formatBackgroundNotice`), stating the cell's clamped timeout, with `details.async = { state: "running", jobId, type: "eval" }`. The deadline is the cell's runtime budget, counted from cell start (including the foreground wait), not wall-clock time left. Agent/completion handle waits, `judge()`, judgment-batch drains, package installation, delegated `tool.task()`/`tool.wait()`, and browser/computer preludes pause the watchdog; ordinary `tool.*` calls, including MCP tools that report progress, do not. The job's completion is delivered later like a backgrounded bash command.
 - A queued user/peer message (steer) arriving mid-wait backgrounds the cell immediately ("Backgrounded early to handle an incoming message; the cell keeps running.").
 - At the async-job manager's running-job capacity the tool falls through to ordinary foreground execution instead of failing.
 - A failed, cancelled, or timed-out cell is reported as a failed background job (an errored execution is re-entered into the job manager's failure path), never as a silent success.
@@ -133,7 +135,7 @@ With `eval.autoBackground.enabled` (default `false`), a cell that outlives `eval
 
 - Retained kernels are keyed by `python:${sessionId}`, normalized cwd, and interpreter. `python.kernelMode="per-call"` instead creates and shuts down a fresh kernel for each invocation.
 - The runner uses one persistent asyncio event loop, so top-level `await` works; `asyncio.run(...)` is invalid there.
-- MIME frames support status, PNG, JSON, markdown, plain text, and HTML-to-markdown conversion.
+- The runner replaces `builtins.print` for stdout: printed images (omp image dicts, matplotlib figures, PIL images, `_repr_png_`/`_repr_jpeg_` objects) attach as images, and DataFrames/Series, Markdown objects, and large dicts/lists/tuples add views. A non-`None` trailing expression prints its `repr` the same way.
 - Interactive stdin is rejected with `Kernel requested stdin; interactive input is not supported.`
 - Synchronous blocks use the default executor with copied ContextVars; Python bytecode still contends on the GIL.
 
@@ -141,7 +143,7 @@ With `eval.autoBackground.enabled` (default `false`), a cell that outlives `eval
 
 All enabled runtimes expose equivalent helpers where the language permits:
 
-- `display(value)`, `print(...)`
+- `print(...)` (Python) / `print(...)` and `console.*` (JS)
 - `read(path, offset?, limit?)`, `write(path, content)`, `env(...)`, `output(...)`
 - `tool.<name>(args)` for a normal session tool call (async in both runtimes: `await tool.read({...})`)
 - `@tool` / `tool(fn, {...})` to define kernel-local tools for subagents (`eval.tools.enabled`, default on)
@@ -152,7 +154,7 @@ All enabled runtimes expose equivalent helpers where the language permits:
 
 JS helpers are asynchronous; Python file helpers are synchronous while `tool.<name>()` is a coroutine. `read()` delegates non-`local://` schemes to the registered read tool, resolves `local://` through injected roots, and reads regular paths relative to cwd. A bare `read("artifact://<id>")` returns the artifact file's full text, with `offset`/`limit` selecting lines, whichever session's artifacts dir holds it; selector forms such as `artifact://<id>:raw:5-9` go to the read tool. `write()` accepts regular and `local://` paths but rejects other protocol URLs.
 
-`display()` captures JSON-compatible structures, images, markdown, or text according to the backend.
+Printing an image or figure attaches it to the result for both the model and the user. Printed data frames, `console.table`, Markdown objects, and large structured values also carry a pretty view for the user; the model sees the printed text.
 
 Enabled extension preludes add globals (such as `browser`) with documentation at `xd://eval/<name>`. Their host calls resolve approval and availability against the live session; disabling a prelude also prevents previously captured functions from retaining host access.
 
@@ -175,7 +177,7 @@ const result = await tool.mcp__example_page({});
 if (result.hasError) throw new Error(result.text);
 const page = result.details.structuredContent;
 if (page === undefined) throw new Error("Server did not return structured data");
-display(page.next_cursor);
+console.log(page.next_cursor);
 ```
 
 Python callers use `result["details"].get("structuredContent")`. The property is
@@ -186,7 +188,7 @@ JSON-looking text. Error results can also carry structured data, so check
 `text` remains the model-facing rendering, including any JSON echo and output
 truncation notices. Truncation does not trim `details.structuredContent`: code
 receives the complete server-supplied object even when the rendering spills. Use
-server-side pagination/bounds for large data and display only the fields needed
+server-side pagination/bounds for large data and print only the fields needed
 by the model. The object is not validated against the server's output schema or
 treated as trusted. Ordinary tools keep their existing return shapes, including
 bare strings for text-only results without details.
@@ -251,7 +253,7 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 
 - Default timeout: 30 seconds; `0` disables. Nonzero timeouts are clamped through `clampTimeout("eval", ..., tools.maxTimeout)`.
 - Output sink default window: 50 KiB (`DEFAULT_MAX_BYTES`); live tail: 100 KiB; truncation helpers cap at 3000 lines.
-- Each model-visible JSON display preview is capped at 8000 UTF-8 bytes. Larger values spill in full to the output artifact and retain bounded preview metadata in `jsonOutputs`; if persistence is unavailable or fails, `jsonOutputs` retains the full value.
+- Each cell keeps at most 16 views, each at most 32 KiB of JSON; larger or excess views show as their printed text.
 - Transcript preview defaults to 10 lines.
 - Eval subagent spawning obeys `task.maxRecursionDepth` (default `2`; negative values allow unlimited depth). Each `workpool()` caps its own live workers at `task.maxConcurrency` (default 32, `0` unbounded). `agent()` takes no `task.maxConcurrency` slot: every handle is a running background job counted against the session-wide `async.maxJobs` cap (default and maximum 100), which it shares with every other background job in the session, including async `bash`, async `task` spawns, `workpool()` pools and nested subagents' jobs. `agent()` fails with `Background job limit reached` once that cap is full. Completion/judgment requests have their own fixed 32-request cap.
 - Malformed params are schema errors; unavailable/disabled backends and missing session are `ToolError`s.

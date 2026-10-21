@@ -9,8 +9,8 @@ import type { InteractiveModeContext } from "../types";
 
 /**
  * Pick the most recently active focusable subagent. Advisors are read-only
- * transcripts and aborted agents are terminal, so neither is focusable; the
- * main session is the view itself, not a focus target. A focused caller passes
+ * transcripts and killed agents wait for an explicit revive, so neither is
+ * cycled to; the main session is the view itself, not a focus target. A focused caller passes
  * its id to cycle to the next-most-recent agent (wrapping), so repeated
  * presses walk the roster instead of sticking on the newest row.
  */

@@ -87,6 +87,8 @@ type ThinkingContent struct {
 	Thinking          string  `json:"thinking"`
 	ThinkingSignature *string `json:"thinkingSignature,omitempty"`
 	ItemID            *string `json:"itemId,omitempty"`
+	// Prose the model addressed to the user, returned by the provider as thinking; present it as answer text.
+	Narration *bool `json:"narration,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -103,6 +105,7 @@ func (v *ThinkingContent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("thinking", &out.Thinking)
 	d.optional("thinkingSignature", &out.ThinkingSignature)
 	d.optional("itemId", &out.ItemID)
+	d.optional("narration", &out.Narration)
 	out.Extra = d.rest()
 	if d.err != nil {
 		return d.err

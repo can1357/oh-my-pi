@@ -675,7 +675,13 @@ fn entry_time(meta: &Metadata, cfg: &Config) -> Option<(i64, i64)> {
 	match kind {
 		TimeKind::Modification => Some((meta.mtime()?, meta.mtime_nsec()?)),
 		TimeKind::Access => Some((meta.atime()?, meta.atime_nsec()?)),
-		TimeKind::Change => Some((meta.ctime()?, meta.ctime_nsec()?)),
+		// Windows has no POSIX status-change time; like `stat`, fall back to
+		// the last write time, as Cygwin does.
+		TimeKind::Change => match (meta.ctime(), meta.ctime_nsec()) {
+			(Some(secs), Some(nsec)) => Some((secs, nsec)),
+			_ if cfg!(windows) => Some((meta.mtime()?, meta.mtime_nsec()?)),
+			_ => None,
+		},
 	}
 }
 
@@ -1075,6 +1081,10 @@ mod tests {
 			std::os::unix::fs::symlink("nowhere", root.join("e/dangling")).unwrap();
 			std::os::unix::fs::symlink("f1.txt", root.join("a/flink")).unwrap();
 		}
+		// Creating symlinks needs a privilege on Windows; a 6-byte file keeps
+		// the inode and apparent-size totals the tests expect from `a/flink`.
+		#[cfg(not(unix))]
+		fs::write(root.join("a/flink"), "f1.txt").unwrap();
 		(dir, root)
 	}
 
@@ -1370,8 +1380,15 @@ mod tests {
 		let (_dir, root) = tree();
 		let at = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
 		let set = |path: &str, secs: u64| {
-			fs::File::options()
-				.write(true)
+			let mut options = fs::File::options();
+			options.write(true);
+			// Windows opens a directory handle only with backup semantics.
+			#[cfg(windows)]
+			std::os::windows::fs::OpenOptionsExt::custom_flags(
+				&mut options,
+				windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS,
+			);
+			options
 				.open(root.join(path))
 				.or_else(|_| fs::File::open(root.join(path)))
 				.unwrap()

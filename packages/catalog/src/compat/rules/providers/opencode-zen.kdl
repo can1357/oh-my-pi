@@ -4,6 +4,10 @@ provider "opencode-zen" {
 	default-model "claude-opus-5"
 	env "OPENCODE_API_KEY"
 	dynamic-models-authoritative #true
+	// Replaces the provider check that disabled forced tool choice on Responses.
+	on-api "openai-responses" {
+		supports-forced-tool-choice #false
+	}
 
 	// Replaces the OpenCode reasoning-model whenThinking fallback object.
 	// Applies to every completions-routed reasoning model, discovered ids

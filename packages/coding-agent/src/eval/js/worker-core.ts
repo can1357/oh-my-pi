@@ -369,7 +369,7 @@ export class WorkerCore {
 				cwd: snapshot.cwd,
 				localRoots: snapshot.localRoots ?? {},
 			});
-			runtime.displayValue(value, hooks);
+			runtime.echo(value, hooks);
 			result = { type: "result", runId, ok: true };
 		} catch (error) {
 			result = { type: "result", runId, ok: false, error: errorPayload(error) };
@@ -434,8 +434,7 @@ export class WorkerCore {
 				}
 				envelope = { ok: true, value: cloneable };
 			}
-			this.#transport.send({ type: "display", runId: msg.runId, output: { type: "json", data: envelope } });
-			this.#transport.send({ type: "result", runId: msg.runId, ok: true });
+			this.#transport.send({ type: "result", runId: msg.runId, ok: true, value: envelope });
 		} catch (error) {
 			this.#transport.send({ type: "result", runId: msg.runId, ok: false, error: errorPayload(error) });
 		} finally {

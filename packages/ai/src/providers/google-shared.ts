@@ -155,24 +155,73 @@ function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: str
 	return isSameProviderAndModel && isValidThoughtSignature(signature) ? signature : undefined;
 }
 
+/** Sort the items whose key is known into key order within the slots they occupy; others stay put. */
+function sortKnownInPlace<T>(items: T[], keyOf: (item: T) => number | undefined): void {
+	const known: Array<{ position: number; key: number; item: T }> = [];
+	items.forEach((item, position) => {
+		const key = keyOf(item);
+		if (key !== undefined) known.push({ position, key, item });
+	});
+	if (known.length < 2) return;
+	const inOrder = [...known].sort((a, b) => a.key - b.key);
+	known.forEach(({ position }, index) => {
+		items[position] = inOrder[index].item;
+	});
+}
+
+/**
+ * Gemini pairs id-less function responses with calls by position. The agent loop stores
+ * parallel results in call order, but histories can still arrive out of call order (sessions
+ * saved by older versions, contexts built through the SDK), so the converters guard the wire:
+ * record each call as it is emitted and each response with its call, then {@link apply} sorts
+ * every turn's matched responses back into call order within the slots they already occupy.
+ */
+export class FunctionCallOrder {
+	#ordinals = new Map<string, number>();
+	#responses = new Map<Part, number>();
+	#next = 0;
+
+	call(id: string): void {
+		this.#ordinals.set(id, this.#next++);
+	}
+
+	/** The call ordinal of `id`, if that call was recorded. */
+	ordinal(id: string): number | undefined {
+		return this.#ordinals.get(id);
+	}
+
+	response(part: Part, callId: string): void {
+		const ordinal = this.#ordinals.get(callId);
+		if (ordinal !== undefined) this.#responses.set(part, ordinal);
+	}
+
+	apply(contents: readonly { parts?: Part[] }[]): void {
+		for (const content of contents) {
+			if (content.parts) sortKnownInPlace(content.parts, part => this.#responses.get(part));
+		}
+	}
+}
+
 /**
  * Convert internal messages to Gemini Content[] format.
  */
 export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
 	const contents: Content[] = [];
 	const emittedToolCallNames = new Map<string, string>();
+	const callOrder = new FunctionCallOrder();
 
 	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id));
 
 	// Gemini < 3 image tool results go in a separate user turn, but parallel tool results must
 	// stay a single contiguous functionResponse turn ("number of function response parts is not
 	// equal to number of function call parts"). Buffer image turns and flush them only after the
-	// merged functionResponse turn is complete.
-	let pendingToolImageParts: Part[] = [];
+	// merged functionResponse turn is complete, each result's images in its call's order.
+	let pendingToolImages: Array<{ ordinal: number | undefined; parts: Part[] }> = [];
 	const flushPendingToolImages = () => {
-		if (pendingToolImageParts.length === 0) return;
-		contents.push({ role: "user", parts: pendingToolImageParts });
-		pendingToolImageParts = [];
+		if (pendingToolImages.length === 0) return;
+		sortKnownInPlace(pendingToolImages, group => group.ordinal);
+		contents.push({ role: "user", parts: pendingToolImages.flatMap(group => group.parts) });
+		pendingToolImages = [];
 	};
 
 	for (const msg of transformedMessages) {
@@ -246,6 +295,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					}
 				} else if (block.type === "toolCall") {
 					emittedToolCallNames.set(block.id, block.name);
+					callOrder.call(block.id);
 					// Gemini 3 requires a thought signature on function calls it makes. The
 					// public API requires the bypass sentinel on every unsigned call. Cloud
 					// Code Assist requires it only when the first call itself is unsigned;
@@ -314,6 +364,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					...(includeId ? { id: msg.toolCallId } : {}),
 				},
 			};
+			callOrder.response(functionResponsePart, msg.toolCallId);
 
 			// Cloud Code Assist API requires all function responses to be in a single user turn.
 			// Check if the last content is already a user turn with function responses and merge.
@@ -329,11 +380,15 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 
 			// For Gemini < 3, buffer images for a separate user message after the functionResponse turn
 			if (hasImages && !modelSupportsMultimodalFunctionResponse) {
-				pendingToolImageParts.push({ text: "Tool result image:" }, ...imageParts);
+				pendingToolImages.push({
+					ordinal: callOrder.ordinal(msg.toolCallId),
+					parts: [{ text: "Tool result image:" }, ...imageParts],
+				});
 			}
 		}
 	}
 	flushPendingToolImages();
+	callOrder.apply(contents);
 
 	return contents;
 }

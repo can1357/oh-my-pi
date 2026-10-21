@@ -1,5 +1,6 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { Page, WaitForOptions } from "puppeteer-core";
+import { puppeteerTimeoutError } from "./launch";
 
 declare module "puppeteer-core" {
 	interface Frame {
@@ -15,13 +16,6 @@ export type NavigationWaitUntil = "load" | "domcontentloaded" | "networkidle0" |
 const MAIN_FRAME_LIFECYCLE_EVENTS = { load: "load", domcontentloaded: "DOMContentLoaded" } as const;
 /** How often the main-frame wait re-reads the frame's lifecycle events. */
 const MAIN_FRAME_POLL_MS = 50;
-
-/** Puppeteer-compatible timeout error; built by name so this module keeps `puppeteer-core` type-only. */
-function navigationTimeoutError(timeout: number): Error {
-	const error = new Error(`Navigation timeout of ${timeout} ms exceeded`);
-	error.name = "TimeoutError";
-	return error;
-}
 
 interface PageNavigationGlobal {
 	next?: { router?: { push?: (target: string) => unknown } };
@@ -104,7 +98,7 @@ export async function navigateMainFrame(
 		if (frame.detached) throw new Error("Navigating frame was detached");
 		if (frame._lifecycleEvents.has(event)) return;
 		const remaining = deadline - Date.now();
-		if (remaining <= 0) throw navigationTimeoutError(timeout);
+		if (remaining <= 0) throw puppeteerTimeoutError(`Navigation timeout of ${timeout} ms exceeded`);
 		// The last read lands on the deadline, so an event that arrives after it is a timeout.
 		await untilAborted(signal, () => Bun.sleep(Math.min(MAIN_FRAME_POLL_MS, remaining)));
 	}

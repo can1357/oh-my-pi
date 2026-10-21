@@ -7,6 +7,7 @@
 import { type Component, Markdown } from "../index";
 
 import type { NativeToolHead, NativeToolView, RenderResultOptions } from "./renderer";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { ansi, md } from "../native/describe";
 import type { NativeChild } from "../native/node";
@@ -26,7 +27,8 @@ import {
 	renderJsonTreeLines,
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
-import { formatExpandHint, truncateToWidth } from "../render/render-utils";
+import { clipCollapsed, flattenLine, formatExpandHint, shortenEmbeddedPaths } from "../render/render-utils";
+import { truncateToWidth, visibleWidth } from "../utils";
 import { formatOutputPaneLines, styleToolOutputLine } from "../render/output-pane";
 import type { StatusLineOptions } from "../render/status-line";
 import { plainToolCard, type ToolCardPhase } from "../render/tool-card";
@@ -267,7 +269,7 @@ export function renderMCPResult(
 					expanded,
 					collapsedMaxLines: 4,
 					expandedMaxLines: 12,
-					styleLine: line => truncateToWidth(styleToolOutputLine(line, theme), contentWidth),
+					styleLine: line => clipCollapsed(styleToolOutputLine(line, theme), contentWidth, expanded),
 					showExpandHintWhenUncapped: true,
 				},
 				theme,
@@ -388,6 +390,45 @@ export interface MCPResourceContent {
 /** Supported MCP result content blocks retained in display metadata. */
 export type MCPContent = MCPTextContent | MCPImageContent | MCPResourceContent;
 
+/** Server-reported progress of an in-flight MCP request. */
+export interface MCPProgress {
+	progress: number;
+	total?: number;
+	message?: string;
+}
+
+/**
+ * Read MCP progress fields from an untrusted record: `progress` must be a
+ * finite number; `total` is kept only when finite and `message` only when a
+ * string. Shared by the transports, the Eval bridge, and the status renderer.
+ */
+export function parseMCPProgress(value: unknown): MCPProgress | undefined {
+	if (!isRecord(value) || typeof value.progress !== "number" || !Number.isFinite(value.progress)) return undefined;
+	const progress: MCPProgress = { progress: value.progress };
+	if (typeof value.total === "number" && Number.isFinite(value.total)) progress.total = value.total;
+	if (typeof value.message === "string") progress.message = value.message;
+	return progress;
+}
+
+/**
+ * One-line display text for MCP progress, at most `maxWidth` cells: the
+ * message, with `progress/total` when the server reports a total. The bare
+ * progress value appears only when there is no message: without a total it is
+ * an opaque counter, not a percentage. Home paths in the message show as `~`,
+ * and a long message is cut before the count, so the count stays visible.
+ * Every progress display (tool card and both Eval status renderers) uses it.
+ */
+export function formatMCPProgress(progress: MCPProgress, maxWidth = 200): string {
+	const message =
+		progress.message === undefined ? "" : shortenEmbeddedPaths(flattenLine(sanitizeText(progress.message)));
+	const amount = progress.total === undefined ? `${progress.progress}` : `${progress.progress}/${progress.total}`;
+	if (!message) return truncateToWidth(amount, maxWidth);
+	if (progress.total === undefined) return truncateToWidth(message, maxWidth);
+	const suffix = ` (${amount})`;
+	const messageWidth = maxWidth - visibleWidth(suffix);
+	return messageWidth > 0 ? `${truncateToWidth(message, messageWidth)}${suffix}` : truncateToWidth(amount, maxWidth);
+}
+
 /** MCP result details shared by renderers and programmatic tool consumers. */
 export interface MCPToolDetails {
 	/** Server name */
@@ -406,6 +447,8 @@ export interface MCPToolDetails {
 	provider?: string;
 	/** Provider display name (e.g., "Claude Code", "MCP Config") */
 	providerName?: string;
+	/** Latest progress of a running call; present only on partial updates. */
+	progress?: MCPProgress;
 	/** Structured output metadata (set by the spill wrapper when output is truncated to an artifact). */
 	meta?: OutputMeta;
 }

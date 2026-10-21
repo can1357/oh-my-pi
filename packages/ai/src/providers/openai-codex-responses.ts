@@ -8,7 +8,6 @@ import {
 	CODEX_CLIENT_VERSION,
 	codexRoutingHint,
 	getCodexAccountId,
-	isOfficialCodexApiUrl,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
@@ -72,6 +71,7 @@ import {
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
 import { getProxyForUrl } from "../utils/proxy";
+import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
@@ -2060,7 +2060,7 @@ async function openCodexSseTransport(
 				requestSetup.firstEventTimeoutMs,
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
-				options?.fetch,
+				wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 			),
 		);
 	};
@@ -4706,26 +4706,6 @@ async function getOrCreateCodexWebSocketConnection(
 	return state.connection;
 }
 
-/**
- * Compress an SSE request body with zstd. Returns `undefined` when
- * compression is disabled or fails, in which case the caller sends the
- * plain JSON string without a `content-encoding` header.
- */
-async function compressCodexRequestBody(bodyJson: string, baseUrl: string): Promise<Uint8Array | undefined> {
-	if (!isOfficialCodexApiUrl(baseUrl) || !$flag("PI_CODEX_ZSTD", true)) return undefined;
-	try {
-		// Off the main thread: SSE sends the full transcript, so multi-MB bodies
-		// would otherwise block the event loop for the whole compression.
-		return await Bun.zstdCompress(bodyJson, { level: 3 });
-	} catch (error) {
-		CODEX_DEBUG &&
-			logger.debug("[codex] codex request body compression failed", {
-				error: error instanceof Error ? error.message : String(error),
-			});
-		return undefined;
-	}
-}
-
 async function openCodexSseEventStream(
 	url: string,
 	requestHeaders: Record<string, string> | undefined,
@@ -4782,11 +4762,6 @@ async function openCodexSseEventStream(
 			}
 		}
 	};
-	const bodyJson = JSON.stringify(body);
-	const compressedBody = await compressCodexRequestBody(bodyJson, url);
-	if (compressedBody !== undefined) {
-		headers.set("content-encoding", "zstd");
-	}
 	CODEX_DEBUG &&
 		logger.debug("[codex] codex request", {
 			url,
@@ -4796,11 +4771,12 @@ async function openCodexSseEventStream(
 			sentModelsEtagHeader: headers.has(X_MODELS_ETAG_HEADER),
 		});
 
-	const send = (requestBody: string | Uint8Array): Promise<Response> =>
-		fetchWithRetry(url, {
+	let response: Response;
+	try {
+		response = await fetchWithRetry(url, {
 			method: "POST",
 			headers,
-			body: requestBody,
+			body: JSON.stringify(body),
 			signal,
 			prepareInit: () => {
 				// A retried non-2xx attempt leaves its guard armed for the retry-status
@@ -4816,23 +4792,11 @@ async function openCodexSseEventStream(
 			fetch: fetchAttempt,
 			timeout: false,
 		});
-	let response: Response;
-	try {
-		response = await send(compressedBody ?? bodyJson);
-		if (compressedBody !== undefined && (response.status === 400 || response.status === 415)) {
-			const rejectedStatus = response.status;
-			await response.body?.cancel();
-			headers.delete("content-encoding");
-			CODEX_DEBUG &&
-				logger.debug("[codex] retrying request without zstd after encoding rejection", {
-					url,
-					status: rejectedStatus,
-				});
-			response = await send(bodyJson);
-		}
 	} catch (error) {
 		clearPreResponseTimeout?.();
-		throw error;
+		// Transport rejection after the retry budget: name the host and the cause
+		// instead of surfacing the runtime's bare `getaddrinfo …` text.
+		throw AIError.networkFailureError(error, url);
 	}
 	CODEX_DEBUG &&
 		logger.debug("[codex] codex response", {

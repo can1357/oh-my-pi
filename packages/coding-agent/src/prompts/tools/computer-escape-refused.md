@@ -1,0 +1,1 @@
+Computer use is stopped for this turn: the user pressed Escape to stop it. Nothing was sent. Do not retry; tell the user what you did and what remains. Computer use resumes after the user's next message.

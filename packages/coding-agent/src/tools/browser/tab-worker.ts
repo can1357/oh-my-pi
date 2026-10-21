@@ -59,9 +59,11 @@ import {
 	applyStealthPatches,
 	applyViewport,
 	BROWSER_PROTOCOL_TIMEOUT_MS,
+	browserConnection,
 	connectPuppeteer,
 	DEFAULT_VIEWPORT,
 	isPuppeteerHandle,
+	isPuppeteerTimeout,
 	loadPuppeteerInWorker,
 	loadedKnownDevices,
 	loadedNetworkConditions,
@@ -205,6 +207,7 @@ import {
 	screenshotQuality,
 	screenshotScope,
 	screenshotThreshold,
+	whileDrawing,
 } from "./screenshot";
 import { RuntimeDialogController, type DialogPolicy, type DialogState } from "./dialogs";
 import {
@@ -219,17 +222,18 @@ import { navigateMainFrame, pushState, reloadPage, traverseHistory, type Navigat
 
 import { cloneSafe, RunOutput } from "./run-output";
 import { type UploadRoute, UploadStaging } from "./upload-files";
-import type {
-	Observation,
-	ObservationEntry,
-	ReadyInfo,
-	RunErrorPayload,
-	ScreenshotResult,
-	SessionSnapshot,
-	ToolReply,
-	Transport,
-	WorkerInbound,
-	WorkerInitPayload,
+import {
+	type Observation,
+	type ObservationEntry,
+	ownsPage,
+	type ReadyInfo,
+	type RunErrorPayload,
+	type ScreenshotResult,
+	type SessionSnapshot,
+	type ToolReply,
+	type Transport,
+	type WorkerInbound,
+	type WorkerInitPayload,
 } from "./tab-protocol";
 
 declare module "puppeteer-core" {
@@ -326,6 +330,8 @@ const HANDLE_ACTION_INVALIDATION_TIMEOUT_MS = 500;
 const FRAME_SNAPSHOT_TIMEOUT_MS = 5_000;
 /** Bound on Puppeteer exposing a page Chromium still has; the supervisor's init budget caps the whole attach anyway. */
 const ATTACHED_TARGET_EXPOSE_TIMEOUT_MS = 5_000;
+/** Bound on counting a timed-out selector's matches for its error message. */
+const MATCH_COUNT_PROBE_TIMEOUT_MS = 1_000;
 
 /** Queue a wheel event without treating a delayed renderer acknowledgement as dispatch failure. */
 export async function dispatchScroll(
@@ -1220,14 +1226,30 @@ async function targetIdForPage(page: Page): Promise<string> {
 	return await targetIdForTarget(page.target());
 }
 
-async function createTrackedHeadlessPage(browser: Browser, reportTarget: (targetId: string) => void): Promise<Page> {
-	const session = await browser.target().createCDPSession();
+async function createTrackedPage(
+	browser: Browser,
+	relay: { nearTargetId?: string } | undefined,
+	reportTarget: (targetId: string) => void,
+): Promise<Page> {
 	let targetId: string;
-	try {
-		({ targetId } = await session.send("Target.createTarget", { url: "about:blank" }));
+	if (relay) {
+		// The omp relay has no attachable browser target, so its tab is created over the root connection:
+		// unselected, in the browser of `nearTargetId` (the relay's own parameter) when given.
+		const params: Protocol.Target.CreateTargetRequest & { nearTargetId?: string } = {
+			url: "about:blank",
+			background: true,
+			nearTargetId: relay.nearTargetId,
+		};
+		({ targetId } = await browserConnection(browser).send("Target.createTarget", params));
 		reportTarget(targetId);
-	} finally {
-		await session.detach().catch(() => undefined);
+	} else {
+		const session = await browser.target().createCDPSession();
+		try {
+			({ targetId } = await session.send("Target.createTarget", { url: "about:blank" }));
+			reportTarget(targetId);
+		} finally {
+			await session.detach().catch(() => undefined);
+		}
 	}
 	const existing = browser.targets().find(target => privateTargetId(target) === targetId);
 	const target =
@@ -1236,7 +1258,7 @@ async function createTrackedHeadlessPage(browser: Browser, reportTarget: (target
 			timeout: BROWSER_PROTOCOL_TIMEOUT_MS,
 		}));
 	const page = await target.page();
-	if (!page) throw new ToolError(`Created headless target ${targetId} did not expose a page`);
+	if (!page) throw new ToolError(`Created target ${targetId} did not expose a page`);
 	return page;
 }
 
@@ -1467,22 +1489,6 @@ export function describeScreenshot(opts?: ScreenshotOptions): string {
 	if (opts?.fullPage) return "tab.screenshot({ fullPage: true })";
 	return "tab.screenshot()";
 }
-export async function preparePageForScreenshot(
-	page: Pick<Page, "bringToFront" | "evaluate">,
-	signal: AbortSignal | undefined,
-	activate: boolean,
-): Promise<void> {
-	if (activate) {
-		await untilAborted(signal, () => page.bringToFront()).catch(() => undefined);
-		return;
-	}
-	const visible = await untilAborted(signal, () => page.evaluate(() => document.visibilityState === "visible")).catch(
-		() => false,
-	);
-	if (!visible) {
-		throw new ToolError("The attached browser tab is not visible; switch to it before taking a screenshot");
-	}
-}
 
 /** Summarize still-running helpers (oldest first) so a cell timeout names what stalled. */
 export function describeInflight(inflight: Map<number, InflightOp>): string {
@@ -1509,7 +1515,7 @@ export class WorkerCore {
 	#isolated: boolean;
 	#uninstallRejectionGuard: () => void;
 	#mode?: WorkerInitPayload["mode"];
-	#activateForScreenshot = true;
+	#ownsPage = false;
 	/** The upload route this worker's browser connection takes, and the tab's staging folder. */
 	#uploads?: UploadStaging;
 	#dialogs?: RuntimeDialogController;
@@ -1676,7 +1682,7 @@ export class WorkerCore {
 	async #init(payload: WorkerInitPayload): Promise<void> {
 		try {
 			this.#mode = payload.mode;
-			this.#activateForScreenshot = payload.mode === "headless" || payload.activateForScreenshot !== false;
+			this.#ownsPage = ownsPage(payload);
 			this.#uploads = new UploadStaging(payload.uploadDir);
 			const puppeteer = await loadPuppeteerInWorker(payload.safeDir);
 			registerSemanticQueryHandlers(puppeteer);
@@ -1690,25 +1696,32 @@ export class WorkerCore {
 			// page acquisition so the supervisor's cold-start budget bounds only the
 			// realm setup; page creation runs under the ready wait.
 			this.#transport.send({ type: "setup" });
-			if (payload.mode === "headless") {
+			if (payload.mode === "headless" || payload.page.kind === "create") {
 				// Create the target directly so its id is reportable before
 				// Puppeteer waits for target/page initialization. If that wait
 				// wedges, the supervisor can still close the created target.
-				this.#page = await createTrackedHeadlessPage(this.#browser, targetId => {
+				const relay =
+					payload.mode === "attach" && payload.page.kind === "create"
+						? { nearTargetId: payload.page.nearTargetId }
+						: undefined;
+				this.#page = await createTrackedPage(this.#browser, relay, targetId => {
 					this.#transport.send({ type: "page-created", targetId });
 				});
 				this.#observeDialogs();
-				await applyStealthPatches(this.#browser, this.#page, { browserSession: null, override: null });
-				if (payload.emulateViewport !== false) await applyViewport(this.#page, payload.viewport);
+				if (payload.mode === "headless") {
+					await applyStealthPatches(this.#browser, this.#page, { browserSession: null, override: null });
+					if (payload.emulateViewport !== false) await applyViewport(this.#page, payload.viewport);
+				}
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			} else {
-				const target = await this.#findAttachedTarget(payload.targetId);
+				const target = await this.#findAttachedTarget(payload.page.targetId);
 				// Post-timeout recycle: unblock the target BEFORE adopting the page — an open
 				// modal dialog or hung navigation can stall `target.page()` / ready info, and a
 				// stalled init used to time out and force-kill the tab.
 				if (payload.recover) await this.#recoverAttachedTarget(target);
 				const page = await target.page();
-				if (!page) throw new ToolError(`Target ${payload.targetId} is no longer available on the attached browser`);
+				if (!page)
+					throw new ToolError(`Target ${payload.page.targetId} is no longer available on the attached browser`);
 				this.#page = page;
 				await this.#claimRelayTarget(page);
 				this.#observeDialogs();
@@ -1717,7 +1730,7 @@ export class WorkerCore {
 			this.#page.mainFrame().client.on("Page.frameNavigated", this.#onFrameNavigated);
 			this.#page.mainFrame().client.on("OMP.debuggerDetached", this.#onDebuggerDetached);
 			this.#page.on("error", this.#onPageCrashed);
-			if (payload.mode === "headless" || payload.emulateFocus) {
+			if (this.#ownsPage) {
 				// Background Chromium tabs stop producing frames, stalling rAF,
 				// IntersectionObserver, and input acknowledgements. Keep owned tabs
 				// interactive without raising a window; explicit settle-freeze still applies.
@@ -1749,13 +1762,17 @@ export class WorkerCore {
 			this.#started = true;
 			this.#transport.send({ type: "ready", info });
 		} catch (error) {
-			// A failed headless init leaves the worker's page orphaned in the shared
-			// browser (the supervisor retries with a fresh worker), so close it before
-			// reporting. Attach mode adopts an existing target — never close it.
+			// A page this attempt created would be orphaned (the supervisor retries
+			// with a fresh worker), so close it before reporting. An adopted target —
+			// a borrowed page, or an owned one a recycle retries — is never closed here.
 			const page = this.#page;
 			await this.#webmcp?.dispose().catch(() => undefined);
 			this.#webmcp = undefined;
 			if (payload.mode === "headless" && page && !page.isClosed()) {
+				await page.close().catch(() => undefined);
+			}
+			// So would a relay tab it opened in the background.
+			if (payload.mode === "attach" && payload.page.kind === "create" && page && !page.isClosed()) {
 				await page.close().catch(() => undefined);
 			}
 			this.#transport.send({ type: "init-failed", error: errorPayload(error) });
@@ -2189,18 +2206,20 @@ export class WorkerCore {
 			// our per-op deadline fired, or puppeteer's own (equal) timeout fired first — having
 			// already torn down the CDP action via the op signal, so no work is left dangling.
 			// Cell-budget aborts and uncapped helpers (goto/evaluate) keep their native errors.
-			if (
-				capped &&
-				!cellSignal.aborted &&
-				(opTimeout?.aborted || (err instanceof Error && err.name === "TimeoutError"))
-			) {
+			if (capped && !cellSignal.aborted && (opTimeout?.aborted || isPuppeteerTimeout(err))) {
 				const refusal = err instanceof ClickRefusedError ? err.refusal : undefined;
-				const count = selector ? await this.#selectorMatchCount(selector) : undefined;
-				const hint = refusal
-					? `; the element never became clickable (last check: ${refusal}${count === undefined ? "" : `; selector matches ${count} element(s)`})`
-					: count === undefined
-						? ""
-						: formatSelectorMatchHint(count);
+				const probe = selector ? await this.#selectorMatchCount(selector) : undefined;
+				const countNote =
+					probe === undefined
+						? undefined
+						: "count" in probe
+							? `selector matches ${probe.count} element(s)`
+							: `could not count matches: ${probe.failure}`;
+				let hint = "";
+				if (refusal)
+					hint = `; the element never became clickable (last check: ${refusal}${countNote ? `; ${countNote}` : ""})`;
+				else if (probe && "count" in probe) hint = formatSelectorMatchHint(probe.count);
+				else if (countNote) hint = `; ${countNote}`;
 				throw markBrowserRunRejection(
 					new ToolError(`${label} timed out after ${perOpTimeoutMs}ms${hint}`),
 					active.rejectionOwner,
@@ -2248,21 +2267,23 @@ export class WorkerCore {
 	}
 
 	/**
-	 * Best-effort match count for a timed-out selector op. Never throws;
-	 * undefined when the probe fails, stalls, or the selector is an aria-ref.
+	 * Best-effort match count for a timed-out selector op. Never throws: a probe
+	 * that fails or stalls reports why, since that same probe failing is what keeps
+	 * the zero-match watchdog from failing fast. Undefined for an aria-ref.
 	 */
-	async #selectorMatchCount(selector: string): Promise<number | undefined> {
+	async #selectorMatchCount(selector: string): Promise<{ count: number } | { failure: string } | undefined> {
 		if (parseAriaRefSelector(selector) !== null) return undefined;
 		try {
 			const handles = await Promise.race([
 				this.#requirePage().$$(normalizeSelector(selector)),
-				Bun.sleep(1_000).then(() => null),
+				Bun.sleep(MATCH_COUNT_PROBE_TIMEOUT_MS).then(() => null),
 			]);
-			if (!handles) return undefined;
+			if (!handles) return { failure: `no answer within ${MATCH_COUNT_PROBE_TIMEOUT_MS}ms` };
 			for (const handle of handles) void handle.dispose().catch(() => undefined);
-			return handles.length;
-		} catch {
-			return undefined;
+			return { count: handles.length };
+		} catch (err) {
+			const message = (err instanceof Error ? err.message : String(err)).split("\n", 1)[0];
+			return { failure: message || (err instanceof Error ? err.name : "unknown error") };
 		}
 	}
 
@@ -2331,7 +2352,7 @@ export class WorkerCore {
 							page.goto(url, options),
 						);
 					} catch (err) {
-						if (err instanceof Error && err.name === "TimeoutError") {
+						if (isPuppeteerTimeout(err)) {
 							// Abandon the hung navigation NOW — a still-pending load stalls every
 							// later op on this page and cascades into more opaque timeouts.
 							await this.#stopLoading();
@@ -3055,7 +3076,6 @@ export class WorkerCore {
 		opts: ScreenshotOptions = {},
 	): Promise<string | ScreenshotChangeResult> {
 		const page = this.#requirePage();
-		await preparePageForScreenshot(page, signal, this.#activateForScreenshot);
 		screenshotQuality(opts);
 		const threshold = screenshotThreshold(opts.threshold);
 		const changeDetection = opts.ifChanged === true || opts.threshold !== undefined;
@@ -3087,17 +3107,20 @@ export class WorkerCore {
 			parseAriaRefSelector(selector) !== null
 				? await this.#resolveAriaRef(selector)
 				: asElementHandle(await untilAborted(signal, () => page.$(normalizeSelector(selector))));
-		let comparisonBuffer: Uint8Array;
-		let buffer: Uint8Array;
+		let captured: { comparison: Uint8Array; image: Uint8Array };
 		try {
-			comparisonBuffer = await captureScreenshotBuffer(page, opts, signal, resolveSelector, "png");
-			buffer =
-				captureFormat === "png"
-					? comparisonBuffer
-					: await captureScreenshotBuffer(page, opts, signal, resolveSelector, captureFormat);
+			captured = await whileDrawing(page, signal, async () => {
+				const comparison = await captureScreenshotBuffer(page, opts, signal, resolveSelector, "png");
+				const image =
+					captureFormat === "png"
+						? comparison
+						: await captureScreenshotBuffer(page, opts, signal, resolveSelector, captureFormat);
+				return { comparison, image };
+			});
 		} finally {
 			await cleanupAnnotations();
 		}
+		const { comparison: comparisonBuffer, image: buffer } = captured;
 		let changeResult: ScreenshotChangeResult | undefined;
 		if (changeDetection) {
 			const scope = screenshotScope(opts);
@@ -3159,10 +3182,11 @@ export class WorkerCore {
 		opts: DiffScreenshotOptions = {},
 	): Promise<DiffScreenshotResult> {
 		const page = this.#requirePage();
-		await preparePageForScreenshot(page, signal, this.#activateForScreenshot);
 		const absoluteBaseline = resolveToCwd(baselinePath, session.cwd);
 		const baseline = await untilAborted(signal, () => fs.promises.readFile(absoluteBaseline));
-		const current = await captureScreenshotBuffer(page, {}, signal, async () => null, "png");
+		const current = await whileDrawing(page, signal, () =>
+			captureScreenshotBuffer(page, {}, signal, async () => null, "png"),
+		);
 		const diff = createPngDiff(baseline, current);
 		const threshold = screenshotThreshold(opts.threshold);
 		const changed = diff.pixelChangeRatio > threshold;
@@ -3445,7 +3469,7 @@ export class WorkerCore {
 		await this.#tracing?.dispose();
 		await this.#consoleCapture.detach();
 		this.#emulation?.dispose();
-		if (this.#mode === "headless" && page && !page.isClosed()) await page.close().catch(() => undefined);
+		if (this.#ownsPage && page && !page.isClosed()) await page.close().catch(() => undefined);
 		if (this.#browser?.connected) this.#browser.disconnect();
 		this.#transport.send({ type: "closed" });
 		this.#transport.close();

@@ -4420,7 +4420,7 @@ export class Markdown implements Component {
 	 * Delegates to wrapTextWithAnsi() so ANSI codes + long tokens are handled
 	 * consistently with the rest of the renderer.
 	 */
-	#wrapCellText(text: string, maxWidth: number): string[] {
+	#wrapCellText(text: string, maxWidth: number, clampOversized = true): string[] {
 		const cellWidth = Math.max(1, maxWidth);
 		// Wrap the whole cell in one call so wrapTextWithAnsi() balances OSC 8
 		// hyperlink state across explicit newlines (e.g. `<br>` rendered as \n);
@@ -4435,7 +4435,14 @@ export class Markdown implements Component {
 		// (e.g. mdCode) would bleed into the "│" and the following cells.
 		// Terminate each line at default fg, clearing bold/italic but keeping
 		// any ambient background (message-bg rendering) intact.
-		return wrapped.map(line => `${line}\x1b[22m\x1b[23m\x1b[39m`);
+		// A wide glyph can exceed a one-cell column without wrapping (a 2-cell
+		// emoji in a column squeezed to 1), so clamp here before the row is
+		// spliced between borders; otherwise the overwide row is re-wrapped and
+		// the trailing border lands on its own line.
+		return wrapped.map(line => {
+			const fitted = clampOversized && visibleWidth(line) > cellWidth ? truncateToWidth(line, cellWidth) : line;
+			return `${fitted}\x1b[22m\x1b[23m\x1b[39m`;
+		});
 	}
 
 	/**
@@ -4611,7 +4618,28 @@ export class Markdown implements Component {
 				const text = this.#renderInlineTokens(cell.tokens || [], styleContext);
 				return this.#wrapCellText(text, columnWidths[i]);
 			});
-			const rowLineCount = Math.max(...rowCellLines.map(c => c.length));
+			let rowLineCount = Math.max(...rowCellLines.map(c => c.length));
+			// The open cell is laid out in widths measured without it, so it can
+			// wrap past the lines its row's finished cells need. Those extra lines
+			// come and go as the cell grows and the column widens, moving every row
+			// below the table each frame; hold the row at its finished cells' height
+			// until the cell closes and counts toward the widths. While lines are
+			// held back, only the last kept line makes room for a `…`: it is
+			// re-wrapped one column narrower, since the wrapper closes the line's
+			// links and styles where truncation would cut them off, and dropped when
+			// even that overflows (a wide glyph in a two-cell column).
+			if (rowIndex === lastRow && rowCellLines[openCell]) {
+				const settledLineCount = Math.max(1, ...rowCellLines.filter((_, i) => i !== openCell).map(c => c.length));
+				if (rowCellLines[openCell].length > settledLineCount) {
+					const width = columnWidths[openCell];
+					const kept = rowCellLines[openCell].slice(0, settledLineCount);
+					const last =
+						width > 1 ? (this.#wrapCellText(kept[settledLineCount - 1], width - 1, false)[0] ?? "") : "";
+					kept[settledLineCount - 1] = `${visibleWidth(last) < width ? last : ""}…`;
+					rowCellLines[openCell] = kept;
+				}
+				rowLineCount = settledLineCount;
+			}
 
 			for (let lineIdx = 0; lineIdx < rowLineCount; lineIdx++) {
 				const rowParts = rowCellLines.map((cellLines, colIdx) => {

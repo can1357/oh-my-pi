@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentEvent, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Model, Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
@@ -342,6 +342,48 @@ describe("YieldTool", () => {
 				arguments: { data: { summary: { purge: 13, keep: 20 } } },
 			}),
 		).toEqual({ data: { summary: '{"purge":13,"keep":20}' } });
+	});
+
+	it("rejects unsupported root siblings instead of silently omitting them", async () => {
+		// Regression (#16317): arg validation discarded root siblings while preserving
+		// the complete `data` subtree, then the call published success.
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { summary: { type: "string" }, findings: { type: "array", items: { type: "string" } } },
+				},
+			}),
+		);
+		const validate = (args: Record<string, unknown>) =>
+			validateAgentToolArguments(tool, { type: "toolCall", id: "call-root-extras", name: "yield", arguments: args });
+
+		const withExtras = validate({
+			data: { summary: "s", findings: ["one"] },
+			findings: ["one", "two", "three", "four", "five"],
+			evidence_gaps: ["x"],
+		});
+		await expect(tool.execute("call-root-extras", withExtras)).rejects.toThrow(
+			'unsupported root field(s) "findings", "evidence_gaps"',
+		);
+
+		// A null-valued stray carries no payload, so it does not block the submission.
+		const result = await tool.execute("call-null-extra", validate({ data: { summary: "s" }, note: null }));
+		expect(result.details).toMatchObject({ status: "success", data: { summary: "s" } });
+
+		// A bridged payload's forged `__rawJson` is an internal sentinel, not a root field.
+		const bridged = validateAgentToolArguments(
+			tool,
+			{
+				type: "toolCall",
+				id: "call-bridged",
+				name: "yield",
+				arguments: { data: { summary: "s" }, __rawJson: "{}" },
+			},
+			"payload",
+		);
+		const bridgedResult = await tool.execute("call-bridged", bridged);
+		expect(bridgedResult.details).toMatchObject({ status: "success", data: { summary: "s" } });
 	});
 
 	it("passes array-typed success through as an incremental result", async () => {

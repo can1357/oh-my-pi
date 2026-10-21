@@ -1039,28 +1039,26 @@ describe("Coding Agent Tools", () => {
 			expect(output).not.toContain("Use :3 to continue");
 		});
 
-		it("should spill oversized read output to an artifact", async () => {
+		it("pages oversized file reads at the spill threshold instead of eliding their middle (#16277)", async () => {
 			const testFile = path.join(testDir, "oversized-read.txt");
-			const line = "0123456789".repeat(20);
-			fs.writeFileSync(testFile, `${Array.from({ length: 3500 }, () => line).join("\n")}\n`);
+			const row = (n: number) => `row-${String(n).padStart(4, "0")} ${"0123456789".repeat(20)}`;
+			fs.writeFileSync(testFile, `${Array.from({ length: 3500 }, (_, i) => row(i + 1)).join("\n")}\n`);
 			const spillSettings = Settings.isolated({
 				"tools.artifactSpillThreshold": 20,
 				"tools.artifactTailBytes": 1,
 				"tools.artifactTailLines": 10,
 				"tools.artifactHeadBytes": 1,
 			});
-			const defaultLimit = cfgReadDefaultLimit.get(spillSettings);
 			const spillManager = SessionManager.create(testDir, path.join(testDir, "spill-sessions"));
 			await spillManager.ensureOnDisk();
-			const spillSession = createTestToolSession(testDir, spillSettings, {
-				getSessionFile: () => spillManager.getSessionFile() ?? null,
-				getArtifactsDir: () => spillManager.getArtifactsDir(),
-				localProtocolOptions: {
-					getArtifactsDir: () => spillManager.getArtifactsDir(),
-					getSessionId: () => spillManager.getSessionId(),
-				},
-			});
-			const spillReadTool = wrapToolWithMetaNotice(new ReadTool(spillSession));
+			const spillReadTool = wrapToolWithMetaNotice(
+				new ReadTool(
+					createTestToolSession(testDir, spillSettings, {
+						getSessionFile: () => spillManager.getSessionFile() ?? null,
+						getArtifactsDir: () => spillManager.getArtifactsDir(),
+					}),
+				),
+			);
 			const context = {
 				...createTestToolContext(["read"]),
 				settings: spillSettings,
@@ -1068,38 +1066,97 @@ describe("Coding Agent Tools", () => {
 			};
 
 			try {
-				const result = await spillReadTool.execute(
-					"test-call-read-spill",
-					{ path: testFile },
-					undefined,
-					undefined,
-					context,
-				);
-				const truncation = result.details?.meta?.truncation;
-				const output = getTextOutput(result);
+				for (const [selector, firstRow] of [
+					["", 1],
+					[":1000-1400", 1000],
+				] as const) {
+					const result = await spillReadTool.execute(
+						`test-call-read-page${selector}`,
+						{ path: `${testFile}${selector}` },
+						undefined,
+						undefined,
+						context,
+					);
+					const truncation = result.details?.meta?.truncation;
+					const output = getTextOutput(result);
+					if (!truncation?.nextOffset) throw new Error("expected a continuation offset");
+					const lastRow = truncation.nextOffset - 1;
 
-				expect(truncation?.artifactId).toBeDefined();
-				expect(Buffer.byteLength(output, "utf-8")).toBeLessThan(20 * 1024);
-				expect(output).toContain("artifact://");
-				expect(truncation?.nextOffset).toBe(defaultLimit + 1);
-				expect(output).toContain(`Use :${defaultLimit + 1} to continue`);
+					// Every row of the page is delivered: nothing between its first and last row is cut.
+					expect(truncation.artifactId).toBeUndefined();
+					expect(output).not.toContain("elided");
+					expect(truncation.outputBytes).toBeLessThanOrEqual(20 * 1024);
+					for (let n = firstRow; n <= lastRow; n++) expect(output).toContain(row(n));
+					expect(output).not.toContain(row(lastRow + 1));
+					expect(output).toContain(`Use :${truncation.nextOffset} to continue`);
 
-				const saveArtifact = vi.spyOn(spillManager, "saveArtifact");
-				const artifactResult = await spillReadTool.execute(
-					"test-call-read-spilled-artifact",
-					{ path: `artifact://${truncation?.artifactId}` },
-					undefined,
-					undefined,
-					context,
-				);
-				expect(getTextOutput(artifactResult)).toContain(line);
-				expect(saveArtifact).not.toHaveBeenCalled();
+					// The named continuation picks up exactly where the page stopped.
+					const next = getTextOutput(
+						await spillReadTool.execute(
+							"test-call-read-next-page",
+							{ path: `${testFile}:${truncation.nextOffset}` },
+							undefined,
+							undefined,
+							context,
+						),
+					);
+					expect(next).toContain(row(lastRow + 1));
+				}
 			} finally {
 				await spillManager.close();
 			}
 		});
 
-		it("spills oversized URL reads like plain files, except pages of artifact storage", async () => {
+		it("keeps prefixed short-row pages unelided but spills pages that block context pushes past the threshold", async () => {
+			const shortRows = path.join(testDir, "short-rows.ts");
+			fs.writeFileSync(shortRows, `${Array.from({ length: 6000 }, (_, i) => `let v${i} = ${i};`).join("\n")}\n`);
+			// Every closer on the page pulls its off-window opener in as block context.
+			const depth = 200;
+			const nested = path.join(testDir, "deep-nesting.ts");
+			const openers = Array.from({ length: depth }, (_, i) => `${" ".repeat(i)}if (c${i} && ${"y".repeat(1000)}) {`);
+			const closers = Array.from({ length: depth }, (_, i) => `${" ".repeat(depth - 1 - i)}}`);
+			fs.writeFileSync(nested, `${[...openers, ...closers].join("\n")}\n`);
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 20,
+				"tools.artifactHeadBytes": 8,
+				"tools.artifactTailBytes": 8,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "prefix-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const spillReadTool = wrapToolWithMetaNotice(
+				new ReadTool(
+					createTestToolSession(testDir, spillSettings, {
+						getSessionFile: () => spillManager.getSessionFile() ?? null,
+						getArtifactsDir: () => spillManager.getArtifactsDir(),
+					}),
+				),
+			);
+			const context = {
+				...createTestToolContext(["read"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+			const read = (target: string) =>
+				spillReadTool.execute(target, { path: target }, undefined, undefined, context);
+
+			try {
+				// Row prefixes on thousands of short rows must not tip the page into middle elision.
+				const page = await read(`${shortRows}:1-3000`);
+				const nextOffset = page.details?.meta?.truncation?.nextOffset;
+				expect(page.details?.meta?.truncation?.artifactId).toBeUndefined();
+				expect(getTextOutput(page)).not.toContain("elided");
+				expect(getTextOutput(page)).toContain(`Use :${nextOffset} to continue`);
+
+				// Block context is unbounded by the line budget, so that page still spills.
+				const closers = await read(`${nested}:${depth + 1}-${depth * 2}`);
+				expect(closers.details?.meta?.truncation?.artifactId).toBeDefined();
+				expect(Buffer.byteLength(getTextOutput(closers), "utf-8")).toBeLessThan(20 * 1024);
+			} finally {
+				await spillManager.close();
+			}
+		});
+
+		it("bounds oversized URL reads like plain files, except pages of artifact storage", async () => {
 			const payload = Array.from({ length: 3000 }, (_, index) => `payload line ${index}`).join("\n");
 			const skillDir = path.join(testDir, "skills", "demo");
 			fs.mkdirSync(skillDir, { recursive: true });
@@ -1148,16 +1205,19 @@ describe("Coding Agent Tools", () => {
 			};
 
 			try {
-				for (const url of [
-					"skill://demo/ref.md",
-					"agent://Worker/report",
-					"local://big.md:1-3000",
-					"agent://Lines:1-3000",
-				]) {
+				for (const url of ["skill://demo/ref.md", "agent://Worker/report"]) {
 					const result = await spillReadTool.execute(`spill-${url}`, { path: url }, undefined, undefined, context);
 					const output = getTextOutput(result);
 					expect(result.details?.meta?.truncation?.artifactId).toBeDefined();
 					expect(Buffer.byteLength(output, "utf-8")).toBeLessThan(20 * 1024);
+				}
+				// Line pages of a URL-located file stop at the threshold and name their continuation.
+				for (const url of ["local://big.md:1-3000", "agent://Lines:1-3000"]) {
+					const result = await spillReadTool.execute(`page-${url}`, { path: url }, undefined, undefined, context);
+					const truncation = result.details?.meta?.truncation;
+					expect(truncation?.artifactId).toBeUndefined();
+					expect(truncation?.outputBytes).toBeLessThanOrEqual(20 * 1024);
+					expect(getTextOutput(result)).toContain(`Use :${truncation?.nextOffset} to continue`);
 				}
 
 				const artifactId = await spillManager.saveArtifact(payload, "read");

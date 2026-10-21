@@ -43,8 +43,9 @@ import type { TspMeterMark, TspProps } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import { col, node, span } from "../native/describe";
 import { getContextMeterThresholds } from "../chrome/context-thresholds";
-import { isNativeRendering } from "../native/state";
+import { isNativeRendering, onNativeRenderingChange } from "../native/state";
 import { getSeparator } from "./separators";
+import { formatJobWidgetGlance, type JobWidgetEntry, latestJobWidget } from "../tools/job-widget";
 import type {
 	CollabStatus,
 	ComposerFacts,
@@ -58,6 +59,9 @@ import type {
 	StatusLineSettings,
 	StatusResetExpiry,
 } from "./types";
+
+/** Sparkline cells the ANSI jobs segment draws after the freshest widget's headline. */
+const JOBS_SEGMENT_SPARK_CELLS = 8;
 
 /** What a click on a native status segment asks omp to open. */
 export type StatusLineNativeAction = "status.model" | "status.context" | "status.git" | "status.cost" | "status.path";
@@ -154,6 +158,10 @@ const WATCHER_FAILURE_POLL_TTL_MS = 5000;
 const BRAND_FADE_MS = 450;
 /** Repaint cadence while the brand fade is in flight (rust omp's `FADE_FRAME`). */
 const BRAND_FADE_FRAME_MS = 40;
+/** Repaint cadence while a turn's active-processing window is open: keeps the
+ * status bar's clock-driven readouts (pi spinner, turn timer) animating when
+ * no other component is requesting renders. */
+const ACTIVE_WINDOW_REPAINT_MS = 250;
 
 /**
  * Providers whose subscription quota is a single monthly bucket, so their
@@ -442,6 +450,8 @@ class StatusLineExternalInputs {
 	isFastModeActive = false;
 	anthropicSlowModeLabel: string | undefined = undefined;
 	compactionSpeculation: unknown = undefined;
+	/** The freshest running job widget's view (stable identity while its data is unchanged). */
+	jobWidgetRef: unknown = undefined;
 }
 
 interface CachedStatusLine {
@@ -690,6 +700,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#gitWatcherUnavailable = false;
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
+	/** Unsubscribe for the native-rendering feed; re-arms the turn-window ticker when a TSP surface is revoked. */
+	#unwatchNativeRendering: (() => void) | undefined;
 	#autoCompactEnabled: boolean = true;
 	/** Pulse timer for the running-speculation indicator; live only while speculation runs. */
 	#speculationBlinkTimer: NodeJS.Timeout | undefined;
@@ -700,6 +712,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#brandWorking = false;
 	/** Frame timer driving repaints while the brand fade is unsettled. */
 	#brandFadeTimer: NodeJS.Timeout | undefined;
+	/** Repaint ticker while a turn's active-processing window is open (see #syncActiveWindowRepaint). */
+	#activeWindowRepaintTimer: NodeJS.Timeout | undefined;
 	/** One wall-clock wakeup for the active model's next tariff change, including while idle. */
 	#pricingTimer: NodeJS.Timeout | undefined;
 	#pricingTimerCost: ModelCost | undefined;
@@ -825,6 +839,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		private readonly host: StatusLineHost<TSession>,
 	) {
 		this.#settings = host.getSettings();
+		this.#unwatchNativeRendering = onNativeRenderingChange(() => this.#syncActiveWindowRepaint());
 	}
 
 	#gitEnabled(): boolean {
@@ -931,6 +946,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#invalidateSessionCaches();
 			this.#closeStaleActiveWindow();
 		}
+		// The ticker self-stops once its tick sees no open window for the
+		// newly-attached session; re-pointing focus at a session whose turn
+		// is still running must re-arm it, and no other path reliably fires
+		// here (closeStaleActiveWindow returns early while streaming, and
+		// the synthesized agent_start no-ops on an already-open window).
+		this.#syncActiveWindowRepaint();
 		this.invalidate();
 	}
 
@@ -1029,6 +1050,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		meter.activeMs = 0;
 		meter.activeStartedAt = null;
 		this.#invalidateStatusLineRenderCache();
+		this.#syncActiveWindowRepaint();
 	}
 
 	/**
@@ -1043,6 +1065,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (meter.activeStartedAt !== null) return;
 		meter.activeStartedAt = Date.now();
 		this.#invalidateStatusLineRenderCache();
+		this.#syncActiveWindowRepaint();
 	}
 
 	/**
@@ -1057,6 +1080,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		meter.activeMs += Math.max(0, Date.now() - meter.activeStartedAt);
 		meter.activeStartedAt = null;
 		this.#invalidateStatusLineRenderCache();
+		this.#syncActiveWindowRepaint();
 	}
 
 	/**
@@ -1282,8 +1306,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#onBranchChange = null;
 		this.#stopSpeculationBlink();
 		this.#stopBrandFadeTimer();
+		this.#stopActiveWindowRepaint();
 		this.#stopPricingTimer();
 		this.#clearUsageStartTimer();
+		this.#unwatchNativeRendering?.();
+		this.#unwatchNativeRendering = undefined;
 		this.#onCodexResetFireworks = undefined;
 		this.#onResetExpiryNotice = undefined;
 		this.#codexResetSnapshots.clear();
@@ -1385,6 +1412,40 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (!this.#brandFadeTimer) return;
 		clearInterval(this.#brandFadeTimer);
 		this.#brandFadeTimer = undefined;
+	}
+
+	/**
+	 * Keep the status bar repainting while a turn's active-processing window
+	 * is open. The `pi` segment's spinner and turn timer are painted from the
+	 * wall clock at render time, so they only animate when frames flow; during
+	 * a quiet turn the working-row loader's 80 ms tick is normally the sole
+	 * repaint source, and paths that stop or bypass that loader mid-turn (an
+	 * error banner, a stale retry/compaction loader reference) froze the
+	 * spinner until the next keystroke. The status line owns the active
+	 * window, so it owns a repaint source for it; a native surface clocks its
+	 * own spinner and needs none.
+	 */
+	#syncActiveWindowRepaint(): void {
+		if (this.#disposed || isNativeRendering() || this.getTurnElapsedMs() === null) {
+			this.#stopActiveWindowRepaint();
+			return;
+		}
+		if (this.#activeWindowRepaintTimer) return;
+		const timer = setInterval(() => {
+			if (this.#disposed || isNativeRendering() || this.getTurnElapsedMs() === null) {
+				this.#stopActiveWindowRepaint();
+				return;
+			}
+			this.#onBranchChange?.();
+		}, ACTIVE_WINDOW_REPAINT_MS);
+		timer.unref?.();
+		this.#activeWindowRepaintTimer = timer;
+	}
+
+	#stopActiveWindowRepaint(): void {
+		if (!this.#activeWindowRepaintTimer) return;
+		clearInterval(this.#activeWindowRepaintTimer);
+		this.#activeWindowRepaintTimer = undefined;
 	}
 
 	#stopPricingTimer(): void {
@@ -1977,6 +2038,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * cadence while a late successful fetch can still refresh the cached segment.
 	 */
 	refreshUsageInBackground(): void {
+		if (this.#disposed) return;
 		const now = Date.now();
 		const session = this.session;
 		const usageContextKey = this.#getUsageContextKey(session);
@@ -2740,6 +2802,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				? this.session.getAnthropicSlowModeLabel()
 				: undefined;
 		target.compactionSpeculation = this.session.compactionSpeculation;
+		target.jobWidgetRef = this.#latestJobWidget()?.view;
+	}
+
+	/** The running job widget that saw data last; the ANSI jobs segment appends its glance. */
+	#latestJobWidget(): JobWidgetEntry | undefined {
+		const entries = this.session.getRunningJobWidgets?.();
+		return entries ? latestJobWidget(entries) : undefined;
 	}
 
 	#sameStatusLineExternalInputs(left: StatusLineExternalInputs, right: StatusLineExternalInputs): boolean {
@@ -2793,7 +2862,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			left.isAutoThinking === right.isAutoThinking &&
 			left.isFastModeActive === right.isFastModeActive &&
 			left.anthropicSlowModeLabel === right.anthropicSlowModeLabel &&
-			left.compactionSpeculation === right.compactionSpeculation
+			left.compactionSpeculation === right.compactionSpeculation &&
+			left.jobWidgetRef === right.jobWidgetRef
 		);
 	}
 
@@ -3002,7 +3072,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (layout !== "plain-left") {
 			const runningBackgroundJobs = this.runningBackgroundJobCount();
 			if (runningBackgroundJobs > 0) {
-				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
+				const widget = this.#latestJobWidget();
+				const glance = widget ? formatJobWidgetGlance(widget.view, theme, JOBS_SEGMENT_SPARK_CELLS) : "";
+				const count = theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`);
+				rightParts.unshift(glance ? `${count} ${glance}` : count);
 			}
 			if (subagentBadge) rightParts.unshift(subagentBadge);
 		}

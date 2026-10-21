@@ -5,6 +5,7 @@ import {
 	resolveFactoryDroidPolicy,
 	resolveFactoryDroidRotation,
 } from "@oh-my-pi/pi-catalog/compat/factory-droid";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import type { RequestPolicy } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -19,13 +20,25 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import type { OAuthRequestIdentity } from "../auth/types";
 import * as AIError from "../error";
 import { mapAnthropicToolChoice } from "../stream";
-import type { Api, Context, Model, ModelSpec, ServiceTier, StreamFunction, StreamOptions, ToolChoice } from "../types";
+import type {
+	Api,
+	AssistantMessage,
+	Context,
+	Model,
+	ModelSpec,
+	ServiceTier,
+	StreamFunction,
+	StreamOptions,
+	ToolCall,
+	ToolChoice,
+} from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { type AnthropicOptions, mapStainlessArch, mapStainlessOs, shouldStripThinkingHistory } from "./anthropic";
 import { createProviderErrorMessage } from "./error-message";
 import droidIdentity from "./factory-droid/droid-identity.md" with { type: "text" };
 import { streamFactoryDroidGemini } from "./factory-droid/gemini";
+import { factoryDroidToolNamesByWire, encodeFactoryDroidCompletionsToolName } from "./factory-droid/tool-names";
 import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from "./register-builtins";
 
 /**
@@ -488,29 +501,87 @@ function streamResponsesWire(a: Attempt, inner: Model<"openai-responses">): Assi
 	});
 }
 
+/**
+ * Chat-completions tool names over the route's bound go out in the CLI's
+ * capped form on declarations and replayed calls and results; shorter names go
+ * out verbatim. Returned calls come back under the caller's tool name.
+ */
+function encodeCompletionsToolNames(context: Context, encode: (name: string) => string): Context {
+	return {
+		...context,
+		tools: context.tools?.map(tool => ({ ...tool, name: encode(tool.name) })),
+		messages: context.messages.map(message => {
+			if (message.role === "toolResult") return { ...message, toolName: encode(message.toolName) };
+			if (message.role !== "assistant") return message;
+			return {
+				...message,
+				content: message.content.map(block =>
+					block.type === "toolCall" ? { ...block, name: encode(block.name) } : block,
+				),
+			};
+		}),
+	};
+}
+
 function streamCompletionsWire(a: Attempt, inner: Model<"openai-completions">): AssistantMessageEventStream {
 	const { options } = a;
+	// The bound `transformMessages` validates replayed names against for this model.
+	const policyMaxLength = resolveCatalogPolicy(inner).toolCallNameMaxLength;
+	const maxLength = typeof policyMaxLength === "number" ? policyMaxLength : 64;
+	const encode = (name: string) => encodeFactoryDroidCompletionsToolName(name, maxLength);
+	const toolNamesByWire = factoryDroidToolNamesByWire(a.context.tools, encode);
 	// The selected dialect owns every reasoning field, so the shared encoder gets none.
 	const extraBody = buildCompletionsReasoningBody(a.route.policy, a.effort, a.disabled);
-	return streamOpenAICompletions({ ...inner, compat: { ...inner.compat, extraBody } }, a.context, {
-		...a.forwarded,
-		sessionId: a.sessionUuid,
-		temperature: options?.temperature ?? FACTORY_DROID_COMPLETIONS_TEMPERATURE,
-		topP: options?.topP,
-		topK: options?.topK,
-		minP: options?.minP,
-		presencePenalty: options?.presencePenalty,
-		repetitionPenalty: options?.repetitionPenalty,
-		frequencyPenalty: options?.frequencyPenalty,
-		stopSequences: options?.stopSequences,
-		initiatorOverride: options?.initiatorOverride,
-		promptCacheKey: options?.promptCacheKey,
-		promptCache: options?.promptCache,
-		serviceTier: options?.serviceTier,
-		reasoning: undefined,
-		disableReasoning: undefined,
-		toolChoice: options?.toolChoice,
-	});
+	const source = streamOpenAICompletions(
+		{ ...inner, compat: { ...inner.compat, extraBody } },
+		encodeCompletionsToolNames(a.context, encode),
+		{
+			...a.forwarded,
+			sessionId: a.sessionUuid,
+			temperature: options?.temperature ?? FACTORY_DROID_COMPLETIONS_TEMPERATURE,
+			topP: options?.topP,
+			topK: options?.topK,
+			minP: options?.minP,
+			presencePenalty: options?.presencePenalty,
+			repetitionPenalty: options?.repetitionPenalty,
+			frequencyPenalty: options?.frequencyPenalty,
+			stopSequences: options?.stopSequences,
+			initiatorOverride: options?.initiatorOverride,
+			promptCacheKey: options?.promptCacheKey,
+			promptCache: options?.promptCache,
+			serviceTier: options?.serviceTier,
+			reasoning: undefined,
+			disableReasoning: undefined,
+			// A forced choice names the tool by its declared (encoded) name.
+			toolChoice:
+				typeof options?.toolChoice === "object" && "function" in options.toolChoice
+					? { ...options.toolChoice, function: { name: encode(options.toolChoice.function.name) } }
+					: typeof options?.toolChoice === "object" && "name" in options.toolChoice
+						? { ...options.toolChoice, name: encode(options.toolChoice.name) }
+						: options?.toolChoice,
+		},
+	);
+	const decodeCall = (block: ToolCall) => {
+		block.name = toolNamesByWire.get(block.name) ?? block.name;
+	};
+	const decode = (message: AssistantMessage) => {
+		for (const block of message.content) if (block.type === "toolCall") decodeCall(block);
+	};
+	const stream = new AssistantMessageEventStream();
+	// `streamOpenAICompletions` (register-builtins) turns every failure, a
+	// rejected retry wait included, into an `error` event and ends; it never
+	// rejects, so this loop always reaches `end()`.
+	(async () => {
+		for await (const event of source) {
+			if ("partial" in event) decode(event.partial);
+			if (event.type === "toolcall_end") decodeCall(event.toolCall);
+			if (event.type === "done") decode(event.message);
+			if (event.type === "error") decode(event.error);
+			stream.push(event);
+		}
+		stream.end();
+	})();
+	return stream;
 }
 
 function streamWire(wire: FactoryDroidWire, a: Attempt): AssistantMessageEventStream {

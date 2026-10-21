@@ -70,6 +70,27 @@ describe("keystrokes during a Tern startup prepaint", () => {
 		}
 	});
 
+	it("apply iTerm2's cell-size reply in device pixels instead of replaying it as typed text", async () => {
+		const before = getCellDimensions();
+		try {
+			const log = new KeyLog();
+			harness = await TspHarness.start(tui => tui.setFocus(log), TERN_PREPAINT);
+			const h = harness;
+
+			h.terminal.send("a");
+			// Points plus the backing scale: a Retina cell of 7x17 points is 14x34 pixels.
+			h.terminal.send("\x1b]1337;ReportCellSize=17.0;7.0;2.0\x1b\\");
+			h.terminal.send("b");
+			h.flush();
+			expect(getCellDimensions()).toEqual({ widthPx: 14, heightPx: 34 });
+
+			h.tui.releaseHeldInput();
+			expect(log.keys).toEqual(["a", "b"]);
+		} finally {
+			setCellDimensions(before);
+		}
+	});
+
 	it("reach a dialog that takes focus live, and resume holding when focus returns", async () => {
 		const editor = new KeyLog();
 		const dialog = new KeyLog();

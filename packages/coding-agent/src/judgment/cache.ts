@@ -89,8 +89,9 @@ function questionKey(name: string, question: Question): QuestionKey {
 		name,
 		type: question.type,
 		instruction: question.instructions,
-		// `null`, not SQL NULL: NULLs never collide under UNIQUE, which would let duplicates in.
-		criteria: stableStringifyJson(question.criteria ?? null),
+		// `null`, not SQL NULL: NULLs never collide under UNIQUE, which would let duplicates in. A box
+		// question's `image` stays local (answers are cached as measured on the sent image), so it is no key.
+		criteria: stableStringifyJson(question.type === "box" ? null : (question.criteria ?? null)),
 	};
 }
 

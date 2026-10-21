@@ -469,6 +469,60 @@ describe("cache warmer lifecycle", () => {
 		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "conversation context changed" });
 	});
 
+	test("publishes the cache entry only once a response reports cache usage, even with warming off", () => {
+		const h = harness();
+		h.mode = "off";
+		const sentAt = Date.now();
+		start(h, { apiKey: () => "resolved-at-request-time" });
+		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache warming disabled" });
+		expect(h.warmer.cacheEntry).toBeUndefined();
+		// The provider's reported write tier wins over the credential guess.
+		h.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500, cttl: { ephemeral1h: 500 } })));
+		expect(h.warmer.cacheEntry).toEqual({ touchedAt: sentAt, tier: "long", ttlMs: 3_600_000 });
+		h.current = false;
+		expect(h.warmer.cacheEntry).toBeUndefined();
+	});
+
+	test("a failed or uncached response never publishes its entry", () => {
+		const failed = harness();
+		start(failed, { cacheRetention: "long" });
+		failed.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 }), "error"));
+		expect(failed.warmer.cacheEntry).toBeUndefined();
+
+		const uncached = harness();
+		start(uncached, { cacheRetention: "long" });
+		uncached.warmer.onResponse(makeMessage(makeUsage({})));
+		expect(uncached.warmer.cacheEntry).toBeUndefined();
+
+		// A later failure keeps the earlier confirmed entry with its own timestamp.
+		const kept = harness();
+		const confirmedAt = Date.now();
+		start(kept);
+		kept.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 })));
+		vi.advanceTimersByTime(1_000);
+		start(kept);
+		kept.warmer.onResponse(makeMessage(makeUsage({}), "error"));
+		expect(kept.warmer.cacheEntry).toEqual({ touchedAt: confirmedAt, tier: "short", ttlMs: 300_000 });
+	});
+
+	test("a refresh that hits the cache confirms and extends the entry; a miss does not", async () => {
+		const h = harness();
+		start(h);
+		const firstTouch = Date.now();
+		// Still pending: the long-running request has not answered yet.
+		await advance(SHORT_DELAY_MS);
+		expect(h.warmer.cacheEntry).toEqual({ touchedAt: firstTouch + SHORT_DELAY_MS, tier: "short", ttlMs: 300_000 });
+
+		const missed = harness();
+		missed.script = { kind: "generate", usage: makeUsage({ cacheWrite: PROMPT_TOKENS }) };
+		start(missed);
+		const missedTouch = Date.now();
+		missed.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 })));
+		await advance(SHORT_DELAY_MS);
+		expect(missed.warmer.status.reason).toBe("refresh missed the cache");
+		expect(missed.warmer.cacheEntry?.touchedAt).toBe(missedTouch);
+	});
+
 	test("extensions can stop a refresh and force one past the threshold", async () => {
 		const stopped = harness({ decide: () => Promise.resolve("stop") });
 		start(stopped);

@@ -301,6 +301,26 @@ function resolveWorkPoolYieldItem(items: readonly WorkPoolYieldItem[], value: un
 	throw new Error(`key must be one of: ${items.map(candidate => candidate.index).join(", ")}`);
 }
 
+/**
+ * Reject root argument keys `parameters` does not declare, skipping `null` (strict-mode
+ * filler). They are payload the model put beside `data`; dropping them would publish a
+ * success that silently lost part of the result.
+ *
+ * @throws naming every unsupported field and the allowed ones, so the model can resubmit.
+ */
+function assertSupportedRootFields(parameters: TSchema, args: Record<string, unknown>): void {
+	const declared = isPlainRecord(parameters) && isPlainRecord(parameters.properties) ? parameters.properties : {};
+	const unsupported: string[] = [];
+	for (const key in args) {
+		if (args[key] != null && !Object.hasOwn(declared, key)) unsupported.push(key);
+	}
+	if (unsupported.length === 0) return;
+	throw new Error(
+		`yield arguments carry unsupported root field(s) ${formatYieldLabels(unsupported)}; nothing was submitted. ` +
+			`Allowed root fields: ${formatYieldLabels(Object.keys(declared))}. Put the entire output inside \`data\`. ${YIELD_FORMAT_HINT}`,
+	);
+}
+
 function buildYieldParameters(dataSchema: Record<string, unknown>): Record<string, unknown> {
 	// `data` xor `error`, and "omitted data requires a `type`", are enforced in
 	// `execute()` at runtime, NOT in this schema: a top-level combinator
@@ -500,6 +520,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		if (!isPlainRecord(params)) throw new Error("yield arguments must be an object");
 		const raw = params;
 		const workPoolItems = this.#workPoolItems();
+		assertSupportedRootFields(
+			workPoolItems.length > 0 ? wrapWorkPoolYieldParameters(workPoolItems) : this.#parameters,
+			raw,
+		);
 		let workPoolItemId: string | undefined;
 		let yieldType: string | string[] | undefined;
 		// Strict-mode providers send omitted optionals as `null`; treat it as absent.

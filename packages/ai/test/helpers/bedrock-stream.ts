@@ -61,6 +61,22 @@ export function encodeBedrockFrame(headers: Record<string, string>, payload: Uin
 export function bedrockEvent(eventType: string, payload: string): Uint8Array {
 	return encodeBedrockFrame({ ":message-type": "event", ":event-type": eventType }, new TextEncoder().encode(payload));
 }
+/** Wraps one Anthropic Messages stream event in Bedrock's native chunk envelope. */
+export function bedrockAnthropicChunkEvent(event: Record<string, unknown>): Uint8Array {
+	const bytes = Buffer.from(JSON.stringify(event)).toString("base64");
+	return encodeBedrockFrame(
+		{ ":message-type": "event", ":event-type": "chunk" },
+		new TextEncoder().encode(JSON.stringify({ bytes })),
+	);
+}
+
+/** Encodes a native Bedrock EventStream exception frame. */
+export function bedrockStreamExceptionFrame(exceptionType: string, message: string): Uint8Array {
+	return encodeBedrockFrame(
+		{ ":message-type": "exception", ":exception-type": exceptionType },
+		new TextEncoder().encode(JSON.stringify({ message })),
+	);
+}
 
 /** The minimal valid five-event stream every happy-path Bedrock test replays. */
 export function bedrockHappyPathFrames(): Uint8Array[] {

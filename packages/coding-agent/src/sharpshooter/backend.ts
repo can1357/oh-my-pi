@@ -131,8 +131,8 @@ export const sharpshooterBackend: MemoryBackend = {
 		await rm(sharpshooterBankDir(agentDir, cwd), { recursive: true, force: true });
 	},
 
-	// `model` and `intervalMinutes` are read per extraction/scheduler tick; only
-	// the prompt-injected budget needs a rebuild to take effect.
+	// `model`, `minPromptLength`, and `intervalMinutes` are read per extraction/scheduler
+	// tick; only the prompt-injected budget needs a rebuild to take effect.
 	async applySettings(session, changed): Promise<void> {
 		if (changed.includes("sharpshooter.injectionTokenLimit")) await session.refreshBaseSystemPrompt();
 	},

@@ -305,25 +305,33 @@ export const cfgToolsApproval = register({
 });
 
 // Default tool approval mode (interaction tab, but governs the tool wrapper).
-//   "always-ask" — auto-approves read-tier tools only; prompts for write/exec.
-//   "write"      — auto-approves read and write-tier tools; prompts for exec.
-//   "yolo"       — auto-approves every tier.
+//   "always-ask"        — auto-approves read-tier tools only; prompts for write/exec.
+//   "always-ask-cached" — like always-ask, but file reads and writes can be approved
+//                         for a file or folder, this session or across sessions.
+//   "write"             — auto-approves read and write-tier tools; prompts for exec.
+//   "yolo"              — auto-approves every tier.
 export const cfgToolsApprovalMode = register({
 	id: "tools.approvalMode",
 	type: "enum",
-	values: ["always-ask", "write", "yolo"] as const,
+	values: ["always-ask", "always-ask-cached", "write", "yolo"] as const,
 	default: "yolo",
 	ui: {
 		tab: "interaction",
 		group: "Approvals",
 		label: "Tool Approval",
 		description:
-			"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
+			"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Ask and remember' also asks before file reads, and can remember a file or folder. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
 		options: [
 			{
 				value: "always-ask",
 				label: "Always ask",
 				description: "Auto-approve read-only tools; require confirmation for write and exec tools.",
+			},
+			{
+				value: "always-ask-cached",
+				label: "Ask and remember",
+				description:
+					"Ask before reading or writing a file, with answers that remember the file or its folder for this session or every session; require confirmation for exec tools.",
 			},
 			{
 				value: "write",
@@ -664,6 +672,34 @@ export const cfgComputerMaxHeight = register({
 	},
 });
 
+export const cfgComputerBackgroundFallback = register({
+	id: "computer.backgroundFallback",
+	type: "enum",
+	values: ["takeover", "refuse"] as const,
+	default: "takeover",
+	ui: {
+		tab: "tools",
+		group: "Computer",
+		label: "Computer Background Fallback",
+		description:
+			"What window input does when its background route is unavailable: rerun it in takeover and return focus to your app (macOS; elsewhere plain takeover), or refuse, which also keeps the agent from taking the foreground or opening macOS menus itself",
+		options: [
+			{
+				value: "takeover",
+				label: "Takeover",
+				description:
+					"Briefly bring the target forward for that one call, then return focus to your app (on macOS even if you kept typing)",
+			},
+			{
+				value: "refuse",
+				label: "Refuse",
+				description:
+					"Fail the call; nothing takes over, and the agent's own takeover, raise, activating open, desktop input and macOS menus (context menus, popup and menu buttons; they take your keyboard while open) are refused too",
+			},
+		],
+	},
+});
+
 export const cfgImagesQuestionTimeoutMs = register({
 	id: "images.questionTimeoutMs",
 	type: "number",
@@ -907,6 +943,19 @@ export const cfgAsyncMaxJobs = register({
 	protocolDefault: ["rpc"],
 	type: "number",
 	default: 100,
+});
+
+export const cfgAsyncWidgets = register({
+	id: "async.widgets",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Live Job Widgets",
+		description:
+			"Draw a live widget for each running background job (charts, bars, status grids derived from its output) in the wait card, the jobs pill and the jobs sheet. The `widget` model role (default: `smol`) writes one spec per job; updates need no further model calls",
+	},
 });
 
 export const cfgToolsXdev = register({

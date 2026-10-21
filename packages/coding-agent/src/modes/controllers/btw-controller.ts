@@ -42,6 +42,7 @@ function assistantMessageWithReplyText(assistantMessage: AssistantMessage, reply
 				type: "thinking",
 				thinking: part.thinking,
 				...(part.summary !== undefined && { summary: part.summary }),
+				...(part.narration && { narration: true }),
 			});
 			continue;
 		}

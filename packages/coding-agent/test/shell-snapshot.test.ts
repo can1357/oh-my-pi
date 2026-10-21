@@ -244,7 +244,11 @@ describe("shell-snapshot fn-env helper", () => {
 });
 
 describe("getOrCreateSnapshot", () => {
-	it("re-exports env vars referenced by snapshotted functions (issue #3470)", async () => {
+	// `getOrCreateSnapshot` deliberately returns null on win32 (snapshotting is POSIX-only), and the
+	// assertions below pin POSIX file modes / per-uid dirs that Windows has no equivalent for.
+	const onWindows = process.platform === "win32";
+
+	it.skipIf(onWindows)("re-exports env vars referenced by snapshotted functions (issue #3470)", async () => {
 		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-3470-"));
 		await fs.writeFile(
 			path.join(home, ".bashrc"),
@@ -297,7 +301,7 @@ describe("getOrCreateSnapshot", () => {
 		expect(dirStat.mode & 0o077).toBe(0);
 	});
 
-	it("keeps the snapshot file at 0600 even when the rc file resets umask to 022", async () => {
+	it.skipIf(onWindows)("keeps the snapshot file at 0600 even when the rc file resets umask to 022", async () => {
 		// PR-review regression: previous revision ran `umask 077` BEFORE sourcing
 		// the rc, so a typical `.bashrc` with `umask 022` reopened the world-read
 		// window between the shell's first `>|` and the JS post-spawn chmod.
@@ -450,7 +454,7 @@ describe("getOrCreateSnapshot", () => {
 		}
 	});
 
-	it("keeps snapshots in a uid-scoped dir so accounts sharing /tmp cannot collide", async () => {
+	it.skipIf(onWindows)("keeps snapshots in a uid-scoped dir so accounts sharing /tmp cannot collide", async () => {
 		// Regression: the dir used to be a single fixed `omp-shell-snapshots` name
 		// under the shared `os.tmpdir()`, created 0700. The first account to run omp
 		// owned it and every other account's pre-create write died with EACCES.

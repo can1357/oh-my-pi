@@ -101,7 +101,9 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 	const roleMatch = /^\s*([^\s[]+)/.exec(selector);
 	const wantedRole = (roleMatch?.[1] ?? "").toLocaleLowerCase();
 	const nameMatch = /\[\s*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))(?:\s+(exact))?\s*\]/i.exec(selector);
-	const wantedName = (nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3])?.trim().toLocaleLowerCase();
+	const normalizeSpace = (value: string): string => value.replace(/\s+/g, " ").trim();
+	const nameText = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
+	const wantedName = nameText === undefined ? undefined : normalizeSpace(nameText).toLocaleLowerCase();
 	const exact = nameMatch?.[4]?.toLocaleLowerCase() === "exact";
 	const implicitRole = (element: Element): string | null => {
 		const tag = element.tagName.toLocaleLowerCase();
@@ -138,35 +140,137 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		}
 		return null;
 	};
-	const accessibleName = (element: Element): string => {
-		const ariaLabel = element.getAttribute("aria-label");
-		if (ariaLabel) return ariaLabel.trim();
+	// Roles named by their content, so `title` names them only when the content is empty.
+	const namedByContent =
+		/^(?:button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox|menuitemradio|option|radio|row|rowheader|switch|tab|tooltip|treeitem)$/.test(
+			wantedRole,
+		);
+	// Text as the accessibility tree reads it (as the Tern kit's `contentText`): hidden subtrees and
+	// `visibility: hidden` text skipped, block children spaced apart, a child's `aria-labelledby` text,
+	// `aria-label`, an image's `alt` or an embedded control's value in place of its content. `skip` is the
+	// element being named, so a label around a field does not repeat the field's own value. `visibility`
+	// "any" reads a hidden `aria-labelledby` target or native label whole, `display: none` descendants
+	// included, as the accessibility tree does. `followRefs` is off inside a referenced subtree, so
+	// `aria-labelledby` chains are not followed (and cannot cycle).
+	const contentText = (
+		start: Pick<Element, "childNodes">,
+		skip: Element | null,
+		visibility: unknown,
+		followRefs = true,
+	): string => {
+		let text = "";
+		const walk = (element: Pick<Element, "childNodes">, visibility: unknown): void => {
+			for (const child of Array.from(element.childNodes)) {
+				// 3 = Node.TEXT_NODE, 1 = Node.ELEMENT_NODE
+				if (child.nodeType === 3 && (visibility === "visible" || visibility === "any")) {
+					text += child.nodeValue ?? "";
+				}
+				if (child.nodeType !== 1 || child === skip) continue;
+				const childElement = child as Element;
+				const tag = childElement.tagName.toLocaleLowerCase();
+				if (["script", "style", "template", "noscript"].includes(tag)) continue;
+				if (visibility !== "any" && childElement.getAttribute("aria-hidden") === "true") continue;
+				const style = getComputedStyle(childElement);
+				if (style.display === "none" && visibility !== "any") continue;
+				const gap = style.display === "inline" || style.display === "contents" ? "" : " ";
+				const shown = visibility === "any" || style.visibility === "visible";
+				const label = normalizeSpace(childElement.getAttribute("aria-label") ?? "");
+				const labelledBy = followRefs ? idrefText(childElement) : "";
+				// Form controls expose `type`, `value` and `selectedOptions`, which the element type here does not declare.
+				const control = childElement as unknown as {
+					type?: string;
+					value?: string;
+					selectedOptions?: ArrayLike<{ text: string }>;
+				};
+				const inputType = tag === "input" ? (control.type ?? "").toLocaleLowerCase() : "";
+				const inputButton = ["button", "submit", "reset"].includes(inputType);
+				const childRole = childElement.getAttribute("role")?.trim().split(/\s+/)[0]?.toLocaleLowerCase();
+				// A range reads its ARIA value text, then value, before the DOM value.
+				const range = inputType === "range" || childRole === "slider" || childRole === "spinbutton";
+				// A text field's value stands in for it; a checkbox's or radio's `value` ("on" by default) is not
+				// text it shows, and an input button is named by its label before its value.
+				const valueIsText =
+					tag === "textarea" ||
+					(tag === "input" &&
+						!inputButton &&
+						!["checkbox", "radio", "file", "hidden", "image"].includes(inputType));
+				text += gap;
+				// A nested field contributes its value, not its own label.
+				if (range) {
+					text += shown
+						? childElement.getAttribute("aria-valuetext") ||
+							childElement.getAttribute("aria-valuenow") ||
+							(control.value ?? "")
+						: "";
+				} else if (tag === "select") {
+					text += shown ? Array.from(control.selectedOptions ?? [], option => option.text).join(" ") : "";
+				} else if (valueIsText) text += shown ? (control.value ?? "") : "";
+				else if (labelledBy) text += shown ? labelledBy : "";
+				else if (label) text += shown ? label : "";
+				else if (tag === "img") text += shown ? (childElement.getAttribute("alt") ?? "") : "";
+				else if (inputButton) text += shown ? (control.value ?? "") : "";
+				else if (tag !== "input") walk(childElement, visibility === "any" ? "any" : style.visibility);
+				text += gap;
+			}
+		};
+		walk(start, visibility);
+		return text;
+	};
+	/** Text of the elements an `aria-labelledby` names (a hidden target read whole), without following their own references. */
+	const idrefText = (element: Element): string => {
 		const labelledBy = element.getAttribute("aria-labelledby");
-		if (labelledBy) {
-			const value = labelledBy
+		if (!labelledBy) return "";
+		return normalizeSpace(
+			labelledBy
 				.split(/\s+/)
-				.map(id => element.ownerDocument?.getElementById(id)?.textContent ?? "")
-				.join(" ")
-				.trim();
-			if (value) return value;
-		}
+				.map(id => {
+					const target = element.ownerDocument?.getElementById(id);
+					if (!target) return "";
+					// Hidden by visibility, `display: none`, or a `hidden`/`aria-hidden` ancestor: read the whole subtree.
+					const targetStyle = getComputedStyle(target);
+					const hidden =
+						targetStyle.visibility !== "visible" ||
+						targetStyle.display === "none" ||
+						target.closest("[hidden], [aria-hidden='true']") !== null;
+					return contentText(target, null, hidden ? "any" : "visible", false);
+				})
+				.join(" "),
+		);
+	};
+	const accessibleName = (element: Element): string => {
+		const ariaLabel = normalizeSpace(element.getAttribute("aria-label") ?? "");
+		if (ariaLabel) return ariaLabel;
+		const labelledBy = idrefText(element);
+		if (labelledBy) return labelledBy;
 		if (element.id) {
 			for (const label of element.ownerDocument?.querySelectorAll("label") ?? []) {
-				if (label.getAttribute("for") === element.id) return (label.textContent ?? "").trim();
+				if (label.getAttribute("for") === element.id) {
+					return normalizeSpace(contentText(label, element, "visible"));
+				}
 			}
 		}
 		const wrappingLabel = element.closest("label");
-		if (wrappingLabel) return (wrappingLabel.textContent ?? "").trim();
-		return (
-			element.getAttribute("alt") ??
-			element.getAttribute("title") ??
-			(element.tagName.toLocaleLowerCase() === "input" &&
-			["button", "submit", "reset"].includes((element as unknown as { type: string }).type.toLocaleLowerCase())
-				? (element as unknown as { value: string }).value
-				: element.textContent) ??
-			element.getAttribute("placeholder") ??
-			""
-		).trim();
+		if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel, element, "visible"));
+		const tag = element.tagName.toLocaleLowerCase();
+		// An `<input>`'s type and value decide its name; other elements have neither.
+		const input = tag === "input" ? (element as unknown as { type: string; value: string }) : null;
+		const inputType = input?.type.toLocaleLowerCase();
+		if (tag === "img" || tag === "area" || inputType === "image") {
+			const alt = normalizeSpace(element.getAttribute("alt") ?? "");
+			if (alt) return alt;
+		}
+		const content =
+			inputType === "button" || inputType === "submit" || inputType === "reset"
+				? normalizeSpace(input?.value ?? "") ||
+					(inputType === "submit" ? "Submit" : inputType === "reset" ? "Reset" : "")
+				: normalizeSpace(contentText(element, null, "visible"));
+		if (content && namedByContent) return content;
+		return normalizeSpace(
+			element.getAttribute("title") ||
+				element.getAttribute("placeholder") ||
+				element.getAttribute("aria-placeholder") ||
+				content,
+		);
 	};
 	return Array.from(root.querySelectorAll("*")).filter(element => {
 		const role = (element.getAttribute("role")?.trim().split(/\s+/)[0] ?? implicitRole(element))?.toLocaleLowerCase();

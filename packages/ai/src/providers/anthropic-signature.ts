@@ -1,21 +1,26 @@
 /**
- * Recovers the serving model id Anthropic embeds in thinking-block signatures.
+ * Reads the cleartext header Anthropic embeds in thinking-block signatures.
  *
  * A signature is a base64 protobuf: outer `{1: version, 2: envelope}`, envelope
  * `{1: header, 2..5: nonce/ciphertext/tag}`, header
- * `{1: schema, 5: hash, 6: model, 8: "thinking", 11: org uuid, 15: profile, 21: unix ts}`.
+ * `{1: schema, 5: hash, 6: model, 8: kind, 11: org uuid, 15: profile, 21: unix ts}`.
  * Field 6 names the model that actually produced the block — a concrete
  * snapshot (`claude-haiku-4-5-20251001`) or an internal codename
  * (`numbat-v6-…`) — which lets a caller notice a gateway serving something other
  * than the requested model. The v4 outer format (`CAQS…`) ships a header
  * without field 6; the decoder then yields nothing.
+ * Field 8 names the block kind: `thinking` for reasoning, `narration` for the
+ * user-facing prose the API converts into a thinking block when the model
+ * writes it between tool calls (connector-text summarization).
  */
 
 const OUTER_ENVELOPE_FIELD = 2;
 const ENVELOPE_HEADER_FIELD = 1;
 const HEADER_MODEL_FIELD = 6;
+const HEADER_KIND_FIELD = 8;
 const MAX_MODEL_ID_LENGTH = 128;
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
+const NARRATION_KIND = Buffer.from("narration");
 
 /** Finds a length-delimited field, rejecting tags and lengths that exceed uint32. */
 function lengthDelimitedField(message: Uint8Array, field: number): Uint8Array | undefined {
@@ -71,12 +76,12 @@ function lengthDelimitedField(message: Uint8Array, field: number): Uint8Array | 
 }
 
 /**
- * Model id embedded in an Anthropic thinking signature, or undefined when the
- * signature is malformed, uses a format without a cleartext header, or names
- * nothing resembling a model id.
+ * Cleartext header of an Anthropic thinking signature, or undefined when malformed or absent.
+ * No upper length bound: the signature grows with its block, and a long reply's
+ * narration signature runs past 13k characters.
  */
-export function servedModelFromAnthropicSignature(signature: string): string | undefined {
-	if (signature.length < 8 || signature.length > 8192) return undefined;
+function anthropicSignatureHeader(signature: string): Uint8Array | undefined {
+	if (signature.length < 8) return undefined;
 	let raw: Uint8Array;
 	try {
 		raw = Buffer.from(signature, "base64");
@@ -85,12 +90,34 @@ export function servedModelFromAnthropicSignature(signature: string): string | u
 	}
 	const envelope = lengthDelimitedField(raw, OUTER_ENVELOPE_FIELD);
 	if (!envelope) return undefined;
-	const header = lengthDelimitedField(envelope, ENVELOPE_HEADER_FIELD);
+	return lengthDelimitedField(envelope, ENVELOPE_HEADER_FIELD);
+}
+
+/**
+ * Model id embedded in an Anthropic thinking signature, or undefined when the
+ * signature is malformed, uses a format without a cleartext header, or names
+ * nothing resembling a model id.
+ */
+export function servedModelFromAnthropicSignature(signature: string): string | undefined {
+	const header = anthropicSignatureHeader(signature);
 	if (!header) return undefined;
 	const modelBytes = lengthDelimitedField(header, HEADER_MODEL_FIELD);
 	if (!modelBytes || modelBytes.length === 0 || modelBytes.length > MAX_MODEL_ID_LENGTH) return undefined;
 	const model = Buffer.from(modelBytes).toString("utf8");
 	return MODEL_ID_PATTERN.test(model) ? model : undefined;
+}
+
+/**
+ * Whether an Anthropic thinking signature marks its block as narration: prose
+ * the model addressed to the user between tool calls, which the API returns as
+ * a thinking block. Only an exact `narration` kind matches; any other or
+ * unreadable header stays reasoning.
+ */
+export function isAnthropicNarrationSignature(signature: string): boolean {
+	const header = anthropicSignatureHeader(signature);
+	if (!header) return false;
+	const kind = lengthDelimitedField(header, HEADER_KIND_FIELD);
+	return kind !== undefined && Buffer.from(kind).equals(NARRATION_KIND);
 }
 
 /**

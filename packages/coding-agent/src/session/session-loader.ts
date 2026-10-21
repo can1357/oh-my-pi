@@ -1,4 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { ConcatSink, getBlobsDir, isEisdir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { Semaphore } from "../task/parallel";
@@ -16,6 +18,7 @@ import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./ses
 import { migrateToCurrentVersion } from "./session-migrations";
 import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
+import { enotdir } from "./session-storage-errors";
 import {
 	parseTitleSlotFromContent,
 	parseTitleSlotLine,
@@ -446,6 +449,26 @@ async function loadWithKnownSize(
 	};
 }
 
+/**
+ * Windows reports ENOENT when a path component is a regular file, where POSIX
+ * yields ENOTDIR. Inspecting the leaf itself and then climbing to the first
+ * existing ancestor distinguishes that path error from a genuinely missing
+ * file.
+ */
+export async function hasFileAsPathComponent(filePath: string): Promise<boolean> {
+	let current = path.resolve(filePath);
+	for (;;) {
+		try {
+			return !(await fs.stat(current)).isDirectory();
+		} catch {
+			// Missing component: climb to the first existing ancestor.
+		}
+		const parent = path.dirname(current);
+		if (parent === current) return false;
+		current = parent;
+	}
+}
+
 /** Load and validate a session while retaining malformed-record diagnostics. */
 export async function loadSessionFile(
 	filePath: string,
@@ -456,7 +479,17 @@ export async function loadSessionFile(
 		const statSize = storage.statSync(filePath).size;
 		const { loaded, sourceSize } = await loadWithKnownSize(filePath, storage, statSize, options);
 		return { ...loaded, sourceSize };
-	} catch (err) {
+	} catch (caught) {
+		// Windows reports ENOENT where POSIX reports ENOTDIR for a path running
+		// through a regular file; restore ENOTDIR so that path error is never
+		// masked as a missing session.
+		const err =
+			isEnoent(caught) &&
+			process.platform === "win32" &&
+			storage instanceof FileSessionStorage &&
+			(await hasFileAsPathComponent(filePath))
+				? enotdir(filePath)
+				: caught;
 		if (options?.throwIfMissing && (isEnoent(err) || isEnotdir(err))) {
 			throw err;
 		}

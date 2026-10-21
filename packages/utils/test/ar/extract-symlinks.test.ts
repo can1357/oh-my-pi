@@ -110,6 +110,51 @@ function symlinkedZip(): Uint8Array {
 // ── extractArchive symlink handling ──────────────────────────────────────────
 
 describe("extractArchive symlink handling", () => {
+	test("refuses to overwrite an occupied symlink-copy destination", async () => {
+		if (!platformDescriptor) throw new Error("process.platform descriptor is unavailable");
+		Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+		const dest = await fsPromises.mkdtemp(path.join(os.tmpdir(), "omp-ar-copy-collision-"));
+		const occupied = path.join(dest, "current");
+		try {
+			await Bun.write(occupied, "existing user content");
+			vi.spyOn(fsPromises, "symlink").mockRejectedValueOnce(
+				Object.assign(new Error("Symlink privilege denied"), { code: "EPERM" }),
+			);
+			await expect(
+				extractArchive({ bytes: await arFixture("zip-symlink-mode.zip"), format: "zip" }, dest),
+			).rejects.toMatchObject({ code: "EEXIST" });
+			expect(await Bun.file(occupied).text()).toBe("existing user content");
+			expect(await Bun.file(path.join(dest, "bin/run.sh")).text()).toContain("zip mode");
+		} finally {
+			await fsPromises.rm(dest, { recursive: true, force: true });
+		}
+	});
+
+	test.skipIf(process.platform === "win32")("refuses to follow an occupied symlink-copy destination", async () => {
+		const root = await fsPromises.mkdtemp(path.join(os.tmpdir(), "omp-ar-copy-link-collision-"));
+		const dest = path.join(root, "extract");
+		const target = path.join(root, "outside.txt");
+		const occupied = path.join(dest, "current");
+		try {
+			await fsPromises.mkdir(dest);
+			await Bun.write(target, "existing outside content");
+			await fsPromises.symlink(target, occupied);
+			if (!platformDescriptor) throw new Error("process.platform descriptor is unavailable");
+			Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+			vi.spyOn(fsPromises, "symlink").mockRejectedValueOnce(
+				Object.assign(new Error("Symlink privilege denied"), { code: "EPERM" }),
+			);
+			await expect(
+				extractArchive({ bytes: await arFixture("zip-symlink-mode.zip"), format: "zip" }, dest),
+			).rejects.toMatchObject({ code: "EEXIST" });
+			expect((await fsPromises.lstat(occupied)).isSymbolicLink()).toBe(true);
+			expect(await fsPromises.readlink(occupied)).toBe(target);
+			expect(await Bun.file(target).text()).toBe("existing outside content");
+		} finally {
+			await fsPromises.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test.skipIf(process.platform === "win32")("materializes zip symlinks as real symlinks", async () => {
 		const dest = fsSync.mkdtempSync(path.join(os.tmpdir(), "omp-ar-link-"));
 		const count = await extractArchive({ bytes: symlinkedZip(), format: "zip" }, dest);

@@ -48,6 +48,7 @@ import {
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
+import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
@@ -938,7 +939,7 @@ const streamOpenAICompletionsOnce = (
 						signal: requestSignal,
 						maxAttempts: options?.maxHttpAttempts,
 						fetch: wrapFetchForCopilotFallback(
-							options?.fetch,
+							wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
 							model.provider === "github-copilot",
 							resolveCopilotRequestIdentity(options?.headers),
 							copilotCacheKey,
@@ -2003,6 +2004,12 @@ function applyOpenAIChatCompletionsPromptCachePolicy(
 			);
 		}
 		return;
+	}
+
+	if (promptCache.ttl === "12h") {
+		throw new AIError.ConfigurationError(
+			`OpenAI 12h prompt caching is only available on the Responses API; ${model.provider}/${model.id} uses Chat Completions.`,
+		);
 	}
 
 	params.prompt_cache_key = promptCacheKey;

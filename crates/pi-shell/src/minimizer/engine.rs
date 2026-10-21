@@ -671,6 +671,37 @@ only_on_exit = [0]
 		assert!(out.text.ends_with("Error: cannot use 1 as object key\n"), "{:?}", out.text);
 	}
 
+	#[test]
+	fn ssh_keeps_long_remote_lines_whole() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut remote = String::new();
+		for i in 0..4 {
+			let _ = writeln!(remote, "{{\"id\":{i},\"payload\":\"{}\"}}", "x".repeat(300));
+		}
+		let input = format!(
+			"Warning: Permanently added 'host' (ED25519) to the list of known \
+			 hosts.\n{remote}Connection to host closed.\n"
+		);
+
+		let out = apply("ssh host cat rows.jsonl", &input, 0, &cfg);
+		assert!(out.changed, "the banner lines are stripped");
+		assert_eq!(out.text, remote);
+	}
+
+	#[test]
+	fn ssh_keeps_blank_remote_lines() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut remote = String::from("first record\n\nsecond record\n\n");
+		for i in 0..60 {
+			let _ = writeln!(remote, "row {i}: remote value");
+		}
+		let input = format!("{remote}Connection to host closed.\n");
+
+		let out = apply("ssh host cat records.txt", &input, 0, &cfg);
+		assert!(out.changed, "the banner line is stripped");
+		assert_eq!(out.text, remote);
+	}
+
 	// Regression guards for the builtin npx catch-all def (defs/npx.toml). Its
 	// `match_subcommand` must exclude every subcommand owned/routed elsewhere so
 	// it cannot shadow `nx-wrapped` (standalone path) or overlay the Rust

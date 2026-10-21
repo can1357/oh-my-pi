@@ -134,3 +134,19 @@ export function normalizeKimiFunctionName(rawId: string): string {
 export function asRecord(value: unknown): Record<string, unknown> {
 	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
+
+/**
+ * Extract a COMPLETE tool name from a partial in-band JSON body.
+ * Returns undefined until the name string is fully closed, so streaming
+ * scanners never start a tool call under a truncated name.
+ */
+export function parseCompleteToolName(body: string): string | undefined {
+	const match = /^\s*\{\s*"name"\s*:\s*("(?:\\.|[^"\\])*")/.exec(body);
+	if (!match) return undefined;
+	try {
+		const name: unknown = JSON.parse(match[1]!);
+		return typeof name === "string" && name.length > 0 ? name : undefined;
+	} catch {
+		return undefined;
+	}
+}

@@ -5,7 +5,10 @@ use std::path::Path;
 
 use napi_derive::napi;
 
-use super::error::{CoreResult, DesktopError};
+use super::{
+	error::{CoreResult, DesktopError},
+	types::DesktopWindow,
+};
 
 #[cfg(target_os = "linux")]
 #[path = "linux/applications.rs"]
@@ -42,6 +45,27 @@ pub struct ApplicationQuery {
 #[derive(Clone, Debug, Default)]
 pub struct ApplicationOpenOptions {
 	pub activate: Option<bool>,
+}
+
+/// An opened application: its [`Application`] fields and the window it
+/// shows. On macOS `window` is its frontmost window once one is on screen;
+/// other platforms report none.
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct OpenedApplication {
+	pub id:      String,
+	pub name:    String,
+	pub path:    String,
+	pub running: bool,
+	pub pid:     Option<u32>,
+	pub window:  Option<DesktopWindow>,
+}
+
+impl OpenedApplication {
+	pub(crate) fn new(application: Application, window: Option<DesktopWindow>) -> Self {
+		let Application { id, name, path, running, pid } = application;
+		Self { id, name, path, running, pid, window }
+	}
 }
 
 pub(crate) const fn supported() -> bool {
@@ -104,7 +128,19 @@ fn unique<'a>(
 	Ok(first)
 }
 
-pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<Application> {
+/// `app`, read from an explicit path, with the running state of the listed
+/// application at its resolved bundle path: a bundle read alone says it is
+/// not running, so a symlink to a running application would be launched
+/// again, which reopens it.
+fn with_listed_state(apps: &[Application], app: Application) -> Application {
+	apps
+		.iter()
+		.find(|listed| listed.path == app.path)
+		.cloned()
+		.unwrap_or(app)
+}
+
+pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<OpenedApplication> {
 	if input.is_empty() || input.contains('\0') {
 		return Err(DesktopError::invalid_target(
 			"application identity must be nonempty and contain no NUL",
@@ -123,7 +159,7 @@ pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<A
 			|| input.contains(std::path::MAIN_SEPARATOR)
 			|| Path::new(input).exists()
 		{
-			platform::from_path(Path::new(input))?
+			with_listed_state(&apps, platform::from_path(Path::new(input))?)
 		} else {
 			resolve(&apps, input)?.cloned().ok_or_else(|| {
 				DesktopError::invalid_target(format!(
@@ -132,7 +168,12 @@ pub(crate) fn open(input: &str, options: ApplicationOpenOptions) -> CoreResult<A
 				))
 			})?
 		};
-		platform::open(app, options.activate.unwrap_or(false))
+		let activate = options.activate.unwrap_or(false);
+		#[cfg(target_os = "macos")]
+		return platform::open(app, activate);
+		#[cfg(not(target_os = "macos"))]
+		return platform::open(app, activate)
+			.map(|application| OpenedApplication::new(application, None));
 	}
 	#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 	{
@@ -174,5 +215,16 @@ mod tests {
 		assert!(resolve(&apps, "EDITOR").is_err());
 		assert!(resolve(&apps, "same").is_err());
 		assert_eq!(resolve(&apps, "/B.app").unwrap().unwrap().path, "/B.app");
+	}
+
+	#[test]
+	fn an_explicit_path_to_a_running_application_keeps_its_running_state() {
+		// A symlink resolved to /Applications/Notes.app, which is running.
+		let running = Application { running: true, pid: Some(42), ..app("notes", "Notes", "/N.app") };
+		let apps = [app("other", "Other", "/O.app"), running];
+		let opened = with_listed_state(&apps, app("notes", "Notes", "/N.app"));
+		assert_eq!((opened.running, opened.pid), (true, Some(42)));
+		let unlisted = with_listed_state(&apps, app("x", "X", "/X.app"));
+		assert_eq!((unlisted.running, unlisted.pid), (false, None));
 	}
 }

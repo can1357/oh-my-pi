@@ -1,4 +1,5 @@
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { type Component, Container } from "../tui";
 import { Image, type ImageBudget } from "../components/image";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
@@ -1803,7 +1804,8 @@ export class AssistantMessageComponent extends Container {
 		this.#lastUpdateTransient = opts?.transient === true;
 		// Everything below renders the display form; #lastMessage keeps the
 		// verbatim message so re-renders re-derive the reaction deterministically.
-		message = this.#displayMessage(message, this.#lastUpdateTransient);
+		// Narration the provider returned as thinking renders as answer text.
+		message = this.#displayMessage(presentNarrationAsAnswer(message), this.#lastUpdateTransient);
 		this.#displayedMessage = message;
 
 		// Streaming-speed gauge: only a live, in-flight render of the single

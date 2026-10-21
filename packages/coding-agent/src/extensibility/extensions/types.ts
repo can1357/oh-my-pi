@@ -263,10 +263,32 @@ export interface ExtensionApprovalPrompt {
 	compact: string;
 	/** Label of the "approve for this session" choice; absent when the call must be approved each time. */
 	session?: string;
+	/**
+	 * Grants an `always-ask-cached` prompt can remember, in display order; absent otherwise. A host
+	 * that does not render them still answers `once`/`session`/`deny`.
+	 */
+	grants?: readonly ExtensionApprovalGrant[];
 }
 
-/** An answer to `ExtensionUIContext.approve()`: this call only, later like calls this session too, or no. */
-export type ExtensionApprovalAnswer = "once" | "session" | "deny";
+/** One remembered-approval choice of an `always-ask-cached` prompt. */
+export interface ExtensionApprovalGrant {
+	/** `folder`: the directory around the call, its own entries only; `target`: the exact file or URL. */
+	scope: "folder" | "target";
+	/** Label of the choice remembered for this session, e.g. `Approve Directory: ~/src`. */
+	label: string;
+	/** Label of the same choice remembered across sessions, e.g. `Always Approve Directory: ~/src`. */
+	alwaysLabel: string;
+}
+
+/**
+ * An answer to `ExtensionUIContext.approve()`: this call only, later like calls this session too,
+ * one of the prompt's {@link ExtensionApprovalPrompt.grants} (`always`: across sessions), or no.
+ */
+export type ExtensionApprovalAnswer =
+	| "once"
+	| "session"
+	| "deny"
+	| { grant: ExtensionApprovalGrant["scope"]; always: boolean };
 
 /**
  * UI context for extensions to request interactive UI.
@@ -304,10 +326,10 @@ export interface ExtensionUIContext {
 	): Promise<ExtensionAskDialogResult | undefined>;
 
 	/**
-	 * Show a tool-approval prompt; anything but an explicit approval is `deny`, and `session` only
-	 * when the prompt offers it. Each prompt is a title line then details: `compact` summarizes the
-	 * tool's own details (command, path, content) to one row for a host with little room, `full`
-	 * keeps them whole. Absent: callers fall back to an Approve/Deny `select`.
+	 * Show a tool-approval prompt; anything but an explicit approval is `deny`, `session` only when
+	 * the prompt offers it, and a grant only one the prompt lists. Each prompt is a title line then
+	 * details: `compact` summarizes the tool's own details (command, path, content) to one row for a
+	 * host with little room, `full` keeps them whole. Absent: callers fall back to a `select`.
 	 */
 	approve?(
 		prompt: ExtensionApprovalPrompt,
@@ -527,7 +549,7 @@ export type AnnotationDiffSource =
 	| { kind: "diff"; diff: string; label?: string }
 	/** Staged + unstaged (or jj working-copy) changes in the live session cwd. */
 	| { kind: "uncommitted" }
-	/** A GitHub PR: `https://github.com/owner/repo/pull/N` or `pr://owner/repo/N`. */
+	/** A GitHub PR or GitLab MR: `https://github.com/owner/repo/pull/N`, `pr://owner/repo/N`, `https://<host>/<group>/<project>/-/merge_requests/N`, or `mr://<host>/<group>/<project>/N/diff`. */
 	| { kind: "pr"; ref: string };
 
 export type AnnotationSource = AnnotationTextSource | AnnotationDiffSource;
@@ -882,6 +904,9 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	/** Tool approval tier. Defaults to `"exec"` when omitted.
 	 *  `"read"`: read-only operations. `"write"`: mutations. `"exec"`: code execution. */
 	approval?: ToolApproval;
+	/** Exact targets an approval mode may remember for this call (`always-ask-cached`), one key per
+	 *  target, derived from the call's args. Omit it and approvals are never remembered per target. */
+	approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
 	/** Structured-output strict grammar opt-in/out. `false` is meaningful: OpenAI-family
 	 *  serializers preserve an explicit `strict: false` on the wire (#4336/#4340). */
 	strict?: boolean;

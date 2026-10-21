@@ -216,7 +216,7 @@ const piSegment: StatusLineSegment = {
 		// Brand fg fades between dim gray (idle) and the accent (working) across
 		// turn edges; the component samples the tween into `brandFgAnsi`.
 		const fgAnsi = ctx.brandFgAnsi ?? theme.getFgAnsi("dim");
-		const profile = getActiveProfile();
+		const profile = ctx.options.pi?.showProfile === false ? undefined : getActiveProfile();
 		// While a turn runs the brand icon becomes a braille spinner plus a
 		// whole-unit turn timer (port of rust omp's status-band active brand).
 		// No trailing pad: the group renderer owns inter-segment spacing, so a
@@ -230,14 +230,15 @@ const piSegment: StatusLineSegment = {
 	describe(ctx) {
 		if (ctx.focusedAgentId) return segView([span(ctx.focusedAgentId, "warning")], "ghost", "warning");
 		// The dock's working row owns activity natively: the brand stays still.
-		const profile = getActiveProfile();
+		const profile = ctx.options.pi?.showProfile === false ? undefined : getActiveProfile();
 		return segView(profile ? [span(profile, "muted")] : [], "omp", "muted");
 	},
 };
 /**
  * Brand glyph tagged with the active named profile (`π-work`) so sessions from
  * different profiles are distinguishable at a glance; the bare glyph for the
- * default profile. The tag stays put while the glyph slot animates.
+ * default profile or with `segmentOptions.pi.showProfile: false`. The tag
+ * stays put while the glyph slot animates.
  */
 function brandMark(glyph: string, profile: string | undefined): string {
 	if (!profile) return glyph;

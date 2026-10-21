@@ -19,7 +19,10 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resolveAnthropicCompactionEffort } from "@oh-my-pi/pi-ai/providers/anthropic";
-import { supportsAnthropicCompaction } from "@oh-my-pi/pi-ai/providers/anthropic-compaction";
+import {
+	supportsAnthropicCompaction,
+	supportsBedrockConverseCompaction,
+} from "@oh-my-pi/pi-ai/providers/anthropic-compaction";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { type InstrumentedChatSpanOptions, instrumentedCompleteSimple } from "../telemetry";
 import type { AgentMessage } from "../types";
@@ -31,6 +34,8 @@ export const ANTHROPIC_COMPACTION_PRESERVE_KEY = "anthropicCompaction";
 export interface AnthropicCompactionPreserveData {
 	provider: string;
 	content: string;
+	/** Opaque signed tool-change records; replayed without normalization. */
+	toolChanges?: Record<string, unknown>[];
 	/** Signature attached to an on-demand block; replayed verbatim. */
 	signature?: string;
 	/** Legacy threshold block state; replay-only. */
@@ -51,17 +56,27 @@ function isAnthropicMessagesModel(model: Model): model is Model<"anthropic-messa
 	return model.api === "anthropic-messages";
 }
 
+function isBedrockConverseModel(model: Model): model is Model<"bedrock-converse-stream"> {
+	return model.api === "bedrock-converse-stream";
+}
+
 /**
  * Whether a model compacts through the Anthropic compaction beta. Model
  * eligibility is catalog policy (`compat.supportsServerCompaction`, the
  * lineage the beta documents); endpoint eligibility is resolved the way the
  * provider routes requests, so a Foundry or `ANTHROPIC_BASE_URL` reroute of a
  * first-party model is excluded unless the route opted in with
- * `remoteCompaction.enabled`.
+ * `remoteCompaction.enabled`. Bedrock Converse models compact through a
+ * Bedrock Runtime side request; their ordinary turns stay on Converse.
  */
-export function shouldUseAnthropicNativeCompaction(model: Model): model is Model<"anthropic-messages"> {
-	return isAnthropicMessagesModel(model) && supportsAnthropicCompaction(model);
+export function shouldUseAnthropicNativeCompaction(
+	model: Model,
+): model is Model<"anthropic-messages" | "bedrock-converse-stream"> {
+	if (isAnthropicMessagesModel(model)) return supportsAnthropicCompaction(model);
+	return isBedrockConverseModel(model) && supportsBedrockConverseCompaction(model);
 }
+
+type AnthropicNativeCompactionModel = Model<"anthropic-messages" | "bedrock-converse-stream">;
 
 export function getPreservedAnthropicCompactionData(
 	preserveData: Record<string, unknown> | undefined,
@@ -70,6 +85,9 @@ export function getPreservedAnthropicCompactionData(
 	if (!isRecord(candidate)) return undefined;
 	if (typeof candidate.provider !== "string" || candidate.provider.length === 0) return undefined;
 	if (typeof candidate.content !== "string" || candidate.content.length === 0) return undefined;
+	const toolChanges = candidate.toolChanges;
+	// The signature covers `tool_changes`: a block missing or mangling them cannot replay.
+	if (toolChanges !== undefined && (!Array.isArray(toolChanges) || !toolChanges.every(isRecord))) return undefined;
 	return {
 		provider: candidate.provider,
 		content: candidate.content,
@@ -90,6 +108,7 @@ export function getPreservedAnthropicCompactionData(
 					),
 				}
 			: {}),
+		...(toolChanges !== undefined ? { toolChanges } : {}),
 		...(candidate.exactTail === true ? { exactTail: true as const } : {}),
 		...(typeof candidate.model === "string" ? { model: candidate.model } : {}),
 		...(typeof candidate.usedTokens === "number" ? { usedTokens: candidate.usedTokens } : {}),
@@ -124,6 +143,7 @@ export function getAnthropicCompactionPayload(
 		...(preserved.signature ? { signature: preserved.signature } : {}),
 		...(preserved.encryptedContent ? { encryptedContent: preserved.encryptedContent } : {}),
 		...(preserved.filesText ? { filesText: preserved.filesText } : {}),
+		...(preserved.toolChanges ? { toolChanges: preserved.toolChanges } : {}),
 		...(preserved.retainedFiles?.length ? { retainedFiles: preserved.retainedFiles } : {}),
 		...(preserved.exactTail ? { exactTail: true as const } : {}),
 	};
@@ -196,6 +216,7 @@ export interface AnthropicNativeCompactionRequest {
 export interface AnthropicNativeCompactionResponse {
 	content: string;
 	signature: string;
+	toolChanges?: Record<string, unknown>[];
 	usage: Usage;
 	model: string;
 }
@@ -224,7 +245,7 @@ export interface AnthropicNativeCompactionOptions
  * output limits; the configured method order can then choose a fallback.
  */
 export async function requestAnthropicNativeCompaction(
-	model: Model<"anthropic-messages">,
+	model: AnthropicNativeCompactionModel,
 	apiKey: ApiKey,
 	request: AnthropicNativeCompactionRequest,
 	signal: AbortSignal | undefined,
@@ -237,7 +258,9 @@ export async function requestAnthropicNativeCompaction(
 			apiKey,
 			signal,
 			maxTokens: request.maxTokens,
-			reasoning: resolveAnthropicCompactionEffort(model, request.context.messages, request.reasoning),
+			reasoning: isAnthropicMessagesModel(model)
+				? resolveAnthropicCompactionEffort(model, request.context.messages, request.reasoning)
+				: request.reasoning,
 			initiatorOverride: options.initiatorOverride,
 			metadata: options.metadata,
 			fetch: options.fetch,
@@ -279,6 +302,7 @@ export async function requestAnthropicNativeCompaction(
 	return {
 		content: payload.content,
 		signature: payload.signature,
+		...(payload.toolChanges ? { toolChanges: payload.toolChanges } : {}),
 		usage: response.usage,
 		model: response.model,
 	};

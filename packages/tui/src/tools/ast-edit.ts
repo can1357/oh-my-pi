@@ -1,3 +1,4 @@
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import { replaceTabs } from "../utils";
@@ -14,11 +15,16 @@ import {
 } from "../render/render-utils";
 import { classifyGroupedLines, groupLineIndicesByBlank } from "./grouped-file-output";
 import type { OutputMeta } from "./output-meta";
-import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
+import type {
+	NativeToolHead,
+	NativeToolView,
+	RenderResultContextOptions,
+	RenderResultOptions,
+	ToolRenderer,
+} from "./renderer";
 import { code, compact, diff, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { diffStatsMeta, displayPath, errorText, fileDiffSection, noteText, resultText, statsText } from "./native-view";
-import { getLanguageFromPath } from "../lang-from-path";
 
 /** Display metadata returned by ast-edit. */
 export interface AstEditToolDetails {
@@ -148,9 +154,9 @@ function parseAstEditChanges(lines: readonly string[]): AstEditFileDiff[] {
 	return files;
 }
 
-/** A file's proposed rewrite as a `diff`: highlighted by the path's language, no path header. */
+/** A file's proposed rewrite as a `diff`: Tern highlights it by the file's grammar and draws no path header. */
 function astEditDiff(file: AstEditFileDiff): NativeNode {
-	return diff(file.lines.join("\n"), { lang: getLanguageFromPath(file.path) });
+	return diff(file.lines.join("\n"), { path: file.path });
 }
 
 /** The single rewrite pattern (`target:"pattern"`), or the rewrite count, for the head. */
@@ -190,7 +196,7 @@ export const astEditToolRenderer = {
 
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: AstEditToolDetails; isError?: boolean },
-		options: RenderResultOptions,
+		options: RenderResultContextOptions,
 		uiTheme: Theme,
 		args?: AstEditRenderArgs,
 	): Component {
@@ -245,6 +251,19 @@ export const astEditToolRenderer = {
 		// Resolve hyperlinks over the whole output so nested directory headers
 		// reconstruct across the blank-line groups the tree list collapses by.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
+		// The display lines are sanitized; reconstruct link targets from the original
+		// grouped headers only when they still align with those display lines.
+		const rawDetails = options.renderContext?.rawDetails;
+		const rawContent =
+			isRecord(rawDetails) && typeof rawDetails.displayContent === "string" ? rawDetails.displayContent : undefined;
+		const rawLines = rawContent?.split("\n");
+		const rawCwd = isRecord(rawDetails) && typeof rawDetails.cwd === "string" ? rawDetails.cwd : undefined;
+		const rawSearchPath =
+			isRecord(rawDetails) && typeof rawDetails.searchPath === "string" ? rawDetails.searchPath : undefined;
+		const rawContexts =
+			rawContent !== undefined && rawLines?.length === allLines.length && sanitizeText(rawContent) === textContent
+				? classifyGroupedLines(rawLines, rawCwd ?? rawSearchPath, rawSearchPath)
+				: undefined;
 		// Style lazily: collapsed bodies show only the first groups.
 		const styledLines: (string | undefined)[] = Array.from({ length: allLines.length }, () => undefined);
 		const styleLine = (index: number): string => {
@@ -255,12 +274,16 @@ export const astEditToolRenderer = {
 			// second vertical bar inside the frame border.
 			const display = replaceTabs(allLines[index]!.replace("│", " "));
 			let styled: string;
+			const linkPath =
+				ctx.headerPath && rawContexts?.[index]?.kind === ctx.kind && rawContexts[index]?.depth === ctx.depth
+					? (rawContexts[index]?.headerPath ?? ctx.headerPath)
+					: ctx.headerPath;
 			if (ctx.kind === "dir") {
 				const accent = uiTheme.fg("accent", display);
-				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, accent) : accent;
+				styled = linkPath ? fileHyperlink(linkPath, accent) : accent;
 			} else if (ctx.kind === "file") {
 				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", display);
-				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, tinted) : tinted;
+				styled = linkPath ? fileHyperlink(linkPath, tinted) : tinted;
 			} else if (display.startsWith("+")) {
 				styled = uiTheme.fg("toolDiffAdded", display);
 			} else if (display.startsWith("-")) {

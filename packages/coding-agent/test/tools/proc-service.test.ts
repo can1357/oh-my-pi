@@ -60,7 +60,11 @@ async function rejectionMessage(promise: Promise<unknown>): Promise<string> {
 	throw new Error("Expected the promise to reject");
 }
 
-function toolSession(cwd: string, manager?: AsyncJobManager, options: { launch?: boolean } = {}): ToolSession {
+function toolSession(
+	cwd: string,
+	manager?: AsyncJobManager,
+	options: { launch?: boolean; async?: boolean } = {},
+): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
@@ -70,7 +74,7 @@ function toolSession(cwd: string, manager?: AsyncJobManager, options: { launch?:
 		asyncJobManager: manager,
 		settings: Settings.isolated({
 			"launch.enabled": options.launch ?? true,
-			"async.enabled": false,
+			"async.enabled": options.async ?? false,
 			"bash.autoBackground.enabled": false,
 			"bash.autoBackground.thresholdMs": 60_000,
 			"bashInterceptor.enabled": false,
@@ -100,6 +104,43 @@ function steeringContext(steeringSignal: AbortSignal): AgentToolContext {
 }
 
 describe("proc:// background jobs", () => {
+	it("reads what a pipeline stage wrote while a later stage still holds it back", async () => {
+		const manager = new AsyncJobManager({});
+		const session = toolSession(process.cwd(), manager, { launch: false, async: true });
+		const proc = new ProcProtocolHandler();
+		try {
+			await new BashTool(session).execute("piped", {
+				command: "{ printf 'one\\r\\ntwo\\rthree\\n'; sleep 30; } | tail -n 1",
+				async: true,
+				pty: false,
+			});
+			const [job] = manager.getAllJobs({ ownerId: "Main" });
+			if (!job) throw new Error("no bash job started");
+			const read = (url: string) => proc.resolve(parseInternalUrl(url), { session });
+
+			// Real-time poll: the stream fills from a real child's pipe write, and
+			// nothing in-process signals when the relay thread has copied it.
+			let stream = "";
+			for (let waited = 0; stream !== "one\ntwo\nthree\n" && waited < 10_000; waited += 20) {
+				await Bun.sleep(20);
+				const opened = (await read(`proc://${job.id}/streams`)).content.startsWith(`proc://${job.id}/streams/1 `);
+				if (opened) stream = (await read(`proc://${job.id}/streams/1`)).content;
+			}
+			// CRLF and bare-CR progress both read as lines.
+			expect(stream).toBe("one\ntwo\nthree\n");
+			// The job's own output is still empty: `tail` prints only at EOF.
+			expect((await read(`proc://${job.id}`)).details).toMatchObject({ proc: { log: "" } });
+			const listing = await read(`proc://${job.id}/streams`);
+			expect(listing.isDirectory).toBeTrue();
+			expect(listing.content).toMatch(new RegExp(`^proc://${job.id}/streams/1 open 15B — .*printf.* → tail -n 1$`));
+			expect(await rejectionMessage(read(`proc://${job.id}/streams/2`))).toContain(
+				`List them with proc://${job.id}/streams`,
+			);
+		} finally {
+			await manager.dispose({ timeoutMs: 2_000 });
+		}
+	}, 20_000);
+
 	it("lists owned jobs, preserves delivery on read, and scopes kill to the owner", async () => {
 		const manager = new AsyncJobManager({});
 		const pending = Promise.withResolvers<string>();

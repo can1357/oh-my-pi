@@ -64,6 +64,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isRecord, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
@@ -161,15 +162,16 @@ function hasConfiguredCompactionMethod(settings: CompactionSettings): boolean {
 	return resolveCompactionMethodOrder(settings.methodOrder).length > 0;
 }
 
-/** Kept Anthropic thinking requires compaction by the same live model. */
+/** Kept Claude thinking (Anthropic Messages or Bedrock Converse) requires compaction by the same live model. */
 function canUseLiveProviderNativeCompaction(
 	candidate: Model,
 	liveModel: Model,
 	settings: EngineCompactionSettings,
 ): boolean {
+	const requiresSameModel = candidate.api === "anthropic-messages" || candidate.api === "bedrock-converse-stream";
 	return (
 		candidate.provider === liveModel.provider &&
-		(candidate.api !== "anthropic-messages" || (candidate.api === liveModel.api && candidate.id === liveModel.id)) &&
+		(!requiresSameModel || (candidate.api === liveModel.api && candidate.id === liveModel.id)) &&
 		shouldUseProviderNativeCompaction(candidate, settings)
 	);
 }
@@ -195,7 +197,7 @@ function isCompactionMethodUsable(
 	return candidate === "remote"
 		? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
 		: candidate === "snapcompact"
-			? !excludeMedia && model?.input.includes("image") === true
+			? !excludeMedia && model !== undefined && sendsImageInputOnWire(model)
 			: candidate === "handoff"
 				? reason !== "overflow"
 				: true;
@@ -1250,7 +1252,7 @@ export class SessionMaintenance {
 				if (method === "snapcompact") {
 					if (
 						explicitSnapcompact ||
-						(!customInstructions && !options?.internalGuidance && activeModel.input.includes("image"))
+						(!customInstructions && !options?.internalGuidance && sendsImageInputOnWire(activeModel))
 					) {
 						selectedMethod = method;
 						selectedMethodIndex = index;
@@ -1338,13 +1340,12 @@ export class SessionMaintenance {
 			const snapcompactShapeSetting = cfgSnapcompactShape.get(this.#host.settings);
 			let snapcompactShape: snapcompact.Shape | undefined;
 			const snapcompactIncludeThinking = snapcompact.readerIncludesThinking(this.#model);
-			if (wantsSnapcompact && !this.#model.input.includes("image")) {
-				this.#host.emitNotice(
-					"warning",
-					`snapcompact needs a vision-capable model (${this.#model.id} is text-only)`,
-					"compaction",
-				);
-				throw new Error(`snapcompact cannot run locally: ${this.#model.id} is text-only.`);
+			if (wantsSnapcompact && !sendsImageInputOnWire(this.#model)) {
+				const reason = this.#model.input.includes("image")
+					? `${this.#model.id}'s provider strips image input`
+					: `${this.#model.id} is text-only`;
+				this.#host.emitNotice("warning", `snapcompact needs a vision-capable model (${reason})`, "compaction");
+				throw new Error(`snapcompact cannot run locally: ${reason}.`);
 			} else if (snapcompactReady) {
 				const text = snapcompact.serializeConversation(
 					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
@@ -4351,7 +4352,7 @@ export class SessionMaintenance {
 		// Re-rendering frames needs a vision-capable model, same gate as the
 		// snapcompact method.
 		const model = this.#model;
-		if (!model?.input.includes("image")) return undefined;
+		if (!model || !sendsImageInputOnWire(model)) return undefined;
 		const staleEntry = getLatestCompactionEntry(branchEntries);
 		if (!staleEntry) return undefined;
 		// Only rescue when the archive is the actual source of the overflow.

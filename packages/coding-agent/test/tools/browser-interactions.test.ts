@@ -152,6 +152,55 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser click timeouts", () => {
 		}
 	}, 30_000);
 
+	test("says why it could not count a timed-out selector's matches", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-uncountable" };
+		const tabName = `uncountable-${crypto.randomUUID()}`;
+		await prelude.invoke(
+			{
+				action: "open",
+				name: tabName,
+				url: `data:text/html,${encodeURIComponent("<!doctype html><p>Nothing here</p>")}`,
+			},
+			context,
+		);
+		try {
+			// The match-count probe and the zero-match watchdog both query through `page.$$`;
+			// replacing it on the tab's page makes every probe fail the way the endpoint's did.
+			// The replacement stays until the tab closes below.
+			const attempt = async (probe: string, timeout: number) => {
+				const result = await prelude.invoke(
+					{
+						action: "run",
+						name: tabName,
+						code: `page.$$ = ${probe};
+try {
+	await tab.click("#missing");
+	return "clicked";
+} catch (error) {
+	return error instanceof Error ? error.message : String(error);
+}`,
+						timeout,
+					},
+					context,
+				);
+				return valueFrom<string>(result);
+			};
+			// A probe that throws never counts toward the 2 s fail-fast, so the click runs to its deadline.
+			const thrown = await attempt(`async () => { throw new Error("probe refused"); }`, 3);
+			expect(thrown).toMatch(
+				/^tab\.click\("#missing"\) timed out after \d+ms; could not count matches: probe refused$/,
+			);
+			// A 12 s cell keeps the 8 s action deadline and leaves ~2 s past the 1 s probe wait
+			// before the whole-cell timeout.
+			const stalled = await attempt(`() => Promise.withResolvers().promise`, 12);
+			expect(stalled).toMatch(/; could not count matches: no answer within 1000ms$/);
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+
 	test("rejects promptly when a text-click candidate evaluation is aborted", async () => {
 		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");

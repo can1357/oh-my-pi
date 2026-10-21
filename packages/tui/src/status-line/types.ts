@@ -36,6 +36,7 @@ export interface CollabStatus {
 }
 
 export interface StatusLineSegmentOptions {
+	pi?: { showProfile?: boolean };
 	model?: { showThinkingLevel?: boolean };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };

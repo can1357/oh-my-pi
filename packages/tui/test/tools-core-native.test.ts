@@ -45,8 +45,8 @@ describe("core tool native views", () => {
 			path?: string;
 			lang?: string;
 		};
-		expect(props.path).toBeUndefined();
-		expect(props.lang).toBe("typescript");
+		expect(props.path).toBe("/tmp/a.ts");
+		expect(props.lang).toBeUndefined();
 		expect(props.hunks?.[0]?.oldStart).toBe(4);
 		expect(props.hunks?.[0]?.newStart).toBe(4);
 		expect(props.hunks?.[0]?.lines.map(line => line[0])).toEqual([" ", "-", "+"]);
