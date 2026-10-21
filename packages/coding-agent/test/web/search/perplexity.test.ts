@@ -3,7 +3,7 @@ import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import { PerplexityProvider, searchPerplexity } from "@oh-my-pi/pi-coding-agent/web/search/providers/perplexity";
 import { getAvailableAuthMethods } from "@oh-my-pi/pi-coding-agent/web/search/providers/perplexity-auth";
 
-const API_URL = "https://api.perplexity.ai/chat/completions";
+const SEARCH_URL = "https://api.perplexity.ai/search";
 const RESPONSES_URL = "https://api.perplexity.ai/v1/responses";
 
 // API-key path only: OAuth access returns undefined so findPerplexityAuth
@@ -32,38 +32,22 @@ function sseResponse(events: Record<string, unknown>[]): Response {
 	});
 }
 
-function mockApi(capture: (body: Record<string, unknown>) => void, events: Record<string, unknown>[]): FetchImpl {
+function searchPayload(results: Record<string, unknown>[] = []): Record<string, unknown> {
+	return { id: "req-search", results };
+}
+
+function mockSearchApi(
+	capture: (body: Record<string, unknown>, headers: Headers) => void,
+	payload: Record<string, unknown> = searchPayload(),
+): FetchImpl {
 	return async (input, init) => {
 		const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-		if (url === API_URL) {
-			capture(JSON.parse(init?.body as string));
-			return sseResponse(events);
+		if (url === SEARCH_URL) {
+			capture(JSON.parse(init?.body as string), new Headers(init?.headers));
+			return new Response(JSON.stringify(payload), { status: 200, headers: { "Content-Type": "application/json" } });
 		}
 		return new Response("not mocked", { status: 500 });
 	};
-}
-
-function baseResponse(extra: Record<string, unknown> = {}): Record<string, unknown>[] {
-	return [
-		{
-			id: "req-1",
-			model: "sonar-pro",
-			choices: [{ index: 0, delta: { role: "assistant", content: "answer" }, finish_reason: null }],
-		},
-		{
-			id: "req-1",
-			model: "sonar-pro",
-			choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-			search_results: [{ title: "T", url: "https://example.com", snippet: "s" }],
-			...extra,
-		},
-		{
-			id: "req-1",
-			model: "sonar-pro",
-			choices: [],
-			usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
-		},
-	];
 }
 
 describe("Perplexity API-key request shape", () => {
@@ -94,31 +78,28 @@ describe("Perplexity API-key request shape", () => {
 		else process.env.PI_PERPLEXITY_API_MODEL = savedApiModel;
 	});
 
-	it("requests comprehensive defaults: 20 results, high context, related questions", async () => {
+	it("posts Fast Search with 10 results and medium context by default", async () => {
 		let body: Record<string, unknown> | undefined;
-		const fetchMock = mockApi(b => (body = b), baseResponse());
-		await searchPerplexity({ query: "quic vs tcp", authStorage: apiKeyAuthStorage, fetch: fetchMock });
-
-		expect(body?.num_search_results).toBe(20);
-		expect(body?.web_search_options).toMatchObject({ search_type: "pro", search_context_size: "high" });
-		expect(body?.return_related_questions).toBe(true);
-	});
-
-	it("accepts a configured direct API model", async () => {
-		process.env.PI_PERPLEXITY_API_MODEL = "sonar-deep-research";
-		let body: Record<string, unknown> | undefined;
-		await searchPerplexity({
-			query: "quic vs tcp",
-			authStorage: apiKeyAuthStorage,
-			fetch: mockApi(b => (body = b), baseResponse()),
+		let headers: Headers | undefined;
+		const fetchMock = mockSearchApi((b, h) => {
+			body = b;
+			headers = h;
 		});
 
-		expect(body?.model).toBe("sonar-deep-research");
+		await searchPerplexity({ query: "quic vs tcp", authStorage: apiKeyAuthStorage, fetch: fetchMock });
+
+		expect(body).toEqual({
+			query: "quic vs tcp",
+			max_results: 10,
+			search_type: "fast",
+			search_context_size: "medium",
+		});
+		expect(headers?.get("authorization")).toBe("Bearer test-key");
 	});
 
 	it("honors a caller-supplied num_search_results over the default", async () => {
 		let body: Record<string, unknown> | undefined;
-		const fetchMock = mockApi(b => (body = b), baseResponse());
+		const fetchMock = mockSearchApi(b => (body = b));
 
 		await searchPerplexity({
 			query: "quic vs tcp",
@@ -127,12 +108,35 @@ describe("Perplexity API-key request shape", () => {
 			fetch: fetchMock,
 		});
 
-		expect(body?.num_search_results).toBe(5);
+		expect(body?.max_results).toBe(5);
+	});
+
+	it("truncates fractional result counts before sending max_results", async () => {
+		let body: Record<string, unknown> | undefined;
+		await searchPerplexity({
+			query: "quic vs tcp",
+			authStorage: apiKeyAuthStorage,
+			num_search_results: 5.7,
+			fetch: mockSearchApi(b => (body = b)),
+		});
+
+		expect(body?.max_results).toBe(5);
+	});
+
+	it("sends a deny-only domain list when the query has no allow list", async () => {
+		let body: Record<string, unknown> | undefined;
+		await searchPerplexity({
+			query: "rust -site:reddit.com",
+			authStorage: apiKeyAuthStorage,
+			fetch: mockSearchApi(b => (body = b)),
+		});
+
+		expect(body?.search_domain_filter).toEqual(["-reddit.com"]);
 	});
 
 	it("maps site:/-site:/after: directives onto native filters and strips them from the query", async () => {
 		let body: Record<string, unknown> | undefined;
-		const fetchMock = mockApi(b => (body = b), baseResponse());
+		const fetchMock = mockSearchApi(b => (body = b));
 
 		await searchPerplexity({
 			query: "rust site:docs.rs -site:reddit.com after:2024-06-01",
@@ -140,58 +144,66 @@ describe("Perplexity API-key request shape", () => {
 			fetch: fetchMock,
 		});
 
-		expect(body?.search_domain_filter).toEqual(["docs.rs", "-reddit.com"]);
+		expect(body?.search_domain_filter).toEqual(["docs.rs"]);
 		expect(body?.search_after_date_filter).toBe("6/1/2024");
-		const messages = body?.messages as { role: string; content: string }[];
-		expect(messages.at(-1)?.content).toBe("rust");
+		expect(body?.query).toBe("rust");
 	});
 
-	it("parses related_questions into relatedQuestions, preserving order and dropping blanks", async () => {
-		const fetchMock = mockApi(
-			() => {},
-			baseResponse({ related_questions: ["How does QUIC handle loss?", "  ", "What is 0-RTT?"] }),
-		);
-
+	it("maps ranked results to sources, preserving first-seen order and dropping URL-less/duplicate rows", async () => {
+		const payload = searchPayload([
+			{ title: "First", url: "https://example.com/a", snippet: "  first\n  source ", date: "2024-11-15" },
+			{ title: "Duplicate", url: "https://example.com/a", snippet: "duplicate" },
+			{ snippet: "no url" },
+			{ title: "Second", url: "https://example.org/b", snippet: "second" },
+		]);
 		const response = await searchPerplexity({
 			query: "quic vs tcp",
 			authStorage: apiKeyAuthStorage,
-			fetch: fetchMock,
+			fetch: mockSearchApi(() => {}, payload),
 		});
 
-		expect(response.relatedQuestions).toEqual(["How does QUIC handle loss?", "What is 0-RTT?"]);
+		expect(response.authMode).toBe("api_key");
+		expect(response.requestId).toBe("req-search");
+		expect(response.answer).toBeUndefined();
+		expect(response.sources).toEqual([
+			{
+				title: "First",
+				url: "https://example.com/a",
+				snippet: "first source",
+				publishedDate: "2024-11-15",
+				ageSeconds: expect.any(Number),
+			},
+			{
+				title: "Second",
+				url: "https://example.org/b",
+				snippet: "second",
+				publishedDate: undefined,
+				ageSeconds: undefined,
+			},
+		]);
 	});
 
-	it("omits relatedQuestions when the API returns none", async () => {
-		const fetchMock = mockApi(() => {}, baseResponse());
-
-		const response = await searchPerplexity({
-			query: "quic vs tcp",
-			authStorage: apiKeyAuthStorage,
-			fetch: fetchMock,
-		});
-
-		expect(response.relatedQuestions).toBeUndefined();
-	});
 	it("never bills an OpenRouter key when the direct Perplexity call fails", async () => {
 		process.env.OPENROUTER_API_KEY = "openrouter-test-key";
 		const urls: string[] = [];
 		const fetchMock: FetchImpl = async input => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
 			urls.push(url);
-			if (url === API_URL) return new Response("direct failed", { status: 400 });
-			return sseResponse(baseResponse());
+			if (url === SEARCH_URL) return new Response("direct failed", { status: 400 });
+			return new Response("not mocked", { status: 500 });
 		};
 
 		await expect(
 			searchPerplexity({ query: "quic vs tcp", authStorage: apiKeyAuthStorage, fetch: fetchMock, explicit: true }),
 		).rejects.toThrow();
-		expect(urls).toEqual([API_URL]);
+		expect(urls).toEqual([SEARCH_URL]);
 	});
+
 	it("rejects with the classified upstream error instead of a generic 401 when the only method fails", async () => {
 		delete process.env.OPENROUTER_API_KEY;
 		const fetchMock: FetchImpl = async input => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-			if (url === API_URL) {
+			if (url === SEARCH_URL) {
 				return new Response(JSON.stringify({ error: { message: "credits exhausted" } }), {
 					status: 402,
 					headers: { "Content-Type": "application/json" },
@@ -495,7 +507,7 @@ describe("Perplexity OAuth transport failure (issue #5315)", () => {
 		expect(methods.some(m => m.type === "api_key")).toBe(false);
 	});
 
-	it("retries the ask endpoint once on transport failure and never falls through to /chat/completions", async () => {
+	it("retries the ask endpoint once on transport failure and never falls through to the Search API", async () => {
 		let askCalls = 0;
 		let apiCalls = 0;
 		const event = {
@@ -512,7 +524,7 @@ describe("Perplexity OAuth transport failure (issue #5315)", () => {
 				if (askCalls === 1) throw new TypeError("socket connection closed before an HTTP response");
 				return new Response(askBody, { status: 200, headers: { "Content-Type": "text/event-stream" } });
 			}
-			if (url === API_URL) {
+			if (url === SEARCH_URL) {
 				apiCalls++;
 				return new Response(JSON.stringify({ error: { message: "Unauthorized" } }), { status: 401 });
 			}

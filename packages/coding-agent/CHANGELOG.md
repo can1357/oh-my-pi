@@ -8,6 +8,7 @@
 ### Changed
 
 - Idle compaction no longer runs on logged-in OpenAI Codex accounts, whose prompt cache never expires; compacting while idle only threw away a warm cache
+- Perplexity web search now uses the Search API with `search_type: "fast"` and a medium extraction budget for the direct API-key path, returning ranked sources; the cookie/OAuth/anonymous consumer path and the `PI_PERPLEXITY_RESPONSES=1` Responses mode are unchanged ([#12690](https://github.com/can1357/oh-my-pi/issues/12690), [#16670](https://github.com/can1357/oh-my-pi/pull/16670) by [@tomdacu](https://github.com/tomdacu))
 
 ## [18.12.5] - 2026-10-21
 

@@ -53,7 +53,7 @@ export function getExtraHelpText(): string {
   ${chalk.dim("# Search & Tools")}
   EXA_API_KEY                - Exa web search
   BRAVE_API_KEY              - Brave web search
-  PERPLEXITY_API_KEY         - Perplexity web search API key (optional; anonymous fallback)
+  PERPLEXITY_API_KEY         - Perplexity Search API key (fast; PI_PERPLEXITY_RESPONSES=1 for Responses)
   PERPLEXITY_COOKIES         - Perplexity web search (session cookie)
   TAVILY_API_KEY             - Tavily web search
   TINYFISH_API_KEY           - TinyFish web search

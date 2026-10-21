@@ -4,7 +4,9 @@
  * Supports four auth modes:
  * - Cookies (`PERPLEXITY_COOKIES`) via `www.perplexity.ai/rest/sse/perplexity_ask`
  * - OAuth/session bearer via `AuthStorage` and `www.perplexity.ai/rest/sse/perplexity_ask`
- * - API key (`PERPLEXITY_API_KEY`) via `api.perplexity.ai/chat/completions`
+ * - API key (`PERPLEXITY_API_KEY`) via the Search API (`api.perplexity.ai/search`,
+ *   `search_type: "fast"`); `PI_PERPLEXITY_RESPONSES=1` keeps the legacy
+ *   Responses stream.
  * - Anonymous via `www.perplexity.ai/rest/sse/perplexity_ask`
  */
 
@@ -17,7 +19,6 @@ import {
 	type Usage,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -26,18 +27,16 @@ import type { PerplexityRequest, PerplexitySearchResult } from "../../../web/sea
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type QuerySyntax, type StructuredQuery } from "../query";
-import { dateToAgeSeconds } from "../utils";
+import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import {
-	type ApiConfig,
-	getAvailableAuthMethods,
-	PERPLEXITY_CHAT_BASE_URL,
-	PERPLEXITY_RESPONSES_BASE_URL,
-} from "./perplexity-auth";
-import { classifyProviderHttpError, withHardTimeout } from "./utils";
+import { type ApiConfig, getAvailableAuthMethods, PERPLEXITY_RESPONSES_BASE_URL } from "./perplexity-auth";
+import { classifyProviderHttpError, normalizeSearchText, toSearchSources, withHardTimeout } from "./utils";
 
 const PERPLEXITY_OAUTH_ASK_URL = "https://www.perplexity.ai/rest/sse/perplexity_ask";
+const PERPLEXITY_SEARCH_URL = "https://api.perplexity.ai/search";
+const DEFAULT_SEARCH_RESULTS = 10;
+const MAX_SEARCH_RESULTS = 20;
 
 const DEFAULT_MAX_TOKENS = 8192;
 const DEFAULT_TEMPERATURE = 0.2;
@@ -109,6 +108,108 @@ function buildNativeFilters(parsed: StructuredQuery, rawQuery: string): Perplexi
 		afterDate: parsed.after ? toPerplexityDate(parsed.after) : undefined,
 		beforeDate: parsed.before ? toPerplexityDate(parsed.before) : undefined,
 		languageFilter: langCode ? [langCode] : undefined,
+	};
+}
+
+interface PerplexitySearchApiResult {
+	title?: string | null;
+	url?: string | null;
+	snippet?: string | null;
+	date?: string | null;
+	last_updated?: string | null;
+}
+
+interface PerplexitySearchApiResponse {
+	results?: PerplexitySearchApiResult[] | null;
+	id?: string | null;
+}
+
+/**
+ * Search API fast path for the direct API-key transport.
+ *
+ * This is the only path that requests Fast Search. The consumer ask endpoint
+ * (cookies/OAuth/anonymous) and the Responses transport are unchanged.
+ */
+async function callPerplexitySearchApi(
+	apiKey: string,
+	filters: PerplexityNativeFilters,
+	parsed: StructuredQuery,
+	params: PerplexitySearchParams,
+): Promise<SearchResponse> {
+	const maxResults = Math.trunc(
+		clampNumResults(params.num_search_results ?? params.num_results, DEFAULT_SEARCH_RESULTS, MAX_SEARCH_RESULTS),
+	);
+	// The native filter takes either an allow-list or a deny-list, not both.
+	// When the query has both, keep the allow-list and let the central
+	// post-filter enforce the exclusions.
+	const domainFilter =
+		parsed.sites.length > 0
+			? [...new Set(parsed.sites.map(siteHost))].slice(0, 20)
+			: parsed.excludedSites.length > 0
+				? [...new Set(parsed.excludedSites.map(site => `-${siteHost(site)}`))].slice(0, 20)
+				: undefined;
+	const body: Record<string, unknown> = {
+		query: filters.query,
+		max_results: maxResults,
+		search_type: "fast",
+		search_context_size: "medium",
+	};
+	if (domainFilter) body.search_domain_filter = domainFilter;
+	if (filters.afterDate) body.search_after_date_filter = filters.afterDate;
+	if (filters.beforeDate) body.search_before_date_filter = filters.beforeDate;
+	if (filters.languageFilter) body.search_language_filter = filters.languageFilter;
+	// The API rejects search_recency_filter combined with absolute date
+	// filters; explicit before:/after: bounds take precedence.
+	if (params.search_recency_filter && !filters.afterDate && !filters.beforeDate) {
+		body.search_recency_filter = params.search_recency_filter;
+	}
+
+	const response = await (params.fetch ?? fetch)(PERPLEXITY_SEARCH_URL, {
+		method: "POST",
+		headers: {
+			Accept: "application/json",
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${apiKey}`,
+		},
+		body: JSON.stringify(body),
+		signal: withHardTimeout(params.signal, params.timeoutMs),
+	});
+
+	if (!response.ok) {
+		const errorText = await response.text();
+		const classified = classifyProviderHttpError("perplexity", response.status, errorText);
+		if (classified) throw classified;
+		throw new SearchProviderError(
+			"perplexity",
+			`Perplexity Search API error (${response.status}): ${errorText}`,
+			response.status,
+		);
+	}
+
+	const payload = (await response.json()) as PerplexitySearchApiResponse;
+	if (!Array.isArray(payload.results)) {
+		throw new SearchProviderError("perplexity", "Perplexity Search API returned an unexpected response shape", 500);
+	}
+
+	const sources: Array<{ title: string; url: string; snippet?: string; publishedDate?: string }> = [];
+	const seenUrls = new Set<string>();
+	for (const result of payload.results) {
+		const url = result.url?.trim();
+		if (!url || seenUrls.has(url)) continue;
+		seenUrls.add(url);
+		sources.push({
+			title: result.title?.trim() || url,
+			url,
+			snippet: normalizeSearchText(result.snippet),
+			publishedDate: result.date?.trim() || undefined,
+		});
+	}
+
+	return {
+		provider: "perplexity",
+		sources: toSearchSources(sources, maxResults),
+		requestId: payload.id ?? undefined,
+		authMode: "api_key",
 	};
 }
 
@@ -350,30 +451,6 @@ interface PerplexityApiStreamMetadata {
 	related_questions?: unknown;
 }
 
-function buildPerplexityCompletionsModel(request: PerplexityRequest): Model<"openai-completions"> {
-	const spec: ModelSpec<"openai-completions"> = {
-		id: request.model,
-		name: request.model,
-		api: "openai-completions",
-		provider: "perplexity",
-		baseUrl: PERPLEXITY_CHAT_BASE_URL,
-		reasoning: false,
-		input: ["text"],
-		supportsTools: false,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: null,
-		maxTokens: null,
-		compat: {
-			supportsStore: false,
-			supportsMultipleSystemMessages: true,
-			supportsReasoningParams: false,
-			supportsUsageInStreaming: true,
-			maxTokensField: "max_tokens",
-		},
-	};
-	return buildModel(spec);
-}
-
 function buildPerplexityResponsesModel(request: PerplexityRequest): Model<"openai-responses"> {
 	const spec: ModelSpec<"openai-responses"> = {
 		id: request.model,
@@ -426,12 +503,6 @@ function buildPerplexityExtraBody(request: PerplexityRequest): Record<string, un
 		search_before_date_filter: request.search_before_date_filter,
 		search_language_filter: request.search_language_filter,
 	};
-}
-
-function applyPerplexityExtraBody(payload: unknown, request: PerplexityRequest): void {
-	const record = asRecord(payload);
-	if (!record) return;
-	Object.assign(record, buildPerplexityExtraBody(request));
 }
 
 function collectPerplexityOutputMetadata(metadata: PerplexityApiStreamMetadata, output: unknown): void {
@@ -508,29 +579,17 @@ async function callPerplexityApi(
 		collectPerplexityMetadata(metadata, event.data);
 	};
 
-	const message = config.useResponses
-		? await drainAssistantStream(
-				streamOpenAIResponses(buildPerplexityResponsesModel(request), context, {
-					apiKey: config.apiKey,
-					maxTokens: request.max_tokens ?? undefined,
-					temperature: request.temperature ?? undefined,
-					signal: requestSignal,
-					fetch: fetchImpl,
-					extraBody: buildPerplexityExtraBody(request),
-					onSseEvent,
-				}),
-			)
-		: await drainAssistantStream(
-				streamOpenAICompletions(buildPerplexityCompletionsModel(request), context, {
-					apiKey: config.apiKey,
-					maxTokens: request.max_tokens ?? undefined,
-					temperature: request.temperature ?? undefined,
-					signal: requestSignal,
-					fetch: fetchImpl,
-					onPayload: payload => applyPerplexityExtraBody(payload, request),
-					onSseEvent,
-				}),
-			);
+	const message = await drainAssistantStream(
+		streamOpenAIResponses(buildPerplexityResponsesModel(request), context, {
+			apiKey: config.apiKey,
+			maxTokens: request.max_tokens ?? undefined,
+			temperature: request.temperature ?? undefined,
+			signal: requestSignal,
+			fetch: fetchImpl,
+			extraBody: buildPerplexityExtraBody(request),
+			onSseEvent,
+		}),
+	);
 
 	if (message.stopReason === "error" || message.stopReason === "aborted") {
 		throwPerplexityStreamError(message);
@@ -982,7 +1041,9 @@ export async function searchPerplexity(params: PerplexitySearchParams): Promise<
 	for (const auth of authMethods) {
 		if (auth.type === "api_key") {
 			try {
-				const result = await callPerplexityApi(auth, request, params.fetch, params.signal, params.timeoutMs);
+				const result = auth.useResponses
+					? await callPerplexityApi(auth, request, params.fetch, params.signal, params.timeoutMs)
+					: await callPerplexitySearchApi(auth.apiKey, filters, parsed, params);
 				result.authMode = "api_key";
 				return applySourceLimit(result, params.num_results);
 			} catch (error) {

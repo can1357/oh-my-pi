@@ -1,7 +1,6 @@
 import type { AuthStorage, OAuthAccess } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
 
-export const PERPLEXITY_CHAT_BASE_URL = "https://api.perplexity.ai";
 export const PERPLEXITY_RESPONSES_BASE_URL = "https://api.perplexity.ai/v1";
 export const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 

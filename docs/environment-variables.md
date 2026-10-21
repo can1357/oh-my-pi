@@ -387,11 +387,11 @@ therefore completes through the paste-code path.
 | `TINYFISH_API_KEY`                                  | TinyFish search provider (required)                                       |
 | `BRAVE_API_KEY`                                     | Brave search provider                                                     |
 | `DEEPSEEK_API_KEY`                                  | DeepSeek search provider (same key as DeepSeek models)                    |
-| `PERPLEXITY_API_KEY`                                | Perplexity search provider API-key mode                                   |
+| `PERPLEXITY_API_KEY`                                | Perplexity Search API key (fast default; `PI_PERPLEXITY_RESPONSES=1` uses Responses) |
 | `PERPLEXITY_COOKIES`                                | Perplexity cookie-auth search mode                                        |
-| `PI_PERPLEXITY_RESPONSES`                           | `1` selects the Perplexity Responses endpoint instead of Chat Completions |
+| `PI_PERPLEXITY_RESPONSES`                           | `1` uses the Perplexity Responses stream instead of Search API Fast Search |
 | `PI_PERPLEXITY_MODEL`                               | Perplexity consumer-subscription model preference (default `experimental`) |
-| `PI_PERPLEXITY_API_MODEL`                           | Perplexity direct API model override (default `sonar-pro`)                |
+| `PI_PERPLEXITY_API_MODEL`                           | Perplexity Responses model override (default `sonar-pro`)                 |
 | `FIRECRAWL_API_KEY`                                 | Firecrawl search provider (keyless fallback when unset) and fetch reader backend (required) |
 | `FIRECRAWL_BASE_URL`                                | Firecrawl API endpoint override (`FIRECRAWL_API_URL` is a fallback alias) |
 | `TAVILY_API_KEY`                                    | Tavily search provider                                                    |
