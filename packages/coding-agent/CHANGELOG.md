@@ -1,8 +1,20 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
 
+## [18.12.5] - 2026-10-21
+
+### Added
+
+- `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
+
+## [18.12.5] - 2026-10-21
+
+### Added
+
+- `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
+
+### Fixed
 - Fixed `workpool()` and `judgeBatch()` ignoring an `op` given to their helpers, so a spread or `op` override now takes effect ([#16446](https://github.com/can1357/oh-my-pi/issues/16446), [#16459](https://github.com/can1357/oh-my-pi/pull/16459) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.5] - 2026-10-21
