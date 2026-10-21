@@ -1,7 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Changed
 
 - Reduced the work done when a provider request is prepared again, so long sessions use less CPU and allocate less on retries and side requests, and the cache behind it is released as soon as the conversation changes ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
@@ -45,7 +44,6 @@
 - `/mcp reauth <name>` now works over ACP, RPC, and print mode (`omp -p '/mcp reauth <name>'`): it opens the browser, prints the authorization URL, reconnects the server in the running session, and print mode exits 1 when reauthorization fails ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
 
 ### Changed
-- Reduced the work done when a provider request is prepared again, so long sessions use less CPU and allocate less on retries and side requests, and the cache behind it is released as soon as the conversation changes ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - ACP `session/cancel` now also cancels prompts that are queued or still dispatching, and stops autonomous runs, instead of being ignored when no client turn is streaming ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
 - Idle compaction no longer runs on logged-in OpenAI Codex accounts, whose prompt cache never expires; compacting while idle only threw away a warm cache
