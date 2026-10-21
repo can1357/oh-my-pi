@@ -27,7 +27,7 @@ import {
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { extractUriScheme, InternalUrlRouter, type ResolveContext, sessionResolveContext } from "../internal-urls";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
-import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
+import { type FileDiagnosticsResult, type UnjudgedFile } from "@oh-my-pi/pi-tui/tools/lsp";
 import { FileChangeType, notifyWorkspaceWatchedFiles } from "../lsp/client";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
@@ -47,6 +47,8 @@ import {
 	invalidateFsScanAfterWrite,
 } from "../tools/fs-cache-invalidation";
 import { outputMeta, resolveOutputMaxColumns } from "../tools/output-meta";
+import { formatPathRelativeToCwd } from "../tools/path-utils";
+import { composeDiagnosticsSummary } from "../lsp/utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { DEFAULT_MAX_COLUMN } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
@@ -252,12 +254,50 @@ function toPerFileResult(file: EditFileOutcome, mode: EditMode): EditToolPerFile
 		newText: file.newText,
 		snapshotsPruned: file.snapshotsPruned || undefined,
 		meta: outputMeta()
-			.diagnostics(diagnostics?.summary ?? "", diagnostics?.messages ?? [], diagnostics?.unjudgedServers)
+			.diagnostics(
+				diagnostics?.summary ?? "",
+				diagnostics?.messages ?? [],
+				diagnostics?.unjudgedServers,
+				// A batched result covers several files: keep the path with the
+				// servers that stayed silent for it (#15408).
+				diagnostics?.unjudgedFiles,
+			)
 			.get(),
 	};
 }
 
-function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode): EditToolDetails | undefined {
+/**
+ * The files a multi-file edit left unjudged, with the servers that stayed
+ * silent for each. A multi-file result has no top-level meta of its own, so
+ * the per-file unavailable states would never reach the model: the notice is
+ * built from the top-level meta alone, so they have to be aggregated here
+ * (#15408).
+ */
+function collectUnjudgedFiles(perFileResults: readonly EditToolPerFileResult[], cwd: string): UnjudgedFile[] {
+	const byPath = new Map<string, string[]>();
+	for (const file of perFileResults) {
+		const diagnostics = file.diagnostics;
+		if (!diagnostics) continue;
+		// A merged (batched) result already carries the paths of every file it
+		// covers; use those instead of attributing them to this file alone.
+		const entries = diagnostics.unjudgedFiles?.length
+			? diagnostics.unjudgedFiles
+			: diagnostics.unjudgedServers?.length
+				? [{ path: file.path, servers: diagnostics.unjudgedServers }]
+				: [];
+		for (const entry of entries) {
+			const path = formatPathRelativeToCwd(entry.path, cwd);
+			const servers = byPath.get(path) ?? [];
+			for (const server of entry.servers) {
+				if (!servers.includes(server)) servers.push(server);
+			}
+			byPath.set(path, servers);
+		}
+	}
+	return Array.from(byPath, ([path, servers]) => ({ path, servers }));
+}
+
+function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode, cwd: string): EditToolDetails | undefined {
 	if (files.length === 0) return undefined;
 	const perFileResults = files.map(file => toPerFileResult(file, mode));
 	if (perFileResults.length === 1) {
@@ -276,6 +316,12 @@ function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode): Ed
 			meta: file.meta,
 		};
 	}
+	// The unavailable states of every file the edit touched, aggregated into
+	// the top-level meta: the per-file metas live in `details`, which the
+	// model never sees, so without this a multi-file edit reports nothing at
+	// all (#15408).
+	const unjudgedFiles = collectUnjudgedFiles(perFileResults, cwd);
+	const unjudgedServers = [...new Set(unjudgedFiles.flatMap(entry => entry.servers))];
 	return {
 		diff: perFileResults
 			.map(file => file.diff)
@@ -283,6 +329,12 @@ function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode): Ed
 			.join("\n"),
 		firstChangedLine: perFileResults.find(file => file.firstChangedLine !== undefined)?.firstChangedLine,
 		perFileResults: capPerFileSnapshots(perFileResults),
+		meta:
+			unjudgedServers.length > 0
+				? outputMeta()
+						.diagnostics(composeDiagnosticsSummary("", unjudgedServers), [], unjudgedServers, unjudgedFiles)
+						.get()
+				: undefined,
 	};
 }
 
@@ -568,7 +620,7 @@ export class EditTool implements AgentTool<TInput> {
 			return { content: [{ type: "text", text: outcome.text }], isError: true };
 		}
 
-		const details = aggregateDetails(outcome.files, this.mode);
+		const details = aggregateDetails(outcome.files, this.mode, this.session.cwd);
 		const result: AgentToolResult<EditToolDetails, TInput> = {
 			content: [{ type: "text", text: outcome.text }],
 			...(details ? { details } : {}),

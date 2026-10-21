@@ -2,6 +2,9 @@ import type { Theme } from "../theme/theme";
 import { formatBytes, wrapBrackets } from "../render/render-utils";
 import type { OutputArtifactError } from "./streaming-output";
 import { formatGroupedFiles } from "./grouped-file-output";
+// Type-only: erased at runtime, so this adds no cycle to the
+// lsp.ts <-> native-view.ts <-> output-meta.ts render graph.
+import type { UnjudgedFile } from "./lsp";
 
 /**
  * Truncation metadata for the output notice.
@@ -59,6 +62,14 @@ export interface DiagnosticMeta {
 	 * the report is incomplete (#15408).
 	 */
 	unjudgedServers?: string[];
+	/**
+	 * Files that no server judged, with the servers that stayed silent for
+	 * each. Set when the result covers more than one file: the flat
+	 * {@link unjudgedServers} list cannot say which file was left unchecked,
+	 * so a warning about an earlier file could be read as belonging to the
+	 * last one (#15408).
+	 */
+	unjudgedFiles?: UnjudgedFile[];
 }
 
 /**
@@ -371,7 +382,16 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 		}
 		// A file no server judged is not a clean file: say so instead of
 		// letting the silence read as "no problems" (issue #15408).
-		if (d.unjudgedServers && d.unjudgedServers.length > 0) {
+		//
+		// When the result covers several files, name each unchecked file: a
+		// flat server list cannot say which file the silence belongs to, so a
+		// warning about an earlier file reads as if it applied to the last
+		// write (issue #15408).
+		if (d.unjudgedFiles && d.unjudgedFiles.length > 0) {
+			for (const file of d.unjudgedFiles) {
+				parts.push(`LSP diagnostics unavailable from ${file.servers.join(", ")} for ${file.path}`);
+			}
+		} else if (d.unjudgedServers && d.unjudgedServers.length > 0) {
 			parts.push(`LSP diagnostics unavailable from ${d.unjudgedServers.join(", ")}`);
 		}
 		if (parts.length > 0) diagnosticsNotice = `\n\n${parts.join("\n")}`;

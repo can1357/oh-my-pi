@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { createLspWritethrough, LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
 import {
@@ -13,7 +14,8 @@ import {
 import { DeferredDiagnostics } from "@oh-my-pi/pi-coding-agent/lsp/deferred-diagnostics";
 import type { Diagnostic, LspClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import type { DeferredDiagnosticsEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { type LspToolDetails } from "@oh-my-pi/pi-tui/tools/lsp";
+import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -25,15 +27,50 @@ import { TempDir } from "@oh-my-pi/pi-utils";
  *
  * The fix refuses the unverified wait: a file no server judged is reported as
  * unjudged, never as clean.
+ *
+ * The same silence has to reach the MODEL, not only the human: a multi-file
+ * edit keeps its per-file metas in `details`, which the provider never sees,
+ * and a batched write merges several files into one result. Both paths are
+ * covered here.
  */
 
 const lspTestSettings = Settings.isolated();
+
+/** A language server that is configured but never comes up. */
+const DEAD_SERVER: ServerConfig = {
+	command: "test-lsp",
+	fileTypes: ["ts"],
+	rootMarkers: [],
+};
 
 function makeLspSession(cwd: string): ToolSession {
 	return { cwd, settings: lspTestSettings } as ToolSession;
 }
 
-function textResult(result: AgentToolResult<LspToolDetails>): string {
+/** A session for the edit/write tools, with the LSP diagnostics turned on. */
+function makeWriteSession(cwd: string): ToolSession {
+	const mutationVersions = new Map<string, number>();
+	return {
+		cwd,
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		settings: Settings.isolated({
+			"lsp.formatOnWrite": false,
+			"lsp.diagnosticsOnEdit": true,
+			"lsp.diagnosticsDeduplicate": true,
+		}),
+		enableLsp: true,
+		bumpFileMutationVersion: target => {
+			const version = (mutationVersions.get(target) ?? 0) + 1;
+			mutationVersions.set(target, version);
+			return version;
+		},
+		getFileMutationVersion: target => mutationVersions.get(target) ?? 0,
+	};
+}
+
+function textResult<T>(result: AgentToolResult<T>): string {
 	return result.content
 		.filter(block => block.type === "text")
 		.map(block => block.text)
@@ -243,4 +280,131 @@ describe("issue #15408: diagnostics that never arrive are not a clean file", () 
 		expect(queued[0]?.messages).toEqual([]);
 		expect(queued[0]?.unjudgedServers).toEqual(["silent-lsp"]);
 	});
+
+	// A multi-file edit keeps its per-file metas inside `details`, which the
+	// provider never sees: the notice the model reads is built from the
+	// top-level `details.meta` alone. Without an aggregated top-level meta a
+	// multi-file edit reports nothing at all, so the model reads an unchecked
+	// file as a checked one (issue #15408).
+	it("tells the model which files of a multi-file edit no server judged", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-unavailable-15408-");
+		try {
+			await Bun.write(path.join(tempDir.path(), "a.ts"), "export const a = 1;\n");
+			await Bun.write(path.join(tempDir.path(), "b.ts"), "export const b = 2;\n");
+
+			// The server never comes up, so it publishes no verdict for either
+			// file: both are left unjudged. It fails fast, so the verdict
+			// lands inline instead of on the deferred channel.
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", DEAD_SERVER]]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockRejectedValue(new Error("test-lsp is not installed"));
+
+			const patch = [
+				"*** Begin Patch",
+				"*** Update File: a.ts",
+				"@@",
+				"-export const a = 1;",
+				"+export const a: number = 1;",
+				"*** Update File: b.ts",
+				"@@",
+				"-export const b = 2;",
+				"+export const b: number = 2;",
+				"*** End Patch",
+				"",
+			].join("\n");
+
+			const tool = wrapToolWithMetaNotice(new EditTool(makeWriteSession(tempDir.path()), "apply_patch"));
+			const result = await tool.execute("edit-multi", { input: patch });
+
+			expect(result.isError).not.toBe(true);
+			// The model must learn that BOTH files were left unchecked, and
+			// which file each silence belongs to.
+			const output = textResult(result);
+			expect(output).toContain("LSP diagnostics unavailable from test-lsp for a.ts");
+			expect(output).toContain("LSP diagnostics unavailable from test-lsp for b.ts");
+		} finally {
+			tempDir.removeSync();
+		}
+	}, 30_000);
+
+	// A batch merges the diagnostics of several files into one result, and
+	// that result is attached to the LAST write of the batch. Without the
+	// path, a warning about an earlier file reads as if it applied to that
+	// write alone, so the model cannot tell which file was left unchecked
+	// (issue #15408).
+	it("keeps the file each unjudged server belongs to when a batch is merged", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-unavailable-15408-");
+		try {
+			const fileA = path.join(tempDir.path(), "a.ts");
+			const fileB = path.join(tempDir.path(), "b.ts");
+			await Bun.write(fileA, "export const a = 1;\n");
+			await Bun.write(fileB, "export const b = 2;\n");
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", DEAD_SERVER]]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockRejectedValue(new Error("test-lsp is not installed"));
+
+			const writethrough = createLspWritethrough(tempDir.path(), { enableDiagnostics: true });
+			await writethrough(fileA, "export const a: number = 1;\n", undefined, undefined, {
+				id: "batch-1",
+				flush: false,
+			});
+			const merged = await writethrough(fileB, "export const b: number = 2;\n", undefined, undefined, {
+				id: "batch-1",
+				flush: true,
+			});
+
+			// The merged result keeps every unchecked file with the servers
+			// that stayed silent for it.
+			expect(merged.diagnostics?.unjudgedFiles).toEqual([
+				{ path: "a.ts", servers: ["test-lsp"] },
+				{ path: "b.ts", servers: ["test-lsp"] },
+			]);
+		} finally {
+			tempDir.removeSync();
+		}
+	}, 30_000);
+
+	// The same batch, end to end through the write tool: the notice the model
+	// reads has to name the earlier file, not just the last write.
+	it("names the earlier file of a batched write in the notice the model reads", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-unavailable-15408-");
+		try {
+			await Bun.write(path.join(tempDir.path(), "a.ts"), "export const a = 1;\n");
+			await Bun.write(path.join(tempDir.path(), "b.ts"), "export const b = 2;\n");
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", DEAD_SERVER]]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockRejectedValue(new Error("test-lsp is not installed"));
+
+			// Two writes in one model response share an LSP batch; the last
+			// one flushes it and carries the merged result.
+			const toolCalls = [
+				{ id: "write-a", name: "write" },
+				{ id: "write-b", name: "write" },
+			];
+			const tool = wrapToolWithMetaNotice(new WriteTool(makeWriteSession(tempDir.path())));
+			await tool.execute(
+				"write-a",
+				{ path: "a.ts", content: "export const a: number = 1;\n" },
+				undefined,
+				undefined,
+				{ toolCall: { batchId: "batch-1", index: 0, total: 2, toolCalls } },
+			);
+			const result = await tool.execute(
+				"write-b",
+				{ path: "b.ts", content: "export const b: number = 2;\n" },
+				undefined,
+				undefined,
+				{ toolCall: { batchId: "batch-1", index: 1, total: 2, toolCalls } },
+			);
+
+			expect(result.isError).not.toBe(true);
+			const output = textResult(result);
+			expect(output).toContain("LSP diagnostics unavailable from test-lsp for a.ts");
+			expect(output).toContain("LSP diagnostics unavailable from test-lsp for b.ts");
+		} finally {
+			tempDir.removeSync();
+		}
+	}, 30_000);
 });

@@ -23,10 +23,11 @@ import {
 	limitDiagnosticMessages,
 	type ServerVersionMap,
 } from "./diagnostics";
-import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-tui/tools/lsp";
+import { type FileDiagnosticsResult, FileFormatResult, type UnjudgedFile } from "@oh-my-pi/pi-tui/tools/lsp";
 import { notifyFileSaved, splitServers, syncFileContent } from "./servers";
 import type { LspClient, ServerConfig } from "./types";
 import { summarizeDiagnosticMessages, composeDiagnosticsSummary } from "./utils";
+import { formatPathRelativeToCwd } from "../tools/path-utils";
 
 const TSSERVER_REQUEST_COMMAND = "typescript.tsserverRequest";
 
@@ -201,20 +202,35 @@ export async function flushLspWritethroughBatch(
 		.diagnostics;
 }
 
+/**
+ * One file's diagnostics inside a batch, paired with the path they belong to.
+ * The path is what the merge needs: a server can stay silent for one file and
+ * answer for another, so the unjudged servers cannot be flattened into a flat
+ * list without losing which file was left unchecked (#15408).
+ */
+interface MergedDiagnosticsEntry {
+	/** Absolute path the result belongs to. */
+	dst: string;
+	/** The file's diagnostics, or undefined when it produced none. */
+	result: FileDiagnosticsResult | undefined;
+}
+
 function mergeDiagnostics(
-	results: Array<FileDiagnosticsResult | undefined>,
+	entries: readonly MergedDiagnosticsEntry[],
 	options: ResolvedWritethroughOptions,
+	cwd: string,
 ): FileDiagnosticsResult | undefined {
 	const messages: string[] = [];
 	const servers = new Set<string>();
 	const unjudgedServers = new Set<string>();
+	const unjudgedFiles: UnjudgedFile[] = [];
 	let hasResults = false;
 	let hasFormatter = false;
 	let formatted = false;
 	let hasFailed = false;
 	let hasUnsupported = false;
 
-	for (const result of results) {
+	for (const { dst, result } of entries) {
 		if (!result) continue;
 		hasResults = true;
 		if (result.server) {
@@ -228,8 +244,18 @@ function mergeDiagnostics(
 		if (result.messages.length > 0) {
 			messages.push(...result.messages);
 		}
-		for (const server of result.unjudgedServers ?? []) {
+		const fileUnjudged = result.unjudgedServers ?? [];
+		for (const server of fileUnjudged) {
 			unjudgedServers.add(server);
+		}
+		if (fileUnjudged.length > 0) {
+			// Keep the path with the servers that stayed silent for it: the
+			// merged result is attached to the last write of the batch, so a
+			// flat list would read as if it applied to that write alone.
+			unjudgedFiles.push({
+				path: formatPathRelativeToCwd(dst, cwd),
+				servers: [...fileUnjudged],
+			});
 		}
 		if (result.formatter !== undefined) {
 			hasFormatter = true;
@@ -274,6 +300,7 @@ function mergeDiagnostics(
 		errored,
 		formatter,
 		unjudgedServers: unjudgedServers.size > 0 ? Array.from(unjudgedServers) : undefined,
+		unjudgedFiles: unjudgedFiles.length > 0 ? unjudgedFiles : undefined,
 	};
 }
 
@@ -604,7 +631,7 @@ async function flushWritethroughBatch(
 	if (batch.length === 0) {
 		return { finalContent: "" };
 	}
-	const results: Array<FileDiagnosticsResult | undefined> = [];
+	const results: MergedDiagnosticsEntry[] = [];
 	const finalContents = new Map<string, string>();
 	for (const entry of batch) {
 		const bundle = getDeferred?.(entry.dst);
@@ -640,14 +667,14 @@ async function flushWritethroughBatch(
 		);
 		finalContents.set(entry.dst, diag.finalContent);
 		bundle?.finalize(diag.diagnostics);
-		results.push(diag.diagnostics);
+		results.push({ dst: entry.dst, result: diag.diagnostics });
 	}
 	const finalContent = requestedDst
 		? (finalContents.get(requestedDst) ?? batch.find(entry => entry.dst === requestedDst)?.content ?? "")
 		: "";
 	return {
 		finalContent,
-		diagnostics: mergeDiagnostics(results, options),
+		diagnostics: mergeDiagnostics(results, options, cwd),
 	};
 }
 

@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
-- Fixed `lsp diagnostics` reporting a file as clean when no language server judged it; an unjudged file is now reported as a failure instead of `OK`, and a file with findings from one server but no report from another shows an `unavailable` marker next to the diagnostic count and names the servers that published no verdict in its summary, whether the report arrives right away or after the edit has returned ([#15408](https://github.com/can1357/oh-my-pi/issues/15408), [#16463](https://github.com/can1357/oh-my-pi/pull/16463) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed `lsp diagnostics` reporting a file as clean when no language server judged it; an unjudged file is now reported as a failure instead of `OK`, and a file with findings from one server but no report from another shows an `unavailable` marker next to the diagnostic count and names the servers that published no verdict in its summary, whether the report arrives right away or after the edit has returned; the tool output now names the file that was left unchecked, for a multi-file edit as well as for a batched write ([#15408](https://github.com/can1357/oh-my-pi/issues/15408), [#16463](https://github.com/can1357/oh-my-pi/pull/16463) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.5] - 2026-10-21
 
