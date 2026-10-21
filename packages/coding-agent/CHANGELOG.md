@@ -1,6 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed `read` inlining unbounded text for an `artifact://` recovery read: the output is now paged at a per-call byte budget across all of the call's ranges, and the notice names the range to read next ([#15062](https://github.com/can1357/oh-my-pi/issues/15062), [#15172](https://github.com/can1357/oh-my-pi/pull/15172) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+## [18.12.5] - 2026-10-21
+
+### Added
+
+- `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
 
 ### Added
 
