@@ -3739,24 +3739,33 @@ export class InteractiveMode implements InteractiveModeContext {
 			for (const child of this.chatContainer.children) {
 				if (child instanceof AssistantMessageComponent) child.setProseOnlyThinking(proseOnlyThinking);
 			}
-			// Reset the stable ledger BEFORE the paired display reset below. It is
-			// unconditional on the live stream: #handleMessageEnd clears both
-			// streaming fields the moment the turn ends, while the finalized
-			// assistant entry stays in the transcript — still carrying the stable
-			// rows its append-only thinking head published — until it retires. A
-			// toggle in that window would replay the entry under the new prose
-			// mode while slicing it by the old prefix height, so a raw-to-prose
-			// shrink cuts past the answer and retirement omits it permanently.
-			this.chatContainer.resetStableEmission();
-			if (this.streamingComponent && this.streamingMessage) {
-				this.#eventController.resyncStreamingRevealVisibility();
+			// A hidden thinking block renders no rows, so the prose mode changes
+			// nothing on screen: it only decides how a block is formatted if it is
+			// shown later. Resetting the ledger and replaying the terminal for it
+			// clears and re-renders an arbitrarily long transcript for a change
+			// nothing observes — the same stall the effective-visibility guard
+			// below avoids. The component state above still carries the new mode,
+			// and the show path propagates it when thinking becomes visible.
+			if (!this.effectiveHideThinkingBlock) {
+				// Reset the stable ledger BEFORE the paired display reset below. It is
+				// unconditional on the live stream: #handleMessageEnd clears both
+				// streaming fields the moment the turn ends, while the finalized
+				// assistant entry stays in the transcript — still carrying the stable
+				// rows its append-only thinking head published — until it retires. A
+				// toggle in that window would replay the entry under the new prose
+				// mode while slicing it by the old prefix height, so a raw-to-prose
+				// shrink cuts past the answer and retirement omits it permanently.
+				this.chatContainer.resetStableEmission();
+				if (this.streamingComponent && this.streamingMessage) {
+					this.#eventController.resyncStreamingRevealVisibility();
+				}
+				// Gated on the value above, not on the key being present: a bulk reload
+				// that carries proseOnlyThinking with an unchanged value reached this
+				// line alone, so ui.resetDisplay() cleared and replayed the whole
+				// terminal for a change nothing observes while the ledger it depends on
+				// was never reset — the same stall the hideThinkingBlock guard fixes.
+				resetDisplay = true;
 			}
-			// Gated on the value above, not on the key being present: a bulk reload
-			// that carries proseOnlyThinking with an unchanged value reached this
-			// line alone, so ui.resetDisplay() cleared and replayed the whole
-			// terminal for a change nothing observes while the ledger it depends on
-			// was never reset — the same stall the hideThinkingBlock guard fixes.
-			resetDisplay = true;
 		}
 		const hideThinkingBlock = cfgHideThinkingBlock.get(this.settings);
 		if (any("hideThinkingBlock") && hideThinkingBlock !== this.hideThinkingBlock) {

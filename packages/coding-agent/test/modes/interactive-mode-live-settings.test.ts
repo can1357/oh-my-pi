@@ -254,6 +254,12 @@ describe("InteractiveMode live settings", () => {
 		// reload — and it did so without the stable-emission ledger the replay has to
 		// be paired with.
 		expect(mode.proseOnlyThinking).toBe(true);
+		// Thinking must be visible for the flip to be observable at all: a hidden
+		// thinking block renders no rows, so the prose mode changes nothing on
+		// screen and owes no replay (see the test below).
+		session.setThinkingLevel(ThinkingLevel.High);
+		await Promise.resolve();
+		expect(mode.effectiveHideThinkingBlock).toBe(false);
 		const resetStableEmission = vi.spyOn(mode.chatContainer, "resetStableEmission");
 		const resetDisplay = vi.spyOn(mode.ui, "resetDisplay");
 
@@ -275,6 +281,32 @@ describe("InteractiveMode live settings", () => {
 		// a replay the ledger reset cannot back up.
 		expect(resetStableEmission).toHaveBeenCalledTimes(1);
 		expect(resetDisplay).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not replay the terminal when a prose-only change lands while thinking is hidden", async () => {
+		// A hidden thinking block renders no rows, so the prose mode changes
+		// nothing on screen: it only decides how a block is formatted if it is
+		// shown later. The branch used to reset the stable-emission ledger and
+		// replay the terminal anyway, clearing and re-rendering an arbitrarily
+		// long transcript for a change nothing observes — the same stall/flicker
+		// the adjacent effective-visibility guard avoids. The component state must
+		// still carry the new mode, but the destructive replay must wait until
+		// thinking is visible.
+		session.setThinkingLevel(ThinkingLevel.Off);
+		await Promise.resolve();
+		expect(mode.effectiveHideThinkingBlock).toBe(true);
+		const resetStableEmission = vi.spyOn(mode.chatContainer, "resetStableEmission");
+		const resetDisplay = vi.spyOn(mode.ui, "resetDisplay");
+
+		cfgProseOnlyThinking.set(session.settings, false);
+		await Promise.resolve();
+
+		// The preference lands on the mode and its components...
+		expect(mode.proseOnlyThinking).toBe(false);
+		expect(cfgProseOnlyThinking.get(session.settings)).toBe(false);
+		// ...but nothing is replayed for a change no row can show.
+		expect(resetStableEmission).not.toHaveBeenCalled();
+		expect(resetDisplay).not.toHaveBeenCalled();
 	});
 
 	it("resets the stable ledger when prose-only thinking changes mid-stream", async () => {
