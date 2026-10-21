@@ -31,6 +31,7 @@ import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-co
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
@@ -4297,18 +4298,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const slashCommands = await slashCommandsPromise;
 
 		// Keep image blocks off the wire when they'd be rejected: either the user
-		// disabled images (`images.blockImages`) or the active model has no vision
-		// support. The latter covers switching from a vision model to a text-only
+		// disabled images (`images.blockImages`) or the active model's wire sends
+		// none. The latter covers switching from a vision model to a text-only
 		// one mid-session — historical image blocks would otherwise be replayed to
-		// a provider that 400s on them (#5400). Read both dynamically so a `/model`
-		// switch or setting change takes effect on the next turn.
+		// a provider that 400s on them (#5400) — and routes that strip images,
+		// whose blocks would otherwise be normalized and published for nothing.
+		// Read both dynamically so a `/model` switch or setting change takes
+		// effect on the next turn.
 		const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
 			const converted = convertToLlm(messages);
 			if (cfgImagesBlockImages.get(settings)) {
 				return replaceLlmImagesWithText(converted, "Image reading is disabled.");
 			}
 			const activeModel = agent?.state.model ?? model;
-			if (activeModel && !activeModel.input.includes("image")) {
+			if (activeModel && !sendsImageInputOnWire(activeModel)) {
 				return replaceLlmImagesWithText(
 					converted,
 					"[image omitted: the active model does not support image input]",

@@ -104,11 +104,13 @@ export interface ReadToolDetails {
 // Parsing also recognizes incomplete counts to explain their errors; path splitting
 // only peels complete selectors (not a trailing `+` or `L`).
 const RANGE_SELECTOR_CHUNK = `${LINE_RANGE_CHUNK_SOURCE}(?<=[\\d.-])`;
-const RANGE_LIST_SRC = `${RANGE_SELECTOR_CHUNK}(?:,${RANGE_SELECTOR_CHUNK})*`;
 // A tail selector: `-N` reads the last N lines. Keep in sync with TAIL_SELECTOR_RE.
 const TAIL_CHUNK_SRC = String.raw`-\d+`;
-const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC}|raw|conflicts|img)$`, "i");
-const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC})$`, "i");
+// A comma list may mix ranges and tails (`1-12,-15`); a lone tail is a one-chunk list.
+const LIST_CHUNK_SRC = `(?:${RANGE_SELECTOR_CHUNK}|${TAIL_CHUNK_SRC})`;
+const RANGE_LIST_SRC = `${LIST_CHUNK_SRC}(?:,${LIST_CHUNK_SRC})*`;
+const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts|img)$`, "i");
+const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^(?:${RANGE_LIST_SRC})$`, "i");
 const FILE_RAW_ONLY_RE = /^raw$/i;
 // Permissive selector chunk for internal URLs — accepts well-formed selectors
 // plus common malformed shapes (e.g. `:-N-M`) so the read tool peels the entire
@@ -117,8 +119,33 @@ const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
 	String.raw`^(?:raw|conflicts|img|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
 	"i",
 );
-/** Split a filesystem path from its trailing read selector. */
-export function splitPathAndSel(rawPath: string): { path: string; sel?: string } {
+
+/**
+ * Fold the list chunks that repeat the selector colon after a comma (`a:1-30,:-30`)
+ * into the `list` that follows them, so the pair reads as `a:1-30,-30`. Only
+ * colons at or after `minColon` count. Each chunk is tested once.
+ */
+function foldRepeatedListColons(basePath: string, list: string, minColon: number): { basePath: string; list: string } {
+	const chunks = [list];
+	while (basePath.endsWith(",")) {
+		const colon = basePath.lastIndexOf(":");
+		const chunk = basePath.slice(colon + 1, -1);
+		if (colon < minColon || !FILE_LINE_RANGE_ONLY_RE.test(chunk)) break;
+		chunks.push(chunk);
+		basePath = basePath.slice(0, colon);
+	}
+	return { basePath, list: chunks.reverse().join(",") };
+}
+
+/**
+ * Split a filesystem path from its trailing read selector. `foldListColons: false`
+ * keeps a colon repeated inside a list as part of the path (`a:1-30,:-30` peels
+ * only `:-30`), for callers checking whether that shorter split names a real file.
+ */
+export function splitPathAndSel(
+	rawPath: string,
+	options?: { foldListColons?: boolean },
+): { path: string; sel?: string } {
 	const colon = rawPath.lastIndexOf(":");
 	if (colon <= 0) return { path: rawPath };
 
@@ -126,25 +153,33 @@ export function splitPathAndSel(rawPath: string): { path: string; sel?: string }
 	if (!FILE_LINE_RANGE_RE.test(candidate)) return { path: rawPath };
 
 	let basePath = rawPath.slice(0, colon);
-	let sel = candidate;
-
 	// Allow a compound trailing selector: `path:1-50:raw`, `path:raw:1-50`, or
-	// `path:raw:-60`. The two chunks must be one line-range (or tail) plus one
-	// `raw`, in either order.
-	const innerColon = basePath.lastIndexOf(":");
-	if (innerColon > 0) {
+	// `path:raw:-60`. The two chunks must be one line list (ranges and tails)
+	// plus one `raw`, in either order.
+	let list: string | undefined;
+	let rawSuffix = "";
+	if (FILE_LINE_RANGE_ONLY_RE.test(candidate)) {
+		list = candidate;
+	} else if (FILE_RAW_ONLY_RE.test(candidate)) {
+		const innerColon = basePath.lastIndexOf(":");
 		const innerCandidate = basePath.slice(innerColon + 1);
-		const innerIsRaw = FILE_RAW_ONLY_RE.test(innerCandidate);
-		const outerIsRaw = FILE_RAW_ONLY_RE.test(candidate);
-		const innerIsRange = FILE_LINE_RANGE_ONLY_RE.test(innerCandidate);
-		const outerIsRange = FILE_LINE_RANGE_ONLY_RE.test(candidate);
-		if ((innerIsRaw && outerIsRange) || (innerIsRange && outerIsRaw)) {
-			sel = `${innerCandidate}:${candidate}`;
+		if (innerColon > 0 && FILE_LINE_RANGE_ONLY_RE.test(innerCandidate)) {
+			list = innerCandidate;
+			rawSuffix = `:${candidate}`;
 			basePath = basePath.slice(0, innerColon);
 		}
 	}
+	if (list === undefined) return { path: basePath, sel: candidate };
 
-	return { path: basePath, sel };
+	if (options?.foldListColons !== false) ({ basePath, list } = foldRepeatedListColons(basePath, list, 1));
+	if (!rawSuffix) {
+		const innerColon = basePath.lastIndexOf(":");
+		const innerCandidate = basePath.slice(innerColon + 1);
+		if (innerColon > 0 && FILE_RAW_ONLY_RE.test(innerCandidate)) {
+			return { path: basePath.slice(0, innerColon), sel: `${innerCandidate}:${list}` };
+		}
+	}
+	return { path: basePath, sel: `${list}${rawSuffix}` };
 }
 
 /**
@@ -189,9 +224,17 @@ export function splitInternalUrlSel(
 		// Stop before crossing into the scheme separator `://`.
 		if (colon < schemeEnd) break;
 		const tail = path.slice(colon + 1);
-		if (!INTERNAL_URL_SELECTOR_PART_RE.test(tail)) break;
-		chunks.unshift(tail);
-		path = path.slice(0, colon);
+		if (INTERNAL_URL_SELECTOR_PART_RE.test(tail)) {
+			chunks.unshift(tail);
+			path = path.slice(0, colon);
+			continue;
+		}
+		// `artifact://7:1-30,:-30`: a list chunk ending in a comma joins the list peeled after it.
+		if (chunks.length === 0 || !FILE_LINE_RANGE_ONLY_RE.test(chunks[0])) break;
+		const folded = foldRepeatedListColons(path, chunks[0], schemeEnd);
+		if (folded.basePath === path) break;
+		chunks[0] = folded.list;
+		path = folded.basePath;
 	}
 	if (chunks.length === 0) return { path: rawPath };
 	return { path, sel: chunks.join(":") };

@@ -242,3 +242,20 @@ describe("custom session-file registry", () => {
 		}
 	});
 });
+
+describe("relative session directory", () => {
+	test("stores the session file under an absolute path", async () => {
+		const cwd = makeTempDir("omp-cwd-");
+		// `--session-dir ./sess` arrives relative to the process cwd.
+		const relativeDir = path.relative(process.cwd(), path.join(cwd, "sess"));
+		const manager = SessionManager.create(cwd, relativeDir, new MemorySessionStorage());
+		try {
+			expect(manager.getSessionDir()).toBe(path.join(cwd, "sess"));
+			const file = manager.getSessionFile();
+			expect(file && path.isAbsolute(file)).toBe(true);
+			expect(path.dirname(file!)).toBe(path.join(cwd, "sess"));
+		} finally {
+			await manager.close();
+		}
+	});
+});

@@ -461,8 +461,12 @@ export interface AnthropicCompactionRequest {
 export interface OpenAIPromptCacheOptions {
 	/** `explicit` disables OpenAI's automatic latest-message breakpoint. */
 	mode: "implicit" | "explicit";
-	/** The only currently supported minimum breakpoint lifetime. */
-	ttl?: "30m";
+	/**
+	 * Minimum cache lifetime. `30m` is OpenAI's default; `12h` (Responses API only)
+	 * bills writes at 2.5× input instead of 1.25×. Defaults to `12h` when
+	 * `cacheRetention` resolves to `long`, otherwise `30m`.
+	 */
+	ttl?: "30m" | "12h";
 	/** By default, mark one existing block from stable history; `none` suppresses that marker. */
 	breakpoint?: "latest-stable-message" | "none";
 }

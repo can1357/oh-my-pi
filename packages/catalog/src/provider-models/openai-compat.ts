@@ -4969,7 +4969,7 @@ export interface MoonshotModelManagerConfig {
  * use the K2.x binary `thinking: { type }` block, so the wire path routes it
  * through OpenAI-style `reasoning_effort` (see `buildOpenAICompat`).
  */
-const MOONSHOT_KIMI_K3_COST = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 } as const;
+const MOONSHOT_KIMI_K3_COST = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 } as const;
 export function moonshotModelManagerOptions(
 	config?: MoonshotModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {

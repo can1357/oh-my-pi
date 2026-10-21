@@ -1016,12 +1016,14 @@ export class SessionManager {
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
 		this.#cwd = cwd;
-		this.#sessionDir = sessionDir;
+		// Absolute, so session files (and `PI_SESSION_FILE` in bash and eval) stay
+		// valid after a command changes directory: `--session-dir` may be relative.
+		this.#sessionDir = sessionDir ? path.resolve(sessionDir) : sessionDir;
 		this.#persist = persist;
 		this.#storage = storage;
 		this.#blobs = new BlobStore(getBlobsDir());
 
-		if (persist && sessionDir) this.#storage.ensureDirSync(sessionDir);
+		if (persist && sessionDir) this.#storage.ensureDirSync(this.#sessionDir);
 	}
 
 	#rememberBreadcrumb(cwd: string, sessionFile: string, fresh = false): void {

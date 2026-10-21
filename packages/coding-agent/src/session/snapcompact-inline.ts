@@ -16,6 +16,7 @@
 
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { Context, ImageContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import {
 	HL_FILE_HASH_LENGTH,
 	HL_FILE_HASH_SEP,
@@ -620,7 +621,7 @@ export function estimateInlineSavings(input: {
 	messages: readonly InlineMessageView[];
 }): SnapcompactSavingsEstimate {
 	const { options, model } = input;
-	if (!model?.input.includes("image")) {
+	if (!model || !sendsImageInputOnWire(model)) {
 		return { visionCapable: false, savedTokens: 0 };
 	}
 
@@ -754,9 +755,9 @@ export class SnapcompactInlineTransformer {
 		if (!options.renderToolResults) this.#toolCache.clear();
 		if (options.renderSystemPrompt === "none") this.#systemCache = undefined;
 		if (!options.renderToolResults && options.renderSystemPrompt === "none") return context;
-		// Vision gate: providers silently DROP images on text-only models —
-		// rendering would lose the content entirely.
-		if (!model.input.includes("image")) return context;
+		// Vision gate: images on a text-only model, or on a wire that strips
+		// them, never reach the model — rendering would lose the content.
+		if (!sendsImageInputOnWire(model)) return context;
 
 		const shape = snapcompact.resolveShape(model, options.shape);
 		const shapeKey = JSON.stringify(shape);

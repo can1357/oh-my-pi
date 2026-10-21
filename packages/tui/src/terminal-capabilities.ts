@@ -1109,6 +1109,19 @@ export function encodeITerm2(
 	return `\x1b]1337;File=${params.join(";")}:${base64Data}\x07`;
 }
 
+/**
+ * The encoded image `encodeITerm2` wrote into `line`, without the size
+ * parameters a rewrap changes; undefined for a line without one.
+ */
+export function iterm2ImagePayload(line: string): string | undefined {
+	const start = line.indexOf(ImageProtocol.Iterm2);
+	if (start === -1) return undefined;
+	const colon = line.indexOf(":", start + ImageProtocol.Iterm2.length);
+	if (colon === -1) return undefined;
+	const end = line.indexOf("\x07", colon + 1);
+	return line.slice(colon + 1, end === -1 ? undefined : end);
+}
+
 export function calculateImageRows(
 	imageDimensions: ImageDimensions,
 	targetWidthCells: number,

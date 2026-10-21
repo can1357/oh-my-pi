@@ -45,6 +45,21 @@ pub fn json_quote(s: &str) -> String {
 /// Lines of context shown either side of a hash mismatch.
 pub const MISMATCH_CONTEXT: u32 = 2;
 
+/// Line numbers [`format_anchored_context`] displays: each in-range anchor
+/// ±[`MISMATCH_CONTEXT`], ascending.
+pub fn anchored_context_lines(anchor_lines: &[u32], line_count: usize) -> BTreeSet<u32> {
+	let mut display_lines = BTreeSet::new();
+	for &line in anchor_lines {
+		if line < 1 || (line as usize) > line_count {
+			continue;
+		}
+		let lo = line.saturating_sub(MISMATCH_CONTEXT).max(1);
+		let hi = (line + MISMATCH_CONTEXT).min(line_count as u32);
+		display_lines.extend(lo..=hi);
+	}
+	display_lines
+}
+
 /// Numbered `LINE:TEXT` rows around `anchor_lines` (±[`MISMATCH_CONTEXT`]),
 /// `*`-marking anchors, `...` between non-adjacent runs. Out-of-range anchors
 /// contribute no rows.
@@ -52,17 +67,7 @@ pub fn format_anchored_context<S: AsRef<str>>(
 	anchor_lines: &[u32],
 	file_lines: &[S],
 ) -> Vec<String> {
-	let mut display_lines = BTreeSet::new();
-	for &line in anchor_lines {
-		if line < 1 || (line as usize) > file_lines.len() {
-			continue;
-		}
-		let lo = line.saturating_sub(MISMATCH_CONTEXT).max(1);
-		let hi = (line + MISMATCH_CONTEXT).min(file_lines.len() as u32);
-		for line_num in lo..=hi {
-			display_lines.insert(line_num);
-		}
-	}
+	let display_lines = anchored_context_lines(anchor_lines, file_lines.len());
 	let anchor_set: HashSet<u32> = anchor_lines.iter().copied().collect();
 	let mut rows = Vec::new();
 	let mut previous: Option<u32> = None;
@@ -451,6 +456,17 @@ pub fn ambiguous_boundary_placement_message(start_line: u32, end_line: u32) -> S
 	)
 }
 
+/// A one-row replacement fails to parse only because its body ends in a
+/// comma the surrounding syntax rejects (the last element of a JSON array).
+pub fn trailing_comma_replacement_message(start_line: u32, end_line: u32) -> String {
+	format!(
+		"`PUT {start_line}{HL_RANGE_SEP}{end_line}:` rejected: the body's last non-blank row ends \
+		 with a comma that does not parse in place (e.g. a trailing comma before a closing `]` or \
+		 `}}`); without that comma this replacement parses. Drop the comma, or include the rows \
+		 that should follow it in the same body."
+	)
+}
+
 /// Exact-text boundary rows were removed because the remaining payload covers
 /// the selected range and the same rows already survive immediately outside it.
 pub fn textual_boundary_echo_warning(start_line: u32, leading: u32, trailing: u32) -> String {
@@ -715,16 +731,6 @@ pub fn write_drift_warning(path: &str) -> String {
 		 (editor/IDE) likely reformatted it on save (e.g. format-on-save, tab/space settings). The \
 		 returned snapshot reflects the actual file; re-read before further edits if the extra \
 		 changes were unexpected."
-	)
-}
-
-/// Section omitted the mandatory snapshot tag. Shared by the apply
-/// (`Patcher.prepare`) and preview/diff paths so both stay in lockstep.
-pub fn missing_snapshot_tag_message(section_path: &str) -> String {
-	format!(
-		"Missing hashline snapshot tag for {section_path}; use \
-		 `{HL_FILE_PREFIX}{section_path}{HL_FILE_HASH_SEP}tag{HL_FILE_SUFFIX}` from your latest \
-		 read/search output. To create a new file, use the write tool."
 	)
 }
 

@@ -43,12 +43,27 @@ const RULE: Rule = {
 	_source: { provider: "test", providerName: "test", path: "bridged-passive.md", level: "project" },
 };
 
+const BUILTIN_RULE: Rule = {
+	name: "ts-no-builtin-token",
+	path: "builtin-defaults:ts-no-builtin-token.md",
+	content: "Avoid BUILTIN_TOKEN unless an exception applies.",
+	interruptMode: "never",
+	condition: ["BUILTIN_TOKEN"],
+	scope: ["tool:write(*.ts)"],
+	_source: {
+		provider: "builtin-defaults",
+		providerName: "Builtin Defaults",
+		path: "builtin-defaults:ts-no-builtin-token.md",
+		level: "user",
+	},
+};
+
 /**
  * A real session whose TTSR coordinator is wired into the extension runner's
  * bridged-call preflight, with a real `write` tool behind the real wrapper.
  * Only the model is stubbed; nothing here calls a provider.
  */
-async function createBridgedHarness(dir: string) {
+async function createBridgedHarness(dir: string, rules: Rule[] = [RULE]) {
 	const manager = SessionManager.inMemory(dir);
 	const settings = Settings.isolated({ "compaction.enabled": false, "tools.approvalMode": "yolo" });
 	const extensionRunner = new ExtensionRunner(
@@ -82,7 +97,7 @@ async function createBridgedHarness(dir: string) {
 		repeatMode: "once",
 		repeatGap: 10,
 	});
-	expect(ttsrManager.addRule(RULE)).toBe(true);
+	for (const rule of rules) expect(ttsrManager.addRule(rule)).toBe(true);
 	const agent = new Agent({
 		getApiKey: () => "test-key",
 		initialState: { model: mock.model, systemPrompt: ["Test"], tools: [wrappedWrite] },
@@ -137,6 +152,35 @@ describe("TTSR reminders on bridged tool calls", () => {
 		expect(sink[0]).toContain(`<system-reminder reason="rule_violation" rule="${RULE.name}"`);
 		expect(sink[0]).toContain(RULE.content);
 		expect(injectedRules()).toEqual([RULE.name]);
+		await session.dispose();
+	});
+
+	it("words a built-in rule's reminder as a check against the rule, a user rule's as an order", async () => {
+		using dir = TempDir.createSync("@pi-ttsr-bridged-builtin-");
+		const { session, settings, wrappedWrite } = await createBridgedHarness(dir.path(), [RULE, BUILTIN_RULE]);
+		const sink: string[] = [];
+		const context = {
+			settings,
+			autoApprove: true,
+			addAdditionalContext: (value: string) => sink.push(value),
+		} as unknown as AgentToolContext;
+
+		await wrappedWrite.execute(
+			"bridged-builtin",
+			{ path: `${dir.path()}/probe.ts`, content: "FORBIDDEN_TOKEN\nBUILTIN_TOKEN\n" },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(sink).toHaveLength(1);
+		const reminders = sink[0].split("\n\n<system-reminder");
+		const builtin = reminders.find(text => text.includes(`rule="${BUILTIN_RULE.name}"`));
+		const user = reminders.find(text => text.includes(`rule="${RULE.name}"`));
+		expect(builtin).toContain("Built-in style rule");
+		expect(builtin).not.toContain("MUST comply");
+		expect(user).toContain("User-defined rule");
+		expect(user).toContain("MUST comply");
 		await session.dispose();
 	});
 

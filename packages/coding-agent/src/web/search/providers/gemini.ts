@@ -394,7 +394,6 @@ async function callGeminiSearch(
 
 	const requestMetadata = auth.isAntigravity
 		? {
-				requestType: "agent",
 				userAgent: "antigravity",
 				requestId: `agent-${crypto.randomUUID()}`,
 			}

@@ -70,7 +70,7 @@ describe("ModelRegistry default custom models config", () => {
 			modelId: "us.anthropic.claude-opus-4-8",
 		});
 
-		expect(model?.compat).toEqual({
+		const expectedCompat = {
 			promptCacheMode: "explicit",
 			supportsLongPromptCacheRetention: false,
 			promptCacheMinimumTokens: 1024,
@@ -84,7 +84,10 @@ describe("ModelRegistry default custom models config", () => {
 			supportsSamplingParams: false,
 			// Bedrock Converse keeps thinking-binding controls on unless an override opts out.
 			supportsThinkingBindingControls: true,
-		});
+			// Converse on an AWS host supports native Claude server compaction (provider rule).
+			supportsServerCompaction: true,
+		} as const;
+		expect(model?.compat).toEqual(expectedCompat);
 	});
 
 	test("prefers default models.yml over models.yaml when both exist", () => {

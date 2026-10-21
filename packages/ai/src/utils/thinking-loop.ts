@@ -406,8 +406,30 @@ export function guardThinkingLoopStream(
 		let thinkingArmed = true;
 		let textArmed = checkAssistantContent;
 		let textStarted = false;
+		// The provider's latest snapshot of this attempt, and when (wall clock,
+		// like its `timestamp`) its first delta arrived: the guard reports the
+		// attempt that tripped, not the wrapper's lifetime around retries. The
+		// attempt's start is kept as a value: providers that retry may reset
+		// the same output object's `timestamp` in place.
+		let snapshot: AssistantMessage | undefined;
+		let attemptStart: number | undefined;
+		let firstDeltaAt: number | undefined;
 		try {
 			for await (const event of inner) {
+				const next = "partial" in event ? event.partial : event.type === "done" ? event.message : undefined;
+				if (next) {
+					if (next.timestamp !== attemptStart) {
+						attemptStart = next.timestamp;
+						firstDeltaAt = undefined;
+					}
+					snapshot = next;
+				}
+				if (
+					firstDeltaAt === undefined &&
+					(event.type === "text_delta" || event.type === "thinking_delta" || event.type === "toolcall_delta")
+				) {
+					firstDeltaAt = Date.now();
+				}
 				let detail: string | null = null;
 				if (event.type === "thinking_delta") {
 					// Re-arm after thinking_end / toolcall_start unless visible answer
@@ -455,7 +477,7 @@ export function guardThinkingLoopStream(
 					outer.push({
 						type: "error",
 						reason: "error",
-						error: buildThinkingLoopError(model, detail),
+						error: buildThinkingLoopError(model, detail, snapshot, firstDeltaAt),
 					});
 					return;
 				}
@@ -502,7 +524,24 @@ export function withThinkingLoopGuard<
 	return guardThinkingLoopStream(dispatch(merged), model, controller, options);
 }
 
-function buildThinkingLoopError(model: Model<Api>, detail: string): AssistantMessage {
+/**
+ * The loop-abort error for one attempt. It keeps what the provider had
+ * reported for that attempt when the guard tripped (usage so far, start time,
+ * response id, and timing a finished snapshot already carries); otherwise
+ * duration and time to first delta run from the attempt's own start, since
+ * the provider's timers stop with the abort.
+ */
+function buildThinkingLoopError(
+	model: Model<Api>,
+	detail: string,
+	snapshot: AssistantMessage | undefined,
+	firstDeltaAt: number | undefined,
+): AssistantMessage {
+	const now = Date.now();
+	const duration = snapshot ? (snapshot.duration ?? now - snapshot.timestamp) : undefined;
+	const ttft =
+		snapshot?.ttft ??
+		(snapshot && firstDeltaAt !== undefined ? Math.max(0, firstDeltaAt - snapshot.timestamp) : undefined);
 	return {
 		role: "assistant",
 		// Empty content is load-bearing: loop-guard output is replay garbage, even
@@ -512,20 +551,26 @@ function buildThinkingLoopError(model: Model<Api>, detail: string): AssistantMes
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
+		// Cloned: the provider keeps mutating its output while it tears down.
+		usage: snapshot?.usage
+			? structuredClone(snapshot.usage)
+			: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
 		stopReason: "error",
 		// "stream stall" makes the transport/session retry classifiers treat this
 		// as a transient (retryable) failure with no bespoke rule.
 		errorMessage: `${THINKING_LOOP_ERROR_MARKER}: the model repeated near-identical content (${detail}). Treating as a stream stall and retrying.`,
 		errorId: AIError.create(AIError.Flag.ThinkingLoop),
-		timestamp: Date.now(),
+		...(snapshot?.responseId && { responseId: snapshot.responseId }),
+		...(duration !== undefined && { duration }),
+		...(ttft !== undefined && { ttft }),
+		timestamp: snapshot?.timestamp ?? now,
 	};
 }
 

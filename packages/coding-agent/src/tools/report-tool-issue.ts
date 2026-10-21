@@ -134,7 +134,9 @@ function parseReportIssueBody(text: string): { tool: string; report: string } {
 		const report = body.slice(firstNewline + 1).trim();
 		if (tool && report) return normalizeGrievance(tool, report);
 	}
-	const colon = body.indexOf(":");
+	// Only a colon followed by whitespace separates, so a URI (`xd://tui`) or an
+	// unspaced argument (`{name:'x'}`) in the tool name stays in the tool name.
+	const colon = body.search(/:\s/);
 	if (colon > 0) {
 		const tool = body.slice(0, colon).trim();
 		const report = body.slice(colon + 1).trim();

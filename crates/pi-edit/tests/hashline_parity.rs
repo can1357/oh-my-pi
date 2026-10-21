@@ -530,24 +530,18 @@ fn pure_format_input_and_streaming_contracts_cover_uncaptured_cases() {
 				.contains("Input header must be")
 		);
 	}
+	// A non-hex word where the tag belongs parses as an untagged section, so
+	// staging can answer with the current tag instead of a header error.
 	for input in [
 		"[src/a.ts#1A2]\nPUT 1-1:\n+after",
 		"[src/a.ts#1A2G]\nPUT 1-1:\n+after",
 		"[src/a.ts#1A2B5]\nPUT 1-1:\n+after",
+		"[Update File: src/a.ts#1A2G]\nPUT 1-1:\n+after",
 	] {
-		assert!(
-			Patch::parse(input, &SplitOptions::default())
-				.expect_err("rejects malformed snapshot tags")
-				.to_string()
-				.contains("Input header must be")
-		);
+		let patch = Patch::parse(input, &SplitOptions::default()).expect("placeholder tag parses");
+		assert_eq!(patch.sections[0].path, "src/a.ts", "{input}");
+		assert_eq!(patch.sections[0].file_hash, None, "{input}");
 	}
-	assert!(
-		Patch::parse("[Update File: src/a.ts#1A2G]\nPUT 1-1:\n+after", &SplitOptions::default())
-			.expect_err("rejects malformed snapshot tags even with apply_patch noise")
-			.to_string()
-			.contains("Input header must be")
-	);
 	let missing = Patch::parse("CUT 38-40", &SplitOptions::default())
 		.expect_err("reports bracket syntax with a 4-hex example when the header is missing")
 		.to_string();

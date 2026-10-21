@@ -102,7 +102,7 @@ const ANNOTATE_MODE_COMPLETIONS: readonly AutocompleteItem[] = [
 	{
 		value: "code-review ",
 		label: "code-review",
-		description: "Annotate local changes or a GitHub pull request",
+		description: "Annotate local changes, a GitHub pull request, or a GitLab merge request",
 	},
 ];
 

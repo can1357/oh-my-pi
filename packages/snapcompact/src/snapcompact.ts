@@ -54,7 +54,7 @@
  */
 
 import type { Api, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
-import { reachesOfficialEndpoint } from "@oh-my-pi/pi-ai/providers/anthropic-state";
+import { reachesBudgetedHost } from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import {
 	type ImageSize,
@@ -540,7 +540,7 @@ export const DEFAULT_FRAME_DATA_BYTES_BUDGET = 3_000_000;
  *  request, so the send-time byte clamp evicts them first; the other half stays
  *  free for live screenshots. */
 export function frameDataBytesBudget(model: Model | undefined): number {
-	const inlineBudget = model ? resolveInlineImageByteBudget(model, reachesOfficialEndpoint(model)) : undefined;
+	const inlineBudget = model ? resolveInlineImageByteBudget(model, reachesBudgetedHost(model)) : undefined;
 	return inlineBudget === undefined ? DEFAULT_FRAME_DATA_BYTES_BUDGET : Math.floor(inlineBudget / 2);
 }
 
@@ -582,8 +582,7 @@ export const DEFAULT_PROVIDER_IMAGE_BUDGET = 5;
  *  system-prompt and tool-result imaging combined. */
 export function providerImageBudget(model: Model | undefined): number {
 	return (
-		(model ? resolveImageCountBudget(model, reachesOfficialEndpoint(model)) : undefined) ??
-		DEFAULT_PROVIDER_IMAGE_BUDGET
+		(model ? resolveImageCountBudget(model, reachesBudgetedHost(model)) : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET
 	);
 }
 

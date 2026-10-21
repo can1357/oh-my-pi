@@ -69,14 +69,19 @@ export function parseLineRanges(sel: string, bare: BareLineMode = "onward"): [Li
 		parsed.push(range);
 	}
 	if (parsed.length === 0) return null;
-	parsed.sort((a, b) => a.startLine - b.startLine);
+	return mergeLineRanges(parsed);
+}
 
-	const merged: LineRange[] = [parsed[0]];
-	for (let i = 1; i < parsed.length; i++) {
-		const current = parsed[i];
+/**
+ * Sort non-empty `ranges` by start line and merge the ones that overlap or touch;
+ * an open-ended range (`endLine` undefined) reaches EOF and absorbs every later one.
+ */
+export function mergeLineRanges(ranges: readonly LineRange[]): [LineRange, ...LineRange[]] {
+	const [first, ...rest] = [...ranges].sort((a, b) => a.startLine - b.startLine);
+	const merged: [LineRange, ...LineRange[]] = [first];
+	for (const current of rest) {
 		const last = merged[merged.length - 1];
-		// Open-ended (endLine undefined) means "to EOF" — any later range is absorbed.
-		if (last.endLine === undefined) continue;
+		if (last.endLine === undefined) break;
 		// Merge when current starts within (or immediately after) the last range.
 		if (current.startLine <= last.endLine + 1) {
 			if (current.endLine === undefined || current.endLine > last.endLine) {
@@ -86,7 +91,7 @@ export function parseLineRanges(sel: string, bare: BareLineMode = "onward"): [Li
 		}
 		merged.push(current);
 	}
-	return merged as [LineRange, ...LineRange[]];
+	return merged;
 }
 
 /**

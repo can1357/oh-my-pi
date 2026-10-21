@@ -31,7 +31,7 @@
 | `name` | `string` | No | Project-unique supervised service name: 1–48 letters, numbers, dots, underscores, or hyphens, starting with a letter or number. Present only when `launch.enabled` and Bash is active. Blank names select finite-command mode. A live name restarts using the new spec. Incompatible with `async: true` or any supplied `timeout`. |
 | `ready` | `{ log?: string; port?: number; host?: string; timeout?: number }` | No | Service readiness requires a nonblank log regex and/or integer TCP port `1..65535`; all supplied conditions must pass. Host defaults to `127.0.0.1`, timeout to 30 seconds (clamped to `0.05..3600`). Without `name`, a nonempty spec is ignored with a notice. |
 
-There is no `env` input. Named services inherit the configured shell environment; put command-specific assignments in `command`.
+There is no `env` input. Every command and named service also gets `PI_SESSION_ID` and `PI_SESSION_FILE` (the transcript's absolute path, empty when the session is not persisted), read when the call starts; see [environment variables](../environment-variables.md#set-by-the-bash-tool). Named services otherwise inherit the configured shell environment; put command-specific assignments in `command`.
 
 Without `name`, `pty`, or a client terminal, commands run in the embedded POSIX-compatible brush shell, even when `shellPath` points to PowerShell or another external shell. `shellPath` selects the external shell for named services, supported terminal routes, and interactive `!` commands; a bash path may still supply environment and rc snapshots to the embedded session. To use PowerShell syntax in a plain tool call, invoke `pwsh -Command '...'` explicitly, quoting so brush preserves PowerShell's `$` variables.
 
@@ -183,7 +183,7 @@ Choose the setting by the desired outcome:
    - Starts like a foreground managed job, then backgrounds it when it outlives the wait window; at capacity, Bash falls back to direct foreground execution.
 6. Named supervised service
    - Requires `launch.enabled` and an active Bash tool; `async: true` and any supplied `timeout` are incompatible.
-   - Runs through the launch broker with project-unique `name`, the configured shell environment, PTY defaulting to `true`, and optional readiness conditions. Reusing a live name restarts it with the new spec.
+   - Runs through the launch broker with project-unique `name`, the configured shell environment plus the session identity, PTY defaulting to `true`, and optional readiness conditions. Reusing a live name restarts it with the new spec.
    - Readiness waits for all supplied log/port conditions, service exit, or timeout. Inspect with `read proc://<name>`.
 7. Intercepted command
    - No subprocess created.

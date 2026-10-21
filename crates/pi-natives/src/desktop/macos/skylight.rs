@@ -591,6 +591,8 @@ impl PointerPresses {
 const HID_SYSTEM_STATE: i32 = 1;
 /// Left, right and other mouse button down and up (`CGEventType`).
 const MOUSE_BUTTON_EVENTS: [u32; 6] = [1, 2, 3, 4, 25, 26];
+/// Indices of the button-down counters in `MOUSE_BUTTON_EVENTS`.
+const PRESS_COUNTERS: [usize; 3] = [0, 2, 4];
 /// ⌘ and ⌃ (`kCGEventFlagMaskCommand | Control`). ⌥ is left out: it types
 /// characters on German, Polish, French and Nordic layouts, and alone it
 /// picks no app (⌥-click counts as a click).
@@ -723,16 +725,32 @@ impl ClickPlacer {
 		let Some(user) = self.user else {
 			return;
 		};
-		let buttons = hid_buttons();
-		if self
-			.latest
-			.lock()
-			.is_some_and(|place| place.buttons == buttons)
-		{
-			return;
+		self.place_at(hid_buttons(), || {
+			since_last_click().is_some_and(|since| since <= CLICK_PLACE) && pointer_over(user)
+		});
+	}
+
+	/// Places the click that left the button counters at `buttons`, by
+	/// `hit_test` unless the counters are placed already. A release counted
+	/// since the last placement ends the click its press began, so it keeps
+	/// that press's place: a hit-test that blocked past the release would
+	/// otherwise leave the press placed under counters no reading has any
+	/// more, and the release too late to place.
+	fn place_at(&self, buttons: [u32; 6], hit_test: impl FnOnce() -> bool) {
+		let latest = *self.latest.lock();
+		if let Some(place) = latest {
+			if place.buttons == buttons {
+				return;
+			}
+			if PRESS_COUNTERS
+				.iter()
+				.all(|&i| place.buttons[i] == buttons[i])
+			{
+				*self.latest.lock() = Some(ClickPlace { buttons, ..place });
+				return;
+			}
 		}
-		let in_user_app =
-			since_last_click().is_some_and(|since| since <= CLICK_PLACE) && pointer_over(user);
+		let in_user_app = hit_test();
 		*self.latest.lock() = Some(ClickPlace { buttons, in_user_app });
 	}
 
@@ -766,9 +784,11 @@ enum UserSwitch {
 enum ClickPlacement {
 	Settled,
 	/// [`ClickPlacer`] may place the change in the user's app only some
-	/// readings later; `previous` is the click to put back then.
+	/// readings later; `previous` is the click to put back then, and `press`
+	/// when the change pressed a button, the user's own-app click it becomes.
 	Pending {
 		previous: Option<Instant>,
+		press:    Option<Instant>,
 	},
 }
 
@@ -790,6 +810,9 @@ struct UserSwitchWatch {
 	/// The one seen before it: Spotlight's panel, once the app picked from it
 	/// takes the keyboard a moment before `WindowServer` lists it in front.
 	before:    Option<(ProcessSerialNumber, Instant)>,
+	/// When a click placed in the user's own app was last seen, until a
+	/// change of their key window uses it ([`Self::take_own_click`]).
+	own_click: Option<Instant>,
 }
 
 impl UserSwitchWatch {
@@ -812,11 +835,19 @@ impl UserSwitchWatch {
 			placement: if signals.in_user_app {
 				ClickPlacement::Settled
 			} else {
-				ClickPlacement::Pending { previous: None }
+				ClickPlacement::Pending {
+					previous: None,
+					press:    signals
+						.last_click
+						.filter(|at| now.saturating_duration_since(*at) <= lookback),
+				}
 			},
 			chord: None,
 			panel: None,
 			before: None,
+			own_click: signals
+				.last_click
+				.filter(|at| signals.in_user_app && now.saturating_duration_since(*at) <= lookback),
 		};
 		watch.observe_held(signals, user, now);
 		watch
@@ -824,22 +855,64 @@ impl UserSwitchWatch {
 
 	fn observe(&mut self, signals: SwitchSignals, front: ProcessSerialNumber, now: Instant) {
 		if signals.buttons != self.buttons {
+			// A press, not its release, is the click: the sampler can see the two
+			// on separate readings.
+			let pressed = PRESS_COUNTERS
+				.into_iter()
+				.any(|i| signals.buttons[i] != self.buttons[i]);
 			self.buttons = signals.buttons;
 			// A click in the user's own app, menus included, picks no app: the
 			// target activating itself right after is still sent back.
+			let pending = self.placement;
 			self.placement = ClickPlacement::Settled;
-			if !signals.in_user_app {
-				self.placement = ClickPlacement::Pending { previous: self.click };
+			if signals.in_user_app {
+				if pressed {
+					self.own_click = Some(signals.last_click.unwrap_or(now));
+				}
+			} else {
+				self.placement = match pending {
+					// A release while its press still waits for placement is part
+					// of that click.
+					ClickPlacement::Pending { previous, press } if !pressed => {
+						ClickPlacement::Pending { previous, press }
+					},
+					_ => ClickPlacement::Pending {
+						previous: self.click,
+						press:    pressed.then(|| signals.last_click.unwrap_or(now)),
+					},
+				};
 				self.click = Some(signals.last_click.unwrap_or(now));
 			}
 		} else if signals.in_user_app
-			&& let ClickPlacement::Pending { previous } = self.placement
+			&& let ClickPlacement::Pending { previous, press } = self.placement
 		{
 			// Placed in the user's app after a reading had counted it.
 			self.placement = ClickPlacement::Settled;
 			self.click = previous;
+			if press.is_some() {
+				self.own_click = press;
+			}
 		}
 		self.observe_held(signals, front, now);
+	}
+
+	/// Whether a click in the user's own app, seen up to
+	/// [`USER_SWITCH_WINDOW`] before `now`, may have picked another of their
+	/// windows.
+	fn own_click_since(&self, now: Instant) -> bool {
+		self
+			.own_click
+			.is_some_and(|at| now.saturating_duration_since(at) <= USER_SWITCH_WINDOW)
+	}
+
+	/// [`Self::own_click_since`], using the click up: one click explains one
+	/// change of the user's key window; a later change, such as a window opened
+	/// from the keyboard, is the user's switch.
+	fn take_own_click(&mut self, now: Instant) -> bool {
+		self
+			.own_click
+			.take()
+			.is_some_and(|at| now.saturating_duration_since(at) <= USER_SWITCH_WINDOW)
 	}
 
 	fn observe_held(&mut self, signals: SwitchSignals, front: ProcessSerialNumber, now: Instant) {
@@ -903,7 +976,9 @@ enum FocusDecision {
 struct BackgroundFocusLease {
 	previous:    ProcessSerialNumber,
 	target:      ProcessSerialNumber,
-	/// The user's key window; `None` when the front app showed no window.
+	/// The user's key window; `None` when the front app showed no window. A
+	/// click of theirs in their app that picks another of its windows makes
+	/// that one the key window kept here.
 	key:         Option<u32>,
 	user:        UserSwitchWatch,
 	/// When the action started, its first act on the target.
@@ -966,6 +1041,20 @@ impl BackgroundFocusLease {
 		signals: SwitchSignals,
 		now: Instant,
 	) -> FocusDecision {
+		self.observe_read(front, key, now, signals, now)
+	}
+
+	/// [`Self::observe`] with the user's `key` window read from `asked` on: a
+	/// click of theirs that may have picked it is aged from then, since that
+	/// read can block, while `signals` and `now` come after it.
+	fn observe_read(
+		&mut self,
+		front: ProcessSerialNumber,
+		key: Option<u32>,
+		asked: Instant,
+		signals: SwitchSignals,
+		now: Instant,
+	) -> FocusDecision {
 		self.user.observe(signals, front, now);
 		let (came, caused) = self.came_forward(front, signals, now);
 		// The target coming forward with no switch of the user's just before is
@@ -979,6 +1068,15 @@ impl BackgroundFocusLease {
 		// probes block it.
 		let action_brought =
 			(front == self.target || caused) && self.user.picked(came, front).is_none();
+		// A click in the user's own app that picked another of its windows
+		// keeps them in their app: that window is the one the lease keeps.
+		if !self.disarmed
+			&& front == self.previous
+			&& key.is_some_and(|key| Some(key) != self.key)
+			&& self.user.take_own_click(asked)
+		{
+			self.key = key;
+		}
 		if self.disarmed
 			|| (front == self.previous && key.is_some_and(|key| Some(key) != self.key))
 			|| (front != self.previous && !action_brought)
@@ -1060,9 +1158,10 @@ pub(super) fn with_background_guard<T>(
 /// third app the action brings forward (Finder's ⌘O opening a document in
 /// `TextEdit`) within [`ACTION_REFLEX`] of one of the action's acts on the
 /// target, are sent back behind the original front app. A changed prior key
-/// window, an app coming forward right after a click, a ⌘/⌃ chord or a
-/// Spotlight-style panel, or a third app coming forward later permanently
-/// disarms the lease; typing does not, even where macOS
+/// window that no click of the user's in their app just picked, an app coming
+/// forward right after a click elsewhere, a ⌘/⌃ chord or a Spotlight-style
+/// panel, or a third app coming forward later permanently disarms the lease;
+/// typing does not, even where macOS
 /// refuses a hand-back because of it. `action` gets the [`TargetVisit`] the
 /// guard records, which keeps being watched after the lease disarms.
 pub(super) fn with_background_watch<T>(
@@ -1287,10 +1386,7 @@ fn guard_focus(
 	desktop: &impl GuardedDesktop,
 	visit: &AtomicBool,
 ) -> CoreResult<()> {
-	let (previous, user_key) = {
-		let lease = lease.lock();
-		(lease.previous, lease.key)
-	};
+	let previous = lease.lock().previous;
 	let observe = |front, key| {
 		let now = desktop.now();
 		let signals = desktop.signals(now);
@@ -1308,12 +1404,20 @@ fn guard_focus(
 				));
 			},
 			Some(front) => {
+				// The user's key window read can block, so a click of theirs is
+				// aged from when it began; the signals and the poll's time come
+				// after it, never older than what the sampler already fed the
+				// lease.
+				let asked = desktop.now();
 				let key = if !disarmed && front == previous {
 					desktop.user_key()
 				} else {
 					None
 				};
-				if observe(front, key) == FocusDecision::Restore {
+				let now = desktop.now();
+				let signals = desktop.signals(now);
+				if lease.lock().observe_read(front, key, asked, signals, now) == FocusDecision::Restore
+				{
 					// Re-check immediately before changing focus: an AX probe may
 					// have raced a newer application or user switch.
 					// `WindowServer` then refuses the hand-back if the user
@@ -1329,16 +1433,35 @@ fn guard_focus(
 						},
 						|since| desktop.hand_back(since),
 					)?;
-					// A hand-back puts the user's key window back too. Otherwise the
-					// re-check observed instead (a disarm it recorded stops the
-					// hand-backs from the next poll), or `WindowServer` refused.
-					if handed_back == Some(FrontRequest::Done)
-						&& let Some(key) = user_key
-						&& !desktop.restore_key(key)
-					{
-						return Err(DesktopError::input_failed(
-							"background key-window restoration was rejected",
-						));
+					// A hand-back puts the user's key window back too. After a click
+					// in their app it is the one their app reports now that it is in
+					// front again: that click may have picked another of its
+					// windows, which is then the one the lease keeps. That read can
+					// block, so the window is put back only while their app is still
+					// in front and the lease armed, and the click is used up only
+					// then. Otherwise the re-check observed instead (a disarm it
+					// recorded stops the hand-backs from the next poll), or
+					// `WindowServer` refused.
+					if handed_back == Some(FrontRequest::Done) {
+						let (kept, own_click) = {
+							let lease = lease.lock();
+							(lease.key, lease.user.own_click_since(desktop.now()))
+						};
+						let fresh = if own_click { desktop.user_key() } else { None };
+						let current =
+							!own_click || (!lease.lock().disarmed && desktop.front() == Some(previous));
+						if current && let Some(key) = fresh.or(kept) {
+							if !desktop.restore_key(key) {
+								return Err(DesktopError::input_failed(
+									"background key-window restoration was rejected",
+								));
+							}
+							let mut lease = lease.lock();
+							lease.key = Some(key);
+							if own_click {
+								lease.user.own_click = None;
+							}
+						}
 					}
 				}
 			},
@@ -2666,14 +2789,21 @@ mod tests {
 	/// Polls are 10 ms apart; an app comes forward of itself at `arrives`; the
 	/// action and its settle end at `end`.
 	struct FakeDesktop {
-		clock:       Cell<Instant>,
-		end:         Instant,
-		front:       Cell<ProcessSerialNumber>,
-		arrives:     Cell<Option<(Instant, ProcessSerialNumber)>>,
-		signals:     Cell<SwitchSignals>,
-		refused_for: Cell<Option<SwitchSignals>>,
-		hand_backs:  Cell<usize>,
-		keys:        std::cell::RefCell<Vec<u32>>,
+		clock:              Cell<Instant>,
+		end:                Instant,
+		front:              Cell<ProcessSerialNumber>,
+		arrives:            Cell<Option<(Instant, ProcessSerialNumber)>>,
+		signals:            Cell<SwitchSignals>,
+		refused_for:        Cell<Option<SwitchSignals>>,
+		hand_backs:         Cell<usize>,
+		keys:               std::cell::RefCell<Vec<u32>>,
+		/// The key window the user's app reports.
+		user_window:        u32,
+		/// The app the user ⌘-Tabs to, with what the next reading sees of it,
+		/// while that report is read.
+		switch_on_key_read: Cell<Option<(ProcessSerialNumber, SwitchSignals)>>,
+		/// How long that report takes to read.
+		key_read_takes:     Duration,
 	}
 
 	impl GuardedDesktop for FakeDesktop {
@@ -2682,7 +2812,12 @@ mod tests {
 		}
 
 		fn user_key(&self) -> Option<u32> {
-			Some(42)
+			self.clock.set(self.clock.get() + self.key_read_takes);
+			if let Some((front, signals)) = self.switch_on_key_read.take() {
+				self.front.set(front);
+				self.signals.set(signals);
+			}
+			Some(self.user_window)
 		}
 
 		fn now(&self) -> Instant {
@@ -2741,14 +2876,17 @@ mod tests {
 		// gave after the guard's check.
 		let run = |input: SwitchSignals| {
 			let desktop = FakeDesktop {
-				clock:       Cell::new(t0 + ms(20)),
-				end:         t0 + ms(120),
-				front:       Cell::new(TARGET),
-				arrives:     Cell::new(None),
-				signals:     Cell::new(idle),
-				refused_for: Cell::new(Some(input)),
-				hand_backs:  Cell::new(0),
-				keys:        std::cell::RefCell::default(),
+				clock:              Cell::new(t0 + ms(20)),
+				end:                t0 + ms(120),
+				front:              Cell::new(TARGET),
+				arrives:            Cell::new(None),
+				signals:            Cell::new(idle),
+				refused_for:        Cell::new(Some(input)),
+				hand_backs:         Cell::new(0),
+				keys:               std::cell::RefCell::default(),
+				user_window:        42,
+				switch_on_key_read: Cell::new(None),
+				key_read_takes:     Duration::ZERO,
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let visit = AtomicBool::new(false);
@@ -2774,6 +2912,185 @@ mod tests {
 	}
 
 	#[test]
+	fn a_window_the_user_clicked_in_their_app_is_kept_when_the_target_comes_forward() {
+		let t0 = Instant::now();
+		// The user clicks another window (43) of their app, which the guard
+		// sees key before the target activates itself: the target is sent back.
+		let mut guard = lease_at(t0, None);
+		let own = clicked_at(t0 + ms(5)).in_user_app();
+		assert_eq!(guard.observe(PREVIOUS, Some(43), own, t0 + ms(10)), FocusDecision::Observe);
+		assert_eq!(guard.key, Some(43));
+		assert_eq!(guard.observe(TARGET, None, own, t0 + ms(30)), FocusDecision::Restore);
+		// Another key window with no click of theirs in it, a window they
+		// opened from the keyboard, say, still stands the guard down.
+		let mut guard = lease_at(t0, None);
+		let idle = input(0, NO_MODIFIERS);
+		assert_eq!(guard.observe(PREVIOUS, Some(43), idle, t0 + ms(10)), FocusDecision::Disarm);
+		// So does one opened long after their click, or a second change that
+		// one click is taken to explain already.
+		let mut guard = lease_at(t0, None);
+		assert_eq!(guard.observe(PREVIOUS, Some(42), own, t0 + ms(10)), FocusDecision::Observe);
+		assert_eq!(guard.observe(PREVIOUS, Some(43), own, t0 + ms(600)), FocusDecision::Disarm);
+		let mut guard = lease_at(t0, None);
+		assert_eq!(guard.observe(PREVIOUS, Some(43), own, t0 + ms(10)), FocusDecision::Observe);
+		assert_eq!(guard.observe(PREVIOUS, Some(44), own, t0 + ms(20)), FocusDecision::Disarm);
+		// The click's press and release seen on separate readings are still one
+		// click.
+		let mut guard = lease_at(t0, None);
+		let down = SwitchSignals::new([1, 0, 0, 0, 0, 0], Some(t0 + ms(5)), NO_MODIFIERS, None);
+		let up = clicked_at(t0 + ms(8)).in_user_app();
+		assert_eq!(
+			guard.observe(PREVIOUS, Some(43), down.in_user_app(), t0 + ms(10)),
+			FocusDecision::Observe
+		);
+		assert_eq!(guard.observe(PREVIOUS, Some(43), up, t0 + ms(15)), FocusDecision::Observe);
+		assert_eq!(guard.observe(PREVIOUS, Some(44), up, t0 + ms(20)), FocusDecision::Disarm);
+		// A click already in the guard's first reading counts too.
+		let own_at_start = clicked_at(t0).in_user_app();
+		let mut guard =
+			BackgroundFocusLease::new(PREVIOUS, TARGET, Some(42), own_at_start, t0 + ms(5));
+		assert_eq!(
+			guard.observe(PREVIOUS, Some(43), own_at_start, t0 + ms(10)),
+			FocusDecision::Observe
+		);
+		// So does one the click placer reaches only after a reading counted it
+		// as a click elsewhere.
+		let mut guard = lease_at(t0, None);
+		let click = clicked_at(t0 + ms(5));
+		assert_eq!(guard.observe(PREVIOUS, Some(42), click, t0 + ms(10)), FocusDecision::Observe);
+		assert_eq!(
+			guard.observe(PREVIOUS, Some(43), click.in_user_app(), t0 + ms(20)),
+			FocusDecision::Observe
+		);
+		// Even when its press and its release are both counted before the
+		// placement arrives: the target coming forward is then sent back.
+		let mut guard = lease_at(t0, None);
+		let down = SwitchSignals::new([1, 0, 0, 0, 0, 0], Some(t0 + ms(5)), NO_MODIFIERS, None);
+		let up = clicked_at(t0 + ms(8));
+		assert_eq!(guard.observe(PREVIOUS, Some(42), down, t0 + ms(10)), FocusDecision::Observe);
+		assert_eq!(guard.observe(PREVIOUS, Some(42), up, t0 + ms(15)), FocusDecision::Observe);
+		let placed = up.in_user_app();
+		assert_eq!(guard.observe(PREVIOUS, Some(43), placed, t0 + ms(20)), FocusDecision::Observe);
+		assert_eq!(guard.observe(TARGET, None, placed, t0 + ms(30)), FocusDecision::Restore);
+	}
+
+	#[test]
+	fn a_press_placed_only_after_its_release_still_places_the_click() {
+		let t0 = Instant::now();
+		let placer = ClickPlacer::new(Some(1));
+		let (down, up) = ([1, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]);
+		let read = |buttons: [u32; 6], at: Instant| {
+			let mut signals = SwitchSignals::new(buttons, Some(at), NO_MODIFIERS, None);
+			signals.in_user_app = placer.in_user_app(buttons);
+			signals
+		};
+		let mut guard = lease_at(t0, None);
+		// The sampler counts the press and then its release while the press's
+		// hit-test blocks; the hit-test finds the user's app only after both.
+		assert_eq!(
+			guard.observe(PREVIOUS, Some(42), read(down, t0 + ms(5)), t0 + ms(10)),
+			FocusDecision::Observe
+		);
+		assert_eq!(
+			guard.observe(PREVIOUS, Some(42), read(up, t0 + ms(8)), t0 + ms(15)),
+			FocusDecision::Observe
+		);
+		placer.place_at(down, || true);
+		// The placer's next round comes past `CLICK_PLACE`, where a hit-test
+		// of the release would find nothing: the release keeps its press's
+		// place.
+		placer.place_at(up, || false);
+		let placed = read(up, t0 + ms(8));
+		assert_eq!(guard.observe(PREVIOUS, Some(43), placed, t0 + ms(60)), FocusDecision::Observe);
+		assert_eq!(guard.observe(TARGET, None, placed, t0 + ms(70)), FocusDecision::Restore);
+		// A new press is hit-tested afresh.
+		let again = [2, 1, 0, 0, 0, 0];
+		placer.place_at(again, || false);
+		assert!(!placer.in_user_app(again));
+	}
+
+	#[test]
+	fn a_hand_back_restores_the_window_the_user_clicked_as_the_target_came_forward() {
+		// The user's app, whose key window was 42 when the action began,
+		// reports 43 once handed back, and the target came forward in the same
+		// reading as `signals`.
+		let t0 = Instant::now();
+		let run = |signals: SwitchSignals, switch: Option<(ProcessSerialNumber, SwitchSignals)>| {
+			let desktop = FakeDesktop {
+				clock:              Cell::new(t0 + ms(20)),
+				end:                t0 + ms(40),
+				front:              Cell::new(TARGET),
+				arrives:            Cell::new(None),
+				signals:            Cell::new(signals),
+				refused_for:        Cell::new(None),
+				hand_backs:         Cell::new(0),
+				keys:               std::cell::RefCell::default(),
+				user_window:        43,
+				switch_on_key_read: Cell::new(switch),
+				key_read_takes:     Duration::ZERO,
+			};
+			let lease = Mutex::new(lease_at(t0, None));
+			let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
+			assert!(result.is_ok(), "the guard ends without an error");
+			let lease = lease.into_inner();
+			(desktop.front.get().low, desktop.keys.into_inner(), lease.key, lease.disarmed)
+		};
+		let own = clicked_at(t0 + ms(15)).in_user_app();
+		// A click in their app picked window 43: it is put back, and the lease
+		// keeps it, so the next poll does not take it for a switch of theirs.
+		assert_eq!(run(own, None), (PREVIOUS.low, vec![43], Some(43), false));
+		// With no click, the window the action began with is put back; 43
+		// turning up later in the user's app is then their switch.
+		assert_eq!(run(input(0, NO_MODIFIERS), None), (PREVIOUS.low, vec![42], Some(42), true));
+		// The user went to another app while their key window was read: no
+		// window of the app they left is made key.
+		assert_eq!(run(own, Some((THIRD, input(1, COMMAND)))), (THIRD.low, vec![], Some(42), true));
+		// The target came forward again while that window was read: the next
+		// hand-back still puts back the window the user clicked.
+		assert_eq!(run(own, Some((TARGET, own))), (PREVIOUS.low, vec![43], Some(43), false));
+	}
+
+	#[test]
+	fn a_users_click_does_not_age_while_their_key_window_is_read() {
+		// Reading the user's key window takes the accessibility timeout; it
+		// reports window 43, which their click just before the read picked.
+		let t0 = Instant::now();
+		let desktop = FakeDesktop {
+			clock:              Cell::new(t0 + ms(20)),
+			end:                t0 + ms(30),
+			front:              Cell::new(PREVIOUS),
+			arrives:            Cell::new(None),
+			signals:            Cell::new(clicked_at(t0 + ms(15)).in_user_app()),
+			refused_for:        Cell::new(None),
+			hand_backs:         Cell::new(0),
+			keys:               std::cell::RefCell::default(),
+			user_window:        43,
+			switch_on_key_read: Cell::new(None),
+			key_read_takes:     ms(600),
+		};
+		let lease = Mutex::new(lease_at(t0, None));
+		assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_ok());
+		let lease = lease.into_inner();
+		assert_eq!((lease.key, lease.disarmed), (Some(43), false));
+	}
+
+	#[test]
+	fn a_switch_read_after_a_blocked_key_window_read_is_timed_after_it() {
+		// A poll's read of the user's key window blocked from 20 ms to 620 ms;
+		// they held ⌘ to switch meanwhile, and the target came forward at 630 ms
+		// once ⌘ was up: their switch, not the target's own.
+		let t0 = Instant::now();
+		let mut guard = lease_at(t0, None);
+		let held = input(0, COMMAND);
+		assert_eq!(
+			guard.observe_read(PREVIOUS, Some(42), t0 + ms(20), held, t0 + ms(620)),
+			FocusDecision::Observe
+		);
+		let released = input(0, NO_MODIFIERS);
+		assert_eq!(guard.observe(TARGET, None, released, t0 + ms(630)), FocusDecision::Disarm);
+	}
+
+	#[test]
 	fn an_app_never_handed_back_before_the_action_ends_fails_it() {
 		// The target, or a third app the action opened something in, came
 		// forward on the action's last poll, and `WindowServer` refused the
@@ -2781,14 +3098,17 @@ mod tests {
 		let t0 = Instant::now();
 		for brought in [TARGET, THIRD] {
 			let desktop = FakeDesktop {
-				clock:       Cell::new(t0 + ms(20)),
-				end:         t0 + ms(20),
-				front:       Cell::new(brought),
-				arrives:     Cell::new(None),
-				signals:     Cell::new(input(0, NO_MODIFIERS)),
-				refused_for: Cell::new(Some(input(0, SHIFT))),
-				hand_backs:  Cell::new(0),
-				keys:        std::cell::RefCell::default(),
+				clock:              Cell::new(t0 + ms(20)),
+				end:                t0 + ms(20),
+				front:              Cell::new(brought),
+				arrives:            Cell::new(None),
+				signals:            Cell::new(input(0, NO_MODIFIERS)),
+				refused_for:        Cell::new(Some(input(0, SHIFT))),
+				hand_backs:         Cell::new(0),
+				keys:               std::cell::RefCell::default(),
+				user_window:        42,
+				switch_on_key_read: Cell::new(None),
+				key_read_takes:     Duration::ZERO,
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
@@ -2809,14 +3129,17 @@ mod tests {
 		let t0 = Instant::now();
 		let sent = t0 + ms(100);
 		let desktop = FakeDesktop {
-			clock:       Cell::new(sent),
-			end:         sent + BACKGROUND_SETTLE,
-			front:       Cell::new(PREVIOUS),
-			arrives:     Cell::new(Some((sent + ACTION_REFLEX - ms(10), THIRD))),
-			signals:     Cell::new(input(0, NO_MODIFIERS).sent_at(sent)),
-			refused_for: Cell::new(None),
-			hand_backs:  Cell::new(0),
-			keys:        std::cell::RefCell::default(),
+			clock:              Cell::new(sent),
+			end:                sent + BACKGROUND_SETTLE,
+			front:              Cell::new(PREVIOUS),
+			arrives:            Cell::new(Some((sent + ACTION_REFLEX - ms(10), THIRD))),
+			signals:            Cell::new(input(0, NO_MODIFIERS).sent_at(sent)),
+			refused_for:        Cell::new(None),
+			hand_backs:         Cell::new(0),
+			keys:               std::cell::RefCell::default(),
+			user_window:        42,
+			switch_on_key_read: Cell::new(None),
+			key_read_takes:     Duration::ZERO,
 		};
 		let lease = Mutex::new(lease_at(t0, None));
 		let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));

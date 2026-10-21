@@ -481,6 +481,25 @@ describe("structured subagent primitive", () => {
 		expect(dispatched[0]?.inheritedSessionAgents).toEqual([inheritedAgent]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+	it("holds the parent on an inline child until it settles, but not on a detached one", async () => {
+		mockDiscovery();
+		const awaits = AgentRegistry.global().awaits;
+		const heldDuringRun: boolean[] = [];
+		const childIds: string[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			childIds.push(options.id);
+			heldDuringRun.push(awaits.blocksOn("Main", options.id, Date.now()));
+			return result();
+		});
+
+		const inline = await runStructuredSubagent(request({ detached: false, retainArtifacts: true }));
+		const detached = await runStructuredSubagent(request({ detached: true, retainArtifacts: true }));
+
+		expect(heldDuringRun).toEqual([true, false]);
+		expect(awaits.blocksOn("Main", childIds[0]!, 0)).toBe(false);
+		await fs.rm(inline.artifactsDir, { recursive: true, force: true });
+		await fs.rm(detached.artifactsDir, { recursive: true, force: true });
+	});
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
 		mockDiscovery(customAgent);

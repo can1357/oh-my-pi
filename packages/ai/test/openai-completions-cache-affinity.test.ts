@@ -163,6 +163,23 @@ describe("OpenAI Chat Completions explicit prompt cache policy", () => {
 		expect(JSON.stringify(body.messages)).not.toContain("prompt_cache_breakpoint");
 	});
 
+	it("rejects the Responses-only 12h lifetime before sending a request", async () => {
+		let sent = false;
+		const fetchMock: FetchImpl = async () => {
+			sent = true;
+			return chatCompletionsSse();
+		};
+		const result = await streamOpenAICompletions(openAI56CompletionsModel, context, {
+			apiKey: "test-key",
+			promptCache: { mode: "implicit", ttl: "12h" },
+			fetch: fetchMock,
+		}).result();
+
+		expect(sent).toBe(false);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("12h prompt caching is only available on the Responses API");
+	});
+
 	it("does not synthesize first-turn content or a caller-disabled breakpoint", async () => {
 		const firstTurn: Context = {
 			messages: [{ role: "user", content: "only prompt", timestamp: 0 }],

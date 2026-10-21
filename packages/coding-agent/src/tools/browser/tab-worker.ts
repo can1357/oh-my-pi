@@ -330,6 +330,8 @@ const HANDLE_ACTION_INVALIDATION_TIMEOUT_MS = 500;
 const FRAME_SNAPSHOT_TIMEOUT_MS = 5_000;
 /** Bound on Puppeteer exposing a page Chromium still has; the supervisor's init budget caps the whole attach anyway. */
 const ATTACHED_TARGET_EXPOSE_TIMEOUT_MS = 5_000;
+/** Bound on counting a timed-out selector's matches for its error message. */
+const MATCH_COUNT_PROBE_TIMEOUT_MS = 1_000;
 
 /** Queue a wheel event without treating a delayed renderer acknowledgement as dispatch failure. */
 export async function dispatchScroll(
@@ -2206,12 +2208,18 @@ export class WorkerCore {
 			// Cell-budget aborts and uncapped helpers (goto/evaluate) keep their native errors.
 			if (capped && !cellSignal.aborted && (opTimeout?.aborted || isPuppeteerTimeout(err))) {
 				const refusal = err instanceof ClickRefusedError ? err.refusal : undefined;
-				const count = selector ? await this.#selectorMatchCount(selector) : undefined;
-				const hint = refusal
-					? `; the element never became clickable (last check: ${refusal}${count === undefined ? "" : `; selector matches ${count} element(s)`})`
-					: count === undefined
-						? ""
-						: formatSelectorMatchHint(count);
+				const probe = selector ? await this.#selectorMatchCount(selector) : undefined;
+				const countNote =
+					probe === undefined
+						? undefined
+						: "count" in probe
+							? `selector matches ${probe.count} element(s)`
+							: `could not count matches: ${probe.failure}`;
+				let hint = "";
+				if (refusal)
+					hint = `; the element never became clickable (last check: ${refusal}${countNote ? `; ${countNote}` : ""})`;
+				else if (probe && "count" in probe) hint = formatSelectorMatchHint(probe.count);
+				else if (countNote) hint = `; ${countNote}`;
 				throw markBrowserRunRejection(
 					new ToolError(`${label} timed out after ${perOpTimeoutMs}ms${hint}`),
 					active.rejectionOwner,
@@ -2259,21 +2267,23 @@ export class WorkerCore {
 	}
 
 	/**
-	 * Best-effort match count for a timed-out selector op. Never throws;
-	 * undefined when the probe fails, stalls, or the selector is an aria-ref.
+	 * Best-effort match count for a timed-out selector op. Never throws: a probe
+	 * that fails or stalls reports why, since that same probe failing is what keeps
+	 * the zero-match watchdog from failing fast. Undefined for an aria-ref.
 	 */
-	async #selectorMatchCount(selector: string): Promise<number | undefined> {
+	async #selectorMatchCount(selector: string): Promise<{ count: number } | { failure: string } | undefined> {
 		if (parseAriaRefSelector(selector) !== null) return undefined;
 		try {
 			const handles = await Promise.race([
 				this.#requirePage().$$(normalizeSelector(selector)),
-				Bun.sleep(1_000).then(() => null),
+				Bun.sleep(MATCH_COUNT_PROBE_TIMEOUT_MS).then(() => null),
 			]);
-			if (!handles) return undefined;
+			if (!handles) return { failure: `no answer within ${MATCH_COUNT_PROBE_TIMEOUT_MS}ms` };
 			for (const handle of handles) void handle.dispose().catch(() => undefined);
-			return handles.length;
-		} catch {
-			return undefined;
+			return { count: handles.length };
+		} catch (err) {
+			const message = (err instanceof Error ? err.message : String(err)).split("\n", 1)[0];
+			return { failure: message || (err instanceof Error ? err.name : "unknown error") };
 		}
 	}
 

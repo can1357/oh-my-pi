@@ -43,6 +43,79 @@ async function hasModule(cwd: string, module: string): Promise<boolean> {
 
 const HAS_MATPLOTLIB = await hasModule(MATPLOTLIB_TEST_CWD, "matplotlib");
 const HAS_PANDAS = await hasModule(MATPLOTLIB_TEST_CWD, "pandas");
+const HAS_ENSUREPIP = await hasModule(MATPLOTLIB_TEST_CWD, "ensurepip");
+
+/** A venv like the ones `uv venv` makes: no pip installed. Returns its interpreter. */
+async function createPiplessVenv(dir: string): Promise<string> {
+	const { env } = (await Settings.init()).getShellConfig();
+	const base = resolvePythonRuntime(dir, filterEnv(env)).pythonPath;
+	const venv = path.join(dir, "venv");
+	const created = Bun.spawnSync([base, "-m", "venv", "--without-pip", venv], { stdout: "ignore", stderr: "pipe" });
+	if (created.exitCode !== 0) throw new Error(`venv creation failed: ${created.stderr.toString()}`);
+	return path.join(venv, "bin", "python");
+}
+
+const SLEEP = Bun.which("sleep") ?? "/bin/sleep";
+
+/**
+ * Starts a kernel on a pip-less venv. `ensurepipMain` shadows the stdlib `ensurepip`'s
+ * `__main__` and `uvScript` (POSIX sh) becomes `uv`; PATH holds nothing else, so a
+ * system uv never runs.
+ */
+async function startPiplessKernel(
+	dir: string,
+	fakes: { ensurepipMain?: string; uvScript?: string },
+): Promise<{ kernel: PythonKernel; python: string; sitePackages: string }> {
+	const python = await createPiplessVenv(dir);
+	const purelib = Bun.spawnSync([python, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"]);
+	const sitePackages = purelib.stdout.toString().trim();
+	const binDir = path.join(dir, "bin");
+	await fs.mkdir(binDir);
+	const env: Record<string, string> = { PATH: binDir };
+	if (fakes.uvScript !== undefined) {
+		await Bun.write(path.join(binDir, "uv"), `#!/bin/sh\nPATH=/usr/bin:/bin\n${fakes.uvScript}\n`);
+		await fs.chmod(path.join(binDir, "uv"), 0o755);
+	}
+	if (fakes.ensurepipMain !== undefined) {
+		const fakeDir = path.join(dir, "fake", "ensurepip");
+		await fs.mkdir(fakeDir, { recursive: true });
+		await Bun.write(path.join(fakeDir, "__init__.py"), "");
+		await Bun.write(path.join(fakeDir, "__main__.py"), fakes.ensurepipMain);
+		env.PYTHONPATH = path.dirname(fakeDir);
+	}
+	const kernel = await PythonKernel.start({ cwd: dir, interpreter: python, env });
+	return { kernel, python, sitePackages };
+}
+
+/** An `ensurepip` that fails the way Debian's disabled system copy does. */
+const DISABLED_ENSUREPIP = 'import sys\nprint("ensurepip is disabled")\nsys.exit(1)\n';
+
+/** Running and not a zombie: a killed process may wait a moment for its reaper. */
+function isRunning(pid: number): boolean {
+	const ps = Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
+	const state = ps.stdout.toString().trim();
+	return state !== "" && !state.startsWith("Z");
+}
+
+/** Runs `code`, cancels it once the installer prints `installer-pids:<pid>,<pid>`, and returns those pids. */
+async function cancelInstall(kernel: PythonKernel, code: string): Promise<number[]> {
+	const ac = new AbortController();
+	const started = Promise.withResolvers<number[]>();
+	let streamed = "";
+	const pending = executePythonWithKernel(kernel, code, {
+		signal: ac.signal,
+		onChunk: chunk => {
+			streamed += chunk;
+			const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
+			if (match) started.resolve([Number(match[1]), Number(match[2])]);
+		},
+	});
+	const pids = await started.promise;
+	ac.abort(new DOMException("user cancelled", "AbortError"));
+	const result = await pending;
+	expect(result.cancelled).toBe(true);
+	return pids;
+}
 
 describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 	afterEach(async () => {
@@ -179,6 +252,126 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			await kernel.shutdown();
 		}
 	});
+
+	it.skipIf(process.platform === "win32" || !HAS_ENSUREPIP)(
+		"%pip bootstraps pip with ensurepip when the venv has no pip",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-ensurepip-");
+			const { kernel } = await startPiplessKernel(tempDir.path(), {});
+			try {
+				const result = await executePythonWithKernel(kernel, "%pip --version");
+				expect(result.output).not.toContain("No module named pip");
+				expect(result.output).toContain(path.join("venv", "lib"));
+				expect(result.displayOutputs).toContainEqual({
+					type: "status",
+					event: { op: "pip", args: "--version", installed: [], exit_code: 0 },
+				});
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		120_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"%pip has uv install pip into the kernel's interpreter when ensurepip fails, then runs pip with the cell's arguments",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-uv-");
+			const uvLog = path.join(tempDir.path(), "uv.log");
+			const { kernel, python, sitePackages } = await startPiplessKernel(tempDir.path(), {
+				ensurepipMain: DISABLED_ENSUREPIP,
+				// Stands in for `uv pip install pip`: a pip that echoes its arguments.
+				uvScript: [
+					`printf '%s\\n' "$*" "$UV_PYTHON" > '${uvLog}'`,
+					'SITE="$("$UV_PYTHON" -c "import sysconfig; print(sysconfig.get_paths()[\'purelib\'])")"',
+					'mkdir -p "$SITE/pip"',
+					': > "$SITE/pip/__init__.py"',
+					`printf '%s\\n' 'import sys' 'print("pip-args:", *sys.argv[1:])' 'print("Successfully installed six-1.17.0")' > "$SITE/pip/__main__.py"`,
+				].join("\n"),
+			});
+			try {
+				const result = await executePythonWithKernel(kernel, "%pip install --disable-pip-version-check six");
+				expect(result.output).toContain("ensurepip is disabled");
+				const [uvArgs, uvPython] = (await Bun.file(uvLog).text()).trimEnd().split("\n");
+				expect(uvArgs).toBe("pip install pip");
+				expect(await fs.realpath(uvPython)).toBe(await fs.realpath(python));
+				expect(await Bun.file(path.join(sitePackages, "pip", "__main__.py")).exists()).toBe(true);
+				expect(result.output).toContain("pip-args: install --disable-pip-version-check six");
+				expect(result.displayOutputs).toContainEqual({
+					type: "status",
+					event: {
+						op: "pip",
+						args: "install --disable-pip-version-check six",
+						installed: ["six"],
+						exit_code: 0,
+					},
+				});
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		60_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"%pip reports the bootstrap failure when ensurepip fails and uv is not on PATH",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-no-bootstrap-");
+			const { kernel } = await startPiplessKernel(tempDir.path(), { ensurepipMain: DISABLED_ENSUREPIP });
+			try {
+				const result = await executePythonWithKernel(kernel, "%pip install six");
+				expect(result.output).toContain("ensurepip is disabled");
+				expect(result.displayOutputs).toContainEqual({
+					type: "status",
+					event: { op: "pip", args: "install six", installed: [], exit_code: 1 },
+				});
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		30_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"cancelling %pip during the ensurepip bootstrap stops ensurepip and the pip it spawned",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-cancel-ensurepip-");
+			// Like the real `ensurepip`, runs pip in a child process.
+			const { kernel } = await startPiplessKernel(tempDir.path(), {
+				ensurepipMain: [
+					"import os, subprocess",
+					`child = subprocess.Popen([${JSON.stringify(SLEEP)}, "30"])`,
+					'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
+					"child.wait()",
+				].join("\n"),
+			});
+			try {
+				const pids = await cancelInstall(kernel, "%pip install six");
+				expect(pids.filter(isRunning)).toEqual([]);
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		30_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"cancelling %pip while uv installs pip stops uv and what it spawned",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-cancel-uv-");
+			const { kernel } = await startPiplessKernel(tempDir.path(), {
+				ensurepipMain: DISABLED_ENSUREPIP,
+				uvScript: 'sleep 30 &\necho "installer-pids:$$,$!"\nwait',
+			});
+			try {
+				const pids = await cancelInstall(kernel, "%pip install six");
+				expect(pids.filter(isRunning)).toEqual([]);
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		30_000,
+	);
 
 	it("loads quoted scripts without source echo, retaining namespace, filename and async execution", async () => {
 		using tempDir = TempDir.createSync("@python-runner-load-");

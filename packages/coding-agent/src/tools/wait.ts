@@ -15,7 +15,6 @@ import { hasLiveOwnedService, listServicesTolerant, waitForOwnedServiceCompletio
 import { drainPendingInbox, messageResult } from "../irc/messaging";
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { throwIfAborted } from "./tool-errors";
 
@@ -35,21 +34,64 @@ function takeQueuedMessage(messaging: WaitMessaging | undefined): IrcMessage | u
 	return drainPendingInbox(messaging.registry, messaging.senderId) ?? IrcBus.global().take(messaging.senderId);
 }
 
+interface PendingReplies {
+	/** Agents asked that can still answer: running, and not blocked on the caller. */
+	from: string[];
+	/** Agents asked that cannot answer before the caller finishes (see `AgentAwaits.blocksOn`). */
+	blocked: string[];
+	/** Agents asked whose turn ended without an answer, or that are gone. */
+	stopped: string[];
+}
+
+/**
+ * Agents the caller messaged during its current run that have not answered
+ * yet, split by whether a reply can still come. Only a running agent can
+ * answer: one that went idle after the question has finished the turn it got
+ * it in, and any automatic reply (a woken subagent's relayed output) has
+ * arrived by then.
+ */
+function pendingReplies(messaging: WaitMessaging): PendingReplies {
+	const { registry, senderId } = messaging;
+	const replies: PendingReplies = { from: [], blocked: [], stopped: [] };
+	const since = registry.get(senderId)?.session?.runStartedAt ?? 0;
+	for (const { to, sentAt } of IrcBus.global().unansweredSends(senderId, since)) {
+		const session = registry.get(to)?.session;
+		if (session && registry.awaits.blocksOn(to, senderId, sentAt)) replies.blocked.push(to);
+		else if (session?.isStreaming) replies.from.push(to);
+		else replies.stopped.push(to);
+	}
+	return replies;
+}
+
+/** Why a reply wait cannot (or can no longer) get its answer. */
+function noReplyText(replies: PendingReplies): string {
+	const ids = (list: string[]) => list.map(id => `\`${id}\``).join(", ");
+	if (replies.blocked.length > 0) {
+		return `${ids(replies.blocked)} cannot reply before you finish: it is waiting on your result. Finish without the answer.`;
+	}
+	if (replies.stopped.length > 0) {
+		return `${ids(replies.stopped)} finished its turn without replying. Ask again, or finish without the answer.`;
+	}
+	return "no background job or service you started is running, and no agent you messaged this run owes a reply. Other agents' results and messages arrive on their own.";
+}
+
 /** Whether `session` has the `wait` tool active, so prompts may point blocked callers at it. */
 export function hasWaitTool(session: ToolSession): boolean {
 	return session.isToolActive?.("wait") ?? true;
 }
 
 /**
- * Blocks on background jobs and services the calling agent started. Work it
- * did not start never sustains a wait: a peer owes no message — a parent
- * blocked awaiting this very agent stays running — so waiting on peers can
- * park both sides for good. A message arriving mid-wait still ends it.
+ * Blocks on background jobs and services the calling agent started, or on
+ * the reply to a message it sent this run. Other agents' work never sustains
+ * a wait: a peer owes no message. A reply wait ends once no agent asked can
+ * still answer: each one finished its turn, or is blocked on the caller
+ * itself, the cycle that would park both sides. A message arriving mid-wait
+ * ends any wait.
  */
 export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetails> {
 	readonly name = "wait";
 	readonly label = "Wait";
-	readonly summary = "Wait for the next result of a background job or service you started";
+	readonly summary = "Wait for the next result of a background job or service you started, or a reply you asked for";
 	readonly description = prompt.render(waitDescription);
 	readonly parameters = waitSchema;
 	readonly strict = true;
@@ -97,14 +139,26 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		}
 		const serviceRunning = hasLiveOwnedService(this.session);
 		if (jobs.length === 0 && !serviceRunning) {
-			throw new ToolError(
-				"Nothing to wait for: no background job or service you started is running. Other agents' results and messages arrive on their own.",
-			);
+			const replies = messaging ? pendingReplies(messaging) : { from: [], blocked: [], stopped: [] };
+			if (replies.from.length === 0) {
+				// An idle poll, not a failure: flagged so the loop guard keeps counting
+				// across it, unless an interrupt (news for the model) landed meanwhile
+				// or the text names an agent asked that can no longer answer.
+				const news = signal?.aborted || replies.blocked.length > 0 || replies.stopped.length > 0;
+				return {
+					content: [{ type: "text", text: `Nothing to wait for: ${noReplyText(replies)}` }],
+					details: { op: "wait", jobs: [] },
+					...(news ? {} : { useless: true }),
+				};
+			}
 		}
 		return this.#blockUntilWake({ jobs, manager, messaging, serviceRunning, signal, onUpdate });
 	}
 
-	/** Block until an owned job settles, an owned service finishes, a message arrives, the cap elapses, or the call aborts. */
+	/**
+	 * Block until an owned job settles, an owned service finishes, a message arrives, the cap elapses, or the call aborts.
+	 * With neither jobs nor a service, the block is a reply wait: it also ends once no agent asked can still reply.
+	 */
 	async #blockUntilWake(args: {
 		jobs: AsyncJob[];
 		manager: AsyncJobManager | undefined;
@@ -125,6 +179,40 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					.wait(messaging.senderId, {}, 0, busAbort.signal)
 					.catch(() => null)
 			: undefined;
+		// A reply wait re-checks whether an agent asked can still answer on
+		// every block change, status change, and end of an asked agent's turn
+		// (after any automatic reply that turn owes has been sent).
+		const replyWait = messaging !== undefined && jobs.length === 0 && !serviceRunning;
+		let noReply: PendingReplies | undefined;
+		const replyGone = Promise.withResolvers<void>();
+		const unsubscribers: Array<() => void> = [];
+		if (replyWait) {
+			const checkReplies = () => {
+				const replies = pendingReplies(messaging);
+				if (replies.from.length > 0) return;
+				noReply = replies;
+				replyGone.resolve();
+			};
+			unsubscribers.push(messaging.registry.awaits.onChange(checkReplies));
+			unsubscribers.push(messaging.registry.onChange(checkReplies));
+			for (const id of pendingReplies(messaging).from) {
+				const session = messaging.registry.get(id)?.session;
+				if (!session) continue;
+				unsubscribers.push(
+					session.subscribe(event => {
+						if (event.type === "agent_end") void session.waitForIrcReplies().then(checkReplies);
+					}),
+				);
+			}
+		}
+		// A wait that only these subagents' results can end blocks the caller on
+		// them, which their own reply waits read. A bash job or service is
+		// another way out, so such a wait blocks on no one.
+		const watchedAgents = jobs.flatMap(job => (job.agentId ? [job.agentId] : []));
+		const releaseHold =
+			messaging && !serviceRunning && watchedAgents.length === jobs.length
+				? messaging.registry.awaits.hold(messaging.senderId, watchedAgents, { interruptible: true })
+				: undefined;
 		const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
 		const timer = setTimeout(timedOut, WAIT_MAX_MS);
 		const abort = Promise.withResolvers<void>();
@@ -140,12 +228,13 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			});
 		const progressTimer = onUpdate && jobs.length > 0 ? setInterval(emitProgress, PROGRESS_INTERVAL_MS) : undefined;
 		if (jobs.length > 0) emitProgress();
-		let wake: "job" | "message" | "service" | "timeout" | "abort";
+		let wake: "job" | "message" | "service" | "unanswerable" | "timeout" | "abort";
 		try {
 			wake = await Promise.race([
 				...jobs.map(job => job.promise.then(() => "job" as const)),
 				...(busLeg ? [busLeg.then(() => "message" as const)] : []),
 				...(serviceLeg ? [serviceLeg.then(() => "service" as const)] : []),
+				...(replyWait ? [replyGone.promise.then(() => "unanswerable" as const)] : []),
 				timeout.then(() => "timeout" as const),
 				abort.promise.then(() => "abort" as const),
 			]);
@@ -154,6 +243,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			clearInterval(progressTimer);
 			busAbort.abort();
 			serviceAbort.abort();
+			for (const unsubscribe of unsubscribers) unsubscribe();
+			releaseHold?.();
 			signal?.removeEventListener("abort", onAbort);
 		}
 		// Unwatch only after the result is built: a job recovered below is
@@ -169,15 +260,22 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				// the designed wake path, so the message injects after a normal
 				// result. Any other abort stops the run.
 				if (signal.reason === TOOL_INTERRUPT_ABORT_REASON) {
+					// Not `useless`: a message woke the agent, which the loop guard
+					// must treat as progress rather than an idle poll.
 					return {
 						content: [{ type: "text", text: "Wait interrupted by message." }],
 						details: { op: "wait", jobs: [], interrupted: true },
-						useless: true,
 					};
 				}
 				throwIfAborted(signal);
 			}
-			if (manager && jobs.length > 0) return buildJobResult(this.session, manager, "wait", jobs, []);
+			if (manager && jobs.length > 0) {
+				const result = buildJobResult(this.session, manager, "wait", jobs, []);
+				// A finished service is news even while every watched job still runs.
+				if (wake !== "service") return result;
+				const { useless: _idle, ...woke } = result;
+				return woke;
+			}
 			return {
 				content: [
 					{
@@ -185,10 +283,16 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 						text:
 							wake === "service"
 								? "A service finished. Read proc:// for its status and output."
-								: "Wait limit reached; background work may still be running. Read proc:// for status.",
+								: wake === "unanswerable" && noReply
+									? noReplyText(noReply)
+									: replyWait
+										? "Wait limit reached with no reply. Ask again, or finish without the answer."
+										: "Wait limit reached; background work may still be running. Read proc:// for status.",
 					},
 				],
 				details: { op: "wait", jobs: [] },
+				// A wait that ran out with nothing to report is an idle poll.
+				...(wake === "timeout" ? { useless: true } : {}),
 			};
 		} finally {
 			manager?.unwatchJobs(watchedIds);

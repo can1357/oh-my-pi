@@ -21,6 +21,12 @@ interface IrcWaiter {
 	cancel: () => void;
 }
 
+/** When a send went out: wall-clock `ts`, and `seq` to order sends within one millisecond. */
+interface SendMark {
+	ts: number;
+	seq: number;
+}
+
 /** Mailbox cap per agent; oldest messages are dropped beyond it. */
 const MAILBOX_CAP = 100;
 
@@ -43,8 +49,12 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
-	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
-	readonly #lastSent = new Map<string, Map<string, number>>();
+	/** The latest successful send per `from` → `to`; see {@link sentSince}. */
+	readonly #lastSent = new Map<string, Map<string, SendMark>>();
+	/** The latest direct (non-broadcast) send per `from` → `to`; see {@link unansweredSends}. */
+	readonly #lastDirect = new Map<string, Map<string, SendMark>>();
+	/** Last {@link SendMark.seq} handed out, taken when a send starts. */
+	#sendSeq = 0;
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
@@ -72,16 +82,25 @@ export class IrcBus {
 	 */
 	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		// Taken before delivery: a reply sent while this message is still being
+		// delivered must still order after it.
+		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq };
 		const receipt = await this.#deliver(message, opts);
 		if (receipt.outcome !== "failed") {
-			let sent = this.#lastSent.get(message.from);
-			if (!sent) {
-				sent = new Map();
-				this.#lastSent.set(message.from, sent);
-			}
-			sent.set(message.to, message.ts);
+			this.#record(this.#lastSent, message, mark);
+			if (!message.broadcast && !message.wakeRelay) this.#record(this.#lastDirect, message, mark);
 		}
 		return receipt;
+	}
+
+	#record(table: Map<string, Map<string, SendMark>>, message: IrcMessage, mark: SendMark): void {
+		let sent = table.get(message.from);
+		if (!sent) {
+			sent = new Map();
+			table.set(message.from, sent);
+		}
+		// Deliveries can settle out of order; keep the latest send.
+		if ((sent.get(message.to)?.seq ?? 0) < mark.seq) sent.set(message.to, mark);
 	}
 
 	/**
@@ -90,8 +109,27 @@ export class IrcBus {
 	 * waker themselves.
 	 */
 	sentSince(from: string, to: string, sinceTs: number): boolean {
-		const ts = this.#lastSent.get(from)?.get(to);
-		return ts !== undefined && ts >= sinceTs;
+		const sent = this.#lastSent.get(from)?.get(to);
+		return sent !== undefined && sent.ts >= sinceTs;
+	}
+
+	/**
+	 * Agents `from` messaged directly at or after `sinceTs` that have sent
+	 * nothing back since, with when the latest of those messages went out:
+	 * the replies a `wait` can block for. "Since" is by send order, not
+	 * timestamp, so an answer to an earlier question never settles a later one
+	 * sent within the same millisecond.
+	 */
+	unansweredSends(from: string, sinceTs: number): Array<{ to: string; sentAt: number }> {
+		const sends = this.#lastDirect.get(from);
+		if (!sends) return [];
+		const unanswered: Array<{ to: string; sentAt: number }> = [];
+		for (const [to, sent] of sends) {
+			if (sent.ts < sinceTs) continue;
+			const reply = this.#lastSent.get(to)?.get(from);
+			if (reply === undefined || reply.seq < sent.seq) unanswered.push({ to, sentAt: sent.ts });
+		}
+		return unanswered;
 	}
 
 	async #deliver(message: IrcMessage, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {

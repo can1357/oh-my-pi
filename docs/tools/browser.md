@@ -64,7 +64,7 @@ await tab.close();
 | `user_agent` | Per-tab user-agent override. |
 | `ignore_https_errors` | Ignore invalid HTTPS certificates for the tab. |
 | `allow_file_access` | Launch flag permitting local file pages to read local files; cannot change an already-running shared Chromium. |
-| `headed` | Override `browser.headless` for this open. `headed: false` also opts out of automatic Tern selection. |
+| `headed` | Override `browser.headless` for this open. It does not choose between Tern and Chromium: inside a Tern pane, use `app.tern: false` to opt out of Tern. |
 | `persist` | Default `false`; opt out of settle-freeze and idle-close management. Explicit reuse by the owning session can change it. |
 | `timeout` | Seconds; default 30, capped by positive `tools.maxTimeout`, then clamped to 1–300. First-use Chromium installation is outside the open deadline. An open that runs out names the step it stalled in: launching or connecting to the browser, closing a tab to reopen it, or opening the tab. |
 
@@ -136,13 +136,13 @@ Python `tab.run` accepts a JavaScript string only; it does not accept a Python c
 
 ## Browser modes
 
-`browser.open` prefers explicit `app.cdp_url`, `app.path`, `app.relay: true`, then `app.tern: true`. Otherwise it considers configured relay, configured CDP, automatic Tern, cmux, then project-shared managed Chromium. Relay and Tern environment kill switches can disable those modes.
+`browser.open` prefers explicit `app.cdp_url`, `app.path`, `app.relay: true`, then `app.tern: true`. Otherwise it considers configured relay (`browser.relay`, overridden either way by `PI_BROWSER_RELAY=1|0`), configured CDP (`browser.cdpUrl`), automatic Tern, cmux, then project-shared managed Chromium. `app.relay: false` skips the relay however it is enabled and `app.tern: false` skips Tern, each only its own mode: with the relay on, `app.tern: false` alone still opens the relay, and `app: { relay: false, tern: false }` falls through to configured CDP, cmux, then managed Chromium. Relay and Tern environment kill switches can disable those modes.
 
 - **Managed Chromium:** creates an omp-owned page in project-shared Chromium and applies stealth patches. Installation happens automatically on first use. `headed` overrides the default hidden mode.
 - **Spawned (`app.path`):** starts or reuses a CDP-enabled browser/Electron executable. `app.args` applies only here; Chromium-family processes use an omp-owned profile unless args specify `--user-data-dir`.
 - **Connected (`app.cdp_url`):** attaches to an existing HTTP CDP discovery endpoint.
 - **Relay (`app.relay: true`):** drives the user's real Chrome. Opening a new name without `app.target` creates omp's own background tab, leaving the user's selected tab and window focus alone (an extension installed before this release selects the new tab instead; reinstall it with `omp browser-relay install`); `url` navigates that tab, and screenshots capture it without raising it. With several browsers on one relay, a new tab opens in the browser of the tab omp used last on that relay (for a page `tab.run` opens, the browser of its own tab), else the browser showing the first selected tab in the relay's tab list (whether or not its window is minimized), else the browser whose extension connected last. `app.target` borrows an existing tab by URL/title substring. Reopening a name that is already open keeps its tab, borrowed or owned.
-- **Tern:** inside a Tern pane, opens a visible browser picture-in-picture over the pane using native WKWebView, not Chromium. `headed: false` or `app.tern: false` opts out; `app.tern: true` requires Tern. Automatic Tern selection falls back to Chromium with an explanatory result when Tern cannot host the page.
+- **Tern:** inside a Tern pane, opens a visible browser picture-in-picture over the pane using native WKWebView, not Chromium. `app.tern: false` opts out; `headed` does not choose between Tern and Chromium. `app.tern: true` requires Tern. Automatic Tern selection falls back to Chromium with an explanatory result when Tern cannot host the page.
 - **Cmux:** drives an available cmux WKWebView surface.
 
 The native-webview backends do not provide full Puppeteer/CDP capabilities. Tern provides fetch/XHR and navigation-response logging, not complete CDP subresource coverage; routing accepts only fetch/XHR resource types. CPU/network throttling, timezone/headers/reduced-motion emulation, CSS-transformed frame input, and tracing/profiling are unsupported; `metrics` returns navigation timing and DOM counts rather than full CDP metrics. Tern PDF accepts only `path`; storage loading restores only the current origin. Inspect backend-specific errors rather than assuming Chromium behavior.

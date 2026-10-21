@@ -272,7 +272,7 @@ ${DIFF}`;
 		expect(result.text).toContain("pr note");
 		await expect(
 			api.submit({ source: { kind: "pr", ref: "not a pr" }, notes: [{ path: "x", note: "y" }] }),
-		).rejects.toThrow("Not a GitHub pull request reference");
+		).rejects.toThrow("Not a GitHub pull request or GitLab merge request reference");
 	});
 });
 

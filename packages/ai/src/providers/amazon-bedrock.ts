@@ -51,7 +51,7 @@ import { toolWireSchema } from "../utils/schema/wire";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
 import { signRequest } from "./aws-sigv4";
-import { isThinkingPrefixBindingError, streamBedrockAnthropicCompaction } from "./anthropic";
+import { isThinkingPrefixBindingError, logDroppedThinking, streamBedrockAnthropicCompaction } from "./anthropic";
 import type { AnthropicMessagesClientLike, AnthropicRequestOptions } from "./anthropic-client";
 import { supportsBedrockConverseCompaction } from "./anthropic-compaction";
 import { isAnthropicNarrationSignature } from "./anthropic-signature";
@@ -1011,13 +1011,13 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						const transformations = parseAnthropicInputTransformations(responseFields?.input_transformations);
 						if (transformations.length > 0) {
 							output.inputTransformations = transformations;
-							for (const transformation of transformations) {
-								if (transformation.reason !== "prefix_binding_mismatch") continue;
-								logger.warn("bedrock: dropped thinking block after conversation prefix changed", {
-									model: model.id,
-									path: transformation.path,
-								});
-							}
+							logDroppedThinking(
+								"bedrock",
+								model.id,
+								transformations
+									.filter(transformation => transformation.reason === "prefix_binding_mismatch")
+									.map(transformation => transformation.path),
+							);
 						}
 						// A sentinel-only request must never surface a tool-use stop:
 						// no real tool exists for the agent to dispatch.

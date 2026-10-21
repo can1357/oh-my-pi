@@ -580,10 +580,12 @@ fn input_accepts_hash_in_tagged_paths_only() {
 		assert_eq!(patch.sections[0].file_hash.as_deref(), Some("1A2B"), "{header}");
 	}
 	// Untagged, a `#` is a malformed tag, not a file name.
-	let error = Patch::parse("[conf.yaml##hostname.home]\nPUT 1:\n+x", &options())
-		.unwrap_err()
-		.to_string();
-	assert!(error.contains("Input header must be"), "{error}");
+	for header in ["[conf.yaml##hostname.home]", "[conf.yaml##hostname]"] {
+		let error = Patch::parse(&format!("{header}\nPUT 1:\n+x"), &options())
+			.unwrap_err()
+			.to_string();
+		assert!(error.contains("Input header must be [PATH#TAG] with"), "{header}: {error}");
+	}
 }
 
 #[test]
@@ -631,7 +633,7 @@ fn input_rejects_multi_group_headers_instead_of_inventing_a_path() {
 
 #[test]
 fn input_rejects_malformed_tags_and_missing_headers() {
-	for header in ["[a.ts#1A2]", "[a.ts#1A2G]", "[a.ts#1A2B5]", "[a.ts#1A2B copied]"] {
+	for header in ["[a.ts#1A2B copied]", "[a.ts#1A2B:812]", "[a.ts#1A2B copied from read]"] {
 		assert!(
 			Patch::parse(&format!("{header}\nPUT 1:\n+x"), &options())
 				.unwrap_err()
@@ -639,6 +641,14 @@ fn input_rejects_malformed_tags_and_missing_headers() {
 				.contains("Input header must be"),
 			"{header}"
 		);
+	}
+	// A placeholder word where the tag belongs is no tag at all.
+	for header in
+		["[a.ts#1A2]", "[a.ts#1A2G]", "[a.ts#1A2B5]", "[a.ts#AUTO]", "[a.ts#????]", "[a.ts#]"]
+	{
+		let patch = Patch::parse(&format!("{header}\nPUT 1:\n+x"), &options()).unwrap();
+		assert_eq!(patch.sections[0].path, "a.ts", "{header}");
+		assert_eq!(patch.sections[0].file_hash, None, "{header}");
 	}
 	let error = Patch::parse("CUT 38.=40", &options())
 		.unwrap_err()

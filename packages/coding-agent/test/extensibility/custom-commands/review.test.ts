@@ -10,7 +10,9 @@ import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-ent
 import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { parsePrUnifiedDiff } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-diff";
+import * as glab from "@oh-my-pi/pi-coding-agent/tools/glab-mr";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
+import { gitlab } from "@oh-my-pi/pi-coding-agent/utils/gitlab";
 import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -585,7 +587,7 @@ describe("ReviewCommand", () => {
 			"1. Review against a base branch (PR Style)",
 			"2. Review uncommitted changes",
 			"3. Review a specific commit",
-			"4. Review a specific PR",
+			"4. Review a specific PR/MR",
 			"5. Custom review instructions",
 		]);
 	});
@@ -600,7 +602,7 @@ describe("ReviewCommand", () => {
 		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		const ctx = createContext({
-			selectResults: ["4. Review a specific PR", "#42  Fix login  @octocat"],
+			selectResults: ["4. Review a specific PR/MR", "#42  Fix login  @octocat"],
 		});
 
 		const result = await command.execute([], ctx);
@@ -628,7 +630,7 @@ describe("ReviewCommand", () => {
 		const selectCalls: SelectCall[] = [];
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		const ctx = createContext({
-			selectResults: ["4. Review a specific PR", "Search open pull requests…", "#7  Filtered match  @octocat"],
+			selectResults: ["4. Review a specific PR/MR", "Search open pull requests…", "#7  Filtered match  @octocat"],
 			inputResults: ["match"],
 			onSelectCall: call => {
 				selectCalls.push(call);
@@ -662,7 +664,7 @@ describe("ReviewCommand", () => {
 		const notifications: NotifyCall[] = [];
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		const ctx = createContext({
-			selectResults: ["4. Review a specific PR", "Search open pull requests…", "#42  Fix login  @octocat"],
+			selectResults: ["4. Review a specific PR/MR", "Search open pull requests…", "#42  Fix login  @octocat"],
 			inputResults: ["login"],
 			onNotify: call => {
 				notifications.push(call);
@@ -689,7 +691,7 @@ describe("ReviewCommand", () => {
 		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
 		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		const ctx = createContext({
-			selectResults: ["4. Review a specific PR", "Search open pull requests…"],
+			selectResults: ["4. Review a specific PR/MR", "Search open pull requests…"],
 			inputResults: ["#123"],
 		});
 
@@ -700,6 +702,152 @@ describe("ReviewCommand", () => {
 		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 123 });
 		expect(listSpy).toHaveBeenCalledTimes(1);
 		expect(listSpy.mock.calls.every(call => !(call[1] as string[]).includes("--search"))).toBe(true);
+	});
+
+	describe("GitLab merge requests", () => {
+		it("reviews explicit MR URLs, including nested groups and self-managed hosts", async () => {
+			const dir = await createTempDir();
+			const diffSpy = spyOn(glab, "getOrFetchMrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+			const ghSpy = spyOn(gh, "getOrFetchPrDiff");
+			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+			const ctx = { hasUI: false } as unknown as HookCommandContext;
+
+			const cases = [
+				{
+					url: "https://gitlab.com/group/sub/proj/-/merge_requests/7",
+					project: "gitlab.com/group/sub/proj",
+					iid: 7,
+				},
+				{
+					url: "https://git.example.org/team/app/-/merge_requests/12/diffs",
+					project: "git.example.org/team/app",
+					iid: 12,
+				},
+				{ url: "mr://gitlab.com/group/proj/9/diff/3", project: "gitlab.com/group/proj", iid: 9 },
+			];
+			for (const { url, project, iid } of cases) {
+				const result = await command.execute([url], ctx);
+				expect(result!).toContain(`MR ${project}!${iid}`);
+				expect(diffSpy).toHaveBeenLastCalledWith({ cwd: dir, project, iid });
+			}
+			expect(ghSpy).not.toHaveBeenCalled();
+		});
+
+		it("treats an MR URL without a group/project pair as plain instructions", async () => {
+			const diffSpy = spyOn(glab, "getOrFetchMrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+			const command = new ReviewCommand({ cwd: "/tmp" } as unknown as CustomCommandAPI);
+			const url = "https://gitlab.com/group/-/merge_requests/7";
+
+			const result = await command.execute([url], { hasUI: false } as unknown as HookCommandContext);
+
+			expect(result!).toContain(url);
+			expect(diffSpy).not.toHaveBeenCalled();
+		});
+
+		it("offers an MR mentioned in conversation", async () => {
+			const dir = await createTempDir();
+			const diffSpy = spyOn(glab, "getOrFetchMrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+			let reviewModeOptions: string[] = [];
+			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+			const ctx = createContext({
+				selectedMode: "Review MR gitlab.com/group/proj!7 from conversation",
+				sessionEntries: [makeUserEntry("u1", "Can you look at https://gitlab.com/group/proj/-/merge_requests/7?")],
+				onSelectCall: call => {
+					if (call.title === "Review Mode") reviewModeOptions = call.options;
+				},
+			});
+
+			const result = await command.execute([], ctx);
+
+			expect(reviewModeOptions[0]).toBe("Review MR gitlab.com/group/proj!7 from conversation");
+			expect(result!).toContain("MR gitlab.com/group/proj!7");
+			expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, project: "gitlab.com/group/proj", iid: 7 });
+		});
+
+		it("falls back to the open-MR picker when gh cannot resolve a repository", async () => {
+			const dir = await createTempDir();
+			spyOn(gh, "resolveDefaultRepoMemoized").mockRejectedValue(new Error("no GitHub remote"));
+			spyOn(gitlab, "available").mockReturnValue(true);
+			spyOn(glab, "resolveDefaultGitlabProjectMemoized").mockResolvedValue("gitlab.com/acme/app");
+			const listSpy = spyOn(gitlab, "json").mockResolvedValue([
+				{
+					iid: 5,
+					title: "Fix",
+					author: { username: "alice" },
+					draft: true,
+					web_url: "https://gitlab.com/acme/app/-/merge_requests/5",
+				},
+			]);
+			const ghListSpy = spyOn(github, "json");
+			const diffSpy = spyOn(glab, "getOrFetchMrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+			const selectCalls: SelectCall[] = [];
+			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+			const ctx = createContext({
+				selectResults: ["4. Review a specific PR/MR", "!5  Fix  @alice  [draft]"],
+				onSelectCall: call => {
+					selectCalls.push(call);
+				},
+			});
+
+			const result = await command.execute([], ctx);
+
+			expect(result!).toContain("MR gitlab.com/acme/app!5");
+			expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, project: "gitlab.com/acme/app", iid: 5 });
+			const listArgs = listSpy.mock.calls[0]![1] as string[];
+			expect(listArgs.slice(listArgs.indexOf("-R"), listArgs.indexOf("-R") + 2)).toEqual([
+				"-R",
+				"https://gitlab.com/acme/app",
+			]);
+			expect(selectCalls[1]).toEqual({
+				title: "Open merge requests in gitlab.com/acme/app",
+				options: ["!5  Fix  @alice  [draft]", "Search open merge requests…"],
+			});
+			expect(ghListSpy).not.toHaveBeenCalled();
+		});
+
+		it("keeps the GitHub-only failure message when glab is not installed", async () => {
+			const dir = await createTempDir();
+			spyOn(gh, "resolveDefaultRepoMemoized").mockRejectedValue(new Error("no GitHub remote"));
+			spyOn(gitlab, "available").mockReturnValue(false);
+			const glabSpy = spyOn(glab, "resolveDefaultGitlabProjectMemoized");
+			const listSpy = spyOn(gitlab, "json");
+			const notifications: NotifyCall[] = [];
+			const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+			const ctx = createContext({
+				selectResults: ["4. Review a specific PR/MR"],
+				onNotify: call => {
+					notifications.push(call);
+				},
+			});
+
+			const result = await command.execute([], ctx);
+
+			expect(result).toBeUndefined();
+			expect(notifications).toEqual([
+				{ message: "Failed to resolve repository for PR picker: no GitHub remote", type: "error" },
+			]);
+			expect(glabSpy).not.toHaveBeenCalled();
+			expect(listSpy).not.toHaveBeenCalled();
+		});
+
+		it("links large MR files to mr:// diff slices", async () => {
+			const paths = Array.from({ length: 21 }, (_, index) => `src/file-${index + 1}.ts`);
+			const diff = paths
+				.map(file => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-old\n+new\n`)
+				.join("\n");
+			const lookup = makePrDiffLookup(diff);
+			lookup.payload = parsePrUnifiedDiff(diff);
+			spyOn(glab, "getOrFetchMrDiff").mockResolvedValue(lookup);
+			const command = new ReviewCommand({ cwd: createTempDir() } as unknown as CustomCommandAPI);
+
+			const result = await command.execute(["https://gitlab.com/acme/app/-/merge_requests/5"], {
+				hasUI: false,
+			} as unknown as HookCommandContext);
+
+			expect(result!).toContain("`mr://gitlab.com/acme/app/5/diff/1`");
+			expect(result!).toContain("`mr://gitlab.com/acme/app/5/diff/21`");
+			expect(result!).toContain("mr://gitlab.com/acme/app/5/diff/all");
+		});
 	});
 
 	it("resolves base-branch review against a real repo without a range revspec", async () => {

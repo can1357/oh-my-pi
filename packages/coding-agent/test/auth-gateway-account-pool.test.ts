@@ -87,6 +87,27 @@ describe("auth-gateway account pool", () => {
 		expect(result.credentials.map(credential => credential.email)).toEqual(["allowed@example.com"]);
 	});
 
+	test("check skips API keys and unlisted providers hidden by an allow-list pool", async () => {
+		await brokerStorage!.credentials.upsert("anthropic", { type: "api_key", key: "hidden-anthropic-key" });
+		await brokerStorage!.credentials.upsert("openrouter", { type: "api_key", key: "hidden-openrouter-key" });
+		await Bun.write(
+			process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE!,
+			JSON.stringify({ "*": false, anthropic: { accounts: ["email:allowed@example.com"], apiKeys: false } }),
+		);
+		let output = "";
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			output += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+			return true;
+		});
+
+		await runAuthGatewayCommand({ action: "check", flags: { json: true } });
+
+		const result = JSON.parse(output) as { credentials: Array<{ provider: string; type: string; email?: string }> };
+		expect(result.credentials.map(({ provider, type, email }) => ({ provider, type, email }))).toEqual([
+			{ provider: "anthropic", type: "oauth", email: "allowed@example.com" },
+		]);
+	});
+
 	test("check uses effective PI_CONFIG_FILES account policies", async () => {
 		const overlayPath = path.join(tempDir, "overlay.yml");
 		await Promise.all([

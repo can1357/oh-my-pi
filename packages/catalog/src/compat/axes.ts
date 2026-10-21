@@ -477,7 +477,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"image-count-budget": { key: "imageCountBudget", set: "catalog", shape: "scalar" },
 	/**
 	 * Replaces `image-count-budget` while the request reaches the official
-	 * endpoint (pi-ai `reachesOfficialEndpoint`): a limit measured or documented
+	 * endpoint (pi-ai `reachesBudgetedHost`): a limit measured or documented
 	 * for the host's own endpoint, which a custom `baseUrl` or an
 	 * `ANTHROPIC_BASE_URL`/`FOUNDRY_BASE_URL` reroute (proxy, gateway) need not share.
 	 */
@@ -493,6 +493,22 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	/** Longest image edge the host passes to the model: it downscales larger images to fit first. */
 	"image-max-edge": { key: "imageMaxEdge", set: "catalog", shape: "scalar" },
 	"inline-image-byte-budget": { key: "inlineImageByteBudget", set: "catalog", shape: "scalar" },
+	/**
+	 * Largest request body the host accepts. Where set, the inline-image byte clamp keeps the newest user message's
+	 * and newest tool result's images past `inline-image-byte-budget` while they alone fit this limit.
+	 */
+	"request-body-byte-limit": { key: "requestBodyByteLimit", set: "catalog", shape: "scalar" },
+	/**
+	 * Opt-in: the host budgets above apply whenever the request reaches the provider's own catalog endpoint
+	 * (`endpoint-hosts`, or an unset `baseUrl`), for a hosted gateway whose compat names no official endpoint.
+	 * Unassigned: they apply only on the official endpoint (pi-ai `reachesOfficialEndpoint`).
+	 */
+	"catalog-endpoint-budgets": {
+		key: "catalogEndpointBudgets",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
 	/**
 	 * Supported formats and size bounds for judgment-request images; `mime-types`
 	 * is comma-separated because object payloads have no array shape.

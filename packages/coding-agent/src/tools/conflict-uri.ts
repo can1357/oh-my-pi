@@ -5,6 +5,7 @@
  */
 import * as fs from "node:fs/promises";
 import { type ConflictEntry, renderConflictRegion } from "@oh-my-pi/pi-tui/tools/conflict-detect";
+import { PREVIEW_LIMITS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getEditStore } from "../edit/store";
 import type { InternalWriteResult } from "../internal-urls/types";
@@ -50,10 +51,31 @@ function parseTarget(raw: string): ParsedConflictUri {
 }
 
 function requireEntry(session: ToolSession, id: number): ConflictEntry {
-	const entry = getConflictHistory(session).get(id);
+	const history = getConflictHistory(session);
+	const entry = history.get(id);
 	if (!entry) {
+		const byPath = new Map<string, number[]>();
+		for (const registered of history.entries()) {
+			const ids = byPath.get(registered.absolutePath) ?? [];
+			ids.push(registered.id);
+			byPath.set(registered.absolutePath, ids);
+		}
+		// Capped: a session can hold hundreds of ids after `:conflicts` scans.
+		const limit = PREVIEW_LIMITS.COLLAPSED_ITEMS;
+		const more = (hidden: number, noun: string) => (hidden > 0 ? ` (+${hidden} more${noun})` : "");
+		const files = [...byPath].slice(0, limit).map(
+			([absolutePath, ids]) =>
+				`${ids
+					.slice(0, limit)
+					.map(n => `#${n}`)
+					.join(", ")}${more(ids.length - limit, "")} in ${formatPathRelativeToCwd(absolutePath, session.cwd)}`,
+		);
+		const known =
+			byPath.size > 0
+				? `Registered: ${files.join("; ")}${more(byPath.size - limit, " files")}.`
+				: "No conflicts are registered.";
 		throw new ToolError(
-			`Conflict #${id} not found. Conflict ids are registered when \`read\` surfaces a marker block; re-read the file to get a current id.`,
+			`Conflict #${id} not found: it was resolved, or no \`read\` has shown its block yet (a ranged read registers only the blocks it shows, so unseen blocks' ids can't be guessed). Read \`<path>:conflicts\` on the file to list and register its blocks. ${known}`,
 		);
 	}
 	return entry;

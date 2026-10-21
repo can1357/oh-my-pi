@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.12.4] - 2026-10-20
+
 ### Fixed
 
 - Enabled native compaction for supported Bedrock Claude models ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))

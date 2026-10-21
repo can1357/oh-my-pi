@@ -5,6 +5,7 @@ import {
 	shouldUseProviderNativeCompaction,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { CompactionSettings } from "./context-settings";
 
 /** Choices presented by the ordered compaction-method setting. */
@@ -126,7 +127,7 @@ export function resolveSpeculationMethod(
 			candidate === "remote"
 				? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
 				: candidate === "snapcompact"
-					? model?.input?.includes("image") === true
+					? !!model && sendsImageInputOnWire(model)
 					: true;
 		if (!available) continue;
 		return candidate === "remote" || candidate === "handoff" || candidate === "soft" ? candidate : undefined;

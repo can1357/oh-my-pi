@@ -527,6 +527,43 @@ describe("dispatchReportIssueDevice", () => {
 		}
 	});
 
+	it.each([
+		[
+			"xd://tui: start fails because kitty-vt-wasm is missing",
+			"xd://tui",
+			"start fails because kitty-vt-wasm is missing",
+		],
+		["write xd://tui: start fails before executing bun", "write xd://tui", "start fails before executing bun"],
+		[
+			'write conflict://*: per-id content "2:\ttext" was read as a hashline prefix',
+			"write conflict://*",
+			'per-id content "2:\ttext" was read as a hashline prefix',
+		],
+	])("keeps the URI in the tool name of %p", async (text, tool, report) => {
+		Bun.env.PI_AUTO_QA = "1";
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = { settings: consentedSettings() } as ToolSession;
+			await dispatchReportIssueDevice(session, text);
+			await settlePipeline();
+			const row = db.prepare("SELECT tool, report FROM grievances").get() as { tool: string; report: string };
+			expect(row).toEqual({ tool, report });
+		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	});
+
+	it.each([
+		"read agent://ReviewLifecycleLever returned an empty response",
+		"browser.open({name:'jio-terms',url:'https://www.jio.com/'}) navigated the attached relay tab",
+	])("rejects %p, which has no `: ` separator, instead of splitting inside it", async text => {
+		Bun.env.PI_AUTO_QA = "1";
+		const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
+		await expect(dispatchReportIssueDevice(session, text)).rejects.toThrow("Invalid report format");
+	});
+
 	it("clamps a prose first line so the stored tool stays within the collector limit", async () => {
 		Bun.env.PI_AUTO_QA = "1";
 		const db = openTempDb();

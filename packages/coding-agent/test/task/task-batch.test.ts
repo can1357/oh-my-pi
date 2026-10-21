@@ -728,6 +728,27 @@ describe("task.batch spawning", () => {
 		]);
 	});
 
+	it("ignores a caller-supplied effort unless task.enableEffort is on", async () => {
+		mockDiscovery();
+		const efforts: Array<string | undefined> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			efforts.push(options.effort);
+			return makeResult(options.id ?? "?");
+		});
+		const run = async (settings: Record<string, unknown>, params: TaskParams) => {
+			const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, ...settings } }));
+			await tool.execute("tc-effort", params);
+		};
+		const batch = { context: "Shared.", tasks: [{ name: "Solo", task: "Reply OK.", effort: "hi" }] } as TaskParams;
+
+		// Stale or model-invented calls carry the unadvertised field in both shapes.
+		await run({ "task.batch": false }, { task: "Reply OK.", solutionSpace: "One exact response.", effort: "hi" });
+		await run({ "task.batch": true }, batch);
+		await run({ "task.batch": true, "task.enableEffort": true }, batch);
+
+		expect(efforts).toEqual([undefined, undefined, "hi"]);
+	});
+
 	it("keeps a long result inline when no readable output artifact exists", async () => {
 		mockDiscovery();
 		const fullOutput = `REPORT:${"x".repeat(6_000)}:END`;

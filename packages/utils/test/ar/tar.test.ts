@@ -1,14 +1,17 @@
 import { describe, expect, test } from "bun:test";
+import { gzipCompress } from "../../src/ar/codecs/gzip";
+import { zstdCompress } from "../../src/ar/codecs/zstd";
 import { ArchiveError } from "../../src/ar/error";
 import { type ArchiveLimits, DEFAULT_ARCHIVE_LIMITS } from "../../src/ar/limits";
-import { memoryByteSource } from "../../src/ar/source";
+import { openArchive } from "../../src/ar/open";
+import { type ByteSource, memoryByteSource } from "../../src/ar/source";
 import { encodeTar, readTar, readTarEntriesFromBuffer, sniffTar } from "../../src/ar/tar";
 import type { ArchiveIndexEntry, FormatReadOptions } from "../../src/ar/types";
 import { arFixture as fixture } from "./fixtures";
 
 const options: FormatReadOptions = { limits: DEFAULT_ARCHIVE_LIMITS };
 
-function index(bytes: Uint8Array, limits: ArchiveLimits = DEFAULT_ARCHIVE_LIMITS): ArchiveIndexEntry[] {
+function index(bytes: Uint8Array, limits: ArchiveLimits = DEFAULT_ARCHIVE_LIMITS): Promise<ArchiveIndexEntry[]> {
 	return readTarEntriesFromBuffer(bytes, { limits });
 }
 
@@ -27,7 +30,7 @@ describe("tar reader", () => {
 	test("indexes ustar paths, modes, mtimes, directories, and member bytes", async () => {
 		const bytes = await fixture("tar-ustar.tar");
 		expect(sniffTar(bytes)).toBe(true);
-		const entries = index(bytes);
+		const entries = await index(bytes);
 		expect(entries.map(entry => entry.path)).toEqual(["nested", "hello.txt", "nested/data.bin"]);
 		const hello = entryAt(entries, "hello.txt");
 		expect(hello.mode).toBe(0o640);
@@ -67,30 +70,30 @@ describe("tar reader", () => {
 	});
 
 	test("applies PAX local long paths and global set/delete records", async () => {
-		const longEntries = index(await fixture("tar-pax-long.tar"));
+		const longEntries = await index(await fixture("tar-pax-long.tar"));
 		const long = longEntries.find(entry => entry.path.endsWith("/payload.txt"));
 		expect(long?.path.length).toBeGreaterThan(160);
 		expect(new TextDecoder().decode(await memberBytes(long!))).toBe("pax long path\n");
 
-		const globalEntries = index(await fixture("tar-pax-global.tar"));
+		const globalEntries = await index(await fixture("tar-pax-global.tar"));
 		expect(new TextDecoder().decode(await memberBytes(entryAt(globalEntries, "global.txt")))).toBe("global\n");
 		expect(new TextDecoder().decode(await memberBytes(entryAt(globalEntries, "literal.txt")))).toBe("literal\n");
 		expect(globalEntries.some(entry => entry.path === "ignored.txt")).toBe(false);
 	});
 
 	test("applies GNU L and K long records", async () => {
-		const longNameEntries = index(await fixture("tar-gnu-longlink.tar"));
+		const longNameEntries = await index(await fixture("tar-gnu-longlink.tar"));
 		const longName = longNameEntries.find(entry => entry.path.endsWith("payload.txt"));
 		expect(longName?.path.length).toBeGreaterThan(150);
 		expect(new TextDecoder().decode(await memberBytes(longName!))).toBe("gnu long link payload\n");
 
-		const longLinkEntries = index(await fixture("tar-gnu-long-links.tar"));
+		const longLinkEntries = await index(await fixture("tar-gnu-long-links.tar"));
 		const link = entryAt(longLinkEntries, "pkg/current");
 		expect(new TextDecoder().decode(await memberBytes(link))).toBe("long target\n");
 	});
 
 	test("resolves hard links, relative file symlinks, and directory aliases", async () => {
-		const entries = index(await fixture("tar-links.tar"));
+		const entries = await index(await fixture("tar-links.tar"));
 		expect(new TextDecoder().decode(await memberBytes(entryAt(entries, "pkg/hard.txt")))).toBe("shared content\n");
 		expect(new TextDecoder().decode(await memberBytes(entryAt(entries, "pkg/bin/tool")))).toBe(
 			"export const tool = true;\n",
@@ -107,13 +110,13 @@ describe("tar reader", () => {
 			"cyclic or unsupported links",
 		);
 		const source = await fixture("tar-links.tar");
-		const dangling = entryAt(index(source), "pkg/dangling");
+		const dangling = entryAt(await index(source), "pkg/dangling");
 		expect(dangling.storage?.type).toBe("link");
 	});
 
 	test("recognizes GNU sparse PAX 0.0, 0.1, and 1.0 but rejects extraction precisely", async () => {
 		for (const name of ["tar-sparse-pax-0.0.tar", "tar-sparse-pax-0.1.tar", "tar-sparse-pax.tar"]) {
-			const entries = index(await fixture(name));
+			const entries = await index(await fixture(name));
 			const sparse = entryAt(entries, "data/sparse.bin");
 			expect(sparse.size).toBe(33_554_432);
 			await expect(memberBytes(sparse)).rejects.toThrow("sparse file");
@@ -122,53 +125,144 @@ describe("tar reader", () => {
 	});
 
 	test("consumes old-GNU sparse continuation metadata before later members", async () => {
-		const entries = index(await fixture("tar-sparse-oldgnu.tar"));
+		const entries = await index(await fixture("tar-sparse-oldgnu.tar"));
 		await expect(memberBytes(entryAt(entries, "data/sparse.bin"))).rejects.toThrow("sparse file");
 		expect(new TextDecoder().decode(await memberBytes(entryAt(entries, "after.txt")))).toBe("after sparse\n");
 	});
 
 	test("accepts base-256 numerics, signed checksums, and old-GNU rename records", async () => {
-		const base256 = entryAt(index(await fixture("tar-base256.tar")), "binary.txt");
+		const base256 = entryAt(await index(await fixture("tar-base256.tar")), "binary.txt");
 		expect(base256.size).toBe(3);
 		expect(base256.mtimeMs).toBe(42_000);
 		expect(new TextDecoder().decode(await memberBytes(base256))).toBe("bin");
-		const signed = entryAt(index(await fixture("tar-signed-checksum.tar")), "signed.txt");
+		const signed = entryAt(await index(await fixture("tar-signed-checksum.tar")), "signed.txt");
 		expect(new TextDecoder().decode(await memberBytes(signed))).toBe("signed");
 
-		const renamed = index(await fixture("tar-oldgnu-rename.tar"));
+		const renamed = await index(await fixture("tar-oldgnu-rename.tar"));
 		expect(renamed.some(entry => entry.path === "old/file.txt")).toBe(false);
 		expect(new TextDecoder().decode(await memberBytes(entryAt(renamed, "moved/file.txt")))).toBe("renamed\n");
 		expect(new TextDecoder().decode(await memberBytes(entryAt(renamed, "outside.txt")))).toBe("renamed\n");
 	});
 
 	test("drops traversal entries and rejects corrupt, truncated, unterminated, or multi-volume archives", async () => {
-		const traversal = index(await fixture("tar-traversal.tar"));
+		const traversal = await index(await fixture("tar-traversal.tar"));
 		expect(traversal.map(entry => entry.path)).toEqual(["safe.txt"]);
 		expect(new TextDecoder().decode(await memberBytes(traversal[0]!))).toBe("safe");
 
 		const truncated = await fixture("tar-truncated.tar");
-		expect(() => index(truncated)).toThrow("truncated");
+		await expect(index(truncated)).rejects.toThrow("truncated");
 		const valid = await fixture("tar-ustar.tar");
-		expect(() => index(valid.subarray(0, valid.byteLength - 1024))).toThrow("missing terminating zero block");
+		await expect(index(valid.subarray(0, valid.byteLength - 1024))).rejects.toThrow("missing terminating zero block");
 		const corrupt = valid.slice();
 		corrupt[0] ^= 1;
-		expect(() => index(corrupt)).toThrow("corrupt tar archive header");
+		await expect(index(corrupt)).rejects.toThrow("corrupt tar archive header");
 		expect(sniffTar(corrupt)).toBe(false);
 
 		const multiVolume = await fixture("tar-unsupported-multivolume.tar");
-		expect(() => index(multiVolume)).toThrow("multi-volume tar members are not supported");
+		await expect(index(multiVolume)).rejects.toThrow("multi-volume tar members are not supported");
 	});
 
 	test("enforces archive, member, path, entry, and metadata limits", async () => {
 		const bytes = await fixture("tar-ustar.tar");
-		expect(() => index(bytes, { ...DEFAULT_ARCHIVE_LIMITS, maxInMemorySize: bytes.byteLength - 1 })).toThrow(
+		await expect(index(bytes, { ...DEFAULT_ARCHIVE_LIMITS, maxInMemorySize: bytes.byteLength - 1 })).rejects.toThrow(
 			"too large to read in memory",
 		);
-		expect(() => index(bytes, { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 3 })).toThrow("too large to extract");
-		expect(() => index(bytes, { ...DEFAULT_ARCHIVE_LIMITS, maxPathBytes: 5 })).toThrow("exceeds 5 bytes");
-		expect(() => index(bytes, { ...DEFAULT_ARCHIVE_LIMITS, maxEntries: 1 })).toThrow("too many entries");
+		await expect(index(bytes, { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 3 })).rejects.toThrow(
+			"too large to extract",
+		);
+		await expect(index(bytes, { ...DEFAULT_ARCHIVE_LIMITS, maxPathBytes: 5 })).rejects.toThrow("exceeds 5 bytes");
+		await expect(index(bytes, { ...DEFAULT_ARCHIVE_LIMITS, maxEntries: 1 })).rejects.toThrow("too many entries");
 		const pax = await fixture("tar-pax-long.tar");
-		expect(() => index(pax, { ...DEFAULT_ARCHIVE_LIMITS, maxIndexSize: 8 })).toThrow("PAX metadata is too large");
+		await expect(index(pax, { ...DEFAULT_ARCHIVE_LIMITS, maxIndexSize: 8 })).rejects.toThrow(
+			"PAX metadata is too large",
+		);
+	});
+});
+
+describe("compressed tar past maxInMemorySize", () => {
+	const members = [
+		["first.txt", new TextEncoder().encode("first\n")],
+		["data/fill.bin", new Uint8Array(6000).fill(0x41)],
+		["data/last.txt", new TextEncoder().encode("last\n")],
+	] as const;
+	// The decompressed tar is about 9 KB, so this ceiling forces the streaming walk.
+	const limits = { maxInMemorySize: 4096 };
+
+	for (const [format, compress] of [
+		["tar.gz", gzipCompress],
+		["tar.zst", zstdCompress],
+	] as const) {
+		test(`${format} lists and reads members in any order`, async () => {
+			const bytes = await compress(await encodeTar(members));
+			const archive = await openArchive({ bytes, format }, { limits });
+			expect(archive.listDirectory("").map(entry => entry.name)).toEqual(["data", "first.txt"]);
+			expect(new TextDecoder().decode((await archive.readFile("data/last.txt")).bytes)).toBe("last\n");
+			expect((await archive.readFile("data/fill.bin")).bytes).toEqual(members[1][1]);
+			expect(new TextDecoder().decode((await archive.readFile("first.txt")).bytes)).toBe("first\n");
+		});
+	}
+
+	test("reading every member in archive order decompresses the stream once", async () => {
+		const bytes = await gzipCompress(await encodeTar(members));
+		let passes = 0;
+		const source: ByteSource = {
+			size: bytes.byteLength,
+			async read(start, end) {
+				if (start === 0) passes++;
+				return bytes.subarray(start, end);
+			},
+		};
+		const archive = await openArchive({ source, format: "tar.gz" }, { limits });
+		const indexPasses = passes;
+		for (const [memberPath, content] of members) {
+			expect((await archive.readFile(memberPath)).bytes).toEqual(content);
+		}
+		expect(passes - indexPasses).toBe(1);
+	});
+
+	test("a streamed member read holds only the member's bytes", async () => {
+		const bytes = await gzipCompress(await encodeTar(members));
+		const archive = await openArchive({ bytes, format: "tar.gz" }, { limits });
+		const first = (await archive.readFile("first.txt")).bytes;
+		expect(new TextDecoder().decode(first)).toBe("first\n");
+		expect(first.buffer.byteLength).toBe(first.byteLength);
+	});
+
+	test("rejects a stream whose gzip trailer is cut off", async () => {
+		const bytes = await gzipCompress(await encodeTar(members));
+		const error = await openArchive(
+			{ bytes: bytes.subarray(0, bytes.byteLength - 8), format: "tar.gz" },
+			{ limits },
+		).then(
+			() => undefined,
+			(reason: unknown) => reason,
+		);
+		expect(error).toBeInstanceOf(ArchiveError);
+	});
+
+	test("a stream that is not a tar fails on the in-memory limit", async () => {
+		const bytes = await gzipCompress(new TextEncoder().encode("log line\n".repeat(1000)));
+		const error = await openArchive({ bytes, format: "gz" }, { limits }).then(
+			() => undefined,
+			(reason: unknown) => reason,
+		);
+		expect(error).toBeInstanceOf(ArchiveError);
+		expect(String(error)).toContain("too large to read in memory");
+		expect(String(error)).toContain("4.0KB limit");
+	});
+
+	test("a decompression bomb stops at maxStreamSize", async () => {
+		// All zeros sniff as an empty tar, so only the stream ceiling stops the walk.
+		const bytes = await gzipCompress(new Uint8Array(64 * 1024));
+		const error = await openArchive(
+			{ bytes, format: "tar.gz" },
+			{ limits: { ...limits, maxStreamSize: 16 * 1024 } },
+		).then(
+			() => undefined,
+			(reason: unknown) => reason,
+		);
+		expect(error).toBeInstanceOf(ArchiveError);
+		expect(String(error)).toContain("past the 16.0KB stream limit");
 	});
 });
 
@@ -185,7 +279,7 @@ describe("tar writer", () => {
 		expect(first).toEqual(second);
 		expect(first.byteLength % 512).toBe(0);
 		expect(sniffTar(first)).toBe(true);
-		const entries = index(first);
+		const entries = await index(first);
 		expect(entryAt(entries, "tree").isDirectory).toBe(true);
 		expect(entryAt(entries, "tree/deep").isDirectory).toBe(true);
 		expect(entryAt(entries, "tree/repeat.txt").mode).toBe(0o644);
@@ -196,7 +290,7 @@ describe("tar writer", () => {
 
 	test("supports explicit empty directories and rejects unsafe or conflicting paths", async () => {
 		const encoded = await encodeTar([["empty/", new Uint8Array(0)]]);
-		expect(entryAt(index(encoded), "empty").isDirectory).toBe(true);
+		expect(entryAt(await index(encoded), "empty").isDirectory).toBe(true);
 		await expect(encodeTar([["../escape", new Uint8Array(0)]])).rejects.toBeInstanceOf(ArchiveError);
 		await expect(
 			encodeTar([
