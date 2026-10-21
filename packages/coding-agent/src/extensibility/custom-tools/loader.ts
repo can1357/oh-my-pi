@@ -19,31 +19,15 @@ import type { HookUIContext } from "../../extensibility/hooks/types";
 import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
 import { loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 // Runtime self-reference: type-only so the barrel's module graph is not
-// evaluated when this loader loads. `loadPiCodingAgent()` resolves the real
-// ESM namespace on first tool binding, which keeps the index.ts cycle safe
-// (same idiom as the extensions loader) while preserving object identity with
-// the statically imported host namespace.
+// evaluated when this loader loads. `loadPiCodingAgentNamespace()` resolves
+// the real ESM namespace on first tool binding, which keeps the index.ts cycle
+// safe (same idiom as the extensions loader) while preserving object identity
+// with the statically imported host namespace.
 import type * as PiCodingAgent from "../../index";
 import * as typebox from "../legacy-typebox";
+import { loadPiCodingAgentNamespace } from "../package-namespace";
 import { createNoOpUIContext, resolvePath, withHostGuard } from "../utils";
 import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError } from "./types";
-
-/**
- * Dereference the package barrel on first tool binding.
- *
- * First-use boundary: evaluating `../../index` at import time would pull the
- * package barrel (and through it sdk/tools/modes/task-executor) into every
- * graph that loads the custom-tool loader. Bun's compiled ESM artifacts lower
- * `require()` to a CommonJS wrapper around the namespace, so the namespace
- * must resolve through a dynamic import to stay `===` with the statically
- * imported host namespace.
- */
-let piCodingAgentNamespace: typeof PiCodingAgent | undefined;
-
-async function loadPiCodingAgent(): Promise<typeof PiCodingAgent> {
-	piCodingAgentNamespace ??= await import("../../index");
-	return piCodingAgentNamespace;
-}
 
 interface LoadToolResult {
 	tools: LoadedCustomTool[];
@@ -255,7 +239,7 @@ export async function loadCustomTools(
 		reject?(reason: string): Promise<AgentToolResult<unknown> | undefined>;
 	}) => void,
 ) {
-	const loader = new CustomToolLoader(await loadPiCodingAgent(), cwd, builtInToolNames, pushPendingAction);
+	const loader = new CustomToolLoader(await loadPiCodingAgentNamespace(), cwd, builtInToolNames, pushPendingAction);
 	await loader.load(pathsWithSources);
 	return {
 		tools: loader.tools,

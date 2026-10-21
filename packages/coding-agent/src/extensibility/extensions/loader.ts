@@ -26,7 +26,7 @@ import { getExtensionNameFromPath } from "../../discovery/helpers";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 // Runtime self-reference: type-only so the barrel's module graph is not
-// evaluated when this loader loads. `loadPiCodingAgent()` resolves the real
+// evaluated when this loader loads. `loadPiCodingAgentNamespace()` resolves the real
 // ESM namespace on first extension construction, which keeps the index.ts
 // cycle safe (same idiom as cli-commands.ts's `loadLaunchHelp`) while
 // preserving object identity with the statically imported host namespace.
@@ -37,6 +37,7 @@ import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
+import { loadPiCodingAgentNamespace } from "../package-namespace";
 import { resolveExtensionDirectory } from "./directory-resolution";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
@@ -64,23 +65,6 @@ installLegacyPiSpecifierShim();
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
-
-/**
- * Dereference the package barrel on first extension construction.
- *
- * First-use boundary: evaluating `../../index` at import time would pull the
- * package barrel (and through it sdk/tools/modes/task-executor) into every
- * graph that loads an extension loader. Bun's compiled ESM artifacts lower
- * `require()` to a CommonJS wrapper around the namespace, so the namespace
- * must resolve through a dynamic import to stay `===` with the statically
- * imported host namespace.
- */
-let piCodingAgentNamespace: typeof PiCodingAgent | undefined;
-
-async function loadPiCodingAgent(): Promise<typeof PiCodingAgent> {
-	piCodingAgentNamespace ??= await import("../../index");
-	return piCodingAgentNamespace;
-}
 
 function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | null {
 	const candidate = typeof module === "function" ? module : module.default;
@@ -470,7 +454,7 @@ async function bindExtension(
 	}
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
-		const api = new ConcreteExtensionAPI(await loadPiCodingAgent(), extension, runtime, cwd, eventBus);
+		const api = new ConcreteExtensionAPI(await loadPiCodingAgentNamespace(), extension, runtime, cwd, eventBus);
 		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
 
 		return { extension, error: null };
@@ -491,7 +475,7 @@ export async function loadExtensionFromFactory(
 	name = "<inline>",
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
-	const api = new ConcreteExtensionAPI(await loadPiCodingAgent(), extension, runtime, cwd, eventBus);
+	const api = new ConcreteExtensionAPI(await loadPiCodingAgentNamespace(), extension, runtime, cwd, eventBus);
 	await runExtensionFactory(factory, api, runtime);
 	return extension;
 }

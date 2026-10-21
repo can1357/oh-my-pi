@@ -13,12 +13,12 @@ import { getConfigDirs } from "../../config";
 
 import { execCommand } from "../../exec/exec";
 // Runtime self-reference: type-only so the barrel's module graph is not
-// evaluated when this loader loads. `loadPiCodingAgent()` resolves the real
+// evaluated when this loader loads. `loadPiCodingAgentNamespace()` resolves the real
 // ESM namespace on first command binding, which keeps the index.ts cycle safe
 // (same idiom as the extensions loader) while preserving object identity with
 // the statically imported host namespace.
-import type * as PiCodingAgent from "../../index";
 import * as typebox from "../legacy-typebox";
+import { loadPiCodingAgentNamespace } from "../package-namespace";
 import { GreenCommand } from "./bundled/ci-green";
 import { AnnotateCommand } from "./bundled/annotate";
 import { ReviewCommand } from "./bundled/review";
@@ -32,23 +32,6 @@ import type {
 } from "./types";
 
 const arktype = Object.assign(Function.prototype.bind.call(type, undefined) as typeof type, type, { type });
-
-/**
- * Dereference the package barrel on first command binding.
- *
- * First-use boundary: evaluating `../../index` at import time would pull the
- * package barrel (and through it sdk/tools/modes/task-executor) into every
- * graph that loads the custom-command loader. Bun's compiled ESM artifacts
- * lower `require()` to a CommonJS wrapper around the namespace, so the
- * namespace must resolve through a dynamic import to stay `===` with the
- * statically imported host namespace.
- */
-let piCodingAgentNamespace: typeof PiCodingAgent | undefined;
-
-async function loadPiCodingAgent(): Promise<typeof PiCodingAgent> {
-	piCodingAgentNamespace ??= await import("../../index");
-	return piCodingAgentNamespace;
-}
 
 /**
  * Load a single command module using native Bun import.
@@ -220,7 +203,7 @@ export async function loadCustomCommands(options: LoadCustomCommandsOptions = {}
 		typebox,
 		arktype,
 		zod,
-		pi: await loadPiCodingAgent(),
+		pi: await loadPiCodingAgentNamespace(),
 	};
 
 	// 1. Load bundled commands first (lowest priority - can be overridden)

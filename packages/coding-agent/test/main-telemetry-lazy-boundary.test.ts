@@ -22,6 +22,42 @@ function toPosix(value: string): string {
 }
 
 /**
+ * The `OTEL_*` variables that decide whether a launch registers an OTLP
+ * exporter. A host that sets any of them legitimately loads the exporter, so
+ * the disabled-startup probe must not inherit them.
+ */
+const OTEL_ENDPOINT_VARS = [
+	"OTEL_EXPORTER_OTLP_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+	"OTEL_TRACES_EXPORTER",
+	"OTEL_LOGS_EXPORTER",
+	"OTEL_METRICS_EXPORTER",
+] as const;
+
+/**
+ * The child's environment, with every OTLP endpoint removed.
+ *
+ * The probe observes the *endpoint-disabled* startup path, so the child must
+ * not inherit a developer's `OTEL_EXPORTER_OTLP_ENDPOINT` (or a signal-specific
+ * endpoint): with one set, the launch legitimately loads the OTLP exporter and
+ * the assertion fails although the product behaves correctly. The kill switch
+ * is cleared as well, so the endpoint check — not the switch — is what keeps
+ * the exporter out of the graph.
+ */
+function disabledTelemetryEnv(): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value === undefined) continue;
+		if ((OTEL_ENDPOINT_VARS as readonly string[]).includes(key)) continue;
+		if (key === "OTEL_SDK_DISABLED") continue;
+		env[key] = value;
+	}
+	return env;
+}
+
+/**
  * Run the real launch in a fresh process and report every repository source
  * file it pulled in.
  *
@@ -37,6 +73,7 @@ function toPosix(value: string): string {
 async function evaluateLaunchModuleGraph(): Promise<string[]> {
 	const proc = Bun.spawn([process.execPath, "--preload", recorderPath, childPath], {
 		cwd: repoRoot,
+		env: disabledTelemetryEnv(),
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
