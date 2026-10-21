@@ -20,6 +20,10 @@
 - Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
 - Fixed the omp daemon staying alive for up to 3 seconds after shutdown, or 11 seconds after stopping a module unit such as the image URL broker, once its work was done
 
+### Changed
+
+- Changed the task tool prompt so the `effort` hint (when `task.enableEffort` is on) defaults to `lo` for lookups, mechanical edits and known fixes, `med` for ordinary implementation, and `hi` only when `solutionSpace` names genuinely open choices ([#16664](https://github.com/can1357/oh-my-pi/pull/16664) by [@Komzpa](https://github.com/Komzpa))
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes
