@@ -1,6 +1,14 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- Added the resolved `provider/model[:level]` and a retry-fallback flag to each subagent's `<task-result>` envelope and to a background delivery's `details`, so a parent can verify which model actually ran ([#16017](https://github.com/can1357/oh-my-pi/issues/16017), [#16135](https://github.com/can1357/oh-my-pi/pull/16135) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+## [18.12.5] - 2026-10-21
+
+### Added
+
+- `providers.cacheRetention: long` now keeps OpenAI GPT-5.6+ prompt caches for 12 hours (Responses API; cache writes cost 2.5× input instead of 1.25×)
 
 ### Added
 

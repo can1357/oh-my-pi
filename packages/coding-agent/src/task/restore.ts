@@ -109,7 +109,7 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 				// model from (#16135 review).
 				const model = resolvedModelDisplay(result);
 				if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
-					throw new AsyncJobError(text, structuredOutput);
+					throw new AsyncJobError(text, structuredOutput, model);
 				}
 				return { text, ...(model ? { model } : {}), ...(structuredOutput ? { structured: structuredOutput } : {}) };
 			},

@@ -385,6 +385,32 @@ describe("AsyncJobManager", () => {
 		expect(job?.structured?.status).toBe("invalid");
 	});
 
+	test("fails the job but keeps the resolved model from AsyncJobError", async () => {
+		// A failed run still resolved a model: the delivery `details` must
+		// report it, or the parent cannot tell which model served the failed
+		// subagent (#16135 review).
+		const manager = new AsyncJobManager({
+			onJobComplete: async () => {},
+		});
+
+		const jobId = manager.register("task", "agent task", async () => {
+			throw new AsyncJobError("Subagent execution failed: the isolation merge failed", undefined, {
+				selector: "anthropic/claude-opus-5-5:high",
+				fallback: true,
+			});
+		});
+
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+		const job = manager.getJob(jobId);
+		expect(job?.status).toBe("failed");
+		expect(job?.latestDetails?.model).toEqual({
+			selector: "anthropic/claude-opus-5-5:high",
+			fallback: true,
+		});
+	});
+
 	test("cancels a running job by id", async () => {
 		const completions: Array<{ jobId: string; text: string }> = [];
 		const manager = new AsyncJobManager({

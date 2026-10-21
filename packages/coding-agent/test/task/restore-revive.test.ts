@@ -160,116 +160,23 @@ it("revives a subagent a crash cut off mid tool call, runs the call again, and d
 		createPersistedSubagentReviverFactory({ session, authStorage, modelRegistry, settings, enableLsp: false }),
 		() => 0,
 	);
-	const delivered = Promise.withResolvers<string>();
-	manager.registerDeliverySink(MAIN_AGENT_ID, (_jobId, text) => {
-		delivered.resolve(text);
-	});
-
-	try {
-		const outcome = await restoreSession(session);
-		expect(outcome.subagents).toEqual([AGENT_ID]);
-
-		expect(await delivered.promise).toContain("restored: 42");
-		expect(readResults).toHaveLength(1);
-		expect(readResults[0]).toContain("the answer is 42");
-	} finally {
-		authStorage.close();
-	}
-}, 20_000);
-
-it("reports the revived subagent's resolved model in the delivery details", async () => {
-	// A restored subagent never streams `progress[]`, so its job's own carrier is
-	// the only place the delivery `details` can report the model from; without it
-	// the parent is back to parsing the child's session JSONL (#16135 review).
-	const cwd = path.join(root, "home", "work");
-	await fs.mkdir(cwd, { recursive: true });
-	await Bun.write(path.join(cwd, "notes.txt"), "the answer is 42\n");
-
-	const main = SessionManager.create(cwd, path.join(root, "sessions"));
-	main.appendMessage({ role: "user", content: "fan out", timestamp: Date.now() });
-	const mainFile = main.getSessionFile();
-	if (!mainFile) throw new Error("Expected a persisted session file");
-	await main.close();
-	const child = await SessionManager.open(
-		path.join(mainFile.slice(0, -6), `${AGENT_ID}.jsonl`),
-		undefined,
-		undefined,
-		{
-			initialCwd: cwd,
-			parentSession: mainFile,
-			suppressBreadcrumb: true,
-		},
-	);
-	child.appendSessionInit({
-		systemPrompt: ["test"],
-		task: "report what notes.txt says",
-		tools: ["read"],
-		agent: "task",
-		resolvedModel: "mock/mock-model",
-	});
-	child.appendMessage({ role: "user", content: "report what notes.txt says", timestamp: Date.now() });
-	child.appendMessage({
-		role: "assistant",
-		content: [{ type: "toolCall", id: "call_read", name: "read", arguments: { path: path.join(cwd, "notes.txt") } }],
-		api: "mock",
-		provider: "mock",
-		model: "mock-model",
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "toolUse",
-		timestamp: Date.now(),
-	});
-	await child.close();
-
-	const authStorage = createInMemoryAuthStorage();
-	authStorage.keys.setRuntime("mock", "test-key");
-	const modelRegistry = new ModelRegistry(authStorage);
-	const mock = createMockModel({
-		handler: context =>
-			context.messages.at(-1)?.role === "toolResult" ? { content: ["restored: 42"] } : { content: ["label"] },
-	});
-	const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
-	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [mock, ...catalogAvailable(kind)]);
-	const settings = Settings.isolated({
-		"task.agentIdleTtlMs": 0,
-		"compaction.enabled": false,
-		"retry.enabled": false,
-		"todo.enabled": false,
-		"todo.reminders": false,
-		"advisor.enabled": false,
-		modelRoles: { default: "mock/mock-model" },
-	});
-	const session = {
-		sessionManager: {
-			getSessionFile: () => mainFile,
-			getCwd: () => cwd,
-			getArtifactManager: () => undefined,
-		},
-		asyncJobManager: manager,
-		settings,
-		effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
-		preparedExtensions: undefined,
-		restoreInterruptedTurn: async () => false,
-	} as unknown as AgentSession;
-	AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
-		createPersistedSubagentReviverFactory({ session, authStorage, modelRegistry, settings, enableLsp: false }),
-		() => 0,
-	);
 	const delivered = Promise.withResolvers<Parameters<Parameters<typeof manager.registerDeliverySink>[1]>>();
 	manager.registerDeliverySink(MAIN_AGENT_ID, (jobId, text, job) => {
 		delivered.resolve([jobId, text, job] as never);
 	});
 
 	try {
-		await restoreSession(session);
+		const outcome = await restoreSession(session);
+		expect(outcome.subagents).toEqual([AGENT_ID]);
+
 		const [, text, job] = (await delivered.promise) as unknown as [string, string, { latestDetails?: unknown }];
 		expect(text).toContain("restored: 42");
+		expect(readResults).toHaveLength(1);
+		expect(readResults[0]).toContain("the answer is 42");
+		// A restored subagent never streams `progress[]`, so its job's own
+		// carrier is the only place the delivery `details` can report the model
+		// from; without it the parent is back to parsing the child's session
+		// JSONL (#16135 review).
 		expect(job.latestDetails).toEqual({ model: { selector: "mock/mock-model", fallback: false } });
 	} finally {
 		authStorage.close();

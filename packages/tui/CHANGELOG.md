@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- Added `ResolvedModelDisplay` and `resolvedModelDisplay()`, the shared projection of a run's resolved `provider/model[:level]` and retry-fallback verdict ([#16017](https://github.com/can1357/oh-my-pi/issues/16017), [#16135](https://github.com/can1357/oh-my-pi/pull/16135) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 

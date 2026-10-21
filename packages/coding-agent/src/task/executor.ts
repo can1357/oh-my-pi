@@ -3474,7 +3474,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					// from (#16135 review).
 					const model = resolvedModelDisplay(result);
 					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
-						wakeJob.outcome.reject(new AsyncJobError(text, structured));
+						wakeJob.outcome.reject(new AsyncJobError(text, structured, model));
 					} else {
 						wakeJob.outcome.resolve({ text, ...(model ? { model } : {}), ...(structured ? { structured } : {}) });
 					}

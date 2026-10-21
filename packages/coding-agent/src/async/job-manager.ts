@@ -59,11 +59,16 @@ export interface AsyncJobRunResult {
  * Job-body failure that still carries the run's structured output, so a
  * strict-mode schema violation fails the job without dropping the parsed
  * (invalid) payload.
+ *
+ * The resolved model rides along too: a run that failed still resolved a
+ * model, and the delivery `details` must report it — otherwise the parent
+ * cannot tell which model served a failed subagent.
  */
 export class AsyncJobError extends Error {
 	constructor(
 		message: string,
 		readonly structured?: StructuredSubagentOutput,
+		readonly model?: ResolvedModelDisplay,
 	) {
 		super(message);
 	}
@@ -477,6 +482,12 @@ export class AsyncJobManager {
 			} catch (error) {
 				job.endTime = Date.now();
 				if (error instanceof AsyncJobError && error.structured) job.structured = error.structured;
+				// A failed run still resolved a model: the delivery `details`
+				// must report it, or the parent cannot tell which model served
+				// the failed subagent.
+				if (error instanceof AsyncJobError && error.model) {
+					job.latestDetails = { ...job.latestDetails, model: error.model };
+				}
 				const errorText = error instanceof Error ? error.message : String(error);
 				job.errorText = errorText;
 				if (job.status !== "cancelled") {
