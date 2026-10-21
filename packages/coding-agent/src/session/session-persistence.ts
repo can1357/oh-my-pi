@@ -49,7 +49,16 @@ export const MAX_PROTOTYPE_CHAIN_DEPTH = 64;
 
 export function isImageBlock(value: unknown): value is { type: "image"; data: string; mimeType?: string } {
 	if (typeof value !== "object" || value === null) return false;
-	if (projectorImageField(value, "type") !== "image") return false;
+	// An own enumerable accessor-backed `type` may yield `"image"`, and the
+	// projector cannot know without running it — so the block is treated as
+	// image-shaped. The alternative truncates the base64 as a generic string,
+	// and the resumed session then carries an undecodable image.
+	const type = projectorImageFieldPresence(value, "type");
+	if (type === "opaque") {
+		const data = projectorImageFieldPresence(value, "data");
+		return data === "string" || data === "opaque";
+	}
+	if (type !== "string" || projectorImageField(value, "type") !== "image") return false;
 	// An accessor-backed `data` is still an image payload: the projector reads
 	// it once, when it externalizes the base64, exactly where the serializer
 	// would have read it. Leaving it inline would truncate the base64 and lose
@@ -564,6 +573,139 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
  * so it must stay in sync with the early-return guards above the recursion.
  */
 export function isAtomicPersistenceNode(obj: object, key?: string): boolean {
+	return classifyAtomicPersistenceNode(obj, key, PROJECTOR_ATOMIC_FIELDS);
+}
+
+/**
+ * The atomic verdict as the entry-line memo reproduces it: own enumerable
+ * data fields only, so the probe never invokes user code.
+ *
+ * The projector reads its carriers by key — following the prototype chain and
+ * running an accessor — so the memo's answer only agrees with the projector's
+ * where the carrier is an own enumerable data field (or a field no link on
+ * the chain carries at all). The memo proves that with its visibility gate
+ * before it stamps a graph, and leaves the graph uncached when it cannot, so
+ * the two answers never disagree where the verdict decides the projected
+ * bytes. A memo answer of "not atomic" against a projector's "atomic" is the
+ * safe direction: the stamp then records leaves the projector keeps verbatim,
+ * which costs a re-projection, never a stale line.
+ */
+export function isAtomicPersistenceNodeOwnFields(obj: object, key?: string): boolean {
+	return classifyAtomicPersistenceNode(obj, key, OWN_ATOMIC_FIELDS);
+}
+
+/**
+ * The fields the atomic classification consults for a node whose own `type`
+ * marker is `type`, and — for the typeless `anthropicCompaction` carrier —
+ * its `content`.
+ *
+ * The list is brand-specific on purpose: the classification decides whether
+ * the node persists verbatim, so every carrier it reads decides whether a
+ * long string inside it is preserved or truncated. A carrier the own-key
+ * stamp cannot see — inherited, own non-enumerable, or an accessor — flips
+ * the verdict without moving a stamped leaf, so the memo's visibility gate
+ * has to name exactly the carriers this brand reads and no others.
+ */
+export function atomicPersistenceCarrierKeys(type: unknown, key: string | undefined): readonly string[] {
+	const carriers: string[] = [];
+	// The typeless `anthropicCompaction` carrier is signed by its `content`,
+	// and that check is independent of the node's own `type` marker.
+	if (key === "anthropicCompaction") carriers.push("content");
+	switch (type) {
+		case "thinking":
+			carriers.push("thinkingSignature");
+			break;
+		case "text":
+			carriers.push("textSignature");
+			break;
+		case "toolCall":
+			carriers.push("thoughtSignature");
+			break;
+		case "redactedThinking":
+			carriers.push("data");
+			break;
+		case "reasoning":
+			carriers.push("encrypted_content");
+			break;
+		case "anthropicServerTool":
+			carriers.push("block");
+			break;
+		default:
+			break;
+	}
+	return carriers;
+}
+
+/**
+ * The fields the `anthropicServerTool` classification reads on the nested
+ * block. The verdict depends on the block's own `type` marker and on the
+ * presence and value of its optional fields, so each of them decides the
+ * atomic verdict exactly like the node's own carriers do.
+ */
+export const ANTHROPIC_SERVER_TOOL_BLOCK_FIELDS = ["type", "name", "id", "tool_use_id", "content"] as const;
+
+/**
+ * A field the atomic classification could not read: absent, or present behind
+ * a descriptor the reader refuses to invoke.
+ */
+const ATOMIC_FIELD_ABSENT = Symbol("atomic.field.absent");
+
+/**
+ * How the atomic classification reads a field. The projector reads by key —
+ * following the prototype chain and running an accessor — because that is
+ * what its own guards do. The memo reads own enumerable data fields only, so
+ * its probe never invokes user code.
+ */
+type AtomicFieldReader = (obj: object, key: string) => unknown;
+
+/** The projector's own field access: by key, chain-following, accessor-running. */
+const PROJECTOR_ATOMIC_FIELDS: AtomicFieldReader = (obj, key) =>
+	key in obj ? (obj as Record<string, unknown>)[key] : ATOMIC_FIELD_ABSENT;
+
+/**
+ * The memo's field access: own enumerable data fields only. A field the
+ * reader cannot see answers "absent" — the memo's visibility gate leaves the
+ * whole graph uncached in that case, so the two readers never disagree where
+ * the classification depends on the answer. The descriptor call is guarded:
+ * it runs a proxy's trap, which can throw.
+ */
+const OWN_ATOMIC_FIELDS: AtomicFieldReader = (obj, key) => {
+	let descriptor: PropertyDescriptor | undefined;
+	try {
+		descriptor = Object.getOwnPropertyDescriptor(obj, key);
+	} catch {
+		return ATOMIC_FIELD_ABSENT;
+	}
+	if (descriptor === undefined) return ATOMIC_FIELD_ABSENT;
+	if (typeof descriptor.get === "function" || typeof descriptor.set === "function") return ATOMIC_FIELD_ABSENT;
+	return descriptor.value;
+};
+
+/** Whether the field the reader returned is a non-empty string. */
+function isNonEmptyAtomicField(field: unknown): boolean {
+	return field !== ATOMIC_FIELD_ABSENT && typeof field === "string" && field.length > 0;
+}
+
+/** The optional block field, spread into the validation view when present. */
+function optionalAtomicField(
+	block: Record<string, unknown>,
+	key: string,
+	read: AtomicFieldReader,
+): Record<string, unknown> {
+	const value = read(block, key);
+	return value === ATOMIC_FIELD_ABSENT ? {} : { [key]: value };
+}
+
+/**
+ * The shared atomic classification, read through `read`.
+ *
+ * The projector and the memo answer the same question — does this node
+ * persist verbatim? — and must agree: a node the memo calls atomic while the
+ * projector calls it a generic container hides the truncation the projector
+ * applies to the strings inside it, and the memo would then reuse a line the
+ * projector no longer produces.
+ */
+function classifyAtomicPersistenceNode(obj: object, key: string | undefined, read: AtomicFieldReader): boolean {
 	// NOTE: image_generation_call results and externalizable image payloads
 	// are NOT atomic — truncateForPersistence rewrites them via the blob
 	// store. They are checked explicitly in the predicate and must never be
@@ -572,46 +714,42 @@ export function isAtomicPersistenceNode(obj: object, key?: string): boolean {
 	// its key-based case sits outside the type guard below — mirroring the
 	// projection's early return, which checks the key without requiring one.
 	const untyped = obj as Record<string, unknown>;
-	if (key === "anthropicCompaction" && "content" in untyped && typeof untyped.content === "string") return true;
-	if (typeof obj === "object" && "type" in obj) {
-		const typed = obj as Record<string, unknown>;
-		// Mirror the truncate guard exactly: only a block that passes
-		// isAnthropicServerToolHistoryBlock is atomic. An interrupted,
-		// corrupt, or forward-version block that FAILS validation falls
-		// through here (and in the main function) into the generic
-		// recursion, so oversized strings and jsonlEvents inside it are
-		// still truncated/stripped instead of bypassing size controls.
-		if (typed.type === "anthropicServerTool" && "block" in typed) {
-			const block = typed.block;
-			if (
-				typeof block === "object" &&
-				block !== null &&
-				"type" in block &&
-				typeof (block as { type?: unknown }).type === "string"
-			) {
-				const asBlock = block as Record<string, unknown>;
-				const validationView = {
-					type: asBlock.type as string,
-					...("name" in asBlock ? { name: asBlock.name } : {}),
-					...("id" in asBlock ? { id: asBlock.id } : {}),
-					...("tool_use_id" in asBlock ? { tool_use_id: asBlock.tool_use_id } : {}),
-					...("content" in asBlock ? { content: asBlock.content } : {}),
-				};
-				if (isAnthropicServerToolHistoryBlock(validationView)) return true;
-			}
-			return false;
-		}
-		if (typed.type === "anthropicCompaction" || typed.type === "cursorHistory") return true;
-		const signed =
-			(typed.type === "thinking" && "thinkingSignature" in typed && isNonEmptyString(typed.thinkingSignature)) ||
-			(typed.type === "text" && "textSignature" in typed && isNonEmptyString(typed.textSignature)) ||
-			(typed.type === "toolCall" && "thoughtSignature" in typed && isNonEmptyString(typed.thoughtSignature));
-		const redacted = typed.type === "redactedThinking" && "data" in typed && isNonEmptyString(typed.data);
-		const encryptedReasoning =
-			typed.type === "reasoning" && "encrypted_content" in typed && isNonEmptyString(typed.encrypted_content);
-		if (signed || redacted || encryptedReasoning) return true;
+	if (key === "anthropicCompaction") {
+		const content = read(untyped, "content");
+		if (content !== ATOMIC_FIELD_ABSENT && typeof content === "string") return true;
 	}
-	return false;
+	const type = read(untyped, "type");
+	if (type === ATOMIC_FIELD_ABSENT) return false;
+	// Mirror the truncate guard exactly: only a block that passes
+	// isAnthropicServerToolHistoryBlock is atomic. An interrupted,
+	// corrupt, or forward-version block that FAILS validation falls
+	// through here (and in the main function) into the generic
+	// recursion, so oversized strings and jsonlEvents inside it are
+	// still truncated/stripped instead of bypassing size controls.
+	if (type === "anthropicServerTool") {
+		const block = read(untyped, "block");
+		if (block === ATOMIC_FIELD_ABSENT) return false;
+		if (typeof block !== "object" || block === null) return false;
+		const blockType = read(block, "type");
+		if (blockType === ATOMIC_FIELD_ABSENT || typeof blockType !== "string") return false;
+		const asBlock = block as Record<string, unknown>;
+		const validationView = {
+			type: blockType,
+			...optionalAtomicField(asBlock, "name", read),
+			...optionalAtomicField(asBlock, "id", read),
+			...optionalAtomicField(asBlock, "tool_use_id", read),
+			...optionalAtomicField(asBlock, "content", read),
+		};
+		return isAnthropicServerToolHistoryBlock(validationView);
+	}
+	if (type === "anthropicCompaction" || type === "cursorHistory") return true;
+	const signed =
+		(type === "thinking" && isNonEmptyAtomicField(read(untyped, "thinkingSignature"))) ||
+		(type === "text" && isNonEmptyAtomicField(read(untyped, "textSignature"))) ||
+		(type === "toolCall" && isNonEmptyAtomicField(read(untyped, "thoughtSignature")));
+	const redacted = type === "redactedThinking" && isNonEmptyAtomicField(read(untyped, "data"));
+	const encryptedReasoning = type === "reasoning" && isNonEmptyAtomicField(read(untyped, "encrypted_content"));
+	return signed || redacted || encryptedReasoning;
 }
 
 /**
