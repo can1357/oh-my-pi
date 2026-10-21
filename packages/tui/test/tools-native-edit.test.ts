@@ -268,4 +268,23 @@ describe("edit native views", () => {
 		if (!view.tool) throw new Error("Expected edit tool head");
 		expect(view.tool.badges?.map(badge => badge.text)).toEqual(["1 diagnostic"]);
 	});
+
+	it("sanitizes a custom server name in the unavailable status row", () => {
+		// A server name is a key of the user's LSP config, so it can carry a
+		// tab or be arbitrarily long. It must not reach the terminal row raw.
+		const diagnostics: FileDiagnosticsResult = {
+			messages: [],
+			summary: "diagnostics unavailable from my-custom-server",
+			errored: false,
+			unjudgedServers: [`my\tcustom-server-${"x".repeat(60)}`],
+		};
+		const children = (diagnosticsSection(diagnostics)?.c ?? []).filter(isNode);
+		const unjudged = children.find(child => prop(child, "key") === "unjudged");
+		if (!unjudged) throw new Error("Expected the unavailable status row");
+		const status = spanText(unjudged, "spans");
+		expect(status).toContain("no diagnostics published by ");
+		expect(status).not.toContain("\t");
+		expect(status).not.toContain("x".repeat(60));
+		expect(status.length).toBeLessThan(80);
+	});
 });

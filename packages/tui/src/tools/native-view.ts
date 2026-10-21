@@ -8,7 +8,8 @@ import { pathToFileURL } from "node:url";
 import type { TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { ansi, code, compact, keyed, node, row, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
-import { type ParsedDiagnostic, parseDiagnosticMessage, shortenPath } from "../render/render-utils";
+import { type ParsedDiagnostic, parseDiagnosticMessage, shortenPath, TRUNCATE_LENGTHS } from "../render/render-utils";
+import { replaceTabs, truncateToWidth } from "../utils";
 import { plainText } from "../native/spans";
 import type { FileDiagnosticsResult } from "./lsp";
 import { formatArtifactErrorNotice, formatTruncationMetaNotice, type OutputMeta } from "./output-meta";
@@ -370,10 +371,13 @@ export function diagnosticsSection(
 		shown.push(text([span(`+${hidden} more`, "muted")], { role: "omp.tool.stats", key: "more" }));
 	}
 	if (unjudged.length > 0) {
+		// A server name comes from the user's LSP config: tabs become spaces
+		// and an overlong name is cut, so a custom name cannot break the row.
+		const names = unjudged.map(name => truncateToWidth(replaceTabs(name), TRUNCATE_LENGTHS.SHORT));
 		// Outside the cap: the status is not a finding, and it must stay
 		// visible even when the diagnostic rows fill the section (issue #15408).
 		shown.push(
-			text([span(`no diagnostics published by ${unjudged.join(", ")}`)], {
+			text([span(`no diagnostics published by ${names.join(", ")}`)], {
 				wrap: "word",
 				role: "omp.tool.diagnostic",
 				key: "unjudged",
