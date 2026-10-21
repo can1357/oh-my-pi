@@ -196,7 +196,6 @@ impl GitRepo {
 		let sign = repo
 			.config_snapshot()
 			.try_boolean("commit.gpgSign")
-			.transpose()
 			.map_err(|err| Error::backend("git commit read commit.gpgSign", err))?
 			.unwrap_or(false);
 		run_commit_hook(self, "pre-commit", &[])?;
@@ -3097,5 +3096,21 @@ mod tests {
 		);
 		assert!(repo.worktree_prune().is_ok());
 		let _ = fs::remove_dir_all(linked);
+	}
+
+	/// A `working-tree-encoding` gix cannot apply fails the restore and leaves
+	/// the file alone, instead of writing the blob's bytes unconverted.
+	#[test]
+	fn restore_with_unavailable_working_tree_encoding_fails_and_keeps_file() {
+		let (temp, repo) = fixture();
+		fs::write(
+			temp.path().join(".git/info/attributes"),
+			"a working-tree-encoding=NO-SUCH-ENCODING\n",
+		)
+		.unwrap();
+		fs::write(temp.path().join("a"), "dirty\n").unwrap();
+		let result = repo.restore(&RestoreOptions { files: vec!["a".into()], ..Default::default() });
+		assert!(result.is_err(), "restore wrote a file it could not encode: {result:?}");
+		assert_eq!(fs::read_to_string(temp.path().join("a")).unwrap(), "dirty\n");
 	}
 }

@@ -11,7 +11,7 @@ use std::{
 
 use futures::TryStreamExt as _;
 use jj_lib::{
-	backend::CommitId,
+	backend::{CommitId, MergedTreeValue},
 	commit::Commit,
 	config::{ConfigSource, StackedConfig},
 	conflicts::{ConflictMarkerStyle, ConflictMaterializeOptions, materialize_tree_value},
@@ -23,7 +23,7 @@ use jj_lib::{
 	},
 	gitignore::GitIgnoreFile,
 	matchers::{EverythingMatcher, NothingMatcher},
-	merge::{Diff, MergedTreeValue},
+	merge::Diff,
 	merged_tree::MergedTree,
 	object_id::{HexPrefix, ObjectId as _, PrefixResolution},
 	repo::{ReadonlyRepo, Repo},
@@ -76,7 +76,7 @@ impl JjWorkspace {
 
 				let mut candidates = BTreeSet::new();
 				for (_, target) in repo.view().local_bookmarks() {
-					for id in target.added_ids() {
+					for id in target.present_adds() {
 						if repo
 							.index()
 							.is_ancestor(id, &wc_id)
@@ -103,6 +103,7 @@ impl JjWorkspace {
 
 				let prefix_len = repo
 					.shortest_unique_change_id_prefix_len(wc_commit.change_id())
+					.await
 					.map_err(|err| Error::backend("jj log", err))?
 					.max(8);
 				let change_id = wc_commit.change_id().reverse_hex();
@@ -236,6 +237,7 @@ impl JjWorkspace {
 				for commit in commits {
 					let prefix_len = repo
 						.shortest_unique_change_id_prefix_len(commit.change_id())
+						.await
 						.map_err(|err| Error::backend("jj log", err))?
 						.max(8);
 					let change_id = commit.change_id().reverse_hex();
@@ -252,7 +254,8 @@ impl JjWorkspace {
 		let rev = rev.to_owned();
 		self.with_current_repo("jj show", move |workspace, repo| {
 			Box::pin(async move {
-				let commit_id = resolve_commit_id(workspace, repo.as_ref(), &rev)?
+				let commit_id = resolve_commit_id(workspace, repo.as_ref(), &rev)
+					.await?
 					.ok_or_else(|| Error::ObjectNotFound { spec: rev.clone() })?;
 				let commit = repo
 					.store()
@@ -415,7 +418,11 @@ fn commit_subject(commit: &Commit) -> String {
 		.to_owned()
 }
 
-fn resolve_commit_id(
+#[allow(
+	clippy::future_not_send,
+	reason = "driven on a per-call current-thread runtime; jj-lib's index futures are !Send"
+)]
+async fn resolve_commit_id(
 	workspace: &Workspace,
 	repo: &dyn Repo,
 	rev: &str,
@@ -429,6 +436,7 @@ fn resolve_commit_id(
 	if let Some(prefix) = HexPrefix::try_from_reverse_hex(rev) {
 		let resolution = repo
 			.resolve_change_id_prefix(&prefix)
+			.await
 			.map_err(|err| Error::backend("jj show", err))?;
 		if let PrefixResolution::SingleMatch(targets) = resolution {
 			let mut visible = targets.visible_with_offsets().map(|(_, id)| id.clone());
@@ -442,6 +450,7 @@ fn resolve_commit_id(
 		let resolution = repo
 			.index()
 			.resolve_commit_id_prefix(&prefix)
+			.await
 			.map_err(|err| Error::backend("jj show", err))?;
 		if let PrefixResolution::SingleMatch(id) = resolution {
 			return Ok(Some(id));
@@ -459,7 +468,7 @@ fn user_settings() -> std::result::Result<UserSettings, jj_lib::config::ConfigGe
 			let _ = config.load_file(ConfigSource::User, &path);
 		}
 	}
-	UserSettings::from_config(config)
+	UserSettings::from_config_and_home_dir(config, std::env::home_dir())
 }
 
 fn user_config_paths() -> Vec<PathBuf> {
@@ -1255,5 +1264,51 @@ mod tests {
 		let details = workspace.commit_details("@").unwrap();
 		assert_eq!(details.sha, workspace.head_id().unwrap().unwrap());
 		assert_eq!(details.parents.len(), 1);
+	}
+
+	/// A read opens the repo at head, which merges divergent operation heads
+	/// and writes the merged view. Since 0.46, `jj` colocates secondary
+	/// workspaces through Git worktrees and records each one's Git HEAD in that
+	/// view; a jj-lib older than that field dropped it on the write, and the
+	/// workspace's next `jj` command re-imported HEAD and replaced its
+	/// working-copy commit with a new empty one.
+	#[test]
+	fn reading_over_divergent_op_heads_keeps_colocated_workspace_working_copy() {
+		if !jj_available() {
+			return;
+		}
+		let temp = tempfile::tempdir().unwrap();
+		let quiet = ["--config", "fsmonitor.backend=none"];
+		let jj = |root: &Path, args: &[&str]| run_jj(root, &[&quiet[..], args].concat());
+		jj(temp.path(), &["git", "init", "--colocate", "main"]);
+		let main = temp.path().join("main");
+		fs::write(main.join("a.txt"), "a\n").unwrap();
+		jj(&main, &["commit", "-m", "base"]);
+		jj(&main, &["--config", "git.colocate=true", "workspace", "add", "../colocated"]);
+		let colocated = temp.path().join("colocated");
+		if !colocated.join(".git").exists() {
+			// This `jj` predates colocated secondary workspaces, so it records no
+			// Git HEAD for one and the read has nothing to drop.
+			return;
+		}
+		jj(&colocated, &["describe", "-m", "work in colocated"]);
+		// A pure-jj workspace for the reader: with no `.git` beside it,
+		// detection takes the jj path.
+		jj(&main, &["--config", "git.colocate=false", "workspace", "add", "../reader"]);
+
+		// Two operations forked from the same parent: divergent op heads.
+		let op = jj(&main, &["op", "log", "--limit", "1", "--no-graph", "-T", "id"]);
+		jj(&main, &["--at-op", op.trim(), "describe", "-m", "side one"]);
+		jj(&main, &["--at-op", op.trim(), "bookmark", "create", "side", "-r", "@-"]);
+
+		let repo = crate::detect(&temp.path().join("reader")).unwrap().unwrap();
+		assert_eq!(repo.kind(), crate::VcsKind::Jj);
+		repo.head_id().unwrap();
+
+		let description = jj(&colocated, &["log", "-r", "@", "--no-graph", "-T", "description"]);
+		assert_eq!(
+			description, "work in colocated\n",
+			"the colocated workspace moved off its working-copy change"
+		);
 	}
 }

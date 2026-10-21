@@ -412,7 +412,7 @@ brush-parser = { path = "crates/vendor/brush-parser" }
 # gix is pinned to the minor jj-lib depends on so both VCS backends share one
 # gitoxide stack in the binary. No transport/credential features: network ops
 # (clone/fetch/push) deliberately shell out to the git CLI for auth parity.
-gix = { version = "0.85", default-features = false, features = [
+gix = { version = "0.88", default-features = false, features = [
    "attributes",
    "blob-diff",
    "dirwalk",
@@ -424,11 +424,9 @@ gix = { version = "0.85", default-features = false, features = [
    "sha1",
    "sha256",
    "status",
-   "tree-editor",
    "worktree-mutation",
-   "zlib-rs",
 ] }
-jj-lib = { version = "0.44", default-features = false, features = ["git"] }
+jj-lib = { version = "0.46", default-features = false, features = ["git"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # AST & Tree-Sitter

@@ -334,18 +334,32 @@ fn index_changes(
 	let index = load_index_or_empty(repo, "git diff --cached")?;
 	let mut pathspec = make_pathspec(repo, files, false)?;
 	let mut out = Vec::new();
+	// The callback's error type is gix's own, so a failure of ours stops the
+	// walk and is returned after it.
+	let mut failure = None;
 	repo
 		.tree_index_status(
 			&tree_id,
 			&index,
 			pathspec.as_mut(),
 			gix::status::tree_index::TrackRenames::AsConfigured,
-			|change, _, _| -> Result<_> {
-				out.push(index_change(repo, change.into_owned())?);
-				Ok(std::ops::ControlFlow::Continue(()))
+			|change, _, _| {
+				Ok(match index_change(repo, change.into_owned()) {
+					Ok(change) => {
+						out.push(change);
+						std::ops::ControlFlow::Continue(())
+					},
+					Err(err) => {
+						failure = Some(err);
+						std::ops::ControlFlow::Break(())
+					},
+				})
 			},
 		)
 		.map_err(|err| Error::backend("git diff --cached", err))?;
+	if let Some(err) = failure {
+		return Err(err);
+	}
 	pair_gitlink_renames(&mut out);
 	sort_changes(&mut out);
 	Ok(out)
@@ -1374,7 +1388,8 @@ const BASE85: &[u8; 85] =
 	b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
 
 fn zlib_compress(data: &[u8]) -> Result<Vec<u8>> {
-	let mut writer = gix::features::zlib::stream::deflate::Write::new(Vec::new());
+	let mut writer =
+		gix::zlib::stream::deflate::Write::new(Vec::new(), gix::zlib::Compression::BEST_SPEED);
 	writer
 		.write_all(data)
 		.and_then(|()| writer.flush())
