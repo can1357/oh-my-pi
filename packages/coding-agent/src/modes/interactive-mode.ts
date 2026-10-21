@@ -5256,6 +5256,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#renderTodoList(): void {
 		this.todoContainer.clear();
 		this.#todoHudNative = undefined;
+		// Record the budget before any early return: the Composer allocation callback rebuilds
+		// the HUD whenever this differs, so an empty or hidden plan must not leave it stale.
+		this.#todoHudRenderedRows = this.getTodoHudPanelRows();
 		const activeDescs = this.#getActiveSubagentDescriptions();
 		this.#todoHudSubagentKey = activeDescs.join("\n");
 		if (this.#todoHudHidden) return;
@@ -5266,7 +5269,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		const activeIdx = phases.indexOf(this.#getActivePhase(phases) ?? phases[0]);
 		// Fixed budgets keep the HUD bounded regardless of plan size / progress.
 		const subsequentStageCap = 4; // stages shown after the active one (a trailing summary row covers the rest)
-		this.#todoHudRenderedRows = this.getTodoHudPanelRows();
 
 		// A pending todo "lights up" (accent) when an in-flight subagent is doing
 		// its work, matched by normalized content overlap.

@@ -806,6 +806,87 @@ describe("InteractiveMode todo HUD anchor", () => {
 		});
 	});
 
+	describe("composer allocation callback", () => {
+		type AllocationApply = (
+			viewport: { columns: number; rows: number },
+			chromeRows: number,
+			renderInput: () => number,
+		) => void;
+
+		let allocMode: InteractiveMode | undefined;
+		let allocBus: EventBus;
+
+		function setTerminalRows(rows: number): void {
+			if (allocMode) Object.defineProperty(allocMode.ui.terminal, "rows", { get: () => rows, configurable: true });
+		}
+
+		async function initCapturingAllocation(): Promise<AllocationApply> {
+			allocBus = new EventBus();
+			const m = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, allocBus);
+			allocMode = m;
+			vi.spyOn(m.statusLine, "watchBranch").mockImplementation(() => {});
+			let apply: AllocationApply | undefined;
+			const setRuntimeChildren = m.composer.setRuntimeChildren.bind(m.composer);
+			vi.spyOn(m.composer, "setRuntimeChildren").mockImplementation((roots, options) => {
+				apply = options?.allocation?.apply;
+				setRuntimeChildren(roots, options);
+			});
+			await m.init();
+			if (!apply) throw new Error("Expected InteractiveMode.init to register a Composer allocation");
+			setTerminalRows(40);
+			return apply;
+		}
+
+		afterEach(() => {
+			allocMode?.setTodos([]);
+			allocMode?.stop();
+			allocMode = undefined;
+		});
+
+		it("does not rebuild the HUD on every keypress when there is no plan", async () => {
+			const apply = await initCapturingAllocation();
+			const clear = vi.spyOn(allocMode!.todoContainer, "clear");
+			for (let keypress = 0; keypress < 20; keypress++) apply({ columns: 120, rows: 40 }, 4, () => 3);
+			expect(clear.mock.calls.length).toBeLessThanOrEqual(1);
+		});
+
+		it("does not rebuild the HUD on every keypress when only workers are running", async () => {
+			const apply = await initCapturingAllocation();
+			allocBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+				id: "Worker",
+				index: 0,
+				agent: "task",
+				description: "Investigate flaky test",
+				status: "started",
+			});
+			const clear = vi.spyOn(allocMode!.todoContainer, "clear");
+			for (let keypress = 0; keypress < 20; keypress++) apply({ columns: 120, rows: 40 }, 4, () => 3);
+			expect(clear.mock.calls.length).toBeLessThanOrEqual(1);
+		});
+
+		it("still rebuilds a planned HUD once when the row budget changes, then stays quiet", async () => {
+			const apply = await initCapturingAllocation();
+			allocMode!.setTodos([
+				{
+					name: "Build",
+					tasks: Array.from({ length: 8 }, (_, index): TodoItem => ({
+						content: `step ${index}`,
+						status: index === 0 ? "in_progress" : "pending",
+					})),
+				},
+			]);
+			apply({ columns: 120, rows: 40 }, 4, () => 3);
+			const clear = vi.spyOn(allocMode!.todoContainer, "clear");
+			for (let keypress = 0; keypress < 20; keypress++) apply({ columns: 120, rows: 40 }, 4, () => 3);
+			expect(clear).not.toHaveBeenCalled();
+			setTerminalRows(20);
+			apply({ columns: 120, rows: 20 }, 4, () => 3);
+			expect(clear).toHaveBeenCalledTimes(1);
+			for (let keypress = 0; keypress < 20; keypress++) apply({ columns: 120, rows: 20 }, 4, () => 3);
+			expect(clear).toHaveBeenCalledTimes(1);
+		});
+	});
+
 	describe("compact todo for small terminal height (< 18 rows)", () => {
 		function setTerminalRows(rows: number): void {
 			Object.defineProperty(mode.ui.terminal, "rows", {
