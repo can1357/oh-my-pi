@@ -193,6 +193,7 @@ rust_shared_library(
         "//crates/pi-edit",
         "//crates/pi-walker",
         "//crates/pi-iso",
+        "//crates/pi-mermaid",
         "//crates/pi-predict",
         "//crates/pi-shell",
         "//crates/pi-vcs",
