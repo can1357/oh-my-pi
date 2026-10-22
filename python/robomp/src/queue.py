@@ -14,6 +14,7 @@ from robomp.cancellation import clear_current_event, set_current_event
 from robomp.config import Settings
 from robomp.db import Database, EventRow
 from robomp.github_backend import GitHubBackend
+from robomp.platform_utils import create_git_transport, create_proxy_backend
 from robomp.sandbox import GitTransport, SandboxManager, _reap_slot
 from robomp.slot_pool import SlotPool
 
@@ -368,7 +369,29 @@ class WorkerPool:
         else:
             self.db.mark_event(row.delivery_id, "done")
 
+    def _platform_github(self, platform: str) -> GitHubBackend:
+        """Return a proxy client scoped to the event's platform.
+
+        For ``github`` (the default), returns the shared singleton. For
+        ``forgejo``, creates a per-call client with ``platform='forgejo'``
+        so every HMAC-signed request carries it in the query string and
+        gh-proxy routes to the Forgejo API + token.
+        """
+        forged = create_proxy_backend(self.settings, platform)
+        if forged is not None:
+            return forged
+        return self.github
+
+    def _platform_transport(self, platform: str) -> GitTransport:
+        """Return a git transport scoped to the event's platform."""
+        forged = create_git_transport(self.settings, platform)
+        if forged is not None:
+            return forged
+        return self.git_transport
+
     async def _dispatch(self, row: EventRow, *, slot_uid: int | None = None) -> None:
+        github = self._platform_github(row.platform)
+        git_transport = self._platform_transport(row.platform)
         event = row.event_type
         action = str(row.payload.get("action") or "")
         log.info(
@@ -386,9 +409,9 @@ class WorkerPool:
             await tasks.triage_issue(
                 settings=self.settings,
                 db=self.db,
-                github=self.github,
+                github=github,
                 sandbox=self.sandbox,
-                git_transport=self.git_transport,
+                git_transport=git_transport,
                 payload=row.payload,
                 delivery_id=row.delivery_id,
                 attempts=row.attempts,
@@ -408,13 +431,13 @@ class WorkerPool:
             )
         elif event == "issue_comment" and action == "created":
             issue = row.payload.get("issue") or {}
-            if "pull_request" in issue:
+            if issue.get("pull_request") is not None:
                 await tasks.handle_pr_conversation(
                     settings=self.settings,
                     db=self.db,
-                    github=self.github,
+                    github=github,
                     sandbox=self.sandbox,
-                    git_transport=self.git_transport,
+                    git_transport=git_transport,
                     payload=row.payload,
                     delivery_id=row.delivery_id,
                     attempts=row.attempts,
@@ -424,9 +447,9 @@ class WorkerPool:
                 await tasks.handle_comment(
                     settings=self.settings,
                     db=self.db,
-                    github=self.github,
+                    github=github,
                     sandbox=self.sandbox,
-                    git_transport=self.git_transport,
+                    git_transport=git_transport,
                     payload=row.payload,
                     delivery_id=row.delivery_id,
                     attempts=row.attempts,
@@ -436,21 +459,26 @@ class WorkerPool:
             await tasks.review_pr(
                 settings=self.settings,
                 db=self.db,
-                github=self.github,
+                github=github,
                 sandbox=self.sandbox,
-                git_transport=self.git_transport,
+                git_transport=git_transport,
                 payload=row.payload,
                 delivery_id=row.delivery_id,
                 attempts=row.attempts,
                 slot_uid=slot_uid,
             )
-        elif event == "pull_request_review_comment" and action == "created":
+        elif event in (
+            "pull_request_review_comment",
+            "pull_request_comment",
+            "pull_request_approved",
+            "pull_request_rejected",
+        ) and action in ("created", "reviewed", "edited"):
             await tasks.handle_review(
                 settings=self.settings,
                 db=self.db,
-                github=self.github,
+                github=github,
                 sandbox=self.sandbox,
-                git_transport=self.git_transport,
+                git_transport=git_transport,
                 payload=row.payload,
                 delivery_id=row.delivery_id,
                 attempts=row.attempts,
