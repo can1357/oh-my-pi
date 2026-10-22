@@ -190,7 +190,12 @@ export class IrcBridge {
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
-		const streaming = this.#host.isStreaming();
+		const recipient = AgentRegistry.global().get(msg.to);
+		// The task owns a running child before its first core prompt starts.
+		// Waking in that setup window steals the brief's dispatch ownership.
+		const dispatchPending =
+			recipient?.kind === "sub" && recipient.status === "running" && !this.#host.agent.state.isStreaming;
+		const streaming = this.#host.isStreaming() || dispatchPending;
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
 		const fromParent = AgentRegistry.global().get(msg.to)?.parentId === msg.from;
 		// An idle subagent runs a monitored wake turn whose output is relayed
@@ -228,6 +233,10 @@ export class IrcBridge {
 		};
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
+			if (dispatchPending) {
+				this.#host.agent.followUp(record);
+				return "injected";
+			}
 			if (fromParent) {
 				const steer: AgentMessage = {
 					role: "user",
