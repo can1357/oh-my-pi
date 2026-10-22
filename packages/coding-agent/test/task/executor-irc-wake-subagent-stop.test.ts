@@ -10,7 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockHandler, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -121,6 +121,8 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		agentType?: string;
 		/** Register the session live and leave it to `runSubagentFollowUpTurn` instead of observing it as a wake. */
 		driven?: boolean;
+		/** The wake turn's prompt rejects once the turn itself ran (a post-yield session failure). */
+		failWakeAfterTurn?: boolean;
 	}) {
 		const stopEvents: SubagentStopEvent[] = [];
 		const lifecycle: LifecycleFrame[] = [];
@@ -149,6 +151,16 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			convertToLlm,
 			streamFn: mock.stream,
 		});
+		if (args.failWakeAfterTurn) {
+			const prompt = agent.prompt.bind(agent);
+			let failed = false;
+			agent.prompt = async (input: string | AgentMessage | AgentMessage[]) => {
+				await (typeof input === "string" ? prompt(input) : prompt(input));
+				if (failed) return;
+				failed = true;
+				throw new Error("post-yield turn failure");
+			};
+		}
 		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
 		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
 		session = new AgentSession({
@@ -259,6 +271,21 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(run.mock.calls).toHaveLength(2);
 		expect(await Bun.file(run.artifact).exists()).toBe(false);
 		expect(run.lifecycle.at(-1)?.status).toBe("failed");
+	});
+
+	it("offers a yield the wake turn latched before the turn failed, instead of publishing it unjudged", async () => {
+		const run = await setup({
+			failWakeAfterTurn: true,
+			responses: [yieldCall("REFUSED-PAYLOAD"), yieldCall("replacement")],
+			onStop: (_event, callIndex) => (callIndex === 1 ? { decision: "block", reason: "keep going" } : undefined),
+		});
+
+		await wake(run.session);
+
+		expect(run.stopEvents).toHaveLength(2);
+		const artifact = await Bun.file(run.artifact).text();
+		expect(artifact).toContain("replacement");
+		expect(artifact).not.toContain("REFUSED-PAYLOAD");
 	});
 
 	it("fails closed when a newer wake took the session while handlers were consulting", async () => {
