@@ -143,6 +143,7 @@ export type LoginProviderId =
 	| "meta"
 	| "minimax-code"
 	| "minimax-code-cn"
+	| "mistral"
 	| "moonshot"
 	| "muse-code"
 	| "nanogpt"
