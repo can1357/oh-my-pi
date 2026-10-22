@@ -990,6 +990,10 @@ export class AgentSession implements SettingsScope {
 	#disposers: Array<() => void> = [];
 	/** Idle recap and idle compaction, once the owner opts in via {@link enableIdleMaintenance}. */
 	#idleMaintenance: IdleMaintenance | undefined;
+	/** Run by {@link onClosed} once dispose has closed the session file. */
+	#closedListeners: Array<() => void> = [];
+	/** See {@link setHeldMailProvider}. */
+	#heldMailProvider: (() => CustomMessage[]) | undefined;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
@@ -2901,6 +2905,30 @@ export class AgentSession implements SettingsScope {
 	/** Registers teardown to run when this session is disposed (e.g. handle listeners bound to it). */
 	addDisposer(dispose: () => void): void {
 		this.#disposers.push(dispose);
+	}
+
+	/** Registers `listener` to run once dispose has closed the session file (or failed to), after its last write. */
+	onClosed(listener: () => void): void {
+		this.#closedListeners.push(listener);
+	}
+
+	/**
+	 * Source of out-of-band mail waiting for the user (`omp poke` held by Esc). A
+	 * user-authored prompt that is about to run or queue calls it synchronously
+	 * and sends what it returns ahead of the user's message, in the same turn.
+	 */
+	setHeldMailProvider(provider: (() => CustomMessage[]) | undefined): void {
+		this.#heldMailProvider = provider;
+	}
+
+	/** A user interrupt (Esc) holds the session: autonomous resumes stay off until the user's next deliberate prompt. */
+	get interruptLatched(): boolean {
+		return this.#advisors.autoResumeSuppressed;
+	}
+
+	/** Agent-initiated turns wait for the client's next prompt (an ACP client that keeps them off). */
+	get defersAgentInitiatedTurns(): boolean {
+		return this.#clientBridge?.deferAgentInitiatedTurns === true && !this.#allowAcpAgentInitiatedTurns;
 	}
 
 	/**
@@ -6466,7 +6494,17 @@ export class AgentSession implements SettingsScope {
 		// already durable, and close() (scheduled post-seal) still flushes and
 		// closes the writer.
 		this.sessionManager.seal();
-		await this.sessionManager.close();
+		try {
+			await this.sessionManager.close();
+		} finally {
+			for (const listener of this.#closedListeners.splice(0)) {
+				try {
+					listener();
+				} catch (error) {
+					logger.warn("Session close listener failed", { error: String(error) });
+				}
+			}
+		}
 
 		// Release retained conversation memory. dispose() is terminal, and every
 		// revival path reopens the transcript from disk (AgentLifecycleManager
@@ -8233,10 +8271,21 @@ export class AgentSession implements SettingsScope {
 		// with the message via prependMessages — not as a separate steer — so the
 		// model sees both in the same turn (#14093).
 		const sessionAgentNotice = options?.synthetic ? undefined : this.#tools.takeSessionAgentNotice();
-		const prependNotices = sessionAgentNotice ? [...keywordNotices, sessionAgentNotice] : keywordNotices;
+		const userInitiated = options?.userInitiated ?? !options?.synthetic;
+		// Mail an interrupt held back (`omp poke` after Esc) goes in ahead of the
+		// prompt that releases the interrupt, claimed before any await below. A
+		// prompt that is about to fail as busy claims nothing; one that is dropped
+		// later leaves its claim to the mailbox, which returns it to the queue.
+		const heldMail =
+			userInitiated && !(this.isStreaming && !options?.streamingBehavior) ? (this.#heldMailProvider?.() ?? []) : [];
+		const prependNotices: CustomMessage[] = [
+			...heldMail,
+			...keywordNotices,
+			...(sessionAgentNotice ? [sessionAgentNotice] : []),
+		];
 
 		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) are not user turns.
-		if (options?.userInitiated ?? !options?.synthetic) this.#noteUserTurn();
+		if (userInitiated) this.#noteUserTurn();
 
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
 
@@ -8393,11 +8442,13 @@ export class AgentSession implements SettingsScope {
 				...options,
 				images: normalizedImages,
 				prependMessages:
+					heldMail.length > 0 ||
 					preludeMessages.length > 0 ||
 					keywordNotices.length > 0 ||
 					attachmentSourceNotices.length > 0 ||
 					imageDescriptionNotice
 						? [
+								...heldMail,
 								...preludeMessages,
 								...keywordNotices,
 								...attachmentSourceNotices,

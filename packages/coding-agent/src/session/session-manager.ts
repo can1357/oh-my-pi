@@ -1142,6 +1142,16 @@ export class SessionManager {
 	}
 
 	/**
+	 * Take this session's ownership lease now instead of at the next write;
+	 * `false` when another live omp process holds it. A caller about to append
+	 * on behalf of someone outside this process (`omp poke` mail) checks this first,
+	 * because a non-owner's write silently moves the session to a sibling file.
+	 */
+	claimOwnership(): boolean {
+		return !this.#sessionOwnedElsewhere();
+	}
+
+	/**
 	 * `#sessionFile` when `error` reports that it changed since this manager
 	 * last wrote it, which the caller can recover from; `undefined` reports the
 	 * conflict as before. A fresh file that already exists is never recovered,

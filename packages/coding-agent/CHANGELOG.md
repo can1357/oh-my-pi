@@ -59,6 +59,40 @@
 - Sessions with computer use enabled receive the desktop guide before the first computer call.
 - The Tern interface now presents warnings, errors, update notices, file reads, and completed background work consistently with chat messages.
 - Muted live voice sessions remain visibly muted while the voice model starts work.
+- Optimized agent startup by deferring loading of non-critical UI modules, accessibility bundles, and provider transports
+- Skill-description setup resolves exact role selectors against their provider without expanding unrelated catalogs; provider-scoped model reads reuse snapshots while keeping credential availability and runtime modifiers live
+- Normal print-mode startup defers slash-command implementation loading until a command is dispatched or an extension requests the command list
+- Session startup overlaps credential-usage reads with tool/context loading and refreshes repository context, context files, and rules concurrently; `PI_TIMING` now separates credential validation from other first-prompt preparation
+- Non-browser launches no longer load cmux/Tern browser evaluators or their accessibility bundles; each backend loads on first use
+- Headless startup no longer loads the interactive composer through plugin-loader SDK self-references or reserved HUD identifiers; injected `api.pi` loads the full host SDK only when accessed
+- The source-checkout launcher skips recreating its isolated Bun startup directory when it already exists.
+- OpenAI live steering (`providers.openaiLiveSteering`) is now off by default for GPT models; typed messages wait for the next tool boundary unless you enable it, avoiding `unsupported_native_inflight_message` errors
+
+- Sub-session collector now determines compression from filename extension instead of a boolean flag
+- HTML exports now match the `/stats` design, with a higher-contrast light theme, timeline drawer, full trace view, and sidebar navigation for nested subagents and advisors
+- Packaged HTML exports load an integrity-pinned viewer and shared Markdown/highlighting libraries from `build.stencil.so` and `stencil.so`; source checkouts inline their generated viewer for local development. Session data stays in the file, but viewing needs network access
+- `tui.autoGraph` defaults to the new `auto`: charts are refined by the judge whenever the judge role resolves to a native TypeSafe jev model, and drawn from the built-in guess otherwise
+- Removed manual scan cache invalidation triggers after file modifications; filesystem changes are now automatically detected via timestamp validation in the new `pi-walker` architecture
+- A muted `/live` call now stays shown as muted when the voice model starts a task or the session starts, instead of switching to "working" or "listening" while the microphone is still off ([#17013](https://github.com/can1357/oh-my-pi/pull/17013) by [@materemias](https://github.com/materemias))
+- Model refreshes (startup, `/model`, toggling extended context) use far less CPU: unchanged models are no longer rebuilt on every pass, and with a custom agent directory or models config the model cache database is opened once per refresh instead of once per provider
+- Sloppy edits whose operations overlap (for example a block rewrite plus an `all` rename that touches it) now apply in order, each later operation matched against the earlier one's result, instead of rejecting the whole payload
+- `PI_INTENT_PROMPT` replaces the system-prompt guidance for the `i` intent field; `PI_INTENT_DESC` replaces its tool-schema description
+- Eval shows printed JSON text (`print(json.dumps(…))`, `console.log(JSON.stringify(…))`) as a collapsible JSON tree, like printed dicts and objects
+- The warning that a saved Codex or Claude rate-limit reset is about to expire now shows once per reset across all conversations and omp windows, and only in its final 6 hours instead of from 24 hours out; the status line keeps counting it down meanwhile
+- The `.`/`c` continue shortcut no longer adds a hidden "continue" directive when your last message is still unanswered (for example after pressing Esc before the model replied); the agent simply answers that message again
+- With `bash.gitGuard` on, `git checkout`, `switch`, `restore`, `reset` and `stash` now run in a linked worktree instead of being refused, saving any uncommitted changes they discard to `refs/omp/discarded` first; stash commands still refuse another branch's entries, and a repository's main checkout keeps every refusal ([#17349](https://github.com/can1357/oh-my-pi/pull/17349) by [@will-bogusz](https://github.com/will-bogusz))
+- Browser `webmcp*` helpers read Chrome's native WebMCP when called instead of injecting a script and `modelContext` polyfill into every page omp drives, and say why when Chrome offers a page none; Tern tabs no longer support them ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
+- Log records written during a session's turns and compaction now carry its `sessionId`, so a subagent's records are told apart from its parent's in the same process log; records that named another kind of id `sessionId` now call it `titleSessionId`, `debugSessionId`, `kernelSessionId`, `acpSessionId` or `providerSessionId` ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
+- Sessions started with computer use enabled receive the desktop guide before their first call, avoiding a separate documentation read before starting a desktop task ([#16918](https://github.com/can1357/oh-my-pi/pull/16918) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Adjusted view placement to align with column‑capped output, fixing view offsets after line truncation
+- In Tern, warnings, errors, the update notice, `@file` reads and finished background jobs, tangents and supervised processes read like the rest of the chat: an icon and the message instead of a raw terminal line
+- Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
+- `omp poke <session> <message>` delivers a message into a session exactly once: an idle omp that has it open starts a turn, a busy one takes it at its next step, after Esc it waits for your next message (`--force` delivers at once), and a closed session holds it until opened or runs one headless turn with `--resume`
+- SDK: `createAgentSession({ mailbox: { deliver: true } })` delivers `omp poke` messages as turns; by default an embedded session only marks itself open, so a poke for it is held instead of resuming it in another process
 
 ### Fixed
 

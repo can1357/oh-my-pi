@@ -113,6 +113,10 @@ export const predictHelp = {
 	description: "Type a prompt and compare every word-completion engine's ghost text live",
 } satisfies CommandMetadata;
 
+export const pokeHelp = {
+	description: "Post a message into a session; a live omp holding it starts a turn on it",
+} satisfies CommandMetadata;
+
 export const psHelp = {
 	description: "List and control daemon-supervised background processes (logs, stop, kill, restart)",
 } satisfies CommandMetadata;

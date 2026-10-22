@@ -129,6 +129,8 @@ import {
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
+import { exitUnlessHeadlessRunMayWrite } from "./mailbox/headless";
+import { MAILBOX_HEADLESS_ENV } from "./mailbox/paths";
 import {
 	discoverSystemPromptOverride,
 	discoverTitleSystemPromptFile,
@@ -2335,6 +2337,11 @@ export async function runRootCommand(
 				: undefined;
 		daemonPresencePromise?.catch(() => {});
 
+		// A headless delivery host must never write a session another process
+		// has open: it takes the write lease before anything else can write, or
+		// leaves without writing so the caller reports the mail as held.
+		if (sessionManager && $env[MAILBOX_HEADLESS_ENV]) exitUnlessHeadlessRunMayWrite(sessionManager);
+
 		let startupTelemetry: CreateAgentSessionOptions["telemetry"];
 		let startupExtensions: CreateAgentSessionOptions["extensions"];
 		// An interactive launch writes nothing to the terminal before its UI: the
@@ -2360,6 +2367,11 @@ export async function runRootCommand(
 			options.hasUI = isInteractive || mode === "rpc-ui";
 			options.allowSessionModelFallback = isInteractive;
 			options.settingsApproval = isInteractive;
+			// omp's own hosts deliver `omp poke` mail as turns.
+			options.mailbox = {
+				deliver: true,
+				host: isInteractive ? "interactive" : (parsedArgs.mode ?? "print"),
+			};
 			options.tuiTranscript = isInteractive;
 			options.autoTitle = isInteractive;
 			options.settings = settingsInstance;
