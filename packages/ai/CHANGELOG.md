@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Fixed Xiaomi MiMo `tp-` Token Plan keys being sent to the standard `api.xiaomimimo.com` host from bundled or cached model rows before discovery re-resolved the base URL; requests now use the Token Plan cluster of the stored login region, else SGP. ([#16646](https://github.com/can1357/oh-my-pi/pull/16646) by [@Komzpa](https://github.com/Komzpa))
 - Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
 
 ## [18.12.4] - 2026-10-20

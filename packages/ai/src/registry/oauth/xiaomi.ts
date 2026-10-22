@@ -24,6 +24,30 @@ function isTokenPlanKey(apiKey: string): boolean {
 	return apiKey.startsWith(TOKEN_PLAN_KEY_PREFIX);
 }
 
+/**
+ * Request-time base URL for a Xiaomi `tp-` key. Bundled and cached catalog rows
+ * keep the standard host (`api.xiaomimimo.com`), which rejects Token Plan keys,
+ * so a Xiaomi row on any `xiaomimimo.com` host resolves to the Token Plan
+ * cluster of the region stored at login (provider id or host), else SGP. A
+ * non-Xiaomi host is a deliberate override and is kept, as is any non-`tp-` key.
+ */
+export function resolveXiaomiRequestBaseUrl(
+	model: { provider?: string; baseUrl?: string },
+	apiKey: string | undefined,
+): string | undefined {
+	const provider = model.provider ?? "";
+	if (provider !== PROVIDER_ID && !provider.startsWith("xiaomi-token-plan-")) return model.baseUrl;
+	if (apiKey === undefined || !isTokenPlanKey(apiKey)) return model.baseUrl;
+	if (model.baseUrl !== undefined && !model.baseUrl.includes("xiaomimimo.com")) return model.baseUrl;
+	const region =
+		/^xiaomi-token-plan-(sgp|ams|cn)$/.exec(provider)?.[1] ??
+		/token-plan-(sgp|ams|cn)\./.exec(model.baseUrl ?? "")?.[1];
+	// Each regional Token Plan host lives once, in its auth policy; reuse it instead of a second table.
+	const login = authPolicyFor(`xiaomi-token-plan-${region ?? "sgp"}`)?.login;
+	if (login?.kind !== "api-key" || login.validate?.kind !== "chat-completions") return model.baseUrl;
+	return login.validate.baseUrl;
+}
+
 const VALIDATION_TIMEOUT_MS = 15_000;
 
 async function validateXiaomiApiKey(apiKey: string, signal?: AbortSignal, fetchOverride?: FetchImpl): Promise<void> {
