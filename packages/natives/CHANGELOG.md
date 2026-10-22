@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- macOS background left drags across the text of one native text view, such as a TextEdit document, now select that text through accessibility, and `drag` resolves to `{ selection, focusReturn }`; drags on web page text and links still throw `BackgroundUnavailable` ([#16223](https://github.com/can1357/oh-my-pi/pull/16223) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.12.5] - 2026-10-21
 
 ### Fixed

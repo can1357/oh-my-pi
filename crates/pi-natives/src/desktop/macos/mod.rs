@@ -37,8 +37,8 @@ use super::{
 	frame::FrameGeometry,
 	keys::KeyName,
 	types::{
-		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector,
-		ScreenState, Target,
+		AxTextSelection, CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow,
+		DisplaySelector, ScreenState, Target,
 	},
 };
 
@@ -167,6 +167,18 @@ impl Backend for MacosBackend {
 		release_guard::scope(pointer_presses(&event, target, mode), || {
 			self.input.pointer(target, event, None, mode, &self.capture)
 		})
+	}
+
+	fn drag_selection(
+		&mut self,
+		target: &Target,
+		event: &PointerEvent,
+		mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<Option<AxTextSelection>> {
+		token.check()?;
+		Self::require_input_permission()?;
+		input::drag_selection(target, event, mode, &self.capture)
 	}
 
 	fn pointer_menu(
