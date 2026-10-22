@@ -6,6 +6,10 @@
 
 - Added `PI_ANTHROPIC_API_VERSION=2026-10-21` to send Anthropic API version 2026-10-21 to the official Anthropic API; sampling parameters are omitted under that version, which rejects them ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 
+### Changed
+
+- `auth.accountPolicies` `priority` now outranks a missing usage report, so a preferred account whose report could not be fetched no longer hands new sessions to a measured lower-priority sibling; blocks, reserve and hot 5-hour windows still come first ([#15124](https://github.com/can1357/oh-my-pi/pull/15124) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.12.5] - 2026-10-21
 
 ### Added
