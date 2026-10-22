@@ -15,6 +15,7 @@ import {
 	logger,
 	normalizePathForComparison,
 } from "@oh-my-pi/pi-utils";
+import { isProjectCodeTrusted } from "../../capability";
 import { getConfigDirPaths } from "../../config";
 import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { findExtensionDirectoryIndex, resolveExtensionDirectory } from "../extensions/directory-resolution";
@@ -267,7 +268,7 @@ async function loadEnabledPlugins(cwd: string, home?: string): Promise<ScopedIns
 
 	let projectPlugins: ScopedInstalledPlugin[] = [];
 	const projectRegistryPath = await resolveActiveProjectRegistryPath(cwd);
-	if (projectRegistryPath) {
+	if (projectRegistryPath && (await isProjectCodeTrusted(cwd))) {
 		const projectRoot = path.dirname(projectRegistryPath);
 		if (normalizePathForComparison(projectRoot) !== normalizePathForComparison(userRoot)) {
 			projectPlugins = await collectPluginsAtRoot(projectRoot, projectOverrides, "project");

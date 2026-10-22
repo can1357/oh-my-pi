@@ -81,6 +81,7 @@ export interface Args {
 	extensions?: string[];
 	trustedExtensions?: string[];
 	noExtensions?: boolean;
+	trustProject?: boolean;
 	pluginDirs?: string[];
 	print?: boolean;
 	printThoughts?: boolean;
@@ -374,6 +375,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.printThoughts = true;
 		} else if (arg === "--no-extensions") {
 			result.noExtensions = true;
+		} else if (arg === "--trust-project") {
+			result.trustProject = true;
 		} else if (arg === "--no-skills") {
 			result.noSkills = true;
 		} else if (arg === "--no-rules") {

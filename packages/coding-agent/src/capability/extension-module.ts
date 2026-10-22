@@ -24,6 +24,7 @@ export const extensionModuleCapability = defineCapability<ExtensionModule>({
 	id: "extension-modules",
 	displayName: "Extension Modules",
 	description: "TypeScript/JavaScript extension modules loaded by the extension system",
+	executesCode: true,
 	key: ext => ext.name,
 	toExtensionId: ext => `extension-module:${ext.name}`,
 	validate: ext => {

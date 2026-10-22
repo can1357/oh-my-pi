@@ -28,6 +28,7 @@ export const toolCapability = defineCapability<CustomTool>({
 	id: "tools",
 	displayName: "Custom Tools",
 	description: "User-defined tools that extend agent capabilities",
+	executesCode: true,
 	key: tool => tool.name,
 	toExtensionId: tool => `tool:${tool.name}`,
 	validate: tool => {

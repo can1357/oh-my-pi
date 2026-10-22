@@ -114,6 +114,8 @@ export interface LoadOptions<T = unknown> {
 	includeInvalid?: boolean;
 	/** Include disabled items without letting them shadow enabled items. Default: false */
 	includeDisabled?: boolean;
+	/** Include project-level code items of an untrusted project (trust prompt preview). Default: false */
+	includeUntrusted?: boolean;
 	/** Explicit disabled extension IDs to apply instead of settings. */
 	disabledExtensions?: string[];
 	/**
@@ -220,6 +222,12 @@ export interface Capability<T> {
 	 * When present, loadCapability() can hide items disabled via settings.
 	 */
 	toExtensionId?(item: T): string | undefined;
+
+	/**
+	 * Items run local code (servers, modules, scripts). Project-level items then
+	 * load only when the project is trusted; see {@link setProjectTrustCheck}.
+	 */
+	executesCode?: boolean;
 
 	/** Registered providers, sorted by priority (highest first) */
 	providers: Provider<T>[];

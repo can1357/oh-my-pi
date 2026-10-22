@@ -28,6 +28,7 @@ export const hookCapability = defineCapability<Hook>({
 	id: "hooks",
 	displayName: "Hooks",
 	description: "Pre/post tool execution hooks",
+	executesCode: true,
 	key: hook => `${hook.type}:${hook.tool}:${hook.name}`,
 	toExtensionId: hook => `hook:${hook.type}:${hook.tool}:${hook.name}`,
 	validate: hook => {

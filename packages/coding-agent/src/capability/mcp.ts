@@ -109,6 +109,7 @@ export const mcpCapability = defineCapability<MCPServer>({
 	id: "mcps",
 	displayName: "MCP Servers",
 	description: "Model Context Protocol server configurations for external tool integrations",
+	executesCode: true,
 	key: server => server.name,
 	equivalent: isSameMCPConnection,
 	toExtensionId: server => `mcp:${server.name}`,

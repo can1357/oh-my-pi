@@ -118,6 +118,13 @@
 - Fixed supported Bedrock Claude models falling back to soft instead of remote compaction ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 - Fixed browser `tab.run(fn, [url])` and `browser.open("https://…")` failing with a bare "expects an options object"; the errors now say to pass `{ args: [...] }` and `browser.open({ url, name })` ([#16236](https://github.com/can1357/oh-my-pi/pull/16236) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the built-in `ts-set-map`, `ts-import-type` and `ts-no-any` rules reminding you about code they allow: an empty or computed `Set`/`Map`, a runtime `await import()`, or the word "any" in a comment ([#16242](https://github.com/can1357/oh-my-pi/pull/16242) by [@will-bogusz](https://github.com/will-bogusz))
+### Breaking Changes
+
+- A project's own MCP servers, extensions, hooks, custom tools, and plugins load only once you trust the project: `omp` asks the first time it finds any, and headless runs (`-p`, `--mode rpc`/`acp`) skip them with a notice unless you pass `--trust-project`
+
+### Added
+
+- Added `--trust-project` to load the current project's MCP servers, extensions, hooks, tools, and plugins without asking; trust you grant at the prompt is remembered in `~/.omp/agent/trusted-projects.json`
 
 ## [18.12.3] - 2026-10-19
 

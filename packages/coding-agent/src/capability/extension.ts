@@ -38,6 +38,7 @@ export const extensionCapability = defineCapability<Extension>({
 	id: "extensions",
 	displayName: "Extensions",
 	description: "Gemini-style extensions providing MCP servers, tools, and context",
+	executesCode: true,
 	key: ext => ext.name,
 	validate: ext => {
 		if (!ext.name) return "Missing extension name";

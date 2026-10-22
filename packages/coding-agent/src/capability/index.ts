@@ -59,6 +59,27 @@ const FOREIGN_USER_PROVIDERS: Record<string, true> = {
 	github: true,
 };
 
+/**
+ * Decides whether a project root may run its project-level code. Unset (SDK
+ * embedding, tests) loads it ungated; the CLI installs one at startup.
+ */
+let projectTrustCheck: ((projectRoot: string) => boolean) | undefined;
+
+/** Install or clear the gate for project-level items of {@link Capability.executesCode} capabilities. */
+export function setProjectTrustCheck(check: ((projectRoot: string) => boolean) | undefined): void {
+	projectTrustCheck = check;
+}
+
+/** The directory trust is granted to: the enclosing repo root, else `cwd` itself. */
+export async function projectTrustRoot(cwd: string): Promise<string> {
+	return (await findRepoRoot(cwd)) ?? path.resolve(cwd);
+}
+
+/** Whether project-level code under `cwd` may run; true while no gate is installed. */
+export async function isProjectCodeTrusted(cwd: string): Promise<boolean> {
+	return projectTrustCheck === undefined || projectTrustCheck(await projectTrustRoot(cwd));
+}
+
 /** Outstanding {@link initializeWithSettings} holds, oldest first; the newest one is bound. */
 const settingsHolds: { settings: Settings }[] = [];
 
@@ -154,6 +175,11 @@ async function loadImpl<T>(
 	const disabledExtensionIds = new Set<string>(
 		options.disabledExtensions ?? (settings ? cfgDisabledExtensions.get(settings) : undefined) ?? [],
 	);
+	const blockProjectItems =
+		capability.executesCode === true &&
+		!options.includeUntrusted &&
+		projectTrustCheck !== undefined &&
+		!projectTrustCheck(ctx.repoRoot ?? path.resolve(ctx.cwd));
 
 	const results = await Promise.all(
 		providers.map(async provider => {
@@ -192,6 +218,8 @@ async function loadImpl<T>(
 				allWarnings.push(`[${provider.displayName}] Item missing _source metadata, skipping`);
 				continue;
 			}
+			// Dropped before dedupe so an untrusted item never shadows a user-level one.
+			if (blockProjectItems && itemWithSource._source.level === "project") continue;
 
 			const extensionId = capability.toExtensionId?.(itemWithSource);
 			const isDisabled = extensionId !== undefined && disabledExtensionIds.has(extensionId);
@@ -567,6 +595,7 @@ export function resetCapabilityForTests(): void {
 	settingsHolds.length = 0;
 	unboundDisabledProviders = new Set();
 	unboundEnabledProviders = new Set();
+	projectTrustCheck = undefined;
 	clearFsCache();
 }
 

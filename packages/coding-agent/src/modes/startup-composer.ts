@@ -1,4 +1,7 @@
 import type { Terminal } from "@oh-my-pi/pi-tui";
+import { type SelectItem, SelectList } from "@oh-my-pi/pi-tui/components/select-list";
+import { Spacer } from "@oh-my-pi/pi-tui/components/spacer";
+import { Text } from "@oh-my-pi/pi-tui/components/text";
 import {
 	COMPOSER_DEFAULTS,
 	Composer,
@@ -11,7 +14,7 @@ import {
 	sharedComposerCache,
 } from "@oh-my-pi/pi-tui/prompt/composer-cache";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
-import { initThemeSync } from "@oh-my-pi/pi-tui/theme";
+import { getSelectListTheme, initThemeSync } from "@oh-my-pi/pi-tui/theme";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 
 /** Inputs available at the CLI prepaint boundary before command modules load. */
@@ -106,6 +109,31 @@ export function takeStartupComposerLease(): ComposerLease | undefined {
 export function stopPendingStartupComposer(): void {
 	pendingComposer?.composer.stop();
 	pendingComposer = undefined;
+}
+
+/**
+ * Offer a choice inside the live prepaint composer: `lines` and a selector
+ * render under the welcome, so nothing is torn down or repainted. Resolves the
+ * chosen value, or `null` on Escape; returns `undefined` when no composer is
+ * pending.
+ */
+export function chooseInStartupComposer(
+	lines: readonly string[],
+	items: readonly SelectItem[],
+): Promise<string | null> | undefined {
+	const composer = pendingComposer?.composer;
+	if (!composer) return undefined;
+	const { promise, resolve } = Promise.withResolvers<string | null>();
+	const list = new SelectList(items, items.length, getSelectListTheme());
+	list.onSelect = item => resolve(item.value);
+	list.onCancel = () => resolve(null);
+	composer.setHeaderExtras([], [new Text(lines.join("\n"), 1, 0), list, new Spacer(1)]);
+	composer.enableInput();
+	composer.ui.setFocus(list);
+	return promise.finally(() => {
+		composer.setHeaderExtras([], []);
+		composer.ui.setFocus(composer.editor);
+	});
 }
 
 /** Apply final settings to the pending Composer and cache them for the next first frame. */

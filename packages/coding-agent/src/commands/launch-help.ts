@@ -104,6 +104,9 @@ export const launchHelp = {
 		"no-extensions": Flags.boolean({
 			description: "Disable extension discovery (explicit -e paths still work)",
 		}),
+		"trust-project": Flags.boolean({
+			description: "Load this project's MCP servers, extensions, hooks, tools, and plugins without asking",
+		}),
 		"no-skills": Flags.boolean({ description: "Disable skills discovery and loading" }),
 		skills: Flags.string({ description: "Comma-separated glob patterns to filter skills (e.g., git-*,docker)" }),
 		"no-rules": Flags.boolean({ description: "Disable rules discovery and loading" }),
