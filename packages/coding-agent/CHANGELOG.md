@@ -33,6 +33,10 @@
 - Fixed `history://<id>` failing with "has no transcript: session is gone" for a worker that is still running but has not created its session or transcript file yet; it now answers "No transcript has been written yet". ([#16645](https://github.com/can1357/oh-my-pi/pull/16645) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- When no configured or active model supports images, image descriptions now prefer the lowest-priced available model instead of catalog order ([#16755](https://github.com/can1357/oh-my-pi/issues/16755))
+
 ## [18.12.6] - 2026-10-21
 
 ### Added

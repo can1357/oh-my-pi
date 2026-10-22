@@ -151,10 +151,12 @@ behavior {
 		exact="openai.gpt-5.5" exact="openai.gpt-5.6-luna" exact="openai.gpt-5.6-sol" exact="openai.gpt-5.6-terra"
 	// [1m] is a Claude Code selector convention, not an inference id.
 	exclude-models provider="zai" glob="*[1m]"
-	// Anthropic /v1/models rows OMP does not route: pre-tool-era snapshots and
-	// the 3.5/3.7 lanes Claude Code retired from the public roster.
-	exclude-models provider="anthropic" prefix="claude-3-5-haiku" prefix="claude-3-7-sonnet" \
-		exact="claude-3-opus-20240229" exact="claude-3-sonnet-20240229"
+	// Anthropic's retired snapshots and their aliases reject inference requests
+	// (https://platform.claude.com/docs/en/about-claude/model-deprecations).
+	exclude-models provider="anthropic" prefix="claude-3-5-haiku" prefix="claude-3-5-sonnet" \
+		prefix="claude-3-7-sonnet" prefix="claude-opus-4-1" exact="claude-3-haiku-20240307" \
+		exact="claude-3-opus-20240229" exact="claude-3-sonnet-20240229" exact="claude-opus-4-0" \
+		exact="claude-opus-4-20250514" exact="claude-sonnet-4-0" exact="claude-sonnet-4-20250514"
 	// Control-plane resource ids are not accepted by the inference API.
 	exclude-models provider="fireworks" prefix="accounts/fireworks/"
 	exclude-models provider="firepass" prefix="accounts/fireworks/"

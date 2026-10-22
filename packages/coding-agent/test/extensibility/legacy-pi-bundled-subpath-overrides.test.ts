@@ -133,7 +133,7 @@ export const observed = [mod.piEscapeRegexLiteral("a.b*c"), mod.piJoinPath("src"
 			`const catalog = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-catalog"]();
 const providers = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-catalog/provider-models"]();
 const result = await catalog.createModelManager(providers.anthropicModelManagerOptions()).refresh("offline");
-export const observed = result.models.some(model => model.id === "claude-3-5-sonnet-20240620");`,
+export const observed = result.models.some(model => model.id === "claude-fable-5");`,
 		);
 		expect(observed).toBe(true);
 	});

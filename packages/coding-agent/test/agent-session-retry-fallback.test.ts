@@ -3056,7 +3056,7 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it("applies a provider-wildcard chain to any model of that provider", async () => {
-		const primaryModel = getBundledModel("anthropic", "claude-opus-4-1");
+		const primaryModel = getBundledModel("anthropic", "claude-opus-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) {
 			throw new Error("Expected bundled test models to exist");
@@ -3289,7 +3289,7 @@ describe("AgentSession retry fallback", () => {
 	);
 	it("surfaces immutable Anthropic thinking errors without retry fallback", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const fallbackModel = getBundledModel("anthropic", "claude-opus-4-1");
+		const fallbackModel = getBundledModel("anthropic", "claude-opus-4-5");
 		if (!primaryModel || !fallbackModel) {
 			throw new Error("Expected bundled Anthropic test models to exist");
 		}
@@ -3365,7 +3365,7 @@ describe("AgentSession retry fallback", () => {
 
 	it("keeps signed Anthropic thinking on its source model during transient retry", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const fallbackModel = getBundledModel("anthropic", "claude-opus-4-1");
+		const fallbackModel = getBundledModel("anthropic", "claude-opus-4-5");
 		if (!primaryModel || !fallbackModel) {
 			throw new Error("Expected bundled Anthropic test models to exist");
 		}
@@ -3449,7 +3449,7 @@ describe("AgentSession retry fallback", () => {
 
 	it("keeps signed thinking in a preserved transport-error turn on its source Anthropic model", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const fallbackModel = getBundledModel("anthropic", "claude-opus-4-1");
+		const fallbackModel = getBundledModel("anthropic", "claude-opus-4-5");
 		if (!primaryModel || !fallbackModel) {
 			throw new Error("Expected bundled Anthropic test models to exist");
 		}

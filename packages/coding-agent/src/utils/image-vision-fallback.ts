@@ -112,9 +112,8 @@ function formatImageBlock(localUrl: string, description: string): string {
 }
 
 /**
- * Resolve a vision-capable model, mirroring image-question priority
- * (`@vision` → `@default` → active → first image-capable available), but
- * never returning a text-only model.
+ * Resolve a vision-capable model, honoring explicit roles and the active model
+ * before choosing the least expensive priced vision model as a last resort.
  */
 function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | undefined {
 	const available = deps.modelRegistry.getAvailable();
@@ -126,12 +125,21 @@ function resolveVisionModel(deps: DescribeAttachedImagesDeps): Model<Api> | unde
 		const model = resolveModelFromString(expanded, available, preferences);
 		return model && sendsImageInputOnWire(model) ? model : undefined;
 	};
-	return (
-		resolvePattern("@vision") ??
-		resolvePattern("@default") ??
-		resolvePattern(deps.activeModelString) ??
-		available.find(model => sendsImageInputOnWire(model))
-	);
+	const preferred = resolvePattern("@vision") ?? resolvePattern("@default") ?? resolvePattern(deps.activeModelString);
+	if (preferred) return preferred;
+
+	let fallback: Model<Api> | undefined;
+	let lowestPrice = Number.POSITIVE_INFINITY;
+	for (const model of available) {
+		if (!sendsImageInputOnWire(model)) continue;
+		const price = model.cost.input + model.cost.output;
+		// Zero rates may mean missing pricing; prefer a known price when available.
+		if (!fallback || (price > 0 && price < lowestPrice)) {
+			fallback = model;
+			if (price > 0) lowestPrice = price;
+		}
+	}
+	return fallback;
 }
 
 /** Run one vision-description round-trip; returns trimmed text or `null` on any failure. */
