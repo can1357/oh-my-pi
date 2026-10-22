@@ -3545,8 +3545,10 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
  * over the newer turn's artifact, and the call returns true so the turn reports
  * as cancelled instead of refused. A pass already under way when the newer
  * observation starts (the older turn is being closed to make room for it) is
- * not stale by that alone: this turn finalizes first, so the newer one's result
- * still lands last.
+ * not stale by that alone: the newer turn has published nothing yet. Only start
+ * order backs this; nothing serializes the two turns' finalization. Dropping an
+ * allow whose pass began after supersession is conservative: if the newer turn
+ * then publishes nothing, this turn's valid yield is lost too.
  *
  * Each continuation settles the session's owner async work before the next
  * pass, so a candidate is only judged once that work quiesced; a result the

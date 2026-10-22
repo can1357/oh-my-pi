@@ -390,7 +390,7 @@ describe("runSubprocess subagent_stop", () => {
 		expect(harness.events).toHaveLength(2);
 		expect(harness.events.map(event => event.stop_hook_active)).toEqual([false, true]);
 		expect(harness.events[1]?.session_id).toBe(harness.events[0]?.session_id);
-		// Each pass observes a snapshot of the child transcript as it stood then: the
+		// Each pass observes a copy of the child transcript's array as it stood then: the
 		// first pass's array does not grow with the continuation's turn.
 		expect(seen.map(entry => entry.count)).toEqual([1, 2]);
 		expect(harness.events[0]?.messages).toHaveLength(1);
