@@ -342,9 +342,9 @@ export class AdvisorRuntime {
 	 *  being retried/requeued into the post-reset conversation. */
 	#epoch = 0;
 	disposed = false;
-	/** Quota/rate-limit pause state. When `true`, the advisor stops processing
-	 *  turns and drops new deltas until an explicit {@link reset} clears it
-	 *  (triggered by `/new`, config rebuild, or session restart). There is no
+	/** Quota/usage-limit pause state. When `true`, the advisor stops processing
+	 *  turns and drops new deltas until a {@link reset} clears it (compaction,
+	 *  image drop, shake, session switch, rebuild, or restart). There is no
 	 *  timer-based auto-resume: provider quota windows (5h/7d) are far longer
 	 *  than any reasonable timer, and premature retries waste calls and
 	 *  re-trigger the same error. */
