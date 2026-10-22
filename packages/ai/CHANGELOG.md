@@ -6,6 +6,10 @@
 
 - Added `PI_ANTHROPIC_API_VERSION=2026-10-21` to send Anthropic API version 2026-10-21 to the official Anthropic API; sampling parameters are omitted under that version, which rejects them ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 
+### Fixed
+
+- Fixed Cursor reporting tools as unavailable before external clients execute them, and losing tool schemas and results between calls ([#16719](https://github.com/can1357/oh-my-pi/pull/16719) by [@gustavosmendes](https://github.com/gustavosmendes))
+
 ## [18.12.5] - 2026-10-21
 
 ### Added
