@@ -29,6 +29,7 @@ import {
 	createSourceMeta,
 	discoverExtensionModulePaths,
 	expandEnvVarsDeep,
+	findNearestAncestorDir,
 	getExtensionNameFromPath,
 	getProjectDiscoveryCeilings,
 	isForeignUserConfigRoot,
@@ -234,9 +235,17 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	// User scope tracks the active profile via getAgentDir() (not ctx.home), so it
 	// stays in sync with getMCPConfigPath("user") and the /mcp config writer.
 	const userAgentDir = getAgentDir();
+	const projectRelPaths = [path.join(PATHS.projectDir, "mcp.json"), path.join(PATHS.projectDir, ".mcp.json")];
+	// Nearest ancestor with a project MCP file wins; stacked ancestor copies
+	// are not merged. The walk stops at repoRoot when known, else the filesystem root.
+	const nearestProjectDir = await findNearestAncestorDir(ctx.cwd, projectRelPaths, ctx.repoRoot);
 	const paths = [
-		{ path: path.join(ctx.cwd, PATHS.projectDir, "mcp.json"), level: "project" as const },
-		{ path: path.join(ctx.cwd, PATHS.projectDir, ".mcp.json"), level: "project" as const },
+		...(nearestProjectDir
+			? [
+					{ path: path.join(nearestProjectDir, PATHS.projectDir, "mcp.json"), level: "project" as const },
+					{ path: path.join(nearestProjectDir, PATHS.projectDir, ".mcp.json"), level: "project" as const },
+				]
+			: []),
 		{ path: path.join(userAgentDir, "mcp.json"), level: "user" as const },
 		{ path: path.join(userAgentDir, ".mcp.json"), level: "user" as const },
 	];

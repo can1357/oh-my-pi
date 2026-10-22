@@ -23,10 +23,12 @@ The native provider also reads `.omp/.mcp.json` and `~/.omp/agent/.mcp.json` for
 
 These user paths are defaults: `PI_CONFIG_DIR` changes the home config root, and `PI_CODING_AGENT_DIR` can override the default-profile agent directory. Named profiles derive their own agent directory rather than inheriting that override. Project config remains in `.omp/`.
 
-OMP also accepts fallback standalone files in the project root:
+OMP also accepts fallback standalone files at the project root (or the nearest ancestor of the launch directory):
 
 - `mcp.json`
 - `.mcp.json`
+
+Both the native project loader and this standalone fallback walk ancestors from the launch directory and use the **nearest** matching file. They do not merge stacked `mcp.json` files from multiple directories. The walk stops at the repository root when one is known, otherwise at the filesystem root.
 
 Use `.omp/mcp.json` or `~/.omp/agent/mcp.json` when you want OMP to own the configuration. Use root `mcp.json` / `.mcp.json` only when you want a portable fallback file that other MCP clients may also read.
 
@@ -54,7 +56,7 @@ Named profiles (`omp --profile <name>` or `OMP_PROFILE`/`PI_PROFILE`) isolate us
 
 Discovery, the `/mcp` commands, and the config writer all follow the active profile, so a profile sees **only** its own user-level servers — never the default profile's `~/.omp/agent/mcp.json`. Add a server to a profile by launching under it (`omp --profile <name>`) and running `/mcp add` → User level, or by editing `~/.omp/profiles/<name>/agent/mcp.json` directly.
 
-Project-scoped MCP config (`.omp/mcp.json`) is keyed to the working directory, not the profile, so it applies under every profile. External-tool configs (`.claude/`, `.cursor/`, etc.) are also profile-independent because they belong to those tools rather than to an OMP profile.
+Project-scoped MCP config (`.omp/mcp.json`) is keyed to the nearest ancestor project file of the working directory, not the profile, so it applies under every profile. External-tool configs (`.claude/`, `.cursor/`, etc.) are also profile-independent because they belong to those tools rather than to an OMP profile.
 
 MCP follows the same profile rules as the rest of OMP-native config; see [Configuration Discovery → Profiles](./config-usage.md#profiles).
 
