@@ -1,9 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-### Changed
-
-- Changed agent storage, memory and `gc` command reads to use typed prepared statements, so a row shape change surfaces at the read site instead of as a silently undefined field ([#15437](https://github.com/can1357/oh-my-pi/pull/15437) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
