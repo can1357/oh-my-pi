@@ -1024,6 +1024,41 @@ export const cfgComposerPredictions = register({
 	},
 });
 
+export const cfgComposerPredictionsOnResume = register({
+	id: "composer.predictionsOnResume",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Predict on Resume",
+		description:
+			"Also predict when you open a conversation whose last turn finished without a prediction: resuming at startup or with /resume, or returning from a subagent. That request may miss the prompt cache, but it warms the cache for your next message",
+		condition: "composerPredictionsEnabled",
+	},
+});
+
+export const cfgComposerPredictionTimeoutSeconds = register({
+	id: "composer.predictionTimeoutSeconds",
+	type: "number",
+	default: 15,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Prediction Timeout",
+		description:
+			"Seconds to wait for a prediction before dropping it. Long conversations, slow models, and predictions on resume may need more",
+		condition: "composerPredictionsEnabled",
+		options: [
+			{ value: "10", label: "10 seconds" },
+			{ value: "15", label: "15 seconds" },
+			{ value: "30", label: "30 seconds" },
+			{ value: "45", label: "45 seconds" },
+			{ value: "60", label: "1 minute" },
+		],
+	},
+});
+
 export const cfgSpellingAutocorrect = register({
 	id: "spelling.autocorrect",
 	type: "boolean",

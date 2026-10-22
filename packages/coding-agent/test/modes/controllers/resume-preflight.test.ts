@@ -55,6 +55,7 @@ function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string; p
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		statusLine: { invalidate: vi.fn(), resetActiveTime: vi.fn() },
+		eventController: { composerPrediction: { catchUp: vi.fn() } },
 		ui: {
 			requestRender: vi.fn(),
 			setFocus,

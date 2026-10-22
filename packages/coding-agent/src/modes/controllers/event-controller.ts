@@ -477,7 +477,7 @@ export class EventController {
 		this.#toolArgsReveal.stop();
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
-		this.composerPrediction.cancel();
+		this.composerPrediction.dispose();
 		this.#setTerminalProgress(false);
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
@@ -937,9 +937,11 @@ export class EventController {
 	 * Clear every transcript-anchored/turn-scoped piece of state. Used by the
 	 * session focus proxy when re-pointing the transcript at another session:
 	 * components, timers, and stream-reveal state all reference the previous
-	 * session's transcript and must not bleed into the new one.
+	 * session's transcript and must not bleed into the new one. A view switch
+	 * passes `keepComposerPrediction`: the main session's prediction is only
+	 * hidden, so returning to it does not pay for another.
 	 */
-	resetTranscriptAnchors(): void {
+	resetTranscriptAnchors(options: { keepComposerPrediction?: boolean } = {}): void {
 		if (this.#messageUpdateTimer) {
 			clearTimeout(this.#messageUpdateTimer);
 			this.#messageUpdateTimer = undefined;
@@ -972,7 +974,8 @@ export class EventController {
 		this.#retryPending = this.ctx.viewSession.isRetrying;
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
-		this.composerPrediction.cancel();
+		if (options.keepComposerPrediction) this.composerPrediction.hide();
+		else this.composerPrediction.cancel();
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
 		}

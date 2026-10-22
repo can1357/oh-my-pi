@@ -140,7 +140,10 @@ export class SessionFocusController {
 		this.#focusedAgentId = undefined;
 		this.#attachedSession = undefined;
 		const attached = await this.#attach(this.ctx.session);
-		if (attached && this.#focusedAgentId === undefined) this.ctx.showStatus("Returned to main session");
+		if (attached && this.#focusedAgentId === undefined) {
+			this.ctx.showStatus("Returned to main session");
+			this.ctx.eventController.composerPrediction.catchUp();
+		}
 	}
 
 	dispose(): void {
@@ -176,7 +179,7 @@ export class SessionFocusController {
 		try {
 			this.ctx.unsubscribe?.();
 			this.ctx.clearTransientSessionUi();
-			this.ctx.eventController.resetTranscriptAnchors();
+			this.ctx.eventController.resetTranscriptAnchors({ keepComposerPrediction: true });
 			let assistantStreamSynced = false;
 			const restoreAssistant = async (message: AssistantMessage): Promise<void> => {
 				if (generation !== this.#attachGeneration) return;

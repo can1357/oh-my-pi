@@ -103,6 +103,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 			},
 			restorePendingToolResults() {},
 			markViewIdle() {},
+			composerPrediction: { catchUp() {} },
 		},
 		statusLine: {
 			setSession: (session: AgentSession, focusedAgentId?: string) => {

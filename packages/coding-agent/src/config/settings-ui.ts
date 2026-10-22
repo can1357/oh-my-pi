@@ -14,7 +14,7 @@ import {
 } from "../session/settings";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
-import { cfgTuiVimMode } from "../modes/settings";
+import { cfgComposerPredictions, cfgTuiVimMode } from "../modes/settings";
 import { cfgAdvisorEnabled } from "../advisor/settings";
 import { cfgContextFilesExtra } from "../session/context-settings";
 
@@ -29,6 +29,7 @@ const CONDITIONS: Record<string, () => boolean> = {
 	nativeRendering: () => isNativeRendering(),
 	advisorEnabled: whenSettings(s => cfgAdvisorEnabled.get(s) === true),
 	vimModeEnabled: whenSettings(s => cfgTuiVimMode.get(s) === true),
+	composerPredictionsEnabled: whenSettings(s => cfgComposerPredictions.get(s) === true),
 	hindsightActive: whenSettings(s => cfgMemoryBackend.get(s) === "hindsight"),
 	mnemopiActive: whenSettings(s => cfgMemoryBackend.get(s) === "mnemopi"),
 	autolearnActive: whenSettings(s => cfgAutolearnEnabled.get(s) === true),

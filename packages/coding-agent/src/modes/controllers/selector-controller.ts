@@ -2003,6 +2003,7 @@ export class SelectorController {
 					: "Resumed session",
 		);
 		if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
+		this.ctx.eventController.composerPrediction.catchUp();
 		return true;
 	}
 

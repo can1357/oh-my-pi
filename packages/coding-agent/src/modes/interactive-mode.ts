@@ -3687,7 +3687,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (any("recap.enabled", "recap.idleSeconds")) this.#eventController.refreshIdleRecapTimer();
 		if (any("composer.predictions") && !next["composer.predictions"]) {
-			this.#eventController.composerPrediction.cancel();
+			this.#eventController.composerPrediction.dispose();
 		}
 		if (any("compaction.enabled", "compaction.methodOrder")) {
 			this.statusLine.setAutoCompactEnabled(this.session.autoCompactionEnabled);

@@ -820,6 +820,9 @@ async function runInteractiveMode(
 		}
 	}
 
+	// A resumed conversation that ended on a finished turn gets the prediction a live turn would have.
+	mode.eventController.composerPrediction.catchUp();
+
 	while (true) {
 		const input = await mode.getUserInput();
 		await submitInteractiveInput(mode, session, input);

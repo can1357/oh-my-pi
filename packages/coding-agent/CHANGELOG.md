@@ -16,6 +16,8 @@
 
 - Added the `_session/steering` ACP extension (advertised as `_meta.steering.supported`), so clients such as agent-shell can steer a running turn; a steer sent while a permission dialog is open cancels that dialog, and `_meta.steering.queue: "followUp"` queues a follow-up instead ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
 - `/mcp reauth <name>` now works over ACP, RPC, and print mode (`omp -p '/mcp reauth <name>'`): it opens the browser, prints the authorization URL, reconnects the server in the running session, and print mode exits 1 when reauthorization fails ([#16046](https://github.com/can1357/oh-my-pi/pull/16046) by [@marcintustin](https://github.com/marcintustin))
+- Composer predictions now also appear when you open a conversation whose last turn finished (resuming at startup or with `/resume`, or returning from a subagent), reusing a prediction already made for that point instead of paying for another; turn this off with `composer.predictionsOnResume` ([#16688](https://github.com/can1357/oh-my-pi/pull/16688) by [@trukhinyuri](https://github.com/trukhinyuri))
+- Added `composer.predictionTimeoutSeconds` (default 15) to give composer predictions more time on long conversations or slow models ([#16688](https://github.com/can1357/oh-my-pi/pull/16688) by [@trukhinyuri](https://github.com/trukhinyuri))
 
 ### Changed
 
