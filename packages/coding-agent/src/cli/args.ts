@@ -21,7 +21,7 @@ import { CliUsageError } from "./usage-error";
 
 export { getExtraHelpText };
 
-export type Mode = "text" | "json" | "rpc" | "acp" | "rpc-ui";
+export type Mode = "text" | "json" | "rpc" | "acp" | "rpc-ui" | "host";
 
 export interface Args {
 	cwd?: string;
@@ -72,6 +72,8 @@ export interface Args {
 	fork?: string;
 	/** Collab link to join at startup (set by the `join` subcommand; no CLI flag). */
 	join?: string;
+	/** Session host target (host id, session id, or session path) to attach to (set by the `attach` subcommand; no CLI flag). */
+	attach?: string;
 	models?: string[];
 	tools?: string[];
 	noTools?: boolean;
@@ -91,6 +93,13 @@ export interface Args {
 	noTitle?: boolean;
 	/** RPC modes only: run extensions without a UI; `rpc-ui` tool UI remains enabled. */
 	noUi?: boolean;
+	/** `--mode host`: this host's registry id, 16 lowercase hex digits (`--host-id`). */
+	hostId?: string;
+	/**
+	 * `--mode host`: the absolute registry directory to publish in (`--host-registry-dir`, set by
+	 * `spawnSessionHost`). A flag, not an environment variable: the host's children must not inherit it.
+	 */
+	hostRegistryDir?: string;
 	autoApprove?: boolean;
 	approvalMode?: ApprovalMode;
 	messages: string[];
@@ -139,12 +148,13 @@ export function validateGoalLaunch(args: Args, interactive: boolean): void {
 
 /**
  * Reject a `--restore` launch that cannot go on with an interrupted session: it
- * needs the interactive TUI and exactly the session it names. Judged on the
- * startup parse, before session resolution, like {@link validateGoalLaunch}.
+ * needs the interactive TUI (or a session host a hosted TUI started) and exactly
+ * the session it names. Judged on the startup parse, before session resolution,
+ * like {@link validateGoalLaunch}.
  */
 export function validateRestoreLaunch(args: Args, interactive: boolean): void {
 	if (!args.restore) return;
-	if (!interactive) {
+	if (!interactive && args.mode !== "host") {
 		throw new CliUsageError("--restore requires an interactive terminal (not --print or --mode).");
 	}
 	if (args.continue || args.fork || args.fromClaude || args.fromCodex || args.noSession || args.goal !== undefined) {
@@ -437,6 +447,10 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 
 	if (result.systemPrompt !== undefined && result.systemPromptTemplate !== undefined) {
 		throw new CliUsageError("--system-prompt and --system-prompt-template cannot be combined");
+	}
+	// Internal to the hosts spawnSessionHost starts: a stray one would let a launch's argv rename such a host.
+	if (result.mode !== "host" && (result.hostId !== undefined || result.hostRegistryDir !== undefined)) {
+		throw new CliUsageError("--host-id and --host-registry-dir are internal to --mode host");
 	}
 	return result;
 }

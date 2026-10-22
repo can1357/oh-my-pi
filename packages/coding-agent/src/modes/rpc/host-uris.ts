@@ -75,7 +75,11 @@ export class RpcHostUriBridge {
 	#output: RpcHostUriOutput;
 	#router: InternalUrlRouter;
 	#definitions = new Map<string, RpcHostUriSchemeDefinition>();
+	/** Handlers this bridge installed, by scheme. Another bridge may since have replaced one. */
+	#handlers = new Map<string, RpcHostUriProtocolHandler>();
 	#pending = new Map<string, PendingUriRequest>();
+	/** Set by {@link clear}: the client is gone, so no scheme may be registered for it and no request sent to it. */
+	#closed: string | undefined;
 
 	constructor(output: RpcHostUriOutput, router: InternalUrlRouter = InternalUrlRouter.instance()) {
 		this.#output = output;
@@ -90,8 +94,12 @@ export class RpcHostUriBridge {
 	 * Replace the registered set of host URI schemes. Previously registered
 	 * schemes that no longer appear in the new set are unregistered from the
 	 * router; surviving and new schemes get fresh handler instances.
+	 *
+	 * @throws Error once {@link clear} ran: a command from a departed client that was still queued must not
+	 * re-register its schemes.
 	 */
 	setSchemes(schemes: RpcHostUriSchemeDefinition[]): string[] {
+		if (this.#closed !== undefined) throw new Error(this.#closed);
 		const normalized = new Map<string, RpcHostUriSchemeDefinition>();
 		for (const raw of schemes) {
 			const scheme = typeof raw?.scheme === "string" ? raw.scheme.trim().toLowerCase() : "";
@@ -116,27 +124,48 @@ export class RpcHostUriBridge {
 
 		for (const previous of this.#definitions.keys()) {
 			if (!normalized.has(previous)) {
-				this.#router.unregister(previous);
+				this.#unregister(previous);
 			}
 		}
 		for (const definition of normalized.values()) {
-			this.#router.register(new RpcHostUriProtocolHandler(definition, this));
+			const handler = new RpcHostUriProtocolHandler(definition, this);
+			this.#router.register(handler);
+			this.#handlers.set(definition.scheme, handler);
 		}
 		this.#definitions = normalized;
 		return Array.from(normalized.keys());
 	}
 
 	/**
-	 * Unregister every host scheme from the router and reject any in-flight
-	 * requests. Called on RPC shutdown to keep the global router clean for
-	 * subsequent sessions in the same process (used by tests).
+	 * Unregister this bridge's host schemes from the router and reject any
+	 * in-flight requests. A scheme another bridge has since registered keeps
+	 * that bridge's handler. Called when the client disconnects, which also
+	 * keeps the global router clean for later sessions in the same process.
+	 * After this the bridge refuses new schemes and requests.
 	 */
 	clear(message: string = "Host URI bridge shut down"): void {
+		this.#closed ??= message;
 		for (const scheme of this.#definitions.keys()) {
-			this.#router.unregister(scheme);
+			this.#unregister(scheme);
 		}
 		this.#definitions.clear();
 		this.rejectAllPending(message);
+	}
+
+	#unregister(scheme: string): void {
+		if (this.#router.getHandler(scheme) === this.#handlers.get(scheme)) this.#router.unregister(scheme);
+		this.#handlers.delete(scheme);
+	}
+
+	/**
+	 * Re-install this bridge's handler for `scheme` after a later registrant
+	 * released it. Returns false when this bridge does not serve `scheme`.
+	 */
+	reclaim(scheme: string): boolean {
+		const handler = this.#handlers.get(scheme);
+		if (!handler) return false;
+		this.#router.register(handler);
+		return true;
 	}
 
 	/** Resolve a pending request by id; called by `rpc-mode` on inbound results. */
@@ -188,6 +217,7 @@ export class RpcHostUriBridge {
 		content: string | undefined,
 		signal: AbortSignal | undefined,
 	): Promise<RpcHostUriResult> {
+		if (this.#closed !== undefined) return Promise.reject(new Error(this.#closed));
 		if (signal?.aborted) {
 			return Promise.reject(new Error(`Host URI ${operation} for ${url} was aborted`));
 		}

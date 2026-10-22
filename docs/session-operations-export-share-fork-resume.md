@@ -495,6 +495,11 @@ interrupted). `--restore` is interactive only, takes no prompt, and cannot be
 combined with `--continue`, `--fork`, imports, `--goal` or `--no-session`.
 `/restart` drops it like the other one-shot selectors.
 
+With [hosted sessions](./cli-reference.md#hosted-sessions-experimental) on, a terminal
+whose session no host runs starts a host with `--restore`, and that host goes on as
+above once it is up, with or without an attached terminal; a session a host already
+runs is attached to as it is.
+
 ## CLI `--continue`
 
 `SessionManager.continueRecent(cwd, sessionDir)`:

@@ -419,6 +419,7 @@ import {
 	isUserAuthoredQueuedMessage,
 	isUserQueuedMessage,
 	queueChipText,
+	queuedGroupHasAttachments,
 	toRestoredQueuedMessage,
 } from "./queued-messages";
 import { checkCodexBalance, readResetMarker, resetLockPath, withResetFence } from "./reset-fence";
@@ -619,6 +620,30 @@ export class SessionBusyError extends Error {
 		this.name = "SessionBusyError";
 	}
 }
+
+export interface SwitchSessionOptions {
+	onCwdChange?: (newCwd: string, previousCwd: string) => Promise<boolean>;
+	/** Collab snapshot adoption keeps the guest's process cwd and marks the replica runtime-only. */
+	preserveLocalCwd?: boolean;
+	/**
+	 * Use this model instead of the target's saved one, like an explicit
+	 * `--model` at startup, and record it in the session when it differs.
+	 */
+	model?: Model;
+	/** Keep the current model without restoring the target's (collab replicas mirror the host's model). */
+	keepModel?: boolean;
+	/**
+	 * Receives the model fallback warning after the switch commits, instead of a
+	 * `notice` event; for hosts that re-render the transcript after switching.
+	 */
+	onModelFallback?: (warning: string) => void;
+}
+
+/**
+ * Decides whether a switch to `sessionFile` may start, and runs it via `proceed`. A guard that does not call
+ * `proceed` refuses: nothing changes and the switch reports cancelled, as for an extension veto.
+ */
+export type SessionSwitchGuard = (sessionFile: string, proceed: () => Promise<boolean>) => Promise<boolean>;
 
 const EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS: Record<string, true> = {
 	context_notes: true,
@@ -845,6 +870,11 @@ export class AgentSession implements SettingsScope {
 	readonly settings: Settings;
 	/** Session-start policy, independent of the selected project memory backend. */
 	readonly memoryEnabled: boolean;
+	/**
+	 * A passive local replica of a session another process runs: it adopts that session's id but owns none of the
+	 * resources the id scopes, so it never releases them (see {@link AgentSessionConfig.passiveReplica}).
+	 */
+	readonly passiveReplica: boolean;
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
@@ -1792,7 +1822,8 @@ export class AgentSession implements SettingsScope {
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
-		this.memoryEnabled = config.memoryEnabled ?? true;
+		this.passiveReplica = config.passiveReplica === true;
+		this.memoryEnabled = !this.passiveReplica && (config.memoryEnabled ?? true);
 		this.#modelRegistry = config.modelRegistry;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
 		this.#interactivePrompts = config.interactivePrompts !== false;
@@ -2656,6 +2687,8 @@ export class AgentSession implements SettingsScope {
 		cfgRatchetEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("ratchet.enabled", enabled));
 		cfgArchiveEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("archive.enabled", enabled));
 		cfgBrowserIdleCloseSec.listen(this, seconds => {
+			// A passive replica carries the owner's session id: arming idle closes under it would reap the owner's tabs.
+			if (this.passiveReplica) return;
 			const ownerId = this.sessionManager.getSessionId() ?? "";
 			// Any change invalidates the armed deadline: cancel first (its
 			// sequence bump stops an in-flight sweep re-arming the old
@@ -2975,6 +3008,16 @@ export class AgentSession implements SettingsScope {
 
 	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
 		this.#sessionSwitchReconciler = reconciler ?? undefined;
+	}
+
+	#sessionSwitchGuard: SessionSwitchGuard | undefined;
+
+	/**
+	 * Wrap every {@link switchSession} (RPC command, extension action, custom command) in `guard`, so a host can
+	 * refuse a target another process owns before anything changes. Not applied to a passive replica.
+	 */
+	setSessionSwitchGuard(guard: SessionSwitchGuard | null): void {
+		this.#sessionSwitchGuard = guard ?? undefined;
 	}
 
 	/**
@@ -3484,7 +3527,9 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#recordSessionExit(reason: postmortem.Reason | "dispose"): void {
-		if (this.#exitRecorded) return;
+		// A passive replica is a view: the owning process records its own exit, and an entry appended here would
+		// recreate the local copy a hosted client deletes when it leaves.
+		if (this.#exitRecorded || this.passiveReplica) return;
 		this.#exitRecorded = true;
 		const pendingToolCalls = collectPendingToolCalls(this.sessionManager.getBranch());
 		if (
@@ -5950,7 +5995,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	async #releaseOwnedBrowserTabs(ownerId: string | undefined): Promise<void> {
-		if (!ownerId) return;
+		if (!ownerId || this.passiveReplica) return;
 		try {
 			const released = await withTimeout(
 				releaseTabsForOwner(ownerId, { kill: true }),
@@ -5976,7 +6021,7 @@ export class AgentSession implements SettingsScope {
 	 */
 	async #settleOwnedBrowserTabs(): Promise<void> {
 		const ownerId = this.sessionManager.getSessionId();
-		if (!ownerId) return;
+		if (!ownerId || this.passiveReplica) return;
 		try {
 			const idleSec = cfgBrowserIdleCloseSec.get(this.settings);
 			if (idleSec > 0) {
@@ -6009,7 +6054,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	async #releaseOwnedComputerSessions(ownerId: string | undefined): Promise<void> {
-		if (!ownerId) return;
+		if (!ownerId || this.passiveReplica) return;
 		try {
 			await withTimeout(
 				releaseComputerSessionsForOwner(ownerId),
@@ -6063,7 +6108,7 @@ export class AgentSession implements SettingsScope {
 		this.#cancelFatalRecoveryHint?.();
 		this.#cancelFatalRecoveryHint = undefined;
 		try {
-			await emitSessionShutdownEvent(this.#extensionRunner);
+			if (!this.passiveReplica) await emitSessionShutdownEvent(this.#extensionRunner);
 		} catch (error) {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
@@ -6097,16 +6142,20 @@ export class AgentSession implements SettingsScope {
 			logger.warn("Session dispose: Sharpshooter release failed", { error: String(error) });
 		}
 		const advisorRecorderClosed = this.#advisors.recorderClosed();
-		releaseShellSessions(this.sessionManager.getSessionId());
+		// A passive replica's id is the host's: the shells it scopes are the host's too.
+		if (!this.passiveReplica) releaseShellSessions(this.sessionManager.getSessionId());
 		const results = await Promise.allSettled([
 			this.#disposeOwnedAsyncJobs(),
 			this.#eval.disposeKernels(),
 			this.#releaseOwnedBrowserTabs(this.sessionManager.getSessionId()),
 			this.#releaseOwnedComputerSessions(this.#eval.getKernelOwnerId()),
+
 			this.#disconnectOwnedMcp(),
 			advisorRecorderClosed,
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
-			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
+			this.passiveReplica
+				? Promise.resolve()
+				: this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
 			sharpshooterFlushed,
 		]);
 		for (const result of results) {
@@ -6503,6 +6552,32 @@ export class AgentSession implements SettingsScope {
 	/** The selector the user configured: `auto` when auto mode is active, else the effective level. */
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined {
 		return this.#models.configuredThinkingLevel();
+	}
+
+	/**
+	 * Passive replica only: mirror the owning session's effective thinking level into the model controls, so every
+	 * reader of {@link thinkingLevel} (composer, editor border, selectors) shows it. Like a transcript restore it
+	 * applies the level to the agent as is: nothing is persisted, clamped to local credentials or emitted.
+	 */
+	setReplicaThinkingLevel(level: ThinkingLevel | undefined): void {
+		if (!this.passiveReplica) throw new Error("Only a passive replica mirrors another session's thinking level");
+		this.#models.restoreThinkingSnapshot(level, false, undefined);
+	}
+
+	/**
+	 * Passive replica only: put the replica on the owning session's active branch. Loading the replica's file selects
+	 * the last journal entry, which is not the owner's branch after it navigated back; this moves the leaf in memory
+	 * (nothing is written) and resynchronizes everything the load derived from the branch it first saw: the agent's
+	 * messages, the todo list and model mentions, and the checkpoint state.
+	 */
+	setReplicaLeaf(leafId: string | null): void {
+		if (!this.passiveReplica) throw new Error("Only a passive replica follows another session's active branch");
+		if (leafId === null) this.sessionManager.resetLeaf();
+		else this.sessionManager.branch(leafId);
+		this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
+		this.#rehydrateCheckpointRewindState();
+		this.#todo.syncFromBranch();
+		this.#modelMentions.syncFromBranch();
 	}
 
 	/** True when `auto` thinking mode is active. */
@@ -9918,6 +9993,24 @@ export class AgentSession implements SettingsScope {
 		return this.queuedMessageCount > 0 || this.agent.peekUndeliveredQueuedMessages().some(isDisplayableQueuedMessage);
 	}
 
+	/**
+	 * Which of the {@link getQueuedMessages} chips stand for a prompt with an attachment its chip text does not carry
+	 * (see {@link queuedGroupHasAttachments}). Parallel to the chip lists: entry `i` describes chip `i`, and both are
+	 * built from the same queues in one synchronous pass, so they cannot disagree.
+	 */
+	getQueuedMessageAttachments(): { steering: boolean[]; followUp: boolean[] } {
+		const flags = (queue: readonly AgentMessage[]): boolean[] =>
+			queue.flatMap((message, index) =>
+				isUserAuthoredQueuedMessage(message)
+					? [queuedGroupHasAttachments(queue.slice(this.#queuedUserGroupStart(queue, index), index + 1))]
+					: [],
+			);
+		return {
+			steering: [...flags(this.agent.peekLiveSteeredMessages()), ...flags(this.agent.peekSteeringQueue())],
+			followUp: flags(this.agent.peekFollowUpQueue()),
+		};
+	}
+
 	/** Chip texts for the queue display. Steering live steering took for the streaming response
 	 *  stays listed until the transcript records it, when the model actually switches to it. */
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number } {
@@ -9972,24 +10065,46 @@ export class AgentSession implements SettingsScope {
 	 * skill invocation's `__queueChipText`, or untransformed text). A missing or
 	 * already delivered target changes nothing; repeated calls may remove further
 	 * duplicates.
+	 *
+	 * `match: "last"` removes the newest prompt whose chip text (see {@link getQueuedMessages}) is `text`,
+	 * for a caller that picked the newest chip of a queue it only sees as chip text.
 	 */
-	removeQueuedMessage(text: string, queue: "steering" | "followUp"): boolean {
-		return this.takeQueuedMessage(text, queue) !== undefined;
+	removeQueuedMessage(text: string, queue: "steering" | "followUp", options?: { match?: "first" | "last" }): boolean {
+		return this.takeQueuedMessage(text, queue, options) !== undefined;
 	}
 
 	/**
 	 * {@link removeQueuedMessage}, returning the removed message as editor-restorable
 	 * content (its chip text and images); undefined when nothing matched.
 	 */
-	takeQueuedMessage(text: string, queue: "steering" | "followUp"): RestoredQueuedMessage | undefined {
+	takeQueuedMessage(
+		text: string,
+		queue: "steering" | "followUp",
+		options?: { match?: "first" | "last" },
+	): RestoredQueuedMessage | undefined {
 		const selected = queue === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue();
-		const index = this.#findQueuedUserMessage(selected, text);
+		const index = this.#findQueuedUserMessage(selected, text, options?.match);
 		if (index < 0) return undefined;
 
 		const removed = selected[index];
 		this.agent.replaceQueue(queue, this.#withoutQueuedUserMessage(selected, index));
 		this.#reconcileQueuedMessageDrain();
 		return toRestoredQueuedMessage(removed);
+	}
+
+	/**
+	 * Whether the prompt `removeQueuedMessage(text, queue, options)` would remove carries an attachment (an image, or
+	 * a companion holding one's source or description) that its chip text does not. False when nothing matches.
+	 */
+	queuedMessageHasAttachments(
+		text: string,
+		queue: "steering" | "followUp",
+		options?: { match?: "first" | "last" },
+	): boolean {
+		const selected = queue === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue();
+		const index = this.#findQueuedUserMessage(selected, text, options?.match);
+		if (index < 0) return false;
+		return queuedGroupHasAttachments(selected.slice(this.#queuedUserGroupStart(selected, index), index + 1));
 	}
 
 	/**
@@ -10022,9 +10137,14 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Queue-editing matcher shared by removal and promotion (see {@link removeQueuedMessage});
 	 * matches the raw text the caller originally submitted first, then the queued chip text
-	 * itself (exact); -1 when nothing matches.
+	 * itself (exact); -1 when nothing matches. `match: "last"` instead picks the LAST user prompt
+	 * whose chip text is `text`: the chip list is what a remote view shows, so the newest chip
+	 * resolves to the newest queued prompt even when an older one was typed as the same raw text.
 	 */
-	#findQueuedUserMessage(queue: readonly AgentMessage[], text: string): number {
+	#findQueuedUserMessage(queue: readonly AgentMessage[], text: string, match: "first" | "last" = "first"): number {
+		if (match === "last") {
+			return queue.findLastIndex(message => isUserAuthoredQueuedMessage(message) && queueChipText(message) === text);
+		}
 		let index = queue.findIndex(
 			message => isUserAuthoredQueuedMessage(message) && this.#queuedMessageRawText.get(message) === text,
 		);
@@ -12318,37 +12438,25 @@ export class AgentSession implements SettingsScope {
 	 * warning. Reloading the current session keeps the current model.
 	 * @returns true if switch completed, false if cancelled by hook or cwd change
 	 */
-	async switchSession(
-		sessionPath: string,
-		options?: {
-			onCwdChange?: (newCwd: string, previousCwd: string) => Promise<boolean>;
-			/** Collab snapshot adoption keeps the guest's process cwd and marks the replica runtime-only. */
-			preserveLocalCwd?: boolean;
-			/**
-			 * Use this model instead of the target's saved one, like an explicit
-			 * `--model` at startup, and record it in the session when it differs.
-			 */
-			model?: Model;
-			/** Keep the current model without restoring the target's (collab replicas mirror the host's model). */
-			keepModel?: boolean;
-			/**
-			 * Receives the model fallback warning after the switch commits, instead of a
-			 * `notice` event; for hosts that re-render the transcript after switching.
-			 */
-			onModelFallback?: (warning: string) => void;
-		},
-	): Promise<boolean> {
+	async switchSession(sessionPath: string, options?: SwitchSessionOptions): Promise<boolean> {
 		const explicitModel = options?.model;
 		if (explicitModel && !this.#modelRegistry.hasConfiguredAuth(explicitModel)) {
 			throw new Error(`No API key for ${explicitModel.provider}/${explicitModel.id}`);
 		}
+		const guard = this.passiveReplica ? undefined : this.#sessionSwitchGuard;
+		const proceed = () => this.#switchSession(sessionPath, options);
+		return guard ? guard(sessionPath, proceed) : proceed();
+	}
+
+	async #switchSession(sessionPath: string, options?: SwitchSessionOptions): Promise<boolean> {
+		const explicitModel = options?.model;
 		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
 			: true;
 		// Emit session_before_switch event (can be cancelled)
-		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
+		if (!this.passiveReplica && this.#extensionRunner?.hasHandlers("session_before_switch")) {
 			const result = (await this.#extensionRunner.emit({
 				type: "session_before_switch",
 				reason: "resume",
@@ -12507,7 +12615,8 @@ export class AgentSession implements SettingsScope {
 			if (switchingToDifferentSession) this.#cancelOwnAsyncJobs();
 
 			// Emit session_switch event to hooks
-			if (this.#extensionRunner) {
+			// A passive replica's runner belongs to no session of this process, so its extensions are not told.
+			if (this.#extensionRunner && !this.passiveReplica) {
 				await this.#extensionRunner.emit({
 					type: "session_switch",
 					reason: "resume",

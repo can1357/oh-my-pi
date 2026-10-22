@@ -366,7 +366,7 @@ export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string, 
 	return result;
 }
 
-function expandTilde(p: string): string {
+export function expandTilde(p: string): string {
 	return p === "~" ? os.homedir() : p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
 }
 

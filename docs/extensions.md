@@ -1054,13 +1054,13 @@ environment propagation rules; the dispatcher does not synthesize uniform variab
 inheritance. Request argv stays separate for direct backends; only shell-input
 backends turn argv into shell text, under the required POSIX grammar assertion.
 
-### RPC mode (`rpc-mode.ts`)
+### RPC mode (`rpc-server.ts`)
 
 `ctx.ui` is backed by RPC `extension_ui_request` events:
 
 - dialog methods (`select`, `confirm`, `input`, `editor`) round-trip to client responses
 - fire-and-forget methods emit requests (`notify`, `setStatus`, `setWidget` for string arrays or removal, and `setEditorText` as `method: "set_editor_text"`); `pasteToEditor` falls back to `setEditorText`
-- `setTitle` emits only when `PI_RPC_EMIT_TITLE` is `1`, `true`, `yes`, or `on` (case-insensitive)
+- `setTitle` emits only when `PI_RPC_EMIT_TITLE` is `1`, `true`, `yes`, or `on` (case-insensitive), except in a session host (`--mode host`), which always forwards it to attached terminals
 
 Unsupported/no-op in RPC implementation:
 

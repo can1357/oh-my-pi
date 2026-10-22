@@ -22,11 +22,15 @@ export class RpcOutputWriter {
 	#failure: Error | undefined;
 	#closing = false;
 	#completion: { promise: Promise<void>; resolve: () => void; reject: (error: Error) => void } | undefined;
+	readonly #maxSpoolBytes: number;
 
+	/** `maxSpoolBytes` bounds the undelivered backlog; past it the writer fails. Unbounded by default. */
 	constructor(
 		private readonly sink: Writable,
 		private readonly onFailure: (error: Error) => void,
+		options: { maxSpoolBytes?: number } = {},
 	) {
+		this.#maxSpoolBytes = options.maxSpoolBytes ?? Number.POSITIVE_INFINITY;
 		sink.on("drain", this.#onDrain);
 		sink.on("error", this.#onError);
 		sink.on("close", this.#onClose);
@@ -82,6 +86,7 @@ export class RpcOutputWriter {
 		}
 		const spool = this.#spool;
 		const bytes = Buffer.from(line);
+		if (spool.written - spool.read + bytes.length > this.#maxSpoolBytes) throw new Error("output backlog exceeded");
 		let offset = 0;
 		// Event callbacks cannot await a disk write without retaining an unbounded queue.
 		while (offset < bytes.length) {

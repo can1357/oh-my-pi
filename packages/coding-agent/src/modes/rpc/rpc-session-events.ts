@@ -1,6 +1,7 @@
 /**
- * Session-event forwarding for RPC mode: stamps message lifecycle frames with a
- * `messageId` and applies the host's `set_event_filter` selection.
+ * Session-event forwarding for RPC mode: the server stamps message lifecycle
+ * frames with a `messageId` once, then each connection applies its own
+ * `set_event_filter` selection and projection.
  */
 import type { AssistantMessageEvent } from "@oh-my-pi/pi-ai";
 import type { AgentSessionEvent } from "../../session/agent-session";
@@ -19,44 +20,16 @@ function withoutPartial(event: AssistantMessageEvent): RpcDeltaMessageUpdateFram
 }
 
 /**
- * Writes session events to the RPC output. Message ids are assigned whether or
- * not the frame passes the filter, so changing the filter mid-message never
- * splits one message across two ids.
+ * Mints message ids once per host, so every connection sees the same id for a
+ * message. Ids are assigned whether or not a connection's filter passes the
+ * frame, so changing a filter mid-message never splits one message across two ids.
  */
-export class RpcSessionEventForwarder {
-	#filter: Set<string> | undefined;
-	#messageUpdates: RpcMessageUpdates = "full";
+export class RpcMessageIdStamper {
 	#messageCount = 0;
 	/** Ids of started, unfinished messages. External records (advisor cards, IRC) nest inside a streaming reply. */
 	#openMessageIds: string[] = [];
-	readonly #output: (frame: RpcProjectedSessionEventFrame) => void;
 
-	constructor(output: (frame: RpcProjectedSessionEventFrame) => void) {
-		this.#output = output;
-	}
-
-	/** Forward only the listed event types; `null` forwards everything. Returns the active selection. */
-	setFilter(events: readonly string[] | null, messageUpdates: RpcMessageUpdates = "full"): string[] | null {
-		this.#filter = events === null ? undefined : new Set(events);
-		this.#messageUpdates = messageUpdates;
-		return this.#filter ? Array.from(this.#filter) : null;
-	}
-
-	forward(event: AgentSessionEvent): void {
-		const frame = this.#stamp(event);
-		if (this.#filter && !this.#filter.has(frame.type)) return;
-		if (frame.type === "message_update" && this.#messageUpdates === "delta") {
-			this.#output({
-				...frame,
-				message: { role: frame.message.role },
-				assistantMessageEvent: withoutPartial(frame.assistantMessageEvent),
-			});
-			return;
-		}
-		this.#output(frame);
-	}
-
-	#stamp(event: AgentSessionEvent): RpcAgentSessionEventFrame {
+	stamp(event: AgentSessionEvent): RpcAgentSessionEventFrame {
 		switch (event.type) {
 			case "message_start": {
 				const messageId = this.#mintMessageId();
@@ -82,7 +55,44 @@ export class RpcSessionEventForwarder {
 		}
 	}
 
+	/** Id of the innermost open message, for mid-turn snapshots. */
+	openMessageId(): string | undefined {
+		return this.#openMessageIds.at(-1);
+	}
+
 	#mintMessageId(): string {
 		return `msg-${++this.#messageCount}`;
+	}
+}
+
+/** One connection's view of the stamped session events: its filter and message-update projection. */
+export class RpcSessionEventForwarder {
+	#filter: Set<string> | undefined;
+	#messageUpdates: RpcMessageUpdates = "full";
+	readonly #output: (frame: RpcProjectedSessionEventFrame) => void;
+
+	constructor(output: (frame: RpcProjectedSessionEventFrame) => void) {
+		this.#output = output;
+	}
+
+	/** Forward only the listed event types; `null` forwards everything. Returns the active selection. */
+	setFilter(events: readonly string[] | null, messageUpdates: RpcMessageUpdates = "full"): string[] | null {
+		this.#filter = events === null ? undefined : new Set(events);
+		this.#messageUpdates = messageUpdates;
+		return this.#filter ? Array.from(this.#filter) : null;
+	}
+
+	/** Applies this connection's filter and projection to an already-stamped frame. */
+	forward(frame: RpcAgentSessionEventFrame): void {
+		if (this.#filter && !this.#filter.has(frame.type)) return;
+		if (frame.type === "message_update" && this.#messageUpdates === "delta") {
+			this.#output({
+				...frame,
+				message: { role: frame.message.role },
+				assistantMessageEvent: withoutPartial(frame.assistantMessageEvent),
+			});
+			return;
+		}
+		this.#output(frame);
 	}
 }
