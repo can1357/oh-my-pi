@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed Escape no longer leaving the focused-subagent view when `app.interrupt` was remapped to another key; a raw Escape now clears the draft or returns to the main session ([#8952](https://github.com/can1357/oh-my-pi/issues/8952), [#16464](https://github.com/can1357/oh-my-pi/pull/16464) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -33,10 +36,6 @@
 - Fixed `history://<id>` failing with "has no transcript: session is gone" for a worker that is still running but has not created its session or transcript file yet; it now answers "No transcript has been written yet". ([#16645](https://github.com/can1357/oh-my-pi/pull/16645) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
 
-
-### Fixed
-
-- Fixed Escape no longer leaving the focused-subagent view when `app.interrupt` was remapped to another key; a raw Escape now clears the draft or returns to the main session ([#8952](https://github.com/can1357/oh-my-pi/issues/8952), [#16464](https://github.com/can1357/oh-my-pi/pull/16464) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ## [18.12.6] - 2026-10-21
 
 ### Added
