@@ -4,6 +4,7 @@
  */
 import { combine, register, type SettingValueOf } from "../config/registry";
 import { DEFAULT_SKILLS_URL } from "@oh-my-pi/pi-wire/skillshare";
+import { cfgUserResourceExclusions } from "./resource-settings";
 
 const EMPTY_STRING_ARRAY: string[] = [];
 
@@ -37,6 +38,30 @@ export const cfgSkillsEnableSkillCommands = register({
 		group: "Commands & Skills",
 		label: "Skill Commands",
 		description: "Register skills as /skill:name commands",
+	},
+});
+
+export const cfgSkillsShowStartupDiagnostics = register({
+	id: "skills.showStartupDiagnostics",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Commands & Skills",
+		label: "Skill Startup Notices",
+		description: "Show skill conflicts and deduplicated installations at startup",
+	},
+});
+
+export const cfgSkillsDedupeSameOrigin = register({
+	id: "skills.dedupeSameOrigin",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Commands & Skills",
+		label: "Dedupe Same-Origin Skills",
+		description: "Keep one variant of same-name skills whose plugins declare the same source repository",
 	},
 });
 
@@ -80,7 +105,7 @@ export const cfgSkillsIncludeSkills = register({
 	default: EMPTY_STRING_ARRAY,
 });
 
-/** Skill discovery options (`skills.*` except the `omp skill` registry URL). */
+/** Skill discovery options (excludes registry URL and startup-only presentation settings). */
 export const cfgSkills = combine({
 	enabled: cfgSkillsEnabled,
 	enableSkillCommands: cfgSkillsEnableSkillCommands,
@@ -94,6 +119,8 @@ export const cfgSkills = combine({
 	customDirectories: cfgSkillsCustomDirectories,
 	ignoredSkills: cfgSkillsIgnoredSkills,
 	includeSkills: cfgSkillsIncludeSkills,
+	dedupeSameOrigin: cfgSkillsDedupeSameOrigin,
+	resourceExclusions: cfgUserResourceExclusions,
 });
 
 /** Skill discovery options ({@link cfgSkills}); omitted fields fall back to the setting defaults. */
