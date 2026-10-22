@@ -3,7 +3,7 @@
 ## [Unreleased]
 ### Changed
 
-- `omp` starts faster: the browser's accessibility audit now loads its `axe-core` engine on demand, so a launch no longer pays for it ([#XXXXX](https://github.com/can1357/oh-my-pi/pull/XXXXX) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- `omp` starts faster: the browser's accessibility audit now loads its `axe-core` engine on demand, so a launch no longer pays for it ([#16775](https://github.com/can1357/oh-my-pi/pull/16775) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
