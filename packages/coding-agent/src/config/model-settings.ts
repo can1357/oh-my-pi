@@ -18,13 +18,19 @@ export interface ModelTagDef {
 export type ModelTagsSettings = Record<string, ModelTagDef>;
 
 /**
- * One saved model preset (`modelPresets.<name>`): the role assignments and default thinking level
- * captured by `/modelpreset save` or the model hub, re-applied as a whole by `/modelpreset switch`.
+ * One saved model preset (`modelPresets.<name>`): the role assignments, default thinking level and
+ * role fallback chains captured by `/modelpreset save` or the model hub, re-applied as a whole by
+ * `/modelpreset switch`.
  */
 export interface ModelPreset {
 	modelRoles: Record<string, string>;
 	/** `defaultThinkingLevel` at save time; absent in hand-written presets that leave it alone. */
 	defaultThinkingLevel?: SettingValueOf<typeof cfgDefaultThinkingLevel>;
+	/**
+	 * Role-keyed `retry.fallbackChains` entries at save time; `[]` is an explicit "no fallbacks".
+	 * Absent in presets saved before chains were recorded; applying such a preset leaves chains alone.
+	 */
+	fallbackChains?: Record<string, string[]>;
 }
 
 const EMPTY_STRING_ARRAY: string[] = [];

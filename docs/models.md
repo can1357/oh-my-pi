@@ -711,10 +711,10 @@ If a role points at another role, the target model still inherits normally and a
 
 ### Model presets
 
-A model preset is a named snapshot of every role assignment plus `defaultThinkingLevel`, so you can swap a whole setup at once:
+A model preset is a named snapshot of every role assignment, `defaultThinkingLevel` and the role fallback chains (`retry.fallbackChains` entries keyed by a role), so you can swap a whole setup at once:
 
 ```text
-/modelpreset save cheap      # save the current roles and thinking level
+/modelpreset save cheap      # save the current roles, thinking level and role fallback chains
 /modelpreset switch deep     # apply a saved preset
 /modelpreset                 # pick one from a list (interactive)
 /modelpreset list | delete <name>
@@ -729,9 +729,14 @@ modelPresets:
       default: anthropic/claude-opus-4-5:high
       smol: anthropic/claude-sonnet-4-5
     defaultThinkingLevel: high
+    fallbackChains:
+      default:
+        - anthropic/claude-sonnet-4-5
 ```
 
 Switching writes roles the way the model picker does: into the scope chosen by `modelRoleStorage`, clearing roles the preset leaves out and replacing `--model`/`--smol` session overrides. The preset's `defaultThinkingLevel` is written to the global config. It then switches the active model to the resulting `default` (an automatic provider-default selection when the preset has none) and sets the session's thinking level from the `:level` suffix on that selector, or else the preset's `defaultThinkingLevel`; a `:inherit` suffix leaves the level the model switch set. When a preset's `default` model is unavailable, nothing is changed. Roles that another layer still decides — a `--config` file, a project config in `global` storage, or the global config in `project` storage — are listed in the switch message with the layer that wins, instead of being reported as switched. The same goes for a `defaultThinkingLevel` set by a project config or `--config` file: the session still switches to the preset's level, but the message names that layer, whose level returns on the next start.
+
+Switching also replaces the role fallback chains in the global config: the preset's chains are written and every other role chain is removed, so the previous setup's fallbacks never stay behind. An empty chain (`slow: []`, meaning "no fallbacks") is saved and restored as is, so it never turns back into the role's default fallbacks. A preset saved before chains were recorded (no `fallbackChains` key) leaves the current chains alone; save it again to record them. With `modelRoleStorage: project`, switching does not change the global chains, because they apply to every project; chains that differ from the preset are listed in the switch message. Chains keyed by a model or provider selector (`anthropic/*`) are not part of a preset and stay as they are. A role chain that a project config or `--config` file still sets is listed in the switch message with that layer.
 
 When several config layers define a preset of the same name, the highest layer (command line, then `--config` file, then project config, then global config) wins whole: entries are never merged across layers, so a project `deep` that only sets `default` applies without the global `deep`'s other roles. A `null` entry in a `--config` file (or a command-line override) hides the preset from lists and switches; a `null` entry in a project config is ignored, so the global preset of that name still applies. Saving always writes the named entry to the global config and reports when a higher layer still takes precedence for that name.
 
