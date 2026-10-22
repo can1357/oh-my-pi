@@ -20,6 +20,23 @@ describe("AgentOutputManager", () => {
 		expect(await mgr.allocate("Bob")).toBe("Bob");
 	});
 
+	it("restarts a taken collision chain from its base instead of growing the chain", async () => {
+		const mgr = new AgentOutputManager(() => null);
+		await mgr.reserve(["Worker", "Worker-2", "Worker-3", "Worker-3-2"]);
+
+		// Re-spawning the already-suffixed `Worker-3-2` must not yield `Worker-3-2-2`.
+		expect(await mgr.allocate("Worker-3-2")).toBe("Worker-4");
+	});
+
+	it("keeps a numeric suffix that is part of the name", async () => {
+		const mgr = new AgentOutputManager(() => null);
+
+		expect(await mgr.allocate("gpt-5")).toBe("gpt-5");
+		// `gpt` was never handed out, so `-5` is the name, not a collision suffix.
+		expect(await mgr.allocate("gpt-5")).toBe("gpt-5-2");
+		expect(await mgr.allocate("Worker-2")).toBe("Worker-2");
+	});
+
 	it("nests ids under a parent prefix and still suffixes repeats", async () => {
 		const mgr = new AgentOutputManager(() => null, { parentPrefix: "Anna" });
 
