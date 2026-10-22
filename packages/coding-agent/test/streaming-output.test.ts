@@ -274,7 +274,11 @@ describe("OutputSink", () => {
 	});
 	test("normalizes carriage-return progress frames across chunk boundaries", async () => {
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk) });
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+		});
 
 		sink.push("start\r");
 		sink.push("one\r");
@@ -291,7 +295,11 @@ describe("OutputSink", () => {
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
 		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk) });
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+		});
 		await sink.push(`before\n${sixel}\nafter`);
 		const dumped = await sink.dump();
 		expect(chunks).toHaveLength(1);
@@ -366,7 +374,12 @@ describe("OutputSink", () => {
 
 	test("throttled onChunk coalesces held-back chunks instead of dropping them", async () => {
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 60_000 });
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+			chunkThrottleMs: 60_000,
+		});
 		sink.push("a");
 		// Inside the throttle window: buffered, not dropped.
 		sink.push("b");
@@ -381,7 +394,12 @@ describe("OutputSink", () => {
 	test("throttled onChunk emits a quiet tail at the throttle boundary", () => {
 		vi.useFakeTimers();
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 20 });
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+			chunkThrottleMs: 20,
+		});
 
 		sink.push("a");
 		sink.push("b");
@@ -395,7 +413,12 @@ describe("OutputSink", () => {
 	test("dump flushes a throttled tail once and cancels its timer", async () => {
 		vi.useFakeTimers();
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 20 });
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+			chunkThrottleMs: 20,
+		});
 
 		sink.push("a");
 		sink.push("b");
@@ -407,10 +430,167 @@ describe("OutputSink", () => {
 		expect(chunks).toEqual(["a", "b"]);
 	});
 
+	test("dispose delivers a throttled pending chunk instead of dropping it silently", async () => {
+		// Failure mode: a second raw chunk arrives inside the executor's 50 ms
+		// OutputSink throttle, then the shell backend rejects — the error path
+		// skips dump() and calls dispose(), which used to clear the pending
+		// timer without flushing. The subscriber's retained tail then silently
+		// ended one chunk early with a zero skipped count. Dispose must deliver
+		// what the shell produced, exactly as dump()'s flush does.
+		const chunks: string[] = [];
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+			chunkThrottleMs: 60_000,
+		});
+		sink.push("first");
+		sink.push("second");
+		expect(chunks).toEqual(["first"]);
+		await sink.dispose();
+		expect(chunks).toEqual(["first", "second"]);
+		// Idempotent: a later dump (or second dispose) must not re-emit it.
+		expect((await sink.dump()).output).toBe("firstsecond");
+		expect(chunks).toEqual(["first", "second"]);
+	});
+
+	test("dispose does not reject when the chunk subscriber throws", async () => {
+		// Disposal runs while the command is already unwinding a backend
+		// failure. A subscriber that rejects the flushed tail used to turn the
+		// cleanup call into a rejection: it replaced the command's own error and
+		// skipped the executor's remaining cleanup, leaving the persistent
+		// shell key marked busy for later commands.
+		let calls = 0;
+		const sink = new OutputSink({
+			onChunk: () => {
+				calls++;
+				if (calls === 2) throw new Error("subscriber failed");
+			},
+			chunkThrottleMs: 60_000,
+		});
+		sink.push("first");
+		sink.push("second");
+		await sink.dispose();
+		expect(calls).toBe(2);
+	});
+
+	test("dispose awaits an async chunk subscriber and swallows its rejection", async () => {
+		// The kernel/JS eval executors pass a promise-returning onChunk straight
+		// through. When that callback rejects while a backend failure triggers
+		// disposal, the rejection used to be left unhandled: the try/catch only
+		// covered synchronous throws, so the flushed tail's promise escaped as an
+		// unhandled rejection instead of being awaited by the cleanup path.
+		// Disposal must settle it and still close the artifact.
+		const chunks: string[] = [];
+		const subscriber = Promise.withResolvers<void>();
+		const sink = new OutputSink({
+			onChunk: (chunk: string) => {
+				chunks.push(chunk);
+				if (chunks.length === 2) return subscriber.promise;
+				return undefined;
+			},
+			chunkThrottleMs: 60_000,
+		});
+		sink.push("first");
+		sink.push("second");
+		expect(chunks).toEqual(["first"]);
+
+		const disposal = sink.dispose();
+		// The pending tail is handed to the subscriber before disposal settles.
+		await Promise.resolve();
+		expect(chunks).toEqual(["first", "second"]);
+		subscriber.reject(new Error("subscriber failed"));
+		// The rejection must not escape the cleanup call.
+		await disposal;
+		// The artifact is closed even though the subscriber failed.
+		expect((await sink.dump()).output).toBe("firstsecond");
+	});
+
+	test("dispose awaits every in-flight async chunk subscriber", async () => {
+		// Two async subscriber calls can overlap when the subscriber is slower
+		// than the next chunk. The earlier call used to clear the tracked call
+		// unconditionally, so a later call that was still pending was no longer
+		// awaited and the executor's cleanup could finish before the final
+		// output update ran.
+		const first = Promise.withResolvers<void>();
+		const second = Promise.withResolvers<void>();
+		let calls = 0;
+		const sink = new OutputSink({
+			onChunk: () => {
+				calls++;
+				return calls === 1 ? first.promise : calls === 2 ? second.promise : undefined;
+			},
+		});
+		sink.push("a");
+		sink.push("b");
+		expect(calls).toBe(2);
+		// The earlier call settles after the later one started.
+		first.resolve();
+		// The settled call's own handler must run before disposal looks at the
+		// tracked calls.
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		let disposed = false;
+		const disposal = sink.dispose().then(() => {
+			disposed = true;
+		});
+		// Drain the microtask queue: a disposal that does not track the pending
+		// call settles within a handful of turns.
+		for (let turn = 0; turn < 20 && !disposed; turn++) {
+			await Promise.resolve();
+		}
+		// The second subscriber call is still pending, so disposal must not have
+		// finished.
+		expect(disposed).toBe(false);
+		second.resolve();
+		await disposal;
+		expect(disposed).toBe(true);
+	});
+
+	test("dispose awaits the tracked callbacks even when the tail flush throws", async () => {
+		// A subscriber can return a still-pending promise for an earlier chunk
+		// and throw synchronously for the throttled tail. The throw must not
+		// skip the tracked calls: the earlier callback is still in flight, and
+		// the executor's teardown must not finish before it does.
+		const first = Promise.withResolvers<void>();
+		const chunks: string[] = [];
+		const sink = new OutputSink({
+			onChunk: (chunk: string) => {
+				chunks.push(chunk);
+				if (chunks.length === 1) return first.promise;
+				throw new Error("subscriber failed");
+			},
+			chunkThrottleMs: 60_000,
+		});
+		sink.push("first");
+		sink.push("second");
+
+		let disposed = false;
+		const disposal = sink.dispose().then(() => {
+			disposed = true;
+		});
+		// Drain the microtask queue: a disposal that skips the tracked calls
+		// settles within a handful of turns.
+		for (let turn = 0; turn < 20 && !disposed; turn++) {
+			await Promise.resolve();
+		}
+		expect(disposed).toBe(false);
+		first.resolve();
+		await disposal;
+		expect(disposed).toBe(true);
+	});
+
 	test("replace cancels a throttled tail and discards its pending preview", () => {
 		vi.useFakeTimers();
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 20 });
+		const sink = new OutputSink({
+			onChunk: chunk => {
+				chunks.push(chunk);
+			},
+			chunkThrottleMs: 20,
+		});
 
 		sink.push("a");
 		sink.push("superseded");
@@ -902,7 +1082,9 @@ describe("OutputSink head-retain mode", () => {
 		const sink: OutputSink = new OutputSink({
 			spillThreshold: 64,
 			headBytes: 16,
-			onChunk: () => previews.push(sink.preview()),
+			onChunk: () => {
+				previews.push(sink.preview());
+			},
 		});
 		for (let i = 0; i < 40; i++) sink.push(`row ${i}\n`);
 		expect(previews.at(-1)).toEndWith("row 39\n");

@@ -16,7 +16,7 @@ import { formatArtifactErrorNotice, formatTruncationMetaNotice, type TruncationM
 import { DynamicBorder } from "../chrome/dynamic-border";
 import { Ellipsis, truncateToWidth, visibleWidth } from "../utils";
 import { interruptKey } from "../chrome/keybinding-hints";
-import { DEFAULT_TERMINAL_PREVIEW_LINES, expandKeyHint } from "../render/render-utils";
+import { DEFAULT_TERMINAL_PREVIEW_LINES, expandKeyHint, PREVIEW_LIMITS } from "../render/render-utils";
 import type { TspCardStatus, TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { card, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
@@ -24,6 +24,13 @@ import { runBox, runFoot, runInput, runOutput, type RunState } from "../tools/na
 
 /** Output rows shown while an execution is collapsed. */
 export const PREVIEW_LINES = 20;
+
+/** The rows a raw output string draws, one per line plus the last partial one. */
+function countLines(output: string): number {
+	let lines = 1;
+	for (let index = output.indexOf("\n"); index >= 0; index = output.indexOf("\n", index + 1)) lines++;
+	return lines;
+}
 
 /** Maximum visible columns retained from an execution output line. */
 export const MAX_DISPLAY_LINE_CHARS = 4000;
@@ -86,11 +93,38 @@ export function buildStatusFooter(opts: {
 	hiddenLineCount: number;
 	/** Suppress the "… N more lines" hint (used when sixel passthrough renders the full output). */
 	suppressHiddenCount?: boolean;
+	/**
+	 * Rows the caller discarded while streaming (the live line cap). They are
+	 * gone for good, so they are reported apart from `hiddenLineCount`, which
+	 * counts retained rows the expand key still delivers.
+	 */
+	droppedLineCount?: number;
+	/**
+	 * Rows the output throttle skipped after the retained rows — a mid/tail
+	 * gap, not a dropped head. Named apart from `droppedLineCount` so the
+	 * visible block is never mistaken for a complete tail.
+	 */
+	throttledLineCount?: number;
+	/**
+	 * Set when the throttle skipped a partial-line suffix that contributes no
+	 * whole row: the retained last row's tail is gone, so the footer names the
+	 * corrupted tail even though the skipped-row count stayed zero.
+	 */
+	throttledFragmentLost?: boolean;
 }): Text | undefined {
 	const parts: string[] = [];
 
 	if (opts.hiddenLineCount > 0 && !opts.suppressHiddenCount) {
 		parts.push(theme.fg("dim", `… ${opts.hiddenLineCount} more lines (${expandKeyHint()} to expand)`));
+	}
+	if (opts.droppedLineCount !== undefined && opts.droppedLineCount > 0) {
+		parts.push(theme.fg("dim", `… ${opts.droppedLineCount} earlier lines dropped`));
+	}
+	if (opts.throttledLineCount !== undefined && opts.throttledLineCount > 0) {
+		parts.push(theme.fg("dim", `… ${opts.throttledLineCount} lines skipped in output`));
+	}
+	if (opts.throttledFragmentLost === true) {
+		parts.push(theme.fg("dim", "… partial output skipped in output"));
 	}
 	if (opts.status === "cancelled") {
 		parts.push(theme.fg("warning", "(cancelled)"));
@@ -125,7 +159,10 @@ export interface ExecutionCardInput {
 	/** `performance.now()` when the run started; drives the live elapsed timer. */
 	readonly startedAt: number;
 	readonly expanded: boolean;
-	/** Body nodes before the output (the eval cell's code). */
+	/**
+	 * Body nodes before the output (the eval cell's code). The card body is not
+	 * clamped, so a lead that can grow long carries its own preview.
+	 */
 	readonly lead?: readonly NativeChild[];
 	/** Raw terminal output. */
 	readonly output: string;
@@ -133,13 +170,37 @@ export interface ExecutionCardInput {
 	readonly exitCode: number | undefined;
 	readonly truncation: TruncationMeta | undefined;
 	readonly artifactError?: OutputArtifactError;
+	/** Rows the live streaming cap discarded; gone for good, so they are named apart from the hidden rows expansion still delivers. */
+	readonly droppedLineCount: number;
+	/** Rows the output throttle skipped after the retained rows — a mid/tail gap, named apart so the visible block is never mistaken for a complete tail. */
+	readonly throttledLineCount: number;
+	/** The throttle skipped a partial-line suffix contributing no whole row; the retained last row's tail is gone. */
+	readonly throttledFragmentLost: boolean;
+}
+/**
+ * Bound one collapsed card image's drawn height to the card's own preview
+ * window. The image node carries its intrinsic pixel size with no max, so
+ * without this a single tall emission fills screens behind a nominally
+ * collapsed card. Expansion describes the untouched node, revealing it whole.
+ * Reuses the image `max` bound convention (not a second mechanism).
+ *
+ * `maxLines` is the image's SHARE of the collapsed group's preview-height
+ * budget: a per-image maximum alone would let every visible image take the
+ * whole window.
+ */
+function clampCollapsedExecutionImage(child: NativeChild, maxLines: number): NativeChild {
+	if (typeof child !== "object" || child === null || !("k" in child)) return child;
+	if (child.k !== "image") return child;
+	return { ...child, p: { ...child.p, max: { ...child.p?.max, h: `${maxLines}lines` } } };
 }
 
 /**
  * Native card shared by user bash/eval runs: the head with a live `elapsed`
- * while running, the output as an `ansi` mini terminal that follows its tail
- * while running, a cancel hint spinner, then exit/truncation notes. The
- * terminal clamps the collapsed body and owns the "N more lines" affordance.
+ * while running, the output as an `ansi` mini terminal pinned to its tail,
+ * a cancel hint spinner, then exit/truncation notes. The card body itself is
+ * never clamped: the output (and any lead) child carries its own preview, so
+ * a collapsed card still shows the notes that a body clamp would hide behind
+ * a long output.
  */
 export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	const running = input.status === "running";
@@ -152,11 +213,44 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 		...(input.lead ?? []),
 	];
 	if (input.output) {
+		// Always pinned to the tail: a settled replay describes once, so
+		// `follow: false` would anchor the collapsed preview at the earliest
+		// rows and hide the result until expansion. Matches runOutput().
 		children.push(
-			node("ansi", { text: input.output, follow: running, preview: { lines: PREVIEW_LINES } }, undefined, "output"),
+			node("ansi", { text: input.output, follow: true, preview: { lines: PREVIEW_LINES } }, undefined, "output"),
 		);
 	}
-	if (input.images) children.push(...input.images);
+	// Images carry no preview of their own, so a collapsed card shows only the
+	// first COLLAPSED_ITEMS and names the rest — otherwise up to 32 decoded
+	// images fill screens behind a nominally collapsed command.
+	// Each visible image also keeps its intrinsic pixel height unbounded, so the
+	// collapsed group carries a drawn-height clamp; expansion delivers the
+	// untouched nodes.
+	const images = input.images ?? [];
+	let visibleImages = images;
+	if (input.expanded) {
+		children.push(...images);
+	} else {
+		// The collapsed body has ONE preview-height budget: the output child's
+		// tail and the image group draw from the same window. An independent
+		// allowance each let the body reach two windows and pushed the
+		// exit/dropped/truncation notes below a normal viewport. The output
+		// takes its rows first — it is the result the user came for — and the
+		// images share what is left of it.
+		const outputRows = input.output ? Math.min(PREVIEW_LINES, countLines(input.output)) : 0;
+		const imageBudget = Math.max(0, PREVIEW_LINES - outputRows);
+		// Each visible image needs a row of its own, so the remaining budget
+		// also caps how many of them the collapsed card shows; the rest are
+		// named by the notice below. At least one stays visible, so a run that
+		// emitted images still shows one of them.
+		visibleImages = images.slice(0, Math.min(PREVIEW_LIMITS.COLLAPSED_ITEMS, Math.max(1, imageBudget)));
+		// Every visible image takes an equal share of the remaining budget, so
+		// several tall emissions cannot fill screens behind a nominally
+		// collapsed command (a per-image maximum alone would allow the whole
+		// window per image).
+		const perImageLines = Math.max(1, Math.floor(imageBudget / Math.max(1, visibleImages.length)));
+		children.push(...visibleImages.map(child => clampCollapsedExecutionImage(child, perImageLines)));
+	}
 	if (running) {
 		children.push(
 			node("spinner", { label: [span(`Running… (${interruptKey()} to cancel)`, "muted")] }, undefined, "running"),
@@ -171,6 +265,14 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	else if (input.status === "error") note(`(exit ${input.exitCode})`, "error");
 	if (input.truncation) note(formatTruncationMetaNotice(input.truncation), "warning");
 	if (input.artifactError) note(formatArtifactErrorNotice(input.artifactError), "warning");
+	// Same notes the legacy footer prints (buildStatusFooter), so a TSP surface
+	// and the fallback card name the dropped head and the throttle gap in the
+	// same words.
+	if (input.droppedLineCount > 0) note(`… ${input.droppedLineCount} earlier lines dropped`, "dim");
+	if (input.throttledLineCount > 0) note(`… ${input.throttledLineCount} lines skipped in output`, "dim");
+	if (input.throttledFragmentLost) note("… partial output skipped in output", "dim");
+	const hiddenImages = images.length - visibleImages.length;
+	if (hiddenImages > 0) note(`… ${hiddenImages} more image${hiddenImages === 1 ? "" : "s"}`, "dim");
 	if (notes.length > 0) children.push(text(notes, { wrap: "word", key: "notes" }));
 	return card(
 		{
@@ -179,7 +281,6 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 			status: EXECUTION_CARD_STATUS[input.status],
 			collapsible: true,
 			collapsed: !input.expanded,
-			preview: { lines: PREVIEW_LINES },
 		},
 		children,
 	);
@@ -207,6 +308,12 @@ export interface ExecutionToolInput {
 	readonly exitCode: number | undefined;
 	readonly truncation: TruncationMeta | undefined;
 	readonly artifactError?: OutputArtifactError;
+	/** Rows the live streaming cap discarded; named in the run foot, apart from the hidden rows the preview still delivers. */
+	readonly droppedLineCount: number;
+	/** Rows the output throttle skipped after the retained rows — a mid/tail gap, named in the run foot apart from the dropped head. */
+	readonly throttledLineCount: number;
+	/** The throttle skipped a partial-line suffix contributing no whole row; the retained last row's tail is gone. */
+	readonly throttledFragmentLost: boolean;
 }
 
 const EXECUTION_RUN_STATE: Record<ExecutionStatus, RunState> = {
@@ -244,7 +351,13 @@ export function describeExecutionTool(input: ExecutionToolInput): NativeNode {
 				state,
 				exitCode: input.exitCode,
 				elapsedMs: ms,
-				meta: { truncation: input.truncation, artifactError: input.artifactError },
+				meta: {
+					truncation: input.truncation,
+					artifactError: input.artifactError,
+					droppedLines: input.droppedLineCount,
+					throttledLines: input.throttledLineCount,
+					throttledFragmentLost: input.throttledFragmentLost,
+				},
 			}),
 		],
 		{ key: "run", tone: state === "failed" ? "error" : undefined },
