@@ -18,6 +18,12 @@ export interface AnimationFrame {
 /** Lets an active block adapt its presentation to its allocated viewport rows. */
 export interface TranscriptPresentationTarget {
 	setTranscriptAllocation?(rows: number, frame: AnimationFrame): void;
+	/**
+	 * Rows of this streaming block no longer fit on screen and none of them is
+	 * stable yet: freeze whatever layout keeps its finished rows changing (a
+	 * table's column widths) so they can go to scrollback.
+	 */
+	lockStreamingLayout?(): void;
 }
 
 /** Presentation declaration captured permanently when a block is added. */
@@ -134,8 +140,12 @@ interface RowSplit {
 type RetirementPolicy = "pressure" | "flush";
 type Offered =
 	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number }
-	/** Whole blocks `[frontier, end)`, then optionally the head rows of block `end`. */
-	| { batch: HistoryBatch; kind: "commit"; end: number; split?: RowSplit }
+	/**
+	 * Whole blocks `[frontier, end)`, then optionally the head rows of block
+	 * `end`: a settled block's `split`, or a streaming block's stable rows up to
+	 * `headEmittedEnd`.
+	 */
+	| { batch: HistoryBatch; kind: "commit"; end: number; split?: RowSplit; headEmittedEnd?: number }
 	| { batch: HistoryBatch; kind: "replay" };
 
 /** Rows a progressive-append retirement offers, and the stable count they bring the head to. */
@@ -379,7 +389,11 @@ export class TranscriptContainer extends Container {
 	 */
 	resetStableEmission(): void {
 		this.#syncEntries();
-		if (this.#offered?.kind === "append" || (this.#offered?.kind === "commit" && this.#offered.split)) {
+		const offered = this.#offered;
+		if (
+			offered?.kind === "append" ||
+			(offered?.kind === "commit" && (offered.split || offered.headEmittedEnd !== undefined))
+		) {
 			this.#offered = undefined;
 		}
 		for (const entry of this.#entries) {
@@ -412,8 +426,12 @@ export class TranscriptContainer extends Container {
 		if (index < 0) return -1;
 		const entry = this.#entries[index]!;
 		if (entry.state === "committed" || entry.emitted > 0 || entry.split !== undefined) return -1;
-		if (this.#offered?.kind === "commit" && index < this.#offered.end + (this.#offered.split ? 1 : 0)) return -1;
-		if (this.#offered?.kind === "append" && index === this.#offered.entry) return -1;
+		// A commit protects its boundary block too when it carries rows of it:
+		// a split's head, or a streaming block's stable rows (completeScrollback).
+		const offered = this.#offered;
+		const carriesBoundary = offered?.kind === "commit" && (offered.split || offered.headEmittedEnd !== undefined);
+		if (offered?.kind === "commit" && index < offered.end + (carriesBoundary ? 1 : 0)) return -1;
+		if (offered?.kind === "append" && index === offered.entry) return -1;
 		return index;
 	}
 
@@ -688,6 +706,14 @@ export class TranscriptContainer extends Container {
 		return drop > 0 ? output.slice(drop) : output;
 	}
 
+	/**
+	 * With `completeScrollback`, a streaming block's rows that no longer fit go
+	 * to scrollback as soon as they are stable, even when that commits a few
+	 * rows still on screen; otherwise those rows are clipped off the top of the
+	 * viewport, with no copy in scrollback, until they retire.
+	 */
+	completeScrollback = false;
+
 	/** Offers stable-head emission or the shortest finalized prefix needed under pressure. */
 	peekFinalizedBatch(width: number, capacity: number): HistoryBatch | undefined {
 		return this.#peekBatch(width, capacity, "pressure");
@@ -755,6 +781,15 @@ export class TranscriptContainer extends Container {
 				const end = Math.min(cut, scrollback.length);
 				offered.split = rowSplit(scrollback, end, width);
 				rows = [...rows, ...scrollback.slice(start, end)];
+			}
+			const streaming = offered.headEmittedEnd !== undefined ? this.#entries[offered.end] : undefined;
+			if (streaming !== undefined && offered.headEmittedEnd !== undefined) {
+				const before = this.#renderStablePrefix(streaming, streaming.emitted, width);
+				const after = this.#renderStablePrefix(streaming, offered.headEmittedEnd, width);
+				// A head whose stable rows no longer extend its emitted prefix waits
+				// for the next offer instead of riding this one.
+				if (isRowPrefix(before, after)) rows = [...rows, ...after.slice(before.length)];
+				else offered.headEmittedEnd = undefined;
 			}
 		} else {
 			rows = this.#renderReplay(width);
@@ -831,6 +866,7 @@ export class TranscriptContainer extends Container {
 			const { rows, emittedEnd } =
 				this.#measuredAppendBatch(appendHead, width, overflow) ??
 				this.#renderedAppendBatch(appendHead, width, overflow);
+			if (this.completeScrollback && rows.length < overflow) this.#lockStreamingLayout(appendHead);
 			if (emittedEnd > appendHead.emitted) {
 				const batch: HistoryBatch = {
 					id: this.#nextBatchId++,
@@ -876,7 +912,10 @@ export class TranscriptContainer extends Container {
 		while (end < limit && end < this.#entries.length && this.#entries[end]!.state === "settled") end++;
 		if (split !== undefined && end !== split.index) split = undefined;
 		if (end === this.#frontier && split === undefined) {
-			if (policy === "pressure") this.#notePinnedFrontier();
+			if (policy === "pressure") {
+				this.#notePinnedFrontier();
+				if (this.completeScrollback && keep > 0) this.#lockStreamingLayout(live[keep - 1]!.entry);
+			}
 			return undefined;
 		}
 		this.#pinnedFrontier = undefined;
@@ -896,12 +935,45 @@ export class TranscriptContainer extends Container {
 			popLoopPhase();
 		}
 		if (split !== undefined && retirement.end !== split.index) split = undefined;
+		// With `completeScrollback`, a streaming block left at the top edge sends
+		// the stable rows that no longer fit along with the blocks above it.
+		// Offered on the next frame instead, they would be clipped off the top
+		// of this frame's viewport with no copy in scrollback.
+		let streamingHead: AppendBatch | undefined;
+		if (this.completeScrollback && policy === "pressure" && split === undefined && keep > 0) {
+			const boundary = live[keep - 1]!;
+			const entry = boundary.entry;
+			if (
+				boundary.index === retirement.end &&
+				entry.mode === "appendOnly" &&
+				!entry.stableFrozen &&
+				entry.split === undefined &&
+				entry.emitted < entry.stableRows.length
+			) {
+				const height = this.#liveBlockRows(entry, boundary.index, width).length;
+				const overflow = height + (tailRows > 0 ? tailRows + 1 : 0) - room;
+				if (overflow > 0) {
+					const batch =
+						this.#measuredAppendBatch(entry, width, overflow) ??
+						this.#renderedAppendBatch(entry, width, overflow);
+					if (batch.emittedEnd > entry.emitted) streamingHead = batch;
+					if (batch.rows.length < overflow) this.#lockStreamingLayout(entry);
+				}
+			}
+		}
+		const rows = split === undefined ? retirement.rows : [...retirement.rows, ...split.rows];
 		const batch: HistoryBatch = {
 			id: this.#nextBatchId++,
-			rows: split === undefined ? retirement.rows : [...retirement.rows, ...split.rows],
+			rows: streamingHead === undefined ? rows : [...rows, ...streamingHead.rows],
 			kind: "append",
 		};
-		this.#offered = { batch, end: retirement.end, kind: "commit", split: split?.split };
+		this.#offered = {
+			batch,
+			end: retirement.end,
+			kind: "commit",
+			split: split?.split,
+			headEmittedEnd: streamingHead?.emittedEnd,
+		};
 		return batch;
 	}
 
@@ -947,6 +1019,11 @@ export class TranscriptContainer extends Container {
 			this.#frontier = offered.end;
 			const head = offered.split ? this.#entries[offered.end] : undefined;
 			if (head !== undefined) head.split = offered.split;
+			const streamingEnd = offered.headEmittedEnd;
+			const streaming = streamingEnd !== undefined ? this.#entries[offered.end] : undefined;
+			if (streaming !== undefined && streamingEnd !== undefined && streamingEnd > streaming.emitted) {
+				streaming.emitted = streamingEnd;
+			}
 		} else {
 			this.#releaseCommittedRenderCaches();
 		}
@@ -1098,6 +1175,15 @@ export class TranscriptContainer extends Container {
 		if (offered?.kind === "commit" && offered.split !== undefined && offered.end === index) {
 			return this.#splitRowCount(entry, offered.split, width);
 		}
+		// A commit can carry the streaming head's rows too (completeScrollback).
+		if (
+			offered?.kind === "commit" &&
+			offered.headEmittedEnd !== undefined &&
+			offered.end === index &&
+			entry.split === undefined
+		) {
+			return this.#stablePrefixRowCount(entry, offered.headEmittedEnd, width);
+		}
 		if (offered?.kind === "append" && offered.entry === index && entry.split === undefined) {
 			return this.#stablePrefixRowCount(entry, offered.emittedEnd, width);
 		}
@@ -1189,8 +1275,8 @@ export class TranscriptContainer extends Container {
 	 * `renderedStableByWidth` holds the newest, so each count's rows are a
 	 * prefix of it and the batch is one slice. Undefined when a count the walk
 	 * needs was never recorded here (published between renders, or before a
-	 * resize); the rendered walk then decides. Like the rendered walk, it never
-	 * passes `overflow`: a prefix reaching onto the screen waits.
+	 * resize); the rendered walk then decides. It sizes the batch the way the
+	 * rendered walk does.
 	 */
 	#measuredAppendBatch(entry: TranscriptEntry, width: number, overflow: number): AppendBatch | undefined {
 		const counts = entry.stableRowCountByWidth.get(width);
@@ -1201,7 +1287,7 @@ export class TranscriptContainer extends Container {
 		if (start === undefined) return undefined;
 		let emittedEnd = entry.emitted;
 		let end = start;
-		while (emittedEnd < target) {
+		while (emittedEnd < target && !(this.completeScrollback && end - start >= overflow)) {
 			const next = counts.get(emittedEnd + 1);
 			if (next === undefined) return undefined;
 			if (next <= start) {
@@ -1210,7 +1296,7 @@ export class TranscriptContainer extends Container {
 				}
 				break;
 			}
-			if (next - start > overflow) break;
+			if (!this.completeScrollback && next - start > overflow) break;
 			end = next;
 			emittedEnd += 1;
 		}
@@ -1218,19 +1304,24 @@ export class TranscriptContainer extends Container {
 	}
 
 	/**
-	 * Size a progressive-append batch by rendering each further stable prefix:
-	 * extend the emitted prefix while its new rows stay within `overflow` — the
-	 * rows that left the screen — stopping at the first prefix that would reach
-	 * onto it, adds no row, or stops extending the emitted one (freezing the
-	 * block when that is the very next prefix). A prefix still partly on screen
-	 * stays live: committing it would strand those rows above the live tail,
-	 * where a later shrink of the chrome below opens a band no frame can fill.
+	 * Size a progressive-append batch by rendering each further stable prefix,
+	 * stopping early at a prefix that adds no row or stops extending the
+	 * emitted one (freezing the block when that is the very next prefix).
+	 * By default the batch stays within `overflow`, the rows that left the
+	 * screen: a prefix still partly on screen stays live, because committing it
+	 * would strand those rows above the live tail, where a later shrink of the
+	 * chrome below opens a band no frame can fill. With `completeScrollback`
+	 * the batch is the shortest prefix that covers `overflow`, since a prefix
+	 * held back is clipped off the top of the viewport with no copy anywhere.
 	 */
 	#renderedAppendBatch(entry: TranscriptEntry, width: number, overflow: number): AppendBatch {
 		const before = this.#renderStablePrefix(entry, entry.emitted, width);
 		let emittedEnd = entry.emitted;
 		let after = before;
-		while (emittedEnd < entry.stableRows.length) {
+		while (
+			emittedEnd < entry.stableRows.length &&
+			!(this.completeScrollback && after.length - before.length >= overflow)
+		) {
 			const next = this.#renderStablePrefix(entry, emittedEnd + 1, width);
 			if (!isRowPrefix(before, next) || next.length === before.length) {
 				if (emittedEnd === entry.emitted) {
@@ -1238,7 +1329,7 @@ export class TranscriptContainer extends Container {
 				}
 				break;
 			}
-			if (next.length - before.length > overflow) break;
+			if (!this.completeScrollback && next.length - before.length > overflow) break;
 			after = next;
 			emittedEnd += 1;
 		}
@@ -1494,6 +1585,12 @@ export class TranscriptContainer extends Container {
 		const visibleOutput = output.slice(0, rows);
 		this.#commitViewportSpans(owners, visibleOutput.length);
 		return visibleOutput;
+	}
+
+	/** A streaming block that overflows with too few stable rows to cover it. */
+	#lockStreamingLayout(entry: TranscriptEntry): void {
+		if (entry.state === "settled") return;
+		(entry.component as Component & TranscriptPresentationTarget).lockStreamingLayout?.();
 	}
 
 	#setAllocation(component: Component, rows: number, frame: AnimationFrame): void {

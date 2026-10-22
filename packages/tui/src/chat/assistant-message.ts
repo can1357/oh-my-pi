@@ -11,6 +11,7 @@ import {
 	rewriteMarkdownLinkDestinations,
 	speculativeStreamingSource,
 	streamingMarkdownSource,
+	type TableLocks,
 } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
@@ -71,7 +72,16 @@ interface FastPathItem {
 }
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
 type StablePartKind = "thinking" | "text";
-type StablePart = { kind: StablePartKind; text: string } | { kind: "spacer" };
+type StableRenderKind = StablePartKind | "figure";
+/**
+ * Prose carries the block and, inside a {@link FigureMarkdown}, the prose run
+ * (0 otherwise) whose table locks it renders with. A figure is a drawn image
+ * rendered by its live component; its text is the source that drew it.
+ */
+type StablePart =
+	| { kind: StablePartKind; text: string; contentIndex: number; run: number }
+	| { kind: "figure"; text: string; component: Component & { pin(): void } }
+	| { kind: "spacer" };
 
 /**
  * One published prefix of the block's finished content. Later snapshots extend
@@ -83,6 +93,8 @@ interface StableSnapshot {
 	// Earlier parts are immutable; only the final part needs a historical offset.
 	readonly partCount: number;
 	readonly lastTextLength: number;
+	/** The final part ends inside a locked table that kept streaming (see Markdown.openTableTail). */
+	readonly openTable: boolean;
 }
 
 /**
@@ -97,7 +109,7 @@ interface StableRowLedger {
 	readonly ends: Map<number, number>;
 	/** Rendered rows of parts a snapshot has closed (full text final), by part index. */
 	readonly parts: (
-		| { readonly kind: StablePartKind; readonly text: string; readonly rows: readonly string[] }
+		| { readonly kind: StableRenderKind; readonly text: string; readonly rows: readonly string[] }
 		| undefined
 	)[];
 }
@@ -131,6 +143,12 @@ function isSnapshotExtension(previous: readonly StablePart[], current: readonly 
 		const after = current[index]!;
 		if (before.kind !== after.kind) return false;
 		if (before.kind === "spacer" || after.kind === "spacer") continue;
+		if (before.kind === "figure" || after.kind === "figure") {
+			if (before.kind !== "figure" || after.kind !== "figure" || before.component !== after.component) return false;
+			if (before.text !== after.text) return false;
+			continue;
+		}
+		if (before.run !== after.run || before.contentIndex !== after.contentIndex) return false;
 		const isLast = index === previous.length - 1;
 		if (isLast ? !after.text.startsWith(before.text) : after.text !== before.text) return false;
 	}
@@ -353,6 +371,9 @@ export class AssistantMessageComponent extends Container {
 	#lastTokenTime = 0;
 	/** Published width-independent stable prefixes; grows only, never retracts. */
 	#stableSnapshots: StableSnapshot[] = [];
+	// Locked table layouts per content block and prose run, shared by the
+	// Markdown streaming that run and the ones rendering its stable prefix.
+	readonly #tableLocks = new Map<string, TableLocks>();
 	#stableParts: readonly StablePart[] = [];
 	#nextStableRowId = 0;
 	#transcriptStableRows: TranscriptStableRow[] = [];
@@ -1198,6 +1219,7 @@ export class AssistantMessageComponent extends Container {
 				snapshot.lastTextLength,
 				width,
 				"replay",
+				snapshot.openTable,
 			);
 			if (this.#recordStableRows(index, width, rows)) return rows;
 		}
@@ -1215,18 +1237,25 @@ export class AssistantMessageComponent extends Container {
 	 */
 	#publishStableSnapshot(rendered: readonly string[], width: number): void {
 		if (!this.#midStreamPublication) return;
-		const parts = this.#currentStableSnapshot();
-		if (!parts) return;
+		const current = this.#currentStableSnapshot();
+		if (!current) return;
+		const { parts, openTable } = current;
 		const last = parts.at(-1);
 		if (!last || last.kind === "spacer") return;
-		const snapshot = { partCount: parts.length, lastTextLength: last.text.length };
+		const snapshot: StableSnapshot = { partCount: parts.length, lastTextLength: last.text.length, openTable };
 		const previous = this.#stableSnapshots.at(-1);
 		// An unmoved boundary publishes nothing whether or not it still extends
 		// the last snapshot, so most frames skip the whole-document comparison.
-		if (previous?.partCount === snapshot.partCount && previous.lastTextLength === snapshot.lastTextLength) return;
+		if (
+			previous?.partCount === snapshot.partCount &&
+			previous.lastTextLength === snapshot.lastTextLength &&
+			previous.openTable === snapshot.openTable
+		) {
+			return;
+		}
 		if (previous && !isSnapshotExtension(this.#stableParts, parts)) return;
 		this.#syncStableRenderInputs();
-		const currentRows = this.#renderStableParts(parts, parts.length, last.text.length, width, "head");
+		const currentRows = this.#renderStableParts(parts, parts.length, last.text.length, width, "head", openTable);
 		// The container verifies stable rows against the blank-trimmed render.
 		if (!isRowPrefix(currentRows, trimBlankEdges(rendered))) return;
 		const previousRows = previous
@@ -1239,6 +1268,9 @@ export class AssistantMessageComponent extends Container {
 		this.#stableSnapshots.push(snapshot);
 		this.#transcriptStableRows.push({ key: `thinking:${this.#nextStableRowId++}` });
 		this.#recordStableRows(this.#stableSnapshots.length, width, currentRows);
+		// Published figure rows may already be in scrollback: a change of room
+		// must not redraw them into different rows.
+		for (const part of parts) if (part.kind === "figure") part.component.pin();
 	}
 
 	/**
@@ -1248,21 +1280,38 @@ export class AssistantMessageComponent extends Container {
 	 * (finalized or non-transient renders, marker rows, extension components,
 	 * hidden thinking, or no frozen prefix yet).
 	 */
-	#currentStableSnapshot(): readonly StablePart[] | undefined {
+	#currentStableSnapshot(): { parts: readonly StablePart[]; openTable: boolean } | undefined {
 		if (this.#transcriptBlockFinalized || !this.#lastUpdateTransient) return undefined;
 		if (this.#markerSlot.children.length > 0) return undefined;
 		const items = this.#fastPathItems;
 		if (!items || items.length === 0) return undefined;
 		const parts: StablePart[] = [];
+		let openTable = false;
 		let itemIndex = 0;
 		for (const child of this.#contentContainer.children) {
 			const item = items[itemIndex];
 			if (item?.md === child) {
 				const md = item.md;
 				if (md instanceof FigureMarkdown) {
-					// Plain Markdown reproduces only the prose ahead of the first figure.
-					if (md.leadingProse) parts.push({ kind: item.blockType, text: md.leadingProse });
-					break;
+					// Prose runs render as fresh Markdown, drawn figures as their live
+					// components; the prefix stops at the first part still changing.
+					const prefix = md.stablePrefix();
+					for (const part of prefix.parts) {
+						if (part.kind === "markdown") {
+							parts.push({
+								kind: item.blockType,
+								text: part.text,
+								contentIndex: item.contentIndex,
+								run: part.index,
+							});
+						} else {
+							parts.push(part);
+						}
+					}
+					openTable = prefix.openTable;
+					if (!prefix.complete || itemIndex === items.length - 1) break;
+					itemIndex++;
+					continue;
 				}
 				if (itemIndex === items.length - 1) {
 					// Streaming child: publish Markdown's frozen prefix, and only
@@ -1277,14 +1326,20 @@ export class AssistantMessageComponent extends Container {
 					let past = streamingMarkdownSource(item.lastText).slice(raw.length);
 					if (item.blockType === "thinking") past = past.replace(UNSETTLED_THINKING_TAIL, "");
 					if (frozen.length > 0 && /\S/.test(past)) {
-						parts.push({ kind: item.blockType, text: frozen });
+						parts.push({ kind: item.blockType, text: frozen, contentIndex: item.contentIndex, run: 0 });
+						openTable = md.lastRenderStableTextEndsInOpenTable();
 					}
 					break;
 				}
 				// Closed child: only the streaming tail may mutate in place, so
 				// everything before it is final. Same form as the frozen prefix it
 				// published while streaming, so the snapshot still extends.
-				parts.push({ kind: item.blockType, text: streamingMarkdownSource(item.lastText) });
+				parts.push({
+					kind: item.blockType,
+					text: streamingMarkdownSource(item.lastText),
+					contentIndex: item.contentIndex,
+					run: 0,
+				});
 				itemIndex++;
 				continue;
 			}
@@ -1297,7 +1352,7 @@ export class AssistantMessageComponent extends Container {
 		}
 		while (parts.at(-1)?.kind === "spacer") parts.pop();
 		if (parts.length === 0) return undefined;
-		return parts;
+		return { parts, openTable };
 	}
 
 	/**
@@ -1313,6 +1368,7 @@ export class AssistantMessageComponent extends Container {
 		lastLength: number,
 		width: number,
 		role: "head" | "replay",
+		openTable: boolean,
 	): readonly string[] {
 		const ledger = this.#stableLedger(width);
 		const rows: string[] = [];
@@ -1329,8 +1385,24 @@ export class AssistantMessageComponent extends Container {
 			let partRows: readonly string[];
 			if (cached?.kind === part.kind && cached.text === text) {
 				partRows = cached.rows;
+			} else if (part.kind === "figure") {
+				// A published figure is pinned, so a change of room (width, viewport
+				// height) scales it instead of redrawing it, and its rows at a width
+				// stay fixed. A cell-size or theme redraw, or an image-budget demotion
+				// to text, still changes them: the transcript then freezes the block,
+				// which retires whole when the reply ends.
+				partRows = part.component.render(width);
+				ledger.parts[index] = { kind: part.kind, text, rows: partRows };
 			} else {
-				partRows = this.#renderStablePart(index, part.kind, text, width, closed ? undefined : role);
+				partRows = this.#renderStablePart(
+					index,
+					part.kind,
+					this.#lockScope(part.contentIndex, part.run),
+					text,
+					width,
+					closed ? undefined : role,
+					!closed && openTable,
+				);
 				if (closed) ledger.parts[index] = { kind: part.kind, text, rows: partRows };
 			}
 			for (const row of partRows) rows.push(row);
@@ -1346,35 +1418,78 @@ export class AssistantMessageComponent extends Container {
 	#renderStablePart(
 		index: number,
 		kind: StablePartKind,
+		locks: TableLocks,
 		text: string,
 		width: number,
 		role: "head" | "replay" | undefined,
+		openTable: boolean,
 	): readonly string[] {
 		// Trim like the live children, dropping the trailing blank line a frozen
 		// prefix still carries.
 		const trimmed = text.trim();
-		if (this.#transcriptBlockFinalized) return this.#createMarkdown(kind, trimmed).render(width);
+		if (this.#transcriptBlockFinalized) {
+			const md = this.#createMarkdown(kind, trimmed, locks);
+			md.openTableTail = openTable;
+			return md.render(width);
+		}
 		const head = this.#stableHeadRenderer;
 		const replay = this.#stableReplayRenderer;
 		const renderer = role === "head" ? head : role === "replay" ? replay : head?.index === index ? head : replay;
 		if (renderer?.index === index && renderer.kind === kind) {
 			renderer.md.setText(trimmed);
+			renderer.md.openTableTail = openTable;
 			return renderer.md.render(width);
 		}
-		const md = this.#createMarkdown(kind, trimmed);
+		const md = this.#createMarkdown(kind, trimmed, locks);
+		md.openTableTail = openTable;
 		if (role === "head") this.#stableHeadRenderer = { index, kind, md };
 		else if (role === "replay") this.#stableReplayRenderer = { index, kind, md };
 		return md.render(width);
 	}
 
 	/** Markdown for a text or thinking block; live children and stable-row renders share it so stable rows prefix the block render. */
-	#createMarkdown(kind: StablePartKind, text: string): Markdown {
-		return kind === "text"
-			? new Markdown(text, 1, 0, this.#getProseTheme(), this.#getProseTextStyle(), 0)
-			: new Markdown(text, 1, 0, getMarkdownTheme(), {
-					color: (value: string) => theme.fg("thinkingText", value),
-					italic: true,
-				});
+	#createMarkdown(kind: StablePartKind, text: string, tableLocks?: TableLocks): Markdown {
+		const md =
+			kind === "text"
+				? new Markdown(text, 1, 0, this.#getProseTheme(), this.#getProseTextStyle(), 0)
+				: new Markdown(text, 1, 0, getMarkdownTheme(), {
+						color: (value: string) => theme.fg("thinkingText", value),
+						italic: true,
+					});
+		md.tableLocks = tableLocks;
+		return md;
+	}
+
+	/**
+	 * The table locks of content block `contentIndex`, prose run `run` (a
+	 * {@link FigureMarkdown}'s part index; 0 for a plain block, which is the
+	 * same run once a figure lifts out of it).
+	 */
+	#lockScope(contentIndex: number, run = 0): TableLocks {
+		const key = `${contentIndex}:${run}`;
+		let locks = this.#tableLocks.get(key);
+		if (locks === undefined) {
+			locks = new Map();
+			this.#tableLocks.set(key, locks);
+		}
+		return locks;
+	}
+
+	/**
+	 * Lock the column widths of a table streaming at the end of this message,
+	 * so its finished rows can leave the screen for scrollback. The transcript
+	 * calls this when rows of this block no longer fit and none of them is
+	 * stable yet. The transcript asks during a frame whose history batch is
+	 * already chosen, so a new lock requests the next frame, which publishes
+	 * and commits the table's finished rows even if the stream pauses. A block
+	 * that publishes nothing mid-stream (a revisable wire) gains nothing from a
+	 * lock, so it keeps its natural layout.
+	 */
+	lockStreamingLayout(): void {
+		if (!this.#midStreamPublication) return;
+		const items = this.#fastPathItems;
+		const md = items?.at(-1)?.md;
+		if ((md instanceof FigureMarkdown || md instanceof Markdown) && md.lockOpenTable()) this.#onImageUpdate?.();
 	}
 
 	/**
@@ -1410,13 +1525,14 @@ export class AssistantMessageComponent extends Container {
 	 * `previous` so its figures keep their rasters across rebuilds.
 	 */
 	#proseBlock(index: number, text: string, previous: ReadonlyMap<number, FigureMarkdown>): ProseBlock {
-		if (!this.#liftsFigures(text)) return this.#createMarkdown("text", text);
+		if (!this.#liftsFigures(text)) return this.#createMarkdown("text", text, this.#lockScope(index));
 		let block = previous.get(index);
 		if (block) {
 			block.setText(text);
 		} else {
 			block = new FigureMarkdown(text, {
 				markdown: value => this.#createMarkdown("text", value),
+				tableLocks: run => this.#lockScope(index, run),
 				charts: this.#showTableCharts,
 				budget: this.#imageBudget,
 				onChange: () => {
@@ -1907,7 +2023,7 @@ export class AssistantMessageComponent extends Container {
 					);
 
 				// Thinking traces in thinkingText color, italic
-				const md = this.#createMarkdown("thinking", thinkingText);
+				const md = this.#createMarkdown("thinking", thinkingText, this.#lockScope(i));
 				md.transientRenderCache = this.#lastUpdateTransient;
 				this.#contentContainer.addChild(md);
 				captureItems?.push({ md, contentIndex: i, blockType: "thinking", lastText: thinkingText });

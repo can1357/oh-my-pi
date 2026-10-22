@@ -225,8 +225,33 @@ export class TableChartFigure implements Component {
 		return this.#table !== undefined && (this.#chart === undefined || (this.#chart !== null && this.#figure.pending));
 	}
 
+	/**
+	 * Whether the last render's rows are final: a chart drawn and ready. A
+	 * table the pick declined is not: the next text update merges it back into
+	 * the prose around it, so its (empty) part must never be published.
+	 */
+	get ready(): boolean {
+		return typeof this.#chart === "string" && this.#figure.ready;
+	}
+
+	/** See {@link SvgFigure.pin}. */
+	pin(): void {
+		this.#figure.pin();
+	}
+
 	render(width: number): readonly string[] {
-		if (this.#chart === undefined && !this.#waiting) this.#resolve();
+		if (this.#chart === undefined && !this.#waiting) {
+			this.#resolve();
+			// The table was split off for a pick that has since landed declined
+			// (another block asked first): report it, so the owner merges the
+			// table back. Not from inside this render, which may be the owner's.
+			if (this.#chart === null) {
+				const table = this.#table;
+				queueMicrotask(() => {
+					if (!this.#disposed && this.#table === table) this.#options.onChange();
+				});
+			}
+		}
 		if (!this.#chart) return [];
 		const rows = this.#figure.render(width);
 		return rows.length ? ["", ...rows] : rows;

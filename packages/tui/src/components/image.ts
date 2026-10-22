@@ -713,6 +713,11 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	/** Whether a SIXEL encode is in flight, so the rows rendered meanwhile are a blank reservation. */
+	get encoding(): boolean {
+		return this.#sixel !== undefined && this.#sixel.sequence === undefined;
+	}
+
 	/**
 	 * SIXEL sequence for a target size and background. A change starts the encode off the JS
 	 * thread and answers `undefined` until it settles; the settled encode

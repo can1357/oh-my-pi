@@ -14,7 +14,7 @@
  */
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { hexToOklch, hueDistance, logger, oklchCusp, oklchToHex } from "@oh-my-pi/pi-utils";
-import { Image, type ImageBudget, imageMaxColumns } from "../components/image";
+import { Image, type ImageBudget, imageMaxColumns, renderForScrollback } from "../components/image";
 import { fencedCode, type Markdown } from "../components/markdown";
 import { type CellDimensions, getCellDimensions, getImageDimensions } from "../terminal-capabilities";
 import { ensureThemeSync, getThemeEpoch, type ThemeColor, theme } from "../theme";
@@ -180,6 +180,8 @@ export class SvgFigure implements Component {
 	#image: { raster: Raster; component: Image } | undefined;
 	#fallback: { source: string; md: Markdown } | undefined;
 	#placeholder: readonly string[] | undefined;
+	/** Rows went out ahead of the block: room changes scale the raster instead of redrawing it. */
+	#pinned = false;
 
 	constructor(options: SvgFigureOptions) {
 		ensureThemeSync();
@@ -206,6 +208,32 @@ export class SvgFigure implements Component {
 		return this.#final && this.#raster?.source !== this.#source && this.#failed !== this.#source;
 	}
 
+	/**
+	 * Whether the last render's rows are the figure's final rows for its final
+	 * source: drawn (or fallen back to code), with no raster or SIXEL encode in
+	 * flight that would change them.
+	 */
+	get ready(): boolean {
+		if (!this.#final || this.#queued || this.#rasterizing || this.#timer) return false;
+		if (this.#failed === this.#source) return true;
+		const image = this.#image;
+		return (
+			image !== undefined &&
+			image.raster === this.#raster &&
+			image.raster.source === this.#source &&
+			!image.component.encoding
+		);
+	}
+
+	/**
+	 * Keep the current raster when only the room changes (width, viewport
+	 * height): the transcript has published these rows, and a redraw would
+	 * change them under it. {@link Image} scales the raster to a new width.
+	 */
+	pin(): void {
+		this.#pinned = true;
+	}
+
 	render(width: number): readonly string[] {
 		// Width, cell size and theme are render-time inputs; a change re-rasterizes.
 		this.#width = width;
@@ -217,7 +245,11 @@ export class SvgFigure implements Component {
 			this.#placeholder ??= [` ${theme.fg("dim", "Drawing SVG…")}`];
 			return this.#placeholder;
 		}
-		return this.#imageFor(raster).render(width);
+		const image = this.#imageFor(raster);
+		// Published rows are bound for scrollback at whatever width they are
+		// emitted: a pinned figure encodes synchronously (SIXEL after a resize),
+		// so its live and published rows are both final, never a blank reservation.
+		return this.#pinned ? renderForScrollback(() => image.render(width)) : image.render(width);
 	}
 
 	invalidate(): void {
@@ -256,7 +288,9 @@ export class SvgFigure implements Component {
 			attempt.themeEpoch !== getThemeEpoch() ||
 			// A streaming attempt that failed is retried once as final.
 			(this.#final && !attempt.final && this.#raster?.source !== this.#source) ||
-			((attempt.limits.columns !== limits.columns || attempt.limits.rows !== limits.rows) && this.#outgrown(limits))
+			(!this.#pinned &&
+				(attempt.limits.columns !== limits.columns || attempt.limits.rows !== limits.rows) &&
+				this.#outgrown(limits))
 		);
 	}
 

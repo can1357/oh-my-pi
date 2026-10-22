@@ -10,7 +10,7 @@ import {
 } from "@oh-my-pi/pi-tui/charts/chart-plan";
 import { renderChartSvg } from "@oh-my-pi/pi-tui/charts/chart-svg";
 import { analyzeTable, parseCell } from "@oh-my-pi/pi-tui/charts/table-data";
-import { svgFigurePalette } from "@oh-my-pi/pi-tui/chat/svg-figure";
+import { setSvgFigureRendering, svgFigurePalette } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { prepareSvg } from "@oh-my-pi/pi-tui/chat/svg-source";
 import {
 	lookupTableChart,
@@ -765,6 +765,203 @@ describe("table charts in assistant Markdown", () => {
 			}
 		} finally {
 			setTerminalImageProtocol(protocol);
+		}
+	});
+
+	/**
+	 * Stream `text` (one text block, or several) into `component` as a
+	 * transient answer and render it at `width`. Published rows may already be
+	 * in native scrollback, so every render must still open with them, byte for byte.
+	 */
+	function streamTo(
+		component: AssistantMessageComponent,
+		text: string | readonly string[],
+		width: number,
+		render = true,
+	): readonly string[] {
+		component.updateContent(
+			{
+				role: "assistant",
+				content: (typeof text === "string" ? [text] : text).map(block => ({ type: "text" as const, text: block })),
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				stopReason: "stop",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: 1,
+			},
+			{ transient: true },
+		);
+		if (!render) return [];
+		const rows = trimBlankEdges(component.render(width));
+		const stable = component.renderTranscriptStableRows(component.getTranscriptStableRows().length, width);
+		expect(rows.slice(0, stable.length)).toEqual([...stable]);
+		return stable;
+	}
+
+	/** The component's image-update callback as an awaitable signal: rasters, SIXEL encodes and chart picks land through it. */
+	function imageUpdates(): { notify: () => void; next: () => Promise<void> } {
+		let pending = Promise.withResolvers<void>();
+		return {
+			notify: () => pending.resolve(),
+			next: async () => {
+				await pending.promise;
+				pending = Promise.withResolvers<void>();
+			},
+		};
+	}
+
+	const after = ["First point after the chart.", "Second point after the chart.", "Third point."];
+
+	// SIXEL encodes the image off the render path; Kitty places it at once.
+	for (const [name, protocol] of [
+		["Kitty", ImageProtocol.Kitty],
+		["SIXEL", ImageProtocol.Sixel],
+	] as const) {
+		it(`publishes a drawn chart and the prose after it while the answer streams on, and keeps it through a resize (${name})`, async () => {
+			const previous = TERMINAL.imageProtocol;
+			const rows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+			await initTheme(false);
+			setTerminalImageProtocol(protocol);
+			try {
+				setTableCharts("always");
+				const text = `Timings:\n\n${TIMINGS}\n\n${after.join("\n\n")}\n\nStill writing`;
+				const updates = imageUpdates();
+				const component = new AssistantMessageComponent(undefined, false, updates.notify);
+				// The prose after the table splits the chart off; the chart is drawn while the answer pauses.
+				const split = text.indexOf(after[0]!) + 1;
+				while (!streamTo(component, text.slice(0, split), 100).some(row => TERMINAL.isImageLine(row))) {
+					await updates.next();
+				}
+				// A paragraph settles once text past it arrives.
+				const resize = text.indexOf(after[2]!) + 1;
+				let stable: readonly string[] = [];
+				for (let end = split; end <= resize; end++) stable = streamTo(component, text.slice(0, end), 100);
+				// The chart and the finished prose below it can leave the screen before the answer ends.
+				expect(stable.some(row => TERMINAL.isImageLine(row))).toBe(true);
+				expect(stable.some(row => row.includes(after[1]!))).toBe(true);
+
+				// A narrower, shorter terminal mid-answer: the published chart is scaled, not redrawn,
+				// so its rows hold and the prose after it keeps publishing.
+				Object.defineProperty(process.stdout, "rows", { value: 12, configurable: true });
+				for (let end = resize; end <= text.length; end++) stable = streamTo(component, text.slice(0, end), 70);
+				expect(stable.some(row => TERMINAL.isImageLine(row))).toBe(true);
+				expect(stable.some(row => row.includes(after[2]!))).toBe(true);
+			} finally {
+				if (rows) Object.defineProperty(process.stdout, "rows", rows);
+				else delete (process.stdout as { rows?: number }).rows;
+				setTerminalImageProtocol(previous);
+			}
+		});
+	}
+
+	// The table in the block still streaming, or in an earlier block no later text update reaches;
+	// the block drawn while the pick is pending, or first drawn once it has landed declined.
+	for (const [shape, drawn] of [
+		["streaming", "pending"],
+		["closed", "pending"],
+		["closed", "landed"],
+	] as const) {
+		it(`keeps publishing past a table whose smart pick declines its chart (${shape} block, first drawn ${drawn})`, async () => {
+			const previous = TERMINAL.imageProtocol;
+			await initTheme(false);
+			setTerminalImageProtocol(ImageProtocol.Kitty);
+			try {
+				const decline = Promise.withResolvers<null>();
+				setTableCharts("smart", () => decline.promise);
+				const table = `Before and after:\n\n${BEFORE_AFTER}\n\n${after[0]}`;
+				const rest = `${after[1]}\n\n${after[2]}\n\nStill writing`;
+				const answer = (end: number): string | string[] =>
+					shape === "streaming"
+						? `${table}\n\n${rest}`.slice(0, table.length + 2 + end)
+						: [table, rest.slice(0, end)];
+				const updates = imageUpdates();
+				const component = new AssistantMessageComponent(undefined, false, updates.notify);
+				// Another answer with the same table asks for the pick first, so this one
+				// finds it already declined the first time it draws the chart.
+				if (drawn === "landed") streamTo(new AssistantMessageComponent(), answer(1), 100);
+				// The prose after the table splits it off while its pick is pending.
+				streamTo(component, answer(1), 100, drawn === "pending");
+				// The pick lands declined: the table's split goes away.
+				decline.resolve(null);
+				if (drawn === "landed") {
+					await decline.promise;
+					streamTo(component, answer(1), 100);
+				}
+				await updates.next();
+				let stable: readonly string[] = [];
+				for (let end = 1; end <= rest.length; end++) stable = streamTo(component, answer(end), 100);
+				expect(stable.some(row => TERMINAL.isImageLine(row))).toBe(false);
+				expect(stable.some(row => row.includes(after[1]!))).toBe(true);
+			} finally {
+				setTerminalImageProtocol(previous);
+			}
+		});
+	}
+
+	it("publishes an svg figure only once its fence closes and its final raster lands", async () => {
+		const previous = TERMINAL.imageProtocol;
+		await initTheme(false);
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		setSvgFigureRendering(true);
+		try {
+			const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 60"><rect x="4" y="4" width="120" height="40" fill="var(--c1)"/></svg>`;
+			const open = `The layout:\n\n\`\`\`svg\n${svg}\n`;
+			const text = `${open}\`\`\`\n\n${after.join("\n\n")}\n\nStill writing`;
+			const updates = imageUpdates();
+			const component = new AssistantMessageComponent(undefined, false, updates.notify);
+			// A streaming raster of the open fence lands; it is not the figure's final rows.
+			streamTo(component, open, 100);
+			await updates.next();
+			expect(streamTo(component, open, 100).some(row => TERMINAL.isImageLine(row))).toBe(false);
+			// The fence closes and prose follows; the final raster replaces the streaming one.
+			const split = text.indexOf(after[0]!) + 1;
+			while (!streamTo(component, text.slice(0, split), 100).some(row => TERMINAL.isImageLine(row))) {
+				await updates.next();
+			}
+			let stable: readonly string[] = [];
+			for (let end = split; end <= text.length; end++) stable = streamTo(component, text.slice(0, end), 100);
+			expect(stable.some(row => row.includes(after[1]!))).toBe(true);
+		} finally {
+			setSvgFigureRendering(false);
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("publishes a table locked mid-stream in a prose run after a chart", async () => {
+		const previous = TERMINAL.imageProtocol;
+		await initTheme(false);
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		try {
+			setTableCharts("always");
+			const head = `Timings:\n\n${TIMINGS}\n\nThe hosts:\n\n| Host | Role |\n|---|---|\n`;
+			const short = Array.from({ length: 6 }, (_, i) => `| h${i} | db |\n`).join("");
+			// Rows wider than the locked columns: without the lock they would re-lay the table out.
+			const wide = Array.from(
+				{ length: 6 },
+				(_, i) => `| host-with-a-much-longer-name-${i} | primary database |\n`,
+			).join("");
+			const updates = imageUpdates();
+			const component = new AssistantMessageComponent(undefined, false, updates.notify);
+			while (!streamTo(component, head + short, 100).some(row => TERMINAL.isImageLine(row))) {
+				await updates.next();
+			}
+			component.lockStreamingLayout();
+			let stable: readonly string[] = [];
+			for (let end = 1; end <= wide.length; end++)
+				stable = streamTo(component, head + short + wide.slice(0, end), 100);
+			// The run's stable render uses the run's own locks, so rows streamed after the lock keep
+			// publishing, wrapped into the locked columns (the last cell of the name is "-4").
+			expect(stable.some(row => /│ -4\s+│/.test(Bun.stripANSI(row)))).toBe(true);
+		} finally {
+			setTerminalImageProtocol(previous);
 		}
 	});
 

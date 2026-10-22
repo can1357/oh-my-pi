@@ -444,6 +444,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// Retirement measures the same live blocks the viewport lays out below;
 		// one open frame renders each of them once for both.
 		transcript.beginFrame(frame);
+		transcript.completeScrollback = this.#preferences.completeScrollback;
 		const history = this.#offerHistory(transcript, width, rows, preRoots.length + belowFloor);
 		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
 		const headerRows = headerVisible ? this.#header.render(width) : [];

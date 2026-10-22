@@ -411,6 +411,122 @@ describe("composer inline shrink (#11007)", () => {
 		h.composer.stop();
 	});
 
+	// One paragraph per update overflows by less than a paragraph, so the commit
+	// must carry the reply's own rows; three overshoot the screen, so the rows a
+	// commit carries must also leave the viewport.
+	for (const perUpdate of [1, 3]) {
+		it(`with completeScrollback, never hides or repeats a streamed row the reply itself pushes off screen (${perUpdate} per update)`, async () => {
+			const h = makeHarness(COLUMNS, 20, 3);
+			h.composer.setPreferences({ completeScrollback: true });
+			await h.scheduler.settle(h.terminal);
+			// A settled three-row block (a user prompt) sits above the reply, so the
+			// reply first overflows in the frame that block retires.
+			h.transcript.addChild({ render: () => ["", "PROMPT", ""] });
+			const message = new AssistantMessageComponent();
+			h.transcript.addChild(message);
+			const tokens = (): string[] =>
+				h.terminal.getScrollBuffer().flatMap(row => Bun.stripANSI(row).match(/\bP\d\d\b/g) ?? []);
+			// Check every frame, not only the settled one: a row offered to history
+			// and painted again on screen shows twice until a later frame repaints.
+			const repeats: string[] = [];
+			const flush = h.terminal.flush.bind(h.terminal);
+			h.terminal.flush = async () => {
+				await flush();
+				const all = tokens();
+				repeats.push(...all.filter((p, i) => all.indexOf(p) !== i));
+			};
+			// Each paragraph wraps to two rows and arrives whole.
+			const paragraphs = Array.from(
+				{ length: 24 },
+				(_, p) => `P${String(p).padStart(2, "0")} ${"word ".repeat(28).trim()}`,
+			);
+			const seen = new Set<string>();
+			for (let n = perUpdate; n <= paragraphs.length; n += perUpdate) {
+				message.updateContent(reply(paragraphs.slice(0, n).join("\n\n")), { transient: true });
+				h.composer.ui.requestRender();
+				await h.scheduler.settle(h.terminal);
+				const now = new Set(tokens());
+				// A paragraph once on screen stays on screen or in scrollback.
+				expect({ n, missing: [...seen].filter(p => !now.has(p)) }).toEqual({ n, missing: [] });
+				for (const p of now) seen.add(p);
+			}
+			expect(repeats).toEqual([]);
+			h.composer.stop();
+		});
+	}
+
+	for (const earlier of ["", "| A | B |\n|---|---|\n| x | y |\n\nSome prose between.\n\n"]) {
+		it(`with completeScrollback, sends a streaming table taller than the screen to scrollback row by row (earlier table: ${earlier !== ""})`, async () => {
+			const h = makeHarness(COLUMNS, 20, 3);
+			h.composer.setPreferences({ completeScrollback: true });
+			await h.scheduler.settle(h.terminal);
+			const message = new AssistantMessageComponent();
+			h.transcript.addChild(message);
+			// Later rows have longer cells, which would widen the columns of an
+			// unlocked table and rewrap every row above them.
+			const rows = Array.from(
+				{ length: 24 },
+				(_, r) => `| R${String(r).padStart(2, "0")} | ${"cell ".repeat(2 + (r % 7)).trim()} |`,
+			);
+			const head = "| Key | Value |\n|---|---|";
+			const tokens = (lines: readonly string[]): Set<string> =>
+				new Set(lines.flatMap(row => Bun.stripANSI(row).match(/\bR\d\d\b/g) ?? []));
+			const seen = new Set<string>();
+			for (let n = 1; n <= rows.length; n++) {
+				// Half of the next row is already arriving, as a stream delivers it.
+				const next = rows[n]?.slice(0, 8) ?? "";
+				message.updateContent(reply(earlier + [head, ...rows.slice(0, n), next].join("\n")), { transient: true });
+				h.composer.ui.requestRender();
+				await h.scheduler.settle(h.terminal);
+				const now = tokens(h.terminal.getScrollBuffer());
+				// A row once on screen stays on screen or in scrollback.
+				expect([...seen].filter(r => !now.has(r))).toEqual([]);
+				for (const r of now) seen.add(r);
+			}
+			message.updateContent(reply(earlier + [head, ...rows].join("\n")));
+			message.markTranscriptBlockFinalized();
+			h.composer.ui.requestRender();
+			await h.scheduler.settle(h.terminal);
+			const buffer = h.terminal.getScrollBuffer().map(row => Bun.stripANSI(row).trimEnd());
+			const from = buffer.findIndex(row => row.includes("Key"));
+			const table = buffer.slice(Math.max(0, from - 1)).filter(row => /^\s*[│├┌└]/.test(row));
+			// Every row arrives once, and the part sent mid-stream lines up with the rest.
+			expect([...tokens(table)]).toEqual(rows.map((_, r) => `R${String(r).padStart(2, "0")}`));
+			expect(new Set(table.map(row => row.length)).size).toBe(1);
+			h.composer.stop();
+		});
+	}
+
+	it("with completeScrollback, leaves a table's layout alone when its block cannot publish mid-stream", async () => {
+		const h = makeHarness(COLUMNS, 20, 3);
+		h.composer.setPreferences({ completeScrollback: true });
+		await h.scheduler.settle(h.terminal);
+		const message = new AssistantMessageComponent();
+		// A revisable wire publishes no stable rows, so a lock would only narrow the table.
+		message.setMidStreamPublication(false);
+		h.transcript.addChild(message);
+		const rows = Array.from(
+			{ length: 24 },
+			// Cells keep widening after the table outgrows the screen.
+			(_, r) => `| R${String(r).padStart(2, "0")} | ${"cell ".repeat(1 + Math.floor(r / 3)).trim()} |`,
+		);
+		const head = "| Key | Value |\n|---|---|";
+		for (let n = 1; n <= rows.length; n++) {
+			message.updateContent(reply([head, ...rows.slice(0, n), rows[n]?.slice(0, 8) ?? ""].join("\n")), {
+				transient: true,
+			});
+			h.composer.ui.requestRender();
+			await h.scheduler.settle(h.terminal);
+		}
+		const full = reply([head, ...rows].join("\n"));
+		message.updateContent(full);
+		message.markTranscriptBlockFinalized();
+		const fresh = new AssistantMessageComponent(full);
+		fresh.markTranscriptBlockFinalized();
+		expect(message.render(COLUMNS)).toEqual(fresh.render(COLUMNS));
+		h.composer.stop();
+	});
+
 	it("keeps the below-chrome baseline across a height resize while inline chrome is expanded", async () => {
 		const shorter = ROWS - 10;
 		const h = makeHarness();
