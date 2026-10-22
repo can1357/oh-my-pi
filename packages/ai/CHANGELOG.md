@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Fixed the auth gateway logging nothing when a streamed reply ended; each streamed request now logs how it ended (stop reason and duration, plus the upstream error for replies that end early or fail) ([#16560](https://github.com/can1357/oh-my-pi/pull/16560) by [@codyw912](https://github.com/codyw912))
 - Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
 
 ## [18.12.4] - 2026-10-20

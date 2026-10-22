@@ -38,7 +38,7 @@ import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import { completeSimple, streamSimple } from "../stream";
-import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
+import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import { resolvePeer } from "../utils/resolve-peer";
@@ -505,8 +505,12 @@ async function handleFormatEndpoint(
 		if (controller.signal.aborted) return clientClosedResponse(route);
 		void events
 			.result()
-			.then(message =>
-				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
+			.then(
+				message => {
+					logStreamSettled(requestId, route.label, model, startedAt, message);
+					recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
+				},
+				error => logStreamFailed(requestId, route.label, error),
 			)
 			.catch(() => {})
 			.finally(settle);
@@ -536,6 +540,46 @@ async function handleFormatEndpoint(
 	} finally {
 		if (!streamOwnsLease) settle();
 	}
+}
+
+/**
+ * One line per streamed reply when it settles. The request line is logged
+ * before the first byte, so without this a stream that ends in an upstream
+ * error or is cut off leaves no trace on the gateway.
+ */
+function logStreamSettled(
+	requestId: string,
+	format: string,
+	model: Model<Api>,
+	startedAt: number,
+	message: AssistantMessage,
+): void {
+	const fields = {
+		requestId,
+		format,
+		resolvedProvider: model.provider,
+		resolvedModel: model.id,
+		stopReason: message.stopReason,
+		durationMs: Math.round(performance.now() - startedAt),
+	};
+	if (message.stopReason === "error" || message.stopReason === "aborted") {
+		logger.warn("auth-gateway stream ended early", {
+			...fields,
+			errorMessage: message.errorMessage,
+			errorStatus: message.errorStatus,
+		});
+	} else {
+		logger.info("auth-gateway stream finished", fields);
+	}
+}
+
+/** A streamed reply whose final result rejected instead of settling to a message. */
+function logStreamFailed(requestId: string, format: string, error: unknown): void {
+	logger.warn("auth-gateway stream failed", {
+		requestId,
+		format,
+		error: error instanceof Error ? error.message : String(error),
+	});
 }
 
 /**
@@ -725,8 +769,12 @@ async function handlePiNative(
 		if (controller.signal.aborted) return aborted();
 		void events
 			.result()
-			.then(message =>
-				recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined),
+			.then(
+				message => {
+					logStreamSettled(requestId, "pi-native", model, startedAt, message);
+					recordGatewayUsage(bootOpts.storage, model, client, message.usage, message.timestamp || undefined);
+				},
+				error => logStreamFailed(requestId, "pi-native", error),
 			)
 			.catch(() => {})
 			.finally(settle);
