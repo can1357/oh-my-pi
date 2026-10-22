@@ -1130,6 +1130,12 @@ provider "factory-droid" {
 		on-upstream "snowflake" {
 			disabled-thinking "disabled"
 		}
+		// Factory's proxy honors `ttl: "1h"` without the extended-cache-ttl beta
+		// and the Anthropic and Bedrock upstreams reject the beta.
+		extended-cache-ttl-beta #false
+		on-upstream "anthropic" "vertex_anthropic" "bedrock_anthropic" "azure_anthropic" {
+			supports-long-cache-retention #true
+		}
 	}
 	// Adaptive models the registry marks `supportsDisabledThinking` send the
 	// explicit disabled form at Off on every upstream.
@@ -1137,8 +1143,13 @@ provider "factory-droid" {
 		"claude-opus-4-8-fast" "claude-opus-5" "claude-opus-5-fast" "claude-haiku-5-5" {
 		disabled-thinking "disabled"
 	}
+	// Cache entry lifetimes per retention tier, in seconds, for the cache warmer.
 	models "claude-*" "atlas-07-21" "aster-07-15" {
 		anthropic-thinking "adaptive-summarized"
+		prompt-cache {
+			short 300
+			long 3600
+		}
 	}
 	models "claude-opus-4-6" "claude-sonnet-4-6" {
 		anthropic-thinking "adaptive"

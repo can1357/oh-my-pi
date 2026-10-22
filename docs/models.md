@@ -380,7 +380,9 @@ command.
 
 Direct Anthropic keeps its existing 5 min / 1 h lifetimes (`short: 300`, `long: 3600`),
 defaulting to 5 min for API keys and 1 h for OAuth subscriber sessions; API keys can
-explicitly select `long`. Claude on native Amazon Bedrock Converse has a 5 min TTL; 1 h is
+explicitly select `long`. Factory Droid's Claude models have the same 5 min / 1 h lifetimes and
+default to 5 min; `long` writes 1 h entries on the Anthropic, Vertex, Bedrock and Azure upstreams
+and stays 5 min elsewhere. Claude on native Amazon Bedrock Converse has a 5 min TTL; 1 h is
 available only where both catalog metadata and the request wire support it. Claude on
 Bedrock Runtime or Mantle's Anthropic Messages route has a 5 min lifetime under existing
 request support; an explicit `long` request falls back to `short` when unsupported. Other Amazon Bedrock models,

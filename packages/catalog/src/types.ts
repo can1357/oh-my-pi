@@ -671,6 +671,8 @@ export interface AnthropicCompat {
 	supportsEagerToolInputStreaming?: boolean;
 	/** Whether long prompt-cache retention (`ttl: "1h"`) is supported. Default: true for canonical Anthropic API. */
 	supportsLongCacheRetention?: boolean;
+	/** Whether a `ttl: "1h"` breakpoint on API-key requests adds the `extended-cache-ttl-2025-04-11` beta. Unset: true (Vertex rawPredict URLs never send it). */
+	extendedCacheTtlBeta?: boolean;
 	/**
 	 * Whether mid-conversation `role: "system"` messages are accepted in the
 	 * `messages` array. When unset, auto-detected from model and deployment policy.
@@ -1186,6 +1188,7 @@ export type ResolvedAnthropicCompat = Required<
 		| "thinkingLoopGuard"
 		| "bedrockMessagesApi"
 		| "effortBeta"
+		| "extendedCacheTtlBeta"
 		| "disabledThinking"
 		| "betweenToolsEffort"
 		| "stripThinkingHistory"
@@ -1196,6 +1199,8 @@ export type ResolvedAnthropicCompat = Required<
 > & {
 	/** Effort-beta override; undefined keeps the transport's legacy heuristic. */
 	effortBeta?: AnthropicCompat["effortBeta"];
+	/** Extended-cache-ttl beta opt-out; undefined sends it where a 1h breakpoint needs it. */
+	extendedCacheTtlBeta?: AnthropicCompat["extendedCacheTtlBeta"];
 	/** Disabled-thinking wire form; undefined keeps the direct-provider behavior. */
 	disabledThinking?: AnthropicCompat["disabledThinking"];
 	/** Effort pinned on `between_tools` turns; undefined leaves effort untouched. */
