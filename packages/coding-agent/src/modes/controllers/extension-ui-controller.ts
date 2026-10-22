@@ -26,6 +26,7 @@ import type {
 	SendUserMessageHandler,
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
+import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
@@ -1404,10 +1405,7 @@ export class ExtensionUiController {
 	}
 
 	async #compactSession(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {
-		const instructions = typeof instructionsOrOptions === "string" ? instructionsOrOptions : undefined;
-		const options =
-			instructionsOrOptions && typeof instructionsOrOptions === "object" ? instructionsOrOptions : undefined;
-		await this.ctx.session.compact(instructions, options);
+		await runExtensionCompact(this.ctx.session, instructionsOrOptions);
 	}
 
 	async #updateSessionName(name: string): Promise<void> {
