@@ -418,6 +418,8 @@ export function writeFrame(stdin: FrameSink, frame: string): boolean {
 const TERM_GRACE_MS = 1000;
 /** Grace window to observe SIGKILL taking effect before `close()` gives up and returns. */
 const KILL_GRACE_MS = 500;
+/** Bun can report stdout EOF before `exited` settles; bound the wait for the exit status. */
+const EXIT_SETTLE_MS = 100;
 
 /**
  * The subset of `Subprocess` that termination needs. Decoupled from the
@@ -650,17 +652,29 @@ export class StdioTransport implements MCPTransport {
 			}
 		} finally {
 			if (this.#connected && closeError === undefined) {
-				const exitCode = this.#process?.exitCode;
+				const proc = this.#process;
+				let exitCode = proc?.exitCode;
+				let signalCode = proc?.signalCode;
+				// Bun reports stdout EOF before it settles `exited`, so `exitCode`
+				// can still be null here. Wait briefly for the status; a process that
+				// is genuinely still alive keeps the closed-stdout wording.
+				if (proc && (exitCode === null || exitCode === undefined)) {
+					await waitForProcessExit(proc.exited, EXIT_SETTLE_MS);
+					exitCode = proc.exitCode;
+					signalCode = proc.signalCode;
+				}
 				closeError = new MCPTransportError({
 					transport: "stdio",
 					stage: "receive",
 					failure: "eof",
 					message:
-						exitCode === null || exitCode === undefined
-							? "MCP subprocess closed stdout before responding"
-							: `MCP subprocess exited with code ${exitCode} before responding`,
+						exitCode !== null && exitCode !== undefined
+							? `MCP subprocess exited with code ${exitCode} before responding`
+							: signalCode
+								? `MCP subprocess was killed by ${signalCode} before responding`
+								: "MCP subprocess closed stdout before responding",
 					retryable: false,
-					code: exitCode ?? undefined,
+					code: exitCode ?? signalCode ?? undefined,
 				});
 			}
 			this.#handleClose(closeError);
