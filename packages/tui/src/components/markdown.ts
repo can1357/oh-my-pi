@@ -136,6 +136,20 @@ function fenceOpenAt(text: string, end: number): boolean {
 	return open !== undefined;
 }
 
+/** Locked column widths: per table (see tableLockKey), per available width. */
+export type TableLocks = Map<string, Map<number, readonly number[]>>;
+
+/**
+ * A table's lock key: where it starts in the source, plus its header and
+ * delimiter lines, so two tables with the same header never share a lock.
+ * Undefined before both lines are complete.
+ */
+function tableLockKey(offset: number, raw: string): string | undefined {
+	const header = raw.indexOf("\n");
+	const delimiter = header < 0 ? -1 : raw.indexOf("\n", header + 1);
+	return delimiter < 0 ? undefined : `${offset}:${raw.slice(0, delimiter)}`;
+}
+
 /**
  * Streaming `md` source for a native terminal, minus a still-growing table row:
  * the unterminated last line when a GFM table (a run of pipe lines holding a
@@ -2267,6 +2281,27 @@ export class Markdown implements Component {
 	// texts extend it, so the published prefix never shrinks when the list
 	// stops being the last block.
 	#streamListSettledText?: string;
+	// The text through the last finished row of a locked table that is still
+	// streaming as the last block. A locked table's column widths no longer
+	// follow its rows, so a finished row renders the same whatever follows it.
+	#streamTableSettledText?: string;
+	// Key of the table streaming as the last block in the latest render, so
+	// lockOpenTable can lock it.
+	#openTableKey?: string;
+	// Source offset of each top-level table token the latest lex produced; a
+	// table's lock is keyed by it.
+	#tableOffsets = new WeakMap<Token, number>();
+	/**
+	 * Column widths of locked tables, per table (see tableLockKey) and per
+	 * available width. The owner gives one map to the Markdown streaming a
+	 * text block and to the ones rendering that block's stable prefix, so both
+	 * lay a locked table out the same; other blocks get their own maps.
+	 */
+	tableLocks?: TableLocks;
+	#openTableTail = false;
+	// While openTableTail is set: the table that is the document's last
+	// top-level block in the render under way, the only one that ends open.
+	#openTailToken?: Token;
 	// The prefix before a rewind that only a closer on the still-growing last
 	// line caused. Once a later text holds no closer line after it, that
 	// prefix is right again, so #lexTokens puts it back.
@@ -2449,15 +2484,57 @@ export class Markdown implements Component {
 	 * Width-independent source prefix of the last render that no append can
 	 * change: up to a frozen Markdown block boundary, stopping in front of a
 	 * display-math opener whose block an append could still close, or, while a
-	 * list streams as the last block, up to its newest top-level item. Only
-	 * meaningful while streaming (transient render cache on); grows
-	 * monotonically under append-only `setText`.
+	 * list streams as the last block, up to its newest top-level item, or,
+	 * while a locked table streams as the last block, through its last
+	 * finished row. Only meaningful while streaming (transient render cache
+	 * on); grows monotonically under append-only `setText`.
 	 */
 	getLastRenderStableText(): string {
 		if (!this.#transientRenderCache) return "";
-		const settled = this.#streamSettledText ?? "";
+		let stable = this.#streamSettledText ?? "";
 		const list = this.#streamListSettledText;
-		return list !== undefined && list.length > settled.length ? list : settled;
+		if (list !== undefined && list.length > stable.length) stable = list;
+		const table = this.#streamTableSettledText;
+		if (table !== undefined && table.length > stable.length) stable = table;
+		return stable;
+	}
+
+	/** Whether {@link getLastRenderStableText} ends inside a locked table that is still streaming. */
+	lastRenderStableTextEndsInOpenTable(): boolean {
+		const table = this.#streamTableSettledText;
+		return table !== undefined && this.getLastRenderStableText() === table;
+	}
+
+	/**
+	 * Lock the column widths of the table streaming as the last block, as they
+	 * stand, so its finished rows stop depending on rows still to come and can
+	 * leave the screen for scrollback. A later cell wraps inside the locked
+	 * widths. The lock holds for the table's final render too. Returns whether
+	 * a table was newly locked, so the owner can request the frame that
+	 * publishes its finished rows.
+	 */
+	lockOpenTable(): boolean {
+		const key = this.#openTableKey;
+		if (key === undefined || this.tableLocks === undefined || this.tableLocks.has(key)) return false;
+		this.tableLocks.set(key, new Map());
+		this.invalidate();
+		return true;
+	}
+
+	/**
+	 * End a table that is the last block with a row separator instead of its
+	 * bottom border: set while rendering a stable prefix cut inside a table
+	 * that keeps streaming, so the prefix's rows are the first rows of every
+	 * later render.
+	 */
+	get openTableTail(): boolean {
+		return this.#openTableTail;
+	}
+
+	set openTableTail(value: boolean) {
+		if (this.#openTableTail === value) return;
+		this.#openTableTail = value;
+		this.invalidate();
 	}
 
 	get transientRenderCache(): boolean {
@@ -2502,6 +2579,18 @@ export class Markdown implements Component {
 	// raw-span offsets). Every fallback is correctness-preserving — only speed
 	// differs; the render loop sees the identical token list either way.
 	#lexTokens(text: string): Token[] {
+		const tokens = this.#lexTopLevel(text);
+		if (this.tableLocks !== undefined) {
+			let offset = 0;
+			for (const token of tokens) {
+				if (token.type === "table") this.#tableOffsets.set(token, offset);
+				offset += token.raw.length;
+			}
+		}
+		return tokens;
+	}
+
+	#lexTopLevel(text: string): Token[] {
 		// A prefix is frozen only while canStream holds and its lex registered no
 		// definitions, and it ends at a "\n\n" block boundary (stableBlockBoundary),
 		// so the tail starts at a fresh line. The scan below then catches a
@@ -2574,6 +2663,7 @@ export class Markdown implements Component {
 			if (tokens !== undefined) {
 				this.#freezeStablePrefix(text, tokens, { preserveExisting: true });
 				this.#checkpointStreamingList(text, tokens);
+				this.#checkpointStreamingTable(text, tokens);
 				return tokens;
 			}
 		}
@@ -2586,7 +2676,10 @@ export class Markdown implements Component {
 				const tokens = [...prefixTokens, ...tailTokens];
 				if (retainPrefix) this.#freezeStablePrefix(text, tokens, { preserveExisting: true });
 				else this.#dropStreamPrefix();
-				if (retainPrefix) this.#checkpointStreamingList(text, tokens);
+				if (retainPrefix) {
+					this.#checkpointStreamingList(text, tokens);
+					this.#checkpointStreamingTable(text, tokens);
+				}
 				return tokens;
 			}
 		}
@@ -2598,6 +2691,7 @@ export class Markdown implements Component {
 		if (canStream && retainPrefix && !hasReferenceDefinitions) {
 			this.#freezeStablePrefix(text, tokens, { preserveExisting: false });
 			this.#checkpointStreamingList(text, tokens);
+			this.#checkpointStreamingTable(text, tokens);
 		} else {
 			this.#dropStreamPrefix();
 		}
@@ -2687,6 +2781,52 @@ export class Markdown implements Component {
 		}
 	}
 
+	#checkpointStreamingTable(text: string, tokens: Token[]): void {
+		if (this.#streamTableSettledText !== undefined && !text.startsWith(this.#streamTableSettledText)) {
+			this.#streamTableSettledText = undefined;
+		}
+		this.#openTableKey = undefined;
+		let index = tokens.length - 1;
+		while (tokens[index]?.type === "space") index--;
+		const token = tokens[index];
+		if (token?.type !== "table") return;
+		// Runs inside the lex, before #lexTokens records offsets: sum them here.
+		let start = 0;
+		for (let i = 0; i < index; i++) start += tokens[i]!.raw.length;
+		const key = tableLockKey(start, token.raw);
+		if (key === undefined) return;
+		this.#openTableKey = key;
+		if (!this.tableLocks?.has(key)) return;
+		// Like a list, the table must start at the settled boundary: a
+		// display-math opener in front of it could still absorb it. ATX headings
+		// right above it (no blank line between) are finished and cannot hold
+		// such an opener, so the boundary may sit in front of them instead.
+		const prefix = this.#streamPrefixText?.length ?? 0;
+		const settled = this.#streamSettledText?.length ?? 0;
+		let boundary = start;
+		for (let i = index - 1; boundary !== prefix || settled !== boundary; i--) {
+			const before = tokens[i];
+			if (before?.type !== "heading" || !/^ {0,3}#/.test(before.raw) || !before.raw.endsWith("\n")) return;
+			boundary -= before.raw.length;
+		}
+		// The header, the delimiter and every finished row end in a newline;
+		// whatever follows the last one is the row still being written. A later
+		// reference definition can still turn a bracketed label into a link, so
+		// the settled rows also stop in front of the first row holding one.
+		const table = token as TableToken;
+		if (table.header.some(cell => REFERENCE_LABEL_RE.test(labelSource(cell.tokens ?? [])))) return;
+		let finished = token.raw.indexOf("\n", token.raw.indexOf("\n") + 1) + 1;
+		for (const row of table.rows) {
+			const next = token.raw.indexOf("\n", finished) + 1;
+			if (next === 0) break;
+			if (row.some(cell => REFERENCE_LABEL_RE.test(labelSource(cell.tokens ?? [])))) break;
+			finished = next;
+		}
+		if (token.raw.slice(0, finished).split("\n").length - 1 < 3) return;
+		const end = start + finished;
+		if (end > (this.#streamTableSettledText?.length ?? 0)) this.#streamTableSettledText = text.slice(0, end);
+	}
+
 	/**
 	 * Drop the frozen lex prefix and the transient row caches keyed on it. A
 	 * prefix set aside for #restoreRewoundPrefix checks itself against each
@@ -2698,6 +2838,8 @@ export class Markdown implements Component {
 		this.#streamPrefixOpeners = NO_OPENERS;
 		this.#streamSettledText = undefined;
 		this.#streamListSettledText = undefined;
+		this.#streamTableSettledText = undefined;
+		this.#openTableKey = undefined;
 		this.#streamPrefixLineCache = undefined;
 		this.#tailRowCache = undefined;
 		this.#listItemRowsCache = undefined;
@@ -3039,7 +3181,10 @@ export class Markdown implements Component {
 		// theme.heading is used as the representative theme probe — it's required
 		// by MarkdownTheme and is one of the most styling-sensitive entries.
 		let cacheKey: string | undefined;
-		if (!this.transientRenderCache) {
+		// A locked table or an open table tail lays out differently from the
+		// same text elsewhere, so such renders stay out of the shared cache.
+		const sharedCache = !this.#openTableTail && !this.tableLocks?.size;
+		if (!this.transientRenderCache && sharedCache) {
 			cacheKey = this.#renderCacheKey(normalizedText, signature);
 			const cached = renderCache.get(cacheKey);
 			if (cached !== undefined) {
@@ -3060,7 +3205,12 @@ export class Markdown implements Component {
 		const lexed = this.#lexTokens(normalizedText);
 		const tail = lexed.at(-1);
 		const speculated = this.transientRenderCache && tail ? speculateStreamingToken(tail) : undefined;
+		const tailOffset = tail === undefined ? undefined : this.#tableOffsets.get(tail);
+		if (speculated !== undefined && tailOffset !== undefined) this.#tableOffsets.set(speculated, tailOffset);
 		const tokens = speculated ? [...lexed.slice(0, -1), speculated] : lexed;
+		let last = tokens.length - 1;
+		while (tokens[last]?.type === "space") last--;
+		this.#openTailToken = this.#openTableTail && tokens[last]?.type === "table" ? tokens[last] : undefined;
 		let contentLines: string[];
 		this.#activeRenderSignature = signature;
 		try {
@@ -4582,6 +4732,15 @@ export class Markdown implements Component {
 			}
 		}
 
+		const offset = this.#tableOffsets.get(token);
+		const key = offset === undefined ? undefined : tableLockKey(offset, token.raw);
+		const lock = key === undefined ? undefined : this.tableLocks?.get(key);
+		if (lock !== undefined) {
+			const pinned = lock.get(availableWidth);
+			if (pinned !== undefined && pinned.length === numCols) columnWidths = [...pinned];
+			else lock.set(availableWidth, columnWidths);
+		}
+
 		const t = this.#symbols.table;
 		const h = t.horizontal;
 		const v = t.vertical;
@@ -4654,6 +4813,12 @@ export class Markdown implements Component {
 			}
 		}
 
+		// A stable prefix cut inside a table that keeps streaming ends where the
+		// next row's separator goes, not with a border no later render has.
+		if (this.#openTableTail && token === this.#openTailToken) {
+			lines.push(separatorLine);
+			return lines;
+		}
 		// Render bottom border
 		const bottomBorderCells = columnWidths.map(w => h.repeat(w));
 		const bottomBorder = `${t.bottomLeft}${h}${bottomBorderCells.join(`${h}${t.teeUp}${h}`)}${h}${t.bottomRight}`;

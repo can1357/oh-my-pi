@@ -11,6 +11,7 @@
 ### Fixed
 
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
+- Fixed rows of a streaming reply, and the top rows of a table taller than the screen, going missing from both the screen and scrollback with `tui.completeScrollback` on; such a table now keeps the column widths it had when it outgrew the screen ([#16355](https://github.com/can1357/oh-my-pi/pull/16355) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
 
 ## [18.12.4] - 2026-10-20
 
