@@ -253,7 +253,13 @@ export class BashExecutionComponent extends Container {
 	/** Switch to PTY rendering and feed raw terminal bytes through the vterm replay. */
 	appendPtyChunk(chunk: string): void {
 		if (this.#status !== "running" && !this.#ptyWriting && this.#ptyQueue.length === 0) return;
-		this.#ptyMode = true;
+		if (!this.#ptyMode) {
+			this.#ptyMode = true;
+			// The pane's `styleLine` reads `#ptyMode`, so its styled rows change
+			// the moment this flips — with the rows themselves unchanged. The pane
+			// memoizes its styled output, so it has to be told.
+			this.#outputPane.invalidate();
+		}
 		this.#ptyReplayFinalized = false;
 		this.#ptyQueue.push(chunk);
 		if (this.#ptyQueue.length > MAX_PTY_QUEUE_CHUNKS) {
