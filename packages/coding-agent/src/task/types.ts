@@ -53,6 +53,7 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": "string",
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -63,6 +64,7 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": "string",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -75,6 +77,7 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": "string",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -86,6 +89,7 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	"model?": "string",
 	"+": "delete",
 });
 function guardBatchAgent(schema: BaseType): BaseType {
@@ -152,7 +156,9 @@ function createTaskSchema(options: {
 		? { "outputSchema?": outputSchemaInputSchema, "schemaMode?": '"permissive" | "strict"' }
 		: {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
-	const seanceFields = options.seanceFields;
+	// `model` is always declared so a rejected per-call model fails preflight
+	// instead of being deleted by `"+": "delete"`; seance widens it to a list.
+	const seanceFields = { "model?": "string", ...options.seanceFields };
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({

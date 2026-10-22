@@ -20,6 +20,7 @@ Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate v
 {{#if seanceGuidance}}{{seanceGuidance}}{{/if}}
 {{#if evalToolsEnabled}}`tools`: eval-defined, run in your kernel.
 {{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
+{{/if}}{{#if perCallModelEnabled}}`model`: one exact `provider/model[:level]` string for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}. Only operator-approved models; no roles, arrays, globs or partial IDs. An agent's `task.agentModelOverrides` entry conflicts with `model`. Omit unless needed. Requested model unavailable → stop and report; NEVER substitute another. No runtime model fallback.
 {{/if}}{{#if structured}}`schemaMode`: default permissive warns after retries; strict fails.
 {{/if}}{{#if isolationEnabled}}{{#if applyIsolatedChanges}}`isolated`: worktree; successful changes apply to parent.
 {{else}}`isolated`: worktree; changes retained, not applied.

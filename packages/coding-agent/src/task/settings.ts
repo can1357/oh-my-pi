@@ -8,6 +8,7 @@ import {
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
 import { effect, register } from "../config/registry";
+import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
@@ -291,6 +292,45 @@ export const cfgTaskEnableEffort = register({
 	},
 });
 
+export const cfgTaskPerCallModel = register({
+	id: "task.perCallModel",
+	type: "enum",
+	values: ["off", "eval", "on"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model",
+		description:
+			"Whether a subagent call may pick its model with one exact provider/model-id[:level] selector. Only models the configuration already routes to are accepted.",
+		options: [
+			{ value: "off", label: "Off", description: "Reject `model` on task items and eval agent()/workpool()" },
+			{ value: "eval", label: "Eval only", description: "Accept `model` in eval agent() and workpool() only" },
+			{ value: "on", label: "On", description: "Accept `model` on task items and in eval agent()/workpool()" },
+		],
+	},
+});
+
+/** Whether `task.perCallModel` accepts a per-call `model` for this invocation kind. */
+export function perCallModelEnabled(settings: Settings, invocationKind: "task" | "eval"): boolean {
+	const mode = cfgTaskPerCallModel.get(settings);
+	return mode === "on" || (mode === "eval" && invocationKind === "eval");
+}
+
+export const cfgTaskPerCallModelAllow = register({
+	id: "task.perCallModelAllow",
+	type: "array",
+	default: [] as string[],
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model Allowlist",
+		editor: "json",
+		description:
+			'Exact provider/model-id entries, e.g. ["anthropic/claude-sonnet-4-5"]. When set, a per-call model must also be listed here. Empty: every model the configuration grants.',
+	},
+});
+
 export const cfgTaskMaxConcurrency = register({
 	id: "task.maxConcurrency",
 	protocolDefault: ["rpc", "acp"],
@@ -463,7 +503,7 @@ export const cfgTaskMaxEffort = register({
 		group: "Subagents",
 		label: "Maximum Per-Spawn Effort",
 		description:
-			"Maximum reasoning effort allowed for the task tool's per-spawn effort hint. Lower values prevent callers from escalating subagents above this ceiling; the default preserves the model's full range.",
+			"Maximum reasoning effort allowed for the task tool's per-spawn effort hint and for any spawn that uses a per-call model (including its `:level` suffix). Lower values prevent callers from escalating subagents above this ceiling; the default preserves the model's full range.",
 		options: THINKING_EFFORTS.map(getThinkingLevelMetadata),
 	},
 });
