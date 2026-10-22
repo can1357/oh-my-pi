@@ -44,15 +44,24 @@ const yieldTool: AgentTool = {
 	name: "yield",
 	label: "Yield",
 	description: "Submit the final result",
-	parameters: type({ data: "string" }),
+	parameters: type({ data: "string", "type?": "string[]" }),
 	execute: async (_id, params) => {
 		const data = isRecord(params) ? params.data : undefined;
-		return { content: [{ type: "text", text: "Result submitted." }], details: { status: "success", data } };
+		const sectionType = isRecord(params) && Array.isArray(params.type) ? params.type : undefined;
+		return {
+			content: [{ type: "text", text: "Result submitted." }],
+			details: { status: "success", data, ...(sectionType ? { type: sectionType } : {}) },
+		};
 	},
 };
 
 const yieldCall = (data: string): MockResponse => ({
 	content: [{ type: "toolCall", name: "yield", arguments: { data } }],
+});
+
+/** An incremental section: recorded for the result, but it does not end the turn's work. */
+const sectionCall = (label: string, data: string): MockResponse => ({
+	content: [{ type: "toolCall", name: "yield", arguments: { type: [label], data } }],
 });
 
 /** Lifecycle frames the monitor publishes; only the fields these tests read. */
@@ -289,6 +298,20 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		const artifact = await Bun.file(run.artifact).text();
 		expect(artifact).toContain("replacement");
 		expect(artifact).not.toContain("REFUSED-PAYLOAD");
+	});
+
+	it("offers sections a wake turn recorded before answering in prose, instead of publishing them unjudged", async () => {
+		const run = await setup({
+			// A section, then prose: no terminal yield, yet the sections are what finalization publishes.
+			responses: [sectionCall("findings", "SECTION-PAYLOAD"), { content: ["done for now"] }, { content: ["still"] }],
+			onStop: () => ({ decision: "block", reason: "not done" }),
+		});
+
+		await wake(run.session);
+
+		expect(run.stopEvents).toHaveLength(1);
+		expect(await Bun.file(run.artifact).exists()).toBe(false);
+		expect(run.lifecycle.at(-1)?.status).toBe("failed");
 	});
 
 	describe("a structured:false child", () => {
