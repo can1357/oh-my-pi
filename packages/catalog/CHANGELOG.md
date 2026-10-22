@@ -6,6 +6,10 @@
 
 - Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 
+### Fixed
+
+- DeepSeek V4.1 Flash keeps image input on gateway rows that namespace the publisher (`ds/deepseek-flash`); the compat carve-out matched only the bare release id, so those rows dropped attachments before the request ([#16470](https://github.com/can1357/oh-my-pi/pull/16470) by [@ZanDev32](https://github.com/ZanDev32))
+
 ## [18.12.6] - 2026-10-21
 
 ### Added

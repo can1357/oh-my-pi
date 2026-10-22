@@ -90,10 +90,13 @@ class "deepseek" {
 	}
 	// V4.1 Flash is natively multimodal (vision encoder + projector, image-text
 	// pre-training) but its release id carries no `vision` token to key on.
+	// Match the id tail so publisher-namespaced rows (`ds/deepseek-flash` on
+	// gateways that prefix the upstream) inherit the same exemption; the exact
+	// selector only covered first-party rows.
 	// Same priority as the V4.1 Flash carve-out: the OpenCode Go provider rule
 	// declares the same value for its `deepseek-flash` lane and would otherwise
 	// tie at equal rank.
-	models "deepseek-flash" priority=10 {
+	models "*deepseek-flash" priority=10 {
 		strip-image-input #false
 	}
 	// DSML is the model's own tool-call grammar, not a host quirk: any server
