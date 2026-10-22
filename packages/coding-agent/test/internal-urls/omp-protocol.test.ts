@@ -1,9 +1,30 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getDocsDiskRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/docs-index";
 
 describe("OmpProtocolHandler", () => {
+	// `locate` materializes docs into the docs cache, so point it at a throwaway
+	// root — never the real ~/.omp/cache/docs.
+	let root: string;
+	let cacheDir: string;
+	let originalCacheDir: string | undefined;
+
+	beforeAll(async () => {
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-docs-"));
+		cacheDir = path.join(root, "cache");
+		originalCacheDir = process.env.OMP_DOCS_CACHE_DIR;
+		process.env.OMP_DOCS_CACHE_DIR = cacheDir;
+	});
+
+	afterAll(() => {
+		if (originalCacheDir === undefined) delete process.env.OMP_DOCS_CACHE_DIR;
+		else process.env.OMP_DOCS_CACHE_DIR = originalCacheDir;
+		return fs.rm(root, { recursive: true, force: true });
+	});
+
 	it("treats omp://docs as the documentation root", async () => {
 		const resource = await InternalUrlRouter.instance().resolve("omp://docs");
 
@@ -23,15 +44,59 @@ describe("OmpProtocolHandler", () => {
 	it("locates a doc to the file the active corpus was read from", async () => {
 		const router = InternalUrlRouter.instance();
 		// A source checkout reads docs from disk; a bundled or embedded corpus
-		// (e.g. after `gen:bundle`) has no file and must never link.
-		const root = getDocsDiskRoot();
-		const onDisk = root === null ? undefined : path.join(root, "tools", "read.md");
+		// (e.g. after `gen:bundle`) leaves the sync paths no file to name.
+		const diskRoot = getDocsDiskRoot();
+		const onDisk = diskRoot === null ? undefined : path.join(diskRoot, "tools", "read.md");
 
-		// Both renderer entry points (sync read cards, async markdown links) must
-		// agree on the file, or a link opens a doc `read` never resolved.
+		// The sync render paths name the corpus file: it is the doc `resolve`
+		// serves. The embedded body can only be inflated off the render path, so
+		// the async locate is what materializes a cache copy for installs that
+		// have no checkout to name.
 		expect(router.locateSync("omp://tools/read.md")).toBe(onDisk);
 		expect(router.locateSync("omp://docs/tools/read.md:1-20")).toBe(onDisk);
-		expect(await router.locate("omp://tools/read.md")).toBe(onDisk ?? null);
+	});
+
+	it("never links a cache entry that resolves outside the docs cache", async () => {
+		// The doc path is joined into the cache root, so containment is proven
+		// before the write: an entry resolving elsewhere (here a symlink standing
+		// in for the content-addressed dir) degrades to a plain-text link.
+		const outside = path.join(root, "outside");
+		await fs.mkdir(outside, { recursive: true });
+		const located = await InternalUrlRouter.instance().locate("omp://tui.md");
+		expect(located).toBeString();
+
+		await Bun.write(path.join(outside, "tui.md"), "not the harness doc");
+		await fs.rm(path.dirname(located!), { recursive: true, force: true });
+		await fs.symlink(outside, path.dirname(located!));
+
+		expect(await InternalUrlRouter.instance().locate("omp://tui.md")).toBeNull();
+	});
+
+	it("keeps the link when the docs cache root is a symlink", async () => {
+		// A cache root behind a symlink (`/var` → `/private/var`, a symlinked
+		// `XDG_CACHE_HOME` or home) makes the resolved cache file live outside
+		// the configured root. The link must survive the cache hit, not only
+		// the first materialization.
+		const realRoot = path.join(root, "real-cache");
+		const linkedRoot = path.join(root, "linked-cache");
+		await fs.mkdir(realRoot, { recursive: true });
+		await fs.symlink(realRoot, linkedRoot);
+
+		const previousCacheDir = process.env.OMP_DOCS_CACHE_DIR;
+		process.env.OMP_DOCS_CACHE_DIR = linkedRoot;
+		try {
+			const router = InternalUrlRouter.instance();
+			const first = await router.locate("omp://tui.md");
+			expect(first).toBeString();
+			// Second render is a cache hit: the file exists, so containment is
+			// checked against the resolved path.
+			const second = await router.locate("omp://tui.md");
+			expect(second).toBeString();
+			expect(second).toBe(first);
+		} finally {
+			if (previousCacheDir === undefined) delete process.env.OMP_DOCS_CACHE_DIR;
+			else process.env.OMP_DOCS_CACHE_DIR = previousCacheDir;
+		}
 	});
 
 	it("never locates a URL that names no doc on disk", async () => {
