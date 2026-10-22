@@ -7,6 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
@@ -455,6 +456,158 @@ describe("ExtensionRunner", () => {
 
 			controller.abort(new Error("caller aborted"));
 			await expect(pending).rejects.toThrow("caller aborted");
+		});
+
+		it("reuses cached message clones for append-only context handlers", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("context", event => ({
+						messages: [...event.messages, {
+							role: "developer",
+							content: [{ type: "text", text: "request-local context" }],
+							timestamp: 999999,
+						}],
+					}));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "append-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const payload = "x".repeat(2500);
+			const messages: AgentMessage[] = Array.from({ length: 400 }, (_, index) => ({
+				role: "user",
+				content: [{ type: "text", text: `${index}:${payload}` }],
+				timestamp: index,
+			}));
+
+			const warmup = await runner.emitContext(messages);
+			expect(warmup).toHaveLength(401);
+
+			// Latency is tracked by bench/extension-context.bench.ts; this test stays deterministic.
+			const second = await runner.emitContext(messages);
+			expect(second).toHaveLength(401);
+			expect(second[0]).toBe(warmup[0]);
+		});
+
+		it("keeps mutating context handlers detached from live history and future calls", async () => {
+			const extCode = `
+				let calls = 0;
+				export default function(pi) {
+					pi.on("context", event => {
+						calls++;
+						if (calls === 1) {
+							event.messages[0].content[0].text = "mutated detached copy";
+						}
+						return { messages: event.messages };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "mutate-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const messages: AgentMessage[] = [
+				{
+					role: "user",
+					content: [{ type: "text", text: "live history" }],
+					timestamp: 1,
+				},
+			];
+
+			const first = await runner.emitContext(messages);
+			expect(((first[0] as { content: TextContent[] }).content[0] as TextContent).text).toBe(
+				"mutated detached copy",
+			);
+			expect(((messages[0] as { content: TextContent[] }).content[0] as TextContent).text).toBe("live history");
+
+			const second = await runner.emitContext(messages);
+			expect(((second[0] as { content: TextContent[] }).content[0] as TextContent).text).toBe("live history");
+		});
+
+		it("drops cached clones after an owner rewrite bumps the message version", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("context", event => ({ messages: event.messages }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "passthrough-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const message = {
+				role: "user",
+				content: [{ type: "text", text: "evict me" }],
+				timestamp: 1,
+			} as AgentMessage;
+
+			const first = await runner.emitContext([message]);
+			expect(((first[0] as { content: TextContent[] }).content[0] as TextContent).text).toBe("evict me");
+
+			((message as { content: TextContent[] }).content[0] as TextContent).text = "[evicted]";
+			invalidateMessageCache(message);
+
+			const second = await runner.emitContext([message]);
+			expect(((second[0] as { content: TextContent[] }).content[0] as TextContent).text).toBe("[evicted]");
+		});
+
+		it("does not leak handler mutations of non-plain descendants into later calls", async () => {
+			const extCode = `
+				let calls = 0;
+				export default function(pi) {
+					pi.on("context", event => {
+						calls++;
+						if (calls === 1) event.messages[0].details.tags.add("handler-only");
+						return { messages: event.messages };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "mutate-map-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const messages = [
+				{
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "bash",
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+					details: { tags: new Set<string>() },
+					timestamp: 1,
+				},
+			] as unknown as AgentMessage[];
+
+			const first = await runner.emitContext(messages);
+			expect((first[0] as unknown as { details: { tags: Set<string> } }).details.tags.has("handler-only")).toBe(
+				true,
+			);
+			const second = await runner.emitContext(messages);
+			expect((second[0] as unknown as { details: { tags: Set<string> } }).details.tags.size).toBe(0);
 		});
 
 		it("calls error listeners when handler throws", async () => {
