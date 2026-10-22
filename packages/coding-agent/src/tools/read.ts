@@ -805,6 +805,15 @@ const readSchema = type({
 	path: type("string").describe("Local path, internal URI, or URL; selectors inline."),
 });
 
+/**
+ * Schema variant for `fetch.enabled=false`: URL reads are refused at runtime, so the
+ * `path` copy must not advertise web URLs. Internal URIs (`artifact://`, `omp://`,
+ * `proc://`, `ssh://`) still resolve, so they stay in the description.
+ */
+const readSchemaNoUrl = type({
+	path: type("string").describe("Local path or internal URI; selectors inline."),
+});
+
 export type ReadToolInput = typeof readSchema.infer;
 
 type ReadParams = ReadToolInput;
@@ -1032,9 +1041,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		return prompt.render(readDescription, {
 			IS_HL_MODE: resolveFileDisplayMode(this.session).hashLines,
 			BINARY_VIEWS: cfgIdaAvailable.get(this.session.settings),
+			FETCH_ENABLED: cfgFetchEnabled.get(this.session.settings),
 		});
 	}
-	readonly parameters = readSchema;
+	/** Schema variant for the live `fetch.enabled` setting. */
+	get parameters(): typeof readSchema {
+		return cfgFetchEnabled.get(this.session.settings) ? readSchema : readSchemaNoUrl;
+	}
 	readonly strict = true;
 
 	readonly speculation = {

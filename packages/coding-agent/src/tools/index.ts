@@ -219,6 +219,13 @@ export interface ToolSession {
 	advertiseHeadlessAsk?: boolean;
 	/** The user approves `cfg://` writes for this session (top-level TUI session only). */
 	settingsApproval?: boolean;
+	/**
+	 * Awaits the system-prompt rebuild the current settings change queued, so a
+	 * `cfg://` write returns only after the prompt the change invalidated has
+	 * been republished. Absent when the session does not rebuild its prompt on
+	 * settings changes.
+	 */
+	awaitPromptRefresh?: () => Promise<void>;
 	/** Whether this session has begun disposal. */
 	isDisposed?: () => boolean;
 	/**

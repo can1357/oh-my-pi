@@ -1,7 +1,7 @@
 Drive real Chromium tabs from JavaScript or Python Eval with the global `browser` object.
 
 <instruction>
-- Static content? Use `read`. Use `browser` for JavaScript execution, authenticated sessions, and interactive actions.
+- Use `browser` for JavaScript execution, authenticated sessions, and interactive actions.
 - JavaScript: `await browser.open(options)` returns a `BrowserTab`; `browser.tab(name)` returns an existing handle; `await browser.tabs()` lists managed tabs; `await browser.targets({app?})` lists the user's own pages `app.target` can adopt; `await browser.close(options)` releases tabs.
 - Python: `await browser.open(name=…, url=…)`, synchronous `browser.tab(name)`, `await browser.tabs()`, `await browser.targets(app=…)`, and `await browser.close(name=…)`. Python methods accept keyword arguments.
 - `targets` options: `app`, `timeout`. It resolves the browser like `open` (pass the same `app`, e.g. `{relay: true}`) and returns `{target, title, url, shown?, docked?, driven?, tab?}` entries: inside a Tern pane, the window's browser blocks (`tab` names the omp tab holding one); with the relay, Chrome's pages (`shown`: the active tab). Call it before adopting, then pass an entry's `target` as `app.target` instead of guessing.

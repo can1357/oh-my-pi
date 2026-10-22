@@ -1,10 +1,12 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { setCfgApprovalHost } from "@oh-my-pi/pi-coding-agent/internal-urls/cfg-protocol";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -22,17 +24,23 @@ import { cfgTtsrEnabled } from "@oh-my-pi/pi-coding-agent/export/ttsr-settings";
 import { cfgToolsFormat } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgInterruptMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgSteeringMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgFetchEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { createAssistantMessage } from "../helpers/agent-session-setup";
 
 describe("AgentSession live settings", () => {
 	const tempDirs: string[] = [];
 	let modelRegistry!: ModelRegistry;
 	let authDir: string;
 	let session: AgentSession | undefined;
+	let sessionManager: SessionManager | undefined;
 
 	beforeAll(async () => {
 		authDir = path.join(os.tmpdir(), `pi-live-settings-auth-${Snowflake.next()}`);
 		fs.mkdirSync(authDir, { recursive: true });
 		modelRegistry = new ModelRegistry(await discoverAuthStorage(authDir));
+		// The mock provider never calls out, but the session refuses a turn
+		// without a credential for the model.
+		modelRegistry.authStorage.keys.setRuntime("openai", "test-key");
 	});
 
 	afterEach(async () => {
@@ -49,18 +57,21 @@ describe("AgentSession live settings", () => {
 
 	const start = async (
 		settings: Settings,
-		extra?: Pick<CreateAgentSessionOptions, "systemPrompt">,
+		extra?: Pick<CreateAgentSessionOptions, "systemPrompt" | "settingsApproval">,
 	): Promise<AgentSession> => {
 		const cwd = path.join(os.tmpdir(), `pi-live-settings-${Snowflake.next()}`);
 		tempDirs.push(cwd);
 		fs.mkdirSync(cwd, { recursive: true });
+		const manager = SessionManager.inMemory();
+		sessionManager = manager;
 		const created = await createAgentSession({
 			cwd,
 			agentDir: cwd,
 			modelRegistry,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: manager,
 			settings,
 			model: getBundledModel("openai", "gpt-4o-mini"),
+			getApiKey: () => "test-key",
 			disableExtensionDiscovery: true,
 			skills: [],
 			contextFiles: [],
@@ -106,7 +117,11 @@ describe("AgentSession live settings", () => {
 	});
 
 	it("rebuilds the system prompt when prompt-affecting settings change", async () => {
-		const settings = Settings.isolated();
+		// Inline descriptors put a tool's description in the prompt (and strip it
+		// from the provider schema), so the `read` tool's URL guidance is prompt
+		// content: a live toggle must republish the prompt, or the model keeps
+		// seeing copy for a URL read the runtime now refuses.
+		const settings = Settings.isolated({ inlineToolDescriptors: "on" });
 		const live = await start(settings);
 		expect(live.systemPrompt.join("\n")).not.toContain("live-settings-tree-marker/");
 
@@ -122,6 +137,15 @@ describe("AgentSession live settings", () => {
 		await Promise.resolve();
 		await live.refreshBaseSystemPrompt();
 		expect(live.systemPrompt.join("\n")).not.toBe(beforePersonality);
+
+		// `fetch.enabled` gates the `read` tool's URL guidance, so turning it off
+		// must republish the prompt without an unrelated settings change.
+		expect(live.systemPrompt.join("\n")).toContain("reader text/markdown");
+		cfgFetchEnabled.set(settings, false);
+		await Promise.resolve();
+		await live.runToolRegistryMutation(async () => {});
+		expect(live.systemPrompt.join("\n")).not.toContain("reader text/markdown");
+		expect(live.systemPrompt.join("\n")).not.toContain("bare host:port");
 	});
 
 	it("rebuilds the system prompt once for a bulk change across several prompt inputs", async () => {
@@ -133,6 +157,7 @@ describe("AgentSession live settings", () => {
 				return defaultPrompt;
 			},
 		});
+
 		// Let startup-queued rebuilds drain before counting.
 		await live.runToolRegistryMutation(async () => {});
 		const before = live.systemPrompt.join("\n");
@@ -148,5 +173,187 @@ describe("AgentSession live settings", () => {
 		expect(builds).toBe(1);
 		expect(live.systemPrompt.join("\n")).not.toBe(before);
 		expect(live.systemPrompt.join("\n")).toContain("live-settings-tree-marker/");
+	});
+
+	it("republishes the prompt before an approved cfg:// write returns", async () => {
+		// Inline descriptors put the `read` tool's URL guidance in the prompt, so
+		// turning `fetch.enabled` off has to republish it. An approved `cfg://`
+		// write applies the setting and returns; the turn then continues with the
+		// next request, and that request must not carry the prompt the change
+		// replaced.
+		const settings = Settings.isolated({ inlineToolDescriptors: "on" });
+		const live = await start(settings, { settingsApproval: true });
+		expect(live.systemPrompt.join("\n")).toContain("reader text/markdown");
+
+		const writeTool = live.agent.state.tools.find(tool => tool.name === "write");
+		expect(writeTool).toBeDefined();
+		setCfgApprovalHost({
+			approve: async () => "once",
+			applied: () => {},
+			persistentSettings: settings,
+		});
+		try {
+			await writeTool!.execute("cfg-1", { path: "cfg://fetch/enabled", content: "false" });
+		} finally {
+			setCfgApprovalHost(null);
+		}
+
+		expect(cfgFetchEnabled.get(settings)).toBe(false);
+		expect(live.systemPrompt.join("\n")).not.toContain("reader text/markdown");
+		expect(live.systemPrompt.join("\n")).not.toContain("bare host:port");
+	});
+
+	it("republishes the prompt before a side request builds its provider context", async () => {
+		// Side requests (ephemeral turns, compaction, handoff) build their own
+		// provider context and never reach the main loop's pre-model-call hook, so
+		// the pending rebuild has to be awaited at their boundary too.
+		const settings = Settings.isolated({ inlineToolDescriptors: "on" });
+		const live = await start(settings);
+		expect(live.systemPrompt.join("\n")).toContain("reader text/markdown");
+
+		// A settings change that did not come through a `cfg://` write: the side
+		// request still has to wait for the rebuild it queued.
+		cfgFetchEnabled.set(settings, false);
+		const context = await live.agent.buildSideRequestContext([]);
+
+		expect(context.systemPrompt?.join("\n")).not.toContain("reader text/markdown");
+	});
+
+	it("drains every queued prompt rebuild before the write returns", async () => {
+		// A change that lands while a rebuild is in flight queues a second
+		// rebuild. The write must wait for both: returning after the first would
+		// hand the next request a prompt that still contradicts the newest setting.
+		const settings = Settings.isolated({ inlineToolDescriptors: "on" });
+		const live = await start(settings, { settingsApproval: true });
+		expect(live.systemPrompt.join("\n")).toContain("reader text/markdown");
+
+		// Hold the first rebuild's completion so a second change can queue a
+		// second rebuild behind it while the write is still waiting.
+		const firstPublished = Promise.withResolvers<void>();
+		const secondRequested = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const originalRefresh = live.refreshBaseSystemPrompt.bind(live);
+		let requests = 0;
+		live.refreshBaseSystemPrompt = async (commitIf?: () => boolean) => {
+			requests++;
+			if (requests === 2) {
+				secondRequested.resolve();
+				return originalRefresh(commitIf);
+			}
+			const result = await originalRefresh(commitIf);
+			firstPublished.resolve();
+			await releaseFirst.promise;
+			return result;
+		};
+
+		const writeTool = live.agent.state.tools.find(tool => tool.name === "write");
+		expect(writeTool).toBeDefined();
+		setCfgApprovalHost({
+			approve: async () => "once",
+			applied: () => {},
+			persistentSettings: settings,
+		});
+		try {
+			const write = writeTool!.execute("cfg-1", { path: "cfg://fetch/enabled", content: "false" });
+			// The first rebuild is published and held; the write is still waiting
+			// for it. A second change now queues a second rebuild behind it.
+			await firstPublished.promise;
+			cfgIncludeWorkspaceTree.set(settings, true);
+			await secondRequested.promise;
+			releaseFirst.resolve();
+			await write;
+		} finally {
+			setCfgApprovalHost(null);
+		}
+
+		expect(live.systemPrompt.join("\n")).not.toContain("reader text/markdown");
+		// The second rebuild ran too, so the newest setting is in the prompt.
+		expect(live.systemPrompt.join("\n")).toContain("live-settings-tree-marker/");
+	});
+
+	it("keeps the provider-visible catalog free of URL reads when fetch.enabled is off", async () => {
+		// The catalog is what the model reads: the prompt when tool descriptions are
+		// inline, the provider schema otherwise. Neither may send the model to a
+		// URL read the runtime refuses, so every description that names one has to
+		// drop it with the setting.
+		for (const inlineToolDescriptors of ["off", "on"] as const) {
+			const settings = Settings.isolated({ inlineToolDescriptors });
+			const live = await start(settings);
+
+			// Everything the provider receives for one side request: the prompt, the
+			// tool descriptions and the published tool schemas.
+			const catalog = async (): Promise<string> => {
+				const context = await live.agent.buildSideRequestContext([]);
+				const descriptions = (context.tools ?? []).map(tool => tool.description ?? "").join("\n");
+				const schemas = (context.tools ?? []).map(tool => JSON.stringify(tool.parameters ?? {})).join("\n");
+				return `${(context.systemPrompt ?? []).join("\n")}\n${descriptions}\n${schemas}`;
+			};
+
+			const enabled = await catalog();
+			expect(enabled).toContain("Known URLs/programmatic data → `read`");
+			expect(enabled).toContain("file/dir/glob/internal URI/web URL");
+			// The `read` tool's `path` schema is published to the provider, so its
+			// copy has to stop offering a web URL with the setting.
+			expect(enabled).toContain("Local path, internal URI, or URL");
+
+			cfgFetchEnabled.set(settings, false);
+			await Promise.resolve();
+			await live.runToolRegistryMutation(async () => {});
+
+			const disabled = await catalog();
+			expect(disabled).not.toContain("Known URLs/programmatic data");
+			expect(disabled).not.toContain("file/dir/glob/internal URI/web URL");
+			expect(disabled).not.toContain("reader text/markdown");
+			expect(disabled).not.toContain("bare host:port");
+			// The `read` tool's own line drops the web reading hint with the setting.
+			expect(disabled).not.toContain("static web");
+			expect(disabled).not.toContain("Local path, internal URI, or URL");
+			// Internal URIs still resolve, so their copy stays.
+			expect(disabled).toContain("Local path or internal URI");
+
+			await live.dispose();
+			session = undefined;
+		}
+	});
+
+	it("re-reads the handoff base prompt after the side-request hooks rebuilt it", async () => {
+		// A handoff request pins the base prompt (not the per-turn override), and
+		// the side-request hooks rebuild that prompt when a setting invalidated it.
+		// A base prompt captured before the hooks ran would still advertise the URL
+		// read the toggle just removed.
+		const settings = Settings.isolated({
+			inlineToolDescriptors: "on",
+			"compaction.enabled": true,
+			"compaction.autoContinue": false,
+			"compaction.asyncEnabled": false,
+			"compaction.keepRecentTokens": 1,
+		});
+		const live = await start(settings);
+		expect(live.systemPrompt.join("\n")).toContain("reader text/markdown");
+
+		// The handoff reads a snapshot of the live messages, so the branch needs a
+		// turn to summarize.
+		const manager = sessionManager!;
+		manager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "start" }],
+			attribution: "user",
+			timestamp: Date.now(),
+		});
+		manager.appendMessage(createAssistantMessage("working"));
+
+		let handoffPrompt: string | undefined;
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async context => {
+			handoffPrompt = (context.systemPrompt ?? []).join("\n");
+			return "## Goal\nHandoff";
+		});
+
+		cfgFetchEnabled.set(settings, false);
+		const result = await live.handoff();
+
+		expect(result?.document).toBe("## Goal\nHandoff");
+		expect(handoffPrompt).toBeDefined();
+		expect(handoffPrompt).not.toContain("reader text/markdown");
+		expect(handoffPrompt).not.toContain("bare host:port");
 	});
 });

@@ -37,6 +37,7 @@ import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identit
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
@@ -86,7 +87,7 @@ import {
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { buildServiceTierByFamily } from "./config/service-tier";
-import { bindEffects, combine } from "./config/registry";
+import { bindEffects, combine, type SettingValueOf } from "./config/registry";
 import { Settings } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
@@ -2336,6 +2337,41 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		agentRegistry.unregister(resolvedAgentId, ref);
 	};
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
+	// The prompt rebuild a settings change queues. The rebuild is asynchronous,
+	// so a change that lands mid-turn can still be in flight when the next
+	// request is built: the `cfg://` write that applied it awaits this promise,
+	// and so does the model call that follows.
+	let pendingPromptRefresh: Promise<void> | undefined;
+	/**
+	 * Awaits every prompt rebuild a settings change queued.
+	 *
+	 * The settings listener runs on the next microtask, so the first tick lets it
+	 * queue the rebuild before it is looked for. A change that lands while a
+	 * rebuild is in flight replaces the pointer with a second one queued behind
+	 * the first, so the loop keeps waiting: the request must not be built from
+	 * the intermediate prompt.
+	 */
+	const awaitPromptRefresh = async (): Promise<void> => {
+		await Promise.resolve();
+		for (;;) {
+			const pending = pendingPromptRefresh;
+			if (!pending) break;
+			await pending;
+		}
+	};
+	/**
+	 * The side-request variant of {@link awaitPromptRefresh}: the wait ends when
+	 * the caller's signal aborts, so a cancelled side request does not stay
+	 * blocked on a rebuild that may never finish.
+	 */
+	const awaitSideRequestPromptRefresh = async (signal?: AbortSignal): Promise<void> => {
+		await Promise.resolve();
+		for (;;) {
+			const pending = pendingPromptRefresh;
+			if (!pending) break;
+			await untilAborted(signal, pending);
+		}
+	};
 
 	try {
 		const getActiveModelString = (): string | undefined => {
@@ -2368,6 +2404,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			canPromptUser: options.interactivePrompts ?? options.hasUI ?? false,
 			advertiseHeadlessAsk: options.advertiseHeadlessAsk,
 			settingsApproval: options.settingsApproval === true && !isSubagentSession,
+			/**
+			 * Awaits the prompt rebuild the current settings change queued. A
+			 * `cfg://` write awaits it so the turn continues only after the prompt
+			 * the change invalidated has been republished.
+			 */
+			awaitPromptRefresh,
 			// Explicit resolvers retain their existing pass-through contract. Ordinary
 			// sessions inherit stored affinity into the child's own provider session.
 			getApiKey: options.getApiKey,
@@ -4914,7 +4956,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Hide Secrets first switches outbound obfuscation on the live obfuscator (earlier
 		// placeholders keep deobfuscating, the first switch-on builds it): the prompt
 		// reports its state.
-		cfgSystemPromptInputs.listen(session, async (next, previous) => {
+		const applyPromptInputChange = async (
+			next: SettingValueOf<typeof cfgSystemPromptInputs>,
+			previous: SettingValueOf<typeof cfgSystemPromptInputs>,
+		): Promise<void> => {
 			if (next.secretsEnabled !== previous.secretsEnabled) {
 				try {
 					if (cfgSecretsEnabled.get(settings) && !obfuscator) {
@@ -4935,7 +4980,31 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			} catch (error) {
 				session.emitNotice("error", `Failed to rebuild the system prompt after a settings change: ${error}`);
 			}
+		};
+		cfgSystemPromptInputs.listen(session, (next, previous) => {
+			// Registered synchronously, before the rebuild starts: a `cfg://` write
+			// awaits the refresh right after it applies the setting, and the
+			// pre-model-call hook waits for the same rebuild. The promise never
+			// rejects — both awaiters treat a failed refresh as "prompt unchanged".
+			const applied = applyPromptInputChange(next, previous).catch(error => {
+				logger.warn("Prompt refresh after a settings change failed", { error: String(error) });
+			});
+			pendingPromptRefresh = applied;
+			void applied.then(() => {
+				if (pendingPromptRefresh === applied) pendingPromptRefresh = undefined;
+			});
 		});
+		// The listener's rebuild is asynchronous, so a settings change that lands
+		// mid-turn can still be in flight when the loop asks for the next request:
+		// the provider would then see the prompt the change was meant to replace.
+		// The loop re-reads the agent prompt right after this hook, so waiting here
+		// makes the next request carry the republished prompt.
+		session.addDisposer(agent.addBeforeModelCallHook(awaitPromptRefresh));
+		// Side requests (ephemeral turns, compaction, handoff) build their own
+		// provider context and never reach the loop's pre-model-call hook, so they
+		// take the same barrier at their own boundary — and a cancelled side
+		// request stops waiting for the rebuild instead of blocking on it.
+		session.addDisposer(agent.addBeforeSideRequestHook(awaitSideRequestPromptRefresh));
 		// Agent-level tool-call switches: the loop snapshots them per prompt run, so a
 		// change applies from the next run without splitting one response's schema/strip.
 		// The prompt listener above republishes the intent-field guidance.

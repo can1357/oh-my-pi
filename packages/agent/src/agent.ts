@@ -26,7 +26,7 @@ import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	abortReasonText,
 	agentLoop,
@@ -368,6 +368,14 @@ export interface AgentPromptOptions {
 	toolChoice?: ToolChoice;
 }
 
+/**
+ * The system prompt a side request sends: a fixed array, or a provider read after
+ * the {@link Agent.addBeforeSideRequestHook} hooks have run. A provider exists so a
+ * host that refreshes the prompt in a hook (a pending system-prompt rebuild, say)
+ * is seen by the request even when the caller pins a prompt of its own.
+ */
+export type SideRequestSystemPrompt = string[] | (() => string[] | Promise<string[]>);
+
 /** Buffered Cursor exec-channel tool result waiting to be emitted after the assistant message. */
 interface CursorToolResultEntry {
 	toolResult: ToolResultMessage;
@@ -504,6 +512,7 @@ export class Agent {
 	#appendOnlyContext?: AppendOnlyContextManager;
 	#beforeQueuedMessageDequeueHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
 	#beforeModelCallHooks = new Set<(signal: AbortSignal | undefined, context: AgentContext) => Promise<void> | void>();
+	#beforeSideRequestHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
 
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
 	#cursorToolResultBuffer: CursorToolResultEntry[] = [];
@@ -912,13 +921,40 @@ export class Agent {
 	 * `systemPrompt` defaults to the live agent prompt so the side request hits the
 	 * same cached prefix as the main loop. Callers that must pin a different prompt
 	 * (e.g. handoff generation, which uses the base prompt rather than a per-turn
-	 * `before_agent_start` hook override) pass it explicitly.
+	 * `before_agent_start` hook override) pass it explicitly. The prompt is read
+	 * after the {@link Agent.addBeforeSideRequestHook} hooks run, so a host that
+	 * refreshes it (a pending system-prompt rebuild, say) is seen by the request —
+	 * pass a {@link SideRequestSystemPrompt} provider to have a pinned prompt read
+	 * at that same point instead of at call time.
+	 *
+	 * `signal` is forwarded to those hooks and re-checked afterwards, so a
+	 * cancelled side request unwinds instead of waiting on a hook that is still
+	 * running, and no request is built for a caller that already gave up.
+	 *
+	 * The model is the one active when the call started: a hook may await (a
+	 * prompt rebuild, say) while the user switches models, and the caller's
+	 * history and tool roster were already captured for the call-time model.
 	 */
 	async buildSideRequestContext(
 		llmMessages: Message[],
-		systemPrompt: string[] = this.#state.systemPrompt,
+		systemPrompt?: SideRequestSystemPrompt,
+		signal?: AbortSignal,
 	): Promise<Context> {
+		// Snapshotted before the hooks run: a hook may await (a prompt rebuild,
+		// say) while the user switches models, and the caller converted its
+		// history for the model that was active when it called.
 		const model = this.#state.model;
+		signal?.throwIfAborted();
+		try {
+			for (const hook of this.#beforeSideRequestHooks) await hook(signal);
+		} catch (error) {
+			// A hook that unwinds on the caller's cancellation raises its own
+			// error; the caller's abort reason is the contract the side-request
+			// callers match on, so it is what surfaces.
+			if (signal?.aborted) signal.throwIfAborted();
+			throw error;
+		}
+		signal?.throwIfAborted();
 		if (!model) throw new Error("No active model on agent");
 		const ownedDialect =
 			(this.#dialectResolver ? this.#dialectResolver(model) : this.#dialect) ??
@@ -930,7 +966,17 @@ export class Agent {
 					injectIntent: this.#intentTracing,
 					pruneDescriptions: this.#pruneToolDescriptions,
 				}) ?? []);
-		let context: Context = { systemPrompt, messages, tools };
+		// A provider that supplies the prompt may await something slow, so the await
+		// races the caller's cancellation instead of blocking the context build
+		// indefinitely; the signal is rechecked afterwards so a provider that
+		// resolves after the cancellation does not run the transforms.
+		// The provider is handed to `untilAborted` as a thunk: the prompt source may
+		// return the array synchronously, and a lazy call keeps the (possibly slow)
+		// read from starting at all once the signal is already aborted.
+		const pinned =
+			typeof systemPrompt === "function" ? await untilAborted(signal, async () => systemPrompt()) : systemPrompt;
+		signal?.throwIfAborted();
+		let context: Context = { systemPrompt: pinned ?? this.#state.systemPrompt, messages, tools };
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
 		// Side requests reuse the main loop's sent definitions without recording their own.
 		if (context.tools?.length) {
@@ -975,6 +1021,15 @@ export class Agent {
 
 	async #runBeforeModelCallHooks(signal: AbortSignal | undefined, context: AgentContext): Promise<void> {
 		for (const hook of this.#beforeModelCallHooks) await hook(signal, context);
+	}
+
+	/** Register an independently removable hook that runs before a side request's provider context is
+	 *  built (ephemeral turns, compaction, handoff). Side requests bypass the main loop's
+	 *  {@link AgentLoopConfig.beforeModelCall}, so a host that must refresh state before them — a
+	 *  pending system-prompt rebuild, say — registers here. */
+	addBeforeSideRequestHook(hook: (signal?: AbortSignal) => Promise<void> | void): () => void {
+		this.#beforeSideRequestHooks.add(hook);
+		return () => this.#beforeSideRequestHooks.delete(hook);
 	}
 
 	async #runBeforeQueuedMessageDequeueHooks(signal?: AbortSignal): Promise<void> {

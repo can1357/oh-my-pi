@@ -2558,6 +2558,8 @@ export class AgentSession implements SettingsScope {
 				const prefixLength = (await this.convertMessagesToLlm(history, signal, model)).length;
 				const live = await this.agent.buildSideRequestContext(
 					await this.convertMessagesToLlm([...history, ...retained], signal, model),
+					undefined,
+					signal,
 				);
 				// Date/cwd reminder controls are the only messages the transforms
 				// insert: count past them, and leave out any at the cut, so the kept
@@ -12098,7 +12100,7 @@ export class AgentSession implements SettingsScope {
 		const snapshot = this.#buildEphemeralSnapshot(args.promptText, args.history);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		assertEphemeralTurnReady();
-		const sideContext = await this.agent.buildSideRequestContext(llmMessages);
+		const sideContext = await this.agent.buildSideRequestContext(llmMessages, undefined, args.signal);
 		const toolHistory = sideContext.messages.some(
 			message =>
 				message.role === "toolResult" ||

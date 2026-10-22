@@ -20,6 +20,7 @@ import webSearchDescription from "../../prompts/tools/web-search.md" with { type
 import { resolveConfiguredModelTarget } from "../../session/role-models";
 import { discoverAuthStorage } from "../../sdk";
 import type { ToolSession } from "../../tools";
+import { cfgFetchEnabled } from "../../tools/settings";
 import { throwIfAborted } from "../../tools/tool-errors";
 import {
 	formatSearchProviderFailure,
@@ -372,15 +373,23 @@ export async function runSearchQuery(
 	}
 }
 
-/** Description without the X operators, for hosts without a model registry. */
-const plainDescription = prompt.render(webSearchDescription);
+/**
+ * Description for the custom-tool variant: it has no session, so it cannot observe
+ * a `fetch.enabled` toggle; it keeps the full text, because a host that never
+ * gates URL reads has none to advertise against.
+ */
+const customToolDescription = prompt.render(webSearchDescription, { FETCH_ENABLED: true });
+
+/** Whether xAI credentials existed at the process's first read with a model registry. */
+let registryXSearch: boolean | undefined;
 
 /**
- * Description rendered on first read with a model registry, then reused for
- * the process: re-checking xAI auth per read would rewrite the tool
- * description, and invalidate the prompt cache, whenever auth changes.
+ * Rendered description, cached per (fetch.enabled, xSearch): re-checking xAI auth
+ * per read would rewrite the tool description and invalidate the prompt cache
+ * whenever auth changes, while `fetch.enabled` is part of the key so a live toggle
+ * republishes the catalog instead of keeping a stale URL referral.
  */
-let registryDescription: string | undefined;
+let descriptionCache: { fetchEnabled: boolean; xSearch: boolean; text: string } | undefined;
 
 /**
  * Web search tool implementation.
@@ -402,12 +411,22 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 		this.#session = session;
 	}
 
-	/** Advertises X search operators when xAI credentials existed at the process's first read. */
+	/**
+	 * Advertises X search operators when xAI credentials existed at the process's
+	 * first read, and drops the URL-read referral while `fetch.enabled` is off —
+	 * the `read` tool refuses a web URL then, so the catalog must not send the
+	 * model there.
+	 */
 	get description(): string {
+		const fetchEnabled = cfgFetchEnabled.get(this.#session.settings);
 		const modelRegistry = this.#session.modelRegistry;
-		if (!modelRegistry) return plainDescription;
-		registryDescription ??= prompt.render(webSearchDescription, { xSearch: xSearchAvailable(modelRegistry) });
-		return registryDescription;
+		// A host without a model registry cannot serve the X operators.
+		const xSearch = modelRegistry ? (registryXSearch ??= xSearchAvailable(modelRegistry)) : false;
+		const cached = descriptionCache;
+		if (cached && cached.fetchEnabled === fetchEnabled && cached.xSearch === xSearch) return cached.text;
+		const text = prompt.render(webSearchDescription, { FETCH_ENABLED: fetchEnabled, xSearch });
+		descriptionCache = { fetchEnabled, xSearch, text };
+		return text;
 	}
 
 	async execute(
@@ -433,7 +452,7 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchResultDetails> = {
 	name: "web_search",
 	label: "Web Search",
-	description: plainDescription,
+	description: customToolDescription,
 	parameters: webSearchSchema,
 
 	approval: "read",
