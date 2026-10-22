@@ -626,6 +626,12 @@ jobs:
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
               bun test scripts/release.test.ts
+              # The Bun floor guard and the runner setup it drives: a regression
+              # in either would leave `check:types` unguarded on every package.
+              # The platform test proves the shell-dependent suites skip
+              # themselves where no POSIX shell is reachable, and still run
+              # where one is.
+              bun test scripts/bun-install-action.test.ts scripts/bun-install-action-platform.test.ts scripts/check-bun-floor.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
