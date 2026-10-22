@@ -169,7 +169,7 @@ import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type SttState } from "../stt";
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
-import { resolveCliEntryCmd } from "../subprocess/worker-client";
+import { resolveRestartCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
@@ -3010,6 +3010,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		using _ = new EventLoopKeepalive();
 		return await promise;
+	}
+	interruptIdleInputForAutoRestart(): void {
+		this.onInputCallback?.({ text: "", cancelled: true, started: false });
 	}
 
 	#scheduleLoopAutoSubmit(): void {
@@ -7366,7 +7369,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Pass the profile explicitly: native exec does not inherit Bun's process.env updates.
 		const activeProfile = getActiveProfile();
 		const cmd = [
-			...resolveCliEntryCmd(),
+			...resolveRestartCmd(),
 			...restartArgv(
 				process.argv.slice(2),
 				sessionFile ? path.resolve(sessionFile) : undefined,
