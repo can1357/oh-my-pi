@@ -201,6 +201,8 @@ const ADVISOR_ACK_SENT = "Delivered.";
 const ADVISOR_ACK_DEFERRED = "Queued for the end of the turn. Do not re-raise.";
 /** The review was cancelled (superseded, reset, disposed); its turn is discarded. */
 const ADVISOR_ACK_CANCELLED = "Dropped: this review was cancelled.";
+/** Delivered live as a non-interrupting aside; the primary sees it at its next step. */
+const ADVISOR_ACK_ASIDE = "Sent as an aside; the agent sees it at its next step. Do not re-raise.";
 /** A suppressed note is never described as recorded or queued. */
 const ADVISOR_ACK_SUPPRESSED: Record<AdvisorSuppressionReason, string> = {
 	empty: "Dropped: empty note.",
@@ -247,10 +249,22 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 *   note is emitted (live or deferred). Defaults to a stock
 	 *   {@link AdvisorEmissionGuard} (default budget
 	 *   {@link ADVISOR_DEFAULT_BUDGET_PER_UPDATE}).
+	 * @param wipDelivery Live getter for how a mid-run (in-progress) non-blocker
+	 *   reaches the primary: `aside` routes it live through the aside channel the
+	 *   instant it is raised; `defer` holds it to the completed-update flush.
+	 *   Defaults to `defer` so a bare tool is legacy-safe; the session wires the
+	 *   `advisor.wipDelivery` setting (which defaults to `aside`). Blockers and
+	 *   completed-update notes ignore it.
 	 */
 	constructor(
-		private readonly onAdvice: (note: string, severity: AdviseDetails["severity"] | undefined, turn?: number) => void,
+		private readonly onAdvice: (
+			note: string,
+			severity: AdviseDetails["severity"] | undefined,
+			turn?: number,
+			opts?: { wip?: boolean },
+		) => void,
 		guard?: AdvisorEmissionGuard,
+		private readonly wipDelivery: () => AdvisorWipDelivery = () => "defer",
 	) {
 		this.#guard = guard ?? new AdvisorEmissionGuard();
 	}
@@ -305,6 +319,20 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		const rank = advisorSeverityRank(args.severity);
 		const key = advisorNoteDedupeKey(args.note);
 		if (this.#inProgressUpdate && args.severity !== "blocker") {
+			if (this.wipDelivery() === "aside") {
+				// Aside mode: deliver the mid-run non-blocker live instead of
+				// withholding it. It still clears the guard, but routes the instant
+				// it is raised — flagged WIP so the session forces it onto the
+				// non-interrupting aside channel (lands at the primary's next step,
+				// never aborts a running tool). Drop any stale same-note reservation
+				// a mode switch may have left behind.
+				const reservedIndex = this.#deferredNotes.findIndex(item => item.key === key);
+				if (reservedIndex !== -1) this.#deferredNotes.splice(reservedIndex, 1);
+				const decision = this.#guard.admit(args.note, { rank, pending: false });
+				if (!decision.accepted) return this.#suppressed(args, decision.reason);
+				this.onAdvice(args.note, args.severity, this.#coveredTurn, { wip: true });
+				return this.#result(ADVISOR_ACK_ASIDE, args);
+			}
 			// Withheld, not delivered: reserve for the deterministic flush at the
 			// completed-update transition / terminal boundary.
 			const pending = this.#deferredNotes.find(item => item.key === key);

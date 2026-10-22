@@ -665,6 +665,18 @@ describe("advisor", () => {
 	});
 
 	describe("AdviseTool", () => {
+		// Deferral is now the legacy, opt-in mode (production defaults to aside).
+		// Pin these tests to it explicitly so the aside default cannot silently
+		// reinterpret what they assert.
+		type DeferAdviseCallback = (
+			note: string,
+			severity: AdvisorNote["severity"],
+			turn?: number,
+			opts?: { wip?: boolean },
+		) => void;
+		const deferTool = (onAdvice: DeferAdviseCallback, guard?: AdvisorEmissionGuard): AdviseTool =>
+			new AdviseTool(onAdvice, guard, () => "defer");
+
 		it("suppresses duplicate advice notes from the same advisor session", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
@@ -742,7 +754,7 @@ describe("advisor", () => {
 
 		it("defers non-blockers per update and flushes the backlog on the next completed update", async () => {
 			const onAdvice = vi.fn();
-			const tool = new AdviseTool(onAdvice);
+			const tool = deferTool(onAdvice);
 			const note = "The result still needs a focused regression test.";
 
 			tool.beginUpdate(true);
@@ -773,7 +785,7 @@ describe("advisor", () => {
 
 		it("does not pile up duplicate deferred notes during a long mid-turn", async () => {
 			const onAdvice = vi.fn();
-			const tool = new AdviseTool(onAdvice);
+			const tool = deferTool(onAdvice);
 			const note = "Same point raised repeatedly.";
 
 			tool.beginUpdate(true);
@@ -789,7 +801,7 @@ describe("advisor", () => {
 
 		it("retains the highest severity when duplicate deferred advice escalates", async () => {
 			const onAdvice = vi.fn();
-			const tool = new AdviseTool(onAdvice);
+			const tool = deferTool(onAdvice);
 
 			tool.beginUpdate(true);
 			await tool.execute("tc-1", { note: "Same point raised repeatedly.", severity: "nit" });
@@ -809,7 +821,7 @@ describe("advisor", () => {
 			const delivered: string[] = [];
 			// Mirror AgentSession: admission (filter + per-update budget) runs at
 			// emission; routing never re-filters.
-			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard());
+			const tool = deferTool(note => delivered.push(note), new AdvisorEmissionGuard());
 			const concerns = [
 				"Bare `location` cannot work outside the page; inspect with `await page.url()`.",
 				"Scope navigation to the visualizer's own `.viz-container`.",
@@ -838,7 +850,7 @@ describe("advisor", () => {
 			// unconditional "will be delivered automatically" promised delivery for
 			// notes the guard had already rejected, and the advice was lost.
 			const delivered: string[] = [];
-			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+			const tool = deferTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
 
 			tool.beginUpdate(true);
 			const accepted = await tool.execute("x-0", { note: "First mid-turn concern.", severity: "concern" });
@@ -861,7 +873,7 @@ describe("advisor", () => {
 			// concern takes the update's slot and the guard names the displaced
 			// pending nit, which must not be flushed alongside it.
 			const delivered: { note: string; severity?: string }[] = [];
-			const tool = new AdviseTool(
+			const tool = deferTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
 			);
@@ -885,7 +897,7 @@ describe("advisor", () => {
 			// older update's accepted reservation holds no slot in the current
 			// update and must survive its eviction rounds.
 			const delivered: { note: string; severity?: string }[] = [];
-			const tool = new AdviseTool(
+			const tool = deferTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
 			);
@@ -910,7 +922,7 @@ describe("advisor", () => {
 			// free slots. When full, a higher-severity note displaces the
 			// lowest-rank PENDING entry — not the first one, never a routed one.
 			const delivered: { note: string; severity?: string }[] = [];
-			const tool = new AdviseTool(
+			const tool = deferTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 3 }),
 			);
@@ -942,7 +954,7 @@ describe("advisor", () => {
 			// so an equal-rank newcomer at a full budget is rate-limited instead
 			// of displacing the genuinely-escalated note.
 			const delivered: { note: string; severity?: string }[] = [];
-			const tool = new AdviseTool(
+			const tool = deferTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 2 }),
 			);
@@ -973,7 +985,7 @@ describe("advisor", () => {
 			// following concern is still reserved and flushed — and the noise call
 			// is told it carried no content.
 			const delivered: string[] = [];
-			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+			const tool = deferTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
 
 			tool.beginUpdate(true);
 			const noise = await tool.execute("n-0", { note: "Stop.", severity: "concern" });
@@ -1034,7 +1046,7 @@ describe("advisor", () => {
 			// interrupt at blocker severity now — not be rejected as already-seen
 			// and arrive late at the lower deferred severity.
 			const delivered: { note: string; severity?: string }[] = [];
-			const tool = new AdviseTool(
+			const tool = deferTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
 			);
@@ -1062,7 +1074,7 @@ describe("advisor", () => {
 			// routed (non-displaceable), so a follow-up emission in the same
 			// update still faces the spent budget. The next beginUpdate resets it.
 			const delivered: { note: string; severity?: string }[] = [];
-			const tool = new AdviseTool(
+			const tool = deferTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
 			);
@@ -1091,7 +1103,7 @@ describe("advisor", () => {
 
 		it("resetDeliveredNotes resets the guard and the pending backlog together", async () => {
 			const delivered: string[] = [];
-			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+			const tool = deferTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
 
 			tool.beginUpdate(true);
 			await tool.execute("q-0", { note: "Queued but never flushed.", severity: "concern" });
@@ -1127,6 +1139,55 @@ describe("advisor", () => {
 
 			const invalid = tool.parameters({ note: 123, severity: "invalid" });
 			expect(invalid instanceof type.errors).toBe(true);
+		});
+	});
+
+	describe("AdviseTool WIP aside delivery", () => {
+		it("delivers a mid-run concern immediately as a WIP aside instead of holding it to the final answer", async () => {
+			// Regression (session 2026-10-22T02-40-40): a concern raised 2s after a
+			// failure reached the primary long past its final answer. In aside mode
+			// it must route the instant it is raised, not on a later completed-update
+			// flush.
+			const onAdvice = vi.fn();
+			const tool = new AdviseTool(onAdvice, undefined, () => "aside");
+			const note = "The #sendEmail path is disabled after its third failure.";
+
+			tool.beginUpdate(true, 11);
+			const ack = await tool.execute("tc-1", { note, severity: "concern" });
+
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith(note, "concern", 11, { wip: true });
+			expect(JSON.stringify(ack.content)).toContain("aside");
+
+			// The completed-update transition must not re-deliver it: nothing queued.
+			tool.beginUpdate(false);
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+		});
+
+		it("dedupes a mid-run aside note repeated across two in-progress updates", async () => {
+			const onAdvice = vi.fn();
+			const tool = new AdviseTool(onAdvice, undefined, () => "aside");
+			const note = "Scope the navigation to the viz container.";
+
+			tool.beginUpdate(true, 1);
+			await tool.execute("a-0", { note, severity: "concern" });
+			tool.beginUpdate(true, 2);
+			await tool.execute("a-1", { note, severity: "concern" });
+
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+		});
+
+		it("still delivers a mid-run blocker live without the WIP flag in aside mode", async () => {
+			const onAdvice = vi.fn();
+			const tool = new AdviseTool(onAdvice, undefined, () => "aside");
+
+			tool.beginUpdate(true, 3);
+			await tool.execute("b-0", { note: "A destructive command is running.", severity: "blocker" });
+
+			// Blockers take the unchanged live path: no wip flag, so the session may
+			// still interrupt now.
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith("A destructive command is running.", "blocker", 3);
 		});
 	});
 
