@@ -146,6 +146,7 @@
 - Fixed the status line `pr` segment keeping the previous branch's PR after switching to the default branch, a detached HEAD, or a branch without a PR ([#15455](https://github.com/can1357/oh-my-pi/pull/15455) by [@ravshansbox](https://github.com/ravshansbox))
 - Fixed the status-line footer total leaving out task subagent spend; it now reads the session's cumulative usage, the same source the interactive status line uses ([#14393](https://github.com/can1357/oh-my-pi/pull/14393) by [@F0Rextasy](https://github.com/F0Rextasy))
 - Fixed transcript rows disappearing from scrollback or reappearing out of order when bottom chrome stays taller after a turn, self-clearing HUDs close, or the composer shape changes ([#15820](https://github.com/can1357/oh-my-pi/pull/15820) by [@emmahyde](https://github.com/emmahyde))
+- Fixed SIXEL composer chip thumbnails leaving stale pixels after the chip or editor moves: thumbnails now use the shared SIXEL fitter, are placed from the editor's rendered height, and show only on Konsole, where the SIXEL delete is confirmed; other SIXEL terminals keep the icon ([#15988](https://github.com/can1357/oh-my-pi/pull/15988) by [@Komzpa](https://github.com/Komzpa))
 
 ## [18.11.1] - 2026-10-15
 
