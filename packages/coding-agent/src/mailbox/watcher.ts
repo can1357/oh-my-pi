@@ -16,11 +16,12 @@
  * processes and across session managers within a process. The consumer takes
  * the session's write lease only once mail is waiting, so opening a session
  * leaves the first-writer rule alone. A claimed message counts as delivered
- * once its id is in the session file; one that never got there (an interrupt
- * dropped it, the write failed, the consumer died) goes back to `new/`, where
- * the Esc hold applies to it again.
+ * once its `session-poke` entry is in the session file; one that never got
+ * there (an interrupt dropped it, the write failed, the consumer died) goes
+ * back to `new/`, where the Esc hold applies to it again.
  */
 import * as fs from "node:fs";
+import { OmpErrors, type } from "@oh-my-pi/omptype";
 import { $env, type FileLockHandle, isEnoent, logger, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import type { CustomMessage } from "../session/messages";
@@ -30,7 +31,6 @@ import {
 	completeMail,
 	listClaimedMail,
 	listNewMail,
-	MAX_MAIL_ATTEMPTS,
 	peekNewMail,
 	readClaimedMail,
 	recordMailAttempt,
@@ -56,7 +56,7 @@ interface InFlight {
 	/** Mailbox the claim sits in (the session may have switched since). */
 	sessionId: string;
 	name: string;
-	/** Session file the message is appended to, and its size at the claim: the entry lands after it. */
+	/** Session file the message is appended to, and how far it has been scanned: the entry lands after the claim. */
 	file: string | undefined;
 	offset: number;
 	/** `sendCustomMessage` has not settled yet: the message is still being admitted or its turn runs. */
@@ -75,22 +75,50 @@ function fileSize(file: string | undefined): number {
 	}
 }
 
-/** Whether `mailId` appears in `file` at or after `offset` (from the start when the file was rewritten shorter). */
-async function sessionFileHas(file: string | undefined, offset: number, mailId: string): Promise<boolean> {
-	if (!file) return false;
+/** The transcript entry a delivered message leaves behind. */
+const DeliveryEntrySchema = type({
+	type: "'custom_message'",
+	customType: `'${SESSION_POKE_MESSAGE_TYPE}'`,
+	details: { mailId: "string" },
+});
+
+/**
+ * Ids of the messages whose delivery entries are in the complete lines of
+ * `file` from `offset` (from the start when the file was rewritten shorter),
+ * and the offset after the last complete line, where the next scan starts.
+ */
+async function scanDeliveries(
+	file: string | undefined,
+	offset: number,
+): Promise<{ mailIds: Set<string>; offset: number }> {
+	const mailIds = new Set<string>();
+	if (!file) return { mailIds, offset };
 	let handle: fs.promises.FileHandle;
 	try {
 		handle = await fs.promises.open(file, "r");
 	} catch (err) {
-		if (isEnoent(err)) return false;
+		if (isEnoent(err)) return { mailIds, offset };
 		throw err;
 	}
 	try {
 		const { size } = await handle.stat();
 		const start = size >= offset ? offset : 0;
-		const bytes = new Uint8Array(size - start);
-		await handle.read(bytes, 0, bytes.length, start);
-		return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).includes(mailId);
+		const buffer = Buffer.allocUnsafe(size - start);
+		const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+		const bytes = buffer.subarray(0, bytesRead);
+		const complete = bytes.lastIndexOf(0x0a) + 1;
+		for (const line of bytes.toString("utf8", 0, complete).split("\n")) {
+			if (!line.includes(SESSION_POKE_MESSAGE_TYPE)) continue;
+			let entry: unknown;
+			try {
+				entry = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			const delivery = DeliveryEntrySchema(entry);
+			if (!(delivery instanceof OmpErrors)) mailIds.add(delivery.details.mailId);
+		}
+		return { mailIds, offset: start + complete };
 	} finally {
 		await handle.close();
 	}
@@ -122,7 +150,7 @@ export class SessionMailbox {
 	#polling = false;
 	#stopped = false;
 	readonly #inFlight = new Map<string, InFlight>();
-	/** Mail ids already logged as waiting (held by Esc, out of attempts), to log each once. */
+	/** Mail ids already logged as held by Esc, to log each once. */
 	readonly #noted = new Set<string>();
 	#refusalLogged: string | undefined;
 
@@ -237,37 +265,44 @@ export class SessionMailbox {
 		// A message claimed now would be dispatched into whichever session is
 		// current once extensions finish loading or the switch completes.
 		if (session.hasPendingDeferredExtensions || session.isSessionTransitioning) return;
-		const fresh = listNewMail(sessionId);
-		if (fresh.length === 0 || !this.#ownSession(presence)) return;
-		for (const name of fresh) {
-			const peeked = peekNewMail(sessionId, name);
-			if (!peeked || this.#waits(session, peeked)) continue;
+		// The write lease is taken only for mail delivered now: mail an Esc holds
+		// or that only a newer omp reads leaves it free.
+		const deliverable: string[] = [];
+		for (const name of listNewMail(sessionId)) {
+			try {
+				const mail = peekNewMail(sessionId, name);
+				if (mail && !this.#waits(session, mail)) deliverable.push(name);
+			} catch (error) {
+				logger.warn("could not read mail", { sessionId, name, error: String(error) });
+			}
+		}
+		if (deliverable.length === 0 || !this.#ownSession(presence)) return;
+		for (const name of deliverable) {
 			const mail = claimMail(sessionId, name);
 			if (mail) this.#inject(session, sessionId, name, mail);
 		}
 	}
 
-	/** Mail waits out an Esc until the user's next prompt unless sent with `--force`; mail out of attempts stays put. */
+	/** Mail waits out an Esc until the user's next prompt unless sent with `--force`. */
 	#waits(session: AgentSession, mail: SessionMail): boolean {
-		const exhausted = (mail.attempts ?? 0) >= MAX_MAIL_ATTEMPTS;
-		const held = !exhausted && session.interruptLatched && !mail.poke.force;
-		if (!exhausted && !held) return false;
+		if (!session.interruptLatched || mail.poke.force) return false;
 		if (!this.#noted.has(mail.id)) {
 			this.#noted.add(mail.id);
-			if (exhausted) logger.warn("mail not delivered after every attempt; left in new/", { mailId: mail.id });
-			else logger.debug("poke held until the next prompt (session interrupted)", { mailId: mail.id });
+			logger.debug("poke held until the next prompt (session interrupted)", { mailId: mail.id });
 		}
 		return true;
 	}
 
-	/** Complete claims whose id reached the session file; return the ones that were dropped to `new/`. */
+	/** Complete claims whose entry reached the session file; return the ones that were dropped to `new/`. */
 	async #settleInFlight(session: AgentSession): Promise<void> {
 		for (const [mailId, flight] of this.#inFlight) {
 			if (flight.pending) continue;
 			const stalled =
 				Date.now() - flight.since > STALL_MS && !session.isStreaming && session.queuedMessageCount === 0;
 			// Before giving a claim up, read the whole file: a rewrite may have moved the entry before the offset.
-			if (await sessionFileHas(flight.file, stalled ? 0 : flight.offset, mailId)) {
+			const scan = await scanDeliveries(flight.file, stalled ? 0 : flight.offset);
+			flight.offset = scan.offset;
+			if (scan.mailIds.has(mailId)) {
 				completeMail(flight.sessionId, flight.name);
 			} else if (stalled) {
 				logger.warn("mail did not reach the session file; returned to the mailbox", { mailId });
@@ -283,12 +318,13 @@ export class SessionMailbox {
 	/** Claims a previous consumer left behind (it died, or closed before they reached the session file). */
 	async #recoverClaims(sessionId: string): Promise<void> {
 		const tracked = new Set([...this.#inFlight.values()].map(flight => flight.name));
-		const file = this.#sessionManager.getSessionFile();
-		for (const name of listClaimedMail(sessionId)) {
-			if (tracked.has(name)) continue;
+		const left = listClaimedMail(sessionId).filter(name => !tracked.has(name));
+		if (left.length === 0) return;
+		const { mailIds } = await scanDeliveries(this.#sessionManager.getSessionFile(), 0);
+		for (const name of left) {
 			const mail = readClaimedMail(sessionId, name);
 			if (!mail) continue;
-			if (await sessionFileHas(file, 0, mail.id)) completeMail(sessionId, name);
+			if (mailIds.has(mail.id)) completeMail(sessionId, name);
 			else releaseMail(sessionId, name);
 		}
 	}
@@ -333,7 +369,7 @@ export class SessionMailbox {
 		const messages: CustomMessage[] = [];
 		for (const name of listNewMail(sessionId)) {
 			const peeked = peekNewMail(sessionId, name);
-			if (!peeked || (peeked.attempts ?? 0) >= MAX_MAIL_ATTEMPTS) continue;
+			if (!peeked) continue;
 			const mail = claimMail(sessionId, name);
 			if (!mail || recordMailAttempt(sessionId, name) === undefined) continue;
 			this.#track(sessionId, name, mail.id, false);

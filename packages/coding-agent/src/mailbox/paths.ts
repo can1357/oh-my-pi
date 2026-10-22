@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { $env, getAgentDir } from "@oh-my-pi/pi-utils";
+import { safeSessionKey } from "../session/session-storage";
 
 /** Overrides the mailbox root (tests, smoke runs). */
 export const MAILBOX_DIR_ENV = "OMP_MAILBOX_DIR";
@@ -12,13 +13,6 @@ export const MAILBOX_ENV = "OMP_MAILBOX";
 
 export function mailboxRoot(): string {
 	return $env[MAILBOX_DIR_ENV] || path.join(getAgentDir(), "mailbox");
-}
-
-/** Session ids come from files and argv: anything but a plain token is hashed so it cannot name a path. */
-export function safeSessionKey(sessionId: string): string {
-	return /^[A-Za-z0-9_-]{1,128}$/.test(sessionId)
-		? sessionId
-		: `h-${Bun.hash.wyhash(sessionId).toString(16).padStart(16, "0")}`;
 }
 
 export function mailDir(sessionId: string): string {

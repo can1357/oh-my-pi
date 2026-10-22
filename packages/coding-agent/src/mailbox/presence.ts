@@ -15,7 +15,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type FileLockHandle, isEnoent, logger, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
-import { presenceDir, safeSessionKey } from "./paths";
+import { safeSessionKey } from "../session/session-storage";
+import { presenceDir } from "./paths";
 
 /** What a present process does with mail addressed to the session. */
 export interface PresenceRecord {
