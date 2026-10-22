@@ -287,6 +287,9 @@ describe("InteractiveMode todo HUD persistence", () => {
 			await mode.focusAgentSession(agentId);
 			expect(renderTodos(mode)).toContain("apply nested review fixes");
 
+			// The registration above schedules one coalesced UI refresh on a real timer.
+			// Let it flush so the fake-timer lifecycle sync below is not absorbed by it.
+			await Bun.sleep(150);
 			vi.useFakeTimers();
 			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
 				id: `${agentId}/NestedFixer`,
