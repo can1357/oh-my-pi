@@ -144,7 +144,7 @@ export interface SubagentStopEvent {
 	parent_session_id?: string;
 	/** Transcript file of the parent that spawned this child. */
 	parent_session_file?: string;
-	/** Snapshot of the child transcript at the moment of the candidate; later turns do not grow it. */
+	/** Copy of the child transcript's message array at the candidate; later turns do not grow it, but the messages themselves are shared. */
 	messages: AgentMessage[];
 	last_assistant_message?: AgentMessage;
 	/** True once this run already had a `subagent_stop` continuation. */
