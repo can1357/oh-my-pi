@@ -68,7 +68,7 @@ import {
 } from "./sqlite-reader";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
-import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
+import { formatWriteSnapshotText, maybeWriteSnapshotDisplay, stripWriteContent } from "./write-content";
 
 import {
 	cfgLspDiagnosticsDeduplicate,
@@ -985,9 +985,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// use it so a drifted write (e.g. client format-on-save) still
 				// hands back a tag that matches what's actually on disk.
 				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
-				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text, displayPath);
+				const display = maybeWriteSnapshotDisplay(this.session, absolutePath, bridgeWrite.text, displayPath);
 				const writeLine = `Successfully wrote ${cleanBytes} bytes to ${displayPath}`;
-				let resultText = header ? `${header}\n${writeLine}` : writeLine;
+				let resultText = formatWriteSnapshotText(display, writeLine);
 				if (stripped) {
 					resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 				}
@@ -1011,10 +1011,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const finalContent = diagnostics.finalContent;
 			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, finalContent);
 
-			const header = maybeWriteSnapshotHeader(this.session, absolutePath, finalContent, displayPath);
+			const display = maybeWriteSnapshotDisplay(this.session, absolutePath, finalContent, displayPath);
 			const finalBytes = finalContent === cleanContent ? cleanBytes : Buffer.byteLength(finalContent, "utf8");
 			const writeLine = `Successfully wrote ${finalBytes} bytes to ${displayPath}`;
-			let resultText = header ? `${header}\n${writeLine}` : writeLine;
+			let resultText = formatWriteSnapshotText(display, writeLine);
 			if (stripped) {
 				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 			}

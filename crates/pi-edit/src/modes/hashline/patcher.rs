@@ -448,9 +448,9 @@ fn assert_seen_lines(
 	let Some(seen) = snapshot.seen_lines else {
 		return Ok(());
 	};
-	if seen.is_empty() {
-		return Ok(());
-	}
+	// An empty set is not "no restriction": it says the snapshot displayed no
+	// line at all, so every anchor is unseen. Only `None` — a tag issued
+	// without any display record — skips the guard.
 	let mut unseen = guarded_lines(section, blocks)?
 		.into_iter()
 		.filter(|line| !seen.contains(line))
@@ -1098,6 +1098,21 @@ mod lifecycle {
 			.await
 			.unwrap_err();
 		assert!(err.contains("never displayed"), "unexpected error: {err}");
+	}
+
+	/// A snapshot that displayed no line is not unrestricted: an anchor on it
+	/// is unseen, so the guard rejects the edit instead of applying it at a
+	/// line number nobody saw.
+	#[tokio::test]
+	async fn empty_seen_set_rejects_an_anchor() {
+		let ctx = Lifecycle::new("empty.txt", 3);
+		let tag = ctx.read("empty.txt", &[]);
+		let err = ctx
+			.edit(&format!("[empty.txt#{tag}]\nPUT 1.=1:\n+changed\n"))
+			.await
+			.unwrap_err();
+		assert!(err.contains("never displayed"), "unexpected error: {err}");
+		assert_eq!(ctx.text("empty.txt"), "let v0001 = 1;\nlet v0002 = 2;\nlet v0003 = 3;\n");
 	}
 
 	/// One section, two ops: the faithful op is rescued while the stale
