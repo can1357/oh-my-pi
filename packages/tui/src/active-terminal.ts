@@ -46,6 +46,34 @@ export function registerStdoutErrorHandler(handler: (err: Error) => void): () =>
 	};
 }
 
+const stderrErrorHandlers = new Set<(err: Error) => void>();
+let stderrErrorListenerInstalled = false;
+
+function onStderrError(err: Error): void {
+	for (const handler of stderrErrorHandlers) handler(err);
+}
+
+/**
+ * Install the one shared `process.stderr` `error` listener. Same reasoning as
+ * stdout: its presence alone keeps a stderr error from crashing the process
+ * as an unhandled `error` event — a diagnostics channel failing (EIO, or the
+ * redirected log target rejecting writes) must not take the UI down.
+ */
+function installStderrErrorListener(): void {
+	if (stderrErrorListenerInstalled) return;
+	process.stderr.on("error", onStderrError);
+	stderrErrorListenerInstalled = true;
+}
+
+/** Observe stderr errors through the shared listener. Returns the unregister callback. */
+export function registerStderrErrorHandler(handler: (err: Error) => void): () => void {
+	stderrErrorHandlers.add(handler);
+	installStderrErrorListener();
+	return () => {
+		stderrErrorHandlers.delete(handler);
+	};
+}
+
 /**
  * Hand `data` to the active terminal's ordered output path. Returns false when
  * no terminal in this thread has started. On the main thread that means the

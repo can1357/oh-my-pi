@@ -35,6 +35,7 @@ export * from "./slugify";
 export * from "./snowflake";
 export * from "./sqlite";
 export * from "./stderr-guard";
+export * from "./terminal-output-guard";
 export * from "./stream";
 export * from "./tab-spacing";
 export * from "./temp";

@@ -244,6 +244,16 @@ describe("central logger file level and batching", () => {
 });
 
 describe("central logger transport lifecycle", () => {
+	test("disables a broken default sink despite a pending flush failure and releases its descriptor", async () => {
+		const result = await runScenario("disable-write-failure");
+		const payload = await Bun.file(result.resultPath).json();
+		expect(payload.writeAttempted).toBe(true);
+		expect(payload.disableError).toBeNull();
+		expect(payload.descriptorClosed).toBe(true);
+		const log = await readSingleLog(path.join(result.primaryDir, ".omp", "logs"));
+		expect(log.text).not.toContain("must-stay-disabled");
+	});
+
 	test("defaults to file-only without touching stdout or stderr", async () => {
 		const result = await runScenario("default-file");
 		expect(result.stdout).toBe("");
@@ -303,7 +313,28 @@ describe("central logger transport lifecycle", () => {
 		expect(payload).toEqual({ disabledSinkSameContext: true, sinkCount: 2, returnsUndefined: true });
 	});
 
-	test("closes A before reconfiguring to B and never cross-writes", async () => {
+	test("disabled structured output retains bounded leased diagnostics and preserves history across restart", async () => {
+		const result = await runScenario("leased-disabled");
+		expect(result.stdout).toBe("");
+		expect(result.stderr).toBe("");
+		const payload = JSON.parse(await fs.readFile(result.resultPath, "utf8")) as {
+			reusedOnDisable: boolean;
+			reusedOnRestart: boolean;
+			retainedBeforeRelease: string[];
+			retainedAfterRestart: string[];
+			retainedAfterIdle: string[];
+			structuredOutputAbsent: boolean;
+		};
+		const base = `omp.2026-01-01.${result.pid}.log`;
+		expect(payload.reusedOnDisable).toBe(true);
+		expect(payload.reusedOnRestart).toBe(true);
+		expect(payload.structuredOutputAbsent).toBe(true);
+		expect(payload.retainedBeforeRelease).toEqual([2, 3, 4, 5, 6].map(index => `${base}.${index}`));
+		expect(payload.retainedAfterRestart).toEqual([3, 4, 5, 6, 7].map(index => `${base}.${index}`));
+		expect(payload.retainedAfterIdle).toEqual(payload.retainedAfterRestart);
+	}, 30_000);
+
+	test("reconfigures from A to B without cross-writing", async () => {
 		const result = await runScenario("reconfigure");
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toBe("");
@@ -315,12 +346,13 @@ describe("central logger transport lifecycle", () => {
 		);
 	});
 
-	test("invalidates closed transports when warm replacement construction fails", async () => {
+	test("preserves the previous transport when warm replacement construction fails", async () => {
 		const result = await runScenario("reconfigure-failure");
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toBe("");
 		expect((await readSingleLog(result.primaryDir)).text).toBe(
-			expectedLine(result.pid, "info", "before-failed-reconfigure"),
+			expectedLine(result.pid, "info", "before-failed-reconfigure") +
+				expectedLine(result.pid, "info", "after-failed-reconfigure", { after: "failure" }),
 		);
 		expect(await logFileNames(result.secondaryDir)).toEqual([]);
 		const payload = JSON.parse(await fs.readFile(result.resultPath, "utf8")) as {

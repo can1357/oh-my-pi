@@ -8,6 +8,13 @@
 
 - Added `RpcConnection.requestCancellable()` and `Client.requestPermission(params, { signal })`; client connections abort a handler and answer `-32800` when the peer sends `$/cancel_request`, while agent connections keep running the request and return its real result ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
 
+### Fixed
+
+- Fixed unmanaged stdout and stderr corrupting interactive displays, with private bounded diagnostics across custom directories, recovery from failed log destinations, transport changes without retired sinks reclaiming output, and disabled structured file logging ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
+
+- Failed log rotations and guard handoffs now keep raw and structured records in the previous target and retry once the destination recovers ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
+- Disabling file logging now succeeds and releases unleased log descriptors even when storage rejects a pending batch ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
+
 ## [18.12.4] - 2026-10-20
 
 ### Breaking Changes

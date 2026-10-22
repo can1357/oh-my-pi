@@ -192,6 +192,18 @@ impl TtyWriter {
 					std::io::Error::last_os_error()
 				)));
 			}
+			// dup() clears FD_CLOEXEC; without an explicit re-mark every exec'd
+			// child inherits a writable descriptor for the terminal and
+			// bypasses the caller's output isolation.
+			// SAFETY: plain F_SETFD on the freshly dup'ed descriptor.
+			if unsafe { libc::fcntl(owned, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+				// SAFETY: owned was just dup'ed and is not shared yet.
+				unsafe { libc::close(owned) };
+				return Err(Error::from_reason(format!(
+					"fcntl(F_SETFD) on dup({fd}) failed: {}",
+					std::io::Error::last_os_error()
+				)));
+			}
 			let inner = Arc::new(Inner {
 				back:    Mutex::new(Vec::new()),
 				pending: AtomicUsize::new(0),
@@ -366,6 +378,52 @@ mod tests {
 		// SAFETY: fds is a valid out-array for pipe(2).
 		assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
 		(fds[0], fds[1])
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn pump_duplicate_is_close_on_exec() {
+		// Find every open descriptor sharing write_fd's pipe inode; excluding
+		// write_fd itself, that is exactly the pump's private dup. The
+		// /proc listing's own directory fd is filtered out naturally (it is
+		// not a pipe endpoint).
+		fn same_pipe_fds(read_fd: i32, write_fd: i32) -> Vec<i32> {
+			let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+			// SAFETY: valid out-buffer for fstat(2).
+			assert_eq!(unsafe { libc::fstat(write_fd, stat.as_mut_ptr()) }, 0);
+			let inode = unsafe { stat.assume_init_mut() }.st_ino;
+			std::fs::read_dir("/proc/self/fd")
+				.unwrap()
+				.filter_map(|entry| {
+					let fd: i32 = entry.ok()?.file_name().to_string_lossy().parse().ok()?;
+					let mut other = std::mem::MaybeUninit::<libc::stat>::uninit();
+					// SAFETY: fd comes from this process's own fd table; a
+					// negative result is filtered out below.
+					if unsafe { libc::fstat(fd, other.as_mut_ptr()) } != 0 {
+						return None;
+					}
+					(unsafe { other.assume_init_ref() }.st_ino == inode).then_some(fd)
+				})
+				.filter(|fd| *fd != read_fd && *fd != write_fd)
+				.collect()
+		}
+		let (read_fd, write_fd) = pipe_pair();
+		assert!(same_pipe_fds(read_fd, write_fd).is_empty());
+		let mut writer = TtyWriter::new(write_fd).unwrap();
+		let dups = same_pipe_fds(read_fd, write_fd);
+		assert_eq!(dups.len(), 1, "the pump owns exactly one private dup");
+		// dup() clears FD_CLOEXEC; without an explicit re-mark every exec'd
+		// child inherits a writable descriptor for the terminal and bypasses
+		// output isolation. SAFETY: F_GETFD only reads descriptor flags.
+		let flags = unsafe { libc::fcntl(dups[0], libc::F_GETFD) };
+		assert!(flags >= 0);
+		assert_ne!(flags & libc::FD_CLOEXEC, 0, "pump dup must be close-on-exec");
+		writer.stop(1_000);
+		// SAFETY: closing test-owned fds.
+		unsafe {
+			libc::close(read_fd);
+			libc::close(write_fd);
+		}
 	}
 
 	#[test]

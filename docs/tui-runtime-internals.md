@@ -10,6 +10,54 @@ This document maps terminal input and rendering ownership in interactive mode. S
 
 The terminal core never interprets messages, tools, transcript blocks, or finality.
 
+On Unix TTYs, `ProcessTerminal.start()` acquires descriptor-level output
+ownership through `packages/utils/src/terminal-output-guard.ts`. Unmanaged
+stdout, same-terminal stderr, and newly inherited child output go to the
+process log instead of the viewport. Cached Node stream writes are redirected
+too; piped stdout and a separately redirected stderr retain their destinations.
+The guards acquire the canonical process-log target before redirecting either
+descriptor. `packages/utils/src/logger/process-log.ts` owns file selection,
+retention, and configuration changes; guards own only descriptor redirection
+and restoration. A replacement target is opened and active guards are notified
+before the previous sink is retired. Recovery uses the last successfully opened
+target, so a failed rollover cannot block switching to a healthy directory.
+Only the active sink publishes rotation targets; retiring sinks still flush
+buffered records without moving guards back to an old destination.
+Guard handoffs participate in the rotation transaction: a rejected open or
+descriptor redirect restores guards to the predecessor, leaves that file
+selected for incoming records, and retries on a later sampling tick.
+New log files are created with owner-only read/write permissions; existing file
+permissions are preserved.
+
+External-writer leases keep size/day sampling active without structured records.
+The final release stops sampling; disabled structured file output still retains
+raw diagnostics in a bounded default sink while a guard owns it, then closes
+that diagnostic-only descriptor. Ordinary idle logging does not create new-day
+files. Existing children retain the file descriptors they inherited.
+
+The renderer retains a private stdout descriptor. The native output pump owns
+its own duplicate, preserving off-thread draining and backlog detection; a
+direct private-descriptor writer is the fallback. Geometry uses another owned
+TTY duplicate and SIGWINCH, so fd 1 redirection cannot freeze terminal sizing.
+`active-terminal.ts` remains the terminal singleton owner. Stop, handoff, and
+emergency cleanup restore fd 1/2 and stream methods; restart reacquires them.
+Overlapping owners form a live chain. Restoring a deferred-input owner pauses
+stdin and restores its prior raw-mode baseline until `enableInput()` resumes it.
+Kitty keyboard frames unwind in stack order: a stopped older owner's frames
+transfer to its direct successor, and stopping the current owner pops its
+outstanding frames without removing a surviving owner's frame.
+Unix isolation failure aborts startup rather than exposing an unprotected TUI.
+Windows retains its existing console path.
+
+Regression entrypoints: `packages/tui/test/terminal-output-isolation.test.ts`
+drives inherited/captured diagnostics, cached Bun writes, handoff/restart,
+resize, emergency restore, piped output and independently redirected stderr.
+Its `test/fixtures/terminal-output-isolation-fixture.ts` accepts keys
+`c` (inherited/in-process), `p` (captured), `e` (handoff/restart), `i`
+(post-restart), `x` (emergency restore), and `q` (quit). Set
+`PI_TEST_RUNTIME=1 OMP_ISOLATION_FALLBACK=1` to exercise the direct writer.
+
+
 ## Boot and root composition
 
 `Composer` creates the `TUI`, welcome header, editor, and status host. Once `InteractiveMode` is ready it mounts the session containers, with `TranscriptContainer` as the transcript root.

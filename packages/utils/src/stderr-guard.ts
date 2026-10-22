@@ -1,117 +1,85 @@
 /**
- * Terminal stderr guard: keeps unmanaged fd-2 writes off the terminal while a
- * TUI owns the viewport.
+ * Compatibility surface for the terminal stderr guard released in 16.5.1
+ * (`suppressTerminalStderr` / `restoreTerminalStderr` and helpers). The
+ * unified terminal-output guard (terminal-output-guard.ts) now covers
+ * inherited stdout as well and is what the TUI uses; these entry points keep
+ * the released names working for external consumers with their original
+ * fd-2-only semantics — calling them must never fence fd 1.
  *
- * Native runtimes and libraries can write directly to file descriptor 2 at
- * arbitrary times. Examples include macOS libmalloc diagnostics and Bun HTTP
- * decompression diagnostics on Linux. Those bytes bypass the renderer and
- * paint straight into the viewport.
- *
- * While the TUI owns the terminal, dup fd 2 aside and dup2 a redirect target
- * over it; restore the saved fd whenever terminal ownership is released
- * (external editor, Ctrl+Z suspend, shutdown, crash restore). This mirrors
- * openai/codex#24459, but redirects to the omp log file instead of /dev/null
- * so diagnostics stay greppable and Bun native-crash reports (which abort
- * before any JS cleanup can restore fd 2) are preserved.
- *
- * Only dup/dup2 go through bun:ffi. fcntl is deliberately avoided: it is
- * variadic, and the arm64-darwin ABI passes variadic arguments on the stack,
- * so a fixed-arity FFI signature would read garbage for the third argument.
+ * When the unified guard is active it already owns both descriptors, so the
+ * legacy calls report suppression and leave the descriptors alone; the
+ * unified release path restores them.
  */
-import { dlopen, FFIType } from "bun:ffi";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getLogPath } from "./dirs";
-
-const STDOUT_FILENO = 1;
-const STDERR_FILENO = 2;
-
-interface LibcFdOps {
-	dup(fd: number): number;
-	dup2(oldFd: number, newFd: number): number;
-}
-
-let libcFdOpsCache: LibcFdOps | null | undefined;
-
-function libcFdOps(): LibcFdOps | null {
-	if (libcFdOpsCache !== undefined) return libcFdOpsCache;
-	libcFdOpsCache = null;
-	if (process.platform === "win32") return null;
-	// Darwin: dyld resolves libSystem from the shared cache. Linux: glibc
-	// first, then the generic soname for musl-style layouts.
-	const candidates =
-		process.platform === "darwin" ? ["libSystem.B.dylib", "/usr/lib/libSystem.B.dylib"] : ["libc.so.6", "libc.so"];
-	for (const candidate of candidates) {
-		try {
-			const libc = dlopen(candidate, {
-				dup: { args: [FFIType.i32], returns: FFIType.i32 },
-				dup2: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
-			});
-			libcFdOpsCache = libc.symbols;
-			return libcFdOpsCache;
-		} catch {
-			// Try the next candidate; the guard stays inert if none load.
-		}
-	}
-	return libcFdOpsCache;
-}
+import { acquireProcessLogTarget, onProcessLogTargetChanged, type ProcessLogTargetLease } from "./logger/process-log";
+import {
+	isTerminalOutputSuppressed,
+	markTerminalFdCloexec,
+	onTerminalOutputRestored,
+	setTerminalOutputRedirectTarget,
+	stderrSharesStdoutTerminal,
+	terminalStderrIsGuarded,
+	tryLibcFdOps,
+} from "./terminal-output-guard";
 
 /**
- * True when fd 2 writes would land on the same terminal the TUI paints to:
- * both stdout and stderr are ttys backed by the same device file. A stderr
- * the user already redirected (`2>file`, `2>/dev/null`, a different tty) must
- * keep flowing untouched.
+ * True when fd 2 writes would land on the same terminal the caller prints
+ * stdout to: both descriptors are ttys backed by the same device file. A
+ * stderr the caller already redirected (`2>file`, `2>/dev/null`, a different
+ * tty) must keep flowing untouched — as in 16.5.1.
  */
-function stderrSharesStdoutTerminal(): boolean {
-	if (!process.stdout.isTTY || !process.stderr.isTTY) return false;
-	try {
-		const stdoutStat = fs.fstatSync(STDOUT_FILENO);
-		const stderrStat = fs.fstatSync(STDERR_FILENO);
-		return stdoutStat.dev === stderrStat.dev && stdoutStat.ino === stderrStat.ino;
-	} catch {
-		return false;
-	}
-}
-
-/** Saved dup of the real stderr while suppression is active, else null. */
+/** Saved dup of the real stderr while legacy suppression is active, else null. */
 let savedStderrFd: number | null = null;
 
-/** Newest log file the guard knows about; see {@link setStderrRedirectTarget}. */
+/** Newest log file the legacy guard knows about; see {@link setStderrRedirectTarget}. */
 let redirectTarget: string | null = null;
+let canonicalLease: ProcessLogTargetLease | undefined;
 
 export interface SuppressTerminalStderrOptions {
 	/**
-	 * Redirect target path; defaults to the log file the rotating sink last
-	 * reported (see {@link setStderrRedirectTarget}), then today's omp log
-	 * file, then /dev/null.
+	 * Redirect target path; defaults to an explicitly selected target, then the
+	 * canonical process log target.
 	 */
 	redirectPath?: string;
-	/** Bypass the same-terminal gate. Tests only. */
+	/** Bypass the same-terminal gate. Tests only, as in 16.5.1. */
 	force?: boolean;
 }
 
 /**
- * Redirect fd 2 away from the terminal while the TUI owns the viewport.
- * Returns true when suppression is (already) active. No-op — returning
- * false — when stderr does not target the stdout terminal or when libc fd
- * operations are unavailable.
+ * Redirect fd 2 away from the terminal — fd 1 is never touched. Returns true
+ * when suppression is (already) active: via this guard, or because the
+ * unified terminal-output guard owns the descriptors. Returns false when
+ * stderr does not share the stdout terminal or libc fd operations are
+ * unavailable.
  */
 export function suppressTerminalStderr(options?: SuppressTerminalStderrOptions): boolean {
-	if (savedStderrFd !== null) return true;
+	if (isTerminalOutputSuppressed() && terminalStderrIsGuarded()) {
+		// Still fenced by the unified guard; a queued release from an earlier
+		// restore call is stale now that suppression is being reasserted.
+		pendingRelease = false;
+		return true;
+	}
+	if (savedStderrFd !== null) {
+		pendingRelease = false;
+		return true;
+	}
 	if (!options?.force && !stderrSharesStdoutTerminal()) return false;
-	const libc = libcFdOps();
+	const libc = tryLibcFdOps();
 	if (!libc) return false;
 
 	let redirectFd: number;
+	let lease: ProcessLogTargetLease | undefined;
 	try {
-		const redirectPath = options?.redirectPath ?? redirectTarget ?? getLogPath();
-		// getLogsDir() only computes the path; the logger creates it lazily, so
-		// on a fresh profile ~/.omp/logs may not exist yet. Create it here so
-		// diagnostics land in the log instead of falling through to /dev/null.
+		const explicitPath = options?.redirectPath ?? redirectTarget;
+		if (explicitPath === null) lease = acquireProcessLogTarget();
+		const redirectPath = explicitPath ?? lease!.path;
 		fs.mkdirSync(path.dirname(redirectPath), { recursive: true });
 		redirectFd = fs.openSync(redirectPath, "a");
-		redirectTarget = redirectPath;
+		if (options?.redirectPath !== undefined) redirectTarget = options.redirectPath;
 	} catch {
+		lease?.release();
+		lease = undefined;
 		try {
 			redirectFd = fs.openSync("/dev/null", "w");
 		} catch {
@@ -119,69 +87,98 @@ export function suppressTerminalStderr(options?: SuppressTerminalStderrOptions):
 		}
 	}
 
-	const saved = libc.dup(STDERR_FILENO);
+	const saved = libc.dup(2);
 	if (saved === -1) {
 		fs.closeSync(redirectFd);
+		lease?.release();
 		return false;
 	}
-	if (libc.dup2(redirectFd, STDERR_FILENO) === -1) {
+	if (libc.dup2(redirectFd, 2) === -1) {
 		fs.closeSync(redirectFd);
 		fs.closeSync(saved);
+		lease?.release();
 		return false;
 	}
 	fs.closeSync(redirectFd);
+	markTerminalFdCloexec(libc, saved);
 	savedStderrFd = saved;
+	canonicalLease = lease;
 	return true;
 }
 
-/**
- * Point fd 2 at `logPath`, the log file the rotating sink is currently
- * writing.
- *
- * The logger calls this on every sink rotation. Without it fd 2 keeps the
- * descriptor opened at TUI start, so after local midnight raw stderr — this
- * process's and every child that inherited fd 2 — keeps landing in the
- * previous day's file, which the sink eventually prunes out from under it.
- *
- * The path is recorded even while suppression is inactive, so a later
- * {@link suppressTerminalStderr} redirects to the live file instead of
- * re-deriving a dated name. Best-effort: if the new file cannot be opened,
- * fd 2 keeps its current target.
- */
+/** Explicitly select a caller-owned sink for both guard APIs. */
 export function setStderrRedirectTarget(logPath: string): void {
-	redirectTarget = logPath;
-	if (savedStderrFd === null) return;
-	const libc = libcFdOps();
-	if (!libc) return;
+	setTerminalOutputRedirectTarget(logPath);
+	if (repointStderr(logPath)) {
+		redirectTarget = logPath;
+		canonicalLease?.release();
+		canonicalLease = undefined;
+	}
+}
+
+onProcessLogTargetChanged(logPath => {
+	if (canonicalLease && redirectTarget === null && !terminalStderrIsGuarded() && !repointStderr(logPath)) {
+		throw new Error("Cannot redirect terminal stderr to the canonical process log");
+	}
+});
+
+function repointStderr(logPath: string): boolean {
+	if (savedStderrFd === null) return true;
+	const libc = tryLibcFdOps();
+	if (!libc) return false;
 	let redirectFd: number;
 	try {
 		redirectFd = fs.openSync(logPath, "a");
 	} catch {
-		return;
+		return false;
 	}
-	libc.dup2(redirectFd, STDERR_FILENO);
+	const redirected = libc.dup2(redirectFd, 2) !== -1;
 	fs.closeSync(redirectFd);
+	return redirected;
 }
 
 /**
  * Re-point fd 2 at the saved terminal stderr. Safe to call unconditionally:
- * no-op when suppression is not active. Called at every terminal-ownership
- * release and by the postmortem fatal handlers before they print, so crash
- * reports reach the real terminal.
+ * no-op when this guard is inactive. A release that arrives while the unified
+ * guard owns the descriptors is recorded and takes effect when that guard
+ * finishes restoring, so a consumer's single restore call still completes.
  */
 export function restoreTerminalStderr(): void {
 	if (savedStderrFd === null) return;
+	if (isTerminalOutputSuppressed()) {
+		pendingRelease = true;
+		return;
+	}
+	performLegacyRestore();
+}
+
+let pendingRelease = false;
+
+function performLegacyRestore(): void {
+	if (savedStderrFd === null) return;
 	const saved = savedStderrFd;
+	const libc = tryLibcFdOps();
+	if (!libc || libc.dup2(saved, 2) === -1) return;
 	savedStderrFd = null;
-	libcFdOps()?.dup2(saved, STDERR_FILENO);
 	try {
 		fs.closeSync(saved);
 	} catch {
 		// The dup'ed fd is process-owned; a close failure leaves nothing to recover.
 	}
+	canonicalLease?.release();
+	canonicalLease = undefined;
 }
 
-/** Whether fd 2 is currently redirected away from the terminal. */
+onTerminalOutputRestored(() => {
+	if (!pendingRelease) return;
+	pendingRelease = false;
+	performLegacyRestore();
+});
+
+/**
+ * Whether fd 2 is currently redirected away from the terminal, by this guard
+ * or by the unified terminal-output guard.
+ */
 export function isTerminalStderrSuppressed(): boolean {
-	return savedStderrFd !== null;
+	return savedStderrFd !== null || (isTerminalOutputSuppressed() && terminalStderrIsGuarded());
 }

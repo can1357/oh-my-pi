@@ -1,13 +1,24 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as fs from "node:fs";
+import * as tty from "node:tty";
 import { TtyWriter } from "@oh-my-pi/pi-natives";
 import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
+import { isRedirectedWriteError, restoreTerminalStderr } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils/loop-phase";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
-import { restoreTerminalStderr, suppressTerminalStderr } from "@oh-my-pi/pi-utils/stderr-guard";
+import {
+	duplicateTerminalOutput,
+	restoreTerminalOutput,
+	suppressTerminalOutput,
+} from "@oh-my-pi/pi-utils/terminal-output-guard";
 import { TSP_VERSION } from "@oh-my-pi/pi-wire";
-import { getActiveTerminal, registerStdoutErrorHandler, setActiveTerminal } from "./active-terminal";
+import {
+	getActiveTerminal,
+	registerStderrErrorHandler,
+	registerStdoutErrorHandler,
+	setActiveTerminal,
+} from "./active-terminal";
 import {
 	encodeBundledGlyphRegistrations,
 	encodeGlyphCoverageQuery,
@@ -456,10 +467,13 @@ function createConsoleCodepageGuard(): (() => void) | null {
  */
 export function emergencyTerminalRestore(): void {
 	try {
-		// Crash paths must surface subsequent stderr (fatal reports) on the
-		// real terminal; no-op when the stderr guard is inactive.
-		restoreTerminalStderr();
 		const terminal = getActiveTerminal();
+		if (!terminal) {
+			restoreTerminalOutput(true);
+			// A consumer may hold fd 2 through the legacy stderr guard; crash-path
+			// diagnostics after this cleanup must reach the terminal, not its log.
+			restoreTerminalStderr();
+		}
 		if (terminal) {
 			// Keyboard enhancement state is screen-local: pop the alt-screen
 			// frame before leaving it, then let stop() pop omp's main-screen frame.
@@ -470,6 +484,12 @@ export function emergencyTerminalRestore(): void {
 				altScreenActive = false;
 			}
 			terminal.stop();
+			let remaining = getActiveTerminal();
+			while (remaining) {
+				remaining.stop();
+				remaining = getActiveTerminal();
+			}
+			restoreTerminalStderr();
 			terminal.showCursor(true);
 		} else if (terminalEverStarted && !isTerminalHeadless()) {
 			// Blind restore only if we know a terminal was started but lost track of it
@@ -501,6 +521,10 @@ export function emergencyTerminalRestore(): void {
 		}
 	} catch {
 		// Terminal may already be dead during crash cleanup - ignore errors
+	} finally {
+		// Teardown failures must not hide fatal reports on redirected fd 1/2.
+		restoreTerminalOutput(true);
+		restoreTerminalStderr();
 	}
 }
 /** Terminal-reported appearance (dark/light mode). */
@@ -838,6 +862,8 @@ export interface ProcessTerminalOptions {
  */
 export class ProcessTerminal implements Terminal {
 	#wasRaw = false;
+	/** Previous live owner; stopped owners are unlinked before their resources close. */
+	#previousTerminal: ProcessTerminal | null = null;
 	#inputHandler?: (data: string) => void;
 	#resizeHandler?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
@@ -845,6 +871,8 @@ export class ProcessTerminal implements Terminal {
 	#isLoopStalled?: () => boolean;
 	#stdoutResizeListener?: () => void;
 	#kittyProtocolActive = false;
+	/** Frames this owner must unwind, including frames inherited from stopped older owners. */
+	#kittyFrames = 0;
 	// Kitty flags omp pushed on its own stack frame; meaningful only while kitty is active.
 	#kittyFlags = 0;
 	#modifyOtherKeysActive = false;
@@ -892,7 +920,14 @@ export class ProcessTerminal implements Terminal {
 	readonly #nativeWindowsConsole: boolean;
 	#writeLogPath = $env.PI_TUI_WRITE_LOG || "";
 	#stdoutErrorCleanup?: () => void;
+	#stderrErrorCleanup?: () => void;
 	#stdoutErrorHandler = (err: Error) => {
+		if (isRedirectedWriteError(err)) {
+			// The redirected log target failed, not the terminal; the UI and
+			// the terminal stay up while diagnostics storage is degraded.
+			logger.warn("redirected log write failed; terminal unaffected", { err: String(err) });
+			return;
+		}
 		this.#markTerminalDisconnected("stdout failed", err);
 	};
 	// Bounds the stdout backlog against a stalled PTY consumer without killing a
@@ -908,6 +943,11 @@ export class ProcessTerminal implements Terminal {
 	// enqueues frames and performs the blocking write(2) on its own thread;
 	// `pendingOutputBytes` exposes the backlog for render-side frame skipping.
 	#outputPump?: TtyWriter;
+	#outputFd: number | null = null;
+	#outputStream?: tty.WriteStream;
+	// The descriptor #outputStream owns (not declared on the stream type); stop()
+	// closes it because destroy() leaves it open.
+	#outputStreamFd?: number;
 	// Upper bound on the pump's backlog: the count its last enqueue or read
 	// reported. Only #safeWrite enqueues and the pump thread only drains, so
 	// the live backlog cannot exceed this until the next enqueue refreshes it.
@@ -1123,42 +1163,76 @@ export class ProcessTerminal implements Terminal {
 		// escapes never reach the developer's terminal during `bun test`.
 		this.#headless = isTerminalHeadless();
 		if (this.#headless) return;
+		this.#wasRaw = process.stdin.isRaw || false;
 		registerPostmortemTerminalRestore();
 
 		// Own stdout: out-of-band writers route through this terminal, and the
 		// emergency restore finds it on crash.
+		const previousTerminal = getActiveTerminal();
+		if (previousTerminal !== this) this.#previousTerminal = previousTerminal;
 		setActiveTerminal(this);
+		// A deferInput start returns before any frame is written, so the lazy
+		// first-write registration would leave redirected-write failures in
+		// that window as unhandled stream errors; install both shared stream
+		// error listeners as soon as this terminal takes ownership.
+		this.#ensureStdoutErrorHandler();
 		// RGB belongs to this ownership session, including deferred-input prepaint.
 		setTerminalBackgroundColor(undefined);
 		terminalEverStarted = true;
-		// Own the blocking write(2) on a pump thread (unix TTYs only). A stale
-		// prebuilt natives module without the export falls back to direct writes.
-		// Test suites spy on `process.stdout.write` with a faked isTTY, so the
-		// pump stays off under `bun test` — same philosophy as isTerminalHeadless.
-		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
-			try {
-				this.#outputPump = new TtyWriter(1);
-				this.#pumpBacklogBound = 0;
-			} catch (err) {
-				logger.debug("tty output pump unavailable; using direct stdout writes", { err: String(err) });
+		try {
+			this.#outputFd = suppressTerminalOutput();
+			if (this.#outputFd !== null) {
+				// The stream owns a separate duplicate, never the guard's saved fd.
+				const streamFd = duplicateTerminalOutput();
+				try {
+					this.#outputStream = new tty.WriteStream(streamFd);
+					this.#outputStreamFd = streamFd;
+				} catch (err) {
+					fs.closeSync(streamFd);
+					throw err;
+				}
+				this.#outputStream.on("error", this.#stdoutErrorHandler);
+				process.stdout.columns = this.#outputStream.columns;
+				process.stdout.rows = this.#outputStream.rows;
 			}
+			// TtyWriter duplicates its input fd and owns that duplicate. Keep the
+			// existing off-thread pump/backlog behavior on the private renderer fd.
+			if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
+				try {
+					this.#outputPump = new TtyWriter(this.#outputFd ?? 1);
+					this.#pumpBacklogBound = 0;
+				} catch (err) {
+					logger.debug("tty output pump unavailable; using private direct writes", { err: String(err) });
+				}
+			}
+		} catch (err) {
+			this.stop();
+			throw err;
 		}
 
-		// Keep unmanaged native fd-2 writes off the viewport while we own the
-		// terminal; released in stop(). See stderr-guard in pi-utils.
-		suppressTerminalStderr();
-
-		// Set up resize handler immediately. The OS refreshes process.stdout
-		// dimensions before firing `resize`, so it is authoritative for geometry:
-		// reconcile any stale cached DEC 2048 report before notifying the renderer.
+		// fd 1 now targets the log. Refresh geometry through the private TTY.
 		this.#stdoutResizeListener = () => {
+			const output = this.#outputStream;
+			if (output) {
+				const oldColumns = output.columns;
+				const oldRows = output.rows;
+				if ("_refreshSize" in output && typeof output._refreshSize === "function") output._refreshSize();
+				process.stdout.columns = output.columns;
+				process.stdout.rows = output.rows;
+				if (oldColumns === output.columns && oldRows === output.rows) return;
+				// fd 1 targets the log while isolated, so the runtime can never
+				// emit process.stdout's own "resize" event; event-keyed consumers
+				// (e.g. editor max-height sync) still need it after a change.
+				process.stdout.emit("resize");
+			}
 			// Conservative: some hosts reset modes across a resize/reattach, so
 			// re-establish cursor visibility on the next explicit call.
 			this.#cursorVisible = undefined;
 			this.#reconcileInBandGeometryOnResize();
 			this.#resizeHandler?.();
 		};
-		process.stdout.on("resize", this.#stdoutResizeListener);
+		if (this.#outputStream) process.on("SIGWINCH", this.#stdoutResizeListener);
+		else process.stdout.on("resize", this.#stdoutResizeListener);
 
 		// Refresh terminal dimensions - they may be stale after suspend/resume
 		// (SIGWINCH is lost while process is stopped). Unix only.
@@ -1658,6 +1732,7 @@ export class ProcessTerminal implements Terminal {
 					this.#kittyFlags = 5;
 				}
 				this.#safeWrite(`\x1b[>${this.#kittyFlags}u`);
+				this.#kittyFrames++;
 				return;
 			}
 
@@ -1988,12 +2063,12 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	/** Hand APC titles back to tmux once this pane stops speaking TSP. */
-	#endTspTmuxPane(): void {
+	#endTspTmuxPane(restoreMode = true): void {
 		clearTimeout(this.#tspTimeout);
 		this.#tspTimeout = undefined;
 		if (!this.#tspTmuxPaneGated) return;
 		this.#tspTmuxPaneGated = false;
-		setTmuxPaneApcTitles(true, $env);
+		if (restoreMode) setTmuxPaneApcTitles(true, $env);
 	}
 
 	#handleTspMessage(sequence: string): void {
@@ -2119,13 +2194,13 @@ export class ProcessTerminal implements Terminal {
 		for (const key of pending) this.#stdinSequenceHandler?.(key);
 	}
 
-	#disableWin32InputMode(): void {
+	#disableWin32InputMode(resetMode = true): void {
 		if (!this.#win32InputDecoder) return;
 		this.#win32PasteNormalizer?.flush();
 		this.#win32PasteNormalizer = undefined;
 		// Held input still belongs to the user (e.g. Escape before a late kitty reply).
 		this.#releaseWin32PendingSequence();
-		this.#safeWrite("\x1b[?9001l");
+		if (resetMode) this.#safeWrite("\x1b[?9001l");
 		this.#win32InputDecoder = undefined;
 	}
 
@@ -2289,7 +2364,10 @@ export class ProcessTerminal implements Terminal {
 		if (this.#kittyProtocolActive) {
 			// Disable Kitty keyboard protocol first so any late key releases
 			// do not generate new Kitty escape sequences.
-			this.#safeWrite("\x1b[<u");
+			while (this.#kittyFrames > 0) {
+				this.#safeWrite("\x1b[<u");
+				this.#kittyFrames--;
+			}
 			this.#kittyProtocolActive = false;
 			setKittyProtocolActive(false);
 		}
@@ -2329,46 +2407,75 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	stop(): void {
+		const owner = getActiveTerminal();
+		if (owner === this) {
+			setActiveTerminal(this.#previousTerminal);
+			if (!this.#previousTerminal) setTerminalBackgroundColor(undefined);
+		} else {
+			// Remove an older owner from the live chain, including its saved raw
+			// baseline, so a later newest-first stop cannot resurrect it.
+			let successor = owner;
+			while (successor && successor.#previousTerminal !== this) successor = successor.#previousTerminal;
+			if (successor) {
+				successor.#previousTerminal = this.#previousTerminal;
+				successor.#wasRaw = this.#wasRaw;
+				successor.#kittyFrames += this.#kittyFrames;
+				this.#kittyFrames = 0;
+			}
+		}
+		this.#previousTerminal = null;
+		const survivor = getActiveTerminal();
+		const resetModes = survivor === null;
+		const resetInput = resetModes || (survivor !== null && survivor.#inputDeferred);
 		// Suppress observer/timer callbacks before any teardown can yield or throw.
 		this.#active = false;
 		this.#inputDeferred = false;
-		// Release stdout ownership (out-of-band writers and emergency cleanup)
-		// before headless/teardown exits, without disturbing another owner's RGB.
-		if (getActiveTerminal() === this) {
-			setActiveTerminal(null);
-			setTerminalBackgroundColor(undefined);
-		}
 		if (this.#headless) return;
 
-		// Release terminal ownership of fd 2 first so external programs,
-		// suspend, and shutdown see the real stderr even if a later teardown
-		// step throws.
-		restoreTerminalStderr();
+		// The pump has its own duplicate for reset sequences. destroy() does
+		// not close the stream's descriptor, so close the duplicate this
+		// terminal owns instead of leaking it across stop/start cycles.
+		const outputStream = this.#outputStream;
+		const streamFd = this.#outputStreamFd;
+		this.#outputStream = undefined;
+		this.#outputStreamFd = undefined;
+		if (outputStream) {
+			outputStream.destroy();
+			if (streamFd !== undefined) {
+				try {
+					fs.closeSync(streamFd);
+				} catch {
+					// Descriptor already closed.
+				}
+			}
+		}
 
 		this.#clearProgressTimer();
 		if (this.#progressActive) {
 			this.#progressActive = false;
-			this.#safeWrite(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+			if (resetModes) this.#safeWrite(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
 
 		// Leave paint-time terminal modes even if the process exits between the
 		// begin/end halves of a frame. Safe no-ops on terminals that ignored them.
-		this.#safeWrite("\x1b[?2026l\x1b[?7h");
+		if (resetModes) this.#safeWrite("\x1b[?2026l\x1b[?7h");
 
 		// Restore normal cursor-key (DECCKM) and numeric-keypad mode (terminfo
 		// `rmkx`). Symmetric with the normalize in start(): a TTY-sharing child
 		// can leave the terminal in application-cursor-keys mode, and without
 		// this reset the parent shell inherits SS3 arrows so Up/Down history
 		// navigation stays broken after omp exits (#6374).
-		this.#safeWrite("\x1b[?1l\x1b>");
+		if (resetModes) this.#safeWrite("\x1b[?1l\x1b>");
 
 		// Disable bracketed paste mode
-		this.#safeWrite("\x1b[?2004l");
-		this.#safeWrite("\x1b[?5522l");
+		if (resetModes) {
+			this.#safeWrite("\x1b[?2004l");
+			this.#safeWrite("\x1b[?5522l");
+		}
 
 		// Hand the cursor shape back to the user's terminal configuration; a Vim
 		// Normal-mode block must not outlive the session in their shell.
-		if (this.#cursorShape !== undefined && this.#cursorShape !== "default") {
+		if (resetModes && this.#cursorShape !== undefined && this.#cursorShape !== "default") {
 			this.#safeWrite(`\x1b[${CURSOR_SHAPE_CODES.default} q`);
 		}
 		this.#cursorShape = undefined;
@@ -2376,19 +2483,19 @@ export class ProcessTerminal implements Terminal {
 		// Disable mouse tracking (enabled only by fullscreen overlays; safe
 		// no-ops otherwise). Covers crash paths that reach stop() without the
 		// TUI's own overlay teardown running.
-		this.#safeWrite("\x1b[?1006l\x1b[?1003l\x1b[?1000l");
+		if (resetModes) this.#safeWrite("\x1b[?1006l\x1b[?1003l\x1b[?1000l");
 
 		// Disable Mode 2031 appearance change notifications
-		this.#safeWrite("\x1b[?2031l");
+		if (resetModes) this.#safeWrite("\x1b[?2031l");
 
 		// Restore xterm scroll-to-bottom modes that were set before startup.
 		for (const mode of this.#xtermScrollToBottomRestoreModes) {
-			this.#safeWrite(`\x1b[?${mode}h`);
+			if (resetModes) this.#safeWrite(`\x1b[?${mode}h`);
 		}
 		this.#xtermScrollToBottomRestoreModes.clear();
 
 		if (this.#inBandResizeActive) {
-			this.#safeWrite("\x1b[?2048l");
+			if (resetModes) this.#safeWrite("\x1b[?2048l");
 			this.#inBandResizeActive = false;
 		}
 		if (this.#mode2031DebounceTimer) {
@@ -2409,16 +2516,16 @@ export class ProcessTerminal implements Terminal {
 		this.#osc99PendingId = undefined;
 		this.#osc99ResponseBuffer = "";
 		this.#osc99Capabilities.clear();
-		setOsc99Supported(false);
+		if (resetModes) setOsc99Supported(false);
 		this.#glyphProtocolPhase = "idle";
 		this.#glyphProtocolResult = undefined;
 		this.#glyphProtocolReplyBuffer = "";
 		this.#glyphProtocolCallbacks = [];
 		this.#sixelSupport = undefined;
 		this.#sixelSupportCallbacks = [];
-		setTerminalGlyphProtocol(false);
+		if (resetModes) setTerminalGlyphProtocol(false);
 		this.#tspPending = false;
-		this.#endTspTmuxPane();
+		this.#endTspTmuxPane(resetModes);
 		this.#tspResult = undefined;
 		this.#tspReplyBuffer = "";
 		this.#tspCallbacks = [];
@@ -2432,23 +2539,27 @@ export class ProcessTerminal implements Terminal {
 		this.#reportedColumns = undefined;
 		this.#reportedRows = undefined;
 
-		// Disable Kitty keyboard protocol if not already done by drainInput()
-		if (this.#kittyProtocolActive) {
-			this.#safeWrite("\x1b[<u");
-			this.#kittyProtocolActive = false;
-			setKittyProtocolActive(false);
+		// Older frames stay below a survivor's frame until that owner can pop them in order.
+		if (owner === this || resetModes) {
+			while (this.#kittyFrames > 0) {
+				this.#safeWrite("\x1b[<u");
+				this.#kittyFrames--;
+			}
+			setKittyProtocolActive(survivor !== null && survivor.#kittyProtocolActive);
 		}
+		this.#kittyProtocolActive = false;
 		if (this.#modifyOtherKeysTimeout) {
 			clearTimeout(this.#modifyOtherKeysTimeout);
 			this.#modifyOtherKeysTimeout = undefined;
 		}
 		if (this.#modifyOtherKeysActive) {
-			this.#safeWrite("\x1b[>4;0m");
+			if (resetModes) this.#safeWrite("\x1b[>4;0m");
+			else survivor.#modifyOtherKeysActive = true;
 			this.#modifyOtherKeysActive = false;
 		}
-		this.#disableWin32InputMode();
+		this.#disableWin32InputMode(resetModes);
 
-		this.#restoreWindowsVTInput();
+		if (resetModes) this.#restoreWindowsVTInput();
 		// Clean up StdinBuffer
 		if (this.#stdinBuffer) {
 			this.#stdinBuffer.destroy();
@@ -2469,6 +2580,7 @@ export class ProcessTerminal implements Terminal {
 		this.#appearance = undefined;
 		if (this.#stdoutResizeListener) {
 			process.stdout.removeListener("resize", this.#stdoutResizeListener);
+			process.removeListener("SIGWINCH", this.#stdoutResizeListener);
 			this.#stdoutResizeListener = undefined;
 		}
 		this.#disarmStdoutStallWatchdog();
@@ -2480,11 +2592,17 @@ export class ProcessTerminal implements Terminal {
 			this.#outputPump.stop(1000);
 			this.#outputPump = undefined;
 		}
+		// Release only an acquisition this instance still holds: a repeated
+		// stop (emergency cleanup plus owner teardown) must not decrement the
+		// count a surviving instance still relies on.
+		const heldOutputFd = this.#outputFd;
+		this.#outputFd = null;
+		if (heldOutputFd !== null) restoreTerminalOutput();
 
 		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
 		// re-interpreted after raw mode is disabled. This fixes a race condition
 		// where Ctrl+D could close the parent shell over SSH.
-		process.stdin.pause();
+		if (resetInput) process.stdin.pause();
 
 		// Restore raw mode state. On a disconnected terminal (pane recycled, ssh
 		// dropped) the fd is no longer a tty and Bun's node:tty shim throws; there
@@ -2492,12 +2610,14 @@ export class ProcessTerminal implements Terminal {
 		// live terminal the failure still surfaces - swallowing it would silently
 		// leave stdin in raw mode.
 		try {
-			process.stdin.setRawMode?.(this.#wasRaw);
+			if (resetInput) process.stdin.setRawMode?.(this.#wasRaw);
 		} catch (err) {
 			if (!this.#dead) throw err;
 		}
 		this.#stdoutErrorCleanup?.();
 		this.#stdoutErrorCleanup = undefined;
+		this.#stderrErrorCleanup?.();
+		this.#stderrErrorCleanup = undefined;
 		// After stop() the terminal is shared with other writers; visibility
 		// tracking is only meaningful while this instance owns the TTY.
 		this.#cursorVisible = undefined;
@@ -2505,6 +2625,16 @@ export class ProcessTerminal implements Terminal {
 
 	#ensureStdoutErrorHandler(): void {
 		this.#stdoutErrorCleanup ??= registerStdoutErrorHandler(this.#stdoutErrorHandler);
+		// stderr is the diagnostics channel, never the render path: a failure
+		// there (EIO, or the redirected log target rejecting writes) must not
+		// crash the process as an unhandled stream error or disconnect the UI.
+		this.#stderrErrorCleanup ??= registerStderrErrorHandler(err => {
+			if (isRedirectedWriteError(err)) {
+				logger.warn("redirected log write failed on stderr; terminal unaffected", { err: String(err) });
+				return;
+			}
+			logger.error("stderr stream failed; continuing without diagnostics", { err: String(err) });
+		});
 	}
 
 	#markTerminalDisconnected(reason: string, err?: unknown): void {
@@ -2598,6 +2728,14 @@ export class ProcessTerminal implements Terminal {
 			// away from UTF-8; repair it before any bytes hit WriteFile so no frame
 			// is ever translated through an OEM codepage. See ensureWindowsConsoleUtf8.
 			if (process.platform === "win32") ensureWindowsConsoleUtf8();
+			if (this.#outputFd !== null) {
+				if (this.#conpty && Buffer.byteLength(data, "utf8") > MAX_CONPTY_WRITE_CHUNK_BYTES) {
+					for (const chunk of chunkForConPTY(data)) this.#writePrivateOutput(chunk);
+				} else {
+					this.#writePrivateOutput(data);
+				}
+				return;
+			}
 			// Windows ConPTY drops viewport tracking when a single write exceeds
 			// ~32-64 KB: the host UI's scroll position stays parked at wherever
 			// the write began, even though every byte landed in scrollback. Split
@@ -2628,6 +2766,17 @@ export class ProcessTerminal implements Terminal {
 			this.#markTerminalDisconnected("stdout failed", err);
 		} finally {
 			popLoopPhase();
+		}
+	}
+
+	#writePrivateOutput(data: string): void {
+		if (this.#outputFd === null) return;
+		const bytes = Buffer.from(data);
+		let offset = 0;
+		while (offset < bytes.length) {
+			const written = fs.writeSync(this.#outputFd, bytes, offset, bytes.length - offset);
+			if (written <= 0) throw new Error("terminal output made no progress");
+			offset += written;
 		}
 	}
 

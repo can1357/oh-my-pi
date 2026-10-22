@@ -10,6 +10,9 @@
 
 ### Fixed
 
+- Fixed unmanaged stdout/stderr and inherited subprocess diagnostics corrupting the Unix viewport; diagnostic routing now follows log configuration from startup through rotation, handoff, and shutdown ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
+- Fixed stopping overlapping terminal sessions disabling the survivor's modes or input, leaking raw mode across either deferred-input handoff order, or leaving Kitty and modifyOtherKeys modes active even without the output pump; emergency shutdown now restores every remaining session ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
+
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
 
 ## [18.12.4] - 2026-10-20

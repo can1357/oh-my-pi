@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
 import { restoreTerminalStderr } from "./stderr-guard";
+import { restoreTerminalOutput } from "./terminal-output-guard";
 
 // Cleanup reasons, in order of priority/meaning.
 export enum Reason {
@@ -519,6 +520,16 @@ function formatFatalError(label: string, err: Error): string {
 	return `\n[${label}] ${name}: ${message}${formattedStack}\n`;
 }
 
+/**
+ * Put both descriptors back for a fatal report: force-restore the unified
+ * guard, then the 16.5.1 stderr guard so a legacy suppression cannot send
+ * the crash report into the log instead of the terminal.
+ */
+export function restoreTerminalForFatalReport(): void {
+	restoreTerminalOutput(true);
+	restoreTerminalStderr();
+}
+
 async function exitAfterFatal(output: string, logMessage: string, err: Error, reason: Reason): Promise<never> {
 	const forcedExit = setTimeout(() => exitProcess(1), CLEANUP_DEADLINE_MS);
 	try {
@@ -526,7 +537,7 @@ async function exitAfterFatal(output: string, logMessage: string, err: Error, re
 		// completion promise. TUI owners therefore hand the cursor back before the
 		// fatal report is written, while slower resource cleanup continues afterward.
 		const cleanup = runCleanup(reason);
-		restoreTerminalStderr();
+		restoreTerminalForFatalReport();
 		// A revoked terminal can make stream writes raise another fatal error. Use
 		// the descriptor directly so failure stays synchronous and contained.
 		try {

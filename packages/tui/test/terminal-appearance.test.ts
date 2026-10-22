@@ -10,6 +10,7 @@ import {
 	setTerminalBackgroundColor,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "../src/terminal-multiplexer";
 
 const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
@@ -22,7 +23,6 @@ const originalWslInterop = Bun.env.WSL_INTEROP;
 const originalWtSession = Bun.env.WT_SESSION;
 const originalTermProgram = Bun.env.TERM_PROGRAM;
 const originalTmux = Bun.env.TMUX;
-const originalTerm = Bun.env.TERM;
 
 // These suites drive the real ProcessTerminal start()/probe pipeline, so they
 // opt out of the test-default headless suppression and restore it per case.
@@ -883,6 +883,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 
 describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 	let originalCellDims: CellDimensions;
+	const multiplexerEnv = new Map<string, string | undefined>();
 
 	beforeEach(() => {
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
@@ -890,8 +891,10 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		Object.defineProperty(process.stdin, "setRawMode", { value: vi.fn(), configurable: true });
 		originalCellDims = { ...getCellDimensions() };
 		previousHeadless = setTerminalHeadless(false);
-		delete Bun.env.TMUX;
-		delete Bun.env.TERM;
+		for (const key of TERMINAL_MULTIPLEXER_ENV_KEYS) {
+			multiplexerEnv.set(key, Bun.env[key]);
+			delete Bun.env[key];
+		}
 	});
 
 	afterEach(() => {
@@ -905,8 +908,8 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		restoreProperty(process.stdout, "columns", stdoutColumnsDescriptor);
 		restoreProperty(process.stdout, "rows", stdoutRowsDescriptor);
 		setCellDimensions(originalCellDims);
-		restoreEnv("TMUX", originalTmux);
-		restoreEnv("TERM", originalTerm);
+		for (const [key, value] of multiplexerEnv) restoreEnv(key, value);
+		multiplexerEnv.clear();
 	});
 
 	function setup(startOptions?: TerminalStartOptions) {
