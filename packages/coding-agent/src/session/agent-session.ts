@@ -162,6 +162,7 @@ import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } fr
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
+import { resolveStopContinuationText } from "../extensibility/extensions/stop-continuation";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
@@ -5399,19 +5400,9 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#sessionStopContinuationContext(result: SessionStopEventResult | undefined): string | undefined {
-		if (!result) return undefined;
-		const additionalContext =
-			typeof result.additionalContext === "string" && result.additionalContext.length > 0
-				? result.additionalContext
-				: undefined;
-		const reason = typeof result.reason === "string" && result.reason.length > 0 ? result.reason : undefined;
-		if (result.decision === "block") {
-			return reason ?? additionalContext ?? prompt.render(sessionStopBlockedPrompt);
-		}
-		if (result.continue === true) {
-			return additionalContext ?? reason;
-		}
-		return undefined;
+		// Shared with `subagent_stop`: both stop hooks accept the same result and
+		// apply the same precedence (see stop-continuation.ts).
+		return resolveStopContinuationText(result, prompt.render(sessionStopBlockedPrompt));
 	}
 
 	/**

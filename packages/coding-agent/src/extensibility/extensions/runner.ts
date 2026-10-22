@@ -94,6 +94,8 @@ import type {
 	SessionCompactingResult,
 	SessionStopEvent,
 	SessionStopEventResult,
+	SubagentStopEvent,
+	SubagentStopEventResult,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolRegistrationListener,
@@ -426,7 +428,9 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 					? SessionCompactingResult | undefined
 					: TEvent extends { type: "session_stop" }
 						? SessionStopEventResult | undefined
-						: undefined;
+						: TEvent extends { type: "subagent_stop" }
+							? SubagentStopEventResult | undefined
+							: undefined;
 
 // Session-lifecycle handler types live once in session-handler-types (imported
 // above for local use); re-exported here to keep this module's public API stable.
@@ -961,6 +965,12 @@ export class ExtensionRunner {
 	async emitSessionStop(event: Omit<SessionStopEvent, "type">): Promise<SessionStopEventResult | undefined> {
 		if (event.signal.aborted) return undefined;
 		return await this.emit({ type: "session_stop", ...event });
+	}
+
+	/** Emits a subagent stop pass that can be cancelled with the run's abort signal. */
+	async emitSubagentStop(event: Omit<SubagentStopEvent, "type">): Promise<SubagentStopEventResult | undefined> {
+		if (event.signal.aborted) return undefined;
+		return await this.emit({ type: "subagent_stop", ...event });
 	}
 
 	/**
@@ -1615,12 +1625,15 @@ export class ExtensionRunner {
 		onFailure?: (kind: "timeout" | "error", message: string) => R,
 		outerSignal?: AbortSignal,
 	): Promise<R | undefined> {
-		// `session_stop` carries its own signal on the event; `tool_call` receives
-		// the outer dispatch signal (loop request or wrapper execute) so an abort
-		// while a handler awaits a human dialog cancels the dialog and settles the
-		// gate without executing the underlying tool. Compose whichever apply.
+		// `session_stop` and `subagent_stop` carry their own signal on the event;
+		// `tool_call` receives the outer dispatch signal (loop request or wrapper
+		// execute) so an abort while a handler awaits a human dialog cancels the
+		// dialog and settles the gate without executing the underlying tool.
+		// Compose whichever apply.
 		const sessionStopSignal =
-			event.type === "session_stop" && "signal" in event && event.signal instanceof AbortSignal
+			(event.type === "session_stop" || event.type === "subagent_stop") &&
+			"signal" in event &&
+			event.signal instanceof AbortSignal
 				? event.signal
 				: undefined;
 		const signals = [outerSignal, sessionStopSignal].filter((s): s is AbortSignal => s !== undefined);
@@ -1754,7 +1767,7 @@ export class ExtensionRunner {
 					result = handlerResult as SessionCompactingResult;
 				}
 
-				if (event.type === "session_stop" && handlerResult) {
+				if ((event.type === "session_stop" || event.type === "subagent_stop") && handlerResult) {
 					const stopResult = handlerResult as SessionStopEventResult;
 					if (stopResult.decision === "block") {
 						return stopResult as RunnerEmitResult<TEvent>;

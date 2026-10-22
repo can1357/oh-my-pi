@@ -23,7 +23,7 @@ import { extractSessionInit } from "../session/session-manager";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { EventBus } from "../utils/event-bus";
 import { runSubagentFollowUpTurn } from "./executor";
-import { persistedAgentDefinition } from "./persisted-revive";
+import { persistedAgentDefinition, persistedAgentName, resolveSpawner } from "./persisted-revive";
 import { formatTaskResultSummary } from "./result-summary";
 import { cfgTaskMaxRuntimeMs } from "./settings";
 
@@ -86,9 +86,14 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 			"task",
 			id,
 			async ({ signal }) => {
+				// `subagent_stop` reports the persisted definition and the session that spawned this child.
+				const spawner = await resolveSpawner(registry, session, ref, sub.header?.parentSession);
 				const result = await runSubagentFollowUpTurn({
 					id,
 					agent: persistedAgentDefinition(ref.displayName, init),
+					agentType: persistedAgentName(ref.displayName, init),
+					parentSessionId: spawner.sessionId,
+					parentSessionFile: spawner.sessionFile,
 					message: init.task,
 					restore: true,
 					structured,

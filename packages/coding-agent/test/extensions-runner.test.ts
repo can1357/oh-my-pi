@@ -1405,6 +1405,226 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("subagent_stop", () => {
+		it("returns a loaded handler's advisory continuation feedback", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "subagent-stop.ts"),
+				`
+				export default function(pi) {
+					pi.on("subagent_stop", async () => ({ continue: true, additionalContext: "Run one more pass." }));
+				}
+			`,
+			);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const stopResult = await runner.emitSubagentStop({
+				agent_id: "Scout",
+				agent_type: "task",
+				session_id: "child-session-1",
+				messages: [],
+				stop_hook_active: false,
+				signal: new AbortController().signal,
+			});
+
+			expect(stopResult).toEqual({ continue: true, additionalContext: "Run one more pass." });
+		});
+
+		it("fails open when a handler throws and reports the failure through the error channel", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "subagent-stop-throws.ts"),
+				`
+				export default function(pi) {
+					pi.on("subagent_stop", async () => {
+						throw new Error("handler exploded");
+					});
+				}
+			`,
+			);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: ExtensionError[] = [];
+			runner.onError(error => errors.push(error));
+
+			// A crashing handler must not wedge the child run: no verdict means the
+			// candidate is allowed, and the failure is reported, not thrown.
+			await expect(
+				runner.emitSubagentStop({
+					agent_id: "Scout",
+					agent_type: "task",
+					session_id: "child-session-1",
+					messages: [],
+					stop_hook_active: false,
+					signal: new AbortController().signal,
+				}),
+			).resolves.toBeUndefined();
+			expect(errors).toHaveLength(1);
+			expect(errors[0]).toMatchObject({ event: "subagent_stop", error: "handler exploded" });
+		});
+
+		it("keeps subagent_stop dispatch independent of session_stop handlers", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "stop-separation.ts"),
+				`
+				export default function(pi) {
+					pi.on("session_stop", async () => ({ decision: "block", reason: "main only" }));
+					pi.on("subagent_stop", async () => ({ decision: "block", reason: "child only" }));
+				}
+			`,
+			);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			expect(runner.hasHandlers("subagent_stop")).toBe(true);
+			await expect(
+				runner.emitSubagentStop({
+					agent_id: "Scout",
+					agent_type: "task",
+					session_id: "child-session-1",
+					messages: [],
+					stop_hook_active: false,
+					signal: new AbortController().signal,
+				}),
+			).resolves.toEqual({ decision: "block", reason: "child only" });
+			await expect(
+				runner.emitSessionStop({
+					messages: [],
+					turn_id: 0,
+					session_id: "session-123",
+					stop_hook_active: false,
+					signal: new AbortController().signal,
+				}),
+			).resolves.toEqual({ decision: "block", reason: "main only" });
+		});
+
+		it("gives a later hard block precedence over advisory continuation feedback", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "subagent-stop-precedence.ts"),
+				`
+				export default function(pi) {
+					pi.on("subagent_stop", async () => ({ continue: true, additionalContext: "Earlier advisory." }));
+					pi.on("subagent_stop", async () => ({ decision: "block", reason: "Continue from second handler." }));
+				}
+			`,
+			);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			await expect(
+				runner.emitSubagentStop({
+					agent_id: "Scout",
+					agent_type: "task",
+					session_id: "child-session-1",
+					messages: [],
+					stop_hook_active: true,
+					signal: new AbortController().signal,
+				}),
+			).resolves.toEqual({ decision: "block", reason: "Continue from second handler." });
+		});
+
+		it("ignores an advisory request that carries no continuation context", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "subagent-stop-empty-advisory.ts"),
+				`
+				export default function(pi) {
+					pi.on("subagent_stop", async () => ({ continue: true }));
+				}
+			`,
+			);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			// Nothing model-visible to continue with: the run must be allowed to
+			// settle rather than spend a continuation turn on an empty prompt.
+			await expect(
+				runner.emitSubagentStop({
+					agent_id: "Scout",
+					agent_type: "task",
+					session_id: "child-session-1",
+					messages: [],
+					stop_hook_active: false,
+					signal: new AbortController().signal,
+				}),
+			).resolves.toBeUndefined();
+		});
+
+		it("skips a handler pass when the run is already cancelled", async () => {
+			const extensionPath = path.join(tempDir.path(), "subagent-stop-cancelled.ts");
+			const startedPath = path.join(tempDir.path(), "subagent-stop-started.txt");
+			await Bun.write(
+				extensionPath,
+				`
+				import * as fs from "node:fs";
+
+				export default function(pi) {
+					pi.on("subagent_stop", async () => {
+						fs.writeFileSync(${JSON.stringify(startedPath)}, "started");
+						return { decision: "block", reason: "should not run" };
+					});
+				}
+			`,
+			);
+
+			const result = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const cancelled = new AbortController();
+			cancelled.abort();
+
+			await expect(
+				runner.emitSubagentStop({
+					agent_id: "Scout",
+					agent_type: "task",
+					session_id: "child-session-1",
+					messages: [],
+					stop_hook_active: false,
+					signal: cancelled.signal,
+				}),
+			).resolves.toBeUndefined();
+			expect(await Bun.file(startedPath).exists()).toBe(false);
+		});
+	});
+
 	describe("tool_result chaining", () => {
 		it("chains content modifications across handlers", async () => {
 			const extCode1 = `

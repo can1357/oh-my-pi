@@ -219,6 +219,12 @@ pi.on("session_stop", async (event) => {
   if (event.stop_hook_active) return;
   return { continue: true, additionalContext: `Review final status after turn ${event.turn_id}.` };
 });
+
+// Fires per task/subagent run, before its result is accepted or published.
+pi.on("subagent_stop", async (event) => {
+  if (event.stop_hook_active) return; // allow the second pass
+  return { decision: "block", reason: `Re-check ${event.agent_id}'s result before finishing.` };
+});
 ```
 
 Full event catalog: see [extension authoring guide](../extensions.md).

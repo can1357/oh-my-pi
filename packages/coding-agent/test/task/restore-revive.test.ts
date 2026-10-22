@@ -11,6 +11,8 @@ import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { SubagentStopEvent } from "@oh-my-pi/pi-coding-agent/extensibility/shared-events";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -71,14 +73,17 @@ afterEach(async () => {
 	await removeWithRetries(root);
 });
 
-it("revives a subagent a crash cut off mid tool call, runs the call again, and delivers its answer to the parent", async () => {
+/**
+ * The main session and its subagent's transcript, as the process left them when it
+ * died inside the subagent's `read` call, plus a fake top-level session carrying
+ * `preparedExtensions` and the reviver that rebuilds the subagent from disk.
+ */
+async function crashedSubagentFixture(preparedExtensions?: PreparedExtension[]) {
 	const cwd = path.join(root, "home", "work");
 	await fs.mkdir(cwd, { recursive: true });
 	const notes = path.join(cwd, "notes.txt");
 	await Bun.write(notes, "the answer is 42\n");
 
-	// The main session and its subagent's transcript, as the process left them when it died
-	// inside the subagent's `read` call: no tool result, no exit record.
 	const main = SessionManager.create(cwd, path.join(root, "sessions"));
 	main.appendMessage({ role: "user", content: "fan out", timestamp: Date.now() });
 	const mainFile = main.getSessionFile();
@@ -145,6 +150,8 @@ it("revives a subagent a crash cut off mid tool call, runs the call again, and d
 		modelRoles: { default: "mock/mock-model" },
 	});
 	const session = {
+		sessionId: "main-session-1",
+		sessionFile: mainFile,
 		sessionManager: {
 			getSessionFile: () => mainFile,
 			getCwd: () => cwd,
@@ -153,7 +160,7 @@ it("revives a subagent a crash cut off mid tool call, runs the call again, and d
 		asyncJobManager: manager,
 		settings,
 		effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
-		preparedExtensions: undefined,
+		preparedExtensions,
 		restoreInterruptedTurn: async () => false,
 	} as unknown as AgentSession;
 	AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
@@ -164,15 +171,49 @@ it("revives a subagent a crash cut off mid tool call, runs the call again, and d
 	manager.registerDeliverySink(MAIN_AGENT_ID, (_jobId, text) => {
 		delivered.resolve(text);
 	});
+	return { session, mainFile, authStorage, readResults, delivered: delivered.promise };
+}
 
+it("revives a subagent a crash cut off mid tool call, runs the call again, and delivers its answer to the parent", async () => {
+	const fixture = await crashedSubagentFixture();
 	try {
-		const outcome = await restoreSession(session);
+		const outcome = await restoreSession(fixture.session);
 		expect(outcome.subagents).toEqual([AGENT_ID]);
 
-		expect(await delivered.promise).toContain("restored: 42");
-		expect(readResults).toHaveLength(1);
-		expect(readResults[0]).toContain("the answer is 42");
+		expect(await fixture.delivered).toContain("restored: 42");
+		expect(fixture.readResults).toHaveLength(1);
+		expect(fixture.readResults[0]).toContain("the answer is 42");
 	} finally {
-		authStorage.close();
+		fixture.authStorage.close();
+	}
+}, 20_000);
+
+it("reports the restored subagent's definition and spawning session to subagent_stop", async () => {
+	const stopEvents: SubagentStopEvent[] = [];
+	const fixture = await crashedSubagentFixture([
+		{
+			path: "<stop-recorder>",
+			resolvedPath: "<stop-recorder>",
+			factory: pi => {
+				pi.on("subagent_stop", event => {
+					stopEvents.push(event);
+				});
+			},
+			error: null,
+		},
+	]);
+	try {
+		await restoreSession(fixture.session);
+		expect(await fixture.delivered).toContain("restored: 42");
+
+		expect(stopEvents).toHaveLength(1);
+		expect(stopEvents[0]).toMatchObject({
+			agent_id: AGENT_ID,
+			agent_type: "task",
+			parent_session_id: "main-session-1",
+			parent_session_file: fixture.mainFile,
+		});
+	} finally {
+		fixture.authStorage.close();
 	}
 }, 20_000);
