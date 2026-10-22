@@ -38,6 +38,7 @@ import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
+import { planNumberedFileTags } from "./bash-view-tags";
 import { checkBashInterception } from "./bash-interceptor";
 import { rewriteGitWorktreeAdd } from "./bash-worktree-rewrite";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
@@ -47,7 +48,7 @@ import { serviceLogs, startService, type ServiceReady } from "../launch/services
 import { isFindEnabled } from "./jfind";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { resolveInlineByteCapBudget } from "./output-meta";
+import { resolveArtifactSpillThreshold, resolveInlineByteCapBudget } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { extractLeadingCdTarget, extractLiteralAndChainSegments, tokenizeShellSegments } from "./shell-tokenize";
 import { ToolAbortError } from "./tool-errors";
@@ -419,15 +420,35 @@ function normalizeReady(ready: ServiceReady | undefined): ServiceReady | undefin
 
 export interface BashToolOptions {}
 
+/** A finished command whose output may hold numbered file rows (see {@link planNumberedFileTags}). */
+interface NumberedView {
+	command: string;
+	cwd: string;
+	output: string;
+}
+
 type ManagedBashJobCompletion =
 	| {
 			kind: "completed";
 			result: AgentToolResult<BashToolDetails>;
+			/** Rows to tag if the foreground waiter returns the result itself. */
+			view?: NumberedView;
 	  }
 	| {
 			kind: "failed";
 			error: unknown;
 	  };
+
+/** The output of a command that ran to completion whole, which alone can vouch for its rows. */
+function numberedView(
+	result: BashResult | BashInteractiveResult,
+	command: string,
+	cwd: string,
+): NumberedView | undefined {
+	if (result.timedOut === true || result.cancelled || result.exitCode === undefined || result.truncated)
+		return undefined;
+	return { command, cwd, output: normalizeResultOutput(result) };
+}
 
 interface ManagedBashJobHandle {
 	jobId: string;
@@ -710,6 +731,37 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 	}
 
+	/**
+	 * Appends the edit tags for the numbered file rows the command printed to
+	 * `text`, the result the model receives now, and records those rows. Past the
+	 * spill threshold the inline cap or the artifact spill cuts the result, so it
+	 * vouches for nothing.
+	 */
+	async #tagNumberedRows(text: string, view: NumberedView): Promise<string> {
+		const spillThreshold = resolveArtifactSpillThreshold(this.session.settings);
+		if (Buffer.byteLength(text) > spillThreshold) return text;
+		const tags = await planNumberedFileTags(this.session, view.command, view.cwd, view.output);
+		if (!tags) return text;
+		const tagged = `${text}\n\n${tags.notice}`;
+		if (Buffer.byteLength(tagged) > spillThreshold) return text;
+		tags.commit();
+		return tagged;
+	}
+
+	async #withNumberedRows(
+		result: AgentToolResult<BashToolDetails>,
+		view: NumberedView,
+	): Promise<AgentToolResult<BashToolDetails>> {
+		const index = result.content.findIndex(block => block.type === "text");
+		const block = result.content[index];
+		if (block?.type !== "text") return result;
+		const text = await this.#tagNumberedRows(block.text, view);
+		if (text === block.text) return result;
+		const content = [...result.content];
+		content[index] = { ...block, text };
+		return { ...result, content };
+	}
+
 	async #buildCompletedResult(
 		result: BashResult | BashInteractiveResult,
 		timeoutSec: number | undefined,
@@ -717,6 +769,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			requestedTimeoutSec?: number;
 			notices?: readonly string[];
 			wallTimeMs?: number;
+			/** Tags the numbered file rows the command printed into the returned result. */
+			view?: { command: string; cwd: string };
 		} = {},
 	): Promise<AgentToolResult<BashToolDetails>> {
 		const exitCode = result.exitCode;
@@ -736,7 +790,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		if (notices.length > 0) outputLines.push("", ...notices);
 		if (failedExit) outputLines.push("", formatExitCodeNotice(exitCode));
-		const outputText = outputLines.join("\n");
+		let outputText = outputLines.join("\n");
+		const view = options.view && numberedView(result, options.view.command, options.view.cwd);
+		if (view) outputText = await this.#tagNumberedRows(outputText, view);
 
 		// Timeouts are not failures — the command ran its course. Return an error
 		// result (isError=true for the model) but flag timedOut so the renderer
@@ -950,7 +1006,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					// Hand the detailed result to the foreground auto-background
 					// waiter (which renders it, footer included) before deciding
 					// the job's terminal state.
-					completion.resolve({ kind: "completed", result: finalResult });
+					completion.resolve({
+						kind: "completed",
+						result: finalResult,
+						view: numberedView(result, options.command, options.commandCwd),
+					});
 					if (finalResult.isError === true) {
 						// A non-zero exit is a completed command that failed. Re-enter
 						// the failure path so the job manager records it as failed and
@@ -1265,7 +1325,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			);
 			if (waitResult.kind === "completed") {
 				autoBgManager.releaseForegroundJob(job.jobId);
-				return waitResult.result;
+				// Only the waiter's own return reaches the model whole and at once; a
+				// backgrounded job's delivery carries no tags.
+				return waitResult.view
+					? await this.#withNumberedRows(waitResult.result, waitResult.view)
+					: waitResult.result;
 			}
 			if (waitResult.kind === "failed") {
 				autoBgManager.releaseForegroundJob(job.jobId);
@@ -1569,6 +1633,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					requestedTimeoutSec,
 					notices: bridgeNotices,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
+					view: { command, cwd: commandCwd },
 				});
 			} finally {
 				clearTimeout(timeoutTimer);
@@ -1655,6 +1720,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			requestedTimeoutSec,
 			notices: pendingNotices,
 			wallTimeMs,
+			view: { command, cwd: commandCwd },
 		});
 	}
 }
