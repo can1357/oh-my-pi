@@ -1014,6 +1014,29 @@ describe("runSubprocess subagent_stop", () => {
 		expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
 	});
 
+	it("does not publish a yield the run was cancelled on before handlers could judge it", async () => {
+		const id = "CancelledBeforeStopPass";
+		const controller = new AbortController();
+		const harness = createHarness({
+			hasStopHandlers: true,
+			onPrompt: call => {
+				call.yieldTerminal({ report: "UNJUDGED-PAYLOAD" });
+				controller.abort();
+			},
+			onStop: async () => ({ decision: "block", reason: "not done" }),
+		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+
+		const result = await runSubprocess({ ...baseOptions(id), signal: controller.signal });
+
+		expect(harness.events).toHaveLength(0);
+		expect(result.exitCode).not.toBe(0);
+		expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeUndefined();
+		expect(result.output).not.toContain("UNJUDGED-PAYLOAD");
+		expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
+	});
+
 	it("drops an allowed candidate when the run is cancelled while the pass revalidates it", async () => {
 		const id = "CancelledDuringRevalidation";
 		const controller = new AbortController();
