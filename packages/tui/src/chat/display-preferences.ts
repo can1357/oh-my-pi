@@ -3,6 +3,7 @@ export interface ChatTranscriptDisplayPreferences {
 	hideToolActivity: boolean;
 	/** Show the interactive shell execution visualization instead of the plain command. */
 	shellVisualization: boolean;
+	collapsedToolTitles: boolean;
 	readToolResultPreview: boolean;
 	showImages: boolean;
 	cacheMissMarker: boolean;
@@ -16,6 +17,7 @@ export interface ChatTranscriptDisplayPreferences {
 export const chatTranscriptDisplayPreferences: ChatTranscriptDisplayPreferences = {
 	hideToolActivity: false,
 	shellVisualization: true,
+	collapsedToolTitles: false,
 	readToolResultPreview: false,
 	showImages: true,
 	cacheMissMarker: false,

@@ -85,6 +85,7 @@ import { cfgCycleOrder } from "../../config/model-settings";
 import {
 	cfgBareExitOnEmptySession,
 	cfgBareSlashCommands,
+	cfgDisplayCollapsedToolTitles,
 	cfgDisplayHideToolActivity,
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
@@ -3091,6 +3092,7 @@ export class InputController {
 				child.setExpanded(false);
 			} else if (child instanceof AssistantMessageComponent) {
 				child.setToolResultImagesVisible(!this.ctx.hideToolActivity);
+				if (!this.ctx.hideToolActivity) child.setExpanded(false);
 			}
 		}
 		this.ctx.chatContainer.setToolActivityVisible(!this.ctx.hideToolActivity);
@@ -3109,9 +3111,10 @@ export class InputController {
 				child.setExpanded(expanded);
 			}
 		}
-		// Toggling expansion mutates every live block; blocks already committed to
-		// terminal history stay at their committed presentation.
-		this.ctx.ui.requestRender(true);
+		// Title mode hides every tool body in committed history too, so Ctrl+O must replay it;
+		// otherwise blocks already committed to terminal history keep their presentation.
+		if (cfgDisplayCollapsedToolTitles.get(this.ctx.settings)) this.ctx.ui.resetDisplay();
+		else this.ctx.ui.requestRender(true);
 	}
 
 	toggleThinkingBlockVisibility(): void {

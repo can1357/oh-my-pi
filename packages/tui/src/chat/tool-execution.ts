@@ -61,6 +61,7 @@ import {
 import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
+import { chatTranscriptDisplayPreferences } from "./display-preferences";
 import { FenceFigure } from "./fence-figure";
 import { SpotlightNotices } from "./spotlight";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
@@ -989,9 +990,13 @@ export class ToolExecutionComponent extends Container {
 			this.#toolName !== "todo" &&
 			!isBackgroundAsyncRunning &&
 			(pendingCallConsumesSpinner || partialResultConsumesSpinner);
+		// A collapsed title row draws its own spinner glyph for any live call.
+		const isLiveTitleRow =
+			this.rendersCollapsedTitleRow() && this.#nativeStatus() === "running" && !isBackgroundAsyncRunning;
 		// TSP terminals clock spinners themselves; the frame counter is ANSI-only.
 		const needsSpinner =
-			!isNativeRendering() && (isStreamingArgs || isLivePartialTool || this.#displaceableByToolName === "wait");
+			!isNativeRendering() &&
+			(isStreamingArgs || isLivePartialTool || isLiveTitleRow || this.#displaceableByToolName === "wait");
 		if (needsSpinner && !this.#spinnerActive) {
 			const frameCount = theme.spinnerFrames.length;
 			const frame = sharedSpinnerFrame(frameCount);
@@ -1091,11 +1096,21 @@ export class ToolExecutionComponent extends Container {
 
 	/** Hold visible results until their figures and Kitty images are ready for immutable scrollback. */
 	isTranscriptBlockPending(): boolean {
+		// A collapsed title row never draws the figure, so its raster cannot gate history.
+		if (chatTranscriptDisplayPreferences.collapsedToolTitles && !this.#expanded) return false;
 		return (
 			this.#toolActivityVisible &&
 			this.#presentation.shown.mode === "full" &&
 			((this.#showImages && this.#kittyConversionsAwaited.size > 0) || this.#figure?.pending === true)
 		);
+	}
+
+	/**
+	 * Whether the block draws only its one-row title (`display.collapsedToolTitles`,
+	 * not expanded). Such a row is compact, so it packs against compact neighbors.
+	 */
+	rendersCollapsedTitleRow(): boolean {
+		return chatTranscriptDisplayPreferences.collapsedToolTitles && !this.#expanded && this.#toolActivityVisible;
 	}
 
 	/**
@@ -1195,6 +1210,7 @@ export class ToolExecutionComponent extends Container {
 	setExpanded(expanded: boolean): void {
 		if (this.#expanded !== expanded) this.#blockVersion++;
 		this.#expanded = expanded;
+		this.#updateSpinnerAnimation();
 		this.#updateDisplay();
 	}
 
@@ -1251,7 +1267,8 @@ export class ToolExecutionComponent extends Container {
 		if (!this.#toolActivityVisible || this.#allocation === 0 || (this.#toolName === "wait" && this.#isBenignSkip())) {
 			return false;
 		}
-		return this.#presentation.shown.mode === "compact";
+		const mode = this.#presentation.shown.mode;
+		return mode === "compact" || (mode === "full" && this.rendersCollapsedTitleRow());
 	}
 
 	/** The file paths this call targets (edit/write/apply_patch args), display-relative. */
@@ -1630,6 +1647,8 @@ export class ToolExecutionComponent extends Container {
 	override invalidate(): void {
 		super.invalidate();
 		this.#updateDisplay();
+		// The title-mode setting may have flipped; spinner needs follow it.
+		this.#updateSpinnerAnimation();
 	}
 
 	#updateDisplay(): void {
@@ -1692,6 +1711,11 @@ export class ToolExecutionComponent extends Container {
 				this.#allocation,
 			);
 		}
+		if (this.rendersCollapsedTitleRow()) {
+			this.#firstResultViewportRepaintShapePainted = false;
+			this.#partialResultShapePainted = false;
+			return this.#renderTitleRow(width);
+		}
 		let lines = super.render(width);
 		if (this.#allocation < 3) {
 			// A squeezed allocation degrades only blocks that genuinely overflow it.
@@ -1739,6 +1763,36 @@ export class ToolExecutionComponent extends Container {
 		const text = this.#compactText(width);
 		if (this.#allocation === 1) return [truncateToWidth(`${this.#compactGlyph()} ${text}`, width)];
 		return [truncateToWidth(`${theme.fg("dim", "╭─")} ${text}`, width), theme.fg("dim", "╰")];
+	}
+
+	/** One row per call: status glyph, tool label, primary target. Ctrl+O restores the full card. */
+	#renderTitleRow(width: number): readonly string[] {
+		const summary = this.#activitySummary();
+		const status = (
+			{ pending: "pending", running: "running", done: "success", error: "error", cancelled: "warning" } as const
+		)[this.#nativeStatus()];
+		// Without a renderer summary the detail is a generic command/path/input guess or a
+		// "running" placeholder; a search's query or pattern names the call better.
+		const generic = this.#renderer?.activitySummary === undefined || summary.detail === "running";
+		const target = ((generic ? this.#titleTarget() : undefined) ?? summary.detail ?? "").replace(/\s+/g, " ").trim();
+		const detail = target ? theme.fg("muted", ` · ${sanitizeText(target)}`) : "";
+		const label = sanitizeText(summary.label).replace(/\s+/g, " ");
+		return [
+			truncateToWidth(
+				`${formatStatusIcon(status, theme, this.#spinnerFrame)} ${theme.fg("toolTitle", theme.bold(label))}${detail}`,
+				width,
+			),
+		];
+	}
+
+	/** Search-style primary targets the shared summary fallback leaves out. */
+	#titleTarget(): string | undefined {
+		if (!isRecord(this.#args)) return undefined;
+		for (const key of ["query", "pattern", "pat", "url"] as const) {
+			const value = this.#args[key];
+			if (typeof value === "string" && value.length > 0) return value.split("\n", 1)[0];
+		}
+		return undefined;
 	}
 
 	#activitySummary(): ToolActivitySummary {

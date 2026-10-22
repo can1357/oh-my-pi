@@ -43,6 +43,7 @@ import { FigureMarkdown } from "./figure-markdown";
 import { svgFigureRendering } from "./svg-figure";
 import { hasSvgFence } from "./svg-source";
 import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from "./table-chart";
+import { chatTranscriptDisplayPreferences } from "./display-preferences";
 
 /**
  * Max wrapped rows of a turn-ending provider error rendered inline in the
@@ -865,7 +866,9 @@ export class AssistantMessageComponent extends Container {
 	setExpanded(expanded: boolean): void {
 		if (this.#errorExpanded === expanded) return;
 		this.#errorExpanded = expanded;
-		if (this.#hasTruncatableError && this.#lastMessage) {
+		const toolImagesFollowExpansion =
+			chatTranscriptDisplayPreferences.collapsedToolTitles && this.#toolImagesByCallId.size > 0;
+		if ((this.#hasTruncatableError || toolImagesFollowExpansion) && this.#lastMessage) {
 			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		}
 	}
@@ -1775,6 +1778,8 @@ export class AssistantMessageComponent extends Container {
 
 	#renderToolImages(): void {
 		if (!this.#showToolResultImages) return;
+		// Title mode: tool-result images belong to the collapsed body, shown with Ctrl+O.
+		if (chatTranscriptDisplayPreferences.collapsedToolTitles && !this.#errorExpanded) return;
 		const entries = Array.from(this.#toolImagesByCallId.entries()).flatMap(([toolCallId, images]) => {
 			const sourcePath = this.#toolMediaPathByCallId.get(toolCallId);
 			return images.map((image, index) => ({ image, key: `${toolCallId}:${index}`, sourcePath }));

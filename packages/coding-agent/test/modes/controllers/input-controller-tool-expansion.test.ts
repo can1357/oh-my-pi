@@ -3,7 +3,7 @@ import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-messa
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { cfgDisplayHideToolActivity } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgDisplayCollapsedToolTitles, cfgDisplayHideToolActivity } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 describe("InputController tool output expansion", () => {
 	it("expands children and forces a full repaint so every live block re-renders", () => {
@@ -14,6 +14,7 @@ describe("InputController tool output expansion", () => {
 		const showStatus = vi.fn();
 		const ctx = {
 			toolOutputExpanded: false,
+			settings: Settings.isolated(),
 			chatContainer: { children: [expandable, inert] },
 			pendingShellContainer: { children: [pendingShell] },
 			ui: { requestRender },
@@ -32,6 +33,28 @@ describe("InputController tool output expansion", () => {
 		expect(showStatus).toHaveBeenCalledWith("Tool output expansion: enabled");
 	});
 
+	it("replays committed history in title mode so retired title rows expand too", () => {
+		const expandable = { setExpanded: vi.fn() };
+		const requestRender = vi.fn();
+		const resetDisplay = vi.fn();
+		const settings = Settings.isolated();
+		cfgDisplayCollapsedToolTitles.set(settings, true);
+		const ctx = {
+			toolOutputExpanded: false,
+			settings,
+			chatContainer: { children: [expandable] },
+			pendingShellContainer: { children: [] },
+			ui: { requestRender, resetDisplay },
+			showStatus: vi.fn(),
+		} as unknown as InteractiveModeContext;
+
+		new InputController(ctx).toggleToolOutputExpansion();
+
+		expect(expandable.setExpanded).toHaveBeenCalledWith(true);
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
+		expect(requestRender).not.toHaveBeenCalled();
+	});
+
 	it("does not expand hidden tool activity and explains why", () => {
 		const expandable = { setExpanded: vi.fn() };
 		const requestRender = vi.fn();
@@ -40,6 +63,7 @@ describe("InputController tool output expansion", () => {
 			hideToolActivity: true,
 			toolOutputExpanded: false,
 			chatContainer: { children: [expandable] },
+			pendingShellContainer: { children: [] },
 			keybindings: { getKeys: vi.fn(() => ["alt+h"]) },
 			showStatus,
 			ui: { requestRender },
@@ -74,6 +98,7 @@ describe("InputController tool activity visibility", () => {
 			toolOutputExpanded: true,
 			settings,
 			chatContainer: { children, clear, addChild, setToolActivityVisible },
+			pendingShellContainer: { children: [] },
 			rebuildChatFromMessages,
 			showStatus,
 			ui: { clearInlineImages, resetDisplay },
@@ -96,8 +121,12 @@ describe("InputController tool activity visibility", () => {
 		expect(showStatus).toHaveBeenLastCalledWith("Tool activity: hidden");
 		expect(setToolResultImagesVisible).toHaveBeenLastCalledWith(false);
 		expect(setToolActivityVisible).toHaveBeenLastCalledWith(false);
-
+		assistant.setExpanded(true);
+		const setAssistantExpanded = vi.spyOn(assistant, "setExpanded");
 		controller.toggleToolActivityVisibility();
+
+		// Unhiding collapses tools, so grouped read images must collapse with them.
+		expect(setAssistantExpanded).toHaveBeenLastCalledWith(false);
 
 		expect(ctx.hideToolActivity).toBe(false);
 		expect(ctx.toolOutputExpanded).toBe(false);

@@ -1,5 +1,6 @@
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { Container } from "../tui";
+import { chatTranscriptDisplayPreferences } from "../chat/display-preferences";
 import { Spacer } from "../components/spacer";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { theme } from "../theme/theme";
@@ -183,6 +184,11 @@ class UsageRowBlock extends Container {
 				style: text => theme.fg("dim", text),
 			}),
 		);
+	}
+
+	/** Title mode packs the turn's metrics against the title rows of its calls. */
+	isTranscriptBlockCompact(): boolean {
+		return chatTranscriptDisplayPreferences.collapsedToolTitles;
 	}
 
 	/**

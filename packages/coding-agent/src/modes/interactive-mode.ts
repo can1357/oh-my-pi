@@ -406,6 +406,7 @@ import {
 	cfgDisplayAdvisorCollapsedLines,
 	cfgDisplayCacheMissMarker,
 	cfgDisplayCollapseCompacted,
+	cfgDisplayCollapsedToolTitles,
 	cfgDisplayHideToolActivity,
 	cfgDisplayPinnedAgents,
 	cfgDisplayShellVisualization,
@@ -516,6 +517,7 @@ const cfgLiveUiSettings = combine({
 	"display.advisorCollapsedLines": cfgDisplayAdvisorCollapsedLines,
 	"display.cacheMissMarker": cfgDisplayCacheMissMarker,
 	"display.collapseCompacted": cfgDisplayCollapseCompacted,
+	"display.collapsedToolTitles": cfgDisplayCollapsedToolTitles,
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
 	"display.showTurnTime": cfgDisplayShowTurnTime,
 	"tui.colorfulMarkdown": cfgTuiColorfulMarkdown,
@@ -4288,6 +4290,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					child.setExpanded(false);
 				} else if (child instanceof AssistantMessageComponent) {
 					child.setToolResultImagesVisible(!hideToolActivity);
+					if (!hideToolActivity) child.setExpanded(false);
 				}
 			}
 			this.chatContainer.setToolActivityVisible(!hideToolActivity);
@@ -4341,6 +4344,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				"display.shellVisualization",
 				"display.cacheMissMarker",
 				"display.collapseCompacted",
+				"display.collapsedToolTitles",
 				"display.showTokenUsage",
 				"display.showTurnTime",
 			)
