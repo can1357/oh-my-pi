@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -13,6 +14,7 @@ from typing import Any, Protocol
 from fastapi import Body, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from robomp import github_events, issue_index
 from robomp.autoclose import AutocloseScheduler
@@ -350,7 +352,14 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                 kill_timeout=cfg.shutdown_kill_timeout_seconds,
             )
 
+    cfg = settings or get_settings()
     app = FastAPI(title="robomp", version="0.1.0", lifespan=lifespan)
+    if cfg.trusted_hosts:
+        allowed_hosts = [h.strip() for h in cfg.trusted_hosts.split(",") if h.strip()]
+        if allowed_hosts:
+            # DNS-rebinding defense-in-depth; unset by default so token-less
+            # loopback dev and existing tests see zero behavior change.
+            app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -545,7 +554,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         cfg: Settings = bag["settings"]
         if cfg.replay_token is None:
             raise HTTPException(404, "replay disabled")
-        if x_robomp_token != cfg.replay_token.get_secret_value():
+        if not hmac.compare_digest((x_robomp_token or "").encode(), cfg.replay_token.get_secret_value().encode()):
             raise HTTPException(401, "invalid replay token")
         db: Database = bag["db"]
         row = db.get_event(delivery_id)
@@ -559,7 +568,17 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
     def _require_trigger_token(cfg: Settings, token: str | None) -> None:
         if cfg.replay_token is None:
             raise HTTPException(404, "trigger disabled (set ROBOMP_REPLAY_TOKEN to enable)")
-        if token != cfg.replay_token.get_secret_value():
+        if not hmac.compare_digest((token or "").encode(), cfg.replay_token.get_secret_value().encode()):
+            raise HTTPException(401, "invalid replay token")
+
+    def _require_read_token(cfg: Settings, token: str | None) -> None:
+        """Gate dashboard read endpoints. With no token configured (loopback
+        dev) reads stay open — there is no credential to protect. With a
+        token set, every read carries the same secret as the write paths.
+        """
+        if cfg.replay_token is None:
+            return
+        if not hmac.compare_digest((token or "").encode(), cfg.replay_token.get_secret_value().encode()):
             raise HTTPException(401, "invalid replay token")
 
     @app.get("/api/github/issues")
@@ -743,7 +762,13 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         )
 
     @app.get("/events")
-    async def events(request: Request, limit: int = 50) -> dict[str, Any]:
+    async def events(
+        request: Request,
+        limit: int = 50,
+        x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
+    ) -> dict[str, Any]:
+        cfg: Settings = request.app.state.bag["settings"]
+        _require_read_token(cfg, x_robomp_token)
         rows = request.app.state.bag["db"].list_events(limit=limit)
         return {
             "events": [
@@ -762,7 +787,13 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         }
 
     @app.get("/issues")
-    async def issues(request: Request, limit: int = 100) -> dict[str, Any]:
+    async def issues(
+        request: Request,
+        limit: int = 100,
+        x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
+    ) -> dict[str, Any]:
+        cfg: Settings = request.app.state.bag["settings"]
+        _require_read_token(cfg, x_robomp_token)
         rows = request.app.state.bag["db"].list_issues(limit=limit)
         return {
             "issues": [
@@ -781,7 +812,13 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         }
 
     @app.get("/releases")
-    async def releases(request: Request, limit: int = 50) -> dict[str, Any]:
+    async def releases(
+        request: Request,
+        limit: int = 50,
+        x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
+    ) -> dict[str, Any]:
+        cfg: Settings = request.app.state.bag["settings"]
+        _require_read_token(cfg, x_robomp_token)
         capped = max(1, min(int(limit), 500))
         rows = request.app.state.bag["db"].list_releases(limit=capped)
         return {"releases": [_release_payload(row) for row in rows]}
@@ -789,13 +826,36 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
         cfg: Settings = request.app.state.bag["settings"]
-        token = cfg.replay_token.get_secret_value() if cfg.replay_token else None
-        return HTMLResponse(render_index(token))
+        # `GET /` is unauthenticated, so the config blob carries the auth
+        # posture only — never the token itself (baking it there disclosed
+        # the credential to anyone who could load the dashboard). The SPA
+        # fetches `/api/config`, gated by the same check, when it needs it.
+        return HTMLResponse(render_index(cfg.replay_token is not None))
+
+    @app.get("/api/config")
+    async def api_config(
+        request: Request,
+        x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
+    ) -> dict[str, Any]:
+        """The only route that hands out the replay token — and only to
+        callers who already present it (same constant-time check as the
+        write paths). With no token configured (open dev mode) it is
+        unauthenticated and reports replay as disabled.
+        """
+        cfg: Settings = request.app.state.bag["settings"]
+        if cfg.replay_token is None:
+            return {"replayEnabled": False, "replayToken": ""}
+        _require_trigger_token(cfg, x_robomp_token)
+        return {"replayEnabled": True, "replayToken": cfg.replay_token.get_secret_value()}
 
     @app.get("/api/status")
-    async def api_status(request: Request) -> dict[str, Any]:
+    async def api_status(
+        request: Request,
+        x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
+    ) -> dict[str, Any]:
         bag = request.app.state.bag
         cfg: Settings = bag["settings"]
+        _require_read_token(cfg, x_robomp_token)
         db: Database = bag["db"]
         pool: _AppPool = bag["pool"]
         started = float(bag.get("started_at") or time.time())
@@ -892,15 +952,21 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         }
 
     @app.get("/api/logs")
-    async def api_logs(request: Request, limit: int = 400) -> dict[str, Any]:
+    async def api_logs(
+        request: Request,
+        limit: int = 400,
+        x_robomp_token: str | None = Header(None, alias="X-Robomp-Replay-Token"),
+    ) -> dict[str, Any]:
         cfg: Settings = request.app.state.bag["settings"]
+        _require_read_token(cfg, x_robomp_token)
         capped = max(1, min(int(limit), 2000))
         entries = tail_jsonl(cfg.log_dir / "robomp.log.jsonl", limit=capped)
         return {"entries": entries, "count": len(entries), "limit": capped}
 
     # Mount the built dashboard bundle. The `index.html` itself is served by
-    # the `@app.get("/")` handler above so the per-instance replay-token can
-    # be substituted; `/static/*` carries the hashed JS/CSS produced by Vite.
+    # the `@app.get("/")` handler above so the per-request config blob (auth
+    # posture, never the token) can be substituted; `/static/*` carries the
+    # hashed JS/CSS produced by Vite.
     app.mount("/static", StaticFiles(directory=static_dir()), name="static")
 
     return app
