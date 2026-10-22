@@ -4,6 +4,11 @@
 
 ### Added
 
+- Added an Amazon product page handler to `read`: it returns the product's title, price, offers, variants, images, specs, description, ratings and reviews, and drops navigation, ads and other products, which cuts a typical page from about 70,000 to under 7,000 tokens ([#16251](https://github.com/can1357/oh-my-pi/pull/16251) by [@HarshalRathore](https://github.com/HarshalRathore))
+
+### Fixed
+
+- Fixed `read` on Amazon product pages missing customer reviews: Amazon sends a trimmed page to the default curl request, so `read` now asks Amazon hosts for the page as a browser with compression ([#16251](https://github.com/can1357/oh-my-pi/pull/16251) by [@HarshalRathore](https://github.com/HarshalRathore))
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 

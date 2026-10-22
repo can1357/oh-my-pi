@@ -3,6 +3,7 @@
  *
  * Builds the specialHandler list for site-specific content extraction.
  */
+import { handleAmazon } from "./amazon";
 import { handleArtifactHub } from "./artifacthub";
 import { handleArxiv } from "./arxiv";
 import { handleAur } from "./aur";
@@ -158,6 +159,8 @@ export const specialHandlers: SpecialHandler[] = [
 	handleOsv,
 	// Crypto
 	handleCoinGecko,
+	// Shopping
+	handleAmazon,
 	// Business
 	handleOpenCorporates,
 	handleSecEdgar,
