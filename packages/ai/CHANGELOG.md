@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Fixed a tool call whose arguments were one complete JSON object followed by stray closing braces or brackets (e.g. `{"a":1}}`) being rejected as unparseable; the first object is now used, while trailing content still keeps the rejection and tells the model to resend exactly one JSON object ([#16644](https://github.com/can1357/oh-my-pi/pull/16644) by [@Komzpa](https://github.com/Komzpa))
 - Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
 
 ## [18.12.4] - 2026-10-20
