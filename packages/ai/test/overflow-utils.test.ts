@@ -40,6 +40,28 @@ describe("context overflow evidence", () => {
 		expect(AIError.is(id, AIError.Flag.PayloadRejected)).toBe(false);
 	});
 
+	it.each([
+		// Requesty, Claude (anthropic/ and bedrock/ routes)
+		'400 {"error":{"origin":"provider","message":"Your input is 222249 tokens, which exceeds the model\'s maximum of 200000 tokens. Please reduce your input and try again."}}',
+		// Requesty, Gemini
+		"400 Your input exceeds the model's maximum of 1048576 tokens. Please reduce your input and try again.",
+		// Zhipu GLM, passed through by Requesty
+		"400 Prompt 超长",
+	])("recognizes gateway-normalized token overflow: %s", errorMessage => {
+		expect(isContextOverflow({ stopReason: "error", errorMessage })).toBe(true);
+		const id = AIError.classifyMessage({ errorMessage, errorStatus: 400 });
+		expect(AIError.is(id, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.PayloadRejected)).toBe(false);
+	});
+
+	it("does not treat an output-budget cap phrased like Requesty's overflow as context overflow", () => {
+		const outputCap = "400 max_tokens exceeds the model's maximum of 8192 tokens";
+		expect(isContextOverflow({ stopReason: "error", errorMessage: outputCap })).toBe(false);
+		const payload = "413 payload too large: requested output exceeds the model's maximum of 8192 tokens";
+		const id = AIError.classifyMessage({ errorMessage: payload, errorStatus: 413 });
+		expect(AIError.is(id, AIError.Flag.PayloadRejected)).toBe(true);
+	});
+
 	it("does not treat an output-token cap as Strata context overflow", () => {
 		const errorMessage = "400 max tokens (25571) exceeds the output limit (16384)";
 		expect(isContextOverflow({ stopReason: "error", errorMessage })).toBe(false);

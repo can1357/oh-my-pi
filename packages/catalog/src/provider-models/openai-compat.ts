@@ -36,6 +36,7 @@ import {
 	type Api,
 	type FetchImpl,
 	type Model,
+	type ModelCost,
 	type ModelKind,
 	type ModelSpec,
 	type OpenAICompat,
@@ -4789,15 +4790,51 @@ const REQUESTY_BASE_URL = "https://router.requesty.ai/v1";
 
 function toPricePerMillionTokens(value: unknown, fallback = 0): number {
 	const num = toNumber(value);
-	return num !== undefined && num >= 0 ? num * 1_000_000 : fallback;
+	return num !== undefined && num >= 0 ? Math.round(num * 1e12) / 1e6 : fallback;
+}
+
+function requestyTierCost(tier: Record<string, unknown>, fallback: TokenCost | undefined): TokenCost {
+	return {
+		input: toPricePerMillionTokens(tier.input_price, fallback?.input ?? 0),
+		output: toPricePerMillionTokens(tier.output_price, fallback?.output ?? 0),
+		cacheRead: toPricePerMillionTokens(tier.cached_price, fallback?.cacheRead ?? 0),
+		cacheWrite: toPricePerMillionTokens(tier.caching_price, fallback?.cacheWrite ?? 0),
+	};
+}
+
+// Requesty prices by prompt-size tier: the threshold-0 tier is the base rate
+// card (also mirrored by the legacy top-level fields), and the first higher
+// tier becomes `longContext`, exclusive like the first-party rows. Live rates
+// are authoritative, so a tier array without a higher tier means none; only a
+// row missing the array entirely keeps the reference tier.
+function mapRequestyCost(entry: OpenAICompatibleModelRecord, reference: ModelSpec<Api> | undefined): ModelCost {
+	const tiers = (Array.isArray(entry.pricing) ? entry.pricing.filter(isRecord) : [])
+		.map(tier => ({ tier, threshold: toNumber(tier.prompt_tokens_threshold) ?? 0 }))
+		.sort((a, b) => a.threshold - b.threshold);
+	const baseTier = tiers.find(({ threshold }) => threshold === 0)?.tier;
+	const base = requestyTierCost(baseTier ? { ...baseTier, ...pickDefinedPrices(entry) } : entry, reference?.cost);
+	const longTier = tiers.find(({ threshold }) => threshold > 0);
+	if (!longTier) {
+		const fallback = Array.isArray(entry.pricing) ? undefined : reference?.cost.longContext;
+		return fallback ? { ...base, longContext: fallback } : base;
+	}
+	return { ...base, longContext: { inputThreshold: longTier.threshold, ...requestyTierCost(longTier.tier, base) } };
+}
+
+function pickDefinedPrices(entry: OpenAICompatibleModelRecord): Record<string, unknown> {
+	const prices: Record<string, unknown> = {};
+	for (const key of ["input_price", "output_price", "cached_price", "caching_price"]) {
+		if (entry[key] !== undefined && entry[key] !== null) prices[key] = entry[key];
+	}
+	return prices;
 }
 
 // Requesty namespaces ids by upstream provider, so Anthropic models are not
 // always `anthropic/`-prefixed (e.g. `bedrock/claude-sonnet-4@us-west-2`).
-function isRequestyAnthropicModel(modelId: string, ownedBy?: string): boolean {
-	const id = modelId.toLowerCase();
-	const owner = ownedBy?.toLowerCase() ?? "";
-	return id.includes("anthropic") || id.includes("claude") || owner.includes("anthropic") || owner.includes("claude");
+// `model_lab` names the model's maker regardless of the hosting route.
+function isRequestyAnthropicModel(modelId: string, entry?: OpenAICompatibleModelRecord): boolean {
+	if (typeof entry?.model_lab === "string" && entry.model_lab.toLowerCase() === "anthropic") return true;
+	return classifyModel("requesty", modelId, { lenient: true }).class === "anthropic";
 }
 
 export function requestyModelManagerOptions(config?: RequestyModelManagerConfig): ModelManagerOptions<Api> {
@@ -4807,6 +4844,9 @@ export function requestyModelManagerOptions(config?: RequestyModelManagerConfig)
 	return {
 		providerId: "requesty",
 		dynamicModelsAuthoritative: true,
+		// Live rates are authoritative: an explicit zero is a free route, not a
+		// missing price (missing fields already fall back to the reference).
+		dynamicCostAuthoritative: true,
 		fetchDynamicModels: () =>
 			fetchOpenAICompatibleModels<Api>({
 				api: "openai-completions",
@@ -4816,26 +4856,26 @@ export function requestyModelManagerOptions(config?: RequestyModelManagerConfig)
 				mapModel: (entry, defaults) => {
 					const reference = references.get(defaults.id);
 					const model = mapWithBundledReference(entry, defaults, reference);
-					const ownedBy = typeof entry.owned_by === "string" ? entry.owned_by : undefined;
-					const api: Api = isRequestyAnthropicModel(defaults.id, ownedBy)
+					const api: Api = isRequestyAnthropicModel(defaults.id, entry)
 						? "anthropic-messages"
 						: "openai-completions";
-					const cost = {
-						input: toPricePerMillionTokens(entry.input_price, reference?.cost.input ?? 0),
-						output: toPricePerMillionTokens(entry.output_price, reference?.cost.output ?? 0),
-						cacheRead: toPricePerMillionTokens(entry.cached_price, reference?.cost.cacheRead ?? 0),
-						cacheWrite: toPricePerMillionTokens(entry.caching_price, reference?.cost.cacheWrite ?? 0),
-					};
 					return {
 						...model,
 						api,
 						name: typeof entry.name === "string" && entry.name.length > 0 ? entry.name : model.name,
-						reasoning: entry.supports_reasoning === true || (reference?.reasoning ?? false),
+						// Mapped as reported; misreported reasoning is corrected in requesty.kdl.
+						reasoning:
+							typeof entry.supports_reasoning === "boolean"
+								? entry.supports_reasoning
+								: (reference?.reasoning ?? false),
 						input:
 							entry.supports_vision === true || (reference?.input.includes("image") ?? false)
 								? ["text", "image"]
 								: ["text"],
-						cost,
+						...(typeof entry.supports_tool_calling === "boolean"
+							? { supportsTools: entry.supports_tool_calling }
+							: {}),
+						cost: mapRequestyCost(entry, reference),
 						contextWindow: toPositiveNumber(
 							entry.context_window,
 							reference?.contextWindow ?? defaults.contextWindow ?? 128000,

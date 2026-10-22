@@ -175,7 +175,10 @@ export function mergePreviousSnapshotModels(
 	return merged;
 }
 
-async function resolveProviderApiKey(providerId: string, catalog: CatalogDiscoveryConfig): Promise<string | undefined> {
+export async function resolveProviderApiKey(
+	providerId: string,
+	catalog: CatalogDiscoveryConfig,
+): Promise<string | undefined> {
 	if (catalog.ignoreApiKey) {
 		return undefined;
 	}

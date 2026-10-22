@@ -339,6 +339,9 @@
 - Added `CatalogPolicyInputs` so catalog-policy lookups accept a reduced model view ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
 - Added a catalog conformance test that fails the build when a `bundle="always"` seed row is missing from the bundled `models.json`, so a stale-snapshot regeneration can no longer silently drop an engine the way `web/deepseek` was lost in 18.12.2 ([#16610](https://github.com/can1357/oh-my-pi/issues/16610), [#17053](https://github.com/can1357/oh-my-pi/pull/17053) by [@ouyangjiahong26](https://github.com/ouyangjiahong26))
 - Added Requesty as a model provider, including public catalog discovery from `https://router.requesty.ai/v1/models`, per-model pricing and limits, and dual-API routing — Claude-family ids (including upstream-prefixed ids like `bedrock/claude-sonnet-4@us-west-2`) via `anthropic-messages`, everything else via `openai-completions`.
+- Added Requesty as a model provider: public catalog discovery with long-context price tiers, Claude routed over `anthropic-messages` and everything else over `openai-completions`, plus provider rules that send the `minimal` effort as Requesty's `min`, repair reasoning Requesty under-reports (Claude 4.5 on every route), and keep a Gemini `web_search` tool from being swapped for Google Search ([#6492](https://github.com/can1357/oh-my-pi/pull/6492) by [@ApplY3D](https://github.com/ApplY3D))
+- Added the `ignore-api-key` discovery property: catalog generation skips every stored credential for that provider so the bundle reflects its full public catalog instead of one account's roster ([#6492](https://github.com/can1357/oh-my-pi/pull/6492) by [@ApplY3D](https://github.com/ApplY3D))
+- The `escape-builtin-tool-names` rule now also applies to `openai-completions` models ([#6492](https://github.com/can1357/oh-my-pi/pull/6492) by [@ApplY3D](https://github.com/ApplY3D))
 
 ### Changed
 

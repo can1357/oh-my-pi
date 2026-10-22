@@ -345,6 +345,12 @@ export interface OpenAICompat {
 	requiresThinkingAsText?: boolean;
 	/** Whether tool call IDs must be normalized to Mistral format (exactly 9 alphanumeric chars). Default: auto-detected from URL. */
 	requiresMistralToolIds?: boolean;
+	/**
+	 * Prefix client tools named like a gateway built-in (`web_search`) on the
+	 * wire, and strip the prefix from returned calls, so they stay ordinary
+	 * function tools. Some gateways swap such names for native server tools.
+	 */
+	escapeBuiltinToolNames?: boolean;
 	/** Format for reasoning/thinking parameter. `"kimi"` uses `thinking: { type, effort }`; other values select their provider-native reasoning fields. Default: `"openai"`. */
 	thinkingFormat?: OpenAIReasoningFormat;
 	/** Kimi Code transport selected by live per-model protocol metadata. User settings take precedence. */
@@ -1110,6 +1116,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsSteering"
 			| "stripImageInput"
 			| "whenThinking"
+			| "escapeBuiltinToolNames"
 		>
 	> & {
 		vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
@@ -1118,6 +1125,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		thinkingKeep?: OpenAICompat["thinkingKeep"];
 		streamIdleTimeoutMs?: number;
 		stripThinkingHistory?: boolean;
+		escapeBuiltinToolNames?: boolean;
 		/** The configured `baseUrl` is the official OpenAI API (provider `openai`); unset otherwise. */
 		officialEndpoint?: boolean;
 		toolStrictMode: ResolvedToolStrictMode;

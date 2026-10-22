@@ -726,7 +726,11 @@ function mergeDynamicModel<TApi extends Api>(
 		: liveReasoning === true || fallbackReasoning === true
 			? true
 			: (liveReasoning ?? fallbackReasoning);
-	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
+	// An authoritative rate card also owns the tier's absence: a route that
+	// dropped its long-context surcharge must not regain the bundled one.
+	const longContextCost = authority.cost
+		? dynamicModel.cost.longContext
+		: (dynamicModel.cost.longContext ?? existingModel.cost.longContext);
 	const timeBasedCost = dynamicModel.cost.timeBased ?? existingModel.cost.timeBased;
 	const existingHeaders = existingModel.resolveHeaders ?? existingModel.headers;
 	const dynamicHeaders = dynamicModel.resolveHeaders ?? dynamicModel.headers;
