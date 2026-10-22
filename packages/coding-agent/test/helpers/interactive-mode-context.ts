@@ -31,6 +31,8 @@
  * that also import the module-level `settings` need the global initialized.
  */
 import { vi } from "bun:test";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { isSettingsInitialized, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
@@ -115,6 +117,15 @@ export function createSessionStub(
 		effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
 		modelRegistry: {},
 		getToolByName: () => undefined,
+		buildToolContext: (): AgentToolContext => ({
+			sessionManager,
+			settings: sessionSettings,
+			modelRegistry: stub.modelRegistry as ModelRegistry,
+			model: stub.model,
+			isIdle: () => !stub.isStreaming,
+			hasQueuedMessages: () => stub.queuedMessageCount > 0,
+			abort: vi.fn(),
+		}),
 		hasBuiltInTool: () => true,
 		getLastAssistantMessage: () => undefined,
 		agent: {

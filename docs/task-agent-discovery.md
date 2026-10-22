@@ -223,11 +223,40 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 For task dispatch, model precedence is:
 
-1. `task.agentModelOverrides[agentName]`
-2. the agent frontmatter's prioritized `model` list
-3. the parent's active model, then its configured/default model fallback
+1. the call's per-call `model` (task item / flat call, eval `agent()` / `workpool()`; see below)
+2. `task.agentModelOverrides[agentName]`
+3. the agent frontmatter's prioritized `model` list
+4. the parent's active model, then its configured/default model fallback
 
-Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
+Role aliases in steps 2 and 3 are expanded through `modelRoles`. Host callers (SDK `runStructuredSubagent({ model })`, `omp cleanse --model`, and host `/seance` with its pickers) supply an ungated model ahead of the settings override. A model-facing `model` naming the bundled seance agent is not ungated; it is a per-call model (see below).
+
+### Per-call `model`
+
+`task.perCallModel` decides where a model-facing call may pick its model:
+
+| Value | Behavior |
+| --- | --- |
+| `off` (default) | A task item, flat call, `agent()` or `workpool()` that passes `model` fails preflight. The field stays in the task schema so it is rejected rather than silently dropped. |
+| `eval` | Accepted by eval `agent()` and `workpool()` only; task items behave as `off`. Use it to route a specialist (e.g. a pinned `reviewer`) from a script while ordinary delegation keeps its configured routing. |
+| `on` | Accepted everywhere. |
+
+A per-call `model` is exactly one `provider/model-id`, optionally followed by a supported `:level` (for example `anthropic/claude-sonnet-4-5:high`). Role aliases (including `@default`), arrays, comma lists, globs and partial ids fail preflight. It is matched literally against the available chat models; there is no fuzzy resolution, and a non-chat model is rejected with that reason.
+
+The model must be one the operator already routes to:
+
+- a configured chat role's `modelRoles` value (non-chat roles such as `image`, `web` and `judge` grant nothing, and role aliases inside a value are not expanded into built-in defaults),
+- the selected bundled or user-level agent's frontmatter `model` (a project agent's frontmatter never grants, so an agent file in the repository cannot widen the set),
+- the parent's live model.
+
+Globs in those values grant every chat model they match; any other value grants the one model it resolves to. Catalog membership, credentials, built-in role defaults and saved transcripts grant nothing. `task.perCallModelAllow`, when set, is a list of exact `provider/model-id` entries that narrows the result: the model must be granted and listed.
+
+An ordinary agent's `model` fails preflight with a conflict error if it has a `task.agentModelOverrides` entry, so the operator's override is never silently replaced. The bundled seance agent's model-facing `model` is a per-call model held to the same gate, exact-selector and approval rules: it is refused unless `task.perCallModel` allows it. Without `model`, its saved source-session selectors are tried in order and unapproved ones are skipped; if none is approved, stop and report the error rather than substituting another model. As before, the bundled seance uses its saved source model or explicit selection instead of `task.agentModelOverrides.seance`. A project or user agent that shadows the `seance` name is an ordinary agent: its `model` is a per-call `model`, held to every rule here.
+
+The saved-selector approval check applies even with `task.perCallModel: off` or `eval`; those modes disable explicit task `model` values, not approved saved models. Model-facing seance workers, including the saved-model path, retain the same running-worker grant checks and no-fallback guarantees described below. Host `/seance` workers remain ungated.
+
+A per-call worker never switches its main-loop model: retry fallback, context promotion and prewalk are off for it, and a requested model that is unavailable or has no working credentials fails the call rather than running on the parent's model. Every main-loop request is checked against the grants read from current settings, so an extension replacement or a settings change cannot move it to an unapproved model. A cold registry at preflight is checked again before the child session is created. Cold revival re-applies the check and grants the agent's frontmatter only while that agent is still discovered. Changing `task.perCallModel` affects new calls only. Side requests the session makes for its own maintenance (compaction summaries via `compactionModel` or the compaction fallback, and advisor calls) use their own configured models and are not covered by this check.
+
+A spawn with a per-call `model` runs under `task.maxEffort` as a hard ceiling, like the `effort` hint: a `:level` above the ceiling is clamped, and a model whose lowest supported effort is above it fails the spawn and every later request. Cold revival restores the ceiling from the live setting and refuses to revive onto a model whose lowest effort is above it.
 
 After policy resolution, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block the spawn or replace the resolved model patterns; a routing note is carried into progress metadata.
 

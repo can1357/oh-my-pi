@@ -1,2 +1,2 @@
-Historical consults: use `agent: "seance"` with `sourceSession` (id/path); optional `model` overrides the saved source model. The source stays unchanged.
-If the saved model is absent/unavailable, set `model` explicitly.
+Historical consults: use `agent: "seance"` with `sourceSession` (id/path). Optional `model` must be one exact approved `provider/model-id[:level]`, and `task.perCallModel` must allow it; otherwise the call fails. The source stays unchanged.
+Without `model`, saved source selectors are tried in order and unapproved ones are skipped. If none is approved, the call stops and reports; do not switch to another model after a failure.

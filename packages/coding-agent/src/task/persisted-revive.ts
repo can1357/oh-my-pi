@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { assertModelSupportsEffortCeiling } from "@oh-my-pi/pi-tui/thinking";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveAgentAdvisorRolePattern } from "../config/model-resolver";
 import { formatModelRoleAlias } from "../config/model-roles";
@@ -31,7 +33,9 @@ import {
 	subagentRetryFallbackRole,
 } from "./executor";
 import { isCompletionProbeEnabled } from "./completion-probe";
-import { cfgTaskAgentAccountPools } from "./settings";
+import { discoverAgents, getAgent } from "./discovery";
+import { assertPerCallModelApproved } from "./model-approval";
+import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";
@@ -163,6 +167,23 @@ export function createPersistedSubagentReviverFactory(
 					`Cannot revive subagent "${ref.id}": session file "${sessionFile}" has no message history (truncated to header/session_init). The agent was not revived.`,
 				);
 			}
+			// The agent's frontmatter model grants a per-call worker only while that agent is still discovered.
+			const configuredAgent =
+				init.perCallModel && init.agent
+					? getAgent(
+							[
+								...(
+									await discoverAgents(
+										ctx.session.sessionManager.getCwd(),
+										undefined,
+										ctx.session.effectiveExtensionRoots,
+									)
+								).agents,
+								...ctx.session.getSessionAgents(),
+							],
+							init.agent,
+						)
+					: undefined;
 			// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
 			// advisor-role model, anything else = the pattern stamped onto this
 			// session's `modelRoles.advisor`. Spawn persists it already expanded
@@ -260,6 +281,31 @@ export function createPersistedSubagentReviverFactory(
 					asyncJobManager: ctx.session.asyncJobManager,
 					parentAgentId: ref.parentId,
 					oauthAccountPools,
+					// A per-call model is held to the operator's current grants, not the transcript's,
+					// never switches models, and keeps the live task.maxEffort ceiling the spawn ran under.
+					...(init.perCallModel
+						? {
+								thinkingLevelCeiling: cfgTaskMaxEffort.get(ctx.settings),
+								disableModelFallback: true,
+								assertDispatchModel: (model: Model) => {
+									assertPerCallModelApproved(
+										model,
+										{
+											settings: ctx.settings,
+											agentName: init.agent ?? ref.displayName,
+											agentModel: configuredAgent?.model,
+											agentSource: configuredAgent?.source,
+											agentRemoved: configuredAgent === undefined,
+											parentModelPattern: ctx.session.model
+												? `${ctx.session.model.provider}/${ctx.session.model.id}`
+												: undefined,
+										},
+										ctx.modelRegistry,
+									);
+									assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(ctx.settings));
+								},
+							}
+						: {}),
 					expectedAgentRef: expectedRef,
 					taskDepth,
 					toolNames: revivedToolNames,
@@ -293,6 +339,17 @@ export function createPersistedSubagentReviverFactory(
 			} catch (error) {
 				mcpFollower?.dispose();
 				throw error;
+			}
+			// A per-call worker whose model cannot run at or below the live ceiling fails instead
+			// of running at the model's floor, as its spawn would.
+			if (init.perCallModel && session.model) {
+				try {
+					assertModelSupportsEffortCeiling(session.model, cfgTaskMaxEffort.get(ctx.settings));
+				} catch (error) {
+					mcpFollower?.dispose();
+					await session.dispose();
+					throw error;
+				}
 			}
 			mcpFollower?.bind(session);
 			// Clamp the active set to the persisted list: createAgentSession's

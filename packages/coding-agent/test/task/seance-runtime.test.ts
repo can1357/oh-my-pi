@@ -1,11 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import type { MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -14,6 +18,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import subagentSystemPromptTemplate from "../../src/prompts/system/subagent-system-prompt.md" with { type: "text" };
 import seanceAssignmentTemplate from "../../src/prompts/system/seance-assignment.md" with { type: "text" };
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -116,14 +123,249 @@ function revivalParent(cwd: string, preparedExtensions: PreparedExtension[]): Ag
 	} as unknown as AgentSession;
 }
 
+const MODEL_GATE_API_SOURCE = "seance-runtime-model-gate-test";
+
+async function modelGateFixture(root: string, settingsOverrides: Record<string, unknown> = {}) {
+	const cwd = path.join(root, "project");
+	await fs.mkdir(cwd, { recursive: true });
+	const approved = createMockModel({
+		id: "approved-seance-model",
+		handler: () => ({ content: ["Approved historical answer."] }),
+	});
+	const unapproved = createMockModel({
+		id: "unapproved-seance-model",
+		handler: () => ({ content: ["Unapproved historical answer."] }),
+	});
+	const models: MockModel[] = [approved, unapproved];
+	const authStorage = await AuthStorage.create(":memory:");
+	authStorage.keys.setRuntime("mock", "credentialed-but-not-approved");
+	const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
+	vi.spyOn(modelRegistry, "getAvailable").mockReturnValue(models);
+	vi.spyOn(modelRegistry, "getAvailableForProviders").mockReturnValue(models);
+	vi.spyOn(modelRegistry, "getAll").mockReturnValue(models);
+	vi.spyOn(modelRegistry, "find").mockImplementation((provider, id) =>
+		models.find(model => model.provider === provider && model.id === id),
+	);
+	const sourceFile = path.join(root, "source.jsonl");
+	const sourceText = `${[
+		sourceHeader("source-session", cwd),
+		{
+			type: "model_change",
+			id: "default-model",
+			parentId: null,
+			timestamp: "2026-10-01T00:00:01.000Z",
+			model: `mock/${approved.id}`,
+			role: "default",
+		},
+		{
+			type: "model_change",
+			id: "active-model",
+			parentId: "default-model",
+			timestamp: "2026-10-01T00:00:02.000Z",
+			model: `mock/${unapproved.id}`,
+			role: "fast",
+		},
+		{ ...sourceMessage(), parentId: "active-model" },
+	]
+		.map(entry => JSON.stringify(entry))
+		.join("\n")}\n`;
+	await Bun.write(sourceFile, sourceText);
+	const seance = getBundledAgent("seance");
+	if (!seance) throw new Error("Expected the bundled seance agent");
+	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [seance], projectAgentsDir: null });
+	const settings = Settings.isolated({
+		"task.perCallModel": "on",
+		"task.maxRecursionDepth": 2,
+		"compaction.enabled": false,
+		"retry.enabled": false,
+		"todo.enabled": false,
+		modelRoles: { review: `mock/${approved.id}` },
+		...settingsOverrides,
+	});
+	const session = {
+		cwd,
+		hasUI: false,
+		settings,
+		authStorage,
+		modelRegistry,
+		getApiKey: async () => "credentialed-but-not-approved",
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		getSessionAgents: () => [],
+		enableLsp: false,
+		enableMCP: false,
+		enableIrc: false,
+	} as unknown as ToolSession;
+	return { session, authStorage, modelRegistry, sourceFile, sourceText, approved, unapproved };
+}
+
 beforeEach(() => {
 	AgentRegistry.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
 });
 
 afterEach(() => {
 	IrcBus.resetGlobalForTests();
+	vi.restoreAllMocks();
+	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
+});
+
+describe("model-facing seance model approval", () => {
+	it("rejects an unapproved credentialed explicit model before dispatching a seance", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-unapproved-model-");
+		const fixture = await modelGateFixture(tempDir.path());
+		try {
+			expect(fixture.modelRegistry.hasConfiguredAuth(fixture.unapproved)).toBe(true);
+			await expect(
+				runStructuredSubagent({
+					session: fixture.session,
+					invocationKind: "task",
+					agent: "seance",
+					assignment: "Read the historical request.",
+					sourceSession: fixture.sourceFile,
+					seanceModel: `mock/${fixture.unapproved.id}`,
+					structured: false,
+					keepAlive: false,
+				}),
+			).rejects.toThrow(/not approved.*Catalog or credentials alone/i);
+			expect(fixture.unapproved.calls).toHaveLength(0);
+			expect(await Bun.file(fixture.sourceFile).text()).toBe(fixture.sourceText);
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("skips an unapproved saved active model and dispatches the approved saved default with per-call models off", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-approved-default-");
+		const fixture = await modelGateFixture(tempDir.path(), { "task.perCallModel": "off" });
+		registerMockApi(MODEL_GATE_API_SOURCE);
+		try {
+			const execution = await runStructuredSubagent({
+				session: fixture.session,
+				invocationKind: "task",
+				agent: "seance",
+				assignment: "Read the historical request.",
+				sourceSession: fixture.sourceFile,
+				structured: false,
+				identity: { id: "ApprovedSavedSeance" },
+				keepAlive: false,
+			});
+			expect(execution.result.exitCode).toBe(0);
+			expect(execution.result.output).toContain("Approved historical answer.");
+			expect(execution.result.resolvedModel).toBe(`mock/${fixture.approved.id}`);
+			expect(fixture.approved.calls).toHaveLength(1);
+			expect(fixture.unapproved.calls).toHaveLength(0);
+			expect(await Bun.file(fixture.sourceFile).text()).toBe(fixture.sourceText);
+		} finally {
+			unregisterCustomApis(MODEL_GATE_API_SOURCE);
+			fixture.authStorage.close();
+		}
+	});
+
+	it("stops and reports when no saved seance model is approved even with a configured override", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-no-approved-saved-");
+		const fixture = await modelGateFixture(tempDir.path(), {
+			"task.agentModelOverrides": { seance: "mock/unapproved-seance-model" },
+		});
+		fixture.session.settings.setModelRole("review", "mock/operator-only-model");
+		try {
+			await expect(
+				runStructuredSubagent({
+					session: fixture.session,
+					invocationKind: "task",
+					agent: "seance",
+					assignment: "Read the historical request.",
+					sourceSession: fixture.sourceFile,
+					structured: false,
+					keepAlive: false,
+				}),
+			).rejects.toMatchObject({
+				kind: "preflight",
+				message: expect.stringMatching(/approved saved.*Stop and report/i),
+			});
+			expect(fixture.approved.calls).toHaveLength(0);
+			expect(fixture.unapproved.calls).toHaveLength(0);
+			expect(await Bun.file(fixture.sourceFile).text()).toBe(fixture.sourceText);
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("dispatches an approved exact explicit seance model", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-approved-explicit-");
+		const fixture = await modelGateFixture(tempDir.path());
+		registerMockApi(MODEL_GATE_API_SOURCE);
+		try {
+			const execution = await runStructuredSubagent({
+				session: fixture.session,
+				invocationKind: "task",
+				agent: "seance",
+				assignment: "Read the historical request.",
+				sourceSession: fixture.sourceFile,
+				seanceModel: `mock/${fixture.approved.id}`,
+				structured: false,
+				identity: { id: "ApprovedExplicitSeance" },
+				keepAlive: false,
+			});
+			expect(execution.result.exitCode).toBe(0);
+			expect(execution.result.output).toContain("Approved historical answer.");
+			expect(execution.result.resolvedModel).toBe(`mock/${fixture.approved.id}`);
+			expect(fixture.approved.calls).toHaveLength(1);
+			expect(fixture.unapproved.calls).toHaveLength(0);
+		} finally {
+			unregisterCustomApis(MODEL_GATE_API_SOURCE);
+			fixture.authStorage.close();
+		}
+	});
+
+	it("refuses the first seance provider request after the operator revokes approval during startup", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-revoked-model-");
+		const fixture = await modelGateFixture(tempDir.path());
+		const eventBus = new EventBus();
+		fixture.session.eventBus = eventBus;
+		let reachedStartedBoundary = false;
+		const unsubscribe = eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload => {
+			if (
+				!payload ||
+				typeof payload !== "object" ||
+				!("id" in payload) ||
+				payload.id !== "RevokedSeance" ||
+				!("status" in payload) ||
+				payload.status !== "started"
+			) {
+				return;
+			}
+			reachedStartedBoundary = true;
+			fixture.session.settings.setModelRole("review", "mock/operator-only-model");
+		});
+		registerMockApi(MODEL_GATE_API_SOURCE);
+		try {
+			const execution = await runStructuredSubagent({
+				session: fixture.session,
+				invocationKind: "task",
+				agent: "seance",
+				assignment: "Read the historical request.",
+				sourceSession: fixture.sourceFile,
+				seanceModel: `mock/${fixture.approved.id}`,
+				structured: false,
+				identity: { id: "RevokedSeance" },
+				keepAlive: false,
+			});
+			expect(reachedStartedBoundary).toBe(true);
+			expect(execution.result.exitCode).not.toBe(0);
+			expect(`${execution.result.error ?? ""}${execution.result.stderr}${execution.result.output}`).toMatch(
+				/not approved/,
+			);
+			expect(fixture.approved.calls).toHaveLength(0);
+			expect(fixture.unapproved.calls).toHaveLength(0);
+		} finally {
+			unsubscribe();
+			unregisterCustomApis(MODEL_GATE_API_SOURCE);
+			fixture.authStorage.close();
+		}
+	});
 });
 
 describe("seance startup contracts", () => {

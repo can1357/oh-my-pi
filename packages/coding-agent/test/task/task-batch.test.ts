@@ -14,20 +14,27 @@
  *    runtime for internal callers.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import * as path from "node:path";
+import { Agent, type AgentTool, type AgentToolContext, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import * as taskModule from "@oh-my-pi/pi-coding-agent/task";
+import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgTaskDisabledAgents, cfgTaskEnableEffort, cfgTaskStructured } from "@oh-my-pi/pi-coding-agent/task/settings";
 
@@ -100,6 +107,58 @@ function mockDiscovery(agent: AgentDefinition | AgentDefinition[] = taskAgent): 
 		projectAgentsDir: null,
 	});
 }
+
+async function seanceSession(
+	root: string,
+	settings: Record<string, unknown>,
+): Promise<{
+	session: ToolSession;
+	context: AgentToolContext;
+	authStorage: AuthStorage;
+	sourceFile: string;
+	modelSelector: string;
+}> {
+	const seance = getBundledAgent("seance");
+	if (!seance) throw new Error("Expected the bundled seance agent");
+	mockDiscovery([taskAgent, seance]);
+	const model = createMockModel({ id: "requested-seance-model" });
+	const modelSelector = `mock/${model.id}`;
+	const authStorage = await AuthStorage.create(":memory:");
+	authStorage.keys.setRuntime("mock", "credentialed-but-not-approved");
+	const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
+	vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([model]);
+	vi.spyOn(modelRegistry, "getAvailableForProviders").mockReturnValue([model]);
+	vi.spyOn(modelRegistry, "find").mockImplementation((provider, id) =>
+		provider === model.provider && id === model.id ? model : undefined,
+	);
+	const sourceFile = path.join(root, "source.jsonl");
+	await Bun.write(
+		sourceFile,
+		`${JSON.stringify({
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id: "source-session",
+			timestamp: "2026-10-01T00:00:00.000Z",
+			cwd: root,
+		})}\n`,
+	);
+	const session = Object.assign(createSession({ settings: { "async.enabled": false, ...settings } }), {
+		cwd: root,
+		authStorage,
+		modelRegistry,
+	});
+	const context: AgentToolContext = {
+		sessionManager: SessionManager.inMemory(root),
+		settings: session.settings,
+		modelRegistry,
+		model,
+		isIdle: () => true,
+		hasQueuedMessages: () => false,
+		abort: () => {},
+	};
+	return { session, context, authStorage, sourceFile, modelSelector };
+}
+
 describe("task.batch schema gating", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -838,5 +897,313 @@ describe("task.batch spawning", () => {
 		expect(last?.async?.state).toBe("failed");
 		expect(last?.progress?.find(p => p.id === "Second")?.status).toBe("aborted");
 		expect(last?.progress?.find(p => p.id === "First")?.status).toBe("completed");
+	});
+});
+
+describe("batch model placement", () => {
+	afterEach(() => vi.restoreAllMocks());
+	it("rejects a top-level model before dispatch even when wire validation is bypassed", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true, "async.enabled": false } }));
+		const result = await tool.execute("batch-model", {
+			context: "Shared context",
+			model: "p/requested",
+			tasks: [{ task: "Do work" }],
+		});
+		expect(getFirstText(result)).toMatch(/model.*tasks|model.*item/i);
+		expect(result.isError).toBe(true);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		["off", "batch"],
+		["eval", "batch"],
+		["off", "flat"],
+		["eval", "flat"],
+	] as const)(
+		"rejects a task call's model before dispatch while task.perCallModel is %s (%s call)",
+		async (mode, shape) => {
+			const batch = shape === "batch";
+			mockDiscovery();
+			const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+			const tool = await TaskTool.create(
+				createSession({ settings: { "task.batch": batch, "async.enabled": false, "task.perCallModel": mode } }),
+			);
+			const work = { task: "Do work", solutionSpace: "c", model: "p/requested" };
+			// Through shared argument validation, as a model's tool call arrives: `model` must reach preflight in both shapes.
+			const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+				type: "toolCall",
+				id: "task-model",
+				name: tool.name,
+				arguments: batch ? { context: "Shared context", tasks: [work] } : work,
+			});
+			const result = await tool.execute("task-model", args as TaskParams);
+			expect(getFirstText(result)).toMatch(/per-call model is disabled/i);
+			expect(result.isError).toBe(true);
+			expect(run).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(["off", "on"] as const)(
+		"holds a project agent named seance to the per-call gate while task.perCallModel is %s",
+		async mode => {
+			mockDiscovery([
+				taskAgent,
+				{ name: "seance", description: "Shadow", systemPrompt: "Work.", source: "project", model: ["p/own"] },
+			]);
+			const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+			const tool = await TaskTool.create(
+				createSession({
+					settings: {
+						"task.batch": true,
+						"async.enabled": false,
+						"task.perCallModel": mode,
+						"task.agentModelOverrides": { seance: "p/own" },
+					},
+				}),
+			);
+			const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+				type: "toolCall",
+				id: "seance-shadow",
+				name: tool.name,
+				arguments: {
+					context: "Shared context",
+					tasks: [{ agent: "seance", task: "Do work", solutionSpace: "c", model: "p/ungranted" }],
+				},
+			});
+			const result = await tool.execute("seance-shadow", args as TaskParams);
+			expect(getFirstText(result)).toMatch(
+				mode === "off" ? /per-call model is disabled/i : /conflicts with task\.agentModelOverrides/,
+			);
+			expect(result.isError).toBe(true);
+			expect(run).not.toHaveBeenCalled();
+		},
+	);
+});
+
+describe("bundled seance model call boundaries", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	it.each([
+		["off", "batch"],
+		["eval", "batch"],
+		["off", "flat"],
+	] as const)(
+		"rejects an approved explicit seance model while task.perCallModel is %s (%s call)",
+		async (mode, shape) => {
+			using tempDir = TempDir.createSync("@omp-seance-model-off-");
+			const batch = shape === "batch";
+			const fixture = await seanceSession(tempDir.path(), {
+				"task.batch": batch,
+				"task.perCallModel": mode,
+				modelRoles: { review: "mock/requested-seance-model" },
+			});
+			const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+			try {
+				const tool = await TaskTool.create(fixture.session);
+				const work = {
+					agent: "seance",
+					task: "Read the historical request.",
+					solutionSpace: "Read-only consultation.",
+					sourceSession: fixture.sourceFile,
+					model: fixture.modelSelector,
+				};
+				const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+					type: "toolCall",
+					id: "seance-model-off",
+					name: "task",
+					arguments: batch ? { context: "Historical context", tasks: [work] } : work,
+				});
+				const result = await tool.execute("seance-model-off", args);
+				expect(result.isError).toBe(true);
+				expect(getFirstText(result)).toMatch(/per-call model is disabled/i);
+				expect(run).not.toHaveBeenCalled();
+			} finally {
+				fixture.authStorage.close();
+			}
+		},
+	);
+
+	it.each([
+		["candidate arrays", ["mock/requested-seance-model"]],
+		["role aliases", "@review"],
+		["model patterns", "mock/*"],
+	] as const)("rejects %s in a model-facing seance item", async (_label, model) => {
+		using tempDir = TempDir.createSync("@omp-seance-model-selectors-");
+		const fixture = await seanceSession(tempDir.path(), {
+			"task.batch": true,
+			"task.perCallModel": "on",
+			modelRoles: { review: "mock/requested-seance-model" },
+		});
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		try {
+			const tool = await TaskTool.create(fixture.session);
+			const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+				type: "toolCall",
+				id: "seance-invalid-model",
+				name: "task",
+				arguments: {
+					context: "Historical context",
+					tasks: [{ agent: "seance", task: "Consult the transcript.", sourceSession: fixture.sourceFile, model }],
+				},
+			});
+			const result = await tool.execute("seance-invalid-model", args);
+			expect(result.isError).toBe(true);
+			expect(getFirstText(result)).toMatch(/one exact provider\/model-id/i);
+			expect(run).not.toHaveBeenCalled();
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("does not fuzzy-match a partial seance model ID to an approved model", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-exact-model-");
+		const fixture = await seanceSession(tempDir.path(), {
+			"task.batch": true,
+			"task.perCallModel": "on",
+			modelRoles: { review: "mock/requested-seance-model" },
+		});
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		try {
+			const tool = await TaskTool.create(fixture.session);
+			const result = await tool.execute("seance-partial-model", {
+				context: "Historical context",
+				tasks: [
+					{
+						agent: "seance",
+						task: "Consult the transcript.",
+						sourceSession: fixture.sourceFile,
+						model: "mock/requested-seance",
+					},
+				],
+			});
+			expect(result.isError).toBe(true);
+			expect(getFirstText(result)).toMatch(/No available model.*exact provider\/model-id/i);
+			expect(run).not.toHaveBeenCalled();
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("does not treat a configured seance override as approval for an explicit model", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-override-grant-");
+		const fixture = await seanceSession(tempDir.path(), {
+			"task.batch": true,
+			"task.perCallModel": "on",
+			"task.agentModelOverrides": { seance: "mock/requested-seance-model" },
+		});
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		try {
+			const tool = await TaskTool.create(fixture.session);
+			const result = await tool.execute("seance-override-grant", {
+				context: "Historical context",
+				tasks: [
+					{
+						agent: "seance",
+						task: "Consult the transcript.",
+						sourceSession: fixture.sourceFile,
+						model: fixture.modelSelector,
+					},
+				],
+			});
+			expect(result.isError).toBe(true);
+			expect(getFirstText(result)).toMatch(/not approved.*Catalog or credentials alone/i);
+			expect(run).not.toHaveBeenCalled();
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("keeps an unapproved host model ungated through queued seance dispatch", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-host-async-");
+		const fixture = await seanceSession(tempDir.path(), {
+			"task.batch": true,
+			"task.perCallModel": "off",
+			"async.enabled": true,
+		});
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		fixture.session.asyncJobManager = manager;
+		const run = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options =>
+				makeResult(options.id, { agent: "seance", resolvedModel: fixture.modelSelector }),
+			);
+		try {
+			const tool = await TaskTool.create(fixture.session);
+			const result = await taskModule.executeTaskFromHost(
+				tool as unknown as AgentTool,
+				"seance-host-async",
+				{
+					agent: "seance",
+					name: "QueuedHostSeance",
+					task: "Consult the transcript.",
+					sourceSession: fixture.sourceFile,
+					model: fixture.modelSelector,
+				},
+				fixture.context,
+			);
+			expect(result.isError).not.toBe(true);
+			expect(result.details?.async?.state).toBe("running");
+			const job = manager.getJob("QueuedHostSeance");
+			if (!job) throw new Error("Expected a queued host seance job");
+			await job.promise;
+			expect(job.status).toBe("completed");
+			expect(run).toHaveBeenCalledTimes(1);
+			expect(run.mock.calls[0]?.[0].modelOverride).toEqual([fixture.modelSelector]);
+		} finally {
+			await manager.dispose({ timeoutMs: 1000 });
+			fixture.authStorage.close();
+		}
+	});
+
+	it("rejects a serialized host marker instead of bypassing the seance model gate", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-host-marker-");
+		const fixture = await seanceSession(tempDir.path(), { "task.batch": false, "task.perCallModel": "off" });
+		const run = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockResolvedValue(makeResult("HostSeance", { agent: "seance" }));
+		try {
+			const tool = await TaskTool.create(fixture.session);
+			const execute = vi.spyOn(tool, "execute");
+			const work = {
+				agent: "seance",
+				task: "Consult the transcript.",
+				sourceSession: fixture.sourceFile,
+				model: fixture.modelSelector,
+			};
+			const hostResult = await taskModule.executeTaskFromHost(
+				tool as unknown as AgentTool,
+				"seance-host-marker",
+				work,
+				fixture.context,
+			);
+			expect(hostResult.isError).not.toBe(true);
+			expect(run).toHaveBeenCalledTimes(1);
+			const hostContext = execute.mock.calls[0]?.[4];
+			if (!hostContext) throw new Error("Expected a host-only task context");
+			const serializedMarker = JSON.parse(
+				JSON.stringify(
+					Object.fromEntries(
+						Reflect.ownKeys(hostContext)
+							.filter(key => typeof key === "symbol")
+							.map(key => [String(key), Reflect.get(hostContext, key)]),
+					),
+				),
+			) as Record<string, unknown>;
+			run.mockClear();
+			const result = await tool.execute(
+				"seance-host-marker",
+				JSON.parse(JSON.stringify({ ...work, taskHostModel: fixture.modelSelector, ...serializedMarker })),
+				undefined,
+				undefined,
+				{ ...fixture.context, ...serializedMarker },
+			);
+			expect(result.isError).toBe(true);
+			expect(getFirstText(result)).toMatch(/per-call model is disabled/i);
+			expect(run).not.toHaveBeenCalled();
+		} finally {
+			fixture.authStorage.close();
+		}
 	});
 });

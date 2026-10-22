@@ -12,7 +12,12 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 let taskSchemaSessionIndex = 0;
 
 function createSession(
-	options: { parentSpawns?: string; disabledAgents?: string[]; planMode?: boolean } = {},
+	options: {
+		parentSpawns?: string;
+		disabledAgents?: string[];
+		planMode?: boolean;
+		settings?: Record<string, unknown>;
+	} = {},
 ): ToolSession {
 	return {
 		cwd: `/tmp/task-schema-${taskSchemaSessionIndex++}`,
@@ -21,6 +26,7 @@ function createSession(
 			"task.isolation.enabled": false,
 			"task.batch": false,
 			"task.disabledAgents": options.disabledAgents ?? [],
+			...options.settings,
 		}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => options.parentSpawns ?? "*",
@@ -85,7 +91,7 @@ describe("task schema (single-spawn)", () => {
 });
 
 describe("task schema seance fields", () => {
-	it("accepts source and model selectors in every flat/batch isolation mode", () => {
+	it("accepts a source and one model selector in every flat/batch isolation mode", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
 				const schema = getTaskSchema({
@@ -94,9 +100,7 @@ describe("task schema seance fields", () => {
 					evalToolsEnabled: false,
 					seanceFields: seanceTaskSchemaFields,
 				});
-				const modelSelector = batchEnabled
-					? ["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]
-					: "anthropic/claude-sonnet-4-5";
+				const modelSelector = "anthropic/claude-sonnet-4-5";
 				const item = {
 					agent: "seance",
 					task: "Read historical context.",
@@ -133,7 +137,8 @@ describe("task schema seance fields", () => {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
 				const wireSchema = JSON.stringify(schema.toJsonSchema());
 				expect(wireSchema).not.toContain('"sourceSession"');
-				expect(wireSchema).not.toContain('"model"');
+				// Only the exact per-call `model` remains.
+				expect(wireSchema).toContain('"model":{"type":"string"}');
 			}
 		}
 	});
@@ -182,7 +187,7 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
-		expect(planSchema).not.toContain('"model"');
+		expect(planSchema).toContain('"model":{"type":"string"}');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 
@@ -219,7 +224,7 @@ describe("task spawn validation", () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
 	});
-	it("rejects a model override for an ordinary task after the enabled schema accepts it", async () => {
+	it("rejects a model override for an ordinary task while task.perCallModel is off", async () => {
 		const schema = getTaskSchema({
 			isolationEnabled: false,
 			batchEnabled: false,
@@ -232,6 +237,18 @@ describe("task spawn validation", () => {
 			model: "anthropic/claude-sonnet-4-5",
 		};
 		expect(schema(params) instanceof type.errors).toBe(false);
-		expect(await executeText(params, [bundledSeance])).toContain("`model` is only accepted for the `seance` agent.");
+		const scout = loadBundledAgents().find(agent => agent.name === "scout");
+		if (!scout) throw new Error("Expected the bundled scout agent");
+		expect(await executeText(params, [bundledSeance, scout])).toContain("task.perCallModel: off");
+	});
+
+	it("advertises `model` in the task prompt only while task.perCallModel is on", async () => {
+		const description = async (mode: string) => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+			return (await TaskTool.create(createSession({ settings: { "task.perCallModel": mode } }))).description;
+		};
+		expect(await description("off")).not.toContain("`model`: one exact");
+		expect(await description("eval")).not.toContain("`model`: one exact");
+		expect(await description("on")).toContain("`model`: one exact");
 	});
 });
