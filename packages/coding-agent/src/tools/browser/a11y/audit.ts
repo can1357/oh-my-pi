@@ -1,5 +1,4 @@
 import type { Frame, Page } from "puppeteer-core";
-import axeSource from "axe-core/axe.min.js" with { type: "text" };
 
 /** Options accepted by the browser accessibility audit helper. */
 export interface BrowserA11yOptions {
@@ -116,7 +115,54 @@ interface PageQueryElement {
 const MAX_RESULT_NODES = 10;
 const MAX_HTML_LENGTH = 300;
 
-function buildEvaluator(params: string[], body: string): (...args: unknown[]) => unknown {
+const PARTIAL_EVALUATOR_BODY = `const options = { resultTypes: ["violations", "incomplete", "passes"], iframes: false };
+if (request.rules.length > 0) options.runOnly = { type: "rule", values: request.rules };
+else if (request.tags.length > 0) options.runOnly = { type: "tag", values: request.tags };
+let context;
+if (request.frameContext !== undefined) {
+	context = request.frameContext;
+} else if (request.selector !== undefined) {
+	try {
+		if (!document.querySelector(request.selector)) throw new Error("No element matches selector: " + request.selector);
+	} catch (error) {
+		if (error instanceof Error && error.message.startsWith("No element matches selector:")) throw error;
+		throw new Error("Invalid selector: " + request.selector);
+	}
+	context = request.selector;
+} else {
+	context = document;
+}
+const frameContexts = agentAxe.utils.getFrameContexts(context).map(entry => entry.frameContext);
+return agentAxe.runPartial(context, options).then(partial => ({ partial, frameContexts }));`;
+
+const FINISH_EVALUATOR_BODY = `const options = { resultTypes: ["violations", "incomplete", "passes"], iframes: false };
+if (request.rules.length > 0) options.runOnly = { type: "rule", values: request.rules };
+else if (request.tags.length > 0) options.runOnly = { type: "tag", values: request.tags };
+return agentAxe.finishRun(partials, options);`;
+
+const STANDALONE_EVALUATOR_BODY = `const options = { resultTypes: ["violations", "incomplete", "passes"] };
+if (request.rules.length > 0) options.runOnly = { type: "rule", values: request.rules };
+else if (request.tags.length > 0) options.runOnly = { type: "tag", values: request.tags };
+let context = document;
+if (request.selector !== undefined) {
+	try {
+		if (!document.querySelector(request.selector)) throw new Error("No element matches selector: " + request.selector);
+	} catch (error) {
+		if (error instanceof Error && error.message.startsWith("No element matches selector:")) throw error;
+		throw new Error("Invalid selector: " + request.selector);
+	}
+	context = request.selector;
+}
+return agentAxe.run(context, options);`;
+
+/** Page-side evaluators that embed the axe-core bundle. */
+interface AxeEvaluators {
+	partial: (...args: unknown[]) => unknown;
+	finish: (...args: unknown[]) => unknown;
+	standalone: (...args: unknown[]) => unknown;
+}
+
+function buildEvaluator(params: string[], body: string, axeSource: string): (...args: unknown[]) => unknown {
 	return new Function(
 		...params,
 		`const previousAxe = Object.getOwnPropertyDescriptor(window, "axe");
@@ -141,54 +187,31 @@ ${body}`,
 	) as unknown as (...args: unknown[]) => unknown;
 }
 
-const evaluatePartial = buildEvaluator(
-	["request"],
-	`const options = { resultTypes: ["violations", "incomplete", "passes"], iframes: false };
-if (request.rules.length > 0) options.runOnly = { type: "rule", values: request.rules };
-else if (request.tags.length > 0) options.runOnly = { type: "tag", values: request.tags };
-let context;
-if (request.frameContext !== undefined) {
-	context = request.frameContext;
-} else if (request.selector !== undefined) {
-	try {
-		if (!document.querySelector(request.selector)) throw new Error("No element matches selector: " + request.selector);
-	} catch (error) {
-		if (error instanceof Error && error.message.startsWith("No element matches selector:")) throw error;
-		throw new Error("Invalid selector: " + request.selector);
-	}
-	context = request.selector;
-} else {
-	context = document;
-}
-const frameContexts = agentAxe.utils.getFrameContexts(context).map(entry => entry.frameContext);
-return agentAxe.runPartial(context, options).then(partial => ({ partial, frameContexts }));`,
-);
+let axeEvaluators: Promise<AxeEvaluators> | undefined;
 
-const evaluateFinish = buildEvaluator(
-	["partials", "request"],
-	`const options = { resultTypes: ["violations", "incomplete", "passes"], iframes: false };
-if (request.rules.length > 0) options.runOnly = { type: "rule", values: request.rules };
-else if (request.tags.length > 0) options.runOnly = { type: "tag", values: request.tags };
-return agentAxe.finishRun(partials, options);`,
-);
-
-const evaluateStandalone = buildEvaluator(
-	["request"],
-	`const options = { resultTypes: ["violations", "incomplete", "passes"] };
-if (request.rules.length > 0) options.runOnly = { type: "rule", values: request.rules };
-else if (request.tags.length > 0) options.runOnly = { type: "tag", values: request.tags };
-let context = document;
-if (request.selector !== undefined) {
-	try {
-		if (!document.querySelector(request.selector)) throw new Error("No element matches selector: " + request.selector);
-	} catch (error) {
-		if (error instanceof Error && error.message.startsWith("No element matches selector:")) throw error;
-		throw new Error("Invalid selector: " + request.selector);
-	}
-	context = request.selector;
+/**
+ * Load the axe-core bundle and build the page-side evaluators that embed it.
+ *
+ * axe-core ships ~567 KB of JavaScript that is only needed once an accessibility
+ * audit actually runs, so it is imported here rather than at module load to keep
+ * it out of the boot module graph.
+ */
+async function loadAxeEvaluators(): Promise<AxeEvaluators> {
+	const axeSource = (await import("axe-core/axe.min.js", { with: { type: "text" } })).default;
+	return {
+		partial: buildEvaluator(["request"], PARTIAL_EVALUATOR_BODY, axeSource),
+		finish: buildEvaluator(["partials", "request"], FINISH_EVALUATOR_BODY, axeSource),
+		standalone: buildEvaluator(["request"], STANDALONE_EVALUATOR_BODY, axeSource),
+	};
 }
-return agentAxe.run(context, options);`,
-);
+
+function getAxeEvaluators(): Promise<AxeEvaluators> {
+	axeEvaluators ??= loadAxeEvaluators().catch((error: unknown) => {
+		axeEvaluators = undefined;
+		throw error;
+	});
+	return axeEvaluators;
+}
 
 function serializeOptions(options: BrowserA11yOptions): SerializableA11yOptions {
 	return {
@@ -263,6 +286,7 @@ export function normalizeA11yResult(url: string, raw: unknown, includeIncomplete
 
 /** Run axe-core through Puppeteer's isolated-world evaluator for every frame and merge the partial reports. */
 export async function runA11yAudit(page: Page, options: BrowserA11yOptions = {}): Promise<BrowserA11yResult> {
+	const { partial, finish } = await getAxeEvaluators();
 	const request = serializeOptions(options);
 	const partials: Array<AxePartial | false> = [];
 	const tasks: AuditTask[] = [{ frame: page.mainFrame(), selector: request.selector }];
@@ -272,7 +296,7 @@ export async function runA11yAudit(page: Page, options: BrowserA11yOptions = {})
 			partials.push(false);
 			continue;
 		}
-		const evaluated = (await task.frame.evaluate(evaluatePartial as never, {
+		const evaluated = (await task.frame.evaluate(partial as never, {
 			tags: request.tags,
 			rules: request.rules,
 			selector: task.selector,
@@ -288,14 +312,15 @@ export async function runA11yAudit(page: Page, options: BrowserA11yOptions = {})
 		}
 		for (let index = children.length - 1; index >= 0; index -= 1) tasks.push(children[index]!);
 	}
-	const raw = (await page.evaluate(evaluateFinish as never, partials, request)) as AxeResults;
+	const raw = (await page.evaluate(finish as never, partials, request)) as AxeResults;
 	return normalizeA11yResult(page.url(), raw, options.includeIncomplete === true);
 }
 
 /** Build a standalone page-world axe audit script for the cmux backend. */
-export function buildA11yPageScript(options: BrowserA11yOptions = {}): string {
+export async function buildA11yPageScript(options: BrowserA11yOptions = {}): Promise<string> {
+	const { standalone } = await getAxeEvaluators();
 	const request = JSON.stringify(serializeOptions(options));
-	return `(${evaluateStandalone.toString()})(${request})`;
+	return `(${standalone.toString()})(${request})`;
 }
 
 function renderTarget(target: string[] | string[][]): string {
