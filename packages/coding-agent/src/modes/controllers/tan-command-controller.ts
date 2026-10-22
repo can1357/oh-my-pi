@@ -155,6 +155,7 @@ export class TanCommandController {
 						try {
 							const created = await sdk.createAgentSession({
 								cwd,
+								costGate: session.costGate,
 								sessionManager: cloneManager,
 								model,
 								thinkingLevel,

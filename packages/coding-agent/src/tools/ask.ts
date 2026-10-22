@@ -619,6 +619,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						activeModelString: this.session.getActiveModelString?.(),
 						telemetryConfig: this.session.getTelemetry?.(),
 						sessionId: this.session.getSessionId?.() ?? undefined,
+						costGate: this.session.costGate,
 					},
 					signal,
 				);

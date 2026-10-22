@@ -3550,10 +3550,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * Hands back a prompt the session dropped before dispatch (an Esc abort or
-	 * usage preflight denial raced turn setup). The message was never persisted,
-	 * so the tree/branch selectors cannot offer it — remove the optimistic
-	 * transcript row and put the typed text back in the editor for editing.
+	 * Hands back a prompt the session dropped before dispatch (an Esc abort,
+	 * usage preflight denial or the cost cap raced turn setup). The message was
+	 * never persisted, so the tree/branch selectors cannot offer it — remove the
+	 * optimistic transcript row and put the typed text back in the editor for editing.
 	 */
 	#restoreDroppedPrompt(prompt: DroppedPrompt): void {
 		this.clearOptimisticUserMessage();
@@ -3562,6 +3562,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#stopLoadingAnimation(true);
 		}
 		this.rebuildChatFromMessages();
+		// The rebuild drops transient notices, including the one that refused this prompt.
+		if (prompt.reason) this.showError(prompt.reason);
 		// The drop arrives asynchronously (after the abort settles); never clobber
 		// a draft the user has already started typing in the meantime.
 		if (!this.editor.getText().trim()) {

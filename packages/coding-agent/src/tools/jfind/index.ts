@@ -105,6 +105,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			onUsage: journalJudgmentUsage(this.session.sessionManager),
 			telemetry: this.session.getTelemetry?.(),
 			cache: sharedJudgmentCache(),
+			costGate: this.session.costGate,
 		});
 		const started = performance.now();
 		const timeout = AbortSignal.timeout(FIND_TIMEOUT_MS);
