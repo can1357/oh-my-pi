@@ -42,7 +42,7 @@ export const cfgPowerSleepPrevention = register({
 		group: "Power",
 		label: "Sleep Prevention",
 		description:
-			"Prevent the system sleeping during active sessions. Each level is cumulative — it adds the flags of all lower levels.",
+			"Prevent the system sleeping while the agent is running a turn; an idle session, including one waiting on background jobs, does not hold it. Each level is cumulative — it adds the flags of all lower levels.",
 		options: [
 			{
 				value: "off",
@@ -52,7 +52,7 @@ export const cfgPowerSleepPrevention = register({
 			{
 				value: "idle",
 				label: "Prevent Idle Sleep",
-				description: "Keep the system awake while a session is open (macOS `caffeinate -i`)",
+				description: "Keep the system awake while the agent is running a turn (macOS `caffeinate -i`)",
 			},
 			{
 				value: "display",
