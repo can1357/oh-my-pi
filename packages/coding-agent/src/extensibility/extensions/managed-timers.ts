@@ -47,6 +47,15 @@ export class ManagedTimers {
 		return timer;
 	}
 
+	/**
+	 * Number of outstanding managed timers. Exposed so teardown paths can be
+	 * asserted directly rather than by waiting to see whether a stale callback
+	 * fires — a timing-based check for "no longer running" is inherently racy.
+	 */
+	get size(): number {
+		return this.#timers.size;
+	}
+
 	/** Clear one managed timer. Accepts an interval or timeout handle. */
 	clear(timer: Timer): void {
 		if (!this.#timers.delete(timer)) return;

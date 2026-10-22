@@ -3508,6 +3508,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const trackUserWait: UserWaitTracker = dialog => (hasSession ? session.waitForUser(dialog) : dialog());
 		extensionRunner.setUserWaitTracker(trackUserWait);
 
+		// Teach the runner how to rebuild its own extension set, so
+		// `/reload-plugins` can pick up edited extension files without a session
+		// restart. Reuses the exact paths this session resolved rather than
+		// re-running discovery: the intent is "re-read the code I just edited",
+		// and re-discovering could also change WHICH extensions are loaded
+		// mid-session, which is a different and more surprising operation.
+		extensionRunner.setExtensionReloader(() => loadExtensions(extensionPaths, cwd, eventBus));
+
 		credentialDisabledTarget = extensionRunner;
 		for (const event of startupCredentialDisabledEvents.splice(0)) {
 			// Discard return: any handler error is routed through runner.onError listeners.

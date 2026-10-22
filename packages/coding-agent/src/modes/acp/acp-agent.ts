@@ -2559,9 +2559,8 @@ export class AcpAgent implements Agent {
 	/**
 	 * Reload plugin/registry state for an ACP session. Mirrors the interactive
 	 * `/reload-plugins` and `/move` flows: invalidates the plugin-roots cache,
-	 * refreshes task agents, resets the capability cache, refreshes the
-	 * session's slash-command state, then re-advertises commands so the client
-	 * sees newly installed/disabled plugins.
+	 * refreshes task agents, resets the capability cache, refreshes slash commands
+	 * and extension modules, then re-advertises commands to the client.
 	 */
 	async #reloadPluginState(record: ManagedSessionRecord): Promise<void> {
 		const cwd = record.session.sessionManager.getCwd();
@@ -2569,6 +2568,7 @@ export class AcpAgent implements Agent {
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 		await refreshAgentDiscovery(cwd, record.session.effectiveExtensionRoots);
 		await record.session.refreshSkillsAndCommands();
+		await record.session.extensionRunner?.reloadExtensions();
 		await this.#emitAvailableCommandsUpdate(record);
 	}
 
