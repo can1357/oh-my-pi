@@ -106,6 +106,8 @@ async function installMnemopiState(
 		// Promote age-eligible working memory to episodic before the session's
 		// first write can TTL-trim unconsolidated retain/learn rows (#10770).
 		state.promoteEligibleWorkingMemory();
+		// Decode recall vectors in the background; startup and the first recall do not wait for it.
+		state.startEmbeddingWarmup();
 		return state;
 	} catch (error) {
 		setMnemopiSessionState(session, undefined);
