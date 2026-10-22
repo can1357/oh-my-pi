@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import type { SessionRepository } from "./session-entries";
 import type { SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
@@ -221,6 +222,45 @@ export function resolveManagedSessionRoot(sessionDir: string, cwd: string): stri
  */
 export function sessionDirForCwd(cwd: string, sessionsRoot: string = getSessionsDir()): string {
 	return path.join(sessionsRoot, getDefaultSessionDirName(cwd).encodedDirName);
+}
+
+/**
+ * Return the absolute Git worktree roots for a session created at `cwd`.
+ * Discovery is best-effort: unavailable or malformed native metadata simply
+ * omits the optional repository field from the session header.
+ */
+export function getSessionRepository(cwd: string): SessionRepository | undefined {
+	try {
+		const repository = vcs.git(cwd);
+		if (!repository) return undefined;
+
+		const linked = repository.linkedWorktree();
+		if (linked) {
+			if (
+				typeof linked.root !== "string" ||
+				!linked.root ||
+				!path.isAbsolute(linked.root) ||
+				typeof linked.primaryRoot !== "string" ||
+				!linked.primaryRoot ||
+				!path.isAbsolute(linked.primaryRoot)
+			) {
+				return undefined;
+			}
+			return {
+				sessionWorktreeRoot: linked.root,
+				primaryWorktreeRoot: linked.primaryRoot,
+			};
+		}
+
+		const primaryRoot = repository.primaryRoot();
+		if (typeof primaryRoot !== "string" || !primaryRoot || !path.isAbsolute(primaryRoot)) return undefined;
+		return {
+			sessionWorktreeRoot: primaryRoot,
+			primaryWorktreeRoot: primaryRoot,
+		};
+	} catch {
+		return undefined;
+	}
 }
 
 /**
