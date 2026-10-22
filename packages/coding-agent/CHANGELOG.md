@@ -32,6 +32,7 @@
 - Fixed reading `proc://<id>/kill` or `proc://<id>/mode` answering only "writable only", so agents often moved on with the job still running; the error now names the `write` call that cancels the job or sets the mode, with the real id ([#16580](https://github.com/can1357/oh-my-pi/pull/16580) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `history://<id>` failing with "has no transcript: session is gone" for a worker that is still running but has not created its session or transcript file yet; it now answers "No transcript has been written yet". ([#16645](https://github.com/can1357/oh-my-pi/pull/16645) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `grep` showing a match that spans several lines (a pattern containing `\n`) with only its first line numbered and a false `...` gap after it; every line of the match that `grep` prints is now numbered, so `edit` accepts anchors on those lines without a retry, and lines outside a `path:N-M` selector are no longer shown. Lines cut off by `grep`'s output size limit no longer count as displayed, so `edit` rejects anchors on them ([#16563](https://github.com/can1357/oh-my-pi/pull/16563) by [@mottopanikeiku](https://github.com/mottopanikeiku))
 
 ## [18.12.6] - 2026-10-21
 

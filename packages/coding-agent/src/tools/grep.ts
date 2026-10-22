@@ -13,7 +13,7 @@ import {
 	openArchive,
 	parseArchivePathCandidates,
 } from "@oh-my-pi/pi-utils/ar";
-import { getEditStore, recordFullySeenRows } from "../edit/store";
+import { getEditStore, NO_FULL_LINE, recordFullySeenRows } from "../edit/store";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
@@ -814,6 +814,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					}
 					throw err;
 				}
+				// A cross-line match is kept by its first line alone, so it carries its file's
+				// ranges to the renderer, which hides the continuation rows they exclude.
+				const rangesByMatch = new Map<GrepMatch, LineRange[]>();
 				if (rangesByAbsPath.size > 0) {
 					const filteredMatches: GrepMatch[] = [];
 					for (const match of result.matches) {
@@ -830,11 +833,13 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						// otherwise leak content the caller explicitly excluded.
 						const trimBefore = match.contextBefore?.filter(c => isLineInRanges(c.lineNumber, ranges));
 						const trimAfter = match.contextAfter?.filter(c => isLineInRanges(c.lineNumber, ranges));
-						filteredMatches.push({
+						const kept: GrepMatch = {
 							...match,
 							contextBefore: trimBefore && trimBefore.length > 0 ? trimBefore : undefined,
 							contextAfter: trimAfter && trimAfter.length > 0 ? trimAfter : undefined,
-						});
+						};
+						filteredMatches.push(kept);
+						rangesByMatch.set(kept, ranges);
 					}
 					result = {
 						matches: filteredMatches,
@@ -1042,15 +1047,25 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						if (tag) hashContexts.set(editable[index].relativePath, { tag, path: editable[index].snapshotPath });
 					}
 				}
+				// Rows count as seen only once the byte cap below has kept them.
+				const seenSections: Array<{
+					relativePath: string;
+					path: string;
+					tag: string;
+					rows: string[];
+					cutLines: Set<number> | undefined;
+				}> = [];
 				const renderMatchesForFile = (relativePath: string): FileMatchSection => {
 					const modelOut: string[] = [];
 					const displayOut: string[] = [];
 					let cutLines: Set<number> | undefined;
 					const fileMatches = matchesByFile.get(relativePath) ?? [];
+					// A cross-line match arrives as one block; give each line it spans its own numbered row.
+					const matchRows = fileMatches.map(match => match.line.split(/\r?\n/));
 					const hashContext = hashContexts.get(relativePath);
 					const useHashLines = hashContext !== undefined;
-					const lineNumberWidth = fileMatches.reduce((width, match) => {
-						let nextWidth = Math.max(width, String(match.lineNumber).length);
+					const lineNumberWidth = fileMatches.reduce((width, match, index) => {
+						let nextWidth = Math.max(width, String(match.lineNumber + matchRows[index].length - 1).length);
 						for (const ctx of match.contextBefore ?? []) {
 							nextWidth = Math.max(nextWidth, String(ctx.lineNumber).length);
 						}
@@ -1061,7 +1076,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					}, 0);
 					let lastEmittedLine: number | undefined;
 					const gutterPad = " ".repeat(lineNumberWidth + 1);
-					for (const match of fileMatches) {
+					for (const [index, match] of fileMatches.entries()) {
 						const pushLine = (lineNumber: number, line: string, isMatch: boolean) => {
 							if (lastEmittedLine !== undefined && lineNumber > lastEmittedLine + 1) {
 								modelOut.push("...");
@@ -1079,11 +1094,21 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								pushLine(ctx.lineNumber, ctx.line, false);
 							}
 						}
+						const rows = matchRows[index];
 						// A cut line shows a window around its first match; name where that match sits.
-						const matchLine = match.column === undefined ? match.line : `${match.line} [col ${match.column}]`;
-						if (match.truncated) (cutLines ??= new Set()).add(match.lineNumber);
-						pushLine(match.lineNumber, matchLine, true);
-						if (match.truncated) linesTruncated = true;
+						if (match.column !== undefined) rows[0] = `${rows[0]} [col ${match.column}]`;
+						if (match.truncated) {
+							linesTruncated = true;
+							// The cut window is contiguous, so only the block's first and last rows may be partial.
+							(cutLines ??= new Set()).add(match.lineNumber).add(match.lineNumber + rows.length - 1);
+						}
+						const ranges = rangesByMatch.get(match);
+						for (let row = 0; row < rows.length; row++) {
+							const lineNumber = match.lineNumber + row;
+							// Like context lines, rows outside the selected ranges are neither shown nor recorded as seen.
+							if (ranges && !isLineInRanges(lineNumber, ranges)) continue;
+							pushLine(lineNumber, rows[row], row === 0);
+						}
 						if (match.contextAfter) {
 							for (const ctx of match.contextAfter) {
 								pushLine(ctx.lineNumber, ctx.line, false);
@@ -1092,13 +1117,13 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						fileMatchCounts.set(relativePath, (fileMatchCounts.get(relativePath) ?? 0) + 1);
 					}
 					if (hashContext?.tag) {
-						recordFullySeenRows(
-							getEditStore(this.session),
-							hashContext.path,
-							hashContext.tag,
-							modelOut.join("\n"),
+						seenSections.push({
+							relativePath,
+							path: hashContext.path,
+							tag: hashContext.tag,
+							rows: modelOut,
 							cutLines,
-						);
+						});
 					}
 					return { model: modelOut, display: displayOut, tag: hashContext?.tag };
 				};
@@ -1128,13 +1153,14 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					.filter(relativePath => fileMatchCounts.get(relativePath) === perFileMatchCap);
 				let suffix = trailer(cappedCandidates);
 				let truncation: TruncationResult;
+				let keptLines: number;
 				for (;;) {
 					const reserved = Buffer.byteLength(suffix);
 					truncation = truncateHead(rawOutput, {
 						maxLines: Number.MAX_SAFE_INTEGER,
 						maxBytes: DEFAULT_MAX_BYTES - reserved,
 					});
-					const keptLines = truncation.truncated ? (truncation.outputLines ?? 0) : outputLines.length;
+					keptLines = truncation.truncated ? (truncation.outputLines ?? 0) : outputLines.length;
 					const shownCapped = isMultiScope
 						? cappedCandidates.filter(
 								relativePath => (matchOutput.modelEnds.get(relativePath) ?? Infinity) <= keptLines,
@@ -1143,6 +1169,22 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					suffix = trailer(shownCapped);
 					// Fewer files named can still mean longer names; re-cut until the notice fits its room.
 					if (Buffer.byteLength(suffix) <= reserved) break;
+				}
+				// The byte cap keeps whole lines from the top: record only the rows of each file it kept.
+				const editStore = getEditStore(this.session);
+				for (const section of seenSections) {
+					const end = matchOutput.modelEnds.get(section.relativePath);
+					if (end === undefined) continue;
+					const firstRow = end - section.rows.length;
+					// Dropped with its header: this output never showed the tag.
+					if (keptLines < firstRow) continue;
+					const keptRows = section.rows.slice(0, keptLines - firstRow);
+					if (keptRows.length === 0) {
+						// Only the header survived: it shows the tag, so record provenance that anchors no line.
+						editStore.recordSeenLines(section.path, section.tag, [NO_FULL_LINE]);
+					} else {
+						recordFullySeenRows(editStore, section.path, section.tag, keptRows.join("\n"), section.cutLines);
+					}
 				}
 				const output = truncation.content + suffix;
 				const displayText = displayLines.join("\n");
