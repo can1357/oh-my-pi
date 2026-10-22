@@ -1,3 +1,6 @@
+// ../coding-agent/src/tools/browser/relay/protocol.ts
+var EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
+
 // extension/debugger-ownership.ts
 async function ownedDebuggerTabs(targets, probe) {
   const owned = await Promise.all(targets.map(async (target) => {
@@ -172,6 +175,8 @@ async function buildHello() {
     userAgent: navigator.userAgent,
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
     discardedTabsProtocol: 1,
+    ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
+    reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
     tabs: snapshots,
     attachedTabIds
   };
@@ -226,6 +231,10 @@ function handleRelayMessage(socket, raw) {
   }
   if (msg.t === "pong")
     return;
+  if (msg.t === "reload") {
+    chrome.runtime.reload();
+    return;
+  }
   const answer = (reply) => {
     if (socket.readyState === WebSocket.OPEN)
       socket.send(JSON.stringify(reply));
