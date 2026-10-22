@@ -97,6 +97,21 @@ pub fn is_vcl_class(class: &str) -> bool {
 		.is_some_and(|suffix| !suffix.is_empty())
 }
 
+/// The base class WinForms wrapped, from the `WindowsForms10.<base>.app.<hash>`
+/// name it registers for every window it creates (`Window` for forms and
+/// panels, `BUTTON` for buttons, check boxes and radio buttons).
+fn winforms_base_class(class: &str) -> Option<&str> {
+	let (base, hash) = class.strip_prefix("WindowsForms10.")?.split_once(".app.")?;
+	(!base.is_empty() && !hash.is_empty()).then_some(base)
+}
+
+/// Whether UI Automation actions on a top-level window of `class` can bring
+/// it to the foreground: Chromium and WPF providers activate their window,
+/// and so do WinForms controls for `Invoke`, `Toggle` and `SetValue`.
+pub fn uia_takes_foreground(class: &str) -> bool {
+	is_chromium_class(class) || is_wpf_class(class) || winforms_base_class(class).is_some()
+}
+
 /// Returns the empirical reason that a posted event would be accepted by
 /// Win32 but silently ignored by the target toolkit.
 pub fn would_be_silently_dropped(
@@ -140,6 +155,13 @@ pub fn would_be_silently_dropped(
 	}
 	if is_vcl_class(class) && matches!(kind, Keystroke | KeyCombo) {
 		return Some("VCL accelerators require real key state from the system input queue");
+	}
+	if winforms_base_class(class).is_some_and(|base| base.eq_ignore_ascii_case("BUTTON"))
+		&& matches!(kind, MouseClick)
+	{
+		return Some(
+			"WinForms buttons, check boxes and radio buttons ignore posted mouse-button messages",
+		);
 	}
 	if is_terminal_class(class) && !target.foreground && matches!(kind, TextInput) {
 		return Some("terminal hosts read text through their console input channel");
@@ -289,6 +311,38 @@ mod tests {
 		assert_matrix(foreground, [true, true, false, false, false, true]);
 		let native = TargetTraits { foreground: true, ..background("Notepad") };
 		assert_matrix(native, [false; 6]);
+	}
+
+	#[test]
+	fn winforms_refuses_posted_clicks_only_on_button_class_controls() {
+		// Button, CheckBox and RadioButton all register the `BUTTON` base class.
+		assert_matrix(background("WindowsForms10.BUTTON.app.0.141b42a_r8_ad1"), [
+			true, false, false, false, false, false,
+		]);
+		assert_matrix(background("WindowsForms10.Button.app.0.2bf8098_r6_ad1"), [
+			true, false, false, false, false, false,
+		]);
+		// Forms and text boxes keep posted clicks (caret placement) and keys.
+		assert_matrix(background("WindowsForms10.Window.8.app.0.141b42a_r8_ad1"), [false; 6]);
+		assert_matrix(background("WindowsForms10.EDIT.app.0.141b42a_r8_ad1"), [false; 6]);
+		assert_matrix(background("WindowsForms10.BUTTON.app."), [false; 6]);
+		assert_matrix(background("Button"), [false; 6]);
+	}
+
+	#[test]
+	fn uia_actions_are_refused_only_on_self_activating_toolkits() {
+		for class in [
+			"Chrome_WidgetWin_1",
+			"HwndWrapper[App;;abc]",
+			"WindowsForms10.Window.8.app.0.141b42a_r8_ad1",
+		] {
+			assert!(uia_takes_foreground(class), "{class}");
+		}
+		for class in
+			["Notepad", "#32770", "WindowsForms10.Window.8", "XWindowsForms10.Window.8.app.0.1"]
+		{
+			assert!(!uia_takes_foreground(class), "{class}");
+		}
 	}
 
 	#[test]

@@ -7,6 +7,7 @@
 ### Fixed
 
 - Fixed a macOS background action leaving its target in front of your app after you clicked another of your windows, when placing the click took longer than the click itself ([#16217](https://github.com/can1357/oh-my-pi/pull/16217))
+- Fixed Windows background `press()`/`setValue()` on WinForms controls bringing the window in front of yours, and posted clicks on WinForms buttons and check boxes reporting delivery while doing nothing; both now throw `BackgroundUnavailable` before anything is sent ([#16572](https://github.com/can1357/oh-my-pi/issues/16572))
 
 ## [18.12.4] - 2026-10-20
 
