@@ -19,6 +19,9 @@
 - Fixed a macOS background action leaving its target in front of your app after you clicked another of your windows, when placing the click took longer than the click itself ([#16217](https://github.com/can1357/oh-my-pi/pull/16217))
 
 ## [18.12.4] - 2026-10-20
+### Added
+
+- Added `DesktopSession.axSelectText` (macOS) to select text in an accessibility element's value by UTF-16 range, refusing missing or ambiguous matches and returning the selection read back ([#15175](https://github.com/can1357/oh-my-pi/pull/15175) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
