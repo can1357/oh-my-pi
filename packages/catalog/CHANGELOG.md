@@ -133,6 +133,7 @@
 - OpenCode Go requests now go to the current `https://opencode.ai/inference/go/v1` endpoint instead of the legacy `/zen/go` one ([#15722](https://github.com/can1357/oh-my-pi/issues/15722))
 
 ### Fixed
+- Bumped the spoofed Gemini CLI client version to 0.60.0 so model and response gating treats the client as current ([#15777](https://github.com/can1357/oh-my-pi/pull/15777) by [@mvid](https://github.com/mvid)).
 
 - Fixed OpenCode Go's `deepseek-flash` alias showing $0, unknown limits, and no reasoning instead of the V4.1 Flash rate card and capabilities ([#15357](https://github.com/can1357/oh-my-pi/issues/15357))
 - Fixed OpenCode Go's Gemini 4 Argon Contributor failing with an unsupported protocol and thinking level; it now uses the native Gemini endpoint ([#15722](https://github.com/can1357/oh-my-pi/issues/15722))
