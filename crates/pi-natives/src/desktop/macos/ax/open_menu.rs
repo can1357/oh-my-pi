@@ -57,15 +57,15 @@ const MAX_LISTED_DEPTH: usize = 2;
 /// owns a hit-tested label or image.
 const MAX_ASCENT: usize = 4;
 
-/// Whether `action` on an element can open a menu: `AXShowMenu` on any
-/// element, `AXPress` on a menu button or popup button. `role` is read only
-/// for `AXPress`, so other actions pay nothing for the check.
+/// Whether `action`, the element's own spelling of the action to perform, can
+/// open a menu: `AXShowMenu` on any element, `AXPress` on a menu button or
+/// popup button, in any case. `role` is read only for a press, so other
+/// actions pay nothing for the check.
 pub(crate) fn may_open(action: &str, role: impl FnOnce() -> Option<String>) -> bool {
-	match action {
-		"AXShowMenu" => true,
-		"AXPress" => opens_menu(role().as_deref()),
-		_ => false,
+	if action.eq_ignore_ascii_case("AXShowMenu") {
+		return true;
 	}
+	action.eq_ignore_ascii_case("AXPress") && opens_menu(role().as_deref())
 }
 
 /// Whether a control of `role` opens a menu when pressed.
@@ -1155,6 +1155,40 @@ mod tests {
 		assert!(may_open("AXPress", || Some("AXPopUpButton".to_string())));
 		assert!(!may_open("AXPress", || Some("AXButton".to_string())));
 		assert!(!may_open("AXPress", || None));
+		// An element's own spelling in another case means the same action.
+		assert!(may_open("axshowmenu", unread));
+		assert!(may_open("axpress", || Some("AXPopUpButton".to_string())));
+	}
+
+	#[test]
+	fn a_menu_opened_by_an_action_the_element_spells_in_another_case_is_closed() {
+		// The element advertises its actions in lowercase, and `perform` sends
+		// the spelling it advertised.
+		let available = ["axshowmenu", "axpress"].map(String::from);
+		for (call, role) in [("showmenu", None), ("press", Some("AXPopUpButton"))] {
+			let native = super::super::supported_action(&available, call).expect("advertised");
+			let watch = may_open(native, || role.map(str::to_string));
+			let before: Option<&[u32]> = watch.then_some(&[]);
+			let mut app = font_book();
+			let error = guard(
+				Press::Action(native),
+				before,
+				None,
+				|| Ok(()),
+				|before, path| settle_with(&mut app, before, path, CONTEXT_MENU_TIMEOUT, held),
+			)
+			.expect_err("the menu was closed unchosen");
+			assert_eq!(error.code.as_str(), "InputFailed", "{call}");
+			assert!(
+				error
+					.message
+					.starts_with(&format!("{native} opened a menu")),
+				"{}",
+				error.message
+			);
+			assert_eq!(*app.log.borrow(), ["cancel"], "{call}: the menu was closed");
+			assert!(app.open.is_empty(), "{call}");
+		}
 	}
 
 	#[test]

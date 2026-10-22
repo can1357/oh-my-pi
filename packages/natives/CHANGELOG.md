@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added to macOS `ax()` lines what an element can do: `(selected)`, `(settable)` on dates `setValue` can write, `(readonly)` on web text fields the page locks, `actions=` beyond its press, and names for window buttons ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- `ax()` lines show 200 characters of a long label or value instead of 80, keep newlines as `\n`, and end a cut value with the `value()` call that reads it whole ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS `ax()` dates read in local time with their offset, the form `setValue` takes back, and `axPerform` runs a listed action in any case, with or without its `AX` prefix ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed macOS `ax()` marking every cell of a focused table or sidebar `(focused)`; only the element holding the app's keyboard focus is marked ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS `axPerform` reporting a followed Preview PDF link or an opened Finder item as failed; the outcome is now reported unconfirmed ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.12.5] - 2026-10-21
 
 ### Fixed
