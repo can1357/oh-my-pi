@@ -3419,6 +3419,7 @@ export class SessionManager {
 			| FileMentionMessage,
 	): string {
 		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message };
+		if (message.role === "assistant") entry.cwd = this.#cwd;
 		this.#recordEntry(entry);
 		return entry.id;
 	}

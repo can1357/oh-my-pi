@@ -99,6 +99,7 @@ function makeCtx(): RenderInitialMessagesTestContext {
 		showStatus: vi.fn(),
 		ui: { requestRender: vi.fn() },
 		resetTranscript: () => ctx.chatContainer.disposeChildren(),
+		proseGithubRepo: () => () => undefined,
 	} as unknown as InteractiveModeContext;
 
 	return { ctx, transcriptSpy, llmContextSpy, renderSessionContextSpy };
@@ -226,6 +227,7 @@ function makeRenderCtx(
 			renderChunk?: () => void,
 		) => helpers.renderSessionContextIncrementally(context, options, renderChunk),
 		showStatus: vi.fn(),
+		proseGithubRepo: () => () => undefined,
 	} as unknown as InteractiveModeContext;
 	const helpers = new UiHelpers(ctx);
 	return { ctx, chatContainer };
