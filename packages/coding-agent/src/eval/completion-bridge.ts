@@ -16,9 +16,10 @@ import { type } from "@oh-my-pi/omptype";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 
+import { disabledSelectorRule, formatDisabledModelError, withoutDisabledModels } from "../config/disabled-models";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	expandRoleAlias,
@@ -239,7 +240,8 @@ function appendFallbackCandidates(
 function resolveTierCandidates(tier: CompletionTier, session: ToolSession): CompletionCandidate[] {
 	const modelRegistry = session.modelRegistry;
 	if (!modelRegistry) return [];
-	const available = modelRegistry.getAvailable();
+	// The session's rules narrow a registry that may have been built with other settings.
+	const available = withoutDisabledModels(modelRegistry.getAvailable(), session.settings);
 	if (available.length === 0) return [];
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
@@ -248,6 +250,15 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 	): { model: Model<Api>; selector: string; configuredEffort?: ConfiguredThinkingLevel } | undefined => {
 		if (!pattern) return undefined;
 		const selector = expandRoleAlias(pattern, session.settings);
+		// Refuse a denied selector outright: fuzzy matching over the filtered list could
+		// otherwise substitute an allowed sibling on the same provider.
+		const denied = disabledSelectorRule(selector, session.settings, available);
+		if (denied) {
+			logger.warn("completion() tier model refused", {
+				reason: formatDisabledModelError(denied.label, denied.rule),
+			});
+			return undefined;
+		}
 		const model = resolveModelFromString(selector, available, matchPreferences);
 		if (!model) return undefined;
 		const configuredEffort =

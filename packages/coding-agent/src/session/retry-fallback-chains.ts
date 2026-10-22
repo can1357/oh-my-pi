@@ -1,5 +1,6 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { disabledSelectorRule } from "../config/disabled-models";
 import type { ModelRegistry } from "../config/model-registry";
 import { cfgModelRoles } from "../config/model-settings";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
@@ -280,6 +281,7 @@ export function validateRetryFallbackChains(
 					report(`Invalid model selector key in retry.fallbackChains: ${key}`);
 				} else if (
 					!modelRegistry.find(parsedKey.provider, parsedKey.id) &&
+					!disabledSelectorRule(key, settings) &&
 					!isDiscoveryPending(parsedKey.provider)
 				) {
 					report(`retry.fallbackChains key references unknown model: ${key}`);
@@ -307,6 +309,7 @@ export function validateRetryFallbackChains(
 			}
 			if (kindRole) {
 				const patterns = resolveConfiguredModelPatterns(selectorStr, settings);
+				if (patterns.some(pattern => disabledSelectorRule(pattern, settings))) continue;
 				if (resolvesForKindRole(selectorStr, providerScopedPool(modelRegistry, patterns))) continue;
 				kindRoleCatalog ??= modelRegistry.getAll("all");
 				if (resolvesForKindRole(selectorStr, kindRoleCatalog)) continue;
@@ -336,6 +339,8 @@ export function validateRetryFallbackChains(
 				report(`Invalid fallback selector format in ${keyKind} '${key}': ${selectorStr}`);
 				continue;
 			}
+			// A denied model is a known, preserved entry: the fallback walk skips it at run time.
+			if (disabledSelectorRule(selectorStr, settings)) continue;
 			if (!modelRegistry.find(parsed.provider, parsed.id) && !isDiscoveryPending(parsed.provider)) {
 				report(`Fallback chain for ${keyKind} '${key}' references unknown model: ${selectorStr}`);
 			}

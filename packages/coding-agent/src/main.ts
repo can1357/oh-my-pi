@@ -180,7 +180,8 @@ import {
 	cfgOmitThinking,
 	cfgPrewalkEnabled,
 } from "./session/settings";
-import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
+import { cfgDisabledModels, cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
+import { formatDisabledModelError } from "./config/disabled-models";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
@@ -1135,14 +1136,18 @@ export async function rebuildScopedModels(
 }
 
 /** Settings the scoped model list follows (see {@link watchScopedModelSettings}). */
-const cfgScopedModelInputs = combine({ enabledModels: cfgEnabledModels, disabledProviders: cfgDisabledProviders });
+const cfgScopedModelInputs = combine({
+	enabledModels: cfgEnabledModels,
+	disabledProviders: cfgDisabledProviders,
+	disabledModels: cfgDisabledModels,
+});
 
 /**
  * Keep the Ctrl+P / scoped `/models` list in step with live settings: an
  * `enabledModels` edit re-resolves a settings-derived scope (an explicit
- * `--models` scope stays pinned), and a `disabledProviders` edit re-resolves
- * after the catalog rebuild so re-enabled providers rejoin (disabled ones are
- * already filtered from `session.scopedModels` at read time).
+ * `--models` scope stays pinned), and a `disabledProviders` or `disabledModels`
+ * edit re-resolves after the catalog rebuild so re-enabled entries rejoin
+ * (disabled providers are already filtered from `session.scopedModels` at read time).
  */
 export function watchScopedModelSettings(
 	session: ScopedModelSink & Pick<AgentSession, "addDisposer">,
@@ -1152,8 +1157,10 @@ export function watchScopedModelSettings(
 ): void {
 	const stop = cfgScopedModelInputs.listen(activeSettings, async (next, previous) => {
 		const providersChanged = !Bun.deepEquals(next.disabledProviders, previous.disabledProviders);
-		if (parsed.models && !providersChanged) return;
-		if (providersChanged) await modelRegistry.reapplyModelPolicies();
+		const modelsChanged = !Bun.deepEquals(next.disabledModels, previous.disabledModels);
+		const policyChanged = providersChanged || modelsChanged;
+		if (parsed.models && !policyChanged) return;
+		if (policyChanged) await modelRegistry.reapplyModelPolicies();
 		if (session.isDisposed) return;
 		const patterns = parsed.models ?? cfgEnabledModels.get(activeSettings);
 		const rebuilt =
@@ -1487,6 +1494,13 @@ export async function buildSessionOptions(
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
 		}
+		if (resolved.disabledModel !== undefined) {
+			// Same refusal as a disabled provider: an explicit denied pin never defers.
+			process.stderr.write(
+				`${chalk.red(resolved.error ?? formatDisabledModelError(resolved.disabledModel.label, resolved.disabledModel.rule))}\n`,
+			);
+			process.exit(1);
+		}
 		if (resolved.disabledProvider !== undefined) {
 			// Deferring a disabled pin to post-extension resolution would let it
 			// through, so refuse here (issue #13079).
@@ -1623,8 +1637,12 @@ export async function buildSessionOptions(
 			modelRegistry,
 			modelMatchPreferences,
 			disabledProviders,
-			{ deferUnregistered: true },
+			{ deferUnregistered: true, settings: activeSettings },
 		);
+		// An explicit `--prewalk-into` naming a denied model fails at startup, naming the rule.
+		if (parsed.prewalkInto !== undefined && selection.disabledModel) {
+			throw new Error(formatDisabledModelError(selection.disabledModel.label, selection.disabledModel.rule));
+		}
 		if (selection.deferred) {
 			// Preserve role fallback order until extensions have registered their providers.
 			options.deferredPrewalk = { target, patterns: targetPatterns };
@@ -1641,9 +1659,19 @@ export async function buildSessionOptions(
 	}
 	if (parsed.planYolo) {
 		const rolePattern = expandRoleAlias(parsed.planYoloInto ?? "@smol", activeSettings);
-		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+		const resolved = resolveCliModel({
+			cliModel: rolePattern,
+			modelRegistry,
+			settings: activeSettings,
+			preferences: modelMatchPreferences,
+		});
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
+		}
+		if (resolved.disabledModel !== undefined) {
+			throw new Error(
+				resolved.error ?? formatDisabledModelError(resolved.disabledModel.label, resolved.disabledModel.rule),
+			);
 		}
 		if (resolved.error || !resolved.model) {
 			throw new Error(resolved.error ?? `Model "${parsed.planYoloInto ?? "@smol"}" not found`);
