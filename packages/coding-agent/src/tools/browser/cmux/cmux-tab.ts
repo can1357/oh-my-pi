@@ -589,7 +589,7 @@ export class CmuxTab implements InProcessRunTab {
 		const context = this.#requireRunContext("tab.a11y()");
 		const stateKey = `__ompA11y${Snowflake.next()}`;
 		const key = JSON.stringify(stateKey);
-		const audit = buildA11yPageScript(options);
+		const audit = await buildA11yPageScript(options);
 		await this.#evalScript(`(() => {
 			const key = ${key};
 			globalThis[key] = { done: false };

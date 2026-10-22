@@ -1813,7 +1813,7 @@ export class TernTab implements InProcessRunTab {
 	async a11y(options: BrowserA11yOptions = {}): Promise<BrowserA11yResult> {
 		const context = this.#requireRunContext("tab.a11y()");
 		const raw = await this.#eval(
-			`function () {\nreturn ${buildA11yPageScript(options)};\n}`,
+			`function () {\nreturn ${await buildA11yPageScript(options)};\n}`,
 			[],
 			"isolated",
 			null,
