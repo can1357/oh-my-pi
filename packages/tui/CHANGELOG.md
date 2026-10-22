@@ -174,6 +174,7 @@
 - Command and eval output panes no longer re-style and re-join their whole output on every frame, so a long command's output stops costing frame time while it sits in the transcript ([#16779](https://github.com/can1357/oh-my-pi/pull/16779) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
+- Fixed the dot between two extension statuses in the status bar wearing the statuses' accent color; it now uses the dim separator color, like the other status bar separators ([#15740](https://github.com/can1357/oh-my-pi/issues/15740), [#16351](https://github.com/can1357/oh-my-pi/pull/16351) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed typo underlines changing when the cursor or selection splits a word ([#16821](https://github.com/can1357/oh-my-pi/issues/16821))
 - Fixed completed `vibe_wait` and `vibe_list` worker cards repeatedly entering scrollback as elapsed time advanced after partial retirement; completed walls now retain a static snapshot while in-flight waits continue updating.
