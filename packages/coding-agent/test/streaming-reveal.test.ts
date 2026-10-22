@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { formatThinkingForDisplay } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import {
 	BlockUnitCounter,
 	buildDisplayMessage,
@@ -175,6 +176,564 @@ describe("streaming reveal", () => {
 
 		expect(thinkingAt(display, 0)).toBe("tho");
 		expect(textAt(display, 1)).toBe("");
+	});
+
+	it("keeps the answer at its reveal position when thinking visibility toggles after the answer is reached", async () => {
+		// Hiding a long thinking prefix mid-stream must not snap the answer to
+		// 100%, and showing it again must not spend the answer's budget on the
+		// freshly shown prefix. The aggregate reveal count is spent from the
+		// first visible block, so the controller re-anchors per block instead of
+		// clamping the old thinking-plus-answer count to the text total.
+		const thinking = "reasoning through the answer ".repeat(12);
+		const answer = "the visible answer tail that the user is reading".repeat(4);
+		let hideThinking = false;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		// Stream the thinking prefix out, then land the answer mid-reveal, so the
+		// reveal position sits inside the answer text, past the whole prefix.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 4);
+		for (let step = 1; step <= 10; step++) {
+			const text = answer.slice(0, Math.floor((answer.length * step) / 10));
+			controller.setTarget(
+				makeMessage([
+					{ type: "thinking", thinking },
+					{ type: "text", text },
+				]),
+				false,
+			);
+			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		}
+		const revealed = textAt(latestMessage(component), 1);
+		expect(revealed.length).toBeGreaterThan(0);
+		expect(revealed.length).toBeLessThan(answer.length);
+
+		// Hide the prefix: the answer keeps exactly the units it had revealed.
+		hideThinking = true;
+		controller.resyncVisibility();
+		expect(textAt(latestMessage(component), 1)).toBe(revealed);
+
+		// Show it again: the answer does not give its units back to the prefix.
+		hideThinking = false;
+		controller.resyncVisibility();
+		expect(textAt(latestMessage(component), 1)).toBe(revealed);
+		const shownBlock = latestMessage(component).content[0];
+		expect(shownBlock?.type).toBe("thinking");
+		if (shownBlock?.type === "thinking") {
+			expect(shownBlock.thinking.length).toBeGreaterThan(0);
+			expect("rawThinking" in shownBlock).toBe(true);
+		}
+	});
+
+	it("restores the reveal-shaped thinking prefix across a hide/show round trip", async () => {
+		// Smooth reveal still part-way through a thinking-only prefix, then two
+		// Ctrl+T presses before the answer advances. The hide pass drops the
+		// block from view; the show pass must restore the prefix the user already
+		// watched stream out. Crediting the whole regenerated block instead
+		// flashes the remaining reasoning to completion (#15336).
+		const thinking = "reasoning through the problem ".repeat(12);
+		const full = formatThinkingForDisplay(thinking, true);
+		let hideThinking = false;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+		const partial = thinkingAt(latestMessage(component), 0);
+		expect(partial.length).toBeGreaterThan(0);
+		expect(partial.length).toBeLessThan(full.length);
+
+		// Hide, then show again while the frontier is still inside thinking.
+		hideThinking = true;
+		controller.resyncVisibility();
+		hideThinking = false;
+		controller.resyncVisibility();
+		expect(thinkingAt(latestMessage(component), 0)).toBe(partial);
+
+		// The reveal keeps pacing from the restored prefix instead of snapping.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		expect(thinkingAt(latestMessage(component), 0).length).toBeGreaterThan(partial.length);
+	});
+
+	it("resumes the reveal from the last watched point when hidden thinking keeps growing", async () => {
+		// A thinking block that was revealed whole is hidden, the provider appends
+		// more reasoning to the SAME block while it stays hidden, and the block is
+		// shown again. Crediting the grown block's whole size on show flashes every
+		// unit generated while hidden at once, instead of letting the smooth reveal
+		// resume from the last point the user watched (#15336).
+		const watched = "reasoning through the problem ".repeat(12);
+		const grown = `${watched}and the reasoning that arrives while the block is hidden `;
+		let hideThinking = false;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking: watched }]), false);
+		for (let frame = 0; frame < 40; frame++) {
+			if (thinkingAt(latestMessage(component), 0) === formatThinkingForDisplay(watched, true)) break;
+			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		}
+		expect(thinkingAt(latestMessage(component), 0)).toBe(formatThinkingForDisplay(watched, true));
+
+		// Hide the block, and let the provider extend it while it stays hidden.
+		hideThinking = true;
+		controller.resyncVisibility();
+		controller.setTarget(makeMessage([{ type: "thinking", thinking: grown }]), false);
+
+		// Show it again: the block is still the watched prefix, and the reasoning
+		// that arrived while it was hidden reveals at the normal pace.
+		hideThinking = false;
+		controller.resyncVisibility();
+		expect(thinkingAt(latestMessage(component), 0)).toBe(formatThinkingForDisplay(watched, true));
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		expect(thinkingAt(latestMessage(component), 0).length).toBeGreaterThan(
+			formatThinkingForDisplay(watched, true).length,
+		);
+	});
+
+	it("keeps the revealed answer whole when a partially revealed thinking block is shown again", async () => {
+		// Hide a leading thinking block while the reveal is still inside it, let
+		// the FOLLOWING answer stream in and reveal to completion, then show the
+		// block again. The show pass restores the thinking prefix out of the saved
+		// spend, but the answer's own units are spent as well: collapsing both
+		// into one aggregate count makes buildDisplayMessage spend the SUM off the
+		// leading thinking block, so the already-visible answer blanks and
+		// retypes while the unseen reasoning jumps forward (#15336).
+		const thinking = "reasoning through the problem ".repeat(12);
+		const full = formatThinkingForDisplay(thinking, true);
+		const answer = "the visible answer tail that the user is reading".repeat(4);
+		let hideThinking = false;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+		const partial = thinkingAt(latestMessage(component), 0);
+		expect(partial.length).toBeGreaterThan(0);
+		expect(partial.length).toBeLessThan(full.length);
+
+		// Hide the block, then let the answer arrive and reveal whole.
+		hideThinking = true;
+		controller.resyncVisibility();
+		controller.setTarget(
+			makeMessage([
+				{ type: "thinking", thinking },
+				{ type: "text", text: answer },
+			]),
+			false,
+		);
+		for (let frame = 0; frame < 400; frame++) {
+			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+			const rendered = latestMessage(component).content[1];
+			if (rendered?.type === "text" && rendered.text === answer) break;
+		}
+		expect(textAt(latestMessage(component), 1)).toBe(answer);
+
+		// Show the block again: neither block may pay for the other's units.
+		hideThinking = false;
+		controller.resyncVisibility();
+		expect(thinkingAt(latestMessage(component), 0)).toBe(partial);
+		expect(textAt(latestMessage(component), 1)).toBe(answer);
+
+		// The reveal keeps pacing the reasoning, not the answer behind it.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 2);
+		expect(textAt(latestMessage(component), 1)).toBe(answer);
+		expect(thinkingAt(latestMessage(component), 0).length).toBeGreaterThan(partial.length);
+	});
+
+	it("keeps the full reasoning when a tool call lands while the thinking block is hidden", async () => {
+		// Hide a partially revealed thinking block and the provider starts
+		// streaming a TOOL CALL before it is shown again: EventController's
+		// setTarget snaps at that boundary, which finalizes the leading block
+		// whole. Showing thinking afterwards must not prefer the saved partial
+		// prefix — the committed copy already carries the whole block, so a show
+		// pass that re-arms the timer on the old prefix renders less than the
+		// finalized copy above a running tool card and strands the remaining
+		// reasoning (#15336).
+		const thinking = "reasoning through the problem ".repeat(12);
+		const full = formatThinkingForDisplay(thinking, true);
+		let hideThinking = false;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+		const partial = thinkingAt(latestMessage(component), 0);
+		expect(partial.length).toBeGreaterThan(0);
+		expect(partial.length).toBeLessThan(full.length);
+
+		// Hide the block, then let a tool call open while it stays hidden.
+		hideThinking = true;
+		controller.resyncVisibility();
+		controller.setTarget(makeMessage([{ type: "thinking", thinking }]), true);
+		expect(thinkingAt(latestMessage(component), 0)).toBe(full);
+		// Every tool-argument flush re-enters setTarget at the same boundary and
+		// takes the already-snapped early return; the boundary must keep
+		// retiring the saved spend on that path too, not only on the first snap.
+		controller.setTarget(makeMessage([{ type: "thinking", thinking }]), true);
+		controller.setTarget(makeMessage([{ type: "thinking", thinking }]), true);
+
+		// Show it again: the finalized reasoning stays whole, never the old prefix.
+		hideThinking = false;
+		controller.resyncVisibility();
+		expect(thinkingAt(latestMessage(component), 0)).toBe(full);
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+		expect(thinkingAt(latestMessage(component), 0)).toBe(full);
+	});
+
+	it("shows the committed whole reasoning after switching off smooth streaming", async () => {
+		// Smooth reveal part-way through a thinking block, then hide it (arming a
+		// partial "hidden block spend"), then switch streaming to non-smooth. The
+		// non-smooth setTarget finalizes the leading segment whole, so it must
+		// retire that saved spend with it. Leaving it armed makes the next show
+		// pass replay the STALE partial prefix (Math.min(spent, units)) over the
+		// committed whole block: the finalized reasoning regresses to the old
+		// partial and retypes, permanently omitting the remaining reasoning the
+		// user should have seen finish (#15336).
+		const thinking = "reasoning through the problem ".repeat(12);
+		const full = formatThinkingForDisplay(thinking, true);
+		let hideThinking = false;
+		let smooth = true;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => smooth,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+		const partial = thinkingAt(latestMessage(component), 0);
+		expect(partial.length).toBeGreaterThan(0);
+		expect(partial.length).toBeLessThan(full.length);
+
+		// Hide the block mid-reveal: a partial latent is armed for a later show.
+		hideThinking = true;
+		controller.resyncVisibility();
+
+		// Switch to non-smooth streaming: the next setTarget commits the leading
+		// segment whole and must spend the saved partial with it.
+		smooth = false;
+		controller.setTarget(makeMessage([{ type: "thinking", thinking }]), false);
+
+		// Show it again: the committed whole reasoning, never the stale partial.
+		hideThinking = false;
+		controller.resyncVisibility();
+		expect(thinkingAt(latestMessage(component), 0)).toBe(full);
+		// The reveal is done in non-smooth mode, so no timer may re-arm and retype.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+		expect(thinkingAt(latestMessage(component), 0)).toBe(full);
+	});
+
+	it("shows the whole reasoning when smoothing is turned off without a provider delta", async () => {
+		// Same round trip as above, but with NO setTarget between the hide and the
+		// show: the user disables smooth streaming and toggles thinking back on
+		// before the provider streams again. resyncVisibility is then the only
+		// path that runs, so it must read the fresh smooth flag itself — restoring
+		// the latent partial there re-arms the 30fps timer and retypes reasoning
+		// that should render whole (#15336).
+		const thinking = "reasoning through the problem ".repeat(12);
+		const full = formatThinkingForDisplay(thinking, true);
+		let hideThinking = false;
+		let smooth = true;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => smooth,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+		const partial = thinkingAt(latestMessage(component), 0);
+		expect(partial.length).toBeGreaterThan(0);
+		expect(partial.length).toBeLessThan(full.length);
+
+		hideThinking = true;
+		controller.resyncVisibility();
+		smooth = false;
+		hideThinking = false;
+		controller.resyncVisibility();
+
+		expect(thinkingAt(latestMessage(component), 0)).toBe(full);
+		// No timer may re-arm, so the rendering cannot regress on later frames.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+		expect(thinkingAt(latestMessage(component), 0)).toBe(full);
+	});
+
+	it("keeps a fully revealed thinking block whole when prose-only expands its fence", async () => {
+		// Prose-only mode elides a fenced-code prefix down to a trailing ellipsis.
+		// Turning it off expands that prefix back to the full fence, so a block
+		// the reveal already consumed whole must stay whole at its new size: a
+		// resync that re-credits only the old short size leaves buildDisplayMessage
+		// spending the answer's saved units on the expanded fence, which blanks
+		// the answer and retypes it as the reveal catches up.
+		const thinking = [
+			"Analyzing the request before answering.",
+			"```js",
+			"const value = compute(42);",
+			"console.log(value);",
+			"```",
+		].join("\n");
+		const answer = "the visible answer tail that the user is reading".repeat(4);
+		let proseOnly = true;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => false,
+			getProseOnlyThinking: () => proseOnly,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		// Reveal the prose-shaped prefix out completely.
+		for (let frame = 0; frame < 40; frame++) {
+			if (thinkingAt(latestMessage(component), 0) === formatThinkingForDisplay(thinking, true)) break;
+			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		}
+		expect(thinkingAt(latestMessage(component), 0)).toBe(formatThinkingForDisplay(thinking, true));
+
+		// Stream the answer in faster than the reveal paces it, so the frontier
+		// ends up past the whole prefix and inside the answer.
+		for (let end = 10; end <= answer.length; end += 10) {
+			controller.setTarget(
+				makeMessage([
+					{ type: "thinking", thinking },
+					{ type: "text", text: answer.slice(0, end) },
+				]),
+				false,
+			);
+			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		}
+		const revealedBefore = textAt(latestMessage(component), 1);
+		expect(revealedBefore.length).toBeGreaterThan(0);
+		expect(revealedBefore.length).toBeLessThan(answer.length);
+
+		// Prose-only off: the fence expands, and the answer must not pay for it.
+		proseOnly = false;
+		controller.resyncVisibility();
+		expect(textAt(latestMessage(component), 1)).toBe(revealedBefore);
+		// The prefix was fully consumed, so it renders whole at the expanded size.
+		expect(thinkingAt(latestMessage(component), 0)).toBe(formatThinkingForDisplay(thinking, false));
+	});
+
+	it("keeps a fully revealed thought whole when a hidden block changes format", async () => {
+		// A prose-only fenced thinking block the reveal consumed whole is hidden,
+		// the prose mode is switched off while the block stays hidden, and it is
+		// shown again: the raw layout is far longer than the prose one, so
+		// restoring only the prose size truncates the completed thought and the
+		// reveal timer retypes the rest. A block the user watched whole keeps
+		// that shape — only the format changed, the raw text is the same.
+		const thinking = [
+			"Analyzing the request before answering.",
+			"```js",
+			"const value = compute(42);",
+			"console.log(value);",
+			"```",
+		].join("\n");
+		let proseOnly = true;
+		let hideThinking = false;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => proseOnly,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		// Reveal the prose-shaped prefix out completely.
+		for (let frame = 0; frame < 40; frame++) {
+			if (thinkingAt(latestMessage(component), 0) === formatThinkingForDisplay(thinking, true)) break;
+			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		}
+		expect(thinkingAt(latestMessage(component), 0)).toBe(formatThinkingForDisplay(thinking, true));
+
+		// Hide it, then flip the format while it stays hidden.
+		hideThinking = true;
+		controller.resyncVisibility();
+		proseOnly = false;
+		controller.resyncVisibility();
+
+		// Show it again: the completed thought must be whole under the raw size.
+		hideThinking = false;
+		controller.resyncVisibility();
+		expect(thinkingAt(latestMessage(component), 0)).toBe(formatThinkingForDisplay(thinking, false));
+	});
+
+	it("restores the watched prefix after a raw to prose to raw round trip", async () => {
+		// The reveal is part-way through a raw fenced thinking block when the
+		// prose mode is switched on: the prose rendering is much shorter, so the
+		// block is whole in that layout. Switching back to raw must restore the
+		// prefix the user watched in the raw layout — crediting the whole raw
+		// block would flash reasoning they never saw to completion.
+		const thinking = [
+			"Analyzing the request before answering at length.",
+			"```js",
+			"const value = compute(42);",
+			"console.log(value);",
+			"```",
+		].join("\n");
+		let proseOnly = false;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => false,
+			getProseOnlyThinking: () => proseOnly,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		// Reveal a strict prefix of the raw block.
+		for (let frame = 0; frame < 6; frame++) {
+			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		}
+		const revealedBefore = thinkingAt(latestMessage(component), 0);
+		expect(revealedBefore.length).toBeGreaterThan(0);
+		expect(revealedBefore).not.toBe(formatThinkingForDisplay(thinking, false));
+
+		// Prose on: the shorter rendering is shown whole.
+		proseOnly = true;
+		controller.resyncVisibility();
+		expect(thinkingAt(latestMessage(component), 0)).toBe(formatThinkingForDisplay(thinking, true));
+
+		// Prose off again: the raw prefix the user watched comes back.
+		proseOnly = false;
+		controller.resyncVisibility();
+		expect(thinkingAt(latestMessage(component), 0)).toBe(revealedBefore);
+	});
+
+	it("preserves the revealed prefix when a streamed text block becomes hidden thinking", async () => {
+		// A provider that streams reasoning as text and then closes the implied
+		// thinking replaces the streamed text block with a thinking block at the
+		// same index. While thinking is hidden the replacement has no visible
+		// units, so the reveal the text had earned must be parked, not discarded:
+		// showing thinking again restores the prefix the user watched instead of
+		// crediting the whole reasoning block at once.
+		const reasoning = "working through the problem step by step. ".repeat(6);
+		let hideThinking = true;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "text", text: reasoning }]), false);
+		// Reveal a strict prefix of the streamed text.
+		for (let frame = 0; frame < 3; frame++) {
+			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		}
+		const revealedBefore = textAt(latestMessage(component), 0);
+		expect(revealedBefore.length).toBeGreaterThan(0);
+		expect(revealedBefore.length).toBeLessThan(reasoning.length);
+
+		// The implied thinking closes: the text block becomes a thinking block
+		// while thinking is hidden, so it has no visible units at all.
+		controller.setTarget(makeMessage([{ type: "thinking", thinking: reasoning }]), false);
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+
+		// Showing thinking restores the watched prefix, not the whole block.
+		hideThinking = false;
+		controller.resyncVisibility();
+		const revealed = thinkingAt(latestMessage(component), 0);
+		expect(revealed.length).toBeGreaterThan(0);
+		expect(revealed.length).toBeLessThan(reasoning.length);
+	});
+
+	it("does not spend the answer's reveal budget on a thinking block revealed past the frontier", async () => {
+		// `thinking -> text -> thinking`, reveal still part-way through the text
+		// while both thinking blocks are hidden. Showing thinking makes both
+		// blocks newly visible; the one AFTER the text is past the reveal
+		// frontier, so crediting it whole raises the aggregate budget that
+		// buildDisplayMessage spends from the first block — the preceding text
+		// then consumes those units and the visible answer jumps forward or
+		// completes. Only blocks at or before the frontier may be snapped whole.
+		const leading = "reasoning through the problem ".repeat(6);
+		const trailing = "double-checking the result ".repeat(6);
+		const answer = "the answer that must not jump forward".repeat(3);
+		let hideThinking = true;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(
+			component,
+			makeMessage([
+				{ type: "thinking", thinking: leading },
+				{ type: "text", text: "" },
+			]),
+			false,
+		);
+		// Land the answer while the reveal paces it, so the frontier sits inside
+		// the text with both thinking blocks still hidden.
+		for (let end = 8; end <= answer.length; end += 8) {
+			controller.setTarget(
+				makeMessage([
+					{ type: "thinking", thinking: leading },
+					{ type: "text", text: answer.slice(0, end) },
+					{ type: "thinking", thinking: trailing },
+				]),
+				false,
+			);
+			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		}
+		const revealedBefore = textAt(latestMessage(component), 1);
+		expect(revealedBefore.length).toBeGreaterThan(0);
+		expect(revealedBefore.length).toBeLessThan(answer.length);
+
+		// Show thinking: the leading block is before the frontier and renders
+		// whole; the trailing one is past it and stays unrevealed, so the answer
+		// keeps exactly the units it had.
+		hideThinking = false;
+		controller.resyncVisibility();
+		expect(textAt(latestMessage(component), 1)).toBe(revealedBefore);
+		expect(thinkingAt(latestMessage(component), 0)).toBe(formatThinkingForDisplay(leading, true));
+		expect(thinkingAt(latestMessage(component), 2)).toBe("");
 	});
 
 	it("uses an adaptive catchup step with the configured floor", () => {
@@ -618,5 +1177,52 @@ describe("frame-skip coalescing", () => {
 		const drained = component.messages.length;
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 4);
 		expect(component.messages.length).toBe(drained);
+	});
+
+	it("clamps the reveal budget at zero when hiding thinking mid-reveal", () => {
+		// When the provider has already supplied a later block while smooth reveal
+		// is still part-way through an earlier one, hiding thinking makes
+		// `remaining` smaller than `before` for the thinking block. Subtracting
+		// the whole block makes it negative, and the subsequent text block then
+		// contributes a negative `spent` value to `revealed`. The answer text
+		// must not be blanked out by the fictitious negative offset.
+		const thinking = "reasoning through the problem ".repeat(20);
+		const answer = "the answer that must remain visible".repeat(3);
+		let hideThinking = false;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => hideThinking,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		vi.useFakeTimers();
+		controller.begin(component, makeMessage([{ type: "thinking", thinking }]), false);
+		// Advance a few frames so reveal is partway through the thinking block.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 3);
+
+		// Provider supplies the answer while reveal is still inside thinking.
+		controller.setTarget(
+			makeMessage([
+				{ type: "thinking", thinking },
+				{ type: "text", text: answer },
+			]),
+			false,
+		);
+
+		// Hide thinking while reveal lags inside the preceding thinking run.
+		hideThinking = true;
+		controller.resyncVisibility();
+
+		// Advance the timer: the answer should reveal from a clamped
+		// (non-negative) offset, not from a fictitious negative one.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 5);
+		const revealedText = textAt(latestMessage(component), 1);
+		expect(revealedText.length).toBeGreaterThan(0);
+
+		// The answer must stay visible — a negative offset would blank it out.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 5);
+		expect(textAt(latestMessage(component), 1).length).toBeGreaterThan(0);
 	});
 });

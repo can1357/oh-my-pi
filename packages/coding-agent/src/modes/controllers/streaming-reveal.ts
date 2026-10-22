@@ -121,6 +121,15 @@ export class BlockUnitCounter {
 	}
 }
 
+/** Raw content length of a block, independent of the display format: a block
+ *  that only changed FORMAT keeps the length it had, while one the provider
+ *  grew while it was hidden does not. */
+function rawLengthOf(block: AssistantContentBlock): number {
+	if (block.type === "text") return block.text.length;
+	if (block.type === "thinking") return block.thinking.length;
+	return 0;
+}
+
 function sliceGraphemes(text: string, units: number): string {
 	if (units <= 0 || text.length === 0) return "";
 	let count = 0;
@@ -173,22 +182,29 @@ function revealThinkingBlock(
 	return { ...block, thinking: sliceOf(index, block.thinking, remaining) };
 }
 
+/** Render `target` truncated to the revealed units. `revealed` is either the
+ *  aggregate count spent from the first visible block, or a per-block budget
+ *  array (aligned with `target.content`) when the reveal keeps a budget per
+ *  block — a block hidden mid-reveal and shown again resumes at its own count
+ *  instead of being credited the units a later block already spent (#15336). */
 export function buildDisplayMessage(
 	target: AssistantMessage,
-	revealed: number,
+	revealed: number | readonly number[],
 	hideThinking: boolean,
 	proseOnly = true,
 	countOf: (index: number, text: string) => number = (_index, text) => countGraphemes(text),
 	sliceOf: GraphemeSlicer = (_index, text, units) => sliceGraphemes(text, units),
 ): AssistantMessage {
-	let remaining = Math.max(0, Math.floor(revealed));
+	const perBlock = typeof revealed === "number" ? undefined : revealed;
+	let remaining = typeof revealed === "number" ? Math.max(0, Math.floor(revealed)) : 0;
 	const content: AssistantContentBlock[] = [];
 	for (let i = 0; i < target.content.length; i++) {
 		const block = target.content[i]!;
+		const budget = perBlock === undefined ? remaining : Math.max(0, Math.floor(perBlock[i] ?? 0));
 		if (block.type === "text") {
 			const units = countOf(i, block.text);
-			content.push(revealTextBlock(block, remaining, units, i, sliceOf));
-			remaining = Math.max(0, remaining - units);
+			content.push(revealTextBlock(block, budget, units, i, sliceOf));
+			if (perBlock === undefined) remaining = Math.max(0, remaining - units);
 		} else if (block.type === "thinking" && !hideThinking) {
 			const formatted = formatThinkingForDisplay(block.thinking, proseOnly);
 			if (hasDisplayableThinking(block.thinking, formatted)) {
@@ -198,8 +214,8 @@ export function buildDisplayMessage(
 					thinking: formatted,
 					rawThinking: block.thinking,
 				};
-				content.push(revealThinkingBlock(displayBlock, remaining, units, i, sliceOf));
-				remaining = Math.max(0, remaining - units);
+				content.push(revealThinkingBlock(displayBlock, budget, units, i, sliceOf));
+				if (perBlock === undefined) remaining = Math.max(0, remaining - units);
 			} else {
 				content.push(block);
 			}
@@ -258,7 +274,15 @@ export class StreamingRevealController {
 	#target: AssistantMessage | undefined;
 	#component: StreamingRevealComponent | undefined;
 	#timer: NodeJS.Timeout | undefined;
-	#revealed = 0;
+	// Revealed units per content block index, in transcript order. A per-block
+	// budget rather than one aggregate count: a block hidden mid-reveal keeps
+	// its own units (see `#hiddenBlockSpend`), so showing it again restores the
+	// prefix the user watched WITHOUT the units a later block already earned —
+	// collapsing both into the scalar credited their sum to the leading block,
+	// which blanked the revealed answer behind it while the unseen reasoning
+	// jumped forward (#15336). Streaming messages only append, so an index keeps
+	// its block until the message is replaced (begin → stop resets it).
+	#blockRevealed: number[] = [];
 	#targetDirty = false;
 	// Immutable deep clone of the leading content snapped at the tool-call
 	// boundary. Kept independent of the live message so an in-place provider
@@ -270,6 +294,22 @@ export class StreamingRevealController {
 	// content is frozen (every flush of a tool-arg stream) they prove equality
 	// in O(blocks) without walking the text; any mismatch defers to the clone.
 	#snappedToolBoundaryBlocks: SnappedBlock[] | undefined;
+	// Reveal units a block had earned while visible, kept while it is hidden.
+	// Keyed by block index: streaming messages only append, so a hidden block
+	// keeps its slot until the message is replaced (begin → stop clears it).
+	// Without it a hide/show round trip loses the reveal-shaped prefix and the
+	// show pass credits the whole regenerated block.
+	// `rawLength` is the block's raw content length when the spend was earned:
+	// a block that only changed FORMAT keeps the length it had, while one the
+	// provider grew while it was hidden does not — the two need different
+	// outcomes when it is shown again.
+	#hiddenBlockSpend = new Map<number, { spent: number; before: number; rawLength: number }>();
+	// Reveal budget a block earned under the OTHER thinking format, keyed by
+	// block index. A raw fenced block and its prose rendering have different
+	// lengths, so one scalar budget cannot describe both: a raw → prose → raw
+	// round trip must restore the prefix the user watched in the raw layout
+	// instead of the shorter prose layout's clamp (#15336).
+	#formatSpend = new Map<number, { raw?: number; prose?: number }>();
 	#hideThinkingBlock = false;
 	#proseOnlyThinking = true;
 	#smoothStreaming = true;
@@ -284,15 +324,88 @@ export class StreamingRevealController {
 		this.#getProseOnlyThinking = options.getProseOnlyThinking;
 		this.#requestRender = options.requestRender;
 	}
-	#build(target: AssistantMessage, revealed: number): AssistantMessage {
+	#build(target: AssistantMessage): AssistantMessage {
 		return buildDisplayMessage(
 			target,
-			revealed,
+			this.#blockRevealed,
 			this.#hideThinkingBlock,
 			this.#proseOnlyThinking,
 			this.#countOf,
 			this.#sliceOf,
 		);
+	}
+
+	/** Aggregate revealed units: the sum of the per-block budgets. A block the
+	 *  fresh flags hide has no visible units, so its budget stays 0 and the
+	 *  aggregate is measured against the visible layout only. */
+	#revealedTotal(): number {
+		let total = 0;
+		for (const units of this.#blockRevealed) total += units;
+		return total;
+	}
+
+	/** Grow the per-block budgets to the live content length (a new block
+	 *  starts unrevealed) and drop budgets past it, then clamp every budget to
+	 *  the block's current units so a shrinking block cannot stay over-drawn.
+	 *
+	 *  A block that just became INVISIBLE must not lose the reveal it had
+	 *  earned: a provider that streams reasoning as text and then closes the
+	 *  implied thinking replaces the streamed text block with a thinking block
+	 *  at the same index, and while thinking is hidden the replacement has no
+	 *  visible units. Parking the spend keeps the prefix the user watched, so
+	 *  showing thinking again restores it instead of crediting the whole
+	 *  regenerated block. */
+	#alignBlocks(message: AssistantMessage, previousContent?: AssistantMessage["content"]): void {
+		const live = message.content.length;
+		if (this.#blockRevealed.length > live) this.#blockRevealed.length = live;
+		for (let i = this.#blockRevealed.length; i < live; i++) this.#blockRevealed.push(0);
+		for (let i = 0; i < live; i++) {
+			const units = this.#blockUnits(message.content[i]!, this.#hideThinkingBlock, this.#proseOnlyThinking, i);
+			const granted = this.#blockRevealed[i]!;
+			if (granted > units) {
+				const previous = previousContent?.[i];
+				if (units === 0 && granted > 0 && previous !== undefined) {
+					const before = this.#blockUnits(previous, this.#hideThinkingBlock, this.#proseOnlyThinking, i);
+					this.#hiddenBlockSpend.set(i, {
+						spent: granted,
+						before: before > 0 ? before : granted,
+						rawLength: rawLengthOf(previous),
+					});
+				}
+				this.#blockRevealed[i] = units;
+			}
+		}
+	}
+
+	/** Credit every block its full visible budget: the boundary snap and the
+	 *  no-smoothing path both finalize the leading segment whole. */
+	#revealWhole(message: AssistantMessage): void {
+		this.#alignBlocks(message);
+		for (let i = 0; i < message.content.length; i++) {
+			this.#blockRevealed[i] = this.#blockUnits(
+				message.content[i]!,
+				this.#hideThinkingBlock,
+				this.#proseOnlyThinking,
+				i,
+			);
+		}
+	}
+
+	/** Spend `units` on the first blocks that still owe reveal units, in
+	 *  transcript order. The frontier walks forward exactly like the single
+	 *  aggregate count did; a block that kept its own budget across a hide/show
+	 *  round trip resumes where it stopped instead of being handed a later
+	 *  block's units. */
+	#advance(message: AssistantMessage, units: number): void {
+		let budget = units;
+		for (let i = 0; i < message.content.length && budget > 0; i++) {
+			const size = this.#blockUnits(message.content[i]!, this.#hideThinkingBlock, this.#proseOnlyThinking, i);
+			const granted = this.#blockRevealed[i] ?? 0;
+			if (granted >= size) continue;
+			const credit = Math.min(size - granted, budget);
+			this.#blockRevealed[i] = granted + credit;
+			budget -= credit;
+		}
 	}
 
 	begin(component: StreamingRevealComponent, message: AssistantMessage, hasToolCalls: boolean): void {
@@ -301,49 +414,56 @@ export class StreamingRevealController {
 		// Reveal counts narration as answer text, matching how the component renders it.
 		message = presentNarrationAsAnswer(message);
 		this.#target = message;
-		this.#revealed = 0;
 		this.#hideThinkingBlock = this.#getHideThinkingBlock();
 		this.#proseOnlyThinking = this.#getProseOnlyThinking();
 		this.#smoothStreaming = this.#getSmoothStreaming();
 		if (!this.#smoothStreaming) {
-			const total = this.#visibleUnits(message);
-			component.updateContent(this.#build(message, total), { transient: true });
+			this.#revealWhole(message);
+			component.updateContent(this.#build(message), { transient: true });
 			return;
 		}
 		const total = this.#visibleUnits(message);
 		if (hasToolCalls) {
 			// A tool call is a transcript-order boundary: finish any leading
 			// assistant text before EventController renders the separate tool card.
-			this.#revealed = total;
-			component.updateContent(this.#build(message, this.#revealed), {
-				transient: true,
-			});
+			this.#revealWhole(message);
+			component.updateContent(this.#build(message), { transient: true });
 			this.#snapToolBoundary(message.content);
 			return;
 		}
+		this.#alignBlocks(message);
 		this.#renderCurrent();
 		this.#syncTimer(total);
 	}
 
 	setTarget(message: AssistantMessage, hasToolCalls: boolean): void {
 		message = presentNarrationAsAnswer(message);
+		// The previous content tells #alignBlocks which block a spend belongs to
+		// when the provider replaces a streamed text block with a thinking one.
+		const previous = this.#target;
 		this.#target = message;
 		this.#hideThinkingBlock = this.#getHideThinkingBlock();
 		this.#proseOnlyThinking = this.#getProseOnlyThinking();
 		this.#smoothStreaming = this.#getSmoothStreaming();
+		this.#alignBlocks(message, previous?.content);
 		if (!this.#component) return;
 		if (!this.#smoothStreaming) {
-			const total = this.#visibleUnits(message);
-			this.#revealed = total;
+			// Switching to non-smooth streaming finalizes the leading segment whole
+			// here, so the spend a hidden block saved during smooth reveal is spent
+			// with it — keeping it armed would replay a stale partial prefix on the
+			// next show pass over the committed whole block and strand the
+			// remaining reasoning (#15336).
+			this.#hiddenBlockSpend.clear();
+			this.#revealWhole(message);
 			this.#targetDirty = false;
 			this.#stopTimer();
-			this.#component.updateContent(this.#build(message, total), { transient: true });
+			this.#component.updateContent(this.#build(message), { transient: true });
 			return;
 		}
 		const total = this.#visibleUnits(message);
 		if (hasToolCalls) {
 			let alreadySnapped = false;
-			if (this.#revealed === total && this.#snappedToolBoundaryContent !== undefined) {
+			if (this.#revealedTotal() === total && this.#snappedToolBoundaryContent !== undefined) {
 				const blocks = this.#snappedToolBoundaryBlocks;
 				if (blocks !== undefined && unchangedSinceSnap(blocks, message.content)) {
 					alreadySnapped = true;
@@ -356,11 +476,16 @@ export class StreamingRevealController {
 			}
 			// A tool call is a transcript-order boundary: finish any leading
 			// assistant text before EventController renders the separate tool card.
-			this.#revealed = total;
+			// The leading segment is committed whole here, so the spend a hidden
+			// block saved for a later show pass is spent with it — restoring that
+			// partial prefix afterwards would render less than the committed copy
+			// above a running tool card and strand the remaining reasoning (#15336).
+			this.#hiddenBlockSpend.clear();
+			this.#revealWhole(message);
 			this.#targetDirty = false;
 			this.#stopTimer();
 			if (alreadySnapped) return;
-			this.#component.updateContent(this.#build(message, this.#revealed), {
+			this.#component.updateContent(this.#build(message), {
 				transient: true,
 			});
 			this.#snapToolBoundary(message.content);
@@ -368,10 +493,8 @@ export class StreamingRevealController {
 		}
 		this.#snappedToolBoundaryContent = undefined;
 		this.#snappedToolBoundaryBlocks = undefined;
-		if (this.#revealed > total) {
-			this.#revealed = total;
-		}
-		if (this.#revealed < total) {
+		const revealed = this.#revealedTotal();
+		if (revealed < total) {
 			// Behind: the running reveal tick renders the newest target at the
 			// cadence; skip the redundant per-delta render (the reveal cadence
 			// bounds markdown work even when the provider deltas arrive faster).
@@ -390,8 +513,10 @@ export class StreamingRevealController {
 		this.#stopTimer();
 		this.#target = undefined;
 		this.#component = undefined;
-		this.#revealed = 0;
+		this.#blockRevealed = [];
 		this.#targetDirty = false;
+		this.#hiddenBlockSpend.clear();
+		this.#formatSpend.clear();
 		this.#snappedToolBoundaryContent = undefined;
 		this.#snappedToolBoundaryBlocks = undefined;
 		this.#unitCounter.reset();
@@ -406,32 +531,159 @@ export class StreamingRevealController {
 	 * Re-read cached visibility flags (hideThinkingBlock, proseOnlyThinking)
 	 * and re-render the current target. Called when the thinking level changes
 	 * mid-stream so the reveal controller doesn't keep rendering with stale values.
+	 *
+	 * A visibility toggle changes which blocks are visible and how many units
+	 * each one has, which would move every later block by the units the toggle
+	 * adds or drops. Re-anchor per block instead: the revealed amount of every
+	 * block that stays visible is preserved, so a hide/show after the reveal
+	 * reached the answer leaves the answer where it was instead of clamping the
+	 * whole budget to the text total (answer snapped to 100%) or spending the
+	 * answer's units on the freshly shown thinking prefix (answer re-hidden).
+	 * Each block is re-credited from its OWN saved units, so one block's budget
+	 * can never fund another block's — the two are summed into one count and
+	 * both were spent off the leading block, blanking the answer behind it
+	 * (#15336). A block the old layout consumed whole stays whole under its new
+	 * size, so a prose toggle that expands or shrinks it does not hand the
+	 * difference to the block after it; a partially revealed one keeps its
+	 * position, clamped to its new length. A block that just became visible is
+	 * snapped whole only while the old budget still covers it — crediting one
+	 * past that frontier hands units the reveal never earned to the blocks
+	 * before it, so the visible answer jumps forward or completes — unless it
+	 * was hidden mid-reveal, in which case the reveal it had earned is restored
+	 * so a hide/show round trip keeps the prefix the user already watched
+	 * stream out.
 	 */
 	resyncVisibility(): void {
 		if (!this.#target || !this.#component) return;
+		const target = this.#target;
+		const hideBefore = this.#hideThinkingBlock;
+		const proseBefore = this.#proseOnlyThinking;
 		this.#hideThinkingBlock = this.#getHideThinkingBlock();
 		this.#proseOnlyThinking = this.#getProseOnlyThinking();
-		// Recalculate visible units — hiding thinking blocks may reduce the total,
-		// and the reveal position may now exceed it.
-		const total = this.#visibleUnits(this.#target);
-		this.#revealed = Math.min(this.#revealed, total);
+		// Smoothing can be turned off between deltas: a hide/show round trip with
+		// no provider update in between then reaches this resync, and restoring
+		// the latent partial would re-arm the reveal timer and retype reasoning
+		// the user asked to see whole. Non-smooth renders the full target, so
+		// spend every block and drop the saved partials with it.
+		if (!this.#getSmoothStreaming()) {
+			this.#smoothStreaming = false;
+			this.#hiddenBlockSpend.clear();
+			this.#revealWhole(target);
+			this.#stopTimer();
+			this.#renderCurrent();
+			return;
+		}
+		// Per-block unit counts under the old and the fresh flags, plus the
+		// reveal each block had already earned under the old layout.
+		const sizes: { before: number; after: number; spent: number }[] = [];
+		for (let i = 0; i < target.content.length; i++) {
+			const before = this.#blockUnits(target.content[i]!, hideBefore, proseBefore, i);
+			const after = this.#blockUnits(target.content[i]!, this.#hideThinkingBlock, this.#proseOnlyThinking, i);
+			sizes.push({ before, after, spent: Math.min(this.#blockRevealed[i] ?? 0, before) });
+		}
+		// First block that still owed units under the old layout: the reveal
+		// frontier. A block at or past it may be credited whole; one before it
+		// was never reached, and crediting it whole hands its units to the blocks
+		// before it — the visible answer jumps forward or completes. No such
+		// block means the old budget covered the whole old layout.
+		let frontier = -1;
+		for (let i = 0; i < sizes.length; i++) {
+			const { before, spent } = sizes[i]!;
+			if (before > 0 && spent < before) {
+				frontier = i;
+				break;
+			}
+		}
+		// Walk the blocks, re-crediting each one from its own saved spend.
+		const blocks: number[] = [];
+		for (let i = 0; i < sizes.length; i++) {
+			const { before, after, spent } = sizes[i]!;
+			// A block whose visible size depends on the thinking format keeps one
+			// budget per format: the prose rendering of a fenced block is much
+			// shorter than the raw one, so the budget earned in one layout says
+			// nothing about the other. Remember what this layout earned before
+			// leaving it, and restore the budget the block already earned in the
+			// layout it is entering.
+			const formatSensitive = before !== after;
+			let own: number | undefined;
+			if (formatSensitive) {
+				const slot = this.#formatSpend.get(i) ?? {};
+				if (proseBefore) slot.prose = this.#blockRevealed[i] ?? 0;
+				else slot.raw = this.#blockRevealed[i] ?? 0;
+				this.#formatSpend.set(i, slot);
+				own = this.#proseOnlyThinking ? slot.prose : slot.raw;
+			}
+			if (before > 0 && after > 0) {
+				if (own !== undefined) {
+					// The block already earned a budget in this format: restore it
+					// instead of folding the other format's budget into this size,
+					// so a raw → prose → raw round trip keeps the prefix the user
+					// watched in the raw layout.
+					blocks.push(Math.min(own, after));
+				} else {
+					// Fully consumed under the old size: consume it whole under the
+					// new one, so the prose-mode expansion of a fence is not funded by
+					// the answer's saved units. Partially revealed: keep the position,
+					// clamped to the new length.
+					blocks.push(spent >= before ? after : Math.min(spent, after));
+				}
+			} else if (before === 0 && after > 0) {
+				// Newly visible. A block the hide pass took away keeps the reveal
+				// it had earned: restoring that spend keeps the user's watched
+				// prefix instead of crediting the whole regenerated block, which
+				// would flash the remaining reasoning to completion (and, with a
+				// later unrevealed text block, restart the reveal from zero).
+				const latent = this.#hiddenBlockSpend.get(i);
+				if (latent !== undefined) {
+					this.#hiddenBlockSpend.delete(i);
+					// A block the user watched WHOLE keeps that shape under the new
+					// size when only the format changed: the raw text is the same, so
+					// the shorter layout it was watched in must not cut the longer
+					// one back — the completed thought would be truncated and the
+					// reveal timer would retype the rest. A block the provider grew
+					// while it was hidden resumes from the watched point instead:
+					// the reasoning generated in the meantime must not flash in at
+					// once.
+					const grew = rawLengthOf(target.content[i]!) !== latent.rawLength;
+					blocks.push(latent.spent >= latent.before && !grew ? after : Math.min(latent.spent, after));
+				} else if (frontier < 0 || frontier >= i) {
+					// Never revealed while hidden: snap it whole only if the old
+					// frontier lies at or past it, or the old budget covered the
+					// whole old layout.
+					blocks.push(after);
+				} else {
+					blocks.push(0);
+				}
+			} else if (before > 0) {
+				// Just hidden: retain the reveal it had earned for a later show
+				// pass, which restores the shaped prefix instead of restarting
+				// the block from zero.
+				this.#hiddenBlockSpend.set(i, { spent, before, rawLength: rawLengthOf(target.content[i]!) });
+				blocks.push(0);
+			} else {
+				blocks.push(0);
+			}
+		}
+		this.#blockRevealed = blocks;
+		const total = this.#visibleUnits(target);
 		this.#renderCurrent();
 		this.#syncTimer(total);
+	}
+
+	/** Visible units of one block under an explicit visibility pair. */
+	#blockUnits(block: AssistantContentBlock, hideThinking: boolean, proseOnly: boolean, index: number): number {
+		if (block.type === "text") return this.#unitCounter.count(index, block.text);
+		if (block.type !== "thinking" || hideThinking) return 0;
+		const formatted = formatThinkingForDisplay(block.thinking, proseOnly);
+		if (!hasDisplayableThinking(block.thinking, formatted)) return 0;
+		return this.#unitCounter.count(index, formatted);
 	}
 
 	/** Total reveal units of `message`, memoized per block across ticks. */
 	#visibleUnits(message: AssistantMessage): number {
 		let total = 0;
 		for (let i = 0; i < message.content.length; i++) {
-			const block = message.content[i]!;
-			if (block.type === "text") {
-				total += this.#unitCounter.count(i, block.text);
-			} else if (block.type === "thinking" && !this.#hideThinkingBlock) {
-				const formatted = formatThinkingForDisplay(block.thinking, this.#proseOnlyThinking);
-				if (hasDisplayableThinking(block.thinking, formatted)) {
-					total += this.#unitCounter.count(i, formatted);
-				}
-			}
+			total += this.#blockUnits(message.content[i]!, this.#hideThinkingBlock, this.#proseOnlyThinking, i);
 		}
 		return total;
 	}
@@ -441,11 +693,11 @@ export class StreamingRevealController {
 		// Every controller render is an in-flight streaming snapshot, even when
 		// smooth reveal has temporarily caught up to the current target. The
 		// message_end handler performs the only stable non-transient render.
-		this.#component.updateContent(this.#build(this.#target, this.#revealed), { transient: true });
+		this.#component.updateContent(this.#build(this.#target), { transient: true });
 	}
 
 	#syncTimer(total = this.#target ? this.#visibleUnits(this.#target) : 0): void {
-		if (!this.#target || !this.#component || this.#revealed >= total) {
+		if (!this.#target || !this.#component || this.#revealedTotal() >= total) {
 			this.#stopTimer();
 			return;
 		}
@@ -474,22 +726,22 @@ export class StreamingRevealController {
 			return;
 		}
 		const total = this.#visibleUnits(target);
-		if (this.#revealed >= total) {
+		if (this.#revealedTotal() >= total) {
 			if (this.#targetDirty) {
 				this.#targetDirty = false;
-				this.#revealed = total;
+				this.#revealWhole(target);
 				this.#renderCurrent();
 				this.#requestRender(component);
 			}
 			this.#stopTimer();
 			return;
 		}
-		this.#revealed = Math.min(total, this.#revealed + nextStep(total - this.#revealed));
-		component.updateContent(this.#build(target, this.#revealed), {
+		this.#advance(target, nextStep(total - this.#revealedTotal()));
+		component.updateContent(this.#build(target), {
 			transient: true,
 		});
 		this.#requestRender(component);
-		if (this.#revealed >= total) {
+		if (this.#revealedTotal() >= total) {
 			this.#stopTimer();
 		}
 	}
