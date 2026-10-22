@@ -79,6 +79,42 @@ describe("buildStage1RolloutItems", () => {
 		await expectParity(`${lines.join("\n")}\n`, [1, 4000, 100_000, 10_000_000]);
 	});
 
+	it("excludes signed and redacted reasoning from the stage-1 extraction payload", async () => {
+		const filePath = path.join(tempDir, "reasoning.jsonl");
+		const messages = [
+			{ role: "user", content: [{ type: "text", text: "Find the broken build step" }] },
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "private analysis", thinkingSignature: "signed-reasoning" },
+					{ type: "text", text: "I found the failing step" },
+					{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "bun check" } },
+				],
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					items: [{ type: "reasoning", summary: "private trace" }],
+				},
+			},
+			{ role: "toolResult", toolName: "bash", content: [{ type: "text", text: "type error in build.ts" }] },
+			{
+				role: "assistant",
+				content: [
+					{ type: "redactedThinking", data: "opaque-reasoning" },
+					{ type: "text", text: "Fix build.ts before running again" },
+				],
+			},
+		];
+		await Bun.write(filePath, messages.map(message => JSON.stringify({ type: "message", message })).join("\n"));
+
+		const items = JSON.parse(await buildStage1RolloutItems(filePath, 1000));
+		expect(items).toEqual([
+			messages[0],
+			{ role: "assistant", content: messages[1].content.slice(1) },
+			messages[2],
+			{ ...messages[3], content: messages[3].content.slice(1) },
+		]);
+	});
+
 	it("rejects missing rollouts", async () => {
 		await expect(buildStage1RolloutItems(path.join(tempDir, "missing.jsonl"), 100)).rejects.toThrow();
 	});

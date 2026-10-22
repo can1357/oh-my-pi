@@ -3046,7 +3046,8 @@ export class ModelHubComponent implements Component {
 				this.#browser,
 			);
 		}
-		return node("col", { gap: "sm", grow: 1 }, children, "body");
+		// Zero basis: the body takes the space left of the sidebar instead of sizing to its widest line.
+		return node("col", { gap: "sm", grow: 1, basis: 0, min: { w: 0 } }, children, "body");
 	}
 
 	#describeStatus(): NativeNode {

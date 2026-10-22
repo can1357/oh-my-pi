@@ -702,7 +702,7 @@ fallback when enabling fails.
 
 ### `set_todos` payload
 
-Replaces the in-memory todo state for the current session and returns `{ todoPhases }`.
+Replaces the todo state for the current session and returns `{ todoPhases }`. The list is recorded on the current session branch and restored when that branch is reloaded, compacted, or resumed, like an interactive `/todo` edit.
 Phases use `{ name, tasks }`; tasks retain `{ content, status, blocker? }`. There
 are no phase or task IDs. Status is `"pending"`, `"in_progress"`, `"completed"`,
 `"abandoned"`, or `"blocked"`. Snapshot cloning drops extra fields, including

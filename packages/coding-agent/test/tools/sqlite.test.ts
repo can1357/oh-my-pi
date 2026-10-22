@@ -223,6 +223,11 @@ describe("SQLite tool support", () => {
 			where: undefined,
 		});
 		expect(parseSqliteSelector("", "q=SELECT+1")).toEqual({ kind: "raw", sql: "SELECT 1" });
+		expect(parseSqliteSelector("", "q=SELECT+1&limit=5&offset=10")).toEqual({
+			kind: "raw",
+			sql: "SELECT 1",
+			page: { limit: 5, offset: 10 },
+		});
 	});
 
 	it("lists tables for a .sqlite database and excludes sqlite internal tables", async () => {
@@ -428,6 +433,60 @@ describe("SQLite tool support", () => {
 		expect(text).toContain("val_1000_end");
 		expect(text).not.toContain("val_1001_end");
 		expect(text).toContain("Output capped at 1000 rows");
+	});
+
+	it("pages raw ?q= rows with limit and offset and names the next page", async () => {
+		const first = getText(
+			await readTool.execute("sqlite-raw-page", {
+				path: `${sqlitePath}?q=SELECT name FROM users ORDER BY id&limit=2&offset=1`,
+			}),
+		);
+		expect(first).toContain("Bob");
+		expect(first).toContain("Carol");
+		expect(first).not.toContain("Alice");
+		expect(first).not.toContain("Dave");
+		const next = /append \?(\S+) to the database path/.exec(first)?.[1];
+		expect(next).toBeDefined();
+
+		const second = getText(await readTool.execute("sqlite-raw-next", { path: `${sqlitePath}?${next}` }));
+		expect(second).toContain("Dave");
+		expect(second).toContain("Eve");
+		expect(second).not.toContain("Carol");
+		expect(second).not.toContain("Frank");
+	});
+
+	it("names the fix when raw ?q= queries carry a table selector or table-only parameters", () => {
+		expect(() => parseSqliteSelector("users", "q=SELECT+1")).toThrow("drop ':users' from the path");
+		expect(() => parseSqliteSelector("", "q=SELECT+1&where=id=1")).toThrow("put 'where' into the SQL");
+	});
+
+	it("pages raw ?q= statements of every shape", async () => {
+		const pageOf = async (sql: string) =>
+			getText(
+				await readTool.execute("sqlite-raw-shape", {
+					path: `${sqlitePath}?q=${encodeURIComponent(sql)}&limit=1&offset=1`,
+				}),
+			);
+		// Inner LIMIT, a CTE, a trailing semicolon and a trailing line comment all page as subqueries.
+		expect(await pageOf("SELECT name FROM users ORDER BY id LIMIT 3")).toContain("Bob");
+		expect(await pageOf("WITH u AS (SELECT name, id FROM users) SELECT name FROM u ORDER BY id;")).toContain("Bob");
+		expect(await pageOf("SELECT name FROM users ORDER BY id -- by id")).toContain("Bob");
+		// PRAGMA cannot nest as a subquery and pages by skipping rows instead: row 2 is `name TEXT`, not `id INTEGER`.
+		const pragma = await pageOf("PRAGMA table_info(users)");
+		expect(pragma).toContain("TEXT");
+		expect(pragma).not.toContain("INTEGER");
+		expect(pragma).toContain("offset=2");
+	});
+
+	it("pages a query with repeated column names exactly as it reads unpaged", async () => {
+		const read = async (query: string) =>
+			getText(await readTool.execute("sqlite-raw-dup", { path: `${sqlitePath}?${query}` })).split("\n[")[0];
+		const sql = encodeURIComponent("SELECT id AS x, id + 10 AS x FROM users ORDER BY id");
+		const unpagedRow = await read(
+			`q=${encodeURIComponent("SELECT id AS x, id + 10 AS x FROM users ORDER BY id LIMIT 1 OFFSET 1")}`,
+		);
+
+		expect(await read(`q=${sql}&limit=1&offset=1`)).toBe(unpagedRow);
 	});
 
 	it("rejects table names that do not exist instead of interpolating them", async () => {

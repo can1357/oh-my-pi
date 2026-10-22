@@ -177,14 +177,14 @@ describe("Devin account usage", () => {
 		);
 		const capture: Capture = {};
 
-		const report = await devinUsageProvider.fetchUsage(params("raw-token"), {
+		const report = await devinUsageProvider.fetchUsage(params("header.payload.signature"), {
 			fetch: mockFetch(payload, capture),
 		});
 
 		expect(capture.url).toBe(USER_STATUS_URL);
 		expect(capture.headers?.get("content-type")).toBe("application/proto");
 		expect(capture.headers?.get("connect-protocol-version")).toBe("1");
-		expect(capture.metadata?.apiKey).toBe("devin-session-token$raw-token");
+		expect(capture.metadata?.apiKey).toBe("devin-session-token$header.payload.signature");
 		expect(capture.metadata?.ideName).toBe("devin-cli");
 		expect(capture.metadata?.ideType).toBe("chisel");
 		expect(capture.metadata?.extensionName).toBe("chisel");
@@ -250,19 +250,21 @@ describe("Devin account usage", () => {
 		expect(report.notes).toEqual(["Overage balance: $2.50"]);
 	});
 
-	test("sends API key credentials without the Devin session-token prefix", async () => {
-		const payload = userStatusPayload(
-			{ planName: "Windsurf Enterprise", monthlyPromptCredits: 500 },
-			{ userId: "legacy-user", usedPromptCredits: 125, availablePromptCredits: 375 },
-		);
-		const capture: Capture = {};
-
-		const report = await devinUsageProvider.fetchUsage(params("legacy-windsurf-key", "api_key"), {
-			fetch: mockFetch(payload, capture),
-		});
-
-		expect(capture.metadata?.apiKey).toBe("legacy-windsurf-key");
-		expect(report?.metadata?.accountId).toBe("legacy-user");
+	test("encodes the credential by its shape, whichever way it is stored", async () => {
+		// OMP's Devin login stores the bare session token as an API key; legacy
+		// Windsurf keys can be stored as either kind and are rejected when prefixed.
+		const payload = userStatusPayload({ planName: "Devin Pro" }, { userId: "user-1" });
+		const sent = async (token: string, type: "oauth" | "api_key") => {
+			const capture: Capture = {};
+			const report = await devinUsageProvider.fetchUsage(params(token, type), {
+				fetch: mockFetch(payload, capture),
+			});
+			expect(report?.metadata?.accountId).toBe("user-1");
+			return capture.metadata?.apiKey;
+		};
+		expect(await sent("header.payload.signature", "api_key")).toBe("devin-session-token$header.payload.signature");
+		expect(await sent("sk-ws-01-legacy", "api_key")).toBe("sk-ws-01-legacy");
+		expect(await sent("sk-ws-01-legacy", "oauth")).toBe("sk-ws-01-legacy");
 	});
 
 	test("decodes a gzip-encoded response body and keeps an already-prefixed session token", async () => {

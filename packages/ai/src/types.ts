@@ -461,8 +461,12 @@ export interface AnthropicCompactionRequest {
 export interface OpenAIPromptCacheOptions {
 	/** `explicit` disables OpenAI's automatic latest-message breakpoint. */
 	mode: "implicit" | "explicit";
-	/** The only currently supported minimum breakpoint lifetime. */
-	ttl?: "30m";
+	/**
+	 * Minimum cache lifetime. `30m` is OpenAI's default; `12h` (Responses API only)
+	 * bills writes at 2.5× input instead of 1.25×. Defaults to `12h` when
+	 * `cacheRetention` resolves to `long`, otherwise `30m`.
+	 */
+	ttl?: "30m" | "12h";
 	/** By default, mark one existing block from stable history; `none` suppresses that marker. */
 	breakpoint?: "latest-stable-message" | "none";
 }
@@ -1117,6 +1121,8 @@ export interface AnthropicCompactionPayload {
 	content: string;
 	/** Signature of an on-demand block; replayed verbatim. */
 	signature?: string;
+	/** Net tool changes across the summarized range; covered by the signature, replayed verbatim. */
+	toolChanges?: Record<string, unknown>[];
 	/** Legacy threshold block state (`compact-2026-01-12`); replay-only. */
 	encryptedContent?: string;
 	/**

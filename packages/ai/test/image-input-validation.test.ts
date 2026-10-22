@@ -281,3 +281,16 @@ it("delivers legal MIME punctuation and image bytes intact through hosted provid
 	expect(consumed.headers.get("content-type")).toBe(input.mimeType);
 	expect(Buffer.from(await consumed.arrayBuffer())).toEqual(IMAGE_BYTES);
 });
+
+it("does not tag Antigravity image requests with the requestType that draws false 429 quota errors", async () => {
+	const calls: FetchCall[] = [];
+	await generateAntigravityImage(
+		antigravityModel,
+		{ prompt: "draw a cat" },
+		{ apiKey: ANTIGRAVITY_KEY, fetch: createFetch(calls) },
+	);
+	const call = calls.find(item => item.url.includes(":streamGenerateContent"));
+	if (!call) throw new Error("Expected the Antigravity image request");
+	const body = jsonBody(call);
+	expect(body !== null && typeof body === "object" && "requestType" in body).toBe(false);
+});

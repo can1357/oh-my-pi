@@ -81,10 +81,12 @@ function printSession(manager: MCPManager, refreshGate?: Promise<void>, onRefres
 		sessionManager: {
 			buildSessionContext: () => ({ messages: [] }),
 			getHeader: () => undefined,
+			getCwd: () => import.meta.dir,
 			getEntries: () => [],
 			onPersistenceError: () => () => {},
 			onPersistenceNotice: () => () => {},
 		},
+		modelRegistry: { getApiKey: async () => "test-key" },
 		refreshMCPTools: async (tools: Array<{ name: string }>) => {
 			onRefreshStarted?.();
 			await refreshGate;
@@ -246,4 +248,54 @@ describe("headless MCP readiness", () => {
 		Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS = "bad";
 		expect(resolveMCPStartupTimeoutMs(600)).toBe(600);
 	}, 1_000);
+
+	it("dispatches a recovery builtin before the strict gate so reauth can attempt the failed server", async () => {
+		// Regression: the strict readiness gate used to skip every
+		// `promptTextFor` call, so `omp -p '/mcp reauth <name>'` exited before
+		// dispatching — the one command that could repair the failed server
+		// never ran. The initial input now dispatches first, and a strict
+		// failure re-evaluates readiness after a local builtin ran.
+		const manager = new MCPManager(import.meta.dir);
+		managers.push(manager);
+		// A command that validates but cannot spawn: the config registers in
+		// the manager (so `/mcp reauth` can resolve it) while readiness fails.
+		// A source is required — the manager tail fallback in
+		// `findMcpServerForAuth` reports a server only with both.
+		await manager.connectServers(
+			{ broken: { type: "stdio", command: "/nonexistent-omp-readiness-fixture" } },
+			{
+				broken: { provider: "mcp-json", providerName: "MCP JSON", path: import.meta.path, level: "project" },
+			},
+		);
+		const capture = printSession(manager);
+		Bun.env.OMP_MCP_TIMEOUT_MS = "100";
+		Bun.env.OMP_MCP_REQUIRE_READY = "1";
+		const output: string[] = [];
+		const stderrSpy = spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+			output.push(String(chunk));
+			return true;
+		});
+		try {
+			const code = await runPrintMode(capture.session, {
+				mode: "text",
+				// CLI-authored positional input (`-p`) — the path an automation
+				// recovery actually takes; the merged stdin/@file message is
+				// never dispatched.
+				messages: ["/mcp reauth broken"],
+				mcpManager: manager,
+			});
+			// The reauth itself fails (stdio transport), so the run still
+			// exits nonzero — but through the command's own refusal, not by
+			// skipping it.
+			expect(code).toBe(1);
+		} finally {
+			stderrSpy.mockRestore();
+		}
+		const joined = output.join("");
+		// The command reached the server and reported its own refusal…
+		expect(joined).toContain("stdio servers manage their own credentials");
+		// …and strict readiness was still enforced afterwards.
+		expect(joined).toContain("Error: MCP servers not ready: broken");
+		expect(capture.prompted()).toBeUndefined();
+	}, 4_000);
 });

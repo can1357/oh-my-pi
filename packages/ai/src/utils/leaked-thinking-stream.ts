@@ -86,6 +86,7 @@ export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): As
 		try {
 			let projector: LeakedThinkingProjector | undefined;
 			for await (const event of inner) {
+				if ("partial" in event) projector?.sync(event.partial);
 				switch (event.type) {
 					case "start":
 						projector = new LeakedThinkingProjector(out, event.partial);
@@ -210,6 +211,17 @@ class LeakedThinkingProjector {
 		this.#out = out;
 		this.#partial = { ...seed, content: [] };
 		this.#out.push({ type: "start", partial: this.#partial });
+	}
+
+	/**
+	 * Follow the source message's non-content fields. Providers replace some of
+	 * them while streaming (Gemini assigns a fresh `usage` per chunk), and the
+	 * projected partial is what downstream wrappers read mid-stream.
+	 */
+	sync(source: AssistantMessage): void {
+		const content = this.#partial.content;
+		Object.assign(this.#partial, source);
+		this.#partial.content = content;
 	}
 
 	/** Feed a visible-text delta through the healer, splitting leaked fences live. */

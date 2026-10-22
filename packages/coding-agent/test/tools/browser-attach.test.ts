@@ -86,6 +86,7 @@ function makeTarget(id: string, page: Page | null = null, pageDelayMs = 0) {
 		type: () => "page",
 		page: pageSpy,
 	} as unknown as Target & { _targetId: string };
+	if (page) Object.assign(page, { target: () => target });
 	return { target, pageSpy };
 }
 
@@ -121,6 +122,7 @@ const RELAY_ENTRIES = [
 interface FakePageOptions {
 	url: string;
 	title: string;
+	id?: string;
 	visible?: boolean;
 }
 
@@ -128,6 +130,7 @@ function fakePage(options: FakePageOptions): Page {
 	return {
 		url: () => options.url,
 		title: async () => options.title,
+		target: () => ({ _targetId: options.id ?? "" }),
 		evaluate: async () => options.visible === true,
 	} as unknown as Page;
 }
@@ -296,15 +299,34 @@ describe("pickElectronTarget", () => {
 		30_000,
 	);
 
-	test("reports available pages when the matcher misses", async () => {
-		const page = fakePage({ url: "https://example.com/", title: "Example" });
+	test("adopts a fresh blank CDP page by its exact id when URLs and titles repeat", async () => {
+		const first = fakePage({ id: "PAGE_FIRST", url: "about:blank", title: "" });
+		const fresh = fakePage({ id: "PAGE_FRESH", url: "about:blank", title: "" });
 		const browser = {
-			targets: () => [fakeTarget("page", page)],
-			pages: async () => [],
+			targets: () => [fakeTarget("page", first), fakeTarget("page", fresh)],
 		} as unknown as Browser;
 
-		await expect(pickElectronTarget(browser, { matcher: "missing" })).rejects.toThrow(
-			'No page target matched "missing". Available pages:\n- Example  https://example.com/',
+		await expect(pickElectronTarget(browser, { matcher: "PAGE_FRESH" })).resolves.toBe(fresh);
+	});
+
+	test("prioritizes an exact CDP id over a URL substring on another page", async () => {
+		const first = fakePage({ id: "PAGE_FIRST", url: "https://example.com/PAGE_SECOND", title: "First" });
+		const second = fakePage({ id: "PAGE_SECOND", url: "about:blank", title: "" });
+		const browser = {
+			targets: () => [fakeTarget("page", first), fakeTarget("page", second)],
+		} as unknown as Browser;
+
+		await expect(pickElectronTarget(browser, { matcher: "PAGE_SECOND" })).resolves.toBe(second);
+	});
+
+	test("reports page ids with their URLs when a target id is missing", async () => {
+		const page = fakePage({ id: "PAGE_AVAILABLE", url: "https://example.com/", title: "Example" });
+		const browser = {
+			targets: () => [fakeTarget("page", page)],
+		} as unknown as Browser;
+
+		await expect(pickElectronTarget(browser, { matcher: "PAGE_MISSING" })).rejects.toThrow(
+			'No page target matched "PAGE_MISSING". Available pages:\n- PAGE_AVAILABLE  Example  https://example.com/',
 		);
 	});
 
@@ -857,6 +879,60 @@ describe("pickElectronTarget relay path", () => {
 		expect(second.pageSpy).not.toHaveBeenCalled();
 	});
 
+	it("adopts an exact relay id before a URL substring on another tab", async () => {
+		relayEntries = [
+			{
+				id: "PAGE_FIRST",
+				type: "page",
+				title: "First",
+				url: "https://example.com/PAGE_SECOND",
+				active: "false",
+				discarded: "false",
+			},
+			{ id: "PAGE_SECOND", type: "page", title: "Second", url: "about:blank", active: "false", discarded: "false" },
+		];
+		const first = makeTarget("PAGE_FIRST", makePage([() => {}], relayEntries[0]!.url).page);
+		const blank = makePage([() => {}], "about:blank").page;
+		const second = makeTarget("PAGE_SECOND", blank);
+
+		expect(
+			await pickElectronTarget(makeBrowser([first.target, second.target]), {
+				relayJson,
+				matcher: "PAGE_SECOND",
+			}),
+		).toBe(blank);
+		expect(first.pageSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not adopt another relay tab when an exact id names a discarded tab", async () => {
+		relayEntries = [
+			{
+				id: "PAGE_FIRST",
+				type: "page",
+				title: "First",
+				url: "https://example.com/PAGE_DISCARDED",
+				active: "false",
+				discarded: "false",
+			},
+			{
+				id: "PAGE_DISCARDED",
+				type: "page",
+				title: "Second",
+				url: "about:blank",
+				active: "false",
+				discarded: "true",
+			},
+		];
+		const browser = makeBrowser([
+			makeTarget("PAGE_FIRST", makePage([() => {}]).page).target,
+			makeTarget("PAGE_DISCARDED", makePage([() => {}]).page).target,
+		]);
+
+		await expect(pickElectronTarget(browser, { relayJson, matcher: "PAGE_DISCARDED" })).rejects.toThrow(
+			"was discarded by Chrome",
+		);
+	});
+
 	it("waits for a just-opened tab to reach /json before failing the matcher", async () => {
 		const opened = {
 			id: "PAGE_NEW",
@@ -877,14 +953,14 @@ describe("pickElectronTarget relay path", () => {
 		expect(served).toBe(2);
 	});
 
-	it("names the missing tab and what to pass when no tab ever matches", async () => {
-		const error = await rejectionOf(pickElectronTarget(makeBrowser([]), { relayJson, matcher: "omp-probe=none" }));
+	it("lists relay page ids with their URLs when a target id is missing", async () => {
+		const error = await rejectionOf(pickElectronTarget(makeBrowser([]), { relayJson, matcher: "PAGE_MISSING" }));
 
 		expect(error).toBeInstanceOf(Error);
 		const message = (error as Error).message;
-		expect(message).toContain('No page target matched "omp-probe=none" after waiting 2s for a newly opened tab');
-		expect(message).toContain("omit it to use the active tab");
-		expect(message).toContain("- Docs  https://docs.example.com");
+		expect(message).toContain('No page target matched "PAGE_MISSING"');
+		expect(message).toContain("PAGE10  Docs  https://docs.example.com");
+		expect(message).toContain("PAGE11  Whole Foods Market Shopping Cart  https://www.amazon.com/cart/localmarket");
 	});
 
 	it("waits for Puppeteer to see a tab that /json already lists", async () => {

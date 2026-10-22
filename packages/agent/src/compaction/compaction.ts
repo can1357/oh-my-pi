@@ -2024,6 +2024,7 @@ export async function compact(
 	let nativeFirstKeptEntryId = firstKeptEntryId;
 	let nativeUsedTokens: number | undefined;
 	let nativeRetainedFiles: AnthropicCompactionFiles[] | undefined;
+	let nativeToolChanges: Record<string, unknown>[] | undefined;
 	if (!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseAnthropicNativeCompaction(model)) {
 		const previousNative = getPreservedAnthropicCompactionData(previousPreserveData);
 		// Lead with the previous summary as the live context renders it:
@@ -2052,6 +2053,7 @@ export async function compact(
 											: {}),
 										...(previousNative.filesText ? { filesText: previousNative.filesText } : {}),
 										...(previousNative.retainedFiles ? { retainedFiles: previousNative.retainedFiles } : {}),
+										...(previousNative.toolChanges ? { toolChanges: previousNative.toolChanges } : {}),
 										...(previousNative.exactTail ? { exactTail: true as const } : {}),
 									}
 								: undefined,
@@ -2148,6 +2150,7 @@ export async function compact(
 			);
 			nativeSummary = remote.content;
 			nativeSignature = remote.signature;
+			nativeToolChanges = remote.toolChanges;
 			nativeUsedTokens = calculatePromptTokens(remote.usage);
 			usedRemoteCompaction = true;
 		} catch (err) {
@@ -2235,16 +2238,18 @@ export async function compact(
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
 	if (nativeSummary !== undefined) {
-		// The replayed block stays byte-identical to the API's summary so it
-		// matches its signature. The harness file lists above travel
-		// separately: the converter replaces the summary message with the
-		// block and skips its text, so they would otherwise be invisible to
-		// this provider. Every other provider keeps reading the entry text.
+		// The replayed block (summary and any `tool_changes`) stays
+		// byte-identical to the API's output so it matches its signature. The
+		// harness file lists above travel separately: the converter replaces the
+		// summary message with the block and skips its text, so they would
+		// otherwise be invisible to this provider. Every other provider keeps
+		// reading the entry text.
 		const filesText = upsertFileOperations("", readFiles, modifiedFiles, fileOps.read) || undefined;
 		preserveData = withAnthropicCompactionPreserveData(preserveData, {
 			provider: model.provider,
 			content: nativeSummary,
 			...(nativeSignature ? { signature: nativeSignature } : {}),
+			...(nativeToolChanges ? { toolChanges: nativeToolChanges } : {}),
 			...(filesText ? { filesText } : {}),
 			...(nativeRetainedFiles ? { retainedFiles: nativeRetainedFiles } : {}),
 			exactTail: true,
@@ -2295,7 +2300,7 @@ async function generateTurnPrefixSummary(
 		preferredDialect(model.id),
 		resolveCatalogPolicy(model).classifierCotExtraction === true,
 	);
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
+	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${formatAdditionalContext(options?.extraContext)}${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
 	const summarizationMessages = [
 		{
 			role: "user" as const,

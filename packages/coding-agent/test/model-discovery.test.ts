@@ -6,6 +6,7 @@ import * as path from "node:path";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -1630,6 +1631,75 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(llama?.input).toEqual(["text", "image"]);
 	});
 
+	test("implicit llama.cpp discovery falls back to port 9931 when 8080 is unreachable", async () => {
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url.startsWith("http://127.0.0.1:8080/")) {
+				throw new TypeError("Unable to connect");
+			}
+			if (url === "http://127.0.0.1:9931/models") {
+				return new Response(JSON.stringify({ data: [{ id: "gemma-3-4b" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url === "http://127.0.0.1:9931/props") {
+				return new Response(JSON.stringify({ default_generation_settings: { n_ctx: 16384 } }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("llama.cpp", "gemma-3-4b");
+		expect(model?.baseUrl).toBe("http://127.0.0.1:9931/v1");
+		expect(model?.contextWindow).toBe(16384);
+	});
+
+	test("implicit llama.cpp discovery reports a 9931 auth rejection as unauthenticated, not an 8080 outage", async () => {
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url.startsWith("http://127.0.0.1:8080/")) {
+				throw new TypeError("Unable to connect");
+			}
+			if (url.startsWith("http://127.0.0.1:9931/")) {
+				return new Response("unauthorized", { status: 401 });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		expect(registry.getProviderDiscoveryState("llama.cpp")?.status).toBe("unauthenticated");
+	});
+
+	test("implicit llama.cpp discovery does not bypass a failing 8080 server for 9931", async () => {
+		const requested: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			requested.push(url);
+			if (url === "http://127.0.0.1:8080/models") {
+				return new Response("internal error", { status: 500 });
+			}
+			if (url === "http://127.0.0.1:8080/props") {
+				return new Response("internal error", { status: 500 });
+			}
+			if (url === "http://127.0.0.1:9931/models") {
+				return new Response(JSON.stringify({ data: [{ id: "other-server-model" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		expect(registry.find("llama.cpp", "other-server-model")).toBeUndefined();
+		expect(registry.getProviderDiscoveryState("llama.cpp")?.status).toBe("unavailable");
+		expect(requested.some(url => url.startsWith("http://127.0.0.1:9931/"))).toBe(false);
+	});
+
 	test("llama.cpp discovery routes Qwen models to chat-completions with the top-level disable dialect", async () => {
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);
@@ -3077,6 +3147,82 @@ describe("ModelRegistry runtime discovery", () => {
 		const unknown = registry.find("openai-test", "unknown-proxy-model");
 		expect(unknown?.contextWindow).toBe(128000);
 		expect(unknown?.reasoning).toBe(false);
+	});
+
+	test("openai-models-list discovery marks advertised reasoning ladders reasoning-capable (codex-lb metadata shape)", async () => {
+		writeRawModelsJson({
+			"openai-test": {
+				baseUrl: "http://127.0.0.1:9994",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9994/v1/models") {
+				// codex-lb shape: the Codex registry nests `supported_reasoning_levels`
+				// and `default_reasoning_level` under `metadata`. `acme-think-1` has
+				// no bundled reference, so without advertised-level parsing it stays
+				// non-reasoning and requests never carry `reasoning_effort`.
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "acme-think-1",
+								object: "model",
+								owned_by: "codex-lb",
+								metadata: {
+									display_name: "Acme Think 1",
+									context_window: 272000,
+									input_modalities: ["text", "image"],
+									supported_reasoning_levels: [
+										{ effort: "low" },
+										{ effort: "medium" },
+										{ effort: "high" },
+										{ effort: "xhigh" },
+										{ effort: "max" },
+										{ effort: "ultra" },
+									],
+									default_reasoning_level: "medium",
+								},
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const advertised = registry.find("openai-test", "acme-think-1");
+		expect(advertised?.reasoning).toBe(true);
+		expect(advertised?.thinking?.mode).toBe("effort");
+		expect(advertised?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+		expect(advertised?.thinking?.defaultLevel).toBe(Effort.Medium);
+		const advertisedCompat = advertised?.compat as OpenAICompat | undefined;
+		expect(advertisedCompat?.supportsReasoningEffort).toBe(true);
+		if (!advertised || advertised.api !== "openai-completions") {
+			throw new Error("expected the discovered model to use OpenAI Completions");
+		}
+		// A request at effort `high` carries the wire effort.
+		let requestPayload: Record<string, unknown> | undefined;
+		const chatFetch: FetchImpl = async (input, init) => {
+			requestPayload = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>;
+			const events = [
+				{ id: "chatcmpl-advertised-fixture", choices: [{ index: 0, delta: { role: "assistant", content: "OK" } }] },
+				{ id: "chatcmpl-advertised-fixture", choices: [{ index: 0, finish_reason: "stop", delta: {} }] },
+			];
+			const body = `${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\ndata: [DONE]\n\n`;
+			return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+		};
+		await streamOpenAICompletions(
+			advertised as Model<"openai-completions">,
+			{ messages: [{ role: "user", content: "Reply with exactly OK.", timestamp: Date.now() }] },
+			{ apiKey: "TEST_KEY", fetch: chatFetch, reasoning: "high" },
+		).result();
+		expect(requestPayload?.reasoning_effort).toBe("high");
 	});
 
 	test("openai-models-list discovery reads server-advertised input modalities for ids absent from the catalog", async () => {

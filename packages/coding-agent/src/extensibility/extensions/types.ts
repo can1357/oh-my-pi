@@ -549,7 +549,7 @@ export type AnnotationDiffSource =
 	| { kind: "diff"; diff: string; label?: string }
 	/** Staged + unstaged (or jj working-copy) changes in the live session cwd. */
 	| { kind: "uncommitted" }
-	/** A GitHub PR: `https://github.com/owner/repo/pull/N` or `pr://owner/repo/N`. */
+	/** A GitHub PR or GitLab MR: `https://github.com/owner/repo/pull/N`, `pr://owner/repo/N`, `https://<host>/<group>/<project>/-/merge_requests/N`, or `mr://<host>/<group>/<project>/N/diff`. */
 	| { kind: "pr"; ref: string };
 
 export type AnnotationSource = AnnotationTextSource | AnnotationDiffSource;
@@ -2215,6 +2215,8 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	/** Set once the extension calls `registerProvider`; providers feed startup model resolution. */
+	registersProviders?: boolean;
 }
 
 /**

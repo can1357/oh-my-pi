@@ -61,6 +61,18 @@ describe("hasResolvableTranscript", () => {
 		expect(await hasResolvableTranscript("Aborted")).toBe(false);
 	});
 
+	it("returns true for a running ref that has no session or session file yet", async () => {
+		AgentRegistry.global().register({
+			id: "Fresh",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: null,
+			status: "running",
+		});
+		expect(await hasResolvableTranscript("Fresh")).toBe(true);
+	});
+
 	it("returns false when the retained session file no longer exists on disk", async () => {
 		AgentRegistry.global().register({
 			id: "Stale",

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.12.4] - 2026-10-20
+
+### Fixed
+
+- Fixed snapcompact archive frames for Factory Droid models ignoring Factory's inline-image budget: they are now sized to half of it, like other budgeted hosts ([#16288](https://github.com/can1357/oh-my-pi/pull/16288) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.10.4] - 2026-10-13
 
 ### Added

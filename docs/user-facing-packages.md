@@ -80,7 +80,7 @@ Sources: [`packages/browser-relay/README.md`](../packages/browser-relay/README.m
   details in the package README).
 - Behavior: the relay auto-starts through the profile-independent global daemon broker; consumers
   across projects hold leases, and the relay stops after the last lease is released. `app.target`
-  borrows a tab by URL/title substring; otherwise omp opens its own background tab, which a URL
+  borrows a tab by exact CDP target id or URL/title substring; otherwise omp opens its own background tab, which a URL
   navigates and close removes. `omp browser-relay --no-group` disables automatic tab grouping.
 - Security/limits: it binds loopback; use `--token` when local processes are untrusted. Chrome
   internal pages, DevTools, Web Store, extension pages, and tabs with DevTools open cannot attach.

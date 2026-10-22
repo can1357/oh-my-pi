@@ -738,7 +738,9 @@ fn fd_walk_request(
 		.gitignore(use_gitignore)
 		.skip_git(false)
 		.skip_node_modules(false)
-		.follow_links(cli.follow.into())
+		// fd walks a path operand that is itself a symlink; `-L` extends that to
+		// links found during the walk.
+		.follow_links(if cli.follow { pi_walker::FollowLinks::Always } else { pi_walker::FollowLinks::Roots })
 		.detail(pi_walker::WalkDetail::Minimal)
 		.order(pi_walker::WalkOrder::Path)
 		.emit_root(true)
@@ -1663,5 +1665,30 @@ mod tests {
 			capture.stdout()
 		);
 		assert!(capture.err().is_empty(), "stderr should stay clean: {:?}", capture.stderr());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn walks_a_symlinked_root_operand_but_not_nested_links() {
+		let tree = Builder::new().prefix("fd-root-link").tempdir().expect("tempdir");
+		fs::create_dir_all(tree.path().join("real/sub")).expect("mkdir");
+		fs::write(tree.path().join("real/a.txt"), "").expect("write");
+		std::os::unix::fs::symlink("real", tree.path().join("link")).expect("link");
+		fs::create_dir(tree.path().join("parent")).expect("mkdir");
+		std::os::unix::fs::symlink("../real", tree.path().join("parent/inner")).expect("link");
+		let list = |args: &[&str]| {
+			let (code, capture) = run_util::<FdCli>(args, "", tree.path());
+			let mut lines: Vec<String> = capture.out().lines().map(|line| line.trim_end_matches('/').to_owned()).collect();
+			lines.sort();
+			(code, lines)
+		};
+
+		assert_eq!(list(&[".", "link"]), (0, vec!["link/a.txt".to_owned(), "link/sub".to_owned()]));
+		// Links met during the walk are listed, not entered, unless -L asks.
+		assert_eq!(list(&[".", "parent"]), (0, vec!["parent/inner".to_owned()]));
+		assert_eq!(
+			list(&["-L", ".", "parent"]),
+			(0, vec!["parent/inner".to_owned(), "parent/inner/a.txt".to_owned(), "parent/inner/sub".to_owned()])
+		);
 	}
 }

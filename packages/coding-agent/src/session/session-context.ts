@@ -15,6 +15,7 @@ import {
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isEmptyErrorTurn,
 	PREWALK_PLAN_MESSAGE_TYPE,
+	REWIND_REPORT_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
 import { CONTEXT_NOTES_ENTRY_TYPE, getContextNotes, renderContextNotes } from "./context-notes";
@@ -395,6 +396,25 @@ export function buildSessionContext(
 		cacheMissExplainedAt.push(trackMessageCacheState(msg));
 	};
 
+	// A rewind persists its report twice: as the branch_summary closing the
+	// exploration branch (shown in the transcript) and as the rewind-report
+	// message that follows it (the model-facing framing). Model context keeps
+	// only the latter so each report reaches the provider once.
+	const rewindSummaryIds = new Set<string>();
+	if (!options?.transcript) {
+		for (let i = 1; i < path.length; i++) {
+			const entry = path[i];
+			const previous = path[i - 1];
+			if (
+				entry.type === "custom_message" &&
+				entry.customType === REWIND_REPORT_MESSAGE_TYPE &&
+				previous.type === "branch_summary"
+			) {
+				rewindSummaryIds.add(previous.id);
+			}
+		}
+	}
+
 	const appendMessage = (entry: SessionEntry) => {
 		handleEntryResetTracking(entry);
 		if (entry.type === "message") {
@@ -415,7 +435,7 @@ export function buildSessionContext(
 			}
 			const message = customMessageEntryMessage(entry);
 			if (message) pushMessage(message);
-		} else if (entry.type === "branch_summary" && entry.summary) {
+		} else if (entry.type === "branch_summary" && entry.summary && !rewindSummaryIds.has(entry.id)) {
 			pushMessage(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
 		}
 	};

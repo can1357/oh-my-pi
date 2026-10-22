@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { AssistantMessage, Message, Model, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message, Model, ModelSpec, Usage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
@@ -509,6 +509,12 @@ describe("shape resolution", () => {
 				snapcompact.resolveShape({ api: "openai-responses", provider: "xai", id: "grok-4.7" }),
 			),
 		).toBe(2442);
+		// DeepSeek V4.1 Flash via OpenRouter: its own verified rule, not the Anthropic-wire fallback's 3,136.
+		expect(
+			snapcompact.plannedFrameTokens(
+				snapcompact.resolveShape(getBundledModel("openrouter", "deepseek/deepseek-v4.1-flash-1017")),
+			),
+		).toBe(994);
 		expect(
 			snapcompact.plannedFrameTokens(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-6" })),
 		).toBe(snapcompact.FRAME_TOKEN_ESTIMATE);
@@ -1403,6 +1409,24 @@ describe("frame data budget", () => {
 		expect(snapcompact.frameDataBytesBudget(throughProxy(sol))).toBe(budget);
 		expect(snapcompact.frameDataBytesBudget(getBundledModel("openrouter", "anthropic/claude-opus-5.5"))).toBe(budget);
 		expect(snapcompact.frameDataBytesBudget(undefined)).toBe(budget);
+		// Factory Droid's own hosts carry a smaller budget; a custom gateway in front of Factory keeps the default.
+		const factory = (baseUrl: string) => {
+			const spec: ModelSpec<"factory-droid-agent"> = {
+				id: "claude-haiku-4-5-20251001",
+				name: "Haiku 4.5",
+				api: "factory-droid-agent",
+				provider: "factory-droid",
+				baseUrl,
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+			};
+			return buildModel(spec);
+		};
+		expect(snapcompact.frameDataBytesBudget(factory("https://api.factory.ai/api/llm/a"))).toBeLessThan(budget);
+		expect(snapcompact.frameDataBytesBudget(factory("https://factory-gateway.example/api/llm/a"))).toBe(budget);
 		// Opus's 1932px frames: 17 under the default, 70 under Anthropic's share.
 		const opusShape = snapcompact.resolveShape(opus);
 		expect(snapcompact.maxFramesForDataBudget(opusShape, budget)).toBe(17);

@@ -810,8 +810,8 @@ export interface AnthropicCompat {
 }
 
 /**
- * Compatibility settings for Bedrock Converse prompt caching. Cache pricing is
- * deliberately not used to infer these request-shape capabilities.
+ * Compatibility settings for Bedrock Converse requests and native streaming
+ * side-compaction. Cache pricing does not imply these capabilities.
  */
 export interface BedrockCompat {
 	/** Explicit disabled-thinking wire form; unset preserves the provider's existing behavior. */
@@ -859,9 +859,14 @@ export interface BedrockCompat {
 	 * local prefix-binding safeguards. Default: true.
 	 */
 	supportsThinkingBindingControls?: boolean;
+	/**
+	 * Whether the model supports a compaction-only Bedrock Runtime
+	 * InvokeModelWithResponseStream request. Ordinary turns still use Converse.
+	 */
+	supportsServerCompaction?: boolean;
 }
 
-/** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
+/** Fully-resolved Bedrock Converse and side-compaction capabilities, materialized once by `buildModel`. */
 export interface ResolvedBedrockCompat {
 	/** See {@link BedrockCompat.disabledThinking}. */
 	disabledThinking?: BedrockCompat["disabledThinking"];
@@ -876,6 +881,8 @@ export interface ResolvedBedrockCompat {
 	supportsForcedToolChoice: boolean;
 	/** See {@link BedrockCompat.supportsThinkingBindingControls}. */
 	supportsThinkingBindingControls: boolean;
+	/** See {@link BedrockCompat.supportsServerCompaction}; false unless the Bedrock model-card policy opts in. */
+	supportsServerCompaction: boolean;
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for hosts with no keepalive
 	 * events; 0 disables the idle watchdog. Undefined defers to

@@ -12,11 +12,17 @@ import * as path from "node:path";
 
 import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { expandTilde } from "../../../tools/path-utils";
-import { normalizePluginRuntimeConfig } from "../runtime-config";
+import { normalizePluginRuntimeConfig, writePluginRuntimeConfig } from "../runtime-config";
 import type { PluginRuntimeConfig, PluginRuntimeState } from "../types";
 
 import { cachePlugin, getCachedPluginPath, isValidVersionForCache } from "./cache";
-import { classifySource, fetchMarketplace, parseMarketplaceCatalog, promoteCloneToCache } from "./fetcher";
+import {
+	classifySource,
+	fetchMarketplace,
+	parseMarketplaceCatalog,
+	promoteCloneToCache,
+	pruneAbandonedMarketplaceClones,
+} from "./fetcher";
 import {
 	addInstalledPlugin,
 	addMarketplaceEntry,
@@ -749,6 +755,7 @@ export class MarketplaceManager {
 	// Refresh marketplace catalogs that haven't been updated in more than 24 h.
 	// Per-marketplace failures are silently swallowed — offline is fine.
 	async refreshStaleMarketplaces(): Promise<void> {
+		await pruneAbandonedMarketplaceClones(this.#opts.marketplacesCacheDir);
 		const reg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 		const staleMs = 24 * 60 * 60 * 1000;
 		for (const entry of reg.marketplaces) {
@@ -935,7 +942,7 @@ export class MarketplaceManager {
 	}
 
 	async #writeRuntimeConfig(scope: "user" | "project", config: PluginRuntimeConfig): Promise<void> {
-		await Bun.write(this.#runtimeLockPath(scope), JSON.stringify(config, null, 2));
+		await writePluginRuntimeConfig(this.#runtimeLockPath(scope), config);
 	}
 
 	async #resolvePluginPackageName(installPath: string, fallbackName: string): Promise<string> {

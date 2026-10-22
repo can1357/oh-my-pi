@@ -445,6 +445,24 @@ describe("Context overflow error handling", () => {
 	});
 
 	// =============================================================================
+	// Inception
+	// Expected pattern: "reduce the length of the messages" (code context_length_exceeded)
+	// =============================================================================
+
+	describe.skipIf(!e2eApiKey("INCEPTION_API_KEY"))("Inception", () => {
+		// Every Mercury model shares the error contract; mercury-2 has the smallest window.
+		it("mercury-2 - should detect overflow via isContextOverflow", async () => {
+			const model = getBundledModel("inception", "mercury-2");
+			const result = await testContextOverflow(model, Bun.env.INCEPTION_API_KEY!);
+			logResult(result);
+
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toMatch(/reduce the length of the messages/i);
+			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+		}, 120000);
+	});
+
+	// =============================================================================
 	// Cerebras
 	// Expected: 400/413 status code with no body
 	// =============================================================================

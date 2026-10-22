@@ -351,6 +351,87 @@ function jobsRenderResult(
 		previewRows.set(job, { expanded, width: continuationWidth, lines });
 		return lines;
 	};
+	// Collapsed card: one line per settled job, or the bare "waiting on N jobs"
+	// header while nothing has settled. Repeated polls then read as a short
+	// completion log instead of a re-printed (and shrinking) job tree; Ctrl+O
+	// restores the full tree with output previews. A running job's live widget
+	// still draws its tile: that chart is the job's progress, not a copy of it.
+	const settledJobs = sortedJobs.filter(job => job.status !== "running");
+	const widgetJobs = sortedJobs.filter(job => job.status === "running" && job.widget?.state === "live");
+	const compactJobLines = (width: number, live: boolean): string[] => {
+		const lines: string[] = [];
+		const indent = " ".repeat(visibleWidth(formatStatusIcon("done", uiTheme)) + 1);
+		// Failures sort first, so the cap never hides one behind successes;
+		// Ctrl+O lists the rest.
+		for (const job of settledJobs.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)) {
+			const icon = formatStatusIcon(statusToIcon(job.status), uiTheme);
+			const word = job.status === "completed" ? "done" : job.status;
+			const exit =
+				job.exitCode !== undefined && job.exitCode !== 0
+					? `${uiTheme.sep.dot}${uiTheme.fg("error", `exit ${job.exitCode}`)}`
+					: "";
+			// The outcome (status, exit, duration) is reserved first; a long id
+			// gives way so a failure is never cut off the row.
+			const outcome = ` ${uiTheme.fg(statusToColor(job.status), word)}${exit}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
+			const id = truncateToWidth(
+				replaceTabs(job.id).replace(/\s+/g, " "),
+				Math.max(1, width - visibleWidth(`${icon} `) - visibleWidth(outcome)),
+				Ellipsis.Unicode,
+			);
+			let line = `${icon} ${uiTheme.fg("accent", id)}${outcome}`;
+			const label = replaceTabs(jobRowLabel(job).split(/\r?\n/)[0] ?? "").trim();
+			const labelBudget = width - visibleWidth(line) - 2;
+			if (label && label !== job.id && labelBudget >= 8) {
+				line += `  ${uiTheme.fg("muted", truncateToWidth(label, labelBudget, Ellipsis.Unicode))}`;
+			}
+			lines.push(line);
+			// A failure says why on the collapsed row; the rest of its output
+			// stays behind Ctrl+O.
+			const reason =
+				job.status === "failed"
+					? stripOutputNotice(job.errorText ?? "", job.meta)
+							.split(/\r?\n/)
+							.find(part => part.trim())
+							?.trim()
+					: undefined;
+			if (reason) {
+				lines.push(
+					`${indent}${uiTheme.fg("error", truncateToWidth(replaceTabs(reason), Math.max(1, width - indent.length), Ellipsis.Unicode))}`,
+				);
+			}
+			// The root warning is suppressed when a row owns the failure, so the
+			// compact row carries it too — otherwise it only shows after Ctrl+O.
+			const artifactError = job.meta?.artifactError ?? job.artifactError;
+			if (artifactError) {
+				lines.push(uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(artifactError), width)));
+			}
+		}
+		const hiddenSettled = settledJobs.length - PREVIEW_LIMITS.COLLAPSED_ITEMS;
+		if (hiddenSettled > 0) lines.push(`${indent}${uiTheme.fg("dim", `… ${hiddenSettled} more settled`)}`);
+		const shownWidgetJobs = widgetJobs.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS);
+		for (const job of shownWidgetJobs) {
+			const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
+			const icon = formatStatusIcon("running", uiTheme, live ? options.spinnerFrame : undefined);
+			const meta = compact([
+				job.completionPercent !== undefined ? uiTheme.fg("accent", `${job.completionPercent}%`) : undefined,
+				uiTheme.fg("dim", formatDuration(job.durationMs)),
+			]).join(" ");
+			lines.push(
+				...renderJobTileLines(jobTile(job, live), width, uiTheme, {
+					lead: `${icon} ${typeBadge} `,
+					meta,
+					full: false,
+				}),
+			);
+		}
+		// Running jobs without a drawn tile (no widget, or past the cap) collapse
+		// into one count; the header already carries it while nothing settled.
+		const quietRunning = counts.running - shownWidgetJobs.length;
+		if (quietRunning > 0 && (settledJobs.length > 0 || shownWidgetJobs.length < widgetJobs.length)) {
+			lines.push(`${indent}${uiTheme.fg("dim", `${quietRunning} still running`)}`);
+		}
+		return lines;
+	};
 	return {
 		render(width: number): readonly string[] {
 			const expanded = options.expanded;
@@ -373,113 +454,121 @@ function jobsRenderResult(
 				.digest();
 			if (!shimmerActive && cached?.key === key) return cached.lines;
 
-			const itemLines = renderTreeList<JobSnapshot>(
-				{
-					items: sortedJobs,
-					expanded,
-					maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
-					itemType: "job",
-					renderItem: (job, context) => {
-						const rowWidth = Math.max(0, width - (context.prefixWidth ?? 0));
-						const lines: string[] = [];
-						const icon = `${formatStatusIcon(
-							statusToIcon(job.status),
-							uiTheme,
-							job.status === "running" ? options.spinnerFrame : undefined,
-						)}${job.exitCode === undefined ? "" : `${uiTheme.sep.dot}${uiTheme.fg(job.exitCode === 0 ? "muted" : "error", `exit ${job.exitCode}`)}`}`;
-						const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
-						const completion =
-							job.status === "running" && job.completionPercent !== undefined
-								? `${uiTheme.sep.dot}${uiTheme.fg("accent", `${job.completionPercent}%`)}`
-								: "";
-						const durationSuffix = `${completion}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
-						const displayId = truncateToWidth(
-							replaceTabs(job.id).replace(/\s+/g, " "),
-							Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${durationSuffix}`)),
-							Ellipsis.Unicode,
-						);
-						const rowLabel = jobRowLabel(job);
-						const rawLabelLines = (rowLabel || "(no label)").split(/\r?\n/);
-						const maxLabelLines = expanded ? LABEL_LINES_EXPANDED : LABEL_LINES_COLLAPSED;
-						const visibleLabelLines = rawLabelLines
-							.slice(0, maxLabelLines)
-							.map(l => truncateToWidth(replaceTabs(l), LABEL_MAX_WIDTH, Ellipsis.Unicode));
-						if (rawLabelLines.length > maxLabelLines && visibleLabelLines.length > 0) {
-							const last = visibleLabelLines[visibleLabelLines.length - 1]!;
-							visibleLabelLines[visibleLabelLines.length - 1] = `${last} …`;
-						}
-						const rowPrefix = `${icon} ${typeBadge} `;
-						const live = job.status === "running" && options.spinnerFrame !== undefined;
-						const continuationWidth = Math.max(0, rowWidth - visibleWidth("  "));
-						if (job.widget?.state === "live") {
-							const meta = compact([
-								job.status === "running" && job.completionPercent !== undefined
-									? uiTheme.fg("accent", `${job.completionPercent}%`)
-									: undefined,
-								uiTheme.fg("dim", formatDuration(job.durationMs)),
-							]).join(" ");
-							lines.push(
-								...renderJobTileLines(jobTile(job, live), rowWidth, uiTheme, {
-									lead: rowPrefix,
-									meta,
-									full: expanded,
-								}),
-							);
-						} else {
-							const modelIdentity = job.resolvedModelIdentity ?? job.resolvedModel;
-							const modelBadge =
-								job.type === "task" && showModelBadge && typeof modelIdentity === "string"
-									? formatFeedModelBadge(
-											modelIdentity,
-											job.resolvedThinkingLevel,
-											job.advisor === true,
-											uiTheme,
-											Math.min(
-												FEED_MODEL_BADGE_WIDTH,
-												Math.max(
-													0,
-													rowWidth - visibleWidth(`${rowPrefix}${displayId}${durationSuffix}`) - 1,
-												),
-											),
-										)
-									: "";
-							const modelLead = modelBadge ? `${modelBadge} ` : "";
-							const headRaw = displayId;
-							// Running rows in a live block shimmer their label; once the block
-							// stops animating (sealed, or a settled snapshot — spinnerFrame
-							// cleared) they render static so scrollback never keeps a mid-sweep
-							// shimmer band.
-							const headLabel = live
-								? shimmerEnabled()
-									? shimmerText(headRaw, uiTheme)
-									: uiTheme.fg("accent", headRaw)
-								: uiTheme.fg("toolOutput", headRaw);
-							let row = `${rowPrefix}${modelLead}${headLabel}`;
-							const distinctLabel = rowLabel.trim() !== job.id;
-							const label = visibleLabelLines[0] ?? "";
-							const inlineLabel = distinctLabel && visibleWidth(`${row} ${label}${durationSuffix}`) <= rowWidth;
-							if (inlineLabel) row += ` ${uiTheme.fg("toolOutput", label)}`;
-							row += durationSuffix;
-							lines.push(truncateToWidth(row, rowWidth, ""));
-							for (let i = distinctLabel && !inlineLabel ? 0 : 1; i < visibleLabelLines.length; i++) {
-								lines.push(
-									`  ${uiTheme.fg("toolOutput", truncateToWidth(visibleLabelLines[i]!, continuationWidth))}`,
+			const compactView = !expanded && jobs.length > 0;
+			const itemLines = compactView
+				? compactJobLines(width, counts.running > 0 && options.spinnerFrame !== undefined)
+				: renderTreeList<JobSnapshot>(
+						{
+							items: sortedJobs,
+							expanded,
+							maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
+							itemType: "job",
+							renderItem: (job, context) => {
+								const rowWidth = Math.max(0, width - (context.prefixWidth ?? 0));
+								const lines: string[] = [];
+								const icon = `${formatStatusIcon(
+									statusToIcon(job.status),
+									uiTheme,
+									job.status === "running" ? options.spinnerFrame : undefined,
+								)}${job.exitCode === undefined ? "" : `${uiTheme.sep.dot}${uiTheme.fg(job.exitCode === 0 ? "muted" : "error", `exit ${job.exitCode}`)}`}`;
+								const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
+								const completion =
+									job.status === "running" && job.completionPercent !== undefined
+										? `${uiTheme.sep.dot}${uiTheme.fg("accent", `${job.completionPercent}%`)}`
+										: "";
+								const durationSuffix = `${completion}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
+								const displayId = truncateToWidth(
+									replaceTabs(job.id).replace(/\s+/g, " "),
+									Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${durationSuffix}`)),
+									Ellipsis.Unicode,
 								);
-							}
-						}
-						const artifactError = job.meta?.artifactError ?? job.artifactError;
-						if (artifactError) {
-							lines.push(
-								uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(artifactError), rowWidth)),
-							);
-						}
+								const rowLabel = jobRowLabel(job);
+								const rawLabelLines = (rowLabel || "(no label)").split(/\r?\n/);
+								const maxLabelLines = expanded ? LABEL_LINES_EXPANDED : LABEL_LINES_COLLAPSED;
+								const visibleLabelLines = rawLabelLines
+									.slice(0, maxLabelLines)
+									.map(l => truncateToWidth(replaceTabs(l), LABEL_MAX_WIDTH, Ellipsis.Unicode));
+								if (rawLabelLines.length > maxLabelLines && visibleLabelLines.length > 0) {
+									const last = visibleLabelLines[visibleLabelLines.length - 1]!;
+									visibleLabelLines[visibleLabelLines.length - 1] = `${last} …`;
+								}
+								const rowPrefix = `${icon} ${typeBadge} `;
+								const live = job.status === "running" && options.spinnerFrame !== undefined;
+								const continuationWidth = Math.max(0, rowWidth - visibleWidth("  "));
+								if (job.widget?.state === "live") {
+									const meta = compact([
+										job.status === "running" && job.completionPercent !== undefined
+											? uiTheme.fg("accent", `${job.completionPercent}%`)
+											: undefined,
+										uiTheme.fg("dim", formatDuration(job.durationMs)),
+									]).join(" ");
+									lines.push(
+										...renderJobTileLines(jobTile(job, live), rowWidth, uiTheme, {
+											lead: rowPrefix,
+											meta,
+											full: expanded,
+										}),
+									);
+								} else {
+									const modelIdentity = job.resolvedModelIdentity ?? job.resolvedModel;
+									const modelBadge =
+										job.type === "task" && showModelBadge && typeof modelIdentity === "string"
+											? formatFeedModelBadge(
+													modelIdentity,
+													job.resolvedThinkingLevel,
+													job.advisor === true,
+													uiTheme,
+													Math.min(
+														FEED_MODEL_BADGE_WIDTH,
+														Math.max(
+															0,
+															rowWidth - visibleWidth(`${rowPrefix}${displayId}${durationSuffix}`) - 1,
+														),
+													),
+												)
+											: "";
+									const modelLead = modelBadge ? `${modelBadge} ` : "";
+									const headRaw = displayId;
+									// Running rows in a live block shimmer their label; once the block
+									// stops animating (sealed, or a settled snapshot — spinnerFrame
+									// cleared) they render static so scrollback never keeps a mid-sweep
+									// shimmer band.
+									const headLabel = live
+										? shimmerEnabled()
+											? shimmerText(headRaw, uiTheme)
+											: uiTheme.fg("accent", headRaw)
+										: uiTheme.fg("toolOutput", headRaw);
+									let row = `${rowPrefix}${modelLead}${headLabel}`;
+									const distinctLabel = rowLabel.trim() !== job.id;
+									const label = visibleLabelLines[0] ?? "";
+									const inlineLabel =
+										distinctLabel && visibleWidth(`${row} ${label}${durationSuffix}`) <= rowWidth;
+									if (inlineLabel) row += ` ${uiTheme.fg("toolOutput", label)}`;
+									row += durationSuffix;
+									lines.push(truncateToWidth(row, rowWidth, ""));
+									for (let i = distinctLabel && !inlineLabel ? 0 : 1; i < visibleLabelLines.length; i++) {
+										lines.push(
+											`  ${uiTheme.fg("toolOutput", truncateToWidth(visibleLabelLines[i]!, continuationWidth))}`,
+										);
+									}
+								}
+								const artifactError = job.meta?.artifactError ?? job.artifactError;
+								if (artifactError) {
+									lines.push(
+										uiTheme.fg(
+											"warning",
+											truncateToWidth(formatArtifactErrorNotice(artifactError), rowWidth),
+										),
+									);
+								}
 
-						for (const previewLine of jobPreviewRows(job, expanded, continuationWidth)) lines.push(previewLine);
-						return lines;
-					},
-				},
-				uiTheme,
-			);
+								for (const previewLine of jobPreviewRows(job, expanded, continuationWidth))
+									lines.push(previewLine);
+								return lines;
+							},
+						},
+						uiTheme,
+					);
 
 			// Agents run outside job control; render them as their own tree so
 			// they never skew the job counts or the "waiting on N jobs" title.
@@ -522,7 +611,7 @@ function jobsRenderResult(
 							uiTheme,
 						);
 
-			const all = [header];
+			const all = compactView && settledJobs.length > 0 ? [] : [header];
 			if (aggregateArtifactError) {
 				all.push(uiTheme.fg("warning", formatArtifactErrorNotice(aggregateArtifactError)));
 			}
@@ -624,22 +713,18 @@ export function createIrcMessageCard(
 	if (card.replyTo) meta.push("reply");
 	const age = messageAge(card.timestamp);
 	if (age) meta.push(age);
-	const component = createCachedComponent(
-		getExpanded,
-		(width, expanded) => {
-			const lines = [renderStatusLine({ iconOverride: ircGlyph(uiTheme), title, meta }, uiTheme)];
-			if (body.trim()) {
-				lines.push(
-					...bodyLines(body, expanded, uiTheme, {
-						indent: "  ",
-						collapsedLines: 3,
-					}),
-				);
-			}
-			return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode));
-		},
-		{ paddingX: 1 },
-	);
+	const component = createCachedComponent(getExpanded, (width, expanded) => {
+		const lines = [renderStatusLine({ iconOverride: ircGlyph(uiTheme), title, meta }, uiTheme)];
+		if (body.trim()) {
+			lines.push(
+				...bodyLines(body, expanded, uiTheme, {
+					indent: "  ",
+					collapsedLines: 3,
+				}),
+			);
+		}
+		return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode));
+	});
 	// Terminal-local collapse replaces `getExpanded`; the node never changes after creation.
 	const described = cardNode(
 		{

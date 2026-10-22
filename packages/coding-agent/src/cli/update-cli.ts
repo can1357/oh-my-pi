@@ -739,7 +739,6 @@ async function fetchLatestManifest(
 		}
 		return manifest;
 	};
-	const isPackument = (body: unknown): boolean => isRecord(body) && isRecord(body["dist-tags"]);
 
 	let response = await get(npmRegistryPackageUrl(registry, pkg, tag));
 	let data: unknown;
@@ -752,10 +751,16 @@ async function fetchLatestManifest(
 			if (!origin || !(err instanceof SyntaxError)) throw err;
 			useFullPackument = true;
 		}
-		if (isPackument(data)) {
-			// Some registries (e.g. Sonatype Nexus) answer the dist-tag shortcut
-			// with the full packument instead of the tagged version manifest.
-			data = fromPackument(data);
+		const distTags = isRecord(data) ? data["dist-tags"] : undefined;
+		if (isRecord(distTags)) {
+			if (typeof distTags[tag] === "string" || !origin) {
+				// Some registries answer the dist-tag shortcut with a full packument.
+				data = fromPackument(data);
+			} else {
+				// Artifactory can add empty packument fields to a tagged manifest;
+				// its full packument may select a different, installable version.
+				useFullPackument = true;
+			}
 		} else if (origin && !(isRecord(data) && typeof data.version === "string")) {
 			useFullPackument = true;
 		}

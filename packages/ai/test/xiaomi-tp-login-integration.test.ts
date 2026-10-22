@@ -6,7 +6,7 @@
  *
  *   1. Login validation targets SGP, then AMS, then CN token-plan hosts
  *   2. Authorization header is Bearer (not x-api-key)
- *   3. Validation request body uses mimo-v2.5 (the token-plan validation model)
+ *   3. Validation request body uses mimo-v2.6-flash (the token-plan validation model)
  *   4. SGP 401 → AMS → CN fallback; all three are tried
  *   5. All three returning 401 throws a descriptive error
  *   6. After login, model discovery hits token-plan hosts (SGP → AMS → CN)
@@ -32,7 +32,7 @@ const STANDARD_HOST = "api.xiaomimimo.com";
 // ─── loginXiaomi: validation phase ─────────────────────────────────────────
 
 describe("loginXiaomi with tp- key", () => {
-	it("validates against SGP token-plan host with Bearer auth and mimo-v2.5 model", async () => {
+	it("validates tp- keys after the MiMo V2.5 retirement with Bearer auth", async () => {
 		const seen: { url: string; headers: Record<string, string>; body: string }[] = [];
 
 		const fetchMock: FetchImpl = async (input, init) => {
@@ -41,6 +41,9 @@ describe("loginXiaomi with tp- key", () => {
 				headers: (init?.headers ?? {}) as Record<string, string>,
 				body: init?.body as string,
 			});
+			if (JSON.parse(String(init?.body)).model !== "mimo-v2.6-flash") {
+				return Response.json({ error: { code: "400", message: "Unsupported model mimo-v2.5" } }, { status: 400 });
+			}
 			return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
 		};
 
@@ -63,7 +66,7 @@ describe("loginXiaomi with tp- key", () => {
 
 		// 3. Uses the token-plan validation model
 		const body = JSON.parse(seen[0]!.body);
-		expect(body.model).toBe("mimo-v2.5");
+		expect(body.model).toBe("mimo-v2.6-flash");
 		expect(body.max_tokens).toBe(1);
 		expect(body.messages).toEqual([{ role: "user", content: "ping" }]);
 	});

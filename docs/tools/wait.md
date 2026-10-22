@@ -13,9 +13,9 @@
 ## Behavior
 - Returns on the first settled caller-owned job or incoming peer message. Job results delivered by this call are consumed so no duplicate async-result follows.
 - A steering/tool interrupt returns `Wait interrupted by message.` with `details.interrupted=true`; other aborts propagate. Handle the incoming notice before calling `wait` again.
-- An owned-job or owned-service wait has a 30-minute safety cap. There is no caller-selectable timeout.
-- If only running peers can wake it, a message-only window returns control after 5, 10, 30, 60, then 300 seconds on consecutive waits. A gap of at least 60 seconds resets the ladder. An elapsed window names running peers and, when detectable, the owner waiting on this agent's result.
-- If no owned job, running visible peer, or owned service can wake it, returns immediately with “Nothing to wait for” and a snapshot.
+- Every wait has a 30-minute safety cap. There is no caller-selectable timeout.
+- With no owned job or service running, `wait` blocks for a reply when the caller sent a direct message (not a broadcast) during its current run to an agent that has not messaged it back since and is still running. Any incoming message ends it, a woken subagent's relayed turn output included. It also ends, without an error, once no agent asked can still answer: each one finished its turn without replying, or is blocked on the caller (a `wait` only the caller's result can end, entered after the question; an inline `task` spawn of it; an untimed eval handle wait on it). A reply that cannot come is what would park both sides.
+- Otherwise returns immediately with “Nothing to wait for”, naming any agent asked that finished without replying or cannot reply before the caller finishes.
 - With no owned jobs, a service finishing returns a notice directing the caller to `proc://` for status/output; with jobs, the call returns their current snapshot/result instead.
 - Results and peer messages also auto-deliver without calling `wait`. Continue useful work instead of polling.
 - Queued peer messages are checked first. Already-settled but undelivered owned jobs are returned without another wait. If a peer message wins a race with job completion, that job remains eligible for normal async delivery.

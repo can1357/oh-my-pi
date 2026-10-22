@@ -17,6 +17,8 @@ import { getStateBgColor, Hasher, padToWidth } from "./utils";
 export interface OutputBlockOptions {
 	header?: string;
 	headerMeta?: string;
+	/** Facts drawn inside the bottom border (`╰── Wall 0.16s · Timeout 300s ──╯`). */
+	footerMeta?: string;
 	state?: State;
 	sections?: Array<{ label?: string; lines: readonly string[]; separator?: boolean }>;
 	width: number;
@@ -46,7 +48,7 @@ export function isFramedBlockComponent(component: Component): boolean {
 
 type BlockRow =
 	| { kind: "bar"; leftChar: string; rightChar: string; label?: string; meta?: string }
-	| { kind: "bottom"; leftChar: string; rightChar: string }
+	| { kind: "bottom"; leftChar: string; rightChar: string; meta?: string }
 	| { kind: "content"; inner: string }
 	| { kind: "sixel"; raw: string };
 
@@ -157,7 +159,26 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 		}
 	}
 
-	rows.push({ kind: "bottom", leftChar: theme.boxRound.bottomLeft, rightChar: theme.boxRound.bottomRight });
+	// Footer facts ride the bottom border only when they fit whole; a clipped
+	// border would silently drop trailing facts (exit code, artifact id), so an
+	// overflowing footer wraps into body rows above a plain border instead.
+	const footerMeta = options.footerMeta;
+	const footerFits =
+		footerMeta === undefined ||
+		visibleWidth(` ${footerMeta} `) <=
+			lineWidth - visibleWidth(`${theme.boxRound.bottomLeft}${cap}`) - visibleWidth(theme.boxRound.bottomRight);
+	if (footerMeta !== undefined && !footerFits) {
+		for (const wrappedLine of wrapTextWithAnsi(footerMeta, contentWidth)) {
+			const innerPadding = padding(Math.max(0, contentWidth - visibleWidth(wrappedLine)));
+			rows.push({ kind: "content", inner: `${wrappedLine}${innerPadding}` });
+		}
+	}
+	rows.push({
+		kind: "bottom",
+		leftChar: theme.boxRound.bottomLeft,
+		rightChar: theme.boxRound.bottomRight,
+		meta: footerFits ? footerMeta : undefined,
+	});
 
 	const H = rows.length;
 
@@ -182,14 +203,6 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 		return `${border(leftGlyphs)}${trimmedLabel}${border(fillGlyphs)}${border(rightGlyph)}`;
 	};
 
-	const renderBottom = (row: { leftChar: string; rightChar: string }): string => {
-		const leftGlyphs = `${row.leftChar}${cap}`;
-		const rightGlyph = row.rightChar;
-		const fillCount = Math.max(0, lineWidth - visibleWidth(leftGlyphs) - visibleWidth(rightGlyph));
-		const fillGlyphs = h.repeat(fillCount);
-		return `${border(leftGlyphs)}${border(fillGlyphs)}${border(rightGlyph)}`;
-	};
-
 	const renderContent = (inner: string): string =>
 		`${border(v)}${contentLeftPadding}${inner}${contentRightPadding}${border(v)}`;
 
@@ -201,8 +214,7 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 			lines.push(row.raw);
 			continue;
 		}
-		const line =
-			row.kind === "bar" ? renderBar(row) : row.kind === "bottom" ? renderBottom(row) : renderContent(row.inner);
+		const line = row.kind === "bar" || row.kind === "bottom" ? renderBar(row) : renderContent(row.inner);
 		lines.push(padToWidth(clipFrame ? truncateToWidth(line, lineWidth, Ellipsis.Omit) : line, lineWidth, bgFn));
 	}
 
@@ -360,6 +372,7 @@ export class CachedOutputBlock {
 		);
 		h.optional(options.header);
 		h.optional(options.headerMeta);
+		h.optional(options.footerMeta);
 		h.optional(options.state);
 		h.optional(options.borderColor);
 		h.bool(options.applyBg ?? true);

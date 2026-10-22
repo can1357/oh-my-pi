@@ -397,6 +397,9 @@ export const INTERRUPTED_THINKING_MESSAGE_TYPE = "interrupted-thinking";
 /** Custom message type for the transient checkpoint-active reminder. */
 export const CHECKPOINT_ACTIVE_REMINDER_TYPE = "checkpoint-active-reminder";
 
+/** Custom message type carrying a completed rewind's report into model context. */
+export const REWIND_REPORT_MESSAGE_TYPE = "rewind-report";
+
 /** Metadata persisted with a hidden interrupted-thinking continuity message. */
 export interface InterruptedThinkingDetails {
 	interruptedAt: number;

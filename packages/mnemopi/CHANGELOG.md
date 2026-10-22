@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Fixed polyphonic recall's graph voice finding no memories for non-English names (e.g. `Hà Nội`) or names of three or more words, and Vietnamese words like `tôi` being stored as the participant `i` ([#16723](https://github.com/can1357/oh-my-pi/issues/16723))
+
+## [18.12.4] - 2026-10-20
+
+### Fixed
+
 - Fixed background fact extraction storing only the first 5 facts of a plain-line extractor answer; it now keeps up to 20, matching JSON answers ([#16377](https://github.com/can1357/oh-my-pi/pull/16377) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.11.2] - 2026-10-16

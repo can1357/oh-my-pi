@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { OmpErrors, type Type } from "@oh-my-pi/omptype";
 import { getAgentDir, isEnoent, logger, stringifyYamlConfig } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
+import { writeFileAtomicallySync } from "../utils/atomic-file";
 
 /** Minimal subset of the AJV ConfigSchemaError shape this module actually relies on. */
 interface ConfigSchemaError {
@@ -46,7 +47,9 @@ function migrateJsonToYml(jsonPath: string, ymlPath: string) {
 			migratedPaths.add(key);
 			return;
 		}
-		fs.writeFileSync(ymlPath, stringifyYamlConfig(parsed));
+		// The migrated config can carry inline API keys: publish it with
+		// owner-only permissions and never leave a half-written file behind.
+		writeFileAtomicallySync(ymlPath, stringifyYamlConfig(parsed));
 		migratedPaths.add(key);
 	} catch (error) {
 		logger.warn("migrateJsonToYml: migration failed", { error: String(error) });

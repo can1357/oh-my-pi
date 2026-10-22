@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 describe("globToolRenderer", () => {
-	it("indents inline glob output and avoids accent-colored success headers", async () => {
+	it("starts glob output at the tool column and avoids accent-colored success headers", async () => {
 		const theme = await getThemeByName("dark");
 		expect(theme).toBeDefined();
 		const uiTheme = theme!;
@@ -32,7 +32,8 @@ describe("globToolRenderer", () => {
 			.render(240);
 		const plainLines = sanitizeText(renderedLines.join("\n")).split("\n");
 
-		expect(plainLines.every(line => line.startsWith(" "))).toBe(true);
+		// Same left edge as every other tool row (read, todo, framed cards).
+		expect(plainLines[0]).not.toStartWith(" ");
 		expect(renderedLines[0]).not.toContain(uiTheme.fg("accent", uiTheme.symbol("icon.search")));
 		expect(renderedLines[0]).not.toContain(uiTheme.fg("accent", "Find"));
 	});

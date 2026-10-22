@@ -118,6 +118,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `AIAND_API_KEY`                 | ai& auth                                         | Using `aiand` provider                                         |                                                                                                     |
 | `GMI_API_KEY`                   | GMI Cloud auth                                   | Using `gmi-cloud` provider                                     |                                                                                                     |
 | `MODEL_API_KEY` / `META_API_KEY` | Meta Model API auth                             | Using `meta` provider                                          | Either variable works                                                                               |
+| `INCEPTION_API_KEY`             | Inception Mercury API auth                      | Using `inception` provider                                     | Also available via `/login inception`, which validates the key with a one-token Mercury 3 request (`/v1/models` is public) |
 | `SINGULARITYAPI_DEV_API_KEY`    | SingularityAPI universal gateway auth            | Using `singularityapi-dev` provider                            | Pay-as-you-go, 300+ models; validated against `https://api.singularityapi.dev/v1/models`    |
 | `SINGULARITYAPI_TECH_API_KEY`   | SingularityAPI reserved lanes auth               | Using `singularityapi-tech` provider                           | Slot-reserved DeepSeek lanes; validated against `https://api.singularityapi.tech/v1/models` |
 
@@ -140,7 +141,7 @@ When the broker is enabled, the local SQLite credential store is bypassed and al
 | `OMP_AUTH_BROKER_TOKEN`             | Bearer token sent on every broker endpoint except `/v1/healthz`                              | `OMP_AUTH_BROKER_URL` is set and no token is available from `auth.broker.token` or `<config-dir>/auth-broker.token`       | Resolution: this env → `auth.broker.token` (`$ENV_NAME` indirection supported) → `<config-dir>/auth-broker.token` (mode `0600`). `<config-dir>` is `~/.omp/` (respecting `PI_CONFIG_DIR`).                                                                                           |
 | `OMP_AUTH_BROKER_SNAPSHOT_TTL_MS`   | Freshness window for the encrypted local broker snapshot cache                               | Optional in broker mode                                                                                                   | Default `3600000` (1 h). Freshness is based on broker `snapshot.generatedAt`; `0` disables cache reads/writes and forces the old blocking fetch every startup.                                                                                                                       |
 | `OMP_AUTH_BROKER_SNAPSHOT_CACHE`    | Path to the encrypted local broker snapshot cache                                            | Optional in broker mode                                                                                                   | Defaults to `~/.omp/cache/auth-broker-snapshot.enc` (or XDG cache equivalent). Useful for tests, ephemeral hosts, or relocating the `0600` cache file.                                                                                                                               |
-| `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` | Process-scoped OAuth account routing for a trusted broker client                             | Optional in broker mode                                                                                                   | Path to a JSON object mapping provider IDs to exact broker `identityKey` arrays. Missing providers are unrestricted; `[]` hides that provider's OAuth accounts; API keys remain visible. Parsed once at startup and fails closed on invalid input. This is not server authorization. |
+| `OMP_AUTH_BROKER_ACCOUNT_POOL_FILE` | Process-scoped broker credential visibility (OAuth accounts and API keys) for a broker client | Optional in broker mode                                                                                                   | Path to a JSON object mapping provider IDs to rules: an `identityKey` array (`[]` hides that provider's OAuth accounts; API keys stay visible), `true`/`false` (everything/nothing), or `{ "accounts"?: [...], "apiKeys"?: boolean }`. Providers without an entry follow the `"*"` rule, else are unrestricted; `"*": false` makes the file an allow-list. Parsed once at startup and fails closed on invalid input. Not broker authorization: a direct client still holds the broker token. Inside `omp auth-gateway serve` it bounds what the gateway's clients can reach; see [auth-broker-gateway.md](./auth-broker-gateway.md#client-account-pools). |
 
 The gateway has no dedicated env vars — it inherits `OMP_AUTH_BROKER_*`. Its own inbound bearer token lives at `<config-dir>/auth-gateway.token` and is managed via `omp auth-gateway token`.
 
@@ -180,6 +181,12 @@ Request bodies of 1 KiB or more are compressed when sent to a provider's own end
 | Variable                 | Behavior                                                                          |
 | ------------------------ | --------------------------------------------------------------------------------- |
 | `PI_REQUEST_COMPRESSION` | `0`/`false`/`no`/`off` sends every request body uncompressed (enabled by default) |
+
+### Anthropic API version
+
+| Variable                   | Behavior                                                                                                                                                                                                                                                                                 |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PI_ANTHROPIC_API_VERSION` | `anthropic-version` sent to the official Anthropic API (`api.anthropic.com`): `2023-06-01` (default) or `2026-10-21`. Under `2026-10-21`, `temperature`/`top_p`/`top_k` are omitted because that version rejects them. Other hosts (Bedrock, Foundry, Copilot, gateways, Anthropic-compatible providers) stay on `2023-06-01`; unknown values log a warning and use `2023-06-01` |
 
 ### Anthropic Foundry Gateway (Azure / enterprise proxy)
 
@@ -591,6 +598,21 @@ These affect where coding-agent stores data and which process-local settings ove
 | `EDITOR`                   | Fallback external editor command                                               |
 
 `PI_BASH_NO_CI`, `PI_BASH_NO_LOGIN`, and `PI_SHELL_PREFIX` use their `CLAUDE_*` aliases when the canonical variable is unset or empty. These controls use non-empty string checks, not boolean parsing: even `0` or `false` activates the corresponding no-CI/no-login control.
+
+### Set by the `bash` tool
+
+Every command the agent runs through the `bash` tool (foreground, background, PTY, ACP client terminal, and `name`-launched services) receives the current session identity:
+
+| Variable          | Value                                                                        |
+| ----------------- | ---------------------------------------------------------------------------- |
+| `PI_SESSION_ID`   | Current session ID                                                           |
+| `PI_SESSION_FILE` | Absolute path to the current session JSONL file; empty when not persisted (`--no-session`) |
+
+Values are read when each tool call starts, so the next call follows `/fork`, `/new`, and `/resume`, and a call already under way keeps the session it started in. They are always set, so an empty value replaces a stale one inherited from a parent omp process. User `!` commands do not receive them.
+
+```bash
+echo "$PI_SESSION_ID"
+```
 
 ---
 

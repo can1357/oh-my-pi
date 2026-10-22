@@ -874,9 +874,19 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 
 	for (const commitSha of agentCommits) {
 		const taskStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyBaselineTree, `${commitSha}^{tree}`);
-		const currentFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [taskStatePatch], {
-			threeWay: true,
-		});
+		// The delta is captured against `HEAD + baseline WIP`, so synthesise the
+		// filtered tree through `patchTree` with that WIP context: hunks that
+		// touch WIP paths — including deletions of untracked WIP the agent never
+		// committed — replay against the WIP state and are rewound afterwards
+		// instead of failing against the clean baseline tree with
+		// "patch does not apply: … does not exist".
+		const currentFilteredTree = await patchTree(
+			opts.repoRoot,
+			baselineSha,
+			opts.taskId,
+			taskStatePatch,
+			opts.baseline.root,
+		);
 		const commitPatchText = await diffTreeOrEmpty(repo, previousFilteredTree, currentFilteredTree);
 		if (commitPatchText.trim()) {
 			const details = await isolationRepo.commitDetails(commitSha);
@@ -903,10 +913,17 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 		return commitPatch(opts.repoRoot, tip, opts.taskId, opts.rootPatch, msg, undefined, opts.baseline.root);
 	}
 	// Reconstruct the final HEAD-derived tree with the same dirty-side blobs
-	// and 3-way synthesis used above; anything left is uncommitted work.
-	const finalFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [opts.rootPatch], {
-		threeWay: true,
-	});
+	// and 3-way synthesis used above; anything left is uncommitted work. The
+	// same WIP context applies: `rootPatch` is captured against `HEAD + WIP`,
+	// so synthesise through `patchTree` or hunks touching WIP paths fail on the
+	// clean baseline tree ("patch does not apply: … does not exist").
+	const finalFilteredTree = await patchTree(
+		opts.repoRoot,
+		baselineSha,
+		opts.taskId,
+		opts.rootPatch,
+		opts.baseline.root,
+	);
 	const leftoverPatch = await diffTreeOrEmpty(repo, previousFilteredTree, finalFilteredTree);
 	if (!leftoverPatch.trim()) return tip;
 	const msg = (opts.commitMessage && (await opts.commitMessage(leftoverPatch))) || opts.fallbackMessage;

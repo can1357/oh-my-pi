@@ -430,7 +430,7 @@ answers or relax these branch guards.
 
 | Command | Source |
 |---|---|
-| `/annotate code-review [focus]` | Local base-branch, working-copy, or commit diff, or a GitHub PR |
+| `/annotate code-review [focus]` | Local base-branch, working-copy, or commit diff, a GitHub PR, or a GitLab MR |
 | `/annotate last` | Latest non-empty assistant reply on the active branch |
 | `/annotate session` | A message or block picked in the `/copy` selector |
 | `/annotate path/to/file` | Text read from a file |
@@ -444,7 +444,7 @@ The whole remainder after `/annotate` is one source specification (`CustomComman
 
 Argument completion offers the modes, a `./` file-path starter, and a quote starter. `CustomCommand.getArgumentCompletions(prefix, cwd)` receives the live session cwd, so file suggestions follow `/move` and `/wt`.
 
-**Code review.** The menu lists up to three GitHub PRs referenced in the conversation, then the local diff kinds. `/annotate code-review pr://owner/repo/N [focus]` skips the menu. The diff is resolved once in the live session cwd and frozen (`ResolvedReviewTarget`); the overlay and the reviewer prompt read the same snapshot, filtered by the same exclusion rules as `/review` (`src/extensibility/custom-commands/bundled/review/diff.ts`). The overlay offers **Continue with LLM review** (submits the `/review` prompt with the notes as operator focus) and **Paste annotations into prompt**. Both include the optional `[focus]` text. Nothing is posted to GitHub.
+**Code review.** The menu lists up to three GitHub PRs or GitLab MRs referenced in the conversation, then the local diff kinds. `/annotate code-review pr://owner/repo/N [focus]` (or a GitLab MR URL) skips the menu. The diff is resolved once in the live session cwd and frozen (`ResolvedReviewTarget`); the overlay and the reviewer prompt read the same snapshot, filtered by the same exclusion rules as `/review` (`src/extensibility/custom-commands/bundled/review/diff.ts`). The overlay offers **Continue with LLM review** (submits the `/review` prompt with the notes as operator focus) and **Paste annotations into prompt**. Both include the optional `[focus]` text. Nothing is posted to GitHub or GitLab.
 
 Without an interactive UI, `code-review` delegates to `/review` instead of opening the annotation overlay; text-source annotation refuses to send a message.
 

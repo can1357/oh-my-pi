@@ -17,6 +17,7 @@ function createBashTool(rules: BashInterceptorRule[]): BashTool {
 			"bash.autoBackground.enabled": false,
 			"bash.autoBackground.thresholdMs": 60_000,
 		}),
+		getSessionFile: () => null,
 	} as unknown as ToolSession;
 
 	return new BashTool(session);

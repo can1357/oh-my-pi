@@ -1193,6 +1193,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		await Promise.all(sessions.splice(0).map(session => session.dispose()));
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.global().unregister("prompt-blocks");
+		AgentRegistry.global().unregister("Peer");
 	});
 
 	function createTool(name: string): AgentTool {
@@ -1313,14 +1314,20 @@ describe("cold revival replays the system prompt the last request sent", () => {
 	/** Spawns through runSubprocess on a real session, then returns its live session and requests. */
 	async function spawn(
 		cwd: string,
-		buildPrompt: (toolNames: string[]) => string[],
+		buildPrompt: (toolNames: string[], options?: CreateAgentSessionOptions) => string[],
 		responses: MockResponseSource,
 		hooks?: ExtensionHooks,
 		toolNames?: string[],
 	): Promise<RecordingSession> {
 		let spawned: RecordingSession | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementationOnce(async options => {
-			spawned = createRecordingSession(options!.sessionManager!, buildPrompt, responses, hooks, toolNames);
+			spawned = createRecordingSession(
+				options!.sessionManager!,
+				names => buildPrompt(names, options),
+				responses,
+				hooks,
+				toolNames,
+			);
 			// The SDK registers a spawned child, which keeps it live after it yields.
 			AgentRegistry.global().register({
 				id: "prompt-blocks",
@@ -1454,6 +1461,83 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		await live.waitForIdle();
 		expect(warm.requests.at(-1)).toEqual(spawned.requests.at(-1)!);
 		expect(warm.toolRequests.at(-1)).toBe(spawned.toolRequests.at(-1)!);
+	});
+
+	/** The executor's own subagent prompt over a default block listing the active tools. */
+	function subagentPrompt(toolNames: string[], options?: CreateAgentSessionOptions): string[] {
+		const build = options?.systemPrompt;
+		if (typeof build !== "function") throw new Error("Expected a system prompt builder");
+		return [build([`default: ${toolNames.join(",")}`])].flat();
+	}
+
+	function registerPeer(): void {
+		AgentRegistry.global().register({
+			id: "Peer",
+			displayName: "Peer",
+			kind: "sub",
+			session: null,
+			sessionFile: null,
+			status: "running",
+		});
+	}
+
+	/** Parks the spawned subagent, lets `whileParked` change the registry, and warm-revives it. */
+	async function parkAndRevive(
+		whileParked: () => void,
+		hooks?: ExtensionHooks,
+	): Promise<{ live: AgentSession; warm: RecordingSession }> {
+		const lifecycle = AgentLifecycleManager.global();
+		await lifecycle.park("prompt-blocks");
+		whileParked();
+		let warm: RecordingSession | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementationOnce(async options => {
+			warm = createRecordingSession(
+				options!.sessionManager!,
+				names => subagentPrompt(names, options),
+				[{ content: ["next"] }],
+				hooks,
+			);
+			return { session: warm.session } as CreateAgentSessionResult;
+		});
+		const live = await lifecycle.ensureLive("prompt-blocks");
+		if (!warm || live !== warm.session) throw new Error("Expected a warm revive through the lifecycle");
+		await live.prompt("next");
+		await live.waitForIdle();
+		return { live, warm };
+	}
+
+	it("warm-revives with the system prompt it was sent with after a peer joins, then shows the peer on rebuild", async () => {
+		const cwd = makeTempDir("@pi-revive-warm-roster-");
+		const spawned = await spawn(cwd, subagentPrompt, spawnResponses());
+		expect(spawned.requests.at(-1)!.join("\n")).toContain("(no other agents)");
+		const { live, warm } = await parkAndRevive(registerPeer);
+		expect(warm.requests[0]).toEqual(spawned.requests.at(-1)!);
+		// Once revived, a rebuild renders the live roster, as it would have in a session that never parked.
+		await live.refreshBaseSystemPrompt();
+		expect(live.systemPrompt.join("\n")).toContain("`Peer` — Peer (sub, running)");
+	});
+
+	it("warm-revives with the roster its prompt held, not one a discarded rebuild rendered", async () => {
+		const cwd = makeTempDir("@pi-revive-discarded-roster-");
+		const spawned = await spawn(cwd, subagentPrompt, spawnResponses());
+		registerPeer();
+		await spawned.session.refreshBaseSystemPrompt(() => false);
+		expect(spawned.session.systemPrompt.join("\n")).not.toContain("`Peer`");
+		const { warm } = await parkAndRevive(() => AgentRegistry.global().unregister("Peer"));
+		expect(warm.requests[0]).toEqual(spawned.requests.at(-1)!);
+	});
+
+	it("warm-revives with the roster its base held when a before_agent_start hook rewrites the prompt", async () => {
+		const cwd = makeTempDir("@pi-revive-hooked-roster-");
+		const mergeBlocks = {
+			beforeAgentStart: async (_session: AgentSession, systemPrompt: string[]) => [
+				`${systemPrompt.join("\n\n")}\n\nhooked`,
+			],
+		};
+		const spawned = await spawn(cwd, subagentPrompt, spawnResponses(), mergeBlocks);
+		expect(spawned.requests.at(-1)).toHaveLength(1);
+		const { warm } = await parkAndRevive(registerPeer, mergeBlocks);
+		expect(warm.requests[0]).toEqual(spawned.requests.at(-1)!);
 	});
 
 	it("replays the base a before_agent_start override was built from when the base rebuilds in the request window", async () => {

@@ -23,7 +23,7 @@ export function safe(value: string): string {
 	return replaceTabs(value).replace(/\r/g, "");
 }
 
-/** Padded card whose lines are sanitized and truncated, re-rendered when the expanded state flips. */
+/** Card whose lines are sanitized and truncated, re-rendered when the expanded state flips. */
 export function card(lines: (width: number, expanded: boolean) => string[], options: RenderResultOptions): Component {
 	return createCachedComponent(
 		() => Boolean(options.expanded),
@@ -31,6 +31,5 @@ export function card(lines: (width: number, expanded: boolean) => string[], opti
 			lines(width, expanded)
 				.flatMap(line => line.split("\n"))
 				.map(line => truncateToWidth(safe(line), width, Ellipsis.Unicode)),
-		{ paddingX: 1 },
 	);
 }

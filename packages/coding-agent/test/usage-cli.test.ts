@@ -429,6 +429,17 @@ describe("collectUnreportedAccounts", () => {
 		expect(unreported).toEqual([{ provider: "cerebras", type: "api_key" }]);
 	});
 
+	it("does not list identity-less OAuth accounts as missing beside an org-attributed report", () => {
+		const account: UsageAccountIdentity = { provider: "devin", type: "oauth" };
+		const report = {
+			...makeReport("devin", "devin@example.test", []),
+			metadata: { email: "devin@example.test", accountId: "account-devin", orgId: "devin-team$account-devin" },
+		};
+
+		expect(collectUnreportedAccounts([report], [account])).toEqual([]);
+		expect(collectUnreportedAccounts([], [account])).toEqual([account]);
+	});
+
 	it("attributes org-decisively when either side carries an org", () => {
 		const shared = "shared@example.test";
 		const orgAccounts: UsageAccountIdentity[] = [
@@ -570,7 +581,7 @@ describe("formatUsageBreakdown", () => {
 		expect(text).not.toContain("policy:");
 	});
 
-	it("shows an explicit priority and reserve override with the observed eligibility reason", () => {
+	it("shows an explicit priority, reserve override and reclaim line with the observed eligibility reason", () => {
 		const report = makeReport("openai-codex", "protected@example.test", [
 			makeLimit({
 				id: "5h",
@@ -589,6 +600,7 @@ describe("formatUsageBreakdown", () => {
 							account: { email: "protected@example.test" },
 							priority: 100,
 							reservePct: 50,
+							reclaimAbovePct: 70,
 						}
 					: undefined,
 		};
@@ -597,7 +609,9 @@ describe("formatUsageBreakdown", () => {
 			formatUsageBreakdown([report], [], Date.now(), undefined, [], policyOptions),
 		);
 
-		expect(text).toContain("policy: priority 100 · reserve 50% (override) · eligible · 80.0% left");
+		expect(text).toContain(
+			"policy: priority 100 · reserve 50% (override) · reclaim above 70% · eligible · 80.0% left",
+		);
 	});
 
 	it("shows the inherited global reserve for an unconfigured sibling in a policy-enabled provider", () => {

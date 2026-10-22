@@ -1764,8 +1764,13 @@ type ListToken = Token & {
 	start?: number;
 	loose: boolean;
 };
-type TableCellToken = { tokens?: Token[] };
-type TableToken = Token & { header: TableCellToken[]; rows: TableCellToken[][]; raw?: string };
+type TableCellToken = { tokens?: Token[]; align?: Tokens.TableCell["align"] };
+type TableToken = Token & {
+	header: TableCellToken[];
+	rows: TableCellToken[][];
+	raw?: string;
+	align?: Array<Tokens.TableCell["align"]>;
+};
 
 /** `item` as marked lexes it inside a loose list: tight `text` blocks become paragraphs. */
 function loosenListItem(item: Tokens.ListItem): Tokens.ListItem {
@@ -1817,6 +1822,63 @@ function formatHyperlink(text: string, target: string): string {
 	}
 
 	return `\x1b]8;;${safeTarget}\x07${text}\x1b]8;;\x07`;
+}
+
+const CODE_ESCAPE_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/y;
+const CODE_URL_RE = /(?<![A-Za-z0-9+.-])https?:\/\/[^\s\x00-\x1f\x7f<>"'`]+/g;
+const CODE_URL_TRAILING_RE = /[.,;:!?]+$/;
+const CODE_URL_OPENERS: Partial<Record<string, string>> = { ")": "(", "]": "[", "}": "{" };
+
+/** Whether `url` ends in a closing bracket that has no matching opener inside it. */
+function endsWithUnbalancedCloser(url: string): boolean {
+	const closer = url.at(-1) ?? "";
+	const opener = CODE_URL_OPENERS[closer];
+	return opener !== undefined && url.split(closer).length > url.split(opener).length;
+}
+
+/**
+ * Wrap each http(s) URL in a highlighted code row with an OSC 8 hyperlink.
+ * The row is hard-wrapped later; wrapTextWithAnsi reopens the link on every
+ * fragment, so terminals open the whole URL instead of only the first visual
+ * line. URLs are located in the visible text so syntax-highlight escapes
+ * inside them stay in place and the visible width is unchanged.
+ */
+function linkifyCodeUrls(line: string): string {
+	if (!TERMINAL.hyperlinks || !line.includes("://") || line.includes("\x1b]8;")) {
+		return line;
+	}
+
+	let visible = "";
+	const offsets: number[] = [];
+	for (let i = 0; i < line.length;) {
+		if (line.charCodeAt(i) === 0x1b) {
+			CODE_ESCAPE_RE.lastIndex = i;
+			const match = CODE_ESCAPE_RE.exec(line);
+			if (match) {
+				i += match[0].length;
+				continue;
+			}
+		}
+		offsets.push(i);
+		visible += line[i];
+		i++;
+	}
+
+	let result = "";
+	let copied = 0;
+	for (const match of visible.matchAll(CODE_URL_RE)) {
+		let url = match[0].replace(CODE_URL_TRAILING_RE, "");
+		// A closer only belongs to the URL when it balances an opener inside it.
+		while (endsWithUnbalancedCloser(url)) {
+			url = url.slice(0, -1).replace(CODE_URL_TRAILING_RE, "");
+		}
+		if (!/:\/\/./.test(url)) continue;
+		const start = offsets[match.index] ?? 0;
+		const end = (offsets[match.index + url.length - 1] ?? start) + 1;
+		result += line.slice(copied, start) + formatHyperlink(line.slice(start, end), url);
+		copied = end;
+	}
+	return copied === 0 ? line : result + line.slice(copied);
 }
 
 function isAsciiTextSizingPayload(text: string): boolean {
@@ -3483,7 +3545,8 @@ export class Markdown implements Component {
 		const tokenText = "text" in token && typeof token.text === "string" ? token.text : "";
 		const lang = "lang" in token && typeof token.lang === "string" ? token.lang : undefined;
 		const addBodyLine = (line: string): void => {
-			bodyLines.push(renderedLine(literalCode ? line : codeIndent + line, literalCode));
+			const linked = linkifyCodeUrls(line);
+			bodyLines.push(renderedLine(literalCode ? linked : codeIndent + linked, literalCode));
 		};
 
 		const streaming = this.transientRenderCache && !this.#renderingStablePrefix;
@@ -4420,7 +4483,7 @@ export class Markdown implements Component {
 	 * Delegates to wrapTextWithAnsi() so ANSI codes + long tokens are handled
 	 * consistently with the rest of the renderer.
 	 */
-	#wrapCellText(text: string, maxWidth: number): string[] {
+	#wrapCellText(text: string, maxWidth: number, clampOversized = true): string[] {
 		const cellWidth = Math.max(1, maxWidth);
 		// Wrap the whole cell in one call so wrapTextWithAnsi() balances OSC 8
 		// hyperlink state across explicit newlines (e.g. `<br>` rendered as \n);
@@ -4435,7 +4498,34 @@ export class Markdown implements Component {
 		// (e.g. mdCode) would bleed into the "│" and the following cells.
 		// Terminate each line at default fg, clearing bold/italic but keeping
 		// any ambient background (message-bg rendering) intact.
-		return wrapped.map(line => `${line}\x1b[22m\x1b[23m\x1b[39m`);
+		// A wide glyph can exceed a one-cell column without wrapping (a 2-cell
+		// emoji in a column squeezed to 1), so clamp here before the row is
+		// spliced between borders; otherwise the overwide row is re-wrapped and
+		// the trailing border lands on its own line.
+		return wrapped.map(line => {
+			const fitted = clampOversized && visibleWidth(line) > cellWidth ? truncateToWidth(line, cellWidth) : line;
+			return `${fitted}\x1b[22m\x1b[23m\x1b[39m`;
+		});
+	}
+
+	/**
+	 * Pad a table cell to the width of its column, following the column's GFM
+	 * alignment: a right-aligned cell ends at the column's right edge, a
+	 * centered one is surrounded by padding, and anything else stays flush left.
+	 */
+	#alignCellText(text: string, width: number, align: Tokens.TableCell["align"]): string {
+		const gap = Math.max(0, width - visibleWidth(text));
+		if (gap === 0) return text;
+		switch (align) {
+			case "right":
+				return padding(gap) + text;
+			case "center": {
+				const left = Math.floor(gap / 2);
+				return padding(left) + text + padding(gap - left);
+			}
+			default:
+				return text + padding(gap);
+		}
 	}
 
 	/**
@@ -4579,6 +4669,12 @@ export class Markdown implements Component {
 		const h = t.horizontal;
 		const v = t.vertical;
 
+		// GFM alignment belongs to the column: the marker in the delimiter row
+		// applies to the header and to every body cell below it.
+		const columnAligns: Array<Tokens.TableCell["align"]> = token.header.map(
+			(cell, i) => cell.align ?? token.align?.[i] ?? null,
+		);
+
 		// Render top border
 		const topBorderCells = columnWidths.map(w => h.repeat(w));
 		lines.push(`${t.topLeft}${h}${topBorderCells.join(`${h}${t.teeDown}${h}`)}${h}${t.topRight}`);
@@ -4593,7 +4689,7 @@ export class Markdown implements Component {
 		for (let lineIdx = 0; lineIdx < headerLineCount; lineIdx++) {
 			const rowParts = headerCellLines.map((cellLines, colIdx) => {
 				const text = cellLines[lineIdx] || "";
-				const padded = text + padding(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
+				const padded = this.#alignCellText(text, columnWidths[colIdx], columnAligns[colIdx] ?? null);
 				return this.#theme.bold(padded);
 			});
 			lines.push(`${v} ${rowParts.join(` ${v} `)} ${v}`);
@@ -4626,7 +4722,8 @@ export class Markdown implements Component {
 				if (rowCellLines[openCell].length > settledLineCount) {
 					const width = columnWidths[openCell];
 					const kept = rowCellLines[openCell].slice(0, settledLineCount);
-					const last = width > 1 ? (this.#wrapCellText(kept[settledLineCount - 1], width - 1)[0] ?? "") : "";
+					const last =
+						width > 1 ? (this.#wrapCellText(kept[settledLineCount - 1], width - 1, false)[0] ?? "") : "";
 					kept[settledLineCount - 1] = `${visibleWidth(last) < width ? last : ""}…`;
 					rowCellLines[openCell] = kept;
 				}
@@ -4636,7 +4733,8 @@ export class Markdown implements Component {
 			for (let lineIdx = 0; lineIdx < rowLineCount; lineIdx++) {
 				const rowParts = rowCellLines.map((cellLines, colIdx) => {
 					const text = cellLines[lineIdx] || "";
-					return text + padding(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
+					const align = row[colIdx]?.align ?? columnAligns[colIdx] ?? null;
+					return this.#alignCellText(text, columnWidths[colIdx], align);
 				});
 				lines.push(`${v} ${rowParts.join(` ${v} `)} ${v}`);
 			}

@@ -1,7 +1,6 @@
-import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { CwdLookupMemo } from "../utils/forge-cli";
 import { github } from "../utils/github";
 import type { ToolSession } from ".";
 import type { GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
@@ -244,42 +243,11 @@ export async function resolveGitHubRepo(
 	return resolveRepoFromCwd(cwd, signal);
 }
 
-/**
- * Process-lifetime cache of `gh repo view` lookups keyed by absolute cwd.
- * Avoids repeated `gh` chatter when the same protocol handler or tool call
- * resolves the default repo many times in a row.
- *
- * The shared lookup is intentionally **not** bound to any caller's
- * AbortSignal. Cancelling one caller would otherwise kill the underlying
- * `gh repo view` for every concurrent waiter on the same cwd. Each caller's
- * signal is honored at the wait point via `untilAborted` instead, so an abort
- * unwinds only that caller.
- */
-export const DEFAULT_REPO_RESOLVED = new Map<string, string>();
-export const DEFAULT_REPO_INFLIGHT = new Map<string, Promise<string>>();
+const defaultRepoMemo = new CwdLookupMemo(cwd => resolveRepoFromCwd(cwd));
 
-export async function resolveDefaultRepoMemoized(cwd: string, signal?: AbortSignal): Promise<string> {
-	const key = path.resolve(cwd);
-	const ready = DEFAULT_REPO_RESOLVED.get(key);
-	if (ready) return ready;
-	let pending = DEFAULT_REPO_INFLIGHT.get(key);
-	if (!pending) {
-		pending = (async () => {
-			// No caller signal: this lookup is shared across every concurrent
-			// waiter on the same cwd.
-			const value = await resolveRepoFromCwd(cwd);
-			DEFAULT_REPO_RESOLVED.set(key, value);
-			return value;
-		})();
-		// Drop the in-flight slot on settle so failures don't poison the cache
-		// and so a successful resolution survives only in `DEFAULT_REPO_RESOLVED`.
-		void pending.then(
-			() => DEFAULT_REPO_INFLIGHT.delete(key),
-			() => DEFAULT_REPO_INFLIGHT.delete(key),
-		);
-		DEFAULT_REPO_INFLIGHT.set(key, pending);
-	}
-	return untilAborted(signal, pending);
+/** `gh repo view` for `cwd`, memoized per absolute cwd (see {@link CwdLookupMemo}). */
+export function resolveDefaultRepoMemoized(cwd: string, signal?: AbortSignal): Promise<string> {
+	return defaultRepoMemo.get(cwd, signal);
 }
 
 /**

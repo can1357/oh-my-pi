@@ -30,6 +30,27 @@ const LIVE_FREE_MODEL_IDS = [
 
 const LIVE_PAID_MODEL_IDS = ["claude-opus-4-8", "gpt-5.5"] as const;
 
+test.each([
+	["opencode-go", "https://opencode.ai/zen/go/v1"],
+	["opencode-zen", "https://opencode.ai/zen/v1"],
+])("%s offers only Step 5 Preview's documented reasoning efforts (#14987)", (provider, baseUrl) => {
+	const model = buildModel({
+		id: "step-5-preview-free",
+		name: "Step 5 Preview Free",
+		api: "openai-completions",
+		provider,
+		baseUrl,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+	});
+
+	expect(model.thinking?.mode).toBe("effort");
+	expect(getSupportedEfforts(model)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+});
+
 function modelListResponse(ids: readonly string[]): Response {
 	return Response.json({
 		object: "list",

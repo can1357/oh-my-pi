@@ -156,21 +156,19 @@ export function parseReadUrlTarget(readPath: string): ParsedReadUrlTarget | null
 		return null;
 	}
 
-	let raw = false;
+	const tokens = embedded?.sels ?? [];
+	const raw = tokens.some(token => token.toLowerCase() === "raw");
 	let ranges: [LineRange, ...LineRange[]] | undefined;
 	let tail: number | undefined;
-	for (const token of embedded?.sels ?? []) {
-		if (token.toLowerCase() === "raw") {
-			raw = true;
-			continue;
-		}
+	for (const token of tokens) {
+		if (token.toLowerCase() === "raw") continue;
 		if (ranges !== undefined || tail !== undefined) {
 			// Two range groups on the same URL (`…:5-10:20-30`) — combine with commas instead.
 			throw new ToolError(
 				`URL selector has multiple range groups; combine them with commas (e.g. \`:5-10,20-30\`).`,
 			);
 		}
-		ranges = parseLineRanges(token) ?? undefined;
+		ranges = parseLineRanges(token, raw ? "single" : "onward") ?? undefined;
 		if (ranges !== undefined) continue;
 		const count = parseTailCount(token);
 		if (count === null) {

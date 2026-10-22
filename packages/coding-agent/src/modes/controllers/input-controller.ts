@@ -1016,6 +1016,8 @@ export class InputController {
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedImages = inputImages;
 
+			// A startup-deferred extension's input hook must see the first submission.
+			if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
 			if (runner?.hasHandlers("input")) {
 				const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
 				if (!input) {
@@ -1892,6 +1894,7 @@ export class InputController {
 		// same draft, and later typing belongs to the next submission.
 		this.ctx.editor.clearDraft();
 
+		if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
 		if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
 			try {
 				const input = await this.#runInputHandlers(text, images, imageLinks);

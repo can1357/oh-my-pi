@@ -81,7 +81,7 @@ use uucore::{display::Quotable, safe_traversal::{DirFd, SymlinkBehavior}};
 
 use super::{
 	Host,
-	InteractiveMode, Options, handle_error_with_force, is_dir_empty, prompt_descend,
+	InteractiveMode, Options, handle_error_with_force, is_dir_empty, is_missing_under_force, prompt_descend,
 	remove_dir_with_special_cases, remove_file, show_permission_denied_error, show_removal_error,
 	verbose_removed_directory, verbose_removed_file,
 };
@@ -197,6 +197,7 @@ pub fn safe_remove_file(host: &mut Host,
 			verbose_removed_file(host, path, options);
 			Some(false)
 		},
+		Err(e) if is_missing_under_force(&e, options) => Some(false),
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::PermissionDenied {
 				show_error!(host, "cannot remove {}: Permission denied", path.quote());
@@ -229,6 +230,7 @@ pub fn safe_remove_empty_dir(host: &mut Host,
 			verbose_removed_directory(host, path, options);
 			Some(false)
 		},
+		Err(e) if is_missing_under_force(&e, options) => Some(false),
 		Err(e) => {
 			show_error!(host, "cannot remove {}: {e}", path.quote());
 			Some(true)
@@ -246,7 +248,10 @@ fn handle_permission_denied(host: &mut Host,
 	// When we can't open a subdirectory due to permission denied,
 	// try to remove it directly (it might be empty).
 	// This matches GNU rm behavior with -f flag.
-	if let Err(_remove_err) = dir_fd.unlink_at(entry_name, true) {
+	if let Err(remove_err) = dir_fd.unlink_at(entry_name, true) {
+		if is_missing_under_force(&remove_err, options) {
+			return false;
+		}
 		// The directory is not empty (or another error) and we can't read it
 		// to remove its contents. Report the original permission denied error.
 		// This matches GNU rm behavior — the real problem is we lack
@@ -268,6 +273,9 @@ fn handle_unlink(host: &mut Host,
 	options: &Options,
 ) -> bool {
 	if let Err(e) = dir_fd.unlink_at(entry_name, is_dir) {
+		if is_missing_under_force(&e, options) {
+			return false;
+		}
 		show_error!(host, "cannot remove {}: {e}", entry_path.quote());
 		true
 	} else {
@@ -300,6 +308,7 @@ pub fn safe_remove_dir_recursive(host: &mut Host,
 			return remove_file(host, path, options, progress_bar);
 		},
 		Ok(metadata) => metadata.permissions().mode(),
+		Err(e) if is_missing_under_force(&e, options) => return false,
 		Err(e) => {
 			return show_removal_error(host, e, path);
 		},
@@ -308,18 +317,22 @@ pub fn safe_remove_dir_recursive(host: &mut Host,
 	// Try to open the directory using DirFd for secure traversal
 	let dir_fd = match DirFd::open(&path_fs, SymlinkBehavior::Follow) {
 		Ok(fd) => fd,
+		Err(e) if is_missing_under_force(&e, options) => return false,
 		Err(e) => {
 			// If we can't open the directory for safe traversal,
 			// handle the error appropriately and try to remove if possible
 			if e.kind() == std::io::ErrorKind::PermissionDenied {
 				// Try to remove the directory directly if it's empty
-				if host.fs().remove_dir(&path_fs).is_ok() {
-					verbose_removed_directory(host, path, options);
-					return false;
+				match host.fs().remove_dir(&path_fs) {
+					Ok(()) => {
+						verbose_removed_directory(host, path, options);
+						return false;
+					},
+					Err(gone) if is_missing_under_force(&gone, options) => return false,
+					// If we can't read the directory AND can't remove it,
+					// show permission denied error for GNU compatibility
+					Err(_) => return show_permission_denied_error(host, path),
 				}
-				// If we can't read the directory AND can't remove it,
-				// show permission denied error for GNU compatibility
-				return show_permission_denied_error(host, path);
 			}
 			return show_removal_error(host, e, path);
 		},
@@ -523,6 +536,17 @@ fn show_permission_denied_error(host: &mut Host, path: &Path) -> bool {
 	true
 }
 
+/// Whether `e` says the entry is already gone, which `-f` ignores as GNU rm
+/// does: another process may remove part of the tree while it is walked.
+///
+/// As in GNU rm, a later `-i`, `-I` or `--interactive=always|once` cancels
+/// that; the parser then leaves an interactive mode other than `Never`.
+fn is_missing_under_force(e: &io::Error, options: &Options) -> bool {
+	options.force
+		&& !matches!(options.interactive, InteractiveMode::Always | InteractiveMode::Once)
+		&& matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory)
+}
+
 /// Helper to handle errors with force mode consideration
 fn handle_error_with_force(host: &mut Host, e: io::Error, path: &Path, options: &Options) -> bool {
 	// Permission denied errors should be shown even in force mode
@@ -546,16 +570,24 @@ fn handle_error_with_force(host: &mut Host, e: io::Error, path: &Path, options: 
 fn remove_empty_dir(host: &mut Host, fs_path: &Path) -> io::Result<()> {
 	let result = host.fs().remove_dir(fs_path);
 	#[cfg(windows)]
-	if let Err(e) = &result
-		&& e.kind() == io::ErrorKind::PermissionDenied
-		&& let Ok(metadata) = host.fs().symlink_metadata(fs_path)
-		// Not a symlink or junction: set_permissions would follow it.
-		&& metadata.is_dir()
-		&& metadata.permissions().readonly()
+	if result
+		.as_ref()
+		.is_err_and(|e| e.kind() == io::ErrorKind::PermissionDenied)
 	{
-		let mut writable = metadata.permissions();
-		writable.set_readonly(false);
-		if host.fs().set_permissions(fs_path, writable).is_ok() {
+		// A step that finds the directory gone reports that, which `-f`
+		// ignores, rather than the stale `PermissionDenied`.
+		let gone = |e: io::Error| (e.kind() == io::ErrorKind::NotFound).then_some(e);
+		let metadata = match host.fs().symlink_metadata(fs_path) {
+			Ok(metadata) => metadata,
+			Err(e) => return Err(gone(e).unwrap_or_else(|| result.unwrap_err())),
+		};
+		// Not a symlink or junction: set_permissions would follow it.
+		if metadata.is_dir() && metadata.permissions().readonly() {
+			let mut writable = metadata.permissions();
+			writable.set_readonly(false);
+			if let Err(e) = host.fs().set_permissions(fs_path, writable) {
+				return Err(gone(e).unwrap_or_else(|| result.unwrap_err()));
+			}
 			let retry = host.fs().remove_dir(fs_path);
 			if retry.is_err() {
 				// Best effort: the retry's error is the one to report.
@@ -571,6 +603,7 @@ fn remove_empty_dir(host: &mut Host, fs_path: &Path) -> io::Result<()> {
 fn remove_dir_with_special_cases(host: &mut Host, path: &Path, options: &Options, error_occurred: bool) -> bool {
 	let path_fs = host.resolve(path);
 	match remove_empty_dir(host, &path_fs) {
+		Err(e) if is_missing_under_force(&e, options) => false,
 		Err(_) if !error_occurred && !is_readable(host, path) => {
 			// For compatibility with GNU test case
 			// `tests/rm/unread2.sh`, show "Permission denied" in this
@@ -607,6 +640,7 @@ fn remove_dir_with_feedback(host: &mut Host, path: &Path, options: &Options) -> 
 			verbose_removed_directory(host, path, options);
 			false
 		},
+		Err(e) if is_missing_under_force(&e, options) => false,
 		Err(e) => show_removal_error(host, e, path),
 	}
 }
@@ -1278,25 +1312,32 @@ fn remove_dir_recursive_with_provider(
 	// Very long Windows paths are removed in one call.
 	#[cfg(not(unix))]
 	if path.to_str().is_some_and(|s| s.len() > 1000) {
-		return match filesystem.remove_dir_all(&fs_path) {
-			Ok(()) => false,
+		match filesystem.remove_dir_all(&fs_path) {
+			Ok(()) => return false,
+			// Something vanished under the call; the walk below removes
+			// whatever is left, and finds nothing if the tree is gone.
+			Err(e) if is_missing_under_force(&e, options) => {},
 			Err(e) => {
 				show_error!(host, "cannot remove {}: {e}", path.quote());
-				true
+				return true;
 			},
-		};
+		}
 	}
 
 	let entries = match filesystem.read_dir(&fs_path) {
 		Ok(entries) => entries,
 		Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
 			// An unreadable directory may still be empty and removable.
-			if filesystem.remove_dir(&fs_path).is_ok() {
-				verbose_removed_directory(host, path, options);
-				return false;
+			match filesystem.remove_dir(&fs_path) {
+				Ok(()) => {
+					verbose_removed_directory(host, path, options);
+					return false;
+				},
+				Err(gone) if is_missing_under_force(&gone, options) => return false,
+				Err(_) => return show_permission_denied_error(host, path),
 			}
-			return show_permission_denied_error(host, path);
 		},
+		Err(e) if is_missing_under_force(&e, options) => return false,
 		Err(e) => return show_removal_error(host, e, path),
 	};
 
@@ -1472,6 +1513,7 @@ fn remove_file(host: &mut Host, path: &Path, options: &Options, progress_bar: Op
 			Ok(_) => {
 				verbose_removed_file(host, path, options);
 			},
+			Err(e) if is_missing_under_force(&e, options) => {},
 			Err(e) => {
 				if e.kind() == io::ErrorKind::PermissionDenied {
 					// GNU compatibility (rm/fail-eacces.sh)
@@ -1853,6 +1895,104 @@ mod tests {
 
 		assert_eq!(code, 1);
 		assert!(tree.is_dir(), "rm ran to completion despite cancellation");
+	}
+
+	// Unix only: Windows reports a file another process is already deleting
+	// (delete pending) as access denied, not as gone, so the race still
+	// surfaces there.
+	#[cfg(unix)]
+	#[test]
+	fn concurrent_forced_removals_both_succeed() {
+		let cwd = tempdir().unwrap();
+		let tree = cwd.path().join("tree");
+		for i in 0..3000 {
+			let dir = tree.join(format!("d{i:04}"));
+			std::fs::create_dir_all(&dir).unwrap();
+			std::fs::write(dir.join("f"), b"").unwrap();
+		}
+		let start = std::sync::Barrier::new(2);
+		let remove = || {
+			start.wait();
+			let (code, capture) = run_util::<Rm>(&["-rf", "tree"], "", cwd.path());
+			(code, capture.err())
+		};
+
+		// Both walks race over the same entries; under -f an entry the other
+		// one removed first is already gone, which is success.
+		let (a, b) = std::thread::scope(|scope| {
+			let a = scope.spawn(remove);
+			let b = scope.spawn(remove);
+			(a.join().unwrap(), b.join().unwrap())
+		});
+
+		assert_eq!(a, (0, String::new()));
+		assert_eq!(b, (0, String::new()));
+		assert!(!tree.exists());
+	}
+
+	/// Answers every prompt "y", deleting `path` first, as another process
+	/// might while the prompt waits.
+	#[derive(Clone)]
+	struct DeleteThenYes {
+		path:    std::path::PathBuf,
+		pending: std::collections::VecDeque<u8>,
+	}
+
+	impl std::io::Read for DeleteThenYes {
+		fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+			if self.pending.is_empty() {
+				let _ = std::fs::remove_file(&self.path);
+				self.pending.extend(b"y\n");
+			}
+			buf[0] = self.pending.pop_front().unwrap();
+			Ok(1)
+		}
+	}
+
+	impl std::io::Write for DeleteThenYes {
+		fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+			Err(std::io::ErrorKind::Unsupported.into())
+		}
+
+		fn flush(&mut self) -> std::io::Result<()> {
+			Ok(())
+		}
+	}
+
+	impl brush_core::openfiles::Stream for DeleteThenYes {
+		fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
+			Box::new(self.clone())
+		}
+
+		#[cfg(unix)]
+		fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, brush_core::Error> {
+			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
+		}
+
+		#[cfg(unix)]
+		fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, brush_core::Error> {
+			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
+		}
+	}
+
+	#[test]
+	fn interactive_after_force_still_reports_a_vanished_file() {
+		// GNU rm: a later -i cancels -f's "ignore missing files"; an earlier
+		// one is overridden by -f, which removes without asking.
+		for (flags, expected) in [("-fi", 1), ("-if", 0)] {
+			let cwd = tempdir().unwrap();
+			let file = cwd.path().join("file");
+			std::fs::write(&file, b"").unwrap();
+			let stdin = Box::new(DeleteThenYes { path: file.clone(), pending: Default::default() });
+			let (mut host, capture) = Host::for_test_with_stdin(Rm::NAME, stdin, cwd.path());
+			let code = Rm::try_parse_from(["rm", flags, "file"]).unwrap().run(&mut host);
+
+			assert_eq!(code, expected, "{flags}: {}", capture.err());
+			assert!(!file.exists(), "{flags}");
+			if expected == 1 {
+				assert!(capture.err().contains("cannot remove 'file'"), "{flags}: {}", capture.err());
+			}
+		}
 	}
 
 	#[cfg(unix)]

@@ -6,6 +6,7 @@ import { createMockModel, type MockContent, registerMockApi } from "@oh-my-pi/pi
 import { complete, completeSimple, stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, AssistantMessage, AssistantMessageEvent, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { wrapLeakedThinkingStream } from "@oh-my-pi/pi-ai/utils/leaked-thinking-stream";
 import {
 	GEMINI_HEADER_RUNAWAY_THRESHOLD,
 	GeminiHeaderRunDetector,
@@ -47,6 +48,12 @@ function nearDuplicateLoop(paragraphs: number): string {
  * The persisted assistant message repeated this cycle 58 times before abort. */
 const OBSERVED_KIRO_CYCLE =
 	"% shipped. 100% delivered. 100% verified. 100% validated. 100% approved. 100% accepted. 100% merged. 100% deployed. 100% live. 100% operational. 100% successful. 100% excellent. 100% perfect. 100% final. 100% absolute. 100% total. 100% whole. 100% full. 100% entire. 100% complete. 100% done. 100% finished. 100";
+
+/** The prose prefix from the first thinking-block trace in issue #13679, up to
+ *  the point where the model began repeating punctuation. Real reasoning text
+ *  ahead of the run, so the test exercises the suffix check on a live tail. */
+const PUNCTUATION_RUN_PREFIX =
+	"10s: 1684 = both directions: uplink ~?? + downlink ~?? mixed ✓✓✓ — 10s downlink+uplink: 168/s ✓ consistent with 65+10 = 75/s + BAR storm to .68??";
 
 /** Genuinely distinct reasoning paragraphs — must never trip the detector. */
 function distinctReasoning(): string {
@@ -324,10 +331,12 @@ describe("ThinkingLoopDetector", () => {
 	});
 
 	test("does not trip on legitimate repetitive numeric output", () => {
-		// A zero-page hexdump is highly repetitive but legitimate: a unit with no
-		// letter or pictograph must never count as a loop.
+		// Zero-page hexdumps and zero-padded literals are highly repetitive but
+		// legitimate: a unit of only digits and whitespace never counts as a loop,
+		// even past the punctuation floor.
 		const detector = new ThinkingLoopDetector();
 		expect(detector.push("00 ".repeat(200))).toBeNull();
+		expect(detector.push(`0x${"0".repeat(1100)}`)).toBeNull();
 	});
 
 	test("does not trip on structurally repetitive code that differs only in literals", () => {
@@ -349,6 +358,42 @@ describe("ThinkingLoopDetector", () => {
 		// Below the repeated-char floor: a brief on-purpose repeat is not a loop.
 		const detector = new ThinkingLoopDetector();
 		expect(detector.push("🌊 ".repeat(26))).toBeNull();
+	});
+
+	test("trips on a punctuation-only runaway with no letter or emoji", () => {
+		// Issue #13679: a stuck local model emitted `?!?!?!...` in a thinking block.
+		// The unit carries neither a letter nor an emoji, so the guard's letter gate
+		// never fired and the turn ran until the provider's output limit. Replayed
+		// through the detector the way the reporter's transcript arrived, in
+		// four-character deltas, to keep the streaming path honest.
+		const payload = `${PUNCTUATION_RUN_PREFIX}${"?!".repeat(2000)}`;
+		expect(feed(payload, 4)).toContain("back-to-back");
+	});
+
+	test("trips on a long dingbat-only runaway", () => {
+		// Second trace from the same report: a run of U+2713 CHECK MARK. It is in
+		// Dingbats but not Extended_Pictographic, so it was invisible to the old
+		// gate for the same reason `?!` was.
+		expect(feed(`${PUNCTUATION_RUN_PREFIX}${"✓".repeat(2000)}`, 4)).toContain("back-to-back");
+	});
+
+	test("trips on a space-separated punctuation runaway", () => {
+		expect(feed(`${PUNCTUATION_RUN_PREFIX}${"?! ".repeat(800)}`, 4)).toContain("back-to-back");
+	});
+
+	test("does not trip on a punctuation run below the repeated-char floor", () => {
+		// Short separators are ordinary output. 800 repeated characters stays under
+		// the 1024 floor, so a brief burst of `?!` is left alone.
+		const detector = new ThinkingLoopDetector();
+		expect(detector.push(`${PUNCTUATION_RUN_PREFIX}${"?!".repeat(400)}`)).toBeNull();
+	});
+
+	test("does not trip on whitespace-heavy separators", () => {
+		// Alignment padding, table gutters, and indented diffs repeat whitespace
+		// freely at length. Those units are excluded outright, so the punctuation
+		// path cannot reach them.
+		const detector = new ThinkingLoopDetector();
+		expect(detector.push(`${PUNCTUATION_RUN_PREFIX}${"  ".repeat(2000)}`)).toBeNull();
 	});
 });
 
@@ -572,6 +617,155 @@ describe("withThinkingLoopGuard (Vertex transport)", () => {
 		expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
 		expect(AIError.is(result.errorId, AIError.Flag.ThinkingLoop)).toBe(true);
 		expect(isRetryableError(new Error(result.errorMessage))).toBe(true);
+	});
+});
+
+describe("thinking-loop error accounting", () => {
+	const model = createMockModel({ provider: "google-vertex", id: "gemini-2.5-pro" }).model;
+	const usage = (input: number, output: number, total: number): AssistantMessage["usage"] => ({
+		input,
+		output,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: input + output,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total },
+	});
+	/** A provider's output for one attempt, as it streams before any final usage. */
+	const attempt = (responseId: string): AssistantMessage => ({
+		role: "assistant",
+		content: [],
+		api: "google-vertex",
+		provider: "google-vertex",
+		model: "gemini-2.5-pro",
+		responseId,
+		usage: usage(0, 0, 0),
+		stopReason: "stop",
+		timestamp: Date.now(),
+	});
+
+	test("keeps the aborted attempt's usage, start time, response id and timing", async () => {
+		// Usage reported mid-stream (Gemini, Anthropic) is on the partial when the guard trips.
+		const partial = { ...attempt("resp-looping"), usage: usage(116_000, 2_400, 0.169) };
+		const guarded = withThinkingLoopGuard(model, undefined, () => {
+			const inner = new AssistantMessageEventStream();
+			void (async () => {
+				inner.push({ type: "start", partial });
+				await scheduler.wait(30);
+				inner.push({ type: "thinking_start", contentIndex: 0, partial });
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Checking the module.\n\n", partial });
+				await scheduler.wait(30);
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial });
+			})();
+			return inner;
+		});
+
+		const result = await guarded.result();
+		// The provider keeps writing to its output while it tears down.
+		partial.usage.output = 9_999;
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+		expect(result.usage).toEqual(usage(116_000, 2_400, 0.169));
+		expect(result.timestamp).toBe(partial.timestamp);
+		expect(result.responseId).toBe("resp-looping");
+		expect(result.ttft).toBeGreaterThanOrEqual(25);
+		expect(result.duration).toBeGreaterThanOrEqual((result.ttft ?? 0) + 20);
+	});
+
+	test("reports the attempt that tripped, not the time spent on an earlier retried attempt", async () => {
+		const first = attempt("attempt-1");
+		let second: AssistantMessage | undefined;
+		const guarded = withThinkingLoopGuard(model, undefined, () => {
+			const inner = new AssistantMessageEventStream();
+			void (async () => {
+				inner.push({ type: "start", partial: first });
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: first });
+				// A replay-safe provider retry: a fresh output after a backoff.
+				await scheduler.wait(80);
+				second = { ...attempt("attempt-2"), usage: usage(50_000, 100, 0.05) };
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: second });
+			})();
+			return inner;
+		});
+
+		const result = await guarded.result();
+		expect(result.responseId).toBe("attempt-2");
+		expect(result.timestamp).toBe(second?.timestamp ?? Number.NaN);
+		expect(result.usage.input).toBe(50_000);
+		expect(result.duration).toBeLessThan(60);
+		expect(result.ttft).toBeLessThan(60);
+	});
+
+	test("restarts attempt timing when a provider resets its output in place for a retry", async () => {
+		// Google's empty-response retry rewrites the same output object (timestamp included).
+		const output = attempt("attempt-1");
+		const guarded = withThinkingLoopGuard(model, undefined, () => {
+			const inner = new AssistantMessageEventStream();
+			void (async () => {
+				inner.push({ type: "start", partial: output });
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: output });
+				await scheduler.wait(80);
+				output.timestamp = Date.now();
+				output.responseId = "attempt-2";
+				inner.push({ type: "start", partial: output });
+				await scheduler.wait(30);
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: output });
+			})();
+			return inner;
+		});
+
+		const result = await guarded.result();
+		expect(result.responseId).toBe("attempt-2");
+		expect(result.ttft).toBeGreaterThanOrEqual(25);
+		expect(result.duration).toBeLessThan(80);
+	});
+
+	test("takes the final message when the loop only shows at the end-of-stream flush", async () => {
+		const partial = attempt("partial-id");
+		const final: AssistantMessage = {
+			...attempt("final-id"),
+			usage: usage(116_000, 2_400, 0.169),
+			timestamp: partial.timestamp,
+			duration: 1_234,
+			ttft: 56,
+		};
+		// Seven separated duplicates leave the cluster-completing eighth unterminated.
+		const block = `${nearDuplicateLoop(7)}\n\n\nI am now verifying the test module to guarantee there are no compile errors and the code is completely safe.`;
+		const guarded = withThinkingLoopGuard(model, undefined, () => {
+			const inner = new AssistantMessageEventStream();
+			inner.push({ type: "start", partial });
+			inner.push({ type: "thinking_start", contentIndex: 0, partial });
+			inner.push({ type: "thinking_delta", contentIndex: 0, delta: block, partial });
+			inner.push({ type: "done", reason: "stop", message: final });
+			return inner;
+		});
+
+		const result = await guarded.result();
+		expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+		expect(result.responseId).toBe("final-id");
+		expect(result.usage).toEqual(usage(116_000, 2_400, 0.169));
+		expect(result.duration).toBe(1_234);
+		expect(result.ttft).toBe(56);
+	});
+
+	test("sees usage a provider replaces mid-stream through leaked-thinking healing", async () => {
+		// Gemini assigns a fresh `usage` object per chunk; the healing wrapper sits between it and the guard.
+		const output = attempt("resp-gemini");
+		const guarded = withThinkingLoopGuard(model, undefined, () => {
+			const inner = new AssistantMessageEventStream();
+			void (async () => {
+				inner.push({ type: "start", partial: output });
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: output });
+				await scheduler.wait(10);
+				output.usage = usage(116_000, 2_500, 0.17);
+				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: output });
+			})();
+			return wrapLeakedThinkingStream(inner);
+		});
+
+		const result = await guarded.result();
+		expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);
+		expect(result.usage).toEqual(usage(116_000, 2_500, 0.17));
 	});
 });
 

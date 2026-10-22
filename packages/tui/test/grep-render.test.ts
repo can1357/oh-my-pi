@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 describe("grepToolRenderer", () => {
-	it("indents inline grep output and avoids accent-colored success headers", async () => {
+	it("starts grep output at the tool column and avoids accent-colored success headers", async () => {
 		const theme = await getThemeByName("dark");
 		expect(theme).toBeDefined();
 		const uiTheme = theme!;
@@ -33,7 +33,8 @@ describe("grepToolRenderer", () => {
 			.render(240);
 		const plainLines = sanitizeText(renderedLines.join("\n")).split("\n");
 
-		expect(plainLines.every(line => line.startsWith(" "))).toBe(true);
+		// Same left edge as every other tool row (read, todo, framed cards).
+		expect(plainLines[0]).not.toStartWith(" ");
 		expect(renderedLines[0]).not.toContain(uiTheme.fg("accent", uiTheme.symbol("icon.search")));
 		expect(renderedLines[0]).not.toContain(uiTheme.fg("accent", "Search"));
 	});
@@ -321,5 +322,33 @@ describe("grepToolRenderer", () => {
 		// Collapsed compacts to match lines only — no context.
 		expect(collapsedBody.some(line => line.includes("context before"))).toBe(false);
 		expect(collapsedBody.some(line => line.includes("more matches"))).toBe(true);
+	});
+
+	it("wraps a long-pattern header so the match summary stays visible", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const pattern = Array.from({ length: 20 }, (_, i) => `alternative${i}`).join("|");
+		const longLine = `const value = "${"x".repeat(200)}";`;
+		const result = {
+			content: [{ type: "text", text: "" }],
+			details: {
+				matchCount: 8,
+				fileCount: 3,
+				truncated: true,
+				displayContent: ["# src/a.ts", `*12│${longLine}`].join("\n"),
+			},
+		};
+		const width = 80;
+
+		for (const expanded of [false, true]) {
+			const lines = grepToolRenderer
+				.renderResult(result as never, { expanded, isPartial: false }, uiTheme, { pattern })
+				.render(width);
+			const plain = sanitizeText(lines.join("\n"));
+			expect(plain).toContain("8 matches · 3 files · truncated");
+			expect(lines.every(line => Bun.stringWidth(line) <= width)).toBe(true);
+			// Body rows stay single-row truncated: the long match line is clipped, not wrapped.
+			expect(plain).not.toContain("x".repeat(200));
+			expect(plain.split("\n").filter(line => line.includes("12│"))).toHaveLength(1);
+		}
 	});
 });

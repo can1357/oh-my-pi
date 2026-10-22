@@ -9,6 +9,8 @@ const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalXdgStateHome = process.env.XDG_STATE_HOME;
 const originalHome = process.env.HOME;
 const originalUserProfile = process.env.USERPROFILE;
+const tmpEnvNames = ["TMPDIR", "TMP", "TEMP"] as const;
+const originalTmpEnv = tmpEnvNames.map(name => process.env[name]);
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 let cleanupRoot: string | undefined;
 
@@ -17,9 +19,10 @@ function restoreEnv(name: string, value: string | undefined): void {
 	else process.env[name] = value;
 }
 
-// Points the logs dir at `root`. XDG_STATE_HOME is only honored on Linux/macOS;
+// Points the report dir at `root`. XDG_STATE_HOME is only honored on Linux/macOS;
 // elsewhere the config root follows the home dir, so redirect that instead —
-// otherwise the test reads and writes the user's real ~/.omp/logs.
+// otherwise the bundle lands in the user's real ~/.omp/reports. A test process's
+// logs dir lives under the temp dir, so point that at `root` too.
 async function isolateLogsRoot(root: string): Promise<void> {
 	if (process.platform === "linux" || process.platform === "darwin") {
 		const xdgStateHome = path.join(root, "state");
@@ -29,6 +32,7 @@ async function isolateLogsRoot(root: string): Promise<void> {
 		process.env.HOME = root;
 		process.env.USERPROFILE = root;
 	}
+	for (const name of tmpEnvNames) process.env[name] = root;
 	setAgentDir(fallbackAgentDir);
 }
 
@@ -36,6 +40,7 @@ afterEach(async () => {
 	restoreEnv("XDG_STATE_HOME", originalXdgStateHome);
 	restoreEnv("HOME", originalHome);
 	restoreEnv("USERPROFILE", originalUserProfile);
+	tmpEnvNames.forEach((name, index) => restoreEnv(name, originalTmpEnv[index]));
 	if (originalAgentDir) {
 		setAgentDir(originalAgentDir);
 	} else {

@@ -44,7 +44,10 @@ const READY_TIMEOUT: Duration = Duration::from_millis(250);
 /// without it.
 const WRITE_TIMEOUT: Duration = Duration::from_millis(100);
 /// How long a request waits for its helper to release what is still open (a
-/// panic unwound it) and exit, keeping input ownership meanwhile.
+/// panic unwound it) and exit, keeping input ownership meanwhile. A helper
+/// that overruns it with presses open keeps its share of ownership until it
+/// exits: it stops releasing at its 2 s release deadline, then ends itself
+/// at most a second later. One with nothing open is stopped.
 const EXIT_TIMEOUT: Duration = Duration::from_millis(500);
 /// How often a request checks whether its helper exited; one with nothing to
 /// release exits within about a millisecond.
@@ -100,10 +103,20 @@ fn scope_with<T>(
 	presses: Presses,
 	action: impl FnOnce() -> T,
 ) -> T {
-	struct End;
+	scope_waiting(connect, presses, EXIT_TIMEOUT, action)
+}
+
+/// [`scope_with`] waiting up to `exit_wait` for the helper to exit.
+fn scope_waiting<T>(
+	connect: fn() -> io::Result<Helper>,
+	presses: Presses,
+	exit_wait: Duration,
+	action: impl FnOnce() -> T,
+) -> T {
+	struct End(Duration);
 	impl Drop for End {
 		fn drop(&mut self) {
-			end();
+			end(self.0);
 		}
 	}
 	let outermost = REQUEST.with_borrow_mut(|request| {
@@ -120,17 +133,17 @@ fn scope_with<T>(
 		*request = Some(ledger);
 		true
 	});
-	let _end = outermost.then(|| End);
+	let _end = outermost.then(|| End(exit_wait));
 	action()
 }
 
 /// Ends the request's stream, also while a panic unwinds it: the helper
 /// releases whatever is still open, then exits. The request waits for that,
 /// so its input ownership outlasts the releases and the helper's share of
-/// it. A helper still running past [`EXIT_TIMEOUT`] with nothing to release,
-/// such as one that has not finished starting, is stopped rather than left
-/// holding that share into the next request.
-fn end() {
+/// it. A helper still running past `exit_wait` (`EXIT_TIMEOUT` outside tests)
+/// with nothing to release, such as one that has not finished starting, is
+/// stopped rather than left holding that share into the next request.
+fn end(exit_wait: Duration) {
 	let Some(Ledger { open, helper: Some(helper), .. }) = REQUEST.with_borrow_mut(Option::take)
 	else {
 		return;
@@ -140,7 +153,7 @@ fn end() {
 	let Some(mut child) = child else {
 		return;
 	};
-	let deadline = Instant::now() + EXIT_TIMEOUT;
+	let deadline = Instant::now() + exit_wait;
 	while Instant::now() < deadline {
 		match child.try_wait() {
 			Ok(None) => thread::sleep(EXIT_POLL),
@@ -549,9 +562,10 @@ mod tests {
 		STAND_IN.with_borrow_mut(|stand_in| {
 			let (_, path) = stand_in.get_or_insert_with(|| {
 				let directory = HelperDirectory::create("omp-release-test").expect("directory");
-				// Well inside EXIT_TIMEOUT (500 ms) so a loaded runner still
-				// sees the request wait for it; long enough that a request that
-				// does not wait finds it running.
+				// Long enough that a request that does not wait finds it
+				// running. Starting a shell under a parallel test run can take
+				// longer than EXIT_TIMEOUT, so tests that need it to finish
+				// wait `HELPER_WAIT`.
 				let script = b"#!/bin/sh\ncat >/dev/null\nsleep 0.15\n";
 				let path = directory
 					.write("helper", script, 0o700)
@@ -915,10 +929,15 @@ mod tests {
 		assert_eq!(left_open().len(), 2);
 	}
 
+	/// The wait for a stand-in helper that must finish: a shell started under
+	/// a parallel test run can overrun `EXIT_TIMEOUT`. The shipped bound is
+	/// exercised by the stuck-helper test, whose helper outlasts it.
+	const HELPER_WAIT: Duration = Duration::from_secs(10);
+
 	#[test]
 	fn a_request_waits_for_its_helper_to_exit_with_or_without_presses_open() {
 		let unwound = catch_unwind(|| {
-			scope_with(slow_helper, Presses::Process, || {
+			scope_waiting(slow_helper, Presses::Process, HELPER_WAIT, || {
 				post(Route::Keyboard(7), &shift(true), || Ok(())).expect("Shift down");
 				panic!("native code panicked while Shift was held");
 			})
@@ -927,7 +946,7 @@ mod tests {
 		assert!(!running(STARTED.get()), "the helper released and exited first");
 		// One that released what it pressed waits too: the helper shares the
 		// request's input ownership until it exits.
-		scope_with(slow_helper, Presses::Process, || {
+		scope_waiting(slow_helper, Presses::Process, HELPER_WAIT, || {
 			post(Route::Keyboard(7), &shift(true), || Ok(())).expect("Shift down");
 			post(Route::Keyboard(7), &shift(false), || Ok(())).expect("Shift up");
 		});

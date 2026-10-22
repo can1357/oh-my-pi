@@ -88,10 +88,17 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 			),
 		]
 	} else {
-		let mut lines = vec![format!(
-			"Edit rejected{path}: hash #{} is not from this session.",
-			details.expected_file_hash
-		)];
+		let mut lines = vec![if details.expected_file_hash.is_empty() {
+			format!(
+				"Edit rejected{path}: the header needs this file's current tag, #{}.",
+				details.actual_file_hash
+			)
+		} else {
+			format!(
+				"Edit rejected{path}: hash #{} is not from this session.",
+				details.expected_file_hash
+			)
+		}];
 		// Name the absolute paths this session has already issued the tag for,
 		// so a lane that pasted a tag from a sibling file (typically the parent
 		// checkout) doesn't follow the suggestion into a wrong-tree write.
@@ -103,11 +110,7 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 				details.expected_file_hash
 			));
 		}
-		lines.push(format!(
-			"The current file hashes to #{}. Re-read the file with `read` to copy a current \
-			 [path#tag] header — never invent the tag and never reuse one from a prior session.",
-			details.actual_file_hash
-		));
+		lines.push(current_tag_advice(&details.actual_file_hash));
 		lines
 	};
 	let context = format_anchored_context(&details.anchor_lines, &details.file_lines);
@@ -116,6 +119,23 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 		lines.extend(context);
 	}
 	lines.join("\n")
+}
+
+fn current_tag_advice(actual_file_hash: &str) -> String {
+	format!(
+		"The current file hashes to #{actual_file_hash}. Re-read the file with `read` to copy a \
+		 current [path#tag] header — never invent the tag and never reuse one from a prior session."
+	)
+}
+
+/// Diagnostic for input whose only content is a section header: no ops to
+/// apply, but the file's current tag, as an unknown tag would get.
+pub fn format_header_only_message(path: &str, actual_file_hash: &str) -> String {
+	format!(
+		"Edit rejected for {path}: no ops follow the header; put them under this file's current \
+		 tag, #{actual_file_hash}.\n{}",
+		current_tag_advice(actual_file_hash)
+	)
 }
 
 /// Construct a match failure from mismatch details.

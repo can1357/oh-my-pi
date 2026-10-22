@@ -346,6 +346,14 @@ pub(crate) struct Rg {
 	#[arg(long = "count-matches")]
 	count_matches: bool,
 
+	/// With -c/--count-matches, also print files with zero matches.
+	#[arg(long = "include-zero", overrides_with = "no_include_zero")]
+	include_zero: bool,
+
+	/// Print counts only for files with matches.
+	#[arg(long = "no-include-zero", overrides_with = "include_zero", hide = true)]
+	no_include_zero: bool,
+
 	/// Print only matching spans.
 	#[arg(short = 'o', long = "only-matching")]
 	only_matching: bool,
@@ -501,6 +509,7 @@ struct SearchOptions {
 	byte_offset:         bool,
 	count:               bool,
 	count_matches:       bool,
+	include_zero:        bool,
 	files_with_matches:  bool,
 	files_without_match: bool,
 	only_matching:       bool,
@@ -749,7 +758,9 @@ impl<M: Matcher, W: Write> Sink for RgSink<'_, M, W> {
 			} else {
 				self.line_count
 			};
-			self.opts.record.write_count_record(self.out, self.display, count)?;
+			if count > 0 || self.opts.include_zero {
+				self.opts.record.write_count_record(self.out, self.display, count)?;
+			}
 		}
 		Ok(())
 	}
@@ -962,6 +973,7 @@ fn search_options(cli: &Rg) -> SearchOptions {
 		byte_offset: cli.byte_offset,
 		count: cli.count && !count_matches,
 		count_matches,
+		include_zero: cli.include_zero,
 		files_with_matches: cli.files_with_matches && !cli.files_without_match,
 		files_without_match: cli.files_without_match,
 		only_matching: cli.only_matching,
@@ -1169,7 +1181,13 @@ fn build_walk(host: &mut Host, cli: &Rg, root: &Path) -> Result<RgWalk, String> 
 		.gitignore(!no_ignore)
 		.skip_git(!no_ignore)
 		.skip_node_modules(false)
-		.follow_links(pi_walker::FollowLinks::from(cli.follow && !cli.no_follow))
+		// ripgrep always follows a path operand that is itself a symlink (even with
+		// `--no-follow`); `-L` extends that to links found during the walk.
+		.follow_links(if cli.follow && !cli.no_follow {
+			pi_walker::FollowLinks::Always
+		} else {
+			pi_walker::FollowLinks::Roots
+		})
 		.detail(if filters.max_filesize.is_some() {
 			pi_walker::WalkDetail::Full
 		} else {
@@ -1931,6 +1949,23 @@ mod tests {
 	}
 
 	#[test]
+	fn count_skips_files_without_matches_unless_include_zero() {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("a"), "hit\nhit\n").unwrap();
+		std::fs::write(tree.path().join("b"), "miss\n").unwrap();
+		let count = |args: &[&str]| {
+			let (code, capture) = run_util::<Rg>(args, "", tree.path());
+			(code, capture.out())
+		};
+
+		assert_eq!(count(&["-c", "hit", "a", "b"]), (0, "a:2\n".to_owned()));
+		assert_eq!(count(&["--count-matches", "hit", "a", "b"]), (0, "a:2\n".to_owned()));
+		assert_eq!(count(&["-c", "hit", "b"]), (1, String::new()));
+		assert_eq!(count(&["-c", "--include-zero", "hit", "a", "b"]), (0, "a:2\nb:0\n".to_owned()));
+		assert_eq!(count(&["-c", "--include-zero", "--no-include-zero", "hit", "a", "b"]), (0, "a:2\n".to_owned()));
+	}
+
+	#[test]
 	fn pcre2_supports_lookbehind() {
 		let (code, out, err) = run(&["--pcre2", "(?<=foo)bar", "-"], "foobar\nbar\n");
 		assert_eq!(code, 0, "{err}");
@@ -1963,6 +1998,35 @@ mod tests {
 		assert_eq!(code, 0, "{}", capture.err());
 		assert!(capture.out().contains("keep.txt:hit\n"));
 		assert!(!capture.out().contains("skip.txt"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn follows_a_symlinked_root_operand_but_not_nested_links() {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(tree.path().join("real/sub")).unwrap();
+		std::fs::write(tree.path().join("real/a.txt"), "hit\n").unwrap();
+		std::fs::write(tree.path().join("real/sub/b.txt"), "hit\n").unwrap();
+		std::os::unix::fs::symlink("real", tree.path().join("link")).unwrap();
+		std::fs::create_dir(tree.path().join("parent")).unwrap();
+		std::os::unix::fs::symlink("../real", tree.path().join("parent/inner")).unwrap();
+		let files = |args: &[&str]| {
+			let (code, capture) = run_util::<Rg>(args, "", tree.path());
+			let mut lines: Vec<String> = capture.out().lines().map(str::to_owned).collect();
+			lines.sort();
+			(code, lines)
+		};
+
+		let linked = (0, vec!["link/a.txt".to_owned(), "link/sub/b.txt".to_owned()]);
+		assert_eq!(files(&["-l", "hit", "link"]), linked);
+		assert_eq!(files(&["-l", "--no-follow", "hit", "link"]), linked);
+		assert_eq!(files(&["--files", "link"]), linked);
+		// Links met during the walk stay unfollowed unless -L asks for them.
+		assert_eq!(files(&["-l", "hit", "parent"]), (1, Vec::new()));
+		assert_eq!(
+			files(&["-l", "-L", "hit", "parent"]),
+			(0, vec!["parent/inner/a.txt".to_owned(), "parent/inner/sub/b.txt".to_owned()])
+		);
 	}
 
 	#[test]

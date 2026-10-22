@@ -215,6 +215,6 @@ content: ""
 - For an existing archive symlink, the writer infers format from the resolved target's suffix, falling back to uncompressed tar when that suffix is unknown; the selector's suffix does not override this.
 - The prompt forbids two common anti-patterns: using `write` for routine edits that should use `edit`, and creating `*.md` / `README` files unless explicitly requested. It also forbids emojis unless requested.
 - Generic write receipts count UTF-8 bytes with `Buffer.byteLength(...)`; handler-owned receipts define their own content/status wording.
-- `stripWriteContent()` only removes hashline prefixes when the session’s file display mode has `hashLines` enabled; otherwise content is written unchanged.
+- `stripWriteContent()` only removes hashline prefixes when the session’s file display mode has `hashLines` enabled; otherwise content is written unchanged. Even then it removes them only when every content row carries one and each number is one more than the row above, except after a blank, elision or header row (how `read` and `grep` number their rows); numbers that jump, such as hex dump addresses or log timestamps, stay as written, and so do partial views that skip rows without a marker (edit previews, `ast_grep` matches). `conflict://*` per-id directives are recognized behind a copied `LINE:` prefix either way.
 
 - The tool has `strict = true`, `loadMode = "essential"`, and exclusive concurrency. The native transcript view previews the first 8 content lines; `xd://` results delegate rendering to the mounted device.

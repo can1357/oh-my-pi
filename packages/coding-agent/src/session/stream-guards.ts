@@ -213,6 +213,7 @@ export class LoopGuards {
 		const detection = this.#activeToolCallLoopGuard()?.recordTurn({
 			message: context.message,
 			toolResults: context.toolResults,
+			injectedContext: (context.additionalMessages?.length ?? 0) > 0,
 		});
 		if (detection) this.#injectToolCallLoopRedirect(messages, detection);
 	}

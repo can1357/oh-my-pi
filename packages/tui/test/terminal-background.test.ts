@@ -8,6 +8,8 @@ import {
 	getCellDimensions,
 	getTerminalBackgroundColor,
 	ImageProtocol,
+	isInsideTerminalMultiplexer,
+	isTerminalBackgroundQueryTrusted,
 	setCellDimensions,
 	setTerminalBackgroundColor,
 	setTerminalImageProtocol,
@@ -205,8 +207,10 @@ describe("terminal background SIXEL repaint", () => {
 	});
 
 	it("repaints multiplexer viewports without clearing their native history", async () => {
-		const previousZellij = Bun.env.ZELLIJ;
-		Bun.env.ZELLIJ = "1";
+		const previousSty = Bun.env.STY;
+		Bun.env.STY = "fixture";
+		expect(isInsideTerminalMultiplexer()).toBe(true);
+		expect(isTerminalBackgroundQueryTrusted()).toBe(true);
 		const terminal = new AppearanceTerminal(40, 5);
 		const scheduler = new VirtualRenderScheduler();
 		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
@@ -232,8 +236,8 @@ describe("terminal background SIXEL repaint", () => {
 			expect(terminal.writes.join("")).not.toContain("\x1b[3J");
 		} finally {
 			tui.stop();
-			if (previousZellij === undefined) delete Bun.env.ZELLIJ;
-			else Bun.env.ZELLIJ = previousZellij;
+			if (previousSty === undefined) delete Bun.env.STY;
+			else Bun.env.STY = previousSty;
 		}
 	});
 

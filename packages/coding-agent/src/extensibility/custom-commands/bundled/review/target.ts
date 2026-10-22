@@ -5,7 +5,7 @@ export type LocalReviewKind = "base-branch" | "uncommitted" | "commit";
 
 /** One frozen diff: the annotation view and the reviewer prompt both read this snapshot. */
 export interface ResolvedReviewTarget {
-	/** `patch` is a caller-supplied diff (annotations API); `pr` never maps to the local checkout. */
+	/** `patch` is a caller-supplied diff (annotations API); `pr` (a PR/MR) never maps to the local checkout. */
 	kind: LocalReviewKind | "pr" | "patch";
 	mode: string;
 	rawDiff: string;
@@ -14,7 +14,7 @@ export interface ResolvedReviewTarget {
 	filteredMessage?: string;
 	diffInstruction?: string;
 	contextInstruction?: string;
-	/** Base URL for per-file slices of the original, unfiltered PR diff. */
+	/** Base URL for per-file slices of the original, unfiltered PR/MR diff. */
 	prDiffUrl?: string;
 }
 

@@ -113,6 +113,13 @@ provider "opencode-go" {
 			thinking-mode "effort"
 		}
 	}
+	// Step 5 Preview uses low/medium/high on this gateway (#14987).
+	class "stepfun" {
+		family "step" {
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high"
+		}
+	}
 	// LongCat exposes a reasoning toggle, not selectable effort tiers.
 	// Off uses the gateway's boolean reasoning switch, never a fake lowest tier.
 	models "longcat-2.5-preview-free" {

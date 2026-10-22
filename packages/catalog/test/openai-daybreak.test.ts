@@ -22,11 +22,11 @@ describe("OpenAI Daybreak and GPT-5.6 models", () => {
 	test("bakes off support and long-context pricing onto every first-party GPT-5.6 alias", () => {
 		const longContextCosts = {
 			"daybreak-blue-latest": { input: 10, output: 45, cacheRead: 1, cacheWrite: 12.5 },
-			"gpt-5.6": { input: 10, output: 45, cacheRead: 1, cacheWrite: 12.5 },
+			"gpt-5.6": { input: 8, output: 30, cacheRead: 0.8, cacheWrite: 10 },
 			"gpt-5.6-luna": { input: 0.4, output: 1.8, cacheRead: 0.04, cacheWrite: 0.5 },
 			"gpt-5.6-luna-pro": { input: 0.4, output: 1.8, cacheRead: 0.04, cacheWrite: 0.5 },
-			"gpt-5.6-sol": { input: 10, output: 45, cacheRead: 1, cacheWrite: 12.5 },
-			"gpt-5.6-sol-pro": { input: 10, output: 45, cacheRead: 1, cacheWrite: 12.5 },
+			"gpt-5.6-sol": { input: 8, output: 30, cacheRead: 0.8, cacheWrite: 10 },
+			"gpt-5.6-sol-pro": { input: 8, output: 30, cacheRead: 0.8, cacheWrite: 10 },
 			"gpt-5.6-terra": { input: 4, output: 18, cacheRead: 0.4, cacheWrite: 5 },
 			"gpt-5.6-terra-pro": { input: 4, output: 18, cacheRead: 0.4, cacheWrite: 5 },
 		} as const;

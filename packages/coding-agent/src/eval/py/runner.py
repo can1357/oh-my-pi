@@ -1310,24 +1310,134 @@ class _BoundedLineScanner:
 @line_magic("pip")
 def _magic_pip(args: str) -> None:
     argv = shlex.split(args) if args else ["--help"]
-    cmd = [sys.executable, "-m", "pip", *argv]
     # Installs are host work, not cell compute: suspend the eval watchdog (same
     # protocol as bridge waits in bridge-timeout.ts). Caller aborts still apply.
     _emit_status("timeout-pause")
     try:
-        _run_pip(cmd, args)
+        _run_pip(argv, args)
     finally:
         _emit_status("timeout-resume")
 
 
-def _run_pip(cmd: list[str], args: str) -> None:
+def _has_pip() -> bool:
+    import importlib.util
+
+    importlib.invalidate_caches()
+    try:
+        return importlib.util.find_spec("pip") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _child_pids() -> dict[int, list[int]]:
+    """Map each live pid to the pids of its children."""
+    children: dict[int, list[int]] = {}
+    if sys.platform.startswith("linux"):
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", "rb") as stat:
+                    ppid = int(stat.read().rsplit(b")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            children.setdefault(ppid, []).append(int(entry))
+        return children
+    try:
+        listing = subprocess.run(
+            # /bin/ps first: the kernel's PATH is the user's and may not hold it.
+            ["/bin/ps" if os.path.exists("/bin/ps") else "ps", "-A", "-o", "pid=,ppid="],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return children
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 2:
+            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    return children
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    # Installers spawn their own children (ensurepip runs pip in one, source
+    # builds run backends and compilers), so killing `proc` alone is not enough.
+    # The tree stays in the kernel's process group so kernel shutdown still
+    # reaches it.
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.kill()
+        proc.wait()
+        return
+    # Stop each process before listing its children, so nothing can spawn
+    # behind the walk; then kill every stopped process.
+    stopped: list[int] = []
+    level = [proc.pid]
+    while level:
+        for pid in level:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except ProcessLookupError:
+                continue
+            stopped.append(pid)
+        children = _child_pids()
+        level = [child for pid in level for child in children.get(pid, ())]
+    for pid in stopped:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    proc.wait()
+
+
+def _run_installer(
+    cmd: list[str],
+    on_text: Callable[[str], None] | None = None,
+    env: dict[str, str] | None = None,
+) -> int:
     # stdin=DEVNULL: see _run_shell_body.
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        env=env,
     )
+    try:
+        _stream_process_output(proc, on_text)
+        return proc.wait()
+    except BaseException:
+        # Cancelling the cell interrupts only the kernel: stop the installer too.
+        _kill_process_tree(proc)
+        raise
+
+
+def _bootstrap_pip() -> int:
+    # Environments made by `uv venv` ship without pip. Install it from the
+    # stdlib wheel; where ensurepip is missing or disabled (Debian's system
+    # Python), have uv install it into the kernel's interpreter instead.
+    code = _run_installer([sys.executable, "-m", "ensurepip"])
+    uv = shutil.which("uv")
+    if code == 0 or uv is None:
+        return code
+    return _run_installer(
+        [uv, "pip", "install", "pip"],
+        env={**os.environ, "UV_PYTHON": sys.executable},
+    )
+
+
+def _run_pip(argv: list[str], args: str) -> None:
+    if not _has_pip():
+        code = _bootstrap_pip()
+        if code != 0:
+            _emit_status("pip", args=args, installed=[], exit_code=code)
+            return
     installed_packages: list[str] = []
 
     def scan_pip_line(raw_line: str) -> None:
@@ -1339,9 +1449,8 @@ def _run_pip(cmd: list[str], args: str) -> None:
                 installed_packages.append(pkg.replace("_", "-"))
 
     scanner = _BoundedLineScanner(_PIP_LINE_SCAN_CHARS, scan_pip_line)
-    _stream_process_output(proc, scanner.add)
+    returncode = _run_installer([sys.executable, "-m", "pip", *argv], scanner.add)
     scanner.finish()
-    proc.wait()
     if installed_packages:
         import importlib
 
@@ -1352,7 +1461,7 @@ def _run_pip(cmd: list[str], args: str) -> None:
             if head in prefixes:
                 sys.modules.pop(mod_name, None)
     _emit_status(
-        "pip", args=args, installed=installed_packages, exit_code=proc.returncode
+        "pip", args=args, installed=installed_packages, exit_code=returncode
     )
 
 

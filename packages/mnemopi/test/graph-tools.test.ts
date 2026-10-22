@@ -78,6 +78,13 @@ describe("EpisodicGraph non-Latin participants", () => {
 			expect(graph.findGistsByParticipant("Βασίλης")).toHaveLength(1);
 		});
 	});
+
+	it("does not read the trailing letter of a non-ASCII word as the pronoun I (issue #16723)", () => {
+		withGraph(graph => {
+			expect(graph.extractGist("tôi đã sửa rồi, đi tiếp đi", "mem_vi").participants).toEqual([]);
+			expect(graph.extractGist("Chúng tôi gặp nhau ở Hà Nội.", "mem_hn").participants).toEqual(["Chúng", "Hà Nội"]);
+		});
+	});
 });
 
 describe("EpisodicGraph links and traversal", () => {

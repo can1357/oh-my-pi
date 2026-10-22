@@ -130,6 +130,12 @@ export type NativeDesktopSessionFactory = (
 type WindowFilter = { id?: string | number; app?: string; title?: string };
 /** Window listings are session-transcript payload; `window()` lookups search the whole native list. */
 const MAX_LISTED_WINDOWS = 48;
+/**
+ * Run time a `control.acquire` confirmation leaves unspent, so an unanswered prompt closes while the script can
+ * still act on `{ active: false, reason: "unanswered" }` instead of the run timing out around it. A run shorter
+ * than four times this keeps a quarter of its timeout instead.
+ */
+const CONTROL_ANSWER_RESERVE_MS = 5_000;
 type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
 type ScreenshotResult = Pick<
@@ -1396,7 +1402,8 @@ export class ComputerWorkerCore {
 			snapshot: message.session,
 			output,
 			screenshots,
-			confirmControl: reason => this.#confirmControl(active, reason),
+			confirmControl: reason =>
+				this.#confirmControl(active, reason, deadline - Math.min(CONTROL_ANSWER_RESERVE_MS, message.timeoutMs / 4)),
 		};
 		let returnValue: unknown;
 		let failure: { error: unknown } | undefined;
@@ -1624,14 +1631,15 @@ export class ComputerWorkerCore {
 		return await promise;
 	}
 
-	async #confirmControl(active: ActiveRun, reason: string): Promise<ControlVerdict> {
+	async #confirmControl(active: ActiveRun, reason: string, answerDeadline: number): Promise<ControlVerdict> {
 		throwIfAborted(active.signal);
 		const id = `computer-control-${active.id}-${crypto.randomUUID()}`;
 		const pending = Promise.withResolvers<unknown>();
 		active.pendingTools.set(id, pending);
-		this.#transport.send({ type: "control-request", id, runId: active.id, reason });
+		const timeoutMs = Math.max(0, Math.floor(answerDeadline - performance.now()));
+		this.#transport.send({ type: "control-request", id, runId: active.id, reason, timeoutMs });
 		const verdict = await pending.promise;
-		return verdict === "approved" || verdict === "no-ui" ? verdict : "denied";
+		return verdict === "approved" || verdict === "no-ui" || verdict === "unanswered" ? verdict : "denied";
 	}
 
 	#deliverToolReply(id: string, reply: ToolReply): void {

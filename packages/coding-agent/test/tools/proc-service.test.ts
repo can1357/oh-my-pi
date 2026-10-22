@@ -187,7 +187,7 @@ describe("proc:// background jobs", () => {
 				"stdin is only available for services",
 			);
 			await expect(protocol.resolve(parseInternalUrl(`proc://${id}/kill`), { session })).rejects.toThrow(
-				"writable only",
+				"write-only",
 			);
 			expect(manager.getJob(id)?.status).toBe("running");
 			const cancelled = await protocol.write(parseInternalUrl(`proc://${id}/kill`), "ignored payload", { session });
@@ -204,6 +204,35 @@ describe("proc:// background jobs", () => {
 			const settled = await protocol.resolve(parseInternalUrl(`proc://${settledId}`), { session });
 			expect(settled.content).toContain("DONE");
 			expect(manager.isJobResultConsumed(settledId)).toBeFalse();
+		} finally {
+			await manager.dispose();
+		}
+	});
+
+	it("answers a read of a write-only action with the write that performs it, leaving the job running", async () => {
+		const manager = new AsyncJobManager({});
+		const pending = Promise.withResolvers<string>();
+		const id = manager.register(
+			"bash",
+			"running command",
+			async ({ signal }) => {
+				signal.addEventListener("abort", () => pending.resolve("cancelled"), { once: true });
+				return pending.promise;
+			},
+			{ id: "bg_12", ownerId: "Main" },
+		);
+		const session = toolSession(process.cwd(), manager, { launch: false });
+		const protocol = new ProcProtocolHandler();
+		try {
+			const kill = await rejectionMessage(protocol.resolve(parseInternalUrl(`proc://${id}/kill`), { session }));
+			expect(kill).toContain("call write with");
+			expect(kill).toContain(JSON.stringify({ path: "proc://bg_12/kill" }));
+			expect(kill).toContain("read proc://bg_12 for its status");
+			expect(manager.getJob(id)?.status).toBe("running");
+			const mode = await rejectionMessage(protocol.resolve(parseInternalUrl(`proc://${id}/mode`), { session }));
+			expect(mode).toContain("call write with");
+			expect(mode).toContain('"path":"proc://bg_12/mode"');
+			expect(mode).toContain("persist, session, or detached");
 		} finally {
 			await manager.dispose();
 		}

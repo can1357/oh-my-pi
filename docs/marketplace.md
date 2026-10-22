@@ -232,7 +232,7 @@ Invalid catalog JSON or invalid required top-level fields reject the catalog. An
   marketplaces.json              # Registry of added marketplaces
   plugins/
     installed_plugins.json       # User-scoped marketplace plugins (version: 2)
-    omp-plugins.lock.json         # Runtime enable/feature state
+    omp-plugins.lock.json         # Runtime enable/feature state and plugin settings
     node_modules/<package>        # Symlink to the cached plugin
     cache/
       marketplaces/<name>/       # Cached marketplace clone/catalog
@@ -244,6 +244,8 @@ Invalid catalog JSON or invalid required top-level fields reject the catalog. An
     omp-plugins.lock.json         # Project runtime enable/feature state
     node_modules/<package>        # Symlink to the cached plugin
 ```
+
+The lockfile also holds plugin settings, including values a plugin marks `secret`, so it is written with owner-only permissions (`0600`).
 
 ## Naming rules
 

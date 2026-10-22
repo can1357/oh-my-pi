@@ -8,6 +8,8 @@
  * keys, probing the regional Token Plan clusters in fallback order.
  */
 
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import type { OAuthController } from "./types";
@@ -17,24 +19,6 @@ const PROVIDER_NAME = "Xiaomi MiMo";
 const STANDARD_AUTH_URL = "https://platform.xiaomimimo.com/#/console/api-keys";
 const STANDARD_API_BASE_URL = "https://api.xiaomimimo.com/v1";
 const TOKEN_PLAN_KEY_PREFIX = "tp-";
-const STANDARD_VALIDATION_MODEL = "mimo-v2.5";
-const TOKEN_PLAN_VALIDATION_MODEL = "mimo-v2.5";
-const TOKEN_PLAN_SGP_API_BASE_URL = "https://token-plan-sgp.xiaomimimo.com/v1";
-const TOKEN_PLAN_AMS_API_BASE_URL = "https://token-plan-ams.xiaomimimo.com/v1";
-const TOKEN_PLAN_CN_API_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1";
-
-type XiaomiTokenPlanRegion = "sgp" | "ams" | "cn";
-
-type XiaomiValidationEndpoint = {
-	baseUrl: string;
-	model: string;
-};
-
-const TOKEN_PLAN_VALIDATION_ENDPOINTS: Record<XiaomiTokenPlanRegion, XiaomiValidationEndpoint> = {
-	sgp: { baseUrl: TOKEN_PLAN_SGP_API_BASE_URL, model: TOKEN_PLAN_VALIDATION_MODEL },
-	ams: { baseUrl: TOKEN_PLAN_AMS_API_BASE_URL, model: TOKEN_PLAN_VALIDATION_MODEL },
-	cn: { baseUrl: TOKEN_PLAN_CN_API_BASE_URL, model: TOKEN_PLAN_VALIDATION_MODEL },
-};
 
 function isTokenPlanKey(apiKey: string): boolean {
 	return apiKey.startsWith(TOKEN_PLAN_KEY_PREFIX);
@@ -46,8 +30,14 @@ async function validateXiaomiApiKey(apiKey: string, signal?: AbortSignal, fetchO
 	const fetchImpl = fetchOverride ?? fetch;
 	// Generic Xiaomi login keeps the historical SGP → AMS → CN fallback.
 	const endpoints = isTokenPlanKey(apiKey)
-		? [TOKEN_PLAN_VALIDATION_ENDPOINTS.sgp, TOKEN_PLAN_VALIDATION_ENDPOINTS.ams, TOKEN_PLAN_VALIDATION_ENDPOINTS.cn]
-		: [{ baseUrl: STANDARD_API_BASE_URL, model: STANDARD_VALIDATION_MODEL }];
+		? ["xiaomi-token-plan-sgp", "xiaomi-token-plan-ams", "xiaomi-token-plan-cn"].map(provider => {
+				const login = authPolicyFor(provider)?.login;
+				if (login?.kind !== "api-key" || login.validate?.kind !== "chat-completions") {
+					throw new AIError.ConfigurationError(`Missing chat-completions validation policy for ${provider}`);
+				}
+				return login.validate;
+			})
+		: [{ baseUrl: STANDARD_API_BASE_URL, model: providerEntry(PROVIDER_ID)!.defaultModel }];
 
 	let lastError: Error | null = null;
 

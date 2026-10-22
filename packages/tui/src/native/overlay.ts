@@ -12,6 +12,9 @@ import { getKeybindings, type Keybinding } from "../keybindings";
 import { card, kbd, list, node, row, span, text } from "./describe";
 import type { NativeChild, NativeNode } from "./node";
 
+/** Below this many columns a centered sheet fills the pane instead of floating with margins. */
+export const NARROW_SHEET_COLS = 100;
+
 /** One footer hint: the keys that trigger it and what it does. */
 export interface NativeHint {
 	/** Key ids (`"ctrl+o"`, `"escape"`); alternatives render side by side. */

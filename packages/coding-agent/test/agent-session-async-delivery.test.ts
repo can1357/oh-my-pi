@@ -9,12 +9,15 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import { buildAsyncResultBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -34,6 +37,7 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 function observeAsyncResultEnqueue(session: AgentSession): Promise<void> {
 	const queued = Promise.withResolvers<void>();
@@ -914,6 +918,206 @@ describe("AgentSession owner-routed async delivery", () => {
 		// The stale entry was consumed by the run's aside/flush path and dropped,
 		// not left lingering as pending work.
 		expect(session.hasPendingAsyncWork()).toBe(false);
+	});
+
+	async function startResumableSession(
+		tempDir: TempDir,
+		options: { extension?: (api: ExtensionAPI, manager: AsyncJobManager) => void } = {},
+	): Promise<{
+		manager: AsyncJobManager;
+		mock: MockModel;
+		targetSessionFile: string;
+	}> {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({ retentionMs: 60_000 });
+		AsyncJobManager.setInstance(manager);
+
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionManager.appendMessage({ role: "user", content: "outgoing session", timestamp: 1 });
+		await sessionManager.flush();
+		const target = SessionManager.create(tempDir.path(), tempDir.path());
+		target.appendMessage({ role: "user", content: "resumed session", timestamp: 2 });
+		await target.flush();
+		const targetSessionFile = target.getSessionFile()!;
+		await target.close();
+
+		const modelRegistry = new ModelRegistry(authStorage);
+		let extensionRunner: ExtensionRunner | undefined;
+		if (options.extension) {
+			const register = options.extension;
+			const runtime = new ExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				api => register(api, manager),
+				tempDir.path(),
+				new EventBus(),
+				runtime,
+				"resume-test-extension",
+			);
+			extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		}
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry,
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+			extensionRunner,
+		});
+		return { manager, mock, targetSessionFile };
+	}
+
+	it("cancels the outgoing session's background jobs when resuming another session", async () => {
+		using tempDir = TempDir.createSync("@pi-resume-async-jobs-");
+		const { manager, mock, targetSessionFile } = await startResumableSession(tempDir);
+		const gate = Promise.withResolvers<void>();
+		manager.register(
+			"bash",
+			"outgoing session job",
+			async ({ signal }) => {
+				signal.addEventListener("abort", () => gate.resolve(), { once: true });
+				await gate.promise;
+				return "PRIOR SESSION RESULT";
+			},
+			{ id: "outgoing-job", ownerId: "Main" },
+		);
+		expect(session.hasPendingAsyncWork()).toBe(true);
+
+		expect(await session.switchSession(targetSessionFile)).toBe(true);
+		gate.resolve();
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 1_000, filter: { ownerId: "Main" } });
+		await session.settleAsyncWork();
+
+		expect(manager.getJob("outgoing-job")?.status).toBe("cancelled");
+		expect(session.hasPendingAsyncWork()).toBe(false);
+		expect(mock.calls).toHaveLength(0);
+		const leaked = session.sessionManager
+			.getEntries()
+			.some(entry => JSON.stringify(entry).includes("PRIOR SESSION RESULT"));
+		expect(leaked).toBe(false);
+	});
+
+	it("keeps background jobs running across a same-session reload", async () => {
+		using tempDir = TempDir.createSync("@pi-reload-async-jobs-");
+		const { manager } = await startResumableSession(tempDir);
+		const gate = Promise.withResolvers<void>();
+		manager.register(
+			"bash",
+			"current session job",
+			async () => {
+				await gate.promise;
+				return "done";
+			},
+			{ id: "current-job", ownerId: "Main" },
+		);
+
+		await session.reload();
+		expect(manager.getJob("current-job")?.status).toBe("running");
+		gate.resolve();
+		await manager.waitForAll();
+	});
+
+	it("does not start a turn for an outgoing job that finishes while the resumed session loads", async () => {
+		using tempDir = TempDir.createSync("@pi-resume-mid-switch-");
+		const { manager, mock, targetSessionFile } = await startResumableSession(tempDir);
+		const gate = Promise.withResolvers<void>();
+		manager.register(
+			"bash",
+			"outgoing session job",
+			async () => {
+				await gate.promise;
+				return "MID-SWITCH RESULT";
+			},
+			{ id: "mid-switch-job", ownerId: "Main" },
+		);
+		const setSessionFile = session.sessionManager.setSessionFile.bind(session.sessionManager);
+		const spy = vi.spyOn(session.sessionManager, "setSessionFile").mockImplementation(async file => {
+			await setSessionFile(file);
+			gate.resolve();
+			await manager.waitForAll();
+			await manager.drainDeliveries({ timeoutMs: 200, filter: { ownerId: "Main" } });
+			await session.waitForIdle();
+		});
+		try {
+			expect(await session.switchSession(targetSessionFile)).toBe(true);
+			await session.waitForIdle();
+		} finally {
+			spy.mockRestore();
+		}
+
+		expect(mock.calls).toHaveLength(0);
+		const leaked = session.sessionManager
+			.getEntries()
+			.some(entry => JSON.stringify(entry).includes("MID-SWITCH RESULT"));
+		expect(leaked).toBe(false);
+	});
+
+	it("keeps background jobs when the resumed session's cwd is rejected", async () => {
+		using tempDir = TempDir.createSync("@pi-resume-cwd-reject-");
+		const { manager, targetSessionFile } = await startResumableSession(tempDir);
+		const target = await SessionManager.open(targetSessionFile);
+		target.setCwdWithoutRelocation(tempDir.join("other-project"));
+		await target.flush();
+		await target.close();
+		const gate = Promise.withResolvers<void>();
+		manager.register(
+			"bash",
+			"outgoing session job",
+			async () => {
+				await gate.promise;
+				return "done";
+			},
+			{ id: "cwd-reject-job", ownerId: "Main" },
+		);
+		const previousSessionFile = session.sessionFile;
+
+		expect(await session.switchSession(targetSessionFile, { onCwdChange: async () => false })).toBe(false);
+		expect(session.sessionFile).toBe(previousSessionFile);
+		expect(manager.getJob("cwd-reject-job")?.status).toBe("running");
+		gate.resolve();
+		await manager.waitForAll();
+	});
+
+	it("keeps a job that a session_switch hook starts for the resumed session", async () => {
+		using tempDir = TempDir.createSync("@pi-resume-hook-job-");
+		const gate = Promise.withResolvers<void>();
+		const { manager, targetSessionFile } = await startResumableSession(tempDir, {
+			extension: (pi, jobs) => {
+				pi.on("session_switch", () => {
+					jobs.register(
+						"bash",
+						"resumed session job",
+						async () => {
+							await gate.promise;
+							return "RESUMED SESSION RESULT";
+						},
+						{ id: "resumed-session-job", ownerId: "Main" },
+					);
+				});
+			},
+		});
+
+		expect(await session.switchSession(targetSessionFile)).toBe(true);
+		expect(manager.getJob("resumed-session-job")?.status).toBe("running");
+		gate.resolve();
+		await manager.waitForAll();
+		await session.settleAsyncWork();
+
+		const delivered = session.sessionManager
+			.getEntries()
+			.some(entry => JSON.stringify(entry).includes("RESUMED SESSION RESULT"));
+		expect(delivered).toBe(true);
 	});
 
 	it("keeps delivery pending until the queued follow-up is injected", async () => {

@@ -402,6 +402,8 @@ export interface JsonTreeDescribeOptions {
 	openDepth?: number;
 	/** Root object keys omitted. Defaults to internal tool argument metadata. */
 	hiddenRootKeys?: readonly string[];
+	/** Called after the tree is built if a depth, node or scalar cap left part of the value out. */
+	onTruncated?: () => void;
 }
 
 type JsonEntry = readonly [key: string, value: unknown];
@@ -438,6 +440,7 @@ export function describeJsonTree(value: unknown, options: JsonTreeDescribeOption
 	const maxScalarLen = Math.max(1, options.maxScalarLen ?? JSON_TREE_SCALAR_LEN_EXPANDED);
 	const openDepth = options.openDepth ?? JSON_TREE_MAX_DEPTH_COLLAPSED;
 	let budget = Math.max(1, options.maxNodes ?? JSON_TREE_MAX_LINES_EXPANDED);
+	let truncated = false;
 	let nextId = 0;
 	const leaf = (label: readonly TspSpan[]): TspTreeNode => ({ id: `${nextId++}`, label });
 
@@ -445,6 +448,7 @@ export function describeJsonTree(value: unknown, options: JsonTreeDescribeOption
 		const out: TspTreeNode[] = [];
 		for (let index = 0; index < entries.length; index++) {
 			if (budget <= 0) {
+				truncated = true;
 				out.push(leaf([span(`… ${entries.length - index} more`, "dim")]));
 				break;
 			}
@@ -463,17 +467,20 @@ export function describeJsonTree(value: unknown, options: JsonTreeDescribeOption
 			const size = Array.isArray(entry) ? `[${entry.length}]` : `{${entries.length}}`;
 			const label = keySpans.length > 0 ? [...keySpans, span(` ${size}`, "dim")] : [span(size, "dim")];
 			if (entries.length === 0) return { id, label };
+			if (depth >= maxDepth) truncated = true;
 			const children = depth >= maxDepth ? [leaf([span("…", "dim")])] : describeEntries(entries, depth + 1);
 			return { id, label, open: depth < openDepth, children };
 		}
 		const prefix = keySpans.length > 0 ? [...keySpans, span(": ", "muted")] : [];
 		if (typeof entry === "string") {
 			const lines = plainText(entry).split("\n");
+			if (lines.some(line => line.length > maxScalarLen)) truncated = true;
 			const first = clipScalar(lines[0], maxScalarLen);
 			if (lines.length === 1) return { id, label: [...prefix, span(`"${first}"`, "syntaxString")] };
 			const children: TspTreeNode[] = [];
 			for (let index = 0; index < lines.length; index++) {
 				if (budget <= 0) {
+					truncated = true;
 					children.push(leaf([span(`… ${lines.length - index} more lines`, "dim")]));
 					break;
 				}
@@ -499,5 +506,6 @@ export function describeJsonTree(value: unknown, options: JsonTreeDescribeOption
 	} else {
 		nodes = [describeValue(undefined, value, 0)];
 	}
+	if (truncated) options.onTruncated?.();
 	return node("tree", { nodes });
 }

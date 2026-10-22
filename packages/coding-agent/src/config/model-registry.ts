@@ -83,6 +83,7 @@ import {
 	getImplicitOllamaBaseUrl,
 	getOllamaContextLengthOverride,
 	isDiscoveryAuthRejection,
+	LLAMA_CPP_DEFAULT_BASE_URLS,
 	normalizeBareDiscoveryBaseUrl,
 	normalizeLiteLLMDiscoveryBaseUrl,
 	normalizeLlamaCppBaseUrl,
@@ -1660,9 +1661,10 @@ export class ModelRegistry {
 			this.#discoverableProviders.push({
 				provider: "llama.cpp",
 				api: "openai-responses",
-				baseUrl: Bun.env.LLAMA_CPP_BASE_URL || "http://127.0.0.1:8080",
+				baseUrl: Bun.env.LLAMA_CPP_BASE_URL || LLAMA_CPP_DEFAULT_BASE_URLS[0],
 				discovery: { type: "llama.cpp" },
 				optional: !Bun.env.LLAMA_CPP_BASE_URL,
+				fallbackBaseUrls: Bun.env.LLAMA_CPP_BASE_URL ? undefined : LLAMA_CPP_DEFAULT_BASE_URLS.slice(1),
 			});
 			// Only mark as keyless if no API key is configured
 			if (this.authStorage.keys.source("llama.cpp") === undefined) {

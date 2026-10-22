@@ -90,7 +90,9 @@ export function cursorRawReadPath(readPath: string): string {
 	if (chunks.some(chunk => chunk.toLowerCase() === "raw")) return readPath;
 	if (piReadPathHasRange(readPath)) {
 		const last = chunks.pop()!;
-		return `${chunks.join(":")}:raw:${last}`;
+		// Beside `raw` a bare `N` is that one line; the range-only `N` meant "from N".
+		const range = /^L?\d+$/i.test(last) ? `${last}-` : last;
+		return `${chunks.join(":")}:raw:${range}`;
 	}
 	return `${readPath}:raw`;
 }

@@ -33,8 +33,8 @@ function parseKittyParam(sequence: string, key: "c" | "r"): number | null {
 	return Number.parseInt(match[1], 10);
 }
 
-function parseITermWidth(sequence: string): string | null {
-	const match = sequence.match(/width=([^;:]+)/);
+function parseITermParam(sequence: string, key: "width" | "height"): string | null {
+	const match = sequence.match(new RegExp(`;${key}=([^;:]+)`));
 	return match?.[1] ?? null;
 }
 
@@ -205,8 +205,9 @@ describe("terminal image rendering", () => {
 
 		expect(result).not.toBeNull();
 		expect(result?.rows).toBe(2);
-		expect(parseITermWidth(result?.sequence ?? "")).toBe("2");
-		expect(result?.sequence).toContain("height=auto");
+		expect(parseITermParam(result?.sequence ?? "", "width")).toBe("2");
+		// An explicit height in rows: iTerm2 drops an `auto` height image written to a background tab.
+		expect(parseITermParam(result?.sequence ?? "", "height")).toBe(String(result?.rows));
 	});
 
 	it("encodes SIXEL at the cell box size and reserves rows while one is pending", () => {

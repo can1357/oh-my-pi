@@ -1,12 +1,13 @@
 import { type Component, Container, type HistoryBatch } from "../tui";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
-import { renderForScrollback } from "../components/image";
+import { measureRender, renderForScrollback } from "../components/image";
 import { col } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { isNativeSettled, settleNative } from "../native/settle";
 import { isUsageRowBlock } from "../overlays/usage-row";
 import { isToolActivityComponent } from "./tool-activity";
+import { directPlacementLift, ImageProtocol, iterm2ImagePayload, TERMINAL } from "../terminal-capabilities";
 
 /** Shared animation time supplied by the constrained transcript root. */
 export interface AnimationFrame {
@@ -118,6 +119,14 @@ interface RowSplit {
 	readonly width: number;
 	readonly hash: number | bigint;
 	readonly text: string;
+	/**
+	 * Inline images in the committed rows, in order, each with its payload and
+	 * the length of `text` before it. Their reserved rows carry no content, so
+	 * relocating by `text` alone would stop above an image and make the
+	 * archived image live again at another width; payload and offset tell the
+	 * archived image apart from a replacement or one moved elsewhere.
+	 */
+	readonly images: readonly { readonly payload: string; readonly offset: number }[];
 	/** Seam of the last render it was located in; renders are memoized per frame. */
 	located?: { readonly rendered: readonly string[]; readonly count: number };
 }
@@ -150,6 +159,13 @@ const RETIREMENT_BUDGET_MS = 8;
 const EMPTY_ROWS: readonly string[] = [];
 const EMPTY_STABLE_ROWS: readonly TranscriptStableRow[] = [];
 
+/** A block's full-allocation render taken by {@link TranscriptContainer}'s walk-order measurement. */
+interface MeasuredBlock {
+	rows: readonly string[];
+	/** Whether the render observed a budgeted image; see {@link measureRender}. */
+	images: boolean;
+}
+
 function isFinalized(component: Component): boolean {
 	const block = component as Component & FinalizableBlock;
 	return (block.isTranscriptBlockFinalized?.() ?? true) && block.isTranscriptBlockPending?.() !== true;
@@ -180,7 +196,33 @@ function contentOf(rows: readonly string[]): string {
  */
 function rowSplit(scrollback: readonly string[], rows: number, width: number): RowSplit {
 	const committed = scrollback.slice(0, rows);
-	return { rows, width, hash: Bun.hash(committed.join("\n")), text: contentOf(committed) };
+	const images: { payload: string; offset: number }[] = [];
+	let text = "";
+	for (const row of committed) {
+		if (TERMINAL.isImageLine(row)) images.push({ payload: iterm2ImagePayload(row) ?? row, offset: text.length });
+		text += contentOf([row]);
+	}
+	return { rows, width, hash: Bun.hash(committed.join("\n")), text, images };
+}
+
+/**
+ * `cut` moved to just below an image it would split, on terminals that cannot
+ * draw part of an image (iTerm2's inline images). There the image row draws
+ * the whole picture upward over its reserved rows; once some of those rows are
+ * in scrollback, the picture has nowhere to go and is dropped, so the image
+ * must reach scrollback whole. Kitty and SIXEL draw the visible part instead.
+ */
+function cutBelowWholeImage(rows: readonly string[], cut: number): number {
+	const protocol = TERMINAL.imageProtocol;
+	if (protocol === null || protocol === ImageProtocol.Kitty || protocol === ImageProtocol.Sixel) return cut;
+	// Only reserved rows sit between a cut inside an image and its image row,
+	// so the first image row at or below the cut decides.
+	for (let index = Math.max(0, cut); index < rows.length; index++) {
+		const row = rows[index]!;
+		if (!TERMINAL.isImageLine(row)) continue;
+		return index - directPlacementLift(row) < cut ? index + 1 : cut;
+	}
+	return cut;
 }
 
 /** Whether `prefix` matches `rows` byte-for-byte from the top. */
@@ -247,7 +289,7 @@ export class TranscriptContainer extends Container {
 	 * composition, with no block mutation possible in between; replaying the
 	 * first measurement spares every block its second render per frame.
 	 */
-	#frameRows = new Map<TranscriptEntry, readonly string[]>();
+	#frameRows = new Map<TranscriptEntry, MeasuredBlock>();
 	#frameRowsWidth = 0;
 	#releaseFailures = new WeakSet<Component>();
 	/** The `children` array `#entries` last mirrored; see {@link #syncEntries}. */
@@ -475,41 +517,47 @@ export class TranscriptContainer extends Container {
 		this.#settleFinalized();
 		let total = 0;
 		for (const { entry, index } of this.#liveEntries()) {
-			const block = this.#liveBlockRows(entry, index, width);
+			const block = this.#liveBlock(entry, index, width).rows;
 			if (block.length > 0) total += block.length + (total > 0 ? 1 : 0);
 			if (total > limit) break;
 		}
 		return total;
 	}
 
-	/** One live block's un-emitted rows at `width`, rendered against its full-height allocation. */
-	#liveBlockRows(entry: TranscriptEntry, index: number, width: number): readonly string[] {
-		const rows = this.#measuredRows(entry, width);
+	/** One live block's un-emitted rows at `width`, measured against its full-height allocation. */
+	#liveBlock(entry: TranscriptEntry, index: number, width: number): MeasuredBlock {
+		const measured = this.#measure(entry, width);
 		const emitted = this.#projectedEmittedRowCount(entry, index, width);
-		return emitted === 0 ? rows : rows.slice(emitted);
+		return emitted === 0 ? measured : { rows: measured.rows.slice(emitted), images: measured.images };
 	}
 
 	/**
 	 * One block's blank-trimmed render at its full-height allocation. Inside an
 	 * open frame the first measurement of each block is replayed to later ones,
 	 * leaving whatever allocation the viewport has since rendered it at.
+	 *
+	 * Measurements run in walk order, not display order, so they render under
+	 * {@link measureRender}: a block whose images they observed must render
+	 * again in display order before its rows are laid out.
 	 */
-	#measuredRows(entry: TranscriptEntry, width: number): readonly string[] {
-		if (this.#openFrame === undefined) {
-			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-			return this.#renderEntry(entry, width);
-		}
+	#measure(entry: TranscriptEntry, width: number): MeasuredBlock {
+		if (this.#openFrame === undefined) return this.#measureEntry(entry, width);
 		if (this.#frameRowsWidth !== width) {
 			this.#frameRows.clear();
 			this.#frameRowsWidth = width;
 		}
-		let rows = this.#frameRows.get(entry);
-		if (rows === undefined) {
-			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-			rows = this.#renderEntry(entry, width);
-			this.#frameRows.set(entry, rows);
+		let measured = this.#frameRows.get(entry);
+		if (measured === undefined) {
+			measured = this.#measureEntry(entry, width);
+			this.#frameRows.set(entry, measured);
 		}
-		return rows;
+		return measured;
+	}
+
+	#measureEntry(entry: TranscriptEntry, width: number): MeasuredBlock {
+		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+		const { value: rows, images } = measureRender(() => this.#renderEntry(entry, width));
+		return { rows, images };
 	}
 
 	#closeFrame(): void {
@@ -571,6 +619,7 @@ export class TranscriptContainer extends Container {
 		// show — the whole ledger on a resumed session's first paint (#12933).
 		const shown: Array<{ entry: TranscriptEntry; index: number }> = [];
 		const blocks: (readonly string[])[] = [];
+		const measuredImages: boolean[] = [];
 		let unrendered = 0;
 		for (let cursor = live.length - 1; cursor >= 0; cursor--) {
 			if (shown.length > capacity) {
@@ -578,15 +627,15 @@ export class TranscriptContainer extends Container {
 				break;
 			}
 			const candidate = live[cursor]!;
-			const block = this.#liveBlockRows(candidate.entry, candidate.index, width);
-			if (block.length === 0) continue;
+			const block = this.#liveBlock(candidate.entry, candidate.index, width);
+			if (block.rows.length === 0) continue;
 			shown.push(candidate);
-			blocks.push(block);
+			blocks.push(block.rows);
+			measuredImages.push(block.images);
 		}
 		shown.reverse();
 		blocks.reverse();
-		let total = 0;
-		for (const block of blocks) total += block.length + (total > 0 ? 1 : 0);
+		measuredImages.reverse();
 		if (shown.length === 0) {
 			this.#lastViewportSpans = [];
 			return EMPTY_ROWS;
@@ -596,6 +645,19 @@ export class TranscriptContainer extends Container {
 			// emergency layout consults them only where it must.
 			return this.#renderEmergency(shown, live.slice(0, unrendered), width, capacity, frame);
 		}
+		// The walk ran newest-first, so the images it measured claimed no
+		// display slot (see #measure). Render those blocks again oldest-first:
+		// the image budget keeps the newest images live by observation order.
+		for (let blockIndex = 0; blockIndex < shown.length; blockIndex++) {
+			if (!measuredImages[blockIndex]) continue;
+			const { entry, index } = shown[blockIndex]!;
+			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, frame);
+			blocks[blockIndex] = this.#renderEntry(entry, width).slice(
+				this.#projectedEmittedRowCount(entry, index, width),
+			);
+		}
+		let total = 0;
+		for (const block of blocks) total += block.length + (total > 0 ? 1 : 0);
 		if (total <= capacity) {
 			const output: string[] = [];
 			const owners: (Component | undefined)[] = [];
@@ -743,7 +805,7 @@ export class TranscriptContainer extends Container {
 		// Only a render publishes a block's stable rows, so the head renders
 		// before its progressive-append eligibility is read.
 		const head = this.#entries[this.#frontier];
-		if (head !== undefined) this.#measuredRows(head, width);
+		if (head !== undefined) this.#measure(head, width);
 		const appendHead =
 			policy === "pressure" &&
 			head?.mode === "appendOnly" &&
@@ -767,7 +829,7 @@ export class TranscriptContainer extends Container {
 		let fits = true;
 		for (let cursor = live.length - 1; cursor >= 0; cursor--) {
 			const candidate = live[cursor]!;
-			const height = this.#liveBlockRows(candidate.entry, candidate.index, width).length;
+			const height = this.#liveBlock(candidate.entry, candidate.index, width).rows.length;
 			if (height > 0) liveRows += height + (liveRows > 0 ? 1 : 0);
 			if (fits) {
 				const next = height > 0 ? tailRows + height + (tailRows > 0 ? 1 : 0) : tailRows;
@@ -819,13 +881,19 @@ export class TranscriptContainer extends Container {
 		// screen; the rest stays live, so a later shrink of the chrome or the
 		// tail refills the screen from live rows instead of opening a band no
 		// frame can fill (rows still on screen cannot return from scrollback).
+		// One exception: on a terminal that cannot draw part of an image, a cut
+		// inside an image moves below it (cutBelowWholeImage), so up to that
+		// image's height of on-screen rows commits early. A later shrink can then
+		// open a band that tall, which beats losing the image.
 		let split: { index: number; rows: readonly string[]; split: RowSplit } | undefined;
 		if (policy === "pressure" && keep > 0 && limit === this.#frontier + keep) {
 			const boundary = live[keep - 1]!;
 			const visible = room - tailRows - (tailRows > 0 ? 1 : 0);
 			if (boundary.entry.state === "settled" && visible > 0) {
 				const offer = this.#splitOffer(boundary.entry, width, visible);
-				if (offer !== undefined) {
+				if (offer === "whole") {
+					limit = boundary.index + 1;
+				} else if (offer !== undefined) {
 					split = { index: boundary.index, ...offer };
 					limit = boundary.index;
 				}
@@ -868,18 +936,25 @@ export class TranscriptContainer extends Container {
 	 * The head rows of settled `entry` beyond its committed prefix that leave
 	 * `visible` rows live, or undefined when nothing would remain committed
 	 * past that prefix or the scrollback render would not line up row for row.
+	 * `"whole"` when keeping an image whole moves the cut to the block's end:
+	 * the block then retires in full, with the blank row that separates it from
+	 * the next block, which a split never carries.
 	 */
 	#splitOffer(
 		entry: TranscriptEntry,
 		width: number,
 		visible: number,
-	): { rows: readonly string[]; split: RowSplit } | undefined {
-		const measured = this.#measuredRows(entry, width);
+	): { rows: readonly string[]; split: RowSplit } | "whole" | undefined {
+		const measured = this.#measure(entry, width).rows;
 		const start = this.#emittedRowCount(entry, width);
-		const total = measured.length - visible;
-		if (total <= start) return undefined;
-		const scrollback = renderForScrollback(() => this.#renderEntry(entry, width));
+		const cut = measured.length - visible;
+		if (cut <= start) return undefined;
+		// The boundary block stays live, so the viewport renders it in display
+		// order; this render precedes the retired blocks and must claim no slot.
+		const scrollback = measureRender(() => renderForScrollback(() => this.#renderEntry(entry, width))).value;
 		if (scrollback.length !== measured.length) return undefined;
+		const total = cutBelowWholeImage(scrollback, cut);
+		if (total >= scrollback.length) return "whole";
 		return { rows: scrollback.slice(start, total), split: rowSplit(scrollback, total, width) };
 	}
 
@@ -1085,7 +1160,7 @@ export class TranscriptContainer extends Container {
 	 * content stays live: it can repeat committed text but never drop any.
 	 */
 	#splitRowCount(entry: TranscriptEntry, split: RowSplit, width: number): number {
-		const rendered = this.#measuredRows(entry, width);
+		const rendered = this.#measure(entry, width).rows;
 		if (split.located?.rendered === rendered) return split.located.count;
 		let count = 0;
 		if (
@@ -1096,13 +1171,40 @@ export class TranscriptContainer extends Container {
 			count = split.rows;
 		} else {
 			let consumed = 0;
-			while (count < rendered.length && consumed < split.text.length) {
-				const row = contentOf([rendered[count]!]);
-				// An empty-content row matches at any offset, so the walk cannot
-				// tell it apart from a revealed row history never received.
-				if (row.length === 0 || !split.text.startsWith(row, consumed)) break;
-				consumed += row.length;
-				count++;
+			let image = 0;
+			while (count < rendered.length && (consumed < split.text.length || image < split.images.length)) {
+				const row = rendered[count]!;
+				const content = contentOf([row]);
+				if (content.length > 0) {
+					if (!split.text.startsWith(content, consumed)) break;
+					consumed += content.length;
+					count++;
+					continue;
+				}
+				// An empty-content row matches at any offset, so the walk cannot tell it
+				// apart from a revealed row history never received; only the next
+				// archived image carries the seam on, through its own reserved rows to
+				// its row, whatever its height here.
+				let index = count;
+				while (
+					index < rendered.length &&
+					!TERMINAL.isImageLine(rendered[index]!) &&
+					contentOf([rendered[index]!]).length === 0
+				) {
+					index++;
+				}
+				const imageRow = rendered[index];
+				if (
+					imageRow === undefined ||
+					!TERMINAL.isImageLine(imageRow) ||
+					(iterm2ImagePayload(imageRow) ?? imageRow) !== split.images[image]?.payload ||
+					consumed !== split.images[image]?.offset ||
+					index - count !== directPlacementLift(imageRow)
+				) {
+					break;
+				}
+				count = index + 1;
+				image++;
 			}
 		}
 		split.located = { rendered, count };
@@ -1260,10 +1362,10 @@ export class TranscriptContainer extends Container {
 			const entry = this.#entries[this.#frontier]!;
 			if (entry.state !== "settled") return;
 			if (entry.split !== undefined) {
-				if (this.#splitRowCount(entry, entry.split, width) < this.#measuredRows(entry, width).length) return;
+				if (this.#splitRowCount(entry, entry.split, width) < this.#measure(entry, width).rows.length) return;
 			} else {
 				if (entry.mode !== "appendOnly") return;
-				const rendered = this.#measuredRows(entry, width);
+				const rendered = this.#measure(entry, width).rows;
 				if (entry.emitted !== entry.stableRows.length) return;
 				if (this.#renderStablePrefix(entry, entry.emitted, width).length !== rendered.length) return;
 			}
@@ -1328,7 +1430,7 @@ export class TranscriptContainer extends Container {
 		let hiddenBelow = 0;
 		for (const candidate of behind) {
 			if (candidate.entry.state !== "active") continue;
-			if (this.#liveBlockRows(candidate.entry, candidate.index, width).length > 0) hiddenBelow++;
+			if (this.#liveBlock(candidate.entry, candidate.index, width).rows.length > 0) hiddenBelow++;
 		}
 		let behindEmergency: { candidate: { entry: TranscriptEntry; index: number }; row: string } | null | undefined;
 		const findBehindEmergency = () => {
@@ -1339,7 +1441,7 @@ export class TranscriptContainer extends Container {
 				if (candidate.entry.state !== "settled") continue;
 				const block = candidate.entry.component as Component & FinalizableBlock;
 				if (block.renderTranscriptBlockEmergencyRow === undefined) continue;
-				if (this.#liveBlockRows(candidate.entry, candidate.index, width).length === 0) continue;
+				if (this.#liveBlock(candidate.entry, candidate.index, width).rows.length === 0) continue;
 				const row = block.renderTranscriptBlockEmergencyRow(width);
 				if (row === undefined) continue;
 				behindEmergency = { candidate, row };

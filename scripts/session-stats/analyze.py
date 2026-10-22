@@ -521,7 +521,9 @@ _RE_FILE_CHANGED = re.compile(
 _RE_PERM_DENIED = re.compile(r"permission denied|not allowed", re.I)
 _RE_GENERIC_REJECTED = re.compile(r"\b(rejected|failed|error|invalid)\b", re.I)
 _RE_TAG_MISSING = re.compile(
-    r"Missing hashline snapshot tag|from your latest read/search", re.I
+    r"Missing hashline snapshot tag|from your latest read/search|"
+    r"the header needs this file's current tag|no ops follow the header",
+    re.I,
 )
 
 

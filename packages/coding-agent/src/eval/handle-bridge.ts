@@ -1,5 +1,5 @@
 import type { AsyncJob, AsyncJobManager } from "../async";
-import { MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -225,10 +225,23 @@ export async function runEvalWait(
 			}, 1_000);
 			interval.unref?.();
 			let outcome: "settled" | "timeout" | "aborted";
+			// An untimed wait keeps the eval call open until every awaited agent
+			// finishes: no message to the caller lands before then.
+			const waiter = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
+			const awaits = (options.session.agentRegistry ?? AgentRegistry.global()).awaits;
+			const releaseHolds =
+				timeoutMs === undefined
+					? resolved.flatMap(handle =>
+							"job" in handle && handle.job.agentId
+								? [awaits.hold(waiter, [handle.job.agentId], { interruptible: false })]
+								: [],
+						)
+					: [];
 			try {
 				outcome = await waitForSettlement(resolved, timeoutMs, options.signal);
 			} finally {
 				clearInterval(interval);
+				for (const release of releaseHolds) release();
 			}
 			for (const handle of resolved) emitLatestProgress(handle);
 			if (outcome === "aborted") {

@@ -1167,8 +1167,9 @@ export const cfgProvidersCacheRetention = register({
 			},
 			{
 				value: "long",
-				label: "Long (1h)",
-				description: "1h TTL where the provider supports it; pricier writes, only warmed during active runs",
+				label: "Long (1h+)",
+				description:
+					"Longer TTL where supported (Anthropic/Bedrock 1h, OpenAI GPT-5.6+ Responses 12h); pricier writes, only warmed during active runs",
 			},
 			{ value: "none", label: "Off", description: "Disable prompt caching and cache-affinity routing" },
 		],

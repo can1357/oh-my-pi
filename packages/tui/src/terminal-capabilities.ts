@@ -404,7 +404,11 @@ export function detectStyledUnderlineSupport(terminalId: TerminalId, env: NodeJS
 			// render. Enable only on a confirmed major.minor >= 3.5; an absent or
 			// unparseable version keeps the flat fallback so only proven terminals
 			// get the colon form.
-			const version = parseMajorMinorVersion(env.TERM_PROGRAM_VERSION);
+			//
+			// `LC_TERMINAL_VERSION` carries the same version over SSH, where
+			// `TERM_PROGRAM_VERSION` is stripped, so it is the fallback source.
+			const version =
+				parseMajorMinorVersion(env.TERM_PROGRAM_VERSION) ?? parseMajorMinorVersion(env.LC_TERMINAL_VERSION);
 			return version !== null && (version.major > 3 || (version.major === 3 && version.minor >= 5));
 		}
 		default:
@@ -673,6 +677,7 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 		VSCODE_PID,
 		ALACRITTY_WINDOW_ID,
 		TERM_PROGRAM,
+		LC_TERMINAL,
 		TERM,
 		COLORTERM,
 	} = env;
@@ -686,6 +691,22 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 
 	const programId = fromProgram(TERM_PROGRAM);
 	if (programId) return programId;
+
+	// iTerm2 sets `LC_TERMINAL=iTerm2` (plus `LC_TERMINAL_VERSION`) in the local
+	// session precisely so it survives SSH: openssh/mosh forward `LC_*` to the
+	// remote host, while `ITERM_SESSION_ID` and `TERM_PROGRAM` are stripped. Its
+	// own shell integration says the same: "TERM_PROGRAM is set by the local
+	// terminal but not forwarded over SSH. LC_TERMINAL is set by iTerm2 and may
+	// be forwarded over SSH." Without this branch the remote session falls to
+	// the true-color profile and loses the iTerm2 inline-image protocol, OSC 8
+	// hyperlinks and OSC 9 notifications.
+	//
+	// Gated on the absence of a multiplexer: iTerm2's OSC 1337 encoder is the
+	// only image encoder that does not wrap its payload in a tmux passthrough
+	// envelope, so inside a multiplexer the sequence would be swallowed by the
+	// multiplexer instead of reaching the outer terminal. The multiplexer path
+	// resolves the outer client on its own.
+	if (LC_TERMINAL && caseEq(LC_TERMINAL, "iTerm2") && !isInsideTerminalMultiplexer(env)) return "iterm2";
 
 	// tmux >= 3.2 replaces the pane's identity with `TERM_PROGRAM=tmux`.
 	// Its server still holds the attached client's terminal-type reply and TERM.
@@ -1088,6 +1109,19 @@ export function encodeITerm2(
 	return `\x1b]1337;File=${params.join(";")}:${base64Data}\x07`;
 }
 
+/**
+ * The encoded image `encodeITerm2` wrote into `line`, without the size
+ * parameters a rewrap changes; undefined for a line without one.
+ */
+export function iterm2ImagePayload(line: string): string | undefined {
+	const start = line.indexOf(ImageProtocol.Iterm2);
+	if (start === -1) return undefined;
+	const colon = line.indexOf(":", start + ImageProtocol.Iterm2.length);
+	if (colon === -1) return undefined;
+	const end = line.indexOf("\x07", colon + 1);
+	return line.slice(colon + 1, end === -1 ? undefined : end);
+}
+
 export function calculateImageRows(
 	imageDimensions: ImageDimensions,
 	targetWidthCells: number,
@@ -1357,9 +1391,12 @@ export function renderImage(
 		return { sequence, rows };
 	}
 	if (TERMINAL.imageProtocol === ImageProtocol.Iterm2) {
+		// The height is the rows reserved for the image, not `auto`: iTerm2
+		// resolves `auto` only for a session on screen, so an image written to a
+		// background tab is dropped, and its rows stay blank in scrollback too.
 		const sequence = encodeITerm2(base64Data, {
 			width: fit.columns,
-			height: "auto",
+			height: fit.rows,
 			preserveAspectRatio: options.preserveAspectRatio ?? true,
 		});
 		return { sequence, rows: fit.rows };

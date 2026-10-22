@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import {
 	type JobsPanelDetail,
@@ -150,6 +151,54 @@ describe("JobsSheet", () => {
 		expect(lines).toContain("> running  bash");
 		expect(lines).toContain("pid 41");
 		expect(lines).toContain("running 12 tests");
+	});
+
+	it("shows the selected job's full command in the terminal fallback, bounded above its facts", () => {
+		const long = `export A=1; ${"x".repeat(150)}; cargo test --workspace -- --exact tail_marker`;
+		const script = Array.from({ length: 40 }, (_, i) => `echo step ${i}`).join("\n");
+		for (const [command, expectTail] of [
+			[long, true],
+			[script, false],
+		] as const) {
+			const job: JobsPanelJob = {
+				id: "bash-x",
+				type: "bash",
+				status: "running",
+				label: command.slice(0, 40),
+				startTime: NOW,
+			};
+			const detail: JobsPanelDetail = { command, cwd: "/work", pids: [7], output: "out\n" };
+			const sheet = new JobsSheet({
+				load: () => ({ running: [job], recent: [] }),
+				inspect: () => detail,
+				close: vi.fn(),
+			});
+			const lines = sheet.render(60).map(line => Bun.stripANSI(line));
+			const text = lines.join("\n");
+			// Wrapped, not cut at the row label: the end of a long one-liner is reachable.
+			if (expectTail) expect(text).toContain("tail_marker");
+			else expect(text).toContain("… 28 more command lines");
+			// The facts and output tail still follow the command.
+			expect(text).toContain("pid 7");
+			expect(text).toContain("out");
+		}
+	});
+
+	it("strips terminal control sequences and the home directory from the full command", () => {
+		const home = os.homedir();
+		const command = `cat <<EOF > ${home}/notes.txt\n\x1b]0;pwned\x07\x1b[2Jhello\nEOF`;
+		const job: JobsPanelJob = { id: "bash-x", type: "bash", status: "running", label: "cat", startTime: NOW };
+		const sheet = new JobsSheet({
+			load: () => ({ running: [job], recent: [] }),
+			inspect: () => ({ command, pids: [] }),
+			close: vi.fn(),
+		});
+		const text = sheet.render(120).join("\n");
+		expect(text).toContain("hello");
+		expect(text).toContain("~/notes.txt");
+		expect(text).not.toContain(home);
+		expect(text).not.toContain("\x1b]0;");
+		expect(text).not.toContain("\x1b[2J");
 	});
 
 	it("renders read-only when the source cannot cancel: the jobs and detail stay, Cancel job is gone", () => {

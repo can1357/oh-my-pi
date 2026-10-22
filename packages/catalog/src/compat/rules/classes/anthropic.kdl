@@ -163,33 +163,35 @@ class "anthropic" {
 	// Foundry / Claude Platform on AWS are first-party Anthropic routes whose
 	// effective URLs are checked at request time.
 	on "anthropic" "google-vertex" "amazon-bedrock" "bedrock-mantle" {
-		family "fable" {
-			revision ">=5" {
+		on-api "anthropic-messages" {
+			family "fable" {
+				revision ">=5" {
+					supports-server-compaction #true
+				}
+			}
+			family "mythos" {
+				revision ">=5" {
+					supports-server-compaction #true
+				}
+			}
+			family "opus" {
+				revision ">=4.6" {
+					supports-server-compaction #true
+				}
+			}
+			family "sonnet" {
+				revision ">=4.6" {
+					supports-server-compaction #true
+				}
+			}
+			family "haiku" {
+				revision ">=5.5 <6" {
+					supports-server-compaction #true
+				}
+			}
+			models "claude-mythos-preview" {
 				supports-server-compaction #true
 			}
-		}
-		family "mythos" {
-			revision ">=5" {
-				supports-server-compaction #true
-			}
-		}
-		family "opus" {
-			revision ">=4.6" {
-				supports-server-compaction #true
-			}
-		}
-		family "sonnet" {
-			revision ">=4.6" {
-				supports-server-compaction #true
-			}
-		}
-		family "haiku" {
-			revision ">=5.5 <6" {
-				supports-server-compaction #true
-			}
-		}
-		models "claude-mythos-preview" {
-			supports-server-compaction #true
 		}
 	}
 	// Sonnet 4.5 and newer end generation with `model_context_window_exceeded`

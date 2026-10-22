@@ -1,14 +1,6 @@
 import { $which, isRecord } from "@oh-my-pi/pi-utils";
-import { REJECT_PROMPT_COMMAND } from "../exec/non-interactive-env";
-import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-
-/** Captured result of a completed `gh` invocation. */
-export interface GhCommandResult {
-	exitCode: number;
-	stdout: string;
-	stderr: string;
-}
+import { FORGE_NON_INTERACTIVE_ENV, type ForgeCliResult, type ForgeCliSpec, runForgeCli } from "./forge-cli";
 
 /** Options shaping `gh` failure messages and output handling. */
 export interface GhCommandOptions {
@@ -21,41 +13,13 @@ export interface GhCommandOptions {
 /** Deadline for `gh` subprocesses spawned by the coding agent. */
 export const GH_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 
-const GH_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
-const GH_TRUNCATED_MARKER = "\n[gh subprocess output truncated after 8 MiB]\n";
-const GH_NON_INTERACTIVE_ENV = {
-	...process.env,
-	GIT_ASKPASS: "true",
-	GIT_EDITOR: "true",
-	GIT_TERMINAL_PROMPT: "0",
-	LC_ALL: undefined,
-	LC_MESSAGES: "C",
-	SSH_ASKPASS: REJECT_PROMPT_COMMAND,
-	GH_PROMPT_DISABLED: "1",
+const GH_SPEC: ForgeCliSpec = {
+	bin: "gh",
+	displayName: "GitHub CLI",
+	installMessage: "GitHub CLI (gh) is not installed. Install it from https://cli.github.com/.",
+	env: { ...FORGE_NON_INTERACTIVE_ENV, GH_PROMPT_DISABLED: "1" },
+	timeoutMs: GH_COMMAND_TIMEOUT_MS,
 };
-
-async function readCappedText(stream: ReadableStream<Uint8Array>): Promise<string> {
-	const reader = stream.getReader();
-	const chunks: Uint8Array[] = [];
-	let captured = 0;
-	let total = 0;
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			total += value.byteLength;
-			if (captured < GH_OUTPUT_LIMIT_BYTES) {
-				const take = Math.min(value.byteLength, GH_OUTPUT_LIMIT_BYTES - captured);
-				if (take > 0) chunks.push(value.subarray(0, take));
-				captured += take;
-			}
-		}
-	} finally {
-		reader.releaseLock();
-	}
-	const text = Buffer.concat(chunks).toString("utf8");
-	return total > GH_OUTPUT_LIMIT_BYTES ? `${text}${GH_TRUNCATED_MARKER}` : text;
-}
 
 function formatGhFailure(args: readonly string[], stdout: string, stderr: string, options?: GhCommandOptions): string {
 	const message = (stderr || stdout).trim();
@@ -130,43 +94,8 @@ export const github = {
 	},
 
 	/** Run a raw `gh` CLI command. Does not throw on non-zero exit. */
-	async run(cwd: string, args: string[], signal?: AbortSignal, options?: GhCommandOptions): Promise<GhCommandResult> {
-		throwIfAborted(signal);
-		if (!$which("gh")) {
-			throw new ToolError("GitHub CLI (gh) is not installed. Install it from https://cli.github.com/.");
-		}
-		const timeoutSignal = AbortSignal.timeout(GH_COMMAND_TIMEOUT_MS);
-		const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-		try {
-			const child = Bun.spawn(["gh", ...args], {
-				cwd,
-				env: GH_NON_INTERACTIVE_ENV,
-				stdin: "ignore",
-				stdout: "pipe",
-				stderr: "pipe",
-				windowsHide: true,
-				signal: combinedSignal,
-			});
-			if (!(child.stdout instanceof ReadableStream) || !(child.stderr instanceof ReadableStream)) {
-				throw new ToolError("Failed to capture GitHub CLI output.");
-			}
-			const [stdout, stderr, exitCode] = await Promise.all([
-				readCappedText(child.stdout),
-				readCappedText(child.stderr),
-				child.exited,
-			]);
-			throwIfAborted(signal);
-			const trim = options?.trimOutput !== false;
-			return {
-				exitCode: exitCode ?? 0,
-				stdout: trim ? stdout.trim() : stdout,
-				stderr: trim ? stderr.trim() : stderr,
-			};
-		} catch (error) {
-			if (signal?.aborted) throw new ToolAbortError();
-			if (timeoutSignal.aborted) throw new ToolError(`GitHub CLI command timed out: gh ${args.join(" ")}`);
-			throw error;
-		}
+	run(cwd: string, args: string[], signal?: AbortSignal, options?: GhCommandOptions): Promise<ForgeCliResult> {
+		return runForgeCli(GH_SPEC, cwd, args, signal, options?.trimOutput !== false);
 	},
 
 	/** Run `gh` and parse stdout as JSON. Throws on non-zero exit or invalid JSON. */

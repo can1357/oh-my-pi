@@ -108,4 +108,35 @@ class "deepseek" {
 	revision ">=4" {
 		portable-reasoning #true
 	}
+	// V4.1 Flash's vision config (patch 14, 3x3 merge, 1024-token cap, 544²
+	// floor). verified: OpenRouter billing matched it exactly on Fireworks and
+	// DeepInfra and within one token on Together, 256px to 4000px.
+	// Later Flash releases stay on their wire fallback until measured.
+	family "flash" {
+		revision ">=4.1 <4.2" {
+			image-tokenization {
+				regime "deepseek-patch"
+				verified #true
+				patch-size 14
+				downsample 3
+				max-tokens 1024
+				min-pixels 295936
+			}
+		}
+	}
+	// DeepSeek's API retired the V4.0 vision preview and serves its legacy id
+	// with the current Flash (api-docs.deepseek.com/guides/vision); hosts that
+	// still run the preview keep their fallback.
+	on "deepseek" {
+		models "deepseek-v4-flash-vision-exp" {
+			image-tokenization {
+				regime "deepseek-patch"
+				verified #true
+				patch-size 14
+				downsample 3
+				max-tokens 1024
+				min-pixels 295936
+			}
+		}
+	}
 }

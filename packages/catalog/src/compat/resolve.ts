@@ -952,6 +952,7 @@ function resolveBedrockPolicy(spec: ModelSpec<"bedrock-converse-stream">, axes: 
 	// no-checkpoint shape.
 	const compat: ResolvedBedrockCompat = {
 		promptCacheMode: "none",
+		supportsServerCompaction: false,
 		supportsLongPromptCacheRetention: false,
 		promptCacheMinimumTokens: 0,
 		promptCacheMaximumCheckpoints: 0,

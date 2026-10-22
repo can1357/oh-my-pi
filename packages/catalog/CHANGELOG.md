@@ -2,6 +2,56 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+
+### Changed
+
+- llama.cpp login instructions now list both default local base URLs (`http://127.0.0.1:8080`, then `http://127.0.0.1:9931`) ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
+
+### Fixed
+
+- Fixed Step 5 Preview reasoning choices on OpenCode Go and Zen to offer only low, medium, and high ([#14987](https://github.com/can1357/oh-my-pi/issues/14987), [#16669](https://github.com/can1357/oh-my-pi/pull/16669) by [@SheetHappiness](https://github.com/SheetHappiness))
+- Fixed GPT-6 Sol/Luna API and MiniMax-M3 long-context usage estimates above their published input thresholds ([#16711](https://github.com/can1357/oh-my-pi/issues/16711))
+- Fixed Xiaomi Token Plan login and default model selection after the V2.5 retirement by using MiMo V2.6 Flash ([#16727](https://github.com/can1357/oh-my-pi/pull/16727) by [@LiPu-jpg](https://github.com/LiPu-jpg))
+- Fixed GPT-5.6 Sol requests over 272K input tokens (`openai` and `openai-codex`) being priced at the retired $10/$45 long-context card instead of $8/$30 ([#16742](https://github.com/can1357/oh-my-pi/issues/16742))
+- Fixed DeepSeek's official vision requests being held to the 5-image unknown-host floor: the catalog endpoint now carries DeepSeek's documented 600-image and 40 MiB inline-image budgets, while a custom `baseUrl` keeps the conservative floor ([vision limits](https://api-docs.deepseek.com/guides/vision#limits); [#16737](https://github.com/can1357/oh-my-pi/pull/16737) by [@Fun10165](https://github.com/Fun10165))
+- Fixed Devin model discovery falling back to the two SWE-1.6 seed models when the catalog takes longer than 5s to respond; it now waits up to 15s ([#16668](https://github.com/can1357/oh-my-pi/pull/16668) by [@DusKing1](https://github.com/DusKing1))
+
+## [18.12.6] - 2026-10-21
+
+### Added
+
+- Added the `prompt-cache-persistent` catalog axis (`isPromptCachePersistent`) for providers whose own endpoint never expires prompt caches; logged-in OpenAI Codex declares it
+
+### Changed
+
+- Updated the bundled Yolo-Auto catalog to its current models, `qwen3.8-27b` (now the default), `yolo`, `yolo-small`, and `yolo-128k`, and removed the retired `deepseek-flash-v4` and `qwen3.8-flash`
+
+## [18.12.5] - 2026-10-21
+
+### Fixed
+
+- Fixed Moonshot `kimi-k3` pricing cache writes at $0; usage cost now includes cache writes at Moonshot's $3/M 5-minute rate ([#16508](https://github.com/can1357/oh-my-pi/issues/16508))
+
+## [18.12.4] - 2026-10-20
+
+### Added
+
+- Added native Inception support with Mercury 3, Mercury 2.5, and Mercury 2, live chat-model discovery, API-key login, reasoning controls, and Mercury 3 launch pricing while its catalog reports none; Mercury 3 waits up to 10 minutes for its first output, since high-effort reasoning streams nothing ([#16439](https://github.com/can1357/oh-my-pi/pull/16439) by [@eggpeat](https://github.com/eggpeat))
+
+### Changed
+
+- Changed Devin model discovery to send legacy Windsurf Enterprise keys unprefixed in one request, dropping the Windsurf-editor retry that returned a smaller model list ([#13677](https://github.com/can1357/oh-my-pi/pull/13677) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Factory Droid now carries Droid's 3.5 MB inline-image budget (`inline-image-byte-budget`) for its hosted routes, under their 4.5 MB request limit, and the new `request-body-byte-limit` axis (`resolveRequestBodyByteLimit`) records that limit; it applies on Factory's own hosts through pi-ai's `reachesBudgetedHost` ([#16288](https://github.com/can1357/oh-my-pi/pull/16288) by [@will-bogusz](https://github.com/will-bogusz))
+- DeepSeek V4.1 Flash images are now priced by DeepSeek's own billing (994 tokens for a snapcompact frame) instead of a GPT or Claude rate (2,882 to 3,136), so a 25-frame archive no longer counts about 50k tokens the provider never bills and triggers compaction early ([#16418](https://github.com/can1357/oh-my-pi/pull/16418) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Amazon Bedrock Kimi K3 (`global.`/`us.moonshotai.kimi-k3`) offering Anthropic-style thinking budgets it ignores; it now offers `low`, `high` and `max` effort, defaulting to `max` ([#13697](https://github.com/can1357/oh-my-pi/pull/13697) by [@alblez](https://github.com/alblez))
+- Marked supported Bedrock Claude models as eligible for native compaction ([#16343](https://github.com/can1357/oh-my-pi/pull/16343) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
+
 ## [18.12.3] - 2026-10-19
 
 ### Changed

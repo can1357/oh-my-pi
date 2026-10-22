@@ -14,6 +14,7 @@ import {
 } from "../../src/launch/protocol";
 import { listServices, sendService, startService, waitForOwnedServiceCompletion } from "../../src/launch/services";
 import type { ToolSession } from "../../src/tools";
+import { BashTool } from "../../src/tools/bash";
 
 interface EmbeddedBroker {
 	/** Settles once this in-process broker has shut down and flushed its metadata. */
@@ -268,4 +269,40 @@ describe("session-owned supervised services", () => {
 			process.title = previousTitle;
 		}
 	}, 20_000);
+
+	it("starts a bash `name` service with the session identity", async () => {
+		using tempDir = TempDir.createSync("@omp-service-env-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = await startBroker(projectDir, runtimeDir);
+		const sessionFile = path.join(projectDir, "svc.jsonl");
+		const session: ToolSession = {
+			cwd: projectDir,
+			hasUI: false,
+			settings: Settings.isolated(),
+			getSessionFile: () => sessionFile,
+			getSessionSpawns: () => "*",
+			getAgentId: () => "Main",
+			getSessionId: () => "session-svc",
+		};
+		try {
+			vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
+			const result = await new BashTool(session).execute("svc-env", {
+				command: `echo "env=$PI_SESSION_ID|$PI_SESSION_FILE"; read answer`,
+				name: "env-service",
+				pty: false,
+				ready: { log: `env=session-svc\\|${sessionFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, timeout: 5 },
+			});
+			expect(result.details?.service).toMatchObject({ name: "env-service", ready: true, timedOut: false });
+		} finally {
+			vi.restoreAllMocks();
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker.finished;
+			process.title = previousTitle;
+		}
+	}, 15_000);
 });

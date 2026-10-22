@@ -148,6 +148,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `devin`                          | `DEVIN_API_KEY`                                                               |
 | `gmi-cloud`                      | `GMI_API_KEY`                                                                 |
 | `huggingface`                    | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN`                                      |
+| `inception`                      | `INCEPTION_API_KEY`                                                           |
 | `moonshot`                       | `MOONSHOT_API_KEY`, then `KIMI_API_KEY`                                       |
 | `stepfun`                        | `STEPFUN_API_KEY`                                                             |
 | `helmcode`                       | `HELMCODE_API_KEY`                                                            |
@@ -206,6 +207,8 @@ For `xai-oauth`, `XAI_API_KEY` is accepted for an explicit request but does not 
 `/login snowflake` prompts for your Snowflake account identifier or account URL, then signs in through the browser with Snowflake's built-in local-application OAuth integration and stores the account with the token. To use environment variables instead, set both `SNOWFLAKE_PAT` and `SNOWFLAKE_ACCOUNT`.
 
 `charm-hyper` is Charm's OpenAI-compatible inference gateway for coding agents. Issue or manage a key at `https://hyper.charm.land/`; the model list is discovered live from the provider's public `/v1/models` endpoint, and `HYPER_API_KEY` is accepted as a fallback alias for `CHARM_HYPER_API_KEY`.
+
+`inception` is Inception's native Mercury API. Set `INCEPTION_API_KEY` or run `/login inception` with a key from `https://platform.inceptionlabs.ai/dashboard/api-keys`, then select `inception/mercury-3`. OMP discovers chat models from `/v1/models`, including Mercury 3, Mercury 2.5, and Mercury 2; FIM/edit and Decisions-only models are excluded. Mercury 3 supports a 1,000,000-token context and up to 131,072 output tokens. Thinking levels are `minimal`, `low`, `medium`, and `high`; `minimal` maps to Inception's `instant`, and `off` requests that lowest effort rather than disabling reasoning entirely. Mercury does not stream its reasoning, so no thinking text appears and a `high` turn can be silent for minutes before its first output; OMP waits up to 10 minutes for Mercury 3's first chunk (`providers.streamFirstEventTimeoutSeconds` overrides this). While `/v1/models` reports Mercury 3 at $0, OMP prices it at the published launch rate ($0.10 input / $0.35 output per million tokens); a tariff reported by `/v1/models` takes precedence.
 
 SingularityAPI sells two unrelated products behind one brand, so OMP models them as two providers: they share no key, no billing model, and no effort ladder, and neither key is accepted by the other host.
 

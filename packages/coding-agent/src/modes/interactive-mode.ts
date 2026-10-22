@@ -67,6 +67,7 @@ import {
 	adjustHsv,
 	formatDuration,
 	formatNumber,
+	getActiveProfile,
 	getProjectDir,
 	isEnoent,
 	logger,
@@ -1145,11 +1146,12 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 }
 
 /**
- * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
- * a bounded set of running-agent rows in the same `Id ⟨role⟩: description` shape
- * the inline task rows use (muted task preview when no description was given).
- * Layout mirrors the Todos HUD exactly: unindented header, then
- * `renderTreeList` rows (dim connectors) shifted right by one space.
+ * Build the anchored subagent HUD block: a bold accent "Subagents · N running"
+ * header (with the agent-hub key right-aligned when `hubKey` is given) plus
+ * a bounded set of running-agent rows in the same `Id ⟨role⟩: description`
+ * shape the inline task rows use (muted assignment preview when no
+ * description was given). Layout mirrors the Todos HUD exactly: unindented
+ * header, then `renderTreeList` rows (dim connectors) shifted right by one space.
  * Every active subagent is listed — detached background spawns and sync task
  * calls alike — so the pinned block doubles as a click jump list.
  * With `livePreview` (`display.subagentLivePreview`), a row that has called a
@@ -1162,6 +1164,7 @@ export function renderSubagentHudLines(
 	columns: number,
 	expanded = false,
 	livePreview = false,
+	hubKey?: string,
 ): string[] {
 	const running = sessions.filter(isHudSubagent);
 	if (running.length === 0) return [];
@@ -1211,12 +1214,19 @@ export function renderSubagentHudLines(
 						line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
 					}
 				} else {
-					// No spawn description: fall back to a muted task preview, same as
-					// the inline task rows when a row has no label.
-					const taskPreview = session.progress?.task?.trim();
-					if (taskPreview && !labelEchoesHandle(session.id, taskPreview)) {
-						const formatted = replaceTabs(taskPreview).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-						const budget = Math.min(TRUNCATE_LENGTHS.SHORT, Math.max(0, rowWidth - visibleWidth(line) - 1));
+					// No spawn description: fall back to a muted preview of the raw
+					// assignment — never the rendered prompt, whose fixed template
+					// preamble would fill the row instead of the work. Every spawn
+					// that renders the template (task tool, structured/eval spawns)
+					// also records `assignment`; `task` alone is a raw message
+					// (IRC-woken or direct sends), so it is safe to preview as is.
+					const preview = (session.progress?.assignment ?? session.progress?.task)?.trim();
+					if (preview && !labelEchoesHandle(session.id, preview)) {
+						const formatted = shortenEmbeddedPaths(replaceTabs(sanitizeText(preview))).replace(
+							/\s*[\r\n]+\s*/g,
+							" ↵ ",
+						);
+						const budget = Math.max(0, rowWidth - visibleWidth(line) - 1);
 						if (budget > 0) line += ` ${theme.fg("muted", truncateToWidth(formatted, budget))}`;
 					}
 				}
@@ -1253,12 +1263,13 @@ export function renderSubagentHudLines(
 		);
 		cursor += count;
 	}
-	return [
-		"",
-		truncateToWidth(theme.bold(theme.fg("accent", "Subagents")), contentColumns),
-		...itemLines,
-		...toggleRow,
-	];
+	const title = theme.bold(theme.fg("accent", "Subagents"));
+	const runningLabel = theme.fg("dim", `${theme.sep.dot}${running.length} running`);
+	const titleText = truncateToWidth(`${title}${runningLabel}`, contentColumns);
+	const hint = hubKey ? theme.fg("dim", hubKey) : "";
+	const gap = contentColumns - visibleWidth(titleText) - visibleWidth(hint);
+	const header = hint && gap >= 2 ? `${titleText}${" ".repeat(gap)}${hint}` : titleText;
+	return ["", header, ...itemLines, ...toggleRow];
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
@@ -4747,7 +4758,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const running = sessions.filter(isHudSubagent);
 		const expanded = this.#pinnedHudOverride ?? mode === "full";
 		const livePreview = cfgDisplaySubagentLivePreview.get(settings);
-		const lines = renderSubagentHudLines(sessions, this.ui.terminal.columns, expanded, livePreview);
+		const hubKey = appKey(this.keybindings, "app.agents.hub") || undefined;
+		const lines = renderSubagentHudLines(sessions, this.ui.terminal.columns, expanded, livePreview, hubKey);
 		if (lines.length === 0) return undefined;
 		const layout = layoutPinnedHud(running.length, expanded);
 		const tickMs =
@@ -7351,10 +7363,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		const sessionFile = this.sessionManager.isSessionOnDisk() ? this.sessionManager.getSessionFile() : undefined;
+		// Pass the profile explicitly: native exec does not inherit Bun's process.env updates.
+		const activeProfile = getActiveProfile();
 		const cmd = [
 			...resolveCliEntryCmd(),
-			...restartArgv(process.argv.slice(2), sessionFile ? path.resolve(sessionFile) : undefined),
+			...restartArgv(
+				process.argv.slice(2),
+				sessionFile ? path.resolve(sessionFile) : undefined,
+				activeProfile ? { "--profile": true } : undefined,
+			),
 		];
+		if (activeProfile) cmd.push("--profile", activeProfile);
 		await postmortem.cleanup();
 		await postmortem.drainStdout();
 		if (process.platform !== "win32") {

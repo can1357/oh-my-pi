@@ -2006,6 +2006,12 @@ function applyOpenAIChatCompletionsPromptCachePolicy(
 		return;
 	}
 
+	if (promptCache.ttl === "12h") {
+		throw new AIError.ConfigurationError(
+			`OpenAI 12h prompt caching is only available on the Responses API; ${model.provider}/${model.id} uses Chat Completions.`,
+		);
+	}
+
 	params.prompt_cache_key = promptCacheKey;
 	params.prompt_cache_options = {
 		mode: promptCache.mode,

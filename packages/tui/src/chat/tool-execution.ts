@@ -438,6 +438,8 @@ export class ToolExecutionComponent extends Container {
 	#spinnerActive = false;
 	// Todo write completion strikethrough reveal animation
 	#todoStrikeInterval?: NodeJS.Timeout;
+	// Once-a-second repaint for renderers that show live elapsed time (`tickElapsed`)
+	#elapsedTicker?: NodeJS.Timeout;
 	// Track if args are still being streamed (for edit/write spinner)
 	#argsComplete = false;
 	#executionStarted = false;
@@ -474,6 +476,8 @@ export class ToolExecutionComponent extends Container {
 		argsComplete?: boolean;
 		executionStarted?: boolean;
 		renderContext?: Record<string, unknown>;
+		/** Live: read at render time, so a ticking spinner advances it. */
+		readonly elapsedMs?: number;
 	} = {
 		expanded: false,
 		isPartial: true,
@@ -491,6 +495,10 @@ export class ToolExecutionComponent extends Container {
 		toolCallId?: string,
 	) {
 		super();
+		Object.defineProperty(this.#renderState, "elapsedMs", {
+			get: () => this.#elapsedMs(this.#nativeStatus()),
+			enumerable: true,
+		});
 		ensureThemeSync();
 		this.#toolCallId = toolCallId;
 		this.#toolName = toolName;
@@ -772,6 +780,32 @@ export class ToolExecutionComponent extends Container {
 				this.#renderState.spinnerFrame = undefined;
 			}
 		}
+		this.#updateElapsedTicker(isBackgroundAsyncRunning);
+	}
+
+	/**
+	 * Repaint once a second while a `tickElapsed` renderer's call executes, so a
+	 * quiet command's elapsed time advances without the 30fps spinner ticker.
+	 */
+	#updateElapsedTicker(isBackgroundAsyncRunning: boolean): void {
+		const needsTicker =
+			this.#renderer?.tickElapsed === true &&
+			this.#executionStarted &&
+			this.#isPartial &&
+			!this.#sealed &&
+			!isBackgroundAsyncRunning &&
+			!isNativeRendering();
+		if (needsTicker && !this.#elapsedTicker) {
+			this.#elapsedTicker = setInterval(() => this.#ui.requestComponentRender(this), 1000);
+		} else if (!needsTicker) {
+			this.#stopElapsedTicker();
+		}
+	}
+
+	#stopElapsedTicker(): void {
+		if (!this.#elapsedTicker) return;
+		clearInterval(this.#elapsedTicker);
+		this.#elapsedTicker = undefined;
 	}
 
 	/**
@@ -917,6 +951,7 @@ export class ToolExecutionComponent extends Container {
 			this.#renderState.spinnerFrame = undefined;
 		}
 		this.#stopTodoStrikeAnimation();
+		this.#stopElapsedTicker();
 		this.#previewReady?.resolve();
 	}
 

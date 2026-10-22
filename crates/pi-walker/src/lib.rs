@@ -97,12 +97,6 @@ pub enum FollowLinks {
 	Always,
 }
 
-impl From<bool> for FollowLinks {
-	fn from(follow: bool) -> Self {
-		if follow { Self::Always } else { Self::Never }
-	}
-}
-
 impl FollowLinks {
 	const fn follow_at_depth(self, depth: usize) -> bool {
 		match self {

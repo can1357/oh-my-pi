@@ -692,8 +692,9 @@ describe("update-cli package manager commands", () => {
 				// precedence (env outranks file). Same-source env would also mask
 				// the before/min-release-age exclusivity abort on npm 11.10-11.14.
 				const home = path.join(root, "home");
+				const prefix = path.join(root, "prefix");
 				await fs.mkdir(home, { recursive: true });
-				await fs.mkdir(path.join(root, "prefix"), { recursive: true });
+				await fs.mkdir(npmGlobalLayout(prefix).nodeModulesDir, { recursive: true });
 				await Bun.write(path.join(home, ".npmrc"), "min-release-age=365\n");
 				// Bogus proxies keep a corporate proxy from intercepting the loopback
 				// registry; NO_PROXY exempts 127.0.0.1 so the fake registry stays reachable.
@@ -703,7 +704,7 @@ describe("update-cli package manager commands", () => {
 					// npm resolves the home npmrc from USERPROFILE and the global
 					// prefix from APPDATA on Windows; pin both inside the sandbox.
 					USERPROFILE: home,
-					npm_config_prefix: path.join(root, "prefix"),
+					npm_config_prefix: prefix,
 					npm_config_cache: path.join(root, "cache"),
 					npm_config_audit: "false",
 					npm_config_fund: "false",

@@ -134,6 +134,23 @@ function unique(values: Iterable<string>, limit = Number.MAX_SAFE_INTEGER): stri
 	return out;
 }
 
+/**
+ * Capitalized proper nouns of at most two words, in any cased script (Latin, Greek,
+ * Cyrillic, Vietnamese, …), deduplicated case-insensitively. Gist participants are
+ * stored with this extractor and the polyphonic graph voice looks gists up with it, so
+ * a query entity matches a stored participant exactly (`findGistsByParticipant`).
+ * Unicode property escapes and `\p{L}`-based lookaround boundaries replace `[A-Z][a-z]+`
+ * and ASCII `\b`, which matched no non-English name (issues #7918, #16723).
+ */
+export function extractProperNouns(text: string): string[] {
+	return unique(
+		Array.from(
+			text.matchAll(/(?<![\p{L}\p{N}_])(\p{Lu}\p{Ll}+(?:\s+\p{Lu}\p{Ll}+)?)(?![\p{L}\p{N}_])/gu),
+			match => match[1] ?? "",
+		),
+	);
+}
+
 function parseJsonStringArray(value: string | null): string[] {
 	if (value === null || value === "") return [];
 	try {
@@ -604,19 +621,13 @@ export class EpisodicGraph {
 	}
 
 	private extractParticipants(content: string): string[] {
-		// Match capitalized proper nouns across cased scripts (Latin, Greek, Cyrillic, …).
-		// `[A-Z][a-z]+` plus ASCII `\b` matched no non-Latin token, so any non-English
-		// memory produced zero participants (issue #7918). Unicode property escapes with
-		// the `u` flag, and `\p{L}`-based lookaround boundaries in place of `\b`, fix that.
-		const names = Array.from(
-			content.matchAll(/(?<![\p{L}\p{N}_])(\p{Lu}\p{Ll}+(?:\s+\p{Lu}\p{Ll}+)?)(?![\p{L}\p{N}_])/gu),
-			match => match[1] ?? "",
-		);
+		// `\p{L}` boundaries, not ASCII `\b`: with `i`, `\b` matched the trailing `i` of
+		// words like Vietnamese `tôi` as the pronoun `I` (issue #16723).
 		const pronouns = Array.from(
-			content.matchAll(/\b(I|you|we|they|he|she|it|me|us|them|him|her)\b/gi),
+			content.matchAll(/(?<![\p{L}\p{N}_])(I|you|we|they|he|she|it|me|us|them|him|her)(?![\p{L}\p{N}_])/giu),
 			match => match[1] ?? "",
 		);
-		return unique([...names, ...pronouns], 5);
+		return unique([...extractProperNouns(content), ...pronouns], 5);
 	}
 
 	private extractTemporalScope(content: string): string | null {

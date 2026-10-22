@@ -81,5 +81,11 @@ export interface ClientBridge {
 		toolCall: ClientBridgePermissionToolCall,
 		options: ClientBridgePermissionOption[],
 		signal?: AbortSignal,
+		/**
+		 * Aborts when a user steer is queued onto the live turn while this
+		 * elicit is open. The implementation should cancel its pending client
+		 * dialog and resolve cancelled instead of waiting behind the steer.
+		 */
+		steeringSignal?: AbortSignal,
 	): Promise<ClientBridgePermissionOutcome>;
 }

@@ -1009,6 +1009,66 @@ describe("model thinking derivation", () => {
 			createModel({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider: "opencode-zen" }).compat
 				.supportsServerCompaction,
 		).toBe(false);
+		// The shared Messages policy remains enabled for those Bedrock model
+		// families on that adapter; its Haiku 4.5 case must not leak to Messages.
+		for (const id of ["claude-fable-5", "claude-mythos-5", "claude-mythos-preview"]) {
+			expect(
+				createModel({ id, api: "anthropic-messages", provider: "amazon-bedrock" }).compat.supportsServerCompaction,
+			).toBe(true);
+		}
+		expect(
+			createModel({
+				id: "claude-haiku-4-5",
+				api: "anthropic-messages",
+				provider: "amazon-bedrock",
+			}).compat.supportsServerCompaction,
+		).toBe(false);
+	});
+
+	it("enables Bedrock Runtime compaction only for model-card-supported Claude revisions", () => {
+		const supported = [
+			"global.anthropic.claude-haiku-4-5-20251001-v1:0",
+			"global.anthropic.claude-haiku-5-5",
+			"global.anthropic.claude-sonnet-5",
+			"global.anthropic.claude-sonnet-5-5",
+			"global.anthropic.claude-opus-4-7",
+			"global.anthropic.claude-opus-4-8",
+			"global.anthropic.claude-opus-5",
+			"global.anthropic.claude-opus-5-5",
+		];
+		for (const id of supported) {
+			const model = createModel({ id, api: "bedrock-converse-stream", provider: "amazon-bedrock" });
+			expect(model.api).toBe("bedrock-converse-stream");
+			expect(model.compat.supportsServerCompaction).toBe(true);
+		}
+
+		const explicitlyDisabled = createModel({
+			id: "global.anthropic.claude-opus-5-5",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			compat: { supportsServerCompaction: false },
+		});
+		expect(explicitlyDisabled.compat.supportsServerCompaction).toBe(false);
+
+		for (const id of [
+			"global.anthropic.claude-opus-4-6-v1",
+			"global.anthropic.claude-haiku-4-6",
+			"global.anthropic.claude-sonnet-4-6",
+			"global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+			"global.anthropic.claude-opus-5-1",
+			"global.anthropic.claude-sonnet-5-1",
+			"global.anthropic.claude-fable-5",
+			"global.anthropic.claude-fable-5-1",
+			"global.anthropic.claude-mythos-5",
+			"global.anthropic.claude-mythos-5-1",
+			"global.anthropic.claude-mythos-preview",
+			"global.amazon.nova-pro-v1:0",
+		]) {
+			expect(
+				createModel({ id, api: "bedrock-converse-stream", provider: "amazon-bedrock" }).compat
+					.supportsServerCompaction,
+			).toBe(false);
+		}
 	});
 
 	it("classifies OpenAI-schema Bedrock models as effort, leaving gpt-oss on budget", () => {

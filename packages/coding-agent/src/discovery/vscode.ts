@@ -4,7 +4,8 @@
  * Loads config from `.vscode` directory (project-only).
  * Supports MCP server discovery from `mcp.json` with nested `mcp.servers` structure.
  */
-import { tryParseJson } from "@oh-my-pi/pi-utils";
+import * as fs from "node:fs/promises";
+import { isEnoent, tryParseJson } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
@@ -53,8 +54,10 @@ async function loadMCPConfig(
 	const warnings: string[] = [];
 
 	const content = await readFile(path);
-	if (!content) {
-		warnings.push(`Failed to read ${path}`);
+	if (content === null) {
+		// Most projects have no .vscode/mcp.json; only one that exists but can't be read is a failure.
+		const missing = await fs.stat(path).then(() => false, isEnoent);
+		if (!missing) warnings.push(`Failed to read ${path}`);
 		return { items, warnings };
 	}
 

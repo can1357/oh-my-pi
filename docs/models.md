@@ -262,6 +262,11 @@ use native OpenAI compaction without an opt-in, for any provider id. Set
 `enabled: false` to turn it off, or `v2StreamingEnabled: false` to keep only
 the V1 `/responses/compact` request. See [compaction](./compaction.md).
 
+Bedrock Converse Claude models compact natively through a Bedrock Runtime side request on AWS endpoints;
+a custom non-AWS `baseUrl` needs `remoteCompaction.enabled: true`, and `enabled: false` opts out. See
+[compaction](./compaction.md#summary-generation). The separate Anthropic Messages `/anthropic` route has
+its own [setup](./models.md#claude-on-bedrocks-anthropic-messages-api-anthropic).
+
 ### Model value checks
 
 - `id` is required and non-empty; optional `name`, model `baseUrl`, `contextPromotionTarget`, and `compactionModel` must also be non-empty

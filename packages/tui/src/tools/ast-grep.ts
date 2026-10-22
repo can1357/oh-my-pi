@@ -2,10 +2,11 @@ import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
 import type { Theme } from "../theme/theme";
-import { Ellipsis, fileHyperlink, renderStatusLine, renderTreeList, truncateToWidth } from "../render";
+import { fileHyperlink, renderStatusLine, renderTreeList } from "../render";
 import {
 	appendParseErrorsBulletList,
 	createCachedComponent,
+	fitHeaderedRows,
 	formatCount,
 	formatEmptyMessage,
 	formatErrorMessage,
@@ -205,7 +206,7 @@ export const astGrepToolRenderer = {
 					},
 					uiTheme,
 				);
-				return [header, ...matchLines, ...extraLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
+				return fitHeaderedRows(header, [...matchLines, ...extraLines], width);
 			},
 		);
 	},

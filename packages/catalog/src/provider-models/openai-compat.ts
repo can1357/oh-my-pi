@@ -10,6 +10,7 @@ import {
 	isLikelyOpenAIResponsesId,
 	modelLimitsFor,
 } from "../compat/behavior";
+import { resolveAnthropicApiVersion } from "../compat/anthropic";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision } from "../compat/revision";
@@ -499,10 +500,10 @@ function mapAnthropicModelsDev(payload: unknown, baseUrl: string): ModelSpec<"an
 	return models;
 }
 
-function buildAnthropicDiscoveryHeaders(apiKey: string): Record<string, string> {
+function buildAnthropicDiscoveryHeaders(apiKey: string, baseUrl: string): Record<string, string> {
 	const oauthToken = isAnthropicOAuthToken(apiKey);
 	const headers: Record<string, string> = {
-		"anthropic-version": "2023-06-01",
+		"anthropic-version": resolveAnthropicApiVersion(baseUrl),
 		"anthropic-dangerous-direct-browser-access": "true",
 		"anthropic-beta": ANTHROPIC_OAUTH_BETA,
 	};
@@ -569,8 +570,8 @@ function perTokenPricingCost(pricing: unknown): TokenCost {
 	return {
 		input: toPositiveNumber(rates.prompt, 0) * 1_000_000,
 		output: toPositiveNumber(rates.completion, 0) * 1_000_000,
-		cacheRead: toPositiveNumber(rates.input_cache_read, 0) * 1_000_000,
-		cacheWrite: toPositiveNumber(rates.input_cache_write, 0) * 1_000_000,
+		cacheRead: toPositiveNumber(rates.input_cache_read ?? rates.input_cache_reads, 0) * 1_000_000,
+		cacheWrite: toPositiveNumber(rates.input_cache_write ?? rates.input_cache_writes, 0) * 1_000_000,
 	};
 }
 
@@ -913,7 +914,7 @@ function createSimpleAnthropicProviderOptions(
 					api: "anthropic-messages",
 					provider: providerId,
 					baseUrl: discoveryBaseUrl,
-					headers: buildAnthropicDiscoveryHeaders(apiKey),
+					headers: buildAnthropicDiscoveryHeaders(apiKey, discoveryBaseUrl),
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						const model = mapWithBundledReference(entry, defaults, reference);
@@ -4740,6 +4741,48 @@ export function togetherModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// Inception
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds Inception's authenticated model-discovery manager. A successful
+ * `/v1/models` fetch is the complete roster, keeping only rows that advertise
+ * `chat.completions` (the shared roster also lists FIM/edit and Decisions-only
+ * models); without an API key the bundled Mercury seeds are served.
+ */
+export function inceptionModelManagerOptions(config?: ModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	return {
+		...createOpenAICompatibleModelManagerOptions({
+			api: "openai-completions",
+			providerId: "inception",
+			defaultBaseUrl: "https://api.inceptionlabs.ai/v1",
+			config,
+			requireApiKey: true,
+			dynamicModelsAuthoritative: true,
+			mapModel: (entry, defaults, reference) => {
+				// The shared roster also contains FIM/edit and Decisions-only models;
+				// `supported_endpoints` is required, so a row without it is not chat.
+				if (!Array.isArray(entry.supported_endpoints) || !entry.supported_endpoints.includes("chat.completions")) {
+					return null;
+				}
+				const model = mapWithBundledReference(entry, defaults, reference);
+				return {
+					...model,
+					input: Array.isArray(entry.input_modalities) ? toInputCapabilities(entry.input_modalities) : model.input,
+					cost: isRecord(entry.pricing) ? perTokenPricingCost(entry.pricing) : model.cost,
+					contextWindow: toPositiveNumber(entry.context_length, model.contextWindow),
+					maxTokens: toPositiveNumber(entry.max_output_length, model.maxTokens),
+					...(Array.isArray(entry.supported_features) && {
+						supportsTools: entry.supported_features.includes("tools"),
+					}),
+				};
+			},
+		}),
+		staticModels: seedModels<"openai-completions">("inception"),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 15.5 CoreWeave Serverless Inference
 // ---------------------------------------------------------------------------
 
@@ -4927,7 +4970,7 @@ export interface MoonshotModelManagerConfig {
  * use the K2.x binary `thinking: { type }` block, so the wire path routes it
  * through OpenAI-style `reasoning_effort` (see `buildOpenAICompat`).
  */
-const MOONSHOT_KIMI_K3_COST = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 } as const;
+const MOONSHOT_KIMI_K3_COST = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 } as const;
 export function moonshotModelManagerOptions(
 	config?: MoonshotModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
@@ -5270,8 +5313,8 @@ function mapYoloAutoModel(
 	};
 }
 /**
- * Yolo-Auto model manager: OpenAI-compatible chat completions at the
- * flat-rate `deepseek-flash-v4` endpoint. Live `/v1/models` discovery replaces the
+ * Yolo-Auto model manager: flat-rate OpenAI-compatible chat completions
+ * (`qwen3.8-27b`, `yolo`, ...). Live `/v1/models` discovery replaces the
  * bundled seed once a key is stored or present in `YOLO_AUTO_API_KEY`. Models
  * the provider adds later inherit metadata (reasoning, thinking, context)
  * from the global bundled reference index, so new ids work without a per-id
@@ -6827,7 +6870,7 @@ export function anthropicModelManagerOptions(
 						api: "anthropic-messages",
 						provider: "anthropic",
 						baseUrl: discoveryBaseUrl,
-						headers: buildAnthropicDiscoveryHeaders(apiKey),
+						headers: buildAnthropicDiscoveryHeaders(apiKey, discoveryBaseUrl),
 						mapModel: (
 							entry: OpenAICompatibleModelRecord,
 							defaults: ModelSpec<"anthropic-messages">,

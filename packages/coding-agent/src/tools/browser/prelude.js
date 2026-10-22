@@ -224,6 +224,11 @@
 			if (typeof fnOrCode !== "function" && typeof fnOrCode !== "string") {
 				throw new TypeError("tab.run() expects a function or code string");
 			}
+			if (typeof fnOrCode === "function" && Array.isArray(options)) {
+				throw new TypeError(
+					"tab.run() expects an options object; pass the function's arguments as { args: [...] }: tab.run(async ({ page }, url) => …, { args: [url] })",
+				);
+			}
 			const opts = validateOptions("tab.run", options);
 			const args = opts.args ?? [];
 			if (typeof fnOrCode === "string" && (!Array.isArray(args) || args.length > 0)) {
@@ -253,6 +258,11 @@
 	};
 	globalThis.browser = Object.freeze({
 		async open(options) {
+			if (typeof options === "string") {
+				throw new TypeError(
+					"browser.open() expects an options object; pass the URL inside it: browser.open({ url, name })",
+				);
+			}
 			const opts = validateOptions("browser.open", options);
 			const details = await invoke("open", opts);
 			return makeTab(typeof details.name === "string" ? details.name : (opts.name ?? "main"));

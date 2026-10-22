@@ -54,6 +54,7 @@ import { getNativeBlob, type NativeBlob } from "./blobs";
 import { node } from "./describe";
 import { encodeTspJson, encodeTspMessage, type TspHello, TspReader, splitTspMessage } from "./encode";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiEvent } from "./node";
+import { NARROW_SHEET_COLS } from "./overlay";
 import { nativeComponentId, Reconciler } from "./reconcile";
 import { setNativeRendering } from "./state";
 
@@ -244,6 +245,10 @@ class Surface {
 	acked = 0;
 	/** Send times of unacknowledged frames, oldest first. */
 	unacked: number[] = [];
+	/** Send time of the oldest frame left unanswered when the current stall began; cleared by the next ack. */
+	stalledSince: number | undefined;
+	/** Credit resets since {@link stalledSince}. */
+	stallResets = 0;
 	focus: string | null = null;
 	dirty = false;
 
@@ -456,6 +461,8 @@ export class NativeBackend {
 		surface.reconciler.detachLive();
 		surface.unacked = [];
 		surface.acked = surface.seq;
+		surface.stalledSince = undefined;
+		surface.stallResets = 0;
 		surface.focus = null;
 		surface.dirty = false;
 		this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: SESSION_ROLE, adopt: true });
@@ -612,11 +619,16 @@ export class NativeBackend {
 		if (surface.unacked.length < this.#credits) return true;
 		const oldest = surface.unacked[0]!;
 		if (this.#scheduler.now() - oldest < STALLED_ACK_MS) return false;
-		logger.warn("TSP: terminal stopped acknowledging frames; resuming without credits", {
-			sf: surface.id,
-			s: surface.seq,
-			acked: surface.acked,
-		});
+		// One warning per stall: a terminal that never acks would otherwise log one every `STALLED_ACK_MS`.
+		if (surface.stalledSince === undefined) {
+			surface.stalledSince = oldest;
+			logger.warn("TSP: terminal stopped acknowledging frames; resuming without credits", {
+				sf: surface.id,
+				s: surface.seq,
+				acked: surface.acked,
+			});
+		}
+		surface.stallResets++;
 		surface.unacked = [];
 		surface.acked = surface.seq;
 		return true;
@@ -801,6 +813,15 @@ export class NativeBackend {
 				const newly = Math.min(event.s, surface.seq) - surface.acked;
 				surface.acked = Math.min(event.s, surface.seq);
 				surface.unacked.splice(0, newly);
+				if (surface.stalledSince !== undefined) {
+					logger.debug("TSP: terminal acknowledging frames again", {
+						sf: surface.id,
+						stalledMs: this.#scheduler.now() - surface.stalledSince,
+						resets: surface.stallResets,
+					});
+					surface.stalledSince = undefined;
+					surface.stallResets = 0;
+				}
 				this.#clearStallTimer();
 				if (surface.dirty) this.#host.requestRender();
 				return;
@@ -919,7 +940,12 @@ export class NativeBackend {
 		if (overlay.component.nativeSheet?.(this.#cx)) return overlay.component;
 		const own = overlay.component.nativeOverlay;
 		const anchor = own?.anchor ?? overlayAnchor(overlay.options);
-		const size = own?.size ?? overlaySize(overlay.options, this.#cx.cols);
+		let size = own?.size ?? overlaySize(overlay.options, this.#cx.cols);
+		// A centered sheet in a narrow pane fills it instead of floating with margins: `lg`, and a component's own `md`
+		// sheet (an undeclared `md` is a generic dialog sized from its options).
+		if (anchor === "center" && this.#cx.cols < NARROW_SHEET_COLS && (size === "lg" || own?.size === "md")) {
+			size = "full";
+		}
 		const modal = overlay.focused || overlay.options?.fullscreen === true;
 		const role = own?.role;
 		const head = own?.head;

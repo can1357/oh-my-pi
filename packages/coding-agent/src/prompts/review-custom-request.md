@@ -4,7 +4,7 @@ Mode: custom instructions.
 
 ## Distribution
 
-Use `task`: `agent: "reviewer"`, `tasks` array. Create exactly **1 reviewer task**; assignment MUST include custom instructions.
+Use `task` with a `tasks` array. Set `agent: "reviewer"` inside the `tasks[]` item (`tasks[].agent`), never at the top level or omitted. Create exactly **1 reviewer task**; assignment MUST include custom instructions.
 
 ## Reviewer Instructions
 
