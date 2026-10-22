@@ -378,6 +378,90 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			expect(run.stopEvents).toHaveLength(0);
 			expect(run.mock.calls).toHaveLength(1);
 		});
+
+		it("offers its reply to a focused user's prompt before publishing it as the result", async () => {
+			const run = await setup({
+				structured: false,
+				parentId: "Parent",
+				responses: [{ content: ["REFUSED-REPLY"] }, { content: ["replacement reply"] }],
+				onStop: (_event, callIndex) => (callIndex === 1 ? { decision: "block", reason: "keep going" } : undefined),
+			});
+
+			// The focused-session input path: a plain user prompt on the idle child.
+			await run.session.prompt("go on");
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+
+			expect(run.stopEvents.map(event => event.stop_hook_active)).toEqual([false, true]);
+			const artifact = await Bun.file(run.artifact).text();
+			expect(artifact).toContain("replacement reply");
+			expect(artifact).not.toContain("REFUSED-REPLY");
+		});
+
+		it("offers its reply to a parent follow-up it consumed during a peer wake", async () => {
+			const peerTurnRunning = Promise.withResolvers<void>();
+			const releasePeerTurn = Promise.withResolvers<void>();
+			const run = await setup({
+				structured: false,
+				parentId: "Parent",
+				responses: [
+					async () => {
+						peerTurnRunning.resolve();
+						await releasePeerTurn.promise;
+						return { content: ["peer answer"] };
+					},
+					// The parent's steer entered the turn: this reply is the result it asked for.
+					{ content: ["REFUSED-REPLY"] },
+					{ content: ["replacement reply"] },
+				],
+				onStop: (_event, callIndex) => (callIndex === 1 ? { decision: "block", reason: "keep going" } : undefined),
+			});
+
+			await deliverWake(run.session, "m1", "peer");
+			await peerTurnRunning.promise;
+			await deliverWake(run.session, "m2", "Parent");
+			releasePeerTurn.resolve();
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+
+			expect(run.stopEvents.map(event => event.stop_hook_active)).toEqual([false, true]);
+			const artifact = await Bun.file(run.artifact).text();
+			expect(artifact).toContain("replacement reply");
+			expect(artifact).not.toContain("REFUSED-REPLY");
+		});
+
+		it("does not offer an owner wake's reply that ended on a provider error", async () => {
+			const run = await setup({
+				structured: false,
+				parentId: "Parent",
+				responses: [{ content: ["PARTIAL-REPLY"], stopReason: "error" }],
+				onStop: () => ({ decision: "block", reason: "not done" }),
+			});
+
+			await deliverWake(run.session, "m1", "Parent");
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+
+			expect(run.stopEvents).toHaveLength(0);
+			expect(run.mock.calls).toHaveLength(1);
+		});
+
+		it("does not offer an owner wake's reply whose turn then failed", async () => {
+			const run = await setup({
+				structured: false,
+				parentId: "Parent",
+				failWakeAfterTurn: true,
+				responses: [{ content: ["UNPUBLISHED-REPLY"] }],
+				onStop: () => ({ decision: "block", reason: "not done" }),
+			});
+
+			await deliverWake(run.session, "m1", "Parent");
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+
+			expect(run.stopEvents).toHaveLength(0);
+			expect(run.mock.calls).toHaveLength(1);
+		});
 	});
 
 	it("fails closed when a newer wake took the session while handlers were consulting", async () => {
