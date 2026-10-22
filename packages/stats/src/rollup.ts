@@ -525,8 +525,27 @@ function normalizeCutoff(cutoff: number | null | undefined): number | null {
 	return cutoff === undefined || cutoff === null || cutoff <= 0 ? null : cutoff;
 }
 
+/**
+ * Series bucket for a fact row. Day buckets are the local calendar date
+ * (`YYYY-MM-DD` in the server's timezone, the viewer's when both run on one
+ * machine; the client tolerates a mismatch by floor-matching, see
+ * `client/data/series.ts`), so a day matches the date the user sees. Rolled
+ * hours are attributed by their start, so half-hour UTC offsets shift a day
+ * boundary by up to 30 minutes, as in {@link getProviderHourlyBurn}. Shorter
+ * buckets stay epoch-aligned.
+ */
 function seriesBucket(bucketMs: number): string {
+	if (bucketMs === DAY_MS) return "date(f.bucket / 1000, 'unixepoch', 'localtime')";
 	return `(f.bucket / ${bucketMs}) * ${bucketMs}`;
+}
+
+/**
+ * Epoch ms for a {@link seriesBucket} value. A local date resolves the way the
+ * client's day axis does (an offset-less date-time parses as local time), so
+ * both agree even on a day whose midnight a DST change skips.
+ */
+function seriesTimestamp(bucket: number | string): number {
+	return typeof bucket === "string" ? Date.parse(`${bucket}T00:00:00`) : bucket;
 }
 
 // ---------------------------------------------------------------------------
@@ -654,13 +673,13 @@ export function getStatsByAgentType(cutoff: number | null = null): AgentTypeStat
 
 /** Requests, errors, tokens and cost per bucket. */
 export function getTimeSeries({ cutoff, bucketMs }: RangeWindow): TimeSeriesPoint[] {
-	return queryMessages<{ bucket: number; requests: number; errors: number; tokens: number; cost: number }>(
+	return queryMessages<{ bucket: number | string; requests: number; errors: number; tokens: number; cost: number }>(
 		{ cutoff, bucketMs },
 		`${seriesBucket(bucketMs)} AS bucket, SUM(f.requests) AS requests, SUM(f.failed) AS errors,
 		 SUM(f.total_tokens) AS tokens, TOTAL(f.cost_total) AS cost`,
 		"GROUP BY 1 ORDER BY 1",
 	).map(row => ({
-		timestamp: row.bucket,
+		timestamp: seriesTimestamp(row.bucket),
 		requests: row.requests,
 		errors: row.errors,
 		tokens: row.tokens,
@@ -670,17 +689,22 @@ export function getTimeSeries({ cutoff, bucketMs }: RangeWindow): TimeSeriesPoin
 
 /** Requests per bucket per (model, provider). */
 export function getModelTimeSeries({ cutoff, bucketMs }: RangeWindow): ModelTimeSeriesPoint[] {
-	return queryMessages<{ bucket: number; model: string; provider: string; requests: number }>(
+	return queryMessages<{ bucket: number | string; model: string; provider: string; requests: number }>(
 		{ cutoff, bucketMs },
 		`${seriesBucket(bucketMs)} AS bucket, f.model AS model, f.provider AS provider, SUM(f.requests) AS requests`,
 		"GROUP BY 1, f.model, f.provider ORDER BY 1",
-	).map(row => ({ timestamp: row.bucket, model: row.model, provider: row.provider, requests: row.requests }));
+	).map(row => ({
+		timestamp: seriesTimestamp(row.bucket),
+		model: row.model,
+		provider: row.provider,
+		requests: row.requests,
+	}));
 }
 
 /** Average TTFT and output tokens/s per bucket per (model, provider). */
 export function getModelPerformanceSeries({ cutoff, bucketMs }: RangeWindow): ModelPerformancePoint[] {
 	return queryMessages<{
-		bucket: number;
+		bucket: number | string;
 		model: string;
 		provider: string;
 		requests: number;
@@ -693,7 +717,7 @@ export function getModelPerformanceSeries({ cutoff, bucketMs }: RangeWindow): Mo
 		 TOTAL(f.tps_sum) / NULLIF(SUM(f.tps_n), 0) AS avg_tps`,
 		"GROUP BY 1, f.model, f.provider ORDER BY 1",
 	).map(row => ({
-		timestamp: row.bucket,
+		timestamp: seriesTimestamp(row.bucket),
 		model: row.model,
 		provider: row.provider,
 		requests: row.requests,
@@ -705,7 +729,7 @@ export function getModelPerformanceSeries({ cutoff, bucketMs }: RangeWindow): Mo
 /** Daily cost per (model, provider) with the per-component split. */
 export function getCostTimeSeries(cutoff: number | null = null): CostTimeSeriesPoint[] {
 	return queryMessages<{
-		bucket: number;
+		bucket: string;
 		model: string;
 		provider: string;
 		cost: number;
@@ -723,7 +747,7 @@ export function getCostTimeSeries(cutoff: number | null = null): CostTimeSeriesP
 		 SUM(f.requests) AS requests`,
 		"GROUP BY 1, f.model, f.provider ORDER BY 1",
 	).map(row => ({
-		timestamp: row.bucket,
+		timestamp: seriesTimestamp(row.bucket),
 		model: row.model,
 		provider: row.provider,
 		cost: row.cost,
@@ -828,7 +852,7 @@ export function getDailyActivityFromRollup(cutoff: number): DailyActivityPoint[]
 /** Tokens/cost per bucket per provider. */
 export function getProviderTimeSeries({ cutoff, bucketMs }: RangeWindow): ProviderTimeSeriesPoint[] {
 	return queryMessages<{
-		bucket: number;
+		bucket: number | string;
 		provider: string;
 		total_tokens: number;
 		cost: number;
@@ -841,7 +865,7 @@ export function getProviderTimeSeries({ cutoff, bucketMs }: RangeWindow): Provid
 		 TOTAL(f.cost_total) AS cost, SUM(f.unpriced) AS unpriced, SUM(f.requests) AS requests`,
 		"GROUP BY 1, f.provider ORDER BY 1",
 	).map(row => ({
-		timestamp: row.bucket,
+		timestamp: seriesTimestamp(row.bucket),
 		provider: row.provider,
 		totalTokens: row.total_tokens,
 		cost: row.cost,
@@ -964,9 +988,14 @@ export function getToolStatsByModel(cutoff: number | null = null): ToolModelStat
 
 /** Calls and errors per bucket per tool. */
 export function getToolTimeSeries({ cutoff, bucketMs }: RangeWindow): ToolTimeSeriesPoint[] {
-	return queryTools<{ bucket: number; tool_name: string; calls: number; errors: number }>(
+	return queryTools<{ bucket: number | string; tool_name: string; calls: number; errors: number }>(
 		{ cutoff, bucketMs },
 		`${seriesBucket(bucketMs)} AS bucket, f.tool_name AS tool_name, SUM(f.calls) AS calls, SUM(f.errors) AS errors`,
 		"GROUP BY 1, f.tool_name ORDER BY 1",
-	).map(row => ({ timestamp: row.bucket, tool: row.tool_name, calls: row.calls, errors: row.errors }));
+	).map(row => ({
+		timestamp: seriesTimestamp(row.bucket),
+		tool: row.tool_name,
+		calls: row.calls,
+		errors: row.errors,
+	}));
 }
