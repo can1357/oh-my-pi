@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `MCPResourceLinkContent` (including the link's `size`, `annotations`, `icons` and `_meta`) to the `MCPContent` union and exported the shared `MCPAnnotations` and `MCPIcon` types, so `MCPToolDetails.rawContent` can hold MCP `resource_link` tool-result blocks ([#16561](https://github.com/can1357/oh-my-pi/pull/16561) by [@mottopanikeiku](https://github.com/mottopanikeiku))
 - Added `modelEnds` to `GroupedFileSection`: per file, the model-line index just past its last line, so a caller cutting the output can tell which files it shows whole ([#16594](https://github.com/can1357/oh-my-pi/pull/16594) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed

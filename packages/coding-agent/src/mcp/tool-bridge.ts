@@ -230,6 +230,13 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
 						: `[Resource: ${item.resource.uri}]`,
 				);
 				break;
+			case "resource_link": {
+				const header = item.mimeType
+					? `[Resource link: ${item.uri} (${item.mimeType})]`
+					: `[Resource link: ${item.uri}]`;
+				appendText([header, item.title ?? item.name, item.description].filter(Boolean).join("\n"));
+				break;
+			}
 		}
 	}
 	flushText();

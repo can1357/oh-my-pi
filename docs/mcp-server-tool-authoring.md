@@ -241,7 +241,7 @@ assume that every field present in the model-generated call reaches the server.
 `MCPTool.execute()` / `DeferredMCPTool.execute()`:
 
 - calls MCP `tools/call`
-- combines text/resource content while preserving image blocks
+- combines text/resource/resource-link content while preserving image blocks; a `resource_link` becomes a `[Resource link: <uri> (<mimeType>)]` line (MIME type only when given) followed by its title (or name) and description
 - returns details including `serverName`, `mcpToolName`, raw content, MCP `_meta`, and provider metadata
 - preserves `structuredContent` in details and adds a fenced JSON text block unless an existing text block already contains the same JSON value
 - maps server-reported `isError` to an `Error:` prefix and `isError: true`

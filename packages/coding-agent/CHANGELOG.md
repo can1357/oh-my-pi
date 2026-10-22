@@ -7,6 +7,10 @@
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 
+### Changed
+
+- Moved the `MCPAnnotations` and `MCPIcon` types to `@oh-my-pi/pi-tui/tools/mcp`, where MCP resource links share them; import them from there or from `@oh-my-pi/pi-coding-agent/mcp` instead of `@oh-my-pi/pi-coding-agent/mcp/types` ([#16561](https://github.com/can1357/oh-my-pi/pull/16561) by [@mottopanikeiku](https://github.com/mottopanikeiku))
+
 ### Fixed
 
 - Fixed `omp gc --compress` exiting with "the event loop drained while it was still pending" on Bun 1.3.14 when a session artifact is pretty-printed JSON larger than 1 MiB, and session header probes (gc, session move and transfer) reading whole artifacts on Windows ([#15745](https://github.com/can1357/oh-my-pi/issues/15745), [#16754](https://github.com/can1357/oh-my-pi/pull/16754) by [@wolfiesch](https://github.com/wolfiesch))
@@ -32,6 +36,7 @@
 - Fixed reading `proc://<id>/kill` or `proc://<id>/mode` answering only "writable only", so agents often moved on with the job still running; the error now names the `write` call that cancels the job or sets the mode, with the real id ([#16580](https://github.com/can1357/oh-my-pi/pull/16580) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `history://<id>` failing with "has no transcript: session is gone" for a worker that is still running but has not created its session or transcript file yet; it now answers "No transcript has been written yet". ([#16645](https://github.com/can1357/oh-my-pi/pull/16645) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed MCP tool results made of resource links (`resource_link` content) reaching the model as an empty result; each link's URI, title or name, and description are now included ([#16561](https://github.com/can1357/oh-my-pi/pull/16561) by [@mottopanikeiku](https://github.com/mottopanikeiku))
 
 ## [18.12.6] - 2026-10-21
 
