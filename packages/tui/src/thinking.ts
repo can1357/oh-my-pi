@@ -312,12 +312,10 @@ export function resolveTaskEffortLevel(
 			break;
 	}
 	if (maxEffort === undefined) return resolved;
+	if (model) assertModelSupportsEffortCeiling(model, maxEffort);
 	const maxIndex = THINKING_EFFORTS.indexOf(maxEffort);
-	const ceiling = supported.findLast(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex);
-	if (ceiling === undefined) {
-		const modelName = model ? `${model.provider}/${model.id}` : "Selected model";
-		throw new RangeError(`${modelName} has no supported thinking effort at or below task.maxEffort=${maxEffort}`);
-	}
+	// Without a model the full canonical range always holds `maxEffort` itself.
+	const ceiling = supported.findLast(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex) ?? maxEffort;
 	return THINKING_EFFORTS.indexOf(resolved) > THINKING_EFFORTS.indexOf(ceiling) ? ceiling : resolved;
 }
 
@@ -365,6 +363,14 @@ export function modelSupportsEffortCeiling(model: Model, ceiling: Effort): boole
 	if (supported.length === 0) return true;
 	const maxIndex = THINKING_EFFORTS.indexOf(ceiling);
 	return supported.some(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex);
+}
+
+/** Throws when `model` has no supported effort at or below `task.maxEffort`, so a capped spawn fails instead of running at its floor. */
+export function assertModelSupportsEffortCeiling(model: Model, maxEffort: Effort): void {
+	if (modelSupportsEffortCeiling(model, maxEffort)) return;
+	throw new RangeError(
+		`${model.provider}/${model.id} has no supported thinking effort at or below task.maxEffort=${maxEffort}`,
+	);
 }
 
 /**

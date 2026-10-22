@@ -57,6 +57,7 @@ import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import {
+	invalidModelSelectorReason,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
 	StructuredSubagentError,
@@ -81,6 +82,7 @@ import {
 	cfgTaskMaxRuntimeMs,
 	cfgTaskSpeculativeLaunch,
 	cfgTaskStructured,
+	perCallModelEnabled,
 } from "./settings";
 
 function renderSubagentUserPrompt(assignment: string): string {
@@ -152,6 +154,7 @@ interface TaskDescriptionOptions {
 	disabledAgents: string[];
 	batchEnabled: boolean;
 	effortEnabled: boolean;
+	perCallModelEnabled: boolean;
 	evalToolsEnabled: boolean;
 	structured: boolean;
 	asyncEnabled: boolean;
@@ -202,6 +205,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
+		perCallModelEnabled: options.perCallModelEnabled,
 		evalToolsEnabled: options.evalToolsEnabled,
 		structured: options.structured,
 		asyncEnabled: options.asyncEnabled,
@@ -274,8 +278,11 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			if (!item || typeof item.task !== "string" || item.task.trim() === "") {
 				return `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""} is missing \`task\`. Every task needs complete, self-contained instructions.`;
 			}
-			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
+			const label = `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`;
+			const effortError = validateEffort(item.effort, label);
 			if (effortError) return effortError;
+			const modelError = validateModel(item, label);
+			if (modelError) return modelError;
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
@@ -298,7 +305,22 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
 			: "Missing `task`. Provide complete, self-contained instructions for the agent.";
 	}
-	return validateEffort(params.effort, "The call");
+	return validateEffort(params.effort, "The call") ?? validateModel(params, "The call");
+}
+
+/**
+ * A `model` on a call naming `seance` is checked at preflight, once the name resolves:
+ * the bundled seance takes it as its source-session override, a shadowing agent as a per-call model.
+ */
+function validateModel(item: TaskItem | TaskParams, label: string): string | undefined {
+	return item.agent === SEANCE_AGENT_NAME ? undefined : invalidModelSelectorReason(item.model, label);
+}
+
+function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "perCallModel" | "seanceModel"> {
+	if (params.model === undefined) return {};
+	if (params.agent === SEANCE_AGENT_NAME) return { seanceModel: params.model };
+	// `validateModel` rejected anything but one selector or a list of them before dispatch.
+	return { perCallModel: params.model };
 }
 
 /**
@@ -720,6 +742,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			structured: this.#isStructured(),
 			defaultAgent: this.#defaultAgent(),
 			seanceFields: this.#seanceSchemaFields(),
+			perCallModel: perCallModelEnabled(this.session.settings, "task"),
 		});
 	}
 
@@ -753,6 +776,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
+			perCallModelEnabled: perCallModelEnabled(this.session.settings, "task"),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
@@ -920,7 +944,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			context: this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined,
 			agent: params.agent,
 			sourceSession: params.sourceSession,
-			model: params.model,
+			...spawnModelFields(params),
 			...this.#resultParams(params),
 			...this.#effortParams(params),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
@@ -1747,7 +1771,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				context,
 				agent: params.agent,
 				sourceSession: params.sourceSession,
-				model: params.model,
+				...spawnModelFields(params),
 				...this.#resultParams(params),
 				...this.#effortParams(params),
 				solutionSpace: params.solutionSpace,

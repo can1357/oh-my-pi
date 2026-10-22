@@ -4,6 +4,12 @@
 
 ### Added
 
+- Added `task.perCallModel` (`off` by default, `eval`, `on`): task items and eval `agent()`/`workpool()` can pick a subagent's model with one exact `provider/model-id[:level]`, limited to models already named by a configured chat role, a bundled or user-level agent, or the parent session; `task.perCallModelAllow` can narrow that to a list of exact models, and a per-call subagent fails instead of switching to a fallback or larger-context model or running above `task.maxEffort`, including after cold revival; a project agent that shadows the `seance` name gets no exemption ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
+- Added per-call `model` role selectors and candidate lists: a task item or eval `agent()`/`workpool()` can name a configured chat role (`@review`, `@review:high`) or an ordered array of exact ids and roles, tried in order at the spawn and skipping candidates that are unavailable or lack credentials; `@default`, unconfigured roles and built-in role defaults are rejected, every candidate stays limited to operator-approved models, the worker stays on the model it resolved to (including after cold revival), and `task.perCallModelAllow` also accepts configured `@role` entries and globs, which only narrow the grants ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))
+
+### Changed
+
+- A task call or eval `agent()` that passes `model` while `task.perCallModel` does not allow it now fails with an error instead of having `model` silently dropped ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix))
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 
