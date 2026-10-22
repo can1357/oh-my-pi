@@ -123,6 +123,8 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		driven?: boolean;
 		/** The wake turn's prompt rejects once the turn itself ran (a post-yield session failure). */
 		failWakeAfterTurn?: boolean;
+		/** `false` = a message-result child: no yield, its reply is the result. */
+		structured?: boolean;
 	}) {
 		const stopEvents: SubagentStopEvent[] = [];
 		const lifecycle: LifecycleFrame[] = [];
@@ -194,6 +196,7 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 				artifactsDir: tempDir.path(),
 				maxRuntimeMs: args.maxRuntimeMs,
 				agentType: args.agentType,
+				structured: args.structured,
 			});
 		}
 		return { session, mock, stopEvents, lifecycle, eventBus, artifact: path.join(tempDir.path(), `${AGENT_ID}.md`) };
@@ -286,6 +289,57 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		const artifact = await Bun.file(run.artifact).text();
 		expect(artifact).toContain("replacement");
 		expect(artifact).not.toContain("REFUSED-PAYLOAD");
+	});
+
+	describe("a structured:false child", () => {
+		it("offers its reply to an owner wake before publishing it as the result", async () => {
+			const run = await setup({
+				structured: false,
+				parentId: "Parent",
+				responses: [{ content: ["REFUSED-REPLY"] }, { content: ["replacement reply"] }],
+				onStop: (_event, callIndex) => (callIndex === 1 ? { decision: "block", reason: "keep going" } : undefined),
+			});
+
+			await deliverWake(run.session, "m1", "Parent");
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+
+			expect(run.stopEvents.map(event => event.stop_hook_active)).toEqual([false, true]);
+			const artifact = await Bun.file(run.artifact).text();
+			expect(artifact).toContain("replacement reply");
+			expect(artifact).not.toContain("REFUSED-REPLY");
+		});
+
+		it("fails an owner wake whose refused reply no continuation replaced", async () => {
+			const run = await setup({
+				structured: false,
+				parentId: "Parent",
+				responses: [{ content: ["REFUSED-REPLY"] }, { content: [""] }],
+				onStop: () => ({ decision: "block", reason: "not done" }),
+			});
+
+			await deliverWake(run.session, "m1", "Parent");
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+
+			expect(run.stopEvents).toHaveLength(1);
+			expect(await Bun.file(run.artifact).exists()).toBe(false);
+			expect(run.lifecycle.at(-1)?.status).toBe("failed");
+		});
+
+		it("does not offer a peer relay, which is not a result", async () => {
+			const run = await setup({
+				structured: false,
+				parentId: "Parent",
+				responses: [{ content: ["status is fine"] }],
+				onStop: () => ({ decision: "block", reason: "not done" }),
+			});
+
+			await wake(run.session);
+
+			expect(run.stopEvents).toHaveLength(0);
+			expect(run.mock.calls).toHaveLength(1);
+		});
 	});
 
 	it("fails closed when a newer wake took the session while handlers were consulting", async () => {

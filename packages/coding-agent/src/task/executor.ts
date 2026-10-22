@@ -3487,7 +3487,9 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
 }
 
 /**
- * `subagent_stop` passes for an IRC wake turn that ended on a candidate `yield`.
+ * `subagent_stop` passes for an IRC wake turn that ended on a candidate: a
+ * `yield`, or for a `structured: false` child a reply that is its result
+ * (`hasCandidate` reports whether the turn still has one).
  * The session's turn observer finishes after the turn ended and its owned
  * async work settled, so a refusal can only re-drive the session from there.
  * The observer contract detaches the monitor before anything awaits, so each
@@ -3516,6 +3518,7 @@ async function runWakeStopPasses(
 	monitor: SubagentRunMonitor,
 	stopHook: SubagentStopHook,
 	superseded: AbortSignal,
+	hasCandidate: () => boolean,
 ): Promise<boolean> {
 	const signal = monitor.abortSignal;
 	const io: SubagentStopPassIo = {
@@ -3544,12 +3547,12 @@ async function runWakeStopPasses(
 	let refused = true;
 	let supersededWhileJudging = false;
 	try {
-		while (refused && monitor.yieldCalled()) {
+		while (refused && hasCandidate()) {
 			refused = await runSubagentStopPass(session, monitor, stopHook, io);
 			// An allow after a newer observation took the session is no verdict on a
 			// candidate this turn can still publish: it would finalize after the newer
 			// turn and overwrite that turn's artifact with a stale yield. Drop it.
-			if (!refused && superseded.aborted && monitor.yieldCalled()) {
+			if (!refused && superseded.aborted && hasCandidate()) {
 				monitor.invalidateYieldForStop();
 				supersededWhileJudging = true;
 			}
@@ -3585,8 +3588,9 @@ async function runWakeStopPasses(
  * the session up front so a `send await:true` waiter holds its "stopped
  * without replying" verdict until the relay has been delivered.
  *
- * A turn that ended on a yield is offered to `subagent_stop` handlers before it
- * is accepted ({@link runWakeStopPasses}); `parentSessionId` /
+ * A turn that ended on a yield, or a `structured: false` reply its owner or the
+ * user prompted, is offered to `subagent_stop` handlers before it is accepted
+ * ({@link runWakeStopPasses}); `parentSessionId` /
  * `parentSessionFile` identify the spawning session in that event.
  */
 export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWakeTurnMonitorOptions): void {
@@ -3734,13 +3738,23 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		return async turnError => {
 			unsubscribeTurn();
 			unsubscribeParentSteer();
-			// A wake turn's candidate yield is judged like a first run's before it
-			// is accepted or published, even when the turn errored after latching
-			// it: an accepted yield outranks the turn error, so it must not finalize
-			// unjudged. Unstructured wake turns record no yield, so their prose reply
-			// is a peer relay rather than a result and is not offered.
+			// A wake turn's candidate is judged like a first run's before it is
+			// accepted or published: a yield even when the turn errored after
+			// latching it (an accepted yield outranks the turn error, so it must not
+			// finalize unjudged), and for a `structured: false` child the reply its
+			// owner or the user asked for, which publishes as its result. A reply to
+			// a peer is only a relay, not a result, and is not offered.
+			const structured = options.structured !== false;
+			const publishMessageResult = ownerWoken || ownerPrompted || userPrompted;
+			const hasCandidate = structured
+				? () => turnMonitor.yieldCalled()
+				: () => publishMessageResult && turnMonitor.lastReportTurnText() !== undefined;
+			const replyTurn = session.getLastAssistantMessage();
+			const judgeable =
+				structured ||
+				(turnError === undefined && replyTurn?.stopReason !== "error" && replyTurn?.stopReason !== "aborted");
 			let supersededWhileJudging = false;
-			if (turnMonitor.yieldCalled()) {
+			if (judgeable && hasCandidate()) {
 				supersededWhileJudging = await runWakeStopPasses(
 					session,
 					turnMonitor,
@@ -3752,9 +3766,10 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 							parentSessionFile: options.parentSessionFile,
 						},
 						turnMonitor.abortSignal,
-						options.structured !== false,
+						structured,
 					),
 					superseded.signal,
+					hasCandidate,
 				);
 			}
 			const activeSession = turnMonitor.takeActiveSession();
@@ -3843,7 +3858,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					parentToolCallId: options.parentToolCallId,
 					detached: true,
 					followUpTurn: true,
-					publishMessageResult: ownerWoken || ownerPrompted || userPrompted,
+					publishMessageResult,
 					// A cancelled wake job must not replace the accepted result.
 					signal: jobCancel.signal,
 					sessionFile,
