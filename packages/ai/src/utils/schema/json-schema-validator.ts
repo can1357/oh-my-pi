@@ -15,6 +15,7 @@
 import { parseLocalRefPointer } from "@oh-my-pi/omptype";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { areJsonValuesEqual } from "./equality";
+import { stamp } from "./stamps";
 
 export interface JsonSchemaValidationIssue {
 	path: PropertyKey[];
@@ -203,8 +204,46 @@ function requiresOnlyPropertyPresence(schema: unknown, key: string, root: unknow
 	);
 }
 
-/** Whether any same-instance schema declaration or constraint owns this property name. */
+/**
+ * Memo slot for {@link schemaDefinesProperty}'s per-schema answer cache: one
+ * slot per schema object, with the property name as the key inside it.
+ */
+const kDefinesPropertyCache = Symbol("ai.schemaDefinesPropertyCache");
+
+/**
+ * Whether any same-instance schema declaration or constraint owns this property name.
+ *
+ * The answer depends on exactly two things: the property name, and the content
+ * of the JSON-Schema graph reachable from the root. The cache is keyed by BOTH
+ * — the root's object identity (through {@link stamp}, the repo's
+ * identity-keyed side table) and the property name within it — so two
+ * schemas asking about the same name keep separate answers, and one schema
+ * asked about two names keeps two answers.
+ *
+ * The root identity covers the graph because the schema graphs reaching this
+ * function are already treated as immutable for the lifetime of their
+ * identity: `toolWireSchema` memoizes the wire schema against the tool's
+ * parameters, and `stripSchemaDescriptions`, `tryEnforceStrictSchema` and
+ * `memoizedInjectIntentIntoSchema` already memoize derived values against
+ * that same wire-schema object. A graph mutated in place after production
+ * would already hand those three a stale answer; this cache adds no new
+ * assumption beyond the ones the schema pipeline already relies on.
+ */
 export function schemaDefinesProperty(schema: unknown, key: string): boolean {
+	if (!isRecord(schema)) return false;
+	const cache = stamp(schema, kDefinesPropertyCache, () => new Map<string, boolean>());
+	const cached = cache.get(key);
+	if (cached !== undefined) return cached;
+	const result = computeSchemaDefinesProperty(schema, key);
+	cache.set(key, result);
+	return result;
+}
+
+/**
+ * Uncached walk of the schema graph. {@link schemaDefinesProperty} fronts
+ * this with the memo described there.
+ */
+function computeSchemaDefinesProperty(schema: unknown, key: string): boolean {
 	const root = schema;
 	const visited = new WeakMap<object, number>();
 	const visit = (node: unknown, context: "positive" | "negative" | "predicate" = "positive"): boolean => {

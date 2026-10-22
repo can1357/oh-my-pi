@@ -542,7 +542,10 @@ function normalizeSchemaObjectNode(value: JsonObject, options: NormalizeSchemaWa
 		if (typeof result.type === "string") dropForeignTypeKeywords(result, result.type);
 	}
 	if (constValue !== undefined) {
-		const existingEnum = Array.isArray(result.enum) ? result.enum : [];
+		// Copy before pushing: `result.enum` may alias the caller's array (the
+		// keyword copy above reuses the input's value for non-schema keywords),
+		// and pushing into it would mutate the caller's schema in place.
+		const existingEnum = Array.isArray(result.enum) ? [...result.enum] : [];
 		pushEnumValue(existingEnum, constValue);
 		result.enum = existingEnum;
 		if (!result.type) {
