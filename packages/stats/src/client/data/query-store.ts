@@ -39,6 +39,8 @@ export type QueryFetcher<T> = (context: QueryFetchContext, previous: T | undefin
 const defaultBucket: CacheBucket = { entries: new Map(), limit: 128 };
 /** Full session traces: MBs each, at most a few worth keeping. */
 const traceBucket: CacheBucket = { entries: new Map(), limit: 4 };
+/** Context timelines carry per-step browser details and can also reach MBs. */
+const contextBucket: CacheBucket = { entries: new Map(), limit: 4 };
 /** Request detail payloads (full prompts and responses). */
 const requestBucket: CacheBucket = { entries: new Map(), limit: 16 };
 
@@ -46,6 +48,7 @@ const inflight = new Map<string, Inflight>();
 
 function bucketFor(key: string): CacheBucket {
 	if (key.startsWith('["trace",')) return traceBucket;
+	if (key.startsWith('["context-session",')) return contextBucket;
 	if (key.startsWith('["request",')) return requestBucket;
 	return defaultBucket;
 }

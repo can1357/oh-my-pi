@@ -37,7 +37,7 @@ export class TracePathError extends Error {}
  */
 export const TRACE_ETAG_VERSION = 3;
 
-const MAX_TRACK_DEPTH = 6;
+export const MAX_TRACK_DEPTH = 6;
 const LABEL_MAX = 80;
 const DETAIL_MAX = 160;
 const TITLE_SCAN_BYTES = 4096;
@@ -155,7 +155,7 @@ interface TrackScan {
 // Path containment + transcript IO
 
 /** Resolve a client-supplied transcript path, enforcing sessions-root containment. */
-function resolveSessionPath(fileParam: string): string {
+export function resolveSessionPath(fileParam: string): string {
 	const resolved = path.resolve(fileParam);
 	const rel = path.relative(getSessionsDir(), resolved);
 	if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
@@ -169,7 +169,7 @@ function resolveSessionPath(fileParam: string): string {
 }
 
 /** Read a transcript, transparently gunzipping gc-compressed sessions. */
-async function readTranscript(resolved: string): Promise<Uint8Array> {
+export async function readTranscript(resolved: string): Promise<Uint8Array> {
 	const bytes = await Bun.file(resolved).bytes();
 	return resolved.endsWith(".gz") ? Bun.gunzipSync(bytes) : bytes;
 }
@@ -639,8 +639,52 @@ function scanTranscript(
 // Recursive track tree
 
 /** Strip the transcript extension (`.jsonl` / `.jsonl.gz`). */
-function transcriptStem(file: string): string {
+export function transcriptStem(file: string): string {
 	return file.endsWith(".jsonl.gz") ? file.slice(0, -".jsonl.gz".length) : file.slice(0, -".jsonl".length);
+}
+
+/** Sorted direct children; shared by trace construction and recursive discovery. */
+async function directChildTranscripts(file: string): Promise<string[]> {
+	let names: string[];
+	try {
+		names = await fs.readdir(transcriptStem(file));
+	} catch (err) {
+		if (isEnoent(err)) return [];
+		throw err;
+	}
+	return names
+		.sort()
+		.filter(name => name.endsWith(".jsonl") || name.endsWith(".jsonl.gz"))
+		.map(name => path.join(transcriptStem(file), name));
+}
+
+export interface ChildTranscript {
+	file: string;
+	key: string;
+	/** Filename-preserving relative key for freshness fingerprints. */
+	fingerprintKey: string;
+	depth: number;
+}
+
+/** Discover the exact recursive transcript set used by context fleet and ETags. */
+export async function discoverChildTranscripts(rootFile: string): Promise<ChildTranscript[]> {
+	const children: ChildTranscript[] = [];
+	const visited = new Set([rootFile]);
+	const walk = async (file: string, parentKey: string, parentFingerprintKey: string, depth: number): Promise<void> => {
+		if (depth >= MAX_TRACK_DEPTH) return;
+		for (const childFile of await directChildTranscripts(file)) {
+			if (visited.has(childFile)) continue;
+			visited.add(childFile);
+			const stem = path.basename(transcriptStem(childFile));
+			const name = path.basename(childFile);
+			const key = parentKey ? `${parentKey}/${stem}` : stem;
+			const fingerprintKey = parentFingerprintKey ? `${parentFingerprintKey}/${name}` : name;
+			children.push({ file: childFile, key, fingerprintKey, depth: depth + 1 });
+			await walk(childFile, key, fingerprintKey, depth + 1);
+		}
+	};
+	await walk(rootFile, "", "", 0);
+	return children;
 }
 
 /**
@@ -673,18 +717,8 @@ async function buildTrackTree(
 
 	const childrenById = new Map<string, TrackScan>();
 	if (depth < MAX_TRACK_DEPTH) {
-		const artifactsDir = transcriptStem(file);
-		let names: string[] = [];
-		try {
-			names = await fs.readdir(artifactsDir);
-		} catch (err) {
-			if (!isEnoent(err)) throw err;
-		}
-		names.sort();
-		for (const name of names) {
-			// `.jsonl.*.bak` backups fail both suffix checks and are skipped.
-			if (!name.endsWith(".jsonl") && !name.endsWith(".jsonl.gz")) continue;
-			const childFile = path.join(artifactsDir, name);
+		for (const childFile of await directChildTranscripts(file)) {
+			const name = path.basename(childFile);
 			const stem = path.basename(transcriptStem(childFile));
 			const childTrackId = trackId === "main" ? stem : `${trackId}/${stem}`;
 			const childScan = await buildTrackTree(childFile, childTrackId, trackId, depth + 1, visited, out, scans);
@@ -769,39 +803,24 @@ interface TraceMemoEntry {
 
 let traceMemo: { file: string; entry: TraceMemoEntry } | undefined;
 
-/**
- * Fingerprint of the child-transcript set: per-directory file COUNT plus
- * sorted `name@mtimeMs` pairs, mirroring buildTrackTree's discovery (stats
- * only, no parse). The count is load-bearing: without it, children past a
- * truncation cap are invisible and appends to them never invalidate the key.
- * Best-effort: a raced gc deletion is recorded as `name@gone` (which itself
- * changes the fingerprint and misses the memo — the safe direction).
- */
-async function childTranscriptsFingerprint(rootFile: string, depth = 0): Promise<string> {
-	if (depth > MAX_TRACK_DEPTH) return "";
-	let names: string[] = [];
+/** Best-effort fingerprint over the shared recursive child transcript set. */
+export async function childTranscriptsFingerprint(rootFile: string): Promise<string> {
+	let children: ChildTranscript[];
 	try {
-		names = await fs.readdir(transcriptStem(rootFile));
+		children = await discoverChildTranscripts(rootFile);
 	} catch {
 		return "";
 	}
-	names.sort();
-	const dir = transcriptStem(rootFile);
-	const transcriptNames = names.filter(name => name.endsWith(".jsonl") || name.endsWith(".jsonl.gz"));
-	const childParts = await Promise.all(
-		transcriptNames.map(async name => {
-			const childFile = path.join(dir, name);
+	const parts = await Promise.all(
+		children.map(async child => {
 			try {
-				const stat = await fs.stat(childFile);
-				// Recurse like the builder (nested subagents), without parsing.
-				const nested = await childTranscriptsFingerprint(childFile, depth + 1);
-				return nested ? `${name}@${stat.mtimeMs},${name}/{${nested}}` : `${name}@${stat.mtimeMs}`;
+				return `${child.fingerprintKey}@${(await fs.stat(child.file)).mtimeMs}`;
 			} catch {
-				return `${name}@gone`;
+				return `${child.fingerprintKey}@gone`;
 			}
 		}),
 	);
-	return [`n=${transcriptNames.length}`, ...childParts].join(",");
+	return [`n=${children.length}`, ...parts].join(",");
 }
 
 /** Freshness of a root trace: root mtime plus the child-transcript set fingerprint. */
@@ -1023,7 +1042,7 @@ async function readSessionMetadataHead(file: string): Promise<string> {
 }
 
 /** Read list metadata from the fixed title slot and session header. */
-async function readSessionMetadata(file: string): Promise<SessionMetadata> {
+export async function readSessionMetadata(file: string): Promise<SessionMetadata> {
 	let mtimeMs: number;
 	try {
 		mtimeMs = (await fs.stat(file)).mtimeMs;

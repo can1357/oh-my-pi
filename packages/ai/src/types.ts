@@ -38,6 +38,7 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Api, FetchImpl, KnownApi, Model, Provider, ThinkingBudgets, Usage } from "@oh-my-pi/pi-catalog/types";
 import type { ApiKey } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
+import type { ContextSnapshotDetails } from "./context-insights";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { FallbackParam, MessageCreateParamsStreaming, StopDetails } from "./providers/anthropic-wire";
@@ -1263,6 +1264,8 @@ export interface ContextSnapshot {
 	 */
 	compactionEpoch?: number;
 	lastMessageTimestamp?: number;
+	/** Optional composition snapshot; absent on legacy sessions and never synthesized by readers. */
+	details?: ContextSnapshotDetails;
 }
 
 export interface AssistantMessage {

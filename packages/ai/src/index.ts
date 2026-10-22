@@ -42,6 +42,7 @@ export * from "./registry";
 export { resolveCacheRetention } from "./utils";
 export * from "./env-api-key";
 export * from "./stream";
+export * from "./context-insights";
 export * from "./types";
 export * from "./usage";
 export * from "./usage/claude";
