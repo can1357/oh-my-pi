@@ -79,7 +79,18 @@ describe("bash terminal auth detection", () => {
 		expect(bashNeedsAuthTerminal("exec sudo true")).toBe(true);
 		expect(bashNeedsAuthTerminal("nohup doas true")).toBe(true);
 		expect(bashNeedsAuthTerminal("env -u FOO doas true")).toBe(true);
+		// `--` ends the wrapper's own options; the marker is not the command.
+		expect(bashNeedsAuthTerminal("env -- sudo true")).toBe(true);
+		expect(bashNeedsAuthTerminal("time -- sudo true")).toBe(true);
+		expect(bashNeedsAuthTerminal("env -i -- sudo true")).toBe(true);
 		expect(bashNeedsAuthTerminal("time echo sudo")).toBe(false);
+	});
+
+	it("does not treat a `command` lookup as running the command", () => {
+		expect(bashNeedsAuthTerminal("command -v sudo")).toBe(false);
+		expect(bashNeedsAuthTerminal("command -V sudo")).toBe(false);
+		expect(bashNeedsAuthTerminal("command -pv sudo")).toBe(false);
+		expect(bashNeedsAuthTerminal("command -p sudo true")).toBe(true);
 	});
 
 	it("ignores the command name outside a command position", () => {
@@ -105,7 +116,12 @@ describe("bash terminal auth detection", () => {
 		expect(bashNeedsAuthTerminal("sudo --user=root --non-interactive id")).toBe(false);
 		// `-p` takes the prompt text, which may itself look like shell syntax.
 		expect(bashNeedsAuthTerminal("sudo -p Password: -S id")).toBe(false);
-		expect(bashNeedsAuthTerminal("doas -u root -C /etc/doas.conf true")).toBe(true);
+		// `doas -C` parses and checks a configuration file, then exits.
+		expect(bashNeedsAuthTerminal("doas -C /etc/doas.conf true")).toBe(false);
+		expect(bashNeedsAuthTerminal("doas -C /etc/doas.conf")).toBe(false);
+		expect(bashNeedsAuthTerminal("doas -u root -C /etc/doas.conf true")).toBe(false);
+		// `-C` is close-from for `sudo`, which takes a value and keeps going.
+		expect(bashNeedsAuthTerminal("sudo -C 3 id")).toBe(true);
 	});
 
 	it("reads grouped short options as their individual flags", () => {

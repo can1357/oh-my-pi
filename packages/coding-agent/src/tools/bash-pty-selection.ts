@@ -70,6 +70,13 @@ const SHELL_PREFIXES = new Set(["!", "time", "command", "exec", "nohup", "env"])
 const PREFIX_OPTION_ARG = new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string", "-a"]);
 
 /**
+ * `command -v sudo` prints how `sudo` would be resolved instead of running it
+ * (`-v` a path, `-V` a description), so the word after such a query is a
+ * lookup, not an executed command.
+ */
+const COMMAND_QUERY_OPTION = /^-[^-]*[vV]/u;
+
+/**
  * Return whether the command needs a controlling terminal for a password
  * prompt, so the bash tool can route it through the interactive PTY (or the
  * client terminal bridge) the way an explicit `pty` request is routed.
@@ -104,7 +111,10 @@ function effectiveCommandIndex(segment: string[]): number {
 			i++;
 			continue;
 		}
-		if (!SHELL_PREFIXES.has(baseName(word))) return i;
+		const name = baseName(word);
+		if (!SHELL_PREFIXES.has(name)) return i;
+		// A `command` query prints a resolution, so nothing after it runs.
+		if (name === "command" && COMMAND_QUERY_OPTION.test(segment[i + 1] ?? "")) return -1;
 		i = skipPrefixOperands(segment, i + 1);
 	}
 	return -1;
@@ -119,7 +129,13 @@ function skipPrefixOperands(segment: string[], index: number): number {
 			i++;
 			continue;
 		}
-		if (!word.startsWith("-") || word === "-" || word === "--") break;
+		// `--` delimits the prefix's options (`env -- sudo id`); the wrapped
+		// command is the next word, not the marker itself.
+		if (word === "--") {
+			i++;
+			break;
+		}
+		if (!word.startsWith("-") || word === "-") break;
 		i += PREFIX_OPTION_ARG.has(word) ? 2 : 1;
 	}
 	return i;
@@ -128,8 +144,9 @@ function skipPrefixOperands(segment: string[], index: number): number {
 function segmentNeedsAuthTerminal(segment: string[]): boolean {
 	const commandIndex = effectiveCommandIndex(segment);
 	if (commandIndex === -1) return false;
-	if (!TTY_AUTH_COMMANDS.has(baseName(segment[commandIndex]))) return false;
-	return authCommandMayPrompt(segment, commandIndex + 1);
+	const command = baseName(segment[commandIndex]);
+	if (!TTY_AUTH_COMMANDS.has(command)) return false;
+	return authCommandMayPrompt(segment, commandIndex + 1, command);
 }
 
 /**
@@ -137,7 +154,7 @@ function segmentNeedsAuthTerminal(segment: string[]): boolean {
  * command's arguments (`sudo printf -- -n`) says nothing about how the password
  * is read — and report whether any of them asks for no prompt.
  */
-function authCommandMayPrompt(segment: string[], start: number): boolean {
+function authCommandMayPrompt(segment: string[], start: number, command: string): boolean {
 	for (let i = start; i < segment.length; i++) {
 		const token = segment[i];
 		// `--` ends the option list: what follows is the wrapped command.
@@ -157,6 +174,10 @@ function authCommandMayPrompt(segment: string[], start: number): boolean {
 		for (let letter = 1; letter < token.length; letter++) {
 			const flag = token[letter];
 			if (NON_PROMPT_SHORT_OPTIONS.has(flag)) return false;
+			// `doas -C config` parses and checks the configuration, and
+			// `doas -L` clears persisted authentications; both exit without
+			// running the command, so nothing prompts.
+			if (command === "doas" && (flag === "C" || flag === "L")) return false;
 			if (!OPTION_ARG_SHORT.has(flag)) continue;
 			if (letter === token.length - 1) i++;
 			break;
