@@ -347,6 +347,7 @@ async function chmodMovedFile(filePath: string, mode: number): Promise<void> {
 
 /** Memoized native inspection, tagged onto the streamed args object it describes. */
 const kInspection = Symbol("edit.inspection");
+const REMOTE_PREVIEW_DEFERRED = "Remote file preview is deferred until execution approval.";
 
 interface InspectedArgs {
 	[kInspection]?: { mode: EditMode; inspection: EditInspection };
@@ -356,6 +357,7 @@ interface InspectedArgs {
 interface OpenEditSession {
 	native: EditSession;
 	resolveContext: ResolveContext;
+	resolvePhase: { applying: boolean };
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
@@ -545,6 +547,7 @@ export class EditTool implements AgentTool<TInput> {
 			open.native.finish();
 		}
 		const editSession = open.native;
+		open.resolvePhase.applying = true;
 		const batch = getLspBatchRequest(context?.toolCall);
 		let outcome;
 		try {
@@ -582,6 +585,13 @@ export class EditTool implements AgentTool<TInput> {
 				prev: file.oldText,
 				next: file.newText,
 			};
+			if (extractUriScheme(snapshot.path) === "ssh") {
+				// Auto-repair uses a local filesystem writethrough callback.
+				notes.push(
+					`Warning: ${snapshot.path} no longer parses after this edit. The change was applied; re-read the edited region and fix the syntax, or revert if unintended.`,
+				);
+				continue;
+			}
 			try {
 				await record?.(snapshot);
 			} catch {
@@ -643,13 +653,22 @@ export class EditTool implements AgentTool<TInput> {
 		onPreview?: (error: Error | null, batch: EditPreviewBatch) => void,
 	): OpenEditSession {
 		const resolveContext = sessionResolveContext(this.session, { signal });
+		const resolvePhase = { applying: onPreview === undefined };
 		const native = new EditSession(
 			getEditStore(this.session),
 			this.#policy(rawInput, resolveContext),
-			onPreview,
-			(_error, url) => this.#resolveUrl(url, resolveContext),
+			onPreview
+				? (error, batch) =>
+						onPreview(error, {
+							...batch,
+							// A deferred remote preview is not a patch failure. Do not
+							// feed it to the streaming abort guard or display a false error.
+							files: batch.files.filter(file => file.error !== REMOTE_PREVIEW_DEFERRED),
+						})
+				: undefined,
+			(_error, url) => this.#resolveUrl(url, resolveContext, resolvePhase.applying),
 		);
-		return { native, resolveContext };
+		return { native, resolveContext, resolvePhase };
 	}
 
 	#policy(rawInput: boolean, context: ResolveContext): EditPolicy {
@@ -676,18 +695,29 @@ export class EditTool implements AgentTool<TInput> {
 
 	/**
 	 * Host answer for one internal-URL edit target: its backing file, or a model-facing refusal.
-	 * Only file-written mutable schemes ({@link InternalUrlRouter.fileWritable}) are editable;
-	 * handler-owned writes (agent:// messages, proc:// stdin, ...) never patch their backing file.
+	 * File-written mutable schemes ({@link InternalUrlRouter.fileWritable}) use their local backing file;
+	 * SSH supplies full remote text. Other handler-owned writes (agent:// messages, proc:// stdin, ...)
+	 * never patch their backing file.
 	 * A line/partial selector is refused ({@link InternalUrlRouter.peelWriteSelector}): edits
 	 * address whole files.
 	 */
-	async #resolveUrl(url: string, context: ResolveContext): Promise<EditUrlResolution> {
+	async #resolveUrl(url: string, context: ResolveContext, applying: boolean): Promise<EditUrlResolution> {
 		const router = InternalUrlRouter.instance();
 		try {
 			const target = router.peelWriteSelector(url, "edit");
 			const scheme = extractUriScheme(target);
 			const spec = scheme === undefined ? undefined : router.spec(scheme);
 			if (!spec) return { error: `Unknown internal URL: ${url}`, planWritable: false };
+			if (scheme === "ssh") {
+				// Argument previews run before exec approval; resolving SSH opens
+				// an outbound connection. Only execution may read the remote file.
+				if (!applying) return { error: REMOTE_PREVIEW_DEFERRED, planWritable: false };
+				const resource = await router.resolve(target, context);
+				if (resource.immutable || resource.isDirectory) {
+					return { error: `Cannot edit ${url}: it is not a mutable remote file`, planWritable: false };
+				}
+				return { path: target, content: resource.content, planWritable: false };
+			}
 			if (!router.fileWritable(target)) {
 				const reason = spec.write?.via === "handler" ? "is written through `write`, not edited" : "is read-only";
 				return { error: `${url} ${reason}`, planWritable: false };
@@ -700,6 +730,26 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	async #write(request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
+		if (extractUriScheme(request.path) === "ssh") {
+			if (request.op !== "update" || request.content === undefined) {
+				throw new ToolError("Remote edits support updating existing files only", { path: request.path });
+			}
+			await InternalUrlRouter.instance().write(request.path, request.content, {
+				...sessionResolveContext(this.session, { signal }),
+				requireRegularFile: true,
+			});
+			this.session.bumpFileMutationVersion?.(request.path);
+			// SSH itself has no local LSP work, but it can finish a batch that
+			// queued formatting/diagnostics for earlier local writes.
+			const diagnostics =
+				request.flushLsp && request.lspBatchId
+					? await flushLspWritethroughBatch(request.lspBatchId, this.session.cwd, signal)
+					: undefined;
+			return {
+				written: request.content,
+				diagnosticsJson: diagnostics ? JSON.stringify(diagnostics) : undefined,
+			};
+		}
 		if (request.op === "delete") {
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			if (this.session.enableLsp ?? true) {

@@ -342,6 +342,8 @@ export interface WriteContext {
 	cwd?: string;
 	/** Caller's abort signal. */
 	signal?: AbortSignal;
+	/** SSH edits require an existing regular file rather than creating a file or replacing a symlink. */
+	requireRegularFile?: boolean;
 	/** Calling session's `local://` root mapping — see {@link ResolveContext.localProtocolOptions}. */
 	localProtocolOptions?: LocalProtocolOptions;
 	/**

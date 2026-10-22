@@ -49,7 +49,8 @@ const SSH_TEXT_MAX_BYTES = 1024 * 1024;
 function decodeUtf8Text(bytes: Uint8Array): string | null {
 	if (bytes.indexOf(0) !== -1) return null;
 	try {
-		return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		// Keep the BOM in the backing text so targeted edits preserve the file's bytes.
+		return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
 	} catch {
 		return null;
 	}
@@ -360,6 +361,9 @@ export class SshProtocolHandler implements ProtocolHandler {
 	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<void> {
 		const target = await resolveTarget(url, context?.cwd);
 		const remotePath = remotePathFromUrl(url);
-		await writeRemoteFile(target, remotePath, new TextEncoder().encode(content), { signal: context?.signal });
+		await writeRemoteFile(target, remotePath, new TextEncoder().encode(content), {
+			signal: context?.signal,
+			...(context?.requireRegularFile ? { requireRegularFile: true } : {}),
+		});
 	}
 }

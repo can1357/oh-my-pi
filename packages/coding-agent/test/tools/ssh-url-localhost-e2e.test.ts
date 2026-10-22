@@ -4,6 +4,7 @@ import * as capability from "@oh-my-pi/pi-coding-agent/capability";
 import type { SSHHost } from "@oh-my-pi/pi-coding-agent/capability/ssh";
 import type { CapabilityResult } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { SshProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/ssh-protocol";
@@ -117,6 +118,34 @@ describe.skipIf(!SSH_OK)("ssh:// handler against a real localhost ssh", () => {
 		expect(isLink.trim()).toBe("regular");
 		const back = await handler.resolve(parseInternalUrl(`ssh://localhost${TMP}/sym-link`));
 		expect(back.content).toBe("replaced\n");
+	});
+
+	it("refuses targeted edits through a symlink, preserving the link and its target", async () => {
+		mockEmptyHosts();
+		const target = `${TMP}/edit-sym-target`;
+		const link = `${TMP}/edit-sym-link`;
+		await sh(`printf 'alpha\\nbeta\\ngamma\\n' > ${target}; ln -s ${target} ${link}`);
+		const session: ToolSession = {
+			cwd: os.tmpdir(),
+			hasUI: false,
+			enableLsp: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated({ "edit.mode": "hashline" }),
+		};
+		const viewed = await new ReadTool(session).execute("read-link", { path: `ssh://localhost${link}` });
+		const text = viewed.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+		const header = text.match(/^\[ssh:\/\/[^\n]+#[0-9A-Fa-f]{4}\]/m)?.[0];
+		expect(header).toBeDefined();
+		const edited = await new EditTool(session, "hashline").execute("edit-link", {
+			input: `${header}\nPUT 2.=2:\n+BETA`,
+		});
+		expect(edited.isError).toBe(true);
+		expect(edited.content.map(part => (part.type === "text" ? part.text : "")).join("\n")).toContain("symlinks");
+		const kind = await Bun.$`ssh -o BatchMode=yes localhost test -L ${link} && echo link || echo regular`.text();
+		expect(kind.trim()).toBe("link");
+		const original = await handler.resolve(parseInternalUrl(`ssh://localhost${target}`));
+		expect(original.content).toBe("alpha\nbeta\ngamma\n");
 	});
 
 	it("lists a real remote directory (dirs first, dotfiles included, no sourcePath)", async () => {

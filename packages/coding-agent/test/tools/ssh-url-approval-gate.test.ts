@@ -10,7 +10,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 
-// Exercises the real per-tool approval gate (ExtensionToolWrapper) for read/grep/glob/write,
+// Exercises the real per-tool approval gate (ExtensionToolWrapper) for read/grep/glob/write/edit,
 // proving an `ssh://` target is exec-tier (prompts / is denied without a UI) while the
 // equivalent local-path call runs. ssh:// calls are rejected at the approval gate before any
 // connection, so this suite needs no live ssh.
@@ -18,6 +18,7 @@ const BASE_SETTINGS = {
 	"async.enabled": false,
 	"bash.autoBackground.enabled": false,
 	"bashInterceptor.enabled": false,
+	"edit.mode": "replace",
 } as const;
 
 const APPROVAL_RE = /requires approval but no interactive UI available/;
@@ -46,7 +47,7 @@ describe("ssh:// tools are exec-gated through the production approval wrapper", 
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			toolNames: ["read", "grep", "glob", "write"],
+			toolNames: ["read", "grep", "glob", "write", "edit"],
 		});
 		session = created.session;
 	});
@@ -60,7 +61,7 @@ describe("ssh:// tools are exec-gated through the production approval wrapper", 
 		}
 	});
 
-	function tool(name: "read" | "grep" | "glob" | "write") {
+	function tool(name: "read" | "grep" | "glob" | "write" | "edit") {
 		const found = session.getToolByName(name);
 		if (!found) throw new Error(`Expected ${name} tool`);
 		return found;
@@ -133,5 +134,26 @@ describe("ssh:// tools are exec-gated through the production approval wrapper", 
 			ctx("write"),
 		);
 		expect(JSON.stringify(ok.content)).toContain("out.txt");
+	});
+
+	it("edit: ssh:// requires exec approval while a local edit runs in write mode", async () => {
+		await expect(
+			tool("edit").execute(
+				"e-ssh",
+				{ path: "ssh://localhost/tmp/x", old_string: "old", new_string: "new" },
+				undefined,
+				undefined,
+				ctx("write"),
+			),
+		).rejects.toThrow(APPROVAL_RE);
+		const ok = await tool("edit").execute(
+			"e-local",
+			{ path: "local.txt", old_string: "hello-local", new_string: "edited-local" },
+			undefined,
+			undefined,
+			ctx("write"),
+		);
+		expect(ok.isError).not.toBe(true);
+		expect(await Bun.file(path.join(tempDir, "cwd", "local.txt")).text()).toBe("edited-local\n");
 	});
 });
