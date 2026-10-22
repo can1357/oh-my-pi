@@ -3,7 +3,8 @@
  * matcher, the gh-cache invalidator, and the session anonymizer.
  *
  * Splits a bash command into independent command segments, each a list of word
- * tokens. Handles single/double-quoted strings, backslash escapes, and the
+ * tokens. Handles single/double-quoted strings, ANSI-C `$'...'` strings, where
+ * an escaped quote does not close the string, backslash escapes, and the
  * standard operators (`;`, `&&`, `||`, `|`, `&`, `(`, `)`, newlines) as segment
  * boundaries so callers treat the pieces as independent command sequences.
  *
@@ -11,10 +12,10 @@
  * and arithmetic expansion are out of scope; callers fall through when they
  * cannot find the structure they need.
  */
-export function tokenizeShellSegments(command: string): string[][] {
+export function tokenizeShellSegments(command: string, options?: ShellLexOptions): string[][] {
 	const segments: string[][] = [];
 	let current: string[] = [];
-	for (const token of lexShellCommand(command)) {
+	for (const token of lexShellCommand(command, options)) {
 		if (token.kind === "word") {
 			// Empty quoted words (`''`) carry no argument text.
 			if (token.value.length > 0) current.push(token.value);
@@ -27,6 +28,33 @@ export function tokenizeShellSegments(command: string): string[][] {
 	return segments;
 }
 
+/** Operator characters that end a word and split command segments outside quotes and comments. */
+const SHELL_OPERATOR_CHARS = new Set([";", "&", "|", "(", ")"]);
+
+/**
+ * Dialect switches for {@link lexShellCommand}. Shells disagree on both: dash has no
+ * `$'...'` quoting, and bash reads `@(#)` under `extglob` as one glob word, not a comment.
+ * The default reads the command the way bash does with its defaults.
+ */
+export interface ShellLexOptions {
+	/** Treat `$'...'` as ANSI-C quoting, where a backslash escapes the next character. Default true. */
+	ansiC?: boolean;
+	/** Start a `#` comment at a word start. Default true. */
+	comments?: boolean;
+}
+
+/**
+ * Every reading of a command that a deny or prompt rule must be tried against. A rule that
+ * only trusted one reading could be hidden behind a construct that another shell, or another
+ * option, parses differently; trying all of them can only add matches, never remove one.
+ */
+export const CONSERVATIVE_SHELL_LEX_VARIANTS: readonly ShellLexOptions[] = [
+	{},
+	{ ansiC: false },
+	{ comments: false },
+	{ ansiC: false, comments: false },
+];
+
 /** One lexical piece of a shell command: a word, or the whitespace/operator run between words. */
 export type ShellToken = { kind: "word"; raw: string; value: string } | { kind: "separator"; raw: string };
 
@@ -34,15 +62,21 @@ export type ShellToken = { kind: "word"; raw: string; value: string } | { kind: 
  * Lex a command into words and separators with their source text, so callers can rewrite words
  * and reassemble the command. Word boundaries match {@link tokenizeShellSegments}: `value` is the
  * quote/escape-removed word, `raw` its verbatim spelling; separators are runs of spaces, tabs, and
- * the operator characters `\n ; & | ( )`.
+ * the operator characters `\n ; & | ( )`. A `#` comment is part of its words: operators inside it
+ * do not split, and a newline ends it.
  */
-export function lexShellCommand(command: string): ShellToken[] {
+export function lexShellCommand(command: string, options: ShellLexOptions = {}): ShellToken[] {
+	const ansiC = options.ansiC !== false;
+	const comments = options.comments !== false;
 	const tokens: ShellToken[] = [];
 	let value = "";
 	let wordStart = -1;
 	let separatorStart = -1;
 	let inSingle = false;
 	let inDouble = false;
+	let ansi = false;
+	let inComment = false;
+	let escapedAt = -1;
 	const startWord = (index: number) => {
 		if (wordStart >= 0) return;
 		if (separatorStart >= 0) {
@@ -60,8 +94,20 @@ export function lexShellCommand(command: string): ShellToken[] {
 	for (let i = 0; i < command.length; i++) {
 		const ch = command[i];
 		if (inSingle) {
-			if (ch === "'") inSingle = false;
-			else value += ch;
+			// Inside an ANSI-C `$'...'` string a backslash escapes the next
+			// character, so `\'` keeps the string open; in a plain `'...'`
+			// string a backslash is literal text and nothing is escaped.
+			if (ansi && ch === "\\" && i + 1 < command.length) {
+				value += ch + command[i + 1];
+				i++;
+				continue;
+			}
+			if (ch === "'") {
+				inSingle = false;
+				ansi = false;
+			} else {
+				value += ch;
+			}
 			continue;
 		}
 		if (inDouble) {
@@ -77,28 +123,38 @@ export function lexShellCommand(command: string): ShellToken[] {
 			else value += ch;
 			continue;
 		}
-		if (
-			ch === " " ||
-			ch === "\t" ||
-			ch === "\n" ||
-			ch === ";" ||
-			ch === "&" ||
-			ch === "|" ||
-			ch === "(" ||
-			ch === ")"
-		) {
+		if (ch === "\n") inComment = false;
+		// A comment eats the rest of the line, so operators inside it are plain text.
+		if (ch === " " || ch === "\t" || ch === "\n" || (!inComment && SHELL_OPERATOR_CHARS.has(ch))) {
 			endWord(i);
 			if (separatorStart < 0) separatorStart = i;
 			continue;
 		}
+		// A comment starts only where a new word starts. A word already in progress
+		// (`foo\ #`, `''#`) keeps the `#` as text, however the previous byte reads.
+		const startsWord = wordStart < 0;
 		startWord(i);
-		if (ch === "'") {
+		if (inComment) {
+			value += ch;
+		} else if (ch === "'") {
 			inSingle = true;
+			// `$'...'` is an ANSI-C string: escapes are active inside it. An
+			// ESCAPED dollar (`\$'...'`) degrades to plain quoting, and
+			// `escapedAt` records which dollar a backslash consumed, so `\\$'...'`
+			// (an escaped backslash, then a live dollar) still opens one. A `#`
+			// comment runs to end of line and eats any quote after it; this
+			// branch is unreachable inside one because a `#` at a word start
+			// sets `inComment` below. Both probed against bash.
+			ansi = ansiC && command[i - 1] === "$" && escapedAt !== i - 1;
 		} else if (ch === '"') {
 			inDouble = true;
 		} else if (ch === "\\" && i + 1 < command.length) {
 			value += command[i + 1];
+			escapedAt = i + 1;
 			i++;
+		} else if (ch === "#" && comments && startsWord) {
+			// A `#` glued to a word (`$#`, `${x#y}` shape words) stays plain text.
+			inComment = true;
 		} else {
 			value += ch;
 		}
