@@ -4,6 +4,11 @@
  * Runs each subagent on the main thread and forwards AgentEvents for progress tracking.
  */
 
+import {
+	type ProviderExhaustionExclusion,
+	isProviderExhausted,
+	providerExhaustionExclusion,
+} from "../session/provider-exhaustion";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
@@ -254,10 +259,11 @@ interface SubagentRetryFallbackCandidate {
 	selector: string;
 }
 
-function resolveSubagentRetryFallbackCandidates(
+export function resolveSubagentRetryFallbackCandidates(
 	modelPatterns: string[],
 	modelRegistry: ModelRegistry,
 	settings: Settings,
+	exclusions?: ProviderExhaustionExclusion[],
 ): SubagentRetryFallbackCandidate[] {
 	const candidates: SubagentRetryFallbackCandidate[] = [];
 	const seen = new Set<string>();
@@ -266,6 +272,11 @@ function resolveSubagentRetryFallbackCandidates(
 		const resolved = resolveModelOverride([pattern], modelRegistry, settings);
 		if (!resolved.model) continue;
 		if (disabledProviders.has(resolved.model.provider)) continue;
+		const exclusion = providerExhaustionExclusion(resolved.model.provider);
+		if (exclusion) {
+			exclusions?.push(exclusion);
+			continue;
+		}
 		const selector = resolved.explicitThinkingLevel
 			? formatModelSelectorValue(formatModelStringWithRouting(resolved.model), resolved.thinkingLevel)
 			: formatModelStringWithRouting(resolved.model);
@@ -307,7 +318,10 @@ function resolveSubagentInheritedRetryFallbackChain(
 	const disabledProviders = new Set(cfgDisabledProviders.get(settings));
 	return fallbackChain.filter(entry => {
 		const resolved = resolveModelOverride([entry], modelRegistry, settings);
-		return !resolved.model || !disabledProviders.has(resolved.model.provider);
+		return (
+			!resolved.model ||
+			(!disabledProviders.has(resolved.model.provider) && !isProviderExhausted(resolved.model.provider))
+		);
 	});
 }
 
@@ -4420,6 +4434,29 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings),
 						)
 					: undefined;
+			const exclusions: ProviderExhaustionExclusion[] = [];
+			const availableModelPatterns = configuredModelPatterns.filter(pattern => {
+				const resolved = resolveModelOverride([pattern], modelRegistry, settings);
+				const exclusion = resolved.model ? providerExhaustionExclusion(resolved.model.provider) : undefined;
+				if (!exclusion) return true;
+				exclusions.push(exclusion);
+				return false;
+			});
+			if (exclusions.length > 0) {
+				logger.warn("Skipping unavailable subagent providers", { exclusions });
+				if (availableModelPatterns.length === 0) {
+					throw new Error(exclusions.map(entry => `${entry.provider}: ${entry.reason}`).join("; "));
+				}
+			}
+			// Unchanged requests keep their original patterns so alias resolution stays exactly as before.
+			const startupModelPatterns = exclusions.length > 0 ? availableModelPatterns : modelPatterns;
+			const parentResolved = options.parentActiveModelPattern
+				? resolveModelOverride([options.parentActiveModelPattern], modelRegistry, settings)
+				: undefined;
+			const parentModelPattern =
+				parentResolved?.model && isProviderExhausted(parentResolved.model.provider)
+					? undefined
+					: options.parentActiveModelPattern;
 			const {
 				model,
 				thinkingLevel: resolvedThinkingLevel,
@@ -4427,13 +4464,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				authFallbackUsed,
 				warning: modelResolutionWarning,
 			} = await awaitAbortable(
-				resolveModelOverrideWithAuthFallback(
-					modelPatterns,
-					options.parentActiveModelPattern,
-					modelRegistry,
-					settings,
-					id,
-				),
+				resolveModelOverrideWithAuthFallback(startupModelPatterns, parentModelPattern, modelRegistry, settings, id),
 			);
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
