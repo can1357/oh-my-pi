@@ -236,6 +236,7 @@ import {
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
+import { TmuxWindowNamer } from "../utils/tmux-session";
 import {
 	aggregateVibeWorkerTokensPerSecond,
 	type VibeOwnerScope,
@@ -401,6 +402,8 @@ import {
 	cfgTuiCompleteScrollback,
 	cfgTuiTextSizing,
 	cfgTuiTight,
+	cfgTuiTmuxWindowName,
+	cfgTuiTmuxWindowNameColor,
 	cfgTuiTitleSpinner,
 	cfgTuiTitleState,
 	cfgTuiVimMode,
@@ -1635,6 +1638,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	#autocompleteProviderFactories: AutocompleteProviderFactory[] = [];
 	#cleanupUnsubscribe?: () => void;
 	#signalTeardown?: SessionTeardown;
+	/**
+	 * Owns this mode's tmux window name. Instance-scoped so two in-process modes
+	 * cannot clobber each other's captured window name; restored by `shutdown()`
+	 * and, on signal/fatal exits, by the postmortem cleanup it registers itself.
+	 */
+	readonly #tmuxWindow = new TmuxWindowNamer();
 	readonly #version: string;
 	readonly #startupChangelog: StartupChangelogSelection | undefined;
 	/** Header components below the config warnings + welcome, retained so a live config-warning change can rebuild the header (#10048). */
@@ -2459,14 +2468,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			file: () => this.sessionManager.getSessionFile(),
 			cwd: () => this.sessionManager.getCwd(),
 		});
+		this.#tmuxWindow.setEnabled(cfgTuiTmuxWindowName.get(this.settings));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		this.#syncTmuxWindow();
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
 		// #focusController exists, which updateEditorBorderColor dereferences.
 		this.#syncVimStatus(this.editor);
 		// Single side-effect point for title changes: every setSessionName caller
 		// (first-input titling, /rename, extension renames, plan seeding, replan
-		// refresh) gets the terminal title + accent updates from here. Registered
+		// refresh) gets the terminal title, tmux window name, and accent updates
+		// from here. Registered
 		// before initHooksAndCustomTools/#reconcileModeFromSession/#enterPlanMode —
 		// all of which can reach setSessionName during init.
 		this.#eventBusUnsubscribers.push(
@@ -2482,6 +2494,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.sessionManager.onPersistenceNotice(notice => this.showWarning(formatPersistenceNotice(notice))),
 			this.sessionManager.onSessionNameChanged(() => {
 				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+				this.#syncTmuxWindow();
 				this.#handleSessionAccentInputsChanged();
 			}),
 			// Fork and branch adopt a new session file without retitling.
@@ -2648,6 +2661,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.statusLine.invalidate();
 				this.ui.invalidate();
 				this.updateEditorBorderColor();
+				// The session accent is derived from the theme's accent/palette, so a
+				// swap changes the hex while the session name stays the same.
+				this.#syncTmuxWindow();
 				if (event.ephemeral || isInsideTerminalMultiplexer()) {
 					// Theme previews and multiplexer panes use a non-destructive viewport
 					// repaint rather than replacing already emitted history.
@@ -2992,6 +3008,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			return false;
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		// The tmux window name falls back to the cwd basename for unnamed sessions.
+		this.#syncTmuxWindow();
 		this.statusLine.applyCwdChange();
 		return true;
 	}
@@ -3895,10 +3913,33 @@ export class InteractiveMode implements InteractiveModeContext {
 		sharedComposerCache()?.writeStatus(this.sessionManager.getCwd(), status);
 	}
 
+	/**
+	 * Accent hex for this window's tmux status entry, or `undefined` when the
+	 * feature is off. Mirrors the status line: the session's hash-derived accent
+	 * when `statusLine.sessionAccent` is on and the session is named, the theme
+	 * accent otherwise.
+	 */
+	#tmuxWindowAccentHex(): string | undefined {
+		if (!cfgTuiTmuxWindowNameColor.get(this.settings)) return undefined;
+		const accentEnabled = cfgStatusLineSessionAccent.get(this.settings);
+		const sessionName = accentEnabled ? this.sessionManager.getSessionName() : undefined;
+		return sessionName ? getSessionAccentHex(sessionName, theme.sessionAccentInputs) : theme.getColorHex("accent");
+	}
+
+	/** Single point for tmux window name and accent updates. */
+	#syncTmuxWindow(): void {
+		this.#tmuxWindow.sync(
+			this.sessionManager.getSessionName(),
+			this.sessionManager.getCwd(),
+			this.#tmuxWindowAccentHex(),
+		);
+	}
+
 	#handleSessionAccentInputsChanged(): void {
 		this.#clearWorkingMessageAccentCache();
 		this.statusLine.invalidate();
 		this.updateEditorBorderColor();
+		this.#syncTmuxWindow();
 	}
 
 	updateEditorBorderColor(): void {
@@ -7480,6 +7521,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		disposeTerminalTitleState();
 		disposeProgramStatus();
 		popTerminalTitle();
+		this.#tmuxWindow.restore();
 		this.stop();
 	}
 
