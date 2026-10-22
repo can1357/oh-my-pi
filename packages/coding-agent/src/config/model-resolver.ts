@@ -273,7 +273,7 @@ const BEDROCK_INFERENCE_PROFILE_ARN =
 	/^arn:aws(?:-[a-z]+)*:bedrock:[a-z0-9-]+:[0-9]*:(?:application-inference-profile|inference-profile)\/[a-z0-9][a-z0-9._:-]*$/i;
 
 function hasBedrockInferenceProfileThinkingSuffix(modelId: string): boolean {
-	const { base, level } = splitThinkingSuffix(modelId);
+	const { base, level } = splitThinkingSuffix(modelId, -1, MAX_THINKING_SUFFIX_OPTIONS);
 	return level !== undefined && BEDROCK_INFERENCE_PROFILE_ARN.test(base.trim());
 }
 
