@@ -40,7 +40,7 @@ export const cfgIsolationBackend = register({
 	id: "isolation.backend",
 	protocolDefault: ["rpc", "acp"],
 	type: "enum",
-	values: ["auto", "apfs", "btrfs", "zfs", "reflink", "overlayfs", "projfs", "block-clone", "rcopy"] as const,
+	values: ["auto", "apfs", "btrfs", "zfs", "reflink", "overlayfs", "projfs", "block-clone", "rcopy", "command"] as const,
 	default: "auto",
 	ui: {
 		tab: "tasks",
@@ -69,7 +69,27 @@ export const cfgIsolationBackend = register({
 				label: "Recursive copy",
 				description: "git worktree if available, otherwise recursive copy",
 			},
+			{
+				value: "command",
+				label: "External command",
+				description:
+					"Create the workspace by running `isolation.command` (e.g. `wt switch --create`); omp never tears it down. Task spawns only — other worktree consumers treat `command` as `auto`. The workspace starts at the ref the command chooses (it does not carry the parent checkout's uncommitted state); OMP_ISOLATION_BASE_SHA exposes the parent HEAD",
+			},
 		],
+	},
+});
+
+export const cfgIsolationCommand = register({
+	id: "isolation.command",
+	protocolDefault: ["rpc", "acp"],
+	type: "string",
+	default: "",
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "Isolation Command",
+		description:
+			"Shell command that creates an external isolation workspace (used when `isolation.backend` is `command`). Runs with OMP_ISOLATION_AGENT_ID, OMP_ISOLATION_REPO_ROOT, OMP_ISOLATION_BASE_SHA (the parent HEAD), and OMP_ISOLATION_COMMAND_MODE=create in the environment; the last non-empty stdout line must be the workspace path",
 	},
 });
 

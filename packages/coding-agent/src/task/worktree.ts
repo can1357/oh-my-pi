@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { formatBytes, getWorktreeDir, isEnoent, logger, ptree, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
@@ -19,6 +19,7 @@ const { IsoBackendKind } = natives;
 const TASK_ISOLATION_DIR_PREFIX = "t";
 const TASK_ISOLATION_DIR_DIGEST_CHARS = 9;
 const TASK_ISOLATION_MOUNT_DIR = "m";
+const ISOLATION_COMMAND_TIMEOUT_MS = 30 * 60 * 1000;
 const GIT_NETWORK_TIMEOUT_MS = 30 * 60 * 1000;
 type IsoBackendKind = natives.IsoBackendKind;
 async function diffTreeOrEmpty(repo: VcsGitRepo, base: string, head: string): Promise<string> {
@@ -554,11 +555,16 @@ export function parseIsolationBackend(backend: IsolationBackendSetting): IsoBack
 			return IsoBackendKind.WindowsBlockClone;
 		case "rcopy":
 			return IsoBackendKind.Rcopy;
+		case "command":
+			// Not a PAL backend: `ensureIsolation` never sees this value. The
+			// `"command"` setting is intercepted upstream (structured-subagent →
+			// `ensureExternalIsolation`).
+			return undefined;
 	}
 }
 
 /** Return the canonical setting label for a resolved native backend. */
-export function formatIsolationBackend(backend: IsoBackendKind): Exclude<IsolationBackendSetting, "auto"> {
+export function formatIsolationBackend(backend: IsoBackendKind): Exclude<IsolationBackendSetting, "auto" | "command"> {
 	switch (backend) {
 		case IsoBackendKind.Apfs:
 			return "apfs";
@@ -582,8 +588,10 @@ export function formatIsolationBackend(backend: IsoBackendKind): Exclude<Isolati
 export interface IsolationHandle {
 	/** Merged view materialised by the backend; pass this to the task. */
 	mergedDir: string;
-	/** Backend the PAL actually used. */
-	backend: IsoBackendKind;
+	/** Backend the PAL actually used. Absent for external (`isolation.backend: "command"`) workspaces. */
+	backend?: IsoBackendKind;
+	/** True for a workspace created by the external `isolation.command`; omp owns no teardown for it. */
+	external?: true;
 	/** True when the resolver downgraded from `preferred` to `backend`. */
 	fellBack: boolean;
 	/** Optional reason associated with `fellBack`. */
@@ -645,6 +653,152 @@ async function detachSubmodules(sourceRoot: string, isolationRoot: string): Prom
 	}
 }
 
+/**
+ * Resolve a workspace path printed by an external command: expand a leading
+ * `~`, resolve a relative path against `repoRoot`, and canonicalize.
+ */
+function resolveExternalWorkspacePath(raw: string, repoRoot: string): string {
+	const trimmed = raw.trim();
+	const expandsToHome = trimmed === "~" || trimmed.startsWith(`~${path.sep}`) || trimmed.startsWith("~/");
+	const homeExpanded = expandsToHome ? path.join(os.homedir(), trimmed.slice(1)) : trimmed;
+	return path.resolve(repoRoot, homeExpanded);
+}
+
+/** Last non-empty line of the external command's stdout, or an error naming `command`. */
+function externalCommandWorkspacePath(stdout: string, command: string): string {
+	const lines = stdout.split(/\r?\n/).filter(line => line.trim() !== "");
+	const last = lines.at(-1);
+	if (!last) {
+		throw new Error(
+			`Isolation command produced no workspace path on stdout: \`${command}\` (expected the workspace path as the last non-empty stdout line).`,
+		);
+	}
+	return last;
+}
+
+/** Real paths of every worktree registered with `repoRoot`'s repository. */
+async function registeredWorktreePaths(repoRoot: string): Promise<Set<string>> {
+	const registered = new Set<string>();
+	for (const worktree of await vcs.requireGit(repoRoot).worktrees()) {
+		registered.add(await fs.realpath(worktree.path).catch(() => path.resolve(worktree.path)));
+	}
+	return registered;
+}
+
+/**
+ * Materialise an external isolation workspace by running `command`
+ * (`isolation.backend: "command"` + `isolation.command`). The command owns the
+ * workspace layout entirely (e.g. worktrunk's `wt switch --create`), so omp
+ * applies none of its own PAL machinery: no base dir under `getWorktreeDir`,
+ * no ownership marker, no git detach, no submodule materialisation.
+ *
+ * Identity is checked on real paths, in order: the printed location must exist
+ * as a directory, resolve to the ROOT of a git worktree (not a subdirectory),
+ * share the parent repo's git common dir (a linked worktree of THIS repository
+ * — not an independent clone), be registered with the parent repo, and not be
+ * either the calling checkout or the primary checkout (nor inside them).
+ * Without the realpath and registration checks, a command printing a symlink
+ * into the parent tree — or the primary checkout while omp runs from a linked
+ * worktree — would pass every lexical check and leave the child editing the
+ * user's own checkout while omp reported it isolated.
+ */
+export async function ensureExternalIsolation(repoRoot: string, id: string, command: string): Promise<IsolationHandle> {
+	const trimmedCommand = command.trim();
+	if (trimmedCommand === "") {
+		throw new Error(
+			'isolation.backend is "command" but isolation.command is empty — set isolation.command to a workspace-creation command (e.g. `wt switch --create <path>`).',
+		);
+	}
+	const realParentRoot = await fs.realpath(repoRoot).catch(() => path.resolve(repoRoot));
+	const parentCommonDir = await realCommonDir(repoRoot);
+	if (!parentCommonDir) {
+		throw new Error(`Isolation command requires a Git checkout at ${repoRoot}.`);
+	}
+	const primaryRoot = vcs.requireGit(repoRoot).primaryRoot();
+	const realPrimaryRoot = await fs.realpath(primaryRoot).catch(() => path.resolve(primaryRoot));
+	const parentHead = (await vcs.requireGit(repoRoot).headSha()) ?? "";
+	const env: Record<string, string | undefined> = {
+		...process.env,
+		OMP_ISOLATION_AGENT_ID: id,
+		OMP_ISOLATION_REPO_ROOT: repoRoot,
+		OMP_ISOLATION_COMMAND_MODE: "create",
+		// Unlike the PAL copy backends, an external command picks its own base;
+		// expose the parent HEAD so it can match it (e.g. `wt switch --create x
+		// --base=@`-equivalent) instead of silently diverging.
+		OMP_ISOLATION_BASE_SHA: parentHead,
+	};
+	const result = await ptree.exec(
+		process.platform === "win32" ? ["cmd.exe", "/d", "/s", "/c", trimmedCommand] : ["/bin/sh", "-c", trimmedCommand],
+		{
+			cwd: repoRoot,
+			env,
+			timeout: ISOLATION_COMMAND_TIMEOUT_MS,
+			allowNonZero: true,
+		},
+	);
+	if ((result.exitCode ?? 1) !== 0) {
+		const detail = result.stderr.trim() || result.stdout.trim();
+		const status = result.exitCode === null ? "was killed by a signal" : `failed with exit code ${result.exitCode}`;
+		throw new Error(`Isolation command \`${trimmedCommand}\` ${status}${detail ? `: ${detail}` : ""}`);
+	}
+	const printed = resolveExternalWorkspacePath(externalCommandWorkspacePath(result.stdout, trimmedCommand), repoRoot);
+
+	let entry;
+	try {
+		entry = await fs.stat(printed);
+	} catch (error) {
+		if (isEnoent(error)) {
+			throw new Error(`Isolation command \`${trimmedCommand}\` printed a nonexistent workspace path: ${printed}`);
+		}
+		throw error;
+	}
+	if (!entry.isDirectory()) {
+		throw new Error(`Isolation command \`${trimmedCommand}\` printed a path that is not a directory: ${printed}`);
+	}
+	const mergedDir = await fs.realpath(printed).catch(() => path.resolve(printed));
+	for (const forbiddenRoot of [realParentRoot, realPrimaryRoot]) {
+		if (mergedDir === forbiddenRoot || mergedDir.startsWith(`${forbiddenRoot}${path.sep}`)) {
+			throw new Error(
+				`Isolation command \`${trimmedCommand}\` printed the checkout omp is running in, or a path inside it: ${printed}. External isolation requires a separate worktree of the repository.`,
+			);
+		}
+	}
+	let resolvedRoot: string;
+	try {
+		resolvedRoot = await getRepoRoot(mergedDir);
+	} catch (error) {
+		throw new Error(
+			`Isolation command \`${trimmedCommand}\` printed ${printed}, which is not inside a Git checkout: ${errorMessage(
+				error,
+			)}`,
+		);
+	}
+	const realResolvedRoot = await fs.realpath(resolvedRoot).catch(() => path.resolve(resolvedRoot));
+	if (mergedDir !== realResolvedRoot) {
+		throw new Error(
+			`Isolation command \`${trimmedCommand}\` printed ${printed}, which is a subdirectory of the worktree at ${realResolvedRoot}. External isolation requires the worktree root.`,
+		);
+	}
+	const commonDir = await realCommonDir(mergedDir);
+	if (commonDir !== parentCommonDir) {
+		throw new Error(
+			`Isolation command \`${trimmedCommand}\` printed ${printed}, which is not a worktree of this repository (its git common dir ${
+				commonDir ?? "<none>"
+			} differs from the parent repo's ${parentCommonDir}). External isolation workspaces must share the parent repository's object database and refs, not be an independent clone.`,
+		);
+	}
+	if (!(await registeredWorktreePaths(repoRoot)).has(mergedDir)) {
+		throw new Error(
+			`Isolation command \`${trimmedCommand}\` printed ${printed}, which is not a worktree registered with this repository.`,
+		);
+	}
+	// The external workspace stays put on release: `cleanupIsolation` and
+	// `retainIsolationWorkspace` both no-op for external handles. The external
+	// tool (worktrunk via `wt remove`) owns the directory; omp must never
+	// rename or delete it.
+	return { mergedDir, external: true, fellBack: false, fallbackReason: null };
+}
+
 export async function ensureIsolation(
 	baseCwd: string,
 	id: string,
@@ -653,6 +807,13 @@ export async function ensureIsolation(
 	const repoRoot = await getRepoRoot(baseCwd);
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
 	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
+	// OWNERSHIP INVARIANT: every PAL isolation lives under this omp-managed
+	// `getWorktreeDir` layout, so `omp worktree list|clear` ownership markers
+	// (`writeIsolationOwner`) cover exactly what omp created. External
+	// workspaces (`isolation.backend: "command"`, see
+	// `ensureExternalIsolation`) live wherever the user's command puts them,
+	// carry no owner marker, and are outside this layout — `omp worktree
+	// clear` must never see or touch them; the external tool owns teardown.
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = await natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
@@ -697,8 +858,14 @@ export async function ensureIsolation(
 	throw new Error(fallbackReason ?? "No isolation backend is available.");
 }
 
-/** Tear down a handle returned by {@link ensureIsolation}. */
+/** Tear down a handle returned by {@link ensureIsolation}. External workspaces are exempt: the external tool owns their directory. */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
+	if (handle.external) {
+		// EXTERNAL WORKSPACE (`isolation.backend: "command"`): the external
+		// tool (e.g. worktrunk) owns the directory. No `isoStop`, no `rm`,
+		// no rename — omp leaves it exactly where the command left it.
+		return;
+	}
 	try {
 		try {
 			await natives.isoStop(handle.backend, handle.mergedDir);
@@ -959,6 +1126,7 @@ export async function commitToBranch(
 	taskId: string,
 	description: string | undefined,
 	commitMessage?: (diff: string) => Promise<string | null>,
+	options?: { sharedObjectDb?: boolean },
 ): Promise<CommitToBranchResult | null> {
 	const baselineSha = baseline.root.headCommit;
 	const isolationRepo = vcs.requireGit(isolationDir);
@@ -991,7 +1159,15 @@ export async function commitToBranch(
 		// stranded once `cleanupIsolation` tears the workspace down) into the
 		// parent repo's object DB and create the branch at the agent's HEAD.
 		// `+HEAD:…` force-overwrites a stale branch from a prior run.
-		await repo.fetch(isolationDir, "HEAD", `refs/heads/${branchName}`, GIT_NETWORK_TIMEOUT_MS);
+		//
+		// External workspaces (linked worktrees) already share the parent's
+		// object DB and refs, so the commits are reachable without a fetch.
+		// Forcing that refspec would also fail outright whenever the branch is
+		// checked out in the worktree ("refusing to fetch into branch"), turning
+		// a successful capture into a throw.
+		if (!options?.sharedObjectDb) {
+			await repo.fetch(isolationDir, "HEAD", `refs/heads/${branchName}`, GIT_NETWORK_TIMEOUT_MS);
+		}
 		tip = isolationHead;
 		// Leftover = anything still uncommitted in isolation on top of the
 		// agent's last commit (staged, unstaged, untracked). The agent didn't
@@ -1015,6 +1191,13 @@ export async function commitToBranch(
 	}
 
 	if (tip === baselineSha) return { rootPatch, baseSha: baselineSha, nestedPatches };
+	// An external workspace may sit on `refs/heads/${branchName}` itself (the
+	// command named the task branch): force-updating that ref from the parent
+	// fails with "cannot force update the branch … checked out at", and the
+	// shared ref already points at `tip`.
+	if (options?.sharedObjectDb && tip === isolationHead) {
+		return { branchName, baseSha: baselineSha, rootPatch, nestedPatches };
+	}
 	await repo.createBranch(branchName, tip, true);
 	return { branchName, baseSha: baselineSha, rootPatch, nestedPatches };
 }

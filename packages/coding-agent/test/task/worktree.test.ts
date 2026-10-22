@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { retainIsolationWorkspace } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import {
 	applyNestedPatches,
 	captureBaseline,
@@ -10,6 +11,7 @@ import {
 	cleanupIsolation,
 	cleanupTaskBranches,
 	commitToBranch,
+	ensureExternalIsolation,
 	ensureIsolation,
 	getRepoRoot,
 	ISOLATION_BASELINE_MAX_CONTENT_BYTES,
@@ -73,6 +75,10 @@ describe("worktree isolation helpers", () => {
 		expect(parseIsolationBackend("projfs")).toBe(natives.IsoBackendKind.Projfs);
 		expect(parseIsolationBackend("block-clone")).toBe(natives.IsoBackendKind.WindowsBlockClone);
 		expect(parseIsolationBackend("rcopy")).toBe(natives.IsoBackendKind.Rcopy);
+
+		// `"command"` is not a PAL backend: it is intercepted upstream and must
+		// never be handed to the native resolver.
+		expect(parseIsolationBackend("command")).toBeUndefined();
 	});
 
 	// Regression for #8939: baseline capture buffered every untracked byte into
@@ -1603,5 +1609,233 @@ describe("commitToBranch preserves agent commits", () => {
 			expect(branchDiff).toContain("+WIP header");
 			expect(branchDiff).toContain("+agent-edit");
 		});
+	});
+});
+
+describe("external command isolation backend", () => {
+	let repo: string;
+	let tempRoot: string;
+
+	beforeEach(async () => {
+		repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "test@example.com"]);
+		await runGit(repo, ["config", "user.name", "Test User"]);
+		await fs.writeFile(path.join(repo, "README.md"), "base\n");
+		await runGit(repo, ["add", "README.md"]);
+		await runGit(repo, ["commit", "-q", "-m", "init"]);
+		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ext-iso-"));
+		tempDirs.push(tempRoot);
+	});
+
+	/** Script that runs `git worktree add <dir>` on the env-provided repo root and prints the dir. */
+	async function writeWorktreeScript(name: string, dir: string): Promise<string> {
+		const scriptPath = path.join(tempRoot, name);
+		await fs.writeFile(
+			scriptPath,
+			`#!/bin/sh\nset -e\nwt_dir="${dir}"\ngit -C "$OMP_ISOLATION_REPO_ROOT" worktree add -q "$wt_dir" 1>&2\necho "$wt_dir"\n`,
+			{ mode: 0o755 },
+		);
+		return scriptPath;
+	}
+
+	it("materialises the workspace the command prints, with a clean baseline and a committable child", async () => {
+		const wtDir = path.join(tempRoot, "wt-happy");
+		const script = await writeWorktreeScript("happy.sh", wtDir);
+		const handle = await ensureExternalIsolation(repo, "ext-happy", `"${script}"`);
+		// The handle carries the canonical path, so a symlinked temp root cannot
+		// later be mistaken for a different workspace.
+		expect(handle.mergedDir).toBe(await fs.realpath(wtDir));
+		expect(handle.external).toBe(true);
+		expect(handle.backend).toBeUndefined();
+		expect(handle.fellBack).toBe(false);
+
+		// The external worktree keeps its linked-worktree git pointer: omp must
+		// not detach it (that would sever worktrunk's bookkeeping).
+		const gitPointer = await fs.readFile(path.join(wtDir, ".git"), "utf8");
+		expect(gitPointer).toContain("gitdir:");
+
+		const baseline = await captureIsolationBaseline(wtDir, repo);
+		expect(baseline.root.staged.trim()).toBe("");
+		expect(baseline.root.unstaged.trim()).toBe("");
+		expect(baseline.root.untrackedPatch.trim()).toBe("");
+
+		// The child can commit in the workspace.
+		await fs.writeFile(path.join(wtDir, "child.txt"), "from child\n");
+		await runGit(wtDir, ["add", "child.txt"]);
+		await runGit(wtDir, ["commit", "-q", "-m", "child commit"]);
+		const head = await runGit(wtDir, ["rev-parse", "HEAD"]);
+		expect(head).not.toBe(await runGit(repo, ["rev-parse", "HEAD"]));
+	});
+
+	it("leaves the external workspace intact through cleanupIsolation and retainIsolationWorkspace", async () => {
+		const wtDir = path.join(tempRoot, "wt-retain");
+		const script = await writeWorktreeScript("retain.sh", wtDir);
+		const handle = await ensureExternalIsolation(repo, "ext-retain", `"${script}"`);
+		await fs.writeFile(path.join(wtDir, "marker.txt"), "keep me\n");
+
+		await cleanupIsolation(handle);
+		await expect(fs.stat(path.join(wtDir, "marker.txt"))).resolves.toBeTruthy();
+
+		const retained = await retainIsolationWorkspace(wtDir, handle);
+		expect(retained.dir).toBe(wtDir);
+		expect(retained.sidecarOk).toBe(true);
+		await expect(fs.stat(path.join(wtDir, "marker.txt"))).resolves.toBeTruthy();
+	});
+
+	it("rejects a nonexistent workspace path", async () => {
+		const scriptPath = path.join(tempRoot, "missing.sh");
+		await fs.writeFile(scriptPath, `#!/bin/sh\necho "${path.join(tempRoot, "nope")}"\n`, { mode: 0o755 });
+		const err = await ensureExternalIsolation(repo, "ext-missing", `"${scriptPath}"`).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(Error);
+		expect((err as Error).message).toContain("nonexistent workspace path");
+	});
+
+	it("rejects the parent repo root itself", async () => {
+		const scriptPath = path.join(tempRoot, "parent.sh");
+		await fs.writeFile(scriptPath, `#!/bin/sh\necho "${repo}"\n`, { mode: 0o755 });
+		const err = await ensureExternalIsolation(repo, "ext-parent", `"${scriptPath}"`).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect((err as Error).message).toContain("the checkout omp is running in");
+	});
+
+	it("rejects an unrelated repo with a different common dir", async () => {
+		const other = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ext-other-"));
+		tempDirs.push(other);
+		await initRepo(other);
+		await fs.writeFile(path.join(other, "x.txt"), "x\n");
+		await runGit(other, ["add", "x.txt"]);
+		await runGit(other, ["commit", "-q", "-m", "other init"]);
+		const scriptPath = path.join(tempRoot, "other.sh");
+		await fs.writeFile(scriptPath, `#!/bin/sh\necho "${other}"\n`, { mode: 0o755 });
+		const err = await ensureExternalIsolation(repo, "ext-other", `"${scriptPath}"`).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect((err as Error).message).toContain("not a worktree of this repository");
+	});
+
+	it("rejects a non-zero command exit, empty stdout, and an empty command, naming the command", async () => {
+		const failPath = path.join(tempRoot, "fail.sh");
+		await fs.writeFile(failPath, "#!/bin/sh\necho boom 1>&2\nexit 3\n", { mode: 0o755 });
+		const failErr = await ensureExternalIsolation(repo, "ext-fail", `"${failPath}"`).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect((failErr as Error).message).toContain("exit code 3");
+		expect((failErr as Error).message).toContain("fail.sh");
+
+		const emptyPath = path.join(tempRoot, "empty.sh");
+		await fs.writeFile(emptyPath, "#!/bin/sh\necho 'noise only' 1>&2\n", { mode: 0o755 });
+		const emptyErr = await ensureExternalIsolation(repo, "ext-empty", `"${emptyPath}"`).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect((emptyErr as Error).message).toContain("no workspace path");
+
+		const cmdErr = await ensureExternalIsolation(repo, "ext-blank", "   ").then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect((cmdErr as Error).message).toContain("isolation.command is empty");
+	});
+
+	it("rejects a path inside the parent checkout, including through a symlink", async () => {
+		await fs.mkdir(path.join(repo, "sub"), { recursive: true });
+		const insidePath = path.join(tempRoot, "inside.sh");
+		await fs.writeFile(insidePath, `#!/bin/sh\necho "${path.join(repo, "sub")}"\n`, { mode: 0o755 });
+		const insideErr = await ensureExternalIsolation(repo, "ext-inside", `"${insidePath}"`).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect((insideErr as Error).message).toContain("path inside it");
+
+		const linkPath = path.join(tempRoot, "parent-link");
+		await fs.symlink(path.join(repo, "sub"), linkPath);
+		const linkScript = path.join(tempRoot, "link.sh");
+		await fs.writeFile(linkScript, `#!/bin/sh\necho "${linkPath}"\n`, { mode: 0o755 });
+		const linkErr = await ensureExternalIsolation(repo, "ext-link", `"${linkScript}"`).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect((linkErr as Error).message).toContain("path inside it");
+	});
+
+	it("rejects a subdirectory of a real worktree, because the root is the isolation contract", async () => {
+		const wtDir = path.join(tempRoot, "wt-subdir");
+		const script = await writeWorktreeScript("subdir.sh", wtDir);
+		await ensureExternalIsolation(repo, "ext-subdir-create", `"${script}"`);
+		await fs.mkdir(path.join(wtDir, "nested"), { recursive: true });
+		const subdirScript = path.join(tempRoot, "print-subdir.sh");
+		await fs.writeFile(subdirScript, `#!/bin/sh\necho "${path.join(wtDir, "nested")}"\n`, { mode: 0o755 });
+		const err = await ensureExternalIsolation(repo, "ext-subdir", `"${subdirScript}"`).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect((err as Error).message).toContain("subdirectory of the worktree");
+	});
+
+	it("rejects a printed path that is not a directory", async () => {
+		const filePath = path.join(tempRoot, "not-a-dir.txt");
+		await fs.writeFile(filePath, "x\n");
+		const scriptPath = path.join(tempRoot, "file.sh");
+		await fs.writeFile(scriptPath, `#!/bin/sh\necho "${filePath}"\n`, { mode: 0o755 });
+		const err = await ensureExternalIsolation(repo, "ext-file", `"${scriptPath}"`).then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect((err as Error).message).toContain("not a directory");
+	});
+
+	it("passes the documented environment and runs in the repo root", async () => {
+		const wtDir = path.join(tempRoot, "wt-env");
+		const scriptPath = path.join(tempRoot, "env.sh");
+		await fs.writeFile(
+			scriptPath,
+			`#!/bin/sh\nset -e\ntest "$OMP_ISOLATION_AGENT_ID" = "ext-env"\ntest "$OMP_ISOLATION_COMMAND_MODE" = "create"\ntest "$OMP_ISOLATION_REPO_ROOT" = "${repo}"\ntest "$(pwd -P)" = "$(cd "${repo}" && pwd -P)"\ngit -C "$OMP_ISOLATION_REPO_ROOT" worktree add -q "${wtDir}"\necho "${wtDir}"\n`,
+			{ mode: 0o755 },
+		);
+		const handle = await ensureExternalIsolation(repo, "ext-env", `"${scriptPath}"`);
+		expect(handle.mergedDir).toBe(await fs.realpath(wtDir));
+	});
+
+	it("accepts a repo reached through a symlinked parent path", async () => {
+		const linkedRepo = path.join(tempRoot, "repo-link");
+		await fs.symlink(repo, linkedRepo);
+		const wtDir = path.join(tempRoot, "wt-symlink-parent");
+		const scriptPath = path.join(tempRoot, "symlink-parent.sh");
+		await fs.writeFile(
+			scriptPath,
+			`#!/bin/sh\nset -e\ngit -C "${linkedRepo}" worktree add -q "${wtDir}"\necho "${wtDir}"\n`,
+			{ mode: 0o755 },
+		);
+		const handle = await ensureExternalIsolation(linkedRepo, "ext-symlink-parent", `"${scriptPath}"`);
+		expect(handle.mergedDir).toBe(await fs.realpath(wtDir));
+	});
+
+	it("commitToBranch with sharedObjectDb returns the branch when the workspace sits on it", async () => {
+		// The command named the task branch itself and the child committed on
+		// it: force-creating `omp/task/<id>` from the parent would fail with
+		// "cannot force update the branch … checked out at".
+		const wtDir = path.join(tempRoot, "wt-on-task-branch");
+		const branch = "omp/task/on-branch";
+		await runGit(repo, ["worktree", "add", "-q", "-b", branch, wtDir]);
+		// Baseline first, like the real flow: it must describe the workspace
+		// before the child's work, or the child's commits look like the base.
+		const baseline = await captureIsolationBaseline(wtDir, repo);
+		await fs.writeFile(path.join(wtDir, "child.txt"), "from child\n");
+		await runGit(wtDir, ["add", "child.txt"]);
+		await runGit(wtDir, ["commit", "-q", "-m", "child commit"]);
+
+		const committed = await commitToBranch(wtDir, baseline, "on-branch", "child change", undefined, {
+			sharedObjectDb: true,
+		});
+		expect(committed?.branchName).toBe(branch);
+		expect(committed?.baseSha).toBe(baseline.root.headCommit);
+		expect(await runGit(repo, ["rev-parse", branch])).toBe(await runGit(wtDir, ["rev-parse", "HEAD"]));
 	});
 });
