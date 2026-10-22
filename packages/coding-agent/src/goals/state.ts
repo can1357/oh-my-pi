@@ -16,7 +16,7 @@ export type GoalRuntimeEvent =
 
 export type GoalTokenUsage = Pick<UsageStatistics, "input" | "output" | "cacheRead" | "cacheWrite">;
 
-export type GoalBudgetSteering = "allowed" | "suppressed";
+export type GoalBudgetSteering = "allowed" | "suppressed" | "deferred";
 export type GoalTerminalMetricEmission = "emit" | "suppress";
 
 /** Rebuild a persisted goal from `mode_change` data; undefined when the record is malformed. */
