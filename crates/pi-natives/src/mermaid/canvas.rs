@@ -518,11 +518,19 @@ impl Canvas {
 			return;
 		};
 		let junction = match (use_ascii, current.as_char(), cell.as_char()) {
-			(false, Some(a), Some(b)) if is_junction_char(a) && is_junction_char(b) => Some((a, b)),
+			// A dotted stroke crossing a solid one has no box-drawing glyph;
+			// `┼` keeps both lines continuous.
+			(false, Some('─'), Some('┆'))
+			| (false, Some('┆'), Some('─'))
+			| (false, Some('│'), Some('┄'))
+			| (false, Some('┄'), Some('│')) => Some('┼'),
+			(false, Some(a), Some(b)) if is_junction_char(a) && is_junction_char(b) => {
+				Some(merge_junctions(a, b))
+			},
 			_ => None,
 		};
-		if let Some((a, b)) = junction {
-			self.set(x, y, Cell::from(merge_junctions(a, b)));
+		if let Some(junction) = junction {
+			self.set(x, y, Cell::from(junction));
 		} else if is_wide {
 			let next_is_label = self.get(x + 1, y).is_some_and(Cell::is_label);
 			if !current.is_label() && !next_is_label {
@@ -648,6 +656,24 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn dotted_and_solid_crossings_keep_both_lines() {
+		for (base_line, crossing) in [("───", '┆'), ("┄┄┄", '│')] {
+			let mut base = Canvas::new(3, 1);
+			base.draw_text(DrawingCoord::new(0, 0), base_line, true);
+			let mut overlay = Canvas::new(3, 1);
+			overlay.set(1, 0, Cell::from(crossing));
+			base.merge(DrawingCoord::new(0, 0), false, &[&overlay]);
+			let expected: String = base_line
+				.chars()
+				.take(1)
+				.chain(['┼'])
+				.chain(base_line.chars().skip(2))
+				.collect();
+			assert_eq!(base.to_plain_string().trim_end(), expected);
+		}
+	}
 
 	#[test]
 	fn merge_resolves_junctions_and_keeps_first_label() {

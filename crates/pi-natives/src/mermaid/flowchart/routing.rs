@@ -141,25 +141,73 @@ pub fn determine_path(graph: &mut AsciiGraph, edge: EdgeId) {
 
 	// Another edge joining the same two nodes may already run along this
 	// route; drawing both on the same cells would merge their lines and
-	// stack their labels. Re-route around it, also trying to leave and enter
-	// both nodes on the side across the flow, as backward edges do.
-	let taken = parallel_route_cells(graph, edge);
-	if !taken.is_empty() && route_rank(&path, &taken).1 > 0 {
+	// stack their labels. Re-route around every routed edge (repeats are
+	// routed last, see `grid::create_mapping`), also trying to leave and
+	// enter on the sides across the flow, as backward edges do.
+	let parallel_taken = parallel_route_cells(graph, edge);
+	if !parallel_taken.is_empty() && route_rank(&path, &parallel_taken).1 > 0 {
+		let other_taken = other_route_cells(graph, edge);
+		let all_taken = all_route_cells(graph, edge);
 		let (side_a, side_b) = match effective_direction {
 			LayoutDirection::LR => (Dir::Down, Dir::Up),
 			LayoutDirection::TD => (Dir::Right, Dir::Left),
 		};
 		let rerouted = [
 			(preferred, preferred_end),
+			(preferred, alternative_end),
+			(alternative, preferred_end),
 			(alternative, alternative_end),
 			(side_a, side_a),
 			(side_b, side_b),
+			(side_a, side_b),
+			(side_b, side_a),
 		]
 		.into_iter()
 		.filter_map(|(start, end)| {
-			let candidate = get_path_avoiding(&graph.grid, from.offset(start), to.offset(end), &taken)
-				.map(merge_path)?;
-			Some((route_rank(&candidate, &taken), start, end, candidate))
+			let candidate =
+				get_path_avoiding(&graph.grid, from.offset(start), to.offset(end), &all_taken)
+					.map(merge_path)?;
+			let shares_end_port = graph.edges.iter().enumerate().any(|(id, other)| {
+				id != edge
+					&& !other.path.is_empty()
+					&& ((other.to == to_id && other.end_dir == end)
+						|| (other.from == to_id && other.start_dir == end))
+			});
+			let shares_parallel_end = graph.edges.iter().enumerate().any(|(id, other)| {
+				id != edge
+					&& !other.path.is_empty()
+					&& other.from == from_id
+					&& other.to == to_id
+					&& other.end_dir == end
+			});
+			// `draw::edge_drawing_path` moves a last segment that enters a port
+			// another edge leaves from beside that edge's stem, so sharing those
+			// cells draws no collision.
+			let leaves_end_port = graph.edges.iter().enumerate().any(|(id, other)| {
+				id != edge && !other.path.is_empty() && other.from == to_id && other.start_dir == end
+			});
+			let separated_end: HashSet<GridCoord> = if leaves_end_port && candidate.len() >= 3 {
+				path_cells(&candidate[candidate.len() - 2..]).collect()
+			} else {
+				HashSet::new()
+			};
+			let other_shared = path_cells(&candidate)
+				.filter(|cell| other_taken.contains(cell) && !separated_end.contains(cell))
+				.count();
+			let parallel_rank = route_rank(&candidate, &parallel_taken);
+			Some((
+				(
+					parallel_rank.0,
+					shares_parallel_end,
+					other_shared,
+					parallel_rank.2,
+					shares_end_port,
+					parallel_rank.1,
+				),
+				start,
+				end,
+				candidate,
+			))
 		})
 		.min_by_key(|(rank, ..)| *rank);
 		if let Some((_, start, end, candidate)) = rerouted {
@@ -174,6 +222,32 @@ pub fn determine_path(graph: &mut AsciiGraph, edge: EdgeId) {
 	}
 }
 
+/// Every grid cell crossed by the routed edges other than `edge`.
+fn all_route_cells(graph: &AsciiGraph, edge: EdgeId) -> HashSet<GridCoord> {
+	let mut cells = HashSet::new();
+	for (id, other) in graph.edges.iter().enumerate() {
+		if id != edge && !other.path.is_empty() {
+			cells.extend(path_cells(&other.path));
+		}
+	}
+	cells
+}
+
+/// Every grid cell crossed by the routed edges that do not join the same two
+/// nodes as `edge`.
+fn other_route_cells(graph: &AsciiGraph, edge: EdgeId) -> HashSet<GridCoord> {
+	let mut cells = HashSet::new();
+	let Some(this) = graph.edges.get(edge) else {
+		return cells;
+	};
+	for (id, other) in graph.edges.iter().enumerate() {
+		if id != edge && !this.joins_same_pair(other) && !other.path.is_empty() {
+			cells.extend(path_cells(&other.path));
+		}
+	}
+	cells
+}
+
 /// Every grid cell crossed by the already-routed edges that join the same two
 /// nodes as `edge` (in either direction).
 fn parallel_route_cells(graph: &AsciiGraph, edge: EdgeId) -> HashSet<GridCoord> {
@@ -185,9 +259,7 @@ fn parallel_route_cells(graph: &AsciiGraph, edge: EdgeId) -> HashSet<GridCoord> 
 		return cells;
 	}
 	for (id, other) in graph.edges.iter().enumerate() {
-		let same_pair = (other.from, other.to) == (this.from, this.to)
-			|| (other.from, other.to) == (this.to, this.from);
-		if id != edge && same_pair {
+		if id != edge && this.joins_same_pair(other) {
 			cells.extend(path_cells(&other.path));
 		}
 	}
@@ -246,12 +318,16 @@ pub fn determine_label_line(graph: &mut AsciiGraph, edge: EdgeId) {
 		let line = [edge_data.path[index - 1], edge_data.path[index]];
 		segments.push((line, calculate_line_width(graph, line), index));
 	}
-	// A segment shared with a parallel edge's route would put this label on
-	// that edge's line; use an own segment whenever the route has one.
-	let taken = parallel_route_cells(graph, edge);
-	let shared = |line: &[GridCoord; 2]| path_cells(line).any(|cell| taken.contains(&cell));
-	if segments.iter().any(|(line, ..)| !shared(line)) {
-		segments.retain(|(line, ..)| !shared(line));
+	// A parallel edge's label goes on a segment of its own: skip segments that
+	// another route fully covers. `.all` rather than `.any`, so a segment that
+	// only meets another route at a corner stays eligible. Edges without a
+	// parallel twin keep their original segment choice.
+	if !parallel_route_cells(graph, edge).is_empty() {
+		let taken = all_route_cells(graph, edge);
+		let shared = |line: &[GridCoord; 2]| path_cells(line).all(|cell| taken.contains(&cell));
+		if segments.iter().any(|(line, ..)| !shared(line)) {
+			segments.retain(|(line, ..)| !shared(line));
+		}
 	}
 
 	let largest_line = segments
@@ -281,7 +357,8 @@ pub fn determine_label_line(graph: &mut AsciiGraph, edge: EdgeId) {
 	let min_x = largest_line[0].x.min(largest_line[1].x);
 	let max_x = largest_line[0].x.max(largest_line[1].x);
 	let column = label_column(graph, min_x, max_x);
-	let required_width = label_width.saturating_add(2);
+	let required_width =
+		required_column_width(graph, min_x, max_x, column, label_width.saturating_add(2));
 	graph
 		.column_width
 		.entry(column)
@@ -289,6 +366,37 @@ pub fn determine_label_line(graph: &mut AsciiGraph, edge: EdgeId) {
 		.or_insert(required_width);
 	if let Some(edge) = graph.edges.get_mut(edge) {
 		edge.label_line = largest_line.to_vec();
+	}
+}
+
+/// When [`label_column`] shifts a label off a node border onto one of the
+/// segment's endpoint columns (`min_x` or `max_x`), only half of that column
+/// lies inside `[center(min_x), center(max_x)]`; size the endpoint column so
+/// its interior half still covers `target_span`.
+fn required_column_width(
+	graph: &AsciiGraph,
+	min_x: i32,
+	max_x: i32,
+	column: i32,
+	target_span: i32,
+) -> i32 {
+	let middle = min_x + (max_x - min_x).div_euclid(2);
+	if min_x < max_x && column != middle && (column == min_x || column == max_x) {
+		let other_end = if column == min_x { max_x } else { min_x };
+		let other_end_half = graph
+			.column_width
+			.get(&other_end)
+			.copied()
+			.unwrap_or(0)
+			.div_euclid(2);
+		let interior: i32 = ((min_x + 1)..max_x)
+			.filter(|&x| x != column)
+			.map(|x| graph.column_width.get(&x).copied().unwrap_or(0))
+			.sum();
+		let needed_half = (target_span - other_end_half - interior).max(0);
+		needed_half.saturating_mul(2).max(target_span)
+	} else {
+		target_span
 	}
 }
 
