@@ -71,6 +71,14 @@ export interface LspToolDetails {
 	action: string;
 	success: boolean;
 	request?: LspParams;
+	/** Whether a language server handled the semantic part of the operation. */
+	semanticRename?: boolean;
+	/** Number of reference edits a language server applied. */
+	referenceEdits?: number;
+	/** Servers that do not implement the requested method. */
+	unsupportedServers?: string[];
+	/** Servers that could not be reached. */
+	unreachableServers?: string[];
 }
 
 /** Diagnostics and formatting status for one file. */
