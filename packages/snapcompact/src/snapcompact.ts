@@ -647,6 +647,9 @@ export interface Archive {
 	 *  reasoning ({@link SerializeOptions.includeThinking} `false`), when this
 	 *  archive carries it. Read through {@link viewWithoutThinking}. */
 	withoutThinking?: ArchiveView;
+	/** Extension context ({@link Options.extraContext}) rendered into the
+	 *  summary; kept here so every re-render of this archive repeats it. */
+	context?: string[];
 }
 
 /** What a reader gets for one compaction: the summary text and the archive it introduces. */
@@ -675,6 +678,8 @@ export interface Options<TMessage = Message> extends SerializeOptions {
 	frameSize?: number;
 	/** Upper limit on archive frames; clamped to (and defaulting to) {@link MAX_FRAMES_DEFAULT}. */
 	maxFrames?: number;
+	/** Context lines to keep in the summary, e.g. from `session.compacting` hooks. */
+	extraContext?: string[];
 }
 
 /** Result of rendering one frame. */
@@ -1797,6 +1802,7 @@ function validateArchive(candidate: unknown): Archive | undefined {
 	const text = typeof archive.text === "string" && archive.text.length > 0 ? archive.text : undefined;
 	const textHead = typeof archive.textHead === "string" && archive.textHead.length > 0 ? archive.textHead : undefined;
 	const textTail = typeof archive.textTail === "string" && archive.textTail.length > 0 ? archive.textTail : undefined;
+	const context = contextLines(archive.context);
 	// A text-only archive (everything fit in the plain-text regions) is valid;
 	// only an archive carrying neither frames nor text is empty.
 	if (frames.length === 0 && text === undefined && textHead === undefined && textTail === undefined) return undefined;
@@ -1807,7 +1813,15 @@ function validateArchive(candidate: unknown): Archive | undefined {
 		...(text !== undefined ? { text } : {}),
 		...(textHead !== undefined ? { textHead } : {}),
 		...(textTail !== undefined ? { textTail } : {}),
+		...(context ? { context } : {}),
 	};
+}
+
+/** Non-empty string entries of `value`, or `undefined` when there are none. */
+function contextLines(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const lines = value.filter((line): line is string => typeof line === "string" && line.trim().length > 0);
+	return lines.length > 0 ? lines : undefined;
 }
 
 /** Validate and extract a persisted frame archive from `preserveData`, with its
@@ -2310,14 +2324,16 @@ export function viewWithoutThinking(summary: string, archive: Archive, details?:
 	const textTail = fits || tailChars === 0 ? "" : text.slice(text.length - tailChars);
 	const truncatedChars = archive.truncatedChars + (fits ? 0 : text.length - headChars - tailChars);
 	const files = details ? formatFileList(details.readFiles, details.modifiedFiles) : "";
+	const { context } = archive;
 	return {
 		summary:
-			textHead.length === 0 && files.length === 0
+			textHead.length === 0 && files.length === 0 && !context
 				? "No prior history."
 				: prompt.render(snapcompactSummaryPrompt, {
 						frameCount: 0,
 						truncatedChars,
 						includedPreviousSummary: text.startsWith(PREVIOUS_SUMMARY_HEAD),
+						context: context?.join("\n\n"),
 						files: files.length > 0 ? files : undefined,
 						includeThinking: false,
 					}),
@@ -2328,6 +2344,7 @@ export function viewWithoutThinking(summary: string, archive: Archive, details?:
 			...(text ? { text } : {}),
 			...(textHead ? { textHead } : {}),
 			...(textTail ? { textTail } : {}),
+			...(context ? { context } : {}),
 		},
 	};
 }
@@ -2451,9 +2468,10 @@ export async function compact<TMessage = Message>(
 
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	const files = formatFileList(readFiles, modifiedFiles, fileOps.read);
+	const context = contextLines(options?.extraContext);
 
 	let summary: string;
-	if (frames.length === 0 && textHead.length === 0 && textTail.length === 0 && files.length === 0) {
+	if (frames.length === 0 && textHead.length === 0 && textTail.length === 0 && files.length === 0 && !context) {
 		summary = "No prior history.";
 	} else {
 		summary = prompt.render(snapcompactSummaryPrompt, {
@@ -2467,6 +2485,7 @@ export async function compact<TMessage = Message>(
 			lineRepeated: high.lineRepeat > 1,
 			truncatedChars,
 			includedPreviousSummary,
+			context: context?.join("\n\n"),
 			files: files.length > 0 ? files : undefined,
 			includeThinking: options?.includeThinking !== false,
 		});
@@ -2487,6 +2506,7 @@ export async function compact<TMessage = Message>(
 		...(persistedText.length > 0 ? { text: persistedText } : {}),
 		...(textHead ? { textHead } : {}),
 		...(textTail ? { textTail } : {}),
+		...(context ? { context } : {}),
 	};
 
 	const textNote = textChars > 0 ? ` (+${textChars.toLocaleString()} chars as text)` : "";

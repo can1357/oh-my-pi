@@ -140,7 +140,10 @@ export class SessionHandoff {
 			// Both can diverge from this.#host.sessionId() (tan/subagent/shared sessions), so
 			// mirror exactly what the live turn populated the cache under.
 			const handoffPromptCacheKey = this.#host.getPromptCacheKeyForModel(model) ?? this.#host.agent.sessionId;
-			const handoffPromptText = renderHandoffPrompt(this.#host.obfuscateTextForProvider(customInstructions));
+			const handoffPromptText = renderHandoffPrompt(
+				this.#host.obfuscateTextForProvider(customInstructions),
+				options?.extraContext,
+			);
 			const handoffSnapshot: AgentMessage[] = [
 				...this.#host.agent.state.messages,
 				{

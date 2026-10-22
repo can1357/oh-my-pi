@@ -502,6 +502,8 @@ export interface HandoffResult {
 export interface SessionHandoffOptions {
 	autoTriggered?: boolean;
 	signal?: AbortSignal;
+	/** Context lines (e.g. from `session.compacting` hooks) sent with the handoff document request. */
+	extraContext?: string[];
 }
 
 /** Result from cycleModel(). */

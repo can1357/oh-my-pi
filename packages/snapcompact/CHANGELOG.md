@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `extraContext` to `compact()` options: the lines are rendered in a `CONTEXT` summary section and kept on the archive ([#16720](https://github.com/can1357/oh-my-pi/pull/16720) by [@integrITsolutions](https://github.com/integrITsolutions))
+
 ## [18.12.4] - 2026-10-20
 
 ### Fixed

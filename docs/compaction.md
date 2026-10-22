@@ -467,12 +467,12 @@ The hook's `customInstructions` carries only the public user focus. Internal sum
 
 ### `session.compacting`
 
-Prompt/context customization hook for default compaction.
+Prompt/context customization hook for compaction summaries, including snapcompact and handoff (automatic, manual and speculative).
 
 Can return:
 
-- `prompt` (override base summary prompt)
-- `context` (extra context lines injected into `<additional-context>`)
+- `prompt` (override base summary prompt; LLM summaries only, ignored by snapcompact and handoff)
+- `context` (extra context lines: injected into `<additional-context>` for LLM summaries and the handoff document request, rendered as a `CONTEXT` section of a snapcompact summary)
 - `preserveData` (stored on compaction entry)
 
 ### `session_compact`

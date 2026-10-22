@@ -1093,11 +1093,11 @@ export interface HandoffOptions {
 	thinkingLevel?: ThinkingLevel;
 }
 
-export function renderHandoffPrompt(customInstructions?: string): string {
-	if (!customInstructions) return HANDOFF_DOCUMENT_PROMPT;
-	return prompt.render(handoffDocumentPrompt, {
-		additionalFocus: customInstructions,
-	});
+export function renderHandoffPrompt(customInstructions?: string, extraContext?: string[]): string {
+	const basePrompt = customInstructions
+		? prompt.render(handoffDocumentPrompt, { additionalFocus: customInstructions })
+		: HANDOFF_DOCUMENT_PROMPT;
+	return `${formatAdditionalContext(extraContext)}${basePrompt}`;
 }
 
 export interface HandoffFromContextOptions {
