@@ -134,7 +134,8 @@ describe("autoresearch before_agent_start handler", () => {
 		const event: BeforeAgentStartEvent = {
 			type: "before_agent_start",
 			prompt: "kick off",
-			systemPrompt: ["alpha block", "beta block"],
+			systemPrompt: "alpha block\nbeta block",
+			systemPromptBlocks: ["alpha block", "beta block"],
 		};
 
 		const result = (await handlers.before_agent_start(event, ctx)) as BeforeAgentStartEventResult;
