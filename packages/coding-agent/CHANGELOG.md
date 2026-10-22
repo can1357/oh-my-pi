@@ -123,6 +123,11 @@
 
 ### Added
 
+- Added `/snippets` and the `alt+s` keybinding (`app.snippets.insert`): a fuzzy picker over your saved prompt templates that inserts the chosen snippet into the editor at the cursor, plus `/snippets save <name> [--scope user|project] [--force] [text]` (saves text, or your last prompt, as `~/.omp/agent/prompts/<name>.md`) and `/snippets delete <name>`; new snippets work as `/snippet:<name>` right away ([#16359](https://github.com/can1357/oh-my-pi/pull/16359) by [@Shadorain](https://github.com/Shadorain))
+
+### Changed
+
+- Prompt templates now autocomplete as `/snippet:<name>`, collapsed behind a `/snippet:` row like `/skill:` skills, so they no longer collide with builtin commands; typing the bare name still surfaces them, and the bare `/<name>` form still expands when submitted ([#16359](https://github.com/can1357/oh-my-pi/pull/16359) by [@Shadorain](https://github.com/Shadorain))
 - Added the **Ask and remember** approval mode (`tools.approvalMode: always-ask-cached`, `--approval-mode always-ask-cached`): it also asks before file reads, and file prompts can remember the folder or the file, for this session or across sessions, through `approval-cache.db` ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
 - Added `/forget-approvals` to forget every file and folder approval Ask and remember has recorded ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
 - Extension `ui.approve()` hosts can render the new `prompt.grants` choices and answer `{ grant, always }`; hosts that ignore them keep answering `once`/`session`/`deny` ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))

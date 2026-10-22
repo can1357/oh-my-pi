@@ -21,6 +21,16 @@ export interface PromptTemplate {
 	source: string; // e.g., "(user)", "(project)", "(project:frontend)"
 }
 
+const discoveredTemplates = new WeakSet<PromptTemplate>();
+
+/**
+ * Whether `template` was produced by {@link loadPromptTemplates} (as opposed to supplied by an SDK
+ * caller). Lets a reload replace discovered templates without discarding supplied ones.
+ */
+export function isDiscoveredPromptTemplate(template: PromptTemplate): boolean {
+	return discoveredTemplates.has(template);
+}
+
 prompt.registerHelper("jtdToTypeScript", (schema: unknown): string => {
 	try {
 		return jtdToTypeScript(schema);
@@ -129,12 +139,14 @@ async function loadTemplatesFromDir(
 					// Append source to description
 					description = description ? `${description} ${sourceStr}` : sourceStr;
 
-					templates.push({
+					const template: PromptTemplate = {
 						name,
 						description,
 						content: body,
 						source: sourceStr,
-					});
+					};
+					discoveredTemplates.add(template);
+					templates.push(template);
 				}
 			} catch (error) {
 				logger.warn("Failed to load prompt template", { path: fullPath, error: String(error) });
@@ -180,6 +192,25 @@ export async function loadPromptTemplates(options: LoadPromptTemplatesOptions = 
 	return templates;
 }
 
+/** Slash-command namespace under which prompt templates (snippets) are advertised: `/snippet:<name>`. */
+export const SNIPPET_COMMAND_PREFIX = "snippet:";
+
+/** Slash-command name (without the leading `/`) that invokes `template`. */
+export function promptTemplateCommandName(template: Pick<PromptTemplate, "name">): string {
+	return `${SNIPPET_COMMAND_PREFIX}${template.name}`;
+}
+
+/** Resolve a command token to a template: the bare `name`, or `snippet:<name>`. Bare wins on an exact match. */
+export function findPromptTemplate(
+	templates: readonly PromptTemplate[],
+	commandName: string,
+): PromptTemplate | undefined {
+	const exact = templates.find(t => t.name === commandName);
+	if (exact || !commandName.startsWith(SNIPPET_COMMAND_PREFIX)) return exact;
+	const bare = commandName.slice(SNIPPET_COMMAND_PREFIX.length);
+	return templates.find(t => t.name === bare);
+}
+
 /**
  * Expand a prompt template if it matches a template name.
  * Returns the expanded content or the original text if not a template.
@@ -191,7 +222,7 @@ export function expandPromptTemplate(text: string, templates: PromptTemplate[]):
 	const templateName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
 	const argsString = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
 
-	const template = templates.find(t => t.name === templateName);
+	const template = findPromptTemplate(templates, templateName);
 	if (template) {
 		const args = parseCommandArgs(argsString);
 		const argsText = args.join(" ");

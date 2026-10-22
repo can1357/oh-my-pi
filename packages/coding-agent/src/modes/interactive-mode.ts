@@ -85,6 +85,7 @@ import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { isDiscoveredPromptTemplate, loadPromptTemplates, promptTemplateCommandName } from "../config/prompt-templates";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
@@ -2830,6 +2831,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#rebuildSlashCommandAutocomplete(basePath);
 	}
 
+	/** Re-discover prompt templates (snippets) from disk and refresh `/snippet:<name>` autocomplete. */
+	async refreshPromptTemplates(): Promise<void> {
+		const basePath = this.sessionManager.getCwd();
+		const agentDir = this.settings.getAgentDir();
+		// Templates an SDK caller supplied are not on disk; keep them across the reload.
+		const supplied = this.session.promptTemplates.filter(template => !isDiscoveredPromptTemplate(template));
+		const discovered = await loadPromptTemplates({ cwd: basePath, agentDir });
+		this.session.setPromptTemplates([...supplied, ...discovered]);
+		this.#rebuildSlashCommandAutocomplete(basePath);
+	}
+
 	/**
 	 * Rebuild the editor's slash-command autocomplete from the pending command list and
 	 * the session's current file-based slash commands and prompt templates.
@@ -2851,24 +2863,15 @@ export class InteractiveMode implements InteractiveModeContext {
 				getInlineHint: argumentHint ? buildStaticInlineHint(argumentHint) : undefined,
 			};
 		});
-		// Surface discovered prompt templates in the picker. AgentSession.prompt() expands
-		// `expandSlashCommand` before `expandPromptTemplate`, and builtin command
-		// execution resolves aliases before template expansion. Mirror that command
-		// resolution order by skipping templates whose names already appear in any
-		// builtin/hook/custom/skill/file command token.
-		const reservedNames = new Set<string>();
-		for (const command of this.#pendingSlashCommands) {
-			reservedNames.add(command.name);
-			for (const alias of command.aliases ?? []) reservedNames.add(alias);
-		}
-		for (const command of fileSlashCommands) {
-			reservedNames.add(command.name);
-			for (const alias of command.aliases ?? []) reservedNames.add(alias);
-		}
+		// Prompt templates (snippets) live under `/snippet:<name>`, like `/skill:<name>`, so they cannot
+		// collide with ordinary command names. A hook, custom, or file command that itself claims a
+		// `snippet:<name>` token runs before template expansion, so that token is not advertised for the template.
+		// The bare `/<name>` form still expands at submit but is no longer advertised.
+		const reservedNames = this.#reservedSlashCommandNames();
 		const promptTemplateCommands: SlashCommand[] = this.session.promptTemplates
-			.filter(template => !reservedNames.has(template.name))
+			.filter(template => !reservedNames.has(promptTemplateCommandName(template)))
 			.map(template => ({
-				name: template.name,
+				name: promptTemplateCommandName(template),
 				// `PromptTemplate.description` from `loadTemplatesFromDir` already includes the
 				// source suffix (e.g. "Review code (project)"), so pass it through verbatim.
 				description: template.description,
@@ -2880,6 +2883,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			basePath,
 		);
 		this.#applyAutocompleteProvider();
+	}
+
+	/** Command tokens (names and aliases) that run a command before a prompt template of the same token. */
+	#reservedSlashCommandNames(): Set<string> {
+		const reservedNames = new Set<string>();
+		for (const command of this.#pendingSlashCommands) {
+			reservedNames.add(command.name);
+			for (const alias of command.aliases ?? []) reservedNames.add(alias);
+		}
+		for (const command of this.session.slashCommands) reservedNames.add(command.name);
+		return reservedNames;
 	}
 
 	/**
@@ -8445,6 +8459,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showHistorySearch(): void {
 		this.#selectorController.showHistorySearch();
+	}
+
+	showSnippetPicker(): Promise<void> {
+		return this.#selectorController.showSnippetPicker(this.#reservedSlashCommandNames());
 	}
 
 	showExtensionsDashboard(): void {

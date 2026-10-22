@@ -42,6 +42,8 @@
 
 ### Added
 
+- Added the `app.snippets.insert` keybinding (default `alt+s`) for inserting a saved snippet, listed in `/hotkeys` ([#16359](https://github.com/can1357/oh-my-pi/pull/16359) by [@Shadorain](https://github.com/Shadorain))
+- Slash-command autocomplete now treats `snippet:<name>` commands like `skill:<name>`: they collapse into a `/snippet:` row until you type the namespace, and still surface directly when a bare name matches more strongly than any ordinary command ([#16359](https://github.com/can1357/oh-my-pi/pull/16359) by [@Shadorain](https://github.com/Shadorain))
 - Added `IrcMessage.broadcast`, set on each copy of an `agent://all` broadcast so recipients can tell it from a direct message ([#16312](https://github.com/can1357/oh-my-pi/pull/16312) by [@will-bogusz](https://github.com/will-bogusz))
 - `AutocompleteItem.descriptionMatch` marks a slash command matched only through its description; `Editor` Enter no longer applies such a row unless the user moved the selection onto it ([#16265](https://github.com/can1357/oh-my-pi/issues/16265))
 - `ApprovalDialogComponent` accepts `grants` and `onGrant`: grant choices above **Approve Once**, led by a toggle that keeps them across sessions ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))

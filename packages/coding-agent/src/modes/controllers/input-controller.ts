@@ -15,6 +15,7 @@ import { formatDoubleTap } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { formatModelRoleAlias, roleCandidatePool } from "../../config/model-roles";
 import { resolveModelRoleValue } from "../../config/model-resolver";
+import { findPromptTemplate } from "../../config/prompt-templates";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { InternalUrlRouter, resolveLocalRoot } from "../../internal-urls";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
@@ -392,6 +393,11 @@ export class InputController {
 						return undefined;
 					}
 					this.ctx.showHistorySearch();
+					return { consume: true };
+				}
+				if (this.ctx.keybindings.matches(data, "app.snippets.insert")) {
+					if (this.ctx.ui.hasOverlay() || this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
+					void this.ctx.showSnippetPicker();
 					return { consume: true };
 				}
 				if (this.ctx.keybindings.matches(data, "app.editor.external")) {
@@ -1416,7 +1422,7 @@ export class InputController {
 			this.ctx.fileSlashCommands.has(token) ||
 			session.extensionRunner?.getCommand(token) !== undefined ||
 			session.customCommands.some(loaded => loaded.command.name === token) ||
-			session.promptTemplates.some(template => template.name === token)
+			findPromptTemplate(session.promptTemplates, token) !== undefined
 		);
 	}
 

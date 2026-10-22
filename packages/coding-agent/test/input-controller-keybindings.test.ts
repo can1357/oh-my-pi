@@ -71,6 +71,7 @@ async function createContext() {
 		"app.stt.pushToTalk": ["space"],
 		"app.thinking.toggle": ["ctrl+t"],
 		"app.history.search": ["ctrl+r"],
+		"app.snippets.insert": ["alt+s"],
 		"app.editor.external": ["ctrl+g"],
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["alt+m"],
@@ -237,6 +238,7 @@ async function createContext() {
 		dictationSpaceHold: vi.fn(),
 		showDebugSelector: vi.fn(),
 		showHistorySearch: vi.fn(),
+		showSnippetPicker: vi.fn(),
 		toggleThinkingBlockVisibility: vi.fn(),
 		showModelSelector,
 		updateEditorBorderColor: vi.fn(),
@@ -1042,6 +1044,20 @@ describe("InputController global editor actions", () => {
 		expect(context.ctx.hideToolActivity).toBe(true);
 		expect(dispatchInput(listeners, ALT_L)).toEqual({ consume: true });
 		expect(context.spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
+	});
+
+	it("opens the snippet picker only while the main editor holds focus", async () => {
+		const context = await createContext();
+		new context.InputController(context.ctx).setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		const ALT_S = "\x1bs";
+
+		expect(dispatchInput(listeners, ALT_S)).toEqual({ consume: true });
+		expect(context.ctx.showSnippetPicker).toHaveBeenCalledTimes(1);
+
+		context.setFocused({ handleInput() {} });
+		expect(dispatchInput(listeners, ALT_S)).toBeUndefined();
+		expect(context.ctx.showSnippetPicker).toHaveBeenCalledTimes(1);
 	});
 
 	it("still routes transcript actions when the main editor holds focus", async () => {

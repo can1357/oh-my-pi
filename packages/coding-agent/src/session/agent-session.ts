@@ -7437,6 +7437,11 @@ export class AgentSession implements SettingsScope {
 		return this.#promptTemplates;
 	}
 
+	/** Replace the prompt templates used for `/name args` expansion. */
+	setPromptTemplates(templates: PromptTemplate[]): void {
+		this.#promptTemplates = [...templates];
+	}
+
 	/** Replace file-based slash commands used for prompt expansion. */
 	setSlashCommands(slashCommands: FileSlashCommand[]): void {
 		this.#slashCommands = [...slashCommands];
@@ -13449,10 +13454,11 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Get all user messages from session for branch selector.
+	 * Get user messages from the session for the branch selector. Lists every branch by default;
+	 * `activeBranchOnly` limits it to the path from the root to the current leaf.
 	 */
-	getUserMessagesForBranching(): Array<{ entryId: string; text: string }> {
-		const entries = this.sessionManager.getEntries();
+	getUserMessagesForBranching(options?: { activeBranchOnly?: boolean }): Array<{ entryId: string; text: string }> {
+		const entries = options?.activeBranchOnly ? this.sessionManager.getBranch() : this.sessionManager.getEntries();
 		const result: Array<{ entryId: string; text: string }> = [];
 
 		for (const entry of entries) {

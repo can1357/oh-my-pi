@@ -62,6 +62,7 @@ interface AppKeybindings {
 	"app.tree.nextBranch": true;
 	"app.plan.toggle": true;
 	"app.history.search": true;
+	"app.snippets.insert": true;
 	"app.stt.pushToTalk": true;
 	"app.stt.toggle": true;
 	"app.live.toggle": true;
@@ -249,6 +250,10 @@ export const KEYBINDINGS = {
 	"app.history.search": {
 		defaultKeys: "ctrl+r",
 		description: "Search history",
+	},
+	"app.snippets.insert": {
+		defaultKeys: "alt+s",
+		description: "Insert a saved snippet",
 	},
 	"app.stt.pushToTalk": {
 		defaultKeys: "space",
