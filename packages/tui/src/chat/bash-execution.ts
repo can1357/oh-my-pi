@@ -9,14 +9,27 @@ import { Text } from "../components/text";
 import { getImageDimensions, imageFallback, ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import { Container, type TUI } from "../tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type { Terminal as XtermTerminalType } from "@oh-my-pi/pi-utils/vterm";
+import type { BufferLine, BufferView, Terminal as XtermTerminalType } from "@oh-my-pi/pi-utils/vterm";
 import { theme } from "../theme/theme";
 import type { OutputArtifactError } from "../tools/streaming-output";
 import type { TruncationMeta } from "../tools/output-meta";
 import { resolveImageOptions } from "../render/render-utils";
 import { OutputPane } from "../render/output-pane";
-import { loadXtermTerminal, readTerminalRows, styleTerminalRow } from "../tools/terminal-output";
-import { getSixelLineMask, isSixelPassthroughEnabled, sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
+import {
+	activeStyleAtRowEnd,
+	loadXtermTerminal,
+	readTerminalRows,
+	SGR,
+	splitTerminalRowAt,
+	styleTerminalRow,
+} from "../tools/terminal-output";
+import {
+	createRawSixelExtractor,
+	getSixelLineMask,
+	isSixelPassthroughEnabled,
+	sanitizeWithOptionalSixelPassthrough,
+	type RawSixelExtractor,
+} from "../render/sixel";
 import {
 	buildExecutionFrame,
 	buildStatusFooter,
@@ -43,6 +56,36 @@ const CHUNK_THROTTLE_MS = 50;
 const PTY_SCROLLBACK_ROWS = 4096;
 // Caps the unwritten PTY chunk backlog while xterm.write drains.
 const MAX_PTY_QUEUE_CHUNKS = 512;
+// Sixel payloads are retained for the final full replay read; this bounds the
+// retained set so a long PTY stream cannot grow it without limit.
+const MAX_PTY_SIXEL_SPANS = 256;
+
+/** One queued PTY replay unit: raw bytes, or a sixel payload held out of the vterm. */
+type PtyQueueUnit =
+	| { kind: "text"; text: string }
+	| { kind: "sixel"; payload: string; line?: BufferLine; column?: number };
+
+/**
+ * A sixel payload retained with the buffer line it was emitted on. The line is
+ * the anchor, not its index: once the scrollback is full every added row is
+ * spliced off the front while `buffer.length` stays at its cap, so an index
+ * recorded earlier addresses a newer row and the payload would reappear
+ * somewhere it was never emitted. `column` is the terminal column the frame
+ * landed on: the text offset is resolved from it against the row's current
+ * cells on every refresh, so a PTY that rewrites the cells to the left of an
+ * emitted frame still splices it back where it belongs.
+ */
+interface PtySixelSpan {
+	line: BufferLine;
+	payload: string;
+	column: number;
+}
+
+/** A retained payload with the text offset resolved against the anchored row. */
+interface ResolvedPtySixelSpan {
+	payload: string;
+	offset: number;
+}
 let nextBashExecutionId = 0;
 
 /** PTY size for `!` commands: the execution frame's inner content area. */
@@ -78,10 +121,16 @@ export class BashExecutionComponent extends Container {
 	#ptyMode = false;
 	#ptyTerminal?: XtermTerminalType;
 	#ptyLoadStarted = false;
-	#ptyQueue: string[] = [];
+	#ptyQueue: PtyQueueUnit[] = [];
 	#ptyWriting = false;
 	#ptyRefreshQueued = false;
 	#ptyReplayFinalized = false;
+	// Sixel passthrough: payloads are pulled out of the raw byte stream (the
+	// vterm swallows DCS strings) and stitched back onto their replay rows.
+	#ptySixelExtractor?: RawSixelExtractor;
+	#ptySixelSpans: PtySixelSpan[] = [];
+	/** Raw SIXEL frames the replay rows currently render. */
+	#ptyRawSixelCount = 0;
 	#images: readonly ImageContent[] = [];
 	#showImages = true;
 	readonly #instanceId = nextBashExecutionId++;
@@ -255,13 +304,28 @@ export class BashExecutionComponent extends Container {
 		if (this.#status !== "running" && !this.#ptyWriting && this.#ptyQueue.length === 0) return;
 		this.#ptyMode = true;
 		this.#ptyReplayFinalized = false;
-		this.#ptyQueue.push(chunk);
+		if (isSixelPassthroughEnabled()) {
+			// Sixel never enters the vterm: it swallows DCS strings, so the payload
+			// would vanish from the replay rows. It is extracted here and stitched
+			// back onto the row it was emitted on in #refreshPtyLines.
+			const extractSixel = (this.#ptySixelExtractor ??= createRawSixelExtractor());
+			for (const segment of extractSixel(chunk)) {
+				this.#ptyQueue.push(
+					segment.kind === "sixel"
+						? { kind: "sixel", payload: segment.payload }
+						: { kind: "text", text: segment.text },
+				);
+			}
+		} else {
+			this.#ptyQueue.push({ kind: "text", text: chunk });
+		}
 		if (this.#ptyQueue.length > MAX_PTY_QUEUE_CHUNKS) {
 			const firstPending = this.#ptyWriting ? 1 : 0;
 			this.#ptyQueue.splice(firstPending, this.#ptyQueue.length - firstPending - MAX_PTY_QUEUE_CHUNKS);
 			// A dropped chunk can split an in-flight DCS/OSC string; a stray string
 			// terminator is a no-op in the ground state but resynchronizes the parser.
-			this.#ptyQueue[firstPending] = `\u001b\\${this.#ptyQueue[firstPending]}`;
+			const next = this.#ptyQueue[firstPending];
+			if (next?.kind === "text") next.text = `\u001b\\${next.text}`;
 		}
 		if (!this.#ptyLoadStarted) {
 			this.#ptyLoadStarted = true;
@@ -283,17 +347,57 @@ export class BashExecutionComponent extends Container {
 	#drainPtyQueue(): void {
 		const terminal = this.#ptyTerminal;
 		if (!terminal || this.#ptyWriting) return;
-		const chunk = this.#ptyQueue.shift();
-		if (chunk === undefined) {
+		const buffer = terminal.buffer.active;
+		const unit = this.#ptyQueue.shift();
+		if (unit === undefined) {
 			if (this.#status !== "running") this.#finalizePtyOutput();
 			return;
 		}
+		if (unit.kind === "sixel") {
+			// The line is anchored by the preceding text write; a leading payload
+			// (nothing written yet) belongs to the cursor's row.
+			this.#anchorPtySixelPayload(unit.payload, unit.line, unit.column ?? buffer.cursorX);
+			// No write follows the payload, so the pending refresh (queued by the
+			// preceding text write) already ran without it.
+			this.#schedulePtyRefresh();
+			this.#drainPtyQueue();
+			return;
+		}
 		this.#ptyWriting = true;
-		terminal.write(chunk, () => {
+		terminal.write(unit.text, () => {
 			this.#ptyWriting = false;
+			// A payload queued behind this text belongs to the row the cursor
+			// now sits on: the vterm consumed the sequence without moving it.
+			const next = this.#ptyQueue[0];
+			if (next?.kind === "sixel" && next.line === undefined) {
+				next.line = buffer.getLine(buffer.baseY + buffer.cursorY);
+				// The payload is held out of the vterm, so the cursor still sits
+				// exactly where the frame landed: the row it belongs to and the
+				// column inside that row.
+				next.column = buffer.cursorX;
+			}
 			this.#schedulePtyRefresh();
 			this.#drainPtyQueue();
 		});
+	}
+
+	/** Retains a payload with the buffer line it was emitted on. */
+	#anchorPtySixelPayload(payload: string, line: BufferLine | undefined, column: number): void {
+		const buffer = this.#ptyTerminal?.buffer.active;
+		if (!buffer) return;
+		const anchored = line ?? buffer.getLine(buffer.baseY + buffer.cursorY) ?? buffer.getLine(buffer.length - 1);
+		if (anchored === undefined) return;
+		// A payload never moves the cursor, so the column it was queued at is
+		// where the frame landed. The text offset that follows from it is
+		// resolved on every refresh: the terminal rewrites the cells to the left
+		// of an emitted frame, so a length measured when the frame arrived no
+		// longer addresses the same text.
+		this.#ptySixelSpans.push({
+			line: anchored,
+			payload,
+			column,
+		});
+		if (this.#ptySixelSpans.length > MAX_PTY_SIXEL_SPANS) this.#ptySixelSpans.shift();
 	}
 
 	#schedulePtyRefresh(): void {
@@ -319,11 +423,100 @@ export class BashExecutionComponent extends Container {
 		const buffer = terminal.buffer.active;
 		const startRow = full ? 0 : Math.max(0, buffer.length - STREAMING_LINE_CAP);
 		const rows = readTerminalRows(terminal, startRow, buffer.length - startRow);
-		while (rows.length > 0 && rows[rows.length - 1] === "") rows.pop();
+		const spansByRow = this.#collectPtySixelSpans(startRow, buffer);
+		const lastPayloadRow = spansByRow.size > 0 ? Math.max(...spansByRow.keys()) : -1;
+		// The frames the replay rows actually render: the decoded copies of
+		// these are the ones the host terminal would draw a second time.
+		let retainedPayloads = 0;
+		for (const spans of spansByRow.values()) retainedPayloads += spans.length;
+		this.#ptyRawSixelCount = retainedPayloads;
+		// Trailing blank rows are trimmed, but never past a row carrying a
+		// payload — an image is frequently the last thing a command emits.
+		let end = rows.length;
+		while (end > lastPayloadRow + 1 && end > 0 && rows[end - 1] === "") end--;
+		end = Math.max(end, lastPayloadRow + 1);
 		const base = theme.getFgAnsi("muted");
-		this.#outputLines = rows.map(row => (row ? styleTerminalRow(row, base) : ""));
+		this.#outputLines = Array.from({ length: end }, (_, index) => {
+			const row = index < rows.length ? rows[index]! : "";
+			const spans = spansByRow.get(index);
+			if (spans === undefined || spans.length === 0) return row ? styleTerminalRow(row, base) : "";
+			// The payloads are spliced back in at the positions they landed on, so
+			// a frame emitted between two text runs stays between them and the row
+			// is what the PTY produced. Payload rows are emitted raw: the DCS bytes
+			// must survive the sanitize/styling pass so the terminal can rasterize
+			// the image.
+			let emitted = "";
+			let remaining = row;
+			let consumed = 0;
+			// The style active where a payload split the row carries into what
+			// follows it: a frame does not reset SGR, so text emitted after it
+			// was still styled. The carry rides ahead of each segment's base
+			// color, and the segment's own runs still override it.
+			let carry = "";
+			for (const span of spans) {
+				let offset = span.offset - consumed;
+				// A frame emitted at a column this row has already passed — the
+				// PTY moved the cursor back between the two frames — cannot be
+				// placed by the text that follows it: the offset would be
+				// negative, the split would collapse to the start of the
+				// remaining text, and the host would draw the frame in the
+				// wrong column. The row carries the cursor positioning
+				// explicitly instead, so the frame lands on the column it was
+				// emitted on.
+				const cursorBack = offset < 0 ? `\x1b[${-offset}D` : "";
+				if (offset < 0) offset = 0;
+				const [head, tail] = splitTerminalRowAt(remaining, offset);
+				// A row renders up to its last non-blank cell, but the anchor
+				// counts every column the cursor advanced — trailing spaces leave
+				// no glyph — so a frame can sit past the end of its rendered row.
+				// Reconstruct the blanks the trim dropped or the frame splices
+				// onto the last visible glyph and the image shifts left.
+				let visible = head.length;
+				for (const match of head.matchAll(SGR)) visible -= match[0].length;
+				const blanks = visible >= offset ? "" : " ".repeat(offset - visible);
+				// The carry is part of what this segment renders, so the style it
+				// leaves active is the one the next segment inherits. Deriving it
+				// from `head` alone drops a run that opened before an earlier
+				// frame and was never reset.
+				carry = activeStyleAtRowEnd(carry + head);
+				emitted += `${styleTerminalRow(carry + head + blanks, base)}${cursorBack}${span.payload}`;
+				consumed = span.offset;
+				remaining = tail;
+			}
+			return `${emitted}${styleTerminalRow(carry + remaining, base)}`;
+		});
 		this.#displayDirty = true;
 		this.#outputVersion++;
+	}
+
+	/** Groups retained payloads by replay row, keyed relative to `startRow`. */
+	#collectPtySixelSpans(startRow: number, buffer: BufferView): Map<number, ResolvedPtySixelSpan[]> {
+		const lines: Array<BufferLine | undefined> = [];
+		for (let row = 0; row < buffer.length; row++) lines.push(buffer.getLine(row));
+		const spansByRow = new Map<number, ResolvedPtySixelSpan[]>();
+		for (const span of this.#ptySixelSpans) {
+			// Trimming splices rows off the front, so the index is resolved from
+			// the anchored line. A line that is gone belonged to trimmed
+			// scrollback: the payload is dropped rather than pinned onto a newer
+			// row that never carried it.
+			const index = lines.indexOf(span.line);
+			if (index < 0) continue;
+			// Above the streaming window: the final full read picks it up.
+			const relative = index - startRow;
+			if (relative < 0) continue;
+			// The offset is resolved against the row's current cells: the
+			// terminal may have rewritten the text to the left of the frame
+			// since it landed, and the frame belongs at the column it was
+			// emitted on, not at the length that text had then.
+			const resolved: ResolvedPtySixelSpan = {
+				payload: span.payload,
+				offset: span.line.translateToString(false, 0, span.column).length,
+			};
+			const rowSpans = spansByRow.get(relative);
+			if (rowSpans) rowSpans.push(resolved);
+			else spansByRow.set(relative, [resolved]);
+		}
+		return spansByRow;
 	}
 
 	/** Final full-scrollback read; the terminal is disposed once lines are snapshotted. */
@@ -395,6 +588,28 @@ export class BashExecutionComponent extends Container {
 		const hiddenLineCount = showingAllLines ? 0 : Math.max(0, availableLines.length - PREVIEW_LINES);
 		this.#outputPane.configure({ uncapSixel: hasSixelOutput });
 		this.#outputPane.setLines(availableLines);
+		// The PTY executor also decodes every graphics frame it saw into an
+		// image. A sixel payload rendered raw through the replay rows already
+		// rasterizes in the host terminal, so handing that decode through here
+		// would draw the same image a second time below the output. Only the
+		// decodes of the frames the replay rows actually render are suppressed:
+		// a frame whose replay row was evicted has no raw rendering left, so its
+		// decode is the only copy of that image. A Kitty frame's APC was already
+		// consumed by the replay terminal, so its decode is the only rendering.
+		let images = this.#images;
+		if (hasSixelOutput) {
+			let sixelDecodes = 0;
+			for (const image of this.#images) if (image.source === "sixel") sixelDecodes++;
+			// The replay rows render the newest frames raw; a frame whose row was
+			// evicted is not rendered at all, so its decode stays.
+			const rendered = this.#ptyMode ? Math.min(sixelDecodes, this.#ptyRawSixelCount) : sixelDecodes;
+			let seen = 0;
+			images = this.#images.filter(image => {
+				if (image.source !== "sixel") return true;
+				seen++;
+				return seen <= sixelDecodes - rendered;
+			});
+		}
 
 		// Rebuild content container
 		this.#contentContainer.clear();
@@ -405,8 +620,8 @@ export class BashExecutionComponent extends Container {
 		// Output
 		if (availableLines.length > 0) this.#contentContainer.addChild(this.#outputPane);
 
-		for (let index = 0; index < this.#images.length; index++) {
-			const image = this.#images[index]!;
+		for (let index = 0; index < images.length; index++) {
+			const image = images[index]!;
 			if (TERMINAL.imageProtocol && this.#showImages) {
 				this.#contentContainer.addChild(
 					new Image(

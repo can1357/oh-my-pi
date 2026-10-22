@@ -22,7 +22,6 @@ import type { TspFrame, TspNode, TspText } from "@oh-my-pi/pi-wire";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
-import { KITTY_PLACEHOLDER } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
 import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
 import { col } from "./native/describe";
@@ -694,7 +693,6 @@ interface LineClassification {
 // must process. On by default; `PI_NO_SGR_COALESCE=1` disables it.
 const SGR_COALESCE_ENABLED = !$flag("PI_NO_SGR_COALESCE");
 const CC_ESC = 0x1b;
-const CC_KITTY_PLACEHOLDER_HIGH = KITTY_PLACEHOLDER.charCodeAt(0);
 const CC_BRACKET = 0x5b; // [
 const CC_M = 0x6d; // m
 const CC_SEMI = 0x3b; // ;
@@ -4242,7 +4240,7 @@ export class TUI extends Container {
 
 		for (let i = 0; i < line.length; i++) {
 			const code = line.charCodeAt(i);
-			if ((code === CC_ESC || code === CC_KITTY_PLACEHOLDER_HIGH) && TERMINAL.hasImageMarkerAt(line, i)) {
+			if (TERMINAL.isImageMarkerStart(code) && TERMINAL.hasImageMarkerAt(line, i)) {
 				return { asciiWidth: undefined, isImage: true, hasOsc8 };
 			}
 			if (

@@ -299,6 +299,23 @@ describe("OutputSink", () => {
 		expect(dumped.output).toContain(sixel);
 	});
 
+	test("keeps a SIXEL payload through the column cap", async () => {
+		// A real frame is wider than the column cap. Cutting it drops the DCS
+		// terminator too, and the terminal this snapshot is replayed into stays
+		// inside the string for the rest of the cell.
+		const sixel = `\x1bPq#0;2;100;0;0${"~~".repeat(400)}\x1b\\`;
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 100_000 });
+		await sink.push(`${"z".repeat(50)}\n`);
+		await sink.push(`${sixel}\nafter`);
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain(sixel);
+		// A plain row in the same sink is still capped.
+		expect(dumped.output).toContain("…");
+		expect(dumped.columnTruncatedLines).toBe(1);
+	});
+
 	test("strips SIXEL chunks when passthrough gates are disabled", async () => {
 		const sixel = "\x1bPqabc\x1b\\";
 		delete Bun.env.PI_FORCE_IMAGE_PROTOCOL;
@@ -362,6 +379,32 @@ describe("OutputSink", () => {
 
 		expect(dumped.truncated).toBe(true);
 		expect(artifactText).toBe("headabcdefgh");
+	});
+
+	test("an inline substitute keeps the full stream as the total", async () => {
+		// The eval tool pushes a full JSON display with a bounded preview as
+		// `inline`. Only the preview is retained, but the totals still have to
+		// describe the complete stream: readers derive the elided byte and line
+		// counts from `totalBytes - outputBytes`, and counting the preview as
+		// the total makes that difference zero — a capped display reports that
+		// nothing was elided while the artifact holds everything the preview hid.
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({ artifactPath, artifactId: "display-1", spillThreshold: 100_000 });
+		const fullText = `display[1]:\n${"x".repeat(400)}\n${"y".repeat(400)}\n`;
+		const previewText = "display[1]:\nxxx…\n";
+
+		sink.push(fullText, { inline: previewText, emitInline: false });
+		const dumped = await sink.dump();
+
+		expect(await Bun.file(artifactPath).text()).toBe(fullText);
+		expect(dumped.truncated).toBe(true);
+		expect(dumped.output).toBe(previewText);
+		expect(dumped.totalBytes).toBe(byteLength(fullText));
+		expect(dumped.totalLines).toBe(fullText.split("\n").length);
+		expect(dumped.outputBytes).toBe(byteLength(previewText));
+		expect(dumped.totalBytes - dumped.outputBytes).toBe(byteLength(fullText) - byteLength(previewText));
+		expect(dumped.totalLines - dumped.outputLines).toBe(fullText.split("\n").length - previewText.split("\n").length);
 	});
 
 	test("throttled onChunk coalesces held-back chunks instead of dropping them", async () => {
@@ -1055,6 +1098,66 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		expect(notice).toContain("Read artifact://77 for a head/tail sample");
 	});
 
+	test("column-cap cut-line numbers stay unmapped when carriage returns redraw a row", async () => {
+		// A bare `\r` is rewritten into a newline for the inline view, so the
+		// cap numbers the redrawn row as line 2. The artifact mirrors the raw
+		// stream, where lines only end on LF, so that row is not line 2 there:
+		// `artifact://77:raw:2-2` reads whatever follows instead of the cut row.
+		// The range is withheld rather than pointing at another row.
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "77",
+			maxColumns: 8,
+			spillThreshold: 100_000,
+		});
+		const wide = "x".repeat(50);
+		await sink.push(`progress\r${wide}\n`);
+		const dumped = await sink.dump();
+
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.columnTruncatedRange).toBeUndefined();
+		const notice = formatOutputNotice(outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get());
+		expect(notice).toContain("Some lines truncated to 8 bytes");
+		expect(notice).not.toContain(":raw:");
+		// The raw file grew no second line; only the inline view has one.
+		const artifactLines = (await Bun.file(artifactPath).text()).split("\n");
+		expect(artifactLines).toHaveLength(2);
+		expect(artifactLines[1]).toBe("");
+	});
+
+	test("column-cap cut-line numbers stay mapped when a CRLF pair spans a chunk boundary", async () => {
+		// The held CR is not yet a redraw: the next chunk can open its LF, and
+		// that CRLF pair is a line ending the raw stream already has. Flagging
+		// it as a redrew row withheld the cut-line range for the rest of the
+		// sink, so a `:raw:` pointer that would have read the correct row was
+		// dropped. Chunk boundaries land wherever the OS splits the stream, so
+		// a CRLF arriving split is the common case, not an exotic one.
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "output.log");
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "77",
+			maxColumns: 8,
+			spillThreshold: 100_000,
+		});
+		const wide = "x".repeat(50);
+		await sink.push("progress\r");
+		await sink.push("\n");
+		await sink.push(`${wide}\n`);
+		const dumped = await sink.dump();
+
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.columnTruncatedRange).toEqual({ first: 2, last: 2 });
+		const notice = formatOutputNotice(outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get());
+		expect(notice).toContain(":raw:2-2");
+		// The artifact's line 2 is the capped row, so the range reads right.
+		const artifactLines = (await Bun.file(artifactPath).text()).split("\n");
+		expect(artifactLines).toHaveLength(3);
+		expect(artifactLines[1]).toBe(wide);
+	});
+
 	test("replace() withholds the cut-line range because the artifact keeps the original stream", async () => {
 		const dir = await createTempDir();
 		const sink = new OutputSink({
@@ -1155,5 +1258,339 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		expect(dropped).toBeGreaterThan(0);
 		// elided + dropped + kept ≤ totalBytes (with a small slack for the marker/newlines).
 		expect(elided + dropped).toBeLessThan(dumped.totalBytes);
+	});
+});
+
+describe("OutputSink SIXEL spill window", () => {
+	function enableSixelPassthrough(): void {
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+	}
+
+	/** A frame too big for any inline budget: the case that used to be sliced. */
+	function oversizedFrame(): string {
+		return `\x1bPq${"~".repeat(70_000)}\x1b\\`;
+	}
+
+	test("a completed frame past the spill budget is never sliced", async () => {
+		// #15327 round 2 item 1: the payload exemption only skipped the column
+		// cap. The spill limits still tail-sliced the frame, so `dump().output`
+		// — which replaces the live preview at completion — carried a DCS whose
+		// introducer and body had been cut away.
+		enableSixelPassthrough();
+		const frame = oversizedFrame();
+		const sink = new OutputSink({ spillThreshold: 50 * 1024, maxColumns: 768 });
+		await sink.push(frame);
+
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain("\x1bPq");
+		expect(dumped.output).toContain("~".repeat(70_000));
+		expect(dumped.output).toContain("\x1b\\");
+		// The elision marker the spill used to splice into the middle of the frame.
+		expect(dumped.output).not.toContain("elided");
+		expect(dumped.truncated).toBeFalsy();
+	});
+
+	test("a completed frame past the spill budget keeps the text around it", async () => {
+		// With head retention on (the eval/bash default) the frame must not be
+		// parked in the head window either: head bytes subtract from the spill
+		// threshold, so an oversized frame parked there zeroed the tail budget
+		// and dropped every text region that followed it.
+		enableSixelPassthrough();
+		const frame = oversizedFrame();
+		const sink = new OutputSink({
+			spillThreshold: 50 * 1024,
+			headBytes: 20 * 1024,
+			maxColumns: 768,
+		});
+		await sink.push("before image\n");
+		await sink.push(frame);
+		await sink.push("\nafter image text");
+
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain("\x1bPq");
+		expect(dumped.output).toContain("~".repeat(70_000));
+		expect(dumped.output).toContain("\x1b\\");
+		expect(dumped.output).toContain("before image");
+		expect(dumped.output).toContain("after image text");
+		// Order survives: the payload sits between the two text regions.
+		expect(dumped.output.indexOf("before image")).toBeLessThan(dumped.output.indexOf("\x1bPq"));
+		expect(dumped.output.indexOf("\x1bPq")).toBeLessThan(dumped.output.indexOf("after image text"));
+		expect(dumped.truncated).toBeFalsy();
+	});
+
+	test("a frame is still elided away once it no longer arrives as one payload", async () => {
+		// The exemption is for complete frames only. Text that merely looks like
+		// the start of one keeps its head/tail window and its elision marker.
+		enableSixelPassthrough();
+		const head = `${"h".repeat(200)}\n`;
+		const middle = `${"m".repeat(2000)}\n`;
+		const tail = `${"t".repeat(200)}\n`;
+		const sink = new OutputSink({ spillThreshold: 600, headBytes: 256 });
+		await sink.push(head);
+		await sink.push(middle);
+		await sink.push(tail);
+
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain("elided");
+		expect(dumped.truncated).toBe(true);
+	});
+
+	test("a frame split across chunks is held, not half-retained", async () => {
+		// A partial frame is held until its terminator arrives; only then is it
+		// exempt. Feeding it in pieces must not slice it either.
+		enableSixelPassthrough();
+		const frame = oversizedFrame();
+		const sink = new OutputSink({ spillThreshold: 50 * 1024, headBytes: 20 * 1024 });
+		for (let i = 0; i < frame.length; i += 8192) await sink.push(frame.slice(i, i + 8192));
+
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain("~".repeat(70_000));
+		expect(dumped.output.indexOf("\x1b\\")).toBeGreaterThan(dumped.output.indexOf("\x1bPq"));
+		expect(dumped.truncated).toBeFalsy();
+	});
+
+	test("an 8-bit introducer is not mistaken for text and loses nothing", async () => {
+		// Round 2 item 4: 0x90 is a C1 DCS introducer. Recognized here, the frame
+		// is a payload; unrecognized, it is text and its introducer is stripped.
+		enableSixelPassthrough();
+		const frame = `\x90q${"~".repeat(70_000)}\x9c`;
+		const sink = new OutputSink({ spillThreshold: 50 * 1024, headBytes: 20 * 1024 });
+		await sink.push(`before\n${frame}\nafter`);
+
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain("\x90q");
+		expect(dumped.output).toContain("\x9c");
+		expect(dumped.output).toContain("~".repeat(70_000));
+		expect(dumped.output).toContain("before");
+		expect(dumped.output).toContain("after");
+	});
+
+	test("a frame the stream ended inside is mirrored to the artifact once", async () => {
+		// #15327 round 3 item 1: #flushHeldSixelSpans re-stored the held raw
+		// bytes through #store, and #store mirrors every chunk to the artifact
+		// once it is open. Those bytes had already streamed to the artifact
+		// with the chunk that carried them, so a mid-frame exit appended the
+		// held prefix — up to the entire held-frame bound — a second time.
+		enableSixelPassthrough();
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "held.log");
+		// An oversized frame opens the artifact (its bytes count toward the
+		// spill mirror), exactly like the streaming production path.
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "art-held",
+			spillThreshold: 50 * 1024,
+			artifactMaxBytes: 0,
+		});
+		await sink.push(`\x1bPq${"~".repeat(70_000)}\x1b\\`);
+		// No ST: the stream ends mid-frame. The trailing marker keeps the prefix
+		// from matching inside the tildes of the frame that streamed before it,
+		// so the occurrence count is exact.
+		const held = `\x1bPq${"~".repeat(60)}HELD`;
+		await sink.push(held);
+
+		await sink.dump();
+		const artifactText = await Bun.file(artifactPath).text();
+
+		// The artifact is the verbatim raw log: the held prefix appears exactly
+		// once — streamed live, never re-mirrored by the finish flush. A second
+		// copy is what the double-mirror wrote: the finish flush re-stored the
+		// held raw bytes through the same chunk path the live stream used.
+		expect(artifactText.split(held).length - 1).toBe(1);
+		// The frame that streamed ahead of it is intact and precedes it.
+		expect(artifactText.endsWith(held)).toBe(true);
+		expect(artifactText).toContain("~".repeat(70_000));
+	});
+
+	test("the artifact holds a frame split across chunks when its terminator opens the spill", async () => {
+		// #15327: the chunks that carry a frame's beginning produce no spans,
+		// so they were never mirrored. Only the chunk that completed the frame
+		// reached the artifact — and the frame's introducer and body were lost
+		// with it, leaving an artifact that cannot recover the raw output.
+		enableSixelPassthrough();
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "split.log");
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "art-split",
+			spillThreshold: 50 * 1024,
+			maxColumns: 768,
+		});
+		const frame = `\x1bPq${"~".repeat(70_000)}\x1b\\`;
+		await sink.push("before\n");
+		await sink.push(frame.slice(0, 20_000));
+		await sink.push(frame.slice(20_000, 40_000));
+		await sink.push(frame.slice(40_000));
+		await sink.push("\nafter");
+
+		await sink.dump();
+		const artifactText = await Bun.file(artifactPath).text();
+
+		// The whole frame is in the artifact, once: the introducer, the body and
+		// the terminator.
+		expect(artifactText).toContain("\x1bPq");
+		expect(artifactText).toContain("~".repeat(70_000));
+		expect(artifactText).toContain("\x1b\\");
+		expect(artifactText.split("\x1bPq").length - 1).toBe(1);
+	});
+
+	test("the oldest frames leave the retained window once the frames exceed their budget", async () => {
+		// #15327: every completed frame that missed the head window was
+		// appended, while the spill budget only counted text. A plotting loop
+		// that streamed frame after frame therefore retained all of them, and
+		// the snapshot grew without limit.
+		enableSixelPassthrough();
+		const sink = new OutputSink({ spillThreshold: 50 * 1024, maxColumns: 768 });
+		const frame = (marker: string) => `\x1bPq#0;2;100;0;0#0${marker}${"~".repeat(3 * 1024 * 1024)}\x1b\\`;
+		await sink.push(frame("FIRST"));
+		await sink.push(frame("SECOND"));
+		await sink.push(frame("THIRD"));
+
+		const dumped = await sink.dump();
+
+		// The oldest frame left the window whole; the newest one survived.
+		expect(dumped.output).not.toContain("FIRST");
+		expect(dumped.output).toContain("SECOND");
+		expect(dumped.output).toContain("THIRD");
+		// A frame that leaves the window is bytes the snapshot lost, so the
+		// summary reports the output as truncated.
+		expect(dumped.truncated).toBe(true);
+	});
+});
+
+describe("OutputSink SIXEL mixed-write column cap", () => {
+	function enableSixelPassthrough(): void {
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+	}
+
+	test("a payload in the same write does not exempt the text after it", async () => {
+		// #15327 round 2 item 2: the whole-write payload exemption let
+		// `sixel + "\n" + 5000 chars` through maxColumns, because one frame in
+		// the write made the guard report the entire chunk as payload.
+		enableSixelPassthrough();
+		const frame = `\x1bPq#0;2;100;0;0${"~~".repeat(16)}\x1b\\`;
+		const wide = "q".repeat(5000);
+		const sink = new OutputSink({ maxColumns: 768, spillThreshold: 100_000 });
+		await sink.push(`${frame}\n${wide}`);
+		const dumped = await sink.dump();
+
+		// The frame survives byte-for-byte.
+		expect(dumped.output).toContain(frame);
+		// The wide row is still capped: the ellipsis fires and the rest is gone.
+		expect(dumped.output).toContain("…");
+		expect(dumped.output).not.toContain(wide);
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.columnDroppedBytes).toBeGreaterThan(4000);
+	});
+
+	test("the cap still fires on text written before and after a payload", async () => {
+		// Both long rows share one write with the frame, so the per-line and
+		// ellipsis state must survive the payload span in between them.
+		enableSixelPassthrough();
+		const frame = `\x1bPq#0~~\x1b\\`;
+		const sink = new OutputSink({ maxColumns: 64, spillThreshold: 100_000 });
+		await sink.push(`${"a".repeat(500)}\n${frame}\n${"b".repeat(500)}`);
+		const dumped = await sink.dump();
+
+		expect(dumped.output).toContain(frame);
+		expect(dumped.output).not.toContain("a".repeat(500));
+		expect(dumped.output).not.toContain("b".repeat(500));
+		expect(dumped.columnTruncatedLines).toBe(2);
+	});
+
+	test("a cap that already fired before a payload written later still fires again", async () => {
+		// Round 2 item 2, second half: the cap routine's state went stale behind
+		// the old whole-write exemption, so a line that tripped after the write
+		// escaped the cap entirely.
+		enableSixelPassthrough();
+		const frame = `\x1bPq#0~~\x1b\\`;
+		const sink = new OutputSink({ maxColumns: 64, spillThreshold: 100_000 });
+		await sink.push(`${"a".repeat(500)}\n${frame}\n`);
+		await sink.push("b".repeat(500));
+
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain(frame);
+		expect(dumped.output).not.toContain("b".repeat(500));
+		expect(dumped.columnTruncatedLines).toBe(2);
+	});
+
+	test("text alone in the same write is capped normally", async () => {
+		enableSixelPassthrough();
+		const sink = new OutputSink({ maxColumns: 64, spillThreshold: 100_000 });
+		await sink.push("a".repeat(500));
+		const dumped = await sink.dump();
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.output).not.toContain("a".repeat(500));
+	});
+});
+
+describe("OutputSink SIXEL elision accounting", () => {
+	function enableSixelPassthrough(): void {
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+	}
+
+	test("sanitized bytes do not trip the middle-elision marker", async () => {
+		// #15327 round 8 item 1: the totals counted the raw chunk while the
+		// head/tail windows held the sanitized content, so ANSI controls and
+		// CRLF alone produced a bogus […NB elided…] marker and truncated: true
+		// on output that fit the budget whole.
+		// Passthrough gates stay off: the shrink under test is the text
+		// sanitize/normalize path, not sixel retention.
+		delete Bun.env.PI_FORCE_IMAGE_PROTOCOL;
+		delete Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH;
+		const sink = new OutputSink({ spillThreshold: 100, headBytes: 50 });
+		sink.push("\x1b[31mred\x1b[0m\r\nplain\r\n");
+		const dumped = await sink.dump();
+		expect(dumped.output).toBe("red\nplain\n");
+		expect(dumped.output).not.toContain("elided");
+		expect(dumped.truncated).toBe(false);
+		expect(dumped.elidedBytes).toBeUndefined();
+		expect(dumped.totalBytes).toBe("red\nplain\n".length);
+	});
+
+	test("a later small frame does not jump ahead of a tailed frame", async () => {
+		// #15327 round 8 item 2: once an oversized frame opened the tail
+		// window, a later smaller frame still fit the head room and was
+		// emitted ahead of it — reordering the multi-image output.
+		enableSixelPassthrough();
+		const big = `\x1bPq${"~".repeat(500)}\x1b\\`;
+		const small = "\x1bPq#0~~\x1b\\";
+		const sink = new OutputSink({ spillThreshold: 1000, headBytes: 200 });
+		sink.push("AAA\n");
+		sink.push(big);
+		sink.push("MID\n");
+		sink.push(small);
+		sink.push("\nZZZ");
+		const dumped = await sink.dump();
+		expect(dumped.output.indexOf("AAA")).toBeLessThan(dumped.output.indexOf(big));
+		expect(dumped.output.indexOf(big)).toBeLessThan(dumped.output.indexOf("MID"));
+		expect(dumped.output.indexOf("MID")).toBeLessThan(dumped.output.indexOf(small));
+		expect(dumped.output.indexOf(small)).toBeLessThan(dumped.output.indexOf("ZZZ"));
+		expect(dumped.truncated).toBeFalsy();
+	});
+
+	test("text after a multi-row frame is capped on its own row", async () => {
+		// #15327 round 8 item 3: the payload branch kept the pre-frame cap
+		// state, so text after a multi-row frame inherited a tripped row (and
+		// was dropped entirely) or a half-spent one (and was cut too early).
+		enableSixelPassthrough();
+		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 100_000 });
+		sink.push("z".repeat(10));
+		sink.push("\x1bPqA\nB\nC\x1b\\");
+		sink.push("TAIL");
+		const dumped = await sink.dump();
+		expect(dumped.output).toContain("TAIL");
+		expect(dumped.columnTruncatedLines).toBe(1);
+
+		const fresh = new OutputSink({ maxColumns: 8, spillThreshold: 100_000 });
+		fresh.push("123456");
+		fresh.push("\x1bPqA\nB\x1b\\");
+		fresh.push("WXYZ1234");
+		const redumped = await fresh.dump();
+		expect(redumped.output).toContain("WXYZ1234");
+		expect(redumped.columnTruncatedLines).toBeFalsy();
 	});
 });

@@ -72,6 +72,8 @@ export type TerminalId =
 
 const IMAGE_MARKER_SCAN_LIMIT = 512;
 const SIXEL_MARKER_SCAN_LIMIT = 128;
+// The 8-bit C1 DCS introducer; the 7-bit spelling is `ESC P`.
+const C1_DCS = 0x90;
 const KITTY_PLACEHOLDER_HIGH_SURROGATE = KITTY_PLACEHOLDER.charCodeAt(0);
 const KITTY_PLACEHOLDER_LOW_SURROGATE = KITTY_PLACEHOLDER.charCodeAt(1);
 
@@ -114,11 +116,19 @@ export class TerminalInfo {
 		const protocol = this.imageProtocol;
 		if (!protocol) return false;
 		if (protocol === ImageProtocol.Sixel) {
+			// Both legal introducer encodings: the 7-bit `ESC P` form and the 8-bit
+			// C1 DCS. The terminal decoder and the raw-stream splitter already
+			// accept both, so recognising only `ESC P` here left an 8-bit frame's
+			// row classified as text and cut to the viewport width mid-payload.
 			const limit = Math.min(line.length, SIXEL_MARKER_SCAN_LIMIT);
-			if (start + 3 > limit || line.charCodeAt(start) !== 0x1b || line.charCodeAt(start + 1) !== 0x50) {
+			let i: number;
+			if (start + 2 <= limit && line.charCodeAt(start) === 0x1b && line.charCodeAt(start + 1) === 0x50) {
+				i = start + 2;
+			} else if (start + 1 <= limit && line.charCodeAt(start) === C1_DCS) {
+				i = start + 1;
+			} else {
 				return false;
 			}
-			let i = start + 2;
 			while (i < limit) {
 				const code = line.charCodeAt(i);
 				if ((code >= 0x30 && code <= 0x39) || code === 0x3b) {
@@ -143,6 +153,22 @@ export class TerminalInfo {
 		);
 	}
 
+	/**
+	 * Whether a byte can begin an image marker under this terminal's protocol:
+	 * the ESC of a 7-bit introducer, the C1 DCS of an 8-bit SIXEL frame, or the
+	 * Kitty placeholder's high surrogate. The renderer's common classifier and
+	 * the slow-path scan share it, so neither can miss an introducer the other
+	 * recognises.
+	 */
+	isImageMarkerStart(code: number): boolean {
+		if (!this.imageProtocol) return false;
+		if (code === 0x1b) return true;
+		if (code === KITTY_PLACEHOLDER_HIGH_SURROGATE) return true;
+		// The 8-bit C1 DCS is a legal sixel introducer but is not an ESC, so it
+		// needs its own scan candidate or an 8-bit frame never classifies.
+		return this.imageProtocol === ImageProtocol.Sixel && code === C1_DCS;
+	}
+
 	isImageLine(line: string): boolean {
 		if (!this.imageProtocol) return false;
 		const limit = Math.min(
@@ -150,8 +176,7 @@ export class TerminalInfo {
 			this.imageProtocol === ImageProtocol.Sixel ? SIXEL_MARKER_SCAN_LIMIT : IMAGE_MARKER_SCAN_LIMIT,
 		);
 		for (let i = 0; i < limit; i++) {
-			const code = line.charCodeAt(i);
-			if (code !== 0x1b && code !== KITTY_PLACEHOLDER_HIGH_SURROGATE) continue;
+			if (!this.isImageMarkerStart(line.charCodeAt(i))) continue;
 			if (this.hasImageMarkerAt(line, i)) return true;
 		}
 		return false;

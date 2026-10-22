@@ -34,6 +34,7 @@ export interface ImageContent {
 	detail?: "auto" | "low" | "high" | "original";
 	url?: string;
 	providerFile?: Record<string, unknown>;
+	source?: "kitty" | "sixel";
 }
 
 export interface ToolCall {

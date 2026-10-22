@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { formatBytes, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
-import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
+import { isSixelPassthroughEnabled, SixelSpanParser, type RawSixelSegment } from "../render/sixel";
 
 // =============================================================================
 // Constants
@@ -24,10 +24,27 @@ export const ARTIFACT_DEFAULT_MAX_BYTES = 16 * 1024 * 1024; // 16 MiB
 export const ARTIFACT_DEFAULT_HEAD_BYTES = 3 * 1024 * 1024; // 3 MiB
 /** Upper bound on how far the rolling artifact tail may outgrow its budget between trims. */
 const ARTIFACT_TAIL_MAX_SLACK_BYTES = 4 * 1024 * 1024;
+/**
+ * Aggregate budget for the complete SIXEL payloads the inline window keeps.
+ * A payload is never sliced, so the window drops whole frames — oldest first —
+ * once the retained frames exceed this budget; the newest frame is always
+ * kept, so a single frame larger than the budget stays whole instead of
+ * disappearing. The budget bounds what a plotting loop can retain in memory
+ * (and what the snapshot carries into the model) while still holding a
+ * realistic number of frames.
+ */
+const SIXEL_RETAINED_MAX_BYTES = 8 * 1024 * 1024; // 8 MiB
 
 const NL = "\n";
 const CR = "\r";
 const ELLIPSIS = "…";
+
+/** Concatenate a split back into the stream it was split from. */
+function joinSixelSegments(spans: readonly RawSixelSegment[]): string {
+	let text = "";
+	for (const span of spans) text += span.kind === "text" ? span.text : span.payload;
+	return text;
+}
 
 // =============================================================================
 // Interfaces
@@ -884,14 +901,32 @@ export class TailBuffer {
 
 /** Captures bounded inline output while optionally preserving a full artifact. */
 export class OutputSink {
-	#buffer = "";
-	#bufferBytes = 0;
+	/**
+	 * Rolling tail window, oldest first: budgeted text regions interleaved with
+	 * complete SIXEL payloads. A payload is never trimmed — cutting either end
+	 * of a DCS leaves the terminal inside an open string when the snapshot that
+	 * holds it is replayed.
+	 */
+	#tail: RawSixelSegment[] = [];
 	/** The overflowed tail window may exceed its budget until {@link #trimTail} runs. */
 	#tailUntrimmed = false;
+	/** Bytes of retained tail text, the only part the spill window budgets. */
+	#tailTextBytes = 0;
+	/** Bytes of retained payloads. Kept out of {@link #tailTextBytes}, counted in reporting. */
+	#tailSixelBytes = 0;
+	/** Cached concatenation of {@link #tail}, invalidated by every mutation. */
+	#tailCache: string | undefined;
 	#head = "";
 	#headBytes = 0;
 	#headLines = 0; // newline count inside #head
 	#headRetentionDisabled = false;
+	/**
+	 * Set once a payload was routed to the tail window because it could not fit
+	 * the head room. From then on the head takes no text: the composed body is
+	 * `head + tail`, so head text added afterwards would be ordered ahead of a
+	 * payload that arrived earlier.
+	 */
+	#tailWindowOpened = false;
 	#totalLines = 0; // newline count
 	#totalBytes = 0;
 	#sawData = false;
@@ -911,6 +946,15 @@ export class OutputSink {
 	#columnLastCutLine = 0;
 	/** Set once a cut line's number may not match the artifact; the range is then withheld. */
 	#columnCutLinesUnmapped = false;
+	/** Set once carriage-return normalization added a line break the raw stream (and so the artifact) does not have. */
+	#lineBreaksRedrawn = false;
+	// Holds a frame until its terminator arrives, so a DCS split over chunk
+	// boundaries is only retained — and only exempted — once complete.
+	#sixelParser = new SixelSpanParser();
+	// Set once a chunk carrying an unterminated frame has been mirrored to the
+	// artifact, so the held prefix is already on disk and must not be written
+	// again when the stream ends mid-frame.
+	#heldBytesMirrored = false;
 	#file?: {
 		path: string;
 		artifactId?: string;
@@ -987,6 +1031,11 @@ export class OutputSink {
 	 * Converts carriage-return progress updates into line boundaries while
 	 * collapsing CRLF to one newline. A trailing CR is held until the next
 	 * chunk so split CRLF sequences do not create blank lines.
+	 *
+	 * A CR that stands for a line break adds one the raw stream does not have,
+	 * so it sets {@link #lineBreaksRedrawn}: the artifact mirrors the raw stream
+	 * and numbers its lines by LF only, which leaves every later line number
+	 * off by the number of redrawn breaks.
 	 */
 	#normalizeCarriageReturns(text: string): string {
 		if (text.length === 0 || (!this.#pendingCarriageReturn && !text.includes(CR))) return text;
@@ -996,7 +1045,11 @@ export class OutputSink {
 		if (this.#pendingCarriageReturn) {
 			this.#pendingCarriageReturn = false;
 			normalized = NL;
+			// The held CR only redrew a row when nothing that already ends the
+			// line followed it: a CRLF pair has its line ending in the raw
+			// stream the artifact mirrors, so the collapse moves no boundary.
 			if (text.startsWith(NL)) cursor = 1;
+			else this.#lineBreaksRedrawn = true;
 		}
 
 		while (cursor < text.length) {
@@ -1007,10 +1060,16 @@ export class OutputSink {
 			}
 			normalized += text.substring(cursor, carriageReturn);
 			if (carriageReturn === text.length - 1) {
+				// Held until the next chunk decides whether it redrew a row: the
+				// following text may open the CRLF pair, which collapses to the
+				// one line ending the raw stream already had.
 				this.#pendingCarriageReturn = true;
 				break;
 			}
 			normalized += NL;
+			// A CRLF pair already ends a line in the raw stream: the collapse
+			// shortens it without moving any line boundary.
+			if (!text.startsWith(NL, carriageReturn + 1)) this.#lineBreaksRedrawn = true;
 			cursor = text.startsWith(NL, carriageReturn + 1) ? carriageReturn + 2 : carriageReturn + 1;
 		}
 		return normalized;
@@ -1027,12 +1086,30 @@ export class OutputSink {
 	 */
 	push(chunk: string, options?: { inline?: string; emitInline?: boolean }): void {
 		if (this.#finalized) return;
-		chunk = sanitizeWithOptionalSixelPassthrough(chunk, text => sanitizeText(this.#normalizeCarriageReturns(text)));
+		// The bytes the parser holds from earlier chunks belong to no chunk of
+		// their own: an artifact that opens mid-frame needs them to hold the
+		// frame whole, so they are captured before this chunk is parsed.
+		const heldBytes = isSixelPassthroughEnabled() ? this.#sixelParser.heldBytes : "";
+		// Split raw output into text spans and DCS payload spans before
+		// sanitizing: `sanitizeText` strips ESC and the C1 range, which would
+		// delete the introducer of an 8-bit frame. Passthrough off leaves the
+		// stream as one text span, so SIXEL control bytes are still stripped.
+		const spans: RawSixelSegment[] = isSixelPassthroughEnabled()
+			? this.#sanitizeSpans(this.#sixelParser.push(chunk))
+			: [{ kind: "text", text: sanitizeText(this.#normalizeCarriageReturns(chunk)) }];
+		const content = joinSixelSegments(spans);
 		const inline = options?.inline;
 		const substituted = inline !== undefined;
-		const inlineChunk = inline === undefined ? chunk : sanitizeText(inline);
+		const inlineChunk = inline === undefined ? content : sanitizeText(inline);
+		// The substitute is its own bounded representation of this chunk, so the
+		// cap applies to it; the complete chunk still mirrors to the artifact.
+		const bufferSpans: RawSixelSegment[] = substituted ? [{ kind: "text", text: inlineChunk }] : spans;
 
-		this.#store(chunk, inlineChunk, substituted);
+		// Totals come from the complete normalized chunk while retention and the
+		// column cap run on the substitute: the elided byte and line counts are
+		// derived from those totals, so counting the substitute as the whole
+		// stream reports nothing was elided from a display the artifact kept.
+		this.#store(chunk, bufferSpans, content, substituted, true, heldBytes);
 
 		// Throttled onChunk: coalesce chunks arriving inside the throttle window.
 		// A timer flushes quiet tails at the throttle boundary; dump() catches a
@@ -1050,25 +1127,118 @@ export class OutputSink {
 		}
 	}
 
-	/** Count, cap, mirror, and retain one sanitized chunk. */
-	#store(chunk: string, inlineChunk: string, substituted: boolean): void {
-		const rawBytes = Buffer.byteLength(chunk, "utf-8");
-		this.#totalBytes += rawBytes;
-		// Line the chunk starts on, as numbered in the artifact; 0 when the capped
-		// inline text is a substitute whose lines do not map onto the artifact.
-		const firstLine = substituted ? 0 : this.#totalLines + 1;
+	/** Store a frame the stream ended mid-way through: its bytes are only text now. */
+	#flushHeldSixelSpans(): void {
+		if (!isSixelPassthroughEnabled()) return;
+		const held = this.#sixelParser.finish();
+		if (held.length === 0) return;
+		const sanitized = this.#sanitizeSpans(held);
+		const heldText = joinSixelSegments(held);
+		// The held bytes arrived with the chunks that streamed them, so once such a
+		// chunk was mirrored the prefix is already on disk and writing it again
+		// would duplicate up to the whole held-frame bound. When no chunk was
+		// mirrored — the frame was the stream's only output, so nothing ever
+		// tripped the mirror condition — this is the one write that creates the
+		// recovery artifact, and leaving it out loses the prefix with no way back.
+		const mirrored = this.#heldBytesMirrored;
+		this.#heldBytesMirrored = false;
+		if (!mirrored && this.#artifactPath) this.#writeToFile(heldText);
+		this.#store(heldText, sanitized, joinSixelSegments(sanitized), false, false);
+	}
 
-		if (chunk.length > 0) {
+	/**
+	 * Sanitize the text spans of a split, leaving payload spans byte-for-byte.
+	 * A trailing CR is held for the next text span; a payload is not text, so the
+	 * held newline is emitted here to keep the frame on the row after the text.
+	 */
+	#sanitizeSpans(spans: readonly RawSixelSegment[]): RawSixelSegment[] {
+		const sanitized: RawSixelSegment[] = [];
+		for (const span of spans) {
+			if (span.kind === "sixel") {
+				if (this.#pendingCarriageReturn) {
+					this.#pendingCarriageReturn = false;
+					// The held CR becomes a line break the raw stream does not have.
+					this.#lineBreaksRedrawn = true;
+					sanitized.push({ kind: "text", text: NL });
+				}
+				sanitized.push(span);
+				continue;
+			}
+			sanitized.push({ kind: "text", text: sanitizeText(this.#normalizeCarriageReturns(span.text)) });
+		}
+		return sanitized;
+	}
+
+	/**
+	 * Count, cap, mirror, and retain one sanitized chunk split into spans. The
+	 * raw chunk is mirrored to the artifact before any cap is applied; the totals
+	 * count the normalized `content` of the whole chunk while `spans` carry what
+	 * the in-memory view retains, so an inline substitute reports the bytes it
+	 * elided. `mirrorToArtifact: false` skips that mirror for bytes that already
+	 * streamed to the artifact with earlier chunks. `heldBytes` are the raw bytes
+	 * the parser holds from earlier chunks: they belong to no chunk of their
+	 * own, so the mirror writes them with this chunk unless they are already on
+	 * disk.
+	 */
+	#store(
+		chunk: string,
+		spans: readonly RawSixelSegment[],
+		content: string,
+		substituted: boolean,
+		mirrorToArtifact = true,
+		heldBytes = "",
+	): void {
+		const normalizedBytes = Buffer.byteLength(content, "utf-8");
+		this.#totalBytes += normalizedBytes;
+		// Line the chunk starts on, as numbered in the artifact. 0 — unmapped —
+		// when the capped inline text cannot be lined up against the artifact:
+		// an inline substitute rewrites the view, and carriage-return
+		// normalization adds line breaks the raw stream mirrors without.
+		let line = substituted || this.#lineBreaksRedrawn ? 0 : this.#totalLines + 1;
+
+		if (content.length > 0) {
 			this.#sawData = true;
-			this.#totalLines += countNewlines(chunk);
+			this.#totalLines += countNewlines(content);
 		}
 
-		const inlineBytes = substituted ? Buffer.byteLength(inlineChunk, "utf-8") : rawBytes;
 		// Per-line column cap. State persists across chunks so a mid-line split
-		// still respects the budget. Operates on the inline chunk; the complete
-		// chunk is mirrored to the artifact before any cap is applied.
-		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(inlineChunk, firstLine) : inlineChunk;
-		const cappedBytes = capped === inlineChunk ? inlineBytes : Buffer.byteLength(capped, "utf-8");
+		// still respects the budget. Operates on the text spans only: a payload
+		// is exempt because cutting it drops the DCS terminator, and the
+		// terminal that receives this snapshot would stay inside an open string
+		// for the rest of the cell. The surrounding text keeps its line-byte and
+		// ellipsis state, so the cap still fires after a payload.
+		let inlineBytes = 0;
+		let cappedBytes = 0;
+		const retained: RawSixelSegment[] = [];
+		for (const span of spans) {
+			if (span.kind === "sixel") {
+				// Exempt: its bytes are retained verbatim, so they count as capped.
+				const payloadBytes = Buffer.byteLength(span.payload, "utf-8");
+				inlineBytes += payloadBytes;
+				cappedBytes += payloadBytes;
+				// A multi-row frame still moves the cursor: advance the cap's
+				// line state for the newlines inside the payload so the text
+				// after it is capped on its own row, not the pre-frame one.
+				// The payload bytes themselves stay exempt.
+				if (span.payload.includes(NL)) {
+					if (line > 0) line += countNewlines(span.payload);
+					this.#currentLineBytes = 0;
+					this.#columnEllipsisAdded = false;
+				} else if (line > 0) {
+					line += countNewlines(span.payload);
+				}
+				retained.push(span);
+				continue;
+			}
+			const bytes = Buffer.byteLength(span.text, "utf-8");
+			inlineBytes += bytes;
+			const capped = this.#maxColumns > 0 ? this.#applyColumnCap(span.text, line) : span.text;
+			if (line > 0) line += countNewlines(span.text);
+			if (capped.length === 0) continue;
+			const cappedSpanBytes = Buffer.byteLength(capped, "utf-8");
+			cappedBytes += cappedSpanBytes;
+			retained.push({ kind: "text", text: capped });
+		}
 		const cappedThisChunk = cappedBytes < inlineBytes;
 		if (substituted) this.#truncated = true;
 
@@ -1076,37 +1246,102 @@ export class OutputSink {
 		// representation differs, overflows memory, hits the column cap, or a
 		// prior chunk already opened the artifact.
 		if (
+			mirrorToArtifact &&
 			this.#artifactPath &&
 			(this.#file != null || substituted || cappedThisChunk || this.#willOverflow(cappedBytes))
 		) {
-			this.#writeToFile(chunk);
+			// A frame split over chunks keeps its earlier bytes in the parser, not
+			// in a chunk: the artifact gets them with the chunk that completes the
+			// frame, so a capture that opens mid-frame still holds the frame's
+			// introducer and body instead of only its tail.
+			this.#writeToFile(this.#heldBytesMirrored ? chunk : heldBytes + chunk);
+			// The chunk carrying an unterminated frame went to disk whole, so the
+			// held prefix is already mirrored and must not be written a second time
+			// when the stream ends mid-frame.
+			if (this.#sixelParser.holding) this.#heldBytesMirrored = true;
 		}
-		if (cappedBytes === 0) return;
+		// A completed frame releases the held bytes: the next frame's prefix is
+		// not on disk yet, so it has to be written with the chunk that follows.
+		if (!this.#sixelParser.holding) this.#heldBytesMirrored = false;
+		if (retained.length === 0) return;
 
-		// Head retention: drain the (capped) chunk into #head until the budget is
-		// exhausted, then forward any leftover to the tail buffer.
-		let tailChunk = capped;
-		let tailBytes = cappedBytes;
-		if (this.#headLimit > 0 && !this.#headRetentionDisabled && this.#headBytes < this.#headLimit) {
+		for (const span of retained) {
+			if (span.kind === "sixel") {
+				this.#retainSixel(span.payload);
+				continue;
+			}
+			this.#retainText(span.text, Buffer.byteLength(span.text, "utf-8"));
+		}
+	}
+
+	/**
+	 * Route one text region through head retention: the head window drains
+	 * until its budget is exhausted, then any leftover flows to the tail buffer.
+	 */
+	#retainText(text: string, bytes: number): void {
+		if (bytes === 0) return;
+		let chunk = text;
+		let chunkBytes = bytes;
+		// A payload already routed to the tail window closes the head one: the
+		// composed body is `head + tail`, so text that arrived after it must not
+		// be appended ahead of it.
+		if (
+			this.#headLimit > 0 &&
+			!this.#headRetentionDisabled &&
+			!this.#tailWindowOpened &&
+			this.#headBytes < this.#headLimit
+		) {
 			const room = this.#headLimit - this.#headBytes;
-			if (cappedBytes <= room) {
-				this.#head += capped;
-				this.#headBytes += cappedBytes;
-				this.#headLines += countNewlines(capped);
+			if (bytes <= room) {
+				this.#head += chunk;
+				this.#headBytes += chunkBytes;
+				this.#headLines += countNewlines(chunk);
 				return;
 			}
 			// Split: head takes a UTF-8-safe prefix; remainder flows to tail.
-			const headSlice = truncateHeadBytes(capped, room);
+			const headSlice = truncateHeadBytes(chunk, room);
 			if (headSlice.bytes > 0) {
 				this.#head += headSlice.text;
 				this.#headBytes += headSlice.bytes;
 				this.#headLines += countNewlines(headSlice.text);
-				tailChunk = capped.substring(headSlice.text.length);
-				tailBytes = cappedBytes - headSlice.bytes;
+				chunk = chunk.substring(headSlice.text.length);
+				chunkBytes -= headSlice.bytes;
 			}
 		}
 
-		this.#pushTail(tailChunk, tailBytes);
+		this.#pushTail(chunk, chunkBytes);
+	}
+
+	/**
+	 * Retain a complete payload outside the spill window. It goes into the head
+	 * window while one is still draining and the payload fits what is left of
+	 * it, so the stream keeps its order, and into the tail window otherwise;
+	 * either way it is never sliced. Once a payload has gone to the tail the
+	 * head stays closed — like {@link #retainText} — because the composed body
+	 * is `head + tail`, so a later payload in the head would be emitted ahead
+	 * of an earlier payload that arrived first. Parking an oversized payload in
+	 * the head is what starves the tail: head bytes are subtracted from the
+	 * spill threshold, so a frame past the remaining room would zero the tail
+	 * budget and drop every text region that follows it.
+	 */
+	#retainSixel(payload: string): void {
+		const payloadBytes = Buffer.byteLength(payload, "utf-8");
+		const room = this.#headLimit - this.#headBytes;
+		if (
+			this.#headLimit > 0 &&
+			!this.#headRetentionDisabled &&
+			!this.#tailWindowOpened &&
+			room > 0 &&
+			// Slicing the payload is out of the question; taking more than the
+			// room that is left is.
+			payloadBytes <= room
+		) {
+			this.#head += payload;
+			this.#headBytes += payloadBytes;
+			this.#headLines += countNewlines(payload);
+			return;
+		}
+		this.#pushTailSixel(payload);
 	}
 
 	/**
@@ -1203,24 +1438,24 @@ export class OutputSink {
 	// the inline budget: `spillThreshold - #headBytes`. While the head window
 	// fills it shrinks toward `spillThreshold - headLimit`; after `replace()`
 	// (head cleared) it grows back to the full threshold. This keeps
-	// `head + tail <= spillThreshold`, so the composed dump body fits the
-	// inline byte cap by construction.
+	// `head + tail text <= spillThreshold`, so the composed dump body fits the
+	// inline byte cap by construction — a retained payload is exempt, because
+	// slicing one is what the budget exists to prevent.
 
 	#willOverflow(dataBytes: number): boolean {
 		// Triggers file mirroring as soon as the next chunk would push us over
 		// the tail budget — i.e. the first byte that could be lost from memory.
-		return this.#bufferBytes + dataBytes > this.#spillThreshold - this.#headBytes;
+		return this.#tailTextBytes + dataBytes > this.#spillThreshold - this.#headBytes;
 	}
 
 	#pushTail(chunk: string, dataBytes: number): void {
 		if (dataBytes === 0) return;
 
 		const threshold = Math.max(0, this.#spillThreshold - this.#headBytes);
-		const willOverflow = this.#bufferBytes + dataBytes > threshold;
+		const willOverflow = this.#tailTextBytes + dataBytes > threshold;
 
 		if (!willOverflow) {
-			this.#buffer += chunk;
-			this.#bufferBytes += dataBytes;
+			this.#appendTail({ kind: "text", text: chunk }, dataBytes);
 			return;
 		}
 
@@ -1229,19 +1464,89 @@ export class OutputSink {
 
 		// Avoid creating a giant intermediate string when chunk alone dominates.
 		if (dataBytes >= threshold) {
+			// The window becomes this chunk's tail slice, latest text last; the
+			// payloads retained before it move to its head so order survives.
 			const { text, bytes } = truncateTailBytes(chunk, threshold);
-			this.#buffer = text;
-			this.#bufferBytes = bytes;
+			const retained = this.#tail.filter(region => region.kind === "sixel");
+			this.#setTail([...retained, { kind: "text", text }]);
+			this.#tailTextBytes = bytes;
 			this.#tailUntrimmed = false;
 			return;
 		}
 		// Amortize the trim: let the window grow to 2× the budget before cutting it
 		// back, so steady-state chunks cost an append instead of a window copy.
 		// `#trimTail()` restores the exact budget before the buffer is read.
-		this.#buffer += chunk;
-		this.#bufferBytes += dataBytes;
+		this.#appendTail({ kind: "text", text: chunk }, dataBytes);
 		this.#tailUntrimmed = true;
-		if (this.#bufferBytes > threshold * 2) this.#trimTail();
+		if (this.#tailTextBytes > threshold * 2) this.#trimTail();
+	}
+
+	/**
+	 * Retain a complete payload verbatim, outside the byte budget. Nothing in
+	 * the window may drop it: the introducer and the terminator both have to
+	 * survive, or the terminal that replays this snapshot stays inside an open
+	 * DCS string for the rest of the output.
+	 *
+	 * The retained frames are bounded in aggregate: the oldest whole frames
+	 * leave the window once they exceed {@link SIXEL_RETAINED_MAX_BYTES}, so a
+	 * stream of frames cannot grow the snapshot without limit.
+	 */
+	#pushTailSixel(payload: string): void {
+		if (payload.length === 0) return;
+		this.#tailWindowOpened = true;
+		this.#appendTail({ kind: "sixel", payload }, 0);
+		this.#evictOldPayloads();
+	}
+
+	/**
+	 * Drop the oldest complete frames until the retained payloads fit their
+	 * aggregate budget. A frame leaves whole — introducer and terminator
+	 * together — so the snapshot stays a valid DCS stream; only the newest
+	 * frame is exempt, so a single oversized frame survives on its own.
+	 */
+	#evictOldPayloads(): void {
+		if (this.#tailSixelBytes <= SIXEL_RETAINED_MAX_BYTES) return;
+		let payloads = 0;
+		for (const region of this.#tail) if (region.kind === "sixel") payloads++;
+		if (payloads <= 1) return;
+		let retainedBytes = this.#tailSixelBytes;
+		const kept: RawSixelSegment[] = [];
+		let dropped = false;
+		for (const region of this.#tail) {
+			if (region.kind === "sixel" && retainedBytes > SIXEL_RETAINED_MAX_BYTES && payloads > 1) {
+				payloads--;
+				retainedBytes -= Buffer.byteLength(region.payload, "utf-8");
+				dropped = true;
+				continue;
+			}
+			kept.push(region);
+		}
+		if (!dropped) return;
+		this.#tailSixelBytes = retainedBytes;
+		this.#setTail(kept);
+		// The dropped frames are still in the artifact; the snapshot lost them.
+		this.#truncated = true;
+	}
+
+	#appendTail(region: RawSixelSegment, textBytes: number): void {
+		this.#tailCache = undefined;
+		if (region.kind === "sixel") this.#tailSixelBytes += Buffer.byteLength(region.payload, "utf-8");
+		const last = this.#tail[this.#tail.length - 1];
+		// Consecutive text regions merge, so a region-boundary push (an inline
+		// substitute, or text that follows a payload) stays one window entry.
+		if (region.kind === "text" && last?.kind === "text") last.text += region.text;
+		else this.#tail.push(region);
+		this.#tailTextBytes += textBytes;
+	}
+
+	#setTail(tail: RawSixelSegment[]): void {
+		this.#tail = tail;
+		this.#tailCache = undefined;
+	}
+
+	/** The tail window as one string, payloads byte-for-byte in stream order. */
+	#tailText(): string {
+		return (this.#tailCache ??= joinSixelSegments(this.#tail));
 	}
 
 	/** Cut an overflowed tail window back to the current tail budget. */
@@ -1249,10 +1554,36 @@ export class OutputSink {
 		if (!this.#tailUntrimmed) return;
 		this.#tailUntrimmed = false;
 		const threshold = Math.max(0, this.#spillThreshold - this.#headBytes);
-		if (this.#bufferBytes <= threshold) return;
-		const { text, bytes } = truncateTailBytes(this.#buffer, threshold);
-		this.#buffer = text;
-		this.#bufferBytes = bytes;
+		if (this.#tailTextBytes <= threshold) return;
+		this.#evictTailText(this.#tailTextBytes - threshold);
+	}
+
+	/**
+	 * Drop the oldest `bytes` of tail text. A payload region is never dropped
+	 * and never cut, so the window may exceed its budget by exactly what it must
+	 * hold to keep the frames it already retained intact.
+	 */
+	#evictTailText(bytes: number): void {
+		const kept: RawSixelSegment[] = [];
+		for (const region of this.#tail) {
+			if (bytes <= 0 || region.kind !== "text") {
+				kept.push(region);
+				continue;
+			}
+			const regionBytes = Buffer.byteLength(region.text, "utf-8");
+			if (regionBytes <= bytes) {
+				bytes -= regionBytes;
+				this.#tailTextBytes -= regionBytes;
+				continue;
+			}
+			// Keep this region's tail slice, cutting only the text that must go.
+			const { text, bytes: keptBytes } = truncateTailBytes(region.text, regionBytes - bytes);
+			region.text = text;
+			this.#tailTextBytes -= regionBytes - keptBytes;
+			bytes = 0;
+			kept.push(region);
+		}
+		this.#setTail(kept);
 	}
 
 	/**
@@ -1398,8 +1729,9 @@ export class OutputSink {
 			}
 
 			// Flush existing buffer to file BEFORE it gets trimmed further.
-			if (this.#buffer.length > 0) {
-				this.#emitToSink(this.#buffer);
+			const tail = this.#tailText();
+			if (tail.length > 0) {
+				this.#emitToSink(tail);
 			}
 
 			// Drain any chunks that arrived while the sink was being created.
@@ -1443,26 +1775,37 @@ export class OutputSink {
 	 */
 	replace(text: string): void {
 		this.#clearPendingChunkTimer();
+		const bytes = Buffer.byteLength(text, "utf-8");
+		// The replacement is held to the per-line column cap like streamed
+		// output: a minimizer that rewrites the captured output into a wider
+		// line must not bypass `tools.outputMaxColumns`. The cap state starts
+		// fresh, and the totals keep the uncapped size — the replacement is
+		// what the stream produced, the cap only shapes what is displayed.
 		this.#currentLineBytes = 0;
 		this.#columnEllipsisAdded = false;
 		this.#columnDroppedBytes = 0;
 		this.#columnTruncatedLines = 0;
+		this.#columnFirstCutLine = 0;
+		this.#columnLastCutLine = 0;
 		// The artifact keeps the replaced stream, so later line numbers no longer match it.
 		this.#columnCutLinesUnmapped = true;
 		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(text, 0) : text;
-		this.#buffer = capped;
-		this.#bufferBytes = Buffer.byteLength(capped, "utf-8");
+		this.#setTail([{ kind: "text", text: capped }]);
+		this.#tailTextBytes = Buffer.byteLength(capped, "utf-8");
+		this.#tailSixelBytes = 0;
 		this.#tailUntrimmed = false;
 		this.#head = "";
 		this.#headBytes = 0;
 		this.#headLines = 0;
 		this.#headRetentionDisabled = true;
-		this.#totalBytes = Buffer.byteLength(text, "utf-8");
+		this.#tailWindowOpened = false;
+		this.#totalBytes = bytes;
 		this.#totalLines = countNewlines(text);
 		this.#sawData = text.length > 0;
 		this.#truncated = false;
 		this.#pendingChunk = "";
 		this.#pendingCarriageReturn = false;
+		this.#lineBreaksRedrawn = false;
 	}
 
 	#clearPendingChunkTimer(): void {
@@ -1561,8 +1904,8 @@ export class OutputSink {
 		this.#trimTail();
 		const totalLines = this.#sawData ? this.#totalLines + 1 : 0;
 		const headBytes = this.#headBytes;
-		const tailBuf = this.#buffer;
-		const tailBytes = this.#bufferBytes;
+		const tailBuf = this.#tailText();
+		const tailBytes = this.#tailTextBytes + this.#tailSixelBytes;
 		const headLines = this.#headLines + (headBytes > 0 && !this.#head.endsWith("\n") ? 1 : 0);
 		const tailLines = tailBuf.length > 0 ? countNewlines(tailBuf) + 1 : 0;
 
@@ -1599,8 +1942,13 @@ export class OutputSink {
 	}
 
 	async dump(notice?: string): Promise<OutputSummary> {
+		// A frame the stream ended mid-way through never completed, so it is
+		// stored as the text it now is — its introducer is stripped with it.
+		this.#flushHeldSixelSpans();
 		if (this.#pendingCarriageReturn) {
 			this.#pendingCarriageReturn = false;
+			// The held CR became a line break the raw stream does not have.
+			this.#lineBreaksRedrawn = true;
 			this.push(NL);
 		}
 		const noticeLine = notice ? `[${notice}]\n` : "";
