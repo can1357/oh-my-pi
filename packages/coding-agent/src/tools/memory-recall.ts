@@ -1,6 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { isDakeraConfigured, loadDakeraConfig } from "../dakera/config";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { formatCurrentTime, formatMemories } from "../hindsight/content";
 import recallDescription from "../prompts/tools/recall.md" with { type: "text" };
@@ -33,14 +34,42 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 
 	static createIf(session: ToolSession): MemoryRecallTool | null {
 		const backend = cfgMemoryBackend.get(session.settings);
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "dakera") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
+		if (backend === "dakera" && !isDakeraConfigured(loadDakeraConfig(session.settings))) return null;
 		return new MemoryRecallTool(session);
 	}
 
 	async execute(_id: string, params: MemoryRecallParams, signal?: AbortSignal): Promise<AgentToolResult> {
 		return untilAborted(signal, async () => {
 			const backend = cfgMemoryBackend.get(this.session.settings);
+			if (backend === "dakera") {
+				const state = this.session.getDakeraSessionState?.();
+				if (!state) {
+					throw new Error("Dakera backend is not initialised for this session.");
+				}
+				const { hits, text, renderedCount } = await state.recallFormatted(params.query, signal);
+				if (hits.length === 0) {
+					return {
+						content: [{ type: "text", text: "No relevant memories found." }],
+						details: {},
+						useless: true,
+					};
+				}
+				return {
+					content: [
+						{
+							type: "text",
+							// Count what the block actually renders: the char budget
+							// can drop trailing hits, and a header promising memories
+							// the model cannot see reads as a tool malfunction.
+							text: `Found ${renderedCount} relevant ${renderedCount === 1 ? "memory" : "memories"} (as of ${formatCurrentTime()} UTC):\n\n${text}`,
+						},
+					],
+					details: {},
+				};
+			}
+
 			if (backend === "mnemopi") {
 				const state = this.session.getMnemopiSessionState?.();
 				if (!state) {

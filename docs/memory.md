@@ -8,7 +8,8 @@ omp supports five memory modes. Memory is disabled by default; select one backen
 | `local`          | Project-scoped summaries and lessons generated from persisted sessions | This page                                               |
 | `hindsight`      | Remote, bank-scoped Hindsight memory                                   | [Hindsight](#hindsight-remote-backend)                  |
 | `mnemopi`        | Local Mnemopi SQLite memory                                            | [Mnemopi memory backend](./mnemosyne-memory-backend.md) |
-| `sharpshooter`   | Friction-gated project decision files (architecture/product/style), consolidated in the background | [Sharpshooter](#sharpshooter-backend) |
+| `sharpshooter`   | Friction-gated project decision files (architecture/product/style), consolidated in the background | [Sharpshooter](#sharpshooter-backend)                   |
+| `dakera`         | Remote, agent-scoped [Dakera](https://dakera.ai) memory                | [Dakera](#dakera-remote-backend)                        |
 
 Enable the local summary pipeline:
 
@@ -43,7 +44,7 @@ The agent can read memory files directly using `memory://` URLs with the `read` 
 
 The `memory://<memory-id>` form returns the full stored row rather than the clipped recall preview (recall content that exceeds the preview cap ends with a trailing `…`); agents are instructed to read it before any `memory_edit update`.
 
-The `memory://root[/…]` rows are file-backed and only exist with `memory.backend: local`, which populates the on-disk memory root via the consolidation pipeline. Under `hindsight` or `mnemopi` the root is never written, so those URLs do not resolve — use `recall`/`reflect` (and `read memory://<memory-id>` on `mnemopi`) instead.
+The `memory://root[/…]` rows are file-backed and only exist with `memory.backend: local`, which populates the on-disk memory root via the consolidation pipeline. Under `hindsight`, `mnemopi`, or `dakera` the root is never written, so those URLs do not resolve — use `recall`/`reflect` (and `read memory://<memory-id>` on `mnemopi`) instead. Dakera memories are not addressable by id at all: `memory://<id>` returns a corrective pointer to `recall`/`reflect`.
 
 ### `/memory` slash command
 
@@ -178,6 +179,38 @@ sharpshooter:
 | `sharpshooter.minPromptLength`     | `16`       | Prompts shorter than this many characters are not sent for extraction; values below `2` act as `2`. Characters are counted as displayed (one CJK character or emoji is one), the same in every language, so Chinese users may lower it to capture short replies such as "用方案二" |
 | `sharpshooter.intervalMinutes`     | `5`        | Minimum minutes between consolidation runs                                                                                                                                                                                  |
 | `sharpshooter.injectionTokenLimit` | `15000`    | Approximate token cap for the decision files injected into the system prompt                                                                                                                                                |
+
+## Dakera remote backend
+
+[Dakera](https://dakera.ai) is a self-hosted memory server with a plain REST API; no SDK or extra dependency is needed on the omp side. The default endpoint is `http://localhost:3000`; set a token when the server requires authentication:
+
+```yaml
+memory:
+  backend: dakera
+dakera:
+  apiUrl: http://localhost:3000
+  apiToken: ${DAKERA_API_TOKEN}
+```
+
+`DAKERA_*` environment variables override `dakera.*` settings, which override built-in defaults. Both `DAKERA_API_TOKEN` and `DAKERA_API_KEY` are accepted for the bearer token (`TOKEN` wins when both are set), so one exported variable covers the server, its MCP surface, and omp. See the [complete Dakera environment-variable table](./environment-variables.md#dakera-memory-backend) for all supported overrides, accepted values, parsing rules, precedence, and defaults.
+
+Dakera has **no bank concept**: the isolation unit is the `agent_id`, and `dakera.scoping` offers three modes. The default `per-project` derives one agent id per repository (hard isolation). `per-project-tagged` shares one agent id across repositories while keeping projects separable: every retain is tagged `project:<label>`, recall filters on that tag, and `/memory clear` wipes only the tagged rows — `dakera.globalTag` (env `DAKERA_GLOBAL_TAG`) optionally adds a second tag to every recall so a shared global pool mixes back in; leave it unset for strict project isolation. `global` uses one shared agent id where every project's memories mix, with retains still tagged `project:<label>` so provenance survives. An explicit `dakera.agentId` selects the base id (default `omp`), and `dakera.agentIdPrefix` prepends an environment segment (`prod-team` + `alpha` → `prod-team-alpha`). No setup call is needed: storing against an unseen agent id creates it.
+
+Project naming matches Hindsight: the repository's primary checkout root (so every linked worktree resolves to one directory), lowercased basename. Because that derivation names one agent per repository, a multi-repo setup that wants a single logical agent can pin the id in the repository itself: a `dakera.agentId` string in `<repo>/.omp/config.yml` replaces the whole derived id (prefix included). The file is looked up from the working directory up to the repository root — so it applies from subfolders and linked worktrees alike, where project settings are otherwise invisible — and never above it, so sibling checkouts cannot read each other's override.
+
+The primary session recalls on its first model turn (`dakera.autoRecall: true`) and retains the transcript on agent end every three user turns by default (`dakera.autoRetain: true`, `dakera.retainEveryNTurns`). `dakera.retainMode: full-session` keeps **one** growing episodic memory per session and rewrites it in place (`PUT /v1/memory/update/{id}`) instead of piling up duplicates; a new session id or `/memory enqueue` starts a fresh one. `last-turn` stores a chunk sliced at the user-turn boundary instead. Recalled and retained content is secret-redacted on the wire, including the `context` a `retain` item carries in the row's metadata. Subagents resolve the same agent id as their project but run no automatic recall or retention of their own; explicit `recall`, `retain`, and `reflect` calls still work.
+
+A store is not inert: the server runs its own fact extraction over the row it just took, so a retained transcript also yields derived `semantic` rows. Those include bare `[timestamp: …]` lines from the retention format, and they appear in later recall results — expect more rows than writes.
+
+Recall is injected as background context, not instructions, and recalled memory is also available as extra context during compaction. Results are ranked by the server's `smart_score` (falling back to `weighted_score`, then `score`). Selecting Dakera exposes `recall`, `retain`, and `reflect`; `memory_edit` is not available and neither is `read memory://<id>` — Dakera rows are not addressable through the internal URL scheme, and the handler returns a pointer to `recall`/`reflect`.
+
+`reflect` is synthesized **client-side**: Dakera has no generative endpoint, so omp recalls over the question and asks a model to answer across those memories. Nothing is written back — a reflection stored as a memory would feed the next recall. The model comes from `dakera.reflectModel` and otherwise walks the memory role ladder (`smol`, then `default`).
+
+`/memory view`, `/memory stats` (per-`memory_type` counts), and `/memory enqueue` operate through the active Dakera state. Unlike Hindsight, `/memory clear` really does wipe the server: it first drains any in-flight auto-retain, then lists the agent's memories and `POST`s them to `/v1/memory/forget`. Under a shared agent id (`global` / `per-project-tagged`) the wipe forgets only rows carrying this project's retain tag — other projects' memories survive. Counts rendered as `N+ (listing capped at 1000)` are a page floor, not a total.
+
+Two Dakera endpoints are deliberately not wrapped: `consolidate` and `knowledge_summarize`. Both concatenate their inputs rather than synthesize, `consolidate` ignores `dry_run` (a "preview" merges and deletes for real), and the server's counters (`deleted_count`, `memories_removed`) are inflated, so neither result can be trusted as reported.
+
+If you self-host, note that Dakera ships with telemetry enabled; set `DAKERA_TELEMETRY=off` on the server.
 
 ## Key files
 
