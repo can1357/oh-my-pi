@@ -166,7 +166,8 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			const prompt = agent.prompt.bind(agent);
 			let failed = false;
 			agent.prompt = async (input: string | AgentMessage | AgentMessage[]) => {
-				await (typeof input === "string" ? prompt(input) : prompt(input));
+				// `prompt` dispatches on the input shape at runtime; the cast only picks an overload.
+				await prompt(input as AgentMessage[]);
 				if (failed) return;
 				failed = true;
 				throw new Error("post-yield turn failure");
