@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed `write` handing back a tag whose edits applied at any line number: the written lines are now numbered in the write result, so the model anchors on the line numbers it just saw, and an anchor the write did not display is rejected like an unread line ([#15666](https://github.com/can1357/oh-my-pi/issues/15666), [#16455](https://github.com/can1357/oh-my-pi/pull/16455) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -33,10 +36,6 @@
 - Fixed `history://<id>` failing with "has no transcript: session is gone" for a worker that is still running but has not created its session or transcript file yet; it now answers "No transcript has been written yet". ([#16645](https://github.com/can1357/oh-my-pi/pull/16645) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
 
-
-### Fixed
-
-- Fixed `write` handing back a tag whose edits applied at any line number: the written lines are now numbered in the write result, so the model anchors on the line numbers it just saw, and an anchor the write did not display is rejected like an unread line ([#15666](https://github.com/can1357/oh-my-pi/issues/15666), [#16455](https://github.com/can1357/oh-my-pi/pull/16455) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ## [18.12.6] - 2026-10-21
 
 ### Added
