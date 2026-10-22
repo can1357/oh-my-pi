@@ -22,7 +22,7 @@ BUILD_URL="${PI_BUILD_URL:-https://build.stencil.so}"
 while [ "${BUILD_URL%/}" != "$BUILD_URL" ]; do
     BUILD_URL="${BUILD_URL%/}"
 done
-MIN_BUN_VERSION="1.3.14"
+MIN_BUN_VERSION="1.4.3"
 
 # Parse arguments
 MODE=""
@@ -141,19 +141,60 @@ version_ge() {
     [ "$current_patch" -ge "$minimum_patch" ]
 }
 
+# True when bun meets the minimum version requirement (no exit). This is the
+# single version predicate; callers that must fail hard call require_bun_version.
+#
+# A prerelease of the boundary (1.4.3-canary.1) does NOT satisfy it: the CLI
+# compares the unstripped `Bun.version` and sorts that prerelease below 1.4.3,
+# so approving it here would report success and then exit on first run.
+bun_version_ok() {
+    floor="${1:-$MIN_BUN_VERSION}"
+    version_raw=$(bun --version 2>/dev/null || true)
+    [ -z "$version_raw" ] && return 1
+    version_clean=${version_raw%%-*}
+    version_ge "$version_clean" "$floor" || return 1
+    case "$version_raw" in
+        *-*)
+            # A prerelease only qualifies when it is past the floor release.
+            [ "$version_clean" != "$floor" ] || return 1
+            ;;
+    esac
+    return 0
+}
+
+# Exit with a diagnostic unless bun meets the minimum version requirement.
 require_bun_version() {
+    if bun_version_ok; then
+        return 0
+    fi
+
     version_raw=$(bun --version 2>/dev/null || true)
     if [ -z "$version_raw" ]; then
         echo "Failed to read bun version"
-        exit 1
+    else
+        echo "Bun ${MIN_BUN_VERSION} or newer is required. Current version: $version_raw}"
+        echo "Upgrade Bun at https://bun.sh/docs/installation"
+    fi
+    exit 1
+}
+
+# Fail unless bun satisfies the floor a specific tree declares. Installing a
+# historical --ref must be checked against THAT tree's engines.bun: an older tag
+# supports runtimes this repository no longer does.
+require_bun_version_for() {
+    floor="$1"
+    if bun_version_ok "$floor"; then
+        return 0
     fi
 
-    version_clean=${version_raw%%-*}
-    if ! version_ge "$version_clean" "$MIN_BUN_VERSION"; then
-        echo "Bun ${MIN_BUN_VERSION} or newer is required. Current version: ${version_clean}"
+    version_raw=$(bun --version 2>/dev/null || true)
+    if [ -z "$version_raw" ]; then
+        echo "Failed to read bun version"
+    else
+        echo "Bun ${floor} or newer is required by the selected ref. Current version: $version_raw"
         echo "Upgrade Bun at https://bun.sh/docs/installation"
-        exit 1
     fi
+    exit 1
 }
 
 # Check if git is available
@@ -207,6 +248,14 @@ install_via_bun() {
         if [ ! -d "$TMP_DIR/packages/coding-agent" ]; then
             echo "Expected package at ${TMP_DIR}/packages/coding-agent"
             exit 1
+        fi
+
+        # The checked-out tree carries its own floor; the global minimum is this
+        # repo's, which a historical tag need not share.
+        ref_floor=$(json_string bun < "$TMP_DIR/packages/coding-agent/package.json" 2>/dev/null || true)
+        ref_floor=${ref_floor#>=}
+        if [ -n "$ref_floor" ]; then
+            require_bun_version_for "$ref_floor"
         fi
 
         bun install -g "$TMP_DIR/packages/coding-agent" || {
@@ -377,8 +426,12 @@ case "$MODE" in
         # Default: use bun only when it matches the host architecture, otherwise
         # fall back to the prebuilt binary so Rosetta bun can't force an x86_64 build.
         if has_bun && bun_arch_matches_host; then
-            require_bun_version
-            install_via_bun
+            if bun_version_ok; then
+                install_via_bun
+            else
+                echo "Bun $(bun --version 2>/dev/null || echo 'unknown') is below the minimum required ${MIN_BUN_VERSION}; using the prebuilt binary instead."
+                install_binary
+            fi
         else
             if has_bun; then
                 echo "Detected bun with architecture '$(bun_arch)' on a '$(host_arch)' host; using the prebuilt binary instead."
