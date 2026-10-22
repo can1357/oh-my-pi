@@ -4,15 +4,11 @@
 
 ### Breaking Changes
 
-- `WebMcpController` (`tools/browser/webmcp`) now takes the Puppeteer `Page` instead of a host and options; `installWebMcpPageHook`, `uninstallWebMcpPageHook`, `webMcpSnapshotInPage`, `webMcpInvokeInPage`, `WEBMCP_BRIDGE_KEY` and the page-hook types are removed ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
+- `WebMcpController` (`tools/browser/webmcp`) now takes the Puppeteer `Page` instead of a host and options; `installWebMcp` (construct `WebMcpController` instead), `installWebMcpPageHook`, `uninstallWebMcpPageHook`, `webMcpSnapshotInPage`, `webMcpInvokeInPage`, `WEBMCP_BRIDGE_KEY` and the page-hook types are removed ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Added
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
-
-### Fixed
-
-- Fixed `omp gc --compress` exiting with "the event loop drained while it was still pending" on Bun 1.3.14 when a session artifact is pretty-printed JSON larger than 1 MiB, and session header probes (gc, session move and transfer) reading whole artifacts on Windows ([#15745](https://github.com/can1357/oh-my-pi/issues/15745), [#16754](https://github.com/can1357/oh-my-pi/pull/16754) by [@wolfiesch](https://github.com/wolfiesch))
 
 ### Changed
 
@@ -20,6 +16,7 @@
 
 ### Fixed
 
+- Fixed `omp gc --compress` exiting with "the event loop drained while it was still pending" on Bun 1.3.14 when a session artifact is pretty-printed JSON larger than 1 MiB, and session header probes (gc, session move and transfer) reading whole artifacts on Windows ([#15745](https://github.com/can1357/oh-my-pi/issues/15745), [#16754](https://github.com/can1357/oh-my-pi/pull/16754) by [@wolfiesch](https://github.com/wolfiesch))
 - Fixed `webmcpInvoke` returning an empty error when a page's tool throws, and leaving a timed-out invocation running in the page ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.6] - 2026-10-21

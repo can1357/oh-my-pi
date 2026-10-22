@@ -483,6 +483,47 @@ document.modelContext.registerTool({ name: "child_tool", description: "Answers f
 	);
 
 	it(
+		"blames the Chrome version only when invokeTool itself is missing, not for another error saying something wasn't found",
+		async () => {
+			using server = servePage(`<title>tool</title><script>
+document.modelContext.registerTool({ name: "rename_page", description: "Renames.", inputSchema: { type: "object" }, execute: () => 1 });
+</script>`);
+			const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+			if (!("browser" in handle)) throw new Error("Expected a Puppeteer browser");
+			holdBrowser(handle);
+			const page = await handle.browser.newPage();
+			try {
+				await page.goto(`http://localhost:${server.port}/`);
+				const session = page.mainFrame().client;
+				const send = session.send.bind(session);
+				let failure = "";
+				// Puppeteer's ProtocolError message: the method, then Chrome's own message.
+				session.send = ((method: string, ...rest: unknown[]) => {
+					if (method === "WebMCP.invokeTool")
+						return Promise.reject(new Error(`Protocol error (${method}): ${failure}`));
+					return (send as (method: string, ...rest: unknown[]) => Promise<unknown>)(method, ...rest);
+				}) as typeof session.send;
+				const controller = new WebMcpController(page);
+
+				failure = "No frame with the given id wasn't found";
+				const result = await controller.invoke("rename_page", {});
+				expect(result).toMatchObject({ ok: false, untrusted: true });
+				if (result.ok) throw new Error("Expected the invocation to fail");
+				expect(result.error).toContain("No frame with the given id wasn't found");
+
+				failure = "'WebMCP.invokeTool' wasn't found";
+				expect(String(await rejectionOf(controller.invoke("rename_page", {})))).toContain(
+					"invoking needs Chrome 149 or newer",
+				);
+			} finally {
+				await page.close();
+				await releaseBrowser(handle, { kill: false });
+			}
+		},
+		BROWSER_TEST_TIMEOUT_MS,
+	);
+
+	it(
 		"says the browser has no WebMCP when its DevTools protocol lacks the domain",
 		async () => {
 			const puppeteer = await loadPuppeteer();

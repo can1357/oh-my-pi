@@ -162,9 +162,12 @@ function errorText(error: unknown): string {
 	return String(error);
 }
 
-/** Whether a CDP command failed because the browser does not implement it. */
-function isMissingCommand(error: unknown): boolean {
-	return error instanceof Error && error.message.includes("wasn't found");
+/**
+ * Whether `method` failed because the browser does not implement it. Chrome's method-not-found message names the
+ * method; other failures of the same command can also say "wasn't found" about a frame or tool.
+ */
+function isMissingCommand(error: unknown, method: string): boolean {
+	return error instanceof Error && error.message.includes(`'${method}' wasn't found`);
 }
 
 function boundedResult(value: unknown): WebMcpInvokeSuccess {
@@ -211,7 +214,7 @@ async function rootFrameTools(
 		await untilAborted(signal, () => session.send("WebMCP.enable"));
 		return tools;
 	} catch (error) {
-		if (isMissingCommand(error)) return undefined;
+		if (isMissingCommand(error, "WebMCP.enable")) return undefined;
 		throw error;
 	} finally {
 		session.off("WebMCP.toolsAdded", onAdded);
@@ -289,20 +292,26 @@ export class WebMcpController {
 				if (this.#announced.get(key)?.session === session) this.#announced.delete(key);
 			}
 		};
-		// Chrome announces no removal when a frame loads another document; that document's tools follow this event.
-		const onNavigated = (event: Protocol.Page.FrameNavigatedEvent): void => {
-			if (event.type !== "Navigation") return;
+		const forgetFrame = (frameId: string): void => {
 			for (const [key, announced] of this.#announced) {
-				if (announced.session === session && announced.tool.frameId === event.frame.id) this.#announced.delete(key);
+				if (announced.session === session && announced.tool.frameId === frameId) this.#announced.delete(key);
 			}
 		};
+		// Chrome announces no removal when a frame loads another document; that document's tools follow this event.
+		const onNavigated = (event: Protocol.Page.FrameNavigatedEvent): void => {
+			if (event.type === "Navigation") forgetFrame(event.frame.id);
+		};
+		// Nor when a frame goes away, as a same-process iframe does when its parent navigates.
+		const onDetached = (event: Protocol.Page.FrameDetachedEvent): void => forgetFrame(event.frameId);
 		session.on("WebMCP.toolsAdded", onAdded);
 		session.on("WebMCP.toolsRemoved", onRemoved);
 		session.on("Page.frameNavigated", onNavigated);
+		session.on("Page.frameDetached", onDetached);
 		this.#watched.set(session, () => {
 			session.off("WebMCP.toolsAdded", onAdded);
 			session.off("WebMCP.toolsRemoved", onRemoved);
 			session.off("Page.frameNavigated", onNavigated);
+			session.off("Page.frameDetached", onDetached);
 		});
 	}
 
@@ -401,7 +410,7 @@ export class WebMcpController {
 			return boundedResult(response.output);
 		} catch (error) {
 			if (signal?.aborted) throw error;
-			if (isMissingCommand(error)) throw new ToolError(NO_WEBMCP_INVOKE);
+			if (isMissingCommand(error, "WebMCP.invokeTool")) throw new ToolError(NO_WEBMCP_INVOKE);
 			return { ok: false, error: untrustedBoundary(errorText(error)), untrusted: true };
 		}
 	}
@@ -553,9 +562,4 @@ export class WebMcpController {
 			this.#droppedThrough = removed.at(-1)?.sequence ?? this.#droppedThrough;
 		}
 	}
-}
-
-/** Start following a tab's WebMCP announcements; nothing reaches the page until a `webmcp*` call. */
-export async function installWebMcp(page: Page): Promise<WebMcpController> {
-	return new WebMcpController(page);
 }
