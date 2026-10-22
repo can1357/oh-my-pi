@@ -128,8 +128,9 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		const { terminal, queryCount, sentinelCount } = setupTerminal();
 
 		// Startup writes one OSC 11 query and one OSC 11 DA1 sentinel; the kitty
-		// keyboard probe's sentinel is fused into a combined `\x1b[?u\x1b[c` write,
-		// so it does not appear under the bare `\x1b[c` filter.
+		// keyboard probe's sentinel is fused into a combined
+		// `\x1b[?u\x1b[>5u\x1b[c` write, so it does not appear under the bare
+		// `\x1b[c` filter.
 		expect(queryCount()).toBe(1);
 		expect(sentinelCount()).toBe(1);
 
@@ -784,10 +785,13 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 	it("kitty keyboard probe owns its own DA1 sentinel — does not consume OSC 11's", () => {
 		const { terminal, writes, received } = setupTerminal();
 
-		// The probe must use `\x1b[?u` (query only). Pushing `\x1b[>31u` would
-		// leak a frame onto the kitty stack that shutdown's single pop cannot balance.
+		// The probe queries the terminal and arms it in the same write: the
+		// arming push puts the kitty keyboard protocol on the terminal's stack
+		// before the negotiation finishes, so a key pressed in that window is
+		// reported in kitty encoding (#12411). The query comes first, so the
+		// reply still describes the flags a parent application pushed.
 		expect(writes.some(w => w.includes("\x1b[>31u"))).toBe(false);
-		expect(writes).toContain("\x1b[?u\x1b[c");
+		expect(writes).toContain("\x1b[?u\x1b[>5u\x1b[c");
 
 		// Eight DA1 sentinels are in flight at startup: keyboard probe, OSC 11, and
 		// the DECRQM probes for DEC 2026, 2048, 2031, 2004, 1010, and 1011 (each
@@ -832,11 +836,15 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 
 	it("uses disambiguation-only keyboard reporting on ConPTY", () => {
 		const { terminal, writes } = setupTerminal({ conpty: true });
+		// The negotiation arms the ConPTY host with disambiguation only.
+		expect(writes).toContain("\x1b[?u\x1b[>1u\x1b[c");
 		writes.length = 0;
 		process.stdin.emit("data", "\x1b[?0u");
 
-		expect(writes).toContain("\x1b[>1u");
-		expect(writes).not.toContain("\x1b[>5u");
+		// The reply confirms the level the arming push already chose, so the
+		// frame is kept as it is and no second frame is pushed.
+		expect(writes).toEqual([]);
+		expect(terminal.kittyEnableSequence).toBe("\x1b[>1u");
 		terminal.stop();
 	});
 
@@ -845,8 +853,13 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		writes.length = 0;
 		process.stdin.emit("data", "\x1b[?3u");
 
-		expect(writes).toContain("\x1b[>3u");
+		// The arming frame is raised in place instead of pushing a second one:
+		// every push stays matched by one pop, and a parent application's frame
+		// is never rewritten.
+		expect(writes).toContain("\x1b[=3;1u");
+		expect(writes).not.toContain("\x1b[>3u");
 		expect(writes).not.toContain("\x1b[>7u");
+		expect(terminal.kittyEnableSequence).toBe("\x1b[>3u");
 		terminal.stop();
 	});
 
@@ -872,7 +885,11 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		// Simulate kitty-capable terminal reply (level >=1).
 		process.stdin.emit("data", "\x1b[?1u");
 
-		const pushes = writes.filter(w => w === "\x1b[>5u" || w === "\x1b[>7u" || w === "\x1b[>31u").length;
+		// The negotiation arms the terminal in the same write as the query, so
+		// the arming push is part of that fused write rather than a standalone
+		// one, and the reply keeps the frame it finds instead of pushing a
+		// second one.
+		const pushes = writes.join("").match(/\x1b\[>\d+u/g)?.length ?? 0;
 		expect(pushes).toBe(1);
 
 		terminal.stop();

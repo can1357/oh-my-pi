@@ -6,12 +6,18 @@ import {
 	type ProcessTerminalRenderHarness,
 } from "./process-terminal-render-harness";
 
-// Progressive-enhancement probe ordering contract. omp sends `CSI ? u \\ CSI c`
-// at startup: the kitty reply (`CSI ? <flags> u`) authoritatively says the
-// terminal speaks the kitty keyboard protocol; the DA1 reply (`CSI ? ... c`)
-// is only a sentinel that guarantees a reply even from terminals that ignore
-// `CSI ? u`. Some terminals (Superset / xterm-on-Electron) answer DA1 first;
-// the kitty reply must still be honored regardless of ordering.
+// Progressive-enhancement probe ordering contract. omp sends `CSI ? u \ CSI c`
+// at startup and arms the terminal with `CSI > flags u` in the same write: the
+// arming push puts the kitty keyboard protocol on the terminal's stack before
+// the negotiation finishes (an unarmed terminal folds Shift+Enter into a bare
+// CR that submits the prompt, #12411). The query comes first in that write, so
+// the terminal answers it before the push is applied and the reply still
+// describes the flags a parent application pushed. The kitty reply
+// (`CSI ? <flags> u`) authoritatively says the terminal speaks the kitty
+// keyboard protocol; the DA1 reply (`CSI ? ... c`) is only a sentinel that
+// guarantees a reply even from terminals that ignore `CSI ? u`. Some terminals
+// (Superset / xterm-on-Electron) answer DA1 first; the kitty reply must still
+// be honored regardless of ordering.
 
 class ModalProbe implements Component {
 	invalidate(): void {}
@@ -48,38 +54,59 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 
 	it("requests alternate keys when the kitty reply arrives before the DA1 sentinel", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
-		await harness.settle();
-		expect(harness.writes.join("")).toContain("\x1b[?u\x1b[c");
+		// The negotiation queries and arms the terminal in one write.
+		expect(harness.writes.join("")).toContain("\x1b[?u\x1b[>5u\x1b[c");
 		harness.writes.length = 0;
 
+		// The reply is fed in the same tick as the negotiation. The terminal
+		// gives the negotiation 150 ms to answer, and a reply that arrives
+		// after that window finds the arming frame already popped — it then
+		// pushes a frame of its own instead of rewriting the one in place.
+		// Both paths are correct, but only the in-place rewrite is the one
+		// under test here, so the reply must not race the probe timeout.
 		await harness.feed("\x1b[?0u", "\x1b[?1;2c");
 
 		const out = harness.writes.join("");
 		expect(harness.terminal.kittyProtocolActive).toBe(true);
-		expect(out).toContain("\x1b[>5u");
+		// The terminal is already armed by the negotiation, so the reply must
+		// not push a second frame.
+		expect(out).not.toContain("\x1b[>5u");
 		expect(out).not.toContain("\x1b[>4;2m");
 	});
 
 	it("keeps alternate-key reporting without enabling event types after a previous session", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
-		await harness.settle();
 		harness.writes.length = 0;
 
+		// Fed in the same tick as the negotiation: a reply that arrives after
+		// the 150 ms probe window finds the arming frame already popped and
+		// pushes a frame of its own, so the level under test here would be a
+		// different one.
 		await harness.feed("\x1b[?5u");
 
 		const out = harness.writes.join("");
-		expect(out).toContain("\x1b[>5u");
+		// The terminal echoed the level the negotiation armed the terminal with,
+		// so the frame keeps alternate-key reporting and stays free of event
+		// types (regression #3259).
+		expect(harness.terminal.kittyEnableSequence).toBe("\x1b[>5u");
 		expect(out).not.toContain("\x1b[>7u");
+		expect(out).not.toContain("\x1b[=7;1u");
 	});
 
 	it("preserves event-type reporting enabled by a parent app", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
-		await harness.settle();
 		harness.writes.length = 0;
 
+		// Fed in the same tick as the negotiation: a reply that arrives after
+		// the 150 ms probe window finds the arming frame already popped and
+		// pushes a frame of its own, so the in-place rewrite under test here
+		// would never happen.
 		await harness.feed("\x1b[?3u");
 
-		expect(harness.writes.join("")).toContain("\x1b[>7u");
+		// The armed frame is already on the kitty stack, so the level is
+		// replaced in place instead of pushing a second frame.
+		expect(harness.terminal.kittyEnableSequence).toBe("\x1b[>7u");
+		expect(harness.writes.join("")).toContain("\x1b[=7;1u");
 	});
 
 	it("enables kitty when the DA1 sentinel arrives before the kitty reply (#2042)", async () => {
@@ -115,6 +142,9 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 		expect(harness.terminal.kittyProtocolActive).toBe(false);
 		expect(out).toContain("\x1b[>4;2m");
 		expect(out).not.toContain("\x1b[>5u");
+		// The terminal never confirmed the arming push, so omp takes its frame
+		// back off the kitty stack instead of leaving the terminal armed.
+		expect(out).toContain("\x1b[<u");
 	});
 
 	it("skips modifyOtherKeys fallback for SSH_CONNECTION-only unknown terminals", async () => {

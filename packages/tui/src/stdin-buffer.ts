@@ -446,6 +446,13 @@ export type StdinBufferOptions = {
 	 * same way, bounding memory when the end marker never arrives.
 	 */
 	pasteByteLimit?: number;
+	/**
+	 * Whether the terminal is armed for the kitty keyboard protocol but has not
+	 * confirmed it yet. The arming push switches the terminal to kitty encoding
+	 * right away, so a partial that arrives before the confirmation belongs to a
+	 * split kitty sequence and is held for its tail.
+	 */
+	kittyArmed?: () => boolean;
 };
 
 const KITTY_ENTER = /^\x1b\[13(?:;1)?u/u;
@@ -484,6 +491,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	readonly #partialHoldMaxMs: number;
 	readonly #pasteTimeoutMs: number;
 	readonly #pasteByteLimit: number;
+	readonly #kittyArmed: () => boolean;
 	#pasteMode: boolean = false;
 	#pasteChunks: string[] = [];
 	#pasteOverlap: string = "";
@@ -525,6 +533,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#partialHoldMaxMs = options.partialHoldTimeout ?? PARTIAL_HOLD_MAX_MS;
 		this.#pasteTimeoutMs = options.pasteTimeout ?? PASTE_INACTIVITY_TIMEOUT_MS;
 		this.#pasteByteLimit = options.pasteByteLimit ?? PASTE_MAX_BYTES;
+		this.#kittyArmed = options.kittyArmed ?? (() => false);
 	}
 
 	/**
@@ -563,11 +572,13 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}
 		if (this.#bufferIsStringHead()) this.#trackStringRead(str);
 
-		if (this.#flushDeferral && this.#isFreshEscapeAfterDeferredFlush(str)) {
-			// The buffered partial already hit its flush timeout. A new escape is
-			// a fresh sequence, not a tail; flush the stale partial first so the
-			// new sequence can be parsed from a clean buffer.
-			this.#flushExpired();
+		const freshEscape = this.#isFreshEscapeAfterDeferredFlush(str);
+		if (freshEscape && (this.#flushDeferral || this.#partialHoldStartMs !== 0)) {
+			// The buffered partial already hit its flush timeout, or it was held
+			// for a tail that never came. A new escape is a fresh sequence, not
+			// a tail; deliver the stale partial on its own so the new sequence
+			// can be parsed from a clean buffer instead of being merged into it.
+			this.#flushHeldPartial();
 		} else {
 			// Cancel any pending flush — new data may complete the buffered partial.
 			this.#clearFlushTimer();
@@ -898,9 +909,14 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	 * - Any partial while the kitty keyboard protocol is active — the ESC key
 	 *   arrives as `\x1b[27u` and alt-chords as CSI-u, so a bare `\x1b` (or
 	 *   any unterminated escape) is always a split sequence, never a key.
+	 * - Any partial while the terminal is armed but the negotiation has not
+	 *   confirmed the protocol yet: the arming push already switched the
+	 *   terminal to kitty encoding, so the tail of a split CSI-u belongs to
+	 *   the same key press. Flushing it under legacy timing would deliver
+	 *   the tail as text instead of the key it belongs to.
 	 */
 	#shouldHoldPartial(): boolean {
-		return SGR_MOUSE_PARTIAL.test(this.#buffer) || isKittyProtocolActive();
+		return SGR_MOUSE_PARTIAL.test(this.#buffer) || isKittyProtocolActive() || this.#kittyArmed();
 	}
 
 	/**
@@ -1040,6 +1056,15 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 				return;
 			}
 		}
+		this.#flushHeldPartial();
+	}
+
+	/**
+	 * Deliver the buffered partial regardless of the kitty hold: it already
+	 * waited for its tail, and merging it into the next sequence would deliver
+	 * the garbled remainder as a keystroke.
+	 */
+	#flushHeldPartial(): void {
 		this.#partialHoldStartMs = 0;
 		for (const sequence of this.#drainBuffered()) {
 			this.#emitDataSequence(sequence);
