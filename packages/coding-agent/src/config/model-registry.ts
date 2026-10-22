@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
@@ -136,6 +137,7 @@ import {
 	type ProviderValidationModel,
 	validateProviderConfiguration,
 } from "./models-config";
+import { writeFileAtomicallySync } from "../utils/atomic-file";
 import type { ModelOverride, ModelsConfig, ProviderAuthMode } from "./models-config-schema";
 import { type Settings, settings } from "./settings";
 
@@ -198,8 +200,30 @@ interface CustomModelsResult {
 	keylessProviders?: Set<string>;
 	discoverableProviders?: DiscoveryProviderConfig[];
 	configuredProviders?: Set<string>;
+	/** Config-sourced `apiKey` values by provider, re-installed when a retained snapshot is restored. */
+	providerApiKeys?: Map<string, string>;
+	/** `!command` credential sources by provider, re-registered when a retained snapshot is restored. */
+	commandConfigs?: Map<string, Set<string>>;
 	error?: ConfigError;
+	recovered?: boolean;
 	found: boolean;
+}
+
+/** Independent copy of a parsed models.yml result, so a reload that clears live collections cannot corrupt a retained snapshot. */
+function cloneCustomModelsResult(result: CustomModelsResult): CustomModelsResult {
+	return {
+		...result,
+		overrides: result.overrides && new Map(result.overrides),
+		modelOverrides:
+			result.modelOverrides &&
+			new Map([...result.modelOverrides].map(([provider, models]) => [provider, new Map(models)])),
+		keylessProviders: result.keylessProviders && new Set(result.keylessProviders),
+		configuredProviders: result.configuredProviders && new Set(result.configuredProviders),
+		providerApiKeys: result.providerApiKeys && new Map(result.providerApiKeys),
+		commandConfigs:
+			result.commandConfigs &&
+			new Map([...result.commandConfigs].map(([provider, configs]) => [provider, new Set(configs)])),
+	};
 }
 
 interface ConfiguredModelDiscoveryResult {
@@ -344,6 +368,8 @@ export class ModelRegistry {
 	#configError: ConfigError | undefined = undefined;
 	#warnedCompatKeys = new Set<string>();
 	#configWarnings: string[] = [];
+	#configRecovered = false;
+	#lastGoodCustomModels: CustomModelsResult | undefined;
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
@@ -1003,9 +1029,15 @@ export class ModelRegistry {
 		return warnings;
 	}
 
+	/** Whether the failed primary load retained a validated in-memory or sidecar configuration. */
+	isUsingLastGoodConfig(): boolean {
+		return this.#configRecovered;
+	}
+
 	#loadModels() {
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).
+		const customModelsResult = logger.time("modelRegistry:loadCustomModels", () => this.#loadCustomModels());
 		const {
 			models: customModels = [],
 			overrides = new Map(),
@@ -1014,8 +1046,12 @@ export class ModelRegistry {
 			discoverableProviders = [],
 			configuredProviders = new Set<string>(),
 			error: configError,
-		} = logger.time("modelRegistry:loadCustomModels", () => this.#loadCustomModels());
+		} = customModelsResult;
+		if (customModelsResult.found && !customModelsResult.error) {
+			this.#lastGoodCustomModels = cloneCustomModelsResult(customModelsResult);
+		}
 		this.#configError = configError;
+		this.#configRecovered = customModelsResult.recovered ?? false;
 		this.#keylessProviders = keylessProviders;
 		this.#discoverableProviders = discoverableProviders;
 		this.#customModelOverlays = customModels;
@@ -1722,9 +1758,42 @@ export class ModelRegistry {
 				found: false,
 			};
 		}
-		const { value, error, status } = this.#modelsConfigFile.tryLoad();
+		let loaded = this.#modelsConfigFile.tryLoad();
+		let restoredFromSidecar = false;
+		const error = loaded.status === "error" ? loaded.error : undefined;
+		const configPath = this.#modelsConfigFile.path();
+		// Namespaced by the configured file so registries on different `modelsPath`
+		// values in one directory never restore each other's providers or keys.
+		const sidecarPath = configPath
+			? path.join(path.dirname(configPath), `${path.parse(configPath).name}.last-good.yml`)
+			: undefined;
+		if (loaded.status === "ok" && configPath && sidecarPath) {
+			try {
+				writeFileAtomicallySync(sidecarPath, fs.readFileSync(configPath, "utf8"));
+			} catch (writeError) {
+				logger.warn("Failed to persist last-good models config", { path: sidecarPath, error: writeError });
+			}
+		}
+		if (loaded.status === "error" && !this.#lastGoodCustomModels && sidecarPath) {
+			const sidecar = this.#modelsConfigFile.relocate(sidecarPath, configPath).tryLoad();
+			if (sidecar.status === "ok") {
+				loaded = sidecar;
+				restoredFromSidecar = true;
+			}
+		}
+		const { value, status } = loaded;
 
 		if (status === "error") {
+			if (this.#lastGoodCustomModels) {
+				const snapshot = cloneCustomModelsResult(this.#lastGoodCustomModels);
+				// The reload cleared config credentials; put the retained ones back.
+				for (const [provider, apiKey] of snapshot.providerApiKeys ?? [])
+					this.#installProviderApiKey(provider, apiKey);
+				for (const [provider, configs] of snapshot.commandConfigs ?? []) {
+					this.#commandConfigsByProvider.set(provider, configs);
+				}
+				return { ...snapshot, error, recovered: true };
+			}
 			return {
 				models: [],
 				overrides: new Map(),
@@ -1758,6 +1827,8 @@ export class ModelRegistry {
 		const overrides = new Map<string, ProviderOverride>();
 		const allModelOverrides = new Map<string, Map<string, ModelOverride>>();
 		const keylessProviders = new Set<string>();
+		const providerApiKeys = new Map<string, string>();
+		const parsedCommandConfigs = new Map<string, Set<string>>();
 		const discoverableProviders: DiscoveryProviderConfig[] = [];
 		const providerEntries = Object.entries(value.providers ?? {});
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
@@ -1843,6 +1914,7 @@ export class ModelRegistry {
 			// must authenticate the outbound request.
 			if (providerConfig.apiKey) {
 				this.#installProviderApiKey(providerName, providerConfig.apiKey);
+				providerApiKeys.set(providerName, providerConfig.apiKey);
 			}
 
 			// Parse per-model overrides. Header values stay raw (`!cmd` intact)
@@ -1856,7 +1928,10 @@ export class ModelRegistry {
 				}
 				allModelOverrides.set(providerName, perModel);
 			}
-			if (commandConfigs.size > 0) this.#commandConfigsByProvider.set(providerName, commandConfigs);
+			if (commandConfigs.size > 0) {
+				this.#commandConfigsByProvider.set(providerName, commandConfigs);
+				parsedCommandConfigs.set(providerName, commandConfigs);
+			}
 		}
 
 		return {
@@ -1866,6 +1941,9 @@ export class ModelRegistry {
 			keylessProviders,
 			discoverableProviders,
 			configuredProviders,
+			providerApiKeys,
+			commandConfigs: parsedCommandConfigs,
+			...(restoredFromSidecar ? { error, recovered: true } : {}),
 			found: true,
 		};
 	}
