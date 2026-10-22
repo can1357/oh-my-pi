@@ -685,6 +685,8 @@ async function spillLargeResultToArtifact(
 
 	const newMeta: OutputMeta = { ...existingMeta, truncation: truncationMeta };
 	const newDetails = { ...result.details, meta: newMeta };
+	// A spilled result no longer holds the whole text, so it cannot vouch for a later "unchanged" stub (read's `skillRead`).
+	delete (newDetails as { skillRead?: unknown }).skillRead;
 
 	// Prune the raw payload only MCP results duplicate into `details.rawContent`.
 	// Identify them by the required `serverName` + `mcpToolName` markers (the same

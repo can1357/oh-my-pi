@@ -2408,6 +2408,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get skills() {
 				return session?.skills ?? skills;
 			},
+			get messages() {
+				return agent?.state.messages ?? [];
+			},
 			refreshSkills: () => session.refreshSkills(),
 			rules: allRules,
 			activeRules: [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()],
