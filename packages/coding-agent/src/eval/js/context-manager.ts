@@ -12,7 +12,12 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
-import { attachSessionOwner, EvalKernelNotRunningError, type SessionOwners } from "../executor-base";
+import {
+	attachSessionOwner,
+	type DisposeByOwnerOptions,
+	EvalKernelNotRunningError,
+	type SessionOwners,
+} from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
 import { updateEvalState } from "../state";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
@@ -106,6 +111,7 @@ interface JsSession {
 }
 
 interface StartingJsSession extends SessionOwners {
+	sessionId: string;
 	promise: Promise<JsSession>;
 }
 
@@ -404,11 +410,13 @@ export async function disposeAllVmContexts(): Promise<void> {
 /**
  * Shut down retained JS contexts owned solely by `ownerId`; contexts with other
  * owners (e.g. an in-memory session keyed only by cwd) just drop the registration.
+ * Contexts for `options.keepSessionId` are left untouched.
  */
-export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
+export async function disposeVmContextsByOwner(ownerId: string, options?: DisposeByOwnerOptions): Promise<void> {
+	const keepSessionId = options?.keepSessionId;
 	const toKill: JsSession[] = [];
 	for (const session of Array.from(sessions.values())) {
-		if (!session.ownerIds.has(ownerId)) continue;
+		if (!session.ownerIds.has(ownerId) || session.sessionId === keepSessionId) continue;
 		if (session.ownerIds.size === 1) {
 			toKill.push(session);
 			continue;
@@ -417,7 +425,7 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 	}
 	const startingToKill: StartingJsSession[] = [];
 	for (const [sessionKey, starting] of Array.from(startingSessions.entries())) {
-		if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId)) continue;
+		if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId) || starting.sessionId === keepSessionId) continue;
 		if (starting.ownerIds.size === 1) {
 			startingSessions.delete(sessionKey);
 			startingToKill.push(starting);
@@ -675,6 +683,7 @@ async function acquireSession(
 	startingSession = {
 		ownerIds: new Set(),
 		hasFallbackOwner: false,
+		sessionId: snapshot.sessionId,
 		promise: startup,
 	};
 	attachSessionOwner(startingSession, snapshot.sessionId, ownerId);

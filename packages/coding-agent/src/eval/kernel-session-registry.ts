@@ -4,6 +4,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import {
 	attachSessionOwner,
 	type CancelledErrorClass,
+	type DisposeByOwnerOptions,
 	getRemainingTimeoutMs,
 	isCancellationError,
 	isTimedOutCancellation,
@@ -39,6 +40,7 @@ export interface KernelSession<TKernel extends RegistryKernel> extends SessionOw
 }
 
 interface StartingKernelSession<TSession> extends SessionOwners {
+	sessionId: string;
 	promise: Promise<TSession>;
 }
 
@@ -93,7 +95,7 @@ interface KernelSessionRegistry<
 	TSession extends KernelSession<TKernel>,
 > {
 	disposeAll(): Promise<void>;
-	disposeByOwner(ownerId: string): Promise<void>;
+	disposeByOwner(ownerId: string, options?: DisposeByOwnerOptions): Promise<void>;
 	executeOnSession(code: string, cwd: string, options: TOptions): Promise<R>;
 	peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined;
 	getPresentSession(cwd: string, options: TOptions): TSession | undefined;
@@ -204,6 +206,7 @@ export function createKernelSessionRegistry<
 		startingSession = {
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
+			sessionId,
 			promise: startup,
 		};
 		attachSessionOwner(startingSession, sessionId, options.kernelOwnerId);
@@ -356,11 +359,12 @@ export function createKernelSessionRegistry<
 		}
 	}
 
-	async function disposeByOwner(ownerId: string): Promise<void> {
+	async function disposeByOwner(ownerId: string, options?: DisposeByOwnerOptions): Promise<void> {
+		const keepSessionId = options?.keepSessionId;
 		const toShutdown: TSession[] = [];
 		const startingToShutdown: StartingKernelSession<TSession>[] = [];
 		for (const session of Array.from(sessions.values())) {
-			if (!session.ownerIds.has(ownerId)) continue;
+			if (!session.ownerIds.has(ownerId) || session.sessionId === keepSessionId) continue;
 			if (session.ownerIds.size === 1) {
 				toShutdown.push(session);
 				continue;
@@ -368,7 +372,9 @@ export function createKernelSessionRegistry<
 			session.ownerIds.delete(ownerId);
 		}
 		for (const [sessionKey, starting] of Array.from(startingSessions.entries())) {
-			if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId)) continue;
+			if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId) || starting.sessionId === keepSessionId) {
+				continue;
+			}
 			if (starting.ownerIds.size === 1) {
 				startingSessions.delete(sessionKey);
 				startingToShutdown.push(starting);

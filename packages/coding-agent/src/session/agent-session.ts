@@ -1211,6 +1211,8 @@ export class AgentSession implements SettingsScope {
 			const resolve = this.#resolveSessionTransition;
 			this.#sessionTransitionSettled = undefined;
 			this.#resolveSessionTransition = undefined;
+			// Also after rollbacks: a hook may have started a kernel for the abandoned target.
+			this.#eval.releaseStaleKernels();
 			resolve?.();
 		},
 	};
