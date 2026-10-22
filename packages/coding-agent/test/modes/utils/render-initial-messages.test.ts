@@ -725,6 +725,33 @@ describe("UiHelpers.applyToolOutputDetailsHidden — live setting", () => {
 		expect(ctx.ui.resetDisplay).toHaveBeenCalledTimes(2);
 	});
 
+	it("keeps read-result images hidden while details stay folded as activity returns", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const transcript = transcriptWith([assistantToolCall("read-both", "read", { path: "both.png" })]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript, true, false, true);
+		const assistant = new AssistantMessageComponent(
+			assistantToolCall("read-both", "read", { path: "both.png" }),
+			false,
+			() => {},
+		);
+		assistant.setImagesVisible(true);
+		assistant.setToolResultImages("read-both", [pngImage]);
+		assistant.setToolResultImagesVisible(true);
+		chatContainer.addChild(assistant);
+		const helpers = new UiHelpers(ctx);
+
+		// Revealing tool activity alone leaves the fold in place, so the image stays hidden.
+		helpers.syncToolResultImages();
+
+		expect(hasImageComponent(chatContainer)).toBe(false);
+
+		ctx.hideToolOutputDetails = false;
+		helpers.syncToolResultImages();
+
+		expect(hasImageComponent(chatContainer)).toBe(true);
+	});
+
 	it("keeps read-result images hidden while tool activity is off", async () => {
 		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
 		setTerminalImageProtocol(ImageProtocol.Sixel);

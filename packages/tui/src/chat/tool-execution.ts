@@ -1503,7 +1503,9 @@ export class ToolExecutionComponent extends Container {
 			...(late.section ? [late.section] : []),
 		];
 		const role = `omp.tool.${this.#toolName}`;
-		if (view.inline) return col(children, { role });
+		// An inline view has no collapse of its own: folded tool output details drop
+		// everything past the head instead of leaving its body on screen.
+		if (view.inline) return col(this.#toolOutputDetailsHidden ? children.slice(0, 1) : children, { role });
 		const hasBody = children.length > 1;
 		return card(
 			{

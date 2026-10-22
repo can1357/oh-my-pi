@@ -1115,11 +1115,23 @@ export class UiHelpers {
 	#syncTranscriptVisibility(container: TranscriptContainer): void {
 		if (isToolActivityComponent(container)) container.setToolActivityVisible(!this.ctx.hideToolActivity);
 		if (supportsToolOutputDetails(container)) container.setToolOutputDetailsHidden(this.ctx.hideToolOutputDetails);
-		// Tool-result images live on the assistant message rather than on the tool
-		// card, and no container capability reaches them, so they are applied here.
-		const imagesVisible = !this.ctx.hideToolActivity && !this.ctx.hideToolOutputDetails;
-		for (const child of container.children) {
-			if (child instanceof AssistantMessageComponent) child.setToolResultImagesVisible(imagesVisible);
+		this.#applyToolResultImages(container.children);
+	}
+
+	/**
+	 * Tool-result images live on the assistant message rather than on the tool
+	 * card, and no container capability reaches them, so every live display change
+	 * that touches either axis has to reapply them by hand. They stay hidden while
+	 * tool activity or tool output details are off.
+	 */
+	syncToolResultImages(): void {
+		this.#applyToolResultImages(this.ctx.chatContainer.children);
+	}
+
+	#applyToolResultImages(children: readonly Component[]): void {
+		const visible = !this.ctx.hideToolActivity && !this.ctx.hideToolOutputDetails;
+		for (const child of children) {
+			if (child instanceof AssistantMessageComponent) child.setToolResultImagesVisible(visible);
 		}
 	}
 

@@ -4311,11 +4311,12 @@ export class InteractiveMode implements InteractiveModeContext {
 					(child instanceof ToolExecutionComponent || child instanceof ReadToolGroupComponent)
 				) {
 					child.setExpanded(false);
-				} else if (child instanceof AssistantMessageComponent) {
-					child.setToolResultImagesVisible(!hideToolActivity);
 				}
 			}
 			this.chatContainer.setToolActivityVisible(!hideToolActivity);
+			// Read-result images follow both axes, so revealing tool activity must not
+			// uncover the images folded tool output details still hide.
+			this.#uiHelpers.syncToolResultImages();
 			if (hideToolActivity) this.ui.clearInlineImages();
 			// Visibility changes must rebuild retired terminal history.
 			resetDisplay = true;

@@ -289,6 +289,111 @@ describe("tool output details", () => {
 		expect((expanded.c ?? []).filter(child => child.k === "row")).toHaveLength(2);
 	});
 
+	it("keeps a failed folded read to its status instead of its result text", () => {
+		const group = new ReadToolGroupComponent({ showContentPreview: false });
+		group.updateArgs({ path: "src/broken.ts" }, "read-0");
+		group.updateResult(
+			{ content: [{ type: "text", text: "Error: EACCES permission denied on src/broken.ts" }], isError: true },
+			false,
+			"read-0",
+		);
+
+		group.setToolOutputDetailsHidden(true);
+
+		const folded = group.describe(NATIVE_CX) as TspNode;
+		expect(folded.p).toMatchObject({ status: "error", target: "src/broken.ts" });
+		expect(folded.c ?? []).toHaveLength(0);
+		expect(JSON.stringify(folded)).not.toContain("EACCES");
+
+		// Unfolded keeps the message the setting is meant to hide.
+		group.setToolOutputDetailsHidden(false);
+
+		expect(JSON.stringify(group.describe(NATIVE_CX))).toContain("EACCES");
+	});
+
+	it("keeps folded native read usage on the call row", () => {
+		const group = new ReadToolGroupComponent({ showContentPreview: false });
+		group.updateArgs({ path: "/tmp/a.ts" }, "read-a");
+		group.updateResult({ content: [{ type: "text", text: "a" }] }, false, "read-a");
+		group.updateArgs({ path: "/tmp/b.ts" }, "read-b");
+		group.updateResult({ content: [{ type: "text", text: "b" }] }, false, "read-b");
+		group.attachUsage(
+			["read-a"],
+			{
+				input: 1111,
+				output: 11,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1122,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			1000,
+			500,
+		);
+
+		group.setToolOutputDetailsHidden(true);
+
+		const node = group.describe(NATIVE_CX) as TspNode;
+		const rows = node.c ?? [];
+
+		// One body child per call, with the usage inside that row rather than below it.
+		expect(rows).toHaveLength(2);
+		expect(JSON.stringify(rows[0])).toContain("1.1K");
+		expect(JSON.stringify(rows[1])).not.toContain("1.1K");
+	});
+
+	it("keeps a lone folded native call's usage in its head", () => {
+		const group = new ReadToolGroupComponent({ showContentPreview: false });
+		group.updateArgs({ path: "/tmp/only.ts" }, "read-0");
+		group.updateResult({ content: [{ type: "text", text: "one" }] }, false, "read-0");
+		group.attachUsage(
+			["read-0"],
+			{
+				input: 1111,
+				output: 11,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1122,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			1000,
+			500,
+		);
+
+		group.setToolOutputDetailsHidden(true);
+
+		const node = group.describe(NATIVE_CX) as TspNode;
+
+		expect(node.c ?? []).toHaveLength(0);
+		expect(JSON.stringify(node.p)).toContain("1.1K");
+	});
+
+	it("folds an inline fallback tool view to its head", () => {
+		const card = new ToolExecutionComponent("grep", { pattern: "needle", path: "src" }, {}, undefined, uiStub);
+		try {
+			card.updateResult(
+				{
+					content: [{ type: "text", text: "src/a.ts:1: needle here" }],
+					details: { matches: [{ file: "src/a.ts", line: 1, text: "needle here" }] },
+				},
+				false,
+			);
+
+			const open = card.describe() as TspNode;
+			expect(open.k).toBe("col");
+			expect((open.c ?? []).length).toBeGreaterThan(1);
+
+			card.setToolOutputDetailsHidden(true);
+
+			const folded = card.describe() as TspNode;
+			expect(folded.k).toBe("col");
+			expect(folded.c ?? []).toHaveLength(1);
+			expect(JSON.stringify(folded)).not.toContain("needle here");
+		} finally {
+			card.stopAnimation();
+		}
+	});
+
 	it("keeps one native row per folded read call", () => {
 		const group = new ReadToolGroupComponent({ showContentPreview: false });
 		group.updateArgs({ path: "a.ts:1-5, a.ts:9-12" }, "read-a");

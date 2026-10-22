@@ -854,9 +854,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		// Previews (and a long error message) are what a collapse hides; plain rows always show.
 		let collapsible = previews.length > 0;
 		if (this.#toolOutputDetailsHidden) {
-			const folded = this.#foldedToolRows(entries, targets, body);
-			head = folded.head;
-			collapsible ||= folded.collapsible;
+			head = this.#foldedToolHead(entries, targets, body);
 		} else if (rows.length <= 1) {
 			const row = rows[0];
 			const error = row && this.#statusForTargets(row.targets) === "error" ? this.#errorFor(row) : undefined;
@@ -916,15 +914,17 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	/**
-	 * Head and body for folded tool output details: the setting promises one row
-	 * per read call, so a call that fanned out into several file rows collapses
-	 * onto its own row here instead of retaining the expanded target tree.
+	 * Head for folded tool output details. The setting promises one row per read
+	 * call, so a call that fanned out into several file rows collapses onto the
+	 * inline head instead of retaining the expanded target tree, usage rides that
+	 * row, and a failure keeps its status without exposing the result text the
+	 * setting is there to hide.
 	 */
-	#foldedToolRows(
+	#foldedToolHead(
 		entries: readonly ReadEntry[],
 		targets: readonly ReadDisplayTarget[],
 		body: NativeChild[],
-	): { head: NativeToolHead; collapsible: boolean } {
+	): NativeToolHead {
 		const calls = entries.map(entry => ({
 			entry,
 			rows: this.#buildSummaryRows(targets.filter(target => target.entry === entry)),
@@ -935,42 +935,39 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		// A lone call is the whole group, so its targets share the inline head.
 		const only = calls.length === 1 ? calls[0] : undefined;
 		if (only) {
-			for (const [i, usage] of (usageByCall.get(0) ?? []).entries()) body.push(this.#nativeUsage(usage, `u${i}`));
+			const usage = this.#usageLines(usageByCall.get(0));
+			const meta = (rowHead: NativeToolHead): NativeToolHead =>
+				usage.length > 0 ? { ...rowHead, meta: [...(rowHead.meta ?? []), ...usage] } : rowHead;
 			const row = only.rows[0];
-			if (only.rows.length === 1 && row) {
-				const rowHead = this.#nativeRowHead(row);
-				const error = this.#statusForTargets(row.targets) === "error" ? this.#errorFor(row) : undefined;
-				if (error === undefined) return { head: rowHead, collapsible: false };
-				const view = inlineErrorView(rowHead, error);
-				if (view.body) body.push(...view.body);
-				return { head: view.tool ?? rowHead, collapsible: view.body !== undefined };
-			}
+			if (only.rows.length === 1 && row) return meta(this.#nativeRowHead(row));
 			const summary = only.rows.map(item => this.#nativeRowHead(item).target).join(", ");
-			return { head: { target: summary || "…", targetKind: "text" }, collapsible: false };
+			return meta({ target: summary || "…", targetKind: "text" });
 		}
+		// Several calls keep one row each, their usage on the same row.
 		for (const [index, call] of calls.entries()) {
-			body.push(this.#nativeCallRow(call.entry, call.rows, `c${index}`));
-			for (const [i, usage] of (usageByCall.get(index) ?? []).entries()) {
-				body.push(this.#nativeUsage(usage, `u${index}.${i}`));
-			}
+			body.push(this.#nativeCallRow(call.entry, call.rows, this.#usageLines(usageByCall.get(index)), `c${index}`));
 		}
-		return { head: { target: formatCount("call", calls.length), targetKind: "text" }, collapsible: false };
+		return { target: formatCount("call", calls.length), targetKind: "text" };
 	}
 
-	/** One folded row for a read call: every target the call resolved, on its single line. */
-	#nativeCallRow(entry: ReadEntry, rows: readonly ReadSummaryRow[], key: string): NativeNode {
+	/** One folded row for a read call: every target the call resolved and its usage, on its single line. */
+	#nativeCallRow(entry: ReadEntry, rows: readonly ReadSummaryRow[], usage: string[], key: string): NativeNode {
 		const targets = rows.flatMap(row => row.targets);
 		const status = targets.length > 0 ? this.#statusForTargets(targets) : entry.status;
-		const spans = this.#callPathSpans(rows);
-		return keyed(
-			row(
-				[
-					node("icon", { name: status === "error" ? "x-circle" : "file", tone: READ_STATUS_TONE[status] }),
-					text(spans, { lines: 1, truncate: "end", shrink: 1 }),
-				],
-				{ role: "omp.tool.file", tone: READ_STATUS_TONE[status] },
-			),
-			key,
+		const children: NativeChild[] = [
+			node("icon", { name: status === "error" ? "x-circle" : "file", tone: READ_STATUS_TONE[status] }),
+			text(this.#callPathSpans(rows), { lines: 1, truncate: "end", shrink: 1 }),
+		];
+		if (usage.length > 0) {
+			children.push(text([span(usage.join(theme.sep.dot), "dim")], { lines: 1, truncate: "end", shrink: 1 }));
+		}
+		return keyed(row(children, { role: "omp.tool.file", tone: READ_STATUS_TONE[status] }), key);
+	}
+
+	/** Usage rows as plain one-line strings, as a folded call row carries them. */
+	#usageLines(usages: readonly ReadUsageRow[] | undefined): string[] {
+		return (usages ?? []).map(usage =>
+			plainText(formatUsageRow(usage.usage, usage.durationMs, usage.ttftMs, usage.timestamp, usage.turnElapsedMs)),
 		);
 	}
 
@@ -1090,21 +1087,13 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			);
 			if (calls.length === 1) {
 				head = [title, span(" "), ...this.#callPathSpans(calls[0]!)];
-				for (const usage of usageByCall.get(0) ?? []) children.push(this.#nativeUsage(usage, "u0"));
+				for (const usage of this.#usageLines(usageByCall.get(0))) {
+					head.push(span(theme.sep.dot, "dim"), span(usage, "dim"));
+				}
 			} else {
 				head = [title, span(` (${calls.length})`, "dim")];
 				const items = calls.map((callRows, index) => {
-					const usage = (usageByCall.get(index) ?? []).map(usageRow =>
-						plainText(
-							formatUsageRow(
-								usageRow.usage,
-								usageRow.durationMs,
-								usageRow.ttftMs,
-								usageRow.timestamp,
-								usageRow.turnElapsedMs,
-							),
-						),
-					);
+					const usage = this.#usageLines(usageByCall.get(index));
 					const callTargets = callRows.flatMap(callRow => callRow.targets);
 					return node(
 						"item",
