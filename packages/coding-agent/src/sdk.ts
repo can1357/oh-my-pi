@@ -95,11 +95,14 @@ import { LiveImageUrlService } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
 import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
+import { EVAL_COMPLETION_BRIDGE_NAME, runEvalCompletion } from "./eval/completion-bridge";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
 import { defaultEvalSessionId } from "./eval/session-id";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import { cfgEvalSpeculationEnabled, cfgEvalSpeculationMaxPerTurn } from "./eval/settings";
+import { EvalSpeculationStore, registerEvalSpeculation } from "./eval/speculation/completion-store";
 import {
 	type CustomCommandsLoadResult,
 	type LoadedCustomCommand,
@@ -2556,6 +2559,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// prompt is built from, and therefore advertises, the live set.
 		toolSession.getAdvertisedEvalPreludes = () => session?.getAdvertisedEvalPreludes() ?? getEvalPreludes();
 
+		// Speculative programmatic tool calling: launched from partial eval source
+		// while the model streams, claimed by the eval bridge when the cell runs.
+		// Built here because it needs the tool session to dispatch through, and
+		// bound by weak identity so the bridge can find it without widening
+		// `ToolSession` (see `eval/speculation/completion-store.ts`).
+		const evalSpeculation = new EvalSpeculationStore({
+			isEnabled: () => cfgEvalSpeculationEnabled.get(settings),
+			maxPerTurn: () => cfgEvalSpeculationMaxPerTurn.get(settings),
+			run: (name, args, signal) =>
+				name === EVAL_COMPLETION_BRIDGE_NAME
+					? runEvalCompletion(args, { session: toolSession, signal })
+					: Promise.reject(new Error(`not speculatable: ${name}`)),
+		});
+		registerEvalSpeculation(toolSession, evalSpeculation);
+
 		// Wire process-wide internal URL singletons owned by their real classes.
 		// Top-level sessions install the active snapshots; subagents inherit them.
 		// Artifact and agent-output URLs resolve via `AgentRegistry.global()` —
@@ -4760,6 +4778,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// streamed and parsed on the main thread.
 		session = new AgentSession({
 			cacheWarmer,
+			evalSpeculation,
 			advisorWatchdogPrompt,
 			advisorContextPrompt,
 			advisorMemoryPrompt,

@@ -471,6 +471,7 @@
 ## [18.11.0] - 2026-10-14
 
 ### Added
+- Added opt-in `eval.speculation.enabled` to start literal `completion()` calls while eval cells stream, with `eval.speculation.maxPerTurn` limiting speculative requests. ([#15773](https://github.com/can1357/oh-my-pi/pull/15773) by [@mvid](https://github.com/mvid)).
 
 - Added a microphone button beside Send in Tern: click to record, click Stop to finish, then review and submit the transcription yourself. Clicking while it says **Starting…** cancels a slow first model load ([#15759](https://github.com/can1357/oh-my-pi/pull/15759) by [@daaximus](https://github.com/daaximus)).
 - Added local Nemotron streaming dictation: words appear while you speak, and the microphone waits for the recognizer to be ready before recording ([#15759](https://github.com/can1357/oh-my-pi/pull/15759) by [@daaximus](https://github.com/daaximus)).
