@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use crate::{
 	error::EditError,
 	text::{
-		adjust_indentation, count_leading_whitespace, is_non_empty_line, js_trim, js_trim_end,
-		js_trim_start, normalize_for_fuzzy, normalize_to_lf, normalize_unicode, utf16_len,
+		FoldedDifference, adjust_indentation, count_leading_indent, folded_differences,
+		is_non_empty_line, js_trim, js_trim_end, js_trim_start, normalize_for_fuzzy, normalize_to_lf,
+		normalize_unicode, strip_comment_prefix, utf16_len,
 	},
 };
 
@@ -522,7 +523,7 @@ fn find_exact_match_outcome(
 fn relative_indent_depths(lines: &[&str]) -> Vec<usize> {
 	let indents: Vec<usize> = lines
 		.iter()
-		.map(|line| count_leading_whitespace(line))
+		.map(|line| count_leading_indent(line))
 		.collect();
 	let non_empty_indents: Vec<usize> = lines
 		.iter()
@@ -783,28 +784,6 @@ fn norm_includes(line: &str, pattern: &str) -> bool {
 	pattern_len >= PARTIAL_MATCH_MIN_LENGTH
 		&& line.contains(pattern)
 		&& pattern_len as f64 / line_len.max(1) as f64 >= PARTIAL_MATCH_MIN_RATIO
-}
-
-fn strip_comment_prefix(line: &str) -> &str {
-	let trimmed = js_trim_start(line);
-	let without = if let Some(rest) = trimmed.strip_prefix("/*") {
-		rest
-	} else if let Some(rest) = trimmed.strip_prefix("*/") {
-		rest
-	} else if let Some(rest) = trimmed.strip_prefix("//") {
-		rest
-	} else if let Some(rest) = trimmed.strip_prefix('*') {
-		rest
-	} else if let Some(rest) = trimmed.strip_prefix('#') {
-		rest
-	} else if let Some(rest) = trimmed.strip_prefix(';') {
-		rest
-	} else if let Some(rest) = trimmed.strip_prefix("/ ") {
-		rest
-	} else {
-		trimmed
-	};
-	js_trim_start(without)
 }
 
 fn run_sequence_passes(
@@ -1179,7 +1158,182 @@ fn first_different_line<'a>(old_lines: &'a [&str], new_lines: &'a [&str]) -> (&'
 	(old_lines.first().copied().unwrap_or(""), new_lines.first().copied().unwrap_or(""))
 }
 
-/// Format `EditMatchError.formatMessage` byte-for-byte.
+/// Maximum number of body differences named in a match-error hint.
+const MAX_HINTED_DIFFERENCES: usize = 8;
+
+/// Codepoint-level hint for a diff pair whose characters differ in forms the
+/// fuzzy matcher folds together (typographic quotes, dashes, fullwidth
+/// variants) or in whitespace the terminal renders as blank space. Terminals
+/// render both sides alike, so the printed pair reads as identical and leaves
+/// the caller no actionable difference.
+///
+/// Only exact mode reports the hint: with fuzzy matching enabled both sides
+/// are normalized before scoring, so a folded variant is free and can never be
+/// the reason the match was rejected — naming it would point at a difference
+/// the matcher does not charge for. The ambiguous case is the exception: there
+/// the folded variants are exactly what made the candidates tie, so the
+/// codepoints are what tells the candidates apart.
+///
+/// The body of the two lines is compared the way the matcher compares it:
+/// through the same folding, so the characters line up even when one of the
+/// two lines inserted or deleted whitespace in front of a difference. The
+/// leading and trailing whitespace are compared separately: the matcher trims
+/// them away, but an exact match charges for them, so trimming them here
+/// would hide a difference the caller has to reproduce. The reported position
+/// is a character index into the expected line's body, not a display column.
+///
+/// Returns `None` when the pair differs nowhere the caller cannot see: no
+/// folded difference in the body and no differing boundary codepoint.
+fn folded_difference_hint(expected: &str, actual: &str, report: bool) -> Option<String> {
+	if !report {
+		return None;
+	}
+	let (expected_leading, expected_body, expected_trailing) = split_boundary_whitespace(expected);
+	let (actual_leading, actual_body, actual_trailing) = split_boundary_whitespace(actual);
+	let mut hints: Vec<String> = Vec::new();
+	hints.extend(boundary_difference_hint("start", expected_leading, actual_leading));
+	let mut body_hints = 0usize;
+	let mut omitted = 0usize;
+	for difference in folded_differences(expected_body, actual_body) {
+		if body_hints == MAX_HINTED_DIFFERENCES {
+			omitted += 1;
+			continue;
+		}
+		body_hints += 1;
+		hints.push(folded_difference_line(difference));
+	}
+	hints.extend(boundary_difference_hint("end", expected_trailing, actual_trailing));
+	if hints.is_empty() {
+		return None;
+	}
+	if omitted > 0 {
+		hints.push(format!("  ... and {omitted} more differences"));
+	}
+	Some(hints.join("\n"))
+}
+
+/// The hint for one folded difference.
+///
+/// A whitespace glyph is left out: it renders as blank space — a tab renders
+/// as a hole once the renderer replaces it — so the codepoints alone tell the
+/// caller what to reproduce.
+///
+/// A difference one side has and the other one does not — the codepoints a
+/// longer whitespace run has in excess — is reported with its count and the
+/// side it is on.
+fn folded_difference_line(difference: FoldedDifference) -> String {
+	let index = difference.index + 1;
+	match (difference.expected, difference.actual) {
+		(Some(expected_char), Some(actual_char))
+			if expected_char.is_whitespace() || actual_char.is_whitespace() =>
+		{
+			format!(
+				"  differs at char {index}: U+{:04X} vs U+{:04X}",
+				expected_char as u32, actual_char as u32
+			)
+		},
+		(Some(expected_char), Some(actual_char)) => {
+			format!(
+				"  differs at char {index}: U+{:04X} {expected_char} vs U+{:04X} {actual_char}",
+				expected_char as u32, actual_char as u32
+			)
+		},
+		(Some(expected_char), None) => {
+			format!(
+				"  differs at char {index}: U+{:04X} x{} only in the - line",
+				expected_char as u32, difference.count
+			)
+		},
+		(None, Some(actual_char)) => {
+			format!(
+				"  differs at char {index}: U+{:04X} x{} only in the + line",
+				actual_char as u32, difference.count
+			)
+		},
+		(None, None) => String::new(),
+	}
+}
+
+/// Split a line into its leading whitespace, its body and its trailing
+/// whitespace.
+///
+/// `js_trim` erases the boundary whitespace, but an exact match charges for
+/// it, so the regions are kept to report the codepoints that differ.
+fn split_boundary_whitespace(line: &str) -> (&str, &str, &str) {
+	let start = line.len() - js_trim_start(line).len();
+	let end = js_trim_end(line).len();
+	if start >= end {
+		// The line is nothing but whitespace.
+		return (line, "", "");
+	}
+	(&line[..start], &line[start..end], &line[end..])
+}
+
+/// The boundary whitespace that differs between the two lines. The glyphs are
+/// omitted: whitespace renders as blank space, so only the codepoint tells
+/// the caller what to reproduce.
+///
+/// Every unequal pair counts, not only the ones the matcher folds together.
+/// The boundary whitespace is trimmed away before the match is scored, so an
+/// exact match is the only thing that charges for it — and it charges for the
+/// codepoint, not for the shape: a no-break space (`U+00A0`), a tab and the
+/// ideographic space (`U+3000`) all render as blank space.
+///
+/// One line can carry boundary whitespace the other one does not have at all.
+/// The paired comparison never reaches those characters, so they are reported
+/// with their codepoint and count.
+///
+/// Every unequal pair is reported: they all render as blank whitespace, so
+/// naming one of them leaves the next one undiscovered.
+fn boundary_difference_hint(position: &str, expected: &str, actual: &str) -> Vec<String> {
+	let expected_chars: Vec<char> = expected.chars().collect();
+	let actual_chars: Vec<char> = actual.chars().collect();
+	let mut hints = Vec::new();
+	let common = expected_chars.len().min(actual_chars.len());
+	for offset in 0..common {
+		let (expected_char, actual_char) = (expected_chars[offset], actual_chars[offset]);
+		if expected_char == actual_char {
+			continue;
+		}
+		hints.push(format!(
+			"  differs at the {position}: U+{:04X} vs U+{:04X}",
+			expected_char as u32, actual_char as u32
+		));
+	}
+	// The characters left over after the paired comparison: one line has
+	// boundary whitespace where the other has none.
+	let (leftover, side) = if expected_chars.len() > common {
+		(&expected_chars[common..], "-")
+	} else if actual_chars.len() > common {
+		(&actual_chars[common..], "+")
+	} else {
+		return hints;
+	};
+	// The codepoints in the order the line holds them: the renderer replaces
+	// a tab with spaces, so a hint that sorted them would leave the caller
+	// unable to reproduce the line. Consecutive equal codepoints are grouped,
+	// so a run of three spaces still reads as one entry.
+	let mut codepoints: Vec<String> = Vec::new();
+	let mut offset = 0;
+	while offset < leftover.len() {
+		let ch = leftover[offset];
+		let mut count = 1;
+		while offset + count < leftover.len() && leftover[offset + count] == ch {
+			count += 1;
+		}
+		codepoints.push(format!("U+{:04X} x{count}", ch as u32));
+		offset += count;
+	}
+	hints.push(format!(
+		"  differs at the {position}: {} only in the {side} line",
+		codepoints.join(", ")
+	));
+	hints
+}
+
+/// Format `EditMatchError.formatMessage` byte-for-byte, plus a codepoint hint
+/// when the printed diff pair differs in characters the matcher folds
+/// together: in exact mode, and in fuzzy mode when several candidates tied.
 pub fn format_match_error(
 	path: &str,
 	search_text: &str,
@@ -1200,8 +1354,14 @@ pub fn format_match_error(
 	};
 	let similarity_percent = (closest.confidence * 100.0).round() as i64;
 	let threshold_percent = (threshold * 100.0).round() as i64;
-	let search_lines: Vec<&str> = search_text.split('\n').collect();
-	let actual_lines: Vec<&str> = closest.actual_text.split('\n').collect();
+	// The matcher compares the text with the line endings normalized to LF, so
+	// the printed pair is built from the same text: a `\r` the matcher folded
+	// away is not a difference the caller has to reproduce, and reporting it
+	// would hide the difference that is.
+	let normalized_search = normalize_to_lf(search_text);
+	let normalized_actual = normalize_to_lf(&closest.actual_text);
+	let search_lines: Vec<&str> = normalized_search.split('\n').collect();
+	let actual_lines: Vec<&str> = normalized_actual.split('\n').collect();
 	let (old_line, new_line) = first_different_line(&search_lines, &actual_lines);
 	let hint = if allow_fuzzy {
 		if fuzzy_matches.is_some_and(|count| count > 1) {
@@ -1222,9 +1382,16 @@ pub fn format_match_error(
 	} else {
 		format!("Could not find the exact text in {path}.")
 	};
+	// In fuzzy mode the matcher compares the normalized text, so a folded
+	// variant is free and can never be the reason the match was rejected. The
+	// ambiguous case is the exception: the folded variants are what made the
+	// candidates tie, so the codepoints are what tells them apart.
+	let report_differences = !allow_fuzzy || fuzzy_matches.is_some_and(|count| count > 1);
+	let difference_hint = folded_difference_hint(old_line, new_line, report_differences)
+		.map_or_else(String::new, |hint| format!("{hint}\n"));
 	format!(
 		"{heading}\n\nClosest match ({similarity_percent}% similar) at line {}:\n  - {old_line}\n  \
-		 + {new_line}\n{hint}",
+		 + {new_line}\n{difference_hint}{hint}",
 		closest.start_line
 	)
 }
@@ -1388,6 +1555,7 @@ pub fn replace_text(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::modes::replace::ReplaceEngine;
 
 	#[test]
 	fn fast_distances_match_reference_across_block_boundaries() {
@@ -1696,6 +1864,244 @@ mod tests {
 	}
 
 	#[test]
+	fn match_error_names_folded_codepoint_differences() {
+		// Exact mode charges for the folded difference, so the error names the
+		// codepoints the terminal renders identically.
+		assert_eq!(
+			exact_edit_error("foo（bar）＝1", "foo(bar)=1", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - foo(bar)=1\n",
+				"  + foo（bar）＝1\n",
+				"  differs at char 4: U+0028 ( vs U+FF08 （\n",
+				"  differs at char 8: U+0029 ) vs U+FF09 ）\n",
+				"  differs at char 9: U+003D = vs U+FF1D ＝\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_names_folded_differences_ignoring_indentation() {
+		// The matcher compares trimmed lines, so an indentation difference must
+		// not shift the character positions of the folded pairs.
+		assert_eq!(
+			exact_edit_error("\tfoo（bar）＝1", "  foo(bar)=1", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  -   foo(bar)=1\n",
+				"  + \tfoo（bar）＝1\n",
+				"  differs at the start: U+0020 vs U+0009\n",
+				"  differs at the start: U+0020 x1 only in the - line\n",
+				"  differs at char 4: U+0028 ( vs U+FF08 （\n",
+				"  differs at char 8: U+0029 ) vs U+FF09 ）\n",
+				"  differs at char 9: U+003D = vs U+FF1D ＝\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_omits_folded_difference_hint_in_fuzzy_mode() {
+		// With fuzzy matching enabled a folded variant is free, so it cannot be
+		// the reason the match was rejected and must not be named.
+		let error = fuzzy_edit_error("foo（bar）＝2", "foo(bar)=1", "x");
+		assert!(error.starts_with("Could not find a close enough match in a.ts."), "{error}");
+		assert!(error.contains("Closest match was below the 95% similarity threshold."), "{error}");
+		assert!(!error.contains("differs at"), "{error}");
+	}
+
+	#[test]
+	fn match_error_names_the_codepoints_of_an_ambiguous_fuzzy_match() {
+		// The folded variants are what made the candidates tie, so their
+		// codepoints are what tells them apart: the caller needs them to
+		// write an exact retry.
+		let error = fuzzy_edit_error("foo（bar）\nfoo｟bar｠\n", "foo(bar)", "x");
+		assert!(error.contains("Found 2 high-confidence matches"), "{error}");
+		assert!(error.contains("  differs at char 4: U+0028 ( vs U+FF08 （"), "{error}");
+	}
+
+	#[test]
+	fn match_error_names_folded_boundary_difference() {
+		// The matcher trims the boundary whitespace but an exact match charges
+		// for it, so the codepoints of the invisible boundary difference have
+		// to be named.
+		assert_eq!(
+			exact_edit_error("foo\u{3000}", "foo\u{20}", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - foo\u{20}\n",
+				"  + foo\u{3000}\n",
+				"  differs at the end: U+0020 vs U+3000\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+		assert_eq!(
+			exact_edit_error("\u{3000}foo", "\u{20}foo", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - \u{20}foo\n",
+				"  + \u{3000}foo\n",
+				"  differs at the start: U+0020 vs U+3000\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_names_boundary_whitespace_codepoints() {
+		// Every unequal boundary codepoint has to be named, not only the ones
+		// the matcher folds together: a no-break space and a tab render as
+		// blank space just like the ideographic space, and the exact match
+		// charges for them all the same.
+		assert_eq!(
+			exact_edit_error("foo\u{00A0}", "foo\u{20}", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - foo\u{20}\n",
+				"  + foo\u{00A0}\n",
+				"  differs at the end: U+0020 vs U+00A0\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+		assert_eq!(
+			exact_edit_error("foo\t", "foo\u{20}", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - foo\u{20}\n",
+				"  + foo\t\n",
+				"  differs at the end: U+0020 vs U+0009\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+		assert_eq!(
+			exact_edit_error("\u{00A0}foo", "\u{20}foo", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - \u{20}foo\n",
+				"  + \u{00A0}foo\n",
+				"  differs at the start: U+0020 vs U+00A0\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_names_folded_interior_whitespace() {
+		// The matcher folds a tab onto a space, so the two lines are the same
+		// line — but the renderer replaces the tab, so the printed pair reads
+		// as identical. The codepoints have to be named.
+		assert_eq!(
+			exact_edit_error("foo\tbar", "foo bar", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - foo bar\n",
+				"  + foo\tbar\n",
+				"  differs at char 4: U+0020 vs U+0009\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_names_unpaired_boundary_whitespace() {
+		// One line carries boundary whitespace the other one does not have at
+		// all: the paired comparison never reaches those characters, so they
+		// have to be named with their codepoint and count.
+		assert_eq!(
+			exact_edit_error("foo\u{3000}\nbar", "foo\nbar", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - foo\n",
+				"  + foo\u{3000}\n",
+				"  differs at the end: U+3000 x1 only in the + line\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_names_folded_differences_after_collapsed_whitespace() {
+		// The matcher folds the whitespace run away, so the fullwidth parens
+		// line up with the halfwidth ones — the raw character positions do
+		// not. The run is compared codepoint by codepoint, so the space the
+		// file has in excess is named as well.
+		assert_eq!(
+			exact_edit_error("a  （x）", "a (x)", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - a (x)\n",
+				"  + a  （x）\n",
+				"  differs at char 3: U+0020 x1 only in the + line\n",
+				"  differs at char 3: U+0028 ( vs U+FF08 （\n",
+				"  differs at char 5: U+0029 ) vs U+FF09 ）\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn fuzzy_match_accepts_boundary_whitespace_difference() {
+		// With fuzzy matching enabled the boundary whitespace is free, so the
+		// edit is accepted instead of rejected.
+		let result = ReplaceEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 }
+			.replace("foo\u{3000}", "foo\u{20}", "bar", false, "a.ts")
+			.expect("fuzzy matching accepts the boundary whitespace");
+		assert_eq!(result, ReplaceResult { content: "bar".to_owned(), count: 1 });
+	}
+
+	#[test]
+	fn replace_folds_fullwidth_punctuation() {
+		let result = replaced(
+			replace_text(
+				"let x = foo（bar）＝1;\n",
+				"let x = foo(bar)=1;",
+				"let x = 2;",
+				true,
+				false,
+				Some(0.95),
+			)
+			.expect("halfwidth anchor must match fullwidth content"),
+		);
+		assert_eq!(result.content, "let x = 2;\n");
+		assert_eq!(result.count, 1);
+	}
+
+	#[test]
+	fn replace_keeps_indentation_when_ideographic_space_is_folded() {
+		// The fuzzy matcher folds the ideographic space onto an ASCII space,
+		// so this anchor matches the line — but the replacement has to keep
+		// the indentation of the line it replaces.
+		let result = replaced(
+			replace_text("\u{3000}foo", " foo", " bar", true, false, None)
+				.expect("the folded anchor must match the line"),
+		);
+		assert_eq!(result, ReplaceResult { content: " bar".to_owned(), count: 1 });
+	}
+
+	#[test]
+	fn replace_keeps_the_files_folded_body_when_only_the_indentation_changes() {
+		// The rewrite changes the indentation only, so the body is the file's:
+		// the matcher folds a fullwidth character onto its ASCII counterpart,
+		// and the authored body would transliterate the file's text.
+		let result = replaced(
+			replace_text("ｆｏｏ", "foo", "  foo", true, false, None)
+				.expect("the folded anchor must match the line"),
+		);
+		assert_eq!(result, ReplaceResult { content: "  ｆｏｏ".to_owned(), count: 1 });
+	}
+
+	#[test]
 	fn occurrence_error_includes_preview_limit_suffix() {
 		let outcome = MatchOutcome {
 			occurrences: Some(7),
@@ -1709,11 +2115,117 @@ mod tests {
 		);
 	}
 
+	#[test]
+	fn match_error_names_the_codepoint_inside_a_folded_whitespace_run() {
+		// The matcher collapses the whitespace run into a single space, so the
+		// two lines are the same line — but the tab the file holds renders as
+		// blank space, so its codepoint has to be named. The spaces the run
+		// has in excess are named as well: the renderer expands the tab into
+		// spaces, so a caller that fixed only the named pair still misses
+		// them.
+		assert_eq!(
+			exact_edit_error("foo \tbar", "foo     bar", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  - foo     bar\n",
+				"  + foo \tbar\n",
+				"  differs at char 5: U+0020 vs U+0009\n",
+				"  differs at char 6: U+0020 x3 only in the - line\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_names_the_boundary_codepoints_in_the_order_the_line_holds_them() {
+		// The renderer replaces a tab with spaces, so the printed pair cannot
+		// recover the order of the boundary whitespace: the hint has to name
+		// the codepoints in the order the line holds them.
+		//
+		// The search is a block: a search that is a prefix of the file's line
+		// is a substring of it, and the exact match succeeds - the error path
+		// is never reached.
+		let error = exact_edit_error("foo \t \nbar", "foo\nbar", "x");
+		assert!(
+			error
+				.contains("  differs at the end: U+0020 x1, U+0009 x1, U+0020 x1 only in the + line\n"),
+			"{error}"
+		);
+	}
+
+	#[test]
+	fn match_error_names_the_run_codepoints_in_the_order_the_line_holds_them() {
+		// The same for a run inside the line: the codepoints the file has in
+		// excess are named one position at a time, so the caller can write
+		// them back in the order the file holds them.
+		let error = exact_edit_error("foo \t bar", "foo bar", "x");
+		assert!(error.contains("  differs at char 5: U+0009 x1 only in the + line\n"), "{error}");
+		assert!(error.contains("  differs at char 6: U+0020 x1 only in the + line\n"), "{error}");
+	}
+
+	#[test]
+	fn match_error_names_an_interior_nonbreaking_space() {
+		// The matcher does not fold a nonbreaking space onto a space, but the
+		// terminal renders both as blank space, so the printed pair alone does
+		// not tell the caller which codepoint it has to write.
+		let error = exact_edit_error("foo\u{00A0}bar", "foo bar", "x");
+		assert!(error.contains("  - foo bar\n"), "{error}");
+		assert!(error.contains("  + foo\u{00A0}bar\n"), "{error}");
+		assert!(error.contains("  differs at char 4: U+0020 vs U+00A0\n"), "{error}");
+	}
+
+	#[test]
+	fn match_error_names_every_differing_boundary_codepoint() {
+		// The boundary whitespace renders as blank space, so every unequal
+		// codepoint has to be named: naming one of them leaves the next one
+		// undiscovered.
+		assert_eq!(
+			exact_edit_error("\t\u{3000}foo", " \u{00A0}foo", "x"),
+			concat!(
+				"Could not find the exact text in a.ts.\n\nClosest match (100% similar) at line 1:\n",
+				"  -  \u{00A0}foo\n",
+				"  + \t\u{3000}foo\n",
+				"  differs at the start: U+0020 vs U+0009\n",
+				"  differs at the start: U+00A0 vs U+3000\n",
+				"Fuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept \
+				 high-confidence matches."
+			)
+		);
+	}
+
+	#[test]
+	fn match_error_normalizes_the_line_endings_before_naming_the_difference() {
+		// The matcher folds the carriage return away, so it is not a
+		// difference the caller has to reproduce: the difference behind it
+		// has to be named instead.
+		let error = exact_edit_error("foo\nbaz", "foo\r\nbar", "x");
+		assert!(error.contains("  - bar\n  + baz"), "{error}");
+		assert!(!error.contains('\r'), "{error}");
+		assert!(!error.contains("U+000D"), "{error}");
+	}
+
 	fn replaced(outcome: ReplaceOutcome) -> ReplaceResult {
 		match outcome {
 			ReplaceOutcome::Replaced(result) => result,
 			ReplaceOutcome::Missed(outcome) => panic!("expected a replacement, missed: {outcome:?}"),
 		}
+	}
+
+	/// The error a rejected exact edit shows the model.
+	fn exact_edit_error(content: &str, old_string: &str, new_string: &str) -> String {
+		ReplaceEngine { allow_fuzzy: false, fuzzy_threshold: 0.95 }
+			.replace(content, old_string, new_string, false, "a.ts")
+			.expect_err("the exact edit must be rejected")
+			.to_string()
+	}
+
+	/// The error a rejected fuzzy edit shows the model.
+	fn fuzzy_edit_error(content: &str, old_string: &str, new_string: &str) -> String {
+		ReplaceEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 }
+			.replace(content, old_string, new_string, false, "a.ts")
+			.expect_err("the fuzzy edit must be rejected")
+			.to_string()
 	}
 
 	#[test]
