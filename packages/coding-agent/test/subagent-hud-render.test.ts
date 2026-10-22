@@ -994,6 +994,37 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
+	it("does not repaint unchanged background progress after the HUD settles", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
+		const updateHud = vi.spyOn(SubagentHudComponent.prototype, "update");
+		vi.useFakeTimers();
+		const payload = makeProgressPayload("Background", 0, "Compile", true);
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, payload);
+		await Promise.resolve();
+		vi.runAllTimers();
+		await Promise.resolve();
+		requestRender.mockClear();
+		updateHud.mockClear();
+		for (let index = 0; index < 20; index++) {
+			eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+				...payload,
+				progress: { ...payload.progress, durationMs: index + 1 },
+			});
+			await Promise.resolve();
+			vi.runAllTimers();
+			await Promise.resolve();
+		}
+		expect(requestRender).not.toHaveBeenCalled();
+		expect(updateHud).not.toHaveBeenCalled();
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, makeProgressPayload("Background", 0, "Link", true));
+		await Promise.resolve();
+		vi.runAllTimers();
+		await Promise.resolve();
+		expect(requestRender).toHaveBeenCalled();
+		expect(Bun.stripANSI(mode.subagentContainer.render(120).join("\n"))).toContain("Link");
+	});
+
 	it("applies the setting over a clicked expand override", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		for (let index = 0; index < 5; index++) {
