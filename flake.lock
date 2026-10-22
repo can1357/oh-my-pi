@@ -124,6 +124,22 @@
         "type": "github"
       }
     },
+    "nixpkgs-apple": {
+      "locked": {
+        "lastModified": 1791487292,
+        "narHash": "sha256-tqM7xDEsaeK1p6VvRygeZ9LkQRpUUkbRT02BHv6hnTM=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "8edc0c72e3a38faf5434e40d1f19431125fe4b30",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "ref": "nixpkgs-unstable",
+        "type": "github"
+      }
+    },
     "nixpkgs-darwin-x64": {
       "locked": {
         "lastModified": 1786527240,
@@ -146,6 +162,7 @@
         "bun2nix-darwin-x64": "bun2nix-darwin-x64",
         "nix-bun": "nix-bun",
         "nixpkgs": "nixpkgs",
+        "nixpkgs-apple": "nixpkgs-apple",
         "nixpkgs-darwin-x64": "nixpkgs-darwin-x64",
         "rust-overlay": "rust-overlay"
       }

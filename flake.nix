@@ -11,6 +11,11 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+    # Apple Silicon needs SDK 27 and a linker that understands its stubs.
+    # Keep Linux on its existing pin. Drop this input when the main nixpkgs
+    # and nix-bun pins can be advanced together to an SDK 27-capable set.
+    nixpkgs-apple.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+
     # nixpkgs unstable dropped Intel macOS in 26.11; keep that supported
     # platform on the final stable branch that still receives security fixes.
     nixpkgs-darwin-x64.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
@@ -47,6 +52,7 @@
       nix-bun,
       nixpkgs,
       nixpkgs-darwin-x64,
+      nixpkgs-apple,
       rust-overlay,
       ...
     }:
@@ -67,27 +73,23 @@
         (if system == "x86_64-darwin" then bun2nix-darwin-x64 else bun2nix).packages.${system}.bun2nix;
 
       rustToolchainFor =
-        system:
-        (rust-overlay.lib.mkRustBin { } (pkgsFor system)).fromRustupToolchainFile ./rust-toolchain.toml;
+        pkgs: (rust-overlay.lib.mkRustBin { } pkgs).fromRustupToolchainFile ./rust-toolchain.toml;
 
-      localPackagesFor =
-        system:
-        let
-          pkgs = pkgsFor system;
-        in
-        {
-          bun = pkgs.callPackage (nix-bun.outPath + "/package.nix") {
-            sourcesFile = nix-bun.outPath + "/versions/1.4.2.json";
-          };
-          bun2nix = bun2nixFor system;
-          rustToolchain = rustToolchainFor system;
+      localPackagesFor = system: pkgs: {
+        bun = (pkgsFor system).callPackage (nix-bun.outPath + "/package.nix") {
+          sourcesFile = nix-bun.outPath + "/versions/1.4.2.json";
         };
+        bun2nix = bun2nixFor system;
+        # rust-overlay propagates its C compiler, so use the caller's SDK-compatible set.
+        rustToolchain = rustToolchainFor pkgs;
+      };
 
       packageFor =
         system:
         let
-          pkgs = pkgsFor system;
-          localPkgs = localPackagesFor system;
+          pkgs =
+            if system == "aarch64-darwin" then nixpkgs-apple.legacyPackages.${system} else pkgsFor system;
+          localPkgs = localPackagesFor system pkgs;
         in
         pkgs.callPackage ./nix/package.nix (
           {
@@ -121,7 +123,7 @@
         system:
         let
           pkgs = pkgsFor system;
-          localPackages = localPackagesFor system;
+          localPackages = localPackagesFor system pkgs;
         in
         {
           default = import ./nix/dev-shell.nix ({ inherit pkgs; } // localPackages);

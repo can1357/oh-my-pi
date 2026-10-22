@@ -2,8 +2,10 @@
   addDriverRunpath,
   autoPatchelfHook,
   alsa-lib,
+  apple-sdk_27 ? null,
   bun,
   bun2nix,
+  callPackage,
   cmake,
   config,
   cudaPackages_13 ? null,
@@ -20,6 +22,7 @@
   source,
   stdenv,
   stdenvNoCC,
+  swiftToolchain ? callPackage ./swift-toolchain.nix { },
   unzip,
   # onnxruntime-node (downloaded into the agent cache on first use) ships CUDA
   # execution providers that dlopen vendor libraries absent from the NixOS
@@ -33,6 +36,9 @@
   # ~750 MB (gstreamer, ffmpeg, systemd, ...). Official npm/Bazel addons ship
   # without it, so default to the lean build; opt in via `.override`.
   withWaylandScreencast ? false,
+  # Downstream callers can opt out of the Swift/SDK dependency. The official
+  # Apple Silicon package must include the bridge by default.
+  withAppleFm ? stdenv.hostPlatform.system == "aarch64-darwin",
 }:
 let
   packageJson = lib.importJSON ../packages/coding-agent/package.json;
@@ -111,6 +117,9 @@ let
     '';
   };
 in
+assert lib.assertMsg (
+  withAppleFm -> apple-sdk_27 != null
+) "Apple Foundation Models requires apple-sdk_27; provide it or set withAppleFm = false.";
 stdenv.mkDerivation {
   pname = "omp";
   inherit (packageJson) version;
@@ -142,7 +151,8 @@ stdenv.mkDerivation {
   # libgcc_s is resolved from the compiler's lib output during autoPatchelf.
   buildInputs =
     lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ]
-    ++ lib.optionals withWaylandScreencast [ pipewire ];
+    ++ lib.optionals withWaylandScreencast [ pipewire ]
+    ++ lib.optional withAppleFm apple-sdk_27;
 
   strictDeps = true;
   # Nix builders cannot reliably hardlink cache files into node_modules
@@ -164,7 +174,18 @@ stdenv.mkDerivation {
     SOURCE_DATE_EPOCH = "1";
   }
   // lib.optionalAttrs (platform ? rustFlags) { RUSTFLAGS = platform.rustFlags; }
-  // lib.optionalAttrs stdenv.hostPlatform.isDarwin { BUN_NO_CODESIGN_MACHO_BINARY = "1"; };
+  // lib.optionalAttrs stdenv.hostPlatform.isDarwin { BUN_NO_CODESIGN_MACHO_BINARY = "1"; }
+  // lib.optionalAttrs withAppleFm { OMP_APPLEFM_SWIFTC = "${swiftToolchain}/bin/swiftc"; };
+
+  # Reject both a missing compiler and fallback to a host Xcode/CLT compiler.
+  preBuild = lib.optionalString withAppleFm ''
+    toolchain="$(/bin/sh crates/pi-natives/src/applefm/build-bridge.sh detect)"
+    if [ -z "$toolchain" ] || [ "''${toolchain%%$'\t'*}" != "$OMP_APPLEFM_SWIFTC" ]; then
+      echo "OMP requires its Nix Swift 6.4+ compiler and the macOS 27 SDK; host toolchains are not supported" >&2
+      exit 1
+    fi
+    echo "Apple Foundation Models toolchain: $toolchain"
+  '';
 
   buildPhase = ''
     runHook preBuild
@@ -323,6 +344,28 @@ stdenv.mkDerivation {
         echo "$addonDeps" >&2
         exit 1
       fi
+    ''}
+    ${lib.optionalString withAppleFm ''
+      # Model/device eligibility is not a build requirement. On macOS 27+,
+      # this exercises materialization/dlopen. On older macOS, unsupported_os
+      # only proves the embedded bridge is non-empty; it is not loaded.
+      HOME="$TMPDIR" bun -e '
+        const native = require("./packages/natives/native/${platform.addon}");
+        const status = JSON.parse(await native.appleFmAvailability());
+        console.log("Apple Foundation Models:", status);
+        const eligibilityReasons = [
+          "unsupported_os",
+          "device_not_eligible",
+          "apple_intelligence_not_enabled",
+          "model_not_ready",
+          "unavailable",
+        ];
+        if (
+          status?.type !== "availability" ||
+          !(status.available === true ||
+            (status.available === false && eligibilityReasons.includes(status.reason)))
+        ) process.exit(1);
+      '
     ''}
     runHook postInstallCheck
   '';

@@ -638,6 +638,23 @@ For a non-interactive smoke check:
 bun dev -- --version
 ```
 
+#### Apple Silicon Nix builds
+
+`nix build .#omp` supplies Swift 6.4 and SDK 27 without relying on host Xcode/CLT.
+The build rejects fallback to a host compiler. The compiler and SDK are build-only
+dependencies; a missing `apple-sdk_27` fails evaluation with an opt-out hint.
+
+The `nixpkgs-apple` input tracks `nixpkgs-unstable` for an SDK-compatible stdenv,
+leaving Bun/Rust versions and Linux/Intel package sets unchanged. Remove it when
+the main nixpkgs and nix-bun pins can advance together to an SDK 27-capable set.
+
+Install checks load the bridge on macOS 27+ and accept only valid availability
+responses. On older macOS, `unsupported_os` only confirms a non-empty embedded
+bridge, not successful loading. Model use still requires an eligible device and
+enabled/downloaded Apple Intelligence models. Downstream callers can set
+`omp.override { withAppleFm = false; }` to omit the Swift/SDK dependencies and
+bridge requirement; the official Apple Silicon package enables it by default.
+
 ### Debug Command
 
 `/debug` opens tools for debugging, reporting, and profiling.
