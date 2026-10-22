@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	buildCompactionV2Request,
+	buildCompactionV2RequestFromBody,
 	buildOpenAiNativeHistory,
 	CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE,
 	countResponsesHistoryTokens,
@@ -30,6 +31,7 @@ import { clearAwsCredentialCache } from "@oh-my-pi/pi-ai/providers/aws-credentia
 import {
 	buildTransformedCodexRequestBody,
 	getOpenAICodexTransportDetails,
+	streamOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type {
 	AssistantMessage,
@@ -1642,10 +1644,154 @@ describe("Responses Lite remote compaction", () => {
 		}
 	});
 
+	test("V2 compaction reuses an explicit Lite live chain and sends only the trigger delta", async () => {
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const webSocket = installCodexCompactionWebSocket({
+			respond: (socket, outbound) => {
+				const isCompaction =
+					Array.isArray(outbound.input) &&
+					outbound.input.some(item => isRecord(item) && item.type === "compaction_trigger");
+				const events = isCompaction
+					? compactionV2Events("enc-lazy")
+					: [
+							{
+								type: "response.output_item.done",
+								item: {
+									type: "message",
+									id: "message-live",
+									role: "assistant",
+									status: "completed",
+									content: [{ type: "output_text", text: "live response" }],
+								},
+							},
+							{
+								type: "response.done",
+								response: {
+									id: "resp-live",
+									usage: { input_tokens: 8, output_tokens: 2, total_tokens: 10 },
+								},
+							},
+						];
+				for (const event of events) socket.emit(event);
+			},
+		});
+		try {
+			const model = makeCodexLiteModel({ preferWebsockets: true, useResponsesLite: true });
+			const sessionId = "codex-explicit-lite-compaction";
+			const fetchMock = vi.fn(async () => {
+				throw new Error("held Lite compaction unexpectedly used SSE");
+			});
+			const firstUser = { role: "user" as const, content: "First question", timestamp: Date.now() };
+			const firstContext = {
+				systemPrompt: ["You are a helpful assistant."],
+				messages: [firstUser],
+			};
+			const liveTurn = await streamOpenAICodexResponses(model, firstContext, {
+				apiKey: "test-key",
+				fetch: fetchMock,
+				sessionId,
+				responsesLite: true,
+				preferWebsockets: true,
+				providerSessionState,
+			}).result();
+			expect(liveTurn.stopReason).toBe("stop");
+
+			const liveBody = await buildTransformedCodexRequestBody(model, firstContext, {
+				sessionId,
+				responsesLite: true,
+			});
+			const retainedUserItem = liveBody.input?.find(
+				item =>
+					isRecord(item) &&
+					item.role === "user" &&
+					Array.isArray(item.content) &&
+					item.content.some(
+						part => isRecord(part) && part.type === "input_text" && part.text === "First question",
+					),
+			) as unknown as Record<string, unknown> | undefined;
+			if (!retainedUserItem) throw new Error("expected the original user input item");
+			const liveAssistantItem = {
+				type: "message",
+				role: "assistant",
+				content: [{ type: "output_text", text: "live response" }],
+			};
+			const request = buildCompactionV2RequestFromBody(
+				model,
+				{
+					...liveBody,
+					input: [...(Array.isArray(liveBody.input) ? liveBody.input : []), liveAssistantItem],
+				},
+				{ sessionId, retainedUserItems: [retainedUserItem] },
+			);
+			expect(request.input.at(-1)).toEqual(liveAssistantItem);
+			expect(request.input.some(item => isRecord(item) && item.type === "compaction_trigger")).toBe(false);
+
+			const result = await requestCompactionV2Streaming(model, "test-key", request, undefined, {
+				fetch: fetchMock,
+				preferWebsockets: true,
+				providerSessionState,
+				codexCompaction: { ...TEST_CODEX_COMPACTION, phase: "mid_turn" },
+			});
+
+			const liveRequest = webSocket.sockets[0]?.sent[0];
+			const compactionRequest = webSocket.sockets[0]?.sent[1];
+			expect(fetchMock).not.toHaveBeenCalled();
+			expect(webSocket.sockets).toHaveLength(1);
+			expect(webSocket.sockets[0]?.sent).toHaveLength(2);
+			expect(liveRequest?.previous_response_id).toBeUndefined();
+			expect(compactionRequest?.type).toBe("response.create");
+			expect(compactionRequest?.previous_response_id).toBe("resp-live");
+			expect(compactionRequest?.input).toEqual([{ type: "compaction_trigger" }]);
+			expect(result.compactionItem).toEqual({ type: "compaction", encrypted_content: "enc-lazy" });
+			expect(result.replacementHistory).toEqual([
+				retainedUserItem,
+				{ type: "compaction", encrypted_content: "enc-lazy" },
+			]);
+			expect(
+				getOpenAICodexTransportDetails(model, {
+					sessionId,
+					providerSessionState,
+				}),
+			).toMatchObject({
+				lastTransport: "websocket",
+				websocketConnected: true,
+				canAppend: false,
+			});
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
+			providerSessionState.clear();
+			webSocket.restore();
+		}
+	});
+
 	test("V2 compaction discards partial WebSocket output before SSE replay", async () => {
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const webSocket = installCodexCompactionWebSocket({
-			respond: socket => {
+			respond: (socket, outbound) => {
+				const input = outbound.input;
+				const isCompaction =
+					Array.isArray(input) && input.some(item => isRecord(item) && item.type === "compaction_trigger");
+				if (!isCompaction) {
+					socket.emit({
+						type: "response.output_item.done",
+						item: {
+							type: "message",
+							id: "message-live",
+							role: "assistant",
+							status: "completed",
+							content: [{ type: "output_text", text: "live response" }],
+						},
+					});
+					socket.emit({
+						type: "response.done",
+						response: {
+							id: "resp-live",
+							status: "completed",
+							usage: { input_tokens: 8, output_tokens: 2, total_tokens: 10 },
+						},
+					});
+					return;
+				}
 				socket.emit({
 					type: "response.output_item.done",
 					output_index: 0,
@@ -1655,33 +1801,85 @@ describe("Responses Lite remote compaction", () => {
 			},
 		});
 		try {
-			const model = makeCodexLiteModel({ preferWebsockets: true });
-			const request = buildCompactionV2Request(
+			const model = makeCodexLiteModel({ preferWebsockets: true, useResponsesLite: true });
+			const sessionId = "codex-websocket-fallback";
+			let capturedSseBody: Record<string, unknown> | undefined;
+			const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+				capturedSseBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+				return sseResponse(compactionV2Events("enc-sse"));
+			});
+			const firstUser = { role: "user" as const, content: "First question", timestamp: Date.now() };
+			const firstContext = {
+				systemPrompt: ["You are a helpful assistant."],
+				messages: [firstUser],
+			};
+			const liveTurn = await streamOpenAICodexResponses(model, firstContext, {
+				apiKey: "test-key",
+				fetch: fetchMock,
+				sessionId,
+				responsesLite: true,
+				preferWebsockets: true,
+				providerSessionState,
+			}).result();
+			expect(liveTurn.responseId).toBe("resp-live");
+			const liveBody = await buildTransformedCodexRequestBody(model, firstContext, {
+				sessionId,
+				responsesLite: true,
+			});
+			const retainedUserItem = liveBody.input?.find(
+				item =>
+					isRecord(item) &&
+					item.role === "user" &&
+					Array.isArray(item.content) &&
+					item.content.some(
+						part => isRecord(part) && part.type === "input_text" && part.text === "First question",
+					),
+			) as unknown as Record<string, unknown> | undefined;
+			if (!retainedUserItem) throw new Error("expected the original live user item");
+			const liveAssistantItem = {
+				type: "message",
+				role: "assistant",
+				content: [{ type: "output_text", text: "live response" }],
+			};
+			const request = buildCompactionV2RequestFromBody(
 				model,
-				[{ type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] }],
-				"compact instructions",
-				{ sessionId: "codex-websocket-fallback" },
+				{
+					...liveBody,
+					input: [...(Array.isArray(liveBody.input) ? liveBody.input : []), liveAssistantItem],
+				},
+				{ sessionId, retainedUserItems: [retainedUserItem] },
 			);
-			const fetchMock = vi.fn(async () => sseResponse(compactionV2Events("enc-sse")));
+			const expectedCompactionInput = [...request.input, { type: "compaction_trigger" }];
 
 			const result = await requestCompactionV2Streaming(model, "test-key", request, undefined, {
 				fetch: fetchMock,
 				preferWebsockets: true,
 				providerSessionState,
-				codexCompaction: TEST_CODEX_COMPACTION,
+				codexCompaction: { ...TEST_CODEX_COMPACTION, phase: "mid_turn" },
 			});
 
+			const liveRequest = webSocket.sockets[0]?.sent[0];
+			const compactionRequest = webSocket.sockets[0]?.sent[1];
 			expect(webSocket.sockets).toHaveLength(1);
+			expect(webSocket.sockets[0]?.sent).toHaveLength(2);
+			expect(liveRequest?.previous_response_id).toBeUndefined();
+			expect(compactionRequest?.previous_response_id).toBe("resp-live");
+			expect(compactionRequest?.input).toEqual([{ type: "compaction_trigger" }]);
 			expect(fetchMock).toHaveBeenCalledTimes(1);
 			expect(result.compactionItem).toEqual({ type: "compaction", encrypted_content: "enc-sse" });
+			if (!capturedSseBody) throw new Error("expected captured SSE fallback body");
+			expect(capturedSseBody.previous_response_id).toBeUndefined();
+			expect(capturedSseBody.input).toEqual(expectedCompactionInput);
+			expect(JSON.stringify(capturedSseBody)).not.toContain("resp-live");
 			expect(
 				getOpenAICodexTransportDetails(model, {
-					sessionId: "codex-websocket-fallback",
+					sessionId,
 					providerSessionState,
 				}),
 			).toMatchObject({
 				lastTransport: "sse",
 				websocketDisabled: true,
+				canAppend: false,
 			});
 		} finally {
 			for (const state of providerSessionState.values()) state.close();

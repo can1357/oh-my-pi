@@ -650,6 +650,8 @@ export interface StreamOptions {
 	/**
 	 * Optional callback for inspecting or replacing provider payloads before sending.
 	 * Return undefined to keep the payload unchanged.
+	 * Codex provides complete logical input, then derives a safe wire delta after
+	 * the hook; removed history is not restored or inherited through an old continuation.
 	 */
 	onPayload?: (
 		payload: unknown,

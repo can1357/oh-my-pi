@@ -640,6 +640,10 @@ All providers accept the base `StreamOptions` (in addition to provider-specific 
 - `signal`: Abort in-flight requests
 - `onPayload`: Callback invoked with the provider request payload just before sending. Return a replacement payload object (sync or async) to send it instead of the original; return `undefined` to keep the original. The replacement is applied by every provider that fires the hook — all of them except `devin-agent`, whose payload is a protobuf object and does not fire the hook yet.
 
+For Codex, `onPayload` receives the complete logical `input`, including on chained WebSocket turns, rather than only the next wire suffix. In-place edits and returned replacements are authoritative: cleared or redacted history is not restored during replay or inherited through an old `previous_response_id`. The provider derives a wire delta only after the hook, when the approved history and continuation ownership still permit chaining. Hooks that previously assumed suffix-only input must select the current-turn items from the complete input. Valid native-steering attaches do not prepare a create or invoke the hook.
+
+Stable Codex history-rewriting hooks can retain WebSocket delta chaining whether callers keep their pre-hook transcript or continue from sanitized history, provided public options remain compatible and the final hook-approved input extends the effective history. The provider retains detached pre-hook and effective baselines; hook redaction controls outbound bodies, not in-memory secret erasure.
+
 Example:
 
 ```typescript
