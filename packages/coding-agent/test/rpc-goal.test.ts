@@ -1,8 +1,14 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Effort } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { RpcGoalController, type RpcGoalSession } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-goal";
 import {
@@ -12,9 +18,11 @@ import {
 	watchedScheduledTurnProbe,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-session-settle";
 import type { RpcSessionState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
-import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
-import { removeWithRetries, withTimeout } from "@oh-my-pi/pi-utils";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { removeWithRetries, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 function nextMacrotask(): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
@@ -443,6 +451,7 @@ describe("RpcGoalController continuation gate", () => {
 		const transcript = { id: "t1" };
 		const session = {
 			settings: Settings.isolated({ "goal.continuationModes": ["rpc"] }),
+			classifyAutoThinking: async () => {},
 			// Provider-facing id pinned by the host: must not be used to detect a session change.
 			sessionId: "pinned-provider-id",
 			sessionManager: {
@@ -888,5 +897,55 @@ describe("RpcGoalController continuation gate", () => {
 		controller.observe(agentEnd);
 		await nextMacrotask();
 		expect(admitted).toEqual(["goal-continuation", "goal-continuation", "goal-continuation"]);
+	});
+});
+
+describe("RpcGoalController auto thinking", () => {
+	let dir: TempDir | undefined;
+	let auth: AuthStorage | undefined;
+	let session: AgentSession | undefined;
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await session?.dispose();
+		session = undefined;
+		auth?.close();
+		auth = undefined;
+		dir?.removeSync();
+		dir = undefined;
+	});
+
+	/** Creates a goal over RPC on a real session; resolves with the level of the first continuation request. */
+	async function firstContinuationLevel(thinking: ConfiguredThinkingLevel): Promise<unknown> {
+		dir = TempDir.createSync("@omp-rpc-goal-auto-");
+		auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		auth.keys.setRuntime("anthropic", "test-key");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected anthropic/claude-sonnet-4-5 to exist");
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "goal.continuationModes": ["rpc"] }),
+			modelRegistry: new ModelRegistry(auth, path.join(dir.path(), "models.yml")),
+		});
+		const agent = session.agent;
+		const requested = Promise.withResolvers<unknown>();
+		vi.spyOn(agent, "prompt").mockImplementation(async () => requested.resolve(agent.state.thinkingLevel));
+		session.setThinkingLevel(thinking);
+		await new RpcGoalController(session).handle({ op: "create", objective: "rename one local helper" });
+		return await withTimeout(requested.promise, 10_000, "No goal continuation was requested");
+	}
+
+	test("classifies the objective before the first continuation", async () => {
+		const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+		expect(await firstContinuationLevel(AUTO_THINKING)).toBe(Effort.Low);
+		expect(classifier).toHaveBeenCalledTimes(1);
+		expect(classifier.mock.calls[0]?.[0]?.request).toBe("rename one local helper");
+	});
+
+	test("a pinned thinking level is not classified", async () => {
+		const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+		expect(await firstContinuationLevel(Effort.Medium)).toBe(Effort.Medium);
+		expect(classifier).not.toHaveBeenCalled();
 	});
 });

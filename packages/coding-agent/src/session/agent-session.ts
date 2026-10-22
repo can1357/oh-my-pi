@@ -6510,6 +6510,16 @@ export class AgentSession implements SettingsScope {
 		return this.#models.autoResolvedThinkingLevel;
 	}
 
+	/**
+	 * Classify `text` under `auto` thinking as a typed prompt would be, for work that
+	 * starts without a user turn (RPC goal continuations). No-op unless `auto`; never
+	 * throws — the classifier's timeout and fallback levels apply.
+	 */
+	async classifyAutoThinking(text: string): Promise<void> {
+		if (!this.isAutoThinking) return;
+		await this.#models.applyAutoThinkingLevel(text, this.#promptGeneration);
+	}
+
 	/** Live per-family service tiers (OpenAI / Anthropic / Google). */
 	get serviceTierByFamily(): ServiceTierByFamily {
 		return this.#models.serviceTierByFamily;

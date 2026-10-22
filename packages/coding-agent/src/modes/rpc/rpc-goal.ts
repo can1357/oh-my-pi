@@ -34,6 +34,7 @@ export interface RpcGoalResult {
 export type RpcGoalSession = Pick<
 	AgentSession,
 	| "settings"
+	| "classifyAutoThinking"
 	| "sessionManager"
 	| "goalRuntime"
 	| "getGoalModeState"
@@ -89,6 +90,12 @@ export class RpcGoalController {
 	 * reconcile again (after it) when the change ends, whatever the ids say.
 	 */
 	#changeOverlappedReconcile = false;
+	/**
+	 * Objective of a goal `create`d here and not yet classified. Continuations are hidden
+	 * custom turns that `auto` thinking never classifies, so the next scheduled one
+	 * classifies the objective first; a host prompt supersedes it with its own turn.
+	 */
+	#unclassifiedObjective: string | undefined;
 	readonly #onContinuationDropped: (() => void) | undefined;
 
 	/**
@@ -251,7 +258,7 @@ export class RpcGoalController {
 		if (current?.goal.status === "paused") {
 			throw new Error("Resume or drop the paused goal before creating another.");
 		}
-		await this.#enter(() => this.#session.goalRuntime.createGoal({ objective, tokenBudget }));
+		await this.#enter(() => this.#session.goalRuntime.createGoal({ objective, tokenBudget }), objective);
 		return this.#state;
 	}
 
@@ -264,7 +271,8 @@ export class RpcGoalController {
 		return this.#state;
 	}
 
-	async #enter(start: () => Promise<GoalModeState>): Promise<void> {
+	/** @param objective a new goal's objective, classified before its first continuation. */
+	async #enter(start: () => Promise<GoalModeState>, objective?: string): Promise<void> {
 		// The pre-goal tool set is captured once, when this controller first adds `goal`
 		// (a reattached paused goal already holds it). A `goal` tool the host enabled
 		// before the goal stays enabled afterwards.
@@ -274,6 +282,7 @@ export class RpcGoalController {
 		await this.#session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
 		this.#session.setGoalModeState(state);
 		this.#resetContinuation();
+		this.#unclassifiedObjective = objective;
 		if (this.#session.isStreaming) {
 			await this.#session.sendGoalModeContext({ deliverAs: "steer" });
 			return;
@@ -285,6 +294,7 @@ export class RpcGoalController {
 	async #exit(): Promise<void> {
 		const previousTools = this.#previousTools;
 		this.#previousTools = undefined;
+		this.#unclassifiedObjective = undefined;
 		this.#resetContinuation();
 		if (previousTools) await this.#session.setActiveToolsByName(previousTools);
 	}
@@ -361,8 +371,10 @@ export class RpcGoalController {
 	 */
 	observe(event: AgentSessionEvent): void {
 		if (event.type === "message_start" && event.message.role === "user" && !event.message.synthetic) {
-			// A host prompt re-arms continuation after a no-progress stop.
+			// A host prompt re-arms continuation after a no-progress stop, and its own
+			// classification sets the level the goal continues at.
 			this.#resetContinuation();
+			this.#unclassifiedObjective = undefined;
 			return;
 		}
 		if (event.type === "goal_updated") {
@@ -434,6 +446,11 @@ export class RpcGoalController {
 			const { promise, resolve } = Promise.withResolvers<void>();
 			setImmediate(resolve);
 			await promise;
+			const objective = this.#unclassifiedObjective;
+			if (objective !== undefined) {
+				this.#unclassifiedObjective = undefined;
+				await this.#session.classifyAutoThinking(objective);
+			}
 			await this.#session.waitForIdle();
 			if (!this.#continuationScheduled || generation !== this.#continuationGeneration) {
 				this.#onContinuationDropped?.();

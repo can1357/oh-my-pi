@@ -551,6 +551,9 @@ contains `"rpc"`; this covers both `--mode rpc` and `--mode rpc-ui`. When enable
 `create`/`resume` and each terminal `agent_end` decide whether to start another goal
 turn, sent as a hidden `goal-continuation` message.
 
+- With thinking `auto`, the objective of a goal made by `create` is classified
+  before its first goal turn, so goal turns run at that level; a host prompt sent
+  first is classified instead.
 - The turn starts once the yielding run has fully unwound. At that moment the goal
   must still be active, the session idle with nothing queued, plan mode off, open
   todos not all blocked, and the session not being disposed.
