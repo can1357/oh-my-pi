@@ -29,9 +29,22 @@ function headlessUi(): InteractiveUi {
 	return { custom };
 }
 
-const DOAS = "/usr/bin/doas";
 const ptyUnavailable = process.platform === "win32" || Bun.env.PI_NO_PTY === "1" || !fs.existsSync("/bin/bash");
-const doasUnavailable = ptyUnavailable || !fs.existsSync(DOAS);
+
+/**
+ * Write a stand-in for the real auth command, named `doas`/`sudo` so the routing
+ * keys on it the way it keys on the installed one. The prompting stand-in reads
+ * the password from the controlling terminal, as `doas` and `sudo` do — with no
+ * terminal the write fails, which is exactly the failure the routing prevents.
+ */
+function writeAuthCommand(dir: string, name: "doas" | "sudo", body: string): string {
+	const path = `${dir}/${name}`;
+	fs.writeFileSync(path, `#!/bin/sh\n${body}\n`);
+	fs.chmodSync(path, 0o755);
+	return path;
+}
+
+const PROMPT_FOR_PASSWORD = "printf 'Password: ' > /dev/tty\nread -r _ < /dev/tty\nprintf 'authenticated\\n'";
 
 function makeSession(): ToolSession {
 	return {
@@ -39,7 +52,7 @@ function makeSession(): ToolSession {
 		skills: [],
 		getSessionFile: () => null,
 		settings: Settings.isolated({
-			"async.enabled": false,
+			"async.enabled": true,
 			"bash.autoBackground.enabled": false,
 			"bash.autoBackground.thresholdMs": 60_000,
 			"bashInterceptor.enabled": false,
@@ -77,31 +90,88 @@ describe("BashTool authentication terminal", () => {
 		tempDir.removeSync();
 	});
 
-	it.skipIf(doasUnavailable)("gives a doas command a terminal so it can prompt for the password", async () => {
+	it.skipIf(ptyUnavailable)("gives an auth command a terminal so it can prompt for the password", async () => {
+		const doas = writeAuthCommand(tempDir.path(), "doas", PROMPT_FOR_PASSWORD);
 		const tool = new BashTool(makeSession());
 		const ctx = { hasUI: true, ui: headlessUi() } as unknown as AgentToolContext;
 		// A password nobody types: the call must reach the prompt and then run out
 		// its deadline, which is the observable proof a terminal was allocated.
 		const result = await tool.execute(
 			"call-auth",
-			{ command: `${DOAS} true`, timeout: 4 },
+			{ command: `${doas} true`, timeout: 4 },
 			undefined,
 			undefined,
 			ctx,
 		);
 		const text = resultText(result as { content: Array<{ type: string; text?: string }> });
 
-		expect(text).toContain("password");
+		expect(text).toContain("Password:");
+		expect(text).not.toContain("authenticated");
 		expect((result as { details?: { timedOut?: boolean } }).details?.timedOut).toBe(true);
 	});
 
-	it.skipIf(doasUnavailable)("says a terminal is missing when a doas command finds no interactive one", async () => {
+	it.skipIf(ptyUnavailable)("says a terminal is missing when an auth command finds no interactive one", async () => {
+		const doas = writeAuthCommand(tempDir.path(), "doas", PROMPT_FOR_PASSWORD);
 		const tool = new BashTool(makeSession());
-		const result = await tool.execute("call-no-ui", { command: `${DOAS} true`, timeout: 20 }, undefined, undefined, {
+		const result = await tool.execute("call-no-ui", { command: `${doas} true`, timeout: 20 }, undefined, undefined, {
 			hasUI: false,
 		} as unknown as AgentToolContext);
 		const text = resultText(result as { content: Array<{ type: string; text?: string }> });
 
 		expect(text).toContain("no interactive terminal is available here");
+		expect(text).toContain("only succeeds if it needs no password");
+		expect(text).not.toContain("cannot authenticate");
+	});
+
+	it.skipIf(ptyUnavailable)("does not claim an auth command failed when it needs no password", async () => {
+		// A `NOPASSWD` rule or a cached credential is the normal case for a
+		// passwordless command, so a headless run that exits 0 must not be
+		// reported as an authentication failure.
+		const sudo = writeAuthCommand(tempDir.path(), "sudo", "printf 'ok\\n'");
+		const tool = new BashTool(makeSession());
+		const result = await tool.execute(
+			"call-nopasswd",
+			{ command: `${sudo} true`, timeout: 20 },
+			undefined,
+			undefined,
+			{
+				hasUI: false,
+			} as unknown as AgentToolContext,
+		);
+		const text = resultText(result as { content: Array<{ type: string; text?: string }> });
+
+		expect(text).toContain("ok");
+		expect(text).toContain("no interactive terminal is available here");
+		expect(text).not.toContain("cannot authenticate");
+	});
+
+	it.skipIf(ptyUnavailable)("leaves an explicit pty: false call on the plain executor", async () => {
+		const doas = writeAuthCommand(tempDir.path(), "doas", PROMPT_FOR_PASSWORD);
+		const tool = new BashTool(makeSession());
+		const ctx = { hasUI: true, ui: headlessUi() } as unknown as AgentToolContext;
+		const result = await tool.execute(
+			"call-pty-false",
+			{ command: `${doas} true`, timeout: 20, pty: false },
+			undefined,
+			undefined,
+			ctx,
+		);
+		const text = resultText(result as { content: Array<{ type: string; text?: string }> });
+
+		// No prompt: the stand-in could not reach a terminal, and nothing offered one.
+		expect(text).not.toContain("Password:");
+		expect(text).not.toContain("no interactive terminal is available here");
+	});
+
+	it("refuses an async call that needs a terminal for its password", async () => {
+		const tool = new BashTool(makeSession());
+		// Detection runs before the job starts, so the command never runs and no
+		// real `sudo` is needed.
+		await expect(
+			tool.execute("call-async", { command: "sudo true", timeout: 20, async: true }, undefined, undefined, {
+				hasUI: true,
+				ui: headlessUi(),
+			} as unknown as AgentToolContext),
+		).rejects.toThrow("an async job has none");
 	});
 });

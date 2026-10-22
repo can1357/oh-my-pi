@@ -1158,6 +1158,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// so the user can answer the prompt.
 		const authPty = pty === undefined && bashNeedsAuthTerminal(command);
 		const ptyRequested = ptyRequestedFor(pty, command);
+		// A background job runs the plain executor, which has no terminal to prompt
+		// on, so the call this routing exists for would authenticate against
+		// nothing. Say so instead of starting it.
+		if (authPty && asyncRequested) {
+			throw new ToolError(
+				"This command reads its password from a terminal, and an async job has none. Run it without `async` so it can prompt, or pass `pty: false` when it needs no password.",
+			);
+		}
 
 		// URL paths resolve through the embedded shell's filesystem, within the
 		// tier this command was approved at. A URL cwd stays a URL: only that
@@ -1683,7 +1691,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (ptyRequested && !interactiveUi) {
 			pendingNotices.push(
 				authPty
-					? "This command reads its password from the terminal, and no interactive terminal is available here (no UI, PI_NO_PTY, or headless); it ran without one and cannot authenticate. Ask the user to run it."
+					? "This command reads its password from the terminal, and no interactive terminal is available here (no UI, PI_NO_PTY, or headless); it ran without one, and only succeeds if it needs no password (a passwordless rule or a cached credential). Ask the user to run it."
 					: "pty requested but unavailable in this environment; ran without a terminal",
 			);
 		}

@@ -1,6 +1,6 @@
 Persistent shell: one fact command/pipeline; dependencies use `&&`.
 {{#if hasEval}}Scripts/heredocs/`$(…)`/complex pipelines → `eval`.{{else}}Scripts/heredocs/`$(…)`/complex flow → dedicated tool or checked-in script.{{/if}}
-`cwd`, not `cd`; `pty` only interactive. `doas`/`sudo` get the terminal for their password prompt on their own — `pty` is not needed for them, the user answers the prompt there, and the password is never passed in the command.
+`cwd`, not `cd`; `pty` only interactive. `doas`/`sudo` get the terminal for their password prompt on their own — `pty` is not needed for them, the user answers the prompt there, and the password is never passed in the command; `async` has no such terminal, so those calls cannot be async.
 Internal URIs work as paths for builtins/coreutils, redirects, globs.
 {{#if asyncEnabled}}`async` defers finite results but keeps the deadline (default {{defaultTimeoutSec}}s); `timeout: 0` for watchers and long jobs.{{/if}}
 No `head`/`tail`/redirection; output trunc by default, full result at `artifact://<id>`.

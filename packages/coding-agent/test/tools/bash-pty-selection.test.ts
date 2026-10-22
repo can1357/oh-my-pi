@@ -67,13 +67,26 @@ describe("bash terminal auth detection", () => {
 		expect(bashNeedsAuthTerminal("echo hi && doas dinitctl restart x")).toBe(true);
 		expect(bashNeedsAuthTerminal("cat foo | doas tee /etc/hosts")).toBe(true);
 		expect(bashNeedsAuthTerminal("doas -u root true")).toBe(true);
+		expect(bashNeedsAuthTerminal("sudoedit /etc/hosts")).toBe(true);
+		expect(bashNeedsAuthTerminal("/usr/bin/sudoedit /etc/hosts")).toBe(true);
+	});
+
+	it("looks through the shell prefixes that wrap a command", () => {
+		expect(bashNeedsAuthTerminal("! sudo true")).toBe(true);
+		expect(bashNeedsAuthTerminal("time sudo true")).toBe(true);
+		expect(bashNeedsAuthTerminal("time -p sudo true")).toBe(true);
+		expect(bashNeedsAuthTerminal("command sudo true")).toBe(true);
+		expect(bashNeedsAuthTerminal("exec sudo true")).toBe(true);
+		expect(bashNeedsAuthTerminal("nohup doas true")).toBe(true);
+		expect(bashNeedsAuthTerminal("env -u FOO doas true")).toBe(true);
+		expect(bashNeedsAuthTerminal("time echo sudo")).toBe(false);
 	});
 
 	it("ignores the command name outside a command position", () => {
 		expect(bashNeedsAuthTerminal("echo doas")).toBe(false);
 		expect(bashNeedsAuthTerminal("rg -n 'doas|sudo' src")).toBe(false);
 		expect(bashNeedsAuthTerminal("true")).toBe(false);
-		expect(bashNeedsAuthTerminal("sudoedit /etc/doas.conf")).toBe(false);
+		expect(bashNeedsAuthTerminal("/etc/hosts/sudo.list cat")).toBe(false);
 	});
 
 	it("ignores a call that already says it will not prompt", () => {
@@ -83,5 +96,25 @@ describe("bash terminal auth detection", () => {
 		// Only the auth command's own options count: a `-n` in the wrapped
 		// command's arguments says nothing about how the password is read.
 		expect(bashNeedsAuthTerminal("doas printf -- -n")).toBe(true);
+	});
+
+	it("reads the auth command's option values before deciding it may prompt", () => {
+		// `-u` takes `root`, so the `-n` is an option, not the command.
+		expect(bashNeedsAuthTerminal("sudo -u root -n id")).toBe(false);
+		expect(bashNeedsAuthTerminal("sudo --user root --non-interactive id")).toBe(false);
+		expect(bashNeedsAuthTerminal("sudo --user=root --non-interactive id")).toBe(false);
+		// `-p` takes the prompt text, which may itself look like shell syntax.
+		expect(bashNeedsAuthTerminal("sudo -p Password: -S id")).toBe(false);
+		expect(bashNeedsAuthTerminal("doas -u root -C /etc/doas.conf true")).toBe(true);
+	});
+
+	it("reads grouped short options as their individual flags", () => {
+		expect(bashNeedsAuthTerminal("sudo -Sn id")).toBe(false);
+		expect(bashNeedsAuthTerminal("sudo -nE id")).toBe(false);
+		expect(bashNeedsAuthTerminal("sudo -En id")).toBe(false);
+		expect(bashNeedsAuthTerminal("sudo -uroot -n id")).toBe(false);
+		// A flag that takes no value keeps the scan going to the `-n` after it.
+		expect(bashNeedsAuthTerminal("sudo -E -n id")).toBe(false);
+		expect(bashNeedsAuthTerminal("sudo -ESh id")).toBe(false);
 	});
 });
