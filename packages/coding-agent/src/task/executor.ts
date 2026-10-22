@@ -725,6 +725,12 @@ export const SUBAGENT_WARNING_MISSING_YIELD =
 export const SUBAGENT_WARNING_EMPTY_MESSAGE = "SYSTEM WARNING: Subagent ended without a final message.";
 export const SUBAGENT_STOP_REFUSAL_UNRESOLVED =
 	"Subagent stopped at a yield that a subagent_stop handler refused; the continuation turn ended without a replacement yield.";
+export const SUBAGENT_STOP_REPORT_REFUSAL_UNRESOLVED =
+	"Subagent stopped at a final report that a subagent_stop handler refused; the continuation turn ended without a replacement report.";
+/** The unresolved-refusal diagnostic for a run's result contract: a `yield`, or (`structured: false`) a final report. */
+function subagentStopRefusalUnresolved(structured: boolean): string {
+	return structured ? SUBAGENT_STOP_REFUSAL_UNRESOLVED : SUBAGENT_STOP_REPORT_REFUSAL_UNRESOLVED;
+}
 /** Why a run's latched yield was dropped: the run ended before `subagent_stop` handlers could judge it. */
 const SUBAGENT_STOP_CANDIDATE_UNJUDGED =
 	"Subagent run ended before its subagent_stop handlers judged its yield, so the yield was not published.";
@@ -3016,7 +3022,7 @@ async function driveSessionToResult(
 		// confirmed that payload, so the failure must survive the abort
 		// reconciliation below.
 		if (monitor.yieldInvalidatedByStop() && !monitor.yieldCalled()) {
-			error ??= SUBAGENT_STOP_REFUSAL_UNRESOLVED;
+			error ??= subagentStopRefusalUnresolved(structured);
 			if (exitCode === 0) exitCode = 1;
 		}
 		if (abortSignal.aborted && (!monitor.yieldCalled() || monitor.runtimeLimitExceeded())) {
@@ -3127,7 +3133,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		// The refused candidate may itself have been the child's prose (a
 		// data-less `yield` finalizes on the last report turn), so the failed run
 		// publishes the refusal diagnostic instead of output that could carry it.
-		rawOutput = stderr || SUBAGENT_STOP_REFUSAL_UNRESOLVED;
+		rawOutput = stderr || subagentStopRefusalUnresolved(structured);
 	}
 	// Salvage for cancelled/aborted children that produced no completed output:
 	// surface the last assistant text + stats instead of "(no output)" so the
@@ -3858,11 +3864,11 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					: thrown === undefined
 						? undefined
 						: String(thrown)) ??
-				(unresolvedRefusal ? SUBAGENT_STOP_REFUSAL_UNRESOLVED : undefined);
+				(unresolvedRefusal ? subagentStopRefusalUnresolved(structured) : undefined);
 			const errorForPeer =
 				providerError ??
 				(thrown instanceof Error ? thrown.message : thrown === undefined ? undefined : String(thrown)) ??
-				(unresolvedRefusal ? SUBAGENT_STOP_REFUSAL_UNRESOLVED : undefined);
+				(unresolvedRefusal ? subagentStopRefusalUnresolved(structured) : undefined);
 			turnMonitor.finish();
 			if (yielded) {
 				// Acceptance boundary for an autonomous wake turn (#11079): the
