@@ -8,9 +8,13 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { hookCapability } from "../../capability/hook";
 import type { Hook } from "../../discovery";
 import { loadCapability } from "../../discovery";
-// Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
-import * as PiCodingAgent from "../../index";
+// Runtime self-reference: type-only so the barrel's module graph is not
+// evaluated when this loader loads. `loadPiCodingAgentNamespace()` resolves the real
+// ESM namespace on first hook binding, which keeps the index.ts cycle safe
+// (same idiom as the extensions loader) while preserving object identity with
+// the statically imported host namespace.
 import type { CustomMessagePayload } from "../../session/messages";
+import { loadPiCodingAgentNamespace } from "../package-namespace";
 import * as typebox from "../legacy-typebox";
 import { resolvePath, withHostGuard } from "../utils";
 import { execCommand } from "./runner";
@@ -124,7 +128,7 @@ async function createHookAPI(
 		typebox,
 		arktype: type,
 		zod,
-		pi: PiCodingAgent,
+		pi: await loadPiCodingAgentNamespace(),
 	} as HookAPI;
 
 	return {

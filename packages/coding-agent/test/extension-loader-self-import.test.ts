@@ -44,9 +44,6 @@ describe("extension loader host runtime binding", () => {
 		expect(projectDir).toBeDefined();
 		const cwd = projectDir!.path();
 
-		// Write every module before any loader runs: Bun's resolver caches
-		// directory entries process-wide, so a file created in `cwd` after the
-		// first module resolution there is invisible to later dynamic imports.
 		const extensionPath = writeModule(
 			"extension.ts",
 			`
