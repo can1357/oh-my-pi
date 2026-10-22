@@ -50,7 +50,13 @@ import { AsyncJobError, type AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
-import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
+import {
+	createEvalCustomTools,
+	describeEvalTools,
+	evalToolsEnabled,
+	isBuiltinToolAvailable,
+	stripBuiltinToolNames,
+} from "./eval-tools";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
@@ -98,6 +104,30 @@ function createUsageTotals(): Usage {
 		totalTokens: 0,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
+}
+
+/** Built-in tool names stripped from a spawn item before eval validation, keyed by item. */
+const strippedBuiltinTools = new WeakMap<object, string[]>();
+
+/** Built-ins removed from streamed spawn params, retained for speculative validation. */
+const speculativeBuiltinTools = new WeakMap<object, string[]>();
+
+function appendTaskNotices(
+	result: AgentToolResult<TaskToolDetails>,
+	notices: readonly string[],
+): AgentToolResult<TaskToolDetails> {
+	if (notices.length === 0) return result;
+	const noticeText = notices.join("\n");
+	let appended = false;
+	const content = result.content.map(part => {
+		if (!appended && part.type === "text" && typeof part.text === "string") {
+			appended = true;
+			return { ...part, text: `${part.text}\n\n${noticeText}` };
+		}
+		return part;
+	});
+	if (!appended) content.push({ type: "text", text: noticeText });
+	return { ...result, content };
 }
 
 function addUsageTotals(target: Usage, usage: Partial<Usage>): void {
@@ -259,6 +289,13 @@ function validateEffort(effort: TaskEffort | undefined, label: string): string |
 	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
 }
 
+/** Reject a non-array `tools`, or non-string entries, on calls that bypass the wire schema (lenient validation). */
+function validateTools(tools: unknown, label: string): string | undefined {
+	if (tools === undefined) return undefined;
+	if (Array.isArray(tools) && tools.every(name => typeof name === "string")) return undefined;
+	return `${label} has an invalid \`tools\` value. Use an array of tool-name strings.`;
+}
+
 function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string | undefined {
 	const hasTask = typeof params.task === "string" && params.task.trim() !== "";
 	const tasks = params.tasks;
@@ -276,6 +313,8 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			}
 			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
 			if (effortError) return effortError;
+			const toolsError = validateTools(item.tools, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
+			if (toolsError) return toolsError;
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
@@ -298,7 +337,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
 			: "Missing `task`. Provide complete, self-contained instructions for the agent.";
 	}
-	return validateEffort(params.effort, "The call");
+	return validateEffort(params.effort, "The call") ?? validateTools(params.tools, "The call");
 }
 
 /**
@@ -309,7 +348,15 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
  */
 function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
-		return params.tasks;
+		// Copy each item before stripping: pre-execute planning and `execute`
+		// resolve separately, and the correction record keys on the stripped
+		// item — mutating the caller's `tasks[]` in place would leave the later
+		// resolve with nothing to strip and no notice to report.
+		return params.tasks.map(source => {
+			const item: TaskItem = { ...source };
+			stripBuiltinToolNames(item, strippedBuiltinTools);
+			return item;
+		});
 	}
 	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
 	if ("solutionSpace" in params) item.solutionSpace = params.solutionSpace;
@@ -318,6 +365,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("tools" in params) item.tools = params.tools;
 	if ("effort" in params) item.effort = params.effort;
 	if ("isolated" in params) item.isolated = params.isolated;
+	stripBuiltinToolNames(item, strippedBuiltinTools);
 	if ("sourceSession" in params) item.sourceSession = params.sourceSession;
 	if ("model" in params) item.model = params.model;
 	return [item];
@@ -680,7 +728,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				this.#defaultAgent(),
 				this.#seanceSchemaFields() !== undefined,
 			);
-			return typeof plan === "string" ? undefined : plan.spawns;
+			if (typeof plan === "string") return undefined;
+			return plan.spawns.map((spawn, index) => {
+				const builtins = strippedBuiltinTools.get(plan.items[index]!);
+				if (builtins) speculativeBuiltinTools.set(spawn, builtins);
+				return spawn;
+			});
 		},
 		start: (toolCallId, spawn, index, signal) => this.#startSpeculative(toolCallId, spawn, index, signal),
 	};
@@ -878,13 +931,31 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		index: number,
 		signal: AbortSignal,
 	): Promise<SpawnRun | undefined> {
-		if (spawn.tools?.length && this.session.getPlanModeState?.()?.enabled === true) return undefined;
-		let blocking: boolean;
+		let policy;
 		try {
-			blocking = (await this.#resolveSpawnPreflight(spawn)).effectiveAgent.blocking === true;
+			policy = await this.#resolveSpawnPreflight(spawn);
 		} catch {
 			return undefined;
 		}
+		// A built-in the chosen agent lacks is re-added as an eval tool at dispatch, so the running
+		// speculative child (launched with the stripped list) would be rejected on adopt. Refuse it.
+		if (
+			(speculativeBuiltinTools.get(spawn) ?? []).some(
+				name => !isBuiltinToolAvailable(name, policy.effectiveAgent, this.session),
+			)
+		) {
+			return undefined;
+		}
+		const evalToolNames = spawn.tools ?? [];
+		if (evalToolNames.length > 0) {
+			if (this.session.getPlanModeState?.()?.enabled === true) return undefined;
+			try {
+				await describeEvalTools(this.session, evalToolNames, signal);
+			} catch {
+				return undefined;
+			}
+		}
+		const blocking = policy.effectiveAgent.blocking === true;
 		const detached =
 			cfgAsyncEnabled.get(this.session.settings) && this.session.asyncJobManager !== undefined && !blocking;
 		const agentId = await this.#outputManager().allocate(spawn.name?.trim() || generateTaskName());
@@ -1015,6 +1086,39 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
+		const toolNotices: string[] = [];
+		const unavailableBuiltins: string[] = [];
+		spawnItems.forEach((item, index) => {
+			const policy = policies[index]!;
+			for (const name of strippedBuiltinTools.get(item) ?? []) {
+				if (isBuiltinToolAvailable(name, policy.effectiveAgent, this.session)) {
+					toolNotices.push(
+						`Note: \`${name}\` is a built-in tool provided by agent \`${policy.agentName}\`; it was removed from \`tools\`, which accepts eval-defined tools only.`,
+					);
+				} else {
+					unavailableBuiltins.push(name);
+					item.tools = [...(item.tools ?? []), name];
+					const spawn = normalizedSpawnParams[index]!;
+					spawn.tools = [...(spawn.tools ?? []), name];
+				}
+			}
+		});
+		if (unavailableBuiltins.length > 0) {
+			try {
+				await describeEvalTools(this.session, unavailableBuiltins, signal);
+			} catch (error) {
+				return appendTaskNotices(
+					createTaskModeError(`Task execution failed: ${error instanceof Error ? error.message : String(error)}`),
+					toolNotices,
+				);
+			}
+		}
+		if (this.session.getPlanModeState?.()?.enabled === true && unavailableBuiltins.length > 0) {
+			return appendTaskNotices(
+				createTaskModeError("Task execution failed: Eval-defined tools are unavailable in plan mode."),
+				toolNotices,
+			);
+		}
 
 		// Execution mode is per item: an item whose agent type declares
 		// `blocking: true` runs inline on this turn (the parent waits on its
@@ -1066,7 +1170,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				signal,
 				onUpdate,
 			);
-			if (!advisory) return result;
+			if (!advisory) return appendTaskNotices(result, toolNotices);
 			let appended = false;
 			const content = result.content.map(part => {
 				if (!appended && part.type === "text" && typeof part.text === "string") {
@@ -1076,7 +1180,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				return part;
 			});
 			if (!appended) content.push({ type: "text", text: advisory });
-			return { ...result, content };
+			return appendTaskNotices({ ...result, content }, toolNotices);
 		}
 
 		// Coordination only makes sense for spawns that keep running after this
@@ -1257,7 +1361,25 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					content: [{ type: "text", text: `Spawned agent \`${agentId}\`...` }],
 					details: buildAsyncDetails(),
 				});
-				return withAdvisory({
+				return appendTaskNotices(
+					withAdvisory({
+						content: [
+							{
+								type: "text",
+								text: renderSpawnFeedback(false),
+							},
+						],
+						details: buildAsyncDetails(),
+					}),
+					toolNotices,
+				);
+			}
+			onUpdate?.({
+				content: [{ type: "text", text: `Spawned ${started.length} agents...` }],
+				details: buildAsyncDetails(),
+			});
+			return appendTaskNotices(
+				withAdvisory({
 					content: [
 						{
 							type: "text",
@@ -1265,21 +1387,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						},
 					],
 					details: buildAsyncDetails(),
-				});
-			}
-			onUpdate?.({
-				content: [{ type: "text", text: `Spawned ${started.length} agents...` }],
-				details: buildAsyncDetails(),
-			});
-			return withAdvisory({
-				content: [
-					{
-						type: "text",
-						text: renderSpawnFeedback(false),
-					},
-				],
-				details: buildAsyncDetails(),
-			});
+				}),
+				toolNotices,
+			);
 		}
 
 		// Mixed call: the async jobs above already run detached; the blocking
@@ -1346,11 +1456,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const text = [merged.contentParts.join("\n\n"), spawnedSummary]
 			.filter(section => section.trim().length > 0)
 			.join("\n\n");
-		return withAdvisory({
-			content: [{ type: "text", text: text.length > 0 ? text : "No results." }],
-			...(merged.isError ? { isError: true } : {}),
-			details: buildAsyncDetails(),
-		});
+		return appendTaskNotices(
+			withAdvisory({
+				content: [{ type: "text", text: text.length > 0 ? text : "No results." }],
+				...(merged.isError ? { isError: true } : {}),
+				details: buildAsyncDetails(),
+			}),
+			toolNotices,
+		);
 	}
 
 	/**

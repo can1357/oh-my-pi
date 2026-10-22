@@ -12,6 +12,10 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 
 import { cfgEvalToolsEnabled } from "../eval/settings";
+import { BUILTIN_TOOL_NAMES, normalizeToolName } from "../tools/builtin-names";
+import type { AgentDefinition } from "./types";
+import { cfgTaskMaxRecursionDepth } from "./settings";
+import { resolveSubagentToolNames } from "./tool-plan";
 
 interface EvalToolQueryResult {
 	tools: EvalToolDescriptor[];
@@ -108,6 +112,53 @@ export async function describeEvalTools(
 		const descriptor = byName.get(name);
 		return descriptor ? [descriptor] : [];
 	});
+}
+
+const BUILTIN_TOOL_NAME_LOOKUP: Record<string, true> = Object.fromEntries(
+	BUILTIN_TOOL_NAMES.map(name => [normalizeToolName(name), true]),
+);
+
+/** Whether a requested name is a built-in tool (canonical spelling). */
+export function isBuiltinToolName(name: string): boolean {
+	return BUILTIN_TOOL_NAME_LOOKUP[normalizeToolName(name)] === true;
+}
+
+/**
+ * Whether the selected agent's effective tool plan supplies a built-in tool
+ * name. Uses the executor's plan (auto-added `task`/`wait`, `exec` expansion,
+ * recursion limit), not the raw `tools` frontmatter.
+ */
+export function isBuiltinToolAvailable(name: string, agent: AgentDefinition, session: ToolSession): boolean {
+	const canonical = normalizeToolName(name);
+	if (BUILTIN_TOOL_NAME_LOOKUP[canonical] !== true) return false;
+	const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(session.settings);
+	const childDepth = (session.taskDepth ?? 0) + 1;
+	const plan = resolveSubagentToolNames(agent, {
+		settings: session.settings,
+		structured: true,
+		atMaxDepth: maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth,
+		restrictToolNames: false,
+	});
+	return (plan ?? BUILTIN_TOOL_NAMES).map(normalizeToolName).includes(canonical);
+}
+
+/**
+ * Remove built-in names from a spawn item's `tools` before eval validation,
+ * recording them for a post-policy correction notice. `task.tools` accepts
+ * eval-defined tools only; built-ins come from the selected agent's profile.
+ */
+export function stripBuiltinToolNames(item: { tools?: string[] }, record: WeakMap<object, string[]>): void {
+	if (item.tools === undefined) return;
+	const kept: string[] = [];
+	const stripped: string[] = [];
+	for (const name of item.tools) {
+		// Malformed entries are left for the tool-shape validation to reject.
+		if (typeof name === "string" && isBuiltinToolName(name)) stripped.push(normalizeToolName(name));
+		else kept.push(name);
+	}
+	if (stripped.length === 0) return;
+	item.tools = kept;
+	record.set(item, stripped);
 }
 
 /** List every tool currently defined across retained eval kernels. */
