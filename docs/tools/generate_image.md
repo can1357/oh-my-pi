@@ -48,6 +48,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
    - `google-gemini-cli`: Google Antigravity's internal SSE image endpoint, using the account-advertised image model when discovery provides one.
    - `openai-responses`: OpenAI hosted Responses image generation.
    - `openai-codex-responses`: ChatGPT/Codex hosted Responses image generation through a connected subscription.
+   - `factory-droid-agent`: Factory Droid image models through Factory's proxy with the same client identity as chat. GPT Image models use Factory's `/images/generations`, or `/images/edits` with the reference images inline as JSON; Gemini 3 Pro Image uses Factory's Gemini route with `responseModalities: ["TEXT", "IMAGE"]` and Factory's generate or edit instruction.
 6. Hosted Responses transports use a model with the catalog's `hostedImage` capability as carrier. A selected hosted-capable model carries its own request; otherwise the active model is preferred only when it has that capability and the same provider, then the available same-provider carrier with the lowest input cost. For an `openai-responses` image-kind entry, the image tool names the selected image model. For Codex, or a chat model carrying its own image request, the host chooses the image model. The request always selects `image_generation` and requests WebP; a resolved size is sent for both hosted transports.
 7. Inline images in a successful response are saved to temporary files; paths and base64/MIME image metadata are returned. A response with no image data returns a normal zero-image result rather than `isError`.
 
@@ -74,6 +75,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 - OpenAI-compatible and hosted transports prefer explicit `image_size`; otherwise `1:1` maps to `1024x1024`, `3:4` / `9:16` to `1024x1536`, and `4:3` / `16:9` to `1536x1024`. `3:2` / `2:3` have no inferred OpenAI size. OpenRouter and Gemini receive the requested ratio/size directly. Upstream acceptance and actual dimensions remain provider-dependent.
 - The ChatGPT/Codex subscription backend chooses the image model; the tool does send requested/resolved size rather than discarding it. Results report the backend-returned model, size, and quality when available.
 - xAI/xAI OAuth edit requests are limited to 3 input images.
+- Factory Droid GPT Image edits accept 1–16 PNG, JPEG or WebP references. Every Factory reference is capped at 5 MiB. Factory's Images routes take no size, so `aspect_ratio` and `image_size` reach only its Gemini model.
 
 ## Errors
 - No usable model in the resolved chain: the aggregate error lists attempted models and candidates skipped for unsupported transports, unavailable credentials, invalid credentials, or unavailable hosted carriers.
@@ -81,6 +83,8 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 - Hosted image models without an available same-provider `hostedImage` carrier are skipped as `hosted chat carrier unavailable`; a carrier without usable credentials is skipped as `carrier credentials unavailable`.
 - Antigravity credentials that do not contain both an access token and `projectId` cause that candidate to be skipped as `invalid credentials`.
 - More than three xAI/xAI OAuth edit references: `<provider> image edits accept up to 3 reference images; got <N>`.
+- More than 16 Factory Droid edit references, a reference over 5 MiB, or a GPT Image reference that is not PNG, JPEG or WebP, is rejected before sending.
+- A Factory Droid response with no image (for example a Gemini prompt block) throws with the reason and ends the chain; a Factory HTTP rejection falls through like other providers.
 - Credentialed model HTTP failures fall through to later candidates in the image chain. If every candidate fails or is skipped, the tool throws an `AggregateError` naming the attempted models and containing collected provider HTTP errors.
 - Cancellation, the three-minute timeout, malformed provider responses, and local I/O errors throw directly.
 

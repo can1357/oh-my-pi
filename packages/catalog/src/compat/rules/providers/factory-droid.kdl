@@ -405,6 +405,26 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=196600 max-tokens=64000
 		}
+		// `generate_image` models, in the CLI's tool preference order. GPT Image 2
+		// is retired from the CLI's selectable chain and is not listed.
+		model "gpt-image-2.5-sunburst" name="GPT Image 2.5" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
+		model "gpt-image-2.5-flare" name="GPT Image 2.5 Flare" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
+		model "gemini-3-pro-image-preview" name="Gemini 3 Pro Image" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+		}
 	}
 
 	// Upstream serving regions (the CLI's upstream region table). A model's own
@@ -835,6 +855,23 @@ provider "factory-droid" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-requires-effort #true
 		thinking-default-level "high"
+	}
+	// Image models: the org's `imageGenerationEnabled` and
+	// `imageGenerationAllowedModelIds` managed settings gate them
+	// (discovery/factory-droid.ts), not feature flags. Credits follow the CLI's
+	// image registry: OpenAI output is image tokens at 6x input, Gemini's 60x.
+	models "gpt-image-2.5-sunburst" "gpt-image-2.5-flare" {
+		kind "image"
+		routing-family "openai"
+		upstream-rotation "openai"
+		credit-rates { input 2.0; output 6 }
+	}
+	models "gemini-3-pro-image-preview" {
+		kind "image"
+		routing-family "google"
+		upstream-rotation "google"
+		region-upstreams-us
+		credit-rates { input 0.8; output 60 }
 	}
 	models "inkling" {
 		routing-family "factory"

@@ -94,6 +94,7 @@ export const IMAGE_GENERATION_APIS = [
 	"google-gemini-cli",
 	"openai-responses",
 	"openai-codex-responses",
+	"factory-droid-agent",
 ] as const;
 export type ImageGenerationApi = (typeof IMAGE_GENERATION_APIS)[number];
 
@@ -103,7 +104,7 @@ const IMAGE_CHAT_TRANSPORT_KINDS: readonly ModelKind[] = ["chat", "tiny", "image
 /**
  * Kinds a model on `api` may declare: a runner api serves its own kind; a chat
  * transport serves `chat` and `tiny`, plus `image` when `generate_image` runs it
- * (hosted Responses image tool, Gemini image models). `undefined` for
+ * (hosted Responses image tool, Gemini and Factory Droid image models). `undefined` for
  * `local-inference`, which hosts several kinds chosen by the model itself.
  */
 export function servedKinds(api: Api): readonly ModelKind[] | undefined {

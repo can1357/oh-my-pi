@@ -73,6 +73,28 @@ function readModelPolicy(body: unknown): FactoryModelPolicy | null {
 }
 
 /**
+ * Org image-generation settings from `/api/organization/managed-settings`.
+ * The CLI gates `generate_image` on these, not on the model policy lists
+ * alone: `imageGenerationEnabled: false` withdraws every image model, and an
+ * `imageGenerationAllowedModelIds` list (empty allows none) narrows them.
+ */
+interface FactoryImageSettings {
+	enabled: boolean;
+	allowedModelIds?: readonly string[];
+}
+
+function readImageSettings(body: unknown): FactoryImageSettings | null {
+	if (!isRecord(body) || !isRecord(body.settings)) return null;
+	const { imageGenerationEnabled, imageGenerationAllowedModelIds } = body.settings;
+	return {
+		enabled: imageGenerationEnabled !== false,
+		...(Array.isArray(imageGenerationAllowedModelIds) && {
+			allowedModelIds: imageGenerationAllowedModelIds.filter((id): id is string => typeof id === "string"),
+		}),
+	};
+}
+
+/**
  * Live `provider_routing` dynamic config from the flags payload: per-model
  * upstream rotations that override the registry's static order.
  */
@@ -102,15 +124,22 @@ function readProviderRouting(body: Record<string, unknown>): FactoryProviderRout
 	};
 }
 
-/** Mirrors the client-side model gating: feature flags first, then org model policy. */
+/**
+ * Mirrors the client-side model gating: feature flags first, then org model
+ * policy; image models also need the org's image-generation settings, so they
+ * stay hidden until a managed-settings payload proves them enabled.
+ */
 function isModelAvailable(
 	{ spec, policy: registry }: FactoryDroidRegistryModel,
 	flags: Record<string, boolean>,
 	policy: FactoryModelPolicy | null,
 	region: string | undefined,
+	images: FactoryImageSettings | null,
 ): boolean {
 	const gates = registry.entitlement;
 	if (resolveFactoryDroidRotation(registry, region).length === 0) return false;
+	if (registry.image && (!images?.enabled || (images.allowedModelIds && !images.allowedModelIds.includes(spec.id))))
+		return false;
 	if (gates.featureFlag !== undefined && flags[gates.featureFlag] !== true) return false;
 	if (gates.deprecationFlag !== undefined && flags[gates.deprecationFlag] === true) return false;
 	// Fast tiers are withdrawn as a class, not by id: `base-variant` is what
@@ -138,7 +167,7 @@ export interface FactoryDroidModelDiscoveryOptions extends AccountScope {
 export function factoryDroidSeedModels(scope: AccountScope): ModelSpec<"factory-droid-agent">[] {
 	const inferenceRegion = resolveFactoryDroidInferenceRegion(scope);
 	return factoryDroidRegistry()
-		.filter(model => isModelAvailable(model, {}, null, inferenceRegion))
+		.filter(model => isModelAvailable(model, {}, null, inferenceRegion, null))
 		.map(model =>
 			buildFactoryDroidModel(model, {
 				region: scope.region,
@@ -168,6 +197,7 @@ export async function fetchFactoryDroidModels(
 	let flags: Record<string, boolean>;
 	let policy: FactoryModelPolicy | null = null;
 	let routing: FactoryProviderRouting | null = null;
+	let images: FactoryImageSettings | null = null;
 	const servingRegion = resolveFactoryDroidInferenceRegion(options);
 	try {
 		const [flagsResponse, settingsResponse] = await Promise.all([
@@ -180,15 +210,17 @@ export async function fetchFactoryDroidModels(
 		const raw = body.flags;
 		if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return null;
 		flags = Object.fromEntries(Object.entries(raw).map(([key, value]) => [key, value === true]));
-		if (settingsResponse?.ok) {
-			policy = readModelPolicy(await settingsResponse.json());
-		}
+		// An unreadable settings body leaves policy and image settings unknown, so
+		// gated rows fail closed instead of the whole refresh keeping stale ones.
+		const settings: unknown = settingsResponse?.ok ? await settingsResponse.json().catch(() => null) : null;
+		policy = readModelPolicy(settings);
+		images = readImageSettings(settings);
 		routing = readProviderRouting(body as Record<string, unknown>);
 	} catch {
 		return null;
 	}
 	return factoryDroidRegistry().flatMap(model => {
-		if (!isModelAvailable(model, flags, policy, servingRegion)) return [];
+		if (!isModelAvailable(model, flags, policy, servingRegion, images)) return [];
 		const { id } = model.spec;
 		const family = model.policy.routingFamily;
 		const routed = routing?.models?.[id] ?? (family === undefined ? undefined : routing?.defaults?.[family]);

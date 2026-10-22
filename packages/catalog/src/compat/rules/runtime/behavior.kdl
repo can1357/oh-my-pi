@@ -104,7 +104,7 @@ behavior {
 			"gpt-5.4-mini-fast" "gpt-5.3-codex" "gpt-5.3-codex-fast" "gpt-5.2" "garnet-07-15" \
 			"gemini-3.1-pro-preview" "gemini-3.8-flash" "gemini-3.7-flash" "gemini-3.6-flash" \
 			"gemini-3.5-flash" "gemini-3-flash-preview" "grok-4.7" "grok-4.6" "grok-4.5" "atlas-07-21" \
-			"aster-07-15"
+			"aster-07-15" "gpt-image-2.5-sunburst" "gpt-image-2.5-flare" "gemini-3-pro-image-preview"
 	}
 	// Subscription eligibility for model-aware Codex credential routing.
 	plan-requirement provider="openai-codex" {
@@ -296,10 +296,11 @@ behavior {
 			exact="gpt-5.6-sol" exact="gpt-5.6-sol-fast" exact="gpt-5.6-terra" exact="gpt-5.6-luna" \
 			exact="gpt-5.5" exact="gpt-5.5-fast" exact="gpt-5.5-pro" exact="gpt-5.4" exact="gpt-5.4-fast" \
 			exact="gpt-5.4-mini" exact="gpt-5.4-mini-fast" exact="gpt-5.3-codex" exact="gpt-5.3-codex-fast" \
-			exact="gpt-5.2" exact="grok-4.7" exact="grok-4.6" exact="grok-4.5"
+			exact="gpt-5.2" exact="grok-4.7" exact="grok-4.6" exact="grok-4.5" exact="gpt-image-2.5-sunburst" \
+			exact="gpt-image-2.5-flare"
 		route "google-generate" exact="garnet-07-15" exact="gemini-3.1-pro-preview" exact="gemini-3.8-flash" \
 			exact="gemini-3.7-flash" exact="gemini-3.6-flash" exact="gemini-3.5-flash" \
-			exact="gemini-3-flash-preview"
+			exact="gemini-3-flash-preview" exact="gemini-3-pro-image-preview"
 		route "openai-completions" exact="inkling" exact="mistral-large-4" exact="mistral-medium-3.5" exact="glm-5.3-flash" \
 			exact="glm-5.3" exact="glm-5.2" exact="glm-5.2-fast" exact="kimi-k3" exact="qwen3.8-max" \
 			exact="nemotron-3-ultra" exact="deepseek-v4.1-flash" exact="deepseek-v4-flash-0731" \

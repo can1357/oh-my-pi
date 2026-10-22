@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { afterAll, describe, expect, it } from "bun:test";
 import { type Api, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
+import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -335,6 +337,31 @@ describe("imageGenTool catalog routing", () => {
 
 		expect(requestUrl).toBe("https://google.example/v1/models/gemini-selected-image:generateContent");
 		expect(result.details?.model).toBe("gemini-selected-image");
+	});
+
+	it("generates through a Factory Droid image model chosen for the image role", async () => {
+		const factory = factoryDroidRegistry()
+			.filter(({ spec }) => spec.id === "kimi-k3" || spec.id === "gpt-image-2.5-sunburst")
+			.map(entry => buildModel(buildFactoryDroidModel(entry)));
+		const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			requests.push({ url: input.toString(), body: JSON.parse(String(init?.body)) });
+			return imageResponse();
+		};
+		const ctx = createContext({
+			models: factory,
+			settings: Settings.isolated({ modelRoles: { image: "factory-droid/gpt-image-2.5-sunburst" } }),
+			fetch: fetchMock,
+			activeModel: factory.find(model => model.id === "kimi-k3"),
+		});
+
+		const result = await imageGenTool.execute("factory", { subject: "a lighthouse" }, undefined, ctx);
+		collectPaths(result);
+
+		expect(requests.map(request => request.url)).toEqual(["https://api.factory.ai/api/llm/o/v1/images/generations"]);
+		expect(requests[0].body.model).toBe("gpt-image-2.5-sunburst");
+		expect(result.details?.provider).toBe("factory-droid");
+		expect(result.details?.imageCount).toBe(1);
 	});
 
 	it("falls back to the selected Antigravity id when discovery advertises no image model", async () => {
