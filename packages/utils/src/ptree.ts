@@ -153,6 +153,19 @@ export interface WaitOptions {
 	allowAbort?: boolean;
 	/** `full` requires upfront capture; `exec` enables it, while direct `spawn` callers pass `stderr: "full"`. */
 	stderr?: "full" | "buffer";
+	/**
+	 * How the child's stdout is handled: `capture` keeps it (up to
+	 * `maxStdoutBytes`), `ignore` drains the pipe without retaining any of
+	 * it. A child that writes continuously must not be able to grow the
+	 * retained buffer without bound.
+	 */
+	stdout?: StdoutMode;
+	/**
+	 * Cap on the bytes retained from the child's stdout in `capture` mode. The
+	 * pipe is still drained past the cap, so the child never blocks on a full
+	 * buffer.
+	 */
+	maxStdoutBytes?: number;
 }
 
 /** Result from wait and exec. */
@@ -163,6 +176,15 @@ export interface ExecResult {
 	ok: boolean;
 	exitError?: Exception;
 }
+
+/**
+ * How a child's stdout is handled while it runs.
+ *
+ * `capture` keeps the output (up to a byte cap); `ignore` drains the pipe
+ * without retaining any of it, so a child that writes continuously cannot grow
+ * the buffer without bound.
+ */
+export type StdoutMode = "capture" | "ignore";
 
 // ── ChildProcess ─────────────────────────────────────────────────────────────
 
@@ -461,13 +483,22 @@ export class ChildProcess<In extends InMask = InMask> {
 
 	/**
 	 * Read a pipe fully, stopping early only at an explicit command deadline.
+	 *
+	 * `mode: "ignore"` drains the pipe without retaining any of it: the child
+	 * still sees its output being read, so it never blocks on a full buffer,
+	 * but nothing is accumulated. `maxBytes` caps the retained bytes in
+	 * `capture` mode; the rest is drained and dropped.
 	 */
-	async #readStream(stream: ReadableStream<Uint8Array>): Promise<string> {
+	async #readStream(stream: ReadableStream<Uint8Array>, mode?: StdoutMode, maxBytes?: number): Promise<string> {
 		this.#openPipeReaders++;
 		const reader = stream.getReader();
 		this.#pipeReaders.add(reader);
 		const dec = new TextDecoder();
+		const ignore = mode === "ignore";
+		const limit = maxBytes ?? Number.POSITIVE_INFINITY;
 		let out = "";
+		let retained = 0;
+		let truncated = false;
 		try {
 			for (;;) {
 				if (this.#cutoff) {
@@ -476,14 +507,29 @@ export class ChildProcess<In extends InMask = InMask> {
 				}
 				const r = await reader.read();
 				if (r.done) break;
-				out += dec.decode(r.value, { stream: true });
+				if (ignore) continue;
+				// Past the cap the pipe is still drained — the child must never
+				// block on a full buffer — but nothing more is retained.
+				if (truncated) continue;
+				const remaining = limit - retained;
+				if (remaining <= 0) {
+					truncated = true;
+					continue;
+				}
+				const slice = r.value.byteLength > remaining ? r.value.subarray(0, remaining) : r.value;
+				retained += slice.byteLength;
+				if (slice.byteLength < r.value.byteLength) truncated = true;
+				out += dec.decode(slice, { stream: true });
 			}
 		} catch {
 			// A cancelled or failed read keeps whatever was already collected.
 		}
 		this.#pipeReaders.delete(reader);
 		this.#openPipeReaders--;
-		return out + dec.decode();
+		if (ignore) return "";
+		// The flush is the decoder's pending partial character. A truncated
+		// stream ended mid-character by the cap, so it has none to flush.
+		return truncated ? out : out + dec.decode();
 	}
 
 	async #readBytes(): Promise<Uint8Array<ArrayBuffer>> {
@@ -546,13 +592,19 @@ export class ChildProcess<In extends InMask = InMask> {
 	// ── Wait ─────────────────────────────────────────────────────────────
 
 	async wait(opts?: WaitOptions): Promise<ExecResult> {
-		const { allowNonZero = false, allowAbort = false, stderr: stderrMode = "buffer" } = opts ?? {};
+		const {
+			allowNonZero = false,
+			allowAbort = false,
+			stderr: stderrMode = "buffer",
+			stdout: stdoutMode = "capture",
+			maxStdoutBytes,
+		} = opts ?? {};
 		const stderrChunks = this.#stderrChunks;
 		if (stderrMode === "full" && !stderrChunks) {
 			throw new Error('Full stderr capture must be requested when spawning the process (pass stderr: "full")');
 		}
 
-		const stdoutP = this.#readStream(this.proc.stdout);
+		const stdoutP = this.#readStream(this.proc.stdout, stdoutMode, maxStdoutBytes);
 		const stderrP =
 			stderrMode === "full" && stderrChunks
 				? this.#stderrDone.then(() => new TextDecoder().decode(Buffer.concat(stderrChunks)))
@@ -695,11 +747,11 @@ export interface ExecOptions extends Omit<ChildSpawnOptions, "stderr" | "stdin">
 
 /** Spawn, wait, and return captured output. */
 export async function exec(cmd: string[], opts?: ExecOptions): Promise<ExecResult> {
-	const { input, stderr, allowAbort, allowNonZero, ...spawnOpts } = opts ?? {};
+	const { input, stderr, allowAbort, allowNonZero, stdout, maxStdoutBytes, ...spawnOpts } = opts ?? {};
 	const stdin = typeof input === "string" ? Buffer.from(input) : input;
 	const resolved: ChildSpawnOptions = stdin === undefined ? spawnOpts : { ...spawnOpts, stdin };
 	using child = spawnInternal(cmd, resolved, stderr === "full");
-	return await child.wait({ stderr, allowAbort, allowNonZero });
+	return await child.wait({ stderr, allowAbort, allowNonZero, stdout, maxStdoutBytes });
 }
 
 // ── Signal combinators ───────────────────────────────────────────────────────

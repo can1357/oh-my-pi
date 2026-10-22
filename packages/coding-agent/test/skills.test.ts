@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
 import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
-import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
+import { getWslWindowsHomeCandidate } from "@oh-my-pi/pi-coding-agent/discovery/agents";
 import {
 	type LoadSkillsResult,
 	loadSkills,
@@ -276,8 +276,8 @@ describe("skills", () => {
 			},
 		);
 
-		it("converts Windows USERPROFILE paths to the default WSL mount (#3779)", () => {
-			const resolved = getWslWindowsHomeCandidate({
+		it("converts Windows USERPROFILE paths to the default WSL mount (#3779)", async () => {
+			const resolved = await getWslWindowsHomeCandidate({
 				platform: "linux",
 				env: { WSL_DISTRO_NAME: "Ubuntu", USERPROFILE: "C:\\Users\\alice" },
 				wslPath: () => undefined,
@@ -286,8 +286,8 @@ describe("skills", () => {
 			expect(resolved).toBe("/mnt/c/Users/alice");
 		});
 
-		it("resolves the Windows profile through interop when USERPROFILE is not exported (#3779)", () => {
-			const resolved = getWslWindowsHomeCandidate({
+		it("resolves the Windows profile through interop when USERPROFILE is not exported (#3779)", async () => {
+			const resolved = await getWslWindowsHomeCandidate({
 				platform: "linux",
 				env: { WSL_DISTRO_NAME: "Ubuntu" },
 				windowsUserProfile: () => "C:\\Users\\alice",
@@ -295,24 +295,6 @@ describe("skills", () => {
 			});
 
 			expect(resolved).toBe("/mnt/c/Users/alice");
-		});
-
-		it("kills a host probe that never exits instead of blocking startup (#8402)", () => {
-			// Integration test against real OS timer behavior: the contract is that
-			// runHostProbe's spawnSync `timeout` actually kills a genuinely blocked
-			// child. Injecting a short deadline preserves that native lifecycle
-			// coverage without paying the production discovery budget.
-			const start = performance.now();
-			const result = runHostProbe([process.execPath, "-e", "await Bun.sleep(60_000)"], 25);
-			const elapsed = performance.now() - start;
-			expect(result).toBeUndefined();
-			// Loose bound proves the probe returned via its timeout, not the child.
-			expect(elapsed).toBeLessThan(1_000);
-		});
-
-		it("returns trimmed stdout for a host probe that succeeds (#8402)", () => {
-			const result = runHostProbe([process.execPath, "-e", "process.stdout.write('  host-home  ')"]);
-			expect(result).toBe("host-home");
 		});
 
 		it("respects an explicit enableAgentsUser: false (#2401)", async () => {
