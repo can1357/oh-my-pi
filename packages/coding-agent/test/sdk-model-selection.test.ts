@@ -545,6 +545,52 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("drops a role's denied pattern before deferred expansion, so an allowed sibling never stands in", async () => {
+		const options = deniedModelOptions();
+		options.authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+		const settings = Settings.isolated({
+			disabledModels: ["openai/gpt-4o"],
+			modelRoles: { slow: "openai/gpt-4o,anthropic/claude-sonnet-4-5" },
+		});
+		const { session } = await createAgentSession({
+			...options,
+			settings,
+			modelRegistry: new ModelRegistry(options.authStorage, path.join(tempDir, "denied-role-pattern.yml"), {
+				settings,
+			}),
+			modelPattern: "@slow",
+		});
+		try {
+			// `openai/gpt-4o-mini` stays allowed; the role's next pattern is the only valid stand-in.
+			expect(`${session.model?.provider}/${session.model?.id}`).toBe("anthropic/claude-sonnet-4-5");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("skips a deferred role's denied retry fallback target, never its allowed sibling", async () => {
+		const options = deniedModelOptions();
+		// The role's model has no credential, so the deferred pattern walks the role's fallback chain.
+		const settings = Settings.isolated({
+			disabledModels: ["openai/gpt-4o"],
+			modelRoles: { slow: "anthropic/claude-sonnet-4-5" },
+			"retry.fallbackChains": { slow: ["openai/gpt-4o", "openai/gpt-4.1"] },
+		});
+		const { session } = await createAgentSession({
+			...options,
+			settings,
+			modelRegistry: new ModelRegistry(options.authStorage, path.join(tempDir, "denied-role-fallback.yml"), {
+				settings,
+			}),
+			modelPattern: "@slow",
+		});
+		try {
+			expect(`${session.model?.provider}/${session.model?.id}`).toBe("openai/gpt-4.1");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("refuses a prewalk target the session denies even when the registry's settings allow it", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);

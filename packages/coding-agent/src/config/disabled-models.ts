@@ -13,6 +13,7 @@
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { applyOpenRouterRoutingVariant } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { getBundledModels, getBundledProviders, isGeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import {
 	MAX_THINKING_SUFFIX_OPTIONS,
 	splitThinkingSuffix,
@@ -28,14 +29,14 @@ interface CompiledRule {
 	/** The rule as the user wrote it; diagnostics quote this verbatim. */
 	rule: string;
 	matches(fullId: string, id: string): boolean;
-	/** Whether a bare (provider-less) selector id could name a model this rule denies. */
+	/** Whether the rule itself names a bare (provider-less) selector id: an exact rule's id, or a glob without a provider. */
 	matchesBareId(id: string): boolean;
 }
 
 /**
  * Resolves a model to the first `disabledModels` rule that matches it. An identity
- * with an empty provider is a bare selector id: it matches when the id could name a
- * denied model of some provider.
+ * with an empty provider is a bare selector id: it matches when a rule names that id
+ * itself (see {@link CompiledRule.matchesBareId}).
  */
 export type DisabledModelMatcher = (model: ModelIdentity) => string | undefined;
 
@@ -61,11 +62,12 @@ function compileRule(rule: string): CompiledRule | undefined {
 	const slash = stripped.indexOf("/");
 	if (/[*?[]/.test(stripped)) {
 		const glob = new Bun.Glob(stripped);
-		const idGlob = slash > 0 ? new Bun.Glob(stripped.slice(slash + 1)) : glob;
 		return {
 			rule,
 			matches: (fullId, id) => glob.match(fullId) || glob.match(id),
-			matchesBareId: id => glob.match(id) || idGlob.match(id),
+			// A bare id has no provider, so a provider glob such as `openai/*` never matches it here;
+			// `disabledSelectorRule` checks a bare id against the catalog models with that id instead.
+			matchesBareId: id => glob.match(id),
 		};
 	}
 	// Exact rules name a provider; a bare rule matches nothing (no fuzzy or bare-id deny).
@@ -117,15 +119,90 @@ export function withoutDisabledModels<T extends ModelIdentity>(models: T[], sett
 	return isDisabled === NO_DISABLED_MODELS ? models : models.filter(model => isDisabled(model) === undefined);
 }
 
+/** A model registry's whole catalog: its bundled, custom and discovered models. */
+type ModelCatalog = () => readonly ModelIdentity[];
+
+/** The catalogs registered under one matcher; each registry counts once and is held weakly. */
+interface RegisteredCatalogs {
+	known: WeakSet<ModelCatalog>;
+	live: Set<WeakRef<ModelCatalog>>;
+}
+
+/**
+ * The catalogs of every model registry that filters with each matcher: what a bare selector can
+ * name under that matcher's rules. Registries that share settings all count, so the answer does
+ * not depend on which of them filtered last; a registry that is gone takes its catalog with it.
+ */
+const catalogsByMatcher = new WeakMap<DisabledModelMatcher, RegisteredCatalogs>();
+
+/**
+ * Adds a registry's `catalog` to the models a bare selector can name under `matcher`. The model
+ * registry calls this each time it resolves its matcher; a repeat call costs one lookup.
+ */
+export function registerDisabledModelCatalog(matcher: DisabledModelMatcher, catalog: ModelCatalog): void {
+	if (matcher === NO_DISABLED_MODELS) return;
+	let registered = catalogsByMatcher.get(matcher);
+	if (!registered) {
+		registered = { known: new WeakSet(), live: new Set() };
+		catalogsByMatcher.set(matcher, registered);
+	}
+	if (registered.known.has(catalog)) return;
+	registered.known.add(catalog);
+	registered.live.add(new WeakRef(catalog));
+}
+
+/** The bundled catalog, flattened on first use. */
+let bundledCatalog: readonly ModelIdentity[] | undefined;
+
+/** The rule that denies a model in `models` whose id is exactly `id` (lower-case), if any. */
+function ruleDenyingId(
+	models: readonly ModelIdentity[],
+	id: string,
+	matcher: DisabledModelMatcher,
+): string | undefined {
+	for (const model of models) {
+		if (model.id.toLowerCase() !== id) continue;
+		const rule = matcher(model);
+		if (rule !== undefined) return rule;
+	}
+	return undefined;
+}
+
+/**
+ * The rule that denies a catalog model whose id is exactly `id` (lower-case), if any: the bundled
+ * catalog, then the catalog of every live registry that filters with `matcher`.
+ */
+function deniedCatalogModelRule(id: string, matcher: DisabledModelMatcher): string | undefined {
+	bundledCatalog ??= getBundledProviders().flatMap(provider =>
+		isGeneratedProvider(provider) ? getBundledModels(provider) : [],
+	);
+	const bundledRule = ruleDenyingId(bundledCatalog, id, matcher);
+	if (bundledRule !== undefined) return bundledRule;
+	const live = catalogsByMatcher.get(matcher)?.live;
+	for (const ref of live ?? []) {
+		const catalog = ref.deref();
+		if (!catalog) {
+			live?.delete(ref);
+			continue;
+		}
+		const rule = ruleDenyingId(catalog(), id, matcher);
+		if (rule !== undefined) return rule;
+	}
+	return undefined;
+}
+
 /**
  * The denied model a selector names, if any. The selector is checked with and
  * without its `@upstream` routing and `:thinkingLevel` suffixes, so `x@up:high`
  * is refused by a rule for `x`. Role aliases must be expanded by the caller first.
  *
- * A bare id (no provider) is checked only when `allowed` is given: it is denied
- * when it could name a denied model and no allowed model carries exactly that id.
- * An allowed provider with the same id wins (as with `disabledProviders`); a
- * fuzzy or sibling match over the allowed list is never substituted.
+ * A bare id (no provider) is checked only when `allowed` is given, and only when no
+ * allowed model carries exactly that id: an allowed provider with the same id wins (as
+ * with `disabledProviders`). It is then denied when a rule names the id itself (an exact
+ * rule's id, or a glob without a provider) or denies a catalog model with exactly that id: the
+ * bundled catalog, or the models of a registry that filters with these settings (custom and
+ * discovered models included). A fuzzy selector that is no model's id (`sonnet` under `openai/*`)
+ * is not denied: it resolves over the allowed list, which holds no denied model.
  */
 export function disabledSelectorRule(
 	selector: string,
@@ -150,10 +227,10 @@ export function disabledSelectorRule(
 			continue;
 		}
 		if (!form || !allowed) continue;
-		const rule = matcher({ provider: "", id: form });
-		if (rule === undefined) continue;
 		const id = form.toLowerCase();
-		if (!allowed.some(model => model.id.toLowerCase() === id)) return { label: form, rule };
+		if (allowed.some(model => model.id.toLowerCase() === id)) continue;
+		const rule = matcher({ provider: "", id: form }) ?? deniedCatalogModelRule(id, matcher);
+		if (rule !== undefined) return { label: form, rule };
 	}
 	return undefined;
 }

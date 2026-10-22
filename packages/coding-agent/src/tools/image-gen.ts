@@ -15,10 +15,11 @@ import {
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
 import { isEnoent, logger, parseImageMetadata, prompt, ptree, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { disabledModelRule } from "../config/disabled-models";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
-import { settings } from "../config/settings";
+import { type Settings, settings } from "../config/settings";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
 import { resolveConfiguredModelTarget } from "../session/role-models";
@@ -147,12 +148,21 @@ function resolveHostedImageCarrier(
 	modelRegistry: ModelRegistry,
 	selectedModel: Model,
 	activeModel: Model | undefined,
+	sessionSettings: Settings,
 ): Model | undefined {
-	if (activeModel?.provider === selectedModel.provider && activeModel.hostedImage) return activeModel;
+	// The carrier receives the request too, so one the session denies is never chosen.
+	if (
+		activeModel?.provider === selectedModel.provider &&
+		activeModel.hostedImage &&
+		disabledModelRule(activeModel, sessionSettings) === undefined
+	) {
+		return activeModel;
+	}
 	let carrier: Model | undefined;
 	let carrierInput = Infinity;
 	for (const model of modelRegistry.getAvailable()) {
 		if (model.provider !== selectedModel.provider || !model.hostedImage) continue;
+		if (disabledModelRule(model, sessionSettings) !== undefined) continue;
 		const input = getEffectiveTokenCost(model.cost).input;
 		if (!carrier || input < carrierInput) {
 			carrier = model;
@@ -260,6 +270,13 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 			const skipped: string[] = [];
 			let inputImages: ImageGenerationRequest["inputImages"];
 			for (const model of candidates) {
+				// The registry may be built with other settings than the session's, and the session's own
+				// image swap comes from it: nothing goes out to a model the session denies.
+				const deniedBy = disabledModelRule(model, effectiveSettings);
+				if (deniedBy !== undefined) {
+					skipped.push(`${model.provider}/${model.id} (disabled by disabledModels rule "${deniedBy}")`);
+					continue;
+				}
 				if (!isImageGenerationApi(model.api)) {
 					logger.warn("Skipping unsupported image model API", {
 						provider: model.provider,
@@ -283,7 +300,9 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 				let carrier: Model | undefined;
 				let apiKey = ctx.modelRegistry.resolver(model, sessionId);
 				if (model.api === "openai-responses" || model.api === "openai-codex-responses") {
-					carrier = model.hostedImage ? model : resolveHostedImageCarrier(ctx.modelRegistry, model, ctx.model);
+					carrier = model.hostedImage
+						? model
+						: resolveHostedImageCarrier(ctx.modelRegistry, model, ctx.model, effectiveSettings);
 					if (!carrier) {
 						skipped.push(`${model.provider}/${model.id} (hosted chat carrier unavailable)`);
 						continue;
