@@ -1,9 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
-
-- Fixed the edit tool failing to match a line written with fullwidth characters, the match error now names the differing codepoints instead of printing two lines that look identical, a whitespace-only patch keeps the file's own body when the width fold leaves a residual difference, and a line that holds nothing but whitespace keeps its whitespace once ([#16113](https://github.com/can1357/oh-my-pi/issues/16113), [#16466](https://github.com/can1357/oh-my-pi/pull/16466) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -11,6 +8,7 @@
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 
 ### Fixed
+- Fixed the edit tool failing to match a line written with fullwidth characters, the match error now names the differing codepoints instead of printing two lines that look identical, a whitespace-only patch keeps the file's own body when the width fold leaves a residual difference, and a line that holds nothing but whitespace keeps its whitespace once ([#16113](https://github.com/can1357/oh-my-pi/issues/16113), [#16466](https://github.com/can1357/oh-my-pi/pull/16466) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed `omp gc --compress` exiting with "the event loop drained while it was still pending" on Bun 1.3.14 when a session artifact is pretty-printed JSON larger than 1 MiB, and session header probes (gc, session move and transfer) reading whole artifacts on Windows ([#15745](https://github.com/can1357/oh-my-pi/issues/15745), [#16754](https://github.com/can1357/oh-my-pi/pull/16754) by [@wolfiesch](https://github.com/wolfiesch))
 - `/resume` into another session now cancels the previous session's background jobs, as `/new` does, instead of delivering their results into the resumed session and starting a turn there ([#16760](https://github.com/can1357/oh-my-pi/pull/16760) by [@will-bogusz](https://github.com/will-bogusz))
