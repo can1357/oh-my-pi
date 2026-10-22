@@ -5,8 +5,6 @@
 
 - Raised the minimum required Bun version from >=1.3.14 to >=1.4.3 ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
-## [18.12.4] - 2026-10-20
-
 ### Added
 
 - Added `modelEnds` to `GroupedFileSection`: per file, the model-line index just past its last line, so a caller cutting the output can tell which files it shows whole ([#16594](https://github.com/can1357/oh-my-pi/pull/16594) by [@will-bogusz](https://github.com/will-bogusz))

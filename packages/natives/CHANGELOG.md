@@ -5,10 +5,6 @@
 
 - Raised the minimum required Bun version from >=1.3.14 to >=1.4.3 ([#15332](https://github.com/can1357/oh-my-pi/pull/15332) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
-## [18.12.5] - 2026-10-21
-
-## [18.12.5] - 2026-10-21
-
 ### Fixed
 
 - Fixed a UTF-8 char-boundary panic when parsing `stateDiagram-v2` lines where `>` follows a multibyte character ([#16749](https://github.com/can1357/oh-my-pi/pull/16749) by [@berney](https://github.com/berney))
