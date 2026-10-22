@@ -2474,6 +2474,7 @@ export class AgentSession implements SettingsScope {
 			configWarnings: config.advisorConfigWarnings,
 			streamFn: config.advisorStreamFn,
 			transformProviderContext: config.transformProviderContext,
+			onHistoryChanged: config.onHistoryChanged,
 		});
 
 		const maintenanceHost: SessionMaintenanceHost = {

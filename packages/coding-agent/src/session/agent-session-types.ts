@@ -306,6 +306,14 @@ export interface AgentSessionConfig {
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	/**
+	 * Notified when an agent's history changes in a way that invalidates a
+	 * per-request cache pinned to the previous transcript: the history is
+	 * replaced wholesale, or the transcript grows or shrinks. Release seam for
+	 * session-scoped state that pins the transcript it was built from (the
+	 * date/cwd reminder's replay memo); advisors forward it to their own agents.
+	 */
+	onHistoryChanged?: () => void;
 	/** Stream wrapper for side-channel requests. */
 	sideStreamFn?: StreamFn;
 	/** Stream wrapper for advisor requests. */

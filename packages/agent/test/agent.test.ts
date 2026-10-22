@@ -1988,6 +1988,45 @@ describe("Agent — F3 in-place state mutation", () => {
 		expect(agent.state.pendingToolCalls.size).toBe(0);
 	});
 
+	it("emits history-changed from the transcript and queue mutations that invalidate a pinned cache", () => {
+		const seen: string[] = [];
+		const agent = new Agent({
+			onHistoryChanged: () => {
+				seen.push("changed");
+			},
+		});
+		// A committed turn grows the transcript: a cache pinned to the previous
+		// wire can never be replayed, so it must be released now.
+		agent.appendMessage({ role: "user", content: "x", timestamp: 1 });
+		expect(seen).toEqual(["changed"]);
+
+		agent.clearMessages();
+		expect(seen).toEqual(["changed", "changed"]);
+
+		agent.appendMessage({ role: "user", content: "y", timestamp: 2 });
+		agent.reset();
+		expect(seen).toEqual(["changed", "changed", "changed", "changed"]);
+
+		// One queue replaced or cleared wholesale is the same invalidation as
+		// replacing both: a cache that pinned the previous history is stale.
+		seen.length = 0;
+		agent.replaceQueue("steering", [{ role: "user", content: "s", timestamp: 3 }]);
+		expect(seen).toEqual(["changed"]);
+		agent.clearSteeringQueue();
+		expect(seen).toEqual(["changed", "changed"]);
+		agent.clearFollowUpQueue();
+		expect(seen).toEqual(["changed", "changed", "changed"]);
+		agent.clearAllQueues();
+		expect(seen).toEqual(["changed", "changed", "changed", "changed"]);
+
+		// Ordinary queue-local updates never reach it.
+		seen.length = 0;
+		agent.steer({ role: "user", content: "steer", timestamp: 4 });
+		agent.followUp({ role: "user", content: "follow", timestamp: 5 });
+		agent.popLastSteer();
+		agent.popLastFollowUp();
+		expect(seen).toEqual([]);
+	});
 	it("replaceMessages still snapshots the input (callers may keep mutating their array)", () => {
 		const agent = new Agent();
 		const external = [{ role: "user" as const, content: "x", timestamp: 1 }];

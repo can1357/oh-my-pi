@@ -4376,6 +4376,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		);
 		disposeCallbacks.add(() => blobBroker.dispose());
 		const dateCwdReminder = new DateCwdReminderInjector();
+		// A committed /compact (or any other wholesale replaceMessages) swaps the
+		// history under this session-scoped injector, and a committed turn grows
+		// it; either way its replay memo would keep the previous transcript
+		// reachable, so it is released as soon as the history changes.
+		const releaseDateCwdReminderOnHistoryChange = () => dateCwdReminder.release();
 		// Always installed; the getter-backed options are snapshotted per request,
 		// so `snapcompact.*` changes apply on the next call (a no-op while both are off).
 		const snapcompactInline = new SnapcompactInlineTransformer(
@@ -4529,6 +4534,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const speculativeToolExecution = createSpeculativeToolExecutionConfig(settings, toolSession, extensionRunner);
 
 		agent = new Agent({
+			onHistoryChanged: releaseDateCwdReminderOnHistoryChange,
 			initialState: {
 				systemPrompt,
 				model,
@@ -4833,6 +4839,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			mcpManagerToolNames: initialMcpManagerToolNames,
 			transformContext,
 			transformProviderContext,
+			// Advisors run the same session-scoped provider transform, so their
+			// history discards must release its replay memo too.
+			onHistoryChanged: releaseDateCwdReminderOnHistoryChange,
 			onPayload,
 			onResponse,
 			sideStreamFn: settingsAwareStreamFn,
@@ -5384,6 +5393,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const captureDateCwdReminder = new DateCwdReminderInjector();
 				return new Agent({
 					...captureOptions,
+					onHistoryChanged: () => captureDateCwdReminder.release(),
 					cwd: sessionManager.getCwd(),
 					cwdResolver: () => sessionManager.getCwd(),
 					convertToLlm: convertToLlmFinal,
