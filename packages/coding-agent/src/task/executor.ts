@@ -3823,8 +3823,9 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					hasCandidate,
 				);
 			}
-			// Synchronously after the verdict, before finalization awaits anything.
-			if (hasCandidate()) newestPublished = Math.max(newestPublished, observationSeq);
+			// Synchronously after the verdict, before finalization awaits anything. An
+			// unjudgeable reply (an errored or aborted turn) publishes nothing.
+			if (judgeable && hasCandidate()) newestPublished = Math.max(newestPublished, observationSeq);
 			const activeSession = turnMonitor.takeActiveSession();
 			if (activeSession) turnMonitor.captureSalvage(activeSession);
 			const lastAssistant = session.getLastAssistantMessage();
