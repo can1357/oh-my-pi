@@ -56,15 +56,15 @@
 - `setProcessName()` no longer assigns `process.title` on Windows, where it overwrites the shared console title ([#16842](https://github.com/can1357/oh-my-pi/issues/16842))
 - Fixed inline code spans rendering flush against the surrounding text when a backslash preceded the closing backtick ([#16972](https://github.com/can1357/oh-my-pi/pull/16972) by [@akainth015](https://github.com/akainth015))
 
+### Fixed
+
+- Fixed `readSalvageableRows()` skipping every readable row trapped between two separate damaged regions, so damaged-store recovery of input history, session titles, and recaps keeps the rows that were still readable ([#16144](https://github.com/can1357/oh-my-pi/pull/16144) by [@jchanghong023](https://github.com/jchanghong023))
+
 ## [18.12.6] - 2026-10-21
 
 ### Added
 
 - Added `RpcConnection.requestCancellable()` and `Client.requestPermission(params, { signal })`; client connections abort a handler and answer `-32800` when the peer sends `$/cancel_request`, while agent connections keep running the request and return its real result ([#15885](https://github.com/can1357/oh-my-pi/pull/15885) by [@marcintustin](https://github.com/marcintustin))
-
-### Fixed
-
-- Fixed `readSalvageableRows()` skipping every readable row trapped between two separate damaged regions, so damaged-store recovery of input history, session titles, and recaps keeps the rows that were still readable ([#16144](https://github.com/can1357/oh-my-pi/pull/16144) by [@jchanghong023](https://github.com/jchanghong023))
 
 ## [18.12.4] - 2026-10-20
 
