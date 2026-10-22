@@ -9,34 +9,6 @@ export interface AtomicWriteOptions {
 	beforePublish?: () => Promise<void>;
 }
 
-/** Write a file through a synced sibling before publishing it. */
-export async function writeFileAtomically(
-	filePath: string,
-	content: string,
-	options: AtomicWriteOptions = {},
-): Promise<void> {
-	await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-	const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-	let removeTemp = false;
-	try {
-		const handle = await fs.promises.open(tempPath, "wx", 0o600);
-		removeTemp = true;
-		try {
-			// `open` applies the umask; chmod sets the exact bits before any content lands in the file.
-			if (options.mode !== undefined) await handle.chmod(options.mode);
-			await handle.writeFile(content, "utf8");
-			await handle.sync();
-		} finally {
-			await handle.close();
-		}
-		await options.beforePublish?.();
-		await replaceFileAtomically(tempPath, filePath);
-		removeTemp = false;
-	} finally {
-		if (removeTemp) await fs.promises.rm(tempPath, { force: true });
-	}
-}
-
 /**
  * Publish a staged sibling file atomically, preserving an existing destination
  * across Windows `EPERM`/`EEXIST` replacement failures.
@@ -103,9 +75,15 @@ async function replaceAfterWindowsRenameFailure(
  *
  * The staged file is created with `mode` (0600 by default) and published with
  * that mode, so the destination stays readable only by its owner even when it
- * carries a secret.
+ * carries a secret. Missing parent directories are created.
  */
-export async function writeFileAtomically(filePath: string, content: string, mode: number = 0o600): Promise<void> {
+export async function writeFileAtomically(
+	filePath: string,
+	content: string,
+	options: AtomicWriteOptions = {},
+): Promise<void> {
+	const mode = options.mode ?? 0o600;
+	await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
 	const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	let removeTemp = false;
 	try {
@@ -119,6 +97,7 @@ export async function writeFileAtomically(filePath: string, content: string, mod
 		}
 		// The umask narrows the mode passed to open(); restore it explicitly.
 		await fs.promises.chmod(tempPath, mode);
+		await options.beforePublish?.();
 		await replaceFileAtomically(tempPath, filePath);
 		removeTemp = false;
 	} finally {
