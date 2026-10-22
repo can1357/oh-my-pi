@@ -95,7 +95,7 @@ export class SubagentStopHook {
 			session_file: session.sessionFile,
 			parent_session_id: this.#identity.parentSessionId,
 			parent_session_file: this.#identity.parentSessionFile,
-			messages: session.messages,
+			messages: [...session.messages],
 			last_assistant_message: session.getLastAssistantMessage(),
 			stop_hook_active: this.#active,
 			signal: this.#signal,
