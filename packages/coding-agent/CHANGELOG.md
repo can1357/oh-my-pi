@@ -1,15 +1,14 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed a resumed session rebuilding its memory block from disk, so a `learn` call or a consolidation in another session no longer makes the next turn rewrite the whole prompt cache ([#15704](https://github.com/can1357/oh-my-pi/issues/15704), [#16465](https://github.com/can1357/oh-my-pi/pull/16465) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 
-
-### Fixed
-
-- Fixed a resumed session rebuilding its memory block from disk, so a `learn` call or a consolidation in another session no longer makes the next turn rewrite the whole prompt cache ([#15704](https://github.com/can1357/oh-my-pi/issues/15704), [#16465](https://github.com/can1357/oh-my-pi/pull/16465) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ## [18.12.6] - 2026-10-21
 
 ### Added
