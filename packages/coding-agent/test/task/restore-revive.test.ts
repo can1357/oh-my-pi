@@ -12,6 +12,8 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { Effort } from "@oh-my-pi/pi-ai";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { SubagentStopEvent } from "@oh-my-pi/pi-coding-agent/extensibility/shared-events";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -84,8 +86,11 @@ const thinking = { mode: "effort", efforts: [Effort.Medium, Effort.High] } as co
  * the `read` results and efforts each model saw when the cut-off call ran again.
  * `handoff` records a prewalk handoff to `high` effort before the cut-off call;
  * `fallback` follows that handoff with a retry fallback hop back to the spawn model.
+ * `preparedExtensions` are the top-level session's extensions the revived child inherits.
  */
-async function restoreInterruptedChild(options: { transcript?: "handoff" | "fallback" } = {}) {
+async function restoreInterruptedChild(
+	options: { transcript?: "handoff" | "fallback"; preparedExtensions?: PreparedExtension[] } = {},
+) {
 	const cwd = path.join(root, "home", "work");
 	await fs.mkdir(cwd, { recursive: true });
 	const notes = path.join(cwd, "notes.txt");
@@ -173,6 +178,8 @@ async function restoreInterruptedChild(options: { transcript?: "handoff" | "fall
 		defaultThinkingLevel: Effort.Medium,
 	});
 	const session = {
+		sessionId: "main-session-1",
+		sessionFile: mainFile,
 		sessionManager: {
 			getSessionFile: () => mainFile,
 			getCwd: () => cwd,
@@ -181,7 +188,7 @@ async function restoreInterruptedChild(options: { transcript?: "handoff" | "fall
 		asyncJobManager: manager,
 		settings,
 		effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
-		preparedExtensions: undefined,
+		preparedExtensions: options.preparedExtensions,
 		restoreInterruptedTurn: async () => false,
 	} as unknown as AgentSession;
 	AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
@@ -196,7 +203,7 @@ async function restoreInterruptedChild(options: { transcript?: "handoff" | "fall
 	try {
 		const outcome = await restoreSession(session);
 		expect(outcome.subagents).toEqual([AGENT_ID]);
-		return { delivered: await delivered.promise, readResults, readEfforts };
+		return { delivered: await delivered.promise, readResults, readEfforts, mainFile };
 	} finally {
 		authStorage.close();
 	}
@@ -225,4 +232,31 @@ it("revives a subagent whose handoff target failed over on the spawn model, not 
 	expect(delivered).toContain(`restored: 42 (${SPAWN_MODEL})`);
 	expect(readResults[SPAWN_MODEL]).toHaveLength(1);
 	expect(readResults[HANDOFF_MODEL]).toEqual([]);
+}, 20_000);
+
+it("reports the restored subagent's definition and spawning session to subagent_stop", async () => {
+	const stopEvents: SubagentStopEvent[] = [];
+	const { delivered, mainFile } = await restoreInterruptedChild({
+		preparedExtensions: [
+			{
+				path: "<stop-recorder>",
+				resolvedPath: "<stop-recorder>",
+				factory: pi => {
+					pi.on("subagent_stop", event => {
+						stopEvents.push(event);
+					});
+				},
+				error: null,
+			},
+		],
+	});
+
+	expect(delivered).toContain(`restored: 42 (${SPAWN_MODEL})`);
+	expect(stopEvents).toHaveLength(1);
+	expect(stopEvents[0]).toMatchObject({
+		agent_id: AGENT_ID,
+		agent_type: "task",
+		parent_session_id: "main-session-1",
+		parent_session_file: mainFile,
+	});
 }, 20_000);
