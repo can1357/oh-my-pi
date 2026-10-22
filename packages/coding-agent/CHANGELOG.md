@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed `wait` and `proc://<id>/kill` reporting a settled job as "not auto-delivered; recovered by this snapshot" when the call itself handed the result over, when the snapshot superseded the job's queued completion push, or when the result was genuinely late; the delivery line now says which of the three it is ([#16052](https://github.com/can1357/oh-my-pi/issues/16052), [#16134](https://github.com/can1357/oh-my-pi/pull/16134) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -33,10 +36,6 @@
 - Fixed `history://<id>` failing with "has no transcript: session is gone" for a worker that is still running but has not created its session or transcript file yet; it now answers "No transcript has been written yet". ([#16645](https://github.com/can1357/oh-my-pi/pull/16645) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
 
-
-### Fixed
-
-- Fixed `wait` and `proc://<id>/kill` reporting a settled job as "not auto-delivered; recovered by this snapshot" when the call itself handed the result over, when the snapshot superseded the job's queued completion push, or when the result was genuinely late; the delivery line now says which of the three it is ([#16052](https://github.com/can1357/oh-my-pi/issues/16052), [#16134](https://github.com/can1357/oh-my-pi/pull/16134) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ## [18.12.6] - 2026-10-21
 
 ### Added
