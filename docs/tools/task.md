@@ -78,7 +78,7 @@ Background response (`async.enabled=true`):
 - Live progress streams into the same tool block via `onUpdate(...)`; final results arrive as async-result injections. Non-isolated completions get an idle/follow-up hint when messaging is enabled. Aborted agents that can be resumed get a resume hint; isolated runs point at the transcript. The current `task-follow-up.md` template still labels isolated runs non-resumable, despite the retained-workspace lifecycle described below.
 
 Settled response (`async.enabled=false`, no job manager, every item's agent `blocking: true`, or async job body):
-- `content`: summary rendered from `packages/coding-agent/src/prompts/tools/task-summary.md` with a preview capped at 5000 chars; `agent://<id>` holds the full output. A sync batch concatenates the per-spawn summaries.
+- `content`: summary rendered from `packages/coding-agent/src/prompts/tools/task-summary.md`; output up to 11500 chars is inline whole, longer output shows a 5000-char preview and `agent://<id>` holds the full output. A sync batch concatenates the per-spawn summaries.
 - `details.results`: one `SingleResult` per spawn; `usage`, `outputPaths` populated (aggregated across spawns for a sync batch).
 
 `SingleResult` includes:
@@ -175,7 +175,7 @@ Artifacts and side channels:
 - Soft request budget: `task.softRequestBudget` defaults to 200 requests (`0` disables). Crossing it injects a wrap-up notice when `task.softRequestBudgetNotice` is enabled; at 1.5× the budget the run is force-stopped to yield partial findings. Bundled scout/sonic agents cap it at 100; the setting can lower that cap but not raise it. An exact-name `task.agentSoftRequestBudget` entry (`lead: 400`) replaces both for that agent, in either direction; `0` there disables its guard.
 - Hard wall clock: `task.maxRuntimeMs` applies to every spawn; default `0` disables it.
 - Recursion depth: `task.maxRecursionDepth` defaults to `2`; negative values disable the cap. The tool registry and shared preflight enforce it, and `runSubprocess(...)` strips child `task` access at max depth.
-- Inline summaries use `FULL_OUTPUT_THRESHOLD = 5000` characters in `packages/coding-agent/src/task/result-summary.ts`; truncation requires a full output artifact. `agent://<id>` points to that artifact.
+- Inline summaries carry output up to `INLINE_OUTPUT_CHARS` (11500) characters whole (`packages/coding-agent/src/task/result-summary.ts`), keeping the envelope under async delivery's `ASYNC_INLINE_RESULT_MAX_CHARS` (12000); an envelope that a long `<error>` or `<merge-summary>` would push past that cap, and any longer output, gets a `PREVIEW_CHARS = 5000` head instead, which requires a full output artifact. `agent://<id>` points to that artifact.
 
 ## Errors
 - Shape/preflight failures return `isError: true`, explanatory text, and empty `results`:

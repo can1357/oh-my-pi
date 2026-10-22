@@ -31,6 +31,7 @@ import {
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, type CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { formatTaskResultSummary, INLINE_OUTPUT_CHARS } from "@oh-my-pi/pi-coding-agent/task/result-summary";
 
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
@@ -174,6 +175,70 @@ describe("AgentSession owner-routed async delivery", () => {
 		await session.settleAsyncWork();
 		const recent = session.getAsyncJobSnapshot()?.recent ?? [];
 		expect(recent.find(job => job.id === "proc-job")?.command).toBe(command);
+	});
+
+	it("delivers a background task's whole inline report without cutting it again", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Lead",
+			asyncJobManager: manager,
+		});
+
+		// The largest report the envelope inlines whole, ending in a finding the
+		// parent must see: async delivery must not cut the envelope a second time.
+		const ending = "FINAL FINDING: the cache key omits the locale.";
+		const output = "finding detail ".repeat(1000).slice(0, INLINE_OUTPUT_CHARS - ending.length) + ending;
+		expect(output.length).toBe(INLINE_OUTPUT_CHARS);
+		const envelope = formatTaskResultSummary(
+			{
+				index: 0,
+				id: "Reviewer",
+				agent: "reviewer",
+				agentSource: "bundled",
+				task: "review",
+				exitCode: 0,
+				output,
+				stderr: "",
+				truncated: false,
+				durationMs: 1000,
+				tokens: 10,
+				requests: 2,
+				outputPath: "/tmp/Reviewer.md",
+				outputMeta: { lineCount: 1, charCount: output.length },
+			},
+			{ totalDurationMs: 1000 },
+		);
+		expect(envelope).toContain("<output>");
+		manager.register("task", "review", async () => envelope, { id: "Reviewer", ownerId: "Lead" });
+		await session.settleAsyncWork();
+
+		const delivered = mock.calls
+			.flatMap(call => call.context.messages)
+			.map(message =>
+				typeof message.content === "string"
+					? message.content
+					: message.content.map(block => (block.type === "text" ? block.text : "")).join("\n"),
+			)
+			.find(text => text.includes("<task-result"));
+		expect(delivered).toContain(`${ending}\n</output>`);
+		expect(delivered).toContain("</task-result>");
+		expect(delivered).not.toContain("Output truncated");
 	});
 
 	it("does not spill an incomplete background capture as full output during follow-up delivery", async () => {
