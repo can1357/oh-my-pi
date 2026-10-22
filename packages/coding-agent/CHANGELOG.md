@@ -1,9 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
-
-- Fixed an extension command's failed compaction never reaching `onError`: a compaction rejected because another one is already running now reports through the same once-only reporter as the shared adapter ([#12041](https://github.com/can1357/oh-my-pi/issues/12041), [#16460](https://github.com/can1357/oh-my-pi/pull/16460) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -401,6 +398,7 @@
 - Fixed a turn that ended with background jobs still running looking stuck: the working row now says it is waiting for those jobs and names them instead of repeating the last tool call, and Esc ends the wait, so the jobs keep running and their results land in context for your next prompt instead of starting a new turn ([#17032](https://github.com/can1357/oh-my-pi/pull/17032) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
+- Fixed an extension command's failed compaction never reaching `onError`: a compaction rejected because another one is already running now reports through the same once-only reporter as the shared adapter ([#12041](https://github.com/can1357/oh-my-pi/issues/12041), [#16460](https://github.com/can1357/oh-my-pi/pull/16460) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Honored `display_name`, `context_window`, and `input_modalities` when a model list nests them under `metadata`, so codex-lb-style gateways surface the advertised name, window, and image input instead of the raw id and defaults. ([#17010](https://github.com/can1357/oh-my-pi/pull/17010) by [@adi-IL](https://github.com/adi-IL))
 - Recovered spilled tool output in sessions without an artifacts directory: the `artifact://` link the truncation footer advertises now reads the in-memory copy instead of failing with "No session - artifacts unavailable". ([#17009](https://github.com/can1357/oh-my-pi/pull/17009) by [@adi-IL](https://github.com/adi-IL))
