@@ -7,8 +7,8 @@
  * cache), else uploads it with verb `b` before the frame that first
  * references it.
  */
-import * as url from "node:url";
 import type { TspProps } from "@oh-my-pi/pi-wire";
+import { tryFileUri } from "../render/hyperlink";
 import { resolveImageOptions } from "../render/render-utils";
 import { getImageDimensions } from "../terminal-capabilities";
 import { node } from "./describe";
@@ -100,7 +100,8 @@ export function base64ImageNode(
  * context menu. Empty without a file.
  */
 export function openableImageProps(filePath: string | undefined): Pick<TspProps<"image">, "href" | "actions"> {
-	return filePath ? { href: url.pathToFileURL(filePath).href, actions: { menu: ["open"] } } : {};
+	const href = filePath ? tryFileUri(filePath) : undefined;
+	return href ? { href, actions: { menu: ["open"] } } : {};
 }
 
 /**

@@ -5,6 +5,7 @@ import { getMarkdownTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import {
 	applyHyperlinkSetting,
 	fileHyperlink,
+	fileLinkSpan,
 	fileUriForTerminal,
 	isHyperlinkEnabled,
 	uriHyperlink,
@@ -12,6 +13,8 @@ import {
 	urlHyperlinkAlways,
 } from "@oh-my-pi/pi-tui/render/hyperlink";
 import * as terminalCaps from "@oh-my-pi/pi-tui";
+import { openableImageProps } from "../src/native/blobs";
+import { fileHref } from "../src/tools/native-view";
 
 // OSC 8 sequence markers
 const OSC = "\x1b]";
@@ -166,8 +169,9 @@ describe("fileHyperlink", () => {
 	it("encodes reserved path bytes in vscode://file targets without hiding the location", () => {
 		const uri = fileUriForTerminal("/Users/foo/a#b?c% d.ts", { line: 42, col: 7 }, "vscode");
 		expect(uri).toBe("vscode://file/Users/foo/a%23b%3Fc%25%20d.ts:42:7");
-		expect(new URL(uri).search).toBe("");
-		expect(new URL(uri).hash).toBe("");
+		// The vscode:// branch never builds a `file:` URL, so it always has a target.
+		expect(new URL(uri!).search).toBe("");
+		expect(new URL(uri!).hash).toBe("");
 		expect(fileUriForTerminal("C:\\Users\\foo bar\\a.ts", { line: 4 }, "vscode")).toBe(
 			"vscode://file/C:/Users/foo%20bar/a.ts:4",
 		);
@@ -179,6 +183,31 @@ describe("fileHyperlink", () => {
 			expect(fileUriForTerminal(filePath, { line: 42, col: 7 }, terminalId)).toBe(url.pathToFileURL(filePath).href);
 		}
 	});
+
+	it("keeps a path with a lone surrogate link-free on the VS Code family", () => {
+		setHyperlinkMode("always");
+		// encodeURIComponent throws URIError on a lone surrogate, which a
+		// model-authored path can carry; the row must keep its text.
+		const filePath = "/tmp/\uD800";
+		expect(fileUriForTerminal(filePath, { line: 3 }, "vscode")).toBeUndefined();
+		expect(() => fileHyperlink(filePath, "odd.ts")).not.toThrow();
+	});
+
+	it.skipIf(process.platform !== "win32")(
+		"renders a path Node cannot encode as plain text instead of throwing",
+		() => {
+			setHyperlinkMode("always");
+			// A UNC path escaped twice by its author, as a resumed session can still
+			// hold it: Node rejects it with ERR_INVALID_ARG_VALUE ("Empty UNC servername").
+			const malformed = String.raw`\\\wsl.localhost\Ubuntu-24.04\opt\build-armv7\crypto\evp.h`;
+			expect(fileUriForTerminal(malformed, undefined, "kitty")).toBeUndefined();
+			expect(fileHyperlink(malformed, "evp.h")).toBe("evp.h");
+			expect(fileLinkSpan(malformed, "evp.h")).toEqual({ t: "evp.h", s: "path" });
+			// Native heads and image props share the same converter.
+			expect(fileHref(malformed)).toBeUndefined();
+			expect(openableImageProps(malformed)).toEqual({});
+		},
+	);
 
 	it("produces a stable id for the same path", () => {
 		setHyperlinkMode("always");
