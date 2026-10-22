@@ -847,6 +847,24 @@ export function isRustAnalyzerClient(client: LspClient): boolean {
 	);
 }
 
+/** Empty Rust diagnostics are meaningful only for files attached to a crate. */
+export async function assertRustDocumentAttached(client: LspClient, uri: string, signal?: AbortSignal): Promise<void> {
+	if (!isRustAnalyzerClient(client)) return;
+	const status = await sendRequest(
+		client,
+		"rust-analyzer/analyzerStatus",
+		{ textDocument: { uri } },
+		signal,
+		RUST_ANALYZER_STATUS_REQUEST_TIMEOUT_MS,
+	);
+	if (typeof status !== "string") {
+		throw new Error("Rust diagnostics unavailable: invalid analyzer workspace status");
+	}
+	if (status.startsWith("No workspaces") || status.includes("Does not belong to any crate")) {
+		throw new Error("Rust diagnostics unavailable: file is not attached to a crate in the current workspace");
+	}
+}
+
 function isRustAnalyzerStatusTimeout(err: unknown): boolean {
 	return err instanceof Error && err.message.startsWith("LSP request rust-analyzer/analyzerStatus timed out after ");
 }

@@ -11,6 +11,9 @@
 ### Fixed
 
 - Fixed the `/agents` and `/models` hubs in Tern squeezing the left sidebar as long lines (such as a streaming new-agent draft) widen the body pane
+### Fixed
+
+- Fixed LSP diagnostic cards labeling unavailable analysis as clean or hiding it beside findings ([#16674](https://github.com/can1357/oh-my-pi/pull/16674) by [@BrianHotopp](https://github.com/BrianHotopp))
 
 ## [18.12.4] - 2026-10-20
 

@@ -218,13 +218,14 @@ export function renderResult(
 				bodyLines: renderHover(codeBlockMatch, text, lines, expanded, theme),
 			};
 		}
-		if (errorMatch || warningMatch || hasStatusError) {
+		if (errorMatch || warningMatch || hasStatusError || text.includes(": Rust diagnostics unavailable")) {
 			const errorCount = errorMatch ? Number.parseInt(errorMatch[1], 10) : 0;
 			const warnCount = warningMatch ? Number.parseInt(warningMatch[1], 10) : 0;
+			const parsed = parseLspDiagnostics(lines);
 			return {
 				label: "Diagnostics",
-				state: errorCount > 0 ? "error" : warnCount > 0 ? "warning" : "success",
-				bodyLines: renderDiagnostics(errorMatch, warningMatch, lines, expanded, theme),
+				state: errorCount > 0 || parsed.failures.length > 0 ? "error" : warnCount > 0 ? "warning" : "success",
+				bodyLines: renderDiagnostics(errorMatch, warningMatch, parsed, expanded, theme),
 			};
 		}
 		if (refMatch) {
@@ -378,7 +379,7 @@ function formatDiagnosticLocation(file: string, line: number, col: number, theme
 function renderDiagnostics(
 	errorMatch: RegExpMatchArray | null,
 	warningMatch: RegExpMatchArray | null,
-	lines: string[],
+	parsed: LspDiagnosticsParse,
 	expanded: boolean,
 	theme: Theme,
 ): string[] {
@@ -386,7 +387,7 @@ function renderDiagnostics(
 	const warnCount = warningMatch ? Number.parseInt(warningMatch[1], 10) : 0;
 
 	const icon =
-		errorCount > 0
+		errorCount > 0 || parsed.failures.length > 0
 			? theme.styledSymbol("status.error", "error")
 			: warnCount > 0
 				? theme.styledSymbol("status.warning", "warning")
@@ -395,19 +396,20 @@ function renderDiagnostics(
 	const meta: string[] = [];
 	if (errorCount > 0) meta.push(`${errorCount} error${errorCount !== 1 ? "s" : ""}`);
 	if (warnCount > 0) meta.push(`${warnCount} warning${warnCount !== 1 ? "s" : ""}`);
+	if (parsed.failures.length > 0) meta.push(formatCount("server failure", parsed.failures.length));
 	if (meta.length === 0) meta.push("No issues");
 
-	const diagLines = lines.filter(l => l.includes(theme.status.error) || /:\d+:\d+/.test(l));
-	const parsedDiagnostics = diagLines
-		.map(line => parseDiagnosticMessage(line.trim()))
-		.filter((diag): diag is ParsedDiagnostic => diag !== null);
-	const fallbackDiagnostics: RawDiagnostic[] = diagLines.map(line => ({
-		raw: sanitizeDiagnosticDisplayText(line.trim()),
-	}));
+	const fallbackDiagnostics: RawDiagnostic[] = parsed.other
+		.filter(line => line.includes(theme.status.error) || /:\d+:\d+/.test(line))
+		.map(line => ({ raw: sanitizeDiagnosticDisplayText(line) }));
+	const findings: DiagnosticItem[] = parsed.diagnostics.length > 0 ? parsed.diagnostics : fallbackDiagnostics;
+	const items: DiagnosticItem[] =
+		parsed.failures.length > 0
+			? [...parsed.failures.map(message => ({ raw: sanitizeDiagnosticDisplayText(message) })), ...findings]
+			: findings;
 
 	if (expanded) {
 		let output = `${icon} ${theme.fg("dim", meta.join(theme.sep.dot))}`;
-		const items: DiagnosticItem[] = parsedDiagnostics.length > 0 ? parsedDiagnostics : fallbackDiagnostics;
 		for (let i = 0; i < items.length; i++) {
 			const item = items[i];
 			const isLast = i === items.length - 1;
@@ -432,10 +434,8 @@ function renderDiagnostics(
 	}
 
 	// Collapsed view
-	const previewItems: DiagnosticItem[] =
-		parsedDiagnostics.length > 0 ? parsedDiagnostics.slice(0, 3) : fallbackDiagnostics.slice(0, 3);
-	const remaining =
-		(parsedDiagnostics.length > 0 ? parsedDiagnostics.length : fallbackDiagnostics.length) - previewItems.length;
+	const previewItems = items.slice(0, 3);
+	const remaining = items.length - previewItems.length;
 	const clipped = previewItems.some(
 		item => !("raw" in item) && visibleWidth(formatDiagnosticMessage(item)) > TRUNCATE_LENGTHS.CONTENT,
 	);
@@ -827,6 +827,7 @@ function parseLspDiagnostics(lines: readonly string[]): LspDiagnosticsParse {
 		if (FILE_SUMMARY_RE.test(line)) continue;
 		const parsed = parseDiagnosticMessage(file && DIAGNOSTIC_AT_RE.test(line) ? `${file}:${line}` : line);
 		if (parsed) out.diagnostics.push(parsed);
+		else if (/: Rust diagnostics unavailable\b/.test(line)) out.failures.push(line.replace(STATUS_GLYPH_RE, ""));
 		else out.other.push(line);
 	}
 	return out;

@@ -79,13 +79,15 @@
 - `file: "*"`: `runWorkspaceDiagnostics()` detects every supported root-marker language in Rust → TypeScript → Go → Python order and runs up to two checkers concurrently. It runs `cargo check --message-format=short` for `Cargo.toml`, `npx tsc --noEmit` for `tsconfig.json`, `pyright` for `pyproject.toml` / `pyrightconfig.json`, and `go build` for `go.work` / `go.mod`. `go.work` takes precedence over `go.mod`: it reads `go work edit -json` and builds every `Use[].DiskPath/...` pattern (falling back to `./...`); a single module uses `./...`. Polyglot output contains ordered per-language sections. Unknown projects return a supported-marker message without spawning a checker.
 - Concrete file or glob: `resolveDiagnosticTargets()` treats non-globs as one target, otherwise expands a `Bun.Glob` up to `MAX_GLOB_DIAGNOSTIC_TARGETS`.
 - Per file, every matching server runs: custom clients call `lint(file)`; real LSP servers optionally wait for project load, capture `diagnosticsVersion`, `refreshFile()`, then `waitForDiagnostics()`. It accepts fresh push diagnostics (exact document versions immediately, otherwise a settled publish) and issues `textDocument/diagnostic` when the server supports pull diagnostics. A failed pull with no usable fresh publish is a server failure, not a clean result.
+- Rust file diagnostics query `rust-analyzer/analyzerStatus` for that document only before accepting an empty report. Non-empty diagnostics are returned without a membership lookup. The lookup has a one-second deadline within the tool's call budget. An unattached file or failed membership lookup reports analysis unavailable, even if another server returns an empty report or another target is clean. Other servers' findings are retained, and attached files can still return clean empty reports.
 - Results are deduplicated by range+message and severity-sorted.
 
 **Output text**
-- Single target with no issues from at least one successful server: `OK`, with a warning if other servers failed. Total server failure returns `details.success: false` and an explicit failure message.
-- Single target with issues: `<summary>:\n<grouped diagnostics>`.
-- Batch/glob target: one section per file, plus an initial truncation warning when the glob exceeds the file cap.
+- Single target with no issues from at least one successful server: `OK`, with a warning if other servers failed. Unavailable Rust crate coverage instead returns an explicit unavailable message and `details.success: false`. Total server failure also returns `details.success: false` and an explicit failure message.
+- Single target with issues: `<summary>:\n<grouped diagnostics>`. Findings remain visible when Rust crate coverage is unavailable, but `details.success` is false.
+- Batch/glob target: one section per file, plus an initial truncation warning when the glob exceeds the file cap. Any unavailable Rust target makes the aggregate `details.success` false without discarding other targets' results.
 - Workspace mode: `Workspace diagnostics (<detected descriptions>):\n<command output>`. An empty successful checker reports `No issues found`; a non-zero empty result reports that the workspace was not verified.
+- Server failures identify the configured servers. Arbitrary server error details stay in the logger; unavailable Rust crate coverage uses a fixed crate-verification reason.
 
 ### `definition`
 **Inputs**

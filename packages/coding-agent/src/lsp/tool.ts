@@ -19,6 +19,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-timeouts";
 import {
 	applyWorkspaceEditWithLsp,
+	assertRustDocumentAttached,
 	clearInitializationFailure,
 	getActiveClients,
 	getOrCreateClient,
@@ -323,6 +324,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const allServerNames = new Set<string>();
 			let totalServerAttempts = 0;
 			let totalServerSuccesses = 0;
+			let rustDiagnosticsUnavailable = false;
 			if (truncatedGlobTargets) {
 				results.push(
 					`${theme.status.warning} Pattern matched more than ${MAX_GLOB_DIAGNOSTIC_TARGETS} files; showing first ${MAX_GLOB_DIAGNOSTIC_TARGETS}. Narrow the glob or use workspace diagnostics.`,
@@ -343,11 +345,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const allDiagnostics: Diagnostic[] = [];
 				const failedServers: string[] = [];
 				let succeededServers = 0;
+				let fileRustDiagnosticsUnavailable = false;
 
 				// Query all applicable servers for this file
 				for (const [serverName, serverConfig] of servers) {
 					allServerNames.add(serverName);
 					totalServerAttempts++;
+					let checkingRustAttachment = false;
 					try {
 						throwIfAborted(signal);
 						if (serverConfig.createClient) {
@@ -382,6 +386,11 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							minVersion,
 							expectedDocumentVersion,
 						});
+						if (diagnostics.length === 0 && isRustAnalyzerClient(client)) {
+							checkingRustAttachment = true;
+							await assertRustDocumentAttached(client, uri, signal);
+							checkingRustAttachment = false;
+						}
 						allDiagnostics.push(...diagnostics);
 						succeededServers++;
 						totalServerSuccesses++;
@@ -390,11 +399,16 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							throw err;
 						}
 						// Server failed; record it so a total failure is not reported as clean.
+						const error = err instanceof Error ? err.message : String(err);
 						failedServers.push(serverName);
+						if (checkingRustAttachment) {
+							fileRustDiagnosticsUnavailable = true;
+							rustDiagnosticsUnavailable = true;
+						}
 						logger.debug("LSP diagnostics server failed", {
 							server: serverName,
 							file: relPath,
-							error: err instanceof Error ? err.message : String(err),
+							error,
 						});
 					}
 				}
@@ -411,14 +425,20 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 
 				sortDiagnostics(uniqueDiagnostics);
+				const unavailableStatus = fileRustDiagnosticsUnavailable
+					? `${theme.status.error} ${relPath}: Rust diagnostics unavailable (crate membership could not be verified)`
+					: undefined;
 
 				if (!detailed && targets.length === 1) {
 					if (succeededServers === 0) {
+						const failure =
+							unavailableStatus ??
+							`${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`;
 						return {
 							content: [
 								{
 									type: "text",
-									text: `${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
+									text: failure,
 								},
 							],
 							details: { action, serverName: Array.from(allServerNames).join(", "), success: false },
@@ -426,34 +446,45 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					}
 
 					if (uniqueDiagnostics.length === 0) {
-						const text =
-							failedServers.length > 0
-								? `OK\n${theme.status.warning} some servers failed: ${failedServers.join(", ")}`
-								: "OK";
+						let text = unavailableStatus ?? "OK";
+						if (failedServers.length > 0) {
+							text += `\n${theme.status.warning} some servers failed: ${failedServers.join(", ")}`;
+						}
 						return {
 							content: [{ type: "text", text }],
-							details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
+							details: {
+								action,
+								serverName: Array.from(allServerNames).join(", "),
+								success: !fileRustDiagnosticsUnavailable,
+							},
 						};
 					}
 
 					const summary = formatDiagnosticsSummary(uniqueDiagnostics);
 					const formatted = uniqueDiagnostics.map(d => formatDiagnostic(d, relPath));
 					let output = `${summary}:\n${formatGroupedDiagnosticMessages(formatted)}`;
+					if (unavailableStatus) {
+						output += `\n${unavailableStatus}`;
+					}
 					if (failedServers.length > 0) {
 						output += `\n${theme.status.warning} some servers failed: ${failedServers.join(", ")}`;
 					}
 					return {
 						content: [{ type: "text", text: output }],
-						details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
+						details: {
+							action,
+							serverName: Array.from(allServerNames).join(", "),
+							success: !fileRustDiagnosticsUnavailable,
+						},
 					};
 				}
 
 				if (uniqueDiagnostics.length === 0) {
-					if (succeededServers === 0) {
+					if (succeededServers === 0 && !unavailableStatus) {
 						results.push(
 							`${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
 						);
-					} else {
+					} else if (!fileRustDiagnosticsUnavailable) {
 						results.push(`${theme.status.success} ${relPath}: no issues`);
 						if (failedServers.length > 0) {
 							results.push(
@@ -470,12 +501,19 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						results.push(`${theme.status.warning} ${relPath}: some servers failed (${failedServers.join(", ")})`);
 					}
 				}
+				if (unavailableStatus) {
+					results.push(unavailableStatus);
+				}
 			}
 
 			const allServersFailed = totalServerAttempts > 0 && totalServerSuccesses === 0;
 			return {
 				content: [{ type: "text", text: results.join("\n") }],
-				details: { action, serverName: Array.from(allServerNames).join(", "), success: !allServersFailed },
+				details: {
+					action,
+					serverName: Array.from(allServerNames).join(", "),
+					success: !allServersFailed && !rustDiagnosticsUnavailable,
+				},
 			};
 		}
 
