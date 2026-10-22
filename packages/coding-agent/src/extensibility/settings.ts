@@ -9,7 +9,12 @@ const EMPTY_STRING_ARRAY: string[] = [];
 
 export const cfgExtensions = register({ id: "extensions", type: "array", default: EMPTY_STRING_ARRAY });
 
-export const cfgDisabledExtensions = register({ id: "disabledExtensions", type: "array", default: EMPTY_STRING_ARRAY });
+export const cfgDisabledExtensions = register({
+	id: "disabledExtensions",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	pathScoped: { valuesKey: "extensions" },
+});
 
 // Skill registry (omp skill)
 export const cfgSkillsRegistryUrl = register({

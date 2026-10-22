@@ -27,7 +27,7 @@ export function createExtensionDashboardRuntime(options: {
 	const { cwd, settings, mcpManager, eventBus, onMcpToolsChanged, browserMcpFilterEnabled } = options;
 	return {
 		getDisabledExtensions: () => cfgDisabledExtensions.get(settings),
-		setDisabledExtensions: ids => cfgDisabledExtensions.set(settings, ids),
+		setExtensionDisabled: (id, disabled) => cfgDisabledExtensions.setMember(settings, id, { member: disabled }),
 		getProviders: () =>
 			getAllProvidersInfo().map(provider => ({
 				...provider,

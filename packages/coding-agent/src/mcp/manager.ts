@@ -204,6 +204,9 @@ export interface MCPLoadResult {
 	exaApiKeys: string[];
 }
 
+/** `disabledExtensions` id prefix of an MCP server (`mcp:<name>`, see `capability/mcp.ts`). */
+const MCP_EXTENSION_PREFIX = "mcp:";
+
 /** Readiness of configured MCP servers after the initial tool handshake. */
 export interface MCPStartupStatus {
 	/** Servers whose tools have been registered and whose startup callbacks completed. */
@@ -1379,6 +1382,80 @@ export class MCPManager {
 	async #discardConnection(name: string, connection: MCPServerConnection): Promise<void> {
 		this.#detachConnection(name, connection);
 		await disconnectServer(connection);
+	}
+
+	/**
+	 * Apply a change of the resolved `disabledExtensions` list (a `/move` or
+	 * cross-project resume into or out of a directory whose path-scoped entry
+	 * blocks `mcp:<name>`, or a config edit) and retarget the manager to `cwd`,
+	 * the directory later discovery reads and `roots/list` advertises.
+	 * Serialized with the other reconcilers and joined with in-flight discovery,
+	 * so a discovery that loaded the old list finishes before the new one
+	 * applies. Every disabled server is torn down, tools and retries included;
+	 * servers the new list allows again are rediscovered and connect. Resolves
+	 * to the connect result, whose `exaApiKeys` are those of the Exa definitions
+	 * the new list allows, or `undefined` when its `mcp:` ids did not change.
+	 */
+	reconcileDisabledExtensions(
+		cwd: string,
+		before: readonly string[],
+		after: readonly string[],
+	): Promise<MCPLoadResult | undefined> {
+		const reconcile = this.#browserFilterMutationTail.then(() => this.#applyDisabledExtensions(cwd, before, after));
+		this.#browserFilterMutationTail = reconcile.then(
+			() => undefined,
+			() => undefined,
+		);
+		return reconcile;
+	}
+
+	async #applyDisabledExtensions(
+		cwd: string,
+		before: readonly string[],
+		after: readonly string[],
+	): Promise<MCPLoadResult | undefined> {
+		await this.#discoveryInFlight;
+		this.cwd = cwd;
+		// Before the first discovery there is nothing to reconcile: it reads the list itself.
+		const options = this.#discoverOptions;
+		if (!options) return undefined;
+		const mcpNames = (ids: readonly string[]) => {
+			const names = new Set<string>();
+			for (const id of ids)
+				if (id.startsWith(MCP_EXTENSION_PREFIX)) names.add(id.slice(MCP_EXTENSION_PREFIX.length));
+			return names;
+		};
+		const wasDisabled = mcpNames(before);
+		const disabled = mcpNames(after);
+		if (wasDisabled.size === disabled.size && [...disabled].every(name => wasDisabled.has(name))) return undefined;
+		// Tear down every disabled server whatever its transport state: one whose
+		// transport dropped still keeps its tools, config and scheduled retry, and a
+		// discovery that loaded the old list may have connected one. No-op for
+		// servers the manager does not know.
+		await Promise.all([...disabled].map(name => this.disconnectServer(name)));
+		const allowed = [...wasDisabled].filter(
+			name => !disabled.has(name) && this.getConnectionStatus(name) === "disconnected",
+		);
+		// Always rediscover: besides the configs of newly allowed servers, it
+		// yields the Exa keys of the definitions the new list still allows.
+		const loaded = await this.loadConfigs(this.cwd, {
+			enableProjectConfig: options.enableProjectConfig,
+			filterExa: options.filterExa,
+			filterBrowser: options.filterBrowser,
+			extensionRoots: options.extensionRoots,
+		});
+		const configs: Record<string, MCPServerConfig> = {};
+		const sources: Record<string, SourceMeta> = {};
+		for (const name of allowed) {
+			const config = loaded.configs[name];
+			if (!config) continue;
+			configs[name] = config;
+			const source = loaded.sources[name];
+			if (source) sources[name] = source;
+		}
+		const result = await this.connectServers(configs, sources, options.onStatus, options.startupTimeoutMs);
+		result.exaApiKeys = loaded.exaApiKeys;
+		return result;
 	}
 
 	/**

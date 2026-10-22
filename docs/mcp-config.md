@@ -464,6 +464,17 @@ The active profile's user file supplies two cross-source overrides:
 
 `/mcp enable` and `/mcp disable` update `enabled` directly when the definition is in an OMP-owned writable file. OMP does not mutate another tool's config: for such sources, those commands maintain the user-level allowlist or denylist instead and remove a conflicting stale override.
 
+`disabledServers` applies in every directory. To hide a server only under some directories, list its `mcp:<name>` id in a [path-scoped `disabledExtensions` entry](./settings.md#path-scoped-arrays) in `config.yml`:
+
+```yaml
+disabledExtensions:
+  - path: ~/work
+    extensions:
+      - mcp:personal-mail
+```
+
+When a session changes directory (`/move` in the TUI or RPC mode, or resuming a session from another project), or a config edit changes the list, servers now blocked disconnect and their tools are removed; servers no longer blocked reconnect, with the session's current directory as their `roots/list` workspace root.
+
 ## `/mcp add` vs editing JSON directly
 
 Use `/mcp add` when you want guided setup.
