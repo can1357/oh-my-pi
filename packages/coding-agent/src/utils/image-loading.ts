@@ -10,10 +10,11 @@ import {
 import * as path from "node:path";
 import type { Context, ImageContent, Message, Model, ProviderPayload, TextContent } from "@oh-my-pi/pi-ai";
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
-import { isRecord, logger, readImageMetadata } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, readImageMetadata } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, type ImageResizeOptions, resizeImage } from "./image-resize";
+import { decodeStillImageJpeg, VideoError } from "./video";
 
 /** Largest edge rasterized from SVG before it enters the image pipeline. */
 const SVG_IMAGE_MAX_EDGE_PX = 2048;
@@ -393,6 +394,43 @@ export async function loadSvgImageInput(options: LoadImageInputOptions): Promise
 		resolvedPath,
 		textNotePrefix: "Read SVG file",
 		sourceMimeType: "image/svg+xml",
+		autoResize: options.autoResize,
+		maxBytes,
+		excludeWebP: options.excludeWebP,
+	});
+}
+
+/** Decodes a local HEIC, HEIF or AVIF still image with ffmpeg into a vision-model image input. */
+export async function loadHeifImageInput(
+	options: LoadImageInputOptions,
+	signal?: AbortSignal,
+): Promise<LoadedImageInput> {
+	const resolvedPath = options.resolvedPath ?? resolveReadPath(options.path, options.cwd);
+	const sourceMimeType = options.detectedMimeType ?? "image/heif";
+	const maxBytes = options.maxBytes ?? MAX_IMAGE_INPUT_BYTES;
+	const stat = await Bun.file(resolvedPath).stat();
+	if (stat.size > maxBytes) {
+		throw new ImageInputTooLargeError(stat.size, maxBytes);
+	}
+
+	let jpeg: Uint8Array;
+	try {
+		jpeg = await decodeStillImageJpeg(resolvedPath, maxBytes, signal);
+	} catch (error) {
+		if (!(error instanceof VideoError) || signal?.aborted) throw error;
+		const format = sourceMimeType.slice("image/".length).toUpperCase();
+		const cause = $which("ffmpeg") ? error.message : "Decoding it needs ffmpeg 8.1 or newer, which is not on PATH.";
+		throw new Error(
+			`Could not decode ${format} image. Convert it to PNG or JPEG (e.g. \`sips -s format jpeg -Z 4096\` on macOS) and read that file.\n${cause}`,
+		);
+	}
+
+	return loadInMemoryImageInput({
+		image: { type: "image", data: jpeg.toBase64(), mimeType: "image/jpeg" },
+		bytes: jpeg,
+		resolvedPath,
+		textNotePrefix: "Read image file",
+		sourceMimeType,
 		autoResize: options.autoResize,
 		maxBytes,
 		excludeWebP: options.excludeWebP,

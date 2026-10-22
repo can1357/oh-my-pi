@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `parseHeifImageMimeType()`, which identifies HEIC, HEIF and AVIF images from a file header ([#16612](https://github.com/can1357/oh-my-pi/pull/16612) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.12.6] - 2026-10-21
 
 ### Added
