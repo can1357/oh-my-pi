@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
+import { streamSimple } from "@oh-my-pi/pi-ai";
 import { convertAnthropicMessages, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import {
 	AnthropicMessages,
@@ -7,6 +8,7 @@ import {
 	type AnthropicRequestOptions,
 } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type {
+	MessageCreateParams,
 	ToolSearchToolResultBlockParam,
 	WebSearchToolResultBlockParam,
 } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
@@ -1998,9 +2000,9 @@ describe("anthropic stream envelope handling", () => {
 		expect(result.fallbackCreditHandle?.expiresAt).toBeGreaterThan(Date.now());
 	});
 
-	it("redeems fallback credit token with frozen request body and continuation prefill", async () => {
-		let capturedParams: any;
-		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(((params: any) => {
+	it("redeems fallback credit through simple streaming with frozen history and prefill", async () => {
+		let capturedParams: MessageCreateParams | undefined;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(params => {
 			capturedParams = params;
 			const successEvents: MockAnthropicEvent[] = [
 				{
@@ -2032,10 +2034,10 @@ describe("anthropic stream envelope handling", () => {
 				{ type: "message_stop" },
 			];
 			return createMockRequest(successEvents) as never;
-		}) as never);
+		});
 
 		const fallbackModel = { ...model, id: "claude-opus-4-8" };
-		const stream = streamAnthropic(fallbackModel, context, {
+		const stream = streamSimple(fallbackModel, context, {
 			apiKey: "sk-ant-test",
 			fallbackCreditRedemption: {
 				token: "fct_test_456",
@@ -2052,10 +2054,12 @@ describe("anthropic stream envelope handling", () => {
 			},
 		});
 		const result = await stream.result();
+		if (!capturedParams) throw new Error("Expected the Anthropic request to be sent");
 
 		expect(result.stopReason).toBe("stop");
 		expect(capturedParams.model).toBe("claude-opus-4-8");
 		expect(capturedParams.fallback_credit_token).toBe("fct_test_456");
+		expect(capturedParams.messages[0]).toEqual({ role: "user", content: "Hello world" });
 		expect(capturedParams.messages).toHaveLength(2);
 		expect(capturedParams.messages[1]).toEqual({
 			role: "assistant",

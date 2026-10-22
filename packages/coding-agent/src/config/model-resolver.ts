@@ -211,6 +211,22 @@ export function formatModelStringWithRouting(model: Model<Api>): string {
 	return upstream ? `${selector}@${upstream}` : selector;
 }
 
+/**
+ * Compare the selected model and request target while allowing session-fitted
+ * metadata, such as its context window, to differ.
+ */
+export function modelsHaveSameRequestTarget(actual: Model<Api> | undefined, expected: Model<Api>): boolean {
+	if (!actual) return false;
+	if (actual === expected) return true;
+	return (
+		modelsAreEqual(actual, expected) &&
+		actual.api === expected.api &&
+		actual.baseUrl === expected.baseUrl &&
+		actual.requestModelId === expected.requestModelId &&
+		(actual.compat === expected.compat || getSingleUpstreamRoute(actual) === getSingleUpstreamRoute(expected))
+	);
+}
+
 function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {
 	const colonIdx = modelId.lastIndexOf(":");
 	if (colonIdx === -1) {
