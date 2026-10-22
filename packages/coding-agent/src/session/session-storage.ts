@@ -609,18 +609,22 @@ function readSessionHeaderIdSync(sessionPath: string): string | undefined {
 	return undefined;
 }
 
+/** Session ids come from files and argv: anything but a plain token is hashed so it cannot name a path. */
+export function safeSessionKey(sessionId: string): string {
+	return /^[A-Za-z0-9_-]{1,128}$/.test(sessionId)
+		? sessionId
+		: `h-${Bun.hash.wyhash(sessionId).toString(16).padStart(16, "0")}`;
+}
+
 /**
  * The lock path of a session's ownership lease, shared by every acquirer and
  * prober so they cannot disagree on the name. Keyed by the session id from the
  * journal's header, not by the file's path, so every process that reaches the
  * journal (through a symlink, a hard link, or after a move) meets the same
- * lease. Ids read from a file are untrusted: anything but a plain token is
- * hashed so it cannot name a path outside the directory.
+ * lease. Ids read from a file are untrusted ({@link safeSessionKey}).
  */
 function sessionLeasePath(sessionId: string, createDir: boolean): string {
-	const name = /^[A-Za-z0-9_-]{1,128}$/.test(sessionId)
-		? sessionId
-		: `h-${Bun.hash.wyhash(sessionId).toString(16).padStart(16, "0")}`;
+	const name = safeSessionKey(sessionId);
 	const dir = sessionOwnersDir();
 	// Linux (abstract socket) and Windows (named mutex) locks never touch the
 	// filesystem; elsewhere the lock is a `flock` sidecar in that directory. The

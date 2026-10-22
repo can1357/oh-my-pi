@@ -1,4 +1,4 @@
-import { prompt } from "@oh-my-pi/pi-utils";
+import { escapeXmlAttribute, prompt } from "@oh-my-pi/pi-utils";
 import sessionPokeTemplate from "../prompts/session/session-poke.md" with { type: "text" };
 import type { SessionMail } from "./types";
 
@@ -36,7 +36,7 @@ function formatWallClock(ms: number): string {
  */
 export function renderMail(mail: SessionMail, now: number): string {
 	return prompt.render(sessionPokeTemplate, {
-		from: mail.poke.from,
+		from: escapeXmlAttribute(mail.poke.from),
 		sent: formatWallClock(Date.parse(mail.createdAt)),
 		// Untrusted text must not close the wrapper it is placed in.
 		text: mail.poke.text.replaceAll("</session-poke", "<\\/session-poke"),

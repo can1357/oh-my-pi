@@ -19,10 +19,12 @@ import {
 	isMailDone,
 	listClaimedMail,
 	listNewMail,
+	MAX_MAIL_ATTEMPTS,
 	newMailId,
 	postMail,
+	recordMailAttempt,
 } from "@oh-my-pi/pi-coding-agent/mailbox/mailbox";
-import { MAILBOX_DIR_ENV, MAILBOX_ENV } from "@oh-my-pi/pi-coding-agent/mailbox/paths";
+import { MAILBOX_DIR_ENV, MAILBOX_ENV, mailDir } from "@oh-my-pi/pi-coding-agent/mailbox/paths";
 import { listSessionPresence } from "@oh-my-pi/pi-coding-agent/mailbox/presence";
 import { SessionMailbox } from "@oh-my-pi/pi-coding-agent/mailbox/watcher";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -164,8 +166,7 @@ describe("session mailbox delivery", () => {
 		return { session: opened, mailbox };
 	}
 
-	async function poke(sessionId: string, text: string, force?: boolean): Promise<string> {
-		const id = newMailId("poke");
+	async function poke(sessionId: string, text: string, force?: boolean, id = newMailId("poke")): Promise<string> {
 		await postMail({
 			v: 1,
 			id,
@@ -175,6 +176,20 @@ describe("session mailbox delivery", () => {
 			poke: { text, from: "test", force },
 		});
 		return id;
+	}
+
+	/** Whether another process could take the session's write lease now (the lease is shared within a process). */
+	async function leaseFromAnotherProcess(sessionId: string): Promise<string> {
+		const probe = path.join(tempDir.path(), "lease-probe.ts");
+		await Bun.write(
+			probe,
+			`import { tryAcquireSessionLease } from ${JSON.stringify(SESSION_STORAGE_MODULE)};
+			const lease = tryAcquireSessionLease(${JSON.stringify(sessionId)});
+			console.log(lease ? "free" : "taken");
+			lease?.release();`,
+		);
+		const child = Bun.spawn(["bun", probe], { env: { ...process.env }, stdout: "pipe" });
+		return (await new Response(child.stdout).text()).trim();
 	}
 
 	/** Run a turn into the slow tool, then interrupt it the way Esc does. */
@@ -273,17 +288,42 @@ describe("session mailbox delivery", () => {
 		const sessionId = opened.sessionManager.getSessionId();
 		expect(deliveryTarget(sessionId)).toMatchObject({ kind: "live" });
 
-		// The lease is shared within a process, so another process probes it.
-		const probe = path.join(tempDir.path(), "lease-probe.ts");
-		await Bun.write(
-			probe,
-			`import { tryAcquireSessionLease } from ${JSON.stringify(SESSION_STORAGE_MODULE)};
-			const lease = tryAcquireSessionLease(${JSON.stringify(sessionId)});
-			console.log(lease ? "free" : "taken");
-			lease?.release();`,
+		expect(await leaseFromAnotherProcess(sessionId)).toBe("free");
+	});
+
+	it("moves a malformed message to failed/, leaves one only a newer omp reads, and delivers the mail behind both", async () => {
+		const { session: opened } = openSession();
+		const sessionId = opened.sessionManager.getSessionId();
+		const newDir = path.join(mailDir(sessionId), "new");
+		fs.mkdirSync(newDir, { recursive: true });
+		// Both sort ahead of every `poke-…` message.
+		fs.writeFileSync(path.join(newDir, "a-truncated.json"), '{"v":1,"id":"a-trunc');
+		fs.writeFileSync(
+			path.join(newDir, "a-future.json"),
+			JSON.stringify({ v: 1, id: "a-future", kind: "timer-fire", sessionId, createdAt: new Date().toISOString() }),
 		);
-		const child = Bun.spawn(["bun", probe], { env: { ...process.env }, stdout: "pipe" });
-		expect((await new Response(child.stdout).text()).trim()).toBe("free");
+
+		const mailId = await poke(sessionId, "BEHIND_BAD_MAIL");
+		await until(() => isMailDone(sessionId, mailId), "the poke behind the bad files to reach the transcript");
+		expect(requestTexts(contexts[0]!).at(-1)).toContain("BEHIND_BAD_MAIL");
+		expect(fs.readdirSync(path.join(mailDir(sessionId), "failed"))).toEqual(["a-truncated.json"]);
+		expect(listNewMail(sessionId)).toEqual(["a-future.json"]);
+	});
+
+	it("moves a message out of attempts to failed/ and leaves the write lease to the first writer", async () => {
+		const file = await savedSessionFile();
+		const sessionId = (await SessionManager.open(file)).getSessionId();
+		const name = `${await poke(sessionId, "NEVER_LANDS")}.json`;
+		// Consumers that each claimed it and died before it reached the session file.
+		claimMail(sessionId, name);
+		for (let attempt = 0; attempt < MAX_MAIL_ATTEMPTS; attempt++) recordMailAttempt(sessionId, name);
+
+		openSession(await SessionManager.open(file));
+		await until(() => listClaimedMail(sessionId).length === 0, "the left-behind claim to be settled");
+		expect(await leaseFromAnotherProcess(sessionId)).toBe("free");
+		expect(fs.readdirSync(path.join(mailDir(sessionId), "failed"))).toEqual([name]);
+		expect(listNewMail(sessionId)).toEqual([]);
+		expect(contexts).toHaveLength(0);
 	});
 
 	it("lets one of two session managers in a process consume the session's mail, so a poke is delivered once", async () => {
@@ -341,6 +381,23 @@ describe("session mailbox delivery", () => {
 		expect(contexts).toHaveLength(1);
 		expect(requestTexts(contexts[0]!).at(-1)).toContain("LEFT_BEHIND");
 		expect(listClaimedMail(sessionId)).toEqual([]);
+	});
+
+	it("does not count a left-behind claim as delivered when only other text in the session file names its id", async () => {
+		const mailId = newMailId("poke");
+		const { session: first } = openSession();
+		await first.prompt(`ls ~/.omp/agent/mailbox/mail/*/cur/${mailId}.json`);
+		const file = first.sessionManager.getSessionFile()!;
+		const sessionId = first.sessionManager.getSessionId();
+		await first.dispose();
+		contexts.length = 0;
+		await poke(sessionId, "ECHOED_POKE", false, mailId);
+		claimMail(sessionId, `${mailId}.json`);
+
+		openSession(await SessionManager.open(file));
+		await until(() => isMailDone(sessionId, mailId), "the recovered poke to reach the session file");
+		expect(contexts).toHaveLength(1);
+		expect(requestTexts(contexts[0]!).at(-1)).toContain("ECHOED_POKE");
 	});
 
 	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
