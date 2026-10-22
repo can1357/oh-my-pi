@@ -55,7 +55,8 @@ impl MacInput {
 	}
 
 	/// Delivers `event`; with `menu`, a click that opens a menu chooses that
-	/// item path in it.
+	/// item path in it. `entry_front` was read before anything asked the
+	/// target's application ([`EntryFront`]).
 	#[allow(
 		clippy::needless_pass_by_ref_mut,
 		reason = "`&mut self` exclusivity backs the `Send` safety argument for the CF event source"
@@ -66,6 +67,7 @@ impl MacInput {
 		event: PointerEvent,
 		menu: Option<&[String]>,
 		mode: DeliveryMode,
+		entry_front: EntryFront,
 		capture: &MacCapture,
 	) -> CoreResult<()> {
 		if menu.is_some() && !matches!(event, PointerEvent::Click { .. }) {
@@ -85,14 +87,10 @@ impl MacInput {
 				let (pid, wid) = window_identity(&window)?;
 				match mode {
 					DeliveryMode::Background => {
-						let (entry_front, (window, wid, in_overlay)) =
-							EntryFront::before(skylight::front_pid, || {
-								let (window, wid) = attached_window(capture, window, pid, wid, &event)?;
-								let in_overlay =
-									takes_overlay_focus(wid, ax::key_focus(pid), skylight::window_parent);
-								background_guard(&window, pid, &event)?;
-								Ok((window, wid, in_overlay))
-							})?;
+						let (window, wid) = attached_window(capture, window, pid, wid, &event)?;
+						let in_overlay =
+							takes_overlay_focus(wid, ax::key_focus(pid), skylight::window_parent);
+						background_guard(&window, pid, &event)?;
 						let owner = || -> CoreResult<(libc::pid_t, u32)> {
 							let owner = input_owner(
 								pid,
@@ -171,7 +169,8 @@ impl MacInput {
 				type_keys(&self.source, &unicode_keys(text), KEY_GAP, || Ok(()), post_global)
 			},
 			Target::Window(id) => {
-				self.window_type(&capture.window(id)?, text, mode, None)?;
+				let window = capture.window(id)?;
+				self.window_type(&window, text, mode, None, EntryFront::now())?;
 				Ok(())
 			},
 		}
@@ -191,13 +190,16 @@ impl MacInput {
 		match target {
 			Target::Desktop | Target::Display(_) => global_chord(&self.source, keys),
 			Target::Window(id) => {
-				self.window_chord(&capture.window(id)?, keys, mode, None)?;
+				let window = capture.window(id)?;
+				self.window_chord(&window, keys, mode, None, EntryFront::now())?;
 				Ok(())
 			},
 		}
 	}
 
-	/// Types or presses `input` into `element`, an element of window `id`.
+	/// Types or presses `input` into `element`, an element of window `id`;
+	/// `entry_front` was read before anything asked the element's application
+	/// ([`EntryFront`]).
 	#[allow(
 		clippy::needless_pass_by_ref_mut,
 		reason = "`&mut self` exclusivity backs the `Send` safety argument for the CF event source"
@@ -208,12 +210,17 @@ impl MacInput {
 		element: &AXUIElement,
 		input: &ElementInput,
 		mode: DeliveryMode,
+		entry_front: EntryFront,
 		capture: &MacCapture,
 	) -> CoreResult<ElementDelivery> {
 		let window = capture.window(id)?;
 		match input {
-			ElementInput::Text(text) => self.window_type(&window, text, mode, Some(element)),
-			ElementInput::Chord(keys) => self.window_chord(&window, keys, mode, Some(element)),
+			ElementInput::Text(text) => {
+				self.window_type(&window, text, mode, Some(element), entry_front)
+			},
+			ElementInput::Chord(keys) => {
+				self.window_chord(&window, keys, mode, Some(element), entry_front)
+			},
 		}
 	}
 
@@ -228,10 +235,9 @@ impl MacInput {
 		text: &str,
 		mode: DeliveryMode,
 		element: Option<&AXUIElement>,
+		entry_front: EntryFront,
 	) -> CoreResult<ElementDelivery> {
 		let (pid, wid) = window_identity(window)?;
-		// Read before anything about the target ([`EntryFront::before`]).
-		let entry_front = EntryFront::now();
 		let remote = process::remote_screen(pid);
 		// A takeover write goes to the window brought to the front for it.
 		let behind_user = || match mode {
@@ -317,11 +323,9 @@ impl MacInput {
 		keys: &[KeyName],
 		mode: DeliveryMode,
 		element: Option<&AXUIElement>,
+		entry_front: EntryFront,
 	) -> CoreResult<ElementDelivery> {
 		let (pid, wid) = window_identity(window)?;
-		// Read before anything about the target ([`EntryFront::before`]): the
-		// layout lookup below may run a helper process.
-		let entry_front = EntryFront::now();
 		let remote = process::remote_screen(pid);
 		let gap = key_gap(remote);
 		let chord = chord_keys(window, keys, remote, layout_strokes)?;
