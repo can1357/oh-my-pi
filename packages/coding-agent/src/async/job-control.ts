@@ -221,6 +221,7 @@ export function snapshotJobs(
 			status: latest.status as JobSnapshot["status"],
 			label: latest.label,
 			durationMs: Math.max(0, (latest.endTime ?? now) - latest.startTime),
+			...(latest.endTime !== undefined ? { settledAtMs: latest.endTime } : {}),
 			...(exitCode !== undefined ? { exitCode } : {}),
 			...(resolvedModel ? { resolvedModel } : {}),
 			...(resolvedModelIdentity ? { resolvedModelIdentity } : {}),
@@ -246,6 +247,82 @@ export function snapshotJobs(
 	});
 }
 
+/** Ids of `ownerId`'s jobs that have already settled — a call's entry state. */
+export function settledJobIds(manager: AsyncJobManager, ownerId: string | undefined): Set<string> {
+	return new Set(
+		manager
+			.getAllJobs({ ownerId })
+			.filter(job => job.status !== "running")
+			.map(job => job.id),
+	);
+}
+
+/** Inputs that let a snapshot describe how a settled result reached its owner. */
+export interface JobResultOptions {
+	/**
+	 * Ids already settled when this call started, captured before its first
+	 * await. A settled job outside this set finished while the call was in
+	 * flight, so the call itself handed the result over. Membership is the
+	 * evidence — comparing timestamps would call a job settled in the same
+	 * millisecond as the call "delivered by it" (#16052 review).
+	 *
+	 * Absent for `jobs`, which never waits and therefore only ever reports
+	 * results it did not deliver.
+	 */
+	settledAtEntry?: ReadonlySet<string>;
+	/**
+	 * Epoch ms when this call started. Used only to state how long before the
+	 * call a genuinely late result had settled.
+	 */
+	startedAtMs?: number;
+}
+
+/**
+ * Model-facing delivery line for one settled job. Three very different
+ * situations used to read as the same "not auto-delivered" failure:
+ *
+ * - the job finished while this call was already running: the call is what
+ *   handed the result over — the completion push was never lost, the call
+ *   simply won the race;
+ * - it had already finished and its push was still queued when this snapshot
+ *   consumed it: the snapshot superseded that push, so the follow-up cannot
+ *   arrive — promising one would make the model expect a duplicate;
+ * - it had already finished and nothing is on the way: a genuinely late
+ *   result, reported with how long before the call it settled.
+ *
+ * A queued push this snapshot consumed is always reported as superseded:
+ * `consumeJobResults` re-checks `isDeliveryPending` per id before it
+ * acknowledges the queue, so every pending push the snapshot reads lands in
+ * the superseded set — a "push still on the way" line could never be reached.
+ */
+function describeDelivery(
+	job: JobSnapshot,
+	op: "wait" | "cancel" | "jobs",
+	options: JobResultOptions,
+	alreadyConsumed: boolean,
+	deliverySuperseded: boolean,
+): string {
+	if (alreadyConsumed) return "Delivery: already delivered or recovered.";
+	if (options.settledAtEntry !== undefined && !options.settledAtEntry.has(job.id)) {
+		const surface = op === "wait" ? "this wait" : "this call";
+		const when = op === "wait" ? "it finished while you were waiting" : "it finished as the call ran";
+		return `Delivery: delivered by ${surface} — ${when}.`;
+	}
+	const settledAt = job.settledAtMs;
+	const startedAt = options.startedAtMs;
+	const age =
+		settledAt !== undefined && startedAt !== undefined && startedAt > settledAt
+			? formatDuration(startedAt - settledAt)
+			: undefined;
+	if (deliverySuperseded) {
+		const before = age === undefined ? "" : ` (it finished ${age} before this call)`;
+		return `Delivery: handed over by this snapshot${before} — this snapshot superseded its queued completion push.`;
+	}
+	return `Delivery: not auto-delivered; recovered by this snapshot${
+		age === undefined ? "" : ` — it had already finished ${age} before this call`
+	}.`;
+}
+
 export function buildJobResult(
 	session: ToolSession,
 	manager: AsyncJobManager,
@@ -253,6 +330,7 @@ export function buildJobResult(
 	jobs: TrackedJobLike[],
 	cancelOutcomes: CancelOutcome[],
 	agents: AgentActivitySnapshot[] = [],
+	options: JobResultOptions = {},
 ): AgentToolResult<CoordinationDetails> {
 	// Deduplicate by id (cancelled jobs may also appear in the watched set).
 	const seen = new Set<string>();
@@ -267,6 +345,13 @@ export function buildJobResult(
 	if (op !== "jobs") {
 		manager.consumeJobResults(jobResults.filter(j => j.status !== "running").map(j => j.id));
 	}
+
+	// Read AFTER `consumeJobResults`: that call is what supersedes a queued push,
+	// so reading before it would always miss the jobs this snapshot handed over
+	// and the line would promise a follow-up that cannot arrive (#16135 review).
+	const deliverySuperseded = new Set(
+		jobResults.filter(job => manager.isDeliverySuperseded(job.id)).map(job => job.id),
+	);
 
 	const completed = jobResults.filter(j => j.status !== "running");
 	const running = jobResults.filter(j => j.status === "running");
@@ -302,11 +387,7 @@ export function buildJobResult(
 			lines.push(`### ${j.id} [${j.type}] — ${j.status}`);
 			lines.push(`Label: ${j.label}`);
 			if (j.status !== "cancelled") {
-				lines.push(
-					alreadyConsumed.has(j.id)
-						? "Delivery: already delivered or recovered."
-						: "Delivery: not auto-delivered; recovered by this snapshot.",
-				);
+				lines.push(describeDelivery(j, op, options, alreadyConsumed.has(j.id), deliverySuperseded.has(j.id)));
 			}
 			if (j.resultText) {
 				lines.push("```", j.resultText, "```");
@@ -376,7 +457,14 @@ export async function executeCancel(
 	manager: AsyncJobManager,
 	ownerId: string | undefined,
 	ids: string[],
+	options: { startedAtMs?: number; settledAtEntry?: ReadonlySet<string> } = {},
 ): Promise<AgentToolResult<CoordinationDetails>> {
+	// Same rule as `wait`: a job that settled after this call began is one this
+	// call is handing over, not a lost completion push (#16052). The caller may
+	// pass its own start time — `write proc://<id>/kill` awaits a broker lookup
+	// first, so stamping here would miss a job that settled during that await.
+	const callStartedAt = options.startedAtMs ?? Date.now();
+	const settledAtEntry = options.settledAtEntry ?? settledJobIds(manager, ownerId);
 	const cancelOutcomes: CancelOutcome[] = [];
 	for (const id of ids) {
 		const existing = manager.getJob(id);
@@ -411,7 +499,10 @@ export async function executeCancel(
 				: { id, status: "already_completed", message: `Background job ${id} is already completed.` },
 		);
 	}
-	return buildJobResult(session, manager, "cancel", visibleJobs(manager, ids, ownerId), cancelOutcomes);
+	return buildJobResult(session, manager, "cancel", visibleJobs(manager, ids, ownerId), cancelOutcomes, [], {
+		startedAtMs: callStartedAt,
+		settledAtEntry,
+	});
 }
 
 /**
