@@ -198,6 +198,37 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 		}
 	});
 
+	it("does not leak inherited IPC markers into allowed .envrc commands", async () => {
+		const root = tmp();
+		await Bun.write(
+			path.join(root, ".envrc"),
+			'export PI_DIRENV_IPC_OBSERVED="${NODE_CHANNEL_FD-unset}|${NODE_CHANNEL_SERIALIZATION_MODE-unset}|$PI_DIRENV_PARENT_TEST"\nexport PI_DIRENV_BUN_RESULT="$("$PI_DIRENV_BUN" probe.ts)"\n',
+		);
+		await Bun.write(path.join(root, "probe.ts"), "console.log(process.env.PI_DIRENV_PARENT_TEST);\n");
+		await allowEnvrc(root);
+		const inherited = {
+			NODE_CHANNEL_FD: "3",
+			NODE_CHANNEL_SERIALIZATION_MODE: "advanced",
+			PI_DIRENV_PARENT_TEST: "ordinary-parent-value",
+			PI_DIRENV_BUN: process.execPath,
+		};
+		const saved = Object.fromEntries(Object.keys(inherited).map(key => [key, Bun.env[key]]));
+		Object.assign(Bun.env, inherited);
+		try {
+			const diff = await loadDirenvEnv(root);
+			expect(diff?.set.PI_DIRENV_IPC_OBSERVED).toBe("unset|unset|ordinary-parent-value");
+			expect(diff?.set.PI_DIRENV_BUN_RESULT).toBe("ordinary-parent-value");
+			// Sanitizing the spawn must not break the host's own worker channel.
+			expect(Bun.env.NODE_CHANNEL_FD).toBe("3");
+			expect(Bun.env.NODE_CHANNEL_SERIALIZATION_MODE).toBe("advanced");
+		} finally {
+			for (const [key, value] of Object.entries(saved)) {
+				if (value === undefined) delete Bun.env[key];
+				else Bun.env[key] = value;
+			}
+		}
+	});
+
 	it("re-exports when the .envrc content changes (no stale cache)", async () => {
 		// direnv's allow entry is content-hashed, so each rewrite is re-allowed —
 		// mirroring what a user does after editing their own .envrc.
