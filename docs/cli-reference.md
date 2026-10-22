@@ -159,6 +159,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--skills <globs>` | Comma-separated glob patterns to filter [skills](./skills.md) (e.g. `git-*,docker`). |
 | `--no-skills` | Disable skills discovery and loading. |
 | `--no-rules` | Disable rules discovery and loading. See [context files](./context-files.md). |
+| `--no-context-files` | Disable [context files](./context-files.md) (`AGENTS.md`, `CLAUDE.md`, ...) for the working directory and every `--add-dir` root. Subagents inherit it. |
 
 #### System prompt
 

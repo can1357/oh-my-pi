@@ -88,6 +88,7 @@ export interface Args {
 	noSkills?: boolean;
 	skills?: string[];
 	noRules?: boolean;
+	noContextFiles?: boolean;
 	noTitle?: boolean;
 	/** RPC modes only: run extensions without a UI; `rpc-ui` tool UI remains enabled. */
 	noUi?: boolean;
@@ -378,6 +379,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noSkills = true;
 		} else if (arg === "--no-rules") {
 			result.noRules = true;
+		} else if (arg === "--no-context-files") {
+			result.noContextFiles = true;
 		} else if (arg === "--no-title") {
 			result.noTitle = true;
 		} else if (arg === "--no-ui") {
