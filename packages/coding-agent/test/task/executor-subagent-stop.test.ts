@@ -967,6 +967,40 @@ describe("runSubprocess subagent_stop", () => {
 		expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
 	});
 
+	it("drops an allowed candidate when the run is cancelled while the pass revalidates it", async () => {
+		const id = "CancelledDuringRevalidation";
+		const controller = new AbortController();
+		let stopAnswered = false;
+		let cancelled = false;
+		const harness = createHarness({
+			hasStopHandlers: true,
+			onPrompt: call => call.yieldTerminal({ report: call.text }),
+			onStop: async () => {
+				stopAnswered = true;
+				return undefined;
+			},
+			// After handlers allowed, the pass lets the child settle to see whether the candidate
+			// changed; the run is cancelled right there, so the allow was never revalidated.
+			onWaitForIdle: async () => {
+				if (!stopAnswered || cancelled) return;
+				cancelled = true;
+				controller.abort();
+				await Promise.withResolvers<void>().promise;
+			},
+		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+
+		const result = await runSubprocess({ ...baseOptions(id), signal: controller.signal });
+
+		expect(harness.events).toHaveLength(1);
+		expect(result.aborted).toBe(true);
+		expect(result.exitCode).not.toBe(0);
+		expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeUndefined();
+		expect(result.output).not.toContain("do the work");
+		expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
+	});
+
 	it("gates a resumed worker's turn through the same stop pass", async () => {
 		const id = "ResumedWorker";
 		const harness = createHarness({
