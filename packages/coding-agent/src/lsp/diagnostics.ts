@@ -21,6 +21,7 @@ import type {
 	TextEdit,
 } from "./types";
 import {
+	composeDiagnosticsSummary,
 	fileToUri,
 	formatDiagnostic,
 	formatDiagnosticsSummary,
@@ -208,6 +209,18 @@ interface WaitForDiagnosticsOptions {
 }
 
 /**
+ * Raised when a language server produced no verdict for a document: it neither
+ * published a report nor answered a pull request inside the wait budget. The
+ * file's state is unknown, so it must never be reported as clean (issue #15408).
+ */
+export class DiagnosticsUnavailableError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "DiagnosticsUnavailableError";
+	}
+}
+
+/**
  * Outcome of one document pull-diagnostic request.
  *
  * Distinguishes a usable report from a failed request so a timeout or RPC error
@@ -346,7 +359,13 @@ export async function waitForDiagnostics(
 		if (pullFailure !== undefined) {
 			throw pullFailure instanceof Error ? pullFailure : new Error(String(pullFailure));
 		}
-		return [];
+		// No verdict at all: the server published nothing for this document and
+		// never returned a report. An unjudged file is not a clean file — refuse
+		// the wait instead of handing back an empty list the caller renders as
+		// "OK" (issue #15408).
+		throw new DiagnosticsUnavailableError(
+			`${uriToFile(uri)}: no diagnostics published${pullAttempted ? " or pulled" : ""} within ${timeoutMs}ms`,
+		);
 	}
 	client.diagnostics.set(uri, {
 		diagnostics: pulled,
@@ -439,6 +458,7 @@ export async function getDiagnosticsForFile(
 	const relPath = formatPathRelativeToCwd(absolutePath, cwd);
 	const allDiagnostics: Diagnostic[] = [];
 	const serverNames: string[] = [];
+	const unjudgedServers: string[] = [];
 
 	// Wait for diagnostics from all servers in parallel. Each server's whole
 	// pipeline is wrapped in a hard wall-clock bound: the caller's signal is
@@ -482,30 +502,47 @@ export async function getDiagnosticsForFile(
 		}),
 	);
 
-	for (const result of results) {
-		if (result.status === "fulfilled") {
-			serverNames.push(result.value.serverName);
-			allDiagnostics.push(
-				...filterOrphanProjectDiagnostics(
-					absolutePath,
-					result.value.serverName,
-					result.value.serverConfig,
-					result.value.diagnostics,
-				),
-			);
+	for (const [index, result] of results.entries()) {
+		if (result.status === "rejected") {
+			// The server produced no verdict for this file: it published no
+			// diagnostics, or its wait failed. Remember it — a file that no server
+			// judged must not be reported as clean (issue #15408).
+			unjudgedServers.push(servers[index]![0]);
+			continue;
 		}
+		serverNames.push(result.value.serverName);
+		allDiagnostics.push(
+			...filterOrphanProjectDiagnostics(
+				absolutePath,
+				result.value.serverName,
+				result.value.serverConfig,
+				result.value.diagnostics,
+			),
+		);
 	}
 
 	if (serverNames.length === 0) {
-		return undefined;
+		if (unjudgedServers.length === 0) {
+			return undefined;
+		}
+		// No server judged the file: the only honest report is that its
+		// diagnostics are unavailable, not that the file is clean (issue #15408).
+		return {
+			server: unjudgedServers.join(", "),
+			messages: [],
+			summary: composeDiagnosticsSummary("", unjudgedServers),
+			errored: false,
+			unjudgedServers,
+		};
 	}
 
 	if (allDiagnostics.length === 0) {
 		return {
 			server: serverNames.join(", "),
 			messages: [],
-			summary: "OK",
+			summary: composeDiagnosticsSummary("OK", unjudgedServers),
 			errored: false,
+			unjudgedServers: unjudgedServers.length > 0 ? unjudgedServers : undefined,
 		};
 	}
 
@@ -529,8 +566,9 @@ export async function getDiagnosticsForFile(
 	return {
 		server: serverNames.join(", "),
 		messages: limited,
-		summary,
+		summary: composeDiagnosticsSummary(summary, unjudgedServers),
 		errored: hasErrors,
+		unjudgedServers: unjudgedServers.length > 0 ? unjudgedServers : undefined,
 	};
 }
 

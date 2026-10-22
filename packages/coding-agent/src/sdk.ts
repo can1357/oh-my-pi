@@ -430,28 +430,34 @@ type McpNotificationEntry = {
 	uri: string;
 };
 
+type LateDiagnosticsFile = {
+	path: string;
+	summary: string;
+	errored: boolean;
+	messages: string[];
+	/**
+	 * Servers that published no verdict for the file. A file no server judged
+	 * is not a clean file, so the renderer must be able to say so (issue #15408).
+	 */
+	unjudgedServers?: string[];
+};
+
 type LateDiagnosticsDetails = {
-	files: Array<{ path: string; summary: string; errored: boolean; messages: string[] }>;
+	files: LateDiagnosticsFile[];
 };
 
 function buildLateDiagnosticsBatchMessage(
 	entries: DeferredDiagnosticsEntry[],
 ): CustomMessage<LateDiagnosticsDetails> | null {
 	if (entries.length === 0) return null;
-	const files = entries.map(entry => ({
+	const files: LateDiagnosticsFile[] = entries.map(entry => ({
 		path: entry.path,
 		summary: entry.summary,
 		messages: entry.messages,
 		errored: entry.errored,
+		unjudgedServers: entry.unjudgedServers,
 	}));
-	const details: LateDiagnosticsDetails = {
-		files: files.map(file => ({
-			path: file.path,
-			summary: file.summary,
-			errored: file.errored,
-			messages: file.messages,
-		})),
-	};
+	const details: LateDiagnosticsDetails = { files };
 	return {
 		role: "custom",
 		customType: LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,

@@ -23,6 +23,7 @@ import {
 	truncateTail,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { formatOutputNotice, type OutputMeta, type TruncationMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import type { UnjudgedFile } from "@oh-my-pi/pi-tui/tools/lsp";
 import { renderError } from "./tool-errors";
 import {
 	cfgToolsArtifactHeadBytes,
@@ -422,10 +423,32 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add LSP diagnostics. No-op if no messages. */
-	diagnostics(summary: string, messages: string[]): this {
-		if (messages.length === 0) return this;
-		this.#meta.diagnostics = { summary, messages };
+	/**
+	 * Add LSP diagnostics. No-op when there is nothing to report: no messages
+	 * and no server that left a file unjudged.
+	 *
+	 * `unjudgedFiles` keeps the file→servers association when the result
+	 * covers more than one file, so the notice can name the unchecked file
+	 * instead of listing servers that could belong to any of them (#15408).
+	 */
+	diagnostics(
+		summary: string,
+		messages: string[],
+		unjudgedServers?: readonly string[],
+		unjudgedFiles?: readonly UnjudgedFile[],
+	): this {
+		if (messages.length === 0 && (unjudgedServers?.length ?? 0) === 0 && (unjudgedFiles?.length ?? 0) === 0) {
+			return this;
+		}
+		this.#meta.diagnostics = {
+			summary,
+			messages,
+			unjudgedServers: unjudgedServers && unjudgedServers.length > 0 ? [...unjudgedServers] : undefined,
+			unjudgedFiles:
+				unjudgedFiles && unjudgedFiles.length > 0
+					? unjudgedFiles.map(file => ({ path: file.path, servers: [...file.servers] }))
+					: undefined,
+		};
 		return this;
 	}
 

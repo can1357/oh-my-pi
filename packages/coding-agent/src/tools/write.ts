@@ -1035,7 +1035,15 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					diagnostics: diagnostics.diagnostics,
 					madeExecutable: madeExecutable || undefined,
 					meta: outputMeta()
-						.diagnostics(diagnostics.diagnostics.summary, diagnostics.diagnostics.messages ?? [])
+						.diagnostics(
+							diagnostics.diagnostics.summary,
+							diagnostics.diagnostics.messages ?? [],
+							diagnostics.diagnostics.unjudgedServers,
+							// A batched write merges several files into one result:
+							// keep the path with the servers that stayed silent for
+							// it, so the notice names the unchecked file (#15408).
+							diagnostics.diagnostics.unjudgedFiles,
+						)
 						.get(),
 				},
 			};

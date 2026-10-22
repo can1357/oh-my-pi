@@ -198,6 +198,12 @@ export interface DeferredDiagnosticsEntry {
 	/** True when any message is error severity. */
 	errored: boolean;
 	/**
+	 * Servers that published no verdict for this file. A file no server judged
+	 * is not a clean file: it was never checked, so the report is incomplete
+	 * and must not be read as "no diagnostics" (issue #15408).
+	 */
+	unjudgedServers?: string[];
+	/**
 	 * Evaluated at injection time (in the dispatcher's stale check): drop the entry
 	 * when a newer mutation to the same file has superseded it, so the model never
 	 * sees diagnostics for stale content.

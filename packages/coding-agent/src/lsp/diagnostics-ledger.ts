@@ -1,5 +1,5 @@
 import type { FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
-import { summarizeDiagnosticMessages } from "./utils";
+import { composeDiagnosticsSummary, summarizeDiagnosticMessages } from "./utils";
 
 const DIAGNOSTIC_LOCATION_PREFIX_RE = /^.*?:\d+:\d+\s+/;
 
@@ -33,10 +33,16 @@ export class DiagnosticsLedger {
 			return result;
 		}
 
+		const summarized = summarizeDiagnosticMessages(fresh);
 		return {
 			...result,
 			messages: fresh,
-			...summarizeDiagnosticMessages(fresh),
+			errored: summarized.errored,
+			// The reduction drops the repeated findings, so the summary is
+			// recomputed: re-compose the unavailable status with it. Otherwise a
+			// file whose server published no verdict comes back as "no issues"
+			// and reads as clean (issue #15408).
+			summary: composeDiagnosticsSummary(summarized.summary, result.unjudgedServers ?? []),
 		};
 	}
 }

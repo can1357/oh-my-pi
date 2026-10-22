@@ -8,7 +8,8 @@ import { pathToFileURL } from "node:url";
 import type { TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { ansi, code, compact, keyed, node, row, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
-import { type ParsedDiagnostic, parseDiagnosticMessage, shortenPath } from "../render/render-utils";
+import { type ParsedDiagnostic, parseDiagnosticMessage, shortenPath, TRUNCATE_LENGTHS } from "../render/render-utils";
+import { replaceTabs, truncateToWidth } from "../utils";
 import { plainText } from "../native/spans";
 import type { FileDiagnosticsResult } from "./lsp";
 import { formatArtifactErrorNotice, formatTruncationMetaNotice, type OutputMeta } from "./output-meta";
@@ -336,13 +337,17 @@ function diagnosticRow(diagnostic: ParsedDiagnostic, withPath: boolean, key: str
  * LSP diagnostics section for write/edit results: rows of severity icon ·
  * `line:col` · message, most severe first, capped at five with `+N more`.
  * Rows name the file too when the messages span several files (or `withPath`).
+ * A file no server judged shows a "no diagnostics published" row instead of
+ * nothing, so an unchecked file never reads as a clean one.
  * Undefined when there is nothing to show.
  */
 export function diagnosticsSection(
 	diagnostics: FileDiagnosticsResult | undefined,
 	opts?: { withPath?: boolean },
 ): NativeNode | undefined {
-	if (!diagnostics || diagnostics.messages.length === 0) return undefined;
+	if (!diagnostics) return undefined;
+	const unjudged = diagnostics.unjudgedServers ?? [];
+	if (diagnostics.messages.length === 0 && unjudged.length === 0) return undefined;
 	const parsed: ParsedDiagnostic[] = [];
 	const unparsed: string[] = [];
 	for (const message of diagnostics.messages) {
@@ -365,6 +370,20 @@ export function diagnosticsSection(
 	if (hidden > 0) {
 		shown.push(text([span(`+${hidden} more`, "muted")], { role: "omp.tool.stats", key: "more" }));
 	}
+	if (unjudged.length > 0) {
+		// A server name comes from the user's LSP config: tabs become spaces
+		// and an overlong name is cut, so a custom name cannot break the row.
+		const names = unjudged.map(name => truncateToWidth(replaceTabs(name), TRUNCATE_LENGTHS.SHORT));
+		// Outside the cap: the status is not a finding, and it must stay
+		// visible even when the diagnostic rows fill the section (issue #15408).
+		shown.push(
+			text([span(`no diagnostics published by ${names.join(", ")}`)], {
+				wrap: "word",
+				role: "omp.tool.diagnostic",
+				key: "unjudged",
+			}),
+		);
+	}
 	return node(
 		"section",
 		{
@@ -377,17 +396,31 @@ export function diagnosticsSection(
 	);
 }
 
-/** Head chip counting LSP diagnostics across files (`2 diagnostics`), or undefined when there are none. */
+/**
+ * Head chip counting LSP diagnostics across files (`2 diagnostics`), or
+ * undefined when there are none. A file no server judged shows
+ * `diagnostics unavailable` instead of a clean chip; when other servers did
+ * report, the chip keeps an unavailable marker next to the count, so the
+ * incomplete verdict stays visible in a collapsed card (issue #15408).
+ */
 export function diagnosticsBadge(
 	files: readonly (FileDiagnosticsResult | undefined)[],
 ): { text: string; tone: TspTone } | undefined {
 	let count = 0;
 	let errored = false;
+	let unjudged = false;
 	for (const file of files) {
 		if (!file) continue;
 		count += file.messages.length;
 		errored ||= file.errored;
+		unjudged ||= (file.unjudgedServers?.length ?? 0) > 0;
 	}
-	if (count === 0) return undefined;
-	return { text: count === 1 ? "1 diagnostic" : `${count} diagnostics`, tone: errored ? "error" : "warning" };
+	if (count === 0) {
+		return unjudged ? { text: "diagnostics unavailable", tone: "warning" } : undefined;
+	}
+	const text = count === 1 ? "1 diagnostic" : `${count} diagnostics`;
+	const tone: TspTone = errored ? "error" : "warning";
+	// A server that published no verdict leaves the report incomplete: the
+	// head must say so even when the servers that did report found problems.
+	return unjudged ? { text: `${text} · unavailable`, tone } : { text, tone };
 }

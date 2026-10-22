@@ -220,4 +220,71 @@ describe("edit native views", () => {
 		expect(collect(rows[0]!.c, "text").map(t => spanText(t, "spans"))).toEqual(["40:3", "Type mismatch ts 2322"]);
 		expect(spanText(children.at(-1)!, "spans")).toBe("+2 more");
 	});
+
+	it("keeps the unavailable marker in the head when another server published no verdict", () => {
+		const view = editToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: "ok" }],
+				details: {
+					path: "/tmp/a.ts",
+					diff: "-old\n+new",
+					diagnostics: {
+						messages: ["src/a.ts:2:1 [error] Type mismatch (2322)"],
+						summary: "1 error(s)",
+						errored: true,
+						// This server never published a verdict for the file, so
+						// the report is incomplete even though the other one
+						// found a problem.
+						unjudgedServers: ["silent-lsp"],
+					},
+				},
+			},
+			done,
+			{ path: "/tmp/a.ts" },
+		);
+		if (!view.tool) throw new Error("Expected edit tool head");
+		// A collapsed card shows the head chip, not the diagnostics section:
+		// the count alone would read as a complete verdict.
+		expect(view.tool.badges?.map(badge => badge.text)).toEqual(["1 diagnostic · unavailable"]);
+	});
+
+	it("leaves the head chip plain when every server published a verdict", () => {
+		const view = editToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: "ok" }],
+				details: {
+					path: "/tmp/a.ts",
+					diff: "-old\n+new",
+					diagnostics: {
+						messages: ["src/a.ts:2:1 [error] Type mismatch (2322)"],
+						summary: "1 error(s)",
+						errored: true,
+					},
+				},
+			},
+			done,
+			{ path: "/tmp/a.ts" },
+		);
+		if (!view.tool) throw new Error("Expected edit tool head");
+		expect(view.tool.badges?.map(badge => badge.text)).toEqual(["1 diagnostic"]);
+	});
+
+	it("sanitizes a custom server name in the unavailable status row", () => {
+		// A server name is a key of the user's LSP config, so it can carry a
+		// tab or be arbitrarily long. It must not reach the terminal row raw.
+		const diagnostics: FileDiagnosticsResult = {
+			messages: [],
+			summary: "diagnostics unavailable from my-custom-server",
+			errored: false,
+			unjudgedServers: [`my\tcustom-server-${"x".repeat(60)}`],
+		};
+		const children = (diagnosticsSection(diagnostics)?.c ?? []).filter(isNode);
+		const unjudged = children.find(child => prop(child, "key") === "unjudged");
+		if (!unjudged) throw new Error("Expected the unavailable status row");
+		const status = spanText(unjudged, "spans");
+		expect(status).toContain("no diagnostics published by ");
+		expect(status).not.toContain("\t");
+		expect(status).not.toContain("x".repeat(60));
+		expect(status.length).toBeLessThan(80);
+	});
 });

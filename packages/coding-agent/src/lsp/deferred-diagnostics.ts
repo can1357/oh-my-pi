@@ -42,13 +42,19 @@ export class DeferredDiagnostics {
 		// Read at delivery time so `lsp.diagnosticsDeduplicate` changes apply to in-flight fetches too.
 		const deduplicate = cfgLspDiagnosticsDeduplicate.get(this.session.settings);
 		const effective = deduplicate ? getDiagnosticsLedger(this.session).reduce(path, diagnostics) : diagnostics;
-		if (deduplicate && effective.messages.length === 0) return;
+		// An unjudged file carries no messages but must not be dropped: the
+		// server published nothing, so the file was never checked (issue #15408).
+		if (deduplicate && effective.messages.length === 0 && (effective.unjudgedServers?.length ?? 0) === 0) return;
 
 		const entry: DeferredDiagnosticsEntry = {
 			path,
 			summary: effective.summary ?? "",
 			messages: effective.messages ?? [],
 			errored: effective.errored,
+			// The servers that published no verdict travel with the entry: a
+			// zero-message result that only carries `unjudgedServers` must not
+			// reach the renderer as a clean file (issue #15408).
+			unjudgedServers: effective.unjudgedServers,
 			isStale: () => this.#version(path) !== mutationVersion,
 		};
 		this.session.queueDeferredDiagnostics?.(entry);

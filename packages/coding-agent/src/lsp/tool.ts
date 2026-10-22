@@ -37,6 +37,7 @@ import { getLinterClient } from "./clients";
 import { configCache, getConfig, getServersForFile } from "./config";
 import {
 	BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+	DiagnosticsUnavailableError,
 	formatLocationWithContext,
 	hasRustWorkspaceAncestor,
 	isOnlyQueriedDeclaration,
@@ -343,6 +344,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const relPath = formatPathRelativeToCwd(resolved, this.session.cwd);
 				const allDiagnostics: Diagnostic[] = [];
 				const failedServers: string[] = [];
+				const unjudgedServers: string[] = [];
 				let succeededServers = 0;
 
 				// Query all applicable servers for this file
@@ -390,8 +392,16 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						if (err instanceof ToolAbortError || signal?.aborted) {
 							throw err;
 						}
-						// Server failed; record it so a total failure is not reported as clean.
-						failedServers.push(serverName);
+						if (err instanceof DiagnosticsUnavailableError) {
+							// The server never judged the file: it published no
+							// diagnostics and returned no report. It did not fail — it
+							// stayed silent — so keep it apart from a failed server
+							// (issue #15408).
+							unjudgedServers.push(serverName);
+						} else {
+							// Server failed; record it so a total failure is not reported as clean.
+							failedServers.push(serverName);
+						}
 						logger.debug("LSP diagnostics server failed", {
 							server: serverName,
 							file: relPath,
@@ -413,13 +423,28 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 				sortDiagnostics(uniqueDiagnostics);
 
+				// Servers that stayed silent never judged the file, so the report
+				// is incomplete — name them next to the servers that failed
+				// (issue #15408).
+				const incompleteNotes: string[] = [];
+				if (failedServers.length > 0) {
+					incompleteNotes.push(`some servers failed: ${failedServers.join(", ")}`);
+				}
+				if (unjudgedServers.length > 0) {
+					incompleteNotes.push(`no diagnostics published: ${unjudgedServers.join(", ")}`);
+				}
+				const incompleteNote = incompleteNotes.join("; ");
+
 				if (!detailed && targets.length === 1) {
 					if (succeededServers === 0) {
 						return {
 							content: [
 								{
 									type: "text",
-									text: `${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
+									text:
+										unjudgedServers.length > 0
+											? `${theme.status.error} ${relPath}: no diagnostics available (${incompleteNote})`
+											: `${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
 								},
 							],
 							details: { action, serverName: Array.from(allServerNames).join(", "), success: false },
@@ -427,10 +452,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					}
 
 					if (uniqueDiagnostics.length === 0) {
-						const text =
-							failedServers.length > 0
-								? `OK\n${theme.status.warning} some servers failed: ${failedServers.join(", ")}`
-								: "OK";
+						const text = incompleteNote === "" ? "OK" : `OK\n${theme.status.warning} ${incompleteNote}`;
 						return {
 							content: [{ type: "text", text }],
 							details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
@@ -440,8 +462,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					const summary = formatDiagnosticsSummary(uniqueDiagnostics);
 					const formatted = uniqueDiagnostics.map(d => formatDiagnostic(d, relPath));
 					let output = `${summary}:\n${formatGroupedDiagnosticMessages(formatted)}`;
-					if (failedServers.length > 0) {
-						output += `\n${theme.status.warning} some servers failed: ${failedServers.join(", ")}`;
+					if (incompleteNote !== "") {
+						output += `\n${theme.status.warning} ${incompleteNote}`;
 					}
 					return {
 						content: [{ type: "text", text: output }],
@@ -452,14 +474,14 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				if (uniqueDiagnostics.length === 0) {
 					if (succeededServers === 0) {
 						results.push(
-							`${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
+							unjudgedServers.length > 0
+								? `${theme.status.error} ${relPath}: no diagnostics available (${incompleteNote})`
+								: `${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
 						);
 					} else {
 						results.push(`${theme.status.success} ${relPath}: no issues`);
-						if (failedServers.length > 0) {
-							results.push(
-								`${theme.status.warning} ${relPath}: some servers failed (${failedServers.join(", ")})`,
-							);
+						if (incompleteNote !== "") {
+							results.push(`${theme.status.warning} ${relPath}: ${incompleteNote}`);
 						}
 					}
 				} else {
@@ -467,8 +489,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					results.push(`${theme.status.error} ${relPath}: ${summary}`);
 					const formatted = uniqueDiagnostics.map(d => formatDiagnostic(d, relPath));
 					results.push(formatGroupedDiagnosticMessages(formatted));
-					if (failedServers.length > 0) {
-						results.push(`${theme.status.warning} ${relPath}: some servers failed (${failedServers.join(", ")})`);
+					if (incompleteNote !== "") {
+						results.push(`${theme.status.warning} ${relPath}: ${incompleteNote}`);
 					}
 				}
 			}

@@ -85,7 +85,40 @@ export interface FileDiagnosticsResult {
 	errored: boolean;
 	/** Whether the file was formatted */
 	formatter?: FileFormatResult;
+	/**
+	 * Servers that produced no verdict for this file: they published no
+	 * diagnostics and returned no report. The file was left unjudged by them,
+	 * so the report is incomplete and must not be read as "clean" (#15408).
+	 */
+	unjudgedServers?: string[];
+	/**
+	 * Files that no server judged, when this result covers more than one file
+	 * (a batched write). Each entry keeps the servers that stayed silent for
+	 * that file, so the unchecked file is identifiable instead of a flat list
+	 * that could be read as belonging to the last write (#15408).
+	 */
+	unjudgedFiles?: UnjudgedFile[];
 }
+
+/**
+ * A file that no server judged inside a result that covers more than one file.
+ * The path keeps the association: a server can stay silent for one file and
+ * answer for another, so a flat server list cannot say which file was left
+ * unchecked (#15408).
+ */
+export interface UnjudgedFile {
+	/** Path of the file that was left unjudged. */
+	path: string;
+	/** Servers that published no verdict for that file. */
+	servers: string[];
+}
+
+/**
+ * Status of a file whose diagnostics were never obtained. It is not a finding:
+ * it says the file was left unjudged, so it never counts as a diagnostic
+ * (#15408).
+ */
+export const DIAGNOSTICS_UNAVAILABLE_SUMMARY = "diagnostics unavailable";
 
 /** Outcome of automatic file formatting. */
 export enum FileFormatResult {
