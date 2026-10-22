@@ -1,3 +1,4 @@
+import { readHistoryOffThread } from "./persisted-history-client";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -37,7 +38,7 @@ interface PersistedAgentMetadata {
 	incomplete?: boolean;
 }
 
-interface PersistedTranscript {
+export interface PersistedTranscript {
 	id: string;
 	sessionFile: string;
 	createdAt?: number;
@@ -145,6 +146,13 @@ function isFilesystemError(error: unknown): boolean {
 }
 
 async function readPersistedAgentHistory(
+	transcript: PersistedTranscript,
+	shouldContinue: () => boolean,
+): Promise<AgentHistorySummary> {
+	return readHistoryOffThread(transcript, shouldContinue);
+}
+
+export async function readPersistedAgentHistoryInline(
 	transcript: PersistedTranscript,
 	shouldContinue: () => boolean,
 ): Promise<AgentHistorySummary> {

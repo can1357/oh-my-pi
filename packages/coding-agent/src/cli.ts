@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { PERSISTED_HISTORY_WORKER_ARG } from "./cli/worker-selectors";
 // Strip macOS malloc-stack-logging vars in the parent entrypoint, before any
 // subprocess/worker spawn. libmalloc reads MallocStackLogging /
 // MallocStackLoggingNoCompact during malloc bootstrap (pre-main) in every child
@@ -152,6 +153,8 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestTextPredictDaemon } = await import("./predict/client");
 	await smokeTestSyncWorker();
 	await smokeTestStatsActivityWorker();
+	const { smokeTestPersistedHistoryWorker } = await import("./registry/persisted-history-client");
+	await smokeTestPersistedHistoryWorker();
 
 	const statsServer = await startServer(0);
 	try {
@@ -222,6 +225,12 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	// before binding the selected worker's real handler so the parent's
 	// synchronous `init` survives. The dynamically imported tab/eval modules
 	// consume the same inbox after their module evaluation begins.
+	if (arg === PERSISTED_HISTORY_WORKER_ARG) {
+		const parentPort = getWorkerParentPort();
+		if (parentPort) installWorkerInbox(parentPort);
+		await import("./registry/persisted-history-worker");
+		return true;
+	}
 	if (arg === TAB_WORKER_ARG) {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
