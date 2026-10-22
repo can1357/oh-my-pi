@@ -26,6 +26,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { attachIrcWakeTurnMonitor, runSubagentFollowUpTurn } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { isRecord, TempDir, untilAborted } from "@oh-my-pi/pi-utils";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
@@ -134,6 +135,8 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		failWakeAfterTurn?: boolean;
 		/** `false` = a message-result child: no yield, its reply is the result. */
 		structured?: boolean;
+		/** Output schema; with it the session uses the real `YieldTool` instead of the stand-in. */
+		outputSchema?: Record<string, unknown>;
 	}) {
 		const stopEvents: SubagentStopEvent[] = [];
 		const lifecycle: LifecycleFrame[] = [];
@@ -156,9 +159,19 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		);
 		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
 		const mock = createMockModel({ provider: "openai", id: "gpt-test", responses: args.responses });
+		const sessionYieldTool: AgentTool = args.outputSchema
+			? new YieldTool({
+					cwd: tempDir.path(),
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated(),
+					outputSchema: args.outputSchema,
+				})
+			: yieldTool;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [yieldTool], messages: [] },
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [sessionYieldTool], messages: [] },
 			convertToLlm,
 			streamFn: mock.stream,
 		});
@@ -180,7 +193,7 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			toolRegistry: new Map([["yield", yieldTool]]),
+			toolRegistry: new Map([["yield", sessionYieldTool]]),
 			agentId: AGENT_ID,
 			extensionRunner,
 			ownedAsyncJobManager: args.manager,
@@ -207,6 +220,7 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 				maxRuntimeMs: args.maxRuntimeMs,
 				agentType: args.agentType,
 				structured: args.structured,
+				outputSchema: args.outputSchema,
 			});
 		}
 		return { session, mock, stopEvents, lifecycle, eventBus, artifact: path.join(tempDir.path(), `${AGENT_ID}.md`) };
@@ -405,6 +419,55 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(run.stopEvents).toHaveLength(1);
 		expect(await Bun.file(run.artifact).exists()).toBe(false);
 		expect(run.lifecycle.map(frame => frame.status)).toContain("failed");
+	});
+
+	it("leaves a newer wake's yield-tool state alone when an older wake's refusal can no longer be answered", async () => {
+		const outputSchema = {
+			type: "object",
+			properties: { findings: { type: "array", items: { type: "string" } } },
+			required: ["findings"],
+		};
+		const stopEntered = Promise.withResolvers<void>();
+		const releaseStop = Promise.withResolvers<void>();
+		const newerSectionRecorded = Promise.withResolvers<void>();
+		const olderFinished = Promise.withResolvers<void>();
+		const run = await setup({
+			outputSchema,
+			responses: [
+				{ content: [{ type: "toolCall", name: "yield", arguments: { data: { findings: ["OLDER"] } } }] },
+				{ content: [{ type: "toolCall", name: "yield", arguments: { type: ["findings"], data: "NEWER" } }] },
+				// The section's tool result is in; the newer turn closes its sections only after the older pass refused.
+				async () => {
+					newerSectionRecorded.resolve();
+					await olderFinished.promise;
+					return { content: [{ type: "toolCall", name: "yield", arguments: { type: "result" } }] };
+				},
+				{ content: ["done"] },
+			],
+			onStop: async (_event, callIndex) => {
+				if (callIndex !== 1) return undefined;
+				stopEntered.resolve();
+				await releaseStop.promise;
+				return { decision: "block", reason: "redo" };
+			},
+		});
+		run.eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
+			const status = toLifecycleFrame(data).status;
+			if (status === "failed" || status === "aborted") olderFinished.resolve();
+		});
+
+		await deliverWake(run.session, "m1");
+		await stopEntered.promise;
+		await deliverWake(run.session, "m2");
+		await newerSectionRecorded.promise;
+		releaseStop.resolve();
+		await run.session.waitForIrcReplies();
+		await run.session.waitForIdle();
+
+		// The newer turn's sections were never refused, so its data-less finalize closes them.
+		expect(JSON.stringify(run.session.messages)).not.toContain("cannot satisfy");
+		expect(run.mock.calls).toHaveLength(3);
+		expect(JSON.parse(await Bun.file(run.artifact).text())).toEqual({ findings: ["NEWER"] });
 	});
 
 	it("never lets a newer wake that is still settling publish a refused wake's continuation", async () => {

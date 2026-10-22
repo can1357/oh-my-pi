@@ -1343,8 +1343,11 @@ interface SubagentRunMonitor {
 	 * Drop the refused candidate (every recorded yield item it assembled from,
 	 * or a message-result run's last report turn) so the run demands a fresh one after a
 	 * `subagent_stop` continuation, and charge the refused turn to the budget.
+	 * `releaseYieldTool` also clears the session yield tool's section state and
+	 * reopens the refused workpool items for that continuation; pass false when
+	 * this run no longer owns the session, whose tool then serves a newer turn.
 	 */
-	invalidateYieldForStop(): void;
+	invalidateYieldForStop(releaseYieldTool: boolean): void;
 	/**
 	 * True once a terminal yield with pending owner async work stopped the
 	 * free-running turn (recoverable, like a budget stop) instead of
@@ -2396,7 +2399,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		waitForBudgetStop: () => budgetStopAbortPromise ?? Promise.resolve(),
 		yieldInvalidatedByAsync: () => yieldInvalidatedByAsync,
 		yieldInvalidatedByStop: () => yieldInvalidatedByStop,
-		invalidateYieldForStop: () => {
+		invalidateYieldForStop: (releaseYieldTool: boolean) => {
 			yieldCalled = false;
 			yieldInvalidatedByStop = true;
 			yieldAcceptedAt = undefined;
@@ -2419,6 +2422,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			// only a `complete: true` section or a data-less finalize would publish
 			// refused payload again.
 			const refused = progress.extractedToolData?.yield?.splice(0) ?? [];
+			if (!releaseYieldTool) return;
 			const yieldTool = activeSession?.getToolByName("yield");
 			// The tool's "sections recorded" flag would otherwise accept a data-less
 			// finalize against the sections just discarded.
@@ -2550,6 +2554,11 @@ interface SubagentStopPassIo {
 	 * candidate changed meanwhile. Absent when nothing can change it during a pass.
 	 */
 	watchCandidate?(): () => Promise<boolean>;
+	/**
+	 * Whether this pass's run still owns the session's turns. Absent = always. Once
+	 * a newer turn owns it, a refusal must not touch the yield tool that turn uses.
+	 */
+	ownsSession?(): boolean;
 }
 
 /**
@@ -2578,7 +2587,7 @@ async function runSubagentStopPass(
 	const stop = await stopHook.run(session, io.watchCandidate?.());
 	if (stop.kind === "stale") return true;
 	if (stop.kind === "allow") return false;
-	monitor.invalidateYieldForStop();
+	monitor.invalidateYieldForStop(stop.kind === "continue" && io.ownsSession?.() !== false);
 	if (stop.kind === "aborted") return false;
 	// Charging the refused turn may have stopped the run for budget: let that
 	// abort settle (throws if the run is now aborted, so no continuation starts
@@ -2997,7 +3006,7 @@ async function driveSessionToResult(
 		// or failed before its pass) is no more confirmed than one cancelled mid-pass:
 		// drop it rather than publish it, as the rescue above would.
 		if (monitor.yieldCalled() && !candidateAllowed && session.extensionRunner?.hasHandlers("subagent_stop")) {
-			monitor.invalidateYieldForStop();
+			monitor.invalidateYieldForStop(false);
 			error ??= SUBAGENT_STOP_CANDIDATE_UNJUDGED;
 			if (exitCode === 0) exitCode = 1;
 		}
@@ -3549,6 +3558,7 @@ async function runWakeStopPasses(
 	const signal = monitor.abortSignal;
 	const io: SubagentStopPassIo = {
 		awaitAbortable: promise => untilAborted(signal, () => promise),
+		ownsSession: () => !superseded.aborted,
 		continueWith: async text => {
 			if (superseded.aborted) throw new Error("A newer turn owns the session; the continuation cannot start");
 			const detach = monitor.attach(session);
@@ -3581,7 +3591,7 @@ async function runWakeStopPasses(
 			// verdict on a candidate this turn can still publish: it would finalize
 			// after the newer turn and overwrite that turn's artifact. Drop it.
 			if (!refused && (supersededBeforePass || newerPublished()) && hasCandidate()) {
-				monitor.invalidateYieldForStop();
+				monitor.invalidateYieldForStop(false);
 				supersededWhileJudging = true;
 			}
 		}
@@ -3597,7 +3607,7 @@ async function runWakeStopPasses(
 	// recorded after the refusal clears the refusal flag, so one that async
 	// results un-latched (or that an error cut off) is still unjudged here: drop it
 	// like the refused one, or finalization would publish a payload no handler saw.
-	if (refused && !monitor.yieldInvalidatedByStop()) monitor.invalidateYieldForStop();
+	if (refused && !monitor.yieldInvalidatedByStop()) monitor.invalidateYieldForStop(false);
 	return supersededWhileJudging;
 }
 
