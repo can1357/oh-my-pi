@@ -8,12 +8,14 @@ import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { BtwHistoryStore } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { Spacer } from "@oh-my-pi/pi-tui";
 import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
 import { BTW_INJECT_LABEL, BTW_INJECTED_LABEL } from "@oh-my-pi/pi-tui/overlays/btw-inject";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { APPROVE_ARM_MS, ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { cfgBtwInject } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { interruptKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import {
@@ -210,15 +212,16 @@ describe("BtwController", () => {
 		const btwContainer = new Container();
 		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
 		const controller = new BtwController(ctx);
+		const panelText = (): string => Bun.stripANSI(btwContainer.render(120).join("\n"));
 
 		await controller.start("Question?");
-		expect(btwContainer.children).toHaveLength(1);
+		expect(panelText()).toContain("/btw Question?");
 		expect(controller.handleEscape()).toBe(true);
 		expect(runEphemeralTurn.mock.calls[0]?.[0].signal?.aborted).toBe(true);
-		expect(btwContainer.children).toHaveLength(1);
+		expect(panelText()).toContain(`Cancelled · ${interruptKey()} to close`);
 		expect(controller.hasActiveRequest()).toBe(true);
 		expect(controller.handleEscape()).toBe(true);
-		expect(btwContainer.children).toHaveLength(0);
+		expect(btwContainer.render(120)).toHaveLength(0);
 		expect(controller.hasActiveRequest()).toBe(false);
 		pending.resolve({ replyText: "Late answer", assistantMessage: createAssistantMessage("Late answer") });
 		await drainBtwRequest();
@@ -272,6 +275,24 @@ describe("BtwController", () => {
 		expect(answerText(sheetAt(1))).toBeDefined();
 		pending.resolve({ replyText: "Because streaming.", assistantMessage: createAssistantMessage("x") });
 		await drainBtwRequest();
+		await controller.dispose();
+	});
+
+	it("separates the panel from the transcript with one blank row", async () => {
+		const runEphemeralTurn = vi.fn(async () => Promise.withResolvers<RunEphemeralTurnResult>().promise);
+		const btwContainer = new Container();
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
+		const controller = new BtwController(ctx);
+
+		await controller.start("Question?");
+
+		// The blank row is the container's own first child, and the panel is the one
+		// that follows it: asserting the mount, not only that some row is empty.
+		expect(btwContainer.children[0]).toBeInstanceOf(Spacer);
+		expect(btwContainer.children[1]).toBeInstanceOf(BtwPanelComponent);
+		const rows = btwContainer.render(60).map(row => Bun.stripANSI(row));
+		expect(rows[0]).toBe("");
+		expect(rows[1] ?? "").toContain("/btw Question?");
 		await controller.dispose();
 	});
 
@@ -450,7 +471,8 @@ describe("BtwController", () => {
 			await controller.flush();
 
 			expect(runEphemeralTurn.mock.calls[0]?.[0].promptText).toContain(template);
-			const panel = btwContainer.children[0];
+			// The container mounts one blank row above the panel, so the panel is not child 0.
+			const panel = btwContainer.children.find(child => child instanceof BtwPanelComponent);
 			if (!(panel instanceof BtwPanelComponent)) throw new Error("Expected the BTW panel");
 			expect(panel.title).toBe("/sitrep");
 			expect(Bun.stripANSI(panel.render(100).join("\n"))).not.toContain("Sitrep template");
@@ -596,10 +618,9 @@ describe("BtwController", () => {
 		await Promise.resolve();
 		expect(controller.handlesBranchKey()).toBe(true);
 
-		const panel = btwContainer.children[0];
-		expect(Bun.stripANSI(panel?.render(120).join("\n") ?? "")).toContain("Branching to chat");
+		expect(Bun.stripANSI(btwContainer.render(120).join("\n"))).toContain("Branching to chat");
 		expect(controller.handleEscape()).toBe(true);
-		expect(btwContainer.children).toHaveLength(1);
+		expect(Bun.stripANSI(btwContainer.render(120).join("\n"))).toContain("Branching to chat");
 
 		branch.resolve();
 		await branchPromise;
