@@ -278,6 +278,246 @@ describe("jfind cascade", () => {
 		}
 	});
 
+	it("finds an owner in an explicit file when a sketch lacks the surrounding explanation", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-single-file-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			const body = Array.from({ length: 67 }, (_, i) => {
+				if (i === 60) return "The Valmont coil reservation workflow is owned by the Production Planning team.";
+				if (i === 64) return "The same team signs off on requests before dispatch.";
+				return `Background on inventory planning, section ${i + 1}: ${"general policy ".repeat(3)}`;
+			}).join("\n");
+			await Bun.write(file, body);
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if ("tree" in state) return 0.9;
+				const passage = (state.passages as Record<string, string | [string, string]>)[key]!;
+				const text = typeof passage === "string" ? passage : passage[1];
+				return text.includes("owned by the Production Planning team") &&
+					text.includes("same team signs off on requests")
+					? 0.95
+					: 0.1;
+			});
+			const result = await runCascade({
+				root: { path: file, type: "file", size: Buffer.byteLength(body) },
+				filesystem: urlFs(dir),
+				query: "who owns coil reservation and inventory transfer approvals",
+				extraKeywords: ["coil reservation", "owned by"],
+				judge,
+				includeHidden: false,
+			});
+			expect(result.hits.map(hit => hit.rel)).toEqual([file]);
+			expect(result.hits[0]!.ranges).toEqual([expect.objectContaining({ start: 1, end: 67, p: 0.95 })]);
+			expect(result.hits[0]!.truncated).toBe(false);
+			// A named file needs no filename ranking or sketch routing.
+			expect(judge.requests.filter(request => "tree" in stateOf(request))).toHaveLength(0);
+			expect(judge.requests.filter(request => "files" in stateOf(request))).toHaveLength(0);
+			expect(result.stats.mapCards).toBe(0);
+			expect(result.stats.windowsPruned).toBe(0);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("verifies the final passage of an explicitly named file past the per-file window budget", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-long-file-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			// 30 windows of 8 KiB: more than the 24 windows a directory search
+			// spends on one file, fewer than the passage budget.
+			const body = Array.from({ length: 30 }, (_, i) =>
+				i === 29
+					? "The Production Planning team owns coil reservation approvals."
+					: `section ${i}: ${"x".repeat(8170)}`,
+			).join("\n");
+			await Bun.write(file, body);
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if ("file" in state) {
+					return (state.passages as Record<string, string>)[key]!.includes("Production Planning team") ? 0.9 : 0.1;
+				}
+				return 0.1;
+			});
+			const result = await runCascade({
+				root: { path: file, type: "file", size: Buffer.byteLength(body) },
+				filesystem: urlFs(dir),
+				query: "who owns coil reservation approvals?",
+				extraKeywords: ["coil reservation"],
+				judge,
+				includeHidden: false,
+			});
+			// The whole file is judged: every one of its 30 windows is verified.
+			const judged = judge.requests
+				.filter(request => "file" in stateOf(request))
+				.reduce(
+					(total, request) => total + Object.keys(stateOf(request).passages as Record<string, string>).length,
+					0,
+				);
+			expect(judged).toBe(30);
+			expect(result.hits[0]!.ranges).toEqual([expect.objectContaining({ start: 30, end: 30, p: 0.9 })]);
+			expect(result.hits[0]!.truncated).toBe(false);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("refuses a named file whose windows outgrow the verification budget instead of sampling it", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-over-budget-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			// 60 windows of 4 KiB whose text shares no keyword with the query.
+			// Sampling them would spread the windows through the file and could
+			// drop the one holding the answer, with no truncation flag to show
+			// for it: the search would report a clean "no hits".
+			const body = Array.from({ length: 60 }, (_, i) =>
+				i === 2
+					? `The Production Planning team signs off on the aeon release. ${"x".repeat(4030)}`
+					: `section ${i}: ${"x".repeat(4090)}`,
+			).join("\n");
+			await Bun.write(file, body);
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if ("file" in state) {
+					return (state.passages as Record<string, string>)[key]!.includes("Production Planning team") ? 0.9 : 0.1;
+				}
+				return 0.1;
+			});
+			await expect(
+				runCascade({
+					root: { path: file, type: "file", size: Buffer.byteLength(body) },
+					filesystem: urlFs(dir),
+					query: "who is in charge of the quarterly rollout?",
+					extraKeywords: [],
+					judge,
+					includeHidden: false,
+				}),
+			).rejects.toThrow("60 passages exceed the 40-passage budget");
+			// A refusal, not an empty result: nothing was judged at all.
+			expect(judge.requests).toHaveLength(0);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("does not report a lexical scan phase for an explicitly named file", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-noscan-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			const body = "The Production Planning team owns coil reservation approvals.\n";
+			await Bun.write(file, body);
+			const query = "who owns coil reservation approvals?";
+			const extraKeywords = ["coil reservation"];
+			// The phase progress is what the user sees while the search runs, so
+			// it is the observable contract: a directory search reports the
+			// lexical scan, a named file reports none — it is the only
+			// candidate, so a lexical rank could not reject it.
+			const dirProgress: string[] = [];
+			await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query,
+				extraKeywords,
+				judge: new FakeJudge(() => 0.9),
+				includeHidden: false,
+				onProgress: message => dirProgress.push(message),
+			});
+			const fileProgress: string[] = [];
+			const result = await runCascade({
+				root: { path: file, type: "file", size: Buffer.byteLength(body) },
+				filesystem: urlFs(dir),
+				query,
+				extraKeywords,
+				judge: new FakeJudge(() => 0.9),
+				includeHidden: false,
+				onProgress: message => fileProgress.push(message),
+			});
+			expect(dirProgress).toContain("lexical scan");
+			expect(fileProgress).not.toContain("lexical scan");
+			expect(result.hits.map(hit => hit.rel)).toEqual([file]);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("rejects an explicit file whose line cannot be judged in full", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-clipped-file-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			const body = `${"x".repeat(9000)}\nThe Production Planning team owns coil reservations.`;
+			await Bun.write(file, body);
+			await expect(
+				runCascade({
+					root: { path: file, type: "file", size: Buffer.byteLength(body) },
+					filesystem: urlFs(dir),
+					query: "who owns inventory transfers?",
+					extraKeywords: [],
+					judge: new FakeJudge(() => 0.1),
+					includeHidden: false,
+				}),
+			).rejects.toThrow("a line exceeds the 8.0KB passage limit");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("refuses an explicitly named file too large to read instead of reporting a miss", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-oversized-file-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			// Past the whole-file budget the passage budget can judge, so the
+			// file cannot be judged whole.
+			const body = `${"x".repeat(1023)}\n`.repeat(4200);
+			await Bun.write(file, body);
+			const judge = new FakeJudge(() => 0.1);
+			await expect(
+				runCascade({
+					root: { path: file, type: "file", size: Buffer.byteLength(body) },
+					filesystem: urlFs(dir),
+					query: "who owns coil reservation approvals?",
+					extraKeywords: ["coil reservation"],
+					judge,
+					includeHidden: false,
+				}),
+			).rejects.toThrow("exceeds the 320.0KB read limit");
+			// A refusal, not an empty result: nothing was judged at all.
+			expect(judge.requests).toHaveLength(0);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("keeps a source line that looks like a line tag intact when judging a named file", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-literal-tag-"));
+		try {
+			const file = path.join(dir, "authority.md");
+			// The source line starts with the same text the window format adds, so
+			// a judge that strips the tag must still see the author's own prefix.
+			const body = "L1| The Production Planning team owns coil reservation approvals.\n";
+			await Bun.write(file, body);
+			const judged: string[] = [];
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if (!("file" in state)) return 0.1;
+				const passage = (state.passages as Record<string, string>)[key]!;
+				judged.push(passage);
+				return passage.includes("L1| The Production Planning team") ? 0.9 : 0.1;
+			});
+			const result = await runCascade({
+				root: { path: file, type: "file", size: Buffer.byteLength(body) },
+				filesystem: urlFs(dir),
+				query: "who owns coil reservation approvals?",
+				extraKeywords: ["coil reservation"],
+				judge,
+				includeHidden: false,
+			});
+			// The literal prefix reaches the judge alongside the window tag.
+			expect(judged.join("\n")).toContain("L1| The Production Planning team");
+			expect(result.hits.map(hit => hit.rel)).toEqual([file]);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 	it("routes sketches onward when their judgment fails and reports the failure", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-fail-"));
 		try {

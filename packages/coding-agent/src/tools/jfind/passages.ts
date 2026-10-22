@@ -14,6 +14,8 @@ export interface Passage {
 	text: string;
 	/** Lexical score used for window selection and tie-breaking. */
 	score: number;
+	/** A line exceeded the window budget and was clipped, so the passage is incomplete. */
+	truncated?: boolean;
 }
 
 /** A judged line range with its yes-probability and a one-line preview; the shape the renderer consumes. */
@@ -22,7 +24,8 @@ export type HeatRange = FindRange;
 /**
  * Contiguous whole-line windows bounded by bytes, including the final line. A
  * single oversized line is clipped at a code-point boundary and keeps its real
- * line id.
+ * line id; that passage reports {@link Passage.truncated} so a whole-file
+ * search can refuse to judge it instead of reporting a partial answer.
  */
 export function windows(
 	text: string,
@@ -37,12 +40,17 @@ export function windows(
 		let end = start;
 		let content = "";
 		let used = 0;
+		let truncated = false;
 		while (end < source.length) {
 			const line = source[end]!;
 			const prefix = `L${end + 1}| `;
 			const overhead = prefix.length + 1;
 			if (end > start && used + Buffer.byteLength(line) + overhead > bytes) break;
-			const piece = `${prefix}${clipBytes(line, Math.max(0, bytes - (used + overhead)))}\n`;
+			const lineBytes = Buffer.byteLength(line);
+			const available = Math.max(0, bytes - (used + overhead));
+			const clipped = lineBytes <= available ? line : clipBytes(line, available);
+			if (clipped.length !== line.length) truncated = true;
+			const piece = `${prefix}${clipped}\n`;
 			content += piece;
 			used += Buffer.byteLength(piece);
 			end++;
@@ -53,7 +61,7 @@ export function windows(
 		for (let k = 0; k < keywords.length; k++) {
 			score += weights[k]! * Math.log1p(countOccurrences(lower, keywords[k]!));
 		}
-		passages.push({ start: start + 1, end, text: content, score });
+		passages.push({ start: start + 1, end, text: content, score, truncated });
 		start = end;
 	}
 	return passages;
@@ -68,16 +76,42 @@ export function selectWindows(passages: Passage[], limit: number): Passage[] {
 	let selected = passages;
 	if (selected.length > limit) {
 		if (selected.every(passage => passage.score === 0)) {
-			const len = selected.length;
-			const step = Math.max(limit - 1, 1);
-			const keep = new Set<number>();
-			for (let k = 0; k < limit; k++) keep.add(Math.floor((k * (len - 1)) / step));
-			selected = selected.filter((_, index) => keep.has(index));
+			selected = evenSample(selected, limit);
 		} else {
 			selected = [...selected].sort((a, b) => b.score - a.score || a.start - b.start).slice(0, limit);
 		}
 	}
 	return [...selected].sort((a, b) => a.start - b.start);
+}
+
+/**
+ * An evenly spread sample of `limit` windows: the first and the last window
+ * are always kept and the widest gap between two kept windows is split
+ * first, so the sample covers the whole file rather than its opening bytes.
+ */
+function evenSample(passages: Passage[], limit: number): Passage[] {
+	const len = passages.length;
+	const base = Math.max(1, limit);
+	const keep = new Set<number>();
+	const step = Math.max(base - 1, 1);
+	for (let k = 0; k < base; k++) keep.add(Math.floor((k * (len - 1)) / step));
+	// Split the widest gap between two kept windows until the budget is spent.
+	let sorted = [...keep].sort((a, b) => a - b);
+	while (keep.size < limit) {
+		let at = -1;
+		let widest = 1;
+		for (let i = 0; i + 1 < sorted.length; i++) {
+			const gap = sorted[i + 1]! - sorted[i]!;
+			if (gap > widest) {
+				widest = gap;
+				at = i;
+			}
+		}
+		if (at < 0) break;
+		keep.add(Math.floor((sorted[at]! + sorted[at + 1]!) / 2));
+		sorted = [...keep].sort((a, b) => a - b);
+	}
+	return passages.filter((_, index) => keep.has(index));
 }
 
 /** Passage text with the generated `L<n>| ` tags stripped; the caller owns the line coordinates. */
