@@ -6982,6 +6982,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-mermaid"
+version = "18.12.6"
+dependencies = [
+ "html-escape 0.2.15",
+ "serde",
+ "serde_json",
+ "unicode-segmentation",
+ "unicode-width 0.2.2",
+ "xutf",
+]
+
+[[package]]
 name = "pi-natives"
 version = "18.12.6"
 dependencies = [
@@ -7009,7 +7021,6 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "heapless 0.9.3",
- "html-escape 0.2.15",
  "html-to-markdown-rs",
  "icy_sixel",
  "ignore",
@@ -7036,6 +7047,7 @@ dependencies = [
  "pi-diff",
  "pi-edit",
  "pi-iso",
+ "pi-mermaid",
  "pi-predict",
  "pi-shell",
  "pi-vcs",

@@ -8,10 +8,11 @@ The root `Cargo.toml` lists every crate under `crates/` explicitly in `workspace
 
 | Crate           | Path                                              | Role and consumers                                                                                                                                              |
 | --------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pi-natives`    | [`crates/pi-natives`](../crates/pi-natives)       | Top-level N-API `cdylib`. It exposes the JS-visible API and depends on `pi-ast`, `pi-diff`, `pi-edit`, `pi-iso`, `pi-predict`, `pi-shell`, `pi-vcs`, `pi-vfs`, `pi-voice`, and `pi-walker`.                    |
+| `pi-natives`    | [`crates/pi-natives`](../crates/pi-natives)       | Top-level N-API `cdylib`. It exposes the JS-visible API and depends on `pi-ast`, `pi-diff`, `pi-edit`, `pi-iso`, `pi-mermaid`, `pi-predict`, `pi-shell`, `pi-vcs`, `pi-vfs`, `pi-voice`, and `pi-walker`.                    |
 | `pi-builtins`   | [`crates/pi-builtins`](../crates/pi-builtins)     | Every builtin the embedded shell installs: a patched fork of brush's POSIX/bash builtins, plus one module per in-process command-line utility (`cat`, `grep`/`rg`, `sed`, `ls`, `find`, `jq`, `fd`, `diff`, `ps`, `top`, `kill`, the moreutils set, …). `src/host.rs` holds the `Utility` trait and the `Host` view of the shell (stdio, working directory, exported environment, cancellation) that the utilities run against. Ports of uutils coreutils/findutils/sed and jaq live here too; see the crate `LICENSE` for third-party notices. |
 | `pi-diff` | [`crates/pi-diff`](../crates/pi-diff) | N-API-free jsdiff-compatible Myers, line, word, and structured-patch primitives, consumed by native diff bindings and the edit engine. |
 | `pi-edit` | [`crates/pi-edit`](../crates/pi-edit) | Edit-mode parsing, matching, staging, streaming previews, snapshots, and host-writer application; wrapped by native `EditSession` / `EditStore`. |
+| `pi-mermaid` | [`crates/pi-mermaid`](../crates/pi-mermaid) | N-API-free Mermaid-to-ASCII/Unicode diagram renderer (flowcharts, state, sequence, class, ER, and XY charts), wrapped by `renderMermaidAscii`. |
 | `pi-predict` | [`crates/pi-predict`](../crates/pi-predict) | N-API-free ngram, SmolLM, and macOS spelling-backed word-completion engines, wrapped by `TextPredictor`. |
 | `pi-vfs` | [`crates/pi-vfs`](../crates/pi-vfs) | Injectable async filesystem plus a blocking facade, native host fast paths, and URL-preserving lexical helpers shared by shell, builtins, and traversal. |
 | `pi-shell`      | [`crates/pi-shell`](../crates/pi-shell)           | Persistent embedded brush shell, command execution/minimization, process plumbing, and in-process command integration used by `pi-natives`; traversal and injectable filesystem primitives live in `pi-walker` and `pi-vfs`. |
@@ -35,7 +36,7 @@ The root `Cargo.toml` lists every crate under `crates/` explicitly in `workspace
 ```text
 @oh-my-pi/pi-natives JS entrypoints
   -> pi-natives (N-API conversion, platform bindings, task boundaries)
-       -> pi-ast / pi-diff / pi-edit / pi-iso / pi-predict / pi-vcs / pi-voice
+       -> pi-ast / pi-diff / pi-edit / pi-iso / pi-mermaid / pi-predict / pi-vcs / pi-voice
        -> pi-walker / pi-vfs
        -> pi-shell
             -> brush-core (parser, expansion, interpreter)

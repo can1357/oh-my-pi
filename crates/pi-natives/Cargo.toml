@@ -37,7 +37,6 @@ futures.workspace = true
 grep-pcre2.workspace = true
 grep-regex.workspace = true
 grep-searcher.workspace = true
-html-escape.workspace = true
 html-to-markdown-rs.workspace = true
 icy_sixel.workspace = true
 ignore.workspace = true
@@ -65,6 +64,7 @@ pi-builtins = { workspace = true, features = ["util.grep"] }
 pi-diff.workspace = true
 pi-edit.workspace = true
 pi-iso.workspace = true
+pi-mermaid = { workspace = true, default-features = false, features = ["xutf"] }
 pi-predict.workspace = true
 pi-shell.workspace = true
 pi-vfs.workspace = true

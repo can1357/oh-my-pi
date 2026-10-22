@@ -37,7 +37,7 @@ Do not import unexported `native/*` implementation paths from package consumers.
 | Edit engine              | `EditSession`, `EditStore`, edit inspection/diff/grammar helpers, hashline helpers, `notebookToEditableText` | `edit.rs`, `crates/pi-edit` | mixed |
 | OAuth callbacks          | `NativeOAuthCallback` | `oauth_callback/mod.rs` | class/promises |
 | Apple Foundation Models  | `appleFmAvailability`, `appleFmGenerate`, `appleFmCancel` | `applefm/mod.rs` | promise, handle/callback, sync |
-| Mermaid rendering        | `renderMermaidAscii` | `mermaid/mod.rs` | sync |
+| Mermaid rendering        | `renderMermaidAscii` | `mermaid.rs` (core in `pi-mermaid`) | sync |
 | Diff and vectors         | `diffLines`, `diffWords`, `diffLineRuns`, `structuredPatchHunks`, `DiffStream`, `cosineSimilarityPairs`, `mmrRerankIndices`, `vectorIndexTopK`                     | `diff.rs` (core in `pi-diff`), `vectors.rs`                            | sync transforms; mixed `DiffStream` |
 | Shell and PTY            | `executeShell`, `Shell`, `PtySession`                                                                                                                             | `shell.rs`, `pty.rs`                                                  | classes/promises     |
 | Process and files        | `Process`, `FileLock`, `execReplace`                                                                                                                              | `ps.rs`, `file_lock/mod.rs`                                           | classes/mixed        |
