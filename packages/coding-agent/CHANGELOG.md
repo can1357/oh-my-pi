@@ -6,6 +6,8 @@
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
+- `omp poke <session> <message>` delivers a message into a session exactly once: an idle omp that has it open starts a turn, a busy one takes it at its next step, after Esc it waits for your next message (`--force` delivers at once), and a closed session holds it until opened or runs one headless turn with `--resume`
+- SDK: `createAgentSession({ mailbox: { deliver: true } })` delivers `omp poke` messages as turns; by default an embedded session only marks itself open, so a poke for it is held instead of resuming it in another process
 
 ### Fixed
 

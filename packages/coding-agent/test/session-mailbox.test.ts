@@ -1,0 +1,396 @@
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, Context } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
+import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	claimMail,
+	deliveryTarget,
+	isMailDone,
+	listClaimedMail,
+	listNewMail,
+	newMailId,
+	postMail,
+} from "@oh-my-pi/pi-coding-agent/mailbox/mailbox";
+import { MAILBOX_DIR_ENV, MAILBOX_ENV } from "@oh-my-pi/pi-coding-agent/mailbox/paths";
+import { listSessionPresence } from "@oh-my-pi/pi-coding-agent/mailbox/presence";
+import { SessionMailbox } from "@oh-my-pi/pi-coding-agent/mailbox/watcher";
+import { TempDir } from "@oh-my-pi/pi-utils";
+
+const SESSION_STORAGE_MODULE = path.resolve(import.meta.dir, "../src/session/session-storage.ts");
+
+const zeroUsage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+} satisfies AssistantMessage["usage"];
+
+/** The watcher polls once a second; generous enough for several polls. */
+const DELIVERY_TIMEOUT_MS = 10_000;
+
+async function until(condition: () => boolean, what: string): Promise<void> {
+	const deadline = Date.now() + DELIVERY_TIMEOUT_MS;
+	while (!condition()) {
+		if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+		await Bun.sleep(50);
+	}
+}
+
+/** Text of every message one model request carried, in order. */
+function requestTexts(context: Context): string[] {
+	return context.messages.map(message =>
+		typeof message.content === "string"
+			? message.content
+			: message.content.map(part => ("text" in part ? part.text : "")).join(""),
+	);
+}
+
+describe("session mailbox delivery", () => {
+	let tempDir: TempDir;
+	let authStorage: AuthStorage;
+	let previousRoot: string | undefined;
+	let previousSwitch: string | undefined;
+	let sessions: AgentSession[];
+	let contexts: Context[];
+	let release: PromiseWithResolvers<void>;
+	let toolStarted: PromiseWithResolvers<void>;
+
+	beforeEach(async () => {
+		tempDir = TempDir.createSync("@omp-session-mailbox-");
+		previousRoot = Bun.env[MAILBOX_DIR_ENV];
+		previousSwitch = Bun.env[MAILBOX_ENV];
+		Bun.env[MAILBOX_DIR_ENV] = path.join(tempDir.path(), "mailbox");
+		delete Bun.env[MAILBOX_ENV];
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorage.keys.setRuntime("openai", "openai-test-key");
+		sessions = [];
+		contexts = [];
+		release = Promise.withResolvers<void>();
+		toolStarted = Promise.withResolvers<void>();
+	});
+
+	afterEach(async () => {
+		release.resolve();
+		for (const opened of sessions) await opened.dispose().catch(() => {});
+		authStorage.close();
+		if (previousRoot === undefined) delete Bun.env[MAILBOX_DIR_ENV];
+		else Bun.env[MAILBOX_DIR_ENV] = previousRoot;
+		if (previousSwitch === undefined) delete Bun.env[MAILBOX_ENV];
+		else Bun.env[MAILBOX_ENV] = previousSwitch;
+		tempDir.removeSync();
+	});
+
+	/** A session file written by an earlier process, closed again. */
+	async function savedSessionFile(): Promise<string> {
+		const { session: first } = openSession();
+		await first.prompt("seed");
+		const file = first.sessionManager.getSessionFile()!;
+		await first.dispose();
+		contexts.length = 0;
+		return file;
+	}
+
+	/** A session whose model calls `slow` when the prompt is "go", and answers text otherwise. */
+	function openSession(
+		sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions")),
+		clientBridge?: ClientBridge,
+	): { session: AgentSession; mailbox: SessionMailbox } {
+		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+		const slowTool: AgentTool = {
+			name: "slow",
+			label: "Slow",
+			description: "Blocks until released",
+			parameters: type({}),
+			execute: async () => {
+				toolStarted.resolve();
+				await release.promise;
+				return { content: [{ type: "text", text: "SLOW_DONE" }] };
+			},
+		};
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [slowTool], messages: [] },
+			convertToLlm,
+			streamFn: (_model, context) => {
+				contexts.push(context);
+				const last = requestTexts(context).at(-1);
+				const message: AssistantMessage = {
+					role: "assistant",
+					content:
+						last === "go"
+							? [{ type: "toolCall", id: `tc-${contexts.length}`, name: "slow", arguments: {} }]
+							: [{ type: "text", text: "ok" }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: zeroUsage,
+					stopReason: last === "go" ? "toolUse" : "stop",
+					timestamp: Date.now(),
+				};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: message.stopReason as "stop" | "toolUse", message });
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const mailbox = new SessionMailbox(sessionManager, { deliver: true, host: "test" });
+		const opened = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map([[slowTool.name, slowTool]]),
+		});
+		opened.setClientBridge(clientBridge);
+		mailbox.bind(opened);
+		sessions.push(opened);
+		return { session: opened, mailbox };
+	}
+
+	async function poke(sessionId: string, text: string, force?: boolean): Promise<string> {
+		const id = newMailId("poke");
+		await postMail({
+			v: 1,
+			id,
+			kind: "poke",
+			sessionId,
+			createdAt: new Date().toISOString(),
+			poke: { text, from: "test", force },
+		});
+		return id;
+	}
+
+	/** Run a turn into the slow tool, then interrupt it the way Esc does. */
+	async function interrupt(opened: AgentSession): Promise<void> {
+		const run = opened.prompt("go");
+		await toolStarted.promise;
+		release.resolve();
+		await opened.abort({ reason: USER_INTERRUPT_LABEL });
+		await run.catch(() => {});
+		await opened.waitForIdle();
+		contexts.length = 0;
+	}
+
+	it("starts a turn in an idle session and records the mail as delivered", async () => {
+		const { session: opened } = openSession();
+		const sessionId = opened.sessionManager.getSessionId();
+		expect(deliveryTarget(sessionId)).toMatchObject({ kind: "live", host: "test" });
+
+		const mailId = await poke(sessionId, "BUILD_FINISHED");
+		await until(() => isMailDone(sessionId, mailId), "the poke to reach the transcript");
+
+		expect(contexts).toHaveLength(1);
+		expect(requestTexts(contexts[0]!).at(-1)).toContain("BUILD_FINISHED");
+	});
+
+	it("after Esc, delivers a --force poke at once and holds a plain one for the user's next message, ahead of it in the same request", async () => {
+		const { session: opened } = openSession();
+		const sessionId = opened.sessionManager.getSessionId();
+		await interrupt(opened);
+
+		const heldId = await poke(sessionId, "HELD_POKE");
+		const forcedId = await poke(sessionId, "FORCED_POKE", true);
+		// Every poll that sees the forced poke also lists the held one, posted first.
+		await until(() => isMailDone(sessionId, forcedId), "the forced poke to reach the transcript");
+		expect(contexts).toHaveLength(1);
+		expect(requestTexts(contexts[0]!).at(-1)).toContain("FORCED_POKE");
+		expect(listNewMail(sessionId)).toEqual([`${heldId}.json`]);
+
+		await opened.prompt("NEXT_USER_MESSAGE");
+		expect(contexts).toHaveLength(2);
+		const texts = requestTexts(contexts[1]!);
+		const pokeAt = texts.findIndex(text => text.includes("HELD_POKE"));
+		expect(pokeAt).toBeGreaterThan(-1);
+		expect(texts.indexOf("NEXT_USER_MESSAGE")).toBeGreaterThan(pokeAt);
+		await until(() => isMailDone(sessionId, heldId), "the held poke to be recorded as delivered");
+	});
+
+	it("takes no waiting mail for a prompt that fails because a turn is running", async () => {
+		const { session: opened } = openSession();
+		const run = opened.prompt("go");
+		await toolStarted.promise;
+		let taken = 0;
+		opened.setHeldMailProvider(() => {
+			taken++;
+			return [];
+		});
+
+		expect(
+			await opened.prompt("busy").then(
+				() => undefined,
+				(error: Error) => error.name,
+			),
+		).toBe("AgentBusyError");
+		expect(taken).toBe(0);
+		release.resolve();
+		await run;
+	});
+
+	it("withdraws presence when the session closes, so later mail for it is held for the next opener", async () => {
+		const { session: opened } = openSession();
+		const sessionId = opened.sessionManager.getSessionId();
+		expect(listSessionPresence(sessionId)).toHaveLength(1);
+
+		await opened.dispose();
+		expect(listSessionPresence(sessionId)).toEqual([]);
+		expect(deliveryTarget(sessionId)).toEqual({ kind: "free" });
+	});
+
+	it("withdraws presence even when closing the session file fails", async () => {
+		const { session: opened } = openSession();
+		const sessionId = opened.sessionManager.getSessionId();
+		spyOn(opened.sessionManager, "close").mockRejectedValue(new Error("disk gone"));
+
+		expect(
+			await opened.dispose().then(
+				() => undefined,
+				(error: Error) => error.message,
+			),
+		).toBe("disk gone");
+		expect(listSessionPresence(sessionId)).toEqual([]);
+	});
+
+	it("opening a saved session leaves its write lease to the first writer while no mail waits", async () => {
+		const file = await savedSessionFile();
+		const { session: opened } = openSession(await SessionManager.open(file));
+		const sessionId = opened.sessionManager.getSessionId();
+		expect(deliveryTarget(sessionId)).toMatchObject({ kind: "live" });
+
+		// The lease is shared within a process, so another process probes it.
+		const probe = path.join(tempDir.path(), "lease-probe.ts");
+		await Bun.write(
+			probe,
+			`import { tryAcquireSessionLease } from ${JSON.stringify(SESSION_STORAGE_MODULE)};
+			const lease = tryAcquireSessionLease(${JSON.stringify(sessionId)});
+			console.log(lease ? "free" : "taken");
+			lease?.release();`,
+		);
+		const child = Bun.spawn(["bun", probe], { env: { ...process.env }, stdout: "pipe" });
+		expect((await new Response(child.stdout).text()).trim()).toBe("free");
+	});
+
+	it("lets one of two session managers in a process consume the session's mail, so a poke is delivered once", async () => {
+		const file = await savedSessionFile();
+		const { session: first } = openSession(await SessionManager.open(file));
+		const { session: second } = openSession(await SessionManager.open(file));
+		const sessionId = first.sessionManager.getSessionId();
+		expect(second.sessionManager.getSessionId()).toBe(sessionId);
+		expect(
+			listSessionPresence(sessionId)
+				.map(record => record.delivers)
+				.sort(),
+		).toEqual([false, true]);
+
+		const mailId = await poke(sessionId, "ONE_CONSUMER");
+		await until(() => isMailDone(sessionId, mailId), "the poke to reach the session file");
+		expect(
+			contexts.filter(context => requestTexts(context).some(text => text.includes("ONE_CONSUMER"))),
+		).toHaveLength(1);
+	});
+
+	it("does not claim mail while extensions load, so a session switched to meanwhile never receives it", async () => {
+		const { session: opened } = openSession();
+		await opened.prompt("seed");
+		const oldId = opened.sessionManager.getSessionId();
+		const loading = Promise.withResolvers<void>();
+		const loaded = Promise.withResolvers<void>();
+		opened.setDeferredExtensionLoader(() => {
+			loading.resolve();
+			return loaded.promise;
+		});
+		contexts.length = 0;
+
+		const mailId = await poke(oldId, "OLD_SESSION_POKE");
+		// A claimed poke would start the extension load within a poll; give it two.
+		await Promise.race([loading.promise, Bun.sleep(2_500)]);
+		await opened.newSession();
+		loaded.resolve();
+		await opened.prompt("in the new session");
+		expect(contexts.some(context => requestTexts(context).some(text => text.includes("OLD_SESSION_POKE")))).toBe(
+			false,
+		);
+		expect(listNewMail(oldId)).toEqual([`${mailId}.json`]);
+	});
+
+	it("returns a claim its consumer left behind to the mailbox and delivers it once", async () => {
+		const file = await savedSessionFile();
+		const sessionId = (await SessionManager.open(file)).getSessionId();
+		const mailId = await poke(sessionId, "LEFT_BEHIND");
+		// A consumer that died after claiming, before the message reached the file.
+		claimMail(sessionId, `${mailId}.json`);
+
+		openSession(await SessionManager.open(file));
+		await until(() => isMailDone(sessionId, mailId), "the recovered poke to reach the session file");
+		expect(contexts).toHaveLength(1);
+		expect(requestTexts(contexts[0]!).at(-1)).toContain("LEFT_BEHIND");
+		expect(listClaimedMail(sessionId)).toEqual([]);
+	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"counts a poke as delivered only once its entry is in the session file",
+		async () => {
+			const { session: opened } = openSession();
+			await opened.prompt("seed");
+			const sessionId = opened.sessionManager.getSessionId();
+			const file = opened.sessionManager.getSessionFile()!;
+			// Neither appends nor the manager's repair rewrite can reach the session file.
+			fs.chmodSync(file, 0o444);
+			fs.chmodSync(path.dirname(file), 0o555);
+			let mailId: string;
+			try {
+				mailId = await poke(sessionId, "DISK_FULL_POKE");
+				await until(
+					() => contexts.some(context => requestTexts(context).at(-1)?.includes("DISK_FULL_POKE")),
+					"delivery",
+				);
+				await opened.waitForIdle();
+				// Absence can only be observed across polls: give the watcher two.
+				await Bun.sleep(2_500);
+				expect(isMailDone(sessionId, mailId)).toBe(false);
+			} finally {
+				fs.chmodSync(path.dirname(file), 0o755);
+				fs.chmodSync(file, 0o644);
+			}
+			await opened.prompt("disk is back").catch(() => {});
+			await opened.sessionManager.flush().catch(() => {});
+			await until(() => isMailDone(sessionId, mailId), "the poke to be confirmed once it is in the file");
+			expect(await Bun.file(file).text()).toContain(mailId);
+		},
+	);
+
+	it("reports an ACP client that keeps agent turns off as taking the poke with its next prompt, and starts no turn", async () => {
+		const { session: opened } = openSession(undefined, { capabilities: {}, deferAgentInitiatedTurns: true });
+		await opened.prompt("seed");
+		const sessionId = opened.sessionManager.getSessionId();
+		contexts.length = 0;
+		await until(() => {
+			const target = deliveryTarget(sessionId);
+			return target.kind === "live" && target.deferred;
+		}, "the deferred flag");
+
+		const mailId = await poke(sessionId, "ACP_POKE");
+		await until(() => listNewMail(sessionId).length === 0, "the poke to be claimed");
+		expect(contexts).toHaveLength(0);
+
+		await opened.prompt("client prompt");
+		expect(requestTexts(contexts[0]!).some(text => text.includes("ACP_POKE"))).toBe(true);
+		await until(() => isMailDone(sessionId, mailId), "the poke to reach the session file");
+	});
+});
