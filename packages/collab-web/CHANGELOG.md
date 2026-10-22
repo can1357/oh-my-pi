@@ -27,6 +27,9 @@
 ### Changed
 
 - Redesigned the web client: black chassis with one inset session panel, glass top bar with the omp mark and a live status pill, a docked composer card, prompts shown as cards in the transcript, a sectioned agents rail, and a floating agent drawer; the connect screen was rebuilt too
+### Added
+
+- Added tail-first joining: the web guest loads the latest turns first, earlier messages as you scroll up, and trimmed images, tool output and entries in full when you tap them ([#9469](https://github.com/can1357/oh-my-pi/issues/9469), [#9328](https://github.com/can1357/oh-my-pi/issues/9328), [#11859](https://github.com/can1357/oh-my-pi/issues/11859), [#13389](https://github.com/can1357/oh-my-pi/pull/13389) by [@andrewleech](https://github.com/andrewleech)).
 
 ## [18.3.1] - 2026-09-25
 

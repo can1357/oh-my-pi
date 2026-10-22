@@ -11,6 +11,7 @@
  * runtime, node builtins) and must tolerate partial/malformed `args` and
  * `details` — these arrive as plain JSON over the wire.
  */
+import type { CollabElided } from "@oh-my-pi/pi-wire";
 import type { ComponentType } from "react";
 
 export interface ToolResultText {
@@ -32,6 +33,10 @@ export interface ToolResultLike {
 	content: readonly ToolResultBlock[];
 	details?: unknown;
 	isError?: boolean;
+	/** Id of the session entry holding the result; set when `collabElided` is. */
+	entryId?: string;
+	/** Values the collab host trimmed from the result entry. */
+	collabElided?: readonly CollabElided[];
 }
 
 /**
@@ -44,6 +49,12 @@ export interface ToolRenderHost {
 	hasAgent?(id: string): boolean;
 	/** Open the sub-session/transcript view for an agent id. */
 	openAgent?(id: string): void;
+	/**
+	 * Fetch the original of a trimmed value and swap it into its entry.
+	 * Resolves `null` once loaded, else the reason it could not be.
+	 * Absent (HTML exports), trimmed values show only their placeholders.
+	 */
+	loadFull?(entryId: string, elided: CollabElided): Promise<string | null>;
 }
 
 export interface ToolRenderProps {

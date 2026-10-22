@@ -1,12 +1,20 @@
-import type { AssistantMessage, ImageContent, SessionEntry, TextContent, ToolResultMessage } from "@oh-my-pi/pi-wire";
+import {
+	COLLAB_ENTRY_OMITTED_CUSTOM_TYPE,
+	type AssistantMessage,
+	type CollabElided,
+	type ImageContent,
+	type SessionEntry,
+	type TextContent,
+} from "@oh-my-pi/pi-wire";
 import { ChevronRight } from "lucide-react";
-import type { ReactNode } from "react";
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ActiveTool, ConnectionPhase } from "../../lib/client";
+import type { ReactNode, RefObject } from "react";
+import { Component, Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ActiveTool, ConnectionPhase, HistoryState } from "../../lib/client";
+import { pathEquals } from "../../lib/elided";
 import { fmtTokens } from "../../lib/format";
-import type { ToolRenderHost } from "../../tool-render";
-import { Markdown, StreamingMarkdown } from "./Markdown";
-import { ToolCard } from "./ToolCard";
+import { ElidedImage, LoadFull, type ToolRenderHost } from "../../tool-render";
+import { Markdown } from "./Markdown";
+import { ToolCard, type ToolResultEntry } from "./ToolCard";
 import "./transcript.css";
 
 export interface TranscriptProps {
@@ -20,6 +28,10 @@ export interface TranscriptProps {
 	host?: ToolRenderHost;
 	/** Main connection phase; absent for the agent drawer's compact transcript. */
 	phase?: ConnectionPhase;
+	/** Paging state of a tail join; absent or `null` when every entry is already held. */
+	history?: HistoryState | null;
+	/** Requests the page before the oldest entry ("Load earlier"). */
+	onLoadEarlier?: () => void;
 }
 
 interface ScrollGeometry {
@@ -43,19 +55,123 @@ export function updateTranscriptTailLock(element: ScrollGeometry, lock: TailLock
 	lock.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 40;
 }
 
+/** Rows carrying `data-entry-id`, in entry order. */
+const ENTRY_ROW_SELECTOR = "[data-entry-id]";
+
+interface AnchorRow {
+	getAttribute(name: string): string | null;
+	getBoundingClientRect(): { readonly top: number; readonly bottom: number };
+}
+
+interface AnchorRoot {
+	scrollTop: number;
+	getBoundingClientRect(): { readonly top: number };
+	querySelectorAll(selector: string): ArrayLike<AnchorRow>;
+}
+
+/** An entry row and its offset from the top of the viewport. */
+export interface ScrollAnchor {
+	id: string;
+	offset: number;
+}
+
+/** The topmost entry row still visible in the viewport, or `null` when no row is. */
+export function captureScrollAnchor(root: AnchorRoot): ScrollAnchor | null {
+	const viewportTop = root.getBoundingClientRect().top;
+	const rows = root.querySelectorAll(ENTRY_ROW_SELECTOR);
+	// Rows are laid out in entry order: binary-search the first one whose
+	// bottom edge is below the viewport top, reading O(log n) rects.
+	let lo = 0;
+	let hi = rows.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (rows[mid].getBoundingClientRect().bottom <= viewportTop) lo = mid + 1;
+		else hi = mid;
+	}
+	if (lo >= rows.length) return null;
+	const row = rows[lo];
+	const id = row.getAttribute("data-entry-id");
+	return id === null ? null : { id, offset: row.getBoundingClientRect().top - viewportTop };
+}
+
+/** Scroll so the anchor row sits at its captured offset again; `false` when the row is gone. */
+export function restoreScrollAnchor(root: AnchorRoot, anchor: ScrollAnchor): boolean {
+	const viewportTop = root.getBoundingClientRect().top;
+	const rows = root.querySelectorAll(ENTRY_ROW_SELECTOR);
+	for (let i = 0; i < rows.length; i++) {
+		const row = rows[i];
+		if (row.getAttribute("data-entry-id") !== anchor.id) continue;
+		root.scrollTop += row.getBoundingClientRect().top - viewportTop - anchor.offset;
+		return true;
+	}
+	return false;
+}
+
+interface ScrollAnchorKeeperProps {
+	rootRef: RefObject<HTMLDivElement | null>;
+	lockRef: TailLock;
+	/** Set to the entries whose commit put the reader back on their row. */
+	anchoredRef: { current: readonly SessionEntry[] | null };
+	entries: readonly SessionEntry[];
+	/** Index of the first mounted row. */
+	start: number;
+	/** A tail join: `entries[0]` changing means rows landed above the reader. */
+	tailJoin: boolean;
+}
+
+/**
+ * Keeps the reader's row in place across a commit that mounts rows above it:
+ * earlier rows of the window ("show N earlier"), a history page, or a
+ * reconnect's fresh tail. The row has to be read from the DOM before React
+ * mutates it, which only a class component's `getSnapshotBeforeUpdate` can do;
+ * it restores against the row, not the height delta, so it is exact even when
+ * the same commit also appends live entries. Renders nothing.
+ */
+class ScrollAnchorKeeper extends Component<ScrollAnchorKeeperProps> {
+	override getSnapshotBeforeUpdate(prev: ScrollAnchorKeeperProps): ScrollAnchor | null {
+		const { rootRef, lockRef, entries, start, tailJoin } = this.props;
+		const root = rootRef.current;
+		if (root === null) return null;
+		const windowGrew = start < prev.start && entries[0] === prev.entries[0];
+		// A tail-locked view needs no anchor for a new oldest entry: it keeps following.
+		const oldestChanged =
+			tailJoin &&
+			!lockRef.current &&
+			prev.entries.length > 0 &&
+			entries.length > 0 &&
+			entries[0] !== prev.entries[0];
+		return windowGrew || oldestChanged ? captureScrollAnchor(root) : null;
+	}
+
+	override componentDidUpdate(_prev: ScrollAnchorKeeperProps, _state: unknown, anchor: ScrollAnchor | null): void {
+		const root = this.props.rootRef.current;
+		if (anchor === null || root === null) return;
+		if (restoreScrollAnchor(root, anchor)) this.props.anchoredRef.current = this.props.entries;
+		// The reader's row is gone (a fresh tail no longer holds it): show the latest.
+		else followTranscriptTail(root, this.props.lockRef, true);
+	}
+
+	override render(): null {
+		return null;
+	}
+}
+
 function Row({
 	kind,
 	gutter,
 	title,
+	entryId,
 	children,
 }: {
 	kind: "user" | "assistant" | "custom" | "marker";
 	gutter: ReactNode;
 	title?: string;
+	/** Scroll-anchor key of a committed entry's row; absent for the stream ghost and live tools. */
+	entryId?: string;
 	children: ReactNode;
 }): ReactNode {
 	return (
-		<div className={`tr-row tr-row--${kind}`}>
+		<div className={`tr-row tr-row--${kind}`} data-entry-id={entryId}>
 			<div className="tr-gutter" title={title}>
 				{gutter}
 			</div>
@@ -77,15 +193,127 @@ function ThinkingBlock({ text, redacted }: { text: string; redacted?: boolean })
 	);
 }
 
-/** Markdown + image thumbnails for user / custom message content. */
-function MsgContent({ content }: { content: string | readonly (TextContent | ImageContent)[] }): ReactNode {
-	if (typeof content === "string") return <Markdown text={content} />;
+/** Values the collab host trimmed from one entry, when the host can load them. */
+interface EntryTrims {
+	host: ToolRenderHost;
+	entryId: string;
+	records: readonly CollabElided[];
+	/** Path of the entry's content: `["message", "content"]`, or `["content"]` for a custom message. */
+	prefix: readonly (string | number)[];
+}
+
+function entryTrims(
+	entry: SessionEntry,
+	host: ToolRenderHost | undefined,
+	prefix: readonly (string | number)[],
+): EntryTrims | undefined {
+	if (host?.loadFull === undefined || entry.collabElided === undefined || entry.collabElided.length === 0) {
+		return undefined;
+	}
+	return { host, entryId: entry.id, records: entry.collabElided, prefix };
+}
+
+/**
+ * The record of content block `i` shown inline: the text placeholder of a
+ * trimmed image (`"image"`), or a clipped text block (`"string"`).
+ */
+function blockTrim(trims: EntryTrims | undefined, i: number, kind: "image" | "string"): CollabElided | undefined {
+	if (trims === undefined) return undefined;
+	const path = kind === "image" ? [...trims.prefix, i] : [...trims.prefix, i, "text"];
+	return trims.records.find(
+		record => record.kind === kind && record.removed !== true && pathEquals(record.path, path),
+	);
+}
+
+/**
+ * Records with no inline control, offered by one control for the whole row:
+ * everything but clipped text blocks (or string content) and image
+ * placeholders among the text blocks of `content`.
+ */
+function rowTrims(trims: EntryTrims, content: string | readonly { type: string }[]): CollabElided[] {
+	const { prefix } = trims;
+	return trims.records.filter(record => {
+		if (typeof content === "string") return !(record.kind === "string" && pathEquals(record.path, prefix));
+		if (!pathEquals(record.path.slice(0, prefix.length), prefix)) return true;
+		const index = record.path[prefix.length];
+		if (typeof index !== "number" || content[index]?.type !== "text" || record.removed === true) return true;
+		if (record.path.length === prefix.length + 1) return record.kind !== "image";
+		return !(record.kind === "string" && record.path.length === prefix.length + 2 && record.path.at(-1) === "text");
+	});
+}
+
+/** The row-level control for `trims`' records that have no inline control of their own. */
+function RowTrims({
+	trims,
+	content,
+}: {
+	trims: EntryTrims | undefined;
+	content: string | readonly { type: string }[];
+}): ReactNode {
+	if (trims === undefined) return null;
+	const records = rowTrims(trims, content);
+	const whole = records.some(record => record.path.length === 0);
+	return (
+		<LoadFull
+			host={trims.host}
+			entryId={trims.entryId}
+			records={records}
+			label={whole ? "load full entry" : "load full message"}
+		/>
+	);
+}
+
+/** Markdown + image thumbnails for user / custom message content; trimmed values load in place. */
+function MsgContent({
+	content,
+	trims,
+}: {
+	content: string | readonly (TextContent | ImageContent)[];
+	trims?: EntryTrims;
+}): ReactNode {
+	if (typeof content === "string") {
+		const clipped = trims?.records.find(record => record.kind === "string" && pathEquals(record.path, trims.prefix));
+		return (
+			<>
+				<Markdown text={content} />
+				{trims && clipped && (
+					<LoadFull host={trims.host} entryId={trims.entryId} records={[clipped]} label="load full text" />
+				)}
+			</>
+		);
+	}
 	return (
 		<>
 			{content.map((block, i) => {
 				switch (block.type) {
-					case "text":
-						return <Markdown key={i} text={block.text} />;
+					case "text": {
+						const image = blockTrim(trims, i, "image");
+						if (trims && image) {
+							return (
+								<ElidedImage
+									key={i}
+									host={trims.host}
+									entryId={trims.entryId}
+									elided={image}
+									placeholder={block.text}
+								/>
+							);
+						}
+						const clipped = blockTrim(trims, i, "string");
+						return (
+							<Fragment key={i}>
+								<Markdown text={block.text} />
+								{trims && clipped && (
+									<LoadFull
+										host={trims.host}
+										entryId={trims.entryId}
+										records={[clipped]}
+										label="load full text"
+									/>
+								)}
+							</Fragment>
+						);
+					}
 					case "image":
 						return (
 							<img
@@ -109,13 +337,16 @@ function AssistantBody({
 	active,
 	pending,
 	host,
+	trims,
 }: {
 	message: AssistantMessage;
-	results: ReadonlyMap<string, ToolResultMessage>;
+	results: ReadonlyMap<string, ToolResultEntry>;
 	active: ReadonlyMap<string, ActiveTool>;
 	/** Still streaming — suppress stop-reason chips on the partial message. */
 	pending: boolean;
 	host?: ToolRenderHost;
+	/** Absent for the stream ghost, which the host never trims. */
+	trims?: EntryTrims;
 }): ReactNode {
 	const blocks = message.content.map((block, i) => {
 		switch (block.type) {
@@ -123,8 +354,17 @@ function AssistantBody({
 				return <ThinkingBlock key={i} text={block.thinking} />;
 			case "redactedThinking":
 				return <ThinkingBlock key={i} text="" redacted />;
-			case "text":
-				return pending ? <StreamingMarkdown key={i} text={block.text} /> : <Markdown key={i} text={block.text} />;
+			case "text": {
+				const clipped = blockTrim(trims, i, "string");
+				return (
+					<Fragment key={i}>
+						<Markdown text={block.text} />
+						{trims && clipped && (
+							<LoadFull host={trims.host} entryId={trims.entryId} records={[clipped]} label="load full text" />
+						)}
+					</Fragment>
+				);
+			}
 			case "toolCall": {
 				const act = active.get(block.id);
 				const result = results.get(block.id);
@@ -160,13 +400,18 @@ function AssistantBody({
 					)}
 				</div>
 			)}
+			<RowTrims trims={trims} content={message.content} />
 		</>
 	);
 }
 
+/** Where message and custom-message content sit in their entries, as trim paths address them. */
+const MESSAGE_CONTENT = ["message", "content"];
+const CUSTOM_CONTENT = ["content"];
+
 interface EntryRowProps {
 	entry: SessionEntry;
-	results: ReadonlyMap<string, ToolResultMessage>;
+	results: ReadonlyMap<string, ToolResultEntry>;
 	active: ReadonlyMap<string, ActiveTool>;
 	host?: ToolRenderHost;
 }
@@ -189,16 +434,26 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 		case "message": {
 			const msg = entry.message;
 			switch (msg.role) {
-				case "user":
+				case "user": {
+					const trims = entryTrims(entry, host, MESSAGE_CONTENT);
 					return (
-						<Row kind="user" gutter="host" title={entry.timestamp}>
-							<MsgContent content={msg.content} />
+						<Row kind="user" gutter="host" title={entry.timestamp} entryId={entry.id}>
+							<MsgContent content={msg.content} trims={trims} />
+							<RowTrims trims={trims} content={msg.content} />
 						</Row>
 					);
+				}
 				case "assistant":
 					return (
-						<Row kind="assistant" gutter="agent" title={entry.timestamp}>
-							<AssistantBody message={msg} results={results} active={active} pending={false} host={host} />
+						<Row kind="assistant" gutter="agent" title={entry.timestamp} entryId={entry.id}>
+							<AssistantBody
+								message={msg}
+								results={results}
+								active={active}
+								pending={false}
+								host={host}
+								trims={entryTrims(entry, host, MESSAGE_CONTENT)}
+							/>
 						</Row>
 					);
 				default:
@@ -207,6 +462,7 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 			}
 		}
 		case "custom_message": {
+			const trims = entryTrims(entry, host, CUSTOM_CONTENT);
 			if (entry.customType === "collab-prompt") {
 				const details = entry.details;
 				const from =
@@ -216,42 +472,61 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 						? ((details as Record<string, unknown>).from as string)
 						: "guest";
 				return (
-					<Row kind="user" gutter={<span className="tr-badge">{from}</span>} title={entry.timestamp}>
-						<MsgContent content={entry.content} />
+					<Row
+						kind="user"
+						gutter={<span className="tr-badge">{from}</span>}
+						title={entry.timestamp}
+						entryId={entry.id}
+					>
+						<MsgContent content={entry.content} trims={trims} />
+						<RowTrims trims={trims} content={entry.content} />
+					</Row>
+				);
+			}
+			if (entry.customType === COLLAB_ENTRY_OMITTED_CUSTOM_TYPE) {
+				// Stands in for an entry too large to send; loading swaps the original in.
+				return (
+					<Row kind="custom" gutter="" title={entry.timestamp} entryId={entry.id}>
+						<div className="tr-custom">
+							<span className="tr-chip tr-chip--warn">not sent</span>
+							<MsgContent content={entry.content} />
+							<RowTrims trims={trims} content={entry.content} />
+						</div>
 					</Row>
 				);
 			}
 			if (!entry.display) return null;
 			return (
-				<Row kind="custom" gutter="" title={entry.timestamp}>
+				<Row kind="custom" gutter="" title={entry.timestamp} entryId={entry.id}>
 					<div className="tr-custom">
 						<span className="tr-chip">{entry.customType}</span>
-						<MsgContent content={entry.content} />
+						<MsgContent content={entry.content} trims={trims} />
+						<RowTrims trims={trims} content={entry.content} />
 					</div>
 				</Row>
 			);
 		}
 		case "compaction":
 			return (
-				<div className="tr-divider" title={entry.shortSummary ?? entry.summary}>
+				<div className="tr-divider" title={entry.shortSummary ?? entry.summary} data-entry-id={entry.id}>
 					<span>context compacted · {fmtTokens(entry.tokensBefore)} tokens</span>
 				</div>
 			);
 		case "branch_summary":
 			return (
-				<div className="tr-divider" title={entry.summary}>
+				<div className="tr-divider" title={entry.summary} data-entry-id={entry.id}>
 					<span>branch summary</span>
 				</div>
 			);
 		case "model_change":
 			return (
-				<Row kind="marker" gutter="" title={entry.timestamp}>
+				<Row kind="marker" gutter="" title={entry.timestamp} entryId={entry.id}>
 					<span className="tr-marker">model → {entry.model}</span>
 				</Row>
 			);
 		case "thinking_level_change":
 			return (
-				<Row kind="marker" gutter="" title={entry.timestamp}>
+				<Row kind="marker" gutter="" title={entry.timestamp} entryId={entry.id}>
 					<span className="tr-marker">thinking → {entry.thinkingLevel ?? "off"}</span>
 				</Row>
 			);
@@ -271,22 +546,29 @@ const WINDOW = 100;
 const EARLIER_TRIGGER_PX = 200;
 
 export function Transcript(props: TranscriptProps): ReactNode {
-	const { entries, stream, streamDone, activeTools, working, compact, host, phase } = props;
+	const { entries, stream, streamDone, activeTools, working, compact, host, phase, history, onLoadEarlier } = props;
 
-	// null follows the tail. A number pins the first mounted entry while the
+	// null follows the tail. An entry id pins the first mounted row while the
 	// reader is scrolled away from the bottom, so appended entries never
-	// unmount rows above the reader and shift the page under them.
-	const [pinnedStart, setPinnedStart] = useState<number | null>(null);
+	// unmount rows above the reader and shift the page under them. An id, not
+	// an index: a history page prepends entries and a reconnect's fresh tail
+	// replaces them, and the reader's rows must stay mounted through both.
+	const [pinnedId, setPinnedId] = useState<string | null>(null);
+	const pinnedIndex = useMemo(
+		() => (pinnedId === null ? -1 : entries.findIndex(entry => entry.id === pinnedId)),
+		[entries, pinnedId],
+	);
 	const tailStart = Math.max(0, entries.length - WINDOW);
-	const start = pinnedStart === null ? tailStart : Math.min(pinnedStart, tailStart);
+	const start = pinnedIndex < 0 ? tailStart : Math.min(pinnedIndex, tailStart);
 	const visible = useMemo(() => entries.slice(start), [entries, start]);
 
-	// A tool result always follows its call, so visible rows only pair with visible results.
+	// Tool results by call id, as entries: the id and trims ride along to the card.
+	// A result always follows its call, so visible rows only pair with visible results.
 	const results = useMemo(() => {
-		const map = new Map<string, ToolResultMessage>();
+		const map = new Map<string, ToolResultEntry>();
 		for (const entry of visible) {
 			if (entry.type === "message" && entry.message.role === "toolResult") {
-				map.set(entry.message.toolCallId, entry.message);
+				map.set(entry.message.toolCallId, entry as ToolResultEntry);
 			}
 		}
 		return map;
@@ -294,12 +576,22 @@ export function Transcript(props: TranscriptProps): ReactNode {
 
 	const rootRef = useRef<HTMLDivElement | null>(null);
 	const lockRef = useRef(true);
-	/**
-	 * First visible row and its offset from the viewport top, captured before
-	 * mounting earlier rows. Restoring against the row, not the total height
-	 * delta, stays exact when the same commit also appends live entries.
-	 */
-	const prependRef = useRef<{ anchor: Element; offset: number } | null>(null);
+	const sentinelRef = useRef<HTMLDivElement | null>(null);
+	/** Entries whose commit put the reader back on their row: the `live` jump leaves them there. */
+	const anchoredEntriesRef = useRef<readonly SessionEntry[] | null>(null);
+	/** Latest IntersectionObserver verdict: the sentinel is within a viewport of the top. */
+	const nearTopRef = useRef(false);
+
+	// A tail join's oldest entry changed: a history page was prepended, or a
+	// reconnect swapped in a fresh tail. If every held row was mounted (the pin
+	// sat on the oldest one) and rows landed above it, mount them too, or the
+	// page the reader asked for would hide behind "show N earlier";
+	// ScrollAnchorKeeper keeps the reader's row put.
+	const [oldest, setOldest] = useState(entries[0]);
+	if (entries[0] !== oldest) {
+		setOldest(entries[0]);
+		if (history != null && pinnedIndex > 0 && pinnedId === oldest?.id) setPinnedId(entries[0].id);
+	}
 
 	// Follow the tail while bottom-locked; releasing/re-arming happens in onScroll.
 	useEffect(() => {
@@ -308,37 +600,44 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	}, [entries, stream, activeTools, working]);
 
 	// A `live` transition (initial connect or reconnect) jumps to the latest message
-	// regardless of the prior scroll position. Absent for the agent drawer's compact transcript.
+	// regardless of the prior scroll position, unless a reconnect's fresh tail
+	// still held the reader's row. Absent for the agent drawer's compact transcript.
 	useEffect(() => {
 		const el = rootRef.current;
-		if (phase !== "live" || el === null) return;
-		setPinnedStart(null);
+		// `entries` is the commit that changed `phase`.
+		if (phase !== "live" || el === null || anchoredEntriesRef.current === entries) return;
+		setPinnedId(null);
 		followTranscriptTail(el, lockRef, true);
 	}, [phase]);
 
-	// Keep the reader's content in place when earlier rows mount above it.
-	useLayoutEffect(() => {
-		const el = rootRef.current;
-		const before = prependRef.current;
-		if (el === null || before === null) return;
-		prependRef.current = null;
-		if (!before.anchor.isConnected) return;
-		el.scrollTop += before.anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - before.offset;
-	}, [start]);
-
+	// Mount the previous window of held entries above the reader.
 	const showEarlier = (): void => {
-		const el = rootRef.current;
-		if (el === null || start === 0 || prependRef.current !== null) return;
-		const top = el.getBoundingClientRect().top;
-		for (const row of el.children) {
-			if (row.classList.contains("tr-earlier")) continue;
-			const rect = row.getBoundingClientRect();
-			if (rect.bottom <= top) continue;
-			prependRef.current = { anchor: row, offset: rect.top - top };
-			break;
-		}
-		setPinnedStart(Math.max(0, start - WINDOW));
+		if (start > 0) setPinnedId(entries[Math.max(0, start - WINDOW)].id);
 	};
+
+	// Every held entry is mounted: only then does the host get asked for more.
+	const canAutoLoad = start === 0 && history?.hasEarlier === true && !history.loading && history.error === null;
+
+	// Near the top, page in earlier history. The observer is rebuilt per commit
+	// so each layout gets a fresh verdict (IntersectionObserver reports only
+	// changes); a layout effect so the stale verdict is gone before the scroll
+	// event of an anchor restore. A tail-locked view never loads: reflow at
+	// the bottom (join, streaming) must not page history in.
+	useLayoutEffect(() => {
+		nearTopRef.current = false;
+		const root = rootRef.current;
+		const sentinel = sentinelRef.current;
+		if (!canAutoLoad || onLoadEarlier === undefined || root === null || sentinel === null) return;
+		const observer = new IntersectionObserver(
+			records => {
+				nearTopRef.current = records[records.length - 1]?.isIntersecting === true;
+				if (nearTopRef.current && !lockRef.current) onLoadEarlier();
+			},
+			{ root, rootMargin: "100% 0px 0px 0px" },
+		);
+		observer.observe(sentinel);
+		return () => observer.disconnect();
+	}, [entries, canAutoLoad, onLoadEarlier]);
 
 	// Tool calls committed anywhere in the session: rescanned when entries change,
 	// not per streaming token or tool output update.
@@ -367,23 +666,51 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	// While the snapshot downloads the banner reports progress; an empty transcript isn't "no activity".
 	const settled = phase === undefined || phase === "live";
 
+	const onScroll = (): void => {
+		const el = rootRef.current;
+		if (el === null) return;
+		updateTranscriptTailLock(el, lockRef);
+		// Back at the bottom: drop the pin so the window trims to the tail again.
+		if (lockRef.current) {
+			if (pinnedId !== null) setPinnedId(null);
+		} else if (pinnedIndex < 0) {
+			setPinnedId(visible[0]?.id ?? null);
+		}
+		if (el.scrollTop <= EARLIER_TRIGGER_PX) showEarlier();
+		// Scrolling up off the tail with the sentinel already in range.
+		if (canAutoLoad && nearTopRef.current && !lockRef.current) onLoadEarlier?.();
+	};
+
 	return (
-		<div
-			ref={rootRef}
-			className={`tr-root${compact === true ? " tr-root--compact" : ""}`}
-			onScroll={() => {
-				const el = rootRef.current;
-				if (el === null) return;
-				updateTranscriptTailLock(el, lockRef);
-				// Back at the bottom: drop the pin so the window trims to the tail again.
-				if (lockRef.current) {
-					if (pinnedStart !== null) setPinnedStart(null);
-				} else if (pinnedStart === null) {
-					setPinnedStart(start);
-				}
-				if (el.scrollTop <= EARLIER_TRIGGER_PX) showEarlier();
-			}}
-		>
+		<div ref={rootRef} className={`tr-root${compact === true ? " tr-root--compact" : ""}`} onScroll={onScroll}>
+			<ScrollAnchorKeeper
+				rootRef={rootRef}
+				lockRef={lockRef}
+				anchoredRef={anchoredEntriesRef}
+				entries={entries}
+				start={start}
+				tailJoin={history != null}
+			/>
+			{start === 0 && history?.hasEarlier === true && (
+				<div className="tr-history">
+					<div ref={sentinelRef} className="tr-history-sentinel" aria-hidden="true" />
+					<button
+						type="button"
+						className="tr-earlier"
+						disabled={history.loading || onLoadEarlier === undefined}
+						onClick={onLoadEarlier}
+					>
+						{history.loading && <span className="tv-spin" aria-hidden="true" />}
+						{history.loading ? "loading earlier messages…" : "load earlier messages"}
+					</button>
+					{history.error !== null && (
+						// Hidden, not removed, during a retry: the rows below must not shift.
+						<div className={`tr-history-err${history.loading ? " tr-history-err--retrying" : ""}`} role="alert">
+							couldn't load earlier messages: {history.error}
+						</div>
+					)}
+				</div>
+			)}
 			{settled && entries.length === 0 && stream === null && !working && (
 				<div className="tr-empty">no activity yet</div>
 			)}
