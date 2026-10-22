@@ -2416,6 +2416,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			// only a `complete: true` section or a data-less finalize would publish
 			// refused payload again.
 			const refused = progress.extractedToolData?.yield?.splice(0) ?? [];
+			const yieldTool = activeSession?.getToolByName("yield");
+			// The tool's "sections recorded" flag would otherwise accept a data-less
+			// finalize against the sections just discarded.
+			resetYieldTurnState(yieldTool);
 			// The yield tool remembers submitted workpool items: release every
 			// refused one so the continuation can submit the batch again.
 			const refusedLabels = refused.flatMap(item =>
@@ -2423,7 +2427,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					? item.type.filter((label): label is string => typeof label === "string")
 					: [],
 			);
-			if (refusedLabels.length > 0) reopenYieldWorkPoolItems(activeSession?.getToolByName("yield"), refusedLabels);
+			if (refusedLabels.length > 0) reopenYieldWorkPoolItems(yieldTool, refusedLabels);
 		},
 		yieldTurnStopRequested: () => yieldTurnStopRequested,
 		waitForYieldTurnStop: async () => {
