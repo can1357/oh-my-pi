@@ -730,6 +730,21 @@ export interface AnthropicCompat {
 	 */
 	replayUnsignedThinking?: boolean;
 	/**
+	 * Whether a thinking-mode history must carry a `thinking` block on EVERY
+	 * assistant turn of the current turn. DeepSeek's Anthropic endpoint rejects
+	 * the whole request (`The content[].thinking in the thinking mode must be
+	 * passed back to the API.`) when any assistant turn after the last user text
+	 * lacks one, including turns another upstream in the same gateway model group
+	 * produced without reasoning. Presence is all it validates (the block text may
+	 * be a placeholder, the signature may be empty), and only `thinking` counts —
+	 * `redacted_thinking` does not, and that endpoint rejects the block outright.
+	 * A model group that may fail over to such an endpoint must set this: the
+	 * stricter member defines the replay contract for the group.
+	 * Default: false (official Anthropic and lax proxies tolerate a turn without
+	 * thinking and the block is not invented for them).
+	 */
+	requiresThinkingPresence?: boolean;
+	/**
 	 * Whether the endpoint requires `thinking.type: "enabled"` whenever the
 	 * model reasons. Use for models that reject omitted or disabled thinking.
 	 */
