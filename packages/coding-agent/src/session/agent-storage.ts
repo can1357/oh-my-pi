@@ -43,6 +43,21 @@ type ModelPerfRow = {
 	ttft_ms: number;
 };
 
+/** Row shape for one `<kind>_usage` counter. */
+type UsageCountRow = {
+	name: string;
+	count: number;
+};
+
+/** Row shape for `listAuthCredentials` when disabled credentials are included. */
+type AuthCredentialRow = {
+	id: number;
+	provider: string;
+	credential_type: string;
+	data: string;
+	disabled_cause: string | null;
+};
+
 /** Row shape read from an `omp stats` messages table during backfill. */
 type StatsMessageRow = {
 	rowid: number;
@@ -160,7 +175,7 @@ export type UsageKind = (typeof USAGE_KINDS)[number];
 const USAGE_KINDS = ["command", "hint"] as const;
 
 /** Prepared statements for one `<kind>_usage` table. */
-type UsageStatements = { upsert: Statement; list: Statement };
+type UsageStatements = { upsert: Statement; list: Statement<UsageCountRow, []> };
 
 /** Current agent.db schema version; bump when schema changes require migration. */
 export const SCHEMA_VERSION = 6;
@@ -179,11 +194,11 @@ export class AgentStorage {
 	#db: Database;
 	#authStore: AuthCredentialStore;
 
-	#listSettingsStmt: Statement;
+	#listSettingsStmt: Statement<SettingsRow, []>;
 	#upsertModelUsageStmt: Statement;
-	#listModelUsageStmt: Statement;
+	#listModelUsageStmt: Statement<ModelUsageRow, []>;
 	#upsertModelPerfStmt: Statement;
-	#listModelPerfStmt: Statement;
+	#listModelPerfStmt: Statement<ModelPerfRow, []>;
 	#usageStmts: Record<UsageKind, UsageStatements>;
 	#modelUsageCache: string[] | null = null;
 	/** Only the real user db auto-imports stats.db history; custom paths (tests, embedding) opt in explicitly. */
@@ -204,11 +219,18 @@ export class AgentStorage {
 		// Create AuthCredentialStore with our open database
 		this.#authStore = new SqliteAuthCredentialStore(this.#db);
 
-		this.#listSettingsStmt = this.#db.prepare("SELECT key, value FROM settings");
+		// Field-cached statements use `prepare()`, not `db.query()`: Bun memoizes one
+		// Statement per SQL string on the connection, so this store and the auth store
+		// sharing `#db` would receive the SAME object and closing either one would
+		// finalize it out from under the sibling. `prepare()` hands out a per-instance
+		// statement, so every finalize() in close() stays owned by this store.
+		this.#listSettingsStmt = this.#db.prepare<SettingsRow, []>("SELECT key, value FROM settings");
 		this.#upsertModelUsageStmt = this.#db.prepare(
 			`INSERT INTO model_usage (model_key, last_used_at) VALUES (?, ${SQLITE_NOW_EPOCH}) ON CONFLICT(model_key) DO UPDATE SET last_used_at = ${SQLITE_NOW_EPOCH}`,
 		);
-		this.#listModelUsageStmt = this.#db.prepare("SELECT model_key FROM model_usage ORDER BY last_used_at DESC");
+		this.#listModelUsageStmt = this.#db.prepare<ModelUsageRow, []>(
+			"SELECT model_key FROM model_usage ORDER BY last_used_at DESC",
+		);
 		// Recency-weighted upsert: past MODEL_PERF_DECAY_AT samples, every new
 		// sample first halves the aggregates so old measurements fade out.
 		this.#upsertModelPerfStmt = this.#db.prepare(
@@ -224,7 +246,7 @@ ON CONFLICT(model_key) DO UPDATE SET
 		);
 		// `model_key TEXT PRIMARY KEY` admits NULL (SQLite rowid-table quirk); a NULL
 		// key would break every consumer that treats perf keys as selectors.
-		this.#listModelPerfStmt = this.#db.prepare(
+		this.#listModelPerfStmt = this.#db.prepare<ModelPerfRow, []>(
 			"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf WHERE model_key IS NOT NULL",
 		);
 		this.#usageStmts = {
@@ -240,7 +262,7 @@ ON CONFLICT(model_key) DO UPDATE SET
 				`INSERT INTO ${table} (name, count, last_used_at) VALUES (?, 1, ${SQLITE_NOW_EPOCH})
 ON CONFLICT(name) DO UPDATE SET count = ${table}.count + 1, last_used_at = ${SQLITE_NOW_EPOCH}`,
 			),
-			list: this.#db.prepare(`SELECT name, count FROM ${table}`),
+			list: this.#db.prepare<UsageCountRow, []>(`SELECT name, count FROM ${table}`),
 		};
 	}
 
@@ -290,8 +312,8 @@ CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
 
 		// One-off statements are scoped with `using`: an unfinalized statement keeps the SQLite
 		// connection (and agent.db) open after close() until GC collects it.
-		using settingsInfoStmt = this.#db.prepare("PRAGMA table_info(settings)");
-		const settingsInfo = settingsInfoStmt.all() as Array<{ name?: string }>;
+		using settingsInfoStmt = this.#db.prepare<{ name: string }, []>("PRAGMA table_info(settings)");
+		const settingsInfo = settingsInfoStmt.all();
 		const hasSettingsTable = settingsInfo.length > 0;
 		const hasKey = settingsInfo.some(column => column.name === "key");
 		const hasValue = settingsInfo.some(column => column.name === "value");
@@ -307,8 +329,8 @@ CREATE TABLE settings (
 		} else if (!hasKey || !hasValue) {
 			// Migrate v1 schema: single JSON blob in `data` column → per-key rows
 			let legacySettings: Record<string, unknown> | null = null;
-			using legacyRowStmt = this.#db.prepare("SELECT data FROM settings WHERE id = 1");
-			const row = legacyRowStmt.get() as { data?: string } | undefined;
+			using legacyRowStmt = this.#db.prepare<{ data: string }, []>("SELECT data FROM settings WHERE id = 1");
+			const row = legacyRowStmt.get();
 			if (row?.data) {
 				try {
 					const parsed = JSON.parse(row.data);
@@ -347,8 +369,10 @@ CREATE TABLE settings (
 			migrate(legacySettings);
 		}
 
-		using versionStmt = this.#db.prepare("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
-		const versionRow = versionStmt.get() as { version?: number } | undefined;
+		using versionStmt = this.#db.prepare<{ version: number }, []>(
+			"SELECT version FROM schema_version ORDER BY version DESC LIMIT 1",
+		);
+		const versionRow = versionStmt.get();
 		const schemaVersion = typeof versionRow?.version === "number" ? versionRow.version : 0;
 		if (versionRow?.version !== undefined && versionRow.version !== SCHEMA_VERSION) {
 			logger.warn("AgentStorage schema version mismatch", {
@@ -487,7 +511,7 @@ FROM model_usage_legacy
 	 * @returns Settings object, or null if no settings are stored
 	 */
 	getSettings(): Settings | null {
-		const rows = (this.#listSettingsStmt.all() as SettingsRow[]) ?? [];
+		const rows = this.#listSettingsStmt.all();
 		if (rows.length === 0) return null;
 		const settings: Record<string, unknown> = {};
 		for (const row of rows) {
@@ -535,7 +559,7 @@ FROM model_usage_legacy
 			return this.#modelUsageCache;
 		}
 		try {
-			const rows = this.#listModelUsageStmt.all() as ModelUsageRow[];
+			const rows = this.#listModelUsageStmt.all();
 			this.#modelUsageCache = rows.map(row => row.model_key);
 			return this.#modelUsageCache;
 		} catch (error) {
@@ -562,7 +586,7 @@ FROM model_usage_legacy
 	 */
 	listUsage(kind: UsageKind): Record<string, number> {
 		try {
-			const rows = this.#usageStmts[kind].list.all() as Array<{ name: string; count: number }>;
+			const rows = this.#usageStmts[kind].list.all();
 			const counts: Record<string, number> = {};
 			for (const row of rows) counts[row.name] = row.count;
 			return counts;
@@ -623,7 +647,7 @@ FROM model_usage_legacy
 		this.#kickModelPerfBackfill();
 		const stats = new Map<string, ModelPerfStats>();
 		try {
-			for (const row of this.#listModelPerfStmt.all() as ModelPerfRow[]) {
+			for (const row of this.#listModelPerfStmt.all()) {
 				if (row.gen_ms <= 0 || row.output_tokens <= 0) continue;
 				stats.set(row.model_key, {
 					samples: row.samples,
@@ -651,7 +675,7 @@ FROM model_usage_legacy
 		if (!this.#autoPerfBackfill || this.#perfBackfillChecked) return;
 		this.#perfBackfillChecked = true;
 		try {
-			using markerStmt = this.#db.prepare("SELECT value FROM meta WHERE key = ?");
+			using markerStmt = this.#db.prepare<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?");
 			const marker = markerStmt.get(MODEL_PERF_BACKFILL_KEY);
 			if (marker) return;
 			// The v1 import already folded the stats history into the bare rows, and no
@@ -701,10 +725,9 @@ FROM model_usage_legacy
 			// Stats databases written before the served-tier column existed cannot
 			// separate a fast serving path's samples from standard ones; those rows
 			// import as standard-tier history.
-			const hasTier = (statsDb.prepare("PRAGMA table_info(messages)").all() as { name: string }[]).some(
-				column => column.name === "service_tier",
-			);
-			using select = statsDb.prepare(
+			using tierInfoStmt = statsDb.prepare<{ name: string }, []>("PRAGMA table_info(messages)");
+			const hasTier = tierInfoStmt.all().some(column => column.name === "service_tier");
+			using select = statsDb.prepare<StatsMessageRow, [number, number, number, number]>(
 				`SELECT rowid, timestamp, provider, model, output_tokens, duration, ttft${hasTier ? ", service_tier" : ""}
 FROM messages
 WHERE (timestamp < ?1 OR (timestamp = ?1 AND rowid < ?2))
@@ -721,7 +744,7 @@ LIMIT ?4`,
 			let imported = 0;
 			while (scanned < MODEL_PERF_BACKFILL_MAX_ROWS) {
 				const chunk = Math.min(MODEL_PERF_BACKFILL_CHUNK, MODEL_PERF_BACKFILL_MAX_ROWS - scanned);
-				const rows = select.all(cursorTimestamp, cursorRowid, cutoff, chunk) as StatsMessageRow[];
+				const rows = select.all(cursorTimestamp, cursorRowid, cutoff, chunk);
 				if (rows.length === 0) break;
 				scanned += rows.length;
 				const last = rows[rows.length - 1];
@@ -805,18 +828,18 @@ ON CONFLICT(model_key) DO UPDATE SET
 		const credentials = this.#authStore.listAuthCredentials(provider);
 		if (!includeDisabled) return credentials;
 
-		using stmt = this.#db.prepare(
-			provider
-				? "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC"
-				: "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials ORDER BY id ASC",
-		);
-		const rows = (provider ? stmt.all(provider) : stmt.all()) as Array<{
-			id: number;
-			provider: string;
-			credential_type: string;
-			data: string;
-			disabled_cause: string | null;
-		}>;
+		let rows: AuthCredentialRow[];
+		if (provider) {
+			using stmt = this.#db.prepare<AuthCredentialRow, [string]>(
+				"SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC",
+			);
+			rows = stmt.all(provider);
+		} else {
+			using stmt = this.#db.prepare<AuthCredentialRow, []>(
+				"SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials ORDER BY id ASC",
+			);
+			rows = stmt.all();
+		}
 
 		const results: StoredAuthCredential[] = [];
 		for (const row of rows) {
