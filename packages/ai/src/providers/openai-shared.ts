@@ -4217,31 +4217,37 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 	);
 }
 
-/** Populate `output.usage` from a Responses-API `response.usage` payload. Does not invoke `calculateCost`. */
-export function populateResponsesUsageFromResponse(
-	output: AssistantMessage,
-	usage:
-		| {
-				input_tokens?: number | null;
-				output_tokens?: number | null;
-				total_tokens?: number | null;
-				prompt_cache_hit_tokens?: number | null;
-				prompt_cache_miss_tokens?: number | null;
-				input_tokens_details?: {
-					cached_tokens?: number | null;
-					cache_write_tokens?: number | null;
-					orchestration_input_tokens?: number | null;
-					orchestration_input_cached_tokens?: number | null;
-				} | null;
-				output_tokens_details?: {
-					reasoning_tokens?: number | null;
-					orchestration_output_tokens?: number | null;
-				} | null;
-		  }
-		| null
-		| undefined,
-): void {
-	if (!usage) return;
+/** The Responses-API `usage` payload shape the shared accounting path reads. */
+export interface ResponsesUsagePayload {
+	input_tokens?: number | null;
+	output_tokens?: number | null;
+	total_tokens?: number | null;
+	prompt_cache_hit_tokens?: number | null;
+	prompt_cache_miss_tokens?: number | null;
+	input_tokens_details?: {
+		cached_tokens?: number | null;
+		cache_write_tokens?: number | null;
+		orchestration_input_tokens?: number | null;
+		orchestration_input_cached_tokens?: number | null;
+	} | null;
+	output_tokens_details?: {
+		reasoning_tokens?: number | null;
+		orchestration_output_tokens?: number | null;
+	} | null;
+}
+
+/**
+ * Split a Responses-API `usage` payload into the buckets the ledger bills.
+ *
+ * Pure — no provider state, no I/O — so every lane that has to account for a
+ * Responses request bills the same buckets. The Responses provider and the
+ * compaction endpoint both go through here, so a bucket one of them reports
+ * (cache writes, provider-side orchestration) is never dropped by the other.
+ */
+export function calculateResponsesUsageAccounting(
+	usage: ResponsesUsagePayload | null | undefined,
+): OpenAIUsageAccounting | undefined {
+	if (!usage) return undefined;
 	const details = usage.input_tokens_details;
 	const outputDetails = usage.output_tokens_details;
 	const reportedInputTokens = usage.input_tokens ?? 0;
@@ -4280,6 +4286,16 @@ export function populateResponsesUsageFromResponse(
 		};
 		accounting.totalTokens = reportedTotalTokens ?? accounting.totalTokens + orchestrationTotal;
 	}
+	return accounting;
+}
+
+/** Populate `output.usage` from a Responses-API `response.usage` payload. Does not invoke `calculateCost`. */
+export function populateResponsesUsageFromResponse(
+	output: AssistantMessage,
+	usage: ResponsesUsagePayload | null | undefined,
+): void {
+	const accounting = calculateResponsesUsageAccounting(usage);
+	if (!accounting) return;
 
 	// Wholesale replacement must not drop provider-annotated extras (Copilot
 	// premium-request accounting): the failed/cancelled paths throw right after

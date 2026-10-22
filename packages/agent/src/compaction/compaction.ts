@@ -46,6 +46,7 @@ import { ThinkingLevel } from "../thinking";
 import { Tokenizer } from "../tokenizer";
 import type { AgentMessage } from "../types";
 import {
+	anthropicCompactionRejection,
 	buildAnthropicCompactionInstructions,
 	findAnthropicCompactionCut,
 	getPreservedAnthropicCompactionData,
@@ -63,7 +64,7 @@ import {
 	V2_RETAINED_MESSAGE_TOKEN_BUDGET,
 } from "./compaction-v2-streaming";
 import type { CompactionEntry, SessionEntry } from "./entries";
-import { NativeCompactionError } from "./errors";
+import { NativeCompactionError, RemoteCompactionPayloadError } from "./errors";
 import {
 	type ConvertToLlm,
 	createCompactionSummaryMessage,
@@ -88,6 +89,7 @@ import compactionTurnPrefixPrompt from "./prompts/compaction-turn-prefix.md" wit
 import compactionUpdateSummaryPrompt from "./prompts/compaction-update-summary.md" with { type: "text" };
 import handoffDocumentPrompt from "./prompts/handoff-document.md" with { type: "text" };
 import snapcompactArchiveContextPrompt from "./prompts/snapcompact-archive-context.md" with { type: "text" };
+import { compactionUsageObserver, type CompactionRequestUsage, reportRemoteCompactionUsage } from "./usage-reporter";
 
 import {
 	computeFileLists,
@@ -161,6 +163,24 @@ export interface CompactionResult<T = unknown> {
 	 */
 	providerReplayThroughEntryId?: string;
 }
+
+// ============================================================================
+// Usage accounting
+// ============================================================================
+
+/**
+ * Ledger purposes for the local compaction-side provider requests.
+ *
+ * The shared prefix keeps compaction spend recognizable inside a session
+ * ledger that also records the live turn's own calls.
+ */
+export const COMPACTION_USAGE_PURPOSES = {
+	summary: "compaction:summary",
+	shortSummary: "compaction:short-summary",
+	turnPrefix: "compaction:turn-prefix",
+	handoff: "compaction:handoff",
+	remote: "compaction:remote",
+} as const;
 
 // ============================================================================
 // Types
@@ -718,6 +738,14 @@ export interface SummaryOptions {
 	 */
 	telemetry?: AgentTelemetry;
 	/**
+	 * Observe every billed provider request of this compaction.
+	 *
+	 * The observer fires once per completed attempt — including attempts a
+	 * transient retry discarded and responses the provider rejected — so a host
+	 * can bill the spend even when the compaction itself is later abandoned.
+	 */
+	onUsage?: (usage: CompactionRequestUsage) => void;
+	/**
 	 * Active session thinking level. Threaded from `agent-session.ts` so
 	 * compaction honors the user's `/model` thinking selection instead of
 	 * silently overriding it with `Effort.High` (the historical default).
@@ -1016,18 +1044,30 @@ async function summarizeConversationWindow(
 
 	if (options?.remoteEndpoint) {
 		const endpoint = options.remoteEndpoint;
-		const remote = await withAuth(
-			apiKey,
-			key =>
-				requestRemoteCompaction(
-					endpoint,
-					{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
-					signal,
-					{ fetch: options.fetch, model, apiKey: key },
-				),
-			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
-		);
-		return remote.summary;
+		try {
+			const remote = await withAuth(
+				apiKey,
+				key =>
+					requestRemoteCompaction(
+						endpoint,
+						{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
+						signal,
+						{ fetch: options.fetch, model, apiKey: key },
+					),
+				{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
+			);
+			// The remote summarizer billed this request; the observer never ran for
+			// it, so journal it here.
+			reportRemoteCompactionUsage(options, model, remote.usage, COMPACTION_USAGE_PURPOSES.summary);
+			return remote.summary;
+		} catch (err) {
+			// A payload the provider billed but we cannot use is an abandoned
+			// attempt: it still cost tokens.
+			if (err instanceof RemoteCompactionPayloadError) {
+				reportRemoteCompactionUsage(options, model, err.usage, COMPACTION_USAGE_PURPOSES.summary, err.message);
+			}
+			throw err;
+		}
 	}
 
 	const response = await instrumentedCompleteSimple(
@@ -1051,6 +1091,7 @@ async function summarizeConversationWindow(
 			oneshotKind: "compaction_summary",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttemptCompleted: compactionUsageObserver(options, COMPACTION_USAGE_PURPOSES.summary),
 		},
 	);
 
@@ -1091,6 +1132,14 @@ export interface HandoffOptions {
 	 * `resolveCompactionEffort` for the conversion contract.
 	 */
 	thinkingLevel?: ThinkingLevel;
+	/**
+	 * Observe every billed provider request of this handoff.
+	 *
+	 * The observer fires once per completed attempt — including attempts a
+	 * transient retry discarded and responses the provider rejected — so a host
+	 * can bill the spend even when the handoff itself is later abandoned.
+	 */
+	onUsage?: (usage: CompactionRequestUsage) => void;
 }
 
 export function renderHandoffPrompt(customInstructions?: string): string {
@@ -1121,6 +1170,24 @@ export interface HandoffFromContextOptions {
 	telemetry?: AgentTelemetry;
 	/** See {@link HandoffOptions.thinkingLevel}. */
 	thinkingLevel?: ThinkingLevel;
+	/** See {@link HandoffOptions.onUsage}. */
+	onUsage?: (usage: CompactionRequestUsage) => void;
+}
+
+/**
+ * Why a billed handoff request produced no document, or undefined when it did.
+ *
+ * A handoff response without text leaves the host without a document: it
+ * discards the handoff and the request still cost tokens, so the attempt is
+ * recorded as a failed request rather than a successful one.
+ */
+export function handoffRejection(response: AssistantMessage): string | undefined {
+	const text = response.content
+		.filter((c): c is { type: "text"; text: string } => c.type === "text")
+		.map(c => c.text)
+		.join("\n");
+	if (text.trim().length > 0) return undefined;
+	return "Handoff generation produced no content";
 }
 
 /**
@@ -1151,13 +1218,20 @@ export async function generateHandoffFromContext(
 		oneshotKind: "handoff",
 		completeImpl: options.completeImpl,
 		retry: {},
+		onAttemptCompleted: compactionUsageObserver(options, COMPACTION_USAGE_PURPOSES.handoff, handoffRejection),
 	});
 	if (response.stopReason === "error" && shouldRetryHandoffWithAutoToolChoice(response)) {
 		response = await instrumentedCompleteSimple(
 			model,
 			context,
 			{ ...requestOptions, toolChoice: "auto" },
-			{ telemetry: options.telemetry, oneshotKind: "handoff", completeImpl: options.completeImpl, retry: {} },
+			{
+				telemetry: options.telemetry,
+				oneshotKind: "handoff",
+				completeImpl: options.completeImpl,
+				retry: {},
+				onAttemptCompleted: compactionUsageObserver(options, COMPACTION_USAGE_PURPOSES.handoff, handoffRejection),
+			},
 		);
 	}
 
@@ -1201,6 +1275,7 @@ export async function generateHandoff(
 			},
 			telemetry: options.telemetry,
 			thinkingLevel: options.thinkingLevel,
+			onUsage: options.onUsage,
 		},
 	);
 }
@@ -1231,18 +1306,30 @@ async function generateShortSummary(
 
 	if (options?.remoteEndpoint) {
 		const endpoint = options.remoteEndpoint;
-		const remote = await withAuth(
-			apiKey,
-			key =>
-				requestRemoteCompaction(
-					endpoint,
-					{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
-					signal,
-					{ fetch: options?.fetch, model, apiKey: key },
-				),
-			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
-		);
-		return remote.summary;
+		try {
+			const remote = await withAuth(
+				apiKey,
+				key =>
+					requestRemoteCompaction(
+						endpoint,
+						{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
+						signal,
+						{ fetch: options.fetch, model, apiKey: key },
+					),
+				{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
+			);
+			// The remote summarizer billed this request; the observer never ran for
+			// it, so journal it here.
+			reportRemoteCompactionUsage(options, model, remote.usage, COMPACTION_USAGE_PURPOSES.shortSummary);
+			return remote.summary;
+		} catch (err) {
+			// A payload the provider billed but we cannot use is an abandoned
+			// attempt: it still cost tokens.
+			if (err instanceof RemoteCompactionPayloadError) {
+				reportRemoteCompactionUsage(options, model, err.usage, COMPACTION_USAGE_PURPOSES.shortSummary, err.message);
+			}
+			throw err;
+		}
 	}
 
 	const response = await instrumentedCompleteSimple(
@@ -1269,6 +1356,7 @@ async function generateShortSummary(
 			oneshotKind: "compaction_short_summary",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttemptCompleted: compactionUsageObserver(options, COMPACTION_USAGE_PURPOSES.shortSummary),
 		},
 	);
 
@@ -1686,6 +1774,9 @@ export async function compact(
 		// The caller's opt-out must reach every summarization oneshot, otherwise
 		// an outer retry loop multiplies with the inner one (see SummaryOptions).
 		oneshotRetry: options?.oneshotRetry,
+		// Every fan-out summarizer bills through the same observer, so the host
+		// sees each attempt of each request kind.
+		onUsage: options?.onUsage,
 	};
 
 	// An archive keeps the reasoning policy of the model it was rendered for;
@@ -1907,6 +1998,20 @@ export async function compact(
 						providerSessionState: summaryOptions.providerSessionState,
 						preferWebsockets: summaryOptions.preferWebsockets,
 						codexCompaction: summaryOptions.codexCompaction,
+						// The provider billed this request; journal it like every
+						// other compaction-side request. The collector reports it
+						// as soon as the terminal event arrives, so an attempt
+						// whose payload is rejected is billed too. `failure` names
+						// the reason, so an unusable attempt is recorded as a
+						// failed request rather than a successful one.
+						onUsage: (usage, failure) =>
+							reportRemoteCompactionUsage(
+								summaryOptions,
+								model,
+								usage,
+								COMPACTION_USAGE_PURPOSES.remote,
+								failure,
+							),
 					}),
 				{ signal },
 			);
@@ -1958,26 +2063,44 @@ export async function compact(
 		const convertToLlm = summaryOptions.convertToLlm ?? defaultConvertToLlm;
 		const supportsOriginalDetail = openAiCompatSupportsImageDetailOriginal(model);
 		const sendV1 = async (remoteHistory: Array<Record<string, unknown>>, rewriteOutputs: boolean): Promise<void> => {
-			const remote = await withAuth(
-				apiKey,
-				key =>
-					requestOpenAiRemoteCompaction(
+			try {
+				const remote = await withAuth(
+					apiKey,
+					key =>
+						requestOpenAiRemoteCompaction(
+							model,
+							key,
+							remoteHistory,
+							summaryOptions.remoteSystemPrompt?.join("\n\n") ?? SUMMARIZATION_SYSTEM_PROMPT,
+							signal,
+							{
+								fetch: summaryOptions.fetch,
+								sessionId: summaryOptions.sessionId,
+								providerSessionState: summaryOptions.providerSessionState,
+								codexCompaction: summaryOptions.codexCompaction,
+								rewriteOutputs,
+							},
+						),
+					{ signal },
+				);
+				// The provider billed this request; journal it like every other
+				// compaction-side request.
+				reportRemoteCompactionUsage(summaryOptions, model, remote.usage, COMPACTION_USAGE_PURPOSES.remote);
+				preserveData = withOpenAiRemoteCompactionPreserveData(preserveData, remote);
+			} catch (err) {
+				// A payload the provider billed but we cannot use is an
+				// abandoned attempt: it still cost tokens.
+				if (err instanceof RemoteCompactionPayloadError) {
+					reportRemoteCompactionUsage(
+						summaryOptions,
 						model,
-						key,
-						remoteHistory,
-						summaryOptions.remoteSystemPrompt?.join("\n\n") ?? SUMMARIZATION_SYSTEM_PROMPT,
-						signal,
-						{
-							fetch: summaryOptions.fetch,
-							sessionId: summaryOptions.sessionId,
-							providerSessionState: summaryOptions.providerSessionState,
-							codexCompaction: summaryOptions.codexCompaction,
-							rewriteOutputs,
-						},
-					),
-				{ signal },
-			);
-			preserveData = withOpenAiRemoteCompactionPreserveData(preserveData, remote);
+						err.usage,
+						COMPACTION_USAGE_PURPOSES.remote,
+						err.message,
+					);
+				}
+				throw err;
+			}
 		};
 		const whole = buildOpenAiNativeHistory(
 			convertToLlm(remoteMessages),
@@ -2146,6 +2269,13 @@ export async function compact(
 					completeImpl: summaryOptions.completeImpl,
 					telemetry: summaryOptions.telemetry,
 					retry: summaryOneshotRetry(summaryOptions),
+					// The provider wrote the summary, but the request was still
+					// billed: report it like any other summary attempt.
+					onAttemptCompleted: compactionUsageObserver(
+						summaryOptions,
+						COMPACTION_USAGE_PURPOSES.summary,
+						anthropicCompactionRejection,
+					),
 				},
 			);
 			nativeSummary = remote.content;
@@ -2330,6 +2460,7 @@ async function generateTurnPrefixSummary(
 			oneshotKind: "compaction_turn_prefix",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttemptCompleted: compactionUsageObserver(options, COMPACTION_USAGE_PURPOSES.turnPrefix),
 		},
 	);
 

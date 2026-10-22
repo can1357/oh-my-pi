@@ -270,6 +270,45 @@ describe("async speculative compaction", () => {
 		expect(events).toEqual(expect.arrayContaining(["auto_compaction_start", "auto_compaction_end"]));
 	});
 
+	it("arms a speculation when the branch tip is a usage record", async () => {
+		let summarizations = 0;
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: summarizations++ === 0 ? "speculative summary" : "paid a second summarizer",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+
+		// The ledger's record is the branch tip: a previous compaction billed its
+		// own summary request and no transcript turn followed it.
+		sessionManager.createUsageObserver()({
+			purpose: "compaction:summary",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 80,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		});
+		expect(sessionManager.getBranch().at(-1)?.type).toBe("model_usage");
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
+
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("speculative summary");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("applies an Anthropic snapshot after append-only growth without dropping its tail or new turns", async () => {
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-6");
 		if (!bundled) throw new Error("Expected compaction-capable Anthropic model");
@@ -963,6 +1002,100 @@ describe("async speculative compaction", () => {
 		expect(entry?.type === "compaction" ? entry.tokensAfter : undefined).toBe(
 			agent.tokenizer.countMessages(convertToLlm(agent.state.messages), { excludeEncryptedReasoning: true }),
 		);
+	});
+
+	it("keeps an armed speculation valid when its summary request reports usage", async () => {
+		const compactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockImplementation(async (preparation, requestModel, _resolver, _instructions, _signal, options) => {
+				// The provider billed the speculation's summary request.
+				options?.onUsage?.({
+					purpose: "compaction:summary",
+					api: requestModel.api,
+					provider: requestModel.provider,
+					model: requestModel.id,
+					usage: {
+						input: 100,
+						output: 10,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 110,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+				});
+				return {
+					summary: "armed summary",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: preparation.tokensBefore,
+					details: {},
+				};
+			});
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
+
+		// The usage record is billing metadata, not a new turn: the armed
+		// summary is still applied instead of paying for another summarizer
+		// call.
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("armed summary");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not replay provider history for a snapshot whose usage record is the only follower", async () => {
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!bundled) throw new Error("Expected compaction-capable Anthropic model");
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		maintenance = createMaintenance({ methodOrder: ["remote"] });
+		const compactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockImplementation(async (preparation, requestModel, _resolver, _instructions, _signal, options) => {
+				options?.onUsage?.({
+					purpose: "compaction:summary",
+					api: requestModel.api,
+					provider: requestModel.provider,
+					model: requestModel.id,
+					usage: {
+						input: 100,
+						output: 10,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 110,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+				});
+				return {
+					summary: "signed snapshot summary",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: preparation.tokensBefore,
+					details: {},
+					preserveData: {
+						anthropicCompaction: {
+							provider: "anthropic",
+							content: "signed snapshot summary",
+							signature: "snapshot-signature",
+						},
+					},
+				};
+			});
+		const snapshotLeafId = sessionManager.getBranch().at(-1)?.id;
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
+
+		// No transcript entry follows the snapshot, so the signed block covers
+		// it entirely and no provider replay is owed.
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("signed snapshot summary");
+		expect(entry?.type === "compaction" ? entry.providerReplayThroughEntryId : undefined).toBeUndefined();
+		expect(snapshotLeafId).toBeDefined();
+		expect(compactSpy).toHaveBeenCalledTimes(1);
 	});
 });
 

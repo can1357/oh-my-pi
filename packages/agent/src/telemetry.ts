@@ -1824,6 +1824,16 @@ export interface InstrumentedChatSpanOptions {
 	 * (3 attempts, 500ms base backoff, `retry-after` honored).
 	 */
 	readonly retry?: OneshotRetryOptions;
+	/**
+	 * Observe every completed provider attempt of this oneshot.
+	 *
+	 * Fires once per attempt, before the transient-retry layer can discard a
+	 * response: a provider bills a request it then rejects, so a caller that
+	 * accounts for spend has to see the rejected attempts too. A rejected
+	 * attempt still carries the provider's usage, so the callback receives the
+	 * full response — including `stopReason: "error"` ones.
+	 */
+	readonly onAttemptCompleted?: (response: AssistantMessage) => void;
 }
 
 /**
@@ -1883,7 +1893,7 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
-			const complete = span.completeImpl ?? completeSimple;
+			const complete = span.completeImpl;
 			// Opt-in only (see `retry` on InstrumentedChatSpanOptions): each attempt
 			// re-issues the whole request, which is safe only for replay-safe
 			// oneshots. `getResponseHeaders` hands the failed attempt's headers to
@@ -1893,7 +1903,22 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 				// Clear first so a previous attempt's `retry-after` can never be
 				// reused for a later failure that arrived without headers.
 				capturedHeaders = undefined;
-				return complete(model, ctx, { ...options, onResponse: captureOnResponse });
+				const attemptOptions = { ...options, onResponse: captureOnResponse };
+				// The default transport reports every attempt itself: it re-issues
+				// a stalled request behind the thinking-loop guard. A custom
+				// transport resolves only the final message, so the attempt is
+				// observed here instead.
+				if (!complete) {
+					return completeSimple(model, ctx, { ...attemptOptions, onAttempt: span.onAttemptCompleted });
+				}
+				const attempt = complete(model, ctx, attemptOptions);
+				if (!span.onAttemptCompleted) return attempt;
+				// Report the attempt before the retry layer can discard it: the
+				// provider already billed it, rejected responses included.
+				return attempt.then(response => {
+					span.onAttemptCompleted?.(response);
+					return response;
+				});
 			};
 			const message = span.retry
 				? await retryTransientCompletion(runOnce, {

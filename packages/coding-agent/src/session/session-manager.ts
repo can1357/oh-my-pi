@@ -3462,31 +3462,92 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/** Record usage on its initiating branch without moving a successor branch or session. */
+	/**
+	 * Record usage on its initiating branch without moving a successor branch or session.
+	 *
+	 * `followCurrentBranch` attaches the record to the branch's current tip
+	 * instead of the initiating parent, but only while ordinary descendant turns
+	 * connect the two: a `reset_boundary` (`/clear`) or a committed compaction
+	 * starts a new transcript window, and a request issued before that boundary
+	 * belongs to the window it was issued in.
+	 */
 	appendModelUsage(
 		usage: Pick<
 			ModelUsageEntry,
 			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
 		>,
 		owner: { sessionId: string; parentId: string | null },
+		options?: { followCurrentBranch?: boolean },
 	): string | undefined {
 		if (this.#sessionId !== owner.sessionId || (owner.parentId !== null && !this.#index.has(owner.parentId))) {
 			return undefined;
 		}
 		const activeLeafId = this.#index.leafId();
+		const parentId =
+			options?.followCurrentBranch && this.#canFollowCurrentBranch(owner.parentId, activeLeafId)
+				? activeLeafId
+				: owner.parentId;
 		const entry: ModelUsageEntry = {
 			type: "model_usage",
 			id: generateId(this.#index),
-			parentId: owner.parentId,
+			parentId,
 			timestamp: nowIso(),
 			runtime: currentRuntimeIdentity(),
 			...usage,
-			...(activeLeafId !== owner.parentId ? { activeLeafId } : {}),
+			...(activeLeafId !== parentId ? { activeLeafId } : {}),
 		};
 		this.#recordEntry(entry);
 		// Through #setLeaf so an in-flight atomic batch restores this leaf, not the usage entry, on rollback.
-		if (activeLeafId !== owner.parentId) this.#setLeaf(activeLeafId);
+		if (activeLeafId !== parentId) this.#setLeaf(activeLeafId);
 		return entry.id;
+	}
+
+	/**
+	 * Whether a record issued against `initiatingParentId` may follow the branch
+	 * to its current tip.
+	 *
+	 * Only ordinary descendant turns connect the two. A `reset_boundary`
+	 * (`/clear`) or a committed compaction starts a new transcript window, and a
+	 * request issued before that boundary belongs to the window it was issued
+	 * in — following it would charge the cleared session for the old one.
+	 */
+	#canFollowCurrentBranch(initiatingParentId: string | null, activeLeafId: string | null): boolean {
+		if (initiatingParentId === null || activeLeafId === null) return false;
+		if (initiatingParentId === activeLeafId) return true;
+		const branch = this.#index.branchView();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			// The initiating parent wins over its own entry type: a request
+			// issued right after a compaction belongs to the new window.
+			if (entry.id === initiatingParentId) return true;
+			if (entry.type === "reset_boundary" || entry.type === "compaction") return false;
+		}
+		return false;
+	}
+
+	/**
+	 * Build a ledger observer for a request that runs beside the live turn.
+	 *
+	 * The record is written as soon as the request completes, so a compaction
+	 * that is later discarded still bills what it spent. It follows the branch
+	 * that issued the request, but only across ordinary descendant turns — see
+	 * {@link #canFollowCurrentBranch}.
+	 *
+	 * @param initiatingParentId Branch the request was issued against; defaults
+	 * to the current leaf.
+	 */
+	createUsageObserver(
+		initiatingParentId?: string | null,
+	): (
+		usage: Pick<ModelUsageEntry, "purpose" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage">,
+	) => void {
+		const owner = {
+			sessionId: this.getSessionId(),
+			parentId: initiatingParentId === undefined ? this.getLeafId() : initiatingParentId,
+		};
+		return usage => {
+			this.appendModelUsage(usage, owner, { followCurrentBranch: true });
+		};
 	}
 
 	/** Append a thinking level change as child of current leaf, then advance leaf. Returns entry id. */

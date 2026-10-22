@@ -11,6 +11,7 @@ import type {
 	AnthropicCompactionFiles,
 	AnthropicCompactionPayload,
 	ApiKey,
+	AssistantMessage,
 	Context,
 	Effort,
 	Model,
@@ -233,7 +234,27 @@ export interface AnthropicNativeCompactionOptions
 			| "providerSessionState"
 			| "maxInFlightRequests"
 		>,
-		Pick<InstrumentedChatSpanOptions, "completeImpl" | "telemetry" | "retry"> {}
+		Pick<InstrumentedChatSpanOptions, "completeImpl" | "telemetry" | "retry" | "onAttemptCompleted"> {}
+
+/**
+ * Why a billed Anthropic compaction response produced nothing usable, or
+ * undefined when it did.
+ *
+ * A native compaction response is only usable when the provider wrote a signed
+ * compaction block. Anything else — a refusal, an output limit, a plain text
+ * answer — leaves the caller without a summary, so the attempt is recorded as a
+ * failed request rather than a successful one. A provider error and a
+ * cancellation keep their own outcome.
+ */
+export function anthropicCompactionRejection(response: AssistantMessage): string | undefined {
+	if (response.stopReason === "error" || response.stopReason === "aborted") return undefined;
+	if (response.stopDetails?.type === "compaction") {
+		const payload = response.providerPayload;
+		if (payload?.type === "anthropicCompaction" && payload.content && payload.signature) return undefined;
+		return "Anthropic compaction returned no signed summary";
+	}
+	return `Anthropic compaction response carried no compaction block (stop reason: ${response.stopDetails?.type ?? response.stopReason})`;
+}
 
 /**
  * Run one compaction request and return the summary and signature the API wrote. `completeSimple`
@@ -275,6 +296,7 @@ export async function requestAnthropicNativeCompaction(
 			oneshotKind: "compaction_native",
 			completeImpl: options.completeImpl,
 			retry: options.retry,
+			onAttemptCompleted: options.onAttemptCompleted,
 		},
 	);
 	if (response.stopReason === "aborted") {
@@ -286,18 +308,13 @@ export async function requestAnthropicNativeCompaction(
 			? new Error(message)
 			: new AIError.ProviderHttpError(message, response.errorStatus);
 	}
+	const rejection = anthropicCompactionRejection(response);
+	if (rejection) {
+		throw new Error(rejection);
+	}
 	const payload = response.providerPayload;
-	if (
-		response.stopDetails?.type !== "compaction" ||
-		payload?.type !== "anthropicCompaction" ||
-		!payload.content ||
-		!payload.signature
-	) {
-		throw new Error(
-			response.stopDetails?.type === "compaction"
-				? "Anthropic compaction returned no signed summary"
-				: `Anthropic compaction response carried no compaction block (stop reason: ${response.stopDetails?.type ?? response.stopReason})`,
-		);
+	if (payload?.type !== "anthropicCompaction" || !payload.content || !payload.signature) {
+		throw new Error("Anthropic compaction returned no signed summary");
 	}
 	return {
 		content: payload.content,

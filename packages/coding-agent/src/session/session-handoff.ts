@@ -186,6 +186,9 @@ export class SessionHandoff {
 					// resolveCompactionEffort so unsupported-effort models don't trip
 					// requireSupportedEffort.
 					thinkingLevel: this.#host.thinkingLevel(),
+					// Bill the handoff request against the branch that issued it,
+					// even when the handoff document is later discarded.
+					onUsage: this.#host.sessionManager.createUsageObserver(),
 				},
 			);
 			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
