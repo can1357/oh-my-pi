@@ -25,6 +25,7 @@ import {
 	type TtsrOutput,
 } from "../export/ttsr";
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
+import ttsrProseNoticeTemplate from "../prompts/system/ttsr-prose-notice.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import ttsrWarningTemplate from "../prompts/system/ttsr-warning.md" with { type: "text" };
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -348,12 +349,17 @@ export class TtsrCoordinator {
 		return `TTSR matched ${label}: ${rules.map(rule => rule.name).join(", ")}`;
 	}
 
-	#getInjectionContent(): { content: string; rules: Rule[] } | undefined {
+	/**
+	 * Renders the pending rules with `template`. The template must describe the
+	 * real lifecycle: the abort path interrupts the output, the deferred path
+	 * only reports a rule matched on output the rule did not interrupt.
+	 */
+	#getInjectionContent(template: string): { content: string; rules: Rule[] } | undefined {
 		if (this.#pendingInjections.length === 0) return undefined;
 		const rules = this.#pendingInjections;
 		const content = rules
 			.map(rule =>
-				prompt.render(ttsrInterruptTemplate, {
+				prompt.render(template, {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
 					content: rule.content,
@@ -492,7 +498,11 @@ export class TtsrCoordinator {
 			this.#pendingInjections = [];
 			return;
 		}
-		const injection = this.#getInjectionContent();
+		// The message ended without an abort or error: the pending rules matched
+		// output the rule did not interrupt. The notice must claim neither that
+		// the output was interrupted nor that it completed — a `length` stop
+		// truncates it and a `toolUse` stop continues into tool calls.
+		const injection = this.#getInjectionContent(ttsrProseNoticeTemplate);
 		if (!injection) return;
 		const ruleNames = injection.rules.map(rule => rule.name);
 		const deliveryId = this.#reserveDeferredInjection(injection.rules);
@@ -699,7 +709,7 @@ export class TtsrCoordinator {
 				if (this.#manager?.getSettings().contextMode === "discard") {
 					this.#host.agent.replaceMessages(this.#host.agent.state.messages.slice(0, targetAssistantIndex));
 				}
-				const injection = this.#getInjectionContent();
+				const injection = this.#getInjectionContent(ttsrInterruptTemplate);
 				if (injection) {
 					const details = { rules: injection.rules.map(rule => rule.name) };
 					this.#host.agent.appendMessage({
