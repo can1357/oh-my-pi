@@ -1,0 +1,27 @@
+[package]
+name = "pi-mermaid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Mermaid to ASCII/Unicode terminal diagram renderer"
+
+[lints]
+workspace = true
+
+[features]
+default = ["unicode"]
+unicode = ["dep:unicode-segmentation", "dep:unicode-width"]
+xutf = ["dep:xutf"]
+
+[dependencies]
+html-escape.workspace = true
+unicode-segmentation = { version = "1.13", optional = true }
+unicode-width = { version = "0.2", optional = true }
+xutf = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true
