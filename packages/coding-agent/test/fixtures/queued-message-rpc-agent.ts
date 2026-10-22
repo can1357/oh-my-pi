@@ -8,6 +8,7 @@ import { runRpcMode } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
 
 // Real RPC dispatch and session queues; only the external model response is scripted.
 const authStorage = await AuthStorage.create(path.join(process.cwd(), "auth.db"));
@@ -40,19 +41,43 @@ const firstCall: Record<string, MockHandler> = {
 		return started;
 	},
 };
+const script = Bun.env.QUEUED_RPC_SCRIPT ?? "";
 const mock = createMockModel({
-	responses: [firstCall[Bun.env.QUEUED_RPC_SCRIPT ?? ""] ?? started],
+	responses:
+		script === "todo-error"
+			? [
+					{ content: [{ type: "toolCall", name: "todo", arguments: { op: "append", items: ["task"] } }] },
+					{ content: ["Handled failed todo"], delayMs: 1000 },
+				]
+			: [firstCall[script] ?? started],
 	handler: { content: ["Handled queued request"] },
 });
+const settings = Settings.isolated({ "compaction.enabled": false });
+const todo =
+	script === "todo-error"
+		? new TodoTool({
+				cwd: process.cwd(),
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				settings,
+				getTodoPhases: () => session.getTodoPhases(),
+				setTodoPhases: phases => session.setTodoPhases(phases),
+			})
+		: undefined;
 const agent = new Agent({
 	getApiKey: () => "test-key",
-	initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, systemPrompt: ["Test"], tools: [] },
+	initialState: {
+		model: getBundledModel("anthropic", "claude-sonnet-4-5")!,
+		systemPrompt: ["Test"],
+		tools: todo ? [todo] : [],
+	},
 	streamFn: mock.stream,
 });
 const session = new AgentSession({
 	agent,
 	sessionManager: SessionManager.inMemory(process.cwd()),
-	settings: Settings.isolated({ "compaction.enabled": false }),
+	settings,
 	modelRegistry,
 });
 await runRpcMode(session);
