@@ -109,14 +109,13 @@ export class SubagentStopHook {
 		// count as a continuation, nor leave `stop_hook_active` set for the pass
 		// that judges the new candidate.
 		if (candidateChanged) {
-			let changed: boolean;
+			let changed = false;
 			try {
 				changed = await candidateChanged();
 			} catch (error) {
-				// Cancelled while revalidating: the verdict never covered the candidate the run would publish.
-				if (this.#signal.aborted) return { kind: "aborted" };
-				throw error;
+				if (!this.#signal.aborted) throw error;
 			}
+			// Cancelled while revalidating: the verdict never covered the candidate the run would publish.
 			if (this.#signal.aborted) return { kind: "aborted" };
 			if (changed) return { kind: "stale" };
 		}
