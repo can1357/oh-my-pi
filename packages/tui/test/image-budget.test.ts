@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
 	type CellDimensions,
+	encodeITerm2,
 	encodeKitty,
 	encodeKittyDeleteImage,
 	encodeKittyPlacement,
@@ -19,6 +20,7 @@ import {
 	getCellDimensions,
 	imageFallback,
 	ImageProtocol,
+	iterm2ImagePayload,
 	setCellDimensions,
 	TERMINAL,
 	wrapTmuxPassthrough,
@@ -405,6 +407,28 @@ describe("tmux Kitty graphics passthrough", () => {
 		delete Bun.env.TMUX;
 		expect(encodeKittyTransmit("AA==", 9)).toBe("\x1b_Ga=t,f=100,q=2,i=9;AA==\x1b\\");
 		expect(wrapTmuxPassthrough("\x1b_Gpayload\x1b\\")).toBe("\x1bPtmux;\x1b\x1b_Gpayload\x1b\x1b\\\x1b\\");
+	});
+});
+
+describe("tmux iTerm2 inline image passthrough", () => {
+	beforeEach(() => {
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1,0";
+	});
+
+	it("wraps the iTerm2 inline image in a tmux DCS envelope", () => {
+		const expected = (payload: string) => `\x1bPtmux;${payload.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`;
+		const wrapped = encodeITerm2("QUJD", { width: 3, height: 2 });
+		expect(wrapped).toBe(expected("\x1b]1337;File=inline=1;width=3;height=2:QUJD\x07"));
+	});
+
+	it("still extracts the bare base64 payload from a wrapped line", () => {
+		const wrapped = encodeITerm2("QUJD", { width: 3, height: 2 });
+		expect(iterm2ImagePayload(wrapped)).toBe("QUJD");
+	});
+
+	it("leaves iTerm2 inline images bare outside tmux", () => {
+		delete Bun.env.TMUX;
+		expect(encodeITerm2("QUJD", { width: 3, height: 2 })).toBe("\x1b]1337;File=inline=1;width=3;height=2:QUJD\x07");
 	});
 });
 
