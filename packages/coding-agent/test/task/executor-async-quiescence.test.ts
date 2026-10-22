@@ -416,4 +416,39 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		await cleanupOutcome;
 		expect(cleanupSettled).toBe(true);
 	}, 15_000);
+	it("runtime limit after a parked committed yield cannot retain valid structured metadata", async () => {
+		const settleStarted = Promise.withResolvers<void>();
+		const settleGate = Promise.withResolvers<void>();
+		const harness = createAsyncSession(({ promptIndex, harness: h }) => {
+			if (promptIndex === 1) h.emitTerminalYield({ ok: true });
+		});
+		harness.session.settleAsyncWork = async () => {
+			settleStarted.resolve();
+			await settleGate.promise;
+		};
+		mockCreateAgentSession(harness.session);
+		const run = runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			task: "do the work",
+			index: 0,
+			id: "quiescence-runtime-limit",
+			maxRuntimeMs: 400,
+			outputSchema: {
+				type: "object",
+				additionalProperties: false,
+				properties: { ok: { const: true } },
+				required: ["ok"],
+			},
+			outputSchemaSource: "caller",
+		});
+		await settleStarted.promise;
+		await Bun.sleep(600);
+		settleGate.resolve();
+		const result = await run;
+		expect(result.exitCode).not.toBe(0);
+		expect(result.aborted).toBe(true);
+		expect(result.structuredOutput?.status).not.toBe("valid");
+		expect(result.structuredOutput?.data).toEqual({ ok: true });
+	});
 });

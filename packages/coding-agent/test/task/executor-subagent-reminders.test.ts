@@ -1083,6 +1083,7 @@ describe("runSubprocess yield reminders", () => {
 			signalAborted: false,
 			yieldItems: [{ status: "success", data: { ok: true } }],
 			outputSchema: undefined,
+			terminalContext: { terminalYieldAccepted: true, yieldInvalidatedByAsync: false },
 		});
 
 		expect(result.exitCode).toBe(1);
@@ -1099,6 +1100,11 @@ describe("runSubprocess yield reminders", () => {
 			signalAborted: false,
 			yieldItems: [{ status: "success", data: { ok: true } }],
 			outputSchema: undefined,
+			terminalContext: {
+				terminalYieldAccepted: true,
+				yieldInvalidatedByAsync: false,
+				abortKind: "terminate",
+			},
 		});
 
 		expect(result.exitCode).toBe(0);

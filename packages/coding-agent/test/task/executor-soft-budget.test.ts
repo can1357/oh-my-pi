@@ -297,6 +297,35 @@ describe("runSubprocess soft request budget", () => {
 		expect(handle.disposeCalls()).toBe(0);
 	});
 
+	it("preserves a clean structured:false soft-budget message result", async () => {
+		const id = "BudgetMessageScout";
+		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
+			if (promptIndex === 1) {
+				for (let i = 1; i <= 3; i++) {
+					const message = assistantText(`exploring ${i}`, i === 3 ? "aborted" : "stop");
+					pushMessage(message);
+					emit({ type: "message_end", message } as unknown as AgentSessionEvent);
+				}
+				return;
+			}
+			const wrapUp = assistantText("partial findings from the budget wrap-up");
+			pushMessage(wrapUp);
+			emit({ type: "message_end", message: wrapUp } as unknown as AgentSessionEvent);
+		});
+		mockCreateAgentSession(handle.session);
+		registerRunning(id, handle.session);
+
+		const result = await runSubprocess({
+			...baseOptions(id),
+			structured: false,
+		});
+
+		expect(result.aborted).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.abortReason).toBeUndefined();
+		expect(result.output).toContain("partial findings from the budget wrap-up");
+	});
+
 	it("a budget hard-abort keeps the kept-alive agent adopted and messageable via irc", async () => {
 		const id = "StubbornScout";
 		const eventBus = new EventBus();
