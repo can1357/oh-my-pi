@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Changed the auth credential store to reuse one prepared statement for its schema, revision and data-version queries instead of preparing the same query on every call, and to read every row at a typed read site instead of casting it ([#15437](https://github.com/can1357/oh-my-pi/pull/15437) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
