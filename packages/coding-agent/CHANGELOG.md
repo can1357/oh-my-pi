@@ -4,7 +4,7 @@
 
 ### Breaking Changes
 
-- `WebMcpController` (`tools/browser/webmcp`) now takes the Puppeteer `Page` instead of a host and options; `installWebMcpPageHook`, `uninstallWebMcpPageHook`, `webMcpSnapshotInPage`, `webMcpInvokeInPage`, `WEBMCP_BRIDGE_KEY` and the page-hook types are removed ([#15556](https://github.com/can1357/oh-my-pi/pull/15556) by [@will-bogusz](https://github.com/will-bogusz))
+- `WebMcpController` (`tools/browser/webmcp`) now takes the Puppeteer `Page` instead of a host and options; `installWebMcpPageHook`, `uninstallWebMcpPageHook`, `webMcpSnapshotInPage`, `webMcpInvokeInPage`, `WEBMCP_BRIDGE_KEY` and the page-hook types are removed ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Added
 
@@ -16,11 +16,11 @@
 
 ### Changed
 
-- Browser `webmcp*` helpers read Chrome's native WebMCP when called instead of injecting a script and `modelContext` polyfill into every page omp drives, and say why when Chrome offers a page none; Tern tabs no longer support them ([#15556](https://github.com/can1357/oh-my-pi/pull/15556) by [@will-bogusz](https://github.com/will-bogusz))
+- Browser `webmcp*` helpers read Chrome's native WebMCP when called instead of injecting a script and `modelContext` polyfill into every page omp drives, and say why when Chrome offers a page none; Tern tabs no longer support them ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
-- Fixed `webmcpInvoke` returning an empty error when a page's tool throws, and leaving a timed-out invocation running in the page ([#15556](https://github.com/can1357/oh-my-pi/pull/15556) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `webmcpInvoke` returning an empty error when a page's tool throws, and leaving a timed-out invocation running in the page ([#16756](https://github.com/can1357/oh-my-pi/pull/16756) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.6] - 2026-10-21
 
