@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed macOS background input sending its target back behind your app after you dragged from your app and dropped onto the target: a release now keeps its press's placement only when the pointer stayed within a click's distance ([#16553](https://github.com/can1357/oh-my-pi/pull/16553) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes
@@ -114,10 +118,6 @@
 ### Fixed
 
 - Fixed a macOS background action leaving its target in front of your app after you clicked another of your windows, when placing the click took longer than the click itself ([#16217](https://github.com/can1357/oh-my-pi/pull/16217))
-
-### Fixed
-
-- Fixed macOS background input leaving the target app in front of yours when it came forward right after a quick click in your app that macOS was slow to hit-test ([#16553](https://github.com/can1357/oh-my-pi/pull/16553) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.4] - 2026-10-20
 
