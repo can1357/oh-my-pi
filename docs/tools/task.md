@@ -30,6 +30,10 @@
   - `packages/coding-agent/src/sdk.ts` — child-session router/tool wiring and per-subagent `AgentOutputManager`.
   - `docs/task-agent-discovery.md` — deeper discovery and precedence notes.
 
+## Single-task mechanical delegation
+
+For the opt-in single-task mechanical exception and model-dependent delegation rules, see the canonical [Delegation policy](../../packages/coding-agent/src/prompts/system/system-prompt.md#delegation).
+
 ## Inputs
 
 The wire schema is shape-swapped by `task.batch` (default on). One unit of work is `{ name?, agent?, task, solutionSpace, effort?, outputSchema?, schemaMode?, tools?, isolated? }`. `isolated` exists only when `task.isolation.enabled` is true **and plan mode is disabled**; `effort` requires `task.enableEffort=true` (default off), and `tools` requires `eval.tools.enabled` (default on).

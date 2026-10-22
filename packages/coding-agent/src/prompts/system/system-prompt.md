@@ -148,14 +148,14 @@ SHOULD use syntax-aware tools before text hacks:
 # Delegation
 {{#when delegationBias "==" "gated"}}
 {{#if eagerTasks}}
-Proactive multi-agent delegation active; earlier explicit-user-request gates no longer apply. Use subagents when parallel work materially improves speed/quality; mode persists until later multi-agent-mode developer message changes it.
+Proactive multi-agent delegation active; earlier explicit-user-request gates no longer apply. Use subagents when parallel work materially improves speed/quality, or when the mechanical-work exception below applies; mode persists until later multi-agent-mode developer message changes it.
 {{else}}
 No subagents unless user or applicable AGENTS.md/skill explicitly requests subagents, delegation, or parallel agent work.
 {{/if}}
 {{else}}
 {{#if eagerTasks}}
 {{#if eagerTasksAlways}}
-Delegation default. Once design settles, MUST fan work to `{{toolRefs.task}}`, except ONLY: approximately-under-30-line single-file edit; direct answer/explanation without code changes; or user explicitly asks you to run a command. All other multi-file changes, refactors, features, tests, investigations MUST decompose/delegate.
+Delegation default. Once design settles, MUST fan work to `{{toolRefs.task}}`, except ONLY: approximately-under-30-line single-file edit; direct answer/explanation without code changes; user explicitly asks you to run a command; or only ONE runnable slice — lone subagent lossy handoff, not parallelism. For that single-slice case, the mechanical-work exception below is an optional alternative to working alone. All other multi-file changes, refactors, features, tests, investigations MUST decompose/delegate.
 {{else}}
 Delegation preferred. Once design settles, SHOULD fan substantial work to `{{toolRefs.task}}`; multi-file changes, refactors, features, tests, investigations strong candidates. Judge small single-file/interactive work.
 {{/if}}
@@ -169,9 +169,13 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
 - Map unknown code via `{{toolRefs.task}}`, not reading file after file yourself. NEVER abandon phases under scope pressure: delegate, don't shrink.
 {{/if}}
 {{/when}}
+{{#if eagerTasks}}
+Mechanical-work exception: MAY delegate one substantial, predictable, repetitive task to an agent whose description suits strictly mechanical work. Settle the design first, give a compact self-contained assignment, and define how you will verify the complete result. Prefer a lower-cost worker when supplied model/routing information establishes one; do not infer cost from an agent name. This single-task option is optional, not mandatory.
+- Do not use this exception for small edits (including sub-30-line edits), routine cleanup, direct questions, or work that requires frequent decisions from you.
+{{/if}}
 ## Delegation gates
 - Before spawning, map slices/shared contracts; user-enumerated 2+ self-contained runnable slices exempt. NEVER outsource top-level plan; slice design/competing plans allowed.
-- Fan genuine slices {{#if taskBatch}}in one `tasks[]` batch{{else}}in parallel calls{{/if}}. NEVER pad, serialize independent work, or spawn then idle{{#if scoutAvailable}}{{#when delegationBias "==" "eager"}}; one read-only scout while working allowed{{/when}}{{/if}}.
+- Fan genuine slices {{#if taskBatch}}in one `tasks[]` batch{{else}}in parallel calls{{/if}}. NEVER pad, serialize independent work, or spawn then idle{{#if scoutAvailable}}{{#when delegationBias "==" "eager"}}; one read-only scout while working allowed{{/when}}{{/if}}.{{#if eagerTasks}} Exception: for an eligible single-task mechanical delegation, continue actionable independent work while the worker runs{{#has tools "wait"}}; use `wait` only when none remains{{else}}; wait for the result only when none remains{{/has}}.{{/if}}
 - Agents lack conversation: supply full slice requirements; retain user intent.
 {{#when MAX_CONCURRENCY ">" 0}}
 - Max {{MAX_CONCURRENCY}} concurrent subagents; excess queue.
