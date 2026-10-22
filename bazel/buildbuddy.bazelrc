@@ -1,0 +1,11 @@
+# Build Event Service endpoint/results URL prefix.
+build:buildbuddy --bes_results_url=https://oh-my-pi.buildbuddy.io/invocation/
+build:buildbuddy --bes_backend=grpcs://oh-my-pi.buildbuddy.io
+build:buildbuddy --noslim_profile
+build:buildbuddy --experimental_profile_include_target_label
+build:buildbuddy --experimental_profile_include_primary_output
+
+# Remote cache.
+common:buildbuddy --remote_cache=grpcs://oh-my-pi.buildbuddy.io
+common:buildbuddy --remote_cache_compression
+common:buildbuddy --remote_timeout=10m
