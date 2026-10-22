@@ -5,6 +5,11 @@
 ### Added
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- `/debug` report bundles now include `session-logs.txt`: every log record written today by the reporting session and its subagents, including records older than the last 1,000 lines of each process log that `logs.txt` keeps ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Log records written during a session's turns and compaction now carry its `sessionId`, so a subagent's records are told apart from its parent's in the same process log; records that named another kind of id `sessionId` now call it `titleSessionId`, `debugSessionId`, `kernelSessionId`, `acpSessionId` or `providerSessionId` ([#16587](https://github.com/can1357/oh-my-pi/pull/16587) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.6] - 2026-10-21
 

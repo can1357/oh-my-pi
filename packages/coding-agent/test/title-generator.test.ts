@@ -378,7 +378,7 @@ describe("title generator", () => {
 		expect(warnSpy).toHaveBeenCalledWith(
 			"title-generator: no API key",
 			expect.objectContaining({
-				sessionId: "session-1",
+				titleSessionId: "session-1",
 				provider: model.provider,
 				id: model.id,
 				reason: "missing-api-key",
@@ -412,7 +412,7 @@ describe("title generator", () => {
 		expect(warnSpy).toHaveBeenCalledWith(
 			"title-generator: error",
 			expect.objectContaining({
-				sessionId: "session-2",
+				titleSessionId: "session-2",
 				provider: model.provider,
 				id: model.id,
 				reason: "exception",

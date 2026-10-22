@@ -159,9 +159,11 @@ export async function checkIdleClients(): Promise<void> {
 
 function startIdleChecker(): void {
 	if (idleCheckInterval) return;
-	idleCheckInterval = setInterval(() => {
-		void checkIdleClients();
-	}, IDLE_CHECK_INTERVAL_MS);
+	idleCheckInterval = logger.withoutContext(() =>
+		setInterval(() => {
+			void checkIdleClients();
+		}, IDLE_CHECK_INTERVAL_MS),
+	);
 }
 
 function stopIdleChecker(): void {
@@ -1145,8 +1147,9 @@ export async function getOrCreateClient(
 			}
 		});
 
-		// Start background message reader
-		startMessageReader(client);
+		// Start background message reader. The client is shared by every session
+		// in the process, so its reader's records name none of them.
+		logger.withoutContext(() => startMessageReader(client));
 
 		try {
 			// Send initialize request
