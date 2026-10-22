@@ -1,0 +1,54 @@
+export interface HelloRefreshTabChange {
+	url?: string;
+	groupId?: number;
+}
+
+export function applyHelloTabChanges<T extends { tabId: number }>(
+	tabs: readonly T[],
+	changes: ReadonlyMap<number, T | null>,
+): T[] {
+	const current = new Map(tabs.map(tab => [tab.tabId, tab]));
+	for (const [tabId, tab] of changes) {
+		if (tab === null) current.delete(tabId);
+		else current.set(tabId, tab);
+	}
+	return [...current.values()];
+}
+
+/** Overlay Chrome's synchronous activation event on a possibly older tab query. */
+export function applyHelloTabActivation<T extends { tabId: number; windowId: number; active: boolean }>(
+	tabs: readonly T[],
+	windowId: number,
+	activeTabId: number,
+): T[] {
+	return tabs.map(tab => {
+		if (tab.windowId !== windowId) return tab;
+		const active = tab.tabId === activeTabId;
+		return tab.active === active ? tab : { ...tab, active };
+	});
+}
+
+export function filterHelloTabIds(
+	tabIds: readonly number[],
+	tabs: readonly { tabId: number }[],
+): number[] {
+	const current = new Set(tabs.map(tab => tab.tabId));
+	return tabIds.filter(tabId => current.has(tabId));
+}
+
+/**
+ * URL and group changes affect relay reconciliation, so an in-flight hello
+ * carrying their previous values must be suppressed rather than merely
+ * followed by a metadata refresh.
+ */
+export function invalidatesHelloReconciliation(changeInfo: HelloRefreshTabChange): boolean {
+	return changeInfo.groupId !== undefined || changeInfo.url !== undefined;
+}
+
+export function shouldSuppressHelloSnapshot(
+	structuralDirty: boolean,
+	reconciliationDirty: boolean,
+	allowStaleReconciliation: boolean,
+): boolean {
+	return structuralDirty || (reconciliationDirty && !allowStaleReconciliation);
+}
