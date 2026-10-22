@@ -1,4 +1,6 @@
 import type { InteractiveModeContext } from "../modes/types";
+import { Text } from "@oh-my-pi/pi-tui";
+import { formatSkillDiagnostics } from "../modes/utils/skill-diagnostics";
 import { SkillshareClient } from "../skillshare/client";
 import {
 	formatInstalledSkills,
@@ -20,6 +22,7 @@ const USAGE = [
 	"  /skills search <query>                        Search the registry",
 	"  /skills install <@scope/name[@range]>… [-g]   Install into this project (-g: user-global)",
 	"  /skills installed                             List installed registry skills",
+	"  /skills diagnostics                           Inspect conflicts and deduplicated copies",
 	"  /skills update [@scope/name…] [-g]            Update within the ranges in skills.json",
 ].join("\n");
 
@@ -65,11 +68,12 @@ export const BUILTIN_SKILLS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "skills",
 		icon: "skill",
-		description: "Search, install, and update skills from the skills.omp.sh registry",
+		description: "Manage registry skills and inspect discovery diagnostics",
 		subcommands: [
 			{ name: "search", description: "Search the skill registry", usage: "<query>" },
 			{ name: "install", description: "Install registry skills", usage: "<@scope/name[@range]>… [--global]" },
 			{ name: "installed", description: "List installed registry skills" },
+			{ name: "diagnostics", description: "Inspect skill conflicts and deduplicated installations" },
 			{
 				name: "update",
 				description: "Update registry skills within their ranges",
@@ -84,6 +88,17 @@ export const BUILTIN_SKILLS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const cwd = ctx.sessionManager.getCwd();
 			try {
 				switch (verb) {
+					case "diagnostics": {
+						if (rest) {
+							ctx.showError("Usage: /skills diagnostics");
+							return;
+						}
+						ctx.showCommandReport({
+							title: "Skill Discovery Details",
+							body: new Text(formatSkillDiagnostics(ctx.session.skillDiagnostics), 0, 0),
+						});
+						return;
+					}
 					case "search": {
 						if (!rest) {
 							ctx.showError("Usage: /skills search <query>");

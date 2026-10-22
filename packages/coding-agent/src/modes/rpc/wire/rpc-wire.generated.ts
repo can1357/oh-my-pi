@@ -481,6 +481,44 @@ export interface UsageLimitWrapUp {
 /** Provider-neutral state of an account past its usage limit, discriminated by `stage`. */
 export type UsageLimitState = UsageLimitLowPriority | UsageLimitWrapUp;
 
+/** Rule that ordered the active variants of one skill name. */
+export type SkillSelectionReason = "source-order" | "custom-directory" | "authored-over-installed";
+
+/** Allowlisted identity of one discovered skill file; `repository`/`version` are what its plugin declares. */
+export interface SkillDiagnosticEntry {
+	name: string;
+	filePath: string;
+	source: string;
+	pluginName?: string;
+	repository?: string;
+	version?: string;
+}
+
+/** Why a duplicate is not loaded: identical SKILL.md content, or a same-origin variant (`skills.dedupeSameOrigin`). */
+export type SkillDuplicateMatch = "content" | "origin";
+
+/** A file not loaded because `retained` stands for it; older snapshots imply `match: content`. */
+export interface SkillDiagnosticDuplicate {
+	skill: SkillDiagnosticEntry;
+	retained: SkillDiagnosticEntry;
+	match?: SkillDuplicateMatch;
+}
+
+/** A skill name that resolved into several active variants and/or left redundant copies unloaded. */
+export interface SkillResolutionDiagnostic {
+	name: string;
+	reason: SkillSelectionReason;
+	skills: SkillDiagnosticEntry[];
+	duplicates: SkillDiagnosticDuplicate[];
+}
+
+/** Current skill resolution; an empty `diagnostics` means no conflicts or redundant installations. */
+export interface SkillDiagnosticsSnapshot {
+	cwd: string;
+	showStartupDiagnostics: boolean;
+	diagnostics: SkillResolutionDiagnostic[];
+}
+
 export interface SessionState {
 	sessionId: string;
 	model?: ModelInfo;
@@ -518,6 +556,8 @@ export interface SessionState {
 	contextUsage?: ContextUsage;
 	/** Current goal mode; null when the session has no goal. */
 	goal?: GoalModeState | null;
+	/** Current skill-resolution details; absent when connected to an older server. */
+	skillDiagnostics?: SkillDiagnosticsSnapshot;
 }
 
 export interface BashResult {
@@ -1049,6 +1089,12 @@ export interface AvailableCommandsUpdateEvent {
 	commands: AvailableSlashCommand[];
 }
 
+/** Skill-resolution snapshot, pushed at startup and whenever it or the effective notice setting changes. */
+export interface SkillDiagnosticsUpdateEvent {
+	type: "skill_diagnostics_update";
+	data: SkillDiagnosticsSnapshot;
+}
+
 export type SubagentLifecycleStatus = "started" | "completed" | "failed" | "aborted";
 
 export interface SubagentLifecyclePayload {
@@ -1449,7 +1495,7 @@ export interface HostUriSchemeDefinition {
 }
 
 /** Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`. */
-export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
+export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SkillDiagnosticsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
 
 /** Any frame the server writes to stdout (after reassembling `rpc_chunk` sequences), discriminated by `type`. */
 export type RpcServerFrame = RpcResponse | RpcHostRequest | RpcNotification;
@@ -1504,6 +1550,10 @@ export interface OpenSessionParams {
 	sessionDir: string;
 	provider?: string;
 	modelId?: string;
+}
+
+export interface SetSkillStartupDiagnosticsParams {
+	enabled: boolean;
 }
 
 export interface SetFastModeParams {
@@ -1802,6 +1852,8 @@ export interface RpcWireCommands {
 	new_session: { params: NewSessionParams; result: CancellationResult };
 	open_session: { params: OpenSessionParams; result: OpenSessionResult };
 	get_state: { params: undefined; result: SessionState };
+	get_skill_diagnostics: { params: undefined; result: SkillDiagnosticsSnapshot };
+	set_skill_startup_diagnostics: { params: SetSkillStartupDiagnosticsParams; result: SkillDiagnosticsSnapshot };
 	set_fast_mode: { params: SetFastModeParams; result: FastModeResult };
 	set_slow_mode: { params: SetSlowModeParams; result: SetSlowModeResult };
 	goal: { params: GoalParams; result: GoalResult };
