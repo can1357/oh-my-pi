@@ -22,6 +22,7 @@ import {
 	runSubagentFollowUpTurn,
 	runSubprocess,
 	SUBAGENT_STOP_REFUSAL_UNRESOLVED,
+	SUBAGENT_STOP_REPORT_REFUSAL_UNRESOLVED,
 	SUBAGENT_WARNING_EMPTY_MESSAGE,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -1250,8 +1251,10 @@ describe("runSubprocess subagent_stop", () => {
 
 			expect(harness.events).toHaveLength(1);
 			expect(result.exitCode).not.toBe(0);
-			expect(result.error).toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
-			expect(result.output).toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
+			// The run has no `yield` tool, so the diagnostic must not talk about a yield.
+			expect(result.error).toBe(SUBAGENT_STOP_REPORT_REFUSAL_UNRESOLVED);
+			expect(result.output).toBe(SUBAGENT_STOP_REPORT_REFUSAL_UNRESOLVED);
+			expect(result.output).not.toContain("yield");
 			expect(result.output).not.toContain(refusedReport);
 			expect(result.outputPath).toBeUndefined();
 			expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
