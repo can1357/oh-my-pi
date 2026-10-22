@@ -1337,8 +1337,8 @@ interface SubagentRunMonitor {
 	 */
 	yieldInvalidatedByStop(): boolean;
 	/**
-	 * Drop the refused candidate (the recorded terminal yield, or a message-result
-	 * run's last report turn) so the run demands a fresh one after a
+	 * Drop the refused candidate (every recorded yield item it assembled from,
+	 * or a message-result run's last report turn) so the run demands a fresh one after a
 	 * `subagent_stop` continuation, and charge the refused turn to the budget.
 	 */
 	invalidateYieldForStop(): void;
@@ -2394,7 +2394,6 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		yieldInvalidatedByAsync: () => yieldInvalidatedByAsync,
 		yieldInvalidatedByStop: () => yieldInvalidatedByStop,
 		invalidateYieldForStop: () => {
-			const latched = yieldCalled;
 			yieldCalled = false;
 			yieldInvalidatedByStop = true;
 			yieldAcceptedAt = undefined;
@@ -2409,18 +2408,16 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				lastReportTurnText = undefined;
 				return;
 			}
-			// A latched candidate is the last recorded yield: every recorded yield
-			// reassigns `yieldCalled`, so a latched yield is the newest item. Left in
-			// place it would still win result assembly as the terminal item when the
-			// replacement is only a `complete: true` section. An unlatched candidate
-			// is the output the run would still publish when no terminal yield ever
-			// came: finalization folds EVERY recorded section into it, so all of them
-			// are the refused payload. Left in place, a data-less finalize in the
-			// replacement would publish them again.
-			const recorded = progress.extractedToolData?.yield;
-			const refused = recorded ? (latched ? recorded.splice(-1) : recorded.splice(0)) : [];
-			// A workpool batch's final submission is the candidate: the yield tool
-			// remembers its item as submitted, so release it for the continuation.
+			// Result assembly folds EVERY recorded incremental section into the
+			// candidate alongside its terminal item (a latched yield), or publishes
+			// those sections alone when no terminal yield came: all of them are the
+			// refused payload. An earlier terminal item only stays shadowed while a
+			// newer one exists, so it goes too. Left in place, a replacement that is
+			// only a `complete: true` section or a data-less finalize would publish
+			// refused payload again.
+			const refused = progress.extractedToolData?.yield?.splice(0) ?? [];
+			// The yield tool remembers submitted workpool items: release every
+			// refused one so the continuation can submit the batch again.
 			const refusedLabels = refused.flatMap(item =>
 				isRecord(item) && Array.isArray(item.type)
 					? item.type.filter((label): label is string => typeof label === "string")

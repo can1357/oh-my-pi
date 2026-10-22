@@ -658,6 +658,29 @@ describe("runSubprocess subagent_stop", () => {
 		expect(result.output).not.toContain("REFUSED-PAYLOAD");
 	});
 
+	it("does not let a refused yield's earlier sections ride into the replacement", async () => {
+		const id = "RefusedSectionsThenSection";
+		const harness = createHarness({
+			hasStopHandlers: true,
+			onPrompt: call => {
+				if (call.promptIndex === 1) {
+					call.yieldSection("findings", "REFUSED-FINDING");
+					call.yieldCompleteSection("summary", "REFUSED-SUMMARY");
+				} else call.yieldCompleteSection("summary", "replacement");
+			},
+			onStop: async (_event, callIndex) => (callIndex === 1 ? { decision: "block", reason: "redo" } : undefined),
+		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+
+		const result = await runSubprocess(baseOptions(id));
+
+		expect(harness.events).toHaveLength(2);
+		expect(result.exitCode).toBe(0);
+		// The refused candidate assembled every recorded section, not just its final item.
+		expect(JSON.parse(result.output)).toEqual({ summary: "replacement" });
+	});
+
 	it("lets a workpool item's refused final submission be submitted again", async () => {
 		const id = "RefusedPoolItem";
 		const toolSession: ToolSession = {
@@ -686,6 +709,42 @@ describe("runSubprocess subagent_stop", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain("replacement item");
 		expect(result.output).not.toContain("REFUSED-ITEM");
+	});
+
+	it("lets every workpool item of a refused batch be submitted again", async () => {
+		const id = "RefusedPoolBatch";
+		const toolSession: ToolSession = {
+			cwd: "/tmp",
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+			getWorkPoolYieldItems: () => [
+				{ id: "review#1", index: 1 },
+				{ id: "review#2", index: 2 },
+			],
+		};
+		const harness = createHarness({
+			hasStopHandlers: true,
+			yieldTool: new YieldTool(toolSession),
+			// The second item is the batch's final submission; the candidate is both items.
+			onPrompt: async call => {
+				const tag = call.promptIndex === 1 ? "REFUSED" : "replacement";
+				await call.submitWorkPoolItem(1, `${tag} one`);
+				await call.submitWorkPoolItem(2, `${tag} two`);
+			},
+			onStop: async (_event, callIndex) =>
+				callIndex === 1 ? { decision: "block", reason: "redo both" } : undefined,
+		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+
+		const result = await runSubprocess(baseOptions(id));
+
+		expect(harness.yieldErrors).toEqual([]);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("replacement one");
+		expect(result.output).not.toContain("REFUSED");
 	});
 
 	it("bounds advisory continuations at the cap and then accepts the pending yield", async () => {
