@@ -911,4 +911,31 @@ describe("write resolves conflicts via conflict://N", () => {
 		const after = await Bun.file(filePath).text();
 		expect(after).toBe("// extra line\n// another extra\nline 1\nnewApi(x)\nline N\n");
 	});
+
+	it("keeps a UTF-8 byte-order mark when resolving `conflict://N`", async () => {
+		const filePath = path.join(tempDir, "bom.ts");
+		await Bun.write(filePath, `\uFEFF${TWO_WAY}`);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-bom", { path: "bom.ts" });
+		await write.execute("write-bom", { path: "conflict://1", content: "@theirs" });
+
+		// `Bun.file().text()` hides a BOM; decode verbatim to see it.
+		expect(await fs.readFile(filePath, "utf8")).toBe("\uFEFFline 1\nnewApi(x)\nline N\n");
+	});
+
+	it("keeps a UTF-8 byte-order mark when bulk-resolving `conflict://*`", async () => {
+		const filePath = path.join(tempDir, "bom-bulk.ts");
+		await Bun.write(filePath, `\uFEFF${TWO_BLOCKS}`);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-bom-bulk", { path: "bom-bulk.ts:conflicts" });
+		await write.execute("write-bom-bulk", { path: "conflict://*", content: "@ours" });
+
+		expect(await fs.readFile(filePath, "utf8")).toBe("\uFEFFa-ours\nmiddle\nb-ours\ntail\n");
+	});
 });

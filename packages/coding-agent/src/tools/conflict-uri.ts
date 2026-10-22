@@ -7,6 +7,7 @@ import * as fs from "node:fs/promises";
 import { type ConflictEntry, renderConflictRegion } from "@oh-my-pi/pi-tui/tools/conflict-detect";
 import { PREVIEW_LIMITS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { stripBom } from "../edit/normalize";
 import { getEditStore } from "../edit/store";
 import type { InternalWriteResult } from "../internal-urls/types";
 import { writethroughNoop } from "../lsp/writethrough";
@@ -162,11 +163,12 @@ async function resolveConflict(
 	}
 
 	const expanded = expandContentTokens(replacementContent, entry);
-	const originalText = await Bun.file(absolutePath).text();
+	// `Bun.file().text()` drops a leading UTF-8 BOM; decode verbatim so the write keeps it.
+	const { bom, text: originalText } = stripBom(await fs.readFile(absolutePath, "utf8"));
 	const splice = spliceConflict(originalText, entry, expanded);
 	const newContent = splice.text;
 
-	await writethroughNoop(absolutePath, newContent, signal);
+	await writethroughNoop(absolutePath, bom + newContent, signal);
 	invalidateFsScanAfterWrite(absolutePath);
 	session.bumpFileMutationVersion?.(absolutePath);
 	getEditStore(session).invalidate(absolutePath);
@@ -399,12 +401,13 @@ async function resolveAllConflicts(
 
 		fileEntries.sort((a, b) => b.startLine - a.startLine);
 
+		let bom: string;
 		let text: string;
 		const resolvedEntries: ConflictEntry[] = [];
 		const staleEntries: ConflictEntry[] = [];
 		let failure: string | undefined;
 		try {
-			text = await Bun.file(absolutePath).text();
+			({ bom, text } = stripBom(await fs.readFile(absolutePath, "utf8")));
 		} catch (error) {
 			failedFiles.push({
 				displayPath: sample.displayPath,
@@ -441,7 +444,7 @@ async function resolveAllConflicts(
 			continue;
 		}
 
-		await writethroughNoop(absolutePath, text, signal);
+		await writethroughNoop(absolutePath, bom + text, signal);
 		invalidateFsScanAfterWrite(absolutePath);
 		session.bumpFileMutationVersion?.(absolutePath);
 		getEditStore(session).invalidate(absolutePath);
