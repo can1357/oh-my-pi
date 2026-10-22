@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed the thinking-block visibility toggle and the prose-only format switch no longer clearing and replaying the whole terminal, which stalled a long transcript for a change that renders nothing, and hiding or showing thinking blocks mid-stream no longer losing or jumping the assistant's answer ([#15336](https://github.com/can1357/oh-my-pi/pull/15336) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -33,10 +36,6 @@
 - Fixed `history://<id>` failing with "has no transcript: session is gone" for a worker that is still running but has not created its session or transcript file yet; it now answers "No transcript has been written yet". ([#16645](https://github.com/can1357/oh-my-pi/pull/16645) by [@Komzpa](https://github.com/Komzpa))
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
 
-
-### Fixed
-
-- Fixed the thinking-block visibility toggle and the prose-only format switch no longer clearing and replaying the whole terminal, which stalled a long transcript for a change that renders nothing, and hiding or showing thinking blocks mid-stream no longer losing or jumping the assistant's answer ([#15336](https://github.com/can1357/oh-my-pi/pull/15336) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ## [18.12.6] - 2026-10-21
 
 ### Added
