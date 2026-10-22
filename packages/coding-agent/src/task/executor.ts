@@ -3735,10 +3735,12 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			unsubscribeTurn();
 			unsubscribeParentSteer();
 			// A wake turn's candidate yield is judged like a first run's before it
-			// is accepted or published. Unstructured wake turns record no yield, so
-			// their prose reply is a peer relay rather than a result and is not offered.
+			// is accepted or published, even when the turn errored after latching
+			// it: an accepted yield outranks the turn error, so it must not finalize
+			// unjudged. Unstructured wake turns record no yield, so their prose reply
+			// is a peer relay rather than a result and is not offered.
 			let supersededWhileJudging = false;
-			if (turnError === undefined && turnMonitor.yieldCalled()) {
+			if (turnMonitor.yieldCalled()) {
 				supersededWhileJudging = await runWakeStopPasses(
 					session,
 					turnMonitor,
