@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added TokenRhythm (`tokenrhythm`) as a provider: `/login tokenrhythm` with an API key, the live `/v1/models` roster, and per-family reasoning controls verified against the host (DeepSeek V4 toggle plus low/high/max; Qwen and Seed toggle; GLM, Kimi, LongCat, MiniMax and MiMo always on with no disable field) ([#16053](https://github.com/can1357/oh-my-pi/pull/16053) by [@openvictory](https://github.com/openvictory))
 - Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 
 ### Changed

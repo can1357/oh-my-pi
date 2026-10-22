@@ -26,6 +26,10 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// than from the synchronous, credential-less startup read.
 	"singularityapi-dev": true,
 	"singularityapi-tech": true,
+	// `/v1/models` requires a key, so the roster can differ per account; a key
+	// or endpoint switch must re-run discovery instead of serving the previous
+	// credential's authoritative rows for the full TTL.
+	tokenrhythm: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -50,6 +54,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "https://opencode.ai/zen/v1";
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
+		case "tokenrhythm":
+			return "https://tokenrhythm.studio/v1";
 		default:
 			return undefined;
 	}
@@ -131,6 +137,14 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// raw configured value while `charmHyperModelManagerOptions` passes a
 			// `/v1`-suffixed one; both must land on one namespace.
 			return `charm-hyper:models-v1:${Bun.hash(normalizeCharmHyperBaseUrl(options.baseUrl)).toString(36)}`;
+		}
+		case "tokenrhythm": {
+			// The roster follows both the account and the endpoint. Discovery
+			// passes the `/v1`-suffixed default while the registry passes the raw
+			// configured value, so strip trailing slashes before hashing.
+			const baseUrl = (options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!).trim().replace(/\/+$/, "");
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `tokenrhythm:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "muse-code": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
