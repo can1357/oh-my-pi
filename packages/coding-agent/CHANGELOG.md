@@ -4,6 +4,7 @@
 
 ### Added
 
+- The post-compaction auto-continuation turn now re-asserts the surviving todo list as a hidden reminder, rendering the full canonical state (statuses, blocker notes, completed tasks included) instead of letting the model re-`init` a fresh list from the summarized history; it stays silent when the latest todo snapshot is still inside the compaction kept tail ([#16753](https://github.com/can1357/oh-my-pi/pull/16753) by [@Bensonluo](https://github.com/Bensonluo))
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 

@@ -372,7 +372,8 @@ export const cfgTodoReminders = register({
 		tab: "tools",
 		group: "Todos",
 		label: "Todo Reminders",
-		description: "Remind the agent to complete todos before stopping",
+		description:
+			"Remind the agent to complete todos before stopping, and re-assert the todo list on the post-compaction continuation turn",
 	},
 });
 
