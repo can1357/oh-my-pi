@@ -160,18 +160,24 @@ it("revives a subagent a crash cut off mid tool call, runs the call again, and d
 		createPersistedSubagentReviverFactory({ session, authStorage, modelRegistry, settings, enableLsp: false }),
 		() => 0,
 	);
-	const delivered = Promise.withResolvers<string>();
-	manager.registerDeliverySink(MAIN_AGENT_ID, (_jobId, text) => {
-		delivered.resolve(text);
+	const delivered = Promise.withResolvers<Parameters<Parameters<typeof manager.registerDeliverySink>[1]>>();
+	manager.registerDeliverySink(MAIN_AGENT_ID, (jobId, text, job) => {
+		delivered.resolve([jobId, text, job] as never);
 	});
 
 	try {
 		const outcome = await restoreSession(session);
 		expect(outcome.subagents).toEqual([AGENT_ID]);
 
-		expect(await delivered.promise).toContain("restored: 42");
+		const [, text, job] = (await delivered.promise) as unknown as [string, string, { latestDetails?: unknown }];
+		expect(text).toContain("restored: 42");
 		expect(readResults).toHaveLength(1);
 		expect(readResults[0]).toContain("the answer is 42");
+		// A restored subagent never streams `progress[]`, so its job's own
+		// carrier is the only place the delivery `details` can report the model
+		// from; without it the parent is back to parsing the child's session
+		// JSONL (#16135 review).
+		expect(job.latestDetails).toEqual({ model: { selector: "mock/mock-model", fallback: false } });
 	} finally {
 		authStorage.close();
 	}

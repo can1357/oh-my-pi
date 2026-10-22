@@ -56,7 +56,11 @@ export interface JobSnapshot {
 	exitCode?: number;
 	/** Effective task model selector, including an explicit reasoning suffix when configured. */
 	resolvedModel?: string;
-	/** Provider/id including routing, with no added thinking suffix. */
+	/**
+	 * Provider/id including routing, with no added thinking suffix. Absent when
+	 * only the selector is known (a run that never streamed progress); read
+	 * `resolvedModel` then.
+	 */
 	resolvedModelIdentity?: string;
 	/** Explicit thinking metadata, independent of the model identity. */
 	resolvedThinkingLevel?: ConfiguredThinkingLevel;

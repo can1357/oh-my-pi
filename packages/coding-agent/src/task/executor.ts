@@ -23,6 +23,7 @@ import {
 	TRUNCATE_LENGTHS,
 } from "@oh-my-pi/pi-tui/render/render-utils";
 import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
+import { resolvedModelDisplay } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	formatModelStringWithRouting,
 	resolveAgentAdvisorRolePattern,
@@ -3446,8 +3447,14 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					(userPrompted || ownerPrompted) && options.structured === false && result?.outputPath !== undefined;
 				if (messageResult && !wakeJob && ownerId && session.asyncJobManager && result) {
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+					const model = resolvedModelDisplay(result);
 					try {
-						session.asyncJobManager.publishCompleted("task", id, { text }, { id, agentId: id, ownerId });
+						session.asyncJobManager.publishCompleted(
+							"task",
+							id,
+							{ text, ...(model ? { model } : {}) },
+							{ id, agentId: id, ownerId },
+						);
 					} catch (error) {
 						logger.warn("User-resumed subagent result delivery failed", {
 							id,
@@ -3462,10 +3469,14 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				if (wakeJob && (yielded || messageResult) && result) {
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					const structured = result.structuredOutput;
+					// The wake turn never streams `progress[]`, so the job's carrier
+					// is the only place its delivery `details` can report the model
+					// from (#16135 review).
+					const model = resolvedModelDisplay(result);
 					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
-						wakeJob.outcome.reject(new AsyncJobError(text, structured));
+						wakeJob.outcome.reject(new AsyncJobError(text, structured, model));
 					} else {
-						wakeJob.outcome.resolve(structured ? { text, structured } : { text });
+						wakeJob.outcome.resolve({ text, ...(model ? { model } : {}), ...(structured ? { structured } : {}) });
 					}
 				} else if (wakeJob && yielded) {
 					const message = finalizeError instanceof Error ? finalizeError.message : String(finalizeError);

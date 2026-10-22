@@ -6,7 +6,13 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
-import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "./job-manager";
+import {
+	type AsyncJob,
+	type AsyncJobDetails,
+	type AsyncJobManager,
+	type AsyncJobType,
+	jobProgressRecord,
+} from "./job-manager";
 
 import { renderStructuredJson, structuredStatusLabel } from "../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -153,6 +159,8 @@ interface TrackedJobLike {
 	startTime: number;
 	endTime?: number;
 	latestDetails?: AsyncJobDetails;
+	/** Registry id of the subagent the job runs; matches `progress[].id` when the job id was suffixed on collision. */
+	agentId?: string;
 	resultText?: string;
 	errorText?: string;
 	structured?: StructuredSubagentOutput;
@@ -176,42 +184,37 @@ export function snapshotJobs(
 		let completionPercent: number | undefined;
 		let stage: string | undefined;
 		if (latest.type === "task") {
-			const progressValue = latest.latestDetails?.progress;
-			if (Array.isArray(progressValue)) {
-				let progressRecord: Record<string, unknown> | undefined;
-				for (const item of progressValue) {
-					if (!item || typeof item !== "object") continue;
-					const candidate = item as Record<string, unknown>;
-					if (!progressRecord) progressRecord = candidate;
-					if (candidate.id === latest.id) {
-						progressRecord = candidate;
-						break;
-					}
-				}
-				const modelValue = progressRecord?.resolvedModel;
-				if (typeof modelValue === "string") {
-					const trimmed = modelValue.trim();
-					if (trimmed) resolvedModel = trimmed;
-				}
-				const identityValue = progressRecord?.resolvedModelIdentity;
-				if (typeof identityValue === "string") {
-					const trimmed = identityValue.trim();
-					if (trimmed) resolvedModelIdentity = trimmed;
-				}
-				const thinkingValue = progressRecord?.resolvedThinkingLevel;
-				if (typeof thinkingValue === "string") {
-					resolvedThinkingLevel = parseConfiguredThinkingLevel(thinkingValue);
-				}
-				advisor = progressRecord?.advisor === true;
-				const completionValue = progressRecord?.completionPercent;
-				if (typeof completionValue === "number" && Number.isFinite(completionValue)) {
-					completionPercent = completionValue;
-				}
-				const stageValue = progressRecord?.stage;
-				if (typeof stageValue === "string") {
-					const trimmed = stageValue.trim();
-					if (trimmed) stage = trimmed;
-				}
+			const progressRecord = jobProgressRecord(latest.latestDetails, latest.id, latest.agentId);
+			// A run that never streamed `progress[]` (restored subagent, wake
+			// turn, resumed delivery) still names its model on the job (#16017).
+			const carried = latest.latestDetails?.model;
+			const modelValue = progressRecord?.resolvedModel ?? carried?.selector;
+			if (typeof modelValue === "string") {
+				const trimmed = modelValue.trim();
+				if (trimmed) resolvedModel = trimmed;
+			}
+			// The identity is "provider/id, no thinking suffix"; the carried
+			// selector carries the suffix, so it must not be reported as the
+			// identity. Consumers fall back to `resolvedModel` (the same
+			// selector) instead (#16135 review).
+			const identityValue = progressRecord?.resolvedModelIdentity;
+			if (typeof identityValue === "string") {
+				const trimmed = identityValue.trim();
+				if (trimmed) resolvedModelIdentity = trimmed;
+			}
+			const thinkingValue = progressRecord?.resolvedThinkingLevel;
+			if (typeof thinkingValue === "string") {
+				resolvedThinkingLevel = parseConfiguredThinkingLevel(thinkingValue);
+			}
+			advisor = progressRecord?.advisor === true;
+			const completionValue = progressRecord?.completionPercent;
+			if (typeof completionValue === "number" && Number.isFinite(completionValue)) {
+				completionPercent = completionValue;
+			}
+			const stageValue = progressRecord?.stage;
+			if (typeof stageValue === "string") {
+				const trimmed = stageValue.trim();
+				if (trimmed) stage = trimmed;
 			}
 		}
 		const widget = current ? session.asyncJobManager?.widgets?.view(current) : undefined;

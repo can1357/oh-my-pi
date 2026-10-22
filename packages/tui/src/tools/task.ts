@@ -2291,6 +2291,49 @@ export function oneLineLabel(text: string, max = LABEL_MAX): string {
 	return chars.length > cap ? `${chars.slice(0, cap - 1).join("")}…` : oneLine;
 }
 
+/**
+ * Resolved model of a subagent run, as every consumer reports it: `selector`
+ * is `provider/model[:level]` exactly as the child ran it, and `fallback` is
+ * true when retry-fallback routing replaced the configured model. Absent when
+ * no model was resolved — an absent field beats a `fallback: false` claim
+ * about an unnamed model (#16017).
+ */
+export interface ResolvedModelDisplay {
+	selector: string;
+	fallback: boolean;
+}
+
+/** Trimmed non-empty string, or undefined for any other value. */
+function nonEmptyString(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Project a run's model facts into {@link ResolvedModelDisplay}. The one
+ * implementation of the projection: callers on both sides of the package
+ * boundary hand in their untyped record (a settled `SingleResult` or a
+ * streamed progress record) and get the same trimming and identity-fallback
+ * semantics, so the envelope and the delivery `details` cannot disagree.
+ *
+ * `selector` is the raw model id, never XML-escaped: a JSON consumer reading
+ * `details.jobs[].model.selector` must see the exact id the parent is meant to
+ * verify. Escape it at the XML render site instead — a configured model id may
+ * contain `"` (the model schema accepts any string), which would otherwise
+ * close `model="…"` and let the rest of the id forge `fallback` or the rest of
+ * the `<task-result>` tag (#16135 review).
+ */
+export function resolvedModelDisplay(result: {
+	resolvedModel?: unknown;
+	resolvedModelIdentity?: unknown;
+	resolvedModelIsFallback?: unknown;
+}): ResolvedModelDisplay | undefined {
+	const selector = nonEmptyString(result.resolvedModel) ?? nonEmptyString(result.resolvedModelIdentity);
+	if (selector === undefined) return undefined;
+	return { selector, fallback: result.resolvedModelIsFallback === true };
+}
+
 /** A code review finding reported by the reviewer agent */
 export interface ReviewFinding {
 	title: string;

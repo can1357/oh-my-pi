@@ -1810,8 +1810,21 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const salvaged = settled
 				? { ...settled, error: settled.error ?? (cause instanceof Error ? cause.message : message) }
 				: undefined;
+			// A salvaged child resolved a model before the step that failed, so
+			// its envelope carries the facts the parent verifies. The headline
+			// keeps the failure and its reason; the envelope adds the model and
+			// the fallback verdict, so the parent never has to parse the child's
+			// session JSONL to learn which model ran.
+			const summary = salvaged
+				? formatTaskResultSummary(salvaged, { totalDurationMs: Date.now() - startTime })
+				: undefined;
 			return {
-				content: [{ type: "text", text: `Task execution failed: ${message}` }],
+				content: [
+					{
+						type: "text",
+						text: summary ? `Task execution failed: ${message}\n${summary}` : `Task execution failed: ${message}`,
+					},
+				],
 				isError: true,
 				details: {
 					projectAgentsDir: null,

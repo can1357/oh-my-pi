@@ -9,11 +9,15 @@
  * every completion — regardless of owner — into the first top-level session.
  */
 import { prompt } from "@oh-my-pi/pi-utils";
-import type { AsyncJob, AsyncJobType } from "../async";
+import { type AsyncJob, type AsyncJobType, jobProgressRecord } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
+import {
+	resolvedModelDisplay,
+	type ResolvedModelDisplay,
+	type StructuredSubagentOutput,
+} from "@oh-my-pi/pi-tui/tools/task";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
@@ -59,6 +63,13 @@ type AsyncResultJobDetails = {
 	meta?: OutputMeta;
 	/** Full structured payload (source/mode/status/data/error), when the job used an output schema. */
 	schema?: StructuredSubagentOutput;
+	/**
+	 * Resolved `provider/model[:level]` of a task job's subagent and whether
+	 * retry fallback served it. A background delivery's text is the job's own
+	 * `<task-result>` envelope, which carries these as attributes; a consumer
+	 * reading `details` gets the same facts without parsing that text (#16017).
+	 */
+	model?: ResolvedModelDisplay;
 };
 
 export type AsyncResultDetails = {
@@ -93,6 +104,21 @@ export function structuredStatusLabel(status: StructuredSubagentOutput["status"]
 	return status === "unavailable" ? "unavailable" : `schema ${status}`;
 }
 
+/**
+ * Resolved model reported for one delivered task job. The job's own `model`
+ * carrier wins — it is set by runs that never streamed a progress snapshot
+ * (restored subagent, wake turn, resumed delivery). Otherwise the shared
+ * `progress[]` is matched by the job's id, falling back to its unsuffixed
+ * `agentId`, which is what the rows carry when `register()` suffixed the job
+ * id on collision (#16017 review).
+ */
+function deliveryModel(entry: AsyncResultEntry): ResolvedModelDisplay | undefined {
+	const carried = entry.job?.latestDetails?.model;
+	if (carried) return carried;
+	const record = jobProgressRecord(entry.job?.latestDetails, entry.jobId, entry.job?.agentId);
+	return record ? resolvedModelDisplay(record) : undefined;
+}
+
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => {
@@ -120,6 +146,9 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			durationMs: entry.durationMs,
 			meta: entry.job?.latestDetails?.meta,
 			structured,
+			// The same facts the delivery text's `<task-result>` envelope carries
+			// as attributes, so a consumer reading `details` need not parse it.
+			model: entry.job?.type === "task" ? deliveryModel(entry) : undefined,
 			structuredJson: structuredJson === undefined ? undefined : escapeHarnessTags(structuredJson),
 			hasStructuredData,
 			schemaStatus: structured?.status,
@@ -139,6 +168,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			durationMs: job.durationMs,
 			...(job.meta ? { meta: job.meta } : {}),
 			...(job.structured ? { schema: job.structured } : {}),
+			...(job.model ? { model: job.model } : {}),
 		})),
 	};
 	const text = prompt.render(asyncResultTemplate, {

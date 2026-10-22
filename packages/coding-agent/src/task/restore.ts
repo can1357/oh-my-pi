@@ -15,6 +15,7 @@
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { AsyncJobError } from "../async";
+import { resolvedModelDisplay } from "@oh-my-pi/pi-tui/tools/task";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
@@ -103,10 +104,14 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 				});
 				const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 				const structuredOutput = result.structuredOutput;
+				// A restored subagent never streams `progress[]`, so the job's own
+				// carrier is the only place its delivery `details` can report the
+				// model from (#16135 review).
+				const model = resolvedModelDisplay(result);
 				if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
-					throw new AsyncJobError(text, structuredOutput);
+					throw new AsyncJobError(text, structuredOutput, model);
 				}
-				return structuredOutput ? { text, structured: structuredOutput } : text;
+				return { text, ...(model ? { model } : {}), ...(structuredOutput ? { structured: structuredOutput } : {}) };
 			},
 			{ id, agentId: id, ownerId: ref.parentId },
 		);

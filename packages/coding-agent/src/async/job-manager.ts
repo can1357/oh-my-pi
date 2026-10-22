@@ -1,7 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { PipeStreams } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { ResolvedModelDisplay, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";
 
@@ -51,17 +51,24 @@ export type AsyncJobType = "bash" | "task" | "eval";
 export interface AsyncJobRunResult {
 	text: string;
 	structured?: StructuredSubagentOutput;
+	/** Resolved model of the run, carried onto the job for delivery details. */
+	model?: ResolvedModelDisplay;
 }
 
 /**
  * Job-body failure that still carries the run's structured output, so a
  * strict-mode schema violation fails the job without dropping the parsed
  * (invalid) payload.
+ *
+ * The resolved model rides along too: a run that failed still resolved a
+ * model, and the delivery `details` must report it — otherwise the parent
+ * cannot tell which model served a failed subagent.
  */
 export class AsyncJobError extends Error {
 	constructor(
 		message: string,
 		readonly structured?: StructuredSubagentOutput,
+		readonly model?: ResolvedModelDisplay,
 	) {
 		super(message);
 	}
@@ -73,6 +80,44 @@ export interface AsyncJobDetails extends Record<string, unknown> {
 	images?: ImageContent[];
 	/** Tool output metadata needed when a completion is delivered or recovered later. */
 	meta?: OutputMeta;
+	/**
+	 * Resolved model of a task job whose run never streamed a progress
+	 * snapshot — a restored subagent, an IRC wake turn, or a user-resumed
+	 * delivery. Those jobs settle without `progress[]`, so this is the only
+	 * carrier that lets the delivery `details` still report the model (#16017).
+	 */
+	model?: ResolvedModelDisplay;
+}
+
+/**
+ * Pick the task-progress record for a job out of `latestDetails`.
+ *
+ * Progress rows are keyed by the spawn's *requested* agent id: `buildAsyncDetails()`
+ * reports `spawns.map(spawn => spawn.progress)`, and each row's id is the agent id
+ * the spawn asked for. `register()` suffixes a job id on collision, so the job id
+ * is not the row key — `agentId` is. Match `agentId` across the whole array
+ * before considering the job id: a mixed batch can hold an earlier row whose id
+ * *is* another job's suffix (rows `worker-2, worker` with `{ jobId: "worker-2",
+ * agentId: "worker" }`), and a single-pass OR would return that row first
+ * (#16135 review). There is deliberately no first-row fallback — an unmatched
+ * row belongs to a different run.
+ */
+export function jobProgressRecord(
+	details: AsyncJobDetails | undefined,
+	jobId: string,
+	agentId?: string,
+): Record<string, unknown> | undefined {
+	const value = details?.progress;
+	if (!Array.isArray(value)) return undefined;
+	const rows: Record<string, unknown>[] = [];
+	for (const item of value) {
+		if (item && typeof item === "object") rows.push(item as Record<string, unknown>);
+	}
+	if (agentId !== undefined) {
+		const byAgentId = rows.find(row => row.id === agentId);
+		if (byAgentId) return byAgentId;
+	}
+	return rows.find(row => row.id === jobId);
 }
 
 export interface AsyncJob {
@@ -421,6 +466,12 @@ export class AsyncJobManager {
 				const text = typeof outcome === "string" ? outcome : outcome.text;
 				const structured = typeof outcome === "string" ? undefined : outcome.structured;
 				if (structured) job.structured = structured;
+				// A run that never streamed `progress[]` (restored subagent, wake
+				// turn, resumed delivery) still names its model here, so delivery
+				// details can report it without the parent parsing text (#16017).
+				if (typeof outcome !== "string" && outcome.model) {
+					job.latestDetails = { ...job.latestDetails, model: outcome.model };
+				}
 				if (job.status === "cancelled") {
 					job.resultText = text;
 				} else {
@@ -431,6 +482,12 @@ export class AsyncJobManager {
 			} catch (error) {
 				job.endTime = Date.now();
 				if (error instanceof AsyncJobError && error.structured) job.structured = error.structured;
+				// A failed run still resolved a model: the delivery `details`
+				// must report it, or the parent cannot tell which model served
+				// the failed subagent.
+				if (error instanceof AsyncJobError && error.model) {
+					job.latestDetails = { ...job.latestDetails, model: error.model };
+				}
 				const errorText = error instanceof Error ? error.message : String(error);
 				job.errorText = errorText;
 				if (job.status !== "cancelled") {
@@ -472,6 +529,7 @@ export class AsyncJobManager {
 			agentId: options.agentId,
 			resultText: result.text,
 			structured: result.structured,
+			...(result.model ? { latestDetails: { model: result.model } } : {}),
 		};
 		this.#jobs.set(id, job);
 		this.#enqueueDelivery(id, result.text);
