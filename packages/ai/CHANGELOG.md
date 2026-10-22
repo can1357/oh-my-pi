@@ -13,6 +13,10 @@
 - Fixed auth-gateway requests failing when a client requests an unsupported thinking effort; the gateway now uses the nearest supported tier ([#16671](https://github.com/can1357/oh-my-pi/pull/16671) by [@codyw912](https://github.com/codyw912))
 - Fixed Anthropic tools whose parameters are a root `anyOf`/`oneOf`/`allOf` of objects being sent as an empty closed object that only accepts `{}`; variant properties now fold into the root `input_schema` ([#16630](https://github.com/can1357/oh-my-pi/issues/16630))
 
+### Fixed
+
+- Fixed the SQLite auth credential store leaving its database handle open on Windows after `close()`, which blocked temporary-directory cleanup with `EBUSY`; closing the store now finalizes outstanding statements ([#14828](https://github.com/can1357/oh-my-pi/pull/14828) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.12.5] - 2026-10-21
 
 ### Added
