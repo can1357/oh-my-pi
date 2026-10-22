@@ -3046,6 +3046,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			let deniedDeferred: DisabledModelSelection | undefined;
 			const allEnabledModels = modelRegistry.getAll().filter(candidate => !isUnreachable(candidate));
 			const availableModels = modelRegistry.getAvailable().filter(candidate => !isUnreachable(candidate));
+			// Matched against the deny-filtered list, a denied selector could resolve to an allowed
+			// sibling of the model it names, so it is dropped before expansion. A role pattern's
+			// denial is remembered for the failure message; a fallback target's is not.
+			const isAllowedPattern = (pattern: string, remember: boolean): boolean => {
+				const denied = disabledSelectorRule(pattern, settings, availableModels);
+				if (denied && remember) deniedDeferred ??= denied;
+				return denied === undefined;
+			};
 			const expandedModelPatterns = deferredModelPatterns.flatMap(pattern =>
 				pattern.split(",").flatMap(selector => {
 					const trimmedSelector = selector.trim();
@@ -3063,10 +3071,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						return [];
 					}
 					if (resolved.configuredPatterns && resolved.configuredPatterns.length > 0) {
+						// A role's later pattern stands in for a denied earlier one, as in `resolveModelRoleValue`.
+						const configuredPatterns = resolved.configuredPatterns.filter(pattern =>
+							isAllowedPattern(pattern, true),
+						);
+						if (configuredPatterns.length === 0) return [];
 						const primaryPatterns: Array<{
 							pattern: string;
 							retryFallback: InitialRetryFallbackState | undefined;
-						}> = resolved.configuredPatterns.map(pattern => ({
+						}> = configuredPatterns.map(pattern => ({
 							pattern,
 							retryFallback: undefined,
 						}));
@@ -3081,7 +3094,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							getModelRole: role => settings.getModelRole(role),
 							modelLookup: modelRegistry,
 						};
-						const originalSelector = resolved.configuredPatterns[0];
+						const originalSelector = configuredPatterns[0];
 						const availableOriginal = parseModelPattern(originalSelector, availableModels, matchPreferences);
 						const originalModel =
 							availableOriginal.model ??
@@ -3107,7 +3120,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							...primaryPatterns,
 							...findRetryFallbackCandidates(fallbackContext, chainKey, originalSelector, originalModel, {
 								allowMissingPrimary: true,
-							}).map(candidate => ({ pattern: candidate.raw, retryFallback })),
+							})
+								.filter(candidate => isAllowedPattern(candidate.raw, false))
+								.map(candidate => ({ pattern: candidate.raw, retryFallback })),
 						];
 					}
 					if (resolved.model) {

@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { runSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { runSearchQuery, WebSearchTool } from "@oh-my-pi/pi-coding-agent/web/search";
 import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { SearchProvider } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
@@ -102,6 +103,38 @@ describe("default web chain", () => {
 		);
 
 		expect(attempted).toEqual(["anthropic/claude-haiku-4-5"]);
+	});
+
+	it("applies the owning session's disabledModels when its registry was built with other settings", async () => {
+		// The registry carries the process settings, which deny nothing; only the session denies the model.
+		const session: ToolSession = {
+			cwd: process.cwd(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated({ disabledModels: ["anthropic/claude-sonnet-4-5"] }),
+			authStorage,
+			modelRegistry,
+			getActiveModel: () => sessionModel("anthropic", "claude-sonnet-4-5"),
+		};
+
+		await new WebSearchTool(session).execute("search-call", { query: "anything" });
+
+		expect(attempted).toContain("anthropic/claude-haiku-4-5");
+		expect(attempted).not.toContain("anthropic/claude-sonnet-4-5");
+	});
+
+	it("never lets xAI stand in for a configured web role that disabledModels refused", async () => {
+		resetSettingsForTest();
+		await Settings.init({
+			inMemory: true,
+			overrides: { disabledModels: ["openai/gpt-4o"], modelRoles: { web: "openai/gpt-4o" } },
+		});
+
+		// An X-only query would otherwise put xAI first; the xAI credential exists.
+		await runSearchQuery({ query: "site:x.com anything" }, { authStorage, modelRegistry });
+
+		expect(attempted).toEqual([]);
 	});
 
 	it("skips web/hosted when the session model has no search grounding", async () => {

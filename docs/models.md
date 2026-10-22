@@ -791,7 +791,7 @@ Rules:
 
 Behavior when a model is denied:
 
-- An explicit `--model`, or a role or default that resolves directly to a denied model, fails with `Model "<provider/id>" is disabled by disabledModels rule "<rule>". Remove or narrow that rule to use it.` A bare `--model <id>` is refused the same way when no allowed provider carries that exact id; it never falls back to a similar model.
+- An explicit `--model`, or a role or default that resolves directly to a denied model, fails with `Model "<provider/id>" is disabled by disabledModels rule "<rule>". Remove or narrow that rule to use it.` A bare `--model <id>` is refused the same way when the id names a denied model and no allowed provider carries that id; it never falls back to a similar model. A bare id names a denied model when an exact rule or a glob without a provider names it, or when it is exactly the id of a model that a rule denies: a bundled model, or a custom or discovered model of any model registry built with the same settings. A fuzzy selector that is no model's id (`sonnet` under `openai/*`) resolves over the allowed models.
 - A role value with several comma-separated patterns skips a denied pattern and uses the next one.
 - A configured role (for example `modelRoles.default`) that resolves only to denied models is refused: its fallback chain does not stand in for it, and the log names the rule. An unconfigured role keeps its normal defaults.
 - Automatic retry fallback skips a denied target, shows a warning notice that names the rule, and continues with the next target.
@@ -799,7 +799,7 @@ Behavior when a model is denied:
 - A request whose model is denied is refused before it is sent; it is not retried on that model, and automatic fallback moves on to the next target.
 - The auth gateway omits denied models from `/v1/models` and answers a request for one as an unknown model (HTTP 404); it never serves another model with the same bare id. Provider usage and credential rows stay.
 - Stored roles, fallback chains, and `enabledModels` are never rewritten.
-- Like `disabledProviders`, the rules come from the settings the model registry was built with. A program that embeds OMP and passes a registry built with other settings gets that registry's rules in background helpers; the session's own rules still refuse explicit picks and every request the session sends.
+- Like `disabledProviders`, the rules come from the settings the model registry was built with. A program that embeds OMP and passes a registry built with other settings gets that registry's rules in background helpers, and a bare id is then matched against the bundled catalog only. The session's own rules still apply to explicit picks, to the web search, X read and image generation tools, and to every request the session sends.
 - As with `disabledProviders`, a background feature that tries several roles or a built-in default (commit summaries, title generation, skill descriptions, speech, dictation, image generation) moves on to its next allowed model when its configured role is denied, instead of failing.
 - As with `disabledProviders`, a model that was already active can become active again by restore (for example when plan mode exits) after it is denied; every request on it is then refused.
 

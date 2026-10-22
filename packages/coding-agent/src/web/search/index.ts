@@ -14,7 +14,7 @@ import { ModelRegistry } from "../../config/model-registry";
 import { disabledModelRule } from "../../config/disabled-models";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../../config/model-resolver";
 import { roleCandidatePool } from "../../config/model-roles";
-import { settings } from "../../config/settings";
+import { type Settings, settings } from "../../config/settings";
 import type { CustomTool, CustomToolContext } from "../../extensibility/custom-tools/types";
 import webSearchSystemPrompt from "../../prompts/system/web-search.md" with { type: "text" };
 import webSearchDescription from "../../prompts/tools/web-search.md" with { type: "text" };
@@ -126,6 +126,8 @@ interface ExecuteSearchOptions {
 	sessionId?: string;
 	/** The session's active model; `web/hosted` searches through it. */
 	sessionModel?: Model<Api>;
+	/** The owning session's settings: its web role, `disabledModels` and limits. Defaults to the process settings. */
+	settings?: Settings;
 	signal?: AbortSignal;
 }
 
@@ -144,13 +146,14 @@ function expandHostedCandidate(
 	candidate: RoleChainCandidate,
 	sessionModel: Model<Api> | undefined,
 	pool: Model<Api>[],
+	searchSettings: Settings,
 ): RoleChainCandidate[] {
 	if (!isHostedPlaceholder(candidate.model) || !sessionModel) return [candidate];
 	const swap = resolveConfiguredModelTarget(sessionModel.webSearchModel, sessionModel, pool);
 	// The session model is not drawn from the filtered pool, so disabledModels may deny it.
 	const models = [swap, sessionModel].filter(
 		(model, index, all): model is Model<Api> =>
-			!!model?.webSearch && all.indexOf(model) === index && disabledModelRule(model, settings) === undefined,
+			!!model?.webSearch && all.indexOf(model) === index && disabledModelRule(model, searchSettings) === undefined,
 	);
 	if (models.length === 0) return [candidate];
 	return models.map(model => ({ ...candidate, model }));
@@ -161,10 +164,24 @@ function expandHostedCandidate(
  * or prepend {@link xaiModelChain} when the chain has none. Unchanged without
  * xAI credentials.
  */
-function preferXAI(chain: RoleChainCandidate[], modelRegistry: ModelRegistry): RoleChainCandidate[] {
+function preferXAI(
+	chain: RoleChainCandidate[],
+	modelRegistry: ModelRegistry,
+	searchSettings: Settings,
+): RoleChainCandidate[] {
 	const xai = chain.filter(candidate => candidate.model.webSearch === "xai");
 	if (xai.length > 0) return [...xai, ...chain.filter(candidate => candidate.model.webSearch !== "xai")];
-	return [...xaiModelChain(modelRegistry, settings).map(model => ({ model, explicit: false })), ...chain];
+	return [...xaiModelChain(modelRegistry, searchSettings).map(model => ({ model, explicit: false })), ...chain];
+}
+
+/**
+ * Whether `disabledModels` refused the configured `web` role: `resolveRoleChain` answers such a role
+ * with no candidates, and nothing may stand in for it, not even xAI for an X-only query.
+ */
+function webRoleRefused(candidates: RoleChainCandidate[], searchSettings: Settings, pool: Model<Api>[]): boolean {
+	if (candidates.length > 0 || !Object.hasOwn(searchSettings.getModelRoles(), "web")) return false;
+	const resolved = resolveModelRoleValue(searchSettings.getModelRole("web"), pool, { settings: searchSettings });
+	return resolved.model === undefined && resolved.disabledModel !== undefined;
 }
 
 /** Execute web search */
@@ -174,36 +191,42 @@ async function executeSearch(
 	options: ExecuteSearchOptions,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchResultDetails }> {
 	const { authStorage, sessionId, signal } = options;
-	const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings });
-	const pool = roleCandidatePool("web", settings, modelRegistry);
+	// The owning session's settings decide the web role, its rules and its limits: an SDK host's
+	// registry may be built with other settings. The process settings stand in only without them.
+	const searchSettings = options.settings ?? settings;
+	const modelRegistry =
+		options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings: searchSettings });
+	const pool = roleCandidatePool("web", searchSettings, modelRegistry);
 	const candidates = params.model
 		? (() => {
-				const resolved = resolveModelRoleValue(params.model, pool, { settings });
+				const resolved = resolveModelRoleValue(params.model, pool, { settings: searchSettings });
 				return resolved.model
 					? [{ model: resolved.model, explicit: true, thinkingLevel: resolved.thinkingLevel }]
 					: [];
 			})()
-		: resolveRoleChain("web", settings, pool);
+		: resolveRoleChain("web", searchSettings, pool);
 	const parsedQuery = parseSearchQuery(params.query);
 	let expanded = rankXAIProviders(
-		candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool)),
+		candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool, searchSettings)),
 		candidate => candidate.model,
-		settings,
+		searchSettings,
 	);
 	// Only xAI reaches X posts; X-only queries try it first even when the role prefers another engine.
-	if (!params.model && targetsX(parsedQuery)) expanded = preferXAI(expanded, modelRegistry);
+	if (!params.model && targetsX(parsedQuery) && !webRoleRefused(candidates, searchSettings, pool)) {
+		expanded = preferXAI(expanded, modelRegistry, searchSettings);
+	}
 
 	// Invariant across candidates; resolve once before walking the role chain.
 	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;
 	try {
-		antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
+		antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(searchSettings);
 	} catch {
 		antigravityEndpointMode = undefined;
 	}
 
 	let timeoutMs = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000;
 	try {
-		const configuredSeconds = cfgProvidersWebSearchTimeoutSeconds.get(settings);
+		const configuredSeconds = cfgProvidersWebSearchTimeoutSeconds.get(searchSettings);
 		if (Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
 			timeoutMs = Math.ceil(Math.min(configuredSeconds, MAX_WEB_SEARCH_TIMEOUT_SECONDS) * 1_000);
 		}
@@ -427,6 +450,7 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 			modelRegistry: this.#session.modelRegistry,
 			sessionId,
 			sessionModel: this.#session.getActiveModel?.(),
+			settings: this.#session.settings,
 			signal,
 		});
 	}
@@ -454,6 +478,7 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchResul
 			modelRegistry: ctx.modelRegistry,
 			sessionId,
 			sessionModel: ctx.model,
+			settings: ctx.settings,
 			signal,
 		});
 	},

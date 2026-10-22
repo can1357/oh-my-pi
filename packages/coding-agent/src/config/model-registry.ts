@@ -144,6 +144,7 @@ import {
 	disabledModelMatcher,
 	formatDisabledModelError,
 	NO_DISABLED_MODELS,
+	registerDisabledModelCatalog,
 } from "./disabled-models";
 import {
 	cfgCompactionModelThresholds,
@@ -3088,9 +3089,15 @@ export class ModelRegistry {
 		return this.#disabledModelMatcher()(model);
 	}
 
+	/** Every model this registry knows; a stable callback, so registering it again costs one lookup. */
+	readonly #catalog = (): readonly Model<Api>[] => this.getAll("all");
+
 	#disabledModelMatcher(): DisabledModelMatcher {
 		try {
-			return disabledModelMatcher(this.#settings ?? settings);
+			const matcher = disabledModelMatcher(this.#settings ?? settings);
+			// A bare selector checked under these rules can name any model this registry knows.
+			registerDisabledModelCatalog(matcher, this.#catalog);
+			return matcher;
 		} catch {
 			return NO_DISABLED_MODELS;
 		}

@@ -205,6 +205,65 @@ describe("disabledModels resolution", () => {
 		expect(sibling.model?.id).toBe("gpt-4o-mini");
 	});
 
+	it("resolves a fuzzy bare selector that a provider glob cannot name", () => {
+		const settings = Settings.isolated({ disabledModels: ["openai/*"] });
+		const registry = registryFor(settings);
+		// A selector naming no catalog model, checked first, must not change the answer below.
+		expect(resolveCliModel({ cliModel: "openai/sonnet", modelRegistry: registry, settings }).model).toBeUndefined();
+		// `sonnet` is no model's id, so `openai/*` cannot name it; it resolves over the allowed models.
+		const fuzzy = resolveCliModel({ cliModel: "sonnet", modelRegistry: registry, settings });
+		expect(fuzzy.error).toBeUndefined();
+		expect(fuzzy.model?.provider).toBe("anthropic");
+		const role = resolveModelRoleValue("sonnet", registry.getAvailable(), { settings });
+		expect(role.disabledModel).toBeUndefined();
+		expect(role.model?.provider).toBe("anthropic");
+	});
+
+	it("refuses a bare id that a provider glob denies on a bundled model, never an allowed sibling", () => {
+		// `*/gpt-4o` denies `openai/gpt-4o` but leaves `openai/gpt-4o-mini`, which fuzzy-matches `gpt-4o`.
+		const settings = Settings.isolated({ disabledModels: ["*/gpt-4o"] });
+		const registry = registryFor(settings);
+		const cli = resolveCliModel({ cliModel: "gpt-4o", modelRegistry: registry, settings });
+		expect(cli.model).toBeUndefined();
+		expect(cli.error).toBe(deniedMessage("gpt-4o", "*/gpt-4o"));
+		const role = resolveModelRoleValue("gpt-4o", registry.getAvailable(), { settings });
+		expect(role.model).toBeUndefined();
+		expect(role.disabledModel?.rule).toBe("*/gpt-4o");
+	});
+
+	it("refuses a bare id that a provider glob denies on a custom model, never its custom sibling", async () => {
+		await Bun.write(
+			path.join(tempDir.path(), "models.yml"),
+			[
+				"providers:",
+				"  custom:",
+				"    baseUrl: http://127.0.0.1:9/v1",
+				"    auth: none",
+				"    api: openai-completions",
+				"    models:",
+				"      - id: review-base",
+				"        name: Review Base",
+				"      - id: review-base-mini",
+				"        name: Review Base Mini",
+				"",
+			].join("\n"),
+		);
+		// `custom/*-base` denies `review-base` and leaves `review-base-mini`, which fuzzy-matches it.
+		const settings = Settings.isolated({ disabledModels: ["custom/*-base"] });
+		const registry = registryFor(settings);
+		const pool = registry.getAvailable();
+		// A second registry with the same settings and no custom models filters after the first one.
+		const otherModels = path.join(tempDir.path(), "other", "models.yml");
+		await Bun.write(otherModels, "providers: {}\n");
+		new ModelRegistry(authStorage, otherModels, { settings }).getAvailable();
+		const role = resolveModelRoleValue("review-base", pool, { settings });
+		expect(role.model).toBeUndefined();
+		expect(role.disabledModel?.rule).toBe("custom/*-base");
+		const cli = resolveCliModel({ cliModel: "review-base", modelRegistry: registry, settings });
+		expect(cli.model).toBeUndefined();
+		expect(cli.error).toBe(deniedMessage("review-base", "custom/*-base"));
+	});
+
 	it("refuses a --model that resolves to a session-denied model the registry still lists", () => {
 		// The registry carries no rules, so the selector text alone does not reveal the denial:
 		// the resolved model is checked against the session settings.

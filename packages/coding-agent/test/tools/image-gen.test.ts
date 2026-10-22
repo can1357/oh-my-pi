@@ -393,6 +393,46 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.model).toBe("gpt-image-selected");
 	});
 
+	it("never sends to an image swap the session denies, even when the registry lists it", async () => {
+		const xai = catalogModel("xai", "grok-imagine-image", "openai-images");
+		const active = catalogModel("xai", "grok-4.5", "openai-responses", "chat");
+		const urls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			urls.push(input.toString());
+			return imageResponse();
+		};
+		// The registry lists every model; only the session's settings deny the active model's image swap.
+		const settings = Settings.isolated({ disabledModels: ["xai/grok-imagine-image"] });
+		const ctx = createContext({ models: [xai, active], settings, fetch: fetchMock, activeModel: active });
+
+		await expect(imageGenTool.execute("denied-swap", { subject: "denied" }, undefined, ctx)).rejects.toThrow(
+			'xai/grok-imagine-image (disabled by disabledModels rule "xai/grok-imagine-image")',
+		);
+		expect(urls).toEqual([]);
+	});
+
+	it("carries a hosted image request on an allowed chat model, never one the session denies", async () => {
+		const image = catalogModel("openai", "gpt-image-selected", "openai-responses");
+		const denied = catalogModel("openai", "gpt-5.5", "openai-responses", "chat");
+		const allowed = catalogModel("openai", "gpt-5.4", "openai-responses", "chat");
+		let requestBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			requestBody = JSON.parse(String(init?.body));
+			return hostedResponse();
+		};
+		// Both carriers cost the same, so the first listed one would carry the request.
+		const settings = Settings.isolated({
+			modelRoles: { image: "openai/gpt-image-selected" },
+			disabledModels: ["openai/gpt-5.5"],
+		});
+		const ctx = createContext({ models: [image, denied, allowed], settings, fetch: fetchMock });
+
+		const result = await imageGenTool.execute("allowed-carrier", { subject: "hosted" }, undefined, ctx);
+		collectPaths(result);
+
+		expect(requestBody?.model).toBe("gpt-5.4");
+	});
+
 	it("lets a hosted-image session model generate by itself when its proxy lacks the swap target", async () => {
 		const proxied = catalogModel("my-proxy", "gpt-5.6-sol", "openai-responses", "chat");
 		expect(proxied.hostedImage).toBe(true);
