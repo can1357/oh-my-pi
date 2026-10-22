@@ -3756,13 +3756,20 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			// A wake turn's candidate is judged like a first run's before it is
 			// accepted or published: a yield even when the turn errored after
 			// latching it (an accepted yield outranks the turn error, so it must not
-			// finalize unjudged), and for a `structured: false` child the reply its
-			// owner or the user asked for, which publishes as its result. A reply to
-			// a peer is only a relay, not a result, and is not offered.
+			// finalize unjudged), the incremental sections a turn recorded without a
+			// terminal yield (finalization still publishes them; after a refusal only
+			// a fresh yield answers it, as on a first run), and for a
+			// `structured: false` child the reply its owner or the user asked for,
+			// which publishes as its result. A reply to a peer is only a relay, not a
+			// result, and is not offered.
 			const structured = options.structured !== false;
 			const publishMessageResult = ownerWoken || ownerPrompted || userPrompted;
 			const hasCandidate = structured
-				? () => turnMonitor.yieldCalled()
+				? () =>
+						turnMonitor.yieldCalled() ||
+						(!turnMonitor.yieldInvalidatedByStop() &&
+							!turnMonitor.yieldInvalidatedByAsync() &&
+							(turnMonitor.progress.extractedToolData?.yield?.length ?? 0) > 0)
 				: () => publishMessageResult && turnMonitor.lastReportTurnText() !== undefined;
 			const replyTurn = session.getLastAssistantMessage();
 			const judgeable =
