@@ -59,6 +59,7 @@ import {
 	EPHEMERAL_MODEL_CHANGE_ROLE,
 	type FileEntry,
 	type LabelEntry,
+	MEMORY_SNAPSHOT_ENTRY_TYPE,
 	type ModeChangeEntry,
 	type ModelChangeEntry,
 	type ModelUsageEntry,
@@ -504,6 +505,12 @@ function isDraftOnlyMetadataEntry(entry: SessionEntry): boolean {
 		case "mode_change":
 		case "credential_pin":
 			return true;
+		case "custom":
+			// The memory block records what a prompt was built from, not a
+			// conversation: a session that never produced a message holds
+			// nothing else, so its file must not outlive the draft it was
+			// created for.
+			return entry.customType === MEMORY_SNAPSHOT_ENTRY_TYPE;
 		default:
 			return false;
 	}
