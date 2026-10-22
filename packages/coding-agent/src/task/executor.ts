@@ -3504,10 +3504,16 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
  * already settling stops observing. The refusal then stays unanswered and
  * finalization fails the turn instead of publishing the refused payload. A
  * newer turn that took the session while a pass consults is the same case: the
- * continuation cannot start on a busy session. A handler that allows after a
- * newer observation started is cancelled the same way: the candidate is dropped
- * rather than published over the newer turn's artifact, and the call returns
- * true so the turn reports as cancelled instead of refused.
+ * continuation cannot start on a busy session. A handler that allows a
+ * candidate is cancelled the same way when its pass began after a newer
+ * observation started (a continuation's yield judged once the newer turn took
+ * the session), or when the newer observation went on to publish while it
+ * consulted (`newerPublished`): the candidate is dropped rather than published
+ * over the newer turn's artifact, and the call returns true so the turn reports
+ * as cancelled instead of refused. A pass already under way when the newer
+ * observation starts (the older turn is being closed to make room for it) is
+ * not stale by that alone: this turn finalizes first, so the newer one's result
+ * still lands last.
  *
  * Each continuation settles the session's owner async work before the next
  * pass, so a candidate is only judged once that work quiesced; a result the
@@ -3519,6 +3525,7 @@ async function runWakeStopPasses(
 	monitor: SubagentRunMonitor,
 	stopHook: SubagentStopHook,
 	superseded: AbortSignal,
+	newerPublished: () => boolean,
 	hasCandidate: () => boolean,
 ): Promise<boolean> {
 	const signal = monitor.abortSignal;
@@ -3549,11 +3556,13 @@ async function runWakeStopPasses(
 	let supersededWhileJudging = false;
 	try {
 		while (refused && hasCandidate()) {
+			const supersededBeforePass = superseded.aborted;
 			refused = await runSubagentStopPass(session, monitor, stopHook, io);
-			// An allow after a newer observation took the session is no verdict on a
-			// candidate this turn can still publish: it would finalize after the newer
-			// turn and overwrite that turn's artifact with a stale yield. Drop it.
-			if (!refused && superseded.aborted && hasCandidate()) {
+			// An allow from a pass that began after a newer observation took the
+			// session, or that a newer observation's published result overtook, is no
+			// verdict on a candidate this turn can still publish: it would finalize
+			// after the newer turn and overwrite that turn's artifact. Drop it.
+			if (!refused && (supersededBeforePass || newerPublished()) && hasCandidate()) {
 				monitor.invalidateYieldForStop();
 				supersededWhileJudging = true;
 			}
@@ -3601,6 +3610,10 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	// Aborts when the next observation starts: the session's turns are then the
 	// newer observation's, so an older stop pass can no longer continue the session.
 	let newestObservation: AbortController | undefined;
+	// Observation sequence numbers, and the newest observation that went on to
+	// publish an accepted candidate: an older pass's allow must not land after it.
+	let observationCount = 0;
+	let newestPublished = 0;
 	session.setIrcWakeTurnObserver(records => {
 		// Autonomous IRC wake turns reuse the session's YieldTool just like
 		// runSubagentFollowUpTurn; clear the prior run's incremental-section flag
@@ -3720,6 +3733,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const superseded = new AbortController();
 		newestObservation?.abort();
 		newestObservation = superseded;
+		const observationSeq = ++observationCount;
 		turnMonitor.setActiveSession(session);
 		const unsubscribeTurn = turnMonitor.attach(session);
 		if (ownerWoken) registerWakeJob();
@@ -3770,9 +3784,12 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						structured,
 					),
 					superseded.signal,
+					() => newestPublished > observationSeq,
 					hasCandidate,
 				);
 			}
+			// Synchronously after the verdict, before finalization awaits anything.
+			if (hasCandidate()) newestPublished = Math.max(newestPublished, observationSeq);
 			const activeSession = turnMonitor.takeActiveSession();
 			if (activeSession) turnMonitor.captureSalvage(activeSession);
 			const lastAssistant = session.getLastAssistantMessage();
