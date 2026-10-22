@@ -518,11 +518,14 @@ impl Canvas {
 			return;
 		};
 		let junction = match (use_ascii, current.as_char(), cell.as_char()) {
-			(false, Some(a), Some(b)) if is_junction_char(a) && is_junction_char(b) => Some((a, b)),
+			(false, Some('─'), Some('┆')) | (false, Some('┆'), Some('─')) => Some('┼'),
+			(false, Some(a), Some(b)) if is_junction_char(a) && is_junction_char(b) => {
+				Some(merge_junctions(a, b))
+			},
 			_ => None,
 		};
-		if let Some((a, b)) = junction {
-			self.set(x, y, Cell::from(merge_junctions(a, b)));
+		if let Some(junction) = junction {
+			self.set(x, y, Cell::from(junction));
 		} else if is_wide {
 			let next_is_label = self.get(x + 1, y).is_some_and(Cell::is_label);
 			if !current.is_label() && !next_is_label {
@@ -661,6 +664,16 @@ mod tests {
 		assert_eq!(merged.to_plain_string(), "┼A─ ");
 		base.merge(DrawingCoord::new(0, 0), true, &[&overlay]);
 		assert_eq!(base.to_plain_string(), "│A─ ");
+	}
+
+	#[test]
+	fn dotted_vertical_crossing_preserves_solid_horizontal_route() {
+		let mut horizontal = Canvas::new(3, 1);
+		horizontal.draw_text(DrawingCoord::new(0, 0), "───", true);
+		let mut vertical = Canvas::new(3, 1);
+		vertical.set(1, 0, Cell::from('┆'));
+		horizontal.merge(DrawingCoord::new(0, 0), false, &[&vertical]);
+		assert_eq!(horizontal.to_plain_string(), "─┼─ ");
 	}
 
 	#[test]

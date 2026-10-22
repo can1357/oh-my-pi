@@ -340,10 +340,26 @@ pub fn offset_drawing_for_subgraphs(graph: &mut AsciiGraph) {
 /// subgraph sizing.
 pub fn create_mapping(graph: &mut AsciiGraph) {
 	let direction = graph.config.direction;
+	// Route repeated node pairs after all other edges, regardless of source
+	// order; only then can their reroutes avoid every sibling path.
+	let repeats: Vec<bool> = graph
+		.edges
+		.iter()
+		.enumerate()
+		.map(|(id, edge)| {
+			edge.from != edge.to
+				&& graph.edges[..id]
+					.iter()
+					.any(|other| routing::same_pair(edge, other))
+		})
+		.collect();
+	// Leave an outer approach to a free node port when parallel routes need it.
+	let outer_offset = if repeats.contains(&true) { 4 } else { 0 };
 	let layering = layering::layer(graph);
 	for row in &layering.order {
 		for &node in row {
-			let (level, position) = (layering.rank[node] as i32 * 4, layering.slot[node] as i32 * 4);
+			let (level, position) =
+				(layering.rank[node] as i32 * 4, layering.slot[node] as i32 * 4 + outer_offset);
 			let requested = match direction {
 				LayoutDirection::LR => GridCoord::new(level, position),
 				LayoutDirection::TD => GridCoord::new(position, level),
@@ -357,12 +373,41 @@ pub fn create_mapping(graph: &mut AsciiGraph) {
 	}
 	bundling::analyze_edge_bundles(graph);
 	bundling::process_bundles(graph);
-	for edge in 0..graph.edges.len() {
-		let already_routed_bundle =
-			graph.edges[edge].bundle.is_some() && !graph.edges[edge].path.is_empty();
-		if !already_routed_bundle {
-			routing::determine_path(graph, edge);
+	for repeated in [false, true] {
+		for edge in 0..graph.edges.len() {
+			if repeats[edge] != repeated {
+				continue;
+			}
+			let already_routed_bundle =
+				graph.edges[edge].bundle.is_some() && !graph.edges[edge].path.is_empty();
+			if !already_routed_bundle {
+				routing::determine_path(graph, edge);
+			}
 		}
+	}
+	// Unused outer cells have no drawing width/height to contribute. Drop
+	// their node padding so a short parallel edge adds no blank leading rows.
+	if outer_offset > 0 {
+		let corridor_used = graph
+			.edges
+			.iter()
+			.flat_map(|edge| &edge.path)
+			.chain(graph.bundles.iter().flat_map(|bundle| &bundle.shared_path))
+			.any(|coord| match direction {
+				LayoutDirection::LR => coord.y < outer_offset,
+				LayoutDirection::TD => coord.x < outer_offset,
+			});
+		if !corridor_used {
+			match direction {
+				LayoutDirection::LR => graph.row_height.retain(|&row, _| row >= outer_offset),
+				LayoutDirection::TD => graph
+					.column_width
+					.retain(|&column, _| column >= outer_offset),
+			}
+		}
+	}
+	// Column sizing and label placement retain declaration order.
+	for edge in 0..graph.edges.len() {
 		let path = graph.edges[edge].path.clone();
 		increase_grid_size_for_path(graph, &path);
 		routing::determine_label_line(graph, edge);

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use super::{
-	AsciiGraph, Dir, EdgeId, GridCoord, LayoutDirection,
+	AsciiEdge, AsciiGraph, Dir, EdgeId, GridCoord, LayoutDirection,
 	grid::get_node_subgraph,
 	pathfinder::{get_path, get_path_avoiding, merge_path},
 };
@@ -139,12 +139,16 @@ pub fn determine_path(graph: &mut AsciiGraph, edge: EdgeId) {
 		(None, None) => (preferred, preferred_end, vec![preferred_from, preferred_to]),
 	};
 
-	// Another edge joining the same two nodes may already run along this
-	// route; drawing both on the same cells would merge their lines and
-	// stack their labels. Re-route around it, also trying to leave and enter
-	// both nodes on the side across the flow, as backward edges do.
-	let taken = parallel_route_cells(graph, edge);
-	if !taken.is_empty() && route_rank(&path, &taken).1 > 0 {
+	// Parallel edges need their own ports as well as their own corridor: the
+	// first route can share an attachment or crossing with a different edge.
+	let parallel = parallel_route_cells(graph, edge);
+	if !parallel.is_empty() && route_rank(&path, &parallel).1 > 0 {
+		let mut occupied = parallel;
+		for (id, other) in graph.edges.iter().enumerate() {
+			if id != edge {
+				occupied.extend(path_cells(&other.path));
+			}
+		}
 		let (side_a, side_b) = match effective_direction {
 			LayoutDirection::LR => (Dir::Down, Dir::Up),
 			LayoutDirection::TD => (Dir::Right, Dir::Left),
@@ -154,24 +158,31 @@ pub fn determine_path(graph: &mut AsciiGraph, edge: EdgeId) {
 			(alternative, alternative_end),
 			(side_a, side_a),
 			(side_b, side_b),
+			(side_a, side_b),
+			(side_b, side_a),
 		]
 		.into_iter()
 		.filter_map(|(start, end)| {
-			let candidate = get_path_avoiding(&graph.grid, from.offset(start), to.offset(end), &taken)
-				.map(merge_path)?;
-			Some((route_rank(&candidate, &taken), start, end, candidate))
+			let candidate =
+				get_path_avoiding(&graph.grid, from.offset(start), to.offset(end), &occupied)
+					.map(merge_path)?;
+			Some((route_rank(&candidate, &occupied), start, end, candidate))
 		})
 		.min_by_key(|(rank, ..)| *rank);
 		if let Some((_, start, end, candidate)) = rerouted {
 			(start_dir, end_dir, path) = (start, end, candidate);
 		}
 	}
-
 	if let Some(edge) = graph.edges.get_mut(edge) {
 		edge.start_dir = start_dir;
 		edge.end_dir = end_dir;
 		edge.path = path;
 	}
+}
+
+/// Whether two edges join the same pair of nodes, regardless of direction.
+pub(super) fn same_pair(a: &AsciiEdge, b: &AsciiEdge) -> bool {
+	(a.from, a.to) == (b.from, b.to) || (a.from, a.to) == (b.to, b.from)
 }
 
 /// Every grid cell crossed by the already-routed edges that join the same two
@@ -185,9 +196,7 @@ fn parallel_route_cells(graph: &AsciiGraph, edge: EdgeId) -> HashSet<GridCoord> 
 		return cells;
 	}
 	for (id, other) in graph.edges.iter().enumerate() {
-		let same_pair = (other.from, other.to) == (this.from, this.to)
-			|| (other.from, other.to) == (this.to, this.from);
-		if id != edge && same_pair {
+		if id != edge && same_pair(this, other) {
 			cells.extend(path_cells(&other.path));
 		}
 	}
@@ -324,5 +333,78 @@ mod tests {
 		assert_eq!(determine_direction(origin, GridCoord::new(1, 2)), Dir::Left);
 		assert_eq!(determine_direction(origin, GridCoord::new(3, 2)), Dir::Right);
 		assert_eq!(determine_direction(origin, GridCoord::new(3, 3)), Dir::LowerRight);
+	}
+
+	#[test]
+	fn parallel_edge_keeps_other_node_ports_and_labels_distinct() {
+		let prefix = "flowchart LR
+  X[Client] --> A[Gateway]
+  A -->|first parallel| B[Service B]
+";
+		let other_edges = "  B -->|branch a| D[Target D]
+  B -->|longer branch b| E[Target E]
+  A -->|forward request| C[Service C]
+  F[Caller] --> G[Proxy] --> C
+";
+		let second = "  A -.->|second parallel| B
+";
+		let config = super::super::AsciiConfig {
+			use_ascii:          false,
+			padding_x:          5,
+			padding_y:          5,
+			box_border_padding: 1,
+			direction:          LayoutDirection::LR,
+		};
+		for diagram in
+			[format!("{prefix}{second}{other_edges}"), format!("{prefix}{other_edges}{second}")]
+		{
+			let parsed = super::super::parser::parse_flowchart(&diagram).unwrap();
+			let mut graph = super::super::converter::convert(&parsed, config.clone());
+			super::super::grid::create_mapping(&mut graph);
+			let second = graph
+				.edges
+				.iter()
+				.find(|edge| edge.text == "second parallel")
+				.unwrap();
+			let used: HashSet<_> = path_cells(&second.path).collect();
+			for label in ["forward request", "longer branch b", "first parallel"] {
+				let other = graph.edges.iter().find(|edge| edge.text == label).unwrap();
+				assert!(
+					path_cells(&other.path).all(|cell| !used.contains(&cell)),
+					"parallel edge crossed {label}"
+				);
+			}
+			let rendered = super::super::render(
+				&diagram,
+				config.clone(),
+				None,
+				crate::mermaid::ansi::ColorMode::None,
+				&crate::mermaid::ansi::Theme::default(),
+			)
+			.unwrap();
+			for label in ["first parallel", "second parallel", "forward request", "longer branch b"] {
+				assert!(rendered.contains(label), "edge label {label} was overwritten");
+			}
+		}
+	}
+
+	#[test]
+	fn unused_parallel_corridor_does_not_add_blank_rows() {
+		let config = super::super::AsciiConfig {
+			use_ascii:          false,
+			padding_x:          5,
+			padding_y:          5,
+			box_border_padding: 1,
+			direction:          LayoutDirection::LR,
+		};
+		let rendered = super::super::render(
+			"flowchart LR\nA -->|first| B\nA -.->|second| B",
+			config,
+			None,
+			crate::mermaid::ansi::ColorMode::None,
+			&crate::mermaid::ansi::Theme::default(),
+		)
+		.unwrap();
+		assert!(rendered.starts_with('┌'), "unused corridor added blank rows:\n{rendered}");
 	}
 }
