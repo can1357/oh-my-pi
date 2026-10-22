@@ -126,6 +126,7 @@
 - Command and eval output panes no longer re-style and re-join their whole output on every frame, so a long command's output stops costing frame time while it sits in the transcript ([#16779](https://github.com/can1357/oh-my-pi/pull/16779) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
+- Replaying a persisted bash execution now seeds the recorded output as the completed snapshot, so a resumed or rewound block shows every line it recorded instead of just the streaming tail; a collapsed result that also emitted images keeps its exit and truncation notes on screen instead of overflowing the viewport ([#15326](https://github.com/can1357/oh-my-pi/pull/15326) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed typo underlines changing when the cursor or selection splits a word ([#16821](https://github.com/can1357/oh-my-pi/issues/16821))
 - Fixed completed `vibe_wait` and `vibe_list` worker cards repeatedly entering scrollback as elapsed time advanced after partial retirement; completed walls now retain a static snapshot while in-flight waits continue updating.
