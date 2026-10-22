@@ -3,7 +3,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type Component, Text, TUI } from "@oh-my-pi/pi-tui";
-import { StressRenderScheduler } from "./render-stress-scheduler";
+import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 
 // Viewport-repaint seams of ToolExecutionComponent, driven through the public
@@ -56,10 +56,6 @@ function plainBuffer(term: VirtualTerminal): string[] {
 		.getScrollBuffer()
 		.map(row => Bun.stripANSI(row).trimEnd())
 		.filter(Boolean);
-}
-
-async function drain(scheduler: StressRenderScheduler, term: VirtualTerminal): Promise<void> {
-	await scheduler.drain(term);
 }
 
 describe("ToolExecutionComponent custom-renderer repaint seams", () => {
@@ -137,7 +133,7 @@ describe("ToolExecutionComponent custom-renderer repaint seams", () => {
 
 	it("removes streamed placeholder rows from the terminal buffer when the first result arrives", async () => {
 		const term = new VirtualTerminal(90, 8, 1_000);
-		const scheduler = new StressRenderScheduler();
+		const scheduler = new VirtualRenderScheduler();
 		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
 		const component = new ToolExecutionComponent(
 			"fake_device",
@@ -152,7 +148,7 @@ describe("ToolExecutionComponent custom-renderer repaint seams", () => {
 
 		try {
 			tui.start();
-			await drain(scheduler, term);
+			await scheduler.settle(term);
 			expect(plainBuffer(term).some(row => row.includes("FAKE: […]"))).toBe(true);
 
 			component.updateArgs({
@@ -162,11 +158,11 @@ describe("ToolExecutionComponent custom-renderer repaint seams", () => {
 			});
 			component.setArgsComplete();
 			tui.requestRender();
-			await drain(scheduler, term);
+			await scheduler.settle(term);
 
 			component.updateResult(toolResult("partial output"), true);
 			tui.requestRender();
-			await drain(scheduler, term);
+			await scheduler.settle(term);
 
 			const rows = plainBuffer(term);
 			expect(rows.some(row => row.includes("FAKE: […]"))).toBe(false);
@@ -180,7 +176,7 @@ describe("ToolExecutionComponent custom-renderer repaint seams", () => {
 
 	it("removes provisional partial chrome from the terminal buffer when the result settles", async () => {
 		const term = new VirtualTerminal(90, 8, 1_000);
-		const scheduler = new StressRenderScheduler();
+		const scheduler = new VirtualRenderScheduler();
 		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
 		const component = new ToolExecutionComponent(
 			"fake_device",
@@ -195,17 +191,17 @@ describe("ToolExecutionComponent custom-renderer repaint seams", () => {
 
 		try {
 			tui.start();
-			await drain(scheduler, term);
+			await scheduler.settle(term);
 			component.updateResult(toolResult("partial output"), true);
 			tui.requestRender();
-			await drain(scheduler, term);
+			await scheduler.settle(term);
 			const partialRows = plainBuffer(term);
 			expect(partialRows.some(row => row.includes("FAKE: [router]"))).toBe(true);
 			expect(partialRows.some(row => row.includes("provisional partial output"))).toBe(true);
 
 			component.updateResult(toolResult("final output"), false);
 			tui.requestRender();
-			await drain(scheduler, term);
+			await scheduler.settle(term);
 
 			const rows = plainBuffer(term);
 			expect(rows.some(row => row.includes("provisional partial output"))).toBe(false);
