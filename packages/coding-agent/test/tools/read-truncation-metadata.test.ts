@@ -11,6 +11,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { ReadToolDetails, ReadTruncationStats } from "@oh-my-pi/pi-tui/tools/read";
 import { formatTruncationMetaNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { cfgReadPageBudget } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { readToolRenderer } from "@oh-my-pi/pi-tui/tools/read";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 
@@ -114,7 +115,10 @@ describe("read truncation metadata", () => {
 		const line = "é".repeat(36_000);
 		await Bun.write(path.join(root, "artifacts", "0.read.log"), `before\n${line}\nafter`);
 		const result = persistedResult(await tool.execute("artifact-line", { path: "artifact://0:raw:2-2" }));
-		const preview = line.slice(0, DEFAULT_MAX_BYTES / 2);
+		// Artifact windows cap at the `read.pageBudget` default (32 KB) rather
+		// than the line-scaled budget, so the byte-capped preview binds there.
+		const previewCap = Math.min(DEFAULT_MAX_BYTES, cfgReadPageBudget.get(session.settings) * 1024);
+		const preview = line.slice(0, previewCap / 2);
 
 		expect(textOutput(result)).toBe(preview);
 		expect(result.details?.displayContent).toMatchObject({ text: preview, startLine: 2, lineNumbers: [2] });

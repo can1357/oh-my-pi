@@ -1033,7 +1033,7 @@ describe("Coding Agent Tools", () => {
 				path: "artifact://7:3-4",
 			});
 			const output = getTextOutput(result);
-			expect(output).toContain("[Showing lines 2-2 of 4 (50.0KB limit)]");
+			expect(output).toContain("[Showing lines 2-2 of 4 (32.0KB limit)]");
 			expect(output).toContain("Line 3 is 60.0KB");
 			expect(output).toContain("artifact://7:raw:3-3");
 			expect(output).not.toContain("Use :3 to continue");
@@ -1156,7 +1156,7 @@ describe("Coding Agent Tools", () => {
 			}
 		});
 
-		it("bounds oversized URL reads like plain files, except pages of artifact storage", async () => {
+		it("bounds oversized URL reads like plain files, and pages of artifact storage by the page budget", async () => {
 			const payload = Array.from({ length: 3000 }, (_, index) => `payload line ${index}`).join("\n");
 			const skillDir = path.join(testDir, "skills", "demo");
 			fs.mkdirSync(skillDir, { recursive: true });
@@ -1230,7 +1230,11 @@ describe("Coding Agent Tools", () => {
 					context,
 				);
 				expect(artifactPage.details?.meta?.truncation?.artifactId).toBeUndefined();
-				expect(getTextOutput(artifactPage)).toContain("payload line 2999");
+				// An artifact page is never spilled into another artifact, but it is
+				// bounded by `read.pageBudget`: the page stops at a line boundary and
+				// names the next line to read on the same artifact.
+				expect(getTextOutput(artifactPage)).not.toContain("payload line 2999");
+				expect(artifactPage.details?.meta?.truncation?.nextOffset).toBeGreaterThan(0);
 				expect(saveArtifact).not.toHaveBeenCalled();
 			} finally {
 				await spillManager.close();
