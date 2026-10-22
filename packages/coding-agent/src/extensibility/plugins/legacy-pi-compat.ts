@@ -17,6 +17,7 @@ import {
 	stripWindowsExtendedLengthPathPrefix,
 } from "@oh-my-pi/pi-utils";
 import { registerPluginCacheInvalidator } from "../../discovery/helpers";
+import { readWorkspacePatterns, workspaceMembers } from "../../utils/workspace-packages";
 
 const USE_BUNDLED_PI_MODULES = isCompiledBinary() || Boolean(process.env.PI_BUNDLED);
 
@@ -1551,26 +1552,13 @@ async function findWorkspaceMemberPackageRoot(dir: string, packageName: string):
 		return null;
 	}
 	const manifest = await readPackageManifest(dir);
-	const rawWorkspaces = manifest?.workspaces;
-	const patterns = Array.isArray(rawWorkspaces)
-		? rawWorkspaces
-		: isRecord(rawWorkspaces) && Array.isArray(rawWorkspaces.packages)
-			? rawWorkspaces.packages
-			: null;
-	if (!patterns) {
+	const patterns = await readWorkspacePatterns(dir, manifest ?? undefined);
+	if (patterns.length === 0) {
 		return null;
 	}
-	for (const pattern of patterns) {
-		if (typeof pattern !== "string" || pattern.startsWith("!")) {
-			continue;
-		}
-		const glob = new Bun.Glob(path.join(pattern, "package.json"));
-		for await (const match of glob.scan({ cwd: dir, onlyFiles: true })) {
-			const memberRoot = path.dirname(path.join(dir, match));
-			const memberManifest = await readPackageManifest(memberRoot);
-			if (memberManifest?.name === packageName) {
-				return memberRoot;
-			}
+	for await (const member of workspaceMembers(dir, patterns, readPackageManifest)) {
+		if (member.manifest.name === packageName) {
+			return member.root;
 		}
 	}
 	return null;

@@ -119,4 +119,103 @@ describe("isolated agent release", () => {
 	it("commits follow-up work made after the run-end branch", async () => {
 		expect(await commitsAcrossRelease("ReleaseChanged", patch, `${patch}+follow-up\n`)).toBe(2);
 	});
+
+	it("repairs a borrowed workspace package before starting the isolated worker", async () => {
+		const fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worker-workspace-link-"));
+		tempRoots.push(fixtureRoot);
+		const oldCheckout = path.join(fixtureRoot, "old");
+		const currentCheckout = path.join(fixtureRoot, "current");
+		const workerCheckout = path.join(fixtureRoot, "worker");
+		const artifactsDir = path.join(fixtureRoot, "artifacts");
+		const workspaceName = "@oh-my-pi/pi-ai";
+		for (const [checkout, source] of [
+			[oldCheckout, "old"],
+			[currentCheckout, "current"],
+		]) {
+			await fs.mkdir(path.join(checkout, "packages", "ai"), { recursive: true });
+			await fs.mkdir(path.join(checkout, "packages", "app"), { recursive: true });
+			await fs.writeFile(path.join(checkout, "package.json"), JSON.stringify({ workspaces: ["packages/*"] }));
+			await fs.writeFile(
+				path.join(checkout, "packages", "ai", "package.json"),
+				JSON.stringify({ name: workspaceName, type: "module", exports: "./index.js" }),
+			);
+			await fs.writeFile(
+				path.join(checkout, "packages", "ai", "index.js"),
+				`export const source = ${JSON.stringify(source)};\n`,
+			);
+			await fs.writeFile(
+				path.join(checkout, "packages", "app", "resolve.mjs"),
+				`import { source } from "${workspaceName}";\nconsole.log(source);\n`,
+			);
+		}
+		const oldNodeModules = path.join(oldCheckout, "node_modules");
+		await fs.mkdir(path.join(oldNodeModules, "@oh-my-pi"), { recursive: true });
+		await fs.symlink(
+			path.join(oldCheckout, "packages", "ai"),
+			path.join(oldNodeModules, "@oh-my-pi", "pi-ai"),
+			"dir",
+		);
+		await fs.symlink(oldNodeModules, path.join(currentCheckout, "node_modules"), "dir");
+		await fs.cp(currentCheckout, workerCheckout, { recursive: true });
+		await fs.mkdir(artifactsDir);
+
+		const baseline = {
+			root: {
+				repoRoot: currentCheckout,
+				headCommit: "base",
+				staged: "",
+				unstaged: "",
+				untracked: [],
+				untrackedPatch: "",
+			},
+			nested: [],
+		};
+		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
+			mergedDir: workerCheckout,
+			backend: natives.IsoBackendKind.Rcopy,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		vi.spyOn(worktreeModule, "captureIsolationBaseline").mockResolvedValue(baseline);
+		vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({ rootPatch: "", nestedPatches: [] });
+		vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
+		let observed: string | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const workerRoot = options.worktree;
+			if (!workerRoot) throw new Error("isolated worker has no worktree");
+			const entry = path.join(workerRoot, "packages", "app", "resolve.mjs");
+			const child = Bun.spawn([process.execPath, "run", entry], {
+				cwd: workerRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stdout, stderr] = await Promise.all([
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+			]);
+			const exitCode = await child.exited;
+			if (exitCode !== 0) throw new Error(stderr);
+			observed = stdout.trim();
+			return { ...result(options.id), output: observed };
+		});
+
+		const run = await runIsolatedSubprocess({
+			baseOptions: {
+				cwd: currentCheckout,
+				agent: { name: "task", description: "Task agent", systemPrompt: "test", source: "bundled" },
+				task: "Resolve workspace dependencies",
+				index: 0,
+				id: "BorrowedWorkspace",
+			},
+			context: { repoRoot: currentCheckout },
+			preferredBackend: undefined,
+			agentId: "BorrowedWorkspace",
+			mergeMode: "patch",
+			artifactsDir,
+			buildFailureResult: error => ({ ...result("BorrowedWorkspace"), exitCode: 1, error: String(error) }),
+		});
+
+		expect(run.exitCode).toBe(0);
+		expect(observed).toBe("current");
+	});
 });
