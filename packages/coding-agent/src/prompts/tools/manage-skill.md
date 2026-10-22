@@ -7,6 +7,6 @@ User-authored skills separate; tool NEVER edits them.
 - `action: "update"` — overwrites body; fails if skill absent.
 - `action: "delete"` — fails if skill absent.
 
-`name`: kebab-case (lowercase letters, digits, hyphens).
+`name`: letters, digits, and hyphens in any script (`banruo-liqu-fen`, `般若理趣分`); lowercased.
 `description`: specific; drives discovery.
 No frontmatter in `body`; generated from `name` and `description`.

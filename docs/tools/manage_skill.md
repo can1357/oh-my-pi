@@ -19,7 +19,7 @@
 | Field | Type | Required | Description |
 |---|---|---:|---|
 | `action` | `"create" \| "update" \| "delete"` | Yes | Managed-skill mutation. |
-| `name` | `string` | Yes | Managed skill name; trimmed and lowercased before path resolution, then validated against `[a-z0-9][a-z0-9-]{0,63}`. |
+| `name` | `string` | Yes | Managed skill name; trimmed, lowercased, and NFC-normalized before path resolution, then validated against `^[\p{L}\p{N}][\p{L}\p{N}\p{M}-]{0,63}$` (letters, digits, and marks of any script, plus hyphens) and a 255-byte UTF-8 component limit. |
 | `description` | `string` | Create/update | One-line description used for skill discovery. |
 | `body` | `string` | Create/update | Markdown body for `SKILL.md`; do not include frontmatter. |
 
@@ -53,7 +53,8 @@
 
 ## Limits & Caps
 - Availability requires `autolearn.enabled = true`.
-- Names are trimmed and lowercased, then must match `[a-z0-9][a-z0-9-]{0,63}`.
+- Names are trimmed, lowercased, and NFC-normalized, then must match `^[\p{L}\p{N}][\p{L}\p{N}\p{M}-]{0,63}$` — letters, digits, and marks of any script, plus hyphens — and stay within 255 UTF-8 bytes so they fit one filesystem path component; `/`, `\`, whitespace, and leading dots stay rejected. Canonically equivalent spellings (`é` and `e` + U+0301) name one skill.
+- Discovery keeps a managed skill only when its on-disk `name` is already in that normalized shape and its directory is named exactly that; a hand-placed `Demo`, a decomposed spelling, or a name inside a differently named directory is skipped rather than advertised next to (or instead of) a skill mutation cannot reach.
 - Descriptions are sanitized to one line and stripped of control/format characters, angle brackets, backticks, and repeated tildes.
 - Bodies are trimmed and must remain non-empty; generated frontmatter contains only normalized `name` and sanitized `description`.
 - Final managed `SKILL.md` content is capped at `64_000` UTF-8 bytes, including frontmatter and description.

@@ -63,7 +63,7 @@
 
 ## Limits & Caps
 - Availability requires `autolearn.enabled` plus a supported memory backend; both settings default to disabled/off.
-- Managed skill names are trimmed and lowercased, then must match `[a-z0-9][a-z0-9-]{0,63}`.
+- Managed skill names are trimmed, lowercased, and NFC-normalized, then must match `^[\p{L}\p{N}][\p{L}\p{N}\p{M}-]{0,63}$` (letters, digits, and marks of any script, plus hyphens) and stay within 255 UTF-8 bytes; discovery keeps only names already in that normalized shape whose directory is named exactly that.
 - Managed descriptions are collapsed to one line and stripped of control/format characters, angle brackets, backticks, and repeated tildes.
 - Final managed `SKILL.md` content, including generated frontmatter and description, is capped at `64_000` UTF-8 bytes.
 - Managed skills never override authored skills; authored names win discovery.

@@ -7,6 +7,10 @@
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 
+### Changed
+
+- Managed skill names may now use letters, digits, and combining marks of any script rather than ASCII letters and digits only: `manage_skill` and `learn` accept a name such as `般若理趣分` or `กิ`, and managed-skill discovery keeps such a skill instead of dropping it from the catalog. Names are lowercased and NFC-normalized before they become a directory, so `é` and `e` + U+0301 name one skill, and discovery skips a hand-placed name that normalization would rewrite (`Demo`, a decomposed spelling) or that sits in a differently named directory, instead of exposing it next to its canonical twin; a name is also capped at 255 UTF-8 bytes so it fits one filesystem path component; `/`, `\`, whitespace, a leading dot, and the prompt-listing metacharacters `<`, `>`, and backtick stay rejected ([#15251](https://github.com/can1357/oh-my-pi/pull/15251) by [@iacore](https://github.com/iacore))
+
 ### Fixed
 
 - Fixed `omp gc --compress` exiting with "the event loop drained while it was still pending" on Bun 1.3.14 when a session artifact is pretty-printed JSON larger than 1 MiB, and session header probes (gc, session move and transfer) reading whole artifacts on Windows ([#15745](https://github.com/can1357/oh-my-pi/issues/15745), [#16754](https://github.com/can1357/oh-my-pi/pull/16754) by [@wolfiesch](https://github.com/wolfiesch))

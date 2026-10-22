@@ -43,6 +43,39 @@ describe("managed-skills primitives", () => {
 		it("normalizes and accepts a valid kebab name", () => {
 			expect(sanitizeSkillName("  Demo-Skill ")).toBe("demo-skill");
 		});
+
+		it("accepts a name whose letters carry combining marks", () => {
+			// Thai กิ and Devanagari गि have no precomposed form, so NFC leaves the
+			// combining mark standing: only `\p{M}` in the pattern admits them.
+			expect(sanitizeSkillName("กิ")).toBe("กิ");
+			expect(sanitizeSkillName("गि")).toBe("गि");
+		});
+
+		it("rejects a name that starts with a combining mark", () => {
+			expect(() => sanitizeSkillName("\u0301abc")).toThrow();
+			expect(() => sanitizeSkillName("ิabc")).toThrow();
+		});
+
+		it("folds canonically equivalent spellings onto one name", () => {
+			// Precomposed é and decomposed e + U+0301 must never become two skills.
+			expect(sanitizeSkillName("cafe\u0301")).toBe("caf\u00e9");
+			expect(sanitizeSkillName("  CAFÉ ")).toBe("caf\u00e9");
+		});
+
+		it("rejects a name too long for one filesystem path component", () => {
+			// U+10300 is one code point and four UTF-8 bytes: 64 of them fit the
+			// pattern but are 256 bytes, over the 255-byte NAME_MAX on ext4.
+			const wide = "\u{10300}".repeat(64);
+			expect(() => sanitizeSkillName(wide)).toThrow(/255 UTF-8 bytes/);
+			expect(sanitizeSkillName("\u{10300}".repeat(63))).toBe("\u{10300}".repeat(63));
+		});
+
+		it("still rejects names that could escape the root or break the prompt", () => {
+			expect(() => sanitizeSkillName("..")).toThrow();
+			expect(() => sanitizeSkillName("a\\b")).toThrow();
+			expect(() => sanitizeSkillName("<evil>")).toThrow();
+			expect(() => sanitizeSkillName("a`b")).toThrow();
+		});
 	});
 
 	describe("toSkillFrontmatter", () => {
@@ -66,6 +99,43 @@ describe("managed-skills primitives", () => {
 			await expect(
 				writeManagedSkill({ action: "create", name: "foo", description: "x", body: "y" }),
 			).rejects.toThrow(/already exists/);
+		});
+
+		it("writes and re-parses a non-ASCII-named skill", async () => {
+			await writeManagedSkill({
+				action: "create",
+				name: "般若理趣分",
+				description: "講法時用。",
+				body: "# 般若理趣分",
+			});
+			const { frontmatter } = parseFrontmatter(await Bun.file(skillFile("般若理趣分")).text(), { source: "test" });
+			expect(frontmatter.name).toBe("般若理趣分");
+		});
+
+		it("writes a letter-plus-combining-mark name and reads it back", async () => {
+			await writeManagedSkill({ action: "create", name: "กิ", description: "d", body: "# กิ" });
+			const { frontmatter } = parseFrontmatter(await Bun.file(skillFile("กิ")).text(), { source: "test" });
+			expect(frontmatter.name).toBe("กิ");
+		});
+
+		it("creates the longest accepted name without ENAMETOOLONG", async () => {
+			const name = "\u{10300}".repeat(63); // 252 UTF-8 bytes
+			await writeManagedSkill({ action: "create", name, description: "d", body: "b" });
+			expect(await Bun.file(skillFile(name)).exists()).toBe(true);
+			await deleteManagedSkill(name);
+			expect(await fs.readdir(getManagedSkillsDir())).toEqual([]);
+		});
+
+		it("stores one directory per name across Unicode normalization forms", async () => {
+			// The decomposed spelling must land on the NFC directory, so update and
+			// delete with either spelling address the one skill that exists.
+			await writeManagedSkill({ action: "create", name: "cafe\u0301", description: "d", body: "first" });
+			await writeManagedSkill({ action: "update", name: "caf\u00e9", description: "d", body: "second" });
+			expect(await Bun.file(skillFile("caf\u00e9")).text()).toContain("second");
+			expect(await fs.readdir(getManagedSkillsDir())).toEqual(["caf\u00e9"]);
+
+			await deleteManagedSkill("caf\u00e9");
+			expect(await fs.readdir(getManagedSkillsDir())).toEqual([]);
 		});
 
 		it("update overwrites the body; update of a missing skill throws", async () => {

@@ -15,7 +15,7 @@ import { cfgAutolearnEnabled } from "../autolearn/settings";
 
 const manageSkillSchema = type({
 	action: "'create' | 'update' | 'delete'",
-	name: type("string").describe("kebab-case skill name"),
+	name: type("string").describe("skill name: letters, digits, and hyphens (any script)"),
 	"description?": type("string").describe(
 		"one-line description of when to use the skill (required for create/update)",
 	),

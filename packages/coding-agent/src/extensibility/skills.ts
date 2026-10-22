@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import { getProjectDir, parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import {
-	isValidManagedSkillName,
+	isCanonicalManagedSkillPath,
 	MANAGED_SKILLS_PROVIDER_ID,
 	sanitizeManagedDescription,
 } from "../autolearn/managed-skills";
@@ -537,12 +537,14 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	// so a managed skill can be shadowed by a higher-priority authored skill that
 	// is itself disabled here — managed must stay visible regardless of toggles.
 	// Validate the on-disk name (a hand-placed managed file could carry an unsafe
-	// frontmatter name) and re-sanitize the description on read. Descriptions and
-	// names both render unescaped into the system prompt.
+	// frontmatter name) and require its directory to be that canonical name, so
+	// every discovered skill is reachable by write/delete; then re-sanitize the
+	// description on read. Descriptions and names both render unescaped into the
+	// system prompt.
 	const managedCandidates = result.all.filter(
 		capSkill =>
 			capSkill._source.provider === MANAGED_SKILLS_PROVIDER_ID &&
-			isValidManagedSkillName(capSkill.name) &&
+			isCanonicalManagedSkillPath(capSkill.name, capSkill.path) &&
 			!disabledSkillNames.has(capSkill.name) &&
 			!matchesIgnorePatterns(capSkill.name) &&
 			matchesIncludePatterns(capSkill.name),
