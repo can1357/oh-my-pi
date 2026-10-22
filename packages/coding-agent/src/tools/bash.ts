@@ -40,7 +40,7 @@ import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import { checkBashInterception } from "./bash-interceptor";
 import { rewriteGitWorktreeAdd } from "./bash-worktree-rewrite";
-import { canUseInteractiveBashPty } from "./bash-pty-selection";
+import { bashNeedsAuthTerminal, canUseInteractiveBashPty } from "./bash-pty-selection";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
 import { serviceLogs, startService, type ServiceReady } from "../launch/services";
@@ -419,6 +419,16 @@ function normalizeReady(ready: ServiceReady | undefined): ServiceReady | undefin
 
 export interface BashToolOptions {}
 
+/**
+ * Whether the call runs on a PTY: `pty: true` asks for one, and a command that
+ * reads a password from the controlling terminal (`doas`, `sudo`) needs one that
+ * the plain executor cannot give it. An explicit `pty: false` means neither.
+ */
+function ptyRequestedFor(pty: boolean | undefined, command: string | undefined): boolean {
+	if (pty !== undefined) return pty;
+	return command !== undefined && bashNeedsAuthTerminal(command);
+}
+
 type ManagedBashJobCompletion =
 	| {
 			kind: "completed";
@@ -638,9 +648,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 	// Non-pty calls run alongside each other (the executor isolates overlapping
 	// runs on the same shell session); pty takes over the terminal UI and must
-	// run alone.
+	// run alone. A command routed to the PTY by its own password prompt is a pty
+	// call even though the caller never asked for one, so it runs alone too.
 	readonly concurrency = (args: Partial<BashToolInput>): "shared" | "exclusive" =>
-		args.pty === true ? "exclusive" : "shared";
+		ptyRequestedFor(args.pty, args.command) ? "exclusive" : "shared";
 	readonly strict = true;
 
 	constructor(private readonly session: ToolSession) {}
@@ -1078,6 +1089,22 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// instead of the cached pre-mutation snapshot.
 		invalidateGithubCacheForBashCommand(command);
 
+		// A command that reads its password from the controlling terminal
+		// (`doas systemctl restart x`) has none in the plain executor, where it
+		// fails with `Authentication failed` instead of prompting. Route it
+		// through the interactive PTY exactly like an explicit `pty: true` call,
+		// so the user can answer the prompt.
+		const authPty = pty === undefined && bashNeedsAuthTerminal(command);
+		const ptyRequested = ptyRequestedFor(pty, command);
+		// A background job runs the plain executor, which has no terminal to prompt
+		// on, so the call this routing exists for would authenticate against
+		// nothing. Say so instead of starting it.
+		if (authPty && asyncRequested) {
+			throw new ToolError(
+				"This command reads its password from a terminal, and an async job has none. Run it without `async` so it can prompt, or pass `pty: false` when it needs no password.",
+			);
+		}
+
 		// URL paths resolve through the embedded shell's filesystem, within the
 		// tier this command was approved at. A URL cwd stays a URL: only that
 		// filesystem can enter it, so external backends (service, PTY, client
@@ -1088,7 +1115,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
 		const commandCwd = virtualCwd ?? (cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd);
 		if (virtualCwd !== undefined) {
-			if (name !== undefined || canUseInteractiveBashPty(pty === true, ctx)) {
+			if (name !== undefined || canUseInteractiveBashPty(ptyRequested, ctx)) {
 				throw new ToolError(
 					`Working directory ${virtualCwd} exists only in the embedded shell; ${name !== undefined ? "services" : "pty commands"} run external processes and need a host directory.`,
 				);
@@ -1224,7 +1251,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// instead of failing every bash call until a slot frees up.
 		if (
 			cfgBashAutoBackgroundEnabled.get(this.session.settings) &&
-			!pty &&
+			!ptyRequested &&
 			!bridgeTerminalAvailable &&
 			autoBgManager &&
 			!autoBgManager.atCapacity
@@ -1302,7 +1329,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// (the backend's own timeout is installed only after this await), matching
 		// the executeBash branch so a cold `.envrc` can't outlast a short call.
 		const backendPreflight =
-			bridgeTerminalAvailable || canUseInteractiveBashPty(pty === true, ctx)
+			bridgeTerminalAvailable || canUseInteractiveBashPty(ptyRequested, ctx)
 				? await applyDirenvPreflight(command, commandCwd, {
 						callerEnv: sessionEnv,
 						signal,
@@ -1590,9 +1617,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// Allocate artifact for truncated output storage
 		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 
-		const interactiveUi = canUseInteractiveBashPty(pty === true, ctx) ? ctx?.ui : undefined;
-		if (pty && !interactiveUi) {
-			pendingNotices.push("pty requested but unavailable in this environment; ran without a terminal");
+		const interactiveUi = canUseInteractiveBashPty(ptyRequested, ctx) ? ctx?.ui : undefined;
+		if (ptyRequested && !interactiveUi) {
+			pendingNotices.push(
+				authPty
+					? "This command reads its password from the terminal, and no interactive terminal is available here (no UI, PI_NO_PTY, or headless); it ran without one, and only succeeds if it needs no password (a passwordless rule or a cached credential). Ask the user to run it."
+					: "pty requested but unavailable in this environment; ran without a terminal",
+			);
 		}
 		const wallTimeStart = performance.now();
 		const result: BashResult | BashInteractiveResult = interactiveUi
