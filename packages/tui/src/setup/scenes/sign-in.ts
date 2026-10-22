@@ -17,6 +17,7 @@ import { theme } from "../../theme/theme";
 import { col, node, span, text } from "../../native/describe";
 import type { NativeChild, NativeNode } from "../../native/node";
 import { Memo } from "../../native/memo";
+import { CustomProviderForm } from "./custom-provider";
 import type { SetupScene, SetupSceneController, SetupSceneHost, StyledLine } from "./types";
 
 function loginUrlLink(url: string): string {
@@ -86,11 +87,12 @@ interface PromptState {
 export class SignInScene implements SetupSceneController {
 	readonly title = "Sign in to your providers";
 	get subtitle(): string {
-		return `Sign in to one or more providers. Press ${editorKey("tui.select.cancel")} when you're done.`;
+		return `Sign in to one or more providers or add a custom endpoint. Press ${editorKey("tui.select.cancel")} when you're done.`;
 	}
 
 	#authStorage: AuthStorage;
 	#selector: OAuthSelectorComponent;
+	#customProvider: CustomProviderForm | undefined;
 	/** Status copy under the selector or login flow; replaced (never mutated) on change. */
 	#statusLines: readonly StyledLine[] = [];
 	#authUrl: string | undefined;
@@ -115,6 +117,8 @@ export class SignInScene implements SetupSceneController {
 
 	dispose(): void {
 		this.#disposed = true;
+		this.#customProvider?.dispose();
+		this.#customProvider = undefined;
 		this.#selector.stopValidation();
 		this.#loginAbort?.abort();
 		this.#resolvePrompt("");
@@ -124,10 +128,15 @@ export class SignInScene implements SetupSceneController {
 		this.#native.clear();
 		this.#step?.invalidate();
 		this.#selector.invalidate();
+		this.#customProvider?.invalidate();
 		this.#prompt?.input.invalidate();
 	}
 
 	handleInput(data: string): void {
+		if (this.#customProvider) {
+			this.#customProvider.handleInput(data);
+			return;
+		}
 		if (this.#loggingInProvider) {
 			if (this.#authUrl && (matchesKey(data, "alt+c") || (data === "c" && !this.#prompt))) {
 				void this.#copyAuthUrl();
@@ -143,11 +152,13 @@ export class SignInScene implements SetupSceneController {
 
 	/** Forward mouse to the provider selector; pointer is inert during an active login or code prompt. */
 	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
+		if (this.#customProvider) return;
 		if (this.#loggingInProvider || this.#prompt) return;
 		this.#step?.routeMouse(event, line, col);
 	}
 
 	render(width: number, maxLines?: number): readonly string[] {
+		if (this.#customProvider) return this.#customProvider.render(width, maxLines);
 		// Hint + blank cost two rows; the wizard subtitle already explains
 		// this panel, so on short screens the rows go to the provider list
 		// instead (17 = full selector: 4 chrome above, 10 rows, 3 below).
@@ -223,7 +234,9 @@ export class SignInScene implements SetupSceneController {
 	 * outcome. Signing in: a spinner heading, the login link (with the full
 	 * URL once, char-wrapped), any code prompt and the flow's progress lines.
 	 */
-	describe(): NativeNode {
+	describe(): NativeNode | null {
+		// The custom endpoint form has no native description; fall back to its rendered rows.
+		if (this.#customProvider) return null;
 		const provider = this.#loggingInProvider;
 		const authUrl = this.#authUrl;
 		const launchUrl = this.#authLaunchUrl;
@@ -314,12 +327,35 @@ export class SignInScene implements SetupSceneController {
 		return new OAuthSelectorComponent(
 			"login",
 			this.#authStorage,
-			providerId => {
-				void this.#login(providerId);
-			},
+			providerId => void this.#login(providerId),
 			() => this.#host.finish("skipped"),
-			{ requestRender: () => this.#host.requestRender(), disabledProviders: this.#host.ctx.disabledProviders },
+			{
+				requestRender: () => this.#host.requestRender(),
+				disabledProviders: this.#host.ctx.disabledProviders,
+				extraAction: this.#host.ctx.addCustomProvider
+					? {
+							id: "__omp_custom_provider__",
+							label: "Custom endpoint…",
+							onSelect: () => this.#openCustomProvider(),
+						}
+					: undefined,
+			},
 		);
+	}
+
+	#openCustomProvider(): void {
+		if (this.#customProvider || this.#disposed) return;
+		const addProvider = this.#host.ctx.addCustomProvider;
+		if (!addProvider) return;
+		this.#customProvider = new CustomProviderForm(this.#host, addProvider, () => this.#closeCustomProvider());
+		this.#customProvider.onActivate?.();
+		this.#host.requestRender();
+	}
+
+	#closeCustomProvider(): void {
+		this.#customProvider?.dispose();
+		this.#customProvider = undefined;
+		this.#host.requestRender();
 	}
 
 	async #login(providerId: string): Promise<void> {
