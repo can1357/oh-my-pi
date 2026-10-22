@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, isPassiveToolContextMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
@@ -595,6 +595,8 @@ export class UiHelpers {
 		// (not finalized) so replayed and live frames still route to the card;
 		// the ids are handed back to the controller after the loop (#10447).
 		const backgroundCallIds = new Set<string>();
+		const toolComponents = new Map<string, ToolExecutionHandle>();
+		let lastToolCallId: string | undefined;
 		const messages = sessionContext.messages;
 		const count = messages.length;
 		for (let i = 0; i < count; i++) {
@@ -610,6 +612,7 @@ export class UiHelpers {
 			if (message.role !== "toolResult") flushPendingUsage();
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
+				lastToolCallId = undefined;
 				const timeline = splitAssistantMessageToolTimeline(message);
 				this.ctx.addMessageToChat(message, { reuseSettledComponent: options.reuseSettledComponents });
 				const lastChild = this.ctx.chatContainer.children[this.ctx.chatContainer.children.length - 1];
@@ -651,6 +654,7 @@ export class UiHelpers {
 					if (content.type !== "toolCall") {
 						continue;
 					}
+					lastToolCallId = content.id;
 					const afterToolSegment = timeline.afterToolCalls.get(content.id);
 					if (options.preservedLiveToolCallIds?.has(content.id)) {
 						appendAssistantSegment(afterToolSegment);
@@ -670,6 +674,7 @@ export class UiHelpers {
 								this.ctx.chatContainer.addChild(readGroup);
 							}
 							readGroup.updateArgs(content.arguments, content.id);
+							toolComponents.set(content.id, readGroup);
 							readGroup.updateResult(
 								{ content: [{ type: "text", text: errorMessage }], isError: true },
 								false,
@@ -684,6 +689,7 @@ export class UiHelpers {
 								this.ctx.chatContainer.addChild(readGroup);
 							}
 							readGroup.updateArgs(content.arguments, content.id);
+							toolComponents.set(content.id, readGroup);
 							this.ctx.pendingTools.set(content.id, readGroup);
 							if (assistantComponent) {
 								readToolCallAssistantComponents.set(content.id, assistantComponent);
@@ -732,6 +738,7 @@ export class UiHelpers {
 					);
 					component.setExpanded(this.ctx.toolOutputExpanded);
 					this.ctx.chatContainer.addChild(component);
+					toolComponents.set(content.id, component);
 
 					if (hasErrorStop && errorMessage) {
 						component.updateResult(
@@ -789,6 +796,7 @@ export class UiHelpers {
 						if (!hasText && cfgTerminalShowImages.get(settings)) {
 							if (pendingReadComponent) {
 								pendingReadComponent.updateResult(message, false, message.toolCallId);
+								toolComponents.set(message.toolCallId, pendingReadComponent);
 								this.ctx.pendingTools.delete(message.toolCallId);
 							}
 							readToolCallArgs.delete(message.toolCallId);
@@ -813,6 +821,7 @@ export class UiHelpers {
 						this.ctx.pendingTools.set(message.toolCallId, readGroup);
 					}
 					component.updateResult(message, false, message.toolCallId);
+					toolComponents.set(message.toolCallId, component);
 					this.ctx.pendingTools.delete(message.toolCallId);
 					readToolCallArgs.delete(message.toolCallId);
 					readToolCallAssistantComponents.delete(message.toolCallId);
@@ -867,6 +876,10 @@ export class UiHelpers {
 					}
 				}
 			} else {
+				if (isPassiveToolContextMessage(message) && lastToolCallId !== undefined) {
+					toolComponents.get(lastToolCallId)?.setAdditionalContext(textContent(message.content));
+				}
+				lastToolCallId = undefined;
 				readGroup?.seal();
 				readGroup = null;
 				// A user prompt closes the displacement window, same as the live path.
