@@ -68,7 +68,10 @@ export interface NewSessionOptions {
 	/** Provider prompt-cache identity to seed on the new session header. */
 	providerPromptCacheKey?: string;
 	taskPromptCacheKey?: string;
-	/** Skip flushing the current session and delete it instead of saving. */
+	/**
+	 * Skip flushing the current session and delete it instead of saving. The
+	 * successor starts lazy: no empty header is written until it has content.
+	 */
 	drop?: boolean;
 	/** Additional workspace directories to seed on the new session. */
 	additionalDirectories?: string[];

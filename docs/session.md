@@ -58,7 +58,7 @@ Terminal breadcrumb files are written under:
 ~/.omp/agent/terminal-sessions/<terminal-id>
 ```
 
-Breadcrumb content begins with cwd and session file path. Optional extra lines are `fresh` and `cwdstat <device> <inode>`. A fresh breadcrumb preserves an initially created, lazy session whose JSONL file does not exist yet, preventing `continueRecent()` from reopening the previous session. Explicit `newSession()` boundaries materialize their header before returning. The directory identity permits automatic re-rooting after a same-filesystem project rename; a missing cwd alone is not move evidence. Writes are synchronous, ordered, and best-effort.
+Breadcrumb content begins with cwd and session file path. Optional extra lines are `fresh` and `cwdstat <device> <inode>`. A fresh breadcrumb preserves an initially created, lazy session whose JSONL file does not exist yet, preventing `continueRecent()` from reopening the previous session. Explicit `newSession()` boundaries materialize their header before returning, except the lazy successor created by `drop` (`/delete`). The directory identity permits automatic re-rooting after a same-filesystem project rename; a missing cwd alone is not move evidence. Writes are synchronous, ordered, and best-effort.
 
 ## File Format
 
@@ -526,7 +526,7 @@ Ordinary completed appends update memory and local file storage synchronously on
 
 - A new ordinary session remains memory-only until it contains an assistant message or a caller invokes `ensureOnDisk()`.
 - Before that gate, entries remain in memory; crossing it writes the full title slot, header, and accumulated entries.
-- Explicit `newSession()` (including `/new`) calls `ensureOnDisk()` before returning, preserving an empty session boundary across terminals.
+- Explicit `newSession()` (including `/new`) calls `ensureOnDisk()` before returning, preserving an empty session boundary across terminals. The `/delete` successor (`drop`) is the exception: it stays lazy, because the fresh terminal breadcrumb already pins this terminal to it and a failed deletion leaves the predecessor as a legitimate resume target; a zero-turn quit must not leave an empty file.
 - Afterwards, entries append incrementally.
 - Saving an editor draft forces a discoverable header and stores `draft.txt` with a marker; if the draft disappears while only startup metadata remains, close removes that draft-only session. Explicit `ensureOnDisk()` sessions remain resumable.
 - Concurrent completed appends supersede an in-flight atomic rewrite with an authoritative full-body rewrite so stale publication cannot clobber them.
