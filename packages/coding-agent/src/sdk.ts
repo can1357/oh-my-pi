@@ -229,7 +229,7 @@ import {
 	projectMountedMCPXdevGuidance,
 	type SettingsGatedToolDelta,
 } from "./session/session-tools";
-import { anthropicSlowModeHasNoSiblingHeadroom } from "./session/anthropic-slow-mode";
+import { anthropicSlowModeHasNoSiblingHeadroom, prefersSlowModeOverUsageFallback } from "./session/anthropic-slow-mode";
 import { CacheWarmer } from "./session/cache-warmer";
 import { createSettingsAwareStreamFn, resolveOpenAIWebsocketPreference } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
@@ -3111,7 +3111,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (
 					((modelFallbackEnabled && (hasUsageFallbackCandidate || usageFallbackTriggered)) ||
 						usageReservePolicy === "fail-closed") &&
-					cfgRetryUsageAwareFallback.get(settings)
+					cfgRetryUsageAwareFallback.get(settings) &&
+					!prefersSlowModeOverUsageFallback(primary.model, settings)
 				) {
 					let usageHealth: ModelUsageHealth | undefined;
 					try {
