@@ -227,6 +227,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 				rawPaths,
 				cwd: this.session.cwd,
 				internalUrlAction: "search",
+				context: resolveContext,
 				filesystem: urlFilesystem,
 				resolveExternalUrl: async rawPath => {
 					const target = parseReadUrlTarget(rawPath);
