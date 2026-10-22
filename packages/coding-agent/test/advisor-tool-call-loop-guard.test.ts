@@ -20,6 +20,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { finalizeSubagentLifecycle } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import { AdviseTool } from "../src/advisor";
 import { AdvisorLoopGuard } from "../src/advisor/loop-guard";
 import { cfgAdvisorReviewInterval } from "../src/advisor/settings";
 import { activateTodoTool, createInMemoryAuthStorage, fixedAdvisorTools } from "./helpers/agent-session-setup";
@@ -762,6 +763,46 @@ describe("advisor tool-call loop guard", () => {
 			session.agent.clearSteeringQueue();
 			releaseLiveRun.resolve();
 			await livePrompt;
+		}
+	});
+
+	it("routes a mid-run WIP concern as a non-interrupting aside without arming the immune window", async () => {
+		// advisor.wipDelivery defaults to aside: a concern raised while the primary
+		// is mid-turn must ride the non-interrupting aside queue, never steer, and
+		// must NOT arm the post-interrupt immune window (it did not interrupt).
+		const { advisor } = createAdvisor({ "advisor.syncBacklog": "1" }, 0);
+		if (!session) throw new Error("Expected live session");
+		const advise = advisor.state.tools.find(tool => tool.name === "advise");
+		if (!(advise instanceof AdviseTool)) throw new Error("Expected advise tool");
+
+		session.agent.state.isStreaming = true;
+		try {
+			// In-progress review: the concern is forced onto the aside channel.
+			advise.beginUpdate(true, 1);
+			await advise.execute("wip-note", {
+				note: "The in-progress edit drops the retry guard.",
+				severity: "concern",
+			});
+			await new Promise<void>(resolve => setImmediate(resolve));
+			// Aside, not steer: nothing entered the steering queue; the note is on
+			// the advisor aside channel instead.
+			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+			expect(session.yieldQueue.hasDeliverable("advisor")).toBe(true);
+			session.yieldQueue.clear("advisor");
+
+			// Immunity NOT armed by the aside: a subsequent non-WIP concern in the
+			// same live turn still steers. Had the aside armed immunity, this concern
+			// would be downgraded to an aside and the steering queue would stay empty.
+			advise.beginUpdate(false);
+			await advise.execute("live-note", {
+				note: "A second distinct operation overwrites the destination file.",
+				severity: "concern",
+			});
+			await new Promise<void>(resolve => setImmediate(resolve));
+			expect(session.agent.peekSteeringQueue()).toHaveLength(1);
+		} finally {
+			session.agent.clearSteeringQueue();
+			session.agent.state.isStreaming = false;
 		}
 	});
 

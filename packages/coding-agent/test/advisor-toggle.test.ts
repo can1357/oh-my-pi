@@ -28,7 +28,11 @@ function restoreEnv(key: string, value: string | undefined): void {
 import * as advisorModule from "../src/advisor";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
-import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "@oh-my-pi/pi-coding-agent/advisor/settings";
+import {
+	cfgAdvisorEnabled,
+	cfgAdvisorMaxNotesPerUpdate,
+	cfgAdvisorWipDelivery,
+} from "@oh-my-pi/pi-coding-agent/advisor/settings";
 import { cfgCompactionKeepRecentTokens } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 describe("AgentSession advisor toggle", () => {
@@ -1124,7 +1128,7 @@ describe("AgentSession advisor toggle", () => {
 			},
 			streamFn: mock.stream,
 		});
-		const settings = Settings.isolated({ "compaction.enabled": false });
+		const settings = Settings.isolated({ "compaction.enabled": false, "advisor.wipDelivery": "defer" });
 		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
 		const quotaSession = new AgentSession({
 			agent: primaryAgent,
@@ -1229,6 +1233,9 @@ describe("AgentSession advisor toggle", () => {
 	});
 
 	it("enforces budget precedence through advisor calls: per-advisor > shared WATCHDOG.yml > settings > default", async () => {
+		// This test observes the per-update budget through the deferred ack; pin WIP
+		// delivery to defer so the default (aside) does not route mid-run notes live.
+		cfgAdvisorWipDelivery.set(session.settings, "defer");
 		const exerciseBudget = async (prefix: string, budget: number): Promise<void> => {
 			const advisor = session.getAdvisorAgent();
 			if (!advisor) throw new Error("Expected advisor agent");

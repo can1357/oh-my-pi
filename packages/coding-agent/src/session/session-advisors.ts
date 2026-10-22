@@ -135,6 +135,7 @@ import {
 	cfgAdvisorReviewInterval,
 	cfgAdvisorReviewMode,
 	cfgAdvisorSyncBacklog,
+	cfgAdvisorWipDelivery,
 } from "../advisor/settings";
 import { journalJudgmentUsage } from "../judgment";
 import { cfgCompaction, cfgContextPromotionEnabled } from "./context-settings";
@@ -1379,8 +1380,9 @@ export class SessionAdvisors {
 			// accepted notes and acknowledges truthfully. No separate accept wrapper.
 			const emissionGuard = new AdvisorEmissionGuard({ budgetPerUpdate });
 			const adviseTool = new AdviseTool(
-				(note, severity, turn) => this.#routeAdvice(advisorRef, note, severity, turn),
+				(note, severity, turn, opts) => this.#routeAdvice(advisorRef, note, severity, turn, opts),
 				emissionGuard,
+				() => cfgAdvisorWipDelivery.get(this.#host.settings),
 			);
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
@@ -1826,7 +1828,13 @@ export class SessionAdvisors {
 	 * admission — the note cleared the emission guard inside AdviseTool when it was
 	 * emitted, so a deferred flush replays the backlog without re-filtering.
 	 */
-	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity, turn?: number): void {
+	#routeAdvice(
+		advisor: ActiveAdvisor,
+		note: string,
+		severity?: AdvisorSeverity,
+		turn?: number,
+		opts?: { wip?: boolean },
+	): void {
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
 		const source = advisor.slug ? advisor.name : undefined;
@@ -1841,6 +1849,28 @@ export class SessionAdvisors {
 		// the next user turn.
 		if (this.#advisorTerminalBoundaryOpen) {
 			this.#advisorBoundaryNotes.push({
+				note,
+				severity,
+				advisor: source,
+				turn: turn ?? this.#advisorPrimaryTurnsCompleted,
+			});
+			return;
+		}
+		// WIP aside (advisor.wipDelivery = aside): a mid-run non-blocker must reach
+		// the primary at its NEXT step without interrupting. While the loop is
+		// genuinely streaming — not aborting, not a preserved terminal yield — force
+		// it onto the non-interrupting aside queue regardless of severity and never
+		// arm the post-interrupt immune window (it did not interrupt). If the loop is
+		// no longer streaming (a terminal boundary opened between review start and
+		// this emission) fall through to the normal routing so the note is neither
+		// stranded nor wrongly steered.
+		if (
+			opts?.wip &&
+			this.#host.agent.state.isStreaming &&
+			!this.#preserveTerminalYieldAdvice &&
+			!this.#host.abortInProgress()
+		) {
+			this.#host.yieldQueue.enqueue("advisor", {
 				note,
 				severity,
 				advisor: source,
