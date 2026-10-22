@@ -13,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
 	$env,
+	$envposExact,
 	$flag,
 	asRecord,
 	cloneJsonTree,
@@ -314,8 +315,39 @@ const CODEX_ADDITIONAL_PROGRESS_EVENT_TYPES = new Set(["response.done", "respons
 // whitespace-only function-call argument deltas forever. Those frames count as
 // transport activity, so idle timers never fire; cap the run before raw debug
 // buffers and partial JSON grow without semantic progress.
-const CODEX_WHITESPACE_TOOL_CALL_ARGUMENT_DELTA_EVENT_LIMIT = 256;
-const CODEX_WHITESPACE_TOOL_CALL_ARGUMENT_DELTA_CHAR_LIMIT = 16 * 1024;
+const CODEX_WHITESPACE_TOOL_CALL_ARGUMENT_DELTA_EVENT_LIMIT_DEFAULT = 256;
+const CODEX_WHITESPACE_TOOL_CALL_ARGUMENT_DELTA_CHAR_LIMIT_DEFAULT = 16 * 1024;
+
+/**
+ * Resolve the whitespace-delta caps.
+ *
+ * Some gateways emit those short deltas as keep-alive while a long tool-call
+ * argument is still being assembled, and a legitimate run then trips the cap.
+ * `PI_CODEX_WHITESPACE_DELTA_EVENT_LIMIT` / `PI_CODEX_WHITESPACE_DELTA_CHAR_LIMIT`
+ * raise either cap for those deployments; an unset, empty, non-numeric or
+ * non-positive value keeps the shipped default.
+ *
+ * Read at use rather than at module load: the caps then honour a value set after
+ * the module was imported, and tests do not have to scrub a process-wide
+ * environment before the provider is evaluated.
+ */
+export function resolveCodexWhitespaceDeltaCaps(env: Record<string, string | undefined> = $env): {
+	events: number;
+	chars: number;
+} {
+	return {
+		events: $envposExact(
+			"PI_CODEX_WHITESPACE_DELTA_EVENT_LIMIT",
+			CODEX_WHITESPACE_TOOL_CALL_ARGUMENT_DELTA_EVENT_LIMIT_DEFAULT,
+			env,
+		),
+		chars: $envposExact(
+			"PI_CODEX_WHITESPACE_DELTA_CHAR_LIMIT",
+			CODEX_WHITESPACE_TOOL_CALL_ARGUMENT_DELTA_CHAR_LIMIT_DEFAULT,
+			env,
+		),
+	};
+}
 const CODEX_WHITESPACE_LOOP_RETRY_LIMIT = 2;
 const CODEX_WHITESPACE_LOOP_RETRY_DELAY_MS = 250;
 
@@ -955,10 +987,8 @@ class CodexStreamRuntime {
 		state.consecutiveEvents += 1;
 		state.consecutiveChars += delta.length;
 		state.lastSequenceNumber = sequenceNumber;
-		if (
-			state.consecutiveEvents < CODEX_WHITESPACE_TOOL_CALL_ARGUMENT_DELTA_EVENT_LIMIT &&
-			state.consecutiveChars < CODEX_WHITESPACE_TOOL_CALL_ARGUMENT_DELTA_CHAR_LIMIT
-		) {
+		const caps = resolveCodexWhitespaceDeltaCaps();
+		if (state.consecutiveEvents < caps.events && state.consecutiveChars < caps.chars) {
 			return undefined;
 		}
 
