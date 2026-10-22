@@ -587,15 +587,18 @@ describe("bash services via proc://", () => {
 				),
 			).toContain("must remain persistent");
 			await proc.write(parseInternalUrl("proc://detach-candidate/kill"), "", { session });
-			await expect(bash.execute("invalid", { command: "true", name: "bad", async: true })).rejects.toThrow(
-				"does not accept async or timeout",
-			);
-			await expect(bash.execute("invalid", { command: "true", name: "bad", timeout: 1 })).rejects.toThrow(
-				"does not accept async or timeout",
-			);
+			const ignored = await bash.execute("invalid", {
+				command: "sleep 30",
+				name: "svc-bad",
+				timeout: 1,
+				async: true,
+			});
+			const ignoredText = ignored.content[0]?.type === "text" ? ignored.content[0].text : "";
+			expect(ignoredText.includes("Ignored timeout") && ignoredText.includes("Ignored async")).toBe(true);
 		} finally {
 			await client.request({ op: "stop", name: "echo-service", timeoutMs: 1_000 }).catch(() => undefined);
 			await client.request({ op: "stop", name: "detach-candidate", timeoutMs: 1_000 }).catch(() => undefined);
+			await client.request({ op: "stop", name: "svc-bad", timeoutMs: 1_000 }).catch(() => undefined);
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			await manager.dispose({ timeoutMs: 1_000 });
 			client.close();

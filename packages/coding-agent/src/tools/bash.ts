@@ -1040,15 +1040,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const pendingNotices: string[] = [];
 		if (name !== undefined) {
 			if (!this.#launchEnabled) throw new ToolError("Service launch is disabled in this session.");
-			if (asyncRequested || rawTimeout !== undefined)
-				throw new ToolError("Service mode does not accept async or timeout; use ready.timeout for readiness.");
+			if (rawTimeout !== undefined)
+				pendingNotices.push("Ignored timeout: service-only; readiness follows ready.timeout.");
+			if (asyncRequested)
+				pendingNotices.push("Ignored async: service-only; a service start is asynchronous already.");
 		} else if (ready !== undefined && (ready.log !== undefined || (ready.port !== undefined && ready.port !== 0))) {
 			// Host/timeout only configure a readiness condition; neither requests one,
 			// and tool-call layers may materialize an unset port as zero. Keep service
 			// validation unchanged, but only warn when a condition was actually ignored.
 			pendingNotices.push("Ignored ready: service-only, and no service name was given.");
 		}
-		if (asyncRequested && !cfgAsyncEnabled.get(this.session.settings)) {
+		if (name === undefined && asyncRequested && !cfgAsyncEnabled.get(this.session.settings)) {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
 		}
 
@@ -1159,6 +1161,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					`NOT ready — readiness timed out after ${ready?.timeout ?? 30}s; process state: ${daemon.state}.`,
 				);
 			if (daemon.exitReason) lines.push(`Reason: ${daemon.exitReason}`);
+			lines.push(...pendingNotices);
 			const log = await serviceLogs(this.session, name, signal);
 			if (log) lines.push(log);
 			return {
