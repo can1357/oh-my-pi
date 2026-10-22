@@ -389,9 +389,10 @@ describe("runSubprocess subagent_stop", () => {
 		expect(harness.events).toHaveLength(2);
 		expect(harness.events.map(event => event.stop_hook_active)).toEqual([false, true]);
 		expect(harness.events[1]?.session_id).toBe(harness.events[0]?.session_id);
-		// Both passes observe the live child transcript, and the second pass sees
-		// the replacement turn the refusal produced.
+		// Each pass observes a snapshot of the child transcript as it stood then: the
+		// first pass's array does not grow with the continuation's turn.
 		expect(seen.map(entry => entry.count)).toEqual([1, 2]);
+		expect(harness.events[0]?.messages).toHaveLength(1);
 		expect(seen.map(entry => assistantText(entry.last))).toEqual(["child turn 1", "child turn 2"]);
 		expect(seen[1]?.last).toBe(harness.messages.at(-1));
 		expect(result.exitCode).toBe(0);
