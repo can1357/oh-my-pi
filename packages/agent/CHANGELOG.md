@@ -1,13 +1,13 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `AgentOptions.onHistoryChanged`, notified after the live transcript or the steering/follow-up queues are replaced wholesale or the transcript grows or shrinks, so per-request caches can drop snapshots pinned to the previous history ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))
-### Added
-
-- Added `AgentOptions.onHistoryChanged`, notified after the live transcript or the steering/follow-up queues are replaced wholesale or the transcript grows or shrinks, so per-request caches can drop snapshots pinned to the previous history ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.12.4] - 2026-10-20
 
