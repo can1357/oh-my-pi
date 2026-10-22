@@ -336,13 +336,18 @@ describe("pi-native gateway retry budgets", () => {
 	});
 });
 
-describe("pi-native gateway reasoning flags", () => {
-	it("delivers a forced reasoning-off to the provider stream", async () => {
+describe("pi-native gateway forwarded request policy", () => {
+	// Request policy the client's process owns but the gateway cannot recompute —
+	// `commandcode`'s `CMD_ZDR=1` retention opt-in, forwarded by
+	// `ProviderDefinition.preparePiNativeHeaders` — arrives as a plain option
+	// header. If the gateway dropped option headers, the client would believe
+	// the conversation was not retained while the provider kept it.
+	it("delivers a client option header to the provider stream", async () => {
 		registerMockApi();
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-reasoning-"));
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-headers-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 		storage.keys.setRuntime("openrouter", "test-key");
-		const mock = createMockModel({ provider: "openrouter", id: "pi-native-reasoning" });
+		const mock = createMockModel({ provider: "openrouter", id: "pi-native-headers" });
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
 			bearerTokens: ["test-token"],
@@ -357,9 +362,9 @@ describe("pi-native gateway reasoning flags", () => {
 				method: "POST",
 				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
 				body: JSON.stringify({
-					modelId: "pi-native-reasoning",
+					modelId: "pi-native-headers",
 					context: baseContext,
-					options: { reasoning: Effort.Medium, forceReasoningOff: true },
+					options: { headers: { "x-cmd-zdr": "1" } },
 					stream: false,
 				}),
 			});
@@ -367,9 +372,7 @@ describe("pi-native gateway reasoning flags", () => {
 			expect(response.status).toBe(200);
 			await response.json();
 			expect(mock.calls).toHaveLength(1);
-			// A gateway-routed side turn must be able to force reasoning off, not
-			// only disable it — dropping the flag here silently re-enables thinking.
-			expect(mock.calls[0]?.options).toMatchObject({ reasoning: Effort.Medium, forceReasoningOff: true });
+			expect(mock.calls[0]?.options?.headers).toMatchObject({ "x-cmd-zdr": "1" });
 		} finally {
 			await handle.close();
 			storage.close();

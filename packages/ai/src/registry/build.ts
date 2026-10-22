@@ -18,7 +18,7 @@ import type { KeyResolver, ProviderDefinition } from "./types";
 /** Request/model shaping a provider implements in TypeScript beside its KDL auth policy. */
 export type ProviderTransport = Pick<
 	ProviderDefinition,
-	"prepareModel" | "prepareRequest" | "mapSimpleOptions" | "prepareModelDiscovery"
+	"prepareModel" | "prepareRequest" | "preparePiNativeHeaders" | "mapSimpleOptions" | "prepareModelDiscovery"
 >;
 
 function envResolver(env: CompiledAuthProvider["env"]): KeyResolver | undefined {

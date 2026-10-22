@@ -131,11 +131,7 @@ authorization-code flow, and `github-copilot.kdl` for a custom flow.
 | `org-scoped-identity #true` | Distinguishes stored accounts by organization as well as identity. |
 | `api-key-format "structured"` | Declares a transport-specific credential encoding rather than a plain bearer. |
 | `allows-missing-api-key #true`, `native-auth-api "api" …` | Marks transport-owned authentication paths. |
-
-The compiled types in `packages/catalog/src/compat/types.ts` and the compiler
-are the complete grammar reference. The materialized runtime interface is
-`packages/ai/src/registry/types.ts`'s `ProviderDefinition`, not the authoring
-format for built-ins.
+| `prepare-pi-native-headers` | Provider-owned headers forwarded with a `pi-native` request (`{ [name]: value }`, merged under the caller's). Use for request policy this process owns but the gateway cannot recompute — e.g. an environment-gated retention opt-in. Forward it under a private name and consume it in `prepareRequest`, since the receiving process must reconcile it against its own resolved model before it becomes a request header. |
 
 ## Conventions
 
