@@ -152,12 +152,20 @@ pub(crate) struct Host {
 
 fn output_handle(file: &OpenFile) -> Option<OpenFile> {
 	match file {
-		OpenFile::File(_) | OpenFile::Vfs(_) | OpenFile::Stdout(_) => file.try_clone().ok(),
+		// A stderr-backed stdout is still the file the shell's error output
+		// lands in, so it has to survive for the identity check.
+		OpenFile::File(_) | OpenFile::Vfs(_) | OpenFile::Stdout(_) | OpenFile::Stderr(_) => {
+			file.try_clone().ok()
+		},
 		_ => None,
 	}
 }
 
-fn output_metadata(file: &OpenFile) -> Option<Metadata> {
+/// The identity of the file behind a handle, when the handle names one.
+///
+/// The metadata is taken from the handle itself rather than from its path,
+/// so two descriptors onto the same file compare equal.
+fn handle_metadata(file: &OpenFile) -> Option<Metadata> {
 	match file {
 		// `Metadata::from_file` keeps the handle identity a Windows path stat
 		// drops; without it `path_is_stdout` can never match on Windows.
@@ -179,6 +187,46 @@ fn output_metadata(file: &OpenFile) -> Option<Metadata> {
 			#[cfg(not(any(unix, windows)))]
 			{
 				let _ = stdout;
+				None
+			}
+		},
+		OpenFile::Stdin(stdin) => {
+			#[cfg(unix)]
+			{
+				use std::os::fd::AsFd;
+				let handle = stdin.as_fd().try_clone_to_owned().ok()?;
+				Metadata::from_file(&std::fs::File::from(handle)).ok()
+			}
+			#[cfg(windows)]
+			{
+				use std::os::windows::io::AsHandle;
+				let handle = stdin.as_handle().try_clone_to_owned().ok()?;
+				Metadata::from_file(&std::fs::File::from(handle)).ok()
+			}
+			#[cfg(not(any(unix, windows)))]
+			{
+				let _ = stdin;
+				None
+			}
+		},
+		// The shell's error output can be the file the utility writes to, so
+		// its identity has to be read from the descriptor it names.
+		OpenFile::Stderr(stderr) => {
+			#[cfg(unix)]
+			{
+				use std::os::fd::AsFd;
+				let handle = stderr.as_fd().try_clone_to_owned().ok()?;
+				Metadata::from_file(&std::fs::File::from(handle)).ok()
+			}
+			#[cfg(windows)]
+			{
+				use std::os::windows::io::AsHandle;
+				let handle = stderr.as_handle().try_clone_to_owned().ok()?;
+				Metadata::from_file(&std::fs::File::from(handle)).ok()
+			}
+			#[cfg(not(any(unix, windows)))]
+			{
+				let _ = stderr;
 				None
 			}
 		},
@@ -550,10 +598,47 @@ impl Host {
 	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
 	pub fn path_is_stdout(&self, path: &Path) -> bool {
 		self.stdout_metadata
-			.get_or_init(|| self.stdout_handle.as_ref().and_then(output_metadata))
+			.get_or_init(|| self.stdout_handle.as_ref().and_then(handle_metadata))
 			.as_ref()
 			.is_some_and(|stdout| {
 				stdout.is_file() && self.fs().metadata(path).is_ok_and(|candidate| stdout.same_file(&candidate))
+			})
+	}
+
+	/// Whether the opened `file` is the regular file currently backing
+	/// stdout.
+	///
+	/// The handle counterpart of [`Host::path_is_stdout`]: GNU grep's guard
+	/// against reading the file it writes is `SAME_INODE (st, out_stat)` —
+	/// the same inode, not merely the same path — and `st` is what the
+	/// *opened* input descriptor reports, not what the path it was opened
+	/// by reports. Comparing the handle that was opened therefore cannot be
+	/// defeated by a path that is replaced, or a symlink that is retargeted,
+	/// between the check and the open.
+	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
+	pub fn file_is_stdout(&self, file: &pi_vfs::File) -> bool {
+		self.stdout_metadata
+			.get_or_init(|| self.stdout_handle.as_ref().and_then(handle_metadata))
+			.as_ref()
+			.is_some_and(|stdout| {
+				stdout.is_file() && file.metadata().is_ok_and(|opened| stdout.same_file(&opened))
+			})
+	}
+
+	/// Whether standard input is the regular file currently backing stdout.
+	///
+	/// The descriptor counterpart of [`Host::path_is_stdout`]: GNU grep's
+	/// guard against reading the file it writes is `SAME_INODE (st,
+	/// out_stat)` — the same inode, not merely the same path — so the
+	/// comparison is made between the two handles, not between their paths.
+	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
+	pub fn stdin_is_stdout(&self) -> bool {
+		self.stdout_metadata
+			.get_or_init(|| self.stdout_handle.as_ref().and_then(handle_metadata))
+			.as_ref()
+			.is_some_and(|stdout| {
+				stdout.is_file()
+					&& handle_metadata(self.stdin.file()).is_some_and(|stdin| stdout.same_file(&stdin))
 			})
 	}
 
@@ -2093,6 +2178,17 @@ mod testing {
 			self.stdout = SigpipeGuard::wrap(file, GuardedStream::Stdout, &self.sigpipe);
 		}
 
+		/// Replaces stdin on a test host with a real file, the way a shell
+		/// redirection (`<`) sets it up. Tests that model an input that is
+		/// also the output file hand in the same file they give stdout.
+		pub(crate) fn set_test_stdin(&mut self, file: OpenFile) {
+			self.stdin.file = file;
+			self.stdin_is_search_input = matches!(
+				&self.stdin.file,
+				&OpenFile::PipeReader(_) | &OpenFile::Stream(_) | &OpenFile::Vfs(_)
+			);
+		}
+
 		/// Sets an exported variable on a test host.
 		pub(crate) fn set_test_var(&mut self, key: &str, value: &str) {
 			self.env.insert(key.to_string(), value.to_string());
@@ -2108,6 +2204,35 @@ mod testing {
 		pub(crate) fn cancel_flag_for_test(&self) -> Arc<AtomicBool> {
 			Arc::clone(&self.cancel)
 		}
+	}
+
+	/// Contract: the identity of the output file is decided on the handle
+	/// that was opened, not on the path it was opened by.
+	///
+	/// GNU grep's guard against reading the file it writes is
+	/// `SAME_INODE (st, out_stat)`, where `st` is what the opened input
+	/// descriptor reports. A path that is replaced — or a symlink that is
+	/// retargeted — between the check and the open must therefore not be
+	/// able to hide the fact that the handle that was opened is the output
+	/// file, so the two checks have to disagree in exactly that case.
+	#[test]
+	fn an_opened_handle_is_recognised_as_the_output_file_after_its_path_changes() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let stdout = std::fs::OpenOptions::new().append(true).open(&path).expect("stdout file");
+		let (mut host, _capture) = Host::for_test("grep", "", tree.path());
+		host.set_test_stdout(openfiles::OpenFile::File(stdout));
+		// A handle opened on the output file, while the path still names it.
+		let opened = host.fs().open(&path).expect("open output file");
+		// A second file, written while the first still exists so the two
+		// have distinct identities, then renamed over it: the path now
+		// names a different file, while the handle still names the output.
+		let other = tree.path().join("other.txt");
+		std::fs::write(&other, "other\n").unwrap();
+		std::fs::rename(&other, &path).unwrap();
+		assert!(!host.path_is_stdout(&path), "the path no longer names the output file");
+		assert!(host.file_is_stdout(&opened), "the handle still names the output file");
 	}
 
 	#[cfg(windows)]

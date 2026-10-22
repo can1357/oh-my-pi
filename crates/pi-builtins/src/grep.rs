@@ -531,6 +531,11 @@ struct Options {
 	group_separator:     Option<Vec<u8>>,
 	line_buffered:       bool,
 	binary_files:        BinaryFiles,
+	/// Whether an input file that is also the output file must be refused.
+	///
+	/// GNU grep rejects such an input, because the matches it writes land
+	/// in the file it is still reading.
+	refuse_output_file:  bool,
 }
 
 struct PathRule {
@@ -1102,6 +1107,23 @@ fn search_file_path<M: Matcher, W: Write>(
 	let display_path = display_path_for_operand(operand, resolved, path);
 	match host.fs().open(path) {
 		Ok(file) => {
+			if opts.refuse_output_file && host.file_is_stdout(&file) {
+				// GNU grep refuses to read the file its own output lands in:
+				// the matches it writes would be read back and matched
+				// again. The comparison is made on the handle that was
+				// opened, as GNU's `SAME_INODE (st, out_stat)` does, so a
+				// path that is replaced — or a symlink that is retargeted —
+				// between the check and the open cannot slip past it.
+				*had_error = true;
+				if !opts.no_messages {
+					let _ = writeln!(
+						host.stderr,
+						"grep: {}: input file is also the output",
+						display_path.to_string_lossy()
+					);
+				}
+				return Ok(false);
+			}
 			let display = display_path.as_os_str().as_encoded_bytes();
 			match process_reader(matcher, searcher, file, display, opts, out) {
 				Ok(matched) => Ok(matched),
@@ -1413,30 +1435,43 @@ fn execute_search<M: Matcher>(
 		processed_operand = true;
 
 		if operand == OsStr::new("-") {
-			let display = cli
-				.label
-				.as_deref()
-				.unwrap_or_else(|| OsStr::new("(standard input)"))
-				.as_encoded_bytes();
-			match process_reader(
-				matcher,
-				&mut searcher,
-				&mut host.stdin,
-				display,
-				opts,
-				&mut out,
-			) {
-				Ok(matched) => any_match |= matched,
-				// Abort remaining work; the host maps the BrokenPipe status.
-				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-					return crate::host::SIGPIPE_EXIT_CODE;
-				},
-				Err(error) => {
-					had_error = true;
-					if !opts.no_messages {
-						let _ = writeln!(host.stderr, "grep: (standard input): {error}");
-					}
-				},
+			// `--label` names standard input everywhere else, so it names it
+			// in the refusal diagnostic too.
+			let input_name = cli.label.as_deref().unwrap_or_else(|| OsStr::new("(standard input)"));
+			let display = input_name.as_encoded_bytes();
+			if opts.refuse_output_file && host.stdin_is_stdout() {
+				// GNU grep refuses standard input that is the file its output
+				// lands in: the matches it writes would be read back and
+				// matched again.
+				had_error = true;
+				if !opts.no_messages {
+					let _ = writeln!(
+						host.stderr,
+						"grep: {}: input file is also the output",
+						input_name.to_string_lossy()
+					);
+				}
+			} else {
+				match process_reader(
+					matcher,
+					&mut searcher,
+					&mut host.stdin,
+					display,
+					opts,
+					&mut out,
+				) {
+					Ok(matched) => any_match |= matched,
+					// Abort remaining work; the host maps the BrokenPipe status.
+					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+						return crate::host::SIGPIPE_EXIT_CODE;
+					},
+					Err(error) => {
+						had_error = true;
+						if !opts.no_messages {
+							let _ = writeln!(host.stderr, "grep: (standard input): {error}");
+						}
+					},
+				}
 			}
 			if host.is_cancelled() {
 				had_error = true;
@@ -1524,6 +1559,7 @@ fn execute_search<M: Matcher>(
 impl Utility for Grep {
 	const NAME: &'static str = "grep";
 	const USAGE_ERROR: u8 = 2;
+	const CHECKS_STDOUT_PATH: bool = true;
 
 	fn rewrite_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, String> {
 		Ok(normalize_context_args(argv))
@@ -1576,6 +1612,18 @@ impl Utility for Grep {
 			return 2;
 		},
 	};
+	// A search that selects no record never writes to the file it reads, so
+	// that file is not its own output and the refusal below must stay off.
+	// An empty pattern file leaves nothing to match, and an inverted empty
+	// pattern matches every record and so selects none. `-x` and `-w`
+	// constrain the empty pattern, so they can still select records.
+	let zero_patterns = patterns.is_empty();
+	let inverted_empty_pattern = cli.invert
+		&& !cli.line_regexp
+		&& !cli.word
+		&& !zero_patterns
+		&& patterns.iter().all(|pattern| pattern.is_empty());
+	let selects_no_record = (zero_patterns && !cli.invert) || inverted_empty_pattern;
 	patterns.clear();
 
 	let (files_with_matches, files_without_match) = resolve_file_list_modes(&matches);
@@ -1588,6 +1636,18 @@ impl Utility for Grep {
 	};
 	let prefix_filename = resolve_filename_prefix(&matches)
 		.unwrap_or(directory_action == DirectoryAction::Recurse || files.len() > 1);
+	// GNU grep refuses to search the file its own output lands in: the
+	// matches it writes would be read back and matched again, so the file
+	// grows without bound. It exempts the modes that write at most one line
+	// per file (`-q`, `-c`, `-l`, `-L`) and the bounded `-m1`, which stop
+	// before their output can feed back into the search, and the searches
+	// that select no record at all.
+	let refuse_output_file = !cli.quiet
+		&& !cli.count
+		&& !files_with_matches
+		&& !files_without_match
+		&& max_count.is_none_or(|count| count > 1)
+		&& !selects_no_record;
 	let opts = Options {
 		line_number: cli.line_number,
 		byte_offset: cli.byte_offset,
@@ -1609,6 +1669,7 @@ impl Utility for Grep {
 		group_separator: resolve_group_separator(&cli, &matches),
 		line_buffered: cli.line_buffered,
 		binary_files: resolve_binary_files(&cli, &matches),
+		refuse_output_file,
 	};
 	let follow_links = resolve_follow_links(&cli, &matches);
 
@@ -1655,7 +1716,7 @@ mod tests {
 
 	use super::*;
 	use brush_core::openfiles;
-	use crate::host::{Host, run_caught, run_util};
+	use crate::host::{Host, Utility, run_caught, run_util};
 
 	#[test]
 	fn path_separator_rewrites_the_native_separator_on_windows() {
@@ -1778,6 +1839,421 @@ mod tests {
 		let (code, capture) = run_util::<Grep>(&["-f", "patterns", "haystack"], "", tree.path());
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "alpha\nbeta\n");
+	}
+
+	/// Contract: grep refuses to search the file its own output lands in.
+	///
+	/// GNU grep rejects that input with exit status 2 and
+	/// "input file is also the output", because the matches it writes would
+	/// be read back and matched again. A consumer that redirects grep's
+	/// output into a file it also searches must see that diagnostic rather
+	/// than a growing file.
+	#[test]
+	fn searching_the_output_file_itself_is_refused() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let (code, err) =
+			run_with_stdout_file::<Grep>(&["-m2", "needle", "out.txt"], tree.path(), &path);
+		assert_eq!(code, 2, "{err}");
+		assert!(err.contains("input file is also the output"), "{err}");
+		// The refused input is left exactly as it was.
+		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
+	}
+
+	/// Contract: grep refuses standard input that is the file its output
+	/// lands in.
+	///
+	/// GNU grep reports `(standard input): input file is also the output` and
+	/// exits 2, because the matches it writes would be read back and matched
+	/// again; the input is never read at all.
+	#[test]
+	fn reading_standard_input_that_is_the_output_file_is_refused() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let stdout = std::fs::OpenOptions::new()
+			.append(true)
+			.open(&path)
+			.expect("stdout file");
+		let stdin = std::fs::OpenOptions::new()
+			.read(true)
+			.open(&path)
+			.expect("stdin file");
+		let (mut host, capture) = Host::for_test("grep", "", tree.path());
+		host.set_test_stdin(openfiles::OpenFile::File(stdin));
+		host.set_test_stdout(openfiles::OpenFile::File(stdout));
+		let parsed = Grep::try_parse_from(["grep", "needle", "-"]).unwrap();
+		let code = run_caught(parsed, &mut host);
+		assert_eq!(code, 2, "{}", capture.err());
+		assert!(
+			capture.err().contains("(standard input): input file is also the output"),
+			"{}",
+			capture.err()
+		);
+		// The refused input is left exactly as it was.
+		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
+	}
+
+	/// Contract: `--label` names standard input in the refusal diagnostic.
+	///
+	/// GNU grep reports the label it was given, not the generic
+	/// `(standard input)`, when it refuses an input that is also its output.
+	#[test]
+	fn the_label_names_standard_input_in_the_refusal_diagnostic() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let stdout = std::fs::OpenOptions::new()
+			.append(true)
+			.open(&path)
+			.expect("stdout file");
+		let stdin = std::fs::OpenOptions::new()
+			.read(true)
+			.open(&path)
+			.expect("stdin file");
+		let (mut host, capture) = Host::for_test("grep", "", tree.path());
+		host.set_test_stdin(openfiles::OpenFile::File(stdin));
+		host.set_test_stdout(openfiles::OpenFile::File(stdout));
+		let parsed = Grep::try_parse_from(["grep", "--label=foo", "needle", "-"]).unwrap();
+		let code = run_caught(parsed, &mut host);
+		assert_eq!(code, 2, "{}", capture.err());
+		assert!(
+			capture.err().contains("grep: foo: input file is also the output"),
+			"{}",
+			capture.err()
+		);
+		// The refused input is left exactly as it was.
+		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
+	}
+
+	/// Contract: the modes whose output cannot feed back into the search
+	/// still read standard input that is also the output file.
+	///
+	/// GNU grep exempts them from the same-file rejection — `-q`, `-c` and
+	/// the list modes write at most one line per file, and `-m1` stops after
+	/// the first match — so the exemption holds for standard input as well as
+	/// for a named file.
+	#[test]
+	fn modes_that_cannot_feed_their_output_back_still_read_standard_input() {
+		for (args, expected_code, expected_file) in [
+			(&["-q", "needle"][..], 0, &b"needle\n"[..]),
+			(&["-c", "needle"][..], 0, &b"needle\n1\n"[..]),
+			(&["-l", "needle"][..], 0, &b"needle\n(standard input)\n"[..]),
+			// A file without a match is the one `-L` lists, so it prints its
+			// name and reports that no line matched.
+			(&["-L", "absent"][..], 1, &b"needle\n(standard input)\n"[..]),
+			(&["-m1", "needle"][..], 0, &b"needle\nneedle\n"[..]),
+		] {
+			let tree = tempfile::tempdir().unwrap();
+			let path = tree.path().join("out.txt");
+			std::fs::write(&path, "needle\n").unwrap();
+			let (code, err) = run_with_stdin_and_stdout_file::<Grep>(args, tree.path(), &path);
+			assert_eq!(code, expected_code, "{args:?}: {err}");
+			assert_eq!(std::fs::read(&path).unwrap(), *expected_file, "{args:?}: {err}");
+		}
+	}
+
+	/// Contract: `--no-messages` silences the refusal but keeps its status.
+	///
+	/// GNU grep still exits 2 for an input that is also its output when `-s`
+	/// is given; only the diagnostic is suppressed.
+	#[test]
+	fn no_messages_suppresses_the_refusal_message_but_not_its_status() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let (code, err) =
+			run_with_stdout_file::<Grep>(&["-s", "needle", "out.txt"], tree.path(), &path);
+		assert_eq!(code, 2);
+		assert_eq!(err, "");
+		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
+	}
+
+	/// Contract: a recursive search refuses the output file it walks into.
+	///
+	/// GNU grep names the offending file by its path under the searched
+	/// directory and exits 2.
+	#[test]
+	fn a_recursive_search_refuses_the_output_file_it_walks_into() {
+		let tree = tempfile::tempdir().unwrap();
+		let dir = tree.path().join("tree");
+		std::fs::create_dir(&dir).unwrap();
+		let path = dir.join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let (code, err) =
+			run_with_stdout_file::<Grep>(&["-r", "needle", "tree"], tree.path(), &path);
+		assert_eq!(code, 2, "{err}");
+		// The name is built with `Path::join`, as the implementation builds
+		// it, so the separator is the native one.
+		let named = Path::new("tree").join("out.txt");
+		assert!(
+			err.contains(&format!("{}: input file is also the output", named.display())),
+			"{err}"
+		);
+		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
+	}
+
+	/// Contract: the modes whose output cannot feed back into the search
+	/// still read the file they write to.
+	///
+	/// GNU grep exempts them from the same-file rejection: `-q`, `-c` and
+	/// the list modes write at most one line per file, and `-m1` stops after
+	/// the first match. Each row below checks the record the mode leaves in
+	/// the file it read, and the exit status it reports.
+	#[test]
+	fn modes_that_cannot_feed_their_output_back_still_read_the_output_file() {
+		for (args, expected_code, expected_file) in [
+			(&["-q", "needle", "out.txt"][..], 0, &b"needle\n"[..]),
+			(&["-c", "needle", "out.txt"][..], 0, &b"needle\n1\n"[..]),
+			(&["-l", "needle", "out.txt"][..], 0, &b"needle\nout.txt\n"[..]),
+			// A file without a match is the one `-L` lists, so it prints its
+			// name and reports that no line matched.
+			(&["-L", "absent", "out.txt"][..], 1, &b"needle\nout.txt\n"[..]),
+			(&["-m1", "needle", "out.txt"][..], 0, &b"needle\nneedle\n"[..]),
+		] {
+			let tree = tempfile::tempdir().unwrap();
+			let path = tree.path().join("out.txt");
+			std::fs::write(&path, "needle\n").unwrap();
+			let (code, err) = run_with_stdout_file::<Grep>(args, tree.path(), &path);
+			assert_eq!(code, expected_code, "{args:?}: {err}");
+			assert_eq!(std::fs::read(&path).unwrap(), *expected_file, "{args:?}: {err}");
+		}
+	}
+
+	/// Contract: a search with no pattern at all is not reading its own
+	/// output.
+	///
+	/// GNU grep reads a file whose pattern file is empty, reports that no
+	/// line matched, and leaves the file alone: the search selects no
+	/// record, so it writes nothing that could be read back.
+	#[test]
+	fn a_search_with_no_patterns_is_not_refused_as_the_output_file() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let patterns = tree.path().join("patterns");
+		std::fs::write(&patterns, "").unwrap();
+		let (code, err) =
+			run_with_stdout_file::<Grep>(&["-f", "patterns", "out.txt"], tree.path(), &path);
+		assert_eq!(code, 1, "{err}");
+		assert!(!err.contains("input file is also the output"), "{err}");
+		// The file is read, and left exactly as it was.
+		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
+	}
+
+	/// Contract: an inverted search with no pattern at all is still refused.
+	///
+	/// The boundary of the exemption above: with no pattern the matcher
+	/// matches nothing, and an inverted search of it selects every record.
+	/// GNU grep therefore still rejects the file it writes into.
+	#[test]
+	fn an_inverted_search_with_no_patterns_is_still_refused() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let patterns = tree.path().join("patterns");
+		std::fs::write(&patterns, "").unwrap();
+		let (code, err) =
+			run_with_stdout_file::<Grep>(&["-v", "-f", "patterns", "out.txt"], tree.path(), &path);
+		assert_eq!(code, 2, "{err}");
+		assert!(err.contains("input file is also the output"), "{err}");
+		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
+	}
+
+	/// Contract: an inverted empty pattern is not reading its own output.
+	///
+	/// GNU grep searches a file with `grep -v ''` and writes nothing: the
+	/// empty pattern matches every record, so the inverted search selects
+	/// none of them and the file it reads is not its own output.
+	#[test]
+	fn an_inverted_empty_pattern_is_not_refused_as_the_output_file() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\nother\n").unwrap();
+		let (code, err) =
+			run_with_stdout_file::<Grep>(&["-v", "-e", "", "out.txt"], tree.path(), &path);
+		assert_eq!(code, 1, "{err}");
+		assert!(!err.contains("input file is also the output"), "{err}");
+		assert_eq!(std::fs::read(&path).unwrap(), b"needle\nother\n");
+	}
+
+	/// Contract: an empty pattern constrained by `-x` or `-w` is still
+	/// refused.
+	///
+	/// The boundary of the exemption above: `-x` limits the empty pattern to
+	/// empty lines and `-w` leaves it matching nothing, so an inverted
+	/// search of either still selects records and can write into the file
+	/// it reads. GNU grep rejects that file.
+	#[test]
+	fn a_constrained_inverted_empty_pattern_is_still_refused() {
+		for args in [&["-v", "-x", "-e", "", "out.txt"][..], &["-v", "-w", "-e", "", "out.txt"][..]]
+		{
+			let tree = tempfile::tempdir().unwrap();
+			let path = tree.path().join("out.txt");
+			std::fs::write(&path, "needle\nother\n").unwrap();
+			let (code, err) = run_with_stdout_file::<Grep>(args, tree.path(), &path);
+			assert_eq!(code, 2, "{args:?}: {err}");
+			assert!(err.contains("input file is also the output"), "{args:?}: {err}");
+			assert_eq!(std::fs::read(&path).unwrap(), b"needle\nother\n", "{args:?}: {err}");
+		}
+	}
+
+	/// Contract: grep refuses to search the file the shell's error output
+	/// lands in.
+	///
+	/// A shell whose error output is the searched file, with the command's
+	/// standard output redirected to that error output (`>&2`), leaves grep
+	/// writing into the file it reads. GNU grep rejects that with exit
+	/// status 2 and "input file is also the output".
+	///
+	/// The refusal is decided from the identity of the descriptor the
+	/// shell's error output names, so the case needs the error descriptor to
+	/// BE the searched file. Pointing this process's descriptor 2 at that
+	/// file would hold it there for every test running alongside, so their
+	/// diagnostics would land in the searched file and their own stderr
+	/// would go missing; the case therefore runs in a child process whose
+	/// descriptor 2 is the searched file from the start.
+	#[cfg(unix)]
+	#[test]
+	fn a_stderr_backed_stdout_is_refused_as_the_output_file() {
+		/// The case directory, set on the child process.
+		const CASE_DIR: &str = "PI_BUILTINS_GREP_STDERR_CASE_DIR";
+
+		if let Some(case_dir) = std::env::var_os(CASE_DIR) {
+			// The child: its error descriptor is the searched file from the
+			// moment it starts, the way a shell's `>&2` redirect leaves it.
+			let dir = std::path::PathBuf::from(case_dir);
+			let (mut host, capture) = Host::for_test("grep", "", &dir);
+			host.set_test_stdout(openfiles::OpenFile::Stderr(std::io::stderr()));
+			let parsed = Grep::try_parse_from(["grep", "needle", "out.txt"]).unwrap();
+			let code = run_caught(parsed, &mut host);
+
+			assert_eq!(code, 2, "{}", capture.err());
+			assert!(
+				capture.err().contains("out.txt: input file is also the output"),
+				"{}",
+				capture.err()
+			);
+			// The refused input is left exactly as it was: grep wrote no
+			// match into the file it was reading.
+			assert_eq!(std::fs::read(dir.join("out.txt")).unwrap(), b"needle\n");
+			return;
+		}
+
+		// The parent: the searched file is the child's error descriptor, so
+		// the child sees the identity a `>&2` redirect produces.
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let stderr_file = std::fs::OpenOptions::new()
+			.append(true)
+			.open(&path)
+			.expect("stderr file");
+
+		let name = format!(
+			"{}::a_stderr_backed_stdout_is_refused_as_the_output_file",
+			module_path!()
+				.split_once("::")
+				.expect("crate-qualified module path")
+				.1
+		);
+		let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+			.args(["--exact", &name, "--nocapture", "--test-threads=1"])
+			.env(CASE_DIR, tree.path())
+			// The searched file is the child's error descriptor, so whatever
+			// the child writes there is that file's own content.
+			.stderr(std::process::Stdio::from(stderr_file))
+			.output()
+			.expect("re-exec the case in a child process");
+		assert!(
+			child.status.success(),
+			"the case failed in the child:\n{}\n{}",
+			String::from_utf8_lossy(&child.stdout),
+			String::from_utf8_lossy(&std::fs::read(&path).unwrap_or_default())
+		);
+
+		// The case must not have retargeted this process's error descriptor:
+		// it still names the harness's own output, not the searched file.
+		let searched = std::fs::metadata(&path).unwrap();
+		let searched_identity = {
+			use std::os::unix::fs::MetadataExt;
+			(searched.dev(), searched.ino())
+		};
+		assert_ne!(
+			error_descriptor_identity().expect("the process's error descriptor"),
+			searched_identity,
+			"the case retargeted the process's error descriptor"
+		);
+	}
+
+	/// The identity of the file the process's error descriptor names.
+	#[cfg(unix)]
+	fn error_descriptor_identity() -> Option<(u64, u64)> {
+		use std::os::{
+			fd::{FromRawFd, OwnedFd},
+			unix::fs::MetadataExt,
+		};
+
+		// SAFETY: plain `dup` of a live descriptor.
+		let duplicate = unsafe { libc::dup(libc::STDERR_FILENO) };
+		if duplicate < 0 {
+			return None;
+		}
+		// SAFETY: `duplicate` is a fresh descriptor this function owns, and
+		// the owned descriptor closes it when it goes out of scope.
+		let owned = unsafe { OwnedFd::from_raw_fd(duplicate) };
+		let metadata = std::fs::File::from(owned).metadata().ok()?;
+		Some((metadata.dev(), metadata.ino()))
+	}
+
+	/// Runs a utility whose standard input and stdout are the same file, the
+	/// way `… < out >> out` sets them up, and returns its exit status
+	/// together with the captured stderr.
+	fn run_with_stdin_and_stdout_file<U: Utility>(
+		args: &[&str],
+		cwd: &std::path::Path,
+		path: &std::path::Path,
+	) -> (i32, String) {
+		let stdout = std::fs::OpenOptions::new()
+			.append(true)
+			.open(path)
+			.expect("stdout file");
+		let stdin = std::fs::OpenOptions::new()
+			.read(true)
+			.open(path)
+			.expect("stdin file");
+		let (mut host, capture) = Host::for_test(U::NAME, "", cwd);
+		host.set_test_stdin(openfiles::OpenFile::File(stdin));
+		host.set_test_stdout(openfiles::OpenFile::File(stdout));
+		let argv = std::iter::once(std::ffi::OsString::from(U::NAME))
+			.chain(args.iter().copied().map(std::ffi::OsString::from))
+			.collect::<Vec<_>>();
+		let argv = U::rewrite_argv(argv).expect("rewrite argv");
+		let parsed = U::try_parse_from(argv).expect("parse");
+		(run_caught::<U>(parsed, &mut host), capture.err())
+	}
+
+	/// Runs a utility whose stdout is the file at `stdout_path`, the way a
+	/// shell redirection (`>>`) sets it up, and returns its exit status
+	/// together with the captured stderr.
+	fn run_with_stdout_file<U: Utility>(
+		args: &[&str],
+		cwd: &std::path::Path,
+		stdout_path: &std::path::Path,
+	) -> (i32, String) {
+		let stdout = std::fs::OpenOptions::new()
+			.append(true)
+			.open(stdout_path)
+			.expect("stdout file");
+		let (mut host, capture) = Host::for_test(U::NAME, "", cwd);
+		host.set_test_stdout(openfiles::OpenFile::File(stdout));
+		let argv = std::iter::once(std::ffi::OsString::from(U::NAME))
+			.chain(args.iter().copied().map(std::ffi::OsString::from))
+			.collect::<Vec<_>>();
+		let argv = U::rewrite_argv(argv).expect("rewrite argv");
+		let parsed = U::try_parse_from(argv).expect("parse");
+		(run_caught::<U>(parsed, &mut host), capture.err())
 	}
 
 	#[test]
