@@ -64,9 +64,16 @@ async function boot(): Promise<Harness> {
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	storage.keys.setRuntime("openai", "openai-secret");
 	storage.keys.setRuntime("openrouter", "openrouter-secret");
+	storage.keys.setRuntime("openai-codex", "codex-secret");
 	const direct = transcriptionModel("openai", "whisper-1");
 	const routed = transcriptionModel("openrouter", "openai/whisper-large-v3");
 	const local = transcriptionModel("local", "whisper-small", "local-inference", "local://inference");
+	const codex = transcriptionModel(
+		"openai-codex",
+		"codex-transcribe",
+		"openai-codex-transcriptions",
+		"https://chatgpt.com/backend-api",
+	);
 	const upstream: UpstreamRequest[] = [];
 	const fetchImpl: FetchImpl = async (input, init) => {
 		if (!(init?.body instanceof FormData)) throw new Error("Expected upstream multipart body");
@@ -93,6 +100,7 @@ async function boot(): Promise<Harness> {
 			if (id === direct.id || id === `openai/${direct.id}`) return direct;
 			if (id === routed.id || id === `openrouter/${routed.id}`) return routed;
 			if (id === local.id || id === `local/${local.id}`) return local;
+			if (id === codex.id || id === `openai-codex/${codex.id}`) return codex;
 			return undefined;
 		},
 		version: "test",
@@ -181,6 +189,29 @@ describe("auth-gateway POST /v1/audio/transcriptions", () => {
 			language: "ja",
 			fileName: "audio.wav",
 			mimeType: "audio/wav",
+		});
+		expect(harness.upstream[0]?.audio).toEqual(AUDIO);
+	});
+
+	it("serves Codex subscription dictation through the ChatGPT /transcribe endpoint", async () => {
+		harness = await boot();
+		const response = await fetch(`${harness.url}/v1/audio/transcriptions`, {
+			method: "POST",
+			headers: gatewayHeaders("application/json"),
+			body: JSON.stringify({
+				model: "openai-codex/codex-transcribe",
+				input_audio: { data: AUDIO.toBase64(), format: "flac" },
+			}),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ text: UPSTREAM_RESULT.text });
+		expect(harness.upstream).toHaveLength(1);
+		expect(harness.upstream[0]).toMatchObject({
+			url: "https://chatgpt.com/backend-api/transcribe",
+			authorization: "Bearer codex-secret",
+			model: null,
+			fileName: "audio.flac",
 		});
 		expect(harness.upstream[0]?.audio).toEqual(AUDIO);
 	});

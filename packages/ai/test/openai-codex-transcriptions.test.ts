@@ -1,0 +1,205 @@
+import { describe, expect, it } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { Api, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
+import { TranscriptionApiError, transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
+
+const AUDIO = new Uint8Array([0x66, 0x4c, 0x61, 0x43, 0x01, 0x02, 0x03, 0x04]);
+
+const model: Model<Api> = buildModel({
+	id: "codex-transcribe",
+	name: "Codex Dictation",
+	api: "openai-codex-transcriptions",
+	provider: "openai-codex",
+	baseUrl: "https://chatgpt.com/backend-api",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: null,
+	maxTokens: null,
+	kind: "stt",
+} satisfies ModelSpec<Api>);
+
+/** Unsigned JWT carrying the ChatGPT account claim the Codex backend routes on. */
+function codexToken(accountId: string): string {
+	const payload = btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } }));
+	return `header.${payload}.signature`;
+}
+
+describe("openai-codex-transcriptions transport", () => {
+	it("posts audio to the ChatGPT dictation endpoint as the Codex Desktop client", async () => {
+		const seen: Array<{ url: string; method?: string; headers: Headers; form: FormData }> = [];
+		const fetchImpl: FetchImpl = async (input, init) => {
+			if (!(init?.body instanceof FormData)) throw new Error("Expected multipart body");
+			seen.push({ url: String(input), method: init.method, headers: new Headers(init.headers), form: init.body });
+			return Response.json({
+				text: "Ask not.",
+				asset_pointer: "sediment://x",
+				asset_ttl: "30d",
+				asset_format: "flac",
+			});
+		};
+
+		const result = await transcribeAudio(
+			model,
+			{
+				audio: AUDIO,
+				mimeType: "audio/flac",
+				fileName: "jfk.flac",
+				language: "en",
+				prompt: "ignored",
+				temperature: 0.2,
+				responseFormat: "verbose_json",
+				timestampGranularities: ["word"],
+			},
+			{ apiKey: codexToken("acct-1"), fetch: fetchImpl },
+		);
+
+		expect(result.text).toBe("Ask not.");
+		expect(result.usage.cost.total).toBe(0);
+		expect(seen).toHaveLength(1);
+		const [request] = seen;
+		expect(request?.url).toBe("https://chatgpt.com/backend-api/transcribe");
+		expect(request?.method).toBe("POST");
+		// Cloudflare 403s the backend unless it sees the Codex Desktop identity.
+		expect(request?.headers.get("authorization")).toBe(`Bearer ${codexToken("acct-1")}`);
+		expect(request?.headers.get("chatgpt-account-id")).toBe("acct-1");
+		expect(request?.headers.get("originator")).toBe("Codex Desktop");
+		expect(request?.headers.get("user-agent")).toStartWith("Codex Desktop/");
+		// The endpoint takes only `file` and `language`; OpenAI-only fields are dropped.
+		expect([...(request?.form.keys() ?? [])]).toEqual(["file", "language"]);
+		const file = request?.form.get("file");
+		if (!(file instanceof File)) throw new Error("Expected audio file part");
+		expect(file.name).toBe("jfk.flac");
+		expect(new Uint8Array(await file.arrayBuffer())).toEqual(AUDIO);
+		expect(request?.form.get("language")).toBe("en");
+	});
+
+	it("renames an upload whose extension the endpoint cannot decode after its declared container", async () => {
+		// The backend answers 500 for Ogg/Opus unless the upload is named `*.ogg`; `.oga` and bare names fail.
+		const upload = async (fileName: string, mimeType: string): Promise<string | undefined> => {
+			let uploaded: string | undefined;
+			const fetchImpl: FetchImpl = async (_input, init) => {
+				const file = init?.body instanceof FormData ? init.body.get("file") : null;
+				uploaded = file instanceof File ? file.name : undefined;
+				return Response.json({ text: "ok" });
+			};
+			await transcribeAudio(
+				model,
+				{ audio: AUDIO, mimeType, fileName, responseFormat: "json" },
+				{ apiKey: codexToken("acct-1"), fetch: fetchImpl },
+			);
+			return uploaded;
+		};
+		expect(await upload("voice.oga", "audio/ogg")).toBe("audio.ogg");
+		// A decodable extension whose container contradicts the MIME type is renamed too: the decoder follows the name.
+		expect(await upload("clip.webm", "audio/ogg")).toBe("audio.ogg");
+		// Browser MIME aliases name their container: `audio/x-m4a` is M4A, `audio/opus` is Ogg/Opus.
+		expect(await upload("blob", "audio/x-m4a")).toBe("audio.m4a");
+		// Agreeing containers (including aliases) and unknown MIME types keep the caller's name.
+		expect(await upload("clip.mp3", "audio/mpeg")).toBe("clip.mp3");
+		expect(await upload("clip.mpeg", "audio/mpeg")).toBe("clip.mpeg");
+		expect(await upload("clip.m4a", "audio/mp4")).toBe("clip.m4a");
+		expect(await upload("clip.webm", "application/octet-stream")).toBe("clip.webm");
+	});
+
+	it("declares the token's workspace residency so a region-pinned workspace is not rejected", async () => {
+		const payload = btoa(
+			JSON.stringify({
+				"https://api.openai.com/auth": { chatgpt_account_id: "acct-1", chatgpt_data_residency: "us" },
+			}),
+		);
+		let residency: string | null | undefined;
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			residency = new Headers(init?.headers).get("x-openai-internal-codex-residency");
+			return Response.json({ text: "ok" });
+		};
+		await transcribeAudio(
+			model,
+			{ audio: AUDIO, mimeType: "audio/wav", fileName: "dictation.wav", responseFormat: "json" },
+			{ apiKey: `header.${payload}.signature`, fetch: fetchImpl },
+		);
+		expect(residency).toBe("us");
+	});
+
+	it("attaches the host's DeviceCheck attestation like other Codex requests", async () => {
+		let attestation: string | null | undefined;
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			attestation = new Headers(init?.headers).get("x-oai-attestation");
+			return Response.json({ text: "ok" });
+		};
+		setCodexAttestationProvider(async () => "attest-envelope");
+		try {
+			await transcribeAudio(
+				model,
+				{ audio: AUDIO, mimeType: "audio/wav", fileName: "dictation.wav", responseFormat: "json" },
+				{ apiKey: codexToken("acct-1"), fetch: fetchImpl },
+			);
+		} finally {
+			setCodexAttestationProvider(undefined);
+		}
+		expect(attestation).toBe("attest-envelope");
+	});
+
+	it("never sends the Codex bearer to a plain-HTTP base URL override", async () => {
+		let target: string | undefined;
+		const fetchImpl: FetchImpl = async input => {
+			target = String(input);
+			return Response.json({ text: "ok" });
+		};
+		await transcribeAudio(
+			{ ...model, baseUrl: "http://chatgpt.com/backend-api" },
+			{ audio: AUDIO, mimeType: "audio/flac", fileName: "a.flac", responseFormat: "json" },
+			{ apiKey: codexToken("acct-1"), fetch: fetchImpl },
+		);
+		expect(target).toBe("https://chatgpt.com/backend-api/transcribe");
+	});
+
+	it("surfaces backend ASR failures as TranscriptionApiError with the upstream detail", async () => {
+		const fetchImpl: FetchImpl = async () => Response.json({ detail: "Error in ASR API" }, { status: 500 });
+		const failure = transcribeAudio(
+			model,
+			{ audio: AUDIO, mimeType: "audio/ogg", fileName: "clip.ogg", responseFormat: "json" },
+			{ apiKey: codexToken("acct-1"), fetch: fetchImpl },
+		);
+		await expect(failure).rejects.toBeInstanceOf(TranscriptionApiError);
+		await expect(failure).rejects.toMatchObject({
+			status: 500,
+			message: "openai-codex/codex-transcribe transcription API error (500): Error in ASR API",
+		});
+	});
+
+	it("bounds an HTML error page from Cloudflare instead of embedding it whole in the message", async () => {
+		const page = `<html>${"x".repeat(20_000)}</html>`;
+		const fetchImpl: FetchImpl = async () => new Response(page, { status: 403 });
+		const failure = transcribeAudio(
+			model,
+			{ audio: AUDIO, mimeType: "audio/wav", fileName: "dictation.wav", responseFormat: "json" },
+			{ apiKey: codexToken("acct-1"), fetch: fetchImpl },
+		);
+		await expect(failure).rejects.toMatchObject({
+			status: 403,
+			message: `openai-codex/codex-transcribe transcription API error (403): ${page.slice(0, 500)}`,
+		});
+	});
+
+	it("retries a 401 with the resolver's next credential and that credential's account", async () => {
+		const accounts: Array<string | null> = [];
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			const headers = new Headers(init?.headers);
+			accounts.push(headers.get("chatgpt-account-id"));
+			if (accounts.length === 1) return Response.json({ detail: "Unauthorized" }, { status: 401 });
+			return Response.json({ text: "after refresh" });
+		};
+		const result = await transcribeAudio(
+			model,
+			{ audio: AUDIO, mimeType: "audio/wav", fileName: "dictation.wav", responseFormat: "json" },
+			{
+				apiKey: ctx => (ctx.error === undefined ? codexToken("acct-old") : codexToken("acct-new")),
+				fetch: fetchImpl,
+			},
+		);
+		expect(result.text).toBe("after refresh");
+		expect(accounts).toEqual(["acct-old", "acct-new"]);
+	});
+});

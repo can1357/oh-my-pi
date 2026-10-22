@@ -3,6 +3,8 @@ import { getProxyForUrl, wrapFetchForProxy } from "@oh-my-pi/pi-ai/utils/proxy";
 import {
 	CODEX_BASE_URL,
 	CODEX_CLIENT_VERSION,
+	CODEX_DESKTOP_ORIGINATOR,
+	CODEX_DESKTOP_USER_AGENT,
 	getCodexAccountId,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
@@ -20,7 +22,6 @@ const MAX_ERROR_BODY_LENGTH = 2_048;
 const SIDEBAND_CONNECT_ATTEMPTS = 5;
 const SIDEBAND_CONNECT_TIMEOUT_MS = 15_000;
 const LIVE_PROVIDER = "openai-codex";
-const LIVE_ORIGINATOR = "Codex Desktop";
 const LIVE_CALL_ID_PATTERN = /^rtc_[\w-]+$/;
 
 type Lifecycle = "idle" | "connecting" | "connected" | "closing" | "closed";
@@ -85,9 +86,9 @@ function liveSessionHeaders(
 	const headers: Record<string, string> = {
 		Authorization: `Bearer ${access.accessToken}`,
 		"OpenAI-Alpha": "quicksilver=v2",
-		"User-Agent": `Codex Desktop/${CODEX_CLIENT_VERSION}`,
+		"User-Agent": CODEX_DESKTOP_USER_AGENT,
 		"x-session-id": realtimeSessionId,
-		[OPENAI_HEADERS.ORIGINATOR]: LIVE_ORIGINATOR,
+		[OPENAI_HEADERS.ORIGINATOR]: CODEX_DESKTOP_ORIGINATOR,
 		[OPENAI_HEADERS.VERSION]: CODEX_CLIENT_VERSION,
 		[OPENAI_HEADERS.SCOPED_SESSION_ID]: sessionId,
 		[OPENAI_HEADERS.THREAD_ID]: sessionId,
