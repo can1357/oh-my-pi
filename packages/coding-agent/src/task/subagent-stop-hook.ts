@@ -108,7 +108,18 @@ export class SubagentStopHook {
 		// run now has, so void it before it spends any state: a refusal must not
 		// count as a continuation, nor leave `stop_hook_active` set for the pass
 		// that judges the new candidate.
-		if (candidateChanged && (await candidateChanged())) return { kind: "stale" };
+		if (candidateChanged) {
+			let changed: boolean;
+			try {
+				changed = await candidateChanged();
+			} catch (error) {
+				// Cancelled while revalidating: the verdict never covered the candidate the run would publish.
+				if (this.#signal.aborted) return { kind: "aborted" };
+				throw error;
+			}
+			if (this.#signal.aborted) return { kind: "aborted" };
+			if (changed) return { kind: "stale" };
+		}
 		// The diagnostic is only consulted for a reason-less refusal; render it only for a refusal.
 		const blockedFallback =
 			result?.decision === "block" ? prompt.render(subagentStopBlockedPrompt, { structured: this.#structured }) : "";
