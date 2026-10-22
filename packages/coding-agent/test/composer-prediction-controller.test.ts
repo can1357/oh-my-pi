@@ -17,11 +17,13 @@ describe("parseComposerPrediction", () => {
 		expect(parseComposerPrediction('use "bun test" here')).toBe('use "bun test" here');
 	});
 
-	it("rejects skips, empty replies, and rambling", () => {
+	it("rejects skips, empty replies, and replies past the prompt's 240-character limit", () => {
 		expect(parseComposerPrediction("NO_PREDICTION")).toBeUndefined();
 		expect(parseComposerPrediction("NO_PREDICTION.")).toBeUndefined();
 		expect(parseComposerPrediction(' "" ')).toBeUndefined();
-		expect(parseComposerPrediction("word ".repeat(200))).toBeUndefined();
+		const atLimit = `${"x".repeat(232)}${"😀".repeat(8)}`;
+		expect(parseComposerPrediction(atLimit)).toBe(atLimit);
+		expect(parseComposerPrediction(`${atLimit}x`)).toBeUndefined();
 	});
 });
 
