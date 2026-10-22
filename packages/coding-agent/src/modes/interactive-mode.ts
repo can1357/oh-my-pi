@@ -99,6 +99,8 @@ import type {
 } from "../extensibility/extensions";
 import type {
 	CompactOptions,
+	ExtensionAskDialogQuestion,
+	ExtensionAskDialogResult,
 	PlanReviewChoice,
 	PlanReviewOption,
 	PlanReviewRequestedEvent,
@@ -165,6 +167,8 @@ import {
 } from "../session/session-worktree";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
+import type { HostedClientLink } from "../session-host/hosted-client";
+import type { RpcSessionOrigin } from "./rpc/rpc-types";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type SttState } from "../stt";
@@ -219,7 +223,7 @@ import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { openPath } from "../utils/open";
-import { resumeCommand } from "../utils/resume-command";
+import { attachCommand, resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import type { TokenRateMeter } from "../utils/token-rate";
@@ -347,6 +351,7 @@ import type {
 	SessionPickHandler,
 	ShowStatusOptions,
 	SelectOnlyModelSelectorOptions,
+	ShutdownOptions,
 	SubmittedUserInput,
 } from "./types";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
@@ -1340,6 +1345,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#loopConditionAbort: AbortController | undefined;
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
+	#pendingLoopIterations = 0;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearGeneration = 0;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
@@ -1618,6 +1624,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
+	/** See {@link InteractiveModeContext.hostedClientMode}; the hosted startup sets it before `init()`. */
+	hostedClientMode = false;
+	hostedClient?: HostedClientLink;
+	/** See {@link InteractiveModeContext.hostOrigin}. */
+	hostOrigin?: RpcSessionOrigin;
+	attachHostedSession?: (target?: string) => Promise<void>;
 	#streamPublisher: StreamPublisher | undefined;
 	#recorder: SessionRecorder | undefined;
 	#recorderStarting = false;
@@ -1727,6 +1739,36 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #inputController: InputController;
 	readonly #selectorController: SelectorController;
 	readonly #focusController: SessionFocusController;
+	/** Sessions retain this small activity record, not the terminal and its transcript, after the view leaves. */
+	readonly #idleMaintenanceActivity: {
+		target: AgentSession | undefined;
+		ready: boolean;
+		isComposing: boolean;
+		scheduledTurn: ((target: AgentSession) => boolean) | undefined;
+	} = { target: undefined, ready: false, isComposing: false, scheduledTurn: undefined };
+
+	syncIdleMaintenanceView(target: AgentSession | null = this.viewSession): void {
+		if (this.hostedClientMode) return;
+		const activity = this.#idleMaintenanceActivity;
+		const previous = activity.target;
+		if (target === null) {
+			activity.target = undefined;
+			activity.ready = false;
+			activity.isComposing = false;
+			activity.scheduledTurn = undefined;
+			previous?.refreshIdleMaintenance();
+			return;
+		}
+		if (!activity.scheduledTurn) return;
+		activity.target = target;
+		activity.isComposing = this.editor.getText().trim() !== "";
+		target.enableIdleMaintenance({
+			isBlocked: () => !activity.ready || activity.target !== target || activity.isComposing,
+			scheduledTurn: () => activity.scheduledTurn?.(target) === true,
+		});
+		if (previous !== target) previous?.refreshIdleMaintenance();
+		target.refreshIdleMaintenance();
+	}
 	get viewSession(): AgentSession {
 		return this.#focusController.target ?? this.session;
 	}
@@ -1736,19 +1778,34 @@ export class InteractiveMode implements InteractiveModeContext {
 	get tableChartsVisible(): boolean {
 		return this.#focusController.target === undefined;
 	}
-	resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>> {
-		return resolveMarkdownLinkHrefs(hrefs, this.#linkResolveContext());
+	async resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>> {
+		for (;;) {
+			const origin = this.hostOrigin;
+			// A hosted terminal shows the host's transcript, so its links never mean this terminal's own directories:
+			// with no origin to resolve against (between hosts, or after the link ended) they stay as written.
+			if (this.hostedClientMode && !origin) return new Map();
+			const targets = await resolveMarkdownLinkHrefs(hrefs, this.#linkResolveContext(origin));
+			// The lookup is async: if the host's session was replaced or moved meanwhile, these targets name a place the
+			// view no longer reads from, and caching them would revive the old destinations. Resolve again.
+			if (this.hostOrigin === origin) return targets;
+		}
 	}
-	#linkResolveContext(): ResolveContext {
+	#linkResolveContext(origin: RpcSessionOrigin | undefined): ResolveContext {
 		const session = this.viewSession;
 		return {
-			cwd: session.sessionManager.getCwd(),
+			cwd: origin?.cwd ?? session.sessionManager.getCwd(),
 			sessionFile: session.sessionFile,
 			settings: session.settings,
-			localProtocolOptions: {
-				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
-				getSessionId: () => session.sessionManager.getSessionId(),
-			},
+			localProtocolOptions: origin
+				? {
+						getLocalRoot: () => origin.localRoot,
+						getArtifactsDir: () => origin.artifactsDir,
+						getSessionId: () => origin.sessionId,
+					}
+				: {
+						getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+						getSessionId: () => session.sessionManager.getSessionId(),
+					},
 			skills: session.skills,
 			rules: session.ttsrManager?.getRules(),
 		};
@@ -2201,6 +2258,15 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
 		if (this.isInitialized) return;
+		if (!this.hostedClientMode) {
+			this.#idleMaintenanceActivity.scheduledTurn = target =>
+				target === this.session &&
+				(this.#goalContinuationTimer !== undefined ||
+					this.#pendingGoalContinuationTurns > 0 ||
+					this.#loopAutoSubmitTimer !== undefined ||
+					this.#pendingLoopIterations > 0);
+			this.syncIdleMaintenanceView();
+		}
 
 		// Fresh dialog lifetime: a previous stop (if this mode is ever
 		// re-initialized) left the old controller aborted, and approvals queued
@@ -2228,8 +2294,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.session.beginDispose();
 				this.statusLine.dispose();
 			},
-			saveDraft: text => this.sessionManager.saveDraft(text),
+			// A hosted replica is a disposable copy the link deletes on leaving: saving a draft would recreate its file.
+			saveDraft: text => (this.hostedClientMode ? Promise.resolve() : this.sessionManager.saveDraft(text)),
 			disposeSession: async reason => {
+				await this.#detachHostedClient();
 				await this.#btwController.dispose();
 				await this.session.dispose({
 					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,
@@ -2455,10 +2523,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		initProgramStatus();
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
-		setTerminalSessionSource({
-			file: () => this.sessionManager.getSessionFile(),
-			cwd: () => this.sessionManager.getCwd(),
-		});
+		// A hosted terminal's local session is a disposable replica: its link reports the host's session instead.
+		if (!this.hostedClientMode) {
+			setTerminalSessionSource({
+				file: () => this.sessionManager.getSessionFile(),
+				cwd: () => this.sessionManager.getCwd(),
+			});
+		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
@@ -2543,7 +2614,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (this.session.messages.length > 0) void warmHighlighter();
 			// Open the model API connection while the user reads the first frame.
 			this.session.prewarmModelConnection();
-			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
+			if (!this.hostedClientMode && !$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
 				this.#inputController.prewarmTinyTitleModel();
 			}
 		});
@@ -2553,7 +2624,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// The relay connection proceeds in the background and never blocks init.
 		// The owning caller keeps guest mutations gated through its full outer
 		// startup; early dialog answers do not require that readiness signal.
-		if (options.autoStartCollab === true) this.collabController.autoStart();
+		if (options.autoStartCollab === true && !this.hostedClientMode) this.collabController.autoStart();
 
 		// Initialize hooks with TUI-based UI context
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
@@ -2579,13 +2650,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		// and loop resets also start sessions through handleClearCommand and must
 		// never be dragged back into plan mode; user-initiated /new re-applies the
 		// default through handleNewCommand instead.
-		await this.#applyPlanModeDefault();
+		if (!this.hostedClientMode) await this.#applyPlanModeDefault();
 
 		// Restore unsent editor draft from previous session shutdown (Ctrl+D).
 		// One-shot: consumeDraft removes the sidecar after read so the next
-		// resume does not re-restore the same text.
+		// resume does not re-restore the same text. A hosted client never saves a draft (see the teardown's
+		// `saveDraft`), so any sidecar next to its local session is someone else's: left where it is, not consumed.
 		try {
-			const draft = await logger.time("InteractiveMode.init:draft", () => this.sessionManager.consumeDraft());
+			const draft = this.hostedClientMode
+				? null
+				: await logger.time("InteractiveMode.init:draft", () => this.sessionManager.consumeDraft());
 			if (draft && !this.editor.getText()) {
 				this.editor.setText(draft);
 				this.updateEditorBorderColor();
@@ -2731,6 +2805,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `streamingBehavior: "steer"`, so whichever lands second queues into the
 		// other's turn instead of dying.
 		this.editor.disableSubmit = false;
+		this.#idleMaintenanceActivity.ready = true;
+		this.syncIdleMaintenanceView();
 		// Publish native send readiness even when no user input triggers another frame.
 		this.ui.requestRender();
 	}
@@ -2997,7 +3073,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async getUserInput(): Promise<SubmittedUserInput> {
-		if (this.session.getGoalModeState()?.mode === "exiting") {
+		if (!this.hostedClientMode && this.session.getGoalModeState()?.mode === "exiting") {
 			await this.#exitGoalMode({ reason: "completed", silent: true });
 		}
 		const { promise, resolve } = Promise.withResolvers<SubmittedUserInput>();
@@ -3014,6 +3090,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#scheduleLoopAutoSubmit(): void {
 		this.#cancelLoopAutoSubmit();
+		if (this.hostedClientMode) return;
 		if (!this.loopModeEnabled || !this.loopPrompt || this.#isShuttingDown) return;
 		const prompt = this.loopPrompt;
 		const loopAction = cfgLoopMode.get(settings);
@@ -3026,8 +3103,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Brief delay so the user has a chance to press Esc between iterations.
 		this.#loopAutoSubmitTimer = setTimeout(() => {
 			this.#loopAutoSubmitTimer = undefined;
-			if (!this.loopModeEnabled || !this.onInputCallback) return;
-			callback();
+			try {
+				if (!this.loopModeEnabled || !this.onInputCallback) return;
+				callback();
+			} finally {
+				this.syncIdleMaintenanceView();
+			}
 		}, 800);
 	}
 
@@ -3035,11 +3116,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#loopAutoSubmitTimer) {
 			clearTimeout(this.#loopAutoSubmitTimer);
 			this.#loopAutoSubmitTimer = undefined;
+			this.syncIdleMaintenanceView();
 		}
 	}
 
 	#scheduleGoalContinuation(): void {
 		this.#cancelGoalContinuation();
+		if (this.hostedClientMode) return;
 		if (this.loopModeEnabled) return;
 		if (!this.onInputCallback) return;
 		if (!cfgGoalContinuationModes.get(this.session.settings).includes("interactive")) return;
@@ -3056,30 +3139,34 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!prompt) return;
 		this.#goalContinuationTimer = setTimeout(() => {
 			this.#goalContinuationTimer = undefined;
-			if (!this.onInputCallback) return;
-			if (!this.goalModeEnabled || this.goalModePaused) return;
-			// The 800ms timer can outlive the idle window that scheduled it: a
-			// `/goal set` taken via the streaming branch (or any extension/hook
-			// path that starts a turn while we wait) leaves the agent busy. Firing
-			// the continuation now would route through `submitInteractiveInput` →
-			// `promptCustomMessage` with no `streamingBehavior` and resurface
-			// `AgentBusyError`. Drop this tick; `#handleGoalSessionEvent` reschedules
-			// on the next `agent_end`.
-			if (this.#isAutoSubmitBlocked()) return;
-			if (this.#pendingSubmittedInput) return;
-			if (this.editor.getText().trim().length > 0) return;
-			if ((this.editor.pendingImages?.length ?? 0) > 0) return;
-			const latestState = this.session.getGoalModeState();
-			if (!latestState?.enabled || latestState.goal.status !== "active") return;
-			if (this.#goalOpenWorkAllBlocked()) return;
-			this.#pendingGoalContinuationTurns++;
-			this.onInputCallback(
-				this.startPendingSubmission({
-					text: prompt,
-					customType: "goal-continuation",
-					display: false,
-				}),
-			);
+			try {
+				if (!this.onInputCallback) return;
+				if (!this.goalModeEnabled || this.goalModePaused) return;
+				// The 800ms timer can outlive the idle window that scheduled it: a
+				// `/goal set` taken via the streaming branch (or any extension/hook
+				// path that starts a turn while we wait) leaves the agent busy. Firing
+				// the continuation now would route through `submitInteractiveInput` →
+				// `promptCustomMessage` with no `streamingBehavior` and resurface
+				// `AgentBusyError`. Drop this tick; `#handleGoalSessionEvent` reschedules
+				// on the next `agent_end`.
+				if (this.#isAutoSubmitBlocked()) return;
+				if (this.#pendingSubmittedInput) return;
+				if (this.editor.getText().trim().length > 0) return;
+				if ((this.editor.pendingImages?.length ?? 0) > 0) return;
+				const latestState = this.session.getGoalModeState();
+				if (!latestState?.enabled || latestState.goal.status !== "active") return;
+				if (this.#goalOpenWorkAllBlocked()) return;
+				this.#pendingGoalContinuationTurns++;
+				this.onInputCallback(
+					this.startPendingSubmission({
+						text: prompt,
+						customType: "goal-continuation",
+						display: false,
+					}),
+				);
+			} finally {
+				this.syncIdleMaintenanceView();
+			}
 		}, 800);
 	}
 
@@ -3099,6 +3186,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#goalContinuationTimer) {
 			clearTimeout(this.#goalContinuationTimer);
 			this.#goalContinuationTimer = undefined;
+			this.syncIdleMaintenanceView();
 		}
 	}
 
@@ -3133,63 +3221,69 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #runLoopIteration(action: "prompt" | "compact" | "reset", prompt: string): Promise<void> {
-		if (!this.loopModeEnabled || this.loopPrompt !== prompt || !this.onInputCallback) return;
-		if (this.#isAutoSubmitBlocked()) {
-			this.#deferLoopAutoSubmit(() => {
-				void this.#runLoopIteration(action, prompt);
-			});
-			return;
-		}
+		this.#pendingLoopIterations++;
+		try {
+			if (!this.loopModeEnabled || this.loopPrompt !== prompt || !this.onInputCallback) return;
+			if (this.#isAutoSubmitBlocked()) {
+				this.#deferLoopAutoSubmit(() => {
+					void this.#runLoopIteration(action, prompt);
+				});
+				return;
+			}
 
-		if (action === "reset" && (this.vibeModeEnabled || this.#vibeModeEntry !== undefined)) {
-			this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
-			return;
-		}
+			if (action === "reset" && (this.vibeModeEnabled || this.#vibeModeEntry !== undefined)) {
+				this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
+				return;
+			}
 
-		// An exhausted budget ends the loop regardless of the condition, so check
-		// it first: the user's command must not run one last time for nothing.
-		if (isLoopLimitExhausted(this.loopLimit)) {
-			this.disableLoopMode("Loop limit reached. Loop mode disabled.");
-			return;
-		}
+			// An exhausted budget ends the loop regardless of the condition, so check
+			// it first: the user's command must not run one last time for nothing.
+			if (isLoopLimitExhausted(this.loopLimit)) {
+				this.disableLoopMode("Loop limit reached. Loop mode disabled.");
+				return;
+			}
 
-		// The gate sits before the budget consume so a halt never burns an
-		// iteration that did not run, and after the blocked-check/defer above so
-		// a streaming turn cannot re-run the command on every retry tick.
-		if (this.loopCondition && !(await this.#passesLoopCondition(prompt))) return;
+			// The gate sits before the budget consume so a halt never burns an
+			// iteration that did not run, and after the blocked-check/defer above so
+			// a streaming turn cannot re-run the command on every retry tick.
+			if (this.loopCondition && !(await this.#passesLoopCondition(prompt))) return;
 
-		// The gate awaited a child process: a turn may have started meanwhile
-		// (async job, idle flush), so re-check before spending budget or
-		// compacting/resetting into the now-busy session.
-		if (this.#isAutoSubmitBlocked()) {
-			this.#deferLoopAutoSubmit(() => {
-				void this.#runLoopIteration(action, prompt);
-			});
-			return;
-		}
+			// The gate awaited a child process: a turn may have started meanwhile
+			// (async job, idle flush), so re-check before spending budget or
+			// compacting/resetting into the now-busy session.
+			if (this.#isAutoSubmitBlocked()) {
+				this.#deferLoopAutoSubmit(() => {
+					void this.#runLoopIteration(action, prompt);
+				});
+				return;
+			}
 
-		// /vibe can be enabled while the gate was awaiting: the pre-gate guard
-		// above is stale, and handleClearCommand would only warn and then let
-		// the iteration submit without resetting. Check the entering transition
-		// too: vibeModeEnabled is still false while activateVibeTools is in
-		// flight, but the reset must not run concurrently with the toolset switch.
-		if (action === "reset" && (this.vibeModeEnabled || this.#vibeModeEntry !== undefined)) {
-			this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
-			return;
-		}
+			// /vibe can be enabled while the gate was awaiting: the pre-gate guard
+			// above is stale, and handleClearCommand would only warn and then let
+			// the iteration submit without resetting. Check the entering transition
+			// too: vibeModeEnabled is still false while activateVibeTools is in
+			// flight, but the reset must not run concurrently with the toolset switch.
+			if (action === "reset" && (this.vibeModeEnabled || this.#vibeModeEntry !== undefined)) {
+				this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
+				return;
+			}
 
-		if (!consumeLoopLimitIteration(this.loopLimit)) {
-			this.disableLoopMode("Loop limit reached. Loop mode disabled.");
-			return;
-		}
-		this.#syncLoopModeStatus();
+			if (!consumeLoopLimitIteration(this.loopLimit)) {
+				this.disableLoopMode("Loop limit reached. Loop mode disabled.");
+				return;
+			}
+			this.#syncLoopModeStatus();
 
-		if (action === "compact") {
-			await this.handleCompactCommand();
-		} else if (action === "reset") {
-			await this.handleClearCommand();
+			if (action === "compact") {
+				await this.handleCompactCommand();
+			} else if (action === "reset") {
+				await this.handleClearCommand();
+			}
+			this.#submitLoopPromptWhenReady(prompt);
+		} finally {
+			this.#pendingLoopIterations--;
+			this.syncIdleMaintenanceView();
 		}
-		this.#submitLoopPromptWhenReady(prompt);
 	}
 
 	/**
@@ -3472,6 +3566,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		if (submission.customType !== "goal-continuation") {
 			this.#pendingGoalContinuationTurns = 0;
+			this.syncIdleMaintenanceView();
 		}
 		this.#pendingSubmittedInput = submission;
 		this.#pendingSubmissionPreservesDraft = options?.preserveDraft === true;
@@ -3520,9 +3615,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingSubmissionPreservesDraft = false;
 		this.clearOptimisticUserMessage();
 		this.#pendingWorkingMessage = undefined;
-		if (submission.customType === "goal-continuation") {
-			this.#pendingGoalContinuationTurns = Math.max(0, this.#pendingGoalContinuationTurns - 1);
-		}
+		if (submission.customType === "goal-continuation") this.#releaseGoalContinuationTurn();
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(true);
 		}
@@ -3588,6 +3681,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	finishPendingSubmission(input: SubmittedUserInput): void {
+		// A started continuation the session refused or dropped gets no `agent_end` to release its reservation.
+		if (input.customType === "goal-continuation" && input.started && !input.dispatched) {
+			this.#releaseGoalContinuationTurn();
+		}
 		const wasPendingSubmission = this.#pendingSubmittedInput === input;
 		const pendingSubmissionDispose = this.#pendingSubmissionDispose;
 		if (wasPendingSubmission) {
@@ -3605,6 +3702,12 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#stopLoadingAnimation(true);
 			}
 		}
+	}
+
+	/** Drop one pending goal-continuation reservation, so idle maintenance stops waiting for its turn. */
+	#releaseGoalContinuationTurn(): void {
+		this.#pendingGoalContinuationTurns = Math.max(0, this.#pendingGoalContinuationTurns - 1);
+		this.syncIdleMaintenanceView();
 	}
 
 	#computeEditorMaxHeight(): number {
@@ -3682,10 +3785,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#renderSubagentList();
 			this.ui.requestRender();
 		}
-		if (any("compaction.idleEnabled", "compaction.idleThresholdTokens", "compaction.idleTimeoutSeconds")) {
-			this.#eventController.refreshIdleCompactionTimer();
-		}
-		if (any("recap.enabled", "recap.idleSeconds")) this.#eventController.refreshIdleRecapTimer();
 		if (any("composer.predictions") && !next["composer.predictions"]) {
 			this.#eventController.composerPrediction.cancel();
 		}
@@ -4231,6 +4330,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * Idempotent: only flips open tasks, never re-touches completed ones.
 	 */
 	#reconcileTodosWithSubagents(): void {
+		// A hosted client's todos belong to the host session: auto-completing one would journal an edit into the replica.
+		if (this.hostedClientMode) return;
 		const completedDescs: string[] = [];
 		for (const session of this.#observerRegistry.getSessions()) {
 			if (session.kind !== "subagent") continue;
@@ -4286,6 +4387,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const persisted = getTodoHudVisibility(owner.sessionManager.getBranch(), phases);
 		this.#todoHudHidden = persisted === "dismissed";
 		if (persisted || phases.length === 0) return;
+		// The auto-clear timer journals a dismissal into the session: never into a hosted replica.
+		if (this.hostedClientMode) return;
 		const tasks = phases.flatMap(phase => phase.tasks);
 		if (tasks.length === 0 || tasks.some(task => !isClosedTodo(task))) return;
 		const delaySeconds = cfgTasksTodoClearDelay.get(owner.settings);
@@ -4876,6 +4979,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		this.#scheduleGoalContinuation();
+		this.syncIdleMaintenanceView();
 	}
 
 	async #applyPlanModeModel(): Promise<void> {
@@ -4906,7 +5010,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * settings.
 	 */
 	async #reapplyPlanModeModelOnRoleChange(): Promise<void> {
-		if (!this.planModeEnabled) return;
+		if (this.hostedClientMode || !this.planModeEnabled) return;
 		const resolved = this.session.resolveRoleModelWithThinking("plan");
 		if (!resolved.model) {
 			this.#clearPendingPlanModelSwitch();
@@ -4963,7 +5067,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const pending = this.#pendingModelSwitch;
 		this.#pendingModelSwitch = undefined;
 		this.#pendingPlanModelSwitch = false;
-		if (!pending) return;
+		// The host owns the model: a switch queued by local mode machinery must not touch the replica.
+		if (!pending || this.hostedClientMode) return;
 		try {
 			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
 		} catch (error) {
@@ -5018,6 +5123,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#previousGoalContinuationActivity = undefined;
 			this.#goalSuppressNextContinuation = false;
 			this.#cancelGoalContinuation();
+			this.syncIdleMaintenanceView();
 			this.#updateGoalModeStatus();
 		}
 
@@ -5042,6 +5148,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Reconcile mode state from session entries on resume/switch. */
 	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
+		// The host's mode entries already ran there; replaying them here would switch models and tools locally.
+		if (this.hostedClientMode) return;
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
 		this.#vibeScopeSuspendedForSwitch = false;
 		this.#guidedGoalInterviewActive = false;
@@ -5452,6 +5560,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#previousGoalContinuationActivity = undefined;
 		this.#goalSuppressNextContinuation = false;
 		this.#cancelGoalContinuation();
+		this.syncIdleMaintenanceView();
 		this.#updateGoalModeStatus();
 		if (!options?.silent) {
 			if (options?.reason === "completed") {
@@ -7187,6 +7296,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.syncIdleMaintenanceView(null);
 		this.#hidePlanReview();
 		this.#appearanceRefreshRequest = undefined;
 		// Settle any pending approval prompt as dismissed (deny). The
@@ -7260,7 +7370,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.isInitialized = false;
 	}
 
-	async shutdown(): Promise<void> {
+	async shutdown(options: ShutdownOptions = {}): Promise<void> {
 		if (this.#isShuttingDown) return;
 		// The previous graceful teardown failed AT the memoized session.dispose()
 		// (the session is already disposing), so it re-rejects identically forever
@@ -7280,6 +7390,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#beginClose();
 		const worktreePlan = await this.#planOwnedWorktreeExit();
+		// The teardown detaches a connected hosted client; the host it leaves keeps running.
+		const detachedFrom = this.hostedClient?.hostId;
 		try {
 			await this.#teardown();
 		} catch (error) {
@@ -7292,14 +7404,20 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Print resumption hint only if the session was actually materialized to
 		// durable storage — `--resume <id>` fails on a never-written file (see
-		// #resumableSessionId).
+		// #resumableSessionId). A hosted client has no session of its own to resume: it names the host it left.
 		const sessionId = this.#resumableSessionId();
-		if (sessionId) {
+		if (options.farewell !== undefined) {
+			process.stderr.write(`\n${sanitizeStatusText(options.farewell)}\n`);
+		} else if (detachedFrom !== undefined) {
+			process.stderr.write(
+				`\n${chalk.dim("Detached; the session host keeps running. Attach again with")}\n${chalk.dim(attachCommand(detachedFrom))}\n`,
+			);
+		} else if (sessionId) {
 			// Command on its own line so triple-click selects just the command (#11001).
 			process.stderr.write(`\n${chalk.dim("Resume this session with")}\n${chalk.dim(resumeCommand(sessionId))}\n`);
 		}
 
-		await postmortem.quit(0);
+		await postmortem.quit(options.exitCode ?? 0);
 	}
 
 	#handleTeardownError(action: "close" | "restart", error: unknown): void {
@@ -7404,6 +7522,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * is allocated but the file does not exist (issue #8860).
 	 */
 	#resumableSessionId(): string | undefined {
+		// The replica is a copy of the host's session, not something this process can resume.
+		if (this.hostedClientMode) return undefined;
 		const sessionId = this.sessionManager.getSessionId();
 		const sessionFile = this.sessionManager.getSessionFile();
 		return sessionId && sessionFile && this.sessionManager.isSessionOnDisk() ? sessionId : undefined;
@@ -7417,6 +7537,19 @@ export class InteractiveMode implements InteractiveModeContext {
 	#beginClose(): void {
 		this.#isShuttingDown = true;
 		this.showStatus("Closing session…");
+	}
+
+	/**
+	 * A hosted client leaves its session host (which keeps running) before its local replica is disposed, on every
+	 * exit path: keypress, `/exit`, and signals such as SIGHUP when the terminal goes away. A failed detach is logged
+	 * and never keeps the process alive: the host drops a connection that closes without it.
+	 */
+	async #detachHostedClient(): Promise<void> {
+		try {
+			await this.hostedClient?.detach();
+		} catch (error) {
+			logger.warn("Failed to detach from the session host", { error: String(error) });
+		}
 	}
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
@@ -7456,6 +7589,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (this.#signalTeardown) {
 				await this.#signalTeardown();
 			} else {
+				await this.#detachHostedClient();
 				await this.session.dispose({
 					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 				});
@@ -8034,6 +8168,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#uiHelpers.renderInitialMessages(options);
 		this.syncRetryHintRow();
 	}
+
+	/** See {@link InteractiveModeContext.refreshTranscriptLinks}. */
+	refreshTranscriptLinks(): Promise<void> {
+		return this.#uiHelpers.refreshTranscriptLinks();
+	}
+
 	/**
 	 * Reconcile the idle "F5 to Retry" status row with the transcript tail:
 	 * mount it when the last turn died on a tool call (Esc mid-execution,
@@ -8043,7 +8183,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * dispatched by the editor to `InputController.handleRetry`.
 	 */
 	syncRetryHintRow(): void {
-		const show = !this.collabGuest && !this.viewSession.isStreaming && this.viewSession.hasAbortedToolCallTail;
+		const show =
+			!this.collabGuest &&
+			!this.hostedClientMode &&
+			!this.viewSession.isStreaming &&
+			this.viewSession.hasAbortedToolCallTail;
 		if (this.#retryHintRow) {
 			const mounted = this.statusContainer.children.includes(this.#retryHintRow);
 			if (mounted && show) return;
@@ -8225,6 +8369,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * failures become a warning so startup continues.
 	 */
 	async maybeAutoCreateWorktree(): Promise<void> {
+		// A hosted terminal's session is the host's: a worktree here would only move the local replica.
+		if (this.hostedClientMode) return;
 		try {
 			const policy = cfgWorktreeOnStart.get(this.settings);
 			if (policy === "off" || !(await canAutoCreateWorktree(this.sessionManager.getCwd()))) return;
@@ -8821,8 +8967,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.hideHookSelector();
 	}
 
-	showHookInput(title: string, placeholder?: string): Promise<string | undefined> {
-		return this.#extensionUiController.showHookInput(title, placeholder);
+	showHookInput(
+		title: string,
+		placeholder?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<string | undefined> {
+		return this.#extensionUiController.showHookInput(title, placeholder, dialogOptions);
 	}
 
 	hideHookInput(): void {
@@ -8844,6 +8994,13 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showHookNotify(message: string, type?: "info" | "warning" | "error"): void {
 		this.#extensionUiController.showHookNotify(message, type);
+	}
+
+	showAskDialog(
+		questions: ExtensionAskDialogQuestion[],
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<ExtensionAskDialogResult | undefined> {
+		return this.#extensionUiController.showAskDialog(questions, dialogOptions);
 	}
 
 	showHookCustom<T>(

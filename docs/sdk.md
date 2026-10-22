@@ -238,6 +238,7 @@ const unsubscribe = session.subscribe((event) => {
 - `cache_warming_start` / `cache_warming_end`
 - `config_warnings_changed`
 - `advisor_cost_changed` / `advisor_yielded`
+- `idle_recap` (`recap`: the full reply of an idle recap; journaled in the history database, never added to the transcript or model context)
 
 `agent_end` includes `messages`, optional telemetry fields, and
 `isTerminal?: boolean`. When `isTerminal` is `false`, maintenance or async
@@ -250,6 +251,10 @@ continuing through retry, compaction, or stop-time reminders.
 `awaitingAsyncWork?: boolean` marks a non-terminal end whose only possible wake
 is a background-job result; that wake is not guaranteed if the job is cancelled
 or its delivery is suppressed.
+
+### Idle maintenance
+
+A session starts no autonomous idle work until its owner opts in with `session.enableIdleMaintenance({ isBlocked?, scheduledTurn? })`. Once a turn has fully settled, the session then generates the idle recap (`recap.*` settings) and runs idle compaction (`compaction.idle*` settings), and emits `idle_recap` for a recap. `isBlocked` says the owner wants no autonomous work (a draft being composed, a view that left, startup unfinished); `scheduledTurn` says the owner has decided to start a turn it has not yet admitted. Call `session.refreshIdleMaintenance()` when either answer changes: work that is no longer wanted is dropped and what the stretch still owes is re-armed with a fresh delay. Repeated activation keeps the first owner's probes, a passive replica never runs maintenance, and disposing the session tears it down. The session host and the interactive TUI opt in on their own; stdio RPC, ACP and print mode do not.
 
 ## Prompt lifecycle
 

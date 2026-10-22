@@ -67,6 +67,12 @@ function addPruned(set: Set<string>, value: string, maxSize: number): void {
 	}
 }
 
+/** Whether a connection subscribed at `level` receives a subagent frame of `frameType`. */
+export function subagentFrameVisible(level: RpcSubagentSubscriptionLevel, frameType: string): boolean {
+	if (level === "off") return false;
+	return frameType !== "subagent_event" || level === "events";
+}
+
 export async function readRpcSubagentTranscript(sessionFile: string, fromByte = 0): Promise<RpcSubagentMessagesResult> {
 	let startByte = Number.isFinite(fromByte) ? Math.max(0, Math.trunc(fromByte)) : 0;
 	const file = Bun.file(sessionFile);
@@ -114,7 +120,6 @@ export class RpcSubagentRegistry {
 	#eventUnsubscribe: (() => void) | undefined;
 	#observabilityBus: EventBus | undefined;
 	#output: RpcSubagentOutput;
-	#subscriptionLevel: RpcSubagentSubscriptionLevel = "off";
 
 	constructor(observabilityBus: EventBus, output: RpcSubagentOutput) {
 		this.#observabilityBus = observabilityBus;
@@ -151,21 +156,21 @@ export class RpcSubagentRegistry {
 		this.#transcriptSessionFilesBySubagentId.clear();
 	}
 
-	setSubscriptionLevel(level: RpcSubagentSubscriptionLevel): void {
+	/**
+	 * Observe the high-volume raw `subagent_event` channel only while some connection is subscribed at
+	 * `events` (the server decides; each connection's own level still filters its frames). Idempotent;
+	 * a no-op once disposed.
+	 */
+	setEventFeed(enabled: boolean): void {
 		const observabilityBus = this.#observabilityBus;
-		if (level === "events" && !this.#eventUnsubscribe && observabilityBus) {
+		if (enabled && !this.#eventUnsubscribe && observabilityBus) {
 			this.#eventUnsubscribe = observabilityBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
 				this.handleEvent(data as SubagentEventPayload);
 			});
-		} else if (level !== "events" && this.#eventUnsubscribe) {
+		} else if (!enabled && this.#eventUnsubscribe) {
 			this.#eventUnsubscribe();
 			this.#eventUnsubscribe = undefined;
 		}
-		this.#subscriptionLevel = level;
-	}
-
-	getSubscriptionLevel(): RpcSubagentSubscriptionLevel {
-		return this.#subscriptionLevel;
 	}
 
 	getSubagents(): RpcSubagentSnapshot[] {
@@ -221,9 +226,7 @@ export class RpcSubagentRegistry {
 		} else {
 			this.#subagents.set(payload.id, snapshot);
 		}
-		if (this.#subscriptionLevel !== "off") {
-			this.#output({ type: "subagent_lifecycle", payload });
-		}
+		this.#output({ type: "subagent_lifecycle", payload });
 	}
 
 	handleProgress(payload: SubagentProgressPayload): void {
@@ -248,14 +251,11 @@ export class RpcSubagentRegistry {
 			parentToolCallId: payload.parentToolCallId ?? existing?.parentToolCallId,
 			progress,
 		});
-		if (this.#subscriptionLevel !== "off") {
-			this.#output({ type: "subagent_progress", payload });
-		}
+		this.#output({ type: "subagent_progress", payload });
 	}
 
 	handleEvent(payload: SubagentEventPayload): void {
 		if (this.#staleSubagentIds.has(payload.id)) return;
-		if (this.#subscriptionLevel !== "events") return;
 		this.#output({ type: "subagent_event", payload } satisfies RpcSubagentEventFrame);
 	}
 

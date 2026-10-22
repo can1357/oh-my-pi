@@ -29,16 +29,22 @@ function makeFixture(): Fixture {
 		emit: () => {},
 		append: () => {},
 	} as unknown as Fixture;
-	const sessionManager: { onEntryAppended?: (entry: SessionEntry) => void; [key: string]: unknown } = {
+	const entryListeners = new Set<(entry: SessionEntry) => void>();
+	const sessionManager = {
 		getSessionId: () => sessionId,
 		getCwd: () => "/tmp/collab-no-peer-test",
 		snapshotForReplication: () => ({
 			header: { type: "session", id: sessionId, timestamp: "2026-07-20T00:00:00Z", cwd: "/tmp/collab-no-peer-test" },
 			entries: [],
 		}),
-		onEntryAppended: undefined,
+		subscribeEntryAppended: (listener: (entry: SessionEntry) => void) => {
+			entryListeners.add(listener);
+			return () => entryListeners.delete(listener);
+		},
 	};
-	fixture.append = entry => sessionManager.onEntryAppended?.(entry);
+	fixture.append = entry => {
+		for (const listener of entryListeners) listener(entry);
+	};
 	fixture.ctx = {
 		settings: Settings.isolated(),
 		sessionManager,

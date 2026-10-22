@@ -801,6 +801,12 @@ export interface CreateAgentSessionOptions {
 	/** Limit the session to explicitly supplied tool names, without discovered extras. */
 	restrictToolNames?: boolean;
 	/**
+	 * Create a passive local replica of a session another process runs (a hosted TUI client): it never releases
+	 * resources scoped by the replicated session id, starts no memory backend, selects no model, and reaches no
+	 * provider. See `AgentSessionConfig.passiveReplica`.
+	 */
+	passiveReplica?: boolean;
+	/**
 	 * Permit only caller-supplied SDK custom tools inside a restricted session.
 	 * They must still be named in {@link toolNames}; discovered extensions, MCP,
 	 * and ambient custom tools remain disabled. Default: false.
@@ -2100,9 +2106,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		});
 	}
 
+	// A passive replica mirrors a session another process runs: it must not start, read or promote any memory backend,
+	// select a model, or reach a provider. The host's snapshot is the only model authority.
+	const passiveReplica = options.passiveReplica === true;
+
 	// If still no model, try settings default.
 	// Skip settings fallback when an explicit model was requested.
-	if (!hasExplicitModel && !model && defaultRoleSpec.model) {
+	if (!hasExplicitModel && !model && !passiveReplica && defaultRoleSpec.model) {
 		const settingsDefaultModel = defaultRoleSpec.model;
 		logger.time("resolveSettingsDefaultModel", () => {
 			// defaultRoleSpec.model already comes from modelRegistry.getAvailable(),
@@ -2112,6 +2122,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	}
 
 	const taskDepth = options.taskDepth ?? 0;
+	// A passive replica never talks to a provider: it opens no connection.
+	const preconnect = (model: Model): void => {
+		if (!passiveReplica) void prewarmModelConnection(model);
+	};
 
 	// Resolves the session/agent thinking level using the same precedence we
 	// apply at startup: explicit option → persisted session entry → restored
@@ -2165,7 +2179,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// build). Effective for endpoints known before any request (official
 		// Anthropic); others warm once a request has revealed their real origin.
 		// Every mode benefits (interactive, print, rpc, acp).
-		void prewarmModelConnection(model);
+		preconnect(model);
 	}
 
 	// Re-derives the thinking level whenever startup settles on a different
@@ -2910,7 +2924,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// model: any value derived from the earlier fallback model's
 						// `thinking.defaultLevel` must not become sticky.
 						adoptThinkingForModel(restoredModel);
-						void prewarmModelConnection(restoredModel);
+						preconnect(restoredModel);
 						return true;
 					}
 				}
@@ -3245,7 +3259,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					);
 					modelFallbackMessage = `Fallback: ${usageFallbackReason.from} -> ${target}\n${usageFallbackReason.reason}`;
 				}
-				void prewarmModelConnection(selectedModel);
+				preconnect(selectedModel);
 				break;
 			}
 			if (!model) {
@@ -3259,8 +3273,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Fall back to first available model with a valid API key, honoring the
 		// path-scoped `enabledModels` allow-list when configured. Skip when the
-		// user explicitly requested a model via --model that wasn't found.
-		if (!model && deferredModelPatterns.length === 0) {
+		// user explicitly requested a model via --model that wasn't found, and for a passive
+		// replica, which takes its model from the session it mirrors and must not trigger
+		// provider discovery to pick one.
+		if (!model && deferredModelPatterns.length === 0 && !passiveReplica) {
 			// Retry the configured default role against the current catalog,
 			// setting `model` (+ thinking level) when it resolves. Extension
 			// factories register providers AFTER the early `defaultRoleSpec`
@@ -3290,7 +3306,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// `pickInitialThinkingLevel` closes over `defaultRoleSpec`,
 				// so the role's explicit selector (e.g. `:max`) now applies.
 				adoptThinkingForModel(resolvedDefaultModel);
-				void prewarmModelConnection(resolvedDefaultModel);
+				preconnect(resolvedDefaultModel);
 				return true;
 			};
 
@@ -3364,7 +3380,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						restoredSessionThinkingLevel = retryFallback.originalThinkingLevel;
 					}
 					adoptThinkingForModel(resolved.model);
-					void prewarmModelConnection(resolved.model);
+					preconnect(resolved.model);
 					return true;
 				}
 				return false;
@@ -3438,7 +3454,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		}
 
-		if (model) {
+		if (model && !passiveReplica) {
 			const selectedModel = model;
 			const refreshedModel = await logger.time("refreshInitialModelMetadata", () =>
 				modelRegistry.refreshSelectedModelMetadata(selectedModel),
@@ -3995,7 +4011,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					setActiveRules(nextActiveRules);
 				}
 			}
-			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
+			const memoryBackend = restrictToolNames || passiveReplica ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend
 				? await memoryBackend.buildDeveloperInstructions(agentDir, sessionManager.getCwd(), settings, session)
 				: undefined;
@@ -4814,6 +4830,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				: undefined,
 			memoryEnabled: !restrictToolNames,
+			passiveReplica: options.passiveReplica,
 			memoryAgentDir: agentDir,
 			memoryTaskDepth: taskDepth,
 			createMemoryTools: restrictToolNames
@@ -5224,8 +5241,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// The tiny-model client is a process singleton shared by every session.
 					// Only the session that owns process state drops its connections, once:
 					// that fails every request still in flight, and a repeat dispose must not
-					// cancel requests other sessions made since.
-					if (bindsProcessState && !tinyClientReleased) {
+					// cancel requests other sessions made since. A passive replica never
+					// started it, so it leaves it to the ordinary session using it.
+					if (bindsProcessState && !passiveReplica && !tinyClientReleased) {
 						tinyClientReleased = true;
 						try {
 							await shutdownTinyTitleClient();
@@ -5250,7 +5268,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		const prewarmModel = session.model;
-		if (prewarmModel?.api === "openai-codex-responses") {
+		if (!passiveReplica && prewarmModel?.api === "openai-codex-responses") {
 			// `.api` equality doesn't narrow the generic; the guard makes this cast sound.
 			const codexModel = prewarmModel as Model<"openai-codex-responses">;
 			if (isOpenAICodexWebSocketPreferred(codexModel, { preferWebsockets: session.preferWebsockets })) {
@@ -5449,7 +5467,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `learn`/`manage_skill` on the same setting, and captures resolve those
 		// tools per run. The subscription lives for the session's lifetime; the
 		// reference is intentionally discarded (the listener retains it).
-		if (!restrictToolNames) {
+		if (session.memoryEnabled) {
 			if (cfgAutolearnEnabled.get(settings) && taskDepth === 0) {
 				await logger.time("startMemoryStartupTask", startMemoryBackend);
 			} else {
