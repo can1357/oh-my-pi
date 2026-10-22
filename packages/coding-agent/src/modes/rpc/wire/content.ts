@@ -101,6 +101,7 @@ export const messageDefs = {
 		"attribution?": "Attribution",
 		"synthetic?": "boolean",
 		"userInitiated?": "boolean",
+		"approvedPlanExecution?": "boolean",
 		"providerPayload?": JSON_OBJECT,
 		timestamp: "number",
 	},

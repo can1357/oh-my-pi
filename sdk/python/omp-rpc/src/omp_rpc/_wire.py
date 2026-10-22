@@ -296,6 +296,7 @@ class DeveloperMessage(TypedDict):
     attribution: NotRequired[Attribution]
     synthetic: NotRequired[bool]
     userInitiated: NotRequired[bool]
+    approvedPlanExecution: NotRequired[bool]
     providerPayload: NotRequired[JsonObject]
 
 

@@ -862,6 +862,7 @@ pub struct DeveloperMessage {
 	pub attribution: Option<Attribution>,
 	pub synthetic: Option<bool>,
 	pub user_initiated: Option<bool>,
+	pub approved_plan_execution: Option<bool>,
 	pub provider_payload: Option<Map<String, Value>>,
 	/// Every key not decoded into a declared field.
 	pub extra: Map<String, Value>,
@@ -885,6 +886,9 @@ impl Serialize for DeveloperMessage {
 		if let Some(value) = &self.user_initiated {
 			map.serialize_entry("userInitiated", value)?;
 		}
+		if let Some(value) = &self.approved_plan_execution {
+			map.serialize_entry("approvedPlanExecution", value)?;
+		}
 		if let Some(value) = &self.provider_payload {
 			map.serialize_entry("providerPayload", value)?;
 		}
@@ -895,6 +899,7 @@ impl Serialize for DeveloperMessage {
 				"attribution" if self.attribution.is_some() => continue,
 				"synthetic" if self.synthetic.is_some() => continue,
 				"userInitiated" if self.user_initiated.is_some() => continue,
+				"approvedPlanExecution" if self.approved_plan_execution.is_some() => continue,
 				"providerPayload" if self.provider_payload.is_some() => continue,
 				_ => {}
 			}
@@ -913,6 +918,7 @@ impl<'de> Deserialize<'de> for DeveloperMessage {
 			attribution: take(&mut extra, "attribution"),
 			synthetic: take(&mut extra, "synthetic"),
 			user_initiated: take(&mut extra, "userInitiated"),
+			approved_plan_execution: take(&mut extra, "approvedPlanExecution"),
 			provider_payload: take(&mut extra, "providerPayload"),
 			extra,
 		})

@@ -110,6 +110,7 @@ export interface DeveloperMessage {
 	attribution?: Attribution;
 	synthetic?: boolean;
 	userInitiated?: boolean;
+	approvedPlanExecution?: boolean;
 	providerPayload?: Record<string, unknown>;
 }
 

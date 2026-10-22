@@ -1212,6 +1212,8 @@ export interface DeveloperMessage {
 	synthetic?: boolean;
 	/** True when the synthetic prompt was a deliberate operator action (`.`, `c` continue shortcut) rather than an automatic continuation — its timestamp is the turn's prompt time. */
 	userInitiated?: boolean;
+	/** True only for the hidden execution directive dispatched after plan approval. */
+	approvedPlanExecution?: boolean;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	timestamp: number; // Unix timestamp in milliseconds

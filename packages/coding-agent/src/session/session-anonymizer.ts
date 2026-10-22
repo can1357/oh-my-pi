@@ -82,6 +82,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"steering",
 		"liveSteered",
 		"userInitiated",
+		"approvedPlanExecution",
 		"credentialId",
 		"isError",
 		"useless",

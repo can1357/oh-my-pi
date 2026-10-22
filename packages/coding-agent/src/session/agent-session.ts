@@ -7956,6 +7956,7 @@ export class AgentSession implements SettingsScope {
 					timestamp: submittedAt,
 					synthetic: true,
 					userInitiated: options?.userInitiated === true ? true : undefined,
+					approvedPlanExecution: options?.approvedPlanExecution === true ? true : undefined,
 				}
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
 
@@ -8871,6 +8872,7 @@ export class AgentSession implements SettingsScope {
 			// behind a busy turn): replay uses the marker to clear the preceding
 			// user's prompt anchor, matching the live agent_start clear.
 			synthetic: true,
+			approvedPlanExecution: options.approvedPlanExecution === true ? true : undefined,
 		});
 		this.#scheduleIdleQueueDrain();
 	}

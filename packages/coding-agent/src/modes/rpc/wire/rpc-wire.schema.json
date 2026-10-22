@@ -1154,6 +1154,9 @@
 				"userInitiated": {
 					"type": "boolean"
 				},
+				"approvedPlanExecution": {
+					"type": "boolean"
+				},
 				"providerPayload": {
 					"type": "object",
 					"properties": {},

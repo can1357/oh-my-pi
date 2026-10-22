@@ -437,6 +437,8 @@ export interface PromptOptions {
 	toolChoice?: ToolChoice;
 	/** Send as a developer/system message instead of user. */
 	synthetic?: boolean;
+	/** Mark the hidden execution directive dispatched after plan approval. */
+	approvedPlanExecution?: boolean;
 	/** Whether this prompt is a deliberate user action. */
 	userInitiated?: boolean;
 	/** Explicit billing/initiator attribution. */
@@ -472,6 +474,8 @@ export interface DroppedPrompt {
 export interface FollowUpOptions {
 	/** Enqueue as a hidden developer message instead of a user follow-up. */
 	synthetic?: boolean;
+	/** Mark the hidden execution directive dispatched after plan approval. */
+	approvedPlanExecution?: boolean;
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
 	/** Explicit billing/initiator attribution. */

@@ -167,9 +167,11 @@ export function createWarpEventBridgeExtension(): ExtensionFactory {
 		let emitter: WarpEventEmitter | undefined;
 		let activePrompt: string | undefined;
 		let getCwd: (() => string) | undefined;
+		let running = false;
 
 		const rebuildEmitter = (_event: unknown, ctx: ExtensionContext): void => {
 			activePrompt = undefined;
+			running = false;
 			getCwd = () => ctx.sessionManager.getCwd();
 			emitter = createWarpEventEmitter({ sessionId: ctx.sessionManager.getSessionId(), getCwd });
 			emitter?.emit({ event: "session_start" });
@@ -181,6 +183,14 @@ export function createWarpEventBridgeExtension(): ExtensionFactory {
 
 		api.on("message_start", event => {
 			const message = event.message as AgentMessage;
+			if (message.role === "developer" && message.synthetic && message.approvedPlanExecution) {
+				// Plan approval starts work without a visible user prompt.
+				if (!running) {
+					running = true;
+					emitter?.emit({ event: "prompt_submit", query: activePrompt });
+				}
+				return;
+			}
 			if (message.role === "user") {
 				if (message.synthetic || message.attribution === "agent") {
 					return;
@@ -193,6 +203,7 @@ export function createWarpEventBridgeExtension(): ExtensionFactory {
 				return;
 			}
 			activePrompt = truncateEventText(messageText(message.content));
+			running = true;
 			emitter?.emit({ event: "prompt_submit", query: activePrompt });
 		});
 
@@ -222,6 +233,7 @@ export function createWarpEventBridgeExtension(): ExtensionFactory {
 			if (event.willContinue) {
 				return;
 			}
+			running = false;
 			const stop = lastAssistantStop(event.messages);
 			emitter?.emit({
 				event: stop.event,

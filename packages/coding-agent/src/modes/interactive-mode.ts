@@ -6068,14 +6068,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.session.isStreaming) {
 			await this.session.followUp(planModePrompt, undefined, {
 				synthetic: true,
+				approvedPlanExecution: true,
 			});
 		} else {
 			try {
-				await this.session.prompt(planModePrompt, { synthetic: true });
+				await this.session.prompt(planModePrompt, { synthetic: true, approvedPlanExecution: true });
 			} catch (error) {
 				if (!(error instanceof AgentBusyError)) throw error;
 				await this.session.followUp(planModePrompt, undefined, {
 					synthetic: true,
+					approvedPlanExecution: true,
 				});
 			}
 		}

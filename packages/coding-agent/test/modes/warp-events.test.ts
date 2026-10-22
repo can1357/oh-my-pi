@@ -450,6 +450,62 @@ describe("Warp CLI-agent events", () => {
 		});
 	});
 
+	it("resubmits once when an approved plan starts executing after a stop", () => {
+		enableWarpProtocol();
+		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+		setTmuxSession(false);
+		const handlers = createHandlers();
+		const context = bridgeContext();
+		const sessionStart = handlers.get("session_start") as never as (
+			event: SessionStartEvent,
+			context: ExtensionContext,
+		) => void;
+		const messageStart = handlers.get("message_start") as never as (event: MessageStartEvent) => void;
+		const agentEnd = handlers.get("agent_end") as never as (event: AgentEndEvent) => void;
+		const developerStart = (text: string, approvedPlanExecution?: true): MessageStartEvent => ({
+			type: "message_start",
+			message: {
+				role: "developer",
+				content: text,
+				synthetic: true,
+				approvedPlanExecution,
+				timestamp: Date.now(),
+			} as MessageStartEvent["message"],
+		});
+
+		sessionStart({ type: "session_start" }, context);
+		write.mockClear();
+
+		messageStart(userMessageStart("make a plan"));
+		agentEnd({
+			type: "agent_end",
+			messages: [{ role: "assistant", content: [{ type: "text", text: "plan ready" }] } as never],
+		});
+		// A plain synthetic directive (reminder, auto-continue) is not a new run for Warp.
+		messageStart(developerStart("hidden reminder"));
+		messageStart(developerStart("hidden plan body", true));
+		// Further approved-plan directives inside the same run must not resubmit.
+		messageStart(developerStart("hidden plan body again", true));
+		agentEnd({
+			type: "agent_end",
+			messages: [{ role: "assistant", content: [{ type: "text", text: "implemented" }] } as never],
+		});
+
+		const bodies = parseBodies(write);
+		expect(bodies.map(body => body.event)).toEqual(["prompt_submit", "stop", "prompt_submit", "stop"]);
+		expect(bodies[2]).toMatchObject({ event: "prompt_submit", query: "make a plan", project });
+		const raw = write.mock.calls.map(call => call[0] as string).join("");
+		expect(raw).not.toContain("hidden");
+
+		// A context-clearing approval starts a fresh session with no prior prompt: omit query.
+		write.mockClear();
+		sessionStart({ type: "session_start" }, context);
+		messageStart(developerStart("hidden plan body", true));
+		const fresh = parseBodies(write);
+		expect(fresh.map(body => body.event)).toEqual(["session_start", "prompt_submit"]);
+		expect(fresh[1]).not.toHaveProperty("query");
+	});
+
 	it("falls back to non-silent assistant errorMessage on empty stop responses", () => {
 		enableWarpProtocol();
 		const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);

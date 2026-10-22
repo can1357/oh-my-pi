@@ -579,12 +579,13 @@ func (v UserMessage) MarshalJSON() ([]byte, error) {
 }
 
 type DeveloperMessage struct {
-	Content         MessageContent             `json:"content"`
-	Timestamp       float64                    `json:"timestamp"`
-	Attribution     *Attribution               `json:"attribution,omitempty"`
-	Synthetic       *bool                      `json:"synthetic,omitempty"`
-	UserInitiated   *bool                      `json:"userInitiated,omitempty"`
-	ProviderPayload map[string]json.RawMessage `json:"providerPayload,omitempty"`
+	Content               MessageContent             `json:"content"`
+	Timestamp             float64                    `json:"timestamp"`
+	Attribution           *Attribution               `json:"attribution,omitempty"`
+	Synthetic             *bool                      `json:"synthetic,omitempty"`
+	UserInitiated         *bool                      `json:"userInitiated,omitempty"`
+	ApprovedPlanExecution *bool                      `json:"approvedPlanExecution,omitempty"`
+	ProviderPayload       map[string]json.RawMessage `json:"providerPayload,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -603,6 +604,7 @@ func (v *DeveloperMessage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("attribution", &out.Attribution)
 	d.optional("synthetic", &out.Synthetic)
 	d.optional("userInitiated", &out.UserInitiated)
+	d.optional("approvedPlanExecution", &out.ApprovedPlanExecution)
 	d.optional("providerPayload", &out.ProviderPayload)
 	out.Extra = d.rest()
 	if d.err != nil {
