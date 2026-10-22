@@ -478,6 +478,7 @@ async function startMessageReader(client: LspClient): Promise<void> {
 								pending.reject(
 									new Error(
 										`LSP error${typeof code === "number" ? ` ${code}` : ""}: ${message.error.message}`,
+										{ cause: message.error },
 									),
 								);
 							} else {

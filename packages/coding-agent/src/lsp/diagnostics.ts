@@ -1,7 +1,7 @@
 import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import * as fs from "node:fs";
 import path from "node:path";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { throwIfAborted } from "../tools/tool-errors";
 import { getOrCreateClient, sendRequest, supportsDocumentDiagnostics, waitForProjectLoaded } from "./client";
@@ -242,6 +242,12 @@ function requestDocumentDiagnostics(
 		});
 }
 
+function isRetryableDiagnosticCancellation(error: unknown): boolean {
+	if (!(error instanceof Error) || !isRecord(error.cause)) return false;
+	const { code, data } = error.cause;
+	return code === -32802 && (!isRecord(data) || data.retriggerRequest !== false);
+}
+
 function isProvisionalColdPublish(
 	client: LspClient,
 	published: PublishedDiagnostics,
@@ -315,6 +321,11 @@ export async function waitForDiagnostics(
 				// A pull failure leaves the report unknown, but a dual-mode server
 				// may still publish fresh diagnostics within the remaining budget.
 				pullFailure = pullResult.failed;
+				if (isRetryableDiagnosticCancellation(pullFailure)) {
+					// Retry a cancelled snapshot within the original deadline and polling delay.
+					pullAttempted = false;
+					await Bun.sleep(Math.min(DIAGNOSTICS_POLL_MS, Math.max(0, deadline - Date.now())));
+				}
 			}
 		}
 	}

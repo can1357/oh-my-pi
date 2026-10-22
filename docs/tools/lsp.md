@@ -79,6 +79,7 @@
 - `file: "*"`: `runWorkspaceDiagnostics()` detects every supported root-marker language in Rust → TypeScript → Go → Python order and runs up to two checkers concurrently. It runs `cargo check --message-format=short` for `Cargo.toml`, `npx tsc --noEmit` for `tsconfig.json`, `pyright` for `pyproject.toml` / `pyrightconfig.json`, and `go build` for `go.work` / `go.mod`. `go.work` takes precedence over `go.mod`: it reads `go work edit -json` and builds every `Use[].DiskPath/...` pattern (falling back to `./...`); a single module uses `./...`. Polyglot output contains ordered per-language sections. Unknown projects return a supported-marker message without spawning a checker.
 - Concrete file or glob: `resolveDiagnosticTargets()` treats non-globs as one target, otherwise expands a `Bun.Glob` up to `MAX_GLOB_DIAGNOSTIC_TARGETS`.
 - Per file, every matching server runs: custom clients call `lint(file)`; real LSP servers optionally wait for project load, capture `diagnosticsVersion`, `refreshFile()`, then `waitForDiagnostics()`. It accepts fresh push diagnostics (exact document versions immediately, otherwise a settled publish) and issues `textDocument/diagnostic` when the server supports pull diagnostics. A failed pull with no usable fresh publish is a server failure, not a clean result.
+- A document pull cancelled with `ServerCancelled` (`-32802`) is retried after the polling delay within the original diagnostics deadline, unless `data.retriggerRequest` is explicitly `false`. Caller cancellation still stops the wait; fresh published diagnostics remain usable.
 - Results are deduplicated by range+message and severity-sorted.
 
 **Output text**
@@ -300,6 +301,7 @@ Uses the same location normalization and output shape as `definition`, but sends
   - invalid `rename_file` source/destination conditions
 - `resolveSymbolColumn()` throws explicit errors for missing files, missing symbols, and out-of-bounds `#N` selectors; these surface as `LSP error: ...` or request-specific error text.
 - `sendRequest()` rejects on timeout with `LSP request <method> timed out after <ms>ms`.
+- JSON-RPC server errors retain the server's error object, including `code` and `data`, in `Error.cause`; their error message format is unchanged.
 - Client process exit rejects all pending requests with an exit-code/stderr error assembled in `getOrCreateClient()`.
 - Ordinary single-file action failures inside the main `try` become `LSP error: <message>`; `ToolError` is rethrown.
 - A non-regular target refused while opening, reconciling or refreshing a document, or resolving a symbol column, fails with `Cannot open '<path>': it is a <kind>, not a regular file or directory.` It surfaces like other read errors: single-file actions return `LSP error: Cannot open …` with `details.success: false`; `request` uses its own envelope, or throws when `line` is given (as other `resolveSymbolColumn()` errors do); `reload` reports `Failed to reload <server>: Cannot open …`; diagnostics records the server as failed; background watched-file refreshes log it and continue.
