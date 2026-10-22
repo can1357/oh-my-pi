@@ -6859,6 +6859,9 @@ describe("openai-codex streaming", () => {
 			api: "openai-codex-responses",
 			provider: "openai-codex",
 			baseUrl: "https://chatgpt.com/backend-api",
+			// The fetch mock below is SSE-only: pinning the transport keeps the
+			// fixture off a live websocket whose turn-state header it can never see.
+			preferWebsockets: false,
 			reasoning: true,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -7237,6 +7240,9 @@ describe("openai-codex streaming", () => {
 			api: "openai-codex-responses",
 			provider: "openai-codex",
 			baseUrl: "https://chatgpt.com/backend-api",
+			// The fetch mock below is SSE-only: pinning the transport keeps the
+			// fixture off a live websocket whose mirrored turn-state it can never see.
+			preferWebsockets: false,
 			reasoning: true,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
