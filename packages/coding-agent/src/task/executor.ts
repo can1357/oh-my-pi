@@ -771,6 +771,9 @@ export const SUBAGENT_WARNING_MISSING_YIELD =
 export const SUBAGENT_WARNING_EMPTY_MESSAGE = "SYSTEM WARNING: Subagent ended without a final message.";
 export const SUBAGENT_STOP_REFUSAL_UNRESOLVED =
 	"Subagent stopped at a yield that a subagent_stop handler refused; the continuation turn ended without a replacement yield.";
+/** Why a run's latched yield was dropped: the run ended before `subagent_stop` handlers could judge it. */
+const SUBAGENT_STOP_CANDIDATE_UNJUDGED =
+	"Subagent run ended before its subagent_stop handlers judged its yield, so the yield was not published.";
 /** Why a wake turn's judged yield was dropped: a newer wake took the session while the handlers were consulting. */
 const WAKE_SUPERSEDED_WHILE_JUDGING =
 	"a newer wake took the session before the subagent_stop handlers answered, so this turn's yield was not published";
@@ -2837,6 +2840,10 @@ async function driveSessionToResult(
 		}
 	};
 
+	// Whether handlers confirmed the candidate the run now holds: an allow ends
+	// the drive, so any other way out leaves a latched yield unjudged.
+	let candidateAllowed = false;
+
 	try {
 		if (steps && !restore) recordStepsSent(session.sessionManager, steps.sent, steps.prompts);
 		monitor.holdForSteps(steps !== undefined && steps.sent < steps.prompts.length);
@@ -2933,8 +2940,8 @@ async function driveSessionToResult(
 			}
 		};
 
-		const runStopPass = (): Promise<boolean> =>
-			runSubagentStopPass(session, monitor, stopHook, {
+		const runStopPass = async (): Promise<boolean> => {
+			const again = await runSubagentStopPass(session, monitor, stopHook, {
 				awaitAbortable,
 				continueWith: async text => {
 					await dispatchPrompt(text, { attribution: "agent", synthetic: true }, "subagent_stop continuation");
@@ -2953,6 +2960,9 @@ async function driveSessionToResult(
 					};
 				},
 			});
+			candidateAllowed = !again;
+			return again;
+		};
 
 		// Yield ladder + quiescence barrier (structured concurrency), one
 		// loop: a turn without a yield first settles pending owner work, then
@@ -3158,6 +3168,14 @@ async function driveSessionToResult(
 		}
 	} finally {
 		error ??= monitor.terminalError();
+		// A yield the run latched but handlers never judged (the run was cancelled
+		// or failed before its pass) is no more confirmed than one cancelled mid-pass:
+		// drop it rather than publish it, as the rescue above would.
+		if (monitor.yieldCalled() && !candidateAllowed && session.extensionRunner?.hasHandlers("subagent_stop")) {
+			monitor.invalidateYieldForStop();
+			error ??= SUBAGENT_STOP_CANDIDATE_UNJUDGED;
+			if (exitCode === 0) exitCode = 1;
+		}
 		// A yield a `subagent_stop` handler refused and the model never replaced
 		// is stale: publishing it would launder an explicit refusal into a
 		// successful result. Applies to the cancelled case too — handlers never
