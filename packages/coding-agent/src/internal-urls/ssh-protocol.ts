@@ -278,7 +278,8 @@ export class SshProtocolHandler implements ProtocolHandler {
 		let kind: RemotePathKind | undefined;
 		try {
 			kind = await statRemotePath(target, remotePath, { signal: context?.signal });
-		} catch {
+		} catch (error) {
+			if (context?.signal?.aborted) throw error;
 			// stat failed (host/connection issue) — fall through; the read gives a clearer error.
 		}
 		if (kind === "directory") {
