@@ -158,6 +158,7 @@ function mockIsolation(): void {
 		backend: worktreeModule.parseIsolationBackend("rcopy")!,
 		fellBack: false,
 		fallbackReason: null,
+		excludedPaths: [],
 	};
 
 	vi.spyOn(worktreeModule, "getRepoRoot").mockResolvedValue("/repo");

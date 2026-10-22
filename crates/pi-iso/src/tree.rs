@@ -6,7 +6,7 @@ use std::{
 	ffi::OsStr,
 	fs::{self, FileType},
 	io,
-	path::{Path, PathBuf},
+	path::{Component, Path, PathBuf},
 };
 
 use crate::{IsoError, IsoResult};
@@ -27,6 +27,59 @@ pub fn canonical_existing_dir(
 		return Err(make_err(format!("{what} {} is not a directory", resolved.display())));
 	}
 	Ok(fs::canonicalize(&resolved).unwrap_or(resolved))
+}
+
+/// Normalize exclusion paths accepted by the native isolation boundary.
+///
+/// An exclusion is always a subtree relative to the materialization root.
+/// Reject roots, parent traversal, and duplicate or overlapping paths so a
+/// caller cannot make a copy backend escape its source or create ambiguous
+/// filtering rules.
+pub fn normalize_relative_subtrees(
+	paths: impl IntoIterator<Item = String>,
+) -> IsoResult<Vec<PathBuf>> {
+	let mut normalized = Vec::new();
+	for raw in paths {
+		let path = Path::new(&raw);
+		let mut relative = PathBuf::new();
+		for component in path.components() {
+			match component {
+				Component::Normal(part) => relative.push(part),
+				Component::CurDir
+				| Component::ParentDir
+				| Component::RootDir
+				| Component::Prefix(_) => {
+					return Err(IsoError::other(format!(
+						"isolation exclusion must be a normalized relative subtree: {raw:?}"
+					)));
+				},
+			}
+		}
+		if relative.as_os_str().is_empty() {
+			return Err(IsoError::other("isolation exclusion must name a non-empty relative subtree"));
+		}
+		normalized.push(relative);
+	}
+	normalized.sort();
+	for (index, path) in normalized.iter().enumerate() {
+		if normalized[..index]
+			.iter()
+			.any(|earlier| path.starts_with(earlier))
+		{
+			return Err(IsoError::other(format!(
+				"isolation exclusions must be disjoint relative subtrees: {}",
+				path.display()
+			)));
+		}
+	}
+	Ok(normalized)
+}
+
+/// Whether `relative` is the named excluded subtree or lies below it.
+pub fn is_excluded_subtree(relative: &Path, exclude_paths: &[PathBuf]) -> bool {
+	exclude_paths
+		.iter()
+		.any(|excluded| relative.starts_with(excluded))
 }
 
 /// Creates `merged`'s parent and clears whatever is at `merged` with `remove`,
@@ -85,7 +138,7 @@ pub fn copy_symlink(src: &Path, dst: &Path, file_type: FileType) -> IsoResult<()
 	res.map_err(|err| IsoError::other(format!("symlink {}: {err}", dst.display())))
 }
 
-/// Per-entry actions of [`copy_dir_contents`].
+/// Per-entry actions of [`copy_dir_contents_with_exclusions`].
 pub trait TreeCopy {
 	/// Recreates the symlink `src` at `dst`.
 	fn symlink(&self, src: &Path, dst: &Path, file_type: FileType) -> IsoResult<()>;
@@ -95,14 +148,15 @@ pub trait TreeCopy {
 	fn finish_dir(&self, src: &Path, dst: &Path) -> IsoResult<()>;
 }
 
-/// Copies the entries of the directory `src` into the existing directory
-/// `dst`, recursing into subdirectories. Top-level entries named in `skip` are
-/// left out; the dispatch uses the directory listing's file types, so
-/// symlinks are never followed.
-pub fn copy_dir_contents(
+/// Copies `src` into `dst`, omitting exact relative subtrees from `root`
+/// before opening their children. Entries are classified from the directory
+/// listing, so an excluded symlink is never followed.
+pub fn copy_dir_contents_with_exclusions(
 	src: &Path,
 	dst: &Path,
+	root: &Path,
 	skip: &[&OsStr],
+	exclude_paths: &[PathBuf],
 	copy: &impl TreeCopy,
 ) -> IsoResult<()> {
 	let entries = fs::read_dir(src)
@@ -115,6 +169,16 @@ pub fn copy_dir_contents(
 			continue;
 		}
 		let src_path = entry.path();
+		let relative = src_path.strip_prefix(root).map_err(|_| {
+			IsoError::other(format!(
+				"copy path {} escaped source root {}",
+				src_path.display(),
+				root.display()
+			))
+		})?;
+		if is_excluded_subtree(relative, exclude_paths) {
+			continue;
+		}
 		let file_type = entry
 			.file_type()
 			.map_err(|err| IsoError::other(format!("file_type {}: {err}", src_path.display())))?;
@@ -124,11 +188,34 @@ pub fn copy_dir_contents(
 		} else if file_type.is_dir() {
 			fs::create_dir_all(&dst_path)
 				.map_err(|err| IsoError::other(format!("create {}: {err}", dst_path.display())))?;
-			copy_dir_contents(&src_path, &dst_path, &[], copy)?;
+			copy_dir_contents_with_exclusions(&src_path, &dst_path, root, &[], exclude_paths, copy)?;
 			copy.finish_dir(&src_path, &dst_path)?;
 		} else {
 			copy.file(&src_path, &dst_path, file_type)?;
 		}
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use std::path::{Path, PathBuf};
+
+	use super::{is_excluded_subtree, normalize_relative_subtrees};
+
+	#[test]
+	fn normalizes_disjoint_relative_exclusion_subtrees() {
+		let paths =
+			normalize_relative_subtrees(vec!["apps/web/.verify".to_owned(), "scratch".to_owned()])
+				.expect("valid disjoint paths");
+		assert_eq!(paths, vec![PathBuf::from("apps/web/.verify"), PathBuf::from("scratch")]);
+		assert!(is_excluded_subtree(Path::new("apps/web/.verify/run"), &paths));
+		assert!(!is_excluded_subtree(Path::new("apps/web/runtime"), &paths));
+	}
+
+	#[test]
+	fn rejects_non_relative_or_overlapping_exclusion_subtrees() {
+		assert!(normalize_relative_subtrees(vec!["../escape".to_owned()]).is_err());
+		assert!(normalize_relative_subtrees(vec!["apps".to_owned(), "apps/web".to_owned()]).is_err());
+	}
 }

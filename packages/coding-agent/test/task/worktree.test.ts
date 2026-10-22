@@ -16,6 +16,7 @@ import {
 	IsolationBaselineTooLargeError,
 	mergeTaskBranches,
 	parseIsolationBackend,
+	prepareIsolationCopyPlan,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -1030,6 +1031,138 @@ describe("captureIsolationBaseline", () => {
 
 		const baseline = await captureIsolationBaseline(iso, repo);
 		expect(baseline.nested.map(n => n.relativePath)).toEqual([path.join("vendor", "lib")]);
+	});
+
+	it("omits only ignored same-source checkout subtrees before materialization and baseline capture", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.mkdir(path.join(repo, "apps/web"), { recursive: true });
+		await Promise.all([
+			fs.writeFile(path.join(repo, "README.md"), "source\n"),
+			fs.writeFile(path.join(repo, ".gitignore"), "apps/web/.verify/\n"),
+		]);
+		await runGit(repo, ["add", "README.md", ".gitignore"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const sourceOrigin = "ssh://git@example.invalid:2222/team/repo.git";
+		await runGit(repo, ["remote", "add", "origin", sourceOrigin]);
+		const sourceHead = await runGit(repo, ["rev-parse", "HEAD"]);
+
+		const copies = path.join(repo, "apps/web/.verify");
+		const linked = path.join(copies, "linked");
+		const sameOrigin = path.join(copies, "same-origin");
+		const sameOriginUnrelated = path.join(copies, "same-origin-unrelated");
+		const samePathDifferentPort = path.join(copies, "same-path-different-port");
+		const different = path.join(copies, "different");
+		const unknown = path.join(copies, "unknown");
+		await fs.mkdir(copies, { recursive: true });
+		await fs.writeFile(path.join(copies, "runtime-input.txt"), "retain this ignored runtime input\n");
+		await runGit(repo, ["worktree", "add", "-q", linked, "-b", "fixture-linked", "HEAD"]);
+		await fs.writeFile(path.join(linked, "linked-marker.txt"), "linked checkout\n");
+		await runGit(repo, ["clone", "-q", repo, sameOrigin]);
+		await runGit(sameOrigin, ["remote", "set-url", "origin", sourceOrigin]);
+		await fs.writeFile(path.join(sameOrigin, "clone-marker.txt"), "same origin clone\n");
+		await runGit(repo, ["clone", "-q", repo, samePathDifferentPort]);
+		await runGit(samePathDifferentPort, [
+			"remote",
+			"set-url",
+			"origin",
+			"ssh://git@example.invalid:2223/team/repo.git",
+		]);
+		await fs.writeFile(path.join(samePathDifferentPort, "port-marker.txt"), "different SSH port\n");
+
+		for (const [nested, content] of [
+			[sameOriginUnrelated, "same origin, unrelated history\n"],
+			[different, "different project\n"],
+			[unknown, "unknown identity\n"],
+		] as const) {
+			await fs.mkdir(nested, { recursive: true });
+			await initRepo(nested);
+			await runGit(nested, ["config", "user.email", "nested@example.com"]);
+			await runGit(nested, ["config", "user.name", "Nested User"]);
+			await fs.writeFile(path.join(nested, "nested.txt"), content);
+			await runGit(nested, ["add", "nested.txt"]);
+			await runGit(nested, ["commit", "-q", "-m", "nested"]);
+		}
+		await runGit(sameOriginUnrelated, ["remote", "add", "origin", sourceOrigin]);
+		await runGit(different, ["remote", "add", "origin", "https://example.invalid/different.git"]);
+
+		const plan = await prepareIsolationCopyPlan(repo);
+		expect(plan).toEqual(["apps/web/.verify/linked", "apps/web/.verify/same-origin"]);
+
+		// A raw source copy represents the old APFS behavior. The same plan must
+		// prevent baseline discovery from treating the full same-origin clone as
+		// a nested repository while preserving unrelated nested repositories.
+		const copiedSource = await fs.mkdtemp(path.join(os.tmpdir(), "omp-copy-plan-baseline-"));
+		tempDirs.push(copiedSource);
+		await fs.cp(repo, copiedSource, { recursive: true });
+		const copiedBaseline = await captureIsolationBaseline(copiedSource, repo, undefined, plan);
+		expect(copiedBaseline.nested.map(nested => nested.relativePath).sort()).toEqual([
+			path.join("apps", "web", ".verify", "different"),
+			path.join("apps", "web", ".verify", "same-origin-unrelated"),
+			path.join("apps", "web", ".verify", "same-path-different-port"),
+			path.join("apps", "web", ".verify", "unknown"),
+		]);
+
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-copy-plan-isolation-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			for (const [taskId, backend] of [
+				["copy-plan-default", undefined],
+				["copy-plan-rcopy", natives.IsoBackendKind.Rcopy],
+			] as const) {
+				const handle = await ensureIsolation(repo, taskId, backend);
+				try {
+					expect(handle.excludedPaths).toEqual(plan);
+					expect(await Bun.file(path.join(handle.mergedDir, "apps/web/.verify/linked")).exists()).toBe(false);
+					expect(await Bun.file(path.join(handle.mergedDir, "apps/web/.verify/same-origin")).exists()).toBe(false);
+					expect(
+						await fs.readFile(path.join(handle.mergedDir, "apps/web/.verify/runtime-input.txt"), "utf8"),
+					).toBe("retain this ignored runtime input\n");
+					expect(
+						await fs.readFile(path.join(handle.mergedDir, "apps/web/.verify/different/nested.txt"), "utf8"),
+					).toBe("different project\n");
+					expect(
+						await fs.readFile(
+							path.join(handle.mergedDir, "apps/web/.verify/same-origin-unrelated/nested.txt"),
+							"utf8",
+						),
+					).toBe("same origin, unrelated history\n");
+					expect(
+						await fs.readFile(
+							path.join(handle.mergedDir, "apps/web/.verify/same-path-different-port/port-marker.txt"),
+							"utf8",
+						),
+					).toBe("different SSH port\n");
+					expect(
+						await fs.readFile(path.join(handle.mergedDir, "apps/web/.verify/unknown/nested.txt"), "utf8"),
+					).toBe("unknown identity\n");
+
+					const baseline = await captureIsolationBaseline(handle.mergedDir, repo, undefined, handle.excludedPaths);
+					expect(baseline.nested.map(nested => nested.relativePath).sort()).toEqual([
+						path.join("apps", "web", ".verify", "different"),
+						path.join("apps", "web", ".verify", "same-origin-unrelated"),
+						path.join("apps", "web", ".verify", "same-path-different-port"),
+						path.join("apps", "web", ".verify", "unknown"),
+					]);
+				} finally {
+					await cleanupIsolation(handle);
+				}
+			}
+			expect(await runGit(repo, ["rev-parse", "HEAD"])).toBe(sourceHead);
+			expect(await runGit(repo, ["status", "--porcelain=v1"])).toBe("");
+			expect(await fs.readFile(path.join(linked, "linked-marker.txt"), "utf8")).toBe("linked checkout\n");
+			expect(await Bun.file(path.join(sameOrigin, "clone-marker.txt")).exists()).toBe(true);
+			expect(await Bun.file(path.join(samePathDifferentPort, "port-marker.txt")).exists()).toBe(true);
+		} finally {
+			await runGit(repo, ["worktree", "remove", "--force", linked]);
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
 	});
 });
 

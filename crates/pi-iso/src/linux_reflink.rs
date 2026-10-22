@@ -8,7 +8,7 @@
 //! is no mount or kernel state to undo, so [`stop`](IsolationBackend::stop) is
 //! a recursive remove.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
@@ -40,13 +40,22 @@ impl IsolationBackend for LinuxReflinkBackend {
 	}
 
 	fn start(&self, lower: &Path, merged: &Path) -> IsoResult<()> {
+		self.start_with_exclusions(lower, merged, &[])
+	}
+
+	fn start_with_exclusions(
+		&self,
+		lower: &Path,
+		merged: &Path,
+		exclude_paths: &[PathBuf],
+	) -> IsoResult<()> {
 		#[cfg(target_os = "linux")]
 		{
-			imp::start(lower, merged)
+			imp::start(lower, merged, exclude_paths)
 		}
 		#[cfg(not(target_os = "linux"))]
 		{
-			let _ = (lower, merged);
+			let _ = (lower, merged, exclude_paths);
 			Err(IsoError::unavailable("Linux FICLONE reflink isolation is only available on Linux"))
 		}
 	}
@@ -85,7 +94,7 @@ mod imp {
 			ffi::OsStrExt,
 			fs::{MetadataExt, PermissionsExt},
 		},
-		path::Path,
+		path::{Path, PathBuf},
 	};
 
 	use crate::{
@@ -93,17 +102,33 @@ mod imp {
 		tree::{self, TreeCopy},
 	};
 
-	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
-		clone_tree(lower, merged, &[])
+	pub fn start(lower: &Path, merged: &Path, exclude_paths: &[PathBuf]) -> IsoResult<()> {
+		clone_tree_with_exclusions(lower, merged, &[], exclude_paths)
 	}
 
 	pub fn clone_tree(lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
+		clone_tree_with_exclusions(lower, merged, skip, &[])
+	}
+
+	fn clone_tree_with_exclusions(
+		lower: &Path,
+		merged: &Path,
+		skip: &[&std::ffi::OsStr],
+		exclude_paths: &[PathBuf],
+	) -> IsoResult<()> {
 		let lower = tree::canonical_existing_dir(lower, "reflink source", IsoError::other)?;
 		tree::prepare_destination(merged, "reflink clone", tree::remove_existing)?;
 		let result = (|| {
 			fs::create_dir(merged)
 				.map_err(|err| IsoError::other(format!("create {}: {err}", merged.display())))?;
-			tree::copy_dir_contents(&lower, merged, skip, &Reflink)?;
+			tree::copy_dir_contents_with_exclusions(
+				&lower,
+				merged,
+				&lower,
+				skip,
+				exclude_paths,
+				&Reflink,
+			)?;
 			Reflink.finish_dir(&lower, merged)
 		})();
 		if result.is_err() {

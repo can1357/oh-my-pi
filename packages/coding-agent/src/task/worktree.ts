@@ -3,6 +3,7 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -21,6 +22,7 @@ const TASK_ISOLATION_DIR_DIGEST_CHARS = 9;
 const TASK_ISOLATION_MOUNT_DIR = "m";
 const GIT_NETWORK_TIMEOUT_MS = 30 * 60 * 1000;
 type IsoBackendKind = natives.IsoBackendKind;
+
 async function diffTreeOrEmpty(repo: VcsGitRepo, base: string, head: string): Promise<string> {
 	try {
 		return await repo.diffTree(base, head, true);
@@ -78,6 +80,161 @@ async function realCommonDir(dir: string): Promise<string | undefined> {
 	return fs.realpath(commonDir).catch(() => path.resolve(commonDir));
 }
 
+function normalizedRelativePath(root: string, target: string): string | undefined {
+	const relative = path.relative(root, target);
+	if (
+		relative.length === 0 ||
+		relative === ".." ||
+		relative.startsWith(`..${path.sep}`) ||
+		path.isAbsolute(relative)
+	) {
+		return undefined;
+	}
+	return relative.split(path.sep).join("/");
+}
+
+function isSameOrDescendant(relativePath: string, ancestor: string): boolean {
+	return relativePath === ancestor || relativePath.startsWith(`${ancestor}/`);
+}
+async function canonicalPath(value: string): Promise<string> {
+	return fs.realpath(value).catch(() => path.resolve(value));
+}
+
+async function canonicalOrigin(remote: string, repoRoot: string): Promise<string | undefined> {
+	const value = remote.trim();
+	if (!value) return undefined;
+	try {
+		const url = new URL(value);
+		if (url.protocol === "file:") {
+			return `file:${await canonicalPath(fileURLToPath(url))}`;
+		}
+		if (url.hostname) {
+			const remotePath = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
+			return remotePath ? `remote:${url.host.toLowerCase()}/${remotePath}` : undefined;
+		}
+	} catch {
+		// A local path or scp-style Git URL is not a WHATWG URL.
+	}
+	if (path.isAbsolute(value) || value.startsWith(".")) {
+		return `file:${await canonicalPath(path.resolve(repoRoot, value))}`;
+	}
+	const scp = value.match(/^(?:[^@:\s]+@)?([^:/\s]+):(.+)$/);
+	if (scp) {
+		const remotePath = scp[2].replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
+		return remotePath ? `remote:${scp[1].toLowerCase()}/${remotePath}` : undefined;
+	}
+	return `literal:${value}`;
+}
+
+async function sharesVerifiedOriginAndAncestry(source: VcsGitRepo, candidate: VcsGitRepo): Promise<boolean> {
+	try {
+		const [sourceOrigin, candidateOrigin, sourceHead, candidateHead] = await Promise.all([
+			source.remoteUrl("origin"),
+			candidate.remoteUrl("origin"),
+			source.headSha(),
+			candidate.headSha(),
+		]);
+		if (!sourceOrigin || !candidateOrigin || !sourceHead || !candidateHead) return false;
+		const [sourceIdentity, candidateIdentity] = await Promise.all([
+			canonicalOrigin(sourceOrigin, source.info().repoRoot),
+			canonicalOrigin(candidateOrigin, candidate.info().repoRoot),
+		]);
+		if (!sourceIdentity || sourceIdentity !== candidateIdentity) return false;
+		if (sourceHead === candidateHead) return true;
+		return (await source.mergeBase(sourceHead, candidateHead)) != null;
+	} catch {
+		// A shallow, malformed, or unrelated candidate cannot prove identity.
+		return false;
+	}
+}
+
+async function isOuterIgnored(repoRoot: string, relativePath: string): Promise<boolean> {
+	try {
+		const child = Bun.spawn(["git", "-C", repoRoot, "check-ignore", "--quiet", "--", relativePath], {
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		return (await child.exited) === 0;
+	} catch {
+		// Absence of a trustworthy ignore verdict preserves the candidate.
+		return false;
+	}
+}
+
+/**
+ * Build one conservative exclusion plan for both materialization and baseline
+ * discovery. A nested checkout is omitted only when the outer repository
+ * ignores it, tracks nothing at or beneath it, it is not a declared
+ * submodule/gitlink, and its Git metadata proves it belongs to this source.
+ */
+export async function prepareIsolationCopyPlan(repoRoot: string): Promise<readonly string[]> {
+	const source = vcs.requireGit(repoRoot);
+	const sourceRoot = await canonicalPath(source.info().repoRoot);
+	const sourceCommonDir = await realCommonDir(sourceRoot);
+	const [trackedPaths, submodulePaths] = await Promise.all([source.lsFiles(false, false), source.submodulePaths()]);
+	const normalizedSubmodules = submodulePaths.map(submodule => submodule.replaceAll("\\", "/"));
+	const excluded: string[] = [];
+
+	async function shouldExclude(full: string, relativePath: string): Promise<boolean> {
+		if (normalizedSubmodules.some(submodule => isSameOrDescendant(relativePath, submodule))) return false;
+		if (trackedPaths.some(tracked => isSameOrDescendant(tracked, relativePath))) return false;
+		if (!(await isOuterIgnored(sourceRoot, relativePath))) return false;
+		try {
+			const candidate = vcs.git(full);
+			if (!candidate) return false;
+			const [candidateRoot, actualPath] = await Promise.all([
+				canonicalPath(candidate.info().repoRoot),
+				canonicalPath(full),
+			]);
+			if (candidateRoot !== actualPath) return false;
+			const candidateCommonDir = await realCommonDir(candidateRoot);
+			if (sourceCommonDir && candidateCommonDir === sourceCommonDir) return true;
+			return sharesVerifiedOriginAndAncestry(source, candidate);
+		} catch {
+			// Metadata that cannot be read is unknown identity, not a deletion
+			// target.
+			return false;
+		}
+	}
+
+	async function walk(dir: string): Promise<void> {
+		let entries: Dirent[];
+		try {
+			entries = await fs.readdir(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const entry of entries) {
+			// Dependencies are ordinary runtime input, not candidate sandbox
+			// repositories. Never broaden an exclusion plan by inspecting them.
+			if (entry.name === ".git" || entry.name === "node_modules" || !entry.isDirectory()) continue;
+			const full = path.join(dir, entry.name);
+			const relativePath = normalizedRelativePath(sourceRoot, full);
+			if (!relativePath) continue;
+			if (normalizedSubmodules.some(submodule => isSameOrDescendant(relativePath, submodule))) continue;
+			let nestedRepository: boolean;
+			try {
+				nestedRepository = await hasGitEntry(full);
+			} catch {
+				// Unknown metadata preserves this subtree without inspecting it.
+				continue;
+			}
+			if (nestedRepository) {
+				if (await shouldExclude(full, relativePath)) excluded.push(relativePath);
+				// A nested checkout owns its own subtree. Preserve it or omit it
+				// as one unit, never inspect its runtime files through the outer
+				// repository's ignore rules.
+				continue;
+			}
+			await walk(full);
+		}
+	}
+
+	await walk(sourceRoot);
+	return excluded.sort();
+}
+
 /**
  * Find nested git repositories (non-submodule) under `repoRoot`.
  *
@@ -88,14 +245,20 @@ async function realCommonDir(dir: string): Promise<string | undefined> {
  * targets the source checkout's admin dir; baselining each one re-hashes its
  * whole tree against a foreign index and froze the host (#16068).
  */
-async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]): Promise<string[]> {
-	// Get submodule paths so we can exclude them
-	const submodulePaths = new Set(await vcs.requireGit(repoRoot).submodulePaths());
+async function discoverNestedRepos(
+	repoRoot: string,
+	ownRepos: readonly string[],
+	excludedPaths: readonly string[] = [],
+): Promise<string[]> {
+	const submodulePaths = (await vcs.requireGit(repoRoot).submodulePaths()).map(submodule =>
+		submodule.replaceAll("\\", "/"),
+	);
 	const ownCommonDirs = new Set(
 		(await Promise.all(ownRepos.map(realCommonDir))).filter((dir): dir is string => dir !== undefined),
 	);
 
-	// Find all .git dirs/files that aren't the root or known submodules
+	// Find all .git dirs/files that aren't the root, known submodules, or a
+	// subtree already excluded from the materialization plan.
 	const result: string[] = [];
 	async function walk(dir: string): Promise<void> {
 		let entries: Dirent[];
@@ -105,22 +268,17 @@ async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]
 			return;
 		}
 		for (const entry of entries) {
-			if (entry.name === "node_modules" || entry.name === ".git") continue;
-			if (!entry.isDirectory()) continue;
+			if (entry.name === "node_modules" || entry.name === ".git" || !entry.isDirectory()) continue;
 			const full = path.join(dir, entry.name);
-			const rel = path.relative(repoRoot, full);
-			// Check if this directory is itself a git repo
-			const gitDir = path.join(full, ".git");
-			let hasGit = false;
-			try {
-				await fs.access(gitDir);
-				hasGit = true;
-			} catch {}
-			if (hasGit && !submodulePaths.has(rel)) {
+			const relativePath = normalizedRelativePath(repoRoot, full);
+			if (!relativePath) continue;
+			if (excludedPaths.some(excluded => isSameOrDescendant(relativePath, excluded))) continue;
+			if (submodulePaths.some(submodule => isSameOrDescendant(relativePath, submodule))) continue;
+			if (await hasGitEntry(full)) {
 				const commonDir = await realCommonDir(full);
 				if (commonDir && ownCommonDirs.has(commonDir)) continue;
-				result.push(rel);
-				// Don't recurse into nested repos — they manage their own tree
+				result.push(path.relative(repoRoot, full));
+				// Don't recurse into nested repos — they manage their own tree.
 				continue;
 			}
 			await walk(full);
@@ -286,17 +444,18 @@ async function writeSyntheticTree(
  * Capture the baseline of `repoRoot` and every nested repo under it. Each repo
  * baseline may buffer at most `budgetBytes` of uncommitted content (the
  * isolation-snapshot budget, {@link ISOLATION_BASELINE_MAX_CONTENT_BYTES}).
- * Linked worktrees of any repo in `ownRepos` are not nested repos (see
- * {@link discoverNestedRepos}).
+ * Linked worktrees of any repo in `ownRepos` and subtrees in `excludedPaths`
+ * are not nested repos (see {@link discoverNestedRepos}).
  */
 export async function captureBaseline(
 	repoRoot: string,
 	budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 	ownRepos: readonly string[] = [repoRoot],
+	excludedPaths: readonly string[] = [],
 ): Promise<WorktreeBaseline> {
 	const [root, nestedPaths] = await Promise.all([
 		captureRepoBaseline(repoRoot, budgetBytes),
-		discoverNestedRepos(repoRoot, ownRepos),
+		discoverNestedRepos(repoRoot, ownRepos, excludedPaths),
 	]);
 	const nested = await Promise.all(
 		nestedPaths.map(async relativePath => ({
@@ -323,8 +482,9 @@ export async function captureIsolationBaseline(
 	isolationDir: string,
 	repoRoot: string,
 	budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
+	excludedPaths: readonly string[] = [],
 ): Promise<WorktreeBaseline> {
-	const { root, nested } = await captureBaseline(isolationDir, budgetBytes, [isolationDir, repoRoot]);
+	const { root, nested } = await captureBaseline(isolationDir, budgetBytes, [isolationDir, repoRoot], excludedPaths);
 	return {
 		root: { ...root, repoRoot },
 		nested: nested.map(({ relativePath, baseline }) => ({
@@ -588,6 +748,8 @@ export interface IsolationHandle {
 	fellBack: boolean;
 	/** Optional reason associated with `fellBack`. */
 	fallbackReason: string | null;
+	/** Exact source-copy plan reused by post-materialization baseline discovery. */
+	excludedPaths: readonly string[];
 }
 
 /**
@@ -652,6 +814,7 @@ export async function ensureIsolation(
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
+	const excludedPaths = await prepareIsolationCopyPlan(repoRoot);
 	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = await natives.isoResolve(preferred ?? null);
@@ -668,7 +831,7 @@ export async function ensureIsolation(
 		await fs.mkdir(baseDir, { recursive: true });
 		await writeIsolationOwner(baseDir, id);
 		try {
-			await natives.isoStart(candidate, repoRoot, mergedDir);
+			await natives.isoStart(candidate, repoRoot, mergedDir, [...excludedPaths]);
 			// Sever the isolation's git metadata from the source checkout. Copy
 			// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
 			// pointer file (or the rcopy `git worktree add` registration) leaves
@@ -683,6 +846,7 @@ export async function ensureIsolation(
 				backend: candidate,
 				fellBack: candidate !== resolution.kind || resolution.fellBack,
 				fallbackReason,
+				excludedPaths,
 			};
 		} catch (err) {
 			await fs.rm(baseDir, { recursive: true, force: true });

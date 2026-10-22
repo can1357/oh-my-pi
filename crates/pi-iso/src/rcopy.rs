@@ -11,7 +11,10 @@
 //! file-system magic; the caller pays full filesystem-copy cost up front
 //! and an `rm -rf` on teardown.
 
-use std::{fs::FileType, path::Path};
+use std::{
+	fs::FileType,
+	path::{Component, Path, PathBuf},
+};
 
 use async_trait::async_trait;
 
@@ -37,6 +40,15 @@ impl IsolationBackend for RcopyBackend {
 	}
 
 	fn start(&self, lower: &Path, merged: &Path) -> IsoResult<()> {
+		self.start_with_exclusions(lower, merged, &[])
+	}
+
+	fn start_with_exclusions(
+		&self,
+		lower: &Path,
+		merged: &Path,
+		exclude_paths: &[PathBuf],
+	) -> IsoResult<()> {
 		let lower = tree::canonical_existing_dir(lower, "rcopy source", IsoError::other)?;
 		let merged = std::path::absolute(merged).unwrap_or_else(|_| merged.to_path_buf());
 		tree::prepare_destination(&merged, "rcopy", tree::remove_existing)?;
@@ -48,9 +60,9 @@ impl IsolationBackend for RcopyBackend {
 			// files exactly as they exist in lower. No applyBaseline call
 			// in the caller — every backend's post-`start` invariant is
 			// the same.
-			seed_dirty_state(&lower, &merged)
+			seed_dirty_state(&lower, &merged, exclude_paths)
 		} else {
-			recursive_copy(&lower, &merged)
+			recursive_copy(&lower, &merged, exclude_paths)
 		}
 	}
 
@@ -120,22 +132,24 @@ fn git_worktree_remove(merged: &Path) -> IsoResult<()> {
 }
 
 /// Replicate `lower`'s live working tree on top of a freshly-checked-out
-/// worktree at `merged`. Three passes mirror what `git status` would
-/// report at `lower`:
+/// worktree at `merged`. Four passes mirror what `git status` would report at
+/// `lower` while retaining ordinary ignored runtime input:
 ///
-///  1. **Staged** — `git diff --binary --cached` from lower, applied to both
-///     the index and the working tree of `merged`.
-///  2. **Unstaged** — `git diff --binary` from lower, applied to the working
+///  1. **Staged:** `git diff --binary --cached` from lower, applied to both the
+///     index and the working tree of `merged`.
+///  2. **Unstaged:** `git diff --binary` from lower, applied to the working
 ///     tree only.
-///  3. **Untracked** — every path listed by `git ls-files --others
+///  3. **Untracked:** every path listed by `git ls-files --others
 ///     --exclude-standard -z` from lower, recursively copied into the same
 ///     relative location under `merged`.
+///  4. **Ignored:** collapsed ignored paths from `git ls-files --others
+///     --ignored --exclude-standard --directory -z`, copied through the same
+///     exclusion-aware walker.
 ///
 /// Result: `git status` inside `merged` reports the same dirty set as
-/// `lower` at the moment `start()` was called, so the rest of the PAL
-/// contract ("merged mirrors lower's live working tree") holds for
-/// rcopy on git inputs too.
-fn seed_dirty_state(lower: &Path, merged: &Path) -> IsoResult<()> {
+/// `lower` at the moment `start()` was called, and ignored runtime files stay
+/// available without copying an excluded checkout subtree.
+fn seed_dirty_state(lower: &Path, merged: &Path, exclude_paths: &[PathBuf]) -> IsoResult<()> {
 	let staged = git_capture(lower, &["diff", "--binary", "--no-color", "--cached"])?;
 	if !staged.is_empty() {
 		git_apply(merged, &staged, &["--cached"])?;
@@ -148,21 +162,67 @@ fn seed_dirty_state(lower: &Path, merged: &Path) -> IsoResult<()> {
 	}
 
 	let untracked = git_capture(lower, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-	for path_bytes in untracked.split(|b| *b == 0) {
-		if path_bytes.is_empty() {
+	let ignored = git_capture(
+		lower,
+		["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"].as_slice(),
+	)?;
+	let paths = normalize_listed_paths(&[&untracked, &ignored])?;
+	copy_listed_paths(lower, merged, &paths, exclude_paths)
+}
+
+/// Normalize Git's NUL-delimited path lists once, then drop entries already
+/// covered by an ancestor. `--directory` may collapse an ignored tree while a
+/// second list names a child, and copying both would overwrite a first-copy
+/// readonly Git object.
+fn normalize_listed_paths(lists: &[&[u8]]) -> IsoResult<Vec<PathBuf>> {
+	let mut paths = Vec::new();
+	for list in lists {
+		for path_bytes in list.split(|byte| *byte == 0) {
+			if path_bytes.is_empty() {
+				continue;
+			}
+			let raw = std::str::from_utf8(path_bytes)
+				.map_err(|err| IsoError::other(format!("git listed path is not valid UTF-8: {err}")))?;
+			let mut normalized = PathBuf::new();
+			for component in Path::new(raw).components() {
+				match component {
+					Component::Normal(part) => normalized.push(part),
+					Component::CurDir => {},
+					Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+						return Err(IsoError::other(format!(
+							"git listed path is not a relative subtree: {raw:?}"
+						)));
+					},
+				}
+			}
+			if !normalized.as_os_str().is_empty() {
+				paths.push(normalized);
+			}
+		}
+	}
+	paths.sort_unstable();
+	paths.dedup_by(|path, ancestor| path.starts_with(ancestor));
+	Ok(paths)
+}
+
+fn copy_listed_paths(
+	lower: &Path,
+	merged: &Path,
+	paths: &[PathBuf],
+	exclude_paths: &[PathBuf],
+) -> IsoResult<()> {
+	for relative_path in paths {
+		if tree::is_excluded_subtree(relative_path, exclude_paths) {
 			continue;
 		}
-		let rel = std::str::from_utf8(path_bytes)
-			.map_err(|err| IsoError::other(format!("untracked path is not valid UTF-8: {err}")))?;
-		let src = lower.join(rel);
-		let dst = merged.join(rel);
+		let src = lower.join(relative_path);
+		let dst = merged.join(relative_path);
 		if let Some(parent) = dst.parent() {
 			std::fs::create_dir_all(parent)
 				.map_err(|err| IsoError::other(format!("create {}: {err}", parent.display())))?;
 		}
-		copy_path(&src, &dst)?;
+		copy_path(&src, &dst, lower, exclude_paths)?;
 	}
-
 	Ok(())
 }
 
@@ -260,7 +320,7 @@ fn git_apply_with_program(
 /// Copy a single path (regular file, symlink, or directory) from `src`
 /// to `dst`, preserving mtime. Used by the untracked-files pass;
 /// directories are recursed via [`tree::copy_dir_contents`].
-fn copy_path(src: &Path, dst: &Path) -> IsoResult<()> {
+fn copy_path(src: &Path, dst: &Path, root: &Path, exclude_paths: &[PathBuf]) -> IsoResult<()> {
 	let meta = std::fs::symlink_metadata(src)
 		.map_err(|err| IsoError::other(format!("stat {}: {err}", src.display())))?;
 	if meta.file_type().is_symlink() {
@@ -268,7 +328,7 @@ fn copy_path(src: &Path, dst: &Path) -> IsoResult<()> {
 	} else if meta.file_type().is_dir() {
 		std::fs::create_dir_all(dst)
 			.map_err(|err| IsoError::other(format!("create {}: {err}", dst.display())))?;
-		tree::copy_dir_contents(src, dst, &[], &Rcopy)?;
+		tree::copy_dir_contents_with_exclusions(src, dst, root, &[], exclude_paths, &Rcopy)?;
 		Rcopy.finish_dir(src, dst)
 	} else {
 		Rcopy.file(src, dst, meta.file_type())
@@ -279,10 +339,10 @@ fn copy_path(src: &Path, dst: &Path) -> IsoResult<()> {
 /// `copy` already preserves mtime on the macOS/Linux platforms we care
 /// about, but we still set it explicitly to keep behaviour consistent
 /// across hosts where the stdlib promise is weaker.
-fn recursive_copy(lower: &Path, merged: &Path) -> IsoResult<()> {
+fn recursive_copy(lower: &Path, merged: &Path, exclude_paths: &[PathBuf]) -> IsoResult<()> {
 	std::fs::create_dir_all(merged)
 		.map_err(|err| IsoError::other(format!("create {}: {err}", merged.display())))?;
-	tree::copy_dir_contents(lower, merged, &[], &Rcopy)
+	tree::copy_dir_contents_with_exclusions(lower, merged, lower, &[], exclude_paths, &Rcopy)
 }
 
 struct Rcopy;
@@ -439,6 +499,17 @@ mod tests {
 			.file_type();
 		assert!(file_type.is_symlink_dir(), "expected a directory link, got {file_type:?}");
 		assert_eq!(fs::read(link.join("inner.txt")).expect("read through link"), b"inner");
+	}
+
+	#[test]
+	fn listed_paths_copy_each_covered_subtree_once() {
+		let paths = normalize_listed_paths(&[
+			b"apps/web/.verify/\0runtime/.env\0".as_slice(),
+			b"apps/web/.verify/same-origin-unrelated/.git/objects/9d/object\0runtime/.env\0"
+				.as_slice(),
+		])
+		.expect("relative git paths");
+		assert_eq!(paths, vec![PathBuf::from("apps/web/.verify"), PathBuf::from("runtime/.env")]);
 	}
 
 	struct TempDirGuard(PathBuf);

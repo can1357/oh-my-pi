@@ -25,7 +25,11 @@
 	allow(unused_imports, dead_code, reason = "platform without an isolation backend")
 )]
 
-use std::{fmt, path::Path};
+use std::{
+	ffi::OsStr,
+	fmt,
+	path::{Path, PathBuf},
+};
 
 use async_trait::async_trait;
 
@@ -218,6 +222,12 @@ impl std::error::Error for IsoError {}
 
 pub type IsoResult<T> = Result<T, IsoError>;
 
+/// Validate and normalize materialization exclusions at the public backend
+/// boundary. Each result is a disjoint subtree relative to `lower`.
+pub fn normalize_exclude_paths(paths: impl IntoIterator<Item = String>) -> IsoResult<Vec<PathBuf>> {
+	tree::normalize_relative_subtrees(paths)
+}
+
 /// Build the [`IsoError::Other`] for a failed external command, rendered as
 /// `<what> (exit <code>): <trimmed stderr>`.
 ///
@@ -271,14 +281,28 @@ pub trait IsolationBackend: Send + Sync {
 
 	fn start(&self, lower: &Path, merged: &Path) -> IsoResult<()>;
 
+	/// Materialize `merged` while omitting verified relative subtrees from
+	/// `lower`. Backends that cannot filter a tree must refuse before they
+	/// allocate a snapshot, mount, or copy, allowing the caller to try a
+	/// backend that can preserve the exclusion plan.
+	fn start_with_exclusions(
+		&self,
+		lower: &Path,
+		merged: &Path,
+		exclude_paths: &[PathBuf],
+	) -> IsoResult<()> {
+		if exclude_paths.is_empty() {
+			return self.start(lower, merged);
+		}
+		Err(IsoError::unavailable(format!(
+			"{} cannot materialize an isolation with excluded subtrees",
+			self.kind()
+		)))
+	}
+
 	/// Clone `lower` into `merged` copy-on-write, omitting named top-level
 	/// entries.
-	fn clone_tree(
-		&self,
-		_lower: &Path,
-		_merged: &Path,
-		_skip: &[&std::ffi::OsStr],
-	) -> IsoResult<()> {
+	fn clone_tree(&self, _lower: &Path, _merged: &Path, _skip: &[&OsStr]) -> IsoResult<()> {
 		Err(IsoError::unavailable(format!("{} cannot clone a directory tree in place", self.kind())))
 	}
 

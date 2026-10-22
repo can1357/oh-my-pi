@@ -8,7 +8,7 @@
 //! file. There is no mount/session state to undo, so
 //! [`stop`](IsolationBackend::stop) is a recursive remove.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
@@ -40,13 +40,22 @@ impl IsolationBackend for WindowsBlockCloneBackend {
 	}
 
 	fn start(&self, lower: &Path, merged: &Path) -> IsoResult<()> {
+		self.start_with_exclusions(lower, merged, &[])
+	}
+
+	fn start_with_exclusions(
+		&self,
+		lower: &Path,
+		merged: &Path,
+		exclude_paths: &[PathBuf],
+	) -> IsoResult<()> {
 		#[cfg(windows)]
 		{
-			imp::start(lower, merged)
+			imp::start(lower, merged, exclude_paths)
 		}
 		#[cfg(not(windows))]
 		{
-			let _ = (lower, merged);
+			let _ = (lower, merged, exclude_paths);
 			Err(IsoError::unavailable("Windows block-clone isolation is only available on Windows"))
 		}
 	}
@@ -82,7 +91,7 @@ mod imp {
 		fs::{self, File, FileTimes, FileType, OpenOptions},
 		io,
 		os::windows::fs::{FileTimesExt, OpenOptionsExt},
-		path::Path,
+		path::{Path, PathBuf},
 	};
 
 	use windows_sys::Win32::Storage::FileSystem::{
@@ -94,17 +103,33 @@ mod imp {
 		tree::{self, TreeCopy},
 	};
 
-	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
-		clone_tree(lower, merged, &[])
+	pub fn start(lower: &Path, merged: &Path, exclude_paths: &[PathBuf]) -> IsoResult<()> {
+		clone_tree_with_exclusions(lower, merged, &[], exclude_paths)
 	}
 
 	pub fn clone_tree(lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
+		clone_tree_with_exclusions(lower, merged, skip, &[])
+	}
+
+	fn clone_tree_with_exclusions(
+		lower: &Path,
+		merged: &Path,
+		skip: &[&std::ffi::OsStr],
+		exclude_paths: &[PathBuf],
+	) -> IsoResult<()> {
 		let lower = tree::canonical_existing_dir(lower, "block-clone source", IsoError::other)?;
 		tree::prepare_destination(merged, "block clone", remove_path)?;
 		let result = (|| {
 			fs::create_dir_all(merged)
 				.map_err(|err| IsoError::other(format!("create {}: {err}", merged.display())))?;
-			tree::copy_dir_contents(&lower, merged, skip, &BlockClone)?;
+			tree::copy_dir_contents_with_exclusions(
+				&lower,
+				merged,
+				&lower,
+				skip,
+				exclude_paths,
+				&BlockClone,
+			)?;
 			BlockClone.finish_dir(&lower, merged)
 		})();
 		if result.is_err() {

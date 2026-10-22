@@ -7,7 +7,7 @@
 //! is no mount to undo, so [`stop`](IsolationBackend::stop) is a recursive
 //! remove.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
@@ -39,13 +39,22 @@ impl IsolationBackend for ApfsBackend {
 	}
 
 	fn start(&self, lower: &Path, merged: &Path) -> IsoResult<()> {
+		self.start_with_exclusions(lower, merged, &[])
+	}
+
+	fn start_with_exclusions(
+		&self,
+		lower: &Path,
+		merged: &Path,
+		exclude_paths: &[PathBuf],
+	) -> IsoResult<()> {
 		#[cfg(target_os = "macos")]
 		{
-			imp::start(lower, merged)
+			imp::start(lower, merged, exclude_paths)
 		}
 		#[cfg(not(target_os = "macos"))]
 		{
-			let _ = (lower, merged);
+			let _ = (lower, merged, exclude_paths);
 			Err(IsoError::unavailable("APFS clonefile isolation is only available on macOS"))
 		}
 	}
@@ -77,7 +86,11 @@ impl IsolationBackend for ApfsBackend {
 
 #[cfg(target_os = "macos")]
 mod imp {
-	use std::{fs, path::Path};
+	use std::{
+		fs,
+		os::unix::fs::DirBuilderExt as _,
+		path::{Path, PathBuf},
+	};
 
 	use crate::{
 		IsoError, IsoResult,
@@ -97,7 +110,7 @@ mod imp {
 		IsoError::other(format!("clonefile {} -> {}: {err}", src.display(), dst.display()))
 	}
 
-	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
+	pub fn start(lower: &Path, merged: &Path, exclude_paths: &[PathBuf]) -> IsoResult<()> {
 		let lower = tree::canonical_existing_dir(lower, "clone source", IsoError::other)?;
 		if let Some(parent) = merged.parent() {
 			fs::create_dir_all(parent).map_err(|err| {
@@ -111,8 +124,75 @@ mod imp {
 			})?;
 		}
 
-		// A directory source clones the whole tree in one call.
-		cow::clonefile(&lower, merged, 0).map_err(|err| clone_error(&lower, merged, &err))
+		if exclude_paths.is_empty() {
+			// A directory source clones the whole tree in one call.
+			return cow::clonefile(&lower, merged, 0).map_err(|err| clone_error(&lower, merged, &err));
+		}
+
+		let result = clone_excluding(&lower, merged, &lower, exclude_paths);
+		if result.is_err() {
+			let _ = fs::remove_dir_all(merged);
+		}
+		result
+	}
+
+	/// Clone all unaffected branches with one `clonefile` call, descending only
+	/// through ancestor directories needed to omit an excluded subtree.
+	fn clone_excluding(
+		src_dir: &Path,
+		dst_dir: &Path,
+		root: &Path,
+		exclude_paths: &[PathBuf],
+	) -> IsoResult<()> {
+		let source_permissions = fs::metadata(src_dir)
+			.map_err(|err| IsoError::other(format!("metadata {}: {err}", src_dir.display())))?
+			.permissions();
+		// Ancestors of an excluded subtree cannot use clonefile wholesale. Make
+		// each manually materialized directory private before writing children,
+		// then restore the source mode only after its contents are complete.
+		let mut builder = fs::DirBuilder::new();
+		builder.mode(0o700);
+		builder
+			.create(dst_dir)
+			.map_err(|err| IsoError::other(format!("create {}: {err}", dst_dir.display())))?;
+		for entry in fs::read_dir(src_dir)
+			.map_err(|err| IsoError::other(format!("read_dir {}: {err}", src_dir.display())))?
+		{
+			let entry = entry
+				.map_err(|err| IsoError::other(format!("dir entry in {}: {err}", src_dir.display())))?;
+			let src = entry.path();
+			let relative = src.strip_prefix(root).map_err(|_| {
+				IsoError::other(format!(
+					"clone path {} escaped source root {}",
+					src.display(),
+					root.display()
+				))
+			})?;
+			if tree::is_excluded_subtree(relative, exclude_paths) {
+				continue;
+			}
+			let file_type = entry
+				.file_type()
+				.map_err(|err| IsoError::other(format!("file_type {}: {err}", src.display())))?;
+			if !(file_type.is_file() || file_type.is_dir() || file_type.is_symlink()) {
+				continue;
+			}
+			let dst = dst_dir.join(entry.file_name());
+			if file_type.is_dir()
+				&& exclude_paths
+					.iter()
+					.any(|excluded| excluded.starts_with(relative))
+			{
+				clone_excluding(&src, &dst, root, exclude_paths)?;
+			} else {
+				cow::clonefile(&src, &dst, CLONE_NOFOLLOW)
+					.map_err(|err| clone_error(&src, &dst, &err))?;
+			}
+		}
+		fs::set_permissions(dst_dir, source_permissions).map_err(|err| {
+			IsoError::other(format!("set permissions on {}: {err}", dst_dir.display()))
+		})?;
+		Ok(())
 	}
 
 	pub fn clone_tree(lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
@@ -188,7 +268,11 @@ mod tests {
 	use std::{
 		ffi::OsStr,
 		fs,
-		os::unix::{ffi::OsStrExt, fs::symlink},
+		os::unix::{
+			ffi::OsStrExt,
+			fs::{PermissionsExt, symlink},
+		},
+		path::PathBuf,
 	};
 
 	use super::*;
@@ -235,6 +319,47 @@ mod tests {
 				.file_type()
 				.is_symlink()
 		);
+		fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn filtered_clone_preserves_private_directory_and_file_modes() {
+		let nonce = format!(
+			"pi-iso-apfs-filtered-mode-{}-{}",
+			std::process::id(),
+			std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.unwrap()
+				.as_nanos()
+		);
+		let root = std::env::temp_dir().join(nonce);
+		let lower = root.join("lower");
+		let merged = root.join("merged");
+		let private = lower.join("private");
+		let ancestor = private.join("ancestor");
+		let retained = ancestor.join("retain.txt");
+		fs::create_dir_all(ancestor.join("discard")).unwrap();
+		fs::write(&retained, "private\n").unwrap();
+		fs::set_permissions(&retained, fs::Permissions::from_mode(0o600)).unwrap();
+		for directory in [&lower, &private, &ancestor] {
+			fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+		}
+
+		let result = backend()
+			.start_with_exclusions(&lower, &merged, &[PathBuf::from("private/ancestor/discard")]);
+		if matches!(result, Err(crate::IsoError::Unavailable(_))) {
+			let _ = fs::remove_dir_all(root);
+			return;
+		}
+		result.unwrap();
+
+		let mode = |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+		assert_eq!(mode(&lower), 0o700);
+		assert_eq!(mode(&merged), 0o700);
+		assert_eq!(mode(&merged.join("private/ancestor")), 0o700);
+		assert_eq!(mode(&retained), 0o600);
+		assert_eq!(mode(&merged.join("private/ancestor/retain.txt")), 0o600);
+		assert!(!merged.join("private/ancestor/discard").exists());
 		fs::remove_dir_all(root).unwrap();
 	}
 }

@@ -31,6 +31,7 @@ function handle(): IsolationHandle {
 		backend: IsoBackendKind.Rcopy,
 		fellBack: false,
 		fallbackReason: null,
+		excludedPaths: [],
 	};
 }
 

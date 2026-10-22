@@ -53,6 +53,7 @@ async function commitsAcrossRelease(id: string, runEndPatch: string, releasePatc
 		backend: natives.IsoBackendKind.Rcopy,
 		fellBack: false,
 		fallbackReason: null,
+		excludedPaths: [],
 	});
 	vi.spyOn(worktreeModule, "captureIsolationBaseline").mockResolvedValue(baseline);
 	vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();

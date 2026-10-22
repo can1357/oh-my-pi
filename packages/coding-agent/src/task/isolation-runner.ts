@@ -453,7 +453,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
 		const isolationBackend = handle.backend;
-		const baseline = await captureIsolationBaseline(isolationDir, opts.context.repoRoot);
+		const baseline = await captureIsolationBaseline(
+			isolationDir,
+			opts.context.repoRoot,
+			undefined,
+			handle.excludedPaths,
+		);
 		taskBaseline = baseline;
 		const result = await runSubprocess({
 			...opts.baseOptions,

@@ -2587,9 +2587,11 @@ export interface IsoResolveResult {
 
 /**
  * Materialise `merged` as a writable view of `lower` using the requested
- * backend. `kind` defaults to the native backend.
+ * backend. `kind` defaults to the native backend. `exclude_paths` contains
+ * disjoint normalized relative subtrees that must be omitted before a backend
+ * allocates a copy, snapshot, or mount.
  */
-export declare function isoStart(kind: IsoBackendKind | undefined | null, lower: string, merged: string): Promise<void>
+export declare function isoStart(kind: IsoBackendKind | undefined | null, lower: string, merged: string, excludePaths?: Array<string> | undefined | null): Promise<void>
 
 /** Tear down a previously started backend at `merged`. */
 export declare function isoStop(kind: IsoBackendKind | undefined | null, merged: string): Promise<void>

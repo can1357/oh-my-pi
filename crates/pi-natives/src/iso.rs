@@ -135,16 +135,29 @@ pub fn iso_resolve(preferred: Option<IsoBackendKind>) -> task::Promise<IsoResolv
 }
 
 /// Materialise `merged` as a writable view of `lower` using the requested
-/// backend. `kind` defaults to the native backend.
+/// backend.
+///
+/// `kind` defaults to the native backend. `exclude_paths` contains disjoint
+/// normalized relative subtrees omitted before a backend allocates a copy,
+/// snapshot, or mount.
 #[napi]
-pub async fn iso_start(kind: Option<IsoBackendKind>, lower: String, merged: String) -> Result<()> {
+pub async fn iso_start(
+	kind: Option<IsoBackendKind>,
+	lower: String,
+	merged: String,
+	exclude_paths: Option<Vec<String>>,
+) -> Result<()> {
 	let resolved = kind.map_or_else(BackendKind::native, from_napi_kind);
 	let lower_path = std::path::PathBuf::from(lower);
 	let merged_path = std::path::PathBuf::from(merged);
-	tokio::task::spawn_blocking(move || pi_iso::backend(resolved).start(&lower_path, &merged_path))
-		.await
-		.map_err(|err| Error::from_reason(format!("iso_start join: {err}")))?
-		.map_err(to_napi_error)
+	let exclude_paths =
+		pi_iso::normalize_exclude_paths(exclude_paths.unwrap_or_default()).map_err(to_napi_error)?;
+	tokio::task::spawn_blocking(move || {
+		pi_iso::backend(resolved).start_with_exclusions(&lower_path, &merged_path, &exclude_paths)
+	})
+	.await
+	.map_err(|err| Error::from_reason(format!("iso_start join: {err}")))?
+	.map_err(to_napi_error)
 }
 
 /// Tear down a previously started backend at `merged`.
