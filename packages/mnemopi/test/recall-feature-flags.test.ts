@@ -46,6 +46,19 @@ describe("configureRecallFeatures", () => {
 		expect(isQueryCacheEnabled(true, { MNEMOPI_ENHANCED_RECALL: "1" })).toBe(true);
 	});
 
+	it("reads 1/true/yes/on as on and 0/false/no/off as off, and falls back on any other value", () => {
+		const gates = [
+			["MNEMOPI_POLYPHONIC_RECALL", polyphonicRecallEnabled],
+			["MNEMOPI_ENHANCED_RECALL", enhancedRecallEnabled],
+			["MNEMOPI_PROACTIVE_LINKING", proactiveLinkingEnabled],
+		] as const;
+		for (const [name, enabled] of gates) {
+			for (const value of ["1", "true", "YES", " on "]) expect(enabled({ [name]: value }, false)).toBe(true);
+			for (const value of ["0", "False", "no", "OFF"]) expect(enabled({ [name]: value }, true)).toBe(false);
+			for (const configured of [false, true]) expect(enabled({ [name]: "maybe" }, configured)).toBe(configured);
+		}
+	});
+
 	it("updates only the flags that are present", () => {
 		configureRecallFeatures({ polyphonicRecall: true });
 		expect(polyphonicRecallEnabled({})).toBe(true);

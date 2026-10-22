@@ -34,6 +34,9 @@ import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall"
 import { MemoryReflectTool } from "@oh-my-pi/pi-coding-agent/tools/memory-reflect";
 import { MemoryRetainTool } from "@oh-my-pi/pi-coding-agent/tools/memory-retain";
 import { resetMemoryForTests } from "@oh-my-pi/pi-mnemopi";
+import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
+import { currentEmbeddingModel } from "@oh-my-pi/pi-mnemopi/core/embeddings";
+import { withMnemopiRuntimeOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import { currentLoopPhase, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 
@@ -962,6 +965,167 @@ describe("Mnemopi backend lifecycle", () => {
 		expect(memory.get(retainId)).not.toBeNull();
 		memory.remember("a fresh note after start", { source: "coding-agent-transcript", scope: "bank" });
 		expect(memory.get(retainId)).not.toBeNull();
+	});
+
+	describe("embedding warmup", () => {
+		const yieldTurn = () => {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			return promise;
+		};
+		const settle = async () => {
+			for (let turn = 0; turn < 5; turn += 1) await yieldTurn();
+		};
+		const embeddingProviderOptions = {
+			noEmbeddings: false,
+			embeddingModel: undefined,
+			embeddingApiUrl: undefined,
+			embeddingApiKey: undefined,
+			llm: false as const,
+		};
+
+		/** Seeds three rows with raw-SQL vectors (no provider), then starts the backend on that bank. */
+		const startSeededBank = async (options: { autoRecall?: boolean; noEmbeddings?: boolean } = {}) => {
+			const settings = Settings.isolated({
+				"memory.backend": "mnemopi",
+				"mnemopi.noEmbeddings": options.noEmbeddings ?? false,
+				"mnemopi.autoRecall": options.autoRecall ?? true,
+				"mnemopi.llmMode": "none",
+				"mnemopi.scoping": "global",
+				"mnemopi.bank": "default",
+				"mnemopi.dbPath": makeMnemopiConfig().dbPath,
+			});
+			// Same model the started backend reconciles against; a mismatch makes start wipe these vectors.
+			const backendModel = loadMnemopiConfig(settings, path.dirname(tempDbPath!)).providerOptions.embeddingModel;
+			// Embeddings stay off on the seed so `remember` schedules no provider work; only the model is kept.
+			const seed = registerMnemopiState(
+				makeMnemopiConfig({
+					scoping: "global",
+					bank: "default",
+					providerOptions: { ...embeddingProviderOptions, noEmbeddings: true, embeddingModel: backendModel },
+				}),
+			);
+			const seedMemory = seed.getScopedRetainTarget().memory;
+			const model = withMnemopiRuntimeOptions(seedMemory.runtimeOptions, () => currentEmbeddingModel());
+			const ids: string[] = [];
+			for (let index = 0; index < 3; index += 1) {
+				const id = seedMemory.remember(`warm note ${index}`, {
+					source: "coding-agent-retain",
+					scope: "bank",
+					extract: false,
+				});
+				ids.push(id);
+				seedMemory.beam.db.run(
+					"INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, '[1,0]', ?)",
+					[id, model],
+				);
+			}
+			await seed.dispose({ consolidate: false });
+			registeredMnemopiState = undefined;
+			resetMemoryForTests();
+
+			const modelRegistry = { getApiKeyForProvider: async () => undefined, resolver: () => async () => undefined };
+			const session = {
+				sessionId: TEST_SESSION_ID,
+				settings,
+				modelRegistry,
+				sessionManager: { getEntries: () => [], getCwd: () => "/tmp" },
+				emitNotice: () => {},
+				getHindsightSessionState: () => undefined,
+				subscribe: () => () => {},
+			} as never;
+			const warm = vi.spyOn(BeamMemory.prototype, "warmRecallCache");
+			await mnemopiBackend.start({
+				session,
+				settings,
+				modelRegistry: modelRegistry as never,
+				agentDir: path.dirname(tempDbPath!),
+				taskDepth: 0,
+			});
+			const started = getMnemopiSessionState(session);
+			if (!started) throw new Error("Mnemopi state was not installed");
+			registeredMnemopiState = started;
+			// Spied right after start resolves: warmup yields to the event loop before its first query.
+			const query = vi.spyOn(started.getScopedRecallTargets()[0].memory.beam.db, "query");
+			const vectorReads = () =>
+				query.mock.calls.filter(([sql]) => sql.includes("FROM memory_embeddings WHERE memory_id IN")).length;
+			return { started, warm, vectorReads, ids };
+		};
+
+		it("warms the recall bank's vectors in the background so the next recall reads none", async () => {
+			const { started, warm, vectorReads, ids } = await startSeededBank();
+			expect(vectorReads()).toBe(0);
+
+			await Promise.all(warm.mock.results.map(result => result.value));
+			const warmedReads = vectorReads();
+			expect(warmedReads).toBeGreaterThan(0);
+
+			const target = started.getScopedRecallTargets()[0];
+			const results = await target.memory.beam.recall("qqqzzz", 10, {
+				channelId: target.bank,
+				queryEmbedding: [1, 0],
+			});
+			expect(results.map(result => result.id).sort()).toEqual([...ids].sort());
+			expect(vectorReads()).toBe(warmedReads);
+		});
+
+		it("cancels warmup on dispose while the db is open and consolidation holds the close back", async () => {
+			const { started, warm, vectorReads } = await startSeededBank();
+			const db = started.getScopedRecallTargets()[0].memory.beam.db;
+			const consolidated = Promise.withResolvers<void>();
+			vi.spyOn(started, "consolidate").mockReturnValue(consolidated.promise);
+
+			const disposing = started.dispose();
+			try {
+				// Let the warmup finish, aborted or not, while the close is held; the reads below are then final.
+				await Promise.all(warm.mock.results.map(result => result.value));
+				expect(db.query("SELECT 1 AS ok").get()).toEqual({ ok: 1 });
+				expect(vectorReads()).toBe(0);
+			} finally {
+				consolidated.resolve();
+				await disposing;
+			}
+			expect(vectorReads()).toBe(0);
+			registeredMnemopiState = undefined;
+		});
+
+		it("does not warm when auto-recall is off", async () => {
+			const { warm, vectorReads } = await startSeededBank({ autoRecall: false });
+			await settle();
+			expect(warm).not.toHaveBeenCalled();
+			expect(vectorReads()).toBe(0);
+		});
+
+		it("does not warm when embeddings are disabled", async () => {
+			const { warm, vectorReads } = await startSeededBank({ noEmbeddings: true });
+			await settle();
+			expect(warm).not.toHaveBeenCalled();
+			expect(vectorReads()).toBe(0);
+		});
+
+		it("does not warm for an aliased subagent state", async () => {
+			const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+			const parentState = registerMnemopiState(makeMnemopiConfig({ providerOptions: embeddingProviderOptions }));
+			const warm = vi.spyOn(BeamMemory.prototype, "warmRecallCache");
+			const childSession = {
+				sessionId: "child-session-id",
+				settings,
+				sessionManager: { getEntries: () => [], getCwd: () => "/tmp" },
+				emitNotice: () => {},
+			} as never;
+			await mnemopiBackend.start({
+				session: childSession,
+				settings,
+				modelRegistry: {} as never,
+				agentDir: path.dirname(tempDbPath!),
+				taskDepth: 1,
+				parentMnemopiSessionState: parentState,
+			});
+			expect(getMnemopiSessionState(childSession)?.aliasOf).toBe(parentState);
+
+			await settle();
+			expect(warm).not.toHaveBeenCalled();
+		});
 	});
 
 	it("does not re-store retained turns during consolidation or after resume", async () => {

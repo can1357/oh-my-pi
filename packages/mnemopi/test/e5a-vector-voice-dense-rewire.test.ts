@@ -1,5 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 
+import { DENSE_CANDIDATE_LIMIT } from "@oh-my-pi/pi-mnemopi/config";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { PolyphonicRecallEngine } from "@oh-my-pi/pi-mnemopi/core/polyphonic-recall";
 
@@ -83,6 +84,53 @@ describe("polyphonic vector voice dense rewire", () => {
 
 			expect(results.some(result => result.voice_scores.vector !== undefined)).toBe(true);
 			expect(engine.getStats().vector_stats).toEqual({ embedded_rows: 1 });
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("scores only the newest DENSE_CANDIDATE_LIMIT rows of a tier", () => {
+		const beam = new BeamMemory({ sessionId: "e5a-window", dbPath: ":memory:" });
+		try {
+			const insert = beam.db.prepare(
+				"INSERT INTO working_memory (id, content, source, timestamp, session_id, importance) VALUES (?, 'row', 'test', ?, 'e5a-window', 0.5)",
+			);
+			beam.db.transaction(() => {
+				insert.run("wm-old", "2020-01-01T00:00:00.000Z");
+				for (let i = 0; i < DENSE_CANDIDATE_LIMIT; i++) {
+					insert.run(`wm-${i}`, new Date(Date.UTC(2021, 0, 1) + i * 1000).toISOString());
+				}
+			})();
+			const newest = `wm-${DENSE_CANDIDATE_LIMIT - 1}`;
+			seedEmbedding(beam, "wm-old", [1, 0]);
+			seedEmbedding(beam, newest, [1, 0]);
+
+			const ids = new PolyphonicRecallEngine({ db: beam.db }).vectorVoice([1, 0]).map(result => result.memoryId);
+
+			expect(ids).toEqual([newest]);
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("does not re-read stored vectors on a repeated recall", () => {
+		const beam = new BeamMemory({ sessionId: "e5a-cache", dbPath: ":memory:" });
+		try {
+			beam.db.run(
+				"INSERT INTO working_memory (id, content, source, timestamp, session_id, importance) VALUES ('wm-1', 'cached row', 'test', datetime('now'), 'e5a-cache', 0.5)",
+			);
+			seedEmbedding(beam, "wm-1", [1, 0]);
+			const engine = new PolyphonicRecallEngine({ db: beam.db });
+			const first = engine.recall("cached row", [1, 0], 10);
+			expect(first.map(result => result.id)).toEqual(["wm-1"]);
+
+			const query = spyOn(beam.db, "query");
+			try {
+				expect(engine.recall("cached row", [1, 0], 10)).toEqual(first);
+				expect(query.mock.calls.filter(([sql]) => sql.includes("memory_embeddings"))).toEqual([]);
+			} finally {
+				query.mockRestore();
+			}
 		} finally {
 			beam.close();
 		}
