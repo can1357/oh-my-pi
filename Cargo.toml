@@ -9,6 +9,7 @@ members = [
    "crates/pi-diff",
    "crates/pi-edit",
    "crates/pi-iso",
+   "crates/pi-mermaid",
    "crates/pi-natives",
    "crates/pi-predict",
    "crates/pi-shell",
@@ -251,6 +252,7 @@ pi-ast = { path = "crates/pi-ast", default-features = false }
 pi-diff = { path = "crates/pi-diff" }
 pi-edit = { path = "crates/pi-edit" }
 pi-iso = { path = "crates/pi-iso" }
+pi-mermaid = { path = "crates/pi-mermaid" }
 pi-shell = { path = "crates/pi-shell" }
 pi-predict = { path = "crates/pi-predict" }
 pi-voice = { path = "crates/pi-voice" }
