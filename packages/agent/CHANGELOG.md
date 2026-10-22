@@ -1,17 +1,11 @@
 # Changelog
 
 ## [Unreleased]
-### Added
 
-### Fixed
-
-- Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))
-
-## [18.12.4] - 2026-10-20
-
-## [18.12.4] - 2026-10-20
 ### Fixed
 - Compaction and handoff oneshots now report every completed provider attempt through a new `onUsage` option, including provider-native compaction requests (V1 `/responses/compact`, streamed V2, Anthropic's native compaction, and OpenAI-compatible chat-completions summarizers), attempts a transient retry replaced, responses the provider rejected, and attempts the provider billed but whose payload or stream ended unusable (an incomplete or failed V2 stream, an Anthropic compaction without a signed block, a handoff without a document, a chat-completions response without content); a billed attempt that produced nothing usable is recorded as a failed request rather than a successful one, and a provider-native compaction's usage keeps every bucket the provider billed — cache reads, cache writes and provider-side orchestration — instead of a reduced subset ([#16468](https://github.com/can1357/oh-my-pi/pull/16468) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+- Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))
 
 ## [18.12.4] - 2026-10-20
 
