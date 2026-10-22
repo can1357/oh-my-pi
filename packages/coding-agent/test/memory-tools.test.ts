@@ -92,10 +92,31 @@ function makeSession(settings: Settings, sessionId: string | null = TEST_SESSION
 	} as unknown as ToolSession;
 }
 
+/**
+ * Capture the recall request bodies the real client puts on the wire.
+ *
+ * Forwarding/mock-echo assertions are explicitly out of bounds (see the system
+ * prompt's test rules), so the score-floor contract is checked on the request
+ * the tool actually sends rather than on the shape of an internal call.
+ */
+function captureRecallBodies(): string[] {
+	const bodies: string[] = [];
+	const fetchMock: typeof globalThis.fetch = Object.assign(
+		async (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
+			if (String(input).includes("/memories/recall")) bodies.push(String(init?.body ?? ""));
+			return new Response("{}", { status: 200 });
+		},
+		{ preconnect: globalThis.fetch.preconnect },
+	);
+	vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+	return bodies;
+}
+
 interface RegisterStateOptions {
 	retainTags?: string[];
 	recallTags?: string[];
 	recallTagsMatch?: "any" | "all" | "any_strict" | "all_strict";
+	config?: Partial<HindsightConfig>;
 	sessionOverrides?: Record<string, unknown>;
 }
 
@@ -107,7 +128,7 @@ function registerState(client: HindsightApi, settings?: Settings, opts: Register
 		retainTags: opts.retainTags,
 		recallTags: opts.recallTags,
 		recallTagsMatch: opts.recallTagsMatch,
-		config: makeConfig(),
+		config: makeConfig(opts.config),
 		session: {
 			sessionId: TEST_SESSION_ID,
 			sessionManager: { getEntries: () => [] } as never,
@@ -1673,6 +1694,35 @@ describe("recall.execute", () => {
 			"anything",
 			expect.objectContaining({ tags: ["project:pi"], tagsMatch: "any" }),
 		);
+	});
+
+	it("sends configured score floors on the recall request", async () => {
+		const settings = Settings.isolated({ "memory.backend": "hindsight" });
+		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
+		const bodies = captureRecallBodies();
+		registerState(client, settings, { config: { recallMinScores: { final: 0.1, reranker: 0.2 } } });
+
+		const tool = MemoryRecallTool.createIf(makeSession(settings))!;
+		await tool.execute("call-score-floors", { query: "anything" });
+
+		expect(bodies).toHaveLength(1);
+		expect(JSON.parse(bodies[0] ?? "{}")).toMatchObject({
+			query: "anything",
+			min_scores: { final: 0.1, reranker: 0.2 },
+		});
+	});
+
+	it("omits min_scores when no score floors are configured", async () => {
+		const settings = Settings.isolated({ "memory.backend": "hindsight" });
+		const client = new HindsightApi({ baseUrl: "http://localhost:8888" });
+		const bodies = captureRecallBodies();
+		registerState(client, settings);
+
+		const tool = MemoryRecallTool.createIf(makeSession(settings))!;
+		await tool.execute("call-no-score-floors", { query: "anything" });
+
+		expect(bodies).toHaveLength(1);
+		expect(JSON.parse(bodies[0] ?? "{}")).not.toHaveProperty("min_scores");
 	});
 
 	it("rethrows underlying client errors", async () => {

@@ -10,7 +10,7 @@
 
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
-import type { HindsightConfig } from "./config";
+import type { HindsightConfig, RecallMinScores } from "./config";
 
 const DEFAULT_USER_AGENT = USER_AGENT;
 /** Fallback deadlines (ms) applied when the caller supplies no override. */
@@ -125,6 +125,7 @@ export interface RecallOptions extends HindsightRequestOptions {
 	budget?: Budget;
 	tags?: string[];
 	tagsMatch?: TagsMatch;
+	minScores?: RecallMinScores;
 }
 
 export interface ReflectOptions extends HindsightRequestOptions {
@@ -335,6 +336,7 @@ export class HindsightApi {
 					budget: options?.budget ?? "mid",
 					tags: options?.tags,
 					tags_match: options?.tagsMatch,
+					min_scores: options?.minScores,
 				},
 				signal: options?.signal,
 				timeoutMs: this.#recallTimeoutMs,

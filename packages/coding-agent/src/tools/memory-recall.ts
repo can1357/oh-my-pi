@@ -83,6 +83,7 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 					types: state.config.recallTypes.length > 0 ? state.config.recallTypes : undefined,
 					tags: state.recallTags,
 					tagsMatch: state.recallTagsMatch,
+					minScores: state.config.recallMinScores,
 				});
 				const results = response.results ?? [];
 				if (results.length === 0) {

@@ -59,6 +59,33 @@ describe("HindsightApi timestamp serialization", () => {
 	});
 });
 
+describe("HindsightApi recall score floors", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("serializes configured score floors as Hindsight min_scores", async () => {
+		const bodies = captureRequestBodies();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+
+		await client.recall("omp", "What did we decide?", { minScores: { final: 0.1, reranker: 0.2 } });
+
+		expect(JSON.parse(bodies[0] ?? "{}")).toMatchObject({
+			query: "What did we decide?",
+			min_scores: { final: 0.1, reranker: 0.2 },
+		});
+	});
+
+	it("omits min_scores when no score floors are configured", async () => {
+		const bodies = captureRequestBodies();
+		const client = new HindsightApi({ baseUrl: "http://hindsight.local" });
+
+		await client.recall("omp", "What did we decide?");
+
+		expect(JSON.parse(bodies[0] ?? "{}")).not.toHaveProperty("min_scores");
+	});
+});
+
 /** Fake mental-model list endpoint paging like Hindsight's server (limit default 100, max 1000). */
 function serveMentalModels(count: number, { reportTotal }: { reportTotal: boolean }): string[] {
 	const urls: string[] = [];

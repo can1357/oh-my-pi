@@ -28,6 +28,26 @@ import {
 	cfgHindsightScoping,
 } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
 
+/**
+ * Capture the recall request bodies the real client puts on the wire.
+ *
+ * This file otherwise spies on `HindsightApi.prototype`, but forwarding/mock-echo
+ * assertions are explicitly out of bounds (see the system prompt's test rules), so
+ * the score-floor contract is checked on the request that is actually sent.
+ */
+function captureRecallBodies(): string[] {
+	const bodies: string[] = [];
+	const fetchMock: typeof globalThis.fetch = Object.assign(
+		async (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
+			if (String(input).includes("/memories/recall")) bodies.push(String(init?.body ?? ""));
+			return new Response("{}", { status: 200 });
+		},
+		{ preconnect: globalThis.fetch.preconnect },
+	);
+	vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+	return bodies;
+}
+
 interface FakeSessionDeps {
 	sessionId: string | null;
 	cwd?: string;
@@ -316,6 +336,55 @@ describe("hindsightBackend first-turn injection", () => {
 		block?.commit();
 		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(true);
 		expect(session.getHindsightSessionState()?.lastRecallSnippet).toBe(block?.context);
+	});
+
+	it("sends configured score floors on the first-turn recall request", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.mentalModelsEnabled": false,
+			"hindsight.recallMinScores": { final: 0.1, reranker: 0.2 },
+		});
+		const session = makeFakeSession({ sessionId: "s-score-floors" });
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+		const bodies = captureRecallBodies();
+
+		await hindsightBackend.beforeAgentStartPrompt?.(session as never, "What did we decide?");
+
+		expect(bodies).toHaveLength(1);
+		expect(JSON.parse(bodies[0] ?? "{}")).toMatchObject({
+			query: "What did we decide?",
+			min_scores: { final: 0.1, reranker: 0.2 },
+		});
+	});
+
+	it("omits min_scores when the configured score floors are empty", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.mentalModelsEnabled": false,
+			"hindsight.recallMinScores": {},
+		});
+		const session = makeFakeSession({ sessionId: "s-empty-score-floors" });
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+		const bodies = captureRecallBodies();
+
+		await hindsightBackend.beforeAgentStartPrompt?.(session as never, "What did we decide?");
+
+		expect(bodies).toHaveLength(1);
+		expect(JSON.parse(bodies[0] ?? "{}")).not.toHaveProperty("min_scores");
 	});
 
 	it("does not let agent_start preempt first-turn recall injection", async () => {

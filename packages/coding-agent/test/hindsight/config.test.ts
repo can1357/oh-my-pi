@@ -18,6 +18,17 @@ function configWith(env: Partial<Record<(typeof TOUCHED)[number], string>>, over
 	return loadHindsightConfig(Settings.isolated(overrides));
 }
 
+describe("loadHindsightConfig recallMinScores", () => {
+	it("rejects unknown or non-numeric score fields", () => {
+		expect(() => Settings.isolated({ "hindsight.recallMinScores": { not_a_score: 0.1 } })).toThrow(
+			"hindsight.recallMinScores has unknown field: not_a_score",
+		);
+		expect(() => Settings.isolated({ "hindsight.recallMinScores": { final: "high" } })).toThrow(
+			"hindsight.recallMinScores.final must be a finite number",
+		);
+	});
+});
+
 describe("loadHindsightConfig HINDSIGHT_* env parsing", () => {
 	afterEach(() => {
 		for (const [name, value] of saved) {
