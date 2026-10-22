@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -11,12 +11,21 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { hindsightBackend, rebindMemoryBackendForCwd } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
+import * as resolveModule from "@oh-my-pi/pi-coding-agent/memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/memory-backend/tool-names";
+import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { computeMnemopiBankScope } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import { getMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import * as sharpshooterModule from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
+import { sharpshooterBackend } from "@oh-my-pi/pi-coding-agent/sharpshooter/backend";
+import {
+	flushSharpshooterExtraction,
+	maybeStartSharpshooterExtraction,
+} from "@oh-my-pi/pi-coding-agent/sharpshooter/extract";
+import { writeSharpshooterState } from "@oh-my-pi/pi-coding-agent/sharpshooter/paths";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -27,9 +36,18 @@ import { getProjectAgentDir, getProjectDir, setProjectDir, TempDir } from "@oh-m
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
-import { cfgHindsightApiUrl, cfgHindsightMentalModelsEnabled } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
+import {
+	cfgHindsightApiUrl,
+	cfgHindsightBankId,
+	cfgHindsightMentalModelsEnabled,
+} from "@oh-my-pi/pi-coding-agent/hindsight/settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 import { cfgMnemopiBank, cfgMnemopiRecallLimit, cfgMnemopiScoping } from "@oh-my-pi/pi-coding-agent/mnemopi/settings";
+import {
+	cfgSharpshooterEnabled,
+	cfgSharpshooterInjectionTokenLimit,
+	cfgSharpshooterModel,
+} from "@oh-my-pi/pi-coding-agent/sharpshooter/settings";
 
 function createTool(name: string): AgentTool {
 	return {
@@ -48,9 +66,12 @@ describe("AgentSession memory backend lifecycle", () => {
 	let session: AgentSession | undefined;
 	let settings: Settings;
 	let tempDir: TempDir;
+	/** Counts base-prompt rebuilds; the memory host routes them away from the session object. */
+	let promptRebuilds = 0;
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
+		promptRebuilds = 0;
 		authStorage = createInMemoryAuthStorage();
 		settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -61,6 +82,9 @@ describe("AgentSession memory backend lifecycle", () => {
 	});
 
 	afterEach(async () => {
+		// Restored here rather than at the end of each test, so a failing assertion
+		// cannot leave a mock installed and hand its call history to the next test.
+		mock.restore();
 		await session?.dispose();
 		session = undefined;
 		resetMemoryForTests();
@@ -104,9 +128,10 @@ describe("AgentSession memory backend lifecycle", () => {
 			createMemoryTools,
 			toolRegistry,
 			builtInToolNames: [read.name],
-			rebuildSystemPrompt: async toolNames => ({
-				systemPrompt: [`backend:${cfgMemoryBackend.get(settings)};tools:${toolNames.sort().join(",")}`],
-			}),
+			rebuildSystemPrompt: async toolNames => {
+				promptRebuilds += 1;
+				return { systemPrompt: [`backend:${cfgMemoryBackend.get(settings)};tools:${toolNames.sort().join(",")}`] };
+			},
 		});
 		return session;
 	}
@@ -350,6 +375,452 @@ describe("AgentSession memory backend lifecycle", () => {
 		await rebindMemoryBackendForCwd(current);
 		expect(current.getHindsightSessionState()).toBeDefined();
 		expect(current.getActiveToolNames()).toEqual(expect.arrayContaining(["recall", "retain", "reflect", "learn"]));
+	});
+
+	/**
+	 * Record every Sharpshooter install as `<reason> <cwd>`.
+	 *
+	 * The reason is half the assertion, not decoration: a start against the right
+	 * project still files the source project's trailing prompt into the destination
+	 * bank when it catches up, and a cwd-keyed check alone reads that as success.
+	 * `afterEach` restores the mocks.
+	 */
+	function trackSharpshooterStarts(): string[] {
+		const startedAt: string[] = [];
+		spyOn(sharpshooterBackend, "start").mockImplementation(options => {
+			startedAt.push(`${options.reason ?? "start"} ${options.settings.getCwd()}`);
+		});
+		return startedAt;
+	}
+
+	it("rebinds a paired Sharpshooter to the destination project when Hindsight owns the backend", async () => {
+		// The rebind path skips the full apply while Hindsight state exists, so that
+		// it does not retry a partially torn-down store. Sharpshooter keys its bank
+		// and its per-bank scheduler on cwd, so without a rebind of its own it keeps
+		// consolidating the project the session just left.
+		const source = path.join(tempDir.path(), "source");
+		const destination = path.join(tempDir.path(), "destination");
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, true);
+		await settings.reloadForCwd(source);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(current.getHindsightSessionState()).toBeDefined();
+		expect(startedAt).toEqual([`start ${source}`]);
+
+		await settings.reloadForCwd(destination);
+		await rebindMemoryBackendForCwd(current);
+
+		expect(startedAt).toEqual([`start ${source}`, `rebind ${destination}`]);
+	});
+
+	it("does not catch up on the source prompt when the destination changes the backend", async () => {
+		// The paired rebind above is undone by what follows it: the selection moved,
+		// so the scope rebuild re-applies the whole backend, and a full apply catches
+		// up on a transcript that still ends in the source project's prompt. An
+		// interrupted or failed turn is enough to leave it in that shape, and the
+		// catch-up would file a decision the destination never earned.
+		const source = path.join(tempDir.path(), "source");
+		const destination = path.join(tempDir.path(), "destination");
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, true);
+		await settings.reloadForCwd(source);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(current.getHindsightSessionState()).toBeDefined();
+
+		await settings.reloadForCwd(destination);
+		current.sessionManager.setCwdWithoutRelocation(destination);
+		cfgMemoryBackend.override(settings, "local");
+		await rebindMemoryBackendForCwd(current);
+
+		expect(current.getHindsightSessionState()).toBeUndefined();
+		expect(startedAt.slice(1).every(entry => entry === `rebind ${destination}`)).toBe(true);
+		expect(startedAt.length).toBeGreaterThan(1);
+	});
+
+	it("does not catch up when the scope hook schedules the rebuild before the move asks for it", async () => {
+		// `reloadForCwd` fires the Hindsight scope hook while the move is still
+		// inside it, so the rebuild task is queued as a microtask before the move
+		// reaches `rebindMemoryBackendForCwd`, and it runs on that function's first
+		// await. Anything the move tells the scheduler afterwards arrives too late
+		// to change the apply that already ran, which is why the rebuild asks for
+		// "rebind" itself rather than taking a reason from its caller. The
+		// overrides below stand in for the destination project's own config: what
+		// matters is that the hook fires before the rebind call, exactly as a
+		// reload does.
+		const source = path.join(tempDir.path(), "source");
+		const destination = path.join(tempDir.path(), "destination");
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, true);
+		// `set`, not `override`: only `set` and the reload paths run SETTING_HOOKS,
+		// and `hindsight.bankId` is one of the three paths whose hook fires the
+		// scope signal.
+		cfgHindsightBankId.set(settings, "source-bank");
+		await settings.reloadForCwd(source);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(current.getHindsightSessionState()).toBeDefined();
+
+		await settings.reloadForCwd(destination);
+		current.sessionManager.setCwdWithoutRelocation(destination);
+		cfgMemoryBackend.override(settings, "local");
+		// Fires `onHindsightScopeChanged`, which schedules the rebuild. Nothing
+		// awaits between here and the rebind call, so the queued task is still
+		// unrun when the move starts.
+		cfgHindsightBankId.set(settings, "destination-bank");
+		await rebindMemoryBackendForCwd(current);
+
+		expect(startedAt.slice(1)).not.toContain(`start ${destination}`);
+		expect(startedAt.slice(1).every(entry => entry === `rebind ${destination}`)).toBe(true);
+	});
+
+	it("does not catch up on the source prompt when a store backend moves", async () => {
+		// Nothing about the catch-up is Hindsight's. A session on `local`, `mnemopi`
+		// or `off` takes the full-apply branch of the same move and reaches the same
+		// start, so the reason has to travel with that apply too.
+		const source = path.join(tempDir.path(), "source");
+		const destination = path.join(tempDir.path(), "destination");
+		cfgMemoryBackend.override(settings, "local");
+		cfgSharpshooterEnabled.override(settings, true);
+		await settings.reloadForCwd(source);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(startedAt).toEqual([`start ${source}`]);
+
+		await settings.reloadForCwd(destination);
+		await rebindMemoryBackendForCwd(current);
+
+		expect(startedAt).toEqual([`start ${source}`, `rebind ${destination}`]);
+	});
+
+	it("keeps the live Hindsight store across a pairing toggle", async () => {
+		// A full apply would dispose the store and build a new one, and a fresh
+		// `HindsightSessionState` starts at `lastRetainedTurn: 0` with an empty
+		// transcript cache, so the next `agent_end` re-retains the whole
+		// conversation under a new document. Toggling a flag that the store does
+		// not read must not cost that.
+		const cwd = path.join(tempDir.path(), "project");
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, false);
+		await settings.reloadForCwd(cwd);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		const store = current.getHindsightSessionState();
+		expect(store).toBeDefined();
+		expect(startedAt).toEqual([]);
+		// Progress a reset would erase, whether by replacing the state or by
+		// clearing it in place: it decides what the next `agent_end` retains and
+		// whether first-turn recall fires again.
+		store!.lastRetainedTurn = 3;
+		store!.hasRecalledForFirstTurn = true;
+		const rebuildsBefore = promptRebuilds;
+
+		cfgSharpshooterEnabled.override(settings, true);
+		// No explicit apply: the live edit alone must start the paired leg, ordered
+		// behind the next prompt rather than fired and forgotten by the UI.
+		await current.settleMemoryBackend();
+
+		expect(current.getHindsightSessionState()?.lastRetainedTurn).toBe(3);
+		expect(current.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(true);
+		expect(startedAt).toEqual([`start ${cwd}`]);
+		expect(promptRebuilds).toBeGreaterThan(rebuildsBefore);
+	});
+
+	it("rebuilds the prompt when a paired Sharpshooter setting changes under another backend", async () => {
+		// `sharpshooter.*` edits miss the selected backend's `<id>.` prefix because
+		// the wrapper keeps the store's id; without their own route the injected
+		// decision budget stays at its old value until some unrelated rebuild.
+		const cwd = path.join(tempDir.path(), "project");
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, true);
+		await settings.reloadForCwd(cwd);
+		trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		const rebuildsBefore = promptRebuilds;
+
+		cfgSharpshooterInjectionTokenLimit.override(settings, 1234);
+		await current.settleMemoryBackend();
+
+		expect(promptRebuilds).toBeGreaterThan(rebuildsBefore);
+	});
+
+	it("releases Sharpshooter when the destination project turns pairing off", async () => {
+		// The destination decides both ways. Left installed, the source project's
+		// subscription would keep extracting from this session's messages and its
+		// scheduler would keep consolidating a project the session has left.
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, true);
+		await settings.reloadForCwd(path.join(tempDir.path(), "source"));
+		const startedAt = trackSharpshooterStarts();
+		const releaseSpy = spyOn(sharpshooterModule, "releaseSharpshooterSession").mockImplementation(() => {});
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(startedAt).toHaveLength(1);
+		releaseSpy.mockClear();
+
+		// Sharpshooter's decisions are injected as developer instructions, so the
+		// prompt has to be rebuilt or the session keeps being told the source
+		// project's rules after pairing was turned off. The Hindsight rebuild does
+		// not do it when its own bank scope is unchanged.
+		await settings.reloadForCwd(path.join(tempDir.path(), "destination"));
+		cfgSharpshooterEnabled.override(settings, false);
+		// The edit listener applies the toggle on its own; settle it so the move's
+		// rebind is measured separately.
+		await current.settleMemoryBackend();
+		releaseSpy.mockClear();
+		const rebuildsBefore = promptRebuilds;
+		await rebindMemoryBackendForCwd(current);
+
+		expect(releaseSpy).toHaveBeenCalledTimes(1);
+		expect(startedAt).toHaveLength(1);
+		expect(promptRebuilds).toBeGreaterThan(rebuildsBefore);
+	});
+
+	it("does not catch up on the source prompt when the destination turns pairing on", async () => {
+		// The destination flips `sharpshooter.enabled` on while the primary stays. The settings
+		// reload is drained by the move's first settle, before its explicit rebind, and starts
+		// the leg itself: with a "start" reason it would file the source project's trailing
+		// prompt into the destination bank.
+		const source = path.join(tempDir.path(), "source");
+		const destination = path.join(tempDir.path(), "destination");
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, false);
+		await settings.reloadForCwd(source);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		expect(startedAt).toEqual([]);
+
+		await settings.reloadForCwd(destination);
+		current.sessionManager.setCwdWithoutRelocation(destination);
+		cfgSharpshooterEnabled.override(settings, true);
+		await rebindMemoryBackendForCwd(current);
+
+		expect(startedAt.length).toBeGreaterThan(0);
+		expect(startedAt.every(entry => entry === `rebind ${destination}`)).toBe(true);
+	});
+
+	/** A real extraction queue: the first prompt holds the slot behind `slow`, the second waits for it. */
+	async function queueBehindSlowExtraction(current: AgentSession) {
+		const model = getBundledModel("anthropic", "claude-haiku-4-5");
+		if (!model) throw new Error("Expected bundled Claude Haiku model");
+		cfgSharpshooterModel.override(settings, `${model.provider}/${model.id}`);
+		spyOn(current.modelRegistry, "getAll").mockReturnValue([model]);
+		spyOn(current.modelRegistry, "getAvailable").mockReturnValue([model]);
+		const slow = Promise.withResolvers<AssistantMessage>();
+		const completion = vi
+			.spyOn(ai, "completeSimple")
+			.mockImplementation(() =>
+				completion.mock.calls.length === 1 ? slow.promise : Promise.resolve(memoryReply(model)),
+			);
+		const enqueue = (text: string) =>
+			maybeStartSharpshooterExtraction({
+				session: current,
+				settings,
+				modelRegistry: current.modelRegistry,
+				agentDir: tempDir.path(),
+				message: { role: "user", content: [{ type: "text", text }], timestamp: Date.now() } as never,
+			});
+		enqueue("Keep the cyan status indicator on the first dashboard.");
+		for (let attempt = 0; attempt < 200 && completion.mock.calls.length < 1; attempt++) await Bun.sleep(5);
+		expect(completion).toHaveBeenCalledTimes(1);
+		enqueue("Record that this project ships on Tuesdays only.");
+		return { completion, slow, model };
+	}
+
+	it("never extracts a queued prompt when pairing is switched off while a full apply is suspended", async () => {
+		// The queue is parked for the leg that a full apply restarts. If the extraction holding the
+		// slot settles while the apply is suspended in backend resolution and pairing has just been
+		// switched off, draining it would spend a model call and write a decision after the flag
+		// was disabled.
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, true);
+		await settings.reloadForCwd(path.join(tempDir.path(), "project"));
+		const current = createSession(async () => []);
+		// The leg's scheduler would otherwise consolidate the bank on its first tick.
+		await writeSharpshooterState(tempDir.path(), current.sessionManager.getCwd(), {
+			v: 1,
+			lastConsolidatedAt: Date.now(),
+		});
+		await current.applyMemoryBackend();
+		const { completion, slow, model } = await queueBehindSlowExtraction(current);
+
+		const gate = gateBackendResolution([]);
+		const applying = current.applyMemoryBackend();
+		await Bun.sleep(20);
+		cfgSharpshooterEnabled.override(settings, false);
+		slow.resolve(memoryReply(model));
+		await flushSharpshooterExtraction(current, 500);
+		await flushSharpshooterExtraction(current, 500);
+		gate.resolve();
+		await applying;
+		await current.settleMemoryBackend();
+		await flushSharpshooterExtraction(current, 500);
+
+		expect(completion).toHaveBeenCalledTimes(1);
+	});
+
+	it("extracts a queued prompt on the replacement leg when a full apply keeps pairing", async () => {
+		// The carry that the test above must not extend: the restarted leg takes the queue.
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, true);
+		await settings.reloadForCwd(path.join(tempDir.path(), "project"));
+		const current = createSession(async () => []);
+		await writeSharpshooterState(tempDir.path(), current.sessionManager.getCwd(), {
+			v: 1,
+			lastConsolidatedAt: Date.now(),
+		});
+		await current.applyMemoryBackend();
+		const { completion, slow, model } = await queueBehindSlowExtraction(current);
+
+		cfgMemoryBackend.override(settings, "local");
+		await current.settleMemoryBackend();
+		slow.resolve(memoryReply(model));
+		for (let attempt = 0; attempt < 200 && completion.mock.calls.length < 2; attempt++) await Bun.sleep(5);
+
+		expect(completion).toHaveBeenCalledTimes(2);
+		expect(JSON.stringify(completion.mock.calls[1])).toContain("ships on Tuesdays");
+	});
+
+	it("catches up on a destination prompt when pairing is enabled after a Hindsight move completed", async () => {
+		// A Hindsight-to-Hindsight move never reaches the full apply that commits the applied
+		// cwd, so the explicit rebind has to. Left at the source, every later toggle reads as
+		// part of a move and skips the catch-up that a destination prompt needs.
+		const source = path.join(tempDir.path(), "source");
+		const destination = path.join(tempDir.path(), "destination");
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, false);
+		await settings.reloadForCwd(source);
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		await settings.reloadForCwd(destination);
+		current.sessionManager.setCwdWithoutRelocation(destination);
+		await rebindMemoryBackendForCwd(current);
+		expect(startedAt).toEqual([]);
+
+		cfgSharpshooterEnabled.override(settings, true);
+		await current.settleMemoryBackend();
+
+		expect(startedAt).toEqual([`start ${destination}`]);
+	});
+
+	/** Replaces backend resolution with a gate, so a test can act while the apply is suspended in it. */
+	function gateBackendResolution(events: string[]) {
+		const gate = Promise.withResolvers<void>();
+		const stub = {
+			id: "off",
+			start: (options: { reason?: string }) => {
+				events.push(`start ${options.reason ?? "start"}`);
+			},
+		} as unknown as MemoryBackend;
+		spyOn(resolveModule, "resolveMemoryBackend").mockImplementation(async () => {
+			await gate.promise;
+			events.push("resolved");
+			return stub;
+		});
+		return gate;
+	}
+
+	it("starts as a rebind when the move lands while the backend is still resolving", async () => {
+		// The reason used to be fixed before the teardown and the lazy store import, so a move that
+		// landed in that window started the backend with a catch-up on the source project's prompt.
+		const destination = path.join(tempDir.path(), "destination");
+		cfgMemoryBackend.override(settings, "local");
+		cfgSharpshooterEnabled.override(settings, false);
+		await settings.reloadForCwd(path.join(tempDir.path(), "source"));
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+
+		const events: string[] = [];
+		const gate = gateBackendResolution(events);
+		const applying = current.applyMemoryBackend();
+		await Bun.sleep(20);
+		current.sessionManager.setCwdWithoutRelocation(destination);
+		gate.resolve();
+		await applying;
+
+		expect(events).toEqual(["resolved", "start rebind"]);
+	});
+
+	it("releases the queue when pairing is switched off while the backend is still resolving", async () => {
+		// The queue is kept because a leg was due to restart. If the flag flips during the store
+		// import, an extraction that settles before the queued settings edit applies would drain
+		// that queue after pairing was disabled.
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, true);
+		await settings.reloadForCwd(path.join(tempDir.path(), "project"));
+		trackSharpshooterStarts();
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+
+		const events: string[] = [];
+		const gate = gateBackendResolution(events);
+		spyOn(sharpshooterModule, "releaseSharpshooterSession").mockImplementation((_session, options) => {
+			events.push(options?.keepPending ? "release keep" : "release");
+		});
+		const applying = current.applyMemoryBackend();
+		await Bun.sleep(20);
+		cfgSharpshooterEnabled.override(settings, false);
+		gate.resolve();
+		await applying;
+
+		const afterResolve = events.slice(events.indexOf("resolved") + 1);
+		expect(afterResolve.slice(0, 2)).toEqual(["release", "start start"]);
+	});
+
+	it("leaves Sharpshooter alone on a cwd move when the flag is off", async () => {
+		cfgMemoryBackend.override(settings, "hindsight");
+		cfgHindsightApiUrl.override(settings, "http://127.0.0.1:1");
+		cfgHindsightMentalModelsEnabled.override(settings, false);
+		cfgSharpshooterEnabled.override(settings, false);
+		await settings.reloadForCwd(path.join(tempDir.path(), "source"));
+		const startedAt = trackSharpshooterStarts();
+
+		const current = createSession(async () => []);
+		await current.applyMemoryBackend();
+		await settings.reloadForCwd(path.join(tempDir.path(), "destination"));
+		await rebindMemoryBackendForCwd(current);
+
+		expect(startedAt).toEqual([]);
 	});
 
 	it("applies memory settings edited mid-session before the next prompt", async () => {
