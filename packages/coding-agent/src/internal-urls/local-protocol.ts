@@ -28,6 +28,11 @@ import { formatByteSize } from "../utils/video";
 export interface LocalProtocolOptions {
 	getArtifactsDir?: () => string | null;
 	getSessionId?: () => string | null;
+	/**
+	 * The root itself, when another process already resolved it with this function (a hosted terminal reading the
+	 * session host's `local://` files: the host's temp directory is not this process's). Wins over the other two.
+	 */
+	getLocalRoot?: () => string | null;
 }
 
 const WINDOWS_LOCAL_ROOT_MAX_CHARS = 180;
@@ -238,6 +243,8 @@ function extractRelativePath(url: InternalUrl): string {
 
 /** Resolve the session-scoped local:// root, shortening long Windows artifact paths before writes hit MAX_PATH. */
 export function resolveLocalRoot(options: LocalProtocolOptions, platform: NodeJS.Platform = process.platform): string {
+	const resolvedRoot = options.getLocalRoot?.();
+	if (resolvedRoot) return resolvedRoot;
 	const artifactsDir = options.getArtifactsDir?.();
 	if (artifactsDir) {
 		const candidate = path.resolve(artifactsDir, "local");

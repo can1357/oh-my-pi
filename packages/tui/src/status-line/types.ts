@@ -27,12 +27,14 @@ export type CollabSessionState = SessionState & {
 	contextUsage?: ContextUsage;
 };
 
-/** Collab session indicator + (guest-only) host-state override for segments. */
+/** Shared-session indicator + (guest-only) host-state override for segments. `hosted`: a client attached to a session host. */
 export interface CollabStatus {
-	role: "host" | "guest";
+	role: "host" | "guest" | "hosted";
 	participantCount: number;
 	/** Guest only: host footer snapshot that overrides locally computed values. */
 	stateOverride?: CollabSessionState | null;
+	/** Hosted only: the host's context usage, which replaces the estimate the idle local replica would compute. */
+	contextUsage?: ContextUsage;
 }
 
 export interface StatusLineSegmentOptions {

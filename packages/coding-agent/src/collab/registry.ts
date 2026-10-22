@@ -28,6 +28,17 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { IpcConnection, IpcServer, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { getBaseConfigRoot, isEnoent, isFsError } from "@oh-my-pi/pi-utils";
+import {
+	assertPrivateDir,
+	endpointFiles,
+	ensurePrivateDir,
+	pidAlive,
+	removeFilesSync,
+	tokenMatches,
+	writePrivateJson,
+} from "../ipc/private-endpoint";
+
+const COLLAB_REGISTRY_LABEL = "collab registry";
 
 /** Discovery metadata / IPC protocol version. Mixed omp versions fail safely. */
 export const COLLAB_REGISTRY_VERSION = 1;
@@ -199,14 +210,6 @@ function parseDiscoveryMetadata(text: string): DiscoveryMetadata | null {
 	};
 }
 
-function tokenMatches(expected: string, presented: unknown): boolean {
-	if (typeof presented !== "string") return false;
-	const a = Buffer.from(expected, "utf8");
-	const b = Buffer.from(presented, "utf8");
-	if (a.length !== b.length) return false;
-	return crypto.timingSafeEqual(a, b);
-}
-
 function isAccess(value: unknown): value is CollabAccess {
 	return value === "view" || value === "control";
 }
@@ -355,57 +358,6 @@ function handleConnection(
 }
 
 /**
- * The registry must be a real directory; POSIX also verifies its owner.
- * Both publication and listing check this: listing prunes malformed
- * entries, so following a symlink into an unrelated directory would let a
- * planted link turn `omp collab list` into a deletion tool.
- */
-async function assertPrivateDir(dir: string): Promise<fs.Stats | null> {
-	const stat = await fs.promises.lstat(dir);
-	if (stat.isSymbolicLink()) throw new Error(`collab registry directory is a symlink: ${dir}`);
-	if (!stat.isDirectory()) throw new Error(`collab registry path is not a directory: ${dir}`);
-	if (process.platform === "win32") return null;
-	const uid = process.getuid?.();
-	if (uid !== undefined && stat.uid !== uid) {
-		throw new Error(`collab registry directory is not owned by the current user: ${dir}`);
-	}
-	return stat;
-}
-
-/**
- * Create the directory with owner-only POSIX permissions. Windows retains
- * the config root's ACL. `mkdir` with a mode leaves an
- * existing directory's permissions alone, so an already-present directory is
- * tightened explicitly; a symlink or a directory owned by another user is
- * refused rather than published into.
- */
-async function ensurePrivateDir(dir: string): Promise<void> {
-	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
-	const stat = await assertPrivateDir(dir);
-	if (stat && (stat.mode & 0o077) !== 0) await fs.promises.chmod(dir, 0o700);
-}
-
-/**
- * Unix files an endpoint leaves on disk: the socket and the native listener's
- * `<socket>.bind.lock`. Endpoint names are unique per publication, so no other
- * binder can contend for that lock and unlinking it is race-free.
- */
-function endpointFiles(endpoint: string): string[] {
-	return process.platform === "win32" ? [] : [endpoint, `${endpoint}.bind.lock`];
-}
-
-/** Best-effort synchronous unlink; a survivor is pruned by the next list. */
-function removeFilesSync(files: string[]): void {
-	for (const file of files) {
-		try {
-			fs.rmSync(file, { force: true });
-		} catch {
-			// Best-effort.
-		}
-	}
-}
-
-/**
  * Publish a live Collab host to the local registry.
  *
  * Creates the owner-only runtime dir, starts a private IPC endpoint backed by
@@ -419,7 +371,7 @@ export async function publishCollabHost(
 	options?: CollabPublishOptions,
 ): Promise<CollabHostPublication> {
 	const dir = options?.dir ?? collabHostsRuntimeDir();
-	await ensurePrivateDir(dir);
+	await ensurePrivateDir(dir, COLLAB_REGISTRY_LABEL);
 
 	const instanceId = options?.instanceId ?? crypto.randomBytes(8).toString("hex");
 	if (!INSTANCE_ID_PATTERN.test(instanceId)) throw new Error("invalid collab registry instance id");
@@ -452,24 +404,8 @@ export async function publishCollabHost(
 			createdAt: Date.now(),
 			token,
 		};
-		// Write-then-rename so a concurrent list never observes a partial file
-		// (it would classify the entry as malformed and prune it, leaving this
-		// host published but undiscoverable). The temp suffix keeps it outside
-		// the `*.json` listing filter; the entry ID makes the name unique. Any
-		// failure after the exclusive create removes the temp file again.
-		const tmpPath = `${metaPath}.tmp`;
-		const handle = await fs.promises.open(tmpPath, "wx", 0o600);
-		try {
-			try {
-				await handle.writeFile(JSON.stringify(meta), "utf8");
-			} finally {
-				await handle.close();
-			}
-			await fs.promises.rename(tmpPath, metaPath);
-		} catch (err) {
-			fs.rmSync(tmpPath, { force: true });
-			throw err;
-		}
+		// Atomic write so a concurrent list never observes a partial file.
+		await writePrivateJson(metaPath, meta);
 	} catch (err) {
 		await server.close();
 		removeFilesSync(endpointFiles(endpoint));
@@ -564,15 +500,6 @@ async function querySnapshot(meta: DiscoveryMetadata, timeoutMs: number): Promis
 	return snapshot ? { status: "ok", value: snapshot } : { status: "skip" };
 }
 
-function pidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
 /**
  * Remove one stale entry. Artifact names are unique per publication, so the
  * metadata and endpoint observed dead can only belong to that publication;
@@ -631,7 +558,7 @@ async function listLiveEntries(options?: CollabListOptions): Promise<LiveEntry[]
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS;
 	let names: string[];
 	try {
-		await assertPrivateDir(dir);
+		await assertPrivateDir(dir, COLLAB_REGISTRY_LABEL);
 		names = await fs.promises.readdir(dir);
 	} catch (err) {
 		if (isEnoent(err)) return [];

@@ -223,6 +223,7 @@ export class CollabHost {
 	/** Rejects the in-flight first-open wait when `stop()` overtakes `start()`. */
 	#abortStart: ((reason: Error) => void) | null = null;
 	#unsubscribe?: () => void;
+	#entryUnsubscribe: (() => void) | undefined;
 	/**
 	 * Guest identity and permission, keyed by relay peer id. Drives the
 	 * participant list, notices, the status segment and the writable-peer fan-out.
@@ -490,7 +491,7 @@ export class CollabHost {
 			}
 		}
 		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
-		this.#ctx.sessionManager.onEntryAppended = entry => {
+		this.#entryUnsubscribe = this.#ctx.sessionManager.subscribeEntryAppended(entry => {
 			if (isWireSessionEntry(entry) && this.#broadcastAllowed()) {
 				const bounded = serializeReplicatedEntry(entry);
 				const shrunk = bounded.value;
@@ -506,7 +507,7 @@ export class CollabHost {
 			// Model/thinking/title changes land as entries while idle; refresh
 			// guest state promptly (debounce + JSON diff dedupe).
 			this.#scheduleStateBroadcast();
-		};
+		});
 		this.#updateStatusSegment();
 
 		// Publish to the local host registry only after the relay connection
@@ -593,7 +594,8 @@ export class CollabHost {
 				.close()
 				.catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
 		}
-		this.#ctx.sessionManager.onEntryAppended = undefined;
+		this.#entryUnsubscribe?.();
+		this.#entryUnsubscribe = undefined;
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
 		for (const unsubscribe of this.#busUnsubscribers) unsubscribe();
@@ -809,7 +811,7 @@ export class CollabHost {
 		// into it later, so the live entries are read without a defensive deep
 		// copy. Chunk frames are assembled from these strings only as the
 		// transport drains.
-		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
+		const snapshot = this.#ctx.sessionManager.snapshotForReplication(value => value);
 		const snapshotEntries = this.#serializeSnapshotEntries(snapshot.entries.filter(isWireSessionEntry));
 		const state = this.#buildState();
 		// State broadcasts pause while no guest is joined, so the dedupe baseline
