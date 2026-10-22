@@ -655,6 +655,66 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(run.lifecycle.map(frame => frame.status)).toContain("aborted");
 	});
 
+	it("publishes an older wake's yield its handler allows while the newer wake that closed it is still running", async () => {
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const gate = Promise.withResolvers<string>();
+		const stopEntered = Promise.withResolvers<void>();
+		const releaseStop = Promise.withResolvers<void>();
+		const newerTurnRunning = Promise.withResolvers<void>();
+		const releaseNewerTurn = Promise.withResolvers<void>();
+		// The older wake's lifecycle end: the newer turn cannot end before it is released.
+		const olderEnded = Promise.withResolvers<string | undefined>();
+		const run = await setup({
+			manager,
+			responses: [
+				yieldCall("OLDER-PAYLOAD"),
+				async () => {
+					newerTurnRunning.resolve();
+					await releaseNewerTurn.promise;
+					return { content: ["newer turn answered in prose"] };
+				},
+				// The owner job's delivered result.
+				{ content: ["noted the job result"] },
+			],
+			onStop: async (_event, callIndex) => {
+				if (callIndex !== 1) return undefined;
+				stopEntered.resolve();
+				await releaseStop.promise;
+				return undefined;
+			},
+		});
+		run.eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
+			const status = toLifecycleFrame(data).status;
+			if (status !== undefined && status !== "started") olderEnded.resolve(status);
+		});
+		// Owner background work keeps the first wake's observation open after its turn yielded.
+		manager.register("bash", "bg build", ({ signal }) => untilAborted(signal, gate.promise).then(() => "ok"), {
+			id: "bg-job",
+			ownerId: AGENT_ID,
+		});
+
+		try {
+			await deliverWake(run.session, "m1");
+			await run.session.waitForIdle();
+			// The newer wake closes the open observation: its pass starts, then the newer turn runs.
+			await deliverWake(run.session, "m2");
+			await stopEntered.promise;
+			await newerTurnRunning.promise;
+			// Allowed while the newer turn has published nothing: the older yield is the result.
+			releaseStop.resolve();
+			expect(await olderEnded.promise).toBe("completed");
+			expect(await Bun.file(run.artifact).text()).toContain("OLDER-PAYLOAD");
+		} finally {
+			releaseStop.resolve();
+			releaseNewerTurn.resolve();
+			gate.resolve("ok");
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+			await manager.waitForAll();
+		}
+	});
+
 	it("stops a settling continuation from observing a newer wake's turn", async () => {
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
