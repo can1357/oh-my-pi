@@ -5,9 +5,20 @@ import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { formatStatusIcon } from "@oh-my-pi/pi-tui/render/render-utils";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
+import type { TspNode } from "@oh-my-pi/pi-wire";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 const uiStub = { requestRender() {}, requestComponentRender() {}, clearInlineImages() {} } as unknown as TUI;
+
+/** A describer for terminals with the data-first `tool` surface. */
+const NATIVE_CX = {
+	cols: 100,
+	reduceMotion: false,
+	dark: true,
+	supports: () => true,
+	feature: () => true,
+} as unknown as DescribeContext;
 
 function bashCard(command: string, output: string): ToolExecutionComponent {
 	const card = new ToolExecutionComponent("bash", { command }, {}, undefined, uiStub);
@@ -251,6 +262,58 @@ describe("tool output details", () => {
 		expect(rows).toHaveLength(1);
 		expect(plain(rows)).toContain("one.ts:1-5");
 		expect(plain(rows)).toContain("two.ts:9-12");
+	});
+
+	it("folds a multi-target read call to one native row", () => {
+		const group = new ReadToolGroupComponent({ showContentPreview: false });
+		group.updateArgs({ path: "src/one.ts:1-5, src/two.ts:9-12" }, "read-0");
+		group.updateResult(
+			{
+				content: [{ type: "text", text: "combined" }],
+				details: { displayReadTargets: ["src/one.ts:1-5", "src/two.ts:9-12"] },
+			},
+			false,
+			"read-0",
+		);
+
+		group.setToolOutputDetailsHidden(true);
+
+		const folded = group.describe(NATIVE_CX) as TspNode;
+		expect(folded.k).toBe("tool");
+		expect(folded.c ?? []).toHaveLength(0);
+		expect(folded.p as { target?: string }).toMatchObject({ target: "src/one.ts:1-5, src/two.ts:9-12" });
+
+		group.setToolOutputDetailsHidden(false);
+
+		const expanded = group.describe(NATIVE_CX) as TspNode;
+		expect((expanded.c ?? []).filter(child => child.k === "row")).toHaveLength(2);
+	});
+
+	it("keeps one native row per folded read call", () => {
+		const group = new ReadToolGroupComponent({ showContentPreview: false });
+		group.updateArgs({ path: "a.ts:1-5, a.ts:9-12" }, "read-a");
+		group.updateResult(
+			{
+				content: [{ type: "text", text: "a" }],
+				details: { displayReadTargets: ["a.ts:1-5", "a.ts:9-12"] },
+			},
+			false,
+			"read-a",
+		);
+		group.updateArgs({ path: "b.ts" }, "read-b");
+		group.updateResult({ content: [{ type: "text", text: "b" }] }, false, "read-b");
+
+		group.setToolOutputDetailsHidden(true);
+
+		const dataFirst = group.describe(NATIVE_CX) as TspNode;
+		expect(dataFirst.p as { target?: string }).toMatchObject({ target: "2 calls" });
+		expect((dataFirst.c ?? []).filter(child => child.k === "row")).toHaveLength(2);
+
+		// The fallback card (a terminal without the data-first `tool` feature) folds
+		// its list the same way: one item per call, not one per target.
+		const fallback = group.describe() as TspNode;
+		const list = (fallback.c ?? []).find(child => child.k === "list");
+		expect(list?.c ?? []).toHaveLength(2);
 	});
 
 	it("keeps one folded row per call when a group holds several reads", () => {

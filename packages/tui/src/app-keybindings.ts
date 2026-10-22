@@ -116,7 +116,7 @@ export const KEYBINDINGS = {
 		description: "Reset terminal display",
 	},
 	"app.display.toggleDetail": {
-		defaultKeys: [],
+		defaultKeys: "ctrl+h",
 		description: "Toggle thinking blocks and tool output details",
 	},
 	"app.thinking.cycle": {

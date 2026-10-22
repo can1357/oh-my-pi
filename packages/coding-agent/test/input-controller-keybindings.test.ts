@@ -91,7 +91,10 @@ async function createContext() {
 		"app.clipboard.pasteImage": ["ctrl+v"],
 		"app.tools.toggleVisibility": ["ctrl+shift+o"],
 		"app.tools.expand": ["ctrl+o"],
-		"app.display.toggleDetail": ["ctrl+h"],
+		// Read from the shipped definition rather than hard-coded: an action without
+		// a default chord gets no listener match on a default install, and this map
+		// must not be able to hide that.
+		"app.display.toggleDetail": [...KeybindingsManager.inMemory().getKeys("app.display.toggleDetail")],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();

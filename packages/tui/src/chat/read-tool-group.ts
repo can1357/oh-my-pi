@@ -32,7 +32,7 @@ import { formatUsageRow } from "../overlays/usage-row";
 import { formatCount, isUrlLikePath, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeToolHead } from "../tools/renderer";
-import { card, code, col, keyed, md, node, span, text, withHidden } from "../native/describe";
+import { card, code, col, keyed, md, node, row, span, text, withHidden } from "../native/describe";
 import {
 	type DescribeContext,
 	type NativeChild,
@@ -452,9 +452,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 					// Expanded rows keep a long tree node hanging beneath its connector's
 					// guides instead of wrapping to column zero; the inner `Text` wraps
 					// whatever is left over exactly as it did before.
-					return this.#summaryLines
-						.flatMap(line => wrapTreeLine(line, contentWidth, theme) ?? [line])
-						.join("\n");
+					return this.#summaryLines.flatMap(line => wrapTreeLine(line, contentWidth, theme) ?? [line]).join("\n");
 				}
 				return this.#summaryLines
 					.map((line, index) => {
@@ -847,14 +845,19 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 * code or rendered Markdown, clamped per file while collapsed.
 	 */
 	#describeTool(entries: readonly ReadEntry[]): NativeNode {
-		const rows = this.#buildSummaryRows(this.#displayTargetsForEntries(entries));
+		const targets = this.#displayTargetsForEntries(entries);
+		const rows = this.#buildSummaryRows(targets);
 		const status = this.#groupStatus(entries);
 		const previews = entries.filter(entry => entry.status !== "error" && this.#shouldRenderPreview(entry));
 		const body: NativeChild[] = [];
 		let head: NativeToolHead;
 		// Previews (and a long error message) are what a collapse hides; plain rows always show.
 		let collapsible = previews.length > 0;
-		if (rows.length <= 1) {
+		if (this.#toolOutputDetailsHidden) {
+			const folded = this.#foldedToolRows(entries, targets, body);
+			head = folded.head;
+			collapsible ||= folded.collapsible;
+		} else if (rows.length <= 1) {
 			const row = rows[0];
 			const error = row && this.#statusForTargets(row.targets) === "error" ? this.#errorFor(row) : undefined;
 			const rowHead: NativeToolHead = row ? this.#nativeRowHead(row) : { target: "…", targetKind: "path" };
@@ -910,6 +913,76 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			},
 			body,
 		);
+	}
+
+	/**
+	 * Head and body for folded tool output details: the setting promises one row
+	 * per read call, so a call that fanned out into several file rows collapses
+	 * onto its own row here instead of retaining the expanded target tree.
+	 */
+	#foldedToolRows(
+		entries: readonly ReadEntry[],
+		targets: readonly ReadDisplayTarget[],
+		body: NativeChild[],
+	): { head: NativeToolHead; collapsible: boolean } {
+		const calls = entries.map(entry => ({
+			entry,
+			rows: this.#buildSummaryRows(targets.filter(target => target.entry === entry)),
+		}));
+		const usageByCall = this.#usageRowsByIndex(
+			new Map(entries.map((entry, index): [string, number] => [entry.toolCallId, index])),
+		);
+		// A lone call is the whole group, so its targets share the inline head.
+		const only = calls.length === 1 ? calls[0] : undefined;
+		if (only) {
+			for (const [i, usage] of (usageByCall.get(0) ?? []).entries()) body.push(this.#nativeUsage(usage, `u${i}`));
+			const row = only.rows[0];
+			if (only.rows.length === 1 && row) {
+				const rowHead = this.#nativeRowHead(row);
+				const error = this.#statusForTargets(row.targets) === "error" ? this.#errorFor(row) : undefined;
+				if (error === undefined) return { head: rowHead, collapsible: false };
+				const view = inlineErrorView(rowHead, error);
+				if (view.body) body.push(...view.body);
+				return { head: view.tool ?? rowHead, collapsible: view.body !== undefined };
+			}
+			const summary = only.rows.map(item => this.#nativeRowHead(item).target).join(", ");
+			return { head: { target: summary || "…", targetKind: "text" }, collapsible: false };
+		}
+		for (const [index, call] of calls.entries()) {
+			body.push(this.#nativeCallRow(call.entry, call.rows, `c${index}`));
+			for (const [i, usage] of (usageByCall.get(index) ?? []).entries()) {
+				body.push(this.#nativeUsage(usage, `u${index}.${i}`));
+			}
+		}
+		return { head: { target: formatCount("call", calls.length), targetKind: "text" }, collapsible: false };
+	}
+
+	/** One folded row for a read call: every target the call resolved, on its single line. */
+	#nativeCallRow(entry: ReadEntry, rows: readonly ReadSummaryRow[], key: string): NativeNode {
+		const targets = rows.flatMap(row => row.targets);
+		const status = targets.length > 0 ? this.#statusForTargets(targets) : entry.status;
+		const spans = this.#callPathSpans(rows);
+		return keyed(
+			row(
+				[
+					node("icon", { name: status === "error" ? "x-circle" : "file", tone: READ_STATUS_TONE[status] }),
+					text(spans, { lines: 1, truncate: "end", shrink: 1 }),
+				],
+				{ role: "omp.tool.file", tone: READ_STATUS_TONE[status] },
+			),
+			key,
+		);
+	}
+
+	/** The paths of one call's summary rows, comma-joined: the folded row's whole label. */
+	#callPathSpans(rows: readonly ReadSummaryRow[]): TspSpan[] {
+		const spans: TspSpan[] = [];
+		for (const [index, row] of rows.entries()) {
+			if (index > 0) spans.push(span(", ", "dim"));
+			spans.push(...this.#nativePathSpans(row));
+		}
+		if (spans.length === 0) spans.push(span("…", "toolOutput"));
+		return spans;
 	}
 
 	/** Head data for one summary row: the path (+ selector) target, its link, correction and conflicts. */
@@ -1001,14 +1074,52 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	#describeGroup(entries: readonly ReadEntry[]): NativeNode {
-		const rows = this.#buildSummaryRows(this.#displayTargetsForEntries(entries));
+		const targets = this.#displayTargetsForEntries(entries);
+		const rows = this.#buildSummaryRows(targets);
 		const usageByRow = this.#usageRowsBySummaryRow(rows);
 		const previews = entries.filter(entry => this.#shouldRenderPreview(entry));
 		const status = this.#groupStatus(entries);
 		const title = span("Read", "toolTitle");
 		const children: NativeChild[] = [];
 		let head: TspSpan[] = [title];
-		if (rows.length === 1) {
+		if (this.#toolOutputDetailsHidden) {
+			// Folded details: one row per read call, so a call's targets share its row.
+			const calls = entries.map(entry => this.#buildSummaryRows(targets.filter(target => target.entry === entry)));
+			const usageByCall = this.#usageRowsByIndex(
+				new Map(entries.map((entry, index): [string, number] => [entry.toolCallId, index])),
+			);
+			if (calls.length === 1) {
+				head = [title, span(" "), ...this.#callPathSpans(calls[0]!)];
+				for (const usage of usageByCall.get(0) ?? []) children.push(this.#nativeUsage(usage, "u0"));
+			} else {
+				head = [title, span(` (${calls.length})`, "dim")];
+				const items = calls.map((callRows, index) => {
+					const usage = (usageByCall.get(index) ?? []).map(usageRow =>
+						plainText(
+							formatUsageRow(
+								usageRow.usage,
+								usageRow.durationMs,
+								usageRow.ttftMs,
+								usageRow.timestamp,
+								usageRow.turnElapsedMs,
+							),
+						),
+					);
+					const callTargets = callRows.flatMap(callRow => callRow.targets);
+					return node(
+						"item",
+						{
+							label: this.#callPathSpans(callRows),
+							tone: READ_STATUS_TONE[this.#statusForTargets(callTargets)],
+							detail: usage.length > 0 ? [span(usage.join(" · "), "dim")] : undefined,
+						},
+						[],
+						`c${index}`,
+					);
+				});
+				children.push(node("list", {}, items));
+			}
+		} else if (rows.length === 1) {
 			head = [title, span(" "), ...this.#nativePathSpans(rows[0]!)];
 			if (previews.length === 0) {
 				for (const usage of usageByRow.get(0) ?? []) children.push(this.#nativeUsage(usage, "u0"));
@@ -1129,7 +1240,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 		// Clear previous children and rebuild the summary and preview blocks.
 		this.clear();
-this.#summaryLines = [];
+		this.#summaryLines = [];
 		this.#summaryUsage = [];
 		this.#text = this.#createSummaryText();
 

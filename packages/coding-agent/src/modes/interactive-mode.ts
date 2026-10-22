@@ -4295,9 +4295,11 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Field comparisons skip effects the keybinding toggles already applied.
 		const hideToolOutputDetails = cfgDisplayHideToolOutputDetails.get(this.settings);
-		if (any("display.hideToolOutputDetails") && hideToolOutputDetails !== this.hideToolOutputDetails) {
-			this.hideToolOutputDetails = hideToolOutputDetails;
-			this.chatContainer.setToolOutputDetailsHidden(hideToolOutputDetails);
+		if (any("display.hideToolOutputDetails")) {
+			// Same reset as the Ctrl+H keybinding: rows already in scrollback keep the
+			// presentation they were emitted with until the ledger is forgotten. The
+			// helper no-ops when the keybinding already moved the field.
+			this.#uiHelpers.applyToolOutputDetailsHidden(hideToolOutputDetails);
 		}
 		const hideToolActivity = cfgDisplayHideToolActivity.get(this.settings);
 		if (any("display.hideToolActivity") && hideToolActivity !== this.hideToolActivity) {

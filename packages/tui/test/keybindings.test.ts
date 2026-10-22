@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { addKeyAliases, canonicalKeyId, KeybindingsManager, parseKey, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui";
+import { KEYBINDINGS } from "@oh-my-pi/pi-tui/app-keybindings";
 
 describe("KeybindingsManager", () => {
 	it("does not evict selector confirm when input submit is rebound", () => {
@@ -64,5 +65,15 @@ describe("KeybindingsManager", () => {
 			expect(aliases.has(canonicalKeyId(parsed))).toBe(true);
 			expect(keybindings.matches(input, "tui.input.copy")).toBe(true);
 		}
+	});
+});
+
+describe("shipped app keybindings", () => {
+	it("binds the combined detail toggle on a default install", () => {
+		const keybindings = new KeybindingsManager(KEYBINDINGS);
+
+		expect(keybindings.getKeys("app.display.toggleDetail")).toEqual(["ctrl+h"]);
+		// Kitty-encoded Ctrl+H: the only encoding that is not the legacy Backspace byte.
+		expect(keybindings.matches("\x1b[104;5u", "app.display.toggleDetail")).toBe(true);
 	});
 });

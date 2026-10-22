@@ -181,7 +181,7 @@ function makeRenderCtx(
 		statusLine: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
 		updateEditorTopBorder: vi.fn(),
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn(), imageBudget: undefined },
+		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn(), resetDisplay: vi.fn(), imageBudget: undefined },
 		resetTranscript: () => {
 			ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 			ctx.chatContainer.disposeChildren();
@@ -683,6 +683,66 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 		expect(countImageComponents(chatContainer)).toBe(2);
 		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("Read reopened.png");
 		expect(ctx.ui.requestRender).toHaveBeenCalledWith(true, { clearScrollback: true });
+	});
+});
+
+describe("UiHelpers.applyToolOutputDetailsHidden — live setting", () => {
+	it("repaints retired rows and resyncs read-result images", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const transcript = transcriptWith([assistantToolCall("read-live", "read", { path: "live.png" })]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript, true, false, false);
+		const assistant = new AssistantMessageComponent(
+			assistantToolCall("read-live", "read", { path: "live.png" }),
+			false,
+			() => {},
+		);
+		assistant.setImagesVisible(true);
+		assistant.setToolResultImages("read-live", [pngImage]);
+		assistant.setToolResultImagesVisible(true);
+		chatContainer.addChild(assistant);
+		const resetStableEmission = vi.spyOn(chatContainer, "resetStableEmission");
+		expect(hasImageComponent(chatContainer)).toBe(true);
+
+		new UiHelpers(ctx).applyToolOutputDetailsHidden(true);
+
+		expect(ctx.hideToolOutputDetails).toBe(true);
+		expect(resetStableEmission).toHaveBeenCalledTimes(1);
+		expect(ctx.ui.resetDisplay).toHaveBeenCalledTimes(1);
+		expect(hasImageComponent(chatContainer)).toBe(false);
+
+		new UiHelpers(ctx).applyToolOutputDetailsHidden(false);
+
+		expect(ctx.hideToolOutputDetails).toBe(false);
+		expect(resetStableEmission).toHaveBeenCalledTimes(2);
+		expect(hasImageComponent(chatContainer)).toBe(true);
+
+		// A change the Ctrl+H keybinding already applied arrives with the field
+		// equal: nothing to repaint, so no second destructive reset.
+		new UiHelpers(ctx).applyToolOutputDetailsHidden(false);
+
+		expect(resetStableEmission).toHaveBeenCalledTimes(2);
+		expect(ctx.ui.resetDisplay).toHaveBeenCalledTimes(2);
+	});
+
+	it("keeps read-result images hidden while tool activity is off", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const transcript = transcriptWith([assistantToolCall("read-off", "read", { path: "off.png" })]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript, true, true, true);
+		const assistant = new AssistantMessageComponent(
+			assistantToolCall("read-off", "read", { path: "off.png" }),
+			false,
+			() => {},
+		);
+		assistant.setImagesVisible(true);
+		assistant.setToolResultImages("read-off", [pngImage]);
+		chatContainer.addChild(assistant);
+
+		new UiHelpers(ctx).applyToolOutputDetailsHidden(false);
+
+		expect(ctx.hideToolOutputDetails).toBe(false);
+		expect(hasImageComponent(chatContainer)).toBe(false);
 	});
 });
 
