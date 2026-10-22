@@ -9,8 +9,8 @@ import { type Component, Markdown } from "../index";
 import type { NativeToolHead, NativeToolView, RenderResultOptions } from "./renderer";
 import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import { ansi, md } from "../native/describe";
-import type { NativeChild } from "../native/node";
+import { ansi, md, node, span } from "../native/describe";
+import type { NativeChild, NativeNode } from "../native/node";
 import { OwnerMemo } from "../native/memo";
 import { plainText } from "../native/spans";
 import { errorText, noteText, truncationNotice } from "./native-view";
@@ -291,8 +291,7 @@ function visibleMcpArgs(args: Record<string, unknown> | undefined): [string, unk
 const MCP_ARGS_SUMMARY_CHARS = 160;
 
 /** Native MCP head: the tool title with a one-line args summary as target. */
-function mcpHead(title: string, args: Record<string, unknown> | undefined): NativeToolHead {
-	const entries = visibleMcpArgs(args);
+function mcpHead(title: string, entries: readonly [string, unknown][]): NativeToolHead {
 	const summary =
 		entries.length > 0
 			? formatArgsInline(Object.fromEntries(entries), MCP_ARGS_SUMMARY_CHARS, { characterBudget: true })
@@ -300,17 +299,33 @@ function mcpHead(title: string, args: Record<string, unknown> | undefined): Nati
 	return { title, target: summary ? plainText(summary) : undefined, targetKind: "text" };
 }
 
-/** Native MCP call view: the head only, inline while pending. */
+/**
+ * Native counterpart of the ANSI card's Args tree: the complete arguments,
+ * folded under an `Args` section because the head summary clips each value.
+ */
+function mcpArgsSection(entries: readonly [string, unknown][]): NativeNode | undefined {
+	if (entries.length === 0) return undefined;
+	return node(
+		"section",
+		{ head: [span("Args", "muted")], collapsible: true, collapsed: true },
+		[describeJsonTree(Object.fromEntries(entries))],
+		"args",
+	);
+}
+
+/** Native MCP call view: the head plus the folded args, inline while pending. */
 export function describeMCPCall(args: Record<string, unknown>, label: string): NativeToolView {
-	return { tool: mcpHead(label, args), inline: true };
+	const entries = visibleMcpArgs(args);
+	const section = mcpArgsSection(entries);
+	return { tool: mcpHead(label, entries), body: section ? [section] : undefined, inline: true };
 }
 
 const mcpResultMemo = new OwnerMemo<NativeToolView | undefined>();
 
 /**
  * Native MCP result view: JSON output as a JSON tree, Markdown when the
- * preference is on, otherwise the raw text as tool output. The head's args
- * summary stands in for the ANSI card's Args tree.
+ * preference is on, otherwise the raw text as tool output; the folded Args
+ * section follows, so the collapsed preview still leads with the output.
  */
 export function describeMCPResult(
 	result: { content: Array<{ type: string; text?: string }>; details?: MCPToolDetails; isError?: boolean },
@@ -345,8 +360,11 @@ export function describeMCPResult(
 		else body.push(ansi(output));
 		const warning = truncationNotice(result.details?.meta);
 		if (warning) body.push(warning);
+		const entries = visibleMcpArgs(args);
+		const section = mcpArgsSection(entries);
+		if (section) body.push(section);
 		return {
-			tool: mcpHead(title, args),
+			tool: mcpHead(title, entries),
 			tone: isError ? "error" : undefined,
 			body,
 			preview: { lines: 4 },
