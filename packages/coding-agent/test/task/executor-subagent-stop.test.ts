@@ -79,6 +79,8 @@ interface PromptCall {
 	yieldSection: (label: string, data: unknown) => void;
 	/** Submit one workpool item through the harness's real `YieldTool`; a rejected submission is recorded in `yieldErrors`. */
 	submitWorkPoolItem: (key: number, data: string) => Promise<void>;
+	/** Submit `params` through the harness's real `YieldTool`; a rejected submission is recorded in `yieldErrors`. */
+	submitYield: (params: Record<string, unknown>) => Promise<void>;
 }
 
 /** Observer a kept-alive session's IRC wake turns are bracketed with (`AgentSession.setIrcWakeTurnObserver`). */
@@ -214,10 +216,11 @@ function createHarness(args: {
 					emitYield({ status: "success", data, type: [label], complete: true }, "Section submitted."),
 				yieldSection: (label: string, data: unknown) =>
 					emitYield({ status: "success", data, type: [label] }, "Section submitted."),
-				submitWorkPoolItem: async (key: number, data: string) => {
+				submitWorkPoolItem: (key: number, data: string) => call.submitYield({ key, data }),
+				submitYield: async (params: Record<string, unknown>) => {
 					try {
-						const result = await args.yieldTool?.execute(`pool-${prompts.length}`, { key, data });
-						emitYield({ ...result?.details }, "Item submitted.");
+						const result = await args.yieldTool?.execute(`yield-call-${prompts.length}`, params);
+						emitYield({ ...result?.details }, "Submitted.");
 					} catch (error) {
 						yieldErrors.push(error instanceof Error ? error.message : String(error));
 					}
@@ -745,6 +748,49 @@ describe("runSubprocess subagent_stop", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain("replacement one");
 		expect(result.output).not.toContain("REFUSED");
+	});
+
+	it("rejects a data-less finalize that would close the sections a refusal discarded", async () => {
+		const id = "RefusedSectionsThenBareFinalize";
+		const outputSchema = {
+			type: "object",
+			properties: { findings: { type: "array", items: { type: "string" } } },
+			required: ["findings"],
+		};
+		const toolSession: ToolSession = {
+			cwd: "/tmp",
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+			outputSchema,
+			getLastAssistantText: () => "prose",
+		};
+		const harness = createHarness({
+			hasStopHandlers: true,
+			yieldTool: new YieldTool(toolSession),
+			onPrompt: async call => {
+				if (call.promptIndex === 1) {
+					await call.submitYield({ type: ["findings"], data: "REFUSED-FINDING" });
+					await call.submitYield({ type: "result" });
+				} else if (call.promptIndex === 2) {
+					// Without `data`, a finalize only closes sections, and the refusal discarded them all.
+					await call.submitYield({ type: "result" });
+				} else {
+					await call.submitYield({ data: { findings: ["fresh"] } });
+				}
+			},
+			onStop: async (_event, callIndex) => (callIndex === 1 ? { decision: "block", reason: "redo" } : undefined),
+		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+
+		const result = await runSubprocess({ ...baseOptions(id), outputSchema });
+
+		expect(harness.yieldErrors).toHaveLength(1);
+		expect(harness.yieldErrors[0]).toContain("last-turn result cannot satisfy it");
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output)).toEqual({ findings: ["fresh"] });
 	});
 
 	it("bounds advisory continuations at the cap and then accepts the pending yield", async () => {
