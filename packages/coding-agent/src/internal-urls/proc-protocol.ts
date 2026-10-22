@@ -179,7 +179,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 				...(servicesError ? [`Services unavailable (daemon broker): ${servicesError}`] : []),
 			];
 			return textResource(url, rows.join("\n") || "No background jobs or services.", undefined, true, {
-				jobs: snapshotJobs(session, jobs, { includeResults: true }),
+				jobs: snapshotJobs(session, jobs),
 				agents: runningAgentsOutsideJobs(session),
 				daemons: services,
 			});
@@ -211,7 +211,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 				if (artifact) lines.push(`artifact://${artifact}`);
 			}
 			return textResource(url, lines.join("\n"), undefined, false, {
-				job: snapshotJobs(session, [job], { includeResults: true })[0],
+				job: snapshotJobs(session, [job])[0],
 				log: lines.slice(1).join("\n"),
 			});
 		}
