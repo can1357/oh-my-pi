@@ -3017,7 +3017,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 
 /** Inputs for {@link attachIrcWakeTurnMonitor}. */
 export interface IrcWakeTurnMonitorOptions {
-	/** Registry id of the kept-alive subagent whose autonomous IRC wake turns are monitored. */
+	/** Registry id of the kept-alive subagent whose undriven turns are monitored. */
 	id: string;
 	index?: number;
 	agent: AgentDefinition;
@@ -3204,14 +3204,12 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
 }
 
 /**
- * Bracket a kept-alive subagent's undriven turns — autonomous IRC wakes and
- * user prompts from focused-session steering — with a task run monitor so
- * RPC/collab subscribers see the same `subagent_lifecycle` /
- * `subagent_progress` frames a first run emits, and an accepted yield rewrites
- * the artifact like a first run's. Shared by the live executor reviver and the
- * persisted cold-revive path so a resumed process's parked subagents are not
- * blind spots. The observer runs after the session has flushed its post-prompt
- * settle (see {@link AgentSession.setIrcWakeTurnObserver}).
+ * Bracket a kept-alive subagent's undriven turns — autonomous IRC wakes,
+ * focused-session prompts and bare queued/async continuations — with a task
+ * run monitor so RPC/collab subscribers see lifecycle/progress frames and
+ * accepted results rewrite the artifact. Shared by the live executor reviver
+ * and the persisted cold-revive path; the observer finishes after the session
+ * has flushed its post-prompt settle (see {@link AgentSession.setIrcWakeTurnObserver}).
  *
  * The turn's output reaches the parent as an async job when its message woke
  * the turn, its mid-turn request was consumed, the turn yielded, or a user
