@@ -806,6 +806,41 @@ describe("advisor tool-call loop guard", () => {
 		}
 	});
 
+	it("flushes a pending advisor aside into the terminal-boundary delivery instead of stranding it", async () => {
+		// A WIP aside left in the queue from an earlier streaming step (skipIdleFlush,
+		// so no idle flush drains it) must be pulled into the boundary merge when the
+		// primary reaches its terminal boundary, applying continueSeverity and the
+		// staleness stamp — not stranded for the next prompt nor shipped stampless.
+		const { advisor } = createAdvisor({ "advisor.syncBacklog": "1" }, 0);
+		if (!session) throw new Error("Expected live session");
+		if (!advisor) throw new Error("Expected advisor agent");
+		session.yieldQueue.enqueue("advisor", {
+			note: "The earlier edit still needs a regression test.",
+			severity: "nit",
+			turn: 0,
+		});
+
+		await session.prompt("only update");
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+		await session.waitForIdle();
+
+		// Delivered once, as a visible card (a nit is below the default
+		// continueSeverity) carrying a turns_ago stamp — the boundary-merge path, not
+		// the dispatcher's stampless build.
+		const cards = session.agent.state.messages.filter(
+			message =>
+				message.role === "custom" &&
+				message.customType === "advisor" &&
+				JSON.stringify(message).includes("still needs a regression test"),
+		);
+		expect(cards).toHaveLength(1);
+		const card = cards[0];
+		const content = card && "content" in card && typeof card.content === "string" ? card.content : "";
+		expect(content).toContain('turns_ago="1"');
+		// The leftover aside must not also survive in the queue.
+		expect(session.yieldQueue.hasDeliverable("advisor")).toBe(false);
+	});
+
 	it("holds a final-review continuation during the post-interrupt cooldown", async () => {
 		// The boundary flush decides steering through the same delivery policy as
 		// live routing: inside the post-interrupt immune window a final-review

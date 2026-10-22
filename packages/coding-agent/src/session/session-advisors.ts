@@ -702,6 +702,19 @@ export class SessionAdvisors {
 				// Delivery never pauses: advice already produced against work the
 				// reviewers saw still reaches the primary during an advisor continuation.
 				for (const advisor of this.#advisors) advisor.adviseTool.flushDeferredNotes();
+				// A stale WIP aside (stamped with an earlier turn) left in the queue from
+				// a prior streaming step — the dispatcher is skipIdleFlush, so no idle
+				// flush drains it — would be shipped stampless by the loop's generic
+				// aside drain, and a stale nit would spuriously continue the run. Pull
+				// only those (not fresh, this-turn asides the loop still delivers in
+				// this run) into the boundary merge so they ship under continueSeverity
+				// with their original turn stamp.
+				for (const note of this.#host.yieldQueue.drain<AdvisorNote>(
+					"advisor",
+					n => n.turn !== undefined && n.turn < this.#advisorPrimaryTurnsCompleted,
+				)) {
+					this.#advisorBoundaryNotes.push(note);
+				}
 			}
 			// A boundary of a continuation the advisor itself started is captured but
 			// never schedules a review: the next genuinely started boundary reviews it.
