@@ -6,6 +6,7 @@ import { ADVISOR_SEVERITIES } from "@oh-my-pi/pi-tui/chat/messages";
 import { ADVISOR_REVIEW_MODES, ADVISOR_SYNC_BACKLOG_MODES } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { register } from "../config/registry";
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "./emission-guard";
+import { ADVISOR_WIP_DELIVERY_MODES } from "./advise-tool";
 
 // Advisor is interactive-session assistance: protocol hosts opt in explicitly instead of inheriting the
 // user's local preference, and get the default tuning rather than the user's local tuning.
@@ -78,6 +79,30 @@ export const cfgAdvisorContinueSeverity = register({
 			{ value: "nit", label: "Nit", description: "Every note continues the run." },
 			{ value: "concern", label: "Concern", description: "Concerns and blockers continue the run. Default." },
 			{ value: "blocker", label: "Blocker", description: "Only blockers continue the run." },
+		],
+		condition: "advisorEnabled",
+	},
+});
+
+export const cfgAdvisorWipDelivery = register({
+	id: "advisor.wipDelivery",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ADVISOR_WIP_DELIVERY_MODES,
+	default: "aside",
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor WIP Delivery",
+		description:
+			"How advisor nits and concerns raised while the agent is mid-run reach it. Aside delivers them at the agent's next step without interrupting; Defer holds them until the agent's final answer (legacy).",
+		options: [
+			{
+				value: "aside",
+				label: "Aside",
+				description: "Deliver at the agent's next step without interrupting. Default.",
+			},
+			{ value: "defer", label: "Defer", description: "Hold until the agent's final answer (legacy)." },
 		],
 		condition: "advisorEnabled",
 	},

@@ -74,6 +74,13 @@ export function meetsAdvisorSeverity(severity: AdvisorSeverity | undefined, mini
 
 /** How an advisor note is routed to the primary. */
 export type AdvisorDeliveryChannel = "aside" | "steer" | "preserve";
+
+/** How a WIP (mid-run) advisor non-blocker reaches the primary: `aside`
+ *  delivers it live at the primary's next step boundary without interrupting;
+ *  `defer` holds it until the primary's final answer (legacy). */
+export const ADVISOR_WIP_DELIVERY_MODES = ["aside", "defer"] as const;
+export type AdvisorWipDelivery = (typeof ADVISOR_WIP_DELIVERY_MODES)[number];
+
 /** Half-open turn-count fence for the post-interrupt cooldown. */
 export function isAdvisorInterruptImmuneTurnActive(opts: {
 	completedTurns: number;
