@@ -1,16 +1,14 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- A launch evaluates fewer modules before its first prompt: the `@file` attachment processor, the `--from-claude`/`--from-opencode` resume importer, the python-eval startup probe and the warp-event bridge load on demand, and the extension, custom-tool, custom-command and hook loaders no longer pull the package barrel into the boot graph ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 
-
-### Changed
-
-- A launch evaluates fewer modules before its first prompt: the `@file` attachment processor, the `--from-claude`/`--from-opencode` resume importer, the python-eval startup probe and the warp-event bridge load on demand, and the extension, custom-tool, custom-command and hook loaders no longer pull the package barrel into the boot graph ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed the CLI evaluating the extension, custom-tool, custom-command and hook loader graphs - and the package barrel behind them - while it boots; they are now imported on demand, and the `@file` attachment processor, the `--from-claude`/`--from-opencode` resume importer and the python-eval startup probe load only when used ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 ## [18.12.6] - 2026-10-21
 
 ### Added
