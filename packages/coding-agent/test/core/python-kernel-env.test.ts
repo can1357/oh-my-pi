@@ -50,6 +50,25 @@ describe("Python gateway environment filtering", () => {
 		expect(filtered.LC_CTYPE).toBe("UTF-8");
 		expect(filtered.LC_MESSAGES).toBe("en_US.UTF-8");
 	});
+
+	it("keeps local embedding cache directories and drops inherited Mnemosyne config", () => {
+		const filtered = filterEnv({
+			PATH: "/bin",
+			HF_HOME: "/models/hf",
+			HF_HUB_CACHE: "/models/hub",
+			TRANSFORMERS_CACHE: "/models/transformers",
+			SENTENCE_TRANSFORMERS_HOME: "/models/st",
+			MNEMOSYNE_DATA_DIR: "/shared/mnemosyne",
+			MNEMOSYNE_LLM_API_KEY: "secret",
+		});
+
+		expect(filtered.HF_HOME).toBe("/models/hf");
+		expect(filtered.HF_HUB_CACHE).toBe("/models/hub");
+		expect(filtered.TRANSFORMERS_CACHE).toBe("/models/transformers");
+		expect(filtered.SENTENCE_TRANSFORMERS_HOME).toBe("/models/st");
+		expect(filtered.MNEMOSYNE_DATA_DIR).toBeUndefined();
+		expect(filtered.MNEMOSYNE_LLM_API_KEY).toBeUndefined();
+	});
 });
 
 describe("enumeratePythonRuntimes", () => {

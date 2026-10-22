@@ -179,6 +179,11 @@ import type { DaemonCompletionNotification } from "../launch/protocol";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "../memory-backend/recall-entry";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
+import {
+	getMnemosyneOssSessionState,
+	type MnemosyneOssSessionState,
+	setMnemosyneOssSessionState,
+} from "../mnemosyne-oss/state";
 import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from "../modes/magic-keywords";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { theme } from "@oh-my-pi/pi-tui/theme";
@@ -2064,6 +2069,8 @@ export class AgentSession implements SettingsScope {
 			setHindsightSessionState: state => this.setHindsightSessionState(state),
 			getMnemopiSessionState: () => this.getMnemopiSessionState(),
 			takeMnemopiSessionState: () => setMnemopiSessionState(this, undefined),
+			getMnemosyneOssSessionState: () => this.getMnemosyneOssSessionState(),
+			takeMnemosyneOssSessionState: () => setMnemosyneOssSessionState(this, undefined),
 			setBaseSystemPrompt: prompt => {
 				this.#tools.setBaseSystemPrompt(prompt);
 				this.agent.setSystemPrompt(prompt);
@@ -3020,6 +3027,10 @@ export class AgentSession implements SettingsScope {
 
 	getMnemopiSessionState(): MnemopiSessionState | undefined {
 		return getMnemopiSessionState(this);
+	}
+
+	getMnemosyneOssSessionState(): MnemosyneOssSessionState | undefined {
+		return getMnemosyneOssSessionState(this);
 	}
 
 	/** TTSR manager for time-traveling stream rules */
@@ -6088,6 +6099,7 @@ export class AgentSession implements SettingsScope {
 
 		const hindsightState = this.getHindsightSessionState();
 		const mnemopiState = setMnemopiSessionState(this, undefined);
+		const mnemosyneOssState = setMnemosyneOssSessionState(this, undefined);
 		// Bound the wait for a just-fired sharpshooter extraction before dropping
 		// its subscriptions, so print-mode exits don't cut queued-delta writes.
 		const sharpshooterFlushed = flushSharpshooterExtraction(this, options.mnemopiConsolidateTimeoutMs);
@@ -6107,6 +6119,7 @@ export class AgentSession implements SettingsScope {
 			advisorRecorderClosed,
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
 			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
+			mnemosyneOssState?.dispose() ?? Promise.resolve(),
 			sharpshooterFlushed,
 		]);
 		for (const result of results) {

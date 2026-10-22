@@ -676,6 +676,7 @@ function buildExecutorOptions(
 						lease.unregister?.();
 					}
 				: undefined,
+		parentMnemosyneOssSessionState: preparedSession ? undefined : session.getMnemosyneOssSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentPromptCacheKey: session.getPromptCacheKey?.(),

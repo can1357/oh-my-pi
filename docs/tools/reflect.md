@@ -12,10 +12,12 @@
 - Mnemopi collaborators:
   - `packages/coding-agent/src/mnemopi/state.ts` — scoped local recall and context formatting.
   - `docs/tools/retain.md` — shared backend, storage, scoping, and mental-model behavior.
+- Mnemosyne OSS collaborators: `packages/coding-agent/src/mnemosyne-oss/state.ts` (`recall(...)`) and `packages/coding-agent/src/prompts/memories/mnemosyne-oss-reflect.md`.
 
 ## Registration / Visibility
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`.
-- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`).
+- The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"mnemosyne-oss"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`).
+- Mnemosyne OSS reflects deterministically from its recalled local records (`context` is appended to the query like Mnemopi); it never invokes an LLM for this operation.
 - In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://reflect`; an explicitly requested tool remains top-level.
 - Execution is single-shot and emits no progress updates.
