@@ -129,10 +129,8 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 		const body = Array.from({ length: 20 }, (_, i) => `raw line ${i + 1}`).join("\n");
 		stubLoadPage(body, "application/json");
 
-		// `:raw:N-M` must skip JSON pretty-print (raw mode) AND slice. URL output is
-		// prefixed with a 6-line header (URL/Content-Type/Method/blank/---/blank), so
-		// body line N appears at output line N+6.
-		const result = await tool.execute("call", { path: "https://example.com/api.json:raw:9-11" });
+		// `:raw:N-M` must skip JSON pretty-print and slice the response body.
+		const result = await tool.execute("call", { path: "https://example.com/api.json:raw:3-5" });
 		const text =
 			result.content
 				.filter(c => c.type === "text")
@@ -140,9 +138,24 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 				.join("\n") ?? "";
 
 		expect(result.details?.method).toBe("raw");
-		expect(text).toContain("raw line 3");
-		expect(text).toContain("raw line 5");
-		expect(text).not.toContain("raw line 15");
+		expect(text).toBe("raw line 3\nraw line 4\nraw line 5");
+	});
+
+	it("keeps body coordinates when the response adds a Notes header", async () => {
+		const session = makeSession(testDir);
+		const body = Array.from({ length: 20 }, (_, i) => `raw line ${i + 1}`).join("\n");
+		vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => ({
+			ok: true,
+			status: 200,
+			finalUrl: requestedUrl,
+			contentType: "text/plain",
+			content: body,
+			truncated: true,
+		}));
+
+		const result = await new ReadTool(session).execute("call", { path: "https://example.com/page.txt:12:raw" });
+		expect(result.content.find(c => c.type === "text")?.text).toBe("raw line 12");
+		expect(result.details?.totalLines).toBe(20);
 	});
 });
 
@@ -169,12 +182,12 @@ describe("read URL with multi-range selector (regression: was stuck on URL → 4
 			.map(c => c.text)
 			.join("\n");
 
-		// Body line N is at output line N+6 (URL header prefix). 11-13 = content 5-7,
-		// 26-28 = content 20-22.
-		expect(text).toContain("content 5");
-		expect(text).toContain("content 7");
-		expect(text).toContain("content 20");
-		expect(text).toContain("content 22");
+		expect(text).toContain("content 11");
+		expect(text).toContain("content 13");
+		expect(text).toContain("content 26");
+		expect(text).toContain("content 28");
+		expect(text).not.toContain("content 10");
+		expect(text).not.toContain("content 29");
 		// Lines between ranges are elided
 		expect(text).not.toContain("content 14");
 		// Elision marker between blocks

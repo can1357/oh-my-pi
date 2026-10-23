@@ -1764,7 +1764,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				const entry = await fetchReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal, {
 					ensureArtifact: true,
 				});
-				return buildInMemorySelectorResult(this.session, entry.output, urlSel, {
+				return buildInMemorySelectorResult(this.session, entry.content, urlSel, {
 					details: { ...entry.details },
 					sourceUrl: entry.details.finalUrl,
 					entityLabel: "URL output",
