@@ -255,7 +255,8 @@ describe("persisted subagent revival", () => {
 		const initialize = vi.fn();
 		const onError = vi.fn();
 		const emit = vi.fn(async () => undefined);
-		const extensionRunner = { initialize, onError, emit };
+		const emitBeforeAgentStart = vi.fn(async () => undefined);
+		const extensionRunner = { initialize, onError, emit, emitBeforeAgentStart };
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
 			async () => ({ session: createRevivedSession([], extensionRunner).session }) as CreateAgentSessionResult,
 		);

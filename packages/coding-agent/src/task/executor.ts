@@ -4055,6 +4055,16 @@ function trackSubagentSettings(session: AgentSession, capture: WarmReviveCapture
 }
 
 /**
+ * Runs `before_agent_start` once on a revived subagent's rebuilt extensions. Its wake turns are
+ * agent-initiated and skip the hook, so a tool an extension registers from it, as it did at the
+ * parked session's first prompt, would never come back. The result is dropped: the transcript
+ * already holds what the parked session's turns added.
+ */
+export async function replayRevivedAgentStart(session: AgentSession): Promise<void> {
+	await session.extensionRunner?.emitBeforeAgentStart("", undefined, session.baseSystemPrompt, "revive");
+}
+
+/**
  * Lifecycle reviver for a parked subagent: park closed the JSONL writer, so reopening takes the
  * single-writer lock cleanly and restores the full message history (createAgentSession →
  * agent.replaceMessages). Isolated runs keep their worktree for the same lifecycle, so they use
@@ -4122,6 +4132,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 				reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
 				filterActiveTools: withoutParentOwnedTools,
 			});
+			await replayRevivedAgentStart(revived);
 		} finally {
 			capture.spec.prompt.reviving = false;
 		}

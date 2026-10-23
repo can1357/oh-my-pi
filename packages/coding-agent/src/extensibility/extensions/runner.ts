@@ -2234,6 +2234,7 @@ export class ExtensionRunner {
 		prompt: string,
 		images: ImageContent[] | undefined,
 		systemPrompt: string[],
+		reason: BeforeAgentStartEvent["reason"] = "prompt",
 	): Promise<BeforeAgentStartCombinedResult | undefined> {
 		if (!this.hasHandlers("before_agent_start")) return undefined;
 		const ctx = this.createContext();
@@ -2248,6 +2249,7 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				const event: BeforeAgentStartEvent = {
 					type: "before_agent_start",
+					reason,
 					prompt,
 					images,
 					systemPrompt: currentSystemPrompt,

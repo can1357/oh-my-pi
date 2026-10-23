@@ -28,6 +28,7 @@ import {
 	createMCPProxyTools,
 	createSubagentSettings,
 	followMCPTools,
+	replayRevivedAgentStart,
 	subagentRetryFallbackRole,
 } from "./executor";
 import { isCompletionProbeEnabled } from "./completion-probe";
@@ -314,6 +315,7 @@ export function createPersistedSubagentReviverFactory(
 				reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
 				reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
 			});
+			await replayRevivedAgentStart(session);
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
 			// The internal run-state signal precedes deferrable public `agent_end`,
