@@ -51,6 +51,8 @@ const STARTUP_TIMEOUT_MS = 10_000;
 // generous: a clean interrupt is far preferable to losing the persistent
 // kernel's state, so we only kill as a last-resort recovery path.
 const INTERRUPT_ESCALATION_MS = 5_000;
+/** Bounds interrupt escalation plus the three shutdown grace windows before ACP abandons a session. */
+export const PYTHON_KERNEL_CANCEL_BUDGET_MS = INTERRUPT_ESCALATION_MS + 3 * SHUTDOWN_GRACE_MS;
 
 const PYTHON_RESERVED_PRELUDE_EXPORTS: Record<string, true> = {
 	__omp_tools__: true,

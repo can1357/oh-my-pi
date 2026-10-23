@@ -672,9 +672,11 @@ describe("ACP agent", () => {
 		expect(forkedMessages.some(message => message.role === "user" && message.content === "fork me")).toBe(true);
 
 		await harness.agent.closeSession({ sessionId: forked.sessionId });
-		await expect(harness.agent.setSessionMode({ sessionId: forked.sessionId, modeId: "default" })).rejects.toThrow(
-			"Unsupported ACP session",
-		);
+		await expect(
+			harness.agent.setSessionMode({ sessionId: forked.sessionId, modeId: "default" }),
+		).rejects.toMatchObject({
+			code: -32002,
+		});
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -2544,8 +2546,7 @@ describe("ACP agent", () => {
 		expect(firstResponse.stopReason).toBe("cancelled");
 
 		const queuedError = await secondPrompt;
-		expect(queuedError).toBeInstanceOf(Error);
-		expect((queuedError as Error).message).toBe("ACP cancel cleanup timed out");
+		expect(queuedError).toMatchObject({ code: -32002 });
 
 		// The fire-and-forget close runs off the same cleanup rejection; give it a
 		// few ticks to settle before asserting.
@@ -2559,7 +2560,7 @@ describe("ACP agent", () => {
 				messageId: "00000000-0000-4000-8000-000000000047",
 				prompt: [{ type: "text", text: "after stuck implicit cancel" }],
 			} as PromptRequest),
-		).rejects.toThrow("Unsupported ACP session");
+		).rejects.toMatchObject({ code: -32002 });
 
 		finishPrompt();
 		harness.abortController.abort();
@@ -3128,6 +3129,53 @@ describe("ACP agent", () => {
 		}
 	});
 
+	it("accepts a new prompt after Python's five-second interrupt escalation", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const abortRelease = Promise.withResolvers<void>();
+		const promptStarted = Promise.withResolvers<void>();
+		const nextPromptStarted = Promise.withResolvers<void>();
+		session.abort = async () => {
+			await abortRelease.promise;
+			session.isStreaming = false;
+		};
+		const finishPrompt = holdPromptStreaming(session);
+		const heldPrompt = session.prompt;
+		session.prompt = async text => {
+			(text === "interrupt a stuck Python cell" ? promptStarted : nextPromptStarted).resolve();
+			return heldPrompt(text);
+		};
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "interrupt a stuck Python cell" }],
+		});
+		await promptStarted.promise;
+		vi.useFakeTimers();
+		try {
+			const cancelPrompt = harness.agent.cancel({ sessionId: created.sessionId });
+			expect((await firstPrompt).stopReason).toBe("cancelled");
+			vi.advanceTimersByTime(5_200);
+			abortRelease.resolve();
+			await cancelPrompt;
+			expect(session.disposed).toBe(false);
+
+			const secondPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "continue after interrupt escalation" }],
+			});
+			await nextPromptStarted.promise;
+			finishPrompt();
+			expect((await secondPrompt).stopReason).toBe("end_turn");
+		} finally {
+			abortRelease.resolve();
+			finishPrompt();
+			vi.useRealTimers();
+			harness.abortController.abort();
+		}
+	});
+
 	it("closes the ACP session when cancel cleanup times out", async () => {
 		const harness = await createHarness();
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
@@ -3154,7 +3202,7 @@ describe("ACP agent", () => {
 				messageId: "00000000-0000-4000-8000-000000000042",
 				prompt: [{ type: "text", text: "after stuck cancel" }],
 			} as PromptRequest),
-		).rejects.toThrow("Unsupported ACP session");
+		).rejects.toMatchObject({ code: -32002 });
 
 		finishPrompt();
 		harness.abortController.abort();
@@ -3188,8 +3236,7 @@ describe("ACP agent", () => {
 
 		await cancelPrompt;
 		const queuedError = await queuedPrompt;
-		expect(queuedError).toBeInstanceOf(Error);
-		expect(queuedError.message).toBe("ACP cancel cleanup timed out");
+		expect(queuedError).toMatchObject({ code: -32002 });
 		expect(session.promptCalls).toEqual(["stuck cancel before queued"]);
 
 		finishPrompt();
