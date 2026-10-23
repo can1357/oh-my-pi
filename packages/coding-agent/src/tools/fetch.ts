@@ -247,58 +247,13 @@ function isInlineImageMimeTypeSupported(mimeType: string): boolean {
 }
 
 /**
- * Try fetching URL with .md appended (llms.txt convention)
- */
-async function tryMdSuffix(
-	url: string,
-	timeout: number,
-	signal?: AbortSignal,
-): Promise<{ content: string; truncated: boolean } | null> {
-	const candidates: string[] = [];
-
-	try {
-		const parsed = new URL(url);
-		const pathname = parsed.pathname;
-
-		if (pathname.endsWith("/")) {
-			// /foo/bar/ -> /foo/bar/index.html.md
-			candidates.push(`${parsed.origin}${pathname}index.html.md`);
-		} else if (pathname.includes(".")) {
-			// /foo/bar.html -> /foo/bar.html.md
-			candidates.push(`${parsed.origin}${pathname}.md`);
-		} else {
-			// /foo/bar -> /foo/bar.md
-			candidates.push(`${parsed.origin}${pathname}.md`);
-		}
-	} catch {
-		return null;
-	}
-
-	if (signal?.aborted) {
-		return null;
-	}
-
-	for (const candidate of candidates) {
-		if (signal?.aborted) {
-			return null;
-		}
-		const result = await loadPage(candidate, { timeout, signal });
-		if (result.ok && result.content.trim().length > 100 && !looksLikeHtml(result.content)) {
-			return { content: result.content, truncated: Boolean(result.truncated) };
-		}
-	}
-
-	return null;
-}
-
-/**
  * Try to fetch LLM-friendly endpoints
  */
 async function tryLlmEndpoints(
 	url: string,
 	timeout: number,
 	signal?: AbortSignal,
-): Promise<{ content: string; endpoint: string; truncated: boolean } | null> {
+): Promise<{ content: string; endpoint: string; finalUrl: string; truncated: boolean } | null> {
 	const endpoints = buildLlmEndpointCandidates(url);
 
 	if (signal?.aborted || endpoints.length === 0) {
@@ -311,7 +266,7 @@ async function tryLlmEndpoints(
 		}
 		const result = await loadPage(endpoint, { timeout: Math.min(timeout, 5), signal });
 		if (result.ok && result.content.trim().length > 100 && !looksLikeHtml(result.content)) {
-			return { content: result.content, endpoint, truncated: Boolean(result.truncated) };
+			return { content: result.content, endpoint, finalUrl: result.finalUrl, truncated: Boolean(result.truncated) };
 		}
 	}
 	return null;
@@ -324,7 +279,7 @@ async function tryContentNegotiation(
 	url: string,
 	timeout: number,
 	signal?: AbortSignal,
-): Promise<{ content: string; type: string; truncated: boolean } | null> {
+): Promise<{ content: string; type: string; finalUrl: string; truncated: boolean } | null> {
 	if (signal?.aborted) {
 		return null;
 	}
@@ -339,7 +294,12 @@ async function tryContentNegotiation(
 
 	const mime = normalizeMime(result.contentType);
 	if ((mime.includes("markdown") || mime === "text/plain") && !looksLikeHtml(result.content)) {
-		return { content: result.content, type: result.contentType, truncated: Boolean(result.truncated) };
+		return {
+			content: result.content,
+			type: result.contentType,
+			finalUrl: result.finalUrl,
+			truncated: Boolean(result.truncated),
+		};
 	}
 
 	return null;
@@ -1414,7 +1374,7 @@ async function renderUrl(
 				const output = finalizeOutput(altResult.content);
 				return {
 					url,
-					finalUrl,
+					finalUrl: altResult.finalUrl,
 					contentType: "text/markdown",
 					method: "alternate-markdown",
 					content: output,
@@ -1425,31 +1385,14 @@ async function renderUrl(
 			}
 		}
 
-		// 5B: Try URL.md suffix (llms.txt convention)
-		const mdSuffix = await tryMdSuffix(finalUrl, timeout, signal);
-		if (mdSuffix) {
-			notes.push("Found .md suffix version");
-			const output = finalizeOutput(mdSuffix.content);
-			return {
-				url,
-				finalUrl,
-				contentType: "text/markdown",
-				method: "md-suffix",
-				content: output,
-				fetchedAt,
-				truncated: mdSuffix.truncated,
-				notes,
-			};
-		}
-
-		// 5C: Content negotiation
+		// 5B: Content negotiation
 		const negotiated = await tryContentNegotiation(url, timeout, signal);
 		if (negotiated) {
 			notes.push(`Content negotiation returned ${negotiated.type}`);
 			const output = finalizeOutput(negotiated.content);
 			return {
 				url,
-				finalUrl,
+				finalUrl: negotiated.finalUrl,
 				contentType: normalizeMime(negotiated.type),
 				method: "content-negotiation",
 				content: output,
@@ -1459,7 +1402,7 @@ async function renderUrl(
 			};
 		}
 
-		// 5D: Check for feed alternates
+		// 5C: Check for feed alternates
 		const feedAlternates = alternates.filter(alt => alt.kind === "feed");
 		for (const alt of feedAlternates.slice(0, 2)) {
 			const resolved = new URL(alt.href, finalUrl).href;
@@ -1470,7 +1413,7 @@ async function renderUrl(
 				const output = finalizeOutput(parsed);
 				return {
 					url,
-					finalUrl,
+					finalUrl: altResult.finalUrl,
 					contentType: "application/feed",
 					method: "alternate-feed",
 					content: output,
@@ -1485,7 +1428,7 @@ async function renderUrl(
 			throw new ToolAbortError();
 		}
 
-		// 5E: Render HTML via the reader-backend chain
+		// 5D: Render HTML via the reader-backend chain
 		// (native/trafilatura/lynx/parallel/firecrawl/jina)
 		const htmlResult = await renderHtmlToText(
 			finalUrl,
@@ -1505,7 +1448,7 @@ async function renderUrl(
 				const output = finalizeOutput(llmResult.content);
 				return {
 					url,
-					finalUrl,
+					finalUrl: llmResult.finalUrl,
 					contentType: "text/plain",
 					method: "llms.txt",
 					content: output,
