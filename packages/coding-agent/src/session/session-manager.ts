@@ -578,6 +578,8 @@ export class SessionEntryIndex {
 	// read-only and live: it grows when such an insert lands, while a leaf
 	// change or rebuild starts a fresh array (the old one is never mutated).
 	#generation = 0;
+	// Advances with every change to the active branch; negative branch lookups key on it.
+	#branchRevision = 0;
 	#branchCache: { leaf: string | null | undefined; generation: number; branch: SessionEntry[] } | undefined;
 
 	clear(): void {
@@ -587,6 +589,7 @@ export class SessionEntryIndex {
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
 		this.#generation++;
+		this.#branchRevision++;
 		this.#branchCache = undefined;
 	}
 
@@ -605,6 +608,7 @@ export class SessionEntryIndex {
 		const nextLeaf = sessionEntryLeafId(entry);
 		this.#leaf = nextLeaf;
 		this.#generation++;
+		this.#branchRevision++;
 		const cache = this.#branchCache;
 		if (
 			isNew &&
@@ -668,6 +672,7 @@ export class SessionEntryIndex {
 		if (this.#leaf === id) return;
 		this.#leaf = id;
 		this.#generation++;
+		this.#branchRevision++;
 		this.#branchCache = undefined;
 	}
 
@@ -711,6 +716,22 @@ export class SessionEntryIndex {
 		const branch = this.#walk(this.#leaf);
 		this.#branchCache = { leaf: this.#leaf, generation: this.#generation, branch };
 		return branch;
+	}
+
+	/** Newest active-branch entry `accept` admits, found by walking leaf-to-root without a branch array. */
+	findLastOnBranch(accept: (entry: SessionEntry) => boolean): SessionEntry | undefined {
+		const seen = new Set<string>();
+		let cursor = this.#leaf ? this.#entriesById.get(this.#leaf) : undefined;
+		while (cursor && !seen.has(cursor.id)) {
+			seen.add(cursor.id);
+			if (accept(cursor)) return cursor;
+			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
+		}
+		return undefined;
+	}
+
+	branchRevision(): number {
+		return this.#branchRevision;
 	}
 
 	#walk(leaf: string | null): SessionEntry[] {
@@ -3949,6 +3970,27 @@ export class SessionManager {
 	 */
 	getBranchView(): readonly SessionEntry[] {
 		return this.#index.branchView();
+	}
+
+	/**
+	 * Newest current-branch entry matching `predicate` (and, when given, the `accept` guard). Walks leaf-to-root
+	 * without materializing the branch, so a long session does not keep its full branch array alive for this lookup.
+	 */
+	findLastBranchEntry<T extends SessionEntry>(
+		predicate: (entry: SessionEntry) => boolean,
+		accept: (entry: SessionEntry) => entry is T,
+	): T | undefined;
+	findLastBranchEntry(predicate: (entry: SessionEntry) => boolean): SessionEntry | undefined;
+	findLastBranchEntry(
+		predicate: (entry: SessionEntry) => boolean,
+		accept?: (entry: SessionEntry) => boolean,
+	): SessionEntry | undefined {
+		return this.#index.findLastOnBranch(entry => predicate(entry) && (!accept || accept(entry)));
+	}
+
+	/** Advances on every change to the active branch; negative branch lookups key on it. */
+	getBranchRevision(): number {
+		return this.#index.branchRevision();
 	}
 
 	/**

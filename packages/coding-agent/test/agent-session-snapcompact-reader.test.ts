@@ -13,6 +13,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Context, Message, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -457,11 +458,73 @@ describe("snapcompact archive read by another model", () => {
 		const keptId = plain.appendMessage({ role: "user", content: "Kept turn.", timestamp: Date.now() });
 		plain.appendCompaction(EXTENSION_SUMMARY, "Earlier work.", keptId, 100);
 		const plainSession = startSession(plain, gpt).session;
-		const branchLookups = vi.spyOn(plain.getBranchView(), "findLast");
+		const branchLookups = vi.spyOn(plain, "findLastBranchEntry");
 		for (let call = 0; call < 3; call++) {
 			const sent = requestContent(await plainSession.convertMessagesToLlm(plainSession.messages, undefined, claude));
 			expect(sent.text).toContain(EXTENSION_FACT);
 		}
 		expect(branchLookups).toHaveBeenCalledTimes(1);
+	});
+
+	// Replay reads the archive's compaction, not the history before it.
+	it("sends Claude no reasoning from a reopened journal without reading the history before the archive", async () => {
+		const dir = path.join(tempDir, "selective-history");
+		await fs.mkdir(dir, { recursive: true });
+		const created = SessionManager.create(dir, dir);
+		const oldId = created.appendMessage({
+			role: "toolResult",
+			toolCallId: "old-read",
+			toolName: "read",
+			content: [{ type: "text", text: "old ".repeat(50_000) }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		await seedArchive(created, { summary: EXTENSION_SUMMARY });
+		const writer = startSession(created, gpt).session;
+		const expected = requestContent(await writer.convertMessagesToLlm(writer.messages, undefined, claude));
+		await created.flush();
+		const file = created.getSessionFile()!;
+		await created.close();
+
+		const reopened = await SessionManager.open(file, dir);
+		const { session } = startSession(reopened, gpt);
+		await reopened.flush();
+		await setImmediate();
+		Bun.gc(true);
+		await setImmediate();
+		Bun.gc(true);
+		// Resolving the archive walks leaf-to-root; it must not materialize the whole branch.
+		const branchViews = vi.spyOn(reopened, "getBranchView");
+		const { text, images } = requestContent(await session.convertMessagesToLlm(session.messages, undefined, claude));
+		expect(branchViews).not.toHaveBeenCalled();
+		expect(text).toContain(EXTENSION_FACT);
+		expect(text).not.toContain(REASONING);
+		expect(reopened.getEntry(oldId)).toMatchObject({ id: oldId, type: "message" });
+		expect(images.length).toBeGreaterThan(0);
+		expect(images).toEqual(expected.images);
+	});
+
+	// A miss holds only until the branch revision moves, so an archive attached later is found.
+	it("finds an archive attached to a compaction after a cached miss once the branch moves", async () => {
+		const scratch = SessionManager.inMemory();
+		const archived = await seedArchive(scratch, { summary: EXTENSION_SUMMARY });
+
+		const plain = SessionManager.inMemory();
+		const keptId = plain.appendMessage({ role: "user", content: "Kept turn.", timestamp: Date.now() });
+		plain.appendCompaction(EXTENSION_SUMMARY, "Earlier work.", keptId, 100);
+		const { session } = startSession(plain, gpt);
+		const before = requestContent(await session.convertMessagesToLlm(session.messages, undefined, claude));
+		expect(before.images).toEqual([]);
+		expect(before.text).toContain(EXTENSION_FACT);
+
+		const entry = latestCompaction(plain);
+		entry.preserveData = archived.preserveData;
+		// The miss is keyed by branch revision: a branch change (here a model change) lets the lookup see the mutation.
+		plain.appendModelChange("anthropic/claude-sonnet-4-6", "default");
+		const after = requestContent(await session.convertMessagesToLlm(session.messages, undefined, claude));
+		expect(after.text).not.toContain(REASONING);
+		const variant = snapcompact.getPreservedArchive(latestCompaction(plain).preserveData)!.withoutThinking!;
+		expect(after.images.length).toBeGreaterThan(0);
+		expect(after.images).toEqual(variant.archive.frames.map(frame => frame.data));
 	});
 });
