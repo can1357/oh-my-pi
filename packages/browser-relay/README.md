@@ -27,4 +27,5 @@ After an omp upgrade, the relay keeps the extension current on its own: when it 
 - `chrome://`, DevTools, Web Store, and other-extension pages are not attachable and are hidden from the agent.
 - Chrome shows its "is debugging this browser" infobar while any tab is attached; dismissing it detaches that tab until it navigates again.
 - A tab with DevTools open can't be attached (one debugger per tab — the constraint the relay multiplexes around for its own clients).
+- Chrome refuses the debugger in a tab while another extension's frame, such as a password manager's inline menu, is in it. In a tab omp drives, the extension empties that frame so omp can continue; your other tabs keep theirs.
 - Anything that can reach the relay port can drive your logged-in browser. The relay binds loopback only; use `omp browser-relay --token <secret>` (mirrored in the extension options) if untrusted local processes are a concern.
