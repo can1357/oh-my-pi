@@ -1189,6 +1189,69 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith("A destructive command is running.", "blocker", 3);
 		});
+
+		it("delivers a reserved note once as a WIP aside when wip delivery switches defer->aside on an equal-rank re-raise", async () => {
+			// Regression: the aside branch spliced the pending reservation before
+			// re-admitting, so the guard rejected the equal-rank re-raise as a
+			// duplicate and the note was lost (never routed, nothing left to flush).
+			const onAdvice = vi.fn();
+			let mode: "aside" | "defer" = "defer";
+			const tool = new AdviseTool(onAdvice, undefined, () => mode);
+			const note = "The retry budget is never decremented.";
+
+			tool.beginUpdate(true, 1);
+			const deferred = await tool.execute("c-0", { note, severity: "concern" });
+			expect(JSON.stringify(deferred.content)).toContain("Queued for the end of the turn");
+			expect(onAdvice).not.toHaveBeenCalled();
+
+			// Operator flips the setting mid-update; the same concern is re-raised.
+			mode = "aside";
+			const aside = await tool.execute("c-1", { note, severity: "concern" });
+			expect(JSON.stringify(aside.content)).toContain("aside");
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith(note, "concern", 1, { wip: true });
+
+			// The later flush must not re-send the already-delivered note.
+			tool.flushDeferredNotes();
+			tool.beginUpdate(false);
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+		});
+
+		it("delivers a reserved concern once at concern severity when a lower-rank nit re-raise lands in aside mode", async () => {
+			const onAdvice = vi.fn();
+			let mode: "aside" | "defer" = "defer";
+			const tool = new AdviseTool(onAdvice, undefined, () => mode);
+			const note = "The lock is released before the write completes.";
+
+			tool.beginUpdate(true, 2);
+			await tool.execute("d-0", { note, severity: "concern" });
+			expect(onAdvice).not.toHaveBeenCalled();
+
+			mode = "aside";
+			await tool.execute("d-1", { note, severity: "nit" });
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith(note, "concern", 2, { wip: true });
+
+			tool.flushDeferredNotes();
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+		});
+
+		it("escalates a reserved nit to a concern once as a WIP aside on a higher-rank re-raise in aside mode", async () => {
+			const onAdvice = vi.fn();
+			let mode: "aside" | "defer" = "defer";
+			const tool = new AdviseTool(onAdvice, undefined, () => mode);
+			const note = "The migration drops the audit table.";
+
+			tool.beginUpdate(true, 3);
+			await tool.execute("e-0", { note, severity: "nit" });
+			mode = "aside";
+			await tool.execute("e-1", { note, severity: "concern" });
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith(note, "concern", 3, { wip: true });
+
+			tool.flushDeferredNotes();
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+		});
 	});
 
 	describe("advisor unsafe-output quarantine", () => {

@@ -321,13 +321,24 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		if (this.#inProgressUpdate && args.severity !== "blocker") {
 			if (this.wipDelivery() === "aside") {
 				// Aside mode: deliver the mid-run non-blocker live instead of
-				// withholding it. It still clears the guard, but routes the instant
-				// it is raised — flagged WIP so the session forces it onto the
+				// withholding it, flagged WIP so the session forces it onto the
 				// non-interrupting aside channel (lands at the primary's next step,
-				// never aborts a running tool). Drop any stale same-note reservation
-				// a mode switch may have left behind.
-				const reservedIndex = this.#deferredNotes.findIndex(item => item.key === key);
-				if (reservedIndex !== -1) this.#deferredNotes.splice(reservedIndex, 1);
+				// never aborts a running tool).
+				const pending = this.#deferredNotes.find(item => item.key === key);
+				if (pending) {
+					// A reservation left by defer mode already cleared admission;
+					// re-admitting would be rejected as a duplicate and lose the note.
+					// Deliver it now: escalate in place on a strictly-higher re-raise,
+					// mark it routed (its slot stays charged, no longer displaceable),
+					// drop it from the backlog so the later flush does not re-send it,
+					// and route once at the effective (highest-seen) severity.
+					const severity = rank > advisorSeverityRank(pending.severity) ? args.severity : pending.severity;
+					if (rank > advisorSeverityRank(pending.severity)) this.#guard.escalatePending(args.note, rank);
+					this.#deferredNotes.splice(this.#deferredNotes.indexOf(pending), 1);
+					this.#guard.markRouted(args.note);
+					this.onAdvice(args.note, severity, pending.turn ?? this.#coveredTurn, { wip: true });
+					return this.#result(ADVISOR_ACK_ASIDE, args);
+				}
 				const decision = this.#guard.admit(args.note, { rank, pending: false });
 				if (!decision.accepted) return this.#suppressed(args, decision.reason);
 				this.onAdvice(args.note, args.severity, this.#coveredTurn, { wip: true });
