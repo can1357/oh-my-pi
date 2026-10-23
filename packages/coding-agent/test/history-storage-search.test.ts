@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -32,6 +33,30 @@ afterEach(async () => {
 });
 
 describe("HistoryStorage.search", () => {
+	it("keeps public recent reads and search quiet while strict reads report a closed handle", async () => {
+		const storage = await freshStorage();
+		await seed(storage, ["deploy the service"]);
+		HistoryStorage.close();
+
+		expect(storage.getRecent(10)).toEqual([]);
+		expect(() => storage.getRecentOrThrow(10)).toThrow();
+		expect(storage.search("deploy", 10)).toEqual([]);
+	});
+
+	it("returns no public recent results after a real SQL failure, but exposes the strict failure", async () => {
+		const storage = await freshStorage();
+		await seed(storage, ["deploy the service"]);
+		const raw = new Database(tempDir!.join("history.db"));
+		try {
+			raw.run("DROP TABLE history");
+			expect(storage.getRecent(10)).toEqual([]);
+			expect(() => storage.getRecentOrThrow(10)).toThrow();
+			expect(storage.search("deploy", 10)).toEqual([]);
+		} finally {
+			raw.close();
+		}
+	});
+
 	it("matches across punctuation in the query (FTS token alignment)", async () => {
 		const storage = await freshStorage();
 		await seed(storage, ["run git commit --amend now", "unrelated noise"]);

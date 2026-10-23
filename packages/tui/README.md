@@ -158,6 +158,27 @@ view.setHeight(16);
 
 `ScrollView.revealRange()` preserves manual scrolling while a selection is unchanged; `mode: "once"` supports asynchronously arriving initial selections. `OutputPane.append()` accepts incremental terminal output, including carriage-return updates; call `finish()` when the stream ends.
 
+### History search
+
+Import `HistorySearchComponent`, `HistorySource`, and `HistorySearchScope` from
+`@oh-my-pi/pi-tui/overlays/history-search`.
+
+The constructor accepts either:
+
+- `new HistorySearchComponent(source, onSelect, onCancel)`, where `source` is a
+  `HistorySource` providing `getRecent(limit)` and `search(query, limit)`. Existing
+  single-source callers require no migration. Source methods retain their original
+  receiver, including when the source is a class instance. Sources may also provide
+  methods dynamically through a `Proxy`.
+- `new HistorySearchComponent(scopes, onSelect, onCancel)`, where `scopes` is a
+  non-empty `readonly HistorySearchScope[]`. Each scope provides the same methods
+  plus a `label`; the host binds those methods to the intended data set. The first
+  scope is initially selected, and Tab/Shift+Tab cycle the array while retaining the
+  query. An empty array throws `RangeError`.
+
+Both forms invoke `onSelect` with the full selected prompt and `onCancel` when the
+user cancels. A single source has no scope-switch actions.
+
 ### Container
 
 Groups child components.
