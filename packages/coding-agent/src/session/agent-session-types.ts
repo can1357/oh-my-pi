@@ -335,6 +335,8 @@ export interface AgentSessionConfig {
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** Accessor for live MCP server instructions. */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	/** Installs a host-owned MCP instructions source; see {@link AgentSession.setMcpServerInstructionsSource}. */
+	setMcpServerInstructionsSource?: (source: (() => Map<string, string> | undefined) | undefined) => void;
 	/** Time-traveling stream-rule manager. */
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for provider and edit content. */

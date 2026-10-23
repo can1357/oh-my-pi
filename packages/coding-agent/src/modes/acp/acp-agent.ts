@@ -1695,6 +1695,10 @@ export class AcpAgent implements Agent {
 	): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext);
 		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
+		// Client-declared servers live in `record.mcpManager`, not the session's
+		// own (ACP sessions run with `enableMCP: false`); read it live so every
+		// reconfiguration's `refreshMCPTools` rebuild renders its instructions.
+		session.setMcpServerInstructionsSource(() => record.mcpManager?.getServerInstructions());
 		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
 		// so it shares the bootstrap race guard — see that comment for why.
 		try {

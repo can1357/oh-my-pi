@@ -3943,6 +3943,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					: resolveTelemetry(options.telemetry, providerSessionId),
 			),
 		});
+		// Instructions from MCP servers the host connects outside `mcpManager`
+		// (ACP client-declared servers); installed via
+		// `AgentSession.setMcpServerInstructionsSource`.
+		let hostMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
+		/** Live server instructions from the session's own manager and any host source, sorted by server name. */
+		const readMcpServerInstructions = (): Map<string, string> | undefined => {
+			const own = mcpManager?.getServerInstructions();
+			const hosted = hostMcpServerInstructions?.();
+			if (!hosted || hosted.size === 0) return own;
+			if (!own || own.size === 0) return hosted;
+			return new Map([...own, ...hosted].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)));
+		};
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -4022,7 +4034,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// `getServerInstructions()` are empty until the background connect
 			// completes; the rebuild that `refreshMCPTools` triggers post-discovery
 			// then picks up the mounted routes and any connected-server instructions.
-			const serverInstructions = mcpManager?.getServerInstructions();
+			const serverInstructions = readMcpServerInstructions();
 			// Drive guidance off the auto-learn BUILTINS currently registered (provenance,
 			// not just an active name): a custom/extension tool that merely shares the
 			// name is not built-in, and the settings reconcile adds/removes the built-ins
@@ -4853,20 +4865,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			ensureGoalRegistered,
 			reconcileSettingsGatedTools,
-			getMcpServerInstructions: mcpManager
-				? () => {
-						const raw = mcpManager.getServerInstructions();
-						if (!raw || raw.size === 0) return raw;
-						const out = new Map<string, string>();
-						for (const [name, text] of raw) {
-							out.set(
-								name,
-								text.length > MAX_MCP_INSTRUCTIONS_LENGTH ? text.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH) : text,
-							);
-						}
-						return out;
-					}
-				: undefined,
+			getMcpServerInstructions: () => {
+				const raw = readMcpServerInstructions();
+				if (!raw || raw.size === 0) return raw;
+				const out = new Map<string, string>();
+				for (const [name, text] of raw) {
+					out.set(
+						name,
+						text.length > MAX_MCP_INSTRUCTIONS_LENGTH ? text.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH) : text,
+					);
+				}
+				return out;
+			},
+			setMcpServerInstructionsSource: source => {
+				hostMcpServerInstructions = source;
+			},
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
 			ttsrManager,
 			obfuscator,
