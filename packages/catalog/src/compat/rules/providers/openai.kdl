@@ -148,6 +148,27 @@ provider "openai" {
 				reasoning-disable-mode "none-effort"
 			}
 		}
+		// Tier families are distinct from generic GPT, but share this 5.6 wire policy.
+		family "gpt-sol" {
+			revision "=5.6" {
+				reasoning-disable-mode "none-effort"
+			}
+		}
+		family "gpt-luna" {
+			revision "=5.6" {
+				reasoning-disable-mode "none-effort"
+			}
+		}
+		family "gpt-astra" {
+			revision "=5.6" {
+				reasoning-disable-mode "none-effort"
+			}
+		}
+		family "gpt-terra" {
+			revision "=5.6" {
+				reasoning-disable-mode "none-effort"
+			}
+		}
 		revision ">=5 <7" {
 			apply-patch-tool-type "freeform"
 		}

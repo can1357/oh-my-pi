@@ -130,16 +130,18 @@ export function getFrustrationJobStatus(): FrustrationJobStatus {
 
 /**
  * Merge per-(model, provider) rows into catalog identities (`class/family/revision`)
- * so provider and spelling variants share a row. Classified rows sort by class,
- * then revision ascending, then family; unclassified rows follow by first use.
+ * so provider and spelling variants share a row. Kimi's versioned families
+ * identify the same model even though its taxonomy has no revision rank.
  */
 export function mergeFrustrationRows(rows: readonly FrustrationModelRow[]): FrustrationModelStats[] {
 	const merged = new Map<string, FrustrationModelStats>();
 	for (const row of rows) {
 		const identity = classifyModel(row.provider ?? "", row.model, { lenient: true });
-		const classified = identity.class !== "unknown" && identity.revision !== undefined;
 		const family = identity.family ?? null;
-		const key = classified ? `${identity.class}/${family ?? ""}/${identity.revision}` : row.model;
+		const classified =
+			identity.class !== "unknown" &&
+			(identity.revision !== undefined || (identity.class === "kimi" && family !== null));
+		const key = classified ? `${identity.class}/${family ?? ""}/${identity.revision ?? ""}` : row.model;
 		const existing = merged.get(key);
 		if (existing) {
 			existing.messages += row.messages;
@@ -154,9 +156,16 @@ export function mergeFrustrationRows(rows: readonly FrustrationModelRow[]): Frus
 		const revision = classified ? (identity.revision ?? null) : null;
 		// `4.5.0` → `4.5`, `5.0.0` → `5`.
 		const shortRevision = revision?.replace(/(?:\.0)+$/, "");
+		let label = row.model;
+		if (shortRevision) {
+			const tier = family?.startsWith("gpt-") ? family.slice(4) : undefined;
+			label = tier ? `gpt ${shortRevision} ${tier}` : family ? `${family} ${shortRevision}` : shortRevision;
+		} else if (classified && family) {
+			label = `${identity.class} ${family}`;
+		}
 		merged.set(key, {
 			key,
-			label: shortRevision ? [family, shortRevision].filter(Boolean).join(" ") : row.model,
+			label,
 			modelClass: identity.class,
 			family,
 			revision,

@@ -222,6 +222,52 @@ describe("frustration dashboard", () => {
 		expect(byModel.at(-1)).toMatchObject({ key: "weird-model", modelClass: "unknown", revision: null });
 	});
 
+	it("groups Kimi provider aliases without conflating GPT tiers and labels Argon", async () => {
+		await initDb();
+		insertUserMessageStats([
+			userMessage("kimi via cline", "cline-pass/kimi-k3", "cline-pass", { yelling: 1 }),
+			userMessage("kimi direct", "kimi-k3", "moonshot"),
+			userMessage("kimi older", "kimi-k2.6", "moonshot"),
+			userMessage("luna", "gpt-5.6-luna", "openai"),
+			userMessage("luna worker route", "gpt-5.6-luna-wm", "openai-codex"),
+			userMessage("sol", "gpt-5.6-sol", "openai"),
+			userMessage("terra", "gpt-5.6-terra", "openai"),
+			userMessage("astra", "gpt-6-astra", "openai"),
+			userMessage("luna 6", "gpt-6-luna", "openai"),
+			userMessage("sol 6", "gpt-6-sol", "openai"),
+			userMessage("sol 6.1", "gpt-6.1-sol", "openai"),
+			userMessage("argon", "gemini-4-argon", "google-antigravity"),
+		]);
+
+		const { byModel } = await getFrustrationDashboardStats("all");
+		expect(byModel).toHaveLength(10);
+		expect(Object.fromEntries(byModel.map(row => [row.label, row.messages]))).toEqual({
+			"argon 4": 1,
+			"gpt 5.6 luna": 2,
+			"gpt 5.6 sol": 1,
+			"gpt 5.6 terra": 1,
+			"gpt 6 astra": 1,
+			"gpt 6 luna": 1,
+			"gpt 6 sol": 1,
+			"gpt 6.1 sol": 1,
+			"kimi k2.6": 1,
+			"kimi k3": 2,
+		});
+		expect(byModel.find(row => row.label === "kimi k3")).toMatchObject({
+			key: "kimi/k3/",
+			messages: 2,
+			annoyed: 1,
+		});
+		expect(byModel.find(row => row.label === "kimi k3")?.models.toSorted()).toEqual([
+			"cline-pass/kimi-k3",
+			"kimi-k3",
+		]);
+		expect(byModel.find(row => row.label === "gpt 5.6 luna")?.models.toSorted()).toEqual([
+			"gpt-5.6-luna",
+			"gpt-5.6-luna-wm",
+		]);
+	});
+
 	it("groups DeepSeek Flash aliases and V4 provider variants without merging Pro or V4.1 into V4", async () => {
 		await initDb();
 		const t = Date.now() - 60_000;

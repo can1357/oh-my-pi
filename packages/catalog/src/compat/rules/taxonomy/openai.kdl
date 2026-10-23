@@ -15,6 +15,16 @@ class "openai" {
 	prefix "o4."
 
 	family "gpt" glob="gpt-*"
+	// Reviewed GPT product tiers share a generation but not a product family.
+	// Keep unknown tier names on generic GPT rather than guessing their identity.
+	family "gpt-sol" glob="gpt-*-sol" priority=1
+	family "gpt-sol" glob="gpt-*-sol-*" priority=1
+	family "gpt-luna" glob="gpt-*-luna" priority=1
+	family "gpt-luna" glob="gpt-*-luna-*" priority=1
+	family "gpt-astra" glob="gpt-*-astra" priority=1
+	family "gpt-astra" glob="gpt-*-astra-*" priority=1
+	family "gpt-terra" glob="gpt-*-terra" priority=1
+	family "gpt-terra" glob="gpt-*-terra-*" priority=1
 	family "chatgpt" glob="chatgpt-*"
 	family "gpt-image" glob="gpt-image-*"
 	family "gpt-image" glob="chatgpt-image-*"

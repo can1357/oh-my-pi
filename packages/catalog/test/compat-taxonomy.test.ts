@@ -39,6 +39,50 @@ describe("classifyModel", () => {
 		});
 	});
 
+	test("GPT product tiers are distinct at each revision while routes share their tier identity", () => {
+		for (const [model, family, revision] of [
+			["gpt-5.6-sol", "gpt-sol", "5.6.0"],
+			["gpt-5.6-luna", "gpt-luna", "5.6.0"],
+			["gpt-5.6-astra", "gpt-astra", "5.6.0"],
+			["gpt-5.6-terra", "gpt-terra", "5.6.0"],
+			["gpt-6-sol", "gpt-sol", "6.0.0"],
+			["gpt-6-luna", "gpt-luna", "6.0.0"],
+			["gpt-6-astra", "gpt-astra", "6.0.0"],
+			["gpt-6.1-sol", "gpt-sol", "6.1.0"],
+		] as const) {
+			expect(classifyModel("openai", model)).toMatchObject({ class: "openai", family, revision });
+		}
+		expect(classifyModel("openai-codex", "gpt-5.6-luna-wm")).toMatchObject({
+			class: "openai",
+			family: "gpt-luna",
+			revision: "5.6.0",
+		});
+		expect(classifyModel("openrouter", "openai/gpt-5.6-sol")).toMatchObject({
+			class: "openai",
+			family: "gpt-sol",
+			revision: "5.6.0",
+		});
+		// A new, unreviewed tier name is still generic GPT.
+		expect(classifyModel("openai", "gpt-6-unreviewed")).toMatchObject({
+			class: "openai",
+			family: "gpt",
+			revision: "6.0.0",
+		});
+	});
+
+	test("Gemini 4 Argon variants share the Argon family", () => {
+		for (const [provider, id] of [
+			["google", "gemini-4-argon"],
+			["google-vertex", "gemini-4-argon-cyber-permissive"],
+			["openrouter", "google/gemini-4-argon"],
+			["cursor", "gemini-4-argon-fast"],
+		] as const) {
+			expect(classifyModel(provider, id)).toMatchObject({ class: "gemini", family: "argon", revision: "4.0.0" });
+		}
+		expect(classifyModel("google", "gemini-4-future")).toMatchObject({ class: "gemini", revision: "4.0.0" });
+		expect(classifyModel("google", "gemini-4-future").family).toBeUndefined();
+	});
+
 	test("DeepSeek V4 revisions ignore suffixes and reviewed Flash aliases resolve to V4.1", () => {
 		expect(classifyModel("opencode-zen", "deepseek-v4-flash-free")).toMatchObject({
 			class: "deepseek",

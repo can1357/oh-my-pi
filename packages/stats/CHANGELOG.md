@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Frustration model rows splitting Kimi provider aliases, combining distinct GPT tiers, and hiding the Argon name ([#16849](https://github.com/can1357/oh-my-pi/issues/16849)).
+
 ## [18.12.0] - 2026-10-17
 
 ### Fixed

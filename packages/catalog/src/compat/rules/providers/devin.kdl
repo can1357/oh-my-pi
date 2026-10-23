@@ -103,6 +103,28 @@ provider "devin" {
 				cache-write-rate 1.25
 			}
 		}
+		// Tier names have their own identity family but use the same published
+		// GPT cache-write card; Codex and unreviewed product lines stay excluded.
+		family "gpt-sol" {
+			revision ">=5.6 <7" {
+				cache-write-rate 1.25
+			}
+		}
+		family "gpt-luna" {
+			revision ">=5.6 <7" {
+				cache-write-rate 1.25
+			}
+		}
+		family "gpt-astra" {
+			revision ">=5.6 <7" {
+				cache-write-rate 1.25
+			}
+		}
+		family "gpt-terra" {
+			revision ">=5.6 <7" {
+				cache-write-rate 1.25
+			}
+		}
 	}
 	// residue: Adaptive is a router uid with no model identity; its card
 	// bills cache writes at the input rate.
@@ -129,6 +151,68 @@ provider "devin" {
 					output-multiplier 1.5
 				}
 				// mini and nano share the class rank but have no published tier.
+				models token="mini" {
+					long-context-cost {}
+				}
+				models token="nano" {
+					long-context-cost {}
+				}
+			}
+		}
+		// Named GPT-6 product tiers carry the same card as the generic GPT-6
+		// lane, including priority routes, without reclassifying Codex SKUs.
+		family "gpt-sol" {
+			revision ">=6 <7" {
+				long-context-cost {
+					input-threshold 272000
+					multiplier 2.0
+					output-multiplier 1.5
+				}
+				models token="mini" {
+					long-context-cost {}
+				}
+				models token="nano" {
+					long-context-cost {}
+				}
+			}
+		}
+		family "gpt-luna" {
+			revision ">=6 <7" {
+				long-context-cost {
+					input-threshold 272000
+					multiplier 2.0
+					output-multiplier 1.5
+				}
+				models token="mini" {
+					long-context-cost {}
+				}
+				models token="nano" {
+					long-context-cost {}
+				}
+			}
+		}
+		family "gpt-astra" {
+			revision ">=6 <7" {
+				long-context-cost {
+					input-threshold 272000
+					multiplier 2.0
+					output-multiplier 1.5
+				}
+				models token="mini" {
+					long-context-cost {}
+				}
+				models token="nano" {
+					long-context-cost {}
+				}
+			}
+		}
+		family "gpt-terra" {
+			revision ">=6 <7" {
+				long-context-cost {
+					input-threshold 272000
+					multiplier 2.0
+					output-multiplier 1.5
+				}
 				models token="mini" {
 					long-context-cost {}
 				}

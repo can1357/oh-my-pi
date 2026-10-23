@@ -4,6 +4,9 @@ class "gemini" {
 	family "lite" glob="*flash-lite*" priority=10
 	family "flash" glob="*flash*"
 	family "pro" glob="*pro*"
+	// Argon and its named routes are a product family, not an unranked Gemini.
+	family "argon" glob="gemini-4-argon" priority=10
+	family "argon" glob="gemini-4-argon-*" priority=10
 
 	revision prefix="gemini-"
 }
