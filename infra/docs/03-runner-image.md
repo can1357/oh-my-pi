@@ -84,7 +84,7 @@ reproduced verbatim (it contains no secrets or redactable host identifiers; the
 FROM ghcr.io/actions/actions-runner:latest
 
 ARG RUST_NIGHTLY=nightly-2026-10-06
-ARG BUN_VERSION=1.4.3
+ARG BUN_VERSION=1.4.4
 ARG SCCACHE_VERSION=0.18.0
 ARG ZIG_VERSION=0.16.0
 
@@ -397,6 +397,11 @@ next job's microVM starts cold but with warm dependencies from the local store.
    The rebuild is cache-fast for unchanged layers, the baked-tools check guards
    the change, and the import/helm-upgrade/verify steps roll the new tag out.
    The next job's microVM boots warm with the updated toolchain.
+
+   A bun bump (e.g. to 1.4.4 for CVE-2026-111497 / CVE-2026-91403) reaches
+   running runners only after this reload. Until then the `bun-install` action
+   refuses a preloaded bun below its `min-bun-version` input and installs a
+   patched one per job, so CI is safe but pays the download cost.
 
 ---
 

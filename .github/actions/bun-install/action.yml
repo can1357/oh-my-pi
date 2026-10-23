@@ -6,12 +6,24 @@ description: >
    (e.g. GitHub-hosted). Self-hosted omp-kata runners use the mounted Bun store
    PVC; GitHub-hosted runners use the stock actions/cache backend.
 
+inputs:
+   min-bun-version:
+      description: >
+         Security floor for the bun used in CI, enforced on top of the
+         package.json pin. A preloaded bun older than this is not reused: a
+         floor pin installs latest, an exact pin below it installs this version.
+         Lets CI pick up a patched bun before the runner image is re-rolled.
+      required: false
+      default: "1.4.4"
+
 runs:
    using: composite
    steps:
       - name: Detect environment
         id: env
         shell: bash
+        env:
+           MIN_BUN: ${{ inputs.min-bun-version }}
         run: |
            # bun is baked into the omp-kata runner image — reuse it only when it
            # satisfies the repo pin (package.json "packageManager"). The pin is
@@ -24,10 +36,23 @@ runs:
              echo "::error::could not read pinned bun version from package.json packageManager"
              exit 1
            fi
+           # version_ge A B: true when A >= B under sort -V
+           version_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
            case "$want" in
              '>='*) floor="${want#>=}"; install="latest" ;;
              *)     floor="$want";      install="bun-v$want" ;;
            esac
+           # Raise the floor to the CI security minimum (MIN_BUN). An exact pin
+           # below it becomes "install the minimum" so CI never runs a bun with
+           # known CVEs, independent of when the runner image is re-rolled.
+           if [ -n "$MIN_BUN" ] && ! version_ge "$floor" "$MIN_BUN"; then
+             echo "bun pin $want is below CI minimum $MIN_BUN; raising floor to $MIN_BUN"
+             floor="$MIN_BUN"
+             if [ "$install" != latest ]; then
+               echo "::warning::exact bun pin $want is below CI minimum $MIN_BUN; using bun $MIN_BUN"
+               want="$MIN_BUN"; install="bun-v$MIN_BUN"
+             fi
+           fi
            # bun.sh/install takes a release tag argument; "latest" is spelled as no argument.
            echo "bun_install=$([ "$install" = latest ] || echo "$install")" >> "$GITHUB_OUTPUT"
            have=""
@@ -37,18 +62,17 @@ runs:
            ok=false
            if [ -n "$have" ]; then
              if [ "$install" = latest ]; then
-               # floor satisfied when the floor sorts first (or equal) under sort -V
-               [ "$(printf '%s\n%s\n' "$floor" "$have" | sort -V | head -n1)" = "$floor" ] && ok=true
+               version_ge "$have" "$floor" && ok=true
              elif [ "$have" = "$want" ]; then
                ok=true
              fi
            fi
            if [ "$ok" = true ]; then
              echo "setup_bun=false" >> "$GITHUB_OUTPUT"
-             echo "bun present: $have (satisfies $want)"
+             echo "bun present: $have (satisfies $want, floor $floor)"
            else
              echo "setup_bun=true" >> "$GITHUB_OUTPUT"
-             echo "bun on runner: ${have:-none}; does not satisfy $want, installing $install"
+             echo "bun on runner: ${have:-none}; does not satisfy $want (floor $floor), installing $install"
            fi
            # The repo keys "are we on can.internal infra?" off $BAZEL_REMOTE_USER
            # (the bazel-remote-ci secret is envFrom-injected into every omp-kata
