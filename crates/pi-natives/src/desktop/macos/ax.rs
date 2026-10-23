@@ -411,10 +411,13 @@ impl KeyFocus {
 	/// Whether keyboard focus sits in an overlay window, such as Finder's
 	/// inline rename field or a popover: one attached to `wid` while the
 	/// application reports `wid`, or nothing, as its focused window, or `wid`
-	/// itself while it reports the window `wid` is attached to.
+	/// itself while it reports the window `wid` is attached to, or nothing.
 	pub(super) fn in_overlay_of(&self, wid: u32, parent_of: impl Fn(u32) -> Option<u32>) -> bool {
 		if self.holds_overlay_focus(wid, &parent_of) {
 			return true;
+		}
+		if self.window == FocusedWindow::Unreported && self.element_window == Some(wid) {
+			return parent_of(wid).is_some();
 		}
 		let reported = match self.window {
 			FocusedWindow::Unreported => true,
@@ -749,6 +752,19 @@ fn element_window(element: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
 	None
 }
 
+/// The window id of `element` when it is itself one of `pid`'s `AXWindows`
+/// though not an `AXWindow`, as Finder's inline rename field is: such an
+/// element has no window above it and stands for its own.
+fn listed_window_id(pid: libc::pid_t, element: &AXUIElement) -> Option<u32> {
+	let app = probe_application(pid)?;
+	let windows = copy_elements(&app, "AXWindows").ok()?;
+	windows
+		.iter()
+		.any(|window| **window == *element)
+		.then(|| window_id(element))
+		.flatten()
+}
+
 /// An element that stands for its own `WindowServer` window but is absent
 /// from `AXWindows`, with what can identify that window.
 #[derive(Clone, Copy, Debug)]
@@ -953,14 +969,18 @@ impl AxBackend for MacAx {
 	fn window_id(&mut self, h: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String> {
 		let element = mac_handle(h)?;
 		let pid = element_pid(element)?;
-		let Some(window) = element_window(element) else {
+		let wid = if let Some(window) = element_window(element) {
+			window_id(&window).ok_or_else(|| {
+				DesktopError::ax_failed("AX element's native window id is unavailable")
+			})?
+		} else if let Some(wid) = listed_window_id(pid, element) {
+			wid
+		} else {
 			// A destroyed element has no window either: say so as the
 			// `StaleRef` every element operation gives.
 			copy_held_attribute(element, "AXRole")?;
 			return Err(DesktopError::ax_failed("AX element has no identifiable owning window"));
 		};
-		let wid = window_id(&window)
-			.ok_or_else(|| DesktopError::ax_failed("AX element's native window id is unavailable"))?;
 		windows
 			.iter()
 			.find(|candidate| {
@@ -3021,6 +3041,12 @@ mod tests {
 		assert_eq!(focus.destination(7, 41732, attached), KeyDestination::Target(7));
 		assert!(focus.holds_text_for(7, 41732, attached));
 		assert!(focus.in_overlay_of(41732, attached));
+		// Keys addressed to the overlay window itself reach the field too.
+		assert_eq!(focus.destination(7, 41743, attached), KeyDestination::Target(7));
+		assert!(focus.in_overlay_of(41743, attached));
+		// A top-level window holding the focus is no overlay.
+		let top_level = KeyFocus { element_window: Some(41732), ..focus };
+		assert!(!top_level.in_overlay_of(41732, attached));
 		// The same overlay in another Finder window is not this window's.
 		assert_eq!(focus.destination(7, 35240, attached), KeyDestination::Unreported);
 		assert!(!focus.holds_text_for(7, 35240, attached));
