@@ -14,6 +14,7 @@ import {
 	DEBOUNCE_BUCKET_MS,
 	IMMINENT_RESET_EXPIRY_MS,
 	REPORT_FRESHNESS_MS,
+	RESTORE_WAIT_TOLERANCE_MS,
 	SALVAGE_MIN_USED_FRACTION,
 	type CodexResetTrigger,
 } from "./codex-auto-reset";
@@ -481,7 +482,12 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			if (leftExpiry !== rightExpiry) return leftExpiry - rightExpiry;
 			return right.remainingMs - left.remainingMs;
 		});
-		const best = candidates[0];
+		// A Claude reset keeps the window timers: the allowance it restores lasts
+		// only until the natural unblock, when the account refills anyway. So it
+		// is worth the wait it skips: spend the one that skips the longest,
+		// letting the order above break near-ties.
+		const longestWaitMs = Math.max(...candidates.map(candidate => candidate.remainingMs));
+		const best = candidates.find(candidate => candidate.remainingMs >= longestWaitMs - RESTORE_WAIT_TOLERANCE_MS);
 		if (best) {
 			const expiresAtMs = creditExpiryMs(best.snapshot.credit);
 			restore = {
