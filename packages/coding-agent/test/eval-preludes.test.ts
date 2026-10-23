@@ -131,4 +131,38 @@ describe("eval prelude host invocation", () => {
 		);
 		expect(invoke).not.toHaveBeenCalled();
 	});
+
+	it("runs extension tool_call hooks: revised input executes, blocks never reach the handler", async () => {
+		const invoke = vi.fn(async (parameters: unknown): Promise<AgentToolResult<unknown>> => ({
+			content: [{ type: "text", text: JSON.stringify(parameters) }],
+		}));
+		const definition: EvalPreludeDefinition = {
+			name: "probe",
+			documentation: "Probe documentation",
+			javascript: "globalThis.probe = {};",
+			python: "probe = object()",
+			exports: ["probe"],
+			approval: "read",
+			enabled: () => true,
+			invoke,
+		};
+		const emitToolCall = vi.fn(
+			async (event: { toolName: string; toolCallId: string; input: Record<string, unknown> }) =>
+				event.input.action === "deny"
+					? { block: true, reason: "denied by extension" }
+					: { input: { ...event.input, app: { cdp_url: "http://127.0.0.1:9999" } } },
+		);
+		const session: ToolSession = { ...makeSession(() => [definition]), emitToolCall };
+
+		const result = await invokeEvalPrelude("probe", { action: "open" }, { session, toolCallId: "call-1" });
+		expect(result.content).toEqual([
+			{ type: "text", text: JSON.stringify({ action: "open", app: { cdp_url: "http://127.0.0.1:9999" } }) },
+		]);
+		expect(emitToolCall.mock.calls[0]?.[0]).toMatchObject({ toolName: "probe", toolCallId: "call-1" });
+
+		await expect(invokeEvalPrelude("probe", { action: "deny" }, { session, toolCallId: "call-2" })).rejects.toThrow(
+			/denied by extension/,
+		);
+		expect(invoke).toHaveBeenCalledTimes(1);
+	});
 });

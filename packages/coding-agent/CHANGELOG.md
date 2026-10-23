@@ -11,6 +11,10 @@
 - The bash execution visualization keeps updating, and saved traces still restore, after a command handles bytes that aren't valid UTF-8 (e.g. `v=$(printf '\377')`)
 - On Windows, `grep`, `glob` and isolated subagents no longer flash a console window when they query or start the ovnfs daemon.
 
+### Changed
+
+- Eval `browser` (and other prelude) calls now run extension `tool_call` handlers like regular tool calls, so an extension that blocks or rewrites `browser` calls (for example to point `app.cdp_url` at a per-agent endpoint) also covers calls made from eval ([#18277](https://github.com/can1357/oh-my-pi/pull/18277) by [@aleister1102](https://github.com/aleister1102))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

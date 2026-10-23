@@ -132,6 +132,29 @@ async function approvePreludeInvocation(
 }
 
 /**
+ * Runs the session's extension `tool_call` handlers for a prelude call, as the agent loop does for
+ * tool calls, so an extension that blocks or revises e.g. `browser` calls also sees the ones made
+ * from eval. Runs before approval, which then resolves against the input that executes.
+ */
+async function applyToolCallHooks(name: string, parameters: unknown, context: EvalPreludeContext): Promise<unknown> {
+	const emit = context.session.emitToolCall;
+	if (!emit || parameters === null || typeof parameters !== "object" || Array.isArray(parameters)) return parameters;
+	const result = await emit.call(
+		context.session,
+		{
+			type: "tool_call",
+			toolName: name,
+			toolCallId: context.toolCallId,
+			input: parameters as Record<string, unknown>,
+		},
+		context.signal,
+	);
+	if (result?.block) throw new Error(result.reason || `Eval prelude call blocked by an extension: ${name}`);
+	context.signal?.throwIfAborted();
+	return result?.input ?? parameters;
+}
+
+/**
  * Invoke a prelude through the live session registry. Authorization is resolved
  * before the handler runs and repeated when an awaited approval raced with a
  * replacement, so a disabled or replaced captured function cannot retain host
@@ -139,13 +162,14 @@ async function approvePreludeInvocation(
  */
 export async function invokeEvalPrelude(
 	name: string,
-	parameters: unknown,
+	rawParameters: unknown,
 	context: EvalPreludeContext,
 ): Promise<AgentToolResult<unknown>> {
 	context.signal?.throwIfAborted();
 	let definition = findEnabledEvalPrelude(context.session, name);
 	if (!definition) throw new Error(`Eval prelude "${name}" is not enabled in the current session.`);
 
+	const parameters = await applyToolCallHooks(name, rawParameters, context);
 	await approvePreludeInvocation(definition, parameters, context);
 	context.signal?.throwIfAborted();
 	const current = findEnabledEvalPrelude(context.session, name);

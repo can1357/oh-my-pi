@@ -14,7 +14,9 @@ import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type {
 	BeforeSubagentSpawnEvent,
 	BeforeSubagentSpawnEventResult,
+	CustomToolCallEvent,
 	PreparedExtension,
+	ToolCallEventResult,
 } from "../extensibility/extensions/types";
 import type { Skill, SkillRediscoveryHost } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
@@ -446,6 +448,13 @@ export interface ToolSession {
 		event: BeforeSubagentSpawnEvent,
 		signal?: AbortSignal,
 	): Promise<BeforeSubagentSpawnEventResult | undefined>;
+	/**
+	 * Fires `tool_call` on this session's extensions for a call that reaches a host capability
+	 * outside the agent loop (eval preludes such as `browser`). Extensions may block it or revise
+	 * its input exactly as for a loop-dispatched call. Undefined when the session has no extension
+	 * runner.
+	 */
+	emitToolCall?(event: CustomToolCallEvent, signal?: AbortSignal): Promise<ToolCallEventResult | undefined>;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
 	authStorage?: import("../session/auth-storage").AuthStorage;
 	/** Model registry for passing to subagents (avoids re-discovery) */
