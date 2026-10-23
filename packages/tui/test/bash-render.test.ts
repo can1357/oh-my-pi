@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RenderResultOptions } from "../src/tools/renderer";
@@ -443,5 +443,28 @@ describe("bashToolRenderer", () => {
 		const view = JSON.stringify(bashToolRenderer.describeResult(result, options, args));
 		expect(view).toContain(`Minimized ${label} 1.9KB → 27B`);
 		expect(view).not.toContain("\\u001b[31m");
+	});
+
+	it("shows a home path in a minimizer filter label as ~", () => {
+		const home = spyOn(os, "homedir").mockReturnValue("/home/alice");
+		try {
+			const result = {
+				content: [{ type: "text" as const, text: "ok\n[raw output: artifact://3]" }],
+				details: {
+					meta: {
+						minimized: { filter: "/home/alice/bin/lint", inputBytes: 1960, outputBytes: 27, artifactId: "3" },
+					},
+				},
+			};
+			const options = { expanded: false, isPartial: false };
+			const rendered = bashToolRenderer
+				.renderResult(result, options, uiTheme, { command: "lint" })
+				.render(200)
+				.join("\n");
+			expect(Bun.stripANSI(rendered)).toContain("Minimized: ~/bin/lint 1.9KB → 27B");
+			expect(rendered).not.toContain("/home/alice");
+		} finally {
+			home.mockRestore();
+		}
 	});
 });

@@ -1,6 +1,12 @@
 import type { Theme } from "../theme/theme";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { formatBytes, TRUNCATE_LENGTHS, truncateToWidth, wrapBrackets } from "../render/render-utils";
+import {
+	formatBytes,
+	shortenEmbeddedPaths,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+	wrapBrackets,
+} from "../render/render-utils";
 import type { OutputArtifactError } from "./streaming-output";
 import { formatGroupedFiles } from "./grouped-file-output";
 
@@ -314,10 +320,10 @@ export function formatArtifactErrorNotice(error: OutputArtifactError): string {
 /**
  * `git 120.4KB → 3.2KB`: the minimizer filter that ran and the bytes it took the output from and to.
  * Native labels are short words; a rehydrated session or extension may carry any text, so the label
- * is sanitized to one plain line and width-bounded.
+ * is sanitized to one plain line, its home paths shortened to `~`, and width-bounded.
  */
 export function formatMinimizedMeta(minimized: MinimizedMeta): string {
-	const label = sanitizeText(minimized.filter).replace(/\s+/gu, " ").trim();
+	const label = shortenEmbeddedPaths(sanitizeText(minimized.filter).replace(/\s+/gu, " ").trim());
 	const filter = truncateToWidth(label, TRUNCATE_LENGTHS.SHORT);
 	return `${filter} ${formatBytes(minimized.inputBytes)} → ${formatBytes(minimized.outputBytes)}`;
 }
