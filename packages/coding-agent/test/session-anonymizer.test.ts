@@ -403,13 +403,18 @@ describe("SessionAnonymizer", () => {
 					toolCallId: "toolu_01abcdef",
 					toolName: "mcp__crm_lookup",
 					details: 987654321,
-					content: [{ type: "image", data: "AAAA", mimeType: "image/png", status: "customer-acme" }],
+					content: [
+						{ type: "image", data: "AAAA", mimeType: "image/png", status: "customer-acme" },
+						{ type: "acmeBlock", text: "s" },
+					],
 				},
 			}),
 			// Usage counters stay even though `input` is also the tool-call arguments key.
 			anonymizer.entry({ type: "message", message: { role: "assistant", usage: { input: 120, output: 30 } } }),
 		]);
 		for (const secret of ["123456789", "987654321", "acme", "status"]) expect(json).not.toContain(secret);
+		// Replay tells text from image blocks by `type`; an unknown block type stays opaque.
+		expect(json).toContain('{"type":"image",');
 		expect(json).toContain('"mimeType":"image/png"');
 		expect(json).toContain('"usage":{"input":120,"output":30}');
 	});
