@@ -866,7 +866,8 @@ export class CmuxTab implements InProcessRunTab {
 	}
 
 	async click(selector: string, options?: { button?: string; count?: number }): Promise<void> {
-		refuseUnpressableClick("tab", `tab.click(${JSON.stringify(selector)}, `, options);
+		const quoted = JSON.stringify(selector);
+		refuseUnpressableClick(`tab.click(${quoted}, `, `tab.dblclick(${quoted})`, options);
 		await this.#selectorAction(selector, "click");
 	}
 
@@ -2208,11 +2209,12 @@ class CmuxResponse {
 
 /**
  * Every cmux element-click path presses the left button once; refuse another button or count rather than
- * mis-deliver it. `call` is the call as written up to its options (`tab.click("#x", `).
+ * mis-deliver it. `call` is the call as written up to its options (`tab.click("#x", `), `dblclick` the call
+ * that double-clicks the same target.
  */
 function refuseUnpressableClick(
-	owner: "tab" | "handle",
 	call: string,
+	dblclick: string,
 	options: { button?: string; count?: number } | undefined,
 ): void {
 	if (options?.button !== undefined && options.button !== "left") {
@@ -2222,7 +2224,7 @@ function refuseUnpressableClick(
 	}
 	if (options?.count !== undefined && options.count !== 1) {
 		throw new ToolError(
-			`${call}{ count: ${options.count} }) is not supported in a cmux browser; use ${owner}.dblclick() for a double click`,
+			`${call}{ count: ${options.count} }) is not supported in a cmux browser; use ${dblclick} for a double click`,
 		);
 	}
 }
@@ -2237,7 +2239,7 @@ class CmuxElementHandle {
 	}
 
 	async click(options?: { button?: string; count?: number }): Promise<void> {
-		refuseUnpressableClick("handle", "handle.click(", options);
+		refuseUnpressableClick("handle.click(", "handle.dblclick()", options);
 		await this.#tab.click(this.#selector);
 	}
 
