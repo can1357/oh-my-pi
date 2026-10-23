@@ -12,6 +12,7 @@ import * as path from "node:path";
 
 import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { expandTilde } from "../../../tools/path-utils";
+import { linkPluginDirectory } from "../directory-link";
 import { normalizePluginRuntimeConfig, writePluginRuntimeConfig } from "../runtime-config";
 import type { PluginRuntimeConfig, PluginRuntimeState } from "../types";
 
@@ -1079,7 +1080,7 @@ export class MarketplaceManager {
 		const linkPath = this.#runtimePackagePath(scope, packageName);
 		await fs.mkdir(path.dirname(linkPath), { recursive: true });
 		await fs.rm(linkPath, { recursive: true, force: true });
-		await fs.symlink(cachePath, linkPath, process.platform === "win32" ? "junction" : "dir");
+		await linkPluginDirectory(cachePath, linkPath);
 
 		const config = await this.#loadRuntimeConfig(scope);
 		const previous = config.plugins[packageName];
