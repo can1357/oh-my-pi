@@ -432,7 +432,8 @@ impl Request {
 	/// Whether this mutation takes over the user's own input or foreground,
 	/// which arms the physical-Escape stop: `takeover: true` delivery, input
 	/// to a desktop or display target (it drives the user's real pointer and
-	/// keyboard), an explicit raise, and an activating launch. Held control
+	/// keyboard), an explicit raise, and an activating launch or a reveal in
+	/// Finder, which always comes to the front. Held control
 	/// armed the stop when it was granted, so every operation under it keeps
 	/// the stop.
 	fn takes_over(&self) -> bool {
@@ -449,7 +450,9 @@ impl Request {
 			Self::AxClick { options, .. } => (None, options.takeover),
 			Self::AxInput { takeover, .. } => (None, *takeover),
 			Self::RaiseWindow { .. } => return true,
-			Self::OpenApplication { options, .. } => return options.activate.unwrap_or(false),
+			Self::OpenApplication { options, .. } => {
+				return options.activate.unwrap_or(false) || options.reveal.unwrap_or(false);
+			},
 			Self::AxPerform { action, .. } => return is_raise_action(action),
 			// Background-only mutations and reads: listed by name so a new
 			// request variant must decide whether it arms the stop.
@@ -4899,7 +4902,7 @@ mod capture_tests {
 		};
 		let open = |activate| Request::OpenApplication {
 			id:      "com.apple.TextEdit".to_string(),
-			options: ApplicationOpenOptions { activate },
+			options: ApplicationOpenOptions { activate, ..Default::default() },
 			reply:   reply(),
 		};
 		// Held keys reach the fake backend only as takeover, which the test
@@ -4938,6 +4941,11 @@ mod capture_tests {
 			perform("raise"),
 			perform("AXRaise"),
 			open(Some(true)),
+			Request::OpenApplication {
+				id:      "/tmp".to_string(),
+				options: ApplicationOpenOptions { reveal: Some(true), ..Default::default() },
+				reply:   reply(),
+			},
 		];
 		for request in takeover {
 			let source = CancellationSource::default();
