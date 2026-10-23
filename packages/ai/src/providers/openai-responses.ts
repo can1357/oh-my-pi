@@ -73,7 +73,13 @@ import {
 	rememberOpenAIReasoningEffortFallback,
 	resolveOpenAIReasoningEffortFallback,
 } from "./openai-reasoning-fallback";
-import { resolveCopilotRequestIdentity, wrapFetchForCopilotFallback } from "./github-copilot-headers";
+import {
+	clearCopilotIntegrationCache,
+	rememberCopilotWorkingIntegrationId,
+	resolveCopilotFallbackIdentity,
+	resolveCopilotRequestIdentity,
+	wrapFetchForCopilotFallback,
+} from "./github-copilot-headers";
 import type {
 	Tool as OpenAITool,
 	ReasoningEffort,
@@ -82,6 +88,11 @@ import type {
 	ResponseInputContent,
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
+import {
+	type OpenAIResponsesWebSocketLease,
+	OpenAIResponsesWebSocketPool,
+	OpenAIResponsesWebSocketUpgradeError,
+} from "./openai-responses-websocket";
 import {
 	applyCommonResponsesSamplingParams,
 	applyOpenAIExtraBody,
@@ -120,6 +131,13 @@ import {
 
 // OpenAI Responses-specific options
 export interface OpenAIResponsesOptions extends StreamOptions {
+	/**
+	 * Opt in to WebSocket response.create on the standard /responses endpoint.
+	 * Defaults to model.preferWebsockets, then false; explicit false always wins.
+	 * WebSocket requests replay full history: statefulResponses chaining is HTTP-only.
+	 * Transport failures surface without an automatic HTTP fallback or request replay.
+	 */
+	preferWebsockets?: boolean;
 	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	serviceTier?: ServiceTier;
@@ -129,8 +147,9 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	maxTokensExplicit?: boolean;
 	disableReasoning?: boolean;
 	/**
-	 * Stateful turns: chain via `previous_response_id` + delta input instead of
-	 * replaying the full transcript. Forces `store: true` (the platform only
+	 * HTTP/SSE stateful turns: chain via `previous_response_id` + delta input
+	 * instead of replaying the full transcript. Ignored for WebSockets, which
+	 * always replay full history. Forces `store: true` (the platform only
 	 * resolves stored responses). Precedence: this option, then
 	 * `PI_OPENAI_STATEFUL`, then `compat.statefulResponses`, then ON against the
 	 * official OpenAI API and OFF elsewhere. Requires `sessionId` +
@@ -409,6 +428,7 @@ interface OpenAIResponsesProviderSessionState
 	chains: Map<string, OpenAIResponsesChainState>;
 	/** `configuration_update` effort baselines, keyed by baseUrl/model/session. */
 	effortControls: Map<string, OpenAIEffortControlState<ResponsesStableEffort>>;
+	webSockets: OpenAIResponsesWebSocketPool;
 }
 
 /** Wire efforts a `configuration_update` can carry: every real tier, never `none`/null. */
@@ -465,6 +485,7 @@ function createOpenAIResponsesProviderSessionState(
 		closeCount: 0,
 		chains: new Map(),
 		effortControls: new Map(),
+		webSockets: new OpenAIResponsesWebSocketPool(),
 		releaseSession: sessionId => {
 			const normalizedSessionId = normalizeOpenAIPromptCacheKey(sessionId);
 			if (!normalizedSessionId) return;
@@ -472,12 +493,14 @@ function createOpenAIResponsesProviderSessionState(
 				if (chain.sessionId === normalizedSessionId) state.chains.delete(key);
 			}
 			releaseOpenAIEffortControlSession(state.effortControls, normalizedSessionId);
+			state.webSockets.releaseSession(normalizedSessionId);
 		},
 		close: () => {
 			state.nativeHistoryReplayWarmed = false;
 			state.closeCount++;
 			state.chains.clear();
 			state.effortControls.clear();
+			state.webSockets.releaseSession();
 			clearOpenAIStrictToolsState(state);
 			clearOpenAIReasoningEffortFallbackState(state);
 		},
@@ -504,19 +527,25 @@ function getOpenAIResponsesProviderSessionState(
  * is cold, rebuilding turns from message content, from the first request on a
  * connection-bound host (`compat.connectionBoundNativeHistory`, GitHub Copilot)
  * and after `close()` on any host, until a response succeeds. Without session
- * state every request replays.
+ * state HTTP requests replay. WebSocket requests on connection-bound hosts always
+ * rebuild history: full-replay contexts may combine results from different sockets.
  */
 export function openAIResponsesReplaysNativeHistory(
-	model: Pick<Model, "api" | "provider" | "compat"> | null | undefined,
+	model: Pick<Model, "api" | "provider" | "compat" | "preferWebsockets"> | null | undefined,
 	providerSessionState: Map<string, ProviderSessionState> | undefined,
+	preferWebsockets?: boolean,
 ): boolean {
-	if (model?.api !== "openai-responses" || !providerSessionState) return true;
+	if (model?.api !== "openai-responses") return true;
+	const compat = model.compat;
+	const connectionBoundNativeHistory =
+		compat && "connectionBoundNativeHistory" in compat && compat.connectionBoundNativeHistory;
+	if (connectionBoundNativeHistory && (preferWebsockets ?? model.preferWebsockets ?? false)) return false;
+	if (!providerSessionState) return true;
 	const state = providerSessionState.get(`${OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX}${model.provider}`) as
 		| OpenAIResponsesProviderSessionState
 		| undefined;
 	if (state) return state.nativeHistoryReplayWarmed;
-	const compat = model.compat;
-	return !(compat && "connectionBoundNativeHistory" in compat && compat.connectionBoundNativeHistory);
+	return !connectionBoundNativeHistory;
 }
 
 /** Host per-provider storage defaults; see {@link configureProviderStoreResponses}. */
@@ -745,6 +774,7 @@ const streamOpenAIResponsesOnce = (
 		let chainState: OpenAIResponsesChainState | undefined;
 		let sentPreviousResponseId: string | undefined;
 		let lastSubmittedRequestWasFullReplay: boolean | undefined;
+		let webSocketLease: OpenAIResponsesWebSocketLease | undefined;
 		const abortTracker = createAbortSourceTracker(options?.signal);
 		const firstEventTimeoutAbortError = new AIError.StreamTimeoutError(OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE);
 		const { requestAbortController, requestSignal } = abortTracker;
@@ -788,13 +818,23 @@ const streamOpenAIResponsesOnce = (
 				});
 			const premiumRequestsTotal = copilotPremiumRequests;
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
+			const preferWebsockets = options?.preferWebsockets ?? model.preferWebsockets ?? false;
+			if (providerSessionState && preferWebsockets && model.compat.connectionBoundNativeHistory) {
+				// A WS exchange cannot establish ownership for a later HTTP replay.
+				providerSessionState.nativeHistoryReplayWarmed = false;
+			}
 			const closeCountAtStart = providerSessionState?.closeCount;
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);
 			const promptCacheBreakpointPolicy =
 				resolveCacheRetention(options?.cacheRetention) !== "none" && options?.promptCache?.mode === "explicit"
 					? (options.promptCache.breakpoint ?? "latest-stable-message")
 					: undefined;
-			if (isOpenAIResponsesStatefulEnabled(options, model) && routingSessionId && providerSessionState) {
+			if (
+				!preferWebsockets &&
+				isOpenAIResponsesStatefulEnabled(options, model) &&
+				routingSessionId &&
+				providerSessionState
+			) {
 				chainState = getOpenAIResponsesChainState(providerSessionState, model, baseUrl, routingSessionId);
 				if (chainState.canAppend && chainState.lastPromptCacheBreakpointPolicy !== promptCacheBreakpointPolicy) {
 					resetOpenAIResponsesChainState(chainState);
@@ -850,6 +890,19 @@ const streamOpenAIResponsesOnce = (
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 			const requestUrl = `${resolvedBaseUrl}/responses`;
+			const webSocketPool = preferWebsockets
+				? (providerSessionState?.webSockets ?? new OpenAIResponsesWebSocketPool())
+				: undefined;
+			if (webSocketPool) {
+				webSocketLease = webSocketPool.acquire({
+					url: requestUrl,
+					headers,
+					provider: model.provider,
+					modelId: model.id,
+					sessionId: providerSessionState ? routingSessionId : undefined,
+					captureUpgradeResponse: model.provider === "github-copilot",
+				});
+			}
 			const applyPayloadReplacement = async (requestParams: OpenAIResponsesSamplingParams) => {
 				const replacementPayload = await options?.onPayload?.(requestParams, model);
 				const payload =
@@ -885,6 +938,69 @@ const streamOpenAIResponsesOnce = (
 					);
 				}
 				try {
+					if (webSocketLease) {
+						if (requestParams.previous_response_id != null) {
+							throw new Error(
+								"OpenAI responses WebSocket requests replay full history; previous_response_id is not supported",
+							);
+						}
+						if ("background" in requestParams && requestParams.background === true) {
+							throw new Error("OpenAI responses WebSocket requests do not support background: true");
+						}
+						let connection = webSocketLease.connection;
+						try {
+							await connection.open(requestSignal);
+						} catch (error) {
+							if (
+								model.provider !== "github-copilot" ||
+								!(error instanceof OpenAIResponsesWebSocketUpgradeError) ||
+								requestSignal.aborted
+							)
+								throw error;
+							const alternate = await resolveCopilotFallbackIdentity(
+								error.response,
+								new Headers(headers).get("Copilot-Integration-Id"),
+								resolveCopilotRequestIdentity(options?.headers),
+								copilotCacheKey ? (copilotCacheSnapshot ?? undefined) : undefined,
+							);
+							if (!alternate) throw error;
+							const retryHeaders = { ...headers };
+							for (const name in retryHeaders) {
+								if (name.toLowerCase() === "copilot-integration-id") retryHeaders[name] = alternate;
+							}
+							webSocketLease.release();
+							webSocketLease = webSocketPool!.acquire({
+								url: requestUrl,
+								headers: retryHeaders,
+								provider: model.provider,
+								modelId: model.id,
+								sessionId: providerSessionState ? routingSessionId : undefined,
+								captureUpgradeResponse: true,
+							});
+							connection = webSocketLease.connection;
+							try {
+								await connection.open(requestSignal);
+							} catch (retryError) {
+								if (copilotCacheKey && retryError instanceof OpenAIResponsesWebSocketUpgradeError) {
+									clearCopilotIntegrationCache(copilotCacheKey);
+								}
+								throw retryError;
+							}
+							rememberCopilotWorkingIntegrationId(copilotCacheKey, alternate);
+						}
+						clearTimeout(requestTimeout);
+						if (options?.onResponse) {
+							await options.onResponse(
+								{
+									status: 101,
+									headers: Object.fromEntries(connection.handshakeHeaders ?? []),
+									metadata: { transport: "websocket" },
+								},
+								model,
+							);
+						}
+						return connection.events(requestParams, rawSseObserver);
+					}
 					const headersWithTimeout = { ...headers };
 					if (requestTimeoutMs !== undefined) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
@@ -1067,6 +1183,7 @@ const streamOpenAIResponsesOnce = (
 			if (premiumRequestsTotal !== undefined) output.usage.premiumRequests = premiumRequestsTotal;
 			stream.push({ type: "start", partial: output });
 
+			const retainNativeHistory = !(webSocketLease && model.compat.connectionBoundNativeHistory);
 			const nativeOutputItems: Array<Record<string, unknown>> = [];
 			let transientStreamRetryAttempt = 0;
 			while (true) {
@@ -1105,14 +1222,16 @@ const streamOpenAIResponsesOnce = (
 
 				try {
 					await processResponsesStream(observedOpenaiStream, output, attemptStream, model, {
+						retainReasoningSignatures: retainNativeHistory,
 						onFirstToken: () => {
 							if (!firstTokenTime) firstTokenTime = performance.now();
 						},
-						onOutputItemDone: item => {
-							// `processResponsesStream` hands over a private clone already; no
-							// second deep copy needed (reasoning items carry multi-KB blobs).
-							nativeOutputItems.push(item as unknown as Record<string, unknown>);
-						},
+						onOutputItemDone: retainNativeHistory
+							? item => {
+									// The processor hands over a private clone; no second deep copy needed.
+									nativeOutputItems.push(item as unknown as Record<string, unknown>);
+								}
+							: undefined,
 						onCompleted: () => {
 							sawTerminalResponseEvent = true;
 						},
@@ -1149,6 +1268,7 @@ const streamOpenAIResponsesOnce = (
 					// poll gives up, leaving all existing behavior unchanged.
 					const resumeId = output.responseId;
 					if (
+						!webSocketLease &&
 						resumeId !== undefined &&
 						canResumeOpenAIResponsesResultAfterDrop({
 							responseId: resumeId,
@@ -1256,6 +1376,7 @@ const streamOpenAIResponsesOnce = (
 						}
 					}
 					const canRetry =
+						!webSocketLease &&
 						!sawReplayUnsafeOutput &&
 						!requestSignal.aborted &&
 						!abortTracker.wasCallerAbort() &&
@@ -1300,11 +1421,14 @@ const streamOpenAIResponsesOnce = (
 				}
 			}
 
-			output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeOutputItems);
-			const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
-				cloneJsonTree(nativeOutputItems),
-				{ supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal },
-			);
+			if (retainNativeHistory) {
+				output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeOutputItems);
+			}
+			const replayableResponseItems = retainNativeHistory
+				? sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(cloneJsonTree(nativeOutputItems), {
+						supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal,
+					})
+				: undefined;
 			if (replayableResponseItems) {
 				if (providerSessionState && providerSessionState.closeCount === closeCountAtStart) {
 					providerSessionState.nativeHistoryReplayWarmed = true;
@@ -1355,11 +1479,6 @@ const streamOpenAIResponsesOnce = (
 				chainState.lastResponseId = undefined;
 				chainState.lastResponseItems = undefined;
 			}
-
-			output.duration = performance.now() - startTime;
-			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
 		} catch (error) {
 			if (chainState) resetOpenAIResponsesChainState(chainState);
 			const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
@@ -1380,11 +1499,27 @@ const streamOpenAIResponsesOnce = (
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
-			output.duration = performance.now() - startTime;
-			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+		} finally {
+			webSocketLease?.release();
 		}
+		if (webSocketLease && model.compat.connectionBoundNativeHistory) {
+			// Neither rebuilt WS requests nor HTTP can reuse socket-owned reasoning.
+			// Strip replay metadata before publishing completed or interrupted turns.
+			for (const block of output.content) {
+				if (block.type === "thinking") {
+					block.thinkingSignature = undefined;
+					block.itemId = undefined;
+				}
+			}
+		}
+		output.duration = performance.now() - startTime;
+		if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+		if (output.stopReason === "error" || output.stopReason === "aborted") {
+			stream.push({ type: "error", reason: output.stopReason, error: output });
+		} else {
+			stream.push({ type: "done", reason: output.stopReason, message: output });
+		}
+		stream.end();
 	})();
 
 	return stream;
@@ -1608,7 +1743,9 @@ export function buildParams(
 		omitReasoningEffort: options?.omitReasoningEffort,
 	});
 	const strictResponsesPairing = policy.tools.strictResponsesPairing;
-	const shouldReplayNativeHistory = providerSessionState?.nativeHistoryReplayWarmed ?? true;
+	const shouldReplayNativeHistory =
+		!(model.compat.connectionBoundNativeHistory && (options?.preferWebsockets ?? model.preferWebsockets ?? false)) &&
+		(providerSessionState?.nativeHistoryReplayWarmed ?? true);
 	// Filtering native reasoning must not be undone by reconstruction when the
 	// target also rejects synthetic items (Muse on OpenRouter). Unfiltered targets
 	// retain required text/placeholder replay, including DeepSeek's #10690 fallback.

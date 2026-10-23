@@ -114,8 +114,69 @@ An unscoped OpenRouter `baseUrl` names the `/api/v1` chat root, so OpenRouter De
 models use its `/api/alpha` sibling on the same host, e.g. a `.../api/v1` relay serves judges at
 `.../api/alpha/decisions`.
 
-`preferWebsockets` (on a model or `modelOverrides` entry) controls whether Codex requests prefer
-the WebSocket transport. `omitMaxOutputTokens` omits the model-derived output cap.
+Standard Responses uses HTTP/SSE by default and never probes WebSocket automatically.
+To enable WebSocket for all standard Responses models, set this in `config.yml`:
+
+```yaml
+providers:
+  openaiResponsesWebsockets: true
+```
+
+The independent Codex setting is `providers.openaiWebsockets: auto|on|off`; it does
+not affect standard Responses. `PI_CODEX_WEBSOCKET` also remains Codex-only.
+
+For standard Responses, precedence is SDK request `preferWebsockets` → model
+`preferWebsockets` → provider `preferWebsockets` → `providers.openaiResponsesWebsockets`
+(default `false`). Both `true` and `false` are explicit overrides. The SDK without
+coding-agent settings uses the preference on its resolved model, or HTTP/SSE when
+none is set.
+
+`omp bench` uses the same model/provider/global preferences for standard Responses,
+without enabling WS implicitly. Its Codex WebSocket preference is unchanged.
+The coding-agent also applies these preferences to side requests, including branch
+summaries, rather than requiring every caller to repeat the transport hint.
+
+For mixed providers, leave the global setting off and configure provider defaults
+in `models.yml`. Models inherit their provider's default unless explicitly overridden:
+
+```yaml
+providers:
+  ws-capable-gateway:
+    preferWebsockets: true
+    modelOverrides:
+      http-only-model:
+        preferWebsockets: false
+  http-only-gateway:
+    preferWebsockets: false
+```
+
+Merge these fields into the existing provider entries. Provider IDs are not limited
+to `openai`: the setting applies to the standard Responses protocol across compatible
+providers and gateways. Provider defaults cover bundled, custom and newly discovered
+models. Model overrides belong under the corresponding provider's `modelOverrides`;
+custom `models` entries accept the same boolean directly. Model `true` can opt in
+under provider `false`, just as model `false` can opt out under provider `true`.
+
+`preferWebsockets` retains the existing model/SDK field name at provider scope rather
+than introducing a synonymous transport flag. For standard Responses, `true` selects
+WebSocket: it does not probe support or promise fallback. The endpoint must support
+Responses WebSocket `response.create`; HTTP Responses compatibility alone is not enough.
+Keep `api: openai-responses`, the existing API root, authentication and discovery:
+the client upgrades the same `/responses` endpoint without adding `/codex`.
+
+Standard Responses WebSocket requests replay the full conversation on each turn.
+They do not use `previous_response_id` chaining, even when HTTP stateful Responses
+is enabled; an injected `previous_response_id` or `background: true` is rejected.
+Connection and protocol failures surface as errors rather than silently switching
+to HTTP/SSE. Codex chaining, steering and fallback behavior are unchanged.
+
+For endpoints marked `connectionBoundNativeHistory` (such as GitHub Copilot),
+standard WS rebuilds prior turns from their message content instead of replaying
+item IDs or encrypted reasoning tied to another connection. This also applies
+when a pooled connection is reused, because concurrent results can originate from
+different sockets.
+
+`omitMaxOutputTokens` omits the model-derived output cap.
 
 ### Bedrock request options
 
@@ -744,6 +805,7 @@ Related settings:
 - `modelProviderOrder` (provider precedence when equivalent concrete choices share an id)
 - `providers.kimiApiFormat` (`auto|openai|anthropic`; `auto` follows server-declared model metadata)
 - `providers.openaiWebsockets` (`auto|off|on` websocket preference for OpenAI Codex transport)
+- `providers.openaiResponsesWebsockets` (boolean, default `false`; default transport for standard Responses, overridden by model/request preferences)
 - `providers.openaiLiveSteering` (deliver mid-response user messages into GPT-6 responses over the Codex WebSocket)
 
 `modelRoles` stores model selectors such as `provider/modelId`; `enabledModels` and CLI `--models`

@@ -103,6 +103,89 @@ Tool-call argument streaming:
 - providers that send only `response.function_call_arguments.done` still populate final args
 - tool call IDs are normalized as `"<call_id>|<item_id>"`
 
+### Standard Responses transport ownership
+
+`streamSimple` forwards an explicit request preference to `streamOpenAIResponses`.
+The provider resolves `options.preferWebsockets ?? model.preferWebsockets ?? false`:
+HTTP/SSE remains the default. `buildParams` and `processResponsesStream` own the
+request and event semantics for both transports, so tools, reasoning, usage and
+native history do not acquire a second converter.
+
+`utils/websocket.ts` owns protocol-neutral URL conversion and handshake-header
+normalization, shared with Codex. Proxy selection and abort tracking also reuse
+the existing utilities. `providers/openai-responses-websocket.ts` owns the standard
+Responses exchange and its session-owned socket leases, not Codex headers, Lite
+shaping, steering or its retry state machine. Those behaviors remain in the
+Codex provider; sharing the Responses event protocol does not make their session
+and recovery contracts identical.
+
+Each lease admits one active `response.create`. A concurrent request for the same
+session receives an independent ephemeral socket rather than stealing a busy
+connection. Reuse requires a successful response and an inbound data frame within
+the past 30 seconds; idle leases expire after the same interval. This conservative
+freshness gate avoids trusting Bun's `OPEN` state alone after silent upstream
+eviction, without adding heartbeats or generation retries. Failure or cancellation
+retires the connection. `ProviderSessionState.releaseSession` and `close` own
+teardown. Without provider session state, the connection closes after the request.
+
+Copilot upgrade negotiation uses the shared HTTP identity classifier and credential-scoped
+cache before any `response.create`. To expose rejected HTTP upgrade responses, it enables
+the transport's inspection capability backed by Bun's built-in Node-WS interface; other
+providers retain the DOM interface. The lease keeps the rejected response body alive
+until classification finishes, and closes it on cancellation or release. An alternate
+identity attempt therefore precedes generation rather than replaying a request.
+
+Standard WebSocket requests replay full history and never consult or update the
+HTTP `previous_response_id` baseline. Reconnection therefore requires no native
+chain reconstruction. The provider rejects injected response anchors and background
+execution, and bypasses HTTP transient-stream retry and stored-result recovery on
+WebSocket errors. This boundary avoids hidden replay after uncertain execution;
+Codex recovery policy remains independent.
+
+WS frame serialization removes the HTTP/SSE-only `stream` and `stream_options`
+fields after payload hooks run. The shared HTTP builder retains its streaming
+controls, including the obfuscation opt-out; custom payload fields remain intact.
+
+On `connectionBoundNativeHistory` hosts, standard WS always rebuilds history from
+message content rather than replaying connection-owned item IDs or encrypted
+reasoning. Checking only whether a socket is warm would not cover contexts that
+include results from concurrent ephemeral sockets. WS exchanges invalidate the
+HTTP native-history warm baseline rather than warming it. The replay predicate
+accepts the request's transport preference so token/output-cap estimates use the
+same rule, including requests waiting for a provider concurrency slot.
+
+These WS outputs do not retain native history payloads or socket-owned reasoning
+signatures. The shared event processor suppresses those signatures before partial
+events reach SDK projectors, not just at completion; raw-event diagnostics remain
+unchanged. Serialized WS turns therefore stay safe after later HTTP warmups, while
+HTTP responses keep their own replay metadata. No provider-wide cold-state latch
+or persisted transport tag is needed.
+
+Computer-call metadata remains available for executing the current action and its
+safety checks. On a connection-bound target, fallback history without a replayable
+native payload becomes visible action notes and screenshot input, not native
+computer calls carrying an old item ID. Valid HTTP-native payloads bypass that
+fallback and retain their own computer-call replay. Explicit remote compaction
+on such a target likewise demotes fallback computer items to history notes.
+
+The coding-agent resolves the session transport hint against the actual request
+model, including advisor and side requests. Codex uses `providers.openaiWebsockets`
+independently. The registry's final model projection fills an unset model preference
+from the provider's `preferWebsockets` default, after model overrides and before
+publication. It never writes that inherited value into base/discovery caches, so
+changing or removing a provider default cannot turn an old default into an explicit
+model preference. YAML configuration and extension provider registrations use the
+same projection, including lazy lookups, full snapshots, discovery and refresh.
+Standard Responses then uses the resolved model preference before
+`providers.openaiResponsesWebsockets` (default `false`), including OpenRouter
+Responses dispatch. An explicit SDK request preference takes precedence over
+that hint.
+
+`createSettingsAwareStreamFn` also resolves this standard Responses default for
+callers without a transport hint, including branch summarization. It passes the
+same value to output-budget fitting and provider dispatch; an explicit request
+`false` is preserved.
+
 ## Google Generative AI (`google-generative-ai`)
 
 Source: `packages/ai/src/providers/google.ts` (thin request wrapper) and `google-shared.ts` (`streamGoogleGenAI`, shared chunk-to-block translation)

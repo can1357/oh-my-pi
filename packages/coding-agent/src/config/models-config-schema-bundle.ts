@@ -358,6 +358,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"headers?": { "[string]": "string" },
 		"compat?": ApiCompatSchema,
 		"remoteCompaction?": RemoteCompactionSchema,
+		"preferWebsockets?": "boolean",
 		"authHeader?": "boolean",
 		"auth?": ProviderAuthSchema,
 		"discovery?": ProviderDiscoverySchema,

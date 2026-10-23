@@ -17,7 +17,10 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgProvidersMuseCodeStoreResponses } from "@oh-my-pi/pi-coding-agent/session/settings";
-import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
+import {
+	createSettingsAwareStreamFn,
+	resolveOpenAIWebsocketPreference,
+} from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
 
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
 	const calls: Array<{ options?: SimpleStreamOptions }> = [];
@@ -86,6 +89,33 @@ function replayedReasoningContext(producer: Model): Context {
 }
 
 describe("createSettingsAwareStreamFn", () => {
+	it("resolves independent transport settings with model overrides above the Responses default", () => {
+		const openrouterModel = { api: "openrouter" } as Model;
+		const unrelatedModel = { api: "anthropic-messages" } as Model;
+		expect(resolveOpenAIWebsocketPreference(Settings.isolated(), stubResponsesModel)).toBe(false);
+		for (const codexSetting of ["auto", "on", "off"] as const) {
+			for (const responsesSetting of [false, true]) {
+				const settings = Settings.isolated({
+					"providers.openaiWebsockets": codexSetting,
+					"providers.openaiResponsesWebsockets": responsesSetting,
+				});
+				expect(resolveOpenAIWebsocketPreference(settings, stubCodexModel)).toBe(
+					codexSetting === "on" ? true : codexSetting === "off" ? false : undefined,
+				);
+				for (const model of [stubResponsesModel, openrouterModel]) {
+					expect(resolveOpenAIWebsocketPreference(settings, model)).toBe(responsesSetting);
+					for (const preferWebsockets of [false, true]) {
+						expect(resolveOpenAIWebsocketPreference(settings, { ...model, preferWebsockets })).toBe(
+							preferWebsockets,
+						);
+					}
+				}
+				expect(resolveOpenAIWebsocketPreference(settings, unrelatedModel)).toBeUndefined();
+				expect(resolveOpenAIWebsocketPreference(settings, undefined)).toBeUndefined();
+			}
+		}
+	});
+
 	it("applies provider settings to the forwarded options when caller omits them", () => {
 		const settings = Settings.isolated({
 			"providers.openrouterVariant": "floor",
@@ -311,6 +341,80 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(calls[1]?.options?.maxTokens).toBeLessThan(9_000);
 	});
 
+	it("uses global Responses WS for side requests and preserves an explicit HTTP override and budget", async () => {
+		const wire: Array<{ transport: string; body: Record<string, unknown> }> = [];
+		const item = {
+			type: "message",
+			id: "msg_side",
+			role: "assistant",
+			status: "completed",
+			content: [{ type: "output_text", text: "OK" }],
+		};
+		const events = [
+			{ type: "response.created", response: { id: "resp_side" } },
+			{ type: "response.output_item.added", output_index: 0, item: { ...item, content: [] } },
+			{ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "OK" },
+			{ type: "response.output_item.done", output_index: 0, item },
+			{
+				type: "response.completed",
+				response: {
+					id: "resp_side",
+					status: "completed",
+					usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+				},
+			},
+		];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request, server) {
+				if (request.headers.get("upgrade")) {
+					if (server.upgrade(request)) return;
+					return new Response("Upgrade failed", { status: 400 });
+				}
+				wire.push({ transport: "http", body: (await request.json()) as Record<string, unknown> });
+				return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+					headers: { "content-type": "text/event-stream" },
+				});
+			},
+			websocket: {
+				message(socket, message) {
+					wire.push({ transport: "websocket", body: JSON.parse(String(message)) as Record<string, unknown> });
+					for (const event of events) socket.send(JSON.stringify(event));
+				},
+			},
+		});
+		try {
+			const model: Model = {
+				...getBundledModel("github-copilot", "gpt-5.4"),
+				baseUrl: `http://127.0.0.1:${server.port}/v1`,
+				contextWindow: 10_000,
+				maxTokens: 9_000,
+			};
+			const wrapped = createSettingsAwareStreamFn(
+				Settings.isolated({
+					"providers.openaiResponsesWebsockets": true,
+					"providers.maxInFlightRequests": { "github-copilot": 1 },
+				}),
+			);
+			for (const transport of [{}, { preferWebsockets: false }]) {
+				const stream = await wrapped(model, replayedReasoningContext(model), {
+					apiKey: "side-test-key",
+					maxTokens: 9_000,
+					...transport,
+				});
+				const result = await stream.result();
+				expect(result.stopReason).toBe("stop");
+				expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "OK" }));
+			}
+			expect(wire.map(request => request.transport)).toEqual(["websocket", "http"]);
+			expect(wire[0]?.body.max_output_tokens).toBe(9_000);
+			expect(wire[1]?.body.max_output_tokens).toBeLessThan(9_000);
+		} finally {
+			await server.stop(true);
+		}
+	});
+
 	it("fits a cold request that may wait for a provider slot as replaying", () => {
 		const copilot: Model = {
 			...getBundledModel("github-copilot", "gpt-5.4"),
@@ -333,9 +437,13 @@ describe("createSettingsAwareStreamFn", () => {
 			base,
 		);
 		elsewhere(copilot, context, { apiKey: "k", providerSessionState: new Map() });
+		// A connection-bound WS request rebuilds on every socket, regardless
+		// of another request warming the shared provider state while it waits.
+		queued(copilot, context, { apiKey: "k", providerSessionState: new Map(), preferWebsockets: true });
 
 		expect(calls[0]?.options?.maxTokens).toBeLessThan(9_000);
 		expect(calls[1]?.options?.maxTokens).toBeUndefined();
+		expect(calls[2]?.options?.maxTokens).toBeUndefined();
 	});
 
 	describe("providers.anthropic.serverSideFallback (opt-in)", () => {

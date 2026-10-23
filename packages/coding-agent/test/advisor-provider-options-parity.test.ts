@@ -125,7 +125,7 @@ describe("AgentSession advisor provider-options parity", () => {
 		const advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent to be live");
 
-		// Flipped after the advisor exists: the websocket hint is read per request.
+		// A live Codex global opt-in must not opt this Anthropic advisor into WebSockets.
 		cfgProvidersOpenaiWebsockets.set(session.settings, "on");
 		await advisor.prompt("ping").catch(() => {});
 
@@ -151,7 +151,7 @@ describe("AgentSession advisor provider-options parity", () => {
 		expect(opts.sessionId).toBe(advisor.sessionId);
 		expect(opts.promptCacheKey).toBe(advisor.sessionId);
 		expect(opts.providerSessionState).toBe(session.providerSessionState);
-		expect(opts.preferWebsockets).toBe(true);
+		expect(opts.preferWebsockets).toBeUndefined();
 	});
 
 	it("caps Codex SSE attempts inside each advisor-level retry", async () => {

@@ -4494,7 +4494,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				...streamOptions,
 				thinkingBudgets: streamOptions?.thinkingBudgets ?? cfgThinkingBudgets.get(settings),
 				kimiApiFormat: streamOptions?.kimiApiFormat ?? (kimiApiFormat === "auto" ? undefined : kimiApiFormat),
-				preferWebsockets: streamOptions?.preferWebsockets ?? resolveOpenAIWebsocketPreference(settings),
+				preferWebsockets:
+					streamOptions?.preferWebsockets ?? resolveOpenAIWebsocketPreference(settings, streamModel),
 			});
 		};
 		// Prompt-cache warmer for the main agent loop only: replays the last

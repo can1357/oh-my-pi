@@ -2421,7 +2421,7 @@ export class AgentSession implements SettingsScope {
 			yieldQueue: this.yieldQueue,
 			obfuscator: () => this.#obfuscator,
 			providerSessionState: this.#providerSessionState,
-			preferWebsockets: () => this.preferWebsockets,
+			preferWebsockets: model => resolveOpenAIWebsocketPreference(this.settings, model),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
@@ -2484,7 +2484,7 @@ export class AgentSession implements SettingsScope {
 			extensionRunner: this.#extensionRunner,
 			sideStreamFn: this.#sideStreamFn,
 			providerSessionState: this.#providerSessionState,
-			preferWebsockets: () => this.preferWebsockets,
+			preferWebsockets: model => resolveOpenAIWebsocketPreference(this.settings, model),
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			isDisposed: () => this.#isDisposed,
@@ -3003,9 +3003,9 @@ export class AgentSession implements SettingsScope {
 		return this.#providerSessionState;
 	}
 
-	/** Hint forwarded to provider calls that support websocket transport; read live from `providers.openaiWebsockets`. */
+	/** Live transport hint for the active model, using its API's independent WebSocket policy. */
 	get preferWebsockets(): boolean | undefined {
-		return resolveOpenAIWebsocketPreference(this.settings);
+		return resolveOpenAIWebsocketPreference(this.settings, this.model);
 	}
 
 	getHindsightSessionState(): HindsightSessionState | undefined {
@@ -12145,7 +12145,7 @@ export class AgentSession implements SettingsScope {
 				// conversation's, so the side request keeps its cached prefix.
 				parentSessionId: cacheSessionId,
 				promptCacheKey: this.getPromptCacheKeyForModel(model) ?? this.agent.sessionId,
-				preferWebsockets: this.preferWebsockets,
+				preferWebsockets: resolveOpenAIWebsocketPreference(this.settings, model),
 				providerSessionState: this.#providerSessionState,
 				reasoning: toReasoningEffort(this.thinkingLevel),
 				minimizeEffort: args.minimizeEffort,

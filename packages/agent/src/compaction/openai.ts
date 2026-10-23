@@ -739,7 +739,12 @@ export function buildOpenAiNativeHistory(
 							pending_safety_checks: structuredCloneJSON(block.providerMetadata.pendingSafetyChecks),
 							status: "completed",
 						};
-						if (model.supportsComputerUse !== true) {
+						if (
+							model.supportsComputerUse !== true ||
+							(model.compat &&
+								"connectionBoundNativeHistory" in model.compat &&
+								model.compat.connectionBoundNativeHistory)
+						) {
 							input.push(computerHistoryNote(computerCall));
 							demotedComputerCallIds.add(normalized.callId);
 							continue;

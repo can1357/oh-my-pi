@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added opt-in WebSocket transport for standard OpenAI Responses through `preferWebsockets`, preserving HTTP/SSE by default and reusing the standard request/event pipeline while omitting SSE-only frame options; idle reuse requires recent inbound activity, diagnostic observer failures do not interrupt generation or socket reuse, connection-bound histories rebuild from visible content without replaying socket-owned reasoning or computer-call IDs, and Copilot upgrades share HTTP identity policy and caching before generation ([#16814](https://github.com/can1357/oh-my-pi/pull/16814) by [@TatsukiMeng](https://github.com/TatsukiMeng))
 - Added `PI_ANTHROPIC_API_VERSION=2026-10-21` to send Anthropic API version 2026-10-21 to the official Anthropic API; sampling parameters are omitted under that version, which rejects them ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed

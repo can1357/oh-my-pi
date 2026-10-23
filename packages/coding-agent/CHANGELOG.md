@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `providers.openaiResponsesWebsockets` to opt standard Responses models into WebSocket globally, defaulting to HTTP/SSE; provider-level `preferWebsockets` in `models.yml` and extension registrations supplies defaults for all provider models, including discovery, while explicit model/request preferences take precedence independently of the Codex setting; `omp bench` and side requests, including branch summaries, use the same standard Responses preference resolution ([#16814](https://github.com/can1357/oh-my-pi/pull/16814) by [@TatsukiMeng](https://github.com/TatsukiMeng))
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 

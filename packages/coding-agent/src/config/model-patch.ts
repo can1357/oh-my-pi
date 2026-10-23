@@ -23,6 +23,8 @@ export interface ProviderOverride {
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: RemoteCompactionConfig<Api>;
 	transport?: Model<Api>["transport"];
+	/** Default WebSocket preference for models without an explicit preference. */
+	preferWebsockets?: boolean;
 	guardrailIdentifier?: Model<Api>["guardrailIdentifier"];
 	guardrailVersion?: Model<Api>["guardrailVersion"];
 	guardrailTrace?: Model<Api>["guardrailTrace"];
@@ -259,7 +261,7 @@ export interface ModelPatch {
 	maxContextWindow?: number;
 	maxTokens?: number;
 	omitMaxOutputTokens?: boolean;
-	/** Whether Codex requests should prefer WebSocket transport. */
+	/** Prefer WebSocket transport for standard or Codex Responses; standard Responses defaults to HTTP. */
 	preferWebsockets?: boolean;
 	headers?: Record<string, string>;
 	resolveHeaders?: Model<Api>["resolveHeaders"];

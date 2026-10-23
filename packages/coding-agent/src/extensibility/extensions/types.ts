@@ -1982,6 +1982,8 @@ export interface ProviderConfig {
 	apiKey?: string;
 	/** API type identifier. Required when registering streamSimple or when models don't specify one. */
 	api?: Api;
+	/** Default WebSocket preference for this provider; explicit model and request preferences take precedence. */
+	preferWebsockets?: boolean;
 	/** Custom streaming function for non-built-in APIs. */
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 	/** Custom headers to include in requests. */
@@ -2042,7 +2044,7 @@ export interface ProviderModelConfig {
 	contextWindow: number;
 	/** Maximum output tokens. */
 	maxTokens: number;
-	/** Whether Codex requests should prefer WebSocket transport. */
+	/** Prefer WebSocket transport for standard or Codex Responses; standard Responses defaults to HTTP. */
 	preferWebsockets?: boolean;
 	/** Custom headers for this model. */
 	headers?: Record<string, string>;

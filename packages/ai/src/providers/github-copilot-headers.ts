@@ -163,6 +163,24 @@ async function isCopilotIdentityDenied(response: Response): Promise<boolean> {
 	}
 }
 
+/** Shared HTTP/WS identity gate; callers pass the cache snapshot used to build their request. */
+export async function resolveCopilotFallbackIdentity(
+	response: Response,
+	outgoingId: string | null,
+	explicitIdentity: string | undefined,
+	cachedIdentity: string | undefined,
+): Promise<string | undefined> {
+	if (explicitIdentity !== undefined) return undefined;
+	const cliId = COPILOT_CAPI_IDENTITY_HEADERS["Copilot-Integration-Id"];
+	const alternate =
+		outgoingId === COPILOT_CHAT_INTEGRATION_ID
+			? cliId
+			: outgoingId === cliId && cachedIdentity === cliId
+				? COPILOT_CHAT_INTEGRATION_ID
+				: undefined;
+	return alternate && (await isCopilotIdentityDenied(response)) ? alternate : undefined;
+}
+
 /**
  * Reissue Copilot client-identity denials once with the other surface.
  *
@@ -202,7 +220,6 @@ export function wrapFetchForCopilotFallback(
 ): FetchImpl {
 	const inner = base ?? fetch;
 	if (!enabled) return inner;
-	const cliIntegrationId = COPILOT_CAPI_IDENTITY_HEADERS["Copilot-Integration-Id"];
 	return async (input, init) => {
 		// Provenance fallback for direct callers: without a build-time value,
 		// snapshot at dispatch — still before any await in this invocation, so
@@ -217,44 +234,29 @@ export function wrapFetchForCopilotFallback(
 		if (normalizeCopilotIntegrationId(integrationId) !== undefined) return response;
 		const outgoing = new Headers(init?.headers);
 		const outgoingId = outgoing.get("Copilot-Integration-Id");
-		if (outgoingId === COPILOT_CHAT_INTEGRATION_ID) {
-			if (await isCopilotIdentityDenied(response)) {
-				try {
-					await response.arrayBuffer();
-				} catch {}
-				logger.warn(
-					`GitHub Copilot chat identity denied (HTTP ${response.status}); retrying once as the Copilot CLI`,
-				);
-				const retryHeaders = new Headers(outgoing);
-				retryHeaders.set("Copilot-Integration-Id", cliIntegrationId);
-				const retry = await inner(input, { ...init, headers: retryHeaders });
-				if (cacheKey) {
-					if (retry.ok) rememberCopilotWorkingIntegrationId(cacheKey, cliIntegrationId);
-					else clearCopilotIntegrationCache(cacheKey);
-				}
-				return retry;
-			}
-			return response;
+		const alternate = await resolveCopilotFallbackIdentity(
+			response,
+			outgoingId,
+			undefined,
+			cacheKey ? cachedBeforeRequest : undefined,
+		);
+		if (!alternate) return response;
+		try {
+			await response.arrayBuffer();
+		} catch {}
+		logger.warn(
+			outgoingId === COPILOT_CHAT_INTEGRATION_ID
+				? `GitHub Copilot chat identity denied (HTTP ${response.status}); retrying once as the Copilot CLI`
+				: `GitHub Copilot CLI identity denied (HTTP ${response.status}); retrying once as ${COPILOT_CHAT_INTEGRATION_ID}`,
+		);
+		const retryHeaders = new Headers(outgoing);
+		retryHeaders.set("Copilot-Integration-Id", alternate);
+		const retry = await inner(input, { ...init, headers: retryHeaders });
+		if (cacheKey) {
+			if (retry.ok) rememberCopilotWorkingIntegrationId(cacheKey, alternate);
+			else clearCopilotIntegrationCache(cacheKey);
 		}
-		if (outgoingId === cliIntegrationId && cacheKey) {
-			if (cachedBeforeRequest !== cliIntegrationId) return response;
-			if (await isCopilotIdentityDenied(response)) {
-				try {
-					await response.arrayBuffer();
-				} catch {}
-				logger.warn(
-					`GitHub Copilot CLI identity denied (HTTP ${response.status}); retrying once as ${COPILOT_CHAT_INTEGRATION_ID}`,
-				);
-				const retryHeaders = new Headers(outgoing);
-				retryHeaders.set("Copilot-Integration-Id", COPILOT_CHAT_INTEGRATION_ID);
-				const retry = await inner(input, { ...init, headers: retryHeaders });
-				if (retry.ok) rememberCopilotWorkingIntegrationId(cacheKey, COPILOT_CHAT_INTEGRATION_ID);
-				else clearCopilotIntegrationCache(cacheKey);
-				return retry;
-			}
-			return response;
-		}
-		return response;
+		return retry;
 	};
 }
 export function inferCopilotInitiator(messages: unknown[]): CopilotInitiator {

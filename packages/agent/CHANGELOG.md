@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed remote compaction treating fallback computer-tool metadata as replayable native items on connection-bound Responses backends ([#16814](https://github.com/can1357/oh-my-pi/pull/16814) by [@TatsukiMeng](https://github.com/TatsukiMeng))
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))
 
 ## [18.12.4] - 2026-10-20

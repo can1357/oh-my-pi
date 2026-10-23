@@ -1993,6 +1993,7 @@ function mapOptionsForApi<TApi extends Api>(
 					textVerbosity: options?.textVerbosity,
 					promptCache: options?.promptCache,
 					statefulResponses: options?.statefulResponses,
+					preferWebsockets: options?.preferWebsockets,
 				});
 			}
 			return castApi<"openai-completions">({
@@ -2036,6 +2037,7 @@ function mapOptionsForApi<TApi extends Api>(
 				promptCache: options?.promptCache,
 				statefulResponses: options?.statefulResponses,
 				storeResponses: options?.storeResponses,
+				preferWebsockets: options?.preferWebsockets,
 			});
 
 		case "azure-openai-responses":

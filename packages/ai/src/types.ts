@@ -836,7 +836,7 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	kimiApiFormat?: "openai" | "anthropic";
 	/** API format for Synthetic provider: "openai" or "anthropic" (default: "openai") */
 	syntheticApiFormat?: "openai" | "anthropic";
-	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
+	/** Prefer supported WebSocket transport; standard Responses defaults to HTTP. Explicit false overrides the model preference. */
 	preferWebsockets?: boolean;
 	/**
 	 * OpenRouter routing-variant suffix automatically appended to model IDs when

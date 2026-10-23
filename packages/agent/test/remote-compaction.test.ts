@@ -619,6 +619,32 @@ describe("buildOpenAiNativeHistory computer calls", () => {
 		};
 	}
 
+	test("demotes fallback computer history on connection-bound compaction targets", () => {
+		const target = makeOpenAiModel({
+			provider: "github-copilot",
+			supportsComputerUse: true,
+			remoteCompaction: { enabled: true },
+		});
+		const previous = { ...computerAssistant(), provider: target.provider, model: target.id };
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_computer_1|item_computer_1",
+			toolName: "computer",
+			content: [],
+			isError: false,
+			timestamp: 2,
+			providerMetadata: {
+				type: "computer",
+				screenshot: { type: "computer_screenshot", file_id: "file_visible_screen" },
+				acknowledgedSafetyChecks,
+			},
+		};
+		const items = buildOpenAiNativeHistory([previous, result], target);
+		expect(items.some(item => item.type === "computer_call" || item.type === "computer_call_output")).toBe(false);
+		expect(JSON.stringify(items)).toContain("file_visible_screen");
+		expect(JSON.stringify(items)).toContain("click");
+	});
+
 	test("preserves provider item id, actions, safety checks, screenshot file_id, and acknowledgements", () => {
 		const result: ToolResultMessage = {
 			role: "toolResult",

@@ -404,9 +404,22 @@ export class ModelRegistry {
 		this.#catalogMetrics.add(models);
 	}
 
-	/** Final pass over every published model list: catalog metrics, then implicit local providers last. */
+	/** Final projection: provider transport defaults, catalog metrics, then implicit local providers last. */
 	#finalizeModels(models: Model<Api>[]): Model<Api>[] {
-		return this.#orderImplicitProvidersLast(applyCatalogMetrics(models, this.#catalogMetrics));
+		// Keep inherited preferences out of base/discovery caches so changing or
+		// removing a provider default never turns it into an explicit model value.
+		let resolved = models;
+		for (let index = 0; index < models.length; index++) {
+			const model = models[index]!;
+			if (model.preferWebsockets !== undefined) continue;
+			const preferWebsockets =
+				this.#runtimeProviderOverrides.get(model.provider)?.preferWebsockets ??
+				this.#providerOverrides.get(model.provider)?.preferWebsockets;
+			if (preferWebsockets === undefined) continue;
+			if (resolved === models) resolved = models.slice();
+			resolved[index] = buildModel({ ...toModelSpec(model), preferWebsockets });
+		}
+		return this.#orderImplicitProvidersLast(applyCatalogMetrics(resolved, this.#catalogMetrics));
 	}
 
 	/**
@@ -1779,7 +1792,7 @@ export class ModelRegistry {
 				baseUrlApis.add(providerConfig.api);
 			}
 			const baseUrlScope = baseUrlApis.size > 0 ? [...baseUrlApis] : undefined;
-			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/guardrail*/transport are present
+			// Store transport and policy overrides even when a boolean default is explicitly false.
 			if (
 				providerConfig.baseUrl ||
 				providerConfig.headers ||
@@ -1790,7 +1803,8 @@ export class ModelRegistry {
 				providerConfig.guardrailIdentifier ||
 				providerConfig.requestMetadata ||
 				providerConfig.remoteCompaction ||
-				providerConfig.transport
+				providerConfig.transport ||
+				providerConfig.preferWebsockets !== undefined
 			) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
 				overrides.set(providerName, {
@@ -1808,6 +1822,7 @@ export class ModelRegistry {
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
 					remoteCompaction: providerConfig.remoteCompaction,
 					transport: providerConfig.transport,
+					preferWebsockets: providerConfig.preferWebsockets,
 					guardrailIdentifier: providerConfig.guardrailIdentifier,
 					guardrailVersion: providerConfig.guardrailVersion,
 					guardrailTrace: providerConfig.guardrailTrace,
@@ -2608,6 +2623,7 @@ export class ModelRegistry {
 			compat: override.compat ? mergeCompat(baseOverride?.compat, override.compat) : baseOverride?.compat,
 			remoteCompaction: mergeRemoteCompactionConfig(baseOverride?.remoteCompaction, override.remoteCompaction),
 			transport: override.transport ?? baseOverride?.transport,
+			preferWebsockets: override.preferWebsockets ?? baseOverride?.preferWebsockets,
 		};
 	}
 	#applyProviderTransportOverride<
@@ -3530,6 +3546,13 @@ export class ModelRegistry {
 			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 		}
 
+		if (config.preferWebsockets !== undefined) {
+			this.#runtimeProviderOverrides.set(providerName, {
+				...this.#runtimeProviderOverrides.get(providerName),
+				preferWebsockets: config.preferWebsockets,
+			});
+		}
+
 		// Extension usage providers override built-ins/configured resolvers for the
 		// provider lifetime. #clearRuntimeProviderState removes this override when
 		// the owning extension is unregistered or replaced.
@@ -3685,7 +3708,8 @@ export class ModelRegistry {
 			config.apiKey ||
 			config.authHeader !== undefined ||
 			config.remoteCompaction !== undefined ||
-			config.transport !== undefined
+			config.transport !== undefined ||
+			config.preferWebsockets !== undefined
 		) {
 			const transportOverride = {
 				baseUrl: config.baseUrl,
@@ -3694,6 +3718,7 @@ export class ModelRegistry {
 				authHeader: config.authHeader,
 				remoteCompaction: config.remoteCompaction,
 				transport: config.transport,
+				preferWebsockets: config.preferWebsockets,
 			};
 			const nextRuntimeOverride = this.#mergeProviderOverride(
 				this.#runtimeProviderOverrides.get(providerName),
@@ -3765,6 +3790,8 @@ export interface ProviderConfigInput {
 	baseUrl?: string;
 	apiKey?: string;
 	api?: Api;
+	/** Default WebSocket preference for models without an explicit preference. */
+	preferWebsockets?: boolean;
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];
@@ -3804,7 +3831,7 @@ export interface ProviderConfigInput {
 		contextWindow: number;
 		maxTokens: number;
 		promptCache?: Model<Api>["promptCache"];
-		/** Whether Codex requests should prefer WebSocket transport. */
+		/** Prefer WebSocket transport for standard or Codex Responses; standard Responses defaults to HTTP. */
 		preferWebsockets?: boolean;
 		headers?: Record<string, string>;
 		compat?: ModelSpec<Api>["compat"];

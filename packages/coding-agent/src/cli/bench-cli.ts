@@ -43,6 +43,7 @@ import { createLiveBoard, type LiveBoardOutput } from "@oh-my-pi/pi-tui/chrome/l
 import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 
 import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "../session/settings";
+import { resolveOpenAIWebsocketPreference } from "../session/settings-stream-fn";
 
 const DEFAULT_PAR = 4;
 const DEFAULT_CACHE_MAX_TOKENS = 64;
@@ -666,6 +667,7 @@ async function runBenchRequest(
 	options: BenchRequestOptions,
 	streamFn: StreamSimpleFn,
 	now: () => number,
+	settings?: BenchRuntime["settings"],
 ): Promise<BenchRunResult> {
 	const startedAt = now();
 	let firstTokenAt: number | undefined;
@@ -704,7 +706,12 @@ async function runBenchRequest(
 			disableReasoning: options.disableReasoning,
 			serviceTier: options.serviceTier,
 			providerSessionState,
-			preferWebsockets: true,
+			preferWebsockets:
+				model.api === "openai-codex-responses"
+					? true
+					: settings
+						? resolveOpenAIWebsocketPreference(settings, model)
+						: model.preferWebsockets,
 			// pi-ai opts every OpenRouter request into response caching (1h TTL).
 			// Bench sends a byte-identical request each run, so within the TTL
 			// OpenRouter replays the cached generation with zeroed usage — the run
@@ -1238,6 +1245,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 							},
 							streamFn,
 							now,
+							runtime.settings,
 						);
 						const warmCapture: CacheRequestCapture = {
 							requestIdObserved: false,
@@ -1259,6 +1267,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 							},
 							streamFn,
 							now,
+							runtime.settings,
 						);
 						progress.inFlight--;
 						progress.completed++;
@@ -1334,6 +1343,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 							},
 							streamFn,
 							now,
+							runtime.settings,
 						)),
 						challenge: challenge.kind,
 						phase,

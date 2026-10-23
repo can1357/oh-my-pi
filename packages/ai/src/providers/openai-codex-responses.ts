@@ -75,6 +75,7 @@ import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
+import { extractWebSocketHandshakeHeaders, toWebSocketHeaders, toWebSocketUrl } from "../utils/websocket";
 import { compactGrammarDefinition } from "./grammar";
 import {
 	type CodexLiteShapedBody,
@@ -1127,35 +1128,6 @@ function isCodexWebSocketRetryableStreamError(error: unknown): boolean {
 		message.includes("json")
 	);
 }
-function toCodexHeaderRecord(value: unknown): Record<string, string> | null {
-	if (!value || typeof value !== "object") return null;
-	const headers: Record<string, string> = {};
-	for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-		if (typeof entry === "string") {
-			headers[key] = entry;
-		} else if (Array.isArray(entry) && entry.every(item => typeof item === "string")) {
-			headers[key] = entry.join(",");
-		} else if (typeof entry === "number" || typeof entry === "boolean") {
-			headers[key] = String(entry);
-		}
-	}
-	return Object.keys(headers).length > 0 ? headers : null;
-}
-
-function toCodexHeaders(value: unknown): Headers | undefined {
-	if (!value) return undefined;
-	if (value instanceof Headers) return value;
-	if (Array.isArray(value)) {
-		try {
-			return new Headers(value as Array<[string, string]>);
-		} catch {
-			return undefined;
-		}
-	}
-	const record = toCodexHeaderRecord(value);
-	if (!record) return undefined;
-	return new Headers(record);
-}
 
 function updateCodexSessionMetadataFromHeaders(
 	turnState: CodexTurnStateCell | undefined,
@@ -1172,23 +1144,6 @@ function updateCodexSessionMetadataFromHeaders(
 	if (state && modelsEtag && modelsEtag.length > 0) {
 		state.modelsEtag = modelsEtag;
 	}
-}
-
-function extractCodexWebSocketHandshakeHeaders(socket: Bun.WebSocket, openEvent?: Event): Headers | undefined {
-	const eventRecord = openEvent as Record<string, unknown> | undefined;
-	const eventResponse = eventRecord?.response as Record<string, unknown> | undefined;
-	const socketRecord = socket as unknown as Record<string, unknown>;
-	const socketResponse = socketRecord.response as Record<string, unknown> | undefined;
-	const socketHandshake = socketRecord.handshake as Record<string, unknown> | undefined;
-	return (
-		toCodexHeaders(eventRecord?.responseHeaders) ??
-		toCodexHeaders(eventRecord?.headers) ??
-		toCodexHeaders(eventResponse?.headers) ??
-		toCodexHeaders(socketRecord.responseHeaders) ??
-		toCodexHeaders(socketRecord.handshakeHeaders) ??
-		toCodexHeaders(socketResponse?.headers) ??
-		toCodexHeaders(socketHandshake?.headers)
-	);
 }
 
 // Synthesizes a `RawSseEvent` for a Codex WebSocket frame so the same debug
@@ -1843,7 +1798,7 @@ function applyCodexCompactionResponseMetadata(
 	updateCodexSessionMetadataFromHeaders(
 		requestContext.turnState,
 		requestContext.websocketState,
-		toCodexHeaders(event.headers),
+		toWebSocketHeaders(event.headers),
 	);
 }
 
@@ -2504,7 +2459,7 @@ class CodexStreamProcessor {
 			updateCodexSessionMetadataFromHeaders(
 				this.requestContext.turnState,
 				this.requestContext.websocketState,
-				toCodexHeaders(rawEvent.headers),
+				toWebSocketHeaders(rawEvent.headers),
 			);
 			const moderation = asRecord(rawEvent.metadata)?.[CODEX_MODERATION_METADATA_KEY];
 			if (moderation !== undefined) {
@@ -3892,16 +3847,6 @@ function buildCodexChainedRequestBody(
 	return requestBody;
 }
 
-function toWebSocketUrl(url: string): string {
-	const parsed = new URL(url);
-	if (parsed.protocol === "https:") {
-		parsed.protocol = "wss:";
-	} else if (parsed.protocol === "http:") {
-		parsed.protocol = "ws:";
-	}
-	return parsed.toString();
-}
-
 function headersToRecord(headers: Headers): Record<string, string> {
 	const result: Record<string, string> = {};
 	for (const [key, value] of headers.entries()) {
@@ -4462,7 +4407,7 @@ class CodexWebSocketConnection {
 	}
 
 	#captureHandshakeHeaders(socket: Bun.WebSocket, openEvent?: Event): void {
-		const headers = extractCodexWebSocketHandshakeHeaders(socket, openEvent);
+		const headers = extractWebSocketHandshakeHeaders(socket, openEvent);
 		if (!headers) return;
 		this.#handshakeHeaders = headers;
 		this.#onHandshakeHeaders?.(headers);

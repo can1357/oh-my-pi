@@ -919,6 +919,7 @@ providers:
   tinyModelDevice: default
   tinyModelDtype: default
   openaiWebsockets: auto
+  openaiResponsesWebsockets: false
   openaiLiveSteering: true
   openrouterVariant: default
   kimiApiFormat: auto
@@ -966,7 +967,8 @@ searxng:
 | `stt.enabled`                       | boolean | `false`   | Enable microphone speech-to-text; choose the recognition model with `modelRoles.dictation`.                                                                                                                                                                                                                                                                                                                                           |
 | `stt.language`                      | string  | `en`      | Source language hint for speech-to-text.                                                                                                                                                                                                                                                                                                                                                                                               |
 | `stt.submitTrigger`                 | enum    | `never`   | When completed dictation auto-submits: `never`, `release`, `release-complete`, or `say-submit`.                                                                                                                                                                                                                                                                                                                                        |
-| `providers.openaiWebsockets`        | enum    | `auto`    | `auto`, `off`, `on`.                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `providers.openaiWebsockets`        | enum    | `auto`    | Codex-only transport policy: `auto` follows model defaults, `on` enables WebSocket, `off` disables it. Does not affect standard Responses. |
+| `providers.openaiResponsesWebsockets` | boolean | `false` | Default WebSocket transport for standard Responses across compatible providers, including OpenRouter Responses dispatch. Precedence: explicit SDK request → model `preferWebsockets` → provider `preferWebsockets` in `models.yml` → this default. Independent of the Codex setting. |
 | `providers.streamFirstEventTimeoutSeconds` | number | `-1` | First stream-event watchdog: `-1` uses provider/env defaults, `0` disables, positive values set seconds. |
 | `providers.streamIdleTimeoutSeconds` | number | `-1` | Maximum silence between stream events, with the same `-1`/`0` conventions. |
 | `providers.anthropic.slowMode` | enum | `off` | `off`, `auto`. Anthropic subscription low-priority recovery when a 5-hour limit is reached and the lane is offered; `/slow on` enables it. |
