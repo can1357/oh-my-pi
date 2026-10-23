@@ -6766,6 +6766,118 @@ describe("openai-codex streaming", () => {
 		});
 	});
 
+	it.each(["while the first streams", "in the same tick"])(
+		"sends a same-session request started %s over SSE without closing the active websocket",
+		async start => {
+			const tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+			const token = createCodexTestToken();
+			const fetchMock = vi.fn(
+				async () =>
+					new Response(createStatefulCodexSse("Second over SSE", "resp_second"), {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+			);
+
+			const sockets: HoldingWebSocket[] = [];
+			let closeCount = 0;
+			const firstSent = Promise.withResolvers<void>();
+			class HoldingWebSocket extends MockWebSocket {
+				constructor(url: string, options?: { headers?: WsHeaders }) {
+					super(url, options);
+					sockets.push(this);
+					this.scheduleOpen();
+				}
+
+				override send(): void {
+					if (this !== sockets[0]) {
+						this.emitCodexResponse({
+							messageId: "msg_other",
+							responseId: "resp_other",
+							text: "Second over websocket",
+						});
+						return;
+					}
+					// Start the response but hold its terminal event, so the first request
+					// keeps streaming while the second one arrives.
+					this.sendJson({
+						type: "response.output_item.added",
+						item: { type: "message", id: "msg_first", role: "assistant", status: "in_progress", content: [] },
+					});
+					this.sendJson({ type: "response.content_part.added", part: { type: "output_text", text: "" } });
+					this.sendJson({ type: "response.output_text.delta", delta: "First over websocket" });
+					firstSent.resolve();
+				}
+
+				override close(): void {
+					const wasOpen = this.readyState === MockWebSocket.OPEN;
+					closeCount += 1;
+					super.close();
+					if (wasOpen) setTimeout(() => this.emit("close", { code: 1000 } as unknown as Event), 0);
+				}
+
+				finishFirstResponse(): void {
+					this.sendJson({
+						type: "response.output_item.done",
+						item: {
+							type: "message",
+							id: "msg_first",
+							role: "assistant",
+							status: "completed",
+							content: [{ type: "output_text", text: "First over websocket" }],
+						},
+					});
+					this.sendJson({
+						type: "response.done",
+						response: { id: "resp_first", status: "completed", usage: DEFAULT_USAGE },
+					});
+				}
+			}
+			global.WebSocket = HoldingWebSocket as unknown as typeof WebSocket;
+
+			const model = createCodexTestModel("https://chatgpt.com/backend-api");
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const options = {
+				fetch: fetchMock as FetchImpl,
+				apiKey: token,
+				sessionId: "ws-overlap-session",
+				providerSessionState,
+			};
+
+			const firstResult = streamOpenAICodexResponses(model, createCodexTestContext(), options).result();
+			if (start === "while the first streams") await firstSent.promise;
+			const secondResult = streamOpenAICodexResponses(model, createCodexTestContext(), options).result();
+			await firstSent.promise;
+			// The request that lost the socket finishes on its own; then let any close
+			// it triggered reach the socket before the held response completes.
+			await Promise.race([firstResult, secondResult]);
+			await Bun.sleep(5);
+			sockets[0]?.finishFirstResponse();
+			const results = await Promise.all([firstResult, secondResult]);
+
+			// The socket owner finished on that socket, which nobody closed, and the
+			// other request went over SSE instead of opening a replacement socket.
+			expect(closeCount).toBe(0);
+			for (const result of results) {
+				expect(result.stopReason).toBe("stop");
+				expect(result.errorMessage).toBeUndefined();
+			}
+			expect(results.map(result => result.content.find(block => block.type === "text")?.text).sort()).toEqual([
+				"First over websocket",
+				"Second over SSE",
+			]);
+			expect(sockets).toHaveLength(1);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			const details = getOpenAICodexTransportDetails(model, {
+				sessionId: "ws-overlap-session",
+				providerSessionState,
+			});
+			expect(details.websocketDisabled).toBe(false);
+			expect(details.websocketConnected).toBe(true);
+		},
+	);
+
 	it("does not throw when closing a stale socket", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
