@@ -728,6 +728,44 @@ describe("provider context image budgets", () => {
 		expect(body).not.toContain("p".repeat(100));
 	});
 
+	it("charges a metadata screenshot its base64 payload, not its data-URI header", async () => {
+		// Two 1,749,996-byte payloads total 3,499,992 bytes, inside Factory's 3,500,000-byte allowance; their
+		// `data:image/png;base64,` headers are request text, as an image block's media type is.
+		const older = "A".repeat(1_749_996);
+		const newer = "B".repeat(1_749_996);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: "use the computer", timestamp: 0 },
+				...computerTurn(0, older),
+				...computerTurn(1, newer),
+			],
+		};
+		const hosted = factoryGptModel();
+		const body = await factoryRequestBody(hosted, clampProviderContextImageBytes(context, hosted));
+		expect(body).toContain(older);
+		expect(body).toContain(newer);
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+	});
+
+	it("charges a computer result its content on a native computer-use route, where call pairing picks the copy", () => {
+		// Azure gpt-5.5 has native computer use. A computer result whose call is gone from the history goes out as a
+		// text note, so its metadata screenshot never travels and must not take one of Azure's five image slots.
+		const azure = getBundledModel("azure", "gpt-5.5");
+		const images = Array.from({ length: 5 }, (_, index) => `${index}`.repeat(1_000));
+		const [, orphan] = computerTurn(5, "A".repeat(1_000), []);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				...images.map((data, index) => ({ role: "user" as const, content: [image(data)], timestamp: index })),
+				orphan,
+			],
+		};
+		expect(imageData(clampProviderContextImages(context, azure))).toEqual(images);
+	});
+
 	it("keeps a fresh Factory image that alone fits the route, evicting older ones instead", () => {
 		const older = "B".repeat(500_000);
 		const fresh = "C".repeat(3_800_000);

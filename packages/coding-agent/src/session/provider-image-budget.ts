@@ -70,22 +70,17 @@ function inlineImageBytes(image: ImageContent, model: Model): number {
 }
 
 /**
- * Whether `model`'s request sends a computer result's `providerMetadata.screenshot` in place of its content image.
- * The Responses wire does (`appendResponsesToolResultMessages`: a `computer_call_output`, or an assistant note quoting
- * it on a model without native computer use), except Codex without native computer use, which unrolls the result to its
- * content. Every other wire sends only the content. Factory Droid sends each model over its registry wire.
+ * Whether `model`'s request sends every computer result's `providerMetadata.screenshot` in place of its content: a
+ * Responses wire on a model without native computer use quotes it in an assistant note before checking any call
+ * pairing (`appendResponsesToolResultMessages`, first branch); Factory's GPT and Grok models are such routes. With
+ * native computer use, the copy sent depends on how each result pairs with its `computer_call`, and Codex unrolls the
+ * result to its content, so those routes, like every other wire, are charged the content. Factory Droid sends each
+ * model over its registry wire.
  */
 function sendsComputerScreenshotMetadata(model: Model): boolean {
+	if (model.supportsComputerUse === true) return false;
 	const api = model.api === "factory-droid-agent" ? resolveFactoryDroidPolicy(model)?.wire : model.api;
-	switch (api) {
-		case "openai-responses":
-		case "azure-openai-responses":
-			return true;
-		case "openai-codex-responses":
-			return model.supportsComputerUse === true;
-		default:
-			return false;
-	}
+	return api === "openai-responses" || api === "azure-openai-responses";
 }
 
 /**
@@ -97,7 +92,9 @@ function sentScreenshotBytes(message: Message, metadataWire: boolean): number | 
 	if (!metadataWire || message.role !== "toolResult" || message.providerMetadata?.type !== "computer")
 		return undefined;
 	const imageUrl = message.providerMetadata.screenshot.image_url;
-	return imageUrl?.slice(0, 5).toLowerCase() === "data:" ? imageUrl.length : 0;
+	if (imageUrl?.slice(0, 5).toLowerCase() !== "data:") return 0;
+	// The payload after the comma, as an image block's `data`: the `data:image/png;base64,` header is request text.
+	return imageUrl.length - imageUrl.indexOf(",") - 1;
 }
 
 /** Inline image bytes a user, developer or tool-result message puts on the wire. */
