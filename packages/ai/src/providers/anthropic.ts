@@ -6834,6 +6834,12 @@ type AnthropicStrictBudget = {
 	unionCount: number;
 };
 
+type AnthropicStrictSchemaResult = {
+	schema: Record<string, unknown>;
+	optionalCount: number;
+	unionCount: number;
+};
+
 function hasAnthropicUnionType(schema: Record<string, unknown>): boolean {
 	return Array.isArray(schema.type) || Array.isArray(schema.anyOf);
 }
@@ -6881,7 +6887,7 @@ function makeAnthropicNullableSchema(schema: unknown, budget: AnthropicStrictBud
 function normalizeAnthropicStrictSchemaNode(
 	schema: unknown,
 	budget: AnthropicStrictBudget,
-	cache: WeakMap<Record<string, unknown>, Record<string, unknown>>,
+	cache: WeakMap<Record<string, unknown>, AnthropicStrictSchemaResult | null>,
 ): unknown | undefined {
 	if (Array.isArray(schema)) {
 		const result: unknown[] = [];
@@ -6896,8 +6902,21 @@ function normalizeAnthropicStrictSchemaNode(
 	if (!isRecord(schema)) return schema;
 
 	const cached = cache.get(schema);
-	if (cached) return cached;
+	if (cached === null) return undefined;
+	if (
+		cached !== undefined &&
+		cached.optionalCount <= budget.optionalRemaining &&
+		cached.unionCount <= budget.unionRemaining
+	) {
+		// JSON repeats shared nodes; Anthropic charges every serialized occurrence.
+		budget.optionalRemaining -= cached.optionalCount;
+		budget.optionalCount += cached.optionalCount;
+		budget.unionRemaining -= cached.unionCount;
+		budget.unionCount += cached.unionCount;
+		return cached.schema;
+	}
 
+	// Re-normalize an overflowing occurrence so optionals can become nullable-required.
 	if (!hasAnthropicSchemaDefiningKeyword(schema)) return undefined;
 
 	// Strict tool use only supports closed objects. Open maps stay available on
@@ -6907,7 +6926,10 @@ function normalizeAnthropicStrictSchemaNode(
 	}
 
 	const result: Record<string, unknown> = { ...schema };
-	cache.set(schema, result);
+	const optionalCountBefore = budget.optionalCount;
+	const unionCountBefore = budget.unionCount;
+	// An unfinished entry denotes a cycle, not a reusable serialized subtree.
+	cache.set(schema, null);
 
 	if (hasAnthropicUnionType(result)) {
 		if (budget.unionRemaining <= 0) return undefined;
@@ -6986,6 +7008,11 @@ function normalizeAnthropicStrictSchemaNode(
 		result[defsKey] = normalizedDefinitions;
 	}
 
+	cache.set(schema, {
+		schema: result,
+		optionalCount: budget.optionalCount - optionalCountBefore,
+		unionCount: budget.unionCount - unionCountBefore,
+	});
 	return result;
 }
 
@@ -7025,7 +7052,7 @@ function normalizeAnthropicStrictSchema(
 	schema: Record<string, unknown>,
 	optionalRemaining: number,
 	unionRemaining: number,
-): { schema: Record<string, unknown>; optionalCount: number; unionCount: number } | undefined {
+): AnthropicStrictSchemaResult | undefined {
 	const budget: AnthropicStrictBudget = {
 		optionalRemaining,
 		unionRemaining,
