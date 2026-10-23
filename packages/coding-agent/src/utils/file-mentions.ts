@@ -8,7 +8,6 @@
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { EditStore } from "@oh-my-pi/pi-natives";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { formatAge, formatBytes, isProbablyBinary, readImageMetadata } from "@oh-my-pi/pi-utils";
 import {
@@ -193,7 +192,7 @@ export async function generateFileMentionMessages(
 	filePaths: string[],
 	cwd: string,
 	options?: { autoResizeImages?: boolean; useHashLines?: boolean; snapshotStore?: EditStore },
-): Promise<AgentMessage[]> {
+): Promise<FileMentionMessage[]> {
 	if (filePaths.length === 0) return [];
 
 	const autoResizeImages = options?.autoResizeImages ?? true;

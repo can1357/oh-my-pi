@@ -8488,6 +8488,13 @@ export class AgentSession implements SettingsScope {
 				});
 				for (const fileMentionMessage of fileMentionMessages) {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
+					// `@image.png` mentions are attachments too: a text-only model gets the
+					// same vision-description companion as `options.images`.
+					const mentionImages = fileMentionMessage.files.flatMap(file => (file.image ? [file.image] : []));
+					const descriptionNotice = mentionImages.length
+						? await this.#buildImageDescriptionNotice(mentionImages)
+						: undefined;
+					if (descriptionNotice) messages.push(descriptionNotice);
 				}
 			}
 
