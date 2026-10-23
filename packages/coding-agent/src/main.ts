@@ -109,7 +109,7 @@ import {
 import type { AgentSession } from "./session/agent-session";
 import { createAuthStorageSettingsSync, describeAuthBrokerStartupError } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
-import { describePendingToolCalls } from "./session/exit-diagnostics";
+import { describePendingToolCalls, recordSessionActivation } from "./session/exit-diagnostics";
 import {
 	createForeignSessionStore,
 	foreignSessionInfoToSessionInfo,
@@ -2537,6 +2537,7 @@ export async function runRootCommand(
 				}
 				throw error;
 			}
+			recordSessionActivation(session.sessionManager);
 			scheduleMarketplaceAutoUpdate(marketplaceAutoUpdateOptions);
 
 			// Cold-revive support: a `parked` subagent ref restored from disk (Agent Hub

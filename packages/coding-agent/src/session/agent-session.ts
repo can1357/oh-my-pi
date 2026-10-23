@@ -362,6 +362,7 @@ import {
 	createInterruptedToolResults,
 	createInterruptedTurnAbortMessage,
 	hasRestorableTurn,
+	recordSessionActivation,
 	SESSION_EXIT_CUSTOM_TYPE,
 	type SessionExitData,
 	summarizeToolArguments,
@@ -10705,6 +10706,10 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
+	#recordActivation(): void {
+		if (this.#agentKind === "main") recordSessionActivation(this.sessionManager);
+	}
+
 	/**
 	 * Start a new session, optionally with initial messages and parent tracking.
 	 * Clears all messages and starts a new session.
@@ -10757,6 +10762,7 @@ export class AgentSession implements SettingsScope {
 					...options,
 					additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),
 				});
+				this.#recordActivation();
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
 				// conversation's advisor spend is retired with it. Clearing at the commit
@@ -10940,6 +10946,7 @@ export class AgentSession implements SettingsScope {
 			advisorRecordersDetached = false;
 			await this.#memory.resetContextForNewTranscript();
 
+			this.#recordActivation();
 			// Emit session_switch event with reason "fork" to hooks
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
@@ -12642,6 +12649,7 @@ export class AgentSession implements SettingsScope {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
+			if (switchingToDifferentSession) this.#recordActivation();
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
@@ -12851,6 +12859,7 @@ export class AgentSession implements SettingsScope {
 				} else {
 					this.sessionManager.createBranchedSession(leafId, { copyArtifacts: options?.copyArtifacts });
 				}
+				this.#recordActivation();
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
 				sessionTransitioned = true;

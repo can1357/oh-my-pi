@@ -3,7 +3,7 @@
  * call is revived from disk, its cut-off call runs again, the agent answers, and the
  * parent receives the answer as the subagent's job.
  */
-import { afterEach, beforeEach, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, expect, it, setSystemTime, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,6 +17,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { recordSessionActivation } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { restoreSession } from "@oh-my-pi/pi-coding-agent/task/restore";
@@ -57,6 +58,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	setSystemTime();
 	await AgentLifecycleManager.global().dispose();
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
@@ -79,11 +81,13 @@ it("revives a subagent a crash cut off mid tool call, runs the call again, and d
 
 	// The main session and its subagent's transcript, as the process left them when it died
 	// inside the subagent's `read` call: no tool result, no exit record.
+	setSystemTime(new Date("2026-10-09T00:00:00Z"));
 	const main = SessionManager.create(cwd, path.join(root, "sessions"));
+	recordSessionActivation(main);
+	setSystemTime();
 	main.appendMessage({ role: "user", content: "fan out", timestamp: Date.now() });
 	const mainFile = main.getSessionFile();
 	if (!mainFile) throw new Error("Expected a persisted session file");
-	await main.close();
 	const child = await SessionManager.open(
 		path.join(mainFile.slice(0, -6), `${AGENT_ID}.jsonl`),
 		undefined,
@@ -120,6 +124,10 @@ it("revives a subagent a crash cut off mid tool call, runs the call again, and d
 		timestamp: Date.now(),
 	});
 	await child.close();
+	recordSessionActivation(main);
+	await main.ensureOnDisk();
+	await main.close();
+	const active = await SessionManager.open(mainFile);
 
 	const authStorage = createInMemoryAuthStorage();
 	authStorage.keys.setRuntime("mock", "test-key");
@@ -145,11 +153,7 @@ it("revives a subagent a crash cut off mid tool call, runs the call again, and d
 		modelRoles: { default: "mock/mock-model" },
 	});
 	const session = {
-		sessionManager: {
-			getSessionFile: () => mainFile,
-			getCwd: () => cwd,
-			getArtifactManager: () => undefined,
-		},
+		sessionManager: active,
 		asyncJobManager: manager,
 		settings,
 		effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
@@ -173,6 +177,7 @@ it("revives a subagent a crash cut off mid tool call, runs the call again, and d
 		expect(readResults).toHaveLength(1);
 		expect(readResults[0]).toContain("the answer is 42");
 	} finally {
+		await active.close();
 		authStorage.close();
 	}
 }, 20_000);

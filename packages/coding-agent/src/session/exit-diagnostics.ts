@@ -1,9 +1,17 @@
 import { createSyntheticToolResultMessage, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { SessionEntry } from "./session-entries";
+import type { SessionManager } from "./session-manager";
 
 export const TOOL_EXECUTION_START_CUSTOM_TYPE = "tool_execution_start";
 export const SESSION_EXIT_CUSTOM_TYPE = "session_exit";
+/** Persisted boundary between activations of a top-level session. */
+export const SESSION_ACTIVATION_CUSTOM_TYPE = "session_activation";
+
+/** Record a persisted root session becoming active before it starts new work. */
+export function recordSessionActivation(manager: SessionManager): void {
+	if (manager.getSessionFile()) manager.appendCustomEntry(SESSION_ACTIVATION_CUSTOM_TYPE);
+}
 
 /**
  * Compact projection of tool-call arguments persisted with the start marker.
