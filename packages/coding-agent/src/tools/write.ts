@@ -40,6 +40,7 @@ import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { hasColumnTruncationClause, isColumnTruncationNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { recoverConflictUriPrefix } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 
@@ -206,6 +207,14 @@ const writeSchema = type({
 export type WriteToolInput = typeof writeSchema.infer;
 
 /**
+ * A `read` notice that its projection is incomplete: a truncation notice, or the column-cap
+ * notice of a page whose long lines are shown cut (`[Some lines truncated to 768 chars. …]`).
+ */
+function isReadProjectionNotice(line: string): boolean {
+	return isReadTruncationNotice(line) || isColumnTruncationNotice(line);
+}
+
+/**
  * Offset of the last non-blank line of LF-only `text` when that line is a `read`
  * truncation notice, else -1. Walks lines backward from the end instead of splitting.
  */
@@ -214,7 +223,7 @@ function readTruncationNoticeStart(text: string): number {
 	while (end > 0) {
 		const start = text.lastIndexOf("\n", end - 1) + 1;
 		const line = text.slice(start, end);
-		if (line.trim().length > 0) return isReadTruncationNotice(line) ? start : -1;
+		if (line.trim().length > 0) return isReadProjectionNotice(line) ? start : -1;
 		end = start - 1;
 	}
 	return -1;
@@ -228,13 +237,12 @@ function lfNormalizedLength(text: string): number {
 }
 
 /**
- * `readTruncationNoticeStart(normalizeToLF(content)) !== -1` without normalizing the
- * payload: only the last non-blank line is inspected, bounded in the raw text by CR or LF
- * (exactly the line normalization would produce).
+ * The last non-blank line of `content` without normalizing the payload, bounded in the raw
+ * text by CR or LF (exactly the line normalization would produce); `undefined` when blank.
  */
-function endsWithReadTruncationNotice(content: string): boolean {
+function lastContentLine(content: string): string | undefined {
 	const contentEnd = content.trimEnd().length;
-	if (contentEnd === 0) return false;
+	if (contentEnd === 0) return undefined;
 	let start = contentEnd;
 	while (start > 0) {
 		const ch = content.charCodeAt(start - 1);
@@ -247,7 +255,13 @@ function endsWithReadTruncationNotice(content: string): boolean {
 		if (ch === 0x0a || ch === 0x0d) break;
 		end++;
 	}
-	return isReadTruncationNotice(content.slice(start, end));
+	return content.slice(start, end);
+}
+
+/** `readTruncationNoticeStart(normalizeToLF(content)) !== -1` without normalizing the payload. */
+function endsWithReadTruncationNotice(content: string): boolean {
+	const line = lastContentLine(content);
+	return line !== undefined && isReadProjectionNotice(line);
 }
 
 async function readCurrentWriteSource(
@@ -308,10 +322,18 @@ function assertNotShorterReadProjection(
 ): void {
 	const rawPayloadLength = readProjectionPayloadLength(rawContent);
 	if (rawPayloadLength === undefined || currentContent === undefined) return;
-	const payloadLength = writeContent === rawContent ? rawPayloadLength : lfNormalizedLength(writeContent);
-	if (payloadLength >= lfNormalizedLength(currentContent)) return;
+	// A column-cap notice proves the page lossy at any length: a cut line ends in `…` in place of
+	// its tail, and a line one column past the cap renders exactly as long as its source. So does
+	// a truncation notice carrying the column clause, whose line-number prefixes pad the payload.
+	const columnCut = hasColumnTruncationClause(lastContentLine(rawContent) ?? "");
+	if (!columnCut) {
+		const payloadLength = writeContent === rawContent ? rawPayloadLength : lfNormalizedLength(writeContent);
+		if (payloadLength >= lfNormalizedLength(currentContent)) return;
+	}
 	throw new ToolError(
-		`Refusing to overwrite '${displayPath}' with an incomplete read projection: the content ends with an omp read truncation notice and covers less than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
+		columnCut
+			? `Refusing to overwrite '${displayPath}' with an incomplete read projection: the content ends with an omp read column-cap notice, so its cut lines would replace the full ones. Re-read the cut lines in raw mode and write the complete file, or use edit for a partial change.`
+			: `Refusing to overwrite '${displayPath}' with an incomplete read projection: the content ends with an omp read truncation notice and covers less than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
 	);
 }
 
