@@ -4,7 +4,7 @@ import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
 import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { logger } from "@oh-my-pi/pi-utils";
-import { resolveRoleChain } from "../config/model-resolver";
+import { type RoleChainCandidate, resolveConfiguredModelPatterns, resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { type Settings, settings } from "../config/settings";
 import { type SttStreamHandle, sttClient } from "./asr-client";
@@ -154,13 +154,13 @@ export class STTController {
 		}
 	}
 
-	#resolveModel(): Model<Api> | undefined {
+	#resolveCandidate(): RoleChainCandidate | undefined {
 		if (!this.#registry) return undefined;
 		const pool = roleCandidatePool("dictation", this.#settings, this.#registry);
-		return resolveRoleChain("dictation", this.#settings, pool)[0]?.model;
+		return resolveRoleChain("dictation", this.#settings, pool)[0];
 	}
 
-	#resolveModelKey(model = this.#resolveModel()): SttModelKey {
+	#resolveModelKey(model = this.#resolveCandidate()?.model): SttModelKey {
 		return resolveSttModelSpec(model?.id).key;
 	}
 
@@ -218,7 +218,23 @@ export class STTController {
 	}
 
 	async #startWith(editor: SttTarget, options: SttCallbacks, signal: AbortSignal): Promise<void> {
-		let model = this.#resolveModel();
+		const first = this.#resolveCandidate();
+		const configuredRole = this.#settings.getModelRole("dictation")?.trim();
+		// The first provider-qualified pattern the role expands to (aliases and lists).
+		const configured = configuredRole
+			? (resolveConfiguredModelPatterns(configuredRole, this.#settings) ?? [configuredRole]).find(pattern =>
+					pattern.includes("/"),
+				)
+			: undefined;
+		if (first?.replaces) {
+			options.showWarning(
+				`Dictation model ${first.replaces} not found; using ${first.model.provider}/${first.model.id}`,
+			);
+		} else if (!first && this.#registry && configured?.includes("/")) {
+			// Empty chain: nothing replaced the configured selector, so the built-in local model runs.
+			options.showWarning(`Dictation model ${configured} not found; using the built-in local model`);
+		}
+		let model = first?.model;
 		if (model?.api === "openai-transcriptions") {
 			this.#startBuffered(editor, options, model);
 			return;
@@ -230,7 +246,7 @@ export class STTController {
 
 		let modelKey = await this.#ensureDeps(options, this.#resolveModelKey(model), signal);
 		if (!modelKey || signal.aborted) return;
-		model = this.#resolveModel();
+		model = this.#resolveCandidate()?.model;
 		if (model?.api === "openai-transcriptions") {
 			this.#startBuffered(editor, options, model);
 			return;

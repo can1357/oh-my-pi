@@ -1503,7 +1503,21 @@ export async function buildSessionOptions(
 			// Extensions may register an earlier configured role candidate.
 			options.modelPattern = parsed.model;
 		} else if (resolved.error) {
-			if (!parsed.provider && ((resolved.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))) {
+			if (
+				parsed.provider &&
+				!parsed.model.includes(":") &&
+				// Provider-level knowledge: a discovery provider may hold no rows until refresh.
+				(modelRegistry.hasProvider(parsed.provider) || modelRegistry.hasProvider(parsed.provider.toLowerCase()))
+			) {
+				// Same deferral as `provider/id` for a known provider: extensions and account
+				// discovery may still add the id. An unknown `--provider` still fails here.
+				options.modelPattern = parsed.model.toLowerCase().startsWith(`${parsed.provider.toLowerCase()}/`)
+					? parsed.model
+					: `${parsed.provider}/${parsed.model}`;
+			} else if (
+				!parsed.provider &&
+				((resolved.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))
+			) {
 				// Model not found in built-in registry — defer resolution to after extensions load
 				// (extensions may register additional providers/models via registerProvider)
 				options.modelPattern = parsed.model;
@@ -2607,6 +2621,12 @@ export async function runRootCommand(
 
 			if (modelFallbackMessage) {
 				notifs.push({ kind: "warn", message: modelFallbackMessage });
+				// Non-interactive runs have no notification surface: a model that still
+				// started in place of the requested one is reported on stderr, keeping
+				// structured stdout clean. A run with no model reports it below.
+				if (!isInteractive && session.model) {
+					process.stderr.write(`${chalk.yellow(`Warning: ${modelFallbackMessage}`)}\n`);
+				}
 			}
 
 			const modelRegistryError = modelRegistry.getError();
@@ -2631,11 +2651,22 @@ export async function runRootCommand(
 				if (parsedArgs.model && availableModels.length > 0) {
 					// Credentials work; the requested selector is what failed. Point at
 					// the nearest usable models instead of an API-key checklist.
-					const suggestions = fuzzyFilter(
-						availableModels.map(model => `${model.provider}/${model.id}`),
-						parsedArgs.model,
-						selector => selector,
-					).slice(0, 5);
+					// A provider-qualified request names an exact id: its message carries
+					// that provider's near ids, if any. The cross-provider list is for bare ones.
+					const slashIndex = parsedArgs.model.indexOf("/");
+					const namedProvider =
+						slashIndex === -1 ? undefined : parsedArgs.model.slice(0, slashIndex).toLowerCase();
+					const qualified =
+						Boolean(parsedArgs.provider) ||
+						(namedProvider !== undefined &&
+							modelRegistry.getAll().some(model => model.provider.toLowerCase() === namedProvider));
+					const suggestions = qualified
+						? []
+						: fuzzyFilter(
+								availableModels.map(model => `${model.provider}/${model.id}`),
+								parsedArgs.model,
+								selector => selector,
+							).slice(0, 5);
 					if (suggestions.length > 0) {
 						process.stderr.write(`${chalk.yellow("\nDid you mean:")}\n`);
 						for (const selector of suggestions) process.stderr.write(`  ${selector}\n`);

@@ -5,6 +5,7 @@
 ### Added
 
 - Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- Added the `selector-revision-suffix` catalog axis, set to `@default` on Google Vertex, so `google-vertex/claude-opus-4-8` names `claude-opus-4-8@default` exactly ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -18,6 +19,7 @@
 - Fixed GPT-5.6 Sol requests over 272K input tokens (`openai` and `openai-codex`) being priced at the retired $10/$45 long-context card instead of $8/$30 ([#16742](https://github.com/can1357/oh-my-pi/issues/16742))
 - Fixed DeepSeek's official vision requests being held to the 5-image unknown-host floor: the catalog endpoint now carries DeepSeek's documented 600-image and 40 MiB inline-image budgets, while a custom `baseUrl` keeps the conservative floor ([vision limits](https://api-docs.deepseek.com/guides/vision#limits); [#16737](https://github.com/can1357/oh-my-pi/pull/16737) by [@Fun10165](https://github.com/Fun10165))
 - Fixed Devin model discovery falling back to the two SWE-1.6 seed models when the catalog takes longer than 5s to respond; it now waits up to 15s ([#16668](https://github.com/can1357/oh-my-pi/pull/16668) by [@DusKing1](https://github.com/DusKing1))
+- Removed `cerebras/zai-glm` from the `smol` role defaults and `openai-codex/gpt-5.5` from the `slow` ones: no bundled model has either id, and `cerebras/zai-glm-4.6` and `openai-codex/gpt-5.6-sol` already come earlier in those lists ([#12884](https://github.com/can1357/oh-my-pi/issues/12884)) ([#16297](https://github.com/can1357/oh-my-pi/pull/16297) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.12.6] - 2026-10-21
 
