@@ -715,6 +715,46 @@ describe("Factory Droid dated credit rates over time", () => {
 			setSystemTime();
 		}
 	});
+
+	test("an open `free` search follows credit-only models across cards that charge or free them", () => {
+		// Ids without an `e`, so only the `free` search word can match the query.
+		const charged = (): Model => ({
+			...makeModel("factory-droid", "kilo"),
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			factoryDroidCredits: 0,
+			factoryDroidCreditCards: [{ effectiveFrom: startsAt, input: 0.5 }],
+		});
+		const freed = (): Model => ({
+			...makeModel("factory-droid", "mango"),
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			factoryDroidCredits: 0.5,
+			factoryDroidCreditCards: [{ effectiveFrom: endsAt, input: 0 }],
+		});
+		const search = (models: Model[]) => {
+			const browser = makeBrowser(models, []);
+			browser.setQuery("free");
+			return () => Bun.stripANSI(browser.render(120).join("\n"));
+		};
+		try {
+			setSystemTime(new Date(startsAt - 1000));
+			const both = search([charged(), freed()]);
+			expect(both()).toContain("factory-droid/kilo");
+			expect(both()).not.toContain("factory-droid/mango");
+			setSystemTime(new Date(startsAt));
+			expect(both()).not.toContain("factory-droid/kilo");
+			setSystemTime(new Date(endsAt));
+			expect(both()).toContain("factory-droid/mango");
+
+			// The only dated card belongs to a row the query never showed.
+			setSystemTime(new Date(endsAt - 1000));
+			const hidden = search([freed()]);
+			expect(hidden()).not.toContain("factory-droid/mango");
+			setSystemTime(new Date(endsAt));
+			expect(hidden()).toContain("factory-droid/mango");
+		} finally {
+			setSystemTime();
+		}
+	});
 });
 
 describe("serviceTierFor", () => {
