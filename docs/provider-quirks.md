@@ -2149,6 +2149,23 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 - **Authored seeds**: `abliterated-model`, `abliterated-model-large-v2`, `abliterated-model-large`; bundle policy `fallback`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `abliterationModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
 
+## AI Stupid Level (`aistupidlevel`)
+
+### Special casings
+- Uses `openai-completions` at `https://aistupidlevel.info/v1`. A model id is either a routing mode (`auto`, `auto-coding`, `auto-reasoning`, …), for which the router picks the answering model per request, or a pinned model id. The router calls the chosen model with the user's own provider keys.
+- `/v1/models` lists the routing modes and the pinnable model ids with no capability data. A `models "*"` rule in `providers/aistupidlevel.kdl` gives every row the router's contract: text input only (image, audio and file parts get `400 unsupported_content`), a 262,144-token context and a 64,000-token output cap (the smallest across the router's models), and a `reasoning_effort` ladder from `minimal` to `max` with `none` for off. The router maps an effort to the nearest level the chosen model supports. Reviewed lineage residue with a higher priority, such as GLM 5.3's fixed `low`/`high`/`max` ladder, still applies to a pinned id.
+- `auto-reasoning` and `auto-value-reasoning` are routing strategies, not thinking siblings of `auto` and `auto-value`. `pair-token-exempt "aistupidlevel"` in `rules/taxonomy/_collapse.kdl` keeps the automatic pair rule from folding them together and keeps their thinking optional.
+- Routing modes report `pricingStatus: "variable"`; pinned ids carry no price. Providers bill the user's own keys directly.
+
+### Auth & usage
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/aistupidlevel.kdl`. Environment keys: `AISTUPIDLEVEL_API_KEY`. Validation uses `models-endpoint`: `/v1/models` answers 401 without a key or with a rejected one, and listing models bills nothing.
+
+### Catalog model handling
+- **Provider entry (`aistupidlevel`)**: `packages/catalog/src/compat/rules/providers/aistupidlevel.kdl` declares default model `auto-coding`. Environment keys: `AISTUPIDLEVEL_API_KEY`.
+- **Discovery replacement**: Successful authoritative discovery replaces bundled provider rows. There is no `discovery` node, so generation bundles only the authored seeds.
+- **Authored seeds**: the 15 routing modes `/v1/models` lists; bundle policy `always`.
+- Runtime manager: `aistupidlevelModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
+
 ## Apple Foundation Models (on-device) (`apple`)
 
 ### Special casings

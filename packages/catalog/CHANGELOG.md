@@ -5,6 +5,7 @@
 ### Added
 
 - Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- Added AI Stupid Level as a built-in provider with `/login aistupidlevel` or `AISTUPIDLEVEL_API_KEY`: its benchmark routing modes (default `auto-coding`) and the model ids it can pin come from live discovery as text-only models, and thinking levels are sent as `reasoning_effort` ([#16867](https://github.com/can1357/oh-my-pi/pull/16867) by [@StudioPlatforms](https://github.com/StudioPlatforms))
 
 ### Changed
 
