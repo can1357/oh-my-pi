@@ -9,7 +9,7 @@
 
 ### Changed
 
-- Computer-enabled sessions receive the desktop guide before their first call, avoiding a separate documentation read before starting a desktop task
+- Sessions started with computer use enabled receive the desktop guide before their first call, avoiding a separate documentation read before starting a desktop task
 
 ### Fixed
 

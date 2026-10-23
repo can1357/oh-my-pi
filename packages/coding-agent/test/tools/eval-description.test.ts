@@ -199,6 +199,10 @@ describe("eval tool description", () => {
 		expect(tool.description).toContain("INLINE PRELUDE DOCUMENTATION");
 		expect(tool.description).not.toContain("xd://eval/fixture");
 		expect(tool.docTopics().fixture).toContain("INLINE PRELUDE DOCUMENTATION");
+		const withoutRead = new EvalTool(makeSession({ preludes: () => [prelude], readActive: false }));
+		expect(withoutRead.description.split("INLINE PRELUDE DOCUMENTATION")).toHaveLength(2);
+		expect(withoutRead.description).not.toContain("<fixture>");
+		expect(withoutRead.description).not.toContain("xd://eval/fixture");
 	});
 });
 
