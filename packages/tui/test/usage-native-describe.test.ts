@@ -438,7 +438,8 @@ describe("createUsageRowBlock describe", () => {
 			totalTokens: 600,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
-		const block = createUsageRowBlock(usage, 2000, undefined, new Date(2026, 0, 1, 18, 5, 9).getTime());
+		const timestamp = new Date(2026, 0, 1, 18, 5, 9);
+		const block = createUsageRowBlock(usage, 2000, undefined, timestamp.getTime());
 		const shown = (hour12: boolean | undefined) => {
 			const described = block.describe?.({ ...cx, hour12 });
 			if (!described) throw new Error("usage row did not describe");
@@ -449,8 +450,15 @@ describe("createUsageRowBlock describe", () => {
 		expect(shown(undefined).line).toContain('"18:05 · ');
 		expect(shown(undefined).title).toBe("2026-01-01 18:05:09");
 		const twelve = shown(true);
-		expect(twelve.line).toMatch(/"0?6:05\s?pm · /i);
-		expect(twelve.title).toMatch(/^2026-01-01 0?6:05:09\s?pm$/i);
+		const clock = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hour12: true });
+		const clockWithSeconds = new Intl.DateTimeFormat(undefined, {
+			hour: "2-digit",
+			minute: "2-digit",
+			second: "2-digit",
+			hour12: true,
+		});
+		expect(twelve.line).toContain(`"${clock.format(timestamp)} · `);
+		expect(twelve.title).toBe(`2026-01-01 ${clockWithSeconds.format(timestamp)}`);
 		const twentyFour = shown(false);
 		expect(twentyFour.line).toContain('"18:05 · ');
 		expect(twentyFour.title).toBe("2026-01-01 18:05:09");
