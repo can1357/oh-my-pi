@@ -194,6 +194,24 @@ describe("write tool read projection guard", () => {
 		expect(await Bun.file(filePath).text()).toBe(original);
 	});
 
+	it("rejects a column-cut projection under a fractional column cap", async () => {
+		const filePath = path.join(tmpDir, "fractional.txt");
+		const original = "x".repeat(769);
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+		// Number settings take any finite value, and the notice prints the cap as set.
+		cfgToolsOutputMaxColumns.set(session.settings, 768.5);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-fractional", { path: filePath }),
+		);
+		expect(projection).toContain("Some lines truncated to 768.5 chars");
+
+		await expect(
+			new WriteTool(session).execute("write-fractional", { path: filePath, content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
 	it("rejects a numbered column-cut projection whose notice also says where to continue", async () => {
 		const filePath = path.join(tmpDir, "numbered.txt");
 		// `:1-1` pages on through the short lines after the cut one and stops one line short; the

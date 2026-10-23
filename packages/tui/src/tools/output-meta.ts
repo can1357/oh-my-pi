@@ -204,8 +204,11 @@ export function stripRawOutputArtifactNotice(text: string): { text: string; arti
 
 /** The column-cap clause {@link formatOutputNotice} puts in a notice, alone or after other parts. */
 const COLUMN_TRUNCATION_CLAUSE = "Some lines truncated to ";
-/** The rest of the clause as {@link formatOutputNotice} writes it: the cap, its unit, then a `. ` suffix or the bracket. */
-const COLUMN_TRUNCATION_TAIL = String.raw`\d+ (?:chars|bytes)(?:\. .*)?\]$`;
+/**
+ * The rest of the clause as {@link formatOutputNotice} writes it: the cap as JavaScript prints a
+ * finite number (the setting takes any, `768.5` included), its unit, then a `. ` suffix or the bracket.
+ */
+const COLUMN_TRUNCATION_TAIL = String.raw`-?\d+(?:\.\d+)?(?:e[+-]\d+)? (?:chars|bytes)(?:\. .*)?\]$`;
 const COLUMN_TRUNCATION_NOTICE = new RegExp(String.raw`^\[${COLUMN_TRUNCATION_CLAUSE}${COLUMN_TRUNCATION_TAIL}`, "u");
 const COLUMN_TRUNCATION_IN_NOTICE = new RegExp(
 	String.raw`^\[.*\. ${COLUMN_TRUNCATION_CLAUSE}${COLUMN_TRUNCATION_TAIL}`,
