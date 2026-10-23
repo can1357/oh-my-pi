@@ -35,6 +35,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
+	installRetryFallbackRole,
 	type ServingModel,
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
@@ -7987,5 +7988,151 @@ describe("AgentSession retry fallback", () => {
 
 		expect(requestedModels).toContain("openrouter/z-ai/glm-4.7@chutes");
 		expect(getLastAssistantMessage(session).stopReason).not.toBe("error");
+	});
+
+	it("subagent retry fallback with explicit candidate list falls back even when parent exact model key is empty (#13550)", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
+		const secondFallback = getBundledModel("openai", "gpt-4o");
+		if (!primaryModel || !firstFallback || !secondFallback) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const firstSelector = `${firstFallback.provider}/${firstFallback.id}`;
+		const secondSelector = `${secondFallback.provider}/${secondFallback.id}`;
+
+		const requestedModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
+					mock.push({ throw: "rate_limit_error: 429 too many requests" });
+				} else if (model.provider === firstFallback.provider && model.id === firstFallback.id) {
+					mock.push({ content: ["Recovered on subagent explicit fallback"] });
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": {
+				[primarySelector]: [], // parent exact model key disables fallback
+			},
+		});
+
+		// Install explicit subagent fallback role with shadowPrimaryKeys: true
+		const subagentRole = "subagent:test-child";
+		installRetryFallbackRole(
+			settings,
+			subagentRole,
+			{
+				primary: primarySelector,
+				chain: [firstSelector, secondSelector],
+				shadowPrimaryKeys: true,
+			},
+			modelRegistry,
+		);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") {
+				fallbackAppliedEvents.push(event);
+			}
+		});
+
+		await session.prompt("Run subagent task");
+
+		expect(requestedModels).toEqual([primarySelector, firstSelector]);
+		expect(fallbackAppliedEvents).toHaveLength(1);
+		expect(fallbackAppliedEvents[0]?.to).toBe(firstSelector);
+	});
+
+	it("subagent retry fallback without explicit candidates honors parent exact model key (#13550)", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !firstFallback) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const firstSelector = `${firstFallback.provider}/${firstFallback.id}`;
+
+		const requestedModels: string[] = [];
+
+		let attempts = 0;
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (attempts === 0) {
+					attempts += 1;
+					mock.push({ throw: "overloaded_error: provider returned error 503" });
+				} else {
+					mock.push({ content: ["recovered on same model retry"] });
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+			"retry.fallbackChains": {
+				[primarySelector]: [], // parent exact model key disables fallback
+				default: [firstSelector],
+			},
+		});
+
+		// Plain child with shadowPrimaryKeys: false (inherited default chain)
+		const subagentRole = "subagent:plain-child";
+		installRetryFallbackRole(
+			settings,
+			subagentRole,
+			{
+				primary: primarySelector,
+				chain: [firstSelector],
+				shadowPrimaryKeys: false,
+			},
+			modelRegistry,
+		);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		await session.prompt("Run plain child task");
+
+		// Only requested primaryModel, because primarySelector: [] was preserved and blocked fallback
+		expect(requestedModels.every(m => m === primarySelector)).toBe(true);
 	});
 });
