@@ -1438,10 +1438,15 @@ impl Worker {
 				};
 				let mode = options.mode();
 				let backend = self.backend()?;
-				refuse_menu_press(backend.as_mut(), options.refuse_menu, mode, target, &event)?;
+				// The selection comes first: it reads the front app before any
+				// probe of the target, so a target the user brings forward while
+				// the menu preflight's probes block is not taken as their front
+				// app. A press on text opens no menu; any other drag still meets
+				// the preflight before it is posted.
 				if let Some(selection) = backend.drag_selection(target, &event, mode, token)? {
 					return Ok(Response::TextSelection(selection));
 				}
+				refuse_menu_press(backend.as_mut(), options.refuse_menu, mode, target, &event)?;
 				backend.pointer(target, event, &frame, mode, token)?;
 				Ok(Response::Input(control::take_focus_return()))
 			},
@@ -4683,6 +4688,41 @@ mod capture_tests {
 		let mut worker = worker_with(backend);
 		assert!(matches!(drag(&mut worker), Response::Input(None)));
 		assert_eq!(*clicks.lock(), [WAYLAND_ID]);
+	}
+
+	#[test]
+	fn a_drag_selection_reads_the_target_before_the_menu_preflight_probes_it() {
+		// The menu preflight probes the target, which can block; the selection
+		// reads the front app before any probe, so it runs first. A press on
+		// text opens no menu, so the refusing preflight never sees this drag.
+		let mut backend = FakeWaylandBackend::new();
+		backend.menu_control = true;
+		backend.drag_selection = Some(AxTextSelection {
+			start:   4,
+			length:  5,
+			text:    "quick".to_string(),
+			focused: false,
+		});
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let token = CancellationSource::default().token();
+		let target = Target::Window(WAYLAND_ID.to_string());
+		worker
+			.process(&capture_request(target.clone()), &token)
+			.unwrap();
+		let (reply, _rx) = flume::bounded(1);
+		let request = Request::Drag {
+			target,
+			path: vec![(4.0, 10.0), (30.0, 10.0)],
+			options: ParsedPointerOptions::parse(Some(PointerOptions {
+				refuse_menu: Some(true),
+				..PointerOptions::default()
+			}))
+			.unwrap(),
+			reply,
+		};
+		assert!(matches!(worker.process(&request, &token).unwrap(), Response::TextSelection(_)));
+		assert!(clicks.lock().is_empty(), "no pointer input was posted");
 	}
 
 	#[test]
