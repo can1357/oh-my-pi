@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- OpenAI prompt-cache breakpoints now cover stable assistant, tool, and function-output boundaries, with nested gateway markers rejected ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
 ### Added
 
 - Added `PI_ANTHROPIC_API_VERSION=2026-10-21` to send Anthropic API version 2026-10-21 to the official Anthropic API; sampling parameters are omitted under that version, which rejects them ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
