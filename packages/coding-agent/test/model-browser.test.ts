@@ -593,6 +593,21 @@ describe("Factory Droid credits badge", () => {
 		expect(browser.visibleCount).toBe(0);
 	});
 
+	test("classifies a credit-only row as free by the credit rate due now, not the base", () => {
+		const charged = makeDroidModel("preview-credit-model", 0);
+		charged.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		charged.factoryDroidCreditCards = [{ effectiveFrom: Date.now() - 86_400_000, input: 0.5 }];
+		const browser = makeBrowser([charged], []);
+		const row = browser
+			.render(120)
+			.map(line => Bun.stripANSI(line))
+			.find(line => line.includes("preview-credit-model"));
+		expect(row).toContain("0.5×");
+		expect(row).not.toContain("free");
+		browser.setQuery("free");
+		expect(browser.visibleCount).toBe(0);
+	});
+
 	test("shows the dated credit rate due now and names the next one in the detail, never cutting other facts", () => {
 		const promoted = {
 			...makeDroidModel("gpt-5.6-sol", 2),
