@@ -40,6 +40,7 @@ import { createModelBrowserSource } from "../model-browser-source";
 import { parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
+import { openLocalFileInEditor } from "../local-file-editor";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
@@ -405,6 +406,19 @@ export class InputController {
 						return undefined;
 					}
 					void this.openExternalEditor();
+					return { consume: true };
+				}
+				if (this.ctx.keybindings.matches(data, "app.local.open")) {
+					if (this.ctx.ui.hasOverlay()) return undefined;
+					const focused = this.ctx.ui.getFocused();
+					if (
+						focused instanceof HookEditorComponent ||
+						focused === this.ctx.hookSelector ||
+						focused === this.ctx.hookInput
+					) {
+						return undefined;
+					}
+					void this.openLocalFilePicker();
 					return { consume: true };
 				}
 				if (this.ctx.keybindings.matches(data, "app.tools.toggleVisibility")) {
@@ -2829,6 +2843,14 @@ export class InputController {
 			this.ctx.ui.start();
 			this.ctx.ui.requestRender();
 		}
+	}
+
+	openLocalFilePicker(): Promise<void> {
+		if (this.ctx.collabGuest) {
+			this.ctx.showStatus("/local is host-only during a collab session");
+			return Promise.resolve();
+		}
+		return openLocalFileInEditor(this.ctx);
 	}
 
 	registerExtensionShortcuts(): void {

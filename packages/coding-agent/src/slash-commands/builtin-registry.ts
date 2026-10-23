@@ -7,6 +7,7 @@ import {
 	buildDirectoryArgumentCompletions,
 	buildEffortArgumentCompletions,
 	buildEffortInlineHint,
+	buildLocalFileArgumentCompletions,
 	buildMcpArgumentCompletions,
 	buildModelSelectorCompletions,
 	buildStaticInlineHint,
@@ -99,6 +100,9 @@ function materializeTuiBuiltinSlashCommand(
 		}
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
+		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
+	} else if (cmd.name === "local" && runtime) {
+		materialized.getArgumentCompletions = buildLocalFileArgumentCompletions(runtime);
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
 	} else if (cmd.name === "switch" && runtime) {
 		materialized.getArgumentCompletions = buildModelSelectorCompletions(runtime);

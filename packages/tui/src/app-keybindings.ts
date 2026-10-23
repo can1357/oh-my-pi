@@ -40,6 +40,7 @@ interface AppKeybindings {
 	"app.ask.hide": true;
 	"app.approval.approve": true;
 	"app.editor.external": true;
+	"app.local.open": true;
 	"app.message.followUp": true;
 	"app.retry": true;
 	"app.message.dequeue": true;
@@ -153,6 +154,10 @@ export const KEYBINDINGS = {
 	"app.editor.external": {
 		defaultKeys: "ctrl+g",
 		description: "Open external editor",
+	},
+	"app.local.open": {
+		defaultKeys: "alt+g",
+		description: "Open a local:// file in external editor",
 	},
 	"app.message.followUp": {
 		// Ctrl+Enter is preserved for terminals that deliver it (Kitty/iTerm2/WezTerm/Ghostty),
