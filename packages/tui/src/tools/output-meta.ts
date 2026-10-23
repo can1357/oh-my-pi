@@ -204,24 +204,26 @@ export function stripRawOutputArtifactNotice(text: string): { text: string; arti
 
 /** The column-cap clause {@link formatOutputNotice} puts in a notice, alone or after other parts. */
 const COLUMN_TRUNCATION_CLAUSE = "Some lines truncated to ";
+/** The rest of the clause as {@link formatOutputNotice} writes it: the cap, its unit, then a `. ` suffix or the bracket. */
+const COLUMN_TRUNCATION_TAIL = String.raw`\d+ (?:chars|bytes)(?:\. .*)?\]$`;
+const COLUMN_TRUNCATION_NOTICE = new RegExp(String.raw`^\[${COLUMN_TRUNCATION_CLAUSE}${COLUMN_TRUNCATION_TAIL}`, "u");
+const COLUMN_TRUNCATION_IN_NOTICE = new RegExp(
+	String.raw`^\[.*\. ${COLUMN_TRUNCATION_CLAUSE}${COLUMN_TRUNCATION_TAIL}`,
+	"u",
+);
 
-/** Whether `line` is the column-cap notice {@link formatOutputNotice} emits (`[Some lines truncated to …]`). */
+/** Whether `line` is the column-cap notice {@link formatOutputNotice} emits (`[Some lines truncated to 768 chars…]`). */
 export function isColumnTruncationNotice(line: string): boolean {
-	const trimmed = line.trim();
-	return trimmed.startsWith(`[${COLUMN_TRUNCATION_CLAUSE}`) && trimmed.endsWith("]");
+	return COLUMN_TRUNCATION_NOTICE.test(line.trim());
 }
 
 /**
  * Whether the bracketed notice `line` carries the column-cap clause: alone, or after the parts
- * {@link formatOutputNotice} joins before it (`[Showing lines 1-4 of 5. … Some lines truncated to …]`).
+ * {@link formatOutputNotice} joins before it (`[Showing lines 1-4 of 5. … Some lines truncated to 768 chars…]`).
  */
 export function hasColumnTruncationClause(line: string): boolean {
 	const trimmed = line.trim();
-	if (!trimmed.endsWith("]")) return false;
-	return (
-		isColumnTruncationNotice(trimmed) ||
-		(trimmed.startsWith("[") && trimmed.includes(`. ${COLUMN_TRUNCATION_CLAUSE}`))
-	);
+	return COLUMN_TRUNCATION_NOTICE.test(trimmed) || COLUMN_TRUNCATION_IN_NOTICE.test(trimmed);
 }
 
 function isGeneratedOutputNoticeLine(line: string): boolean {

@@ -221,6 +221,14 @@ describe("write tool read projection guard", () => {
 		expect(await Bun.file(filePath).text()).toBe(content);
 	});
 
+	it("rewrites a file whose last line only reads like a bracketed column-cap notice", async () => {
+		const filePath = path.join(tmpDir, "format.txt");
+		const content = "header\n[Some lines truncated to explain the format]\n";
+		await Bun.write(filePath, content);
+		await new WriteTool(createSession(tmpDir)).execute("write-format", { path: filePath, content });
+		expect(await Bun.file(filePath).text()).toBe(content);
+	});
+
 	it("rejects actual bounded archive-member output without changing the archive", async () => {
 		const archivePath = path.join(tmpDir, "bundle.zip");
 		const member = "member.txt";
