@@ -503,6 +503,9 @@ pub(super) fn drag_selection(
 	let Some((id, (start, end))) = selecting_drag(target, event, mode) else {
 		return Ok(None);
 	};
+	// Read before anything about the target ([`EntryFront::before`]): the
+	// window, sheet and text probes below can block while the user picks it.
+	let entry_front = EntryFront::now();
 	let window = capture.window(id)?;
 	let (pid, wid) = window_identity(&window)?;
 	let (text_wid, remote) = text_window(
@@ -512,7 +515,29 @@ pub(super) fn drag_selection(
 		|window| ax::window_content(pid, window),
 		control::intervention::input_goes_to,
 	)?;
-	ax::select_dragged(pid, text_wid, remote, start, end)
+	selection_behind(entry_front, skylight::front_pid, pid, wid, |started_in_background| {
+		ax::select_dragged(pid, text_wid, remote, started_in_background, start, end)
+	})
+}
+
+/// The selection `select` makes in an app of `pid`, told whether `pid` was
+/// behind a known front app as the drag began (`entry_front`), so a target
+/// the user brings forward while the probes block is left to them. With no
+/// selection made the drag is posted as input next, whose own front check
+/// begins after these probes; so a target that came forward meanwhile
+/// (`front`, read once `select` is done) refuses here instead.
+fn selection_behind<T>(
+	entry_front: EntryFront,
+	front: impl FnOnce() -> Option<libc::pid_t>,
+	pid: libc::pid_t,
+	wid: u32,
+	select: impl FnOnce(bool) -> CoreResult<Option<T>>,
+) -> CoreResult<Option<T>> {
+	let selection = select(entry_front.known_behind(pid))?;
+	if selection.is_none() {
+		entry_front.require_behind(front(), pid, wid)?;
+	}
+	Ok(selection)
 }
 
 /// The window id the text elements under a drag on window `wid` map to, and
@@ -1455,6 +1480,13 @@ impl EntryFront {
 	/// Whether `pid` was behind another application as the input began.
 	pub(super) fn behind(self, pid: libc::pid_t) -> bool {
 		self.0 != Some(pid)
+	}
+
+	/// Whether `pid` was behind a known front process as the input began:
+	/// an unknown front app counts as the target's, as for the focus an AX
+	/// write may borrow.
+	pub(super) fn known_behind(self, pid: libc::pid_t) -> bool {
+		self.0.is_some_and(|front| front != pid)
 	}
 
 	/// Reads the front process with `front`, then runs `probe`, the target's
@@ -7399,6 +7431,37 @@ mod tests {
 		.unwrap();
 		assert_eq!(entry, EntryFront(Some(9)));
 		assert_eq!(front_target(entry, Some(7), 7, || true), FrontTarget::CameForward);
+	}
+
+	#[test]
+	fn a_drag_target_picked_while_its_selection_probes_block_is_left_to_the_user() {
+		use crate::desktop::error::ErrorCode;
+		// The drag began with the user's app (9) in front, and they bring the
+		// target (7) forward while its window and text probes block.
+		let user = EntryFront(Some(9));
+		let picked = || Some(7);
+		// The selection hears the target was behind, so its write refuses.
+		let mut told = None;
+		let selection = selection_behind(user, picked, 7, 42, |behind| {
+			told = Some(behind);
+			Ok(Some("quick"))
+		});
+		assert_eq!(told, Some(true));
+		assert_eq!(selection.unwrap(), Some("quick"));
+		// With no selection, the drag is not handed on to be posted there.
+		let error = selection_behind(user, picked, 7, 42, |_| Ok(None::<&str>)).unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		// Still behind, or in front from the start: it is posted as input.
+		assert_eq!(selection_behind(user, || Some(9), 7, 42, |_| Ok(None::<&str>)).unwrap(), None);
+		let front = EntryFront(Some(7));
+		let mut told = None;
+		let posted = selection_behind(front, picked, 7, 42, |behind| {
+			told = Some(behind);
+			Ok(None::<&str>)
+		});
+		assert_eq!((told, posted.unwrap()), (Some(false), None));
+		// An unknown front app counts as the target's, as for `select`.
+		assert!(!EntryFront(None).known_behind(7));
 	}
 
 	#[test]
