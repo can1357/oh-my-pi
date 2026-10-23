@@ -11,7 +11,7 @@
 - llama.cpp login instructions now list both default local base URLs (`http://127.0.0.1:8080`, then `http://127.0.0.1:9931`) ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 
 ### Fixed
-
+- Fixed DeepSeek V4 Pro cost estimates using Flash rates after September 14 despite Pro billing remaining unchanged ([#16875](https://github.com/can1357/oh-my-pi/issues/16875)).
 - Fixed Step 5 Preview reasoning choices on OpenCode Go and Zen to offer only low, medium, and high ([#14987](https://github.com/can1357/oh-my-pi/issues/14987), [#16669](https://github.com/can1357/oh-my-pi/pull/16669) by [@SheetHappiness](https://github.com/SheetHappiness))
 - Fixed GPT-6 Sol/Luna API and MiniMax-M3 long-context usage estimates above their published input thresholds ([#16711](https://github.com/can1357/oh-my-pi/issues/16711))
 - Fixed Xiaomi Token Plan login and default model selection after the V2.5 retirement by using MiMo V2.6 Flash ([#16727](https://github.com/can1357/oh-my-pi/pull/16727) by [@LiPu-jpg](https://github.com/LiPu-jpg))
