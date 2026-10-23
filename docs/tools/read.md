@@ -223,8 +223,9 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 - `CONVERTIBLE_EXTENSIONS` in `packages/coding-agent/src/utils/markit.ts` covers `.pdf`, `.doc`, `.docx`, `.ppt`, `.pptx`, `.xls`, `.xlsx`, `.rtf`, `.epub`.
 - `convertFileWithMarkit()` converts the file to text/markdown; line-range and `:raw` selectors then apply to the converted output (`file.pdf:50-100`, `:5-16,40-80`).
-- PDF member-looking paths now request Chromium page screenshots, not embedded-image extraction. `doc.pdf:p11-img0.png` or `doc.pdf:page11.png` selects page 11; an empty or unrecognized member defaults to page 1. There is no member listing or extracted-image cache. Numeric line selectors still page converted document text.
-- Page screenshots use the shared headless browser, a temporary tab closed after capture, and a 30-second render deadline. They support `?q=` image questions and otherwise follow normal image presentation.
+- PDF member-looking paths now request Chromium page screenshots, not embedded-image extraction. `doc.pdf:p11-img0.png` or `doc.pdf:page11.png` selects page 11; an empty or unrecognized member defaults to page 1. Only a PDF's filesystem path takes the member: a URL read or `local://` path does not. There is no member listing or extracted-image cache. Numeric line selectors still page converted document text.
+- Page screenshots use the shared headless browser, a temporary 874x874 tab closed after capture, and a 30-second render deadline. The capture is the viewport, which the viewer fits the page into (`view=Fit`); a full-page capture often came back without the PDF plugin's frame. The square tab gives portrait and landscape pages the same long side. They support `?q=` image questions and otherwise follow normal image presentation.
+- PDF pages without extractable text (scans) get a note after the converted text naming the page numbers and the `:page<N>.png` member.
 - Conversion failures return a text block like `[Cannot read .pdf file: ...]`.
 
 ### Jupyter notebooks

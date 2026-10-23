@@ -9,10 +9,17 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 const PDF_IMAGE_MEMBER_RE = /^(.*\.pdf):(.*)$/i;
 const PDF_PAGE_MEMBER_RE = /^(?:p|page[-_]?)(\d+)(?:[-_].*)?\.png$/i;
 const PDF_RENDER_TIMEOUT_MS = 30_000;
+// The viewer fits the page into the tab (`view=Fit`). A square viewport gives
+// portrait and landscape pages the same long side; in the default landscape
+// tab (returned at 1024x576) a letter page came back 441x568, too small to
+// read 8 pt print.
+const PDF_VIEWPORT = { width: 874, height: 874, deviceScaleFactor: 1 };
 
 // Chromium's PDF plugin paints in an out-of-process frame after navigation has
 // completed. Wait for document dimensions, then cross compositor boundaries
 // before capturing; otherwise the screenshot can contain only the viewer shell.
+// Capture the viewport: the viewer fits the page into it, and a full-page
+// capture (beyond the viewport) often comes back without the plugin's frame.
 const PDF_SCREENSHOT_CODE = `
 let viewerFrame;
 await wait(async () => {
@@ -49,7 +56,7 @@ await viewerFrame.evaluate(() => {
 	);
 	return promise;
 });
-return await tab.screenshot({ fullPage: true, silent: true });
+return await tab.screenshot({ silent: true });
 `;
 
 /** A legacy PDF image-member path interpreted as a page screenshot request. */
@@ -107,6 +114,7 @@ export async function renderPdfPageScreenshot(
 		await untilAborted(renderSignal, () =>
 			acquireTab(tabName, acquiredBrowser, {
 				url: url.href,
+				viewport: PDF_VIEWPORT,
 				waitUntil: "load",
 				timeoutMs: PDF_RENDER_TIMEOUT_MS,
 				deadlineStartMs: deadlineStart,
