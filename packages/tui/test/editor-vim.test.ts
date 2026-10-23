@@ -5,6 +5,8 @@ import { defaultEditorTheme } from "./test-themes";
 const ESC = "\x1b";
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
+const LEFT = "\x1b[D";
+const BACKSPACE = "\x7f";
 
 function vimEditor(text = "", options: { cursorToStart?: boolean } = {}): Editor {
 	const editor = new Editor(defaultEditorTheme);
@@ -1134,6 +1136,228 @@ describe("Editor vim mode", () => {
 			mode.handleInput(ESC);
 			mode.handleInput("j");
 			expect(cursor(mode)).toEqual({ line: 2, col: 1 });
+		});
+	});
+
+	describe("dot repeat", () => {
+		const press = (editor: Editor, ...keys: string[]) => {
+			for (const key of keys) editor.handleInput(key);
+		};
+
+		it("repeats an operator change and undoes it in one step", () => {
+			const editor = vimEditor("alfa beta gamma");
+			press(editor, "d", "w", ".");
+			expect(editor.getText()).toBe("gamma");
+			press(editor, "u");
+			expect(editor.getText()).toBe("beta gamma");
+		});
+
+		it("replaces the original count with the count on `.`, which later `.` keeps", () => {
+			const editor = vimEditor("a b c d e f g h i");
+			press(editor, "2", "d", "w");
+			expect(editor.getText()).toBe("c d e f g h i");
+			press(editor, "3", ".");
+			expect(editor.getText()).toBe("f g h i");
+			press(editor, ".");
+			expect(editor.getText()).toBe("i");
+		});
+
+		it("replays a change's typed text, with the live session and the repeat each one undo step", () => {
+			const editor = vimEditor("alfa beta gamma");
+			press(editor, "c", "w", "new", ESC, "w", ".");
+			expect(editor.getText()).toBe("new new gamma");
+			press(editor, "u");
+			expect(editor.getText()).toBe("new beta gamma");
+			press(editor, "u");
+			expect(editor.getText()).toBe("alfa beta gamma");
+		});
+
+		it("multiplies an insert's text by the count on `.`", () => {
+			const editor = vimEditor("x");
+			press(editor, "A", "!", ESC);
+			expect(editor.getText()).toBe("x!");
+			press(editor, "3", ".");
+			expect(editor.getText()).toBe("x!!!!");
+			press(editor, ".");
+			expect(editor.getText()).toBe("x!!!!!!!");
+		});
+
+		it("opens one line per copy when `.` repeats `o` with a count", () => {
+			const editor = vimEditor("a");
+			press(editor, "o", "b", ESC, "2", ".");
+			expect(editor.getText()).toBe("a\nb\nb\nb");
+			expect(cursor(editor)).toEqual({ line: 3, col: 0 });
+		});
+
+		it("replays Backspace past the insert point", () => {
+			const editor = vimEditor("abcd\nefgh");
+			press(editor, "A", BACKSPACE, BACKSPACE, "X", ESC);
+			expect(editor.getText()).toBe("abX\nefgh");
+			press(editor, "j", ".");
+			expect(editor.getText()).toBe("abX\nefX");
+		});
+
+		it("splits redo and undo at an arrow key inside Insert mode", () => {
+			const editor = vimEditor("one\ntwo");
+			press(editor, "I", "x", LEFT, "y", ESC);
+			expect(editor.getText()).toBe("yxone\ntwo");
+			press(editor, "j", ".");
+			expect(editor.getText()).toBe("yxone\nytwo");
+			press(editor, "u");
+			expect(editor.getText()).toBe("yxone\ntwo");
+			press(editor, "u");
+			expect(editor.getText()).toBe("xone\ntwo");
+			press(editor, "u");
+			expect(editor.getText()).toBe("one\ntwo");
+		});
+
+		it("overwrites rather than inserts when repeating Replace mode", () => {
+			const editor = vimEditor("abcd\nefgh");
+			press(editor, "R", "xy", ESC, "j", "0", ".");
+			expect(editor.getText()).toBe("xycd\nxygh");
+		});
+
+		it("repeats a Visual change over the same shape at the cursor", () => {
+			const lines = vimEditor("a\nb\nc\nd\ne");
+			press(lines, "V", "j", "d");
+			expect(lines.getText()).toBe("c\nd\ne");
+			press(lines, ".");
+			expect(lines.getText()).toBe("e");
+
+			const chars = vimEditor("abcdef");
+			press(chars, "v", "l", "d");
+			expect(chars.getText()).toBe("cdef");
+			press(chars, ".");
+			expect(chars.getText()).toBe("ef");
+		});
+
+		it("ignores yanks and undo when choosing what `.` repeats", () => {
+			const editor = vimEditor("abcdef");
+			press(editor, "x");
+			expect(editor.getText()).toBe("bcdef");
+			press(editor, "y", "w", "u");
+			expect(editor.getText()).toBe("abcdef");
+			press(editor, ".");
+			expect(editor.getText()).toBe("bcdef");
+		});
+
+		it("replays an insert that replaced one emoji with another without splitting a surrogate", () => {
+			const editor = vimEditor("😀 abc\n😇 def");
+			press(editor, "l", "i", BACKSPACE, "😇", ESC, "j", "l", ".");
+			expect(editor.getText()).toBe("😇 abc\n😇 def");
+		});
+
+		it("restores the pre-insert text in one undo after the session outgrows the undo stack", () => {
+			const editor = vimEditor("seed");
+			press(editor, "i", ..." ".repeat(130), ESC, "u");
+			expect(editor.getText()).toBe("seed");
+		});
+
+		it("splits redo and undo on native caret moves inside Insert mode", () => {
+			const editor = vimEditor("abcdef");
+			press(editor, "i", "X");
+			editor.applyHostEdit({ len: 7, from: 5, to: 5, cursor: 5, text: "" });
+			press(editor, "Y", ESC);
+			expect(editor.getText()).toBe("XabcdYef");
+			press(editor, "u");
+			expect(editor.getText()).toBe("Xabcdef");
+			press(editor, "u");
+			expect(editor.getText()).toBe("abcdef");
+			press(editor, ".");
+			expect(editor.getText()).toBe("Yabcdef");
+		});
+
+		it("treats the initial Insert session on a fresh editor as a whole-session change", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			press(editor, ..."hello world", ESC);
+			expect(editor.getText()).toBe("hello world");
+			press(editor, ".");
+			expect(editor.getText()).toBe("hello worlhello worldd");
+			press(editor, "u");
+			expect(editor.getText()).toBe("hello world");
+			press(editor, "u");
+			expect(editor.getText()).toBe("");
+		});
+
+		it("preserves newlines in Replace mode recordings", () => {
+			const editor = vimEditor("abcd\nefgh");
+			press(editor, "R", "X", "\n", "Y", ESC);
+			expect(editor.getText()).toBe("X\nYcd\nefgh");
+			press(editor, "j", "0", ".");
+			expect(editor.getText()).toBe("X\nYcd\nX\nYgh");
+			press(editor, "u");
+			expect(editor.getText()).toBe("X\nYcd\nefgh");
+		});
+
+		it("does not replace the last change when an edit command is a no-op", () => {
+			const editor = vimEditor("alfa\nbeta");
+			press(editor, "x");
+			expect(editor.getText()).toBe("lfa\nbeta");
+			press(editor, "G", "J");
+			expect(editor.getText()).toBe("lfa\nbeta");
+			press(editor, "g", "g", ".");
+			expect(editor.getText()).toBe("fa\nbeta");
+		});
+
+		it("starts a fresh tracked Insert session after a submitted draft", () => {
+			const editor = vimEditor("");
+			press(editor, "i", ..."one");
+			editor.submit();
+			press(editor, ..."two", ESC);
+			expect(editor.getText()).toBe("two");
+			press(editor, ".");
+			expect(editor.getText()).toBe("twtwoo");
+			press(editor, "u");
+			expect(editor.getText()).toBe("two");
+			press(editor, "u");
+			expect(editor.getText()).toBe("");
+		});
+
+		it("deletes whole graphemes at a multiline Visual repeat's end", () => {
+			const editor = vimEditor("a\nb\nc\n😀x");
+			press(editor, "v", "j", "d", "j", ".");
+			expect(editor.getText()).toBe("\nx");
+		});
+
+		it("repeats a find that ended on `.` as its target", () => {
+			const editor = vimEditor("a.b.c");
+			press(editor, "d", "f", ".");
+			expect(editor.getText()).toBe("b.c");
+			press(editor, ".");
+			expect(editor.getText()).toBe("c");
+		});
+
+		it("replays a backspace masked by retyping the same grapheme", () => {
+			const editor = vimEditor("abX\ncdY");
+			press(editor, "l", "l", "i", BACKSPACE, "b", "b", ESC);
+			expect(editor.getText()).toBe("abbX\ncdY");
+			press(editor, "j", ".");
+			expect(editor.getText()).toBe("abbX\ncbbY");
+		});
+
+		it("does not coalesce the first session keystroke with pre-Vim typing", () => {
+			const editor = new Editor(defaultEditorTheme);
+			press(editor, ..."abc");
+			editor.setVimMode(true);
+			press(editor, ..."def", ESC);
+			expect(editor.getText()).toBe("abcdef");
+			press(editor, "u");
+			expect(editor.getText()).toBe("abc");
+		});
+
+		it("starts a fresh tracked Replace session after a submitted draft", () => {
+			const editor = vimEditor("");
+			press(editor, "R", ..."one");
+			editor.submit();
+			press(editor, ..."two", ESC);
+			expect(editor.getText()).toBe("two");
+			press(editor, ".");
+			expect(editor.getText()).toBe("twtwo");
+			press(editor, "u");
+			expect(editor.getText()).toBe("two");
+			press(editor, "u");
+			expect(editor.getText()).toBe("");
 		});
 	});
 });

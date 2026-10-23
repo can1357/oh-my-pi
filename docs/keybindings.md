@@ -131,7 +131,8 @@ The status line also shows the mode, pending command, and multi-line Visual sele
 | `dd` `yy` `cc`                | Linewise delete / yank / change                                |
 | `d` `y` `c` + text object     | Operate over a text object, e.g. `diw`, `ca(`, `ci"`, `dap`    |
 | `p` `P`                       | Put the last yank or delete after / before the cursor          |
-| `u`                           | Undo                                                            |
+| `u`                           | Undo (a whole Insert session, or a whole `.`, undoes in one step) |
+| `.`                           | Repeat the last change, including text typed in the Insert session it opened; a count replaces the original one (`3.`) |
 
 ### Text objects
 
