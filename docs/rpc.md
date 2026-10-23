@@ -522,6 +522,31 @@ field is absent outside both stages. No event carries it, so re-read
 Fields whose values are `undefined` are omitted from JSON, including an unset
 model/thinking level, session name/file, or unavailable `contextUsage`.
 `dumpTools` may also include each tool's `examples` alongside its schema.
+It lists only the agent's **top-level tool definitions**, not the full mounted
+inventory. With the default `tools.xdev: true`, enabled discoverable tools,
+including MCP tools, can be mounted as `xd://` devices instead. An MCP tool's
+absence from `dumpTools` does **not** mean its server failed to connect. This
+applies to both `--mode rpc` and `--mode rpc-ui`.
+
+The agent discovers and invokes mounted tools through the ordinary `read` and
+`write` tools:
+
+- `read({"path":"xd://"})` lists mounted devices.
+- `read({"path":"xd://mcp__stub_announce"})` returns a device's documentation and input schema.
+- `write({"path":"xd://mcp__stub_announce","content":"{}"})` invokes that device with a JSON arguments object. Replace `{}` with the tool's required arguments.
+
+These are **agent tool calls**, not additional RPC command types. Use the actual
+device name from the listing; MCP runtime names are sanitized and may differ
+from the server's original tool name. For invocation verification, inspect the
+current turn's `tool_execution_start` / `tool_execution_end` events and result,
+not just assistant text or an earlier transcript entry.
+
+MCP configuration follows the normal [MCP configuration rules](./mcp-config.md):
+`disabledServers` and `enabledServers` are active-profile **user** lists, and the
+denylist wins over the allowlist. Project config can disable a server with its
+per-server `enabled: false`; a project `disabledServers` list is not a substitute
+for the user denylist. After editing MCP config files externally, restart the
+RPC process to apply and verify the new configuration.
 
 `queuedMessages` holds the same displayable queue-chip text as the `queue_update`
 event below. Use this text with `remove_queued_message`, subject to its pending-queue
