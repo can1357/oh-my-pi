@@ -23,7 +23,7 @@ export const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
 
 /**
  * Cancellation controls threaded from the eval tool through
- * `resolveBackend` → `ExecutorBackend.isAvailable` → `checkXKernelAvailability`
+ * `resolveBackend` → `ExecutorBackend.checkAvailability` → `checkXKernelAvailability`
  * so backend discovery is bounded by the same timeout and turn abort as the
  * eval cell that triggered it.
  */

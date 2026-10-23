@@ -106,7 +106,7 @@ interface PythonKernelExecuteOptions extends KernelExecuteOptions {
 }
 
 // Cache successful probes per resolved cwd + explicit interpreter: every cell
-// otherwise pays one (or two — backend.isAvailable + ensureKernelAvailable)
+// otherwise pays one (or two — backend.checkAvailability + ensureKernelAvailable)
 // interpreter spawns even when the kernel is already hot. Failures are not
 // cached so installing a Python mid-session is picked up on the next attempt.
 const availabilityCache = new Map<string, Promise<PythonKernelAvailability>>();

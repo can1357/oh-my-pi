@@ -57,14 +57,21 @@ export interface ExecutorBackendResult {
 	displayOutputs: EvalDisplayOutput[];
 }
 
+/** Outcome of {@link ExecutorBackend.checkAvailability}. */
+export interface BackendAvailability {
+	ok: boolean;
+	/** Why the backend cannot run (e.g. which interpreters failed to start); surfaced in the eval error. */
+	reason?: string;
+}
+
 /** Pluggable language backend for the eval tool. */
 export interface ExecutorBackend {
 	readonly id: EvalLanguage;
 	readonly label: string;
 	/** Source language identifier passed to the syntax highlighter (e.g. "python", "javascript"). */
 	readonly highlightLang: string;
-	/** Cheap availability check. Used by fallback resolution and bounded by the caller's probe options. */
-	isAvailable(session: ToolSession, opts?: BackendProbeOptions): Promise<boolean>;
+	/** Cheap availability check. Used by backend resolution and bounded by the caller's probe options. */
+	checkAvailability(session: ToolSession, opts?: BackendProbeOptions): Promise<BackendAvailability>;
 	/** Execute one cell. Caller invokes once per cell and aggregates results. */
 	execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult>;
 }

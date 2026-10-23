@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `$whichAll()`, which returns every PATH match for a command in PATH order ([#16824](https://github.com/can1357/oh-my-pi/issues/16824))
+
 ## [18.12.6] - 2026-10-21
 
 ### Added
