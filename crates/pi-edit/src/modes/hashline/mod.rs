@@ -13,7 +13,6 @@ pub mod parser;
 pub mod patcher;
 pub mod prefixes;
 pub mod preview;
-pub mod recovery;
 pub mod syntax;
 pub mod tokenizer;
 pub mod types;

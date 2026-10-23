@@ -309,11 +309,12 @@ async fn update_after_delete_rejects_missing_file_without_writing() {
 }
 
 #[tokio::test]
-async fn hashline_streaming_rem_previews_invalid_utf8_deletion_before_later_sections() {
+async fn hashline_streaming_rem_preview_rejects_invalid_utf8_before_later_sections() {
 	let mut ws = Workspace::new(EditMode::Hashline);
 	ws.config.raw_input = true;
 	let path = ws.cwd().join("legacy.txt");
-	std::fs::write(&path, b"name=caf\xe9\n").unwrap();
+	let original = b"name=caf\xe9\n";
+	std::fs::write(&path, original).unwrap();
 	ws.write("next.txt", "next\n");
 	let tag = ws.snapshot("next.txt", "next\n", None);
 	let mut session = ws.session();
@@ -324,9 +325,15 @@ async fn hashline_streaming_rem_previews_invalid_utf8_deletion_before_later_sect
 		.files
 		.iter()
 		.find(|file| file.display == "legacy.txt")
-		.expect("completed deletion section must remain visible while streaming");
-	assert!(deletion.error.is_none(), "{streaming:?}");
-	assert_eq!(deletion.op, Some(FileOp::Delete));
+		.expect("completed section must report its rejection while streaming");
+	assert!(
+		deletion
+			.error
+			.as_deref()
+			.is_some_and(|error| error.contains("UTF-8")),
+		"{streaming:?}"
+	);
+	assert_ne!(deletion.op, Some(FileOp::Delete), "{streaming:?}");
 	assert!(path.exists(), "preview must not delete the file");
 
 	session.finish();
@@ -335,24 +342,31 @@ async fn hashline_streaming_rem_previews_invalid_utf8_deletion_before_later_sect
 		.files
 		.iter()
 		.find(|file| file.display == "legacy.txt")
-		.expect("final preview must retain the deletion");
-	assert!(deletion.error.is_none(), "{final_preview:?}");
-	assert_eq!(deletion.op, Some(FileOp::Delete));
+		.expect("final preview must retain the rejection");
+	assert!(
+		deletion
+			.error
+			.as_deref()
+			.is_some_and(|error| error.contains("UTF-8")),
+		"{final_preview:?}"
+	);
+	assert_ne!(deletion.op, Some(FileOp::Delete), "{final_preview:?}");
 	let writer = DiskWriter::default();
 	session
 		.apply(ApplyRequest::default(), &writer)
 		.await
-		.expect("apply deletions");
-	assert!(!path.exists());
-	assert!(!ws.cwd().join("next.txt").exists());
-	assert_eq!(writer.requests.lock().len(), 2);
+		.expect_err("REM on undecodable bytes must not apply");
+	assert_eq!(std::fs::read(&path).unwrap(), original);
+	assert_eq!(ws.read("next.txt").as_deref(), Some("next\n"));
+	assert!(writer.requests.lock().is_empty());
 }
 
 #[tokio::test]
-async fn hashline_streaming_utf8_bypass_requires_an_allowed_tagged_rem() {
+async fn hashline_invalid_utf8_target_rejects_every_operation_and_stages_nothing() {
 	for (header, diff, original, expected_error) in [
 		("[legacy.ts#FFFF]", "PUT EOF:\n|new", b"name=caf\xe9\n".as_slice(), "UTF-8"),
 		("[legacy.ts]", "REM", b"name=caf\xe9\n".as_slice(), "UTF-8"),
+		("[legacy.ts#FFFF]", "REM", b"name=caf\xe9\n".as_slice(), "UTF-8"),
 		("[legacy.ts#FFFF]", "REM\n|body", b"name=caf\xe9\n".as_slice(), "UTF-8"),
 		("[legacy.ts#FFFF]", "REM", b"// @generated\nname=caf\xe9\n".as_slice(), "auto-generated"),
 	] {
@@ -391,21 +405,45 @@ async fn hashline_streaming_utf8_bypass_requires_an_allowed_tagged_rem() {
 }
 
 #[tokio::test]
-async fn hashline_rem_removes_invalid_utf8_file() {
+async fn hashline_rem_rejects_valid_read_replaced_by_invalid_utf8() {
 	let ws = Workspace::new(EditMode::Hashline);
 	let path = ws.cwd().join("legacy.txt");
-	std::fs::write(&path, b"name=caf\xe9\n").unwrap();
+	ws.write("legacy.txt", "name=café\n");
+	let tag = ws.snapshot("legacy.txt", "name=café\n", None);
+	// An external process swaps in undecodable bytes after the valid read:
+	// the once-current tag can no longer be verified against them.
+	let replacement = b"name=caf\xe9\n";
+	std::fs::write(&path, replacement).unwrap();
+	let input = format!("[legacy.txt#{tag}]\nREM");
+	let mut session = ws.session();
+	session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+	session.finish();
+	let preview = session.preview();
+	let deletion = preview
+		.files
+		.iter()
+		.find(|file| file.display == "legacy.txt")
+		.expect("final preview keeps the rejected section");
+	assert!(
+		deletion
+			.error
+			.as_deref()
+			.is_some_and(|error| error.contains("UTF-8")),
+		"{preview:?}"
+	);
+	assert_ne!(deletion.op, Some(FileOp::Delete), "{preview:?}");
 	let writer = DiskWriter::default();
-	let outcome = ws
-		.apply_json(&serde_json::json!({ "input": "[legacy.txt#FFFF]\nREM" }), &writer)
+	let err = session
+		.apply(ApplyRequest::default(), &writer)
 		.await
-		.expect("REM needs existence, not text");
-	assert!(!path.exists(), "invalid UTF-8 file must be deletable");
-	assert!(outcome.text.contains("Deleted legacy.txt"), "{}", outcome.text);
+		.expect_err("a stale tag must not authorize deleting undecodable bytes");
+	assert!(err.is_invalid_utf8(), "{err}");
+	assert_eq!(std::fs::read(&path).unwrap(), replacement);
+	assert!(writer.requests.lock().is_empty());
 }
 
 #[tokio::test]
-async fn hashline_rem_streaming_preview_does_not_error_on_invalid_utf8() {
+async fn hashline_rem_streaming_preview_never_claims_invalid_utf8_delete() {
 	use pi_edit::{
 		EditStore, PathPolicy,
 		session::{Session, SessionConfig},
@@ -432,18 +470,32 @@ async fn hashline_rem_streaming_preview_does_not_error_on_invalid_utf8() {
 		raw_input:          false,
 	};
 	let mut session = Session::new(config, EditStore::new());
-	// Completed REM section followed by an incomplete trailing section.
+	// Completed REM section followed by an incomplete trailing section: the
+	// rejection is dropped while streaming rather than shown as a delete.
 	session.set_args_json(
 		&serde_json::json!({ "input": "[legacy.txt#FFFF]\nREM\n[other.txt#FFFF]\nPUT " }).to_string(),
 	);
 	let batch = session.preview();
 	assert!(batch.streaming);
-	let completed = batch
+	assert!(
+		batch.files.iter().all(|file| file.display != "legacy.txt"),
+		"rejected REM must not preview as a delete: {batch:?}"
+	);
+	session.finish();
+	let final_batch = session.preview();
+	let completed = final_batch
 		.files
 		.iter()
 		.find(|file| file.display == "legacy.txt")
-		.expect("completed REM section previews");
-	assert_eq!(completed.error, None, "{completed:?}");
+		.expect("final preview retains the rejected REM");
+	assert!(
+		completed
+			.error
+			.as_deref()
+			.is_some_and(|error| error.contains("UTF-8")),
+		"{final_batch:?}"
+	);
+	assert_ne!(completed.op, Some(FileOp::Delete), "{final_batch:?}");
 }
 
 #[tokio::test]

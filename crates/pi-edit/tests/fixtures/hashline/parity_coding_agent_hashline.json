@@ -26,13 +26,13 @@
 			"name": "applies multiple sections targeting the same file against the original snapshot"
 		},
 		{
-			"name": "recovers when the file was modified out-of-band after a read"
+			"name": "rejects a stale tag when the file was modified out-of-band after a read"
 		},
 		{
-			"name": "falls back to mismatch error when the cache does not cover the failing anchor"
+			"name": "returns a mismatch regardless of cached anchor coverage"
 		},
 		{
-			"name": "captures the post-edit result so the next edit can recover from anchors against it"
+			"name": "captures the post-edit result for the next edit using its current tag"
 		},
 		{
 			"name": "rejects replay when a prior in-session edit rewrote the line the model re-targets"

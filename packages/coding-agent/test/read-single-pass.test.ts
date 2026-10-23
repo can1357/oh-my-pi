@@ -55,11 +55,9 @@ describe("read tool single-pass file access", () => {
 		await removeWithRetries(tmpDir);
 	});
 
-	it("hashes the snapshot from BOM-stripped text so a whole-file tag validates without recovery", async () => {
-		// `Bun.file().text()` strips a leading BOM and the patcher's live read goes
-		// through it, so a tag hashed from BOM-bearing text only ever applies via
-		// stale-hash recovery — which tells the model the file changed externally
-		// when nothing changed.
+	it("hashes BOM-stripped text so a whole-file tag validates while preserving the BOM", async () => {
+		// Hash the same BOM-stripped text the editor validates; including the BOM
+		// would reject an unchanged file as a stale snapshot.
 		const filePath = path.join(tmpDir, "bom.ts");
 		await fs.writeFile(filePath, Buffer.from("\uFEFFexport const a = 1;\nexport const b = 2;\n", "utf-8"));
 

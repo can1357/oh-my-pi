@@ -34,11 +34,32 @@
    "expect": {"files": {"bom.txt": "﻿after\n"}, "writes": 1}
   },
   {
-   "name": "applies a head/tail insert with a stale tag and warns instead of hard-failing",
+   "name": "rejects a head insert with a stale tag without writing",
    "files": {"drift.txt": "external\na\nb\n"},
    "snapshots": [{"path": "drift.txt", "text": "a\nb\n"}],
    "args": {"input": "[drift.txt#{{tag:drift.txt}}]\nPUT <1:\n+head"},
-   "expect": {"files": {"drift.txt": "head\nexternal\na\nb\n"}, "writes": 1, "textContains": ["Applied the `PUT <1:`/`PUT >$:` edit despite a stale snapshot tag"]}
+   "expect": {"error": "current file hashes to #", "files": {"drift.txt": "external\na\nb\n"}, "writes": 0}
+  },
+  {
+   "name": "rejects a stale tag before resolving an unsupported block",
+   "files": {"drift.txt": "external\na\nb\n"},
+   "snapshots": [{"path": "drift.txt", "text": "a\nb\n"}],
+   "args": {"input": "[drift.txt#{{tag:drift.txt}}]\nPUT 1*:\n+A"},
+   "expect": {"error": "current file hashes to #", "files": {"drift.txt": "external\na\nb\n"}, "writes": 0}
+  },
+  {
+   "name": "rejects a stale tag before an empty clipboard paste",
+   "files": {"drift.txt": "external\na\nb\n"},
+   "snapshots": [{"path": "drift.txt", "text": "a\nb\n"}],
+   "args": {"input": "[drift.txt#{{tag:drift.txt}}]\nPUT <1"},
+   "expect": {"error": "current file hashes to #", "files": {"drift.txt": "external\na\nb\n"}, "writes": 0}
+  },
+  {
+   "name": "rejects REM with a stale tag without deleting the file",
+   "files": {"drift.txt": "external\na\nb\n"},
+   "snapshots": [{"path": "drift.txt", "text": "a\nb\n"}],
+   "args": {"input": "[drift.txt#{{tag:drift.txt}}]\nREM"},
+   "expect": {"error": "current file hashes to #", "files": {"drift.txt": "external\na\nb\n"}, "writes": 0}
   },
   {
    "name": "rejects a hashless head/tail insert — the tag is required on every section",

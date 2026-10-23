@@ -505,18 +505,101 @@ async fn file_ops_reject_a_tag_that_does_not_match_the_file() {
 }
 
 #[tokio::test]
-async fn head_insert_still_applies_across_a_stale_tag() {
+async fn head_and_tail_inserts_reject_stale_tags_before_a_move() {
+	for insert in ["PUT <1:\n+head", "PUT >$:\n+tail"] {
+		let workspace = common::Workspace::new(EditMode::Hashline);
+		workspace.write("a.txt", "current\n");
+		let tag = workspace.snapshot("a.txt", "old\n", None);
+		let writer = common::DiskWriter::default();
+		let error = workspace
+			.apply_json(&json!({ "input": format!("[a.txt#{tag}]\n{insert}\nMV b.txt\n") }), &writer)
+			.await
+			.expect_err("content-independent insert must not bypass tag validation")
+			.to_string();
+		assert!(error.contains("file changed between read and edit"), "{error}");
+		assert!(writer.requests.lock().is_empty());
+		assert_eq!(workspace.read("a.txt").as_deref(), Some("current\n"));
+		assert_eq!(workspace.read("b.txt"), None);
+	}
+}
+
+#[tokio::test]
+async fn old_tags_reject_unchanged_ranges_after_successive_edits() {
 	let workspace = common::Workspace::new(EditMode::Hashline);
-	workspace.write("a.txt", "current\n");
-	let tag = workspace.snapshot("a.txt", "old\n", None);
-	let outcome = workspace
+	let initial = "first\nuntouched\nthird\nfourth\nfifth\nsixth\n";
+	workspace.write("a.txt", initial);
+	let mut current_tag = workspace.snapshot("a.txt", initial, None);
+	let mut old_tags = Vec::new();
+	for (line, body) in [(4, "FOURTH"), (5, "FIFTH"), (6, "SIXTH")] {
+		old_tags.push(current_tag);
+		let outcome = workspace
+			.apply_json(
+				&json!({ "input": format!("[a.txt#{}]\nPUT {line}.={line}:\n+{body}\n", old_tags.last().unwrap()) }),
+				&common::DiskWriter::default(),
+			)
+			.await
+			.expect("the current tag authorizes each edit");
+		let header = outcome
+			.text
+			.lines()
+			.next()
+			.expect("edit returns a tagged header");
+		current_tag = header
+			.strip_prefix("[a.txt#")
+			.and_then(|value| value.strip_suffix(']'))
+			.expect("copy the returned tag, not an invented snapshot")
+			.to_owned();
+	}
+	let expected = "first\nuntouched\nthird\nFOURTH\nFIFTH\nSIXTH\n";
+	assert_eq!(workspace.read("a.txt").as_deref(), Some(expected));
+	for old_tag in old_tags {
+		let writer = common::DiskWriter::default();
+		let error = workspace
+			.apply_json(
+				&json!({ "input": format!("[a.txt#{old_tag}]\nPUT 2.=2:\n+changed\nPUT >$:\n+partial\n") }),
+				&writer,
+			)
+			.await
+			.expect_err("an unchanged target does not authorize an older snapshot")
+			.to_string();
+		assert!(error.contains("file changed between read and edit"), "{error}");
+		assert!(error.contains("re-read the file"), "{error}");
+		assert!(writer.requests.lock().is_empty());
+		assert_eq!(workspace.read("a.txt").as_deref(), Some(expected));
+	}
+	workspace
 		.apply_json(
-			&json!({ "input": format!("[a.txt#{tag}]\nPUT <1:\n+head\nMV b.txt\n") }),
+			&json!({ "input": format!("[a.txt#{current_tag}]\nPUT 2.=2:\n+changed\n") }),
 			&common::DiskWriter::default(),
 		)
 		.await
-		.expect("head insert is content-independent");
-	assert_eq!(workspace.read("a.txt"), None);
-	assert_eq!(workspace.read("b.txt").as_deref(), Some("head\ncurrent\n"));
-	assert!(outcome.text.contains("despite a stale snapshot tag"), "{}", outcome.text);
+		.expect("the latest successful edit's tag still authorizes the unchanged range");
+	assert_eq!(
+		workspace.read("a.txt").as_deref(),
+		Some("first\nchanged\nthird\nFOURTH\nFIFTH\nSIXTH\n")
+	);
+}
+
+#[tokio::test]
+async fn external_drift_rejects_the_batch_before_any_file_is_written() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	workspace.write("a.txt", "first\nuntouched\nlast\n");
+	workspace.write("b.txt", "before\n");
+	let a_tag = workspace.snapshot("a.txt", "first\nuntouched\nlast\n", None);
+	let b_tag = workspace.snapshot("b.txt", "before\n", None);
+	workspace.write("a.txt", "first\nuntouched\nexternal\n");
+	let writer = common::DiskWriter::default();
+	let error = workspace
+		.apply_json(
+			&json!({ "input": format!("[b.txt#{b_tag}]\nPUT 1.=1:\n+after\n[a.txt#{a_tag}]\nPUT 2.=2:\n+changed\n") }),
+			&writer,
+		)
+		.await
+		.expect_err("external changes invalidate even unchanged target lines")
+		.to_string();
+	assert!(error.contains("file changed between read and edit"), "{error}");
+	assert!(error.contains("re-read the file"), "{error}");
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(workspace.read("a.txt").as_deref(), Some("first\nuntouched\nexternal\n"));
+	assert_eq!(workspace.read("b.txt").as_deref(), Some("before\n"));
 }

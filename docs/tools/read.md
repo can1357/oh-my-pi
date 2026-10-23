@@ -18,7 +18,7 @@
    - `packages/coding-agent/src/utils/cpuprofile.ts` / `sample-profile.ts` — summarize recognized profiler reports.
    - `packages/coding-agent/src/utils/file-display-mode.ts` — decide hashline vs line-number vs raw display.
    - `packages/coding-agent/src/workspace-tree.ts` — render directory trees.
-   - `packages/coding-agent/src/edit/store.ts` — session-scoped native `EditStore` for snapshots and hashline verification/recovery.
+   - `packages/coding-agent/src/edit/store.ts` — session-scoped native `EditStore` for snapshots used by hashline snapshot validation and seen-line enforcement.
    - `packages/coding-agent/src/tools/index.ts` — registers `read: s => new ReadTool(s)`.
 
 ## Registration / Visibility
@@ -113,7 +113,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    - structural summary for parseable code/prose
    - streamed text/line-range read
 10.   Local files up to `SNAPSHOT_MAX_BYTES` (4 MiB) are buffered once for detection, summaries, ranges, and snapshots; larger text files use `streamLinesFromFile()`. A single bounded non-raw text range adds `1` leading and `3` trailing context lines on constrained sides; raw and multi-range reads remain exact.
-11.   Hashline-eligible local reads record snapshots and seen lines in the session's native `EditStore` for later hashline verification/recovery.
+11.   Hashline-eligible local reads record snapshots and seen lines in the session's native `EditStore` for later hashline snapshot validation and seen-line enforcement.
 12.   If suffix resolution happened, the first text block is prefixed with `[Path '...' not found; resolved to '...' via suffix match]`.
 
 ## Modes / Variants
@@ -319,7 +319,7 @@ Notes: ...
    - URL HTML rendering can delegate into site handlers and HTML-to-text backends from `packages/coding-agent/src/tools/fetch.ts`.
    - Video invokes `ffmpeg`/`ffprobe`; PDF page screenshots use headless Chromium; executable views may create/open an IDA database and request rendered views.
 - Session state
-   - Records local text snapshots and seen lines in the session's native `EditStore` for later stale-anchor recovery.
+   - Records local text snapshots and seen lines in the session's native `EditStore` for later hashline snapshot validation and seen-line enforcement.
    - Passes session `cwd`, `settings`, and `localProtocolOptions` into the process-global `InternalUrlRouter.instance().resolve()` for internal URLs.
    - Uses `session.allocateOutputArtifact()` for cached/truncated URL output.
 - Background work / cancellation

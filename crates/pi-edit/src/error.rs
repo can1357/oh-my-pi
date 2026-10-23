@@ -18,8 +18,10 @@ pub enum EditError {
 	#[error("{0}")]
 	Apply(String),
 	/// The target is not valid UTF-8 and the operation needs its text.
-	/// Existence-only operations (delete, create-existence checks) bypass
-	/// decoding and never produce this.
+	/// Untagged existence-only operations (patch-mode delete, create-
+	/// existence checks) bypass decoding and never produce this; a hashline
+	/// `REM` cannot verify a whole-file tag against undecodable bytes and
+	/// rejects with this instead of staging an unverifiable delete.
 	#[error("{display} is not valid UTF-8 at byte {valid_up_to}; refusing to edit")]
 	InvalidUtf8 { display: String, valid_up_to: usize },
 	/// A search anchor could not be located in the target text.

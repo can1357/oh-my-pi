@@ -1249,12 +1249,12 @@ fn hashline_streaming_preview_cases_preserve_partial_and_final_contracts() {
 	workspace.write("a.ts", &format!("// external\n{text_a}"));
 	let batch = preview_for(&workspace, format!("{header_a}\nPUT 2-2:\n+const b = 22\n"), true);
 	assert_eq!(batch.files.len(), 1, "{}", scenarios["recover-stale"]);
-	assert!(batch.files[0].error.is_none());
+	assert!(batch.files[0].diff.is_none());
 	assert!(
 		batch.files[0]
-			.diff
+			.error
 			.as_deref()
-			.is_some_and(|diff| diff.contains("const b = 22"))
+			.is_some_and(|error| error.contains("file changed between read and edit"))
 	);
 
 	let stale = Workspace::new(EditMode::Hashline);

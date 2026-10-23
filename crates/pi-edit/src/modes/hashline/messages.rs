@@ -694,29 +694,6 @@ pub fn after_insert_opener_escape_warning(anchor_line: u32, landing_line: u32) -
 	)
 }
 
-/// `Recovery`: an external write matched a cached snapshot.
-pub const RECOVERY_EXTERNAL_WARNING: &str = "Recovered from a stale file hash using a previous \
-                                             read snapshot (file changed externally between read \
-                                             and edit).";
-
-/// `Recovery`: a prior in-session edit advanced the hash.
-pub const RECOVERY_SESSION_CHAIN_WARNING: &str = "Recovered from a stale file hash using an \
-                                                  earlier in-session snapshot (a prior edit in \
-                                                  this session advanced the hash).";
-
-/// `Recovery`: stale anchors were relocated to unchanged live lines after
-/// drift.
-pub const RECOVERY_LINE_REMAP_WARNING: &str = "Recovered by remapping stale line anchors to \
-                                               unchanged current lines (file changed since the \
-                                               tagged read). Verify the diff matches your intent.";
-
-/// `insert head:`/`insert tail:` applied despite a stale snapshot tag.
-/// Head/tail position is content-independent, so drift is non-fatal: apply
-/// onto live content and warn instead of hard-failing.
-pub const HEADTAIL_DRIFT_WARNING: &str =
-	"Applied the `PUT <1:`/`PUT >$:` edit despite a stale snapshot tag (file changed since your \
-	 read) — head/tail position is content-independent. Re-read if the drift was unexpected.";
-
 /// Disk content after write differs from what was sent (e.g. IDE format on
 /// save).
 ///

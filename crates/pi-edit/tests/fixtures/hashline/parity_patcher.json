@@ -193,7 +193,7 @@
 			]
 		},
 		{
-			"name": "applies a head/tail insert with a stale tag and warns instead of hard-failing",
+			"name": "parses and applies a tail insert without session tag validation",
 			"parse": [
 				{
 					"input": "PUT >$:\n+c",

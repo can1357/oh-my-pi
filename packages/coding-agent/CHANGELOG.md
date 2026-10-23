@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Rejected stale edit snapshot tags even when the targeted lines have not changed, requiring a fresh read before editing; hashline `REM` deletion of a file whose current bytes no longer decode as UTF-8 is rejected too, since no whole-file tag can be verified against them ([#16862](https://github.com/can1357/oh-my-pi/pull/16862) by [@michaeltrefry](https://github.com/michaeltrefry)).
 - Fixed `omp gc --compress` exiting with "the event loop drained while it was still pending" on Bun 1.3.14 when a session artifact is pretty-printed JSON larger than 1 MiB, and session header probes (gc, session move and transfer) reading whole artifacts on Windows ([#15745](https://github.com/can1357/oh-my-pi/issues/15745), [#16754](https://github.com/can1357/oh-my-pi/pull/16754) by [@wolfiesch](https://github.com/wolfiesch))
 - `/resume` into another session now cancels the previous session's background jobs, as `/new` does, instead of delivering their results into the resumed session and starting a turn there ([#16760](https://github.com/can1357/oh-my-pi/pull/16760) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the models config migration writing `models.yml` readable by other users on the machine, and dropping every custom provider when the write was interrupted; the migrated file is now published atomically with owner-only permissions ([#16654](https://github.com/can1357/oh-my-pi/pull/16654) by [@adi-IL](https://github.com/adi-IL))

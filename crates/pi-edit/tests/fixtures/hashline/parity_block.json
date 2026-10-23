@@ -300,7 +300,7 @@
 			]
 		},
 		{
-			"name": "resolves against the tagged snapshot and recovers onto drifted content",
+			"name": "parses a block replacement without resolving a snapshot",
 			"parse": [
 				{
 					"input": "PUT 2*:\n+NEW",

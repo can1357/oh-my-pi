@@ -249,7 +249,7 @@
 			]
 		},
 		{
-			"name": "returns null when neither patch recovery nor replay can land",
+			"name": "parses a single-line replacement without session tag validation",
 			"parse": [
 				{
 					"input": "PUT 2:\n+BETA-MODEL",
@@ -261,7 +261,7 @@
 			]
 		},
 		{
-			"name": "recovers from an older in-session snapshot after the current file advanced",
+			"name": "parses a line-ten replacement without snapshot replay",
 			"parse": [
 				{
 					"input": "PUT 10-10:\n+L10-EDITED",

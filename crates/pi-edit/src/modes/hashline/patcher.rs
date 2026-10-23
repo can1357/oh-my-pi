@@ -14,12 +14,11 @@ use super::{
 	clipboard::validate_clipboard_sequence,
 	input::{Parsed, Patch, PatchSection},
 	messages::{
-		HEADTAIL_DRIFT_WARNING, RevealedLine, UnseenLinesReveal, path_recovered_from_tag_message,
-		unseen_lines_message, unverified_wide_lines_message, wide_unseen_lines_message,
+		RevealedLine, UnseenLinesReveal, path_recovered_from_tag_message, unseen_lines_message,
+		unverified_wide_lines_message, wide_unseen_lines_message,
 	},
 	mismatch::{MismatchDetails, format_header_only_message, mismatch_error},
 	parser::{ParseFailure, parse_patch},
-	recovery::{RecoveryArgs, try_recover},
 	types::{ApplyResult, BlockOpKind, BlockResolution, Edit, FileOp},
 };
 use crate::{
@@ -75,23 +74,6 @@ pub fn no_change_loop_diagnostic(path: &str, count: u32) -> String {
 		 tag, then author a different edit). This exact payload will keep being rejected until it \
 		 changes."
 	)
-}
-
-fn has_anchor_scoped_edit(edits: &[Edit]) -> bool {
-	edits.iter().any(|edit| match edit {
-		Edit::Delete { .. } | Edit::Block { .. } | Edit::Cut { .. } => true,
-		Edit::Paste { at, .. } => match at {
-			super::types::PasteTarget::Span { .. } => true,
-			super::types::PasteTarget::Gap { cursor } => matches!(
-				cursor,
-				super::types::Cursor::BeforeAnchor(_) | super::types::Cursor::AfterAnchor(_)
-			),
-		},
-		Edit::Insert { cursor, .. } => matches!(
-			cursor,
-			super::types::Cursor::BeforeAnchor(_) | super::types::Cursor::AfterAnchor(_)
-		),
-	})
 }
 
 pub(crate) fn mismatch(
@@ -512,7 +494,7 @@ fn assert_seen_lines(
 
 /// `seen_line_guard` enables the displayed-line guard with its column cap
 /// (see [`crate::session::SessionConfig::max_columns`]); `None` disables it.
-pub(crate) fn apply_with_recovery(
+pub(crate) fn apply_with_current_tag(
 	section: &PatchSection,
 	canonical: &Path,
 	normalized: &str,
@@ -522,21 +504,15 @@ pub(crate) fn apply_with_recovery(
 	seen_line_guard: Option<usize>,
 ) -> Result<ApplyResult, EditError> {
 	let expected = section.file_hash.as_deref().unwrap_or_default();
-	let live_matches = file_hash(normalized).eq_ignore_ascii_case(expected);
-	let stored = store.by_hash(canonical, expected);
+	if !file_hash(normalized).eq_ignore_ascii_case(expected) {
+		return Err(mismatch(section, canonical, normalized, expected, store));
+	}
 	let mut block_resolutions = Vec::new();
 	let mut resolve_warnings = Vec::new();
 	let resolved = if has_block_edit(edits) {
-		let base = if live_matches {
-			normalized
-		} else if let Some(snapshot) = &stored {
-			&snapshot.text
-		} else {
-			return Err(mismatch(section, canonical, normalized, expected, store));
-		};
 		resolve_block_edits(
 			edits,
-			base,
+			normalized,
 			&section.path,
 			Unresolved::Throw,
 			&mut |item| block_resolutions.push(item),
@@ -546,60 +522,26 @@ pub(crate) fn apply_with_recovery(
 		Cow::Borrowed(edits)
 	};
 	validate_clipboard_sequence(&resolved, clipboard)?;
-	if live_matches {
-		if let Some(max_columns) = seen_line_guard {
-			assert_seen_lines(
-				section,
-				&block_resolutions,
-				expected,
-				canonical,
-				store,
-				normalized,
-				max_columns,
-			)?;
-		}
-		let mut result = apply_edits(normalized, &resolved, ApplyOptions {
-			clipboard:      Some(clipboard),
-			path:           Some(canonical.to_string_lossy().as_ref()),
-			on_empty_paste: EmptyPaste::Throw,
-		})?;
-		result.block_resolutions = block_resolutions;
-		resolve_warnings.extend(result.warnings);
-		result.warnings = resolve_warnings;
-		return Ok(result);
+	if let Some(max_columns) = seen_line_guard {
+		assert_seen_lines(
+			section,
+			&block_resolutions,
+			expected,
+			canonical,
+			store,
+			normalized,
+			max_columns,
+		)?;
 	}
-	// A bare `MV`/`REM` has no content edit to stand on; the tag is its only
-	// evidence the caller saw this file.
-	if resolved.is_empty() {
-		return Err(mismatch(section, canonical, normalized, expected, store));
-	}
-	if !has_anchor_scoped_edit(&resolved) {
-		let mut result = apply_edits(normalized, &resolved, ApplyOptions {
-			clipboard:      Some(clipboard),
-			path:           Some(canonical.to_string_lossy().as_ref()),
-			on_empty_paste: EmptyPaste::Throw,
-		})?;
-		resolve_warnings.push(HEADTAIL_DRIFT_WARNING.to_owned());
-		resolve_warnings.extend(result.warnings);
-		result.warnings = resolve_warnings;
-		return Ok(result);
-	}
-	if let Some(recovered) = try_recover(store, RecoveryArgs {
-		path:         canonical,
-		current_text: normalized,
-		file_hash:    expected,
-		edits:        &resolved,
-		clipboard:    Some(clipboard),
-	})? {
-		resolve_warnings.extend(recovered.warnings);
-		return Ok(ApplyResult {
-			text:               recovered.text,
-			first_changed_line: recovered.first_changed_line,
-			warnings:           resolve_warnings,
-			block_resolutions:  Vec::new(),
-		});
-	}
-	Err(mismatch(section, canonical, normalized, expected, store))
+	let mut result = apply_edits(normalized, &resolved, ApplyOptions {
+		clipboard:      Some(clipboard),
+		path:           Some(canonical.to_string_lossy().as_ref()),
+		on_empty_paste: EmptyPaste::Throw,
+	})?;
+	result.block_resolutions = block_resolutions;
+	resolve_warnings.extend(result.warnings);
+	result.warnings = resolve_warnings;
+	Ok(result)
 }
 
 fn format_block_resolution(resolution: &BlockResolution) -> String {
@@ -656,41 +598,6 @@ pub(crate) fn recover_target(
 	let display = path.to_string_lossy().into_owned();
 	Some((section.with_path(&display), Resolved { absolute: path, display }))
 }
-/// Stage a whole-file delete for a target whose bytes cannot be decoded:
-/// existence is proven, but there is no content to diff or snapshot.
-#[allow(
-	clippy::too_many_arguments,
-	reason = "delete staging threads section, resolution, dedup, and clipboard state"
-)]
-fn undecodable_delete_staged(
-	section: &PatchSection,
-	resolved: &Resolved,
-	original_path: &str,
-	tag: &str,
-	mut warnings: Vec<String>,
-	canonical_paths: &mut HashMap<std::path::PathBuf, String>,
-	clipboard: &Clipboard,
-) -> Result<StagedFile, EditError> {
-	if section.path != original_path {
-		warnings.push(path_recovered_from_tag_message(original_path, &section.path, tag));
-	}
-	if let Some(previous) = canonical_paths
-		.insert(crate::path_policy::canonical_key(&resolved.absolute), original_path.to_owned())
-	{
-		return Err(EditError::apply(format!(
-			"Multiple hashline sections resolve to the same file ({previous} and {original_path}). \
-			 Merge their ops under one header before applying."
-		)));
-	}
-	let mut item =
-		StagedFile::new(section.path.clone(), resolved.absolute.clone(), EngineFileOp::Delete);
-	item.header = HeaderKind::HashlineTag;
-	item.warnings = warnings;
-	item.record_snapshot = true;
-	item.clipboard_after = Some(clipboard.fork());
-	Ok(item)
-}
-
 /// Stage every parsed hashline section atomically.
 pub fn stage_patch(
 	patch: &Patch,
@@ -711,29 +618,10 @@ pub fn stage_patch(
 		let (section, resolved) = recovered
 			.as_ref()
 			.map_or((original, &initial), |(section, resolved)| (section, resolved));
-		// Whole-file delete needs existence, not text, so an undecodable file
-		// stages without its content; anything else still rejects.
-		let undecodable_delete = tag.filter(|_| matches!(parsed.file_op, Some(FileOp::Rem)));
-		let read = match files.try_read(resolved) {
-			Ok(read) => read,
-			Err(err) if err.is_invalid_utf8() && undecodable_delete.is_some() => None,
-			Err(err) => return Err(err),
-		};
-		let Some(read) = read else {
-			if let Some(tag) = undecodable_delete
-				&& files.exists(&resolved.absolute)
-			{
-				staged.push(undecodable_delete_staged(
-					section,
-					resolved,
-					&original.path,
-					tag,
-					parsed.warnings.clone(),
-					&mut canonical_paths,
-					&clipboard.fork(),
-				)?);
-				continue;
-			}
+		// Whole-file delete (REM) needs existence plus a verifiable tag: an
+		// undecodable target has no whole-file text to hash, so no tag —
+		// current, stale, or arbitrary — can authorize deleting it.
+		let Some(read) = files.try_read(resolved)? else {
 			return Err(EditError::apply(format!(
 				"File not found: {}. Use the write tool to create new files.",
 				section.path
@@ -769,7 +657,7 @@ pub fn stage_patch(
 		} else {
 			parsed.edits.as_slice()
 		};
-		let apply = apply_with_recovery(
+		let apply = apply_with_current_tag(
 			section,
 			&read.canonical,
 			&read.text,

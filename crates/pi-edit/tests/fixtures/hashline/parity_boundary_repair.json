@@ -1410,7 +1410,7 @@
 			]
 		},
 		{
-			"name": "de-duplicates a closer while recovering from a drifted file",
+			"name": "parses a range replacement with a trailing closer",
 			"parse": [
 				{
 					"input": "PUT 4-5:\n+\tsetup2();\n+\trun2();\n+});",

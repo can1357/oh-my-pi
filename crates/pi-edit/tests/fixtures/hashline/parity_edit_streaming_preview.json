@@ -7,7 +7,7 @@
 		{ "name": "renders a live diff while the sole payload line is still being typed", "scenario": "live-line" },
 		{ "name": "does not surface stale hash errors while streaming", "scenario": "stream-stale" },
 		{ "name": "final preview accepts a live content hash even when the snapshot store has no history", "scenario": "live-tag" },
-		{ "name": "final preview recovers a stale tag from snapshot history", "scenario": "recover-stale" },
+		{ "name": "final preview rejects a stale tag even with snapshot history", "scenario": "recover-stale" },
 		{ "name": "surfaces stale hash errors once streaming is complete", "scenario": "final-stale" },
 		{ "name": "yields no preview (not an error) before the first payload byte arrives", "scenario": "empty-body" },
 		{ "name": "hashline: digests stripped `+` body rows only, never headers or op lines", "scenario": "digest" },
