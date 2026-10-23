@@ -44,11 +44,15 @@ provider "kimi-code" {
 	// Moonshot list price only when discovery reports $0, so a future priced
 	// envelope keeps its real rates. `kimi-for-coding` is K2.8 Preview — no
 	// public API SKU exists yet, so it uses the K2.7 Code line rate.
+	// K3 bills cache writes at the default 5m TTL rate (omp never requests
+	// 1h); K2.x SKUs have no cache-write charge.
+	// https://platform.kimi.ai/docs/guide/context-caching
 	models "k3" "k3-256k" {
 		cost-fallback {
 			input 3.0
 			output 15.0
 			cache-read 0.3
+			cache-write 3.0
 		}
 	}
 	models "kimi-for-coding" {

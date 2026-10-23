@@ -102,15 +102,16 @@ describe("Kimi Code provider catalog", () => {
 
 	it("prices $0-discovered rows instead of recording $0 in usage stats", async () => {
 		// /coding/v1/models carries no pricing: rows take their
-		// cost-fallback (k3 at the public K3 list; kimi-k2 at the K2 list;
-		// kimi-for-coding at the K2.7 Code line rate because K2.8 Preview
-		// has no public SKU).
+		// cost-fallback (k3 at the public K3 list, including its 5m cache
+		// write; kimi-k2 at the K2 list; kimi-for-coding at the K2.7 Code
+		// line rate because K2.8 Preview has no public SKU).
 		const models = await discover([LIVE_K3, { ...LIVE_K3, id: "kimi-for-coding" }, { ...LIVE_K3, id: "kimi-k2" }]);
 
 		expect(models.find(candidate => candidate.id === "k3")?.cost).toMatchObject({
 			input: 3,
 			output: 15,
 			cacheRead: 0.3,
+			cacheWrite: 3,
 		});
 		expect(models.find(candidate => candidate.id === "kimi-for-coding")?.cost).toMatchObject({
 			input: 0.95,
