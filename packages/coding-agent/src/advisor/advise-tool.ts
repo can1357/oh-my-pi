@@ -201,8 +201,8 @@ const ADVISOR_ACK_SENT = "Delivered.";
 const ADVISOR_ACK_DEFERRED = "Queued for the end of the turn. Do not re-raise.";
 /** The review was cancelled (superseded, reset, disposed); its turn is discarded. */
 const ADVISOR_ACK_CANCELLED = "Dropped: this review was cancelled.";
-/** Delivered live as a non-interrupting aside; the primary sees it at its next step. */
-const ADVISOR_ACK_ASIDE = "Sent as an aside; the agent sees it at its next step. Do not re-raise.";
+/** The session may route a WIP note as an aside or preserve it at a terminal boundary. */
+const ADVISOR_ACK_ASIDE = "Accepted for delivery. Do not re-raise.";
 /** A suppressed note is never described as recorded or queued. */
 const ADVISOR_ACK_SUPPRESSED: Record<AdvisorSuppressionReason, string> = {
 	empty: "Dropped: empty note.",

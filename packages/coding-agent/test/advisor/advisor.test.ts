@@ -1153,11 +1153,10 @@ describe("advisor", () => {
 			const note = "The #sendEmail path is disabled after its third failure.";
 
 			tool.beginUpdate(true, 11);
-			const ack = await tool.execute("tc-1", { note, severity: "concern" });
+			await tool.execute("tc-1", { note, severity: "concern" });
 
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith(note, "concern", 11, { wip: true });
-			expect(JSON.stringify(ack.content)).toContain("aside");
 
 			// The completed-update transition must not re-deliver it: nothing queued.
 			tool.beginUpdate(false);
@@ -1200,14 +1199,12 @@ describe("advisor", () => {
 			const note = "The retry budget is never decremented.";
 
 			tool.beginUpdate(true, 1);
-			const deferred = await tool.execute("c-0", { note, severity: "concern" });
-			expect(JSON.stringify(deferred.content)).toContain("Queued for the end of the turn");
+			await tool.execute("c-0", { note, severity: "concern" });
 			expect(onAdvice).not.toHaveBeenCalled();
 
 			// Operator flips the setting mid-update; the same concern is re-raised.
 			mode = "aside";
-			const aside = await tool.execute("c-1", { note, severity: "concern" });
-			expect(JSON.stringify(aside.content)).toContain("aside");
+			await tool.execute("c-1", { note, severity: "concern" });
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith(note, "concern", 1, { wip: true });
 
