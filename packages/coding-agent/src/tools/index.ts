@@ -74,6 +74,7 @@ import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
+import { createVibeTools } from "./vibe";
 import { WaitTool } from "./wait";
 import { isMountableUnderXdev, resolveXdevTool, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
@@ -217,6 +218,8 @@ export interface ToolSession {
 	canPromptUser?: boolean;
 	/** Keep `ask` in a headless fork's roster; execution still requires UI. */
 	advertiseHeadlessAsk?: boolean;
+	/** Register the `vibe_*` tools in a `/tan` clone of a vibe-mode parent; every call fails. */
+	advertiseVibeTools?: boolean;
 	/** The user approves `cfg://` writes for this session (top-level TUI session only). */
 	settingsApproval?: boolean;
 	/** Whether this session has begun disposal. */
@@ -863,6 +866,16 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	session.toolRegistry = toolRegistry;
 	const builtInNames = new Set(tools.map(tool => tool.name));
 	for (const tool of tools) toolRegistry.set(tool.name, tool);
+	// Same schemas as the parent's runtime-installed vibe tools, so the clone's
+	// request keeps the parent's cached tool prefix.
+	if (session.advertiseVibeTools) {
+		for (const tool of createVibeTools(session)) {
+			const wrapped = wrapToolWithMetaNotice(tool);
+			tools.push(wrapped);
+			toolRegistry.set(wrapped.name, wrapped);
+			builtInNames.add(wrapped.name);
+		}
+	}
 
 	const xdevRequested = !restrictToolNames && cfgToolsXdev.get(session.settings);
 	// xd:// mounting rides the write tool as its execution transport, so a

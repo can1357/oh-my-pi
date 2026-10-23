@@ -24,10 +24,23 @@ import vibeSpawnDescription from "../prompts/tools/vibe-spawn.md" with { type: "
 import vibeWaitDescription from "../prompts/tools/vibe-wait.md" with { type: "text" };
 
 import { type VibeScreenSnapshot, type VibeWaitOutcome } from "@oh-my-pi/pi-tui/tools/vibe";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { VibeSessionRegistry } from "../vibe/runtime";
 import type { Tool, ToolSession } from "./index";
 
 export const VIBE_TOOL_NAMES = ["vibe_spawn", "vibe_send", "vibe_wait", "vibe_kill", "vibe_list"] as const;
+
+/**
+ * The worker registry every vibe call goes through. Sessions that only advertise vibe tools
+ * (`ToolSession.advertiseVibeTools`, a `/tan` clone of a vibe-mode parent) fail here, so
+ * they keep the director's schemas without spawning or driving worker sessions.
+ */
+function vibeRegistry(session: ToolSession): VibeSessionRegistry {
+	if (session.advertiseVibeTools) {
+		throw new ToolError("Vibe tools are unavailable in a /tan clone; only the vibe-mode session can direct workers.");
+	}
+	return VibeSessionRegistry.global();
+}
 
 const vibeSpawnSchema = type({
 	cli: type("'fast' | 'good'").describe(
@@ -68,7 +81,7 @@ function wallOf(
 	ids?: string[],
 	keep?: ReadonlySet<string>,
 ): Pick<VibeToolDetails, "screens" | "hiddenKilled"> {
-	const all = VibeSessionRegistry.global().screens(session, ids);
+	const all = vibeRegistry(session).screens(session, ids);
 	if (ids?.length) return { screens: all };
 	const screens: VibeScreenSnapshot[] = [];
 	const hiddenKilled: string[] = [];
@@ -96,7 +109,7 @@ export class VibeSpawnTool implements AgentTool<typeof vibeSpawnSchema, VibeTool
 	}
 
 	async execute(_toolCallId: string, params: typeof vibeSpawnSchema.infer): Promise<AgentToolResult<VibeToolDetails>> {
-		const { id, jobId } = await VibeSessionRegistry.global().spawn(this.session, params);
+		const { id, jobId } = await vibeRegistry(this.session).spawn(this.session, params);
 		return textResult(
 			`Spawned ${params.cli} session \`${id}\` (turn job \`${jobId}\`). The turn result will be delivered when it finishes — keep directing other sessions meanwhile. Continue this one with vibe_send \`${id}\`.`,
 			{ op: "spawn", ...wallOf(this.session), spawned: { id, cli: params.cli, jobId } },
@@ -117,7 +130,7 @@ export class VibeSendTool implements AgentTool<typeof vibeSendSchema, VibeToolDe
 	}
 
 	async execute(_toolCallId: string, params: typeof vibeSendSchema.infer): Promise<AgentToolResult<VibeToolDetails>> {
-		const outcome = await VibeSessionRegistry.global().send(this.session, params);
+		const outcome = await vibeRegistry(this.session).send(this.session, params);
 		const ack =
 			outcome.mode === "turn"
 				? `Started a new turn on \`${outcome.id}\` (job \`${outcome.jobId}\`). Its result will be delivered when the turn finishes.`
@@ -149,7 +162,7 @@ export class VibeWaitTool implements AgentTool<typeof vibeWaitSchema, VibeToolDe
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<VibeToolDetails>,
 	): Promise<AgentToolResult<VibeToolDetails>> {
-		const registry = VibeSessionRegistry.global();
+		const registry = vibeRegistry(this.session);
 		// Live TV-wall frames while the wait blocks: each tick re-snapshots the
 		// watched workers so their tool calls and streamed text play in place.
 		// Cards on the wall when the wait starts stay for its duration, so a
@@ -220,7 +233,7 @@ export class VibeKillTool implements AgentTool<typeof vibeKillSchema, VibeToolDe
 	}
 
 	async execute(_toolCallId: string, params: typeof vibeKillSchema.infer): Promise<AgentToolResult<VibeToolDetails>> {
-		const outcome = await VibeSessionRegistry.global().kill(this.session, params.session);
+		const outcome = await vibeRegistry(this.session).kill(this.session, params.session);
 		const cancelNote = outcome.cancelledTurn ? " Its in-flight turn was cancelled." : "";
 		return textResult(
 			`Killed session \`${outcome.id}\`.${cancelNote} Transcript remains at history://${outcome.id}.`,

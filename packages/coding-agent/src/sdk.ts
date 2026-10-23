@@ -900,6 +900,19 @@ export interface CreateAgentSessionOptions {
 	/** Keep `ask` advertised in a headless fork sharing a parent's tool-schema prefix; calls still fail without UI. */
 	advertiseHeadlessAsk?: boolean;
 	/**
+	 * Register the `vibe_*` tools in a fork of a vibe-mode parent (a `/tan` clone) so it keeps the
+	 * parent's tool-schema prefix; every call fails. Ignored for top-level sessions, which own the real
+	 * vibe tools.
+	 */
+	advertiseVibeTools?: boolean;
+	/**
+	 * Whether `read` treats an edit tool as available (hashline output and description), overriding the
+	 * value derived from {@link toolNames}. A `/tan` clone passes its parent's value: a vibe-mode parent
+	 * keeps `edit` registered but inactive, and its `read` schema must match for the clone to share the
+	 * parent's prompt cache.
+	 */
+	hasEditTool?: boolean;
+	/**
 	 * The user approves agent `cfg://` settings writes through the process-global
 	 * host (`setCfgApprovalHost`). Only the top-level TUI session sets this; every
 	 * other session gets no `cfg://` in its prompt and has writes refused. Default: false.
@@ -2367,6 +2380,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			hasUI: options.hasUI ?? false,
 			canPromptUser: options.interactivePrompts ?? options.hasUI ?? false,
 			advertiseHeadlessAsk: options.advertiseHeadlessAsk,
+			advertiseVibeTools: options.advertiseVibeTools === true && isSubagentSession,
 			settingsApproval: options.settingsApproval === true && !isSubagentSession,
 			// Explicit resolvers retain their existing pass-through contract. Ordinary
 			// sessions inherit stored affinity into the child's own provider session.
@@ -2395,6 +2409,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return sessionManager.getSeanceSourceArtifactsDir() ?? undefined;
 			},
 			get hasEditTool() {
+				if (options.hasEditTool !== undefined) return options.hasEditTool;
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 				return restrictToolNames
 					? requestedToolNames?.includes("edit") === true

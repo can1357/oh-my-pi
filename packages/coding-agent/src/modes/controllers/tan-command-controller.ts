@@ -11,6 +11,7 @@ import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE } from "../../session/messages";
 import { SessionManager } from "../../session/session-manager";
 import { createMCPProxyTools, createSubagentSettings, followMCPTools } from "../../task/executor";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
+import { VIBE_TOOL_NAMES } from "../../tools/vibe";
 import type { InteractiveModeContext } from "../types";
 
 import { cfgTaskEnableLsp } from "../../task/settings";
@@ -82,6 +83,7 @@ export class TanCommandController {
 		const toolNames = session.getEnabledToolNames();
 		const activeToolNames = session.getActiveToolNames();
 		const mountedToolNames = session.getMountedXdevToolNames();
+		const hasEditTool = session.hasEditTool;
 		const modelRegistry = session.modelRegistry;
 		// Snapshot the parent's rebindable extensions and root policy at dispatch.
 		// The child rebinds these (skipping discovery) so it re-registers the
@@ -162,6 +164,8 @@ export class TanCommandController {
 								toolNames,
 								mountedToolNames,
 								advertiseHeadlessAsk: activeToolNames.includes("ask"),
+								advertiseVibeTools: VIBE_TOOL_NAMES.some(name => toolNames.includes(name)),
+								hasEditTool,
 								providerSessionId: `${parentSessionId}:tan:${Snowflake.next()}`,
 								providerPromptCacheKey: parentPromptCacheKey,
 								taskPromptCacheKey,
