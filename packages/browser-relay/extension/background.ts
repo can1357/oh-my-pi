@@ -16,6 +16,7 @@ import {
 	type TabSnapshot,
 } from "../../coding-agent/src/tools/browser/relay/protocol";
 import { ownedDebuggerTabs } from "./debugger-ownership";
+import { pastForeignFrames } from "./foreign-frames";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -229,9 +230,11 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 /** Run one relay RPC; `origin` is the socket it came in on, which alone can carry its answer. */
 async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: WebSocket): Promise<unknown> {
 	switch (msg.op) {
-		case "attach":
-			await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+		case "attach": {
+			const attach = () => chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+			await (msg.clearForeignFrames ? pastForeignFrames(msg.tabId, attach) : attach());
 			return {};
+		}
 		case "detach":
 			relayInitiatedDetachTabs.add(msg.tabId);
 			try {
@@ -241,12 +244,15 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: Web
 				relayInitiatedDetachTabs.delete(msg.tabId);
 				throw error;
 			}
-		case "send":
-			return await chrome.debugger.sendCommand(
-				msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
-				msg.method,
-				msg.params,
-			);
+		case "send": {
+			const send = () =>
+				chrome.debugger.sendCommand(
+					msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
+					msg.method,
+					msg.params,
+				);
+			return await (msg.clearForeignFrames ? pastForeignFrames(msg.tabId, send) : send());
+		}
 		case "createTab": {
 			const tab = await chrome.tabs.create({ url: msg.url, active: msg.active ?? true });
 			const snap = snapshot(tab);

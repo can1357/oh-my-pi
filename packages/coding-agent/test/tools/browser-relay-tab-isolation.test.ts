@@ -18,7 +18,7 @@ import { acquireTab, releaseTab, runInTab } from "@oh-my-pi/pi-coding-agent/tool
 import { WorkerCore } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { getPuppeteerDir } from "@oh-my-pi/pi-utils";
-import puppeteer, { type Browser } from "puppeteer-core";
+import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -74,12 +74,13 @@ interface RelayFixture extends RelayBrowser {
 }
 
 /**
- * Headless Chromium running the real relay extension against a relay on a free port, plus a loopback
- * site. A test-only message listener controls its service worker: a programmatic debugger detach does
- * not fire `onDetach`, and `testRefuseRemoves` makes that many `chrome.tabs.remove` calls reject first.
+ * Headless Chromium running the real relay extension, and any `extensions` beside it, against a relay on a free
+ * port, plus a loopback site. A test-only message listener controls its service worker: a programmatic debugger
+ * detach does not fire `onDetach`, and `testRefuseRemoves` makes that many `chrome.tabs.remove` calls reject first.
  */
 async function launchRelayFixture(
 	log?: (message: string, data?: Record<string, unknown>) => void,
+	extensions: string[] = [],
 ): Promise<RelayFixture> {
 	const port = await findFreeCdpPort();
 	const server = startRelayServer({ port, group: false, log });
@@ -87,13 +88,16 @@ async function launchRelayFixture(
 	const pages = Bun.serve({
 		port: 0,
 		fetch(request) {
-			const route = new URL(request.url).pathname;
+			const url = new URL(request.url);
+			const route = url.pathname;
 			const html =
 				route === "/first"
 					? `<title>First</title><button onclick="this.textContent='clicked'">First</button><p id="hover" onmouseover="this.textContent='hovered'">Hover</p>`
 					: route === "/second"
 						? "<title>Second</title><button>Second</button>"
-						: "<title>Human sentinel</title><h1>Keep me</h1>";
+						: route === "/login"
+							? `<title>Login ${url.searchParams.get("who")}</title><input id="pw" type="password">`
+							: "<title>Human sentinel</title><h1>Keep me</h1>";
 			return new Response(html, { headers: { "Content-Type": "text/html" } });
 		},
 	});
@@ -112,7 +116,7 @@ async function launchRelayFixture(
 			executablePath: await ensureChromiumExecutable(),
 			headless: true,
 			pipe: true,
-			enableExtensions: [extensionDir],
+			enableExtensions: [extensionDir, ...extensions],
 			args: ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain"],
 		});
 		browsers.push(browser);
@@ -332,6 +336,66 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			await releaseTab(name).catch(() => undefined);
 			await releaseBrowser(relay, { kill: false });
 			await fixture.close();
+		}
+	}, 60_000);
+
+	it("empties a password manager's menu only in the tab omp drives", async () => {
+		// A stand-in password manager: a focused password field opens its inline menu, a chrome-extension:// frame in
+		// a closed shadow root, the way 1Password draws it.
+		const vaultDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-vault-"));
+		await fs.writeFile(
+			path.join(vaultDir, "manifest.json"),
+			JSON.stringify({
+				manifest_version: 3,
+				name: "Stand-in vault",
+				version: "1.0",
+				content_scripts: [{ matches: ["http://127.0.0.1/*"], js: ["content.js"] }],
+				web_accessible_resources: [{ resources: ["menu.html"], matches: ["http://127.0.0.1/*"] }],
+			}),
+		);
+		await fs.writeFile(path.join(vaultDir, "menu.html"), "<button>Fill</button>");
+		await fs.writeFile(
+			path.join(vaultDir, "content.js"),
+			`document.addEventListener("focusin", event => {
+	if (event.target.type !== "password" || document.querySelector("vault-menu")) return;
+	const host = document.createElement("vault-menu");
+	const menu = document.createElement("iframe");
+	menu.src = chrome.runtime.getURL("menu.html");
+	host.attachShadow({ mode: "closed" }).append(menu);
+	document.body.append(host);
+});`,
+		);
+		const fixture = await launchRelayFixture(undefined, [vaultDir]);
+		const menuOpen = (page: Page) => page.frames().some(frame => frame.url().startsWith("chrome-extension://"));
+		const driven = await fixture.browser.newPage();
+		await driven.goto(`${fixture.origin}/login?who=driven`);
+		// The user's own tab has its menu open when omp connects.
+		const user = await fixture.browser.newPage();
+		await user.goto(`${fixture.origin}/login?who=user`);
+		await user.focus("#pw");
+		await user.waitForFrame(frame => frame.url().startsWith("chrome-extension://"));
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
+		const name = `relay-vault-${process.pid}`;
+		const fill = {
+			code: "await tab.fill('#pw', 'secret'); return await tab.value('#pw');",
+			timeoutMs: 10_000,
+			session,
+		};
+		try {
+			await acquireTab(name, relay, { target: "Login driven", timeoutMs: 20_000 });
+			// Focusing the field opens the menu, and Chrome detaches omp from the tab during the call.
+			await runInTab(name, fill).catch(() => undefined);
+			expect((await runInTab(name, fill)).returnValue).toBe("secret");
+			// The menu opened, and its frame was emptied.
+			expect(await driven.$("vault-menu")).not.toBeNull();
+			expect(menuOpen(driven)).toBeFalse();
+			// Chrome refused the relay the user's tab too, yet its menu there is left alone.
+			expect(menuOpen(user)).toBeTrue();
+		} finally {
+			await releaseTab(name).catch(() => undefined);
+			await releaseBrowser(relay, { kill: false });
+			await fixture.close();
+			await fs.rm(vaultDir, { recursive: true, force: true });
 		}
 	}, 60_000);
 
