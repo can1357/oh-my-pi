@@ -12,7 +12,14 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 
-import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	BINARY_SNIFF_BYTES,
+	isEnoent,
+	isProbablyBinaryHeader,
+	isRecord,
+	prompt,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import {
 	type ArchiveMemberContent,
 	archiveFormatFromPath,
@@ -21,7 +28,7 @@ import {
 	readArchiveEntries,
 	writeArchive,
 } from "@oh-my-pi/pi-utils/ar";
-import { normalizeToLF } from "../edit/normalize";
+import { detectLineEnding, normalizeToLF, restoreLineEndings } from "../edit/normalize";
 
 import { extractUriScheme, InternalUrlRouter, sessionResolveContext, sessionWriteContext } from "../internal-urls";
 import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
@@ -381,6 +388,79 @@ async function maybeMarkExecutableForShebang(absolutePath: string, content: stri
 	} catch {
 		return false;
 	}
+}
+
+/** Line-ending and BOM convention of a text file a write is about to replace. */
+interface TextFileConvention {
+	bom: boolean;
+	crlf: boolean;
+}
+
+/** Bytes read per step while looking for a first line break past the binary sniff window. */
+const LINE_BREAK_SCAN_BYTES = 64 * 1024;
+
+/**
+ * Read the convention of the `size`-byte file at `absolutePath`: a leading UTF-8 BOM, and CRLF when
+ * its first line break is one (the rule `edit` applies). The first {@link BINARY_SNIFF_BYTES} decide
+ * whether it is text; a longer first line is scanned to its end, stopping when `signal` aborts.
+ * `undefined` for a binary file, whose bytes say nothing about text line endings.
+ */
+async function readTextFileConvention(
+	absolutePath: string,
+	size: number,
+	signal: AbortSignal | undefined,
+): Promise<TextFileConvention | undefined> {
+	const file = Bun.file(absolutePath);
+	let chunk = await file.slice(0, BINARY_SNIFF_BYTES).bytes();
+	if (isProbablyBinaryHeader(chunk)) return undefined;
+	const bom = chunk[0] === 0xef && chunk[1] === 0xbb && chunk[2] === 0xbf;
+	let offset = 0;
+	let previous: number | undefined;
+	for (;;) {
+		const lf = chunk.indexOf(0x0a);
+		if (lf !== -1) return { bom, crlf: (lf > 0 ? chunk[lf - 1] : previous) === 0x0d };
+		offset += chunk.length;
+		if (chunk.length === 0 || offset >= size) return { bom, crlf: false };
+		signal?.throwIfAborted();
+		previous = chunk[chunk.length - 1];
+		chunk = await file.slice(offset, offset + LINE_BREAK_SCAN_BYTES).bytes();
+	}
+}
+
+/**
+ * Give `content` the CRLF line endings and BOM of the file it replaces, as `edit` keeps them.
+ * Models write LF text, so without this replacing a CRLF file rewrites every line and drops its BOM.
+ * Each is independent: content with a carriage return keeps its line endings, content that starts
+ * with a BOM keeps it, and empty content stays empty. `applied` says which were added.
+ */
+function applyTextFileConvention(
+	content: string,
+	convention: TextFileConvention | undefined,
+): { text: string; applied: TextFileConvention } {
+	const applied = { bom: false, crlf: false };
+	if (!convention) return { text: content, applied };
+	let text = content;
+	if (convention.crlf && text.includes("\n") && !text.includes("\r")) {
+		text = restoreLineEndings(text, "\r\n");
+		applied.crlf = true;
+	}
+	if (convention.bom && text.length > 0 && !text.startsWith("\uFEFF")) {
+		text = `\uFEFF${text}`;
+		applied.bom = true;
+	}
+	return { text, applied };
+}
+
+/**
+ * Name each convention `applied` added that `finalText` (what the LSP formatter left, or the content
+ * as written) still has, so the model knows the file differs from the text it sent. A convention a
+ * formatter removed again is not claimed.
+ */
+function textFileConventionNote(applied: TextFileConvention, finalText: string): string | undefined {
+	const kept: string[] = [];
+	if (applied.crlf && detectLineEnding(finalText) === "\r\n") kept.push("CRLF line endings");
+	if (applied.bom && finalText.startsWith("\uFEFF")) kept.push("UTF-8 BOM");
+	return kept.length === 0 ? undefined : `Note: kept the replaced file's ${kept.join(" and ")}.`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -973,7 +1053,23 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				cleanContent,
 			);
 
-			emitWriteProgress(onUpdate, cleanBytes, displayPath, absolutePath);
+			// An ACP editor saves with its buffer's own line endings and encoding, so a write routed to
+			// it goes as given. Elsewhere an unreadable file keeps today's behavior; the write reports why.
+			const bridge = this.session.getClientBridge?.();
+			const editorOwnsFile =
+				bridge?.capabilities.writeTextFile === true &&
+				bridge.writeTextFile !== undefined &&
+				(await shouldRouteWriteThroughBridge(this.session, path, absolutePath));
+			const convention =
+				existing?.isFile() && !editorOwnsFile
+					? await readTextFileConvention(absolutePath, existing.size, signal).catch(() => undefined)
+					: undefined;
+			// `untilAborted` has already rejected the call if it was cancelled during the scan; don't write.
+			signal?.throwIfAborted();
+			const { text: writeContent, applied } = applyTextFileConvention(cleanContent, convention);
+			const writeBytes = writeContent === cleanContent ? cleanBytes : Buffer.byteLength(writeContent, "utf8");
+
+			emitWriteProgress(onUpdate, writeBytes, displayPath, absolutePath);
 
 			// Try ACP bridge first for editor-visible filesystem paths. Internal
 			// artifacts such as local:// plans are owned by OMP, not the editor.
@@ -1001,7 +1097,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 
 			const { writethrough, deferred } = this.#lspWritethrough();
-			const diagnostics = await writethrough(absolutePath, cleanContent, signal, undefined, batchRequest, dst =>
+			const diagnostics = await writethrough(absolutePath, writeContent, signal, undefined, batchRequest, dst =>
 				deferred?.begin(dst),
 			);
 			invalidateFsScanAfterWrite(absolutePath);
@@ -1012,11 +1108,17 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, finalContent);
 
 			const header = maybeWriteSnapshotHeader(this.session, absolutePath, finalContent, displayPath);
-			const finalBytes = finalContent === cleanContent ? cleanBytes : Buffer.byteLength(finalContent, "utf8");
+			const finalBytes = finalContent === writeContent ? writeBytes : Buffer.byteLength(finalContent, "utf8");
 			const writeLine = `Successfully wrote ${finalBytes} bytes to ${displayPath}`;
 			let resultText = header ? `${header}\n${writeLine}` : writeLine;
 			if (stripped) {
 				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
+			}
+			// A non-final batch entry returns before the batch's formatter runs: claim nothing yet.
+			const conventionNote =
+				batchRequest?.flush === false ? undefined : textFileConventionNote(applied, finalContent);
+			if (conventionNote) {
+				resultText += `\n${conventionNote}`;
 			}
 			if (madeExecutable) {
 				resultText += `\n${EXECUTABLE_NOTICE}`;
