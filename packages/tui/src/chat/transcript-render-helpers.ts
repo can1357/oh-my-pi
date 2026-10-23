@@ -11,7 +11,7 @@ import type { JobSnapshot } from "../tools/wait";
 import type { DaemonSnapshot } from "../tools/daemon";
 import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldRenderAbortReason } from "./messages";
 import { createIrcMessageCard } from "../tools/wait";
-import { formatArtifactErrorNotice, type OutputMeta } from "../tools/output-meta";
+import { formatArtifactErrorNotice, formatMinimizedMeta, type OutputMeta } from "../tools/output-meta";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { ToolActivityContainer } from "../chrome/tool-activity";
@@ -70,6 +70,9 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 		});
 		if (job.meta?.artifactError) {
 			rows.push({ parts: [{ text: formatArtifactErrorNotice(job.meta.artifactError), color: "warning" }] });
+		}
+		if (job.meta?.minimized) {
+			rows.push({ parts: [{ text: `Minimized: ${formatMinimizedMeta(job.meta.minimized)}`, color: "dim" }] });
 		}
 	}
 	if (details?.meta?.artifactError) {
