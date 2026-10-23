@@ -4305,6 +4305,40 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("closes an open document when a harness delete announces it (#16880)", async () => {
+		// The Edit tool's delete only sends didChangeWatchedFiles. Servers treat an
+		// open document as authoritative over disk, so without didClose the deleted
+		// file kept appearing in references and rename edits.
+		const tempDir = TempDir.createSync("@omp-lsp-deleted-open-doc-");
+		try {
+			const consumer = path.join(tempDir.path(), "consumer.ts");
+			const kept = path.join(tempDir.path(), "kept.ts");
+			await Bun.write(consumer, "import { x } from './kept';\n");
+			await Bun.write(kept, "export const x = 1;\n");
+
+			const server = installHandshakeLsp();
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			await lspClient.ensureFileOpen(client, consumer);
+			await lspClient.ensureFileOpen(client, kept);
+
+			await fsp.unlink(consumer);
+			await lspClient.notifyWorkspaceWatchedFiles(tempDir.path(), [
+				{ filePath: consumer, type: lspClient.FileChangeType.Deleted },
+			]);
+
+			const closed = server.received
+				.filter(message => message.method === "textDocument/didClose")
+				.map(message => message.params);
+			expect(closed).toEqual([{ textDocument: { uri: fileToUri(consumer) } }]);
+			expect(client.openFiles.has(fileToUri(consumer))).toBe(false);
+			expect(client.openFiles.has(fileToUri(kept))).toBe(true);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("reconciles the executed prefix when a workspace edit fails partway", async () => {
 		// A text edit to an open file inside `src/` is flushed to disk before the
 		// non-recursive delete of `src/` runs (subtree flush), and that delete
