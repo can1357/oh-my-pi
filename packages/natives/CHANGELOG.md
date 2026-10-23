@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed macOS spellchecking (typo underlines, autocorrect and `apple` word completion) leaking every spell-server object it created for the life of the process, so long sessions grew by tens of MB of native memory ([#18285](https://github.com/can1357/oh-my-pi/pull/18285) by [@aleister1102](https://github.com/aleister1102))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes
