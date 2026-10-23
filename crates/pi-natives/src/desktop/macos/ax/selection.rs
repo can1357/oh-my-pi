@@ -94,17 +94,17 @@ fn write_selection(
 /// mouse event is posted and no drag-and-drop session can begin. `None`, with
 /// nothing written, for any other drag, for one pressing where it could pick
 /// up an item (on selected text or on an attachment), and in text holding
-/// right-to-left script.
+/// right-to-left script. `started_in_background` says `pid` was behind the
+/// user's app when the drag began, read before the caller's probes of the
+/// target, which can block, as `select` reads it before its own.
 pub(in crate::desktop::macos) fn select_dragged(
 	pid: libc::pid_t,
 	wid: u32,
 	remote: bool,
+	started_in_background: bool,
 	start: (f64, f64),
 	end: (f64, f64),
 ) -> CoreResult<Option<AxTextSelection>> {
-	// Read before the probes below, which can block: an app the user brings
-	// forward meanwhile is left to them, as in `select`.
-	let started_in_background = may_borrow_focus(skylight::front_pid(), pid);
 	if shows_terminal_grid(remote, || process::is_terminal(pid)) {
 		return Ok(None);
 	}
