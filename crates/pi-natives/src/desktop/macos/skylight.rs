@@ -688,9 +688,11 @@ impl SwitchSignals {
 	}
 
 	/// Reads the signals at `now`, with where `placer` has placed the latest
-	/// click. Nothing here waits on an AX probe.
+	/// click, and shows `placer` where the pointer is at the first reading of
+	/// each button change. Nothing here waits on an AX probe.
 	fn read(spi: &ForegroundSpi, now: Instant, placer: &ClickPlacer) -> Self {
 		let buttons = hid_buttons();
+		placer.saw(buttons, pointer);
 		let last_click = since_last_click().and_then(|since| now.checked_sub(since));
 		// SAFETY: HIDSystemState is defined by CGEventSource.h; a read-only
 		// query.
@@ -737,16 +739,42 @@ struct ClickPlacer {
 	/// The user's app.
 	user:   Option<pid_t>,
 	latest: Mutex<Option<ClickPlace>>,
+	/// The button counters the switch readings last saw, and where the pointer
+	/// was at the first reading of them.
+	seen:   Mutex<Option<([u32; 6], Option<CGPoint>)>>,
 }
 
 impl ClickPlacer {
 	const fn new(user: Option<pid_t>) -> Self {
-		Self { user, latest: Mutex::new(None) }
+		Self { user, latest: Mutex::new(None), seen: Mutex::new(None) }
+	}
+
+	/// Notes where `point` reads the pointer at the first switch reading of
+	/// the button counters `buttons`. The readings come every few milliseconds
+	/// and never wait on a hit-test, so this is where a click went down or up
+	/// even when the placer's own pass comes late, after a hit-test that
+	/// blocked while the user moved on.
+	fn saw(&self, buttons: [u32; 6], point: impl FnOnce() -> Option<CGPoint>) {
+		if self.seen.lock().is_some_and(|(seen, _)| seen == buttons) {
+			return;
+		}
+		let point = point();
+		*self.seen.lock() = Some((buttons, point));
+	}
+
+	/// Where the pointer was at the first switch reading of `buttons`; `None`
+	/// when no reading has seen them.
+	fn seen_at(&self, buttons: [u32; 6]) -> Option<CGPoint> {
+		self
+			.seen
+			.lock()
+			.filter(|(seen, _)| *seen == buttons)
+			.and_then(|(_, point)| point)
 	}
 
 	/// Places the latest click unless it is placed already: one within
-	/// [`CLICK_PLACE`] where the pointer is now, an older one nowhere. Blocks
-	/// for as long as the hit-test does.
+	/// [`CLICK_PLACE`] where the switch readings first saw it, an older one
+	/// nowhere. Blocks for as long as the hit-test does.
 	fn place(&self) {
 		let Some(user) = self.user else {
 			return;
@@ -759,7 +787,8 @@ impl ClickPlacer {
 	}
 
 	/// Places the click that left the HID button counters at `buttons`, by
-	/// `hit_test` at the pointer's position `point` reads (`None`: too old to
+	/// `hit_test` at the point a switch reading first saw them at, else at the
+	/// pointer's position `point` reads (`hit_test` returns `None`: too old to
 	/// place, so nowhere), unless it is placed already: the placer runs every
 	/// few milliseconds, and reading the pointer costs a Core Graphics event,
 	/// so an unchanged reading never reads it. A release counted since the last
@@ -778,7 +807,7 @@ impl ClickPlacer {
 		if latest.is_some_and(|place| place.buttons == buttons) {
 			return;
 		}
-		let point = point();
+		let point = self.seen_at(buttons).or_else(point);
 		if let Some(place) = latest {
 			let carried = !pressed(place.buttons, buttons)
 				&& match place.hit {
@@ -2778,6 +2807,39 @@ mod tests {
 		placer.place_at(RELEASED, read, |_| None);
 		assert_eq!(reads.get(), 2);
 		assert_eq!(placer.hit(RELEASED), Some(true));
+	}
+
+	#[test]
+	fn a_release_is_placed_where_the_readings_saw_it_not_where_the_pointer_went() {
+		let at = |x: f64| move || Some(CGPoint::new(x, 100.0));
+		// The user clicks in place in their own app; the press's hit-test
+		// blocks past the release, and the pointer has moved on by the
+		// placer's next pass.
+		let placer = ClickPlacer::new(None);
+		placer.saw(PRESSED, at(100.0));
+		placer.place_at(PRESSED, at(300.0), |_| Some(true));
+		placer.saw(RELEASED, at(101.0));
+		placer.place_at(RELEASED, at(200.0), |_| None);
+		assert_eq!(placer.hit(RELEASED), Some(true));
+		// The press is hit-tested where the readings saw it go down.
+		let placer = ClickPlacer::new(None);
+		placer.saw(PRESSED, at(100.0));
+		let mut tested = None;
+		placer.place_at(PRESSED, at(300.0), |point| {
+			tested = Some(point.x);
+			Some(true)
+		});
+		assert_eq!(tested, Some(100.0));
+		// A drag the readings saw released away from its press is still
+		// hit-tested where it was released.
+		placer.saw(RELEASED, at(200.0));
+		placer.place_at(RELEASED, at(101.0), |_| None);
+		assert_eq!(placer.hit(RELEASED), None);
+		// A reading of counters already seen reads no pointer.
+		placer.saw(RELEASED, || unreachable!("these counters were seen already"));
+		// Counters no reading has seen yet are placed where the pointer is.
+		placer.place_at([2, 1, 0, 0, 0, 0], at(150.0), |point| Some(point.x == 150.0));
+		assert_eq!(placer.hit([2, 1, 0, 0, 0, 0]), Some(true));
 	}
 
 	#[test]
