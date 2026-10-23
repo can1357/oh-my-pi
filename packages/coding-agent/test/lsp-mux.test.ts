@@ -30,6 +30,7 @@ interface FakeState {
 	didChange: Record<string, number[]>;
 	didClose: string[];
 	notifications: string[];
+	workspaceFolders: string[];
 }
 
 interface PublishDiagnosticsParams {
@@ -446,5 +447,21 @@ describe("LspMuxServer", () => {
 		});
 		await second.client.request("test/echo", { barrier: true });
 		expect(await second.client.request<string | null>("test/documentText", { uri })).toBe("replacement");
+	}, 10_000);
+
+	it("removes the workspace folders a session added before reusing its server", async () => {
+		const first = await link();
+		await initialize(first.client);
+		const added = { uri: "file:///other-checkout", name: "other-checkout" };
+		first.client.notify("workspace/didChangeWorkspaceFolders", { event: { added: [added], removed: [] } });
+		expect((await state(first.client)).workspaceFolders).toEqual([added.uri]);
+		const firstClosed = first.client.waitForClose();
+		first.client.destroy();
+		await firstClosed;
+
+		const second = await link();
+		expect(second.connected.spawned).toBe(false);
+		await initialize(second.client);
+		expect((await state(second.client)).workspaceFolders).toEqual([]);
 	}, 10_000);
 });
