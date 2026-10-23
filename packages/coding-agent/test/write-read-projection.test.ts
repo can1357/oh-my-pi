@@ -13,7 +13,11 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
 
-import { cfgReadDefaultLimit, cfgToolsOutputMaxColumns } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import {
+	cfgReadDefaultLimit,
+	cfgReadLineNumbers,
+	cfgToolsOutputMaxColumns,
+} from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function createSession(cwd: string, bridge?: ClientBridge, editMode: "replace" | "hashline" = "replace"): ToolSession {
 	return {
@@ -186,6 +190,25 @@ describe("write tool read projection guard", () => {
 
 		await expect(
 			new WriteTool(session).execute("write-edge", { path: filePath, content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("rejects a numbered column-cut projection whose notice also says where to continue", async () => {
+		const filePath = path.join(tmpDir, "numbered.txt");
+		// `:1-1` pages on through the short lines after the cut one and stops one line short; the
+		// line-number prefixes make the shown payload longer than the source it misses.
+		const original = `${"x".repeat(769)}\nb\nc\nd\ne\n`;
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+		cfgReadLineNumbers.set(session.settings, true);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-numbered", { path: `${filePath}:1-1` }),
+		);
+		expect(projection).toMatch(/\[Showing lines .*\. Some lines truncated to 768 chars/);
+
+		await expect(
+			new WriteTool(session).execute("write-numbered", { path: filePath, content: projection }),
 		).rejects.toThrow("incomplete read projection");
 		expect(await Bun.file(filePath).text()).toBe(original);
 	});
