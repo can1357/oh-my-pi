@@ -67,6 +67,12 @@ class CopyablePromptInput implements Component, Focusable {
 		this.#input.handleInput(data);
 	}
 
+	/** Enhanced-paste delivery targets the focused component's `pasteText`; without it the
+	 *  payload fell back to the detached main editor and never reached this field. */
+	pasteText(text: string): void {
+		this.#input.pasteText(text);
+	}
+
 	invalidate(): void {
 		this.#input.invalidate();
 	}

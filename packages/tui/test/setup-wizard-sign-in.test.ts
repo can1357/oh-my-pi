@@ -106,6 +106,56 @@ describe("SignInScene", () => {
 		}
 	});
 
+	it("delivers pasted text to the focused credential prompt", async () => {
+		const pasted = "sk-paste-0123456789";
+		const submitted = Promise.withResolvers<string>();
+		let focusTarget: (Component & { pasteText?: (text: string) => void }) | undefined;
+
+		const authStorage = {
+			credentials: { has: (_providerId: string) => false },
+			keys: { source: (_providerId: string) => undefined },
+			oauth: {
+				async login(_provider: OAuthProviderId, ctrl: OAuthLoginCallbacks): Promise<void> {
+					ctrl.onAuth({ url: "https://example.com/oauth/authorize?state=paste" });
+					submitted.resolve(await ctrl.onPrompt({ message: "Paste your API key" }));
+				},
+			},
+		} as unknown as AuthStorage;
+
+		const host = {
+			ctx: {
+				authStorage,
+				disabledProviders: [],
+				copyToClipboard: async () => {},
+				refreshProvider: async () => {},
+				openInBrowser(): void {},
+			},
+			requestRender(): void {},
+			finish(): void {},
+			setFocus(component: Component | null): void {
+				focusTarget = component ?? undefined;
+			},
+			restoreFocus(): void {},
+		} as unknown as SetupSceneHost;
+
+		const tab = new SignInScene(host);
+		try {
+			for (const char of "anthropic") tab.handleInput(char);
+			tab.handleInput("\n");
+			await Promise.resolve();
+
+			// The enhanced-paste controller hands terminal paste payloads to the focused
+			// component's `pasteText`, the same hook the modal login prompt exposes.
+			expect(focusTarget).toBeDefined();
+			focusTarget?.pasteText?.(pasted);
+			focusTarget?.handleInput?.("\n");
+
+			await expect(submitted.promise).resolves.toBe(pasted);
+		} finally {
+			tab.dispose();
+		}
+	});
+
 	it("clears manual input after a native callback path settles", async () => {
 		const url = "https://example.com/oauth/authorize?client_id=omp&state=native";
 		const loginCompleted = Promise.withResolvers<void>();
