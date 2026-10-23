@@ -145,3 +145,13 @@ it("retains a deferred forced choice when session switching rolls back", async (
 	expect(mock.calls).toHaveLength(1);
 	expect(mock.calls[0]?.options?.toolChoice).toEqual({ type: "tool", name: "write" });
 });
+
+// Pre-prompt compaction peeks the queued force to size the request; the peek
+// must not serve it, or the model call would lose the force.
+it("still sends a queued force after pre-prompt compaction peeks it", async () => {
+	session.setForcedToolChoice("write");
+
+	await session.prompt("write it");
+
+	expect(mock.calls[0]?.options?.toolChoice).toEqual({ type: "tool", name: "write" });
+});

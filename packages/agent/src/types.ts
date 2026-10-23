@@ -511,6 +511,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	getToolChoice?: () => ToolChoiceDirective | undefined;
 
+	/** Match local context estimates to the resolved model call before compaction checks. */
+	syncTokenizerForRequest?: (request: { model: Model; toolChoice?: ToolChoice; tools?: Context["tools"] }) => void;
+
 	/**
 	 * Soft-requirement lifecycle retained by the host when a pre-model-call
 	 * gate stops a run before its pending reminder or escalation is served.

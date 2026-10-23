@@ -12,6 +12,8 @@ import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
@@ -336,6 +338,64 @@ describe("createSettingsAwareStreamFn", () => {
 
 		expect(calls[0]?.options?.maxTokens).toBeLessThan(9_000);
 		expect(calls[1]?.options?.maxTokens).toBeUndefined();
+	});
+
+	it("fits the output cap over past thinking only when the request's compat view sends it", () => {
+		// The base view drops the model's own thinking; the thinking-engaged view
+		// replays it (the OpenCode Go/Zen shape).
+		const model = buildModel({
+			id: "qwen-host-model",
+			name: "qwen-host-model",
+			api: "openai-completions",
+			provider: "my-host",
+			baseUrl: "http://my-server.example:8000/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 10_000,
+			maxTokens: 9_000,
+			compat: {
+				thinkingFormat: "qwen-chat-template",
+				replayReasoningContent: false,
+				whenThinking: { replayReasoningContent: true },
+			},
+		}) as Model;
+		const context = {
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "r".repeat(20_000), thinkingSignature: "reasoning_content" },
+						{ type: "text", text: "Done." },
+					],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 1,
+				},
+				{ role: "user", content: "next", timestamp: 2 },
+			],
+		} as unknown as Context;
+		const { fn: base, calls } = captureBase();
+		const wrapped = createSettingsAwareStreamFn(Settings.isolated({}), base);
+
+		// Reasoning off: the request drops the 5,000-token thinking.
+		wrapped(model, context, { apiKey: "k" });
+		// Reasoning on through the same stream fn: the request sends it.
+		wrapped(model, context, { apiKey: "k", reasoning: Effort.Medium });
+
+		expect(calls[0]?.options?.maxTokens).toBeUndefined();
+		const fitted = calls[1]?.options?.maxTokens ?? Number.POSITIVE_INFINITY;
+		expect(5_000 + fitted).toBeLessThanOrEqual(10_000);
 	});
 
 	describe("providers.anthropic.serverSideFallback (opt-in)", () => {

@@ -1,4 +1,4 @@
-import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { Agent, AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
 	calculatePromptTokens,
 	findTranscriptUsageAnchor,
@@ -120,6 +120,24 @@ export class SessionStatsTracker {
 	}
 
 	/**
+	 * An anchor's provider base, repriced for the own-thinking drop state
+	 * `tokenizer` counts in. The base holds the model's own prior thinking only
+	 * when the anchor's chat-completions request sent it, so a request in the
+	 * opposite state (thinking switched off, a forced tool) loses or gains that
+	 * thinking across the anchored prefix. An anchor recorded without a state is
+	 * taken to match the session's ordinary request.
+	 */
+	#repricedAnchorBase(anchor: AssistantMessage, prefix: readonly AgentMessage[], tokenizer: Tokenizer): number {
+		const base = correctedPromptTokens(anchor);
+		const requestDrops = tokenizer.dropsOwnThinking;
+		if (requestDrops === undefined) return base;
+		const anchorDropped = anchor.contextSnapshot?.dropsOwnThinking ?? this.#tokenizer.dropsOwnThinking;
+		if (anchorDropped === undefined || anchorDropped === requestDrops) return base;
+		const thinking = tokenizer.ownThinkingTokens(prefix);
+		return requestDrops ? Math.max(0, base - thinking) : base + thinking;
+	}
+
+	/**
 	 * Anchored used-token arithmetic shared by every anchored branch: provider
 	 * base + non-message change since the anchor + local tail + pending.
 	 *
@@ -134,6 +152,7 @@ export class SessionStatsTracker {
 		tailFromIndex: number,
 		activeMessages: readonly AgentMessage[],
 		pendingTokens: number,
+		tokenizer: Tokenizer,
 	): number {
 		const nonMessageDelta =
 			anchor.toolSchemaTokens === undefined
@@ -148,7 +167,7 @@ export class SessionStatsTracker {
 					anchor.toolSchemaTokens;
 		return (
 			Math.max(0, base + nonMessageDelta) +
-			this.#tokenizer.countMessages(activeMessages.slice(tailFromIndex)) +
+			tokenizer.countMessages(activeMessages.slice(tailFromIndex)) +
 			pendingTokens
 		);
 	}
@@ -277,19 +296,21 @@ export class SessionStatsTracker {
 	getContextBreakdown(options?: {
 		contextWindow?: number;
 		pendingMessages?: AgentMessage[];
+		tokenizer?: Tokenizer;
 	}): ContextUsageBreakdown | undefined {
+		const tokenizer = options?.tokenizer ?? this.#tokenizer;
 		const rawContextWindow = options?.contextWindow ?? this.#host.model()?.contextWindow ?? 0;
 		const contextWindow = Number.isFinite(rawContextWindow) && rawContextWindow > 0 ? rawContextWindow : 0;
 		const settings = this.#host.session.settings;
 		const { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens } = computeNonMessageBreakdown(
 			this.#host.session,
-			this.#tokenizer,
+			tokenizer,
 			settings?.revision,
 			settings ? cfgSkillful.get(settings) : undefined,
 		);
 		const categoryNonMessageTokens = skillsTokens + toolsTokens + systemContextTokens + systemPromptTokens;
 		const current = {
-			nonMessageTokens: computeNonMessageTokens(this.#host.session, this.#tokenizer, settings?.revision),
+			nonMessageTokens: computeNonMessageTokens(this.#host.session, tokenizer, settings?.revision),
 			toolSchemaTokens: toolsTokens,
 		};
 		const branchEntries = this.#host.sessionManager.getBranchView();
@@ -298,7 +319,7 @@ export class SessionStatsTracker {
 		let usedTokens = 0;
 		let anchored = false;
 		const pendingMessages = options?.pendingMessages ?? [];
-		const pendingTokens = this.#tokenizer.countMessages(pendingMessages);
+		const pendingTokens = tokenizer.countMessages(pendingMessages);
 		const pending = this.#pendingContextSnapshot;
 
 		let anchorEntry: SessionMessageEntry | undefined;
@@ -331,12 +352,13 @@ export class SessionStatsTracker {
 		if (useAnchor && anchorAssistant) {
 			anchored = true;
 			usedTokens = this.#anchoredUsedTokens(
-				correctedPromptTokens(anchorAssistant),
+				this.#repricedAnchorBase(anchorAssistant, activeMessages.slice(0, anchorIndex), tokenizer),
 				anchorAssistant.contextSnapshot ?? current,
 				current,
 				anchorIndex + 1,
 				activeMessages,
 				pendingTokens,
+				tokenizer,
 			);
 		} else if (pending) {
 			anchored = true;
@@ -347,6 +369,7 @@ export class SessionStatsTracker {
 				pending.cutoffCount,
 				activeMessages,
 				pendingTokens,
+				tokenizer,
 			);
 		}
 
@@ -354,18 +377,19 @@ export class SessionStatsTracker {
 			const liveAnchor = findTranscriptUsageAnchor(activeMessages);
 			if (liveAnchor) {
 				usedTokens = this.#anchoredUsedTokens(
-					correctedPromptTokens(liveAnchor.message),
+					this.#repricedAnchorBase(liveAnchor.message, activeMessages.slice(0, liveAnchor.index), tokenizer),
 					liveAnchor.message.contextSnapshot ?? current,
 					current,
 					liveAnchor.index + 1,
 					activeMessages,
 					pendingTokens,
+					tokenizer,
 				);
 				anchored = true;
 			}
 		}
 		if (!anchored) {
-			usedTokens = current.nonMessageTokens + this.#tokenizer.countMessages(activeMessages) + pendingTokens;
+			usedTokens = current.nonMessageTokens + tokenizer.countMessages(activeMessages) + pendingTokens;
 		}
 		return {
 			contextWindow,

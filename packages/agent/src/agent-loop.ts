@@ -1378,6 +1378,15 @@ async function runLoopBody(
 					}
 
 					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
+					// The one sync per provider call: `beforeModelCall` (next) only inspects
+					// this context, and streamAssistantResponse sends it as prepared.
+					config.syncTokenizerForRequest?.({
+						model: preparedProviderCall.model,
+						toolChoice: preparedProviderCall.ownedDialect
+							? undefined
+							: (hostToolChoice ?? softRequirementState.forcedToolChoice ?? config.toolChoice),
+						tools: preparedProviderCall.context.tools,
+					});
 					preparedProviderCall.liveSteering = openLiveSteering(config, signal, preparedProviderCall);
 					gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
 				} catch (error) {

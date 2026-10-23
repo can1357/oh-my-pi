@@ -11,7 +11,12 @@
  * and OpenRouter response-cache hits across advisor calls.
  */
 import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my-pi/pi-agent-core";
-import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import {
+	completionsRequestDropsOwnThinking,
+	type Model,
+	type SimpleStreamOptions,
+	streamSimple,
+} from "@oh-my-pi/pi-ai";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import type { Settings } from "../config/settings";
@@ -76,9 +81,10 @@ export function createSettingsAwareStreamFn(
 	base: StreamFn = streamSimple,
 	slowModeContext?: SettingsStreamSlowModeContext,
 ): StreamFn {
-	// One tokenizer per reading model and native-history replay state, so
-	// per-message counts are reused across requests: its prices (images,
-	// replayed thinking and reasoning) belong to that model and request state.
+	// One tokenizer per reading model, native-history replay state and
+	// past-thinking drop state, so per-message counts are reused across
+	// requests: its prices (images, replayed thinking and reasoning) belong to
+	// that model and request state.
 	const tokenizers = new Map<string, Tokenizer>();
 	return (model, context, streamOptions) => {
 		const openrouterRoutingPreset = cfgProvidersOpenrouterVariant.get(settings);
@@ -143,10 +149,13 @@ export function createSettingsAwareStreamFn(
 		const nativeHistoryReplay =
 			Object.hasOwn(maxInFlightRequests, model.provider) ||
 			openAIResponsesReplaysNativeHistory(model, streamOptions?.providerSessionState);
-		const tokenizerKey = `${model.provider}\0${model.api}\0${model.id}\0${nativeHistoryReplay}`;
+		// The request's reasoning and tool state picks the chat-completions compat
+		// view, which decides whether the model's own past thinking is sent.
+		const dropsOwnThinking = completionsRequestDropsOwnThinking(model, streamOptions, context.tools);
+		const tokenizerKey = `${model.provider}\0${model.api}\0${model.id}\0${nativeHistoryReplay}\0${dropsOwnThinking}`;
 		let tokenizer = tokenizers.get(tokenizerKey);
 		if (!tokenizer) {
-			tokenizer = new Tokenizer(model, { nativeHistoryReplay });
+			tokenizer = new Tokenizer(model, { nativeHistoryReplay, dropsOwnThinking });
 			tokenizers.set(tokenizerKey, tokenizer);
 		}
 		const maxTokens = fitOutputTokensToContextWindow(model, context, streamOptions?.maxTokens, tokenizer);

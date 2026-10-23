@@ -20,6 +20,33 @@ describe("ToolChoiceQueue", () => {
 		});
 	});
 
+	// Pre-prompt compaction sizes the request for the force it will carry; a
+	// peek that consumed or skipped a yield would change what the turn sends.
+	describe("peekToolChoice", () => {
+		it("returns the next yield without serving it, then serves the same sequence", () => {
+			const q = new ToolChoiceQueue();
+			q.pushSequence([forced, "none"], { label: "user-force" });
+			expect(q.peekToolChoice()).toEqual(forced);
+			expect(q.peekToolChoice()).toEqual(forced);
+			expect(q.hasInFlight).toBe(false);
+			expect(q.nextToolChoice()).toEqual(forced);
+			q.resolve();
+			expect(q.peekToolChoice()).toBe("none");
+			expect(q.nextToolChoice()).toBe("none");
+			q.resolve();
+			expect(q.peekToolChoice()).toBeUndefined();
+		});
+
+		it("skips exhausted directives to reach the next queued force", () => {
+			const q = new ToolChoiceQueue();
+			q.pushSequence([], { label: "empty" });
+			q.pushOnce(forcedRead, { label: "eager-todo" });
+			expect(q.peekToolChoice()).toEqual(forcedRead);
+			expect(q.inspect()).toEqual(["eager-todo"]);
+			expect(q.nextToolChoice()).toEqual(forcedRead);
+		});
+	});
+
 	describe("reject callback", () => {
 		it("onRejected returning 'requeue' replays the lost yield", () => {
 			const q = new ToolChoiceQueue();

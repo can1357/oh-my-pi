@@ -1,11 +1,24 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import type { Api, AssistantMessage, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import { type } from "@oh-my-pi/omptype";
+import {
+	type Api,
+	type AssistantMessage,
+	completionsRequestDropsOwnThinking,
+	type Model,
+	type ProviderSessionState,
+	type SimpleStreamOptions,
+	streamSimple,
+	type Tool,
+} from "@oh-my-pi/pi-ai";
 import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as natives from "@oh-my-pi/pi-natives";
 import { Agent } from "../src/agent";
+import type { AgentTool } from "../src/types";
 import type { SessionMessageEntry } from "../src/compaction/entries";
 import { applyShakeRegions, collectShakeRegions, RESCUE_SHAKE_CONFIG } from "../src/compaction/shake";
 import { Tokenizer, tokenizerEncodingForModel } from "../src/tokenizer";
@@ -434,6 +447,274 @@ describe("countMessage replayed thinking", () => {
 	test("charges the signature's bytes for a reader whose catalog prices them", () => {
 		const model = reader("google", "gemini-3-pro-preview");
 		expect(new Tokenizer(model).countMessage(signedTurn(model, VISIBLE, SIGNATURE))).toBe(VISIBLE_TOKENS + 1000);
+	});
+});
+
+// Contract: a chat-completions reader without a reasoning slot never sends its
+// own turns' thinking, so the context estimate (and every compaction trigger
+// built on it) must not count it; thinking the request does carry still counts
+// (#15797).
+describe("countMessage chat-completions thinking", () => {
+	const THINKING = "Let me reason about the call sites carefully. ".repeat(400);
+	const toolCall = { type: "toolCall", id: "call_1", name: "read", arguments: { path: "a.ts" } } as const;
+
+	function completionsModel(
+		id: string,
+		replayReasoningContent: boolean,
+		thinkingReplay = false,
+	): Model<"openai-completions"> {
+		return buildModel({
+			id,
+			name: id,
+			api: "openai-completions",
+			provider: "my-host",
+			baseUrl: "http://my-server.example:8000/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262_144,
+			maxTokens: 32_768,
+			compat: {
+				thinkingFormat: "qwen-chat-template",
+				replayReasoningContent,
+				...(thinkingReplay ? { whenThinking: { replayReasoningContent: true } } : {}),
+			},
+		});
+	}
+
+	function thinkingTurn(from: Pick<Model, "api" | "provider" | "id">, thinkingSignature: string): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: THINKING, thinkingSignature }, toolCall],
+			api: from.api,
+			provider: from.provider,
+			model: from.id,
+			usage: {
+				input: 100,
+				output: 3_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 3_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+	}
+
+	const dropping = completionsModel("Qwen3.8-27B", false);
+	const replaying = completionsModel("Qwen3.8-27B", true);
+	const toolCallOnly = new Tokenizer(dropping).countMessage({ ...thinkingTurn(dropping, "x"), content: [toolCall] });
+
+	test("skips the reader's own thinking in both arms when the request drops it", () => {
+		const tokenizer = new Tokenizer(dropping);
+		const turn = thinkingTurn(dropping, "reasoning_content");
+		expect(tokenizer.countMessage(turn)).toBe(toolCallOnly);
+		expect(tokenizer.countMessage(turn, { excludeEncryptedReasoning: true })).toBe(toolCallOnly);
+	});
+
+	test.each([
+		["a reader that replays reasoning_content", replaying, replaying, "reasoning_content"],
+		// Another model's thinking reaches the request demoted to text.
+		["another model's turn", dropping, completionsModel("other-model", false), "reasoning_content"],
+		// LiteLLM replays signed thinking in `thinking_blocks`.
+		["a raw LiteLLM signature", dropping, dropping, "EqQBCkgIARABGAIiQL"],
+	] as const)("counts thinking the request carries: %s", (_case, model, from, signature) => {
+		const floored = new Tokenizer(model).countMessage(thinkingTurn(from, signature), {
+			excludeEncryptedReasoning: true,
+		});
+		expect(floored).toBeGreaterThan(toolCallOnly + 4_000);
+	});
+
+	test("an agent re-counts when the reader's replay flag flips", () => {
+		expect(new Tokenizer(dropping).countsAlike(replaying)).toBe(false);
+		expect(new Tokenizer(dropping).countsAlike(dropping)).toBe(true);
+	});
+
+	// The wire is the oracle: the predicate must agree with the payload
+	// `streamSimple` sends, through its request shaping (mandatory-effort
+	// floor), compat views, forced-choice downgrades and omitted tool schemas.
+	const readTool = { name: "read", description: "Read a file", parameters: { type: "object", properties: {} } };
+	// `enum` values that cannot match `type: "null"`: the encoder omits this tool.
+	const rejectedTool = {
+		name: "read",
+		description: "Read a file",
+		parameters: { type: "object", properties: { mode: { enum: ["A", "B"], type: "null" } } },
+	};
+	const kimi = buildModel({
+		id: "kimi-k2.6",
+		name: "Kimi",
+		api: "openai-completions",
+		provider: "opencode-go",
+		baseUrl: "https://opencode.ai/zen/go/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 32_768,
+	});
+	// Mandatory-effort OpenCode Go models: `streamSimple` floors an absent or
+	// disabled effort to the lowest supported one, engaging the replaying view.
+	const mandatoryEffort = (id: string) => () => getBundledModel<"openai-completions">("opencode-go", id);
+
+	type ThinkingRequest = Pick<SimpleStreamOptions, "reasoning" | "disableReasoning" | "toolChoice">;
+
+	async function sentCarriesThinking(
+		model: Model<"openai-completions">,
+		turn: AssistantMessage,
+		request: ThinkingRequest,
+		tools: Tool[] | undefined,
+	): Promise<boolean> {
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamSimple(
+			model,
+			{ messages: [turn], tools },
+			{
+				...request,
+				apiKey: "test-key",
+				fetch: async () => new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } }),
+				onPayload: payload => resolve(payload),
+			},
+		);
+		return JSON.stringify(await promise).includes(THINKING);
+	}
+
+	test.each([
+		{ name: "replay off", model: () => completionsModel("Qwen3.8-27B", false), request: {} },
+		{ name: "replay on", model: () => completionsModel("Qwen3.8-27B", true), request: {} },
+		{
+			name: "thinking view active",
+			model: () => completionsModel("Qwen3.8-27B", false, true),
+			request: { reasoning: Effort.Medium },
+		},
+		{ name: "thinking view inactive", model: () => completionsModel("Qwen3.8-27B", false, true), request: {} },
+		{
+			name: "thinking view suppressed",
+			model: () => completionsModel("Qwen3.8-27B", false, true),
+			request: { reasoning: Effort.Medium, disableReasoning: true },
+		},
+		{
+			name: "forced tool suppresses the thinking view",
+			model: () => kimi,
+			request: { reasoning: Effort.Medium, toolChoice: { type: "tool", name: "read" } },
+			tools: [readTool],
+		},
+		{
+			// The forced tool's schema is omitted, so the force drops and thinking replays.
+			name: "forced tool omitted by schema conversion",
+			model: () => kimi,
+			request: { reasoning: Effort.Medium, toolChoice: { type: "tool", name: "read" } },
+			tools: [rejectedTool],
+		},
+		{ name: "mandatory effort, thinking unset (glm-5.3)", model: mandatoryEffort("glm-5.3"), request: {} },
+		{
+			name: "mandatory effort, thinking off (glm-5.3-flash)",
+			model: mandatoryEffort("glm-5.3-flash"),
+			request: { disableReasoning: true },
+		},
+		{
+			name: "mandatory effort, thinking off (kimi-k3)",
+			model: mandatoryEffort("kimi-k3"),
+			request: { disableReasoning: true },
+		},
+	] satisfies {
+		name: string;
+		model: () => Model<"openai-completions">;
+		request: ThinkingRequest;
+		tools?: Tool[];
+	}[])("matches the sent request for $name", async ({ model: makeModel, request, tools }) => {
+		const model = makeModel();
+		const turn = thinkingTurn(model, "reasoning_content");
+		const carriesThinking = await sentCarriesThinking(model, turn, request, tools);
+		const dropsOwnThinking = completionsRequestDropsOwnThinking(model, request, tools);
+		expect(dropsOwnThinking).toBe(!carriesThinking);
+		const count = new Tokenizer(model, { dropsOwnThinking }).countMessage(turn, { excludeEncryptedReasoning: true });
+		expect(count > toolCallOnly + 4_000).toBe(carriesThinking);
+	});
+
+	test("counts thinking any request may send when the request state is unknown", () => {
+		// One-shot budgets and output fitting without options must not undercount.
+		const model = completionsModel("Qwen3.8-27B", false, true);
+		const count = new Tokenizer(model).countMessage(thinkingTurn(model, "reasoning_content"), {
+			excludeEncryptedReasoning: true,
+		});
+		expect(count).toBeGreaterThan(toolCallOnly + 4_000);
+	});
+
+	test("the agent re-estimates saved thinking when reasoning is turned off", () => {
+		const model = completionsModel("Qwen3.8-27B", false, true);
+		const turn = thinkingTurn(model, "reasoning_content");
+		const agent = new Agent();
+		agent.setModel(model);
+		agent.setThinkingLevel(Effort.Medium);
+		expect(agent.tokenizer.countMessage(turn, { excludeEncryptedReasoning: true })).toBeGreaterThan(
+			toolCallOnly + 4_000,
+		);
+		agent.setDisableReasoning(true);
+		expect(agent.tokenizer.countMessage(turn, { excludeEncryptedReasoning: true })).toBe(toolCallOnly);
+		agent.setDisableReasoning(false);
+		expect(agent.tokenizer.countMessage(turn, { excludeEncryptedReasoning: true })).toBeGreaterThan(
+			toolCallOnly + 4_000,
+		);
+		agent.setThinkingLevel(undefined);
+		expect(agent.tokenizer.countMessage(turn, { excludeEncryptedReasoning: true })).toBe(toolCallOnly);
+	});
+
+	test("a forced Kimi request drops past thinking without undercounting the next turn", async () => {
+		const model = buildModel({
+			id: "kimi-k2.6",
+			name: "Kimi",
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262_144,
+			maxTokens: 32_768,
+		});
+		const schema = type({});
+		const tool: AgentTool<typeof schema, Record<string, never>> = {
+			name: "read",
+			label: "Read",
+			description: "Read a file",
+			parameters: schema,
+			async execute() {
+				return { content: [{ type: "text", text: "done" }], details: {} };
+			},
+		};
+		const mock = createMockModel({ responses: [{ content: ["forced"] }, { content: ["normal"] }] });
+		const agent = new Agent({ streamFn: mock.stream });
+		agent.setModel(model);
+		agent.setThinkingLevel(Effort.Medium);
+		agent.setTools([tool]);
+		const turn = thinkingTurn(model, "reasoning_content");
+		const counts: number[] = [];
+		agent.setBeforeModelCall(() => {
+			counts.push(agent.tokenizer.countMessage(turn, { excludeEncryptedReasoning: true }));
+		});
+		const turnEndCounts: number[] = [];
+		agent.setOnTurnEnd(() => {
+			turnEndCounts.push(agent.tokenizer.countMessage(turn, { excludeEncryptedReasoning: true }));
+		});
+		const ordinary = agent.tokenizer;
+		await agent.prompt("call read", { toolChoice: { type: "tool", name: "read" } });
+		// Flipping back to the ordinary state reuses its tokenizer, so the
+		// per-message memo stays warm instead of recounting the transcript.
+		expect(agent.tokenizer).toBe(ordinary);
+		// The forced request's state outlives the turn end that resets the tokenizer,
+		// so its reported usage can be recorded with the state it was billed in.
+		expect(agent.lastRequestDropsOwnThinking).toBe(true);
+		expect(turnEndCounts[0]).toBeGreaterThan(toolCallOnly + 4_000);
+		expect(agent.tokenizer.countMessage(turn, { excludeEncryptedReasoning: true })).toBeGreaterThan(
+			toolCallOnly + 4_000,
+		);
+		await agent.prompt("answer normally");
+		expect(agent.lastRequestDropsOwnThinking).toBe(false);
+		expect(mock.calls.map(call => call.options?.toolChoice)).toEqual([{ type: "tool", name: "read" }, undefined]);
+		expect(counts).toEqual([toolCallOnly, expect.any(Number)]);
+		expect(counts[1]).toBeGreaterThan(toolCallOnly + 4_000);
+		expect(turnEndCounts[1]).toBeGreaterThan(toolCallOnly + 4_000);
 	});
 });
 

@@ -113,6 +113,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"historyRewriteTokensRemoved",
 		"elidedOutputTokens",
 		"compactionEpoch",
+		"dropsOwnThinking",
 		"lastMessageTimestamp",
 		"historyRewriteAt",
 		"cacheRead",

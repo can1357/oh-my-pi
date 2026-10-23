@@ -1263,6 +1263,13 @@ export interface ContextSnapshot {
 	 */
 	compactionEpoch?: number;
 	lastMessageTimestamp?: number;
+	/**
+	 * Whether this snapshot's chat-completions request dropped the model's own
+	 * prior thinking, so `promptTokens` excludes it. A later request in the
+	 * opposite state reprices the anchored prefix by that thinking. Absent on
+	 * other wires and on snapshots recorded before it existed.
+	 */
+	dropsOwnThinking?: boolean;
 }
 
 export interface AssistantMessage {

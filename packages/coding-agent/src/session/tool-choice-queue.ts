@@ -103,6 +103,8 @@ export class ToolChoiceQueue {
 	 * soft-tool-requirement lifecycle drives resolution without this queue forcing `tool_choice`.
 	 */
 	#pendingInvokers: PendingInvoker[] = [];
+	/** Yields advanced by {@link peekToolChoice} and not yet served by {@link nextToolChoice}. */
+	#peeked = new WeakMap<ToolChoiceDirective, IteratorResult<ToolChoice>>();
 
 	// ── Push ──────────────────────────────────────────────────────────────
 
@@ -140,12 +142,36 @@ export class ToolChoiceQueue {
 	nextToolChoice(): ToolChoice | undefined {
 		while (this.#queue.length > 0) {
 			const head = this.#queue[0]!;
-			const result = head.generator.next();
+			const result = this.#peeked.get(head) ?? head.generator.next();
+			this.#peeked.delete(head);
 			if (result.done) {
 				this.#queue.shift();
 				continue;
 			}
 			this.#inFlight = { directive: head, yielded: result.value, invoked: false };
+			return result.value;
+		}
+		return undefined;
+	}
+
+	/**
+	 * The yield {@link nextToolChoice} would return next, without serving it:
+	 * nothing goes in flight and the same value is served later. Lets callers
+	 * size a request (e.g. pre-prompt compaction) for the forced choice it will
+	 * carry.
+	 */
+	peekToolChoice(): ToolChoice | undefined {
+		while (this.#queue.length > 0) {
+			const head = this.#queue[0]!;
+			let result = this.#peeked.get(head);
+			if (result === undefined) {
+				result = head.generator.next();
+				this.#peeked.set(head, result);
+			}
+			if (result.done) {
+				this.#queue.shift();
+				continue;
+			}
 			return result.value;
 		}
 		return undefined;

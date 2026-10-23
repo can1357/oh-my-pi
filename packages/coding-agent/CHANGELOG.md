@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Fixed auto-compaction firing early on OpenAI-compatible chat-completions models that don't replay past reasoning, including before a queued forced tool call and after switching thinking off ([#15797](https://github.com/can1357/oh-my-pi/issues/15797), [#16498](https://github.com/can1357/oh-my-pi/pull/16498) by [@ghisguth](https://github.com/ghisguth))
+
 ### Added
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
