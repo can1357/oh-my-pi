@@ -314,44 +314,9 @@ async function handleUpgrade(
 	args: string[],
 	flags: PluginCommandArgs["flags"],
 ): Promise<void> {
-	let pluginId = args[0];
 	const manager = await makeMarketplaceManager();
-	// Marketplace IDs are `name@marketplace`; anything else is either a bare
-	// marketplace plugin name or an npm/git-installed plugin (e.g. `ida-mcp`
-	// from `github:HexRaysSA/ida-mcp#latest`, or a scoped `@scope/pkg`).
-	if (pluginId && !parsePluginId(pluginId)) {
-		const bareName = pluginId;
-		const candidates = (await manager.listInstalledPlugins())
-			.map(p => p.id)
-			.filter(id => id.slice(0, id.lastIndexOf("@")) === bareName);
-		const uniqueCandidates = [...new Set(candidates)];
-		if (uniqueCandidates.length > 1) {
-			console.error(
-				chalk.red(
-					`${bareName} is installed from ${uniqueCandidates.length} marketplaces. Qualify it: ${uniqueCandidates.join(", ")}`,
-				),
-			);
-			process.exit(1);
-		}
-		if (uniqueCandidates.length === 1) {
-			pluginId = uniqueCandidates[0] as string;
-		} else {
-			await upgradePackagePlugin(pluginManager, bareName, flags);
-			return;
-		}
-	}
 	try {
-		if (pluginId) {
-			if (flags.scope) {
-				const result = await manager.upgradePlugin(pluginId, flags.scope);
-				console.log(chalk.green(`Upgraded ${pluginId} (${flags.scope}) to ${result.version}`));
-			} else {
-				const entries = await manager.upgradePluginAcrossScopes(pluginId);
-				for (const entry of entries) {
-					console.log(chalk.green(`Upgraded ${pluginId} (${entry.scope}) to ${entry.version}`));
-				}
-			}
-		} else {
+		if (args.length === 0) {
 			if (flags.scope) {
 				console.error(
 					chalk.yellow(
@@ -365,6 +330,43 @@ async function handleUpgrade(
 			} else {
 				for (const r of results) {
 					console.log(chalk.green(`  ${r.pluginId} (${r.scope}): ${r.from} -> ${r.to}`));
+				}
+			}
+			return;
+		}
+
+		for (let pluginId of args) {
+			// Marketplace IDs are `name@marketplace`; anything else is either a bare
+			// marketplace plugin name or an npm/git-installed plugin (e.g. `ida-mcp`
+			// from `github:HexRaysSA/ida-mcp#latest`, or a scoped `@scope/pkg`).
+			if (!parsePluginId(pluginId)) {
+				const bareName = pluginId;
+				const candidates = (await manager.listInstalledPlugins())
+					.map(p => p.id)
+					.filter(id => id.slice(0, id.lastIndexOf("@")) === bareName);
+				const uniqueCandidates = [...new Set(candidates)];
+				if (uniqueCandidates.length > 1) {
+					console.error(
+						chalk.red(
+							`${bareName} is installed from ${uniqueCandidates.length} marketplaces. Qualify it: ${uniqueCandidates.join(", ")}`,
+						),
+					);
+					process.exit(1);
+				}
+				if (uniqueCandidates.length === 1) {
+					pluginId = uniqueCandidates[0];
+				} else {
+					await upgradePackagePlugin(pluginManager, bareName, flags);
+					continue;
+				}
+			}
+			if (flags.scope) {
+				const result = await manager.upgradePlugin(pluginId, flags.scope);
+				console.log(chalk.green(`Upgraded ${pluginId} (${flags.scope}) to ${result.version}`));
+			} else {
+				const entries = await manager.upgradePluginAcrossScopes(pluginId);
+				for (const entry of entries) {
+					console.log(chalk.green(`Upgraded ${pluginId} (${entry.scope}) to ${entry.version}`));
 				}
 			}
 		}
