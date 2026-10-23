@@ -68,6 +68,9 @@ export type CommittableAsideMessage = AgentMessage & {
  */
 export type AsideMessage = CommittableAsideMessage | (() => CommittableAsideMessage | null);
 
+/** Where the loop polls asides: after a tool batch (`"work"`) or after a turn without tool calls (`"stop"`). */
+export type AsideBoundary = "work" | "stop";
+
 export interface AgentTurnEndContext {
 	/** Assistant/user message that just completed this turn boundary. */
 	message: AgentMessage;
@@ -368,8 +371,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * should reach the model between requests without waiting for the agent to
 	 * fully stop. Returned messages are appended to the context with normal
 	 * message events and keep the loop running so the model can react.
+	 *
+	 * `boundary` is `"work"` after a tool batch and `"stop"` when the model ended
+	 * its turn without tool calls; a provider may hold back messages that should
+	 * not extend a finished turn.
 	 */
-	getAsideMessages?: () => Promise<AsideMessage[]>;
+	getAsideMessages?: (boundary: AsideBoundary) => Promise<AsideMessage[]>;
 	/**
 	 * Hook fired right before the loop would exit.
 	 *
