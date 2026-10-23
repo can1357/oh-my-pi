@@ -1923,6 +1923,74 @@ describe("lsp regressions", () => {
 		}, 15_000);
 	}
 
+	it("refreshes externally edited open dependencies before importer diagnostics", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-open-dependency-");
+		const cwd = tempDir.path();
+		const dependency = path.join(cwd, "types.ts");
+		const importer = path.join(cwd, "consumer.ts");
+		const dependencyUri = fileToUri(dependency);
+		const missingExport: Diagnostic = {
+			message: "Module has no exported member 'Added'.",
+			severity: 1,
+			code: 2305,
+			source: "ts",
+			range: { start: { line: 0, character: 14 }, end: { line: 0, character: 19 } },
+		};
+		let hasExport = false;
+		try {
+			await Bun.write(dependency, "export type Existing = boolean;\n");
+			await Bun.write(importer, 'import type { Added } from "./types.js";\nexport const value: Added = true;\n');
+			installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { diagnosticProvider: true } } });
+				} else if (documentUri(message.params) === dependencyUri) {
+					if (message.method === "textDocument/didOpen") {
+						const doc = piUtils.isRecord(message.params) ? message.params.textDocument : undefined;
+						hasExport = piUtils.isRecord(doc) && typeof doc.text === "string" && doc.text.includes("type Added");
+					} else if (message.method === "textDocument/didChange") {
+						const changes = piUtils.isRecord(message.params) ? message.params.contentChanges : undefined;
+						const change = Array.isArray(changes) ? changes[0] : undefined;
+						hasExport =
+							piUtils.isRecord(change) && typeof change.text === "string" && change.text.includes("type Added");
+					}
+				}
+				if (message.method === "textDocument/diagnostic") {
+					server.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { kind: "full", items: hasExport ? [] : [missingExport] },
+					});
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+			const serverConfig: ServerConfig = { command: "fake-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			configCache.set(cwd, { servers: { "fake-lsp": serverConfig } });
+			const client = await lspClient.getOrCreateClient(serverConfig, cwd);
+			await lspClient.ensureFileOpen(client, dependency);
+			const tool = new LspTool(makeLspSession(cwd));
+			const diagnostics = async () =>
+				textResult(await tool.execute("dependency-diags", { action: "diagnostics", file: importer, timeout: 20 }));
+
+			expect(await diagnostics()).toContain("no exported member 'Added'");
+			await Bun.write(dependency, "export type Existing = boolean;\nexport type Added = boolean;\n");
+			expect(await diagnostics()).toBe("OK");
+
+			await Bun.write(dependency, "export type Existing = boolean;\n");
+			await lspClient.reconcileFileFromDisk(client, dependency);
+			expect(await diagnostics()).toContain("no exported member 'Added'");
+			await Bun.write(dependency, "export type Existing = boolean;\nexport type Added = boolean;\n");
+			const write = createLspWritethrough(cwd, { enableDiagnostics: true });
+			expect((await write(importer, await Bun.file(importer).text())).diagnostics?.summary).toBe("OK");
+		} finally {
+			configCache.delete(cwd);
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	}, 30_000);
+
 	for (const scenario of [
 		{
 			name: "rejects a failed document pull when no publish follows (#10035)",

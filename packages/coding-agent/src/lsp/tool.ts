@@ -364,6 +364,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							await waitForProjectLoaded(client, signal);
 							throwIfAborted(signal);
 						}
+						// Open dependencies can hold pre-edit overlays after external disk writes.
+						// Reconcile them before the importer's diagnostics are computed.
+						await reconcileOpenFilesFromDisk(client, signal);
 						const minVersion = client.diagnosticsVersion;
 						await refreshFile(client, resolved, signal);
 						const expectedDocumentVersion = client.openFiles.get(uri)?.version;
