@@ -109,9 +109,10 @@ interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
 	 */
 	ownerSessionId?: string;
 	/**
-	 * Opt out of settle-freeze and idle-close reaping. Recorded on the tab
-	 * when created (never on reuse), mirroring `ownerSessionId`: keeping a
-	 * tab live across turns is the creator's explicit decision.
+	 * Opt out of settle-freeze and idle-close reaping, and keep a page omp
+	 * opened in the user's own browser open when the session ends. Recorded
+	 * on the tab when created (never on reuse), mirroring `ownerSessionId`:
+	 * keeping a tab live across turns is the creator's explicit decision.
 	 */
 	persist?: boolean;
 	/** Wall-clock (`Date.now()`) last use: create, reuse, or run start. Drives idle-close. */
@@ -196,9 +197,10 @@ export interface AcquireTabOptions {
 	 */
 	ownerSessionId?: string;
 	/**
-	 * Keep the tab live across turn settle and idle close. Recorded on the
-	 * tab when created (never on reuse) so a later caller cannot silently
-	 * extend another session's tab lifetime.
+	 * Keep the tab live across turn settle and idle close, and open in the
+	 * user's own browser after the session ends. Recorded on the tab when
+	 * created (never on reuse) so a later caller cannot silently extend
+	 * another session's tab lifetime.
 	 */
 	persist?: boolean;
 }
@@ -219,6 +221,8 @@ export interface RunInTabOptions {
 
 export interface ReleaseTabOptions {
 	kill?: boolean;
+	/** Leave a page omp opened open in its browser and let go of it, instead of closing it. */
+	keepPage?: boolean;
 	/** Maximum time for each asynchronous cleanup resource before close fails with diagnostics. */
 	timeoutMs?: number;
 }
@@ -1354,9 +1358,11 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 	}
 	let cleanupError: unknown;
 	let targetCloseFailed = false;
+	// A page kept open stays the user's: its staged uploads wait for the sweep like a borrowed page's.
+	const closesPage = tab.ownsPage && !opts.keepPage;
 	if (wasAlive && !(tab.worker as ExitTrackedWorker)[kWorkerExited]) {
 		try {
-			tab.worker.send({ type: "close" });
+			tab.worker.send({ type: "close", keepPage: opts.keepPage });
 			await waitForClosed(tab);
 		} catch {
 			// The close by id below confirms an owned page is gone either way.
@@ -1364,12 +1370,12 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 	}
 	await tab.worker.terminate().catch(() => undefined);
 	// omp closes the pages it owns, and with them goes the last reader of their staged uploads.
-	if (tab.ownsPage) await removeUploadStaging(tab.uploadDir);
+	if (closesPage) await removeUploadStaging(tab.uploadDir);
 	// Close a live tab's owned page by id as well, which confirms it is gone: a worker's own
 	// close can fail and still report `closed` (its CDP socket broke), and the relay retracts a
 	// target whose debugger the user dismissed, so the worker cannot close it at all. A dead
 	// tab's page was closed by the teardown that killed it.
-	if (tab.ownsPage && wasAlive) {
+	if (closesPage && wasAlive) {
 		try {
 			// `false` is "not confirmed closed" (the CDP session could not be
 			// created, or `Target.getTargets` failed) — the same unconfirmed
@@ -1447,13 +1453,18 @@ export async function dropHeadlessTabs(): Promise<void> {
  * session opened will not yank teardown responsibility away from the
  * creator. Tabs opened with no owner (e.g. from an SDK caller that doesn't
  * identify a session) are skipped and must be released explicitly.
+ *
+ * A `persist` tab in the user's own browser (relay or connected), which
+ * outlives omp, is let go instead of closed: the page stays open for the
+ * user. Browsers omp launched end with omp, so their persist tabs still close.
  */
 export async function releaseTabsForOwner(ownerId: string, opts: ReleaseTabOptions = {}): Promise<number> {
 	if (!ownerId) return 0;
-	const names = [...tabs.values()].filter(tab => tab.ownerSessionId === ownerId).map(tab => tab.name);
+	const owned = [...tabs.values()].filter(tab => tab.ownerSessionId === ownerId);
 	let count = 0;
-	for (const name of names) {
-		if (await releaseTab(name, opts)) count++;
+	for (const tab of owned) {
+		const keepPage = tab.persist === true && (tab.kindTag === "relay" || tab.kindTag === "connected");
+		if (await releaseTab(tab.name, { ...opts, keepPage })) count++;
 	}
 	return count;
 }

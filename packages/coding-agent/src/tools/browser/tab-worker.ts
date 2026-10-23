@@ -1709,7 +1709,7 @@ export class WorkerCore {
 				this.#deliverToolReply(msg.id, msg.reply);
 				return;
 			case "close":
-				await this.#close();
+				await this.#close(msg.keepPage ?? false);
 				return;
 		}
 	}
@@ -3576,7 +3576,7 @@ export class WorkerCore {
 		return true;
 	}
 
-	async #close(): Promise<void> {
+	async #close(keepPage: boolean): Promise<void> {
 		if (!this.#stop()) return;
 		this.#clearElementCache();
 		const page = this.#page;
@@ -3596,7 +3596,7 @@ export class WorkerCore {
 		await this.#certificateOverride?.detach().catch(() => undefined);
 		this.#certificateOverride = undefined;
 		this.#emulation?.dispose();
-		if (this.#ownsPage && page && !page.isClosed()) await page.close().catch(() => undefined);
+		if (this.#ownsPage && !keepPage && page && !page.isClosed()) await page.close().catch(() => undefined);
 		if (this.#browser?.connected) this.#browser.disconnect();
 		this.#transport.send({ type: "closed" });
 		this.#transport.close();
