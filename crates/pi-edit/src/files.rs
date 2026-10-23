@@ -22,7 +22,7 @@ use std::{
 
 use crate::{
 	engine::{FileOp, Resolved},
-	error::{EditError, EditResult},
+	error::{EditError, EditResult, Rejection},
 	notebook,
 	path_policy::{PathPolicy, UrlResolution, canonical_key},
 	text::{LineEnding, detect_line_ending, normalize_to_lf, restore_line_endings, strip_bom},
@@ -294,9 +294,12 @@ impl FileSource for FileCache {
 
 	fn read(&mut self, authored: &str) -> EditResult<Arc<FileRead>> {
 		let resolved = self.resolve(authored, true)?;
-		self
-			.read_resolved(&resolved)?
-			.ok_or_else(|| EditError::apply(format!("File not found: {}", resolved.display)))
+		self.read_resolved(&resolved)?.ok_or_else(|| {
+			EditError::rejected(
+				Rejection::FileNotFound,
+				format!("File not found: {}", resolved.display),
+			)
+		})
 	}
 
 	fn try_read(&mut self, resolved: &Resolved) -> EditResult<Option<Arc<FileRead>>> {

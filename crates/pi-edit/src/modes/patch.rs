@@ -12,7 +12,7 @@ use crate::{
 		EditMode, FileOp, FileOpIntent, HeaderKind, Inspection, ModeEngine, PreviewFile, Resolved,
 		StagedFile,
 	},
-	error::EditError,
+	error::{EditError, Rejection},
 	files::{FileRead, FileSource, persist_new},
 	fuzzy::{
 		ContextLineResult, ContextMatchStrategy, FindMatchOptions, SequenceMatchStrategy,
@@ -1541,7 +1541,10 @@ fn apply_entry(
 					use_new_encoding: false,
 					undecodable:      false,
 				}),
-				Ok(None) => Err(EditError::apply(format!("File not found: {}", resolved.display))),
+				Ok(None) => Err(EditError::rejected(
+					Rejection::FileNotFound,
+					format!("File not found: {}", resolved.display),
+				)),
 				// Deleting needs existence, not text: the failed read already
 				// proved the file exists.
 				Err(err) if err.is_invalid_utf8() => Ok(AppliedEntry {
@@ -1800,14 +1803,20 @@ impl ModeEngine for PatchEngine {
 				},
 				Operation::Delete => {
 					if !exists {
-						return Err(EditError::apply(format!("File not found: {path}")));
+						return Err(EditError::rejected(
+							Rejection::FileNotFound,
+							format!("File not found: {path}"),
+						));
 					}
 					exists = false;
 					final_op = FileOp::Delete;
 				},
 				Operation::Update => {
 					if !exists {
-						return Err(EditError::apply(format!("File not found: {path}")));
+						return Err(EditError::rejected(
+							Rejection::FileNotFound,
+							format!("File not found: {path}"),
+						));
 					}
 					let diff = input
 						.diff

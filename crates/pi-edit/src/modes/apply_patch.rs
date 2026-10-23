@@ -25,7 +25,6 @@ const ADD_FILE_MARKER: &str = "*** Add File: ";
 const DELETE_FILE_MARKER: &str = "*** Delete File: ";
 const UPDATE_FILE_MARKER: &str = "*** Update File: ";
 const MOVE_TO_MARKER: &str = "*** Move to: ";
-const ATOMICITY_NOTICE: &str = "No files were modified — sections apply atomically.";
 
 static PATH_NOISE_FILE: LazyLock<Regex> = LazyLock::new(|| {
 	Regex::new(r"(?i)^\s*\*{3}\s*(?:Add|Update|Delete)\s+File\s*:\s*")
@@ -256,7 +255,7 @@ fn distinct_paths(entries: &[ApplyPatchEntry]) -> usize {
 /// stays typed so the host can resolve it and retry.
 fn wrap_file_error(path: &str, error: EditError, multiple_files: bool) -> EditError {
 	if multiple_files && !matches!(error, EditError::UnresolvedUrl(_)) {
-		EditError::apply(format!("[{path}]: {error}\n{ATOMICITY_NOTICE}"))
+		EditError::InFile { path: path.to_owned(), source: Box::new(error) }
 	} else {
 		error
 	}

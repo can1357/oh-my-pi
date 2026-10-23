@@ -125,6 +125,21 @@ describe("EditTool details", () => {
 		expect(details.perFileResults?.[1]?.diff).toContain("+1|B");
 	});
 
+	test("a refused edit carries the engine's error kind beside the message", async () => {
+		const session = makeSession(tempDir);
+		const absolute = path.join(tempDir, "a.ts");
+		await Bun.write(absolute, "a\n");
+		const tag = getEditStore(session).recordSnapshot(absolute, "a\n");
+		await Bun.write(absolute, "changed\n");
+
+		const result = await new EditTool(session, "hashline").execute("hashline-stale", {
+			input: `[a.ts#${tag}]\nPUT 1-1:\n+A`,
+		});
+		expect(result.isError).toBe(true);
+		expect(result.details).toEqual({ diff: "", errorKind: "stale_tag" });
+		expect(result.content[0]).toMatchObject({ text: expect.stringContaining("file changed between read and edit") });
+	});
+
 	test("preserves diff metadata while native snapshot pruning removes oversized texts", async () => {
 		const before = `${"line\n".repeat(9_000)}old\n`;
 		await Bun.write(path.join(tempDir, "large.txt"), before);

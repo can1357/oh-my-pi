@@ -615,6 +615,16 @@ export class CommandController {
 		info += `${theme.fg("dim", "Assistant:")} ${stats.assistantMessages}\n`;
 		info += `${theme.fg("dim", "Tool Calls:")} ${stats.toolCalls}\n`;
 		info += `${theme.fg("dim", "Tool Results:")} ${stats.toolResults}\n`;
+		if (stats.editRejections !== undefined) {
+			const kinds = Object.entries(stats.editRejections).sort(
+				([aKind, aCount], [bKind, bCount]) => bCount - aCount || aKind.localeCompare(bKind),
+			);
+			const total = kinds.reduce((sum, [, count]) => sum + count, 0);
+			const breakdown = kinds
+				.map(([kind, count]) => `${replaceTabs(sanitizeText(kind.replaceAll("_", " ")))} ${count}`)
+				.join(", ");
+			info += `${theme.fg("dim", "Edit Rejections:")} ${total} ${theme.fg("dim", `(${breakdown})`)}\n`;
+		}
 		info += `${theme.fg("dim", "Total:")} ${stats.totalMessages}\n\n`;
 		// Append-only context
 		{

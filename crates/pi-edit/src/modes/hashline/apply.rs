@@ -20,7 +20,10 @@ use super::{
 	syntax::{enclosing_boundaries, node_chain, parses_cleanly},
 	types::{Anchor, ApplyResult, BlockResolution, Cursor, Edit},
 };
-use crate::{error::EditError, store::Clipboard};
+use crate::{
+	error::{EditError, Rejection},
+	store::Clipboard,
+};
 
 /// A line containing only closing delimiters and an optional trailing
 /// separator.
@@ -77,11 +80,10 @@ fn validate_bounds(edits: &[Edit], lines: &[&str]) -> Result<(), EditError> {
 	for edit in edits {
 		for anchor in anchors(edit) {
 			if anchor.line < 1 || anchor.line as usize > lines.len() {
-				return Err(EditError::apply(format!(
-					"Line {} does not exist (file has {} lines)",
-					anchor.line,
-					lines.len()
-				)));
+				return Err(EditError::rejected(
+					Rejection::OutOfRange,
+					format!("Line {} does not exist (file has {} lines)", anchor.line, lines.len()),
+				));
 			}
 		}
 	}
@@ -654,7 +656,7 @@ fn splice_variants(
 type RepairedEdits = (Vec<Edit>, Vec<String>);
 
 fn undecided_error(start: u32, end: u32, reason: Undecided) -> EditError {
-	EditError::apply(match reason {
+	EditError::rejected(Rejection::AmbiguousBoundary, match reason {
 		Undecided::Placement => ambiguous_boundary_placement_message(start, end),
 		Undecided::TrailingComma => trailing_comma_replacement_message(start, end),
 	})
@@ -1172,12 +1174,15 @@ pub fn apply_edits(
 	};
 	if authored_parses {
 		if let Some(ambiguity) = ambiguities.first() {
-			return Err(EditError::apply(ambiguous_boundary_echo_message(
-				ambiguity.start,
-				ambiguity.end,
-				ambiguity.side,
-				ambiguity.count,
-			)));
+			return Err(EditError::rejected(
+				Rejection::AmbiguousBoundary,
+				ambiguous_boundary_echo_message(
+					ambiguity.start,
+					ambiguity.end,
+					ambiguity.side,
+					ambiguity.count,
+				),
+			));
 		}
 		return Ok(finish(authored, leading));
 	}
@@ -1191,12 +1196,15 @@ pub fn apply_edits(
 		}
 	}
 	if let Some(ambiguity) = ambiguities.first() {
-		return Err(EditError::apply(ambiguous_boundary_echo_message(
-			ambiguity.start,
-			ambiguity.end,
-			ambiguity.side,
-			ambiguity.count,
-		)));
+		return Err(EditError::rejected(
+			Rejection::AmbiguousBoundary,
+			ambiguous_boundary_echo_message(
+				ambiguity.start,
+				ambiguity.end,
+				ambiguity.side,
+				ambiguity.count,
+			),
+		));
 	}
 	Ok(finish(authored, leading))
 }

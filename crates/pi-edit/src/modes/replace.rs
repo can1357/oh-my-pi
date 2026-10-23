@@ -9,7 +9,7 @@
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
 	engine::{EditMode, FileOp, Inspection, ModeEngine, PreviewFile, StagedFile},
-	error::EditError,
+	error::{EditError, Rejection},
 	files::FileSource,
 	fuzzy::{
 		ReplaceOutcome, ReplaceResult, format_match_error, format_occurrence_error, replace_text,
@@ -213,9 +213,10 @@ impl ModeEngine for ReplaceEngine {
 		}
 		let after = after.unwrap_or_else(|| read.text.clone());
 		if read.text == after {
-			return Err(EditError::apply(format!(
-				"Edits to {display} resulted in no changes being made."
-			)));
+			return Err(EditError::rejected(
+				Rejection::NoChange,
+				format!("Edits to {display} resulted in no changes being made."),
+			));
 		}
 
 		let persisted = read.persist(&after)?;

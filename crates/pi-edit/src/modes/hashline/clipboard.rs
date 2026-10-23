@@ -10,7 +10,10 @@ use super::{
 	},
 	types::{Anchor, Cursor, Edit, PasteTarget},
 };
-use crate::{error::EditError, store::Clipboard};
+use crate::{
+	error::{EditError, Rejection},
+	store::Clipboard,
+};
 
 fn describe_cut(edit: &Edit) -> String {
 	let Edit::Cut { range, register, .. } = edit else {
@@ -110,11 +113,14 @@ fn write_register(
 		unreachable!("register write requires a cut")
 	};
 	if range.start.line == 0 || range.end.line as usize > file_lines.len() {
-		return Err(EditError::apply(format!(
-			"line {line_num}: `{}` is out of range (file has {} lines).",
-			describe_cut(edit),
-			file_lines.len()
-		)));
+		return Err(EditError::rejected(
+			Rejection::OutOfRange,
+			format!(
+				"line {line_num}: `{}` is out of range (file has {} lines).",
+				describe_cut(edit),
+				file_lines.len()
+			),
+		));
 	}
 	let captured: Vec<String> = file_lines[(range.start.line - 1) as usize..range.end.line as usize]
 		.iter()
@@ -183,13 +189,16 @@ pub fn resolve_clipboard_edits<'e>(
 							let register = register
 								.as_ref()
 								.map_or_else(String::new, |value| format!(" @{value}"));
-							return Err(EditError::apply(format!(
-								"line {line_num}: `PUT {}.={}{}` is out of range (file has {} lines).",
-								range.start.line,
-								range.end.line,
-								register,
-								file_lines.len()
-							)));
+							return Err(EditError::rejected(
+								Rejection::OutOfRange,
+								format!(
+									"line {line_num}: `PUT {}.={}{}` is out of range (file has {} lines).",
+									range.start.line,
+									range.end.line,
+									register,
+									file_lines.len()
+								),
+							));
 						}
 						let cursor = Cursor::BeforeAnchor(Anchor { line: range.start.line });
 						for text in lines {

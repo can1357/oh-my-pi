@@ -8,7 +8,7 @@ use super::{
 	format::HL_FILE_HASH_EXAMPLES,
 	messages::{format_anchored_context, json_quote},
 };
-use crate::error::EditError;
+use crate::error::{EditError, Rejection};
 
 static LINE_REF_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^\s*[>+\-*]*\s*(\d+)(?::.*)?\s*$").expect("valid regex"));
@@ -138,7 +138,16 @@ pub fn format_header_only_message(path: &str, actual_file_hash: &str) -> String 
 	)
 }
 
-/// Construct a match failure from mismatch details.
+/// Construct a tag rejection from mismatch details.
 pub fn mismatch_error(details: &MismatchDetails) -> EditError {
-	EditError::matched(format_mismatch_message(details))
+	let reason = if details.hash_recognized {
+		Rejection::StaleTag
+	} else if details.expected_file_hash.is_empty() {
+		Rejection::MissingTag
+	} else if details.tag_origin_paths.is_empty() {
+		Rejection::UnknownTag
+	} else {
+		Rejection::OtherFileTag
+	};
+	EditError::rejected(reason, format_mismatch_message(details))
 }

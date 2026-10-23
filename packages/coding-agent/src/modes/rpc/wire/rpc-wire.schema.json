@@ -3051,6 +3051,14 @@
 						"type": "number"
 					}
 				},
+				"editRejections": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {
+						"type": "number"
+					},
+					"description": "Failed edits by the engine's `errorKind`."
+				},
 				"contextUsage": {
 					"$ref": "#/$defs/ContextUsage"
 				}

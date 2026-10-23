@@ -479,4 +479,15 @@ describe("SessionAnonymizer", () => {
 		// Equal stamps stay comparable after anonymization, so build changes remain visible.
 		expect(at(second, "runtime")).toEqual(at(first, "runtime"));
 	});
+
+	test("keeps an edit's error kind and replaces a value outside the engine's kinds", () => {
+		const anonymizer = new SessionAnonymizer();
+		const result = (errorKind: string) =>
+			anonymizer.entry({
+				type: "message",
+				message: { role: "toolResult", toolName: "edit", isError: true, details: { diff: "", errorKind } },
+			});
+		expect(at(result("unseen_lines"), "message", "details", "errorKind")).toBe("unseen_lines");
+		expect(JSON.stringify(result("customer-acme"))).not.toContain("acme");
+	});
 });

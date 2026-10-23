@@ -640,6 +640,8 @@ export interface SessionStats {
 	sessionFile?: string;
 	credits?: SessionCredits;
 	routedModels?: Record<string, number>;
+	/** Failed edits by the engine's `errorKind`. */
+	editRejections?: Record<string, number>;
 	contextUsage?: ContextUsage;
 }
 

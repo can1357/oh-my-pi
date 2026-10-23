@@ -3291,6 +3291,9 @@ pub struct SessionStats {
 	pub credits: Option<SessionCredits>,
 	#[serde(rename = "routedModels", default, skip_serializing_if = "Option::is_none")]
 	pub routed_models: Option<BTreeMap<String, f64>>,
+	/// Failed edits by the engine's `errorKind`.
+	#[serde(rename = "editRejections", default, skip_serializing_if = "Option::is_none")]
+	pub edit_rejections: Option<BTreeMap<String, f64>>,
 	#[serde(rename = "contextUsage", default, skip_serializing_if = "Option::is_none")]
 	pub context_usage: Option<ContextUsage>,
 }

@@ -23,7 +23,7 @@ use super::{
 	},
 };
 use crate::{
-	error::EditError,
+	error::{EditError, Rejection},
 	fuzzy::{PatternDistance, levenshtein_within},
 	store::{EditStore, payload_hash},
 	text::normalize_unicode,
@@ -2263,7 +2263,7 @@ fn no_op_error(
 		)
 	});
 	let hint = hint.map_or(String::new(), |hint| format!("\n{hint}"));
-	EditError::matched(format!("{base}{grounding}{hint}"))
+	EditError::rejected(Rejection::NoChange, format!("{base}{grounding}{hint}"))
 }
 
 fn reconcile_overlap(
@@ -2733,11 +2733,19 @@ pub fn apply_sloppy(
 	mut context: ApplyContext<'_>,
 ) -> Result<String, EditError> {
 	apply_operations(content, input, &mut context).map_err(|error| {
+		let reason = match &error {
+			EditError::Rejected { reason, .. } => Some(*reason),
+			_ => None,
+		};
 		let message = error.to_string();
-		EditError::matched(if message.contains(ATOMICITY_NOTICE) {
+		let message = if message.contains(ATOMICITY_NOTICE) {
 			message
 		} else {
 			format!("{ATOMICITY_NOTICE}\n{message}")
-		})
+		};
+		match reason {
+			Some(reason) => EditError::rejected(reason, message),
+			None => EditError::matched(message),
+		}
 	})
 }

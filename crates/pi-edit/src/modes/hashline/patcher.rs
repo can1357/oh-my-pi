@@ -25,7 +25,7 @@ use super::{
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
 	engine::{FileOp as EngineFileOp, HeaderKind, Resolved, StagedFile},
-	error::EditError,
+	error::{EditError, Rejection},
 	files::FileSource,
 	store::{Clipboard, EditStore, Snapshot, file_hash, payload_hash},
 };
@@ -152,12 +152,14 @@ pub fn header_only_error(path: &str, files: &mut dyn FileSource) -> EditError {
 		Err(err) => return err,
 	};
 	match files.try_read(&resolved) {
-		Ok(Some(read)) => {
-			EditError::matched(format_header_only_message(path, &file_hash(&read.text)))
-		},
-		Ok(None) => EditError::apply(format!(
-			"File not found: {path}. Use the write tool to create new files."
-		)),
+		Ok(Some(read)) => EditError::rejected(
+			Rejection::HeaderOnly,
+			format_header_only_message(path, &file_hash(&read.text)),
+		),
+		Ok(None) => EditError::rejected(
+			Rejection::FileNotFound,
+			format!("File not found: {path}. Use the write tool to create new files."),
+		),
 		Err(err) => err,
 	}
 }
@@ -443,7 +445,10 @@ fn assert_seen_lines(
 		if wide.is_empty() {
 			return Ok(());
 		}
-		return Err(EditError::matched(unverified_wide_lines_message(section.path.as_str(), &wide)));
+		return Err(EditError::rejected(
+			Rejection::UnseenLines,
+			unverified_wide_lines_message(section.path.as_str(), &wide),
+		));
 	};
 	let Some(seen) = snapshot.seen_lines else {
 		return Ok(());
@@ -481,7 +486,10 @@ fn assert_seen_lines(
 			continue;
 		};
 		if value.chars().count() > SEEN_LINE_REVEAL_MAX_COLUMNS {
-			return Err(EditError::matched(wide_unseen_lines_message(section.path.as_str(), &unseen)));
+			return Err(EditError::rejected(
+				Rejection::UnseenLines,
+				wide_unseen_lines_message(section.path.as_str(), &unseen),
+			));
 		}
 	}
 	for &line in unseen.iter().take(SEEN_LINE_REVEAL_CAP) {
@@ -502,12 +510,13 @@ fn assert_seen_lines(
 			&revealed.iter().map(|item| item.line).collect::<Vec<_>>(),
 		);
 	}
-	Err(EditError::matched(unseen_lines_message(
-		section.path.as_str(),
-		&unseen,
-		expected,
-		&UnseenLinesReveal { lines: revealed, truncated },
-	)))
+	Err(EditError::rejected(
+		Rejection::UnseenLines,
+		unseen_lines_message(section.path.as_str(), &unseen, expected, &UnseenLinesReveal {
+			lines: revealed,
+			truncated,
+		}),
+	))
 }
 
 /// `seen_line_guard` enables the displayed-line guard with its column cap
@@ -734,10 +743,10 @@ pub fn stage_patch(
 				)?);
 				continue;
 			}
-			return Err(EditError::apply(format!(
-				"File not found: {}. Use the write tool to create new files.",
-				section.path
-			)));
+			return Err(EditError::rejected(
+				Rejection::FileNotFound,
+				format!("File not found: {}. Use the write tool to create new files.", section.path),
+			));
 		};
 		// A section with no tag (missing, or a placeholder like `#AUTO`) never
 		// applies; like an unknown tag, it gets the current tag and context.
@@ -824,7 +833,10 @@ pub fn stage_patch(
 		if engine_op == EngineFileOp::Noop && patch.sections.len() == 1 {
 			let (count, escalate) = store.record_noop(&read.canonical, payload_hash(raw_input));
 			if escalate {
-				return Err(EditError::apply(no_change_loop_diagnostic(&original.path, count)));
+				return Err(EditError::rejected(
+					Rejection::NoChange,
+					no_change_loop_diagnostic(&original.path, count),
+				));
 			}
 			item.text_override = Some(no_change_diagnostic(&original.path));
 		}
@@ -835,11 +847,14 @@ pub fn stage_patch(
 	{
 		let canonical = crate::path_policy::canonical_key(&item.absolute);
 		let (count, escalate) = store.record_noop(&canonical, payload_hash(raw_input));
-		return Err(EditError::apply(if escalate {
-			no_change_loop_diagnostic(&item.display, count)
-		} else {
-			no_change_diagnostic(&item.display)
-		}));
+		return Err(EditError::rejected(
+			Rejection::NoChange,
+			if escalate {
+				no_change_loop_diagnostic(&item.display, count)
+			} else {
+				no_change_diagnostic(&item.display)
+			},
+		));
 	}
 	Ok(staged)
 }

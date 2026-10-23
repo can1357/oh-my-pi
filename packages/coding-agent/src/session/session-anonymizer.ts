@@ -12,6 +12,7 @@
  * line and file it processes. Path segments and placeholders share the index space:
  * `name: "Probe"` → `PLACEHOLDER_7` and `agent://Probe` → `agent://seg7`.
  */
+import { editErrorKinds } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { getBundledAgentsMap } from "../task/agents";
 import { BUILTIN_TOOL_NAMES, isMCPToolName } from "../tools/builtin-names";
@@ -244,6 +245,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"server",
 		"customWireName",
 		"visibility",
+		"errorKind",
 	]),
 	...fields("identity", [
 		"api",
@@ -560,6 +562,7 @@ const TOOL_ENUM_VALUES: Record<string, ReadonlySet<string>> = {
 	contentType: MIME_TYPES,
 	mimeType: MIME_TYPES,
 	detail: new Set(["auto", "low", "high", "original"]),
+	errorKind: new Set(editErrorKinds()),
 };
 
 /** Built-in tool argument keys holding free-form structures (env maps, schemas, structured output). */
