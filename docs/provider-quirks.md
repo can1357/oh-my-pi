@@ -558,6 +558,7 @@ Cursor's integration in `packages/ai` operates over an HTTP/2 Connect RPC transp
   - Returns `"cursor:max-mode-v3"` to ensure context window cache invalidation.
 - **Model Discovery (`packages/catalog/src/discovery/cursor.ts`)**:
   - `fetchCursorUsableModels` calls `GetUsableModels` (`/agent.v1.AgentService/GetUsableModels`) over Connect RPC.
+  - `AvailableModels` (`/aiserver.v1.AiService/AvailableModels`) supplies the rich model list. `GetUsableModels` gates which of a model's variants are routed, but a model no usable row covers is kept whole (it lags `AvailableModels` for new SKUs the IDE already enables, e.g. `glm-5p3`). A failed `AvailableModels` call is logged and the `GetUsableModels` list is used alone.
   - Sets `cursorMaxMode` from `details.maxMode`, assigns `api: "cursor-agent"`, maps 1M max-mode vs 200k default context windows, and defaults `maxTokens` to 64,000.
   - Dynamic discovery merges with bundled reference models from `models.json`.
 

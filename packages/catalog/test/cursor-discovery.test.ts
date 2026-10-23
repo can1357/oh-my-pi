@@ -8,6 +8,7 @@ import { buildModel } from "../src/build";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
 import { fetchCursorUsableModels } from "../src/discovery/cursor";
+import { Effort } from "../src/effort";
 import {
 	type AvailableModelsRequest,
 	type AvailableModelsResponse_ModelDetails,
@@ -15,7 +16,9 @@ import {
 	AvailableModelsResponse_ModelDetailsSchema,
 	AvailableModelsResponse_TooltipDataSchema,
 	AvailableModelsResponse_ModelVariantConfigSchema,
+	AvailableModelsResponse_ConfirmationDialogueSchema,
 	AvailableModelsResponseSchema,
+	DegradationStatus,
 	GetDefaultModelForCliResponseSchema,
 	GetUsableModelsResponseSchema,
 	ModelDetailsSchema,
@@ -606,6 +609,222 @@ describe("fetchCursorUsableModels", () => {
 			expect(calculateUncachedInputCost(argon.cost, 1_000_000, argonSwitch)).toBeCloseTo(4 * multiplier, 10);
 		}
 	});
+	it("keeps AvailableModels models the usable list lacks, still honouring per-variant entitlement", async () => {
+		const glm = (name: string, efforts: string[], blocked: string[] = []) =>
+			create(AvailableModelsResponse_ModelDetailsSchema, {
+				name,
+				supportsAgent: true,
+				parameterDefinitions: [
+					create(ModelParameterDefinitionSchema, {
+						id: "reasoning",
+						parameterType: create(ModelParameterDefinition_ModelParameterTypeSchema, {
+							enumParameter: create(ModelParameterDefinition_EnumParameterDefinitionSchema, {
+								values: efforts.map(value =>
+									create(ModelParameterDefinition_EnumParameterDefinition_EnumParameterValueSchema, {
+										value,
+										blockedByAdminAllowlist: blocked.includes(value),
+									}),
+								),
+							}),
+						}),
+					}),
+				],
+				variants: efforts.map(effort =>
+					richVariant(`${name}-${effort}`, { reasoning: effort }, { isDefaultNonMaxConfig: effort === "high" }),
+				),
+			});
+		const usable = create(GetUsableModelsResponseSchema, {
+			models: ["glm-5.2-high", "glm-5.2-max", "admin-blocked-xhigh"].map(modelId =>
+				create(ModelDetailsSchema, { modelId }),
+			),
+		});
+		const available = create(AvailableModelsResponseSchema, {
+			models: [
+				// Usable-covered: only its entitled variants (not `low`) are routed.
+				glm("glm-5.2", ["low", "high", "max"]),
+				// No usable row covers it: kept whole from AvailableModels.
+				glm("glm-5p3-flash", ["low", "high", "max"]),
+				// Usable covers only the admin-blocked variant: still covered, so
+				// the unentitled `low` must not be published.
+				glm("admin-blocked", ["low", "xhigh"], ["xhigh"]),
+			],
+		});
+		const mergedBaseUrl = await startCursorDiscoveryRpcServer({
+			"/agent.v1.AgentService/GetUsableModels": toBinary(GetUsableModelsResponseSchema, usable),
+			"/aiserver.v1.AiService/AvailableModels": toBinary(AvailableModelsResponseSchema, available),
+		});
+
+		const models = await fetchCursorUsableModels({
+			apiKey: "account-token",
+			baseUrl: mergedBaseUrl,
+			timeoutMs: 1_000,
+		});
+		const byId = new Map((models ?? []).map(model => [model.id, model]));
+
+		expect(byId.get("glm-5p3-flash")?.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(byId.get("glm-5.2")?.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
+		expect([...byId.keys()].filter(id => id.startsWith("admin-blocked"))).toEqual([]);
+	});
+
+	it("does not keep uncovered AvailableModels rows the server cannot run through the agent transport", async () => {
+		const row = (name: string, fields: Partial<AvailableModelsResponse_ModelDetails> = {}) =>
+			create(AvailableModelsResponse_ModelDetailsSchema, {
+				name,
+				supportsAgent: true,
+				...fields,
+				variants: [richVariant(`${name}-high`, { reasoning: "high" })],
+			});
+		const usable = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "covered-hidden-high" })],
+		});
+		const available = create(AvailableModelsResponseSchema, {
+			models: [
+				row("plain-uncovered"),
+				row("degraded-uncovered", { degradationStatus: DegradationStatus.DEGRADED }),
+				row("hidden-uncovered", { isHidden: true }),
+				row("admin-disabled-uncovered", { defaultDisabledInAdminAllowlist: true }),
+				row("degradation-disabled-uncovered", { degradationStatus: DegradationStatus.DISABLED }),
+				row("cmdk-only-uncovered", { onlySupportsCmdK: true }),
+				row("cmdk-only-no-agent-flag-uncovered", { supportsAgent: undefined, onlySupportsCmdK: true }),
+				row("no-agent-flag-uncovered", { supportsAgent: undefined }),
+				row("zdr-blocked-uncovered", { reasonForZdrConsentBlock: "Requires data retention" }),
+				// Covered rows are unaffected by the flags: the usable list decides.
+				row("covered-hidden", { isHidden: true }),
+			],
+		});
+		const flaggedBaseUrl = await startCursorDiscoveryRpcServer({
+			"/agent.v1.AgentService/GetUsableModels": toBinary(GetUsableModelsResponseSchema, usable),
+			"/aiserver.v1.AiService/AvailableModels": toBinary(AvailableModelsResponseSchema, available),
+		});
+
+		const models = await fetchCursorUsableModels({
+			apiKey: "account-token",
+			baseUrl: flaggedBaseUrl,
+			timeoutMs: 1_000,
+		});
+
+		expect((models ?? []).map(model => model.id)).toEqual([
+			"covered-hidden",
+			"degraded-uncovered",
+			"plain-uncovered",
+		]);
+	});
+
+	it("keeps submission-blocked and default-admin-blocked variants out of the lag fallback only", async () => {
+		const blocksSubmission = create(AvailableModelsResponse_ConfirmationDialogueSchema, {
+			title: "Confirm",
+			blocksSubmission: true,
+		});
+		const effortVariant = (
+			id: string,
+			effort: string,
+			confirmation?: AvailableModelsResponse_ModelDetails["variants"][number]["confirmationDialogue"],
+		) =>
+			create(AvailableModelsResponse_ModelVariantConfigSchema, {
+				legacySlug: id,
+				confirmationDialogue: confirmation,
+				parameterValues: [create(ModelParameterValueSchema, { id: "reasoning", value: effort })],
+			});
+		const model = (name: string, variants: AvailableModelsResponse_ModelDetails["variants"]) =>
+			create(AvailableModelsResponse_ModelDetailsSchema, { name, supportsAgent: true, variants });
+		const fastDefinition = create(ModelParameterDefinitionSchema, {
+			id: "fast",
+			parameterType: create(ModelParameterDefinition_ModelParameterTypeSchema, {
+				booleanParameter: create(ModelParameterDefinition_BooleanParameterDefinitionSchema, {
+					values: [
+						create(ModelParameterDefinition_BooleanParameterDefinition_BooleanParameterValueSchema, {
+							value: "false",
+						}),
+						create(ModelParameterDefinition_BooleanParameterDefinition_BooleanParameterValueSchema, {
+							value: "true",
+							defaultBlockedInAdminAllowlist: true,
+						}),
+					],
+				}),
+			}),
+		});
+		const usable = create(GetUsableModelsResponseSchema, {
+			models: ["covered-confirm-high", "covered-confirm-max"].map(modelId =>
+				create(ModelDetailsSchema, { modelId }),
+			),
+		});
+		const available = create(AvailableModelsResponseSchema, {
+			models: [
+				model("uncovered-confirm", [
+					effortVariant("uncovered-confirm-high", "high"),
+					effortVariant("uncovered-confirm-max", "max", blocksSubmission),
+				]),
+				model("covered-confirm", [
+					effortVariant("covered-confirm-high", "high"),
+					effortVariant("covered-confirm-max", "max", blocksSubmission),
+				]),
+				model("uncovered-dup", [
+					effortVariant("uncovered-dup-blocked", "high", blocksSubmission),
+					effortVariant("uncovered-dup-high", "high"),
+				]),
+				create(AvailableModelsResponse_ModelDetailsSchema, {
+					name: "uncovered-fast",
+					supportsAgent: true,
+					parameterDefinitions: [fastDefinition],
+					variants: [
+						richVariant("uncovered-fast", { fast: "false" }),
+						richVariant("uncovered-fast-fast", { fast: "true" }),
+					],
+				}),
+			],
+		});
+		const variantBaseUrl = await startCursorDiscoveryRpcServer({
+			"/agent.v1.AgentService/GetUsableModels": toBinary(GetUsableModelsResponseSchema, usable),
+			"/aiserver.v1.AiService/AvailableModels": toBinary(AvailableModelsResponseSchema, available),
+		});
+
+		const models = await fetchCursorUsableModels({
+			apiKey: "account-token",
+			baseUrl: variantBaseUrl,
+			timeoutMs: 1_000,
+		});
+		const routes = (id: string) => Object.keys(models?.find(spec => spec.id === id)?.cursorModelRoutes ?? {});
+
+		// Uncovered: the blocking variant is dropped, its sibling stays.
+		expect(routes("uncovered-confirm")).toEqual(["uncovered-confirm-high"]);
+		// Covered: the usable list is the entitlement, so the variant is unchanged.
+		expect(routes("covered-confirm")).toEqual(["covered-confirm-high", "covered-confirm-max"]);
+		// Uncovered: a blocked variant listed first must not shadow an allowed one
+		// with the same route signature.
+		expect(routes("uncovered-dup")).toEqual(["uncovered-dup-high"]);
+		// Uncovered: a boolean value the admin allowlist blocks by default gets no lane.
+		expect((models ?? []).map(spec => spec.id).filter(id => id.startsWith("uncovered-fast"))).toEqual([
+			"uncovered-fast",
+		]);
+	});
+
+	it("publishes no rich models when GetUsableModels decodes to an empty list", async () => {
+		const available = create(AvailableModelsResponseSchema, {
+			models: [
+				create(AvailableModelsResponse_ModelDetailsSchema, {
+					name: "fixture-model",
+					supportsAgent: true,
+					variants: [richVariant("fixture-model-high", { reasoning: "high" })],
+				}),
+			],
+		});
+		const emptyUsableBaseUrl = await startCursorDiscoveryRpcServer({
+			"/agent.v1.AgentService/GetUsableModels": toBinary(
+				GetUsableModelsResponseSchema,
+				create(GetUsableModelsResponseSchema, { models: [] }),
+			),
+			"/aiserver.v1.AiService/AvailableModels": toBinary(AvailableModelsResponseSchema, available),
+		});
+
+		const models = await fetchCursorUsableModels({
+			apiKey: "account-token",
+			baseUrl: emptyUsableBaseUrl,
+			timeoutMs: 1_000,
+		});
+
+		expect(models).toEqual([]);
+	});
+
 	it("decodes Cursor's length-delimited vendor metadata", () => {
 		const encoded = Uint8Array.from(Buffer.from("0a0766697874757265d202020801", "hex"));
 		const details = fromBinary(AvailableModelsResponse_ModelDetailsSchema, encoded);

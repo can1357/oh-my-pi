@@ -1,6 +1,6 @@
 import * as http2 from "node:http2";
 import { type } from "@oh-my-pi/omptype";
-import { slugify } from "@oh-my-pi/pi-utils";
+import { logger, slugify } from "@oh-my-pi/pi-utils";
 import { collapseVariants, type EffortVariantFamily, reviewedVariantFamilyId } from "../compat/collapse";
 import { compareRevision, parseRevision } from "../compat/revision";
 import { resolveCatalogAxes, resolveModelPolicy } from "../compat/resolve";
@@ -21,6 +21,7 @@ import {
 	type AvailableModelsResponse_ModelDetails,
 	AvailableModelsRequestSchema,
 	AvailableModelsResponseSchema,
+	DegradationStatus,
 	GetDefaultModelForCliRequestSchema,
 	GetDefaultModelForCliResponseSchema,
 	GetUsableModelsRequestSchema,
@@ -153,7 +154,10 @@ export async function fetchCursorUsableModels(
 			? []
 			: normalizeCursorModels(parsedUsable.models, options.baseUrl, references);
 	const usableModelIds = usable === null ? undefined : new Set(legacyModels.map(model => model.id));
-	if (!available || available.models.length === 0) return legacyModels;
+	if (!available || available.models.length === 0) {
+		if (!available) logger.warn("Cursor AvailableModels unavailable; using GetUsableModels only");
+		return legacyModels;
+	}
 	const richModels = normalizeRichCursorModels(
 		available.models,
 		usableModelIds,
@@ -561,7 +565,29 @@ function normalizeRichCursorModels(
 		// retention-required model would expose a route every invocation rejects.
 		if (details.requiresDataRetention === true) continue;
 
-		const variants = normalizeRichCursorVariants(details, baseId, usableModelIds);
+		// GetUsableModels lags AvailableModels (new SKUs the IDE already enables):
+		// a model none of whose ids a usable row matches (blocked variants count
+		// as matched) is kept whole; blocked variants are still filtered. An empty
+		// usable list stays authoritative (nothing usable), never "all uncovered".
+		// A row the server omits on purpose is not lag, so this fallback never
+		// keeps one that is hidden, admin-default-disabled, degradation-disabled,
+		// ZDR-consent-blocked, CmdK-only, or without positive agent support.
+		const uncovered =
+			usableModelIds !== undefined &&
+			usableModelIds.size > 0 &&
+			![...collectRichCursorCatalogIds([details])].some(id => usableModelIds.has(id));
+		if (
+			uncovered &&
+			(details.isHidden === true ||
+				details.defaultDisabledInAdminAllowlist === true ||
+				details.degradationStatus === DegradationStatus.DISABLED ||
+				details.onlySupportsCmdK === true ||
+				details.supportsAgent !== true ||
+				Boolean(details.reasonForZdrConsentBlock))
+		) {
+			continue;
+		}
+		const variants = normalizeRichCursorVariants(details, baseId, uncovered ? undefined : usableModelIds, uncovered);
 		if (variants.length === 0) continue;
 		// The bare lane id belongs to Cursor's flagged default configuration, so
 		// seed axis defaults from it before falling back to first-seen values;
@@ -622,6 +648,7 @@ function normalizeRichCursorVariants(
 	details: AvailableModelsResponse_ModelDetails,
 	baseId: string,
 	usableModelIds: ReadonlySet<string> | undefined,
+	skipUnsubmittable = false,
 ): NormalizedRichVariant[] {
 	if (details.variants.length === 0) {
 		const candidates = [baseId, ...details.legacySlugs, ...details.idAliases];
@@ -633,6 +660,7 @@ function normalizeRichCursorVariants(
 	const seenRoutes = new Set<string>();
 	for (const [index, variant] of details.variants.entries()) {
 		if (isRichVariantBlocked(details, variant)) continue;
+		if (skipUnsubmittable && isRichVariantUnsubmittable(details, variant)) continue;
 		const parameters = variant.parameterValues
 			.map(parameter => ({ id: parameter.id.trim(), value: parameter.value.trim() }))
 			.filter(parameter => parameter.id.length > 0);
@@ -1030,6 +1058,26 @@ function isRichVariantBlocked(details: AvailableModelsResponse_ModelDetails, var
 		if (value?.blockedByAdminAllowlist === true) return true;
 	}
 	return false;
+}
+
+/**
+ * Variants Cursor says not to submit as-is: a confirmation dialogue that blocks
+ * submission, or a boolean parameter value an admin allowlist blocks by default.
+ * omp presents neither, so the usable-list lag fallback never keeps them; a
+ * usable row is the account's entitlement for them.
+ */
+function isRichVariantUnsubmittable(
+	details: AvailableModelsResponse_ModelDetails,
+	variant: RichCursorVariant,
+): boolean {
+	if (variant.confirmationDialogue?.blocksSubmission === true) return true;
+	return variant.parameterValues.some(parameter =>
+		details.parameterDefinitions
+			.find(candidate => candidate.id === parameter.id)
+			?.parameterType?.booleanParameter?.values.some(
+				value => value.value === parameter.value && value.defaultBlockedInAdminAllowlist === true,
+			),
+	);
 }
 
 function normalizeCursorModels(

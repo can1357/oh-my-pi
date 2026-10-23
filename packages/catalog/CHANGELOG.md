@@ -18,6 +18,7 @@
 - Fixed GPT-5.6 Sol requests over 272K input tokens (`openai` and `openai-codex`) being priced at the retired $10/$45 long-context card instead of $8/$30 ([#16742](https://github.com/can1357/oh-my-pi/issues/16742))
 - Fixed DeepSeek's official vision requests being held to the 5-image unknown-host floor: the catalog endpoint now carries DeepSeek's documented 600-image and 40 MiB inline-image budgets, while a custom `baseUrl` keeps the conservative floor ([vision limits](https://api-docs.deepseek.com/guides/vision#limits); [#16737](https://github.com/can1357/oh-my-pi/pull/16737) by [@Fun10165](https://github.com/Fun10165))
 - Fixed Devin model discovery falling back to the two SWE-1.6 seed models when the catalog takes longer than 5s to respond; it now waits up to 15s ([#16668](https://github.com/can1357/oh-my-pi/pull/16668) by [@DusKing1](https://github.com/DusKing1))
+- Fixed Cursor model discovery hiding models that `AvailableModels` lists but `GetUsableModels` omits (e.g. GLM 5.3 and GLM 5.3 Flash, which the Cursor IDE offers) ([#15527](https://github.com/can1357/oh-my-pi/issues/15527), [#16820](https://github.com/can1357/oh-my-pi/pull/16820) by [@tahsinrahman](https://github.com/tahsinrahman))
 
 ## [18.12.6] - 2026-10-21
 
