@@ -172,6 +172,24 @@ describe("write tool read projection guard", () => {
 		expect(await Bun.file(filePath).text()).toBe(original);
 	});
 
+	it("rejects a column-cut projection as long as its source", async () => {
+		const filePath = path.join(tmpDir, "edge.txt");
+		// One unterminated line a column past the 768 cap: its cut shows 768 chars plus `…`, so the
+		// shown payload is exactly as long as the source, yet the last character is gone.
+		const original = "x".repeat(769);
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-edge", { path: `${filePath}:1-1` }),
+		);
+		expect(projection).toContain("Some lines truncated to 768 chars");
+
+		await expect(
+			new WriteTool(session).execute("write-edge", { path: filePath, content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
 	it("writes a file whose last line only starts like the column-cap notice", async () => {
 		const filePath = path.join(tmpDir, "notes.txt");
 		await Bun.write(filePath, "header\nbody line\n");
