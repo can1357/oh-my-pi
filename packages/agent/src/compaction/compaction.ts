@@ -2300,7 +2300,7 @@ async function generateTurnPrefixSummary(
 		preferredDialect(model.id),
 		resolveCatalogPolicy(model).classifierCotExtraction === true,
 	);
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
+	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${formatAdditionalContext(options?.extraContext)}${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
 	const summarizationMessages = [
 		{
 			role: "user" as const,

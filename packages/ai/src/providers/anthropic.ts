@@ -6719,8 +6719,107 @@ function normalizeAnthropicToolSchemaNode(
 	return result;
 }
 
+function stringEntries(value: unknown): string[] {
+	return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+/**
+ * Whether a root combinator variant can merge into the root object. `allOf` branches
+ * may be open (every branch must hold, so an open one loosens nothing); an open
+ * `anyOf`/`oneOf` variant admits any value for keys other variants declare.
+ */
+function isFoldableAnthropicRootVariant(variant: unknown, conjunctive: boolean): variant is Record<string, unknown> {
+	if (!isRecord(variant)) return false;
+	const type = pickAnthropicEffectiveScalarType(variant);
+	if (type !== undefined && type !== "object") return false;
+	if (variant.$ref !== undefined || variant.not !== undefined || variant.if !== undefined) return false;
+	if (COMBINATOR_KEYS.some(key => variant[key] !== undefined)) return false;
+	return conjunctive || variant.additionalProperties === undefined || variant.additionalProperties === false;
+}
+
+/**
+ * Fold root `anyOf`/`oneOf`/`allOf` object variants into the root object.
+ *
+ * Messages rejects combinators at the tool `input_schema` root, so
+ * {@link normalizeAnthropicToolSchemaNode} spills them into `description`. Without
+ * this fold a pure root union reaches the wire as a closed object with no
+ * properties, which admits only `{}`. The folded root admits every value the
+ * union admits:
+ * - properties merge; a key declared differently by several variants keeps every
+ *   declaration under a nested `anyOf` (`allOf` for a root `allOf`);
+ * - `required` gains the keys every `anyOf`/`oneOf` variant requires, or every
+ *   key any `allOf` branch requires;
+ * - variants that cannot merge (non-object, `$ref`, nested combinators, open
+ *   `anyOf`/`oneOf` members) open the root with `additionalProperties: true`.
+ *
+ * The exact union still reaches the model through the spilled description, and
+ * {@link validateToolArguments} enforces it against the original tool schema.
+ */
+function foldAnthropicRootCombinators(schema: Record<string, unknown>): Record<string, unknown> {
+	const rootType = pickAnthropicEffectiveScalarType(schema);
+	if (rootType !== undefined && rootType !== "object") return schema;
+	if (!COMBINATOR_KEYS.some(key => Array.isArray(schema[key]) && schema[key].length > 0)) return schema;
+
+	const properties: Record<string, unknown> = isRecord(schema.properties) ? { ...schema.properties } : {};
+	const required = new Set(stringEntries(schema.required));
+	let open = false;
+	for (const key of COMBINATOR_KEYS) {
+		const variants = schema[key];
+		if (!Array.isArray(variants) || variants.length === 0) continue;
+		const conjunctive = key === "allOf";
+		if (!variants.every(variant => isFoldableAnthropicRootVariant(variant, conjunctive))) {
+			open = true;
+			continue;
+		}
+
+		const declared = new Map<string, unknown[]>();
+		let shared: Set<string> | undefined;
+		for (const variant of variants) {
+			if (isRecord(variant.properties)) {
+				for (const name in variant.properties) {
+					if (!Object.hasOwn(variant.properties, name)) continue;
+					const propertySchema = variant.properties[name];
+					const declarations = declared.get(name) ?? [];
+					if (!declarations.some(entry => Bun.deepEquals(entry, propertySchema)))
+						declarations.push(propertySchema);
+					declared.set(name, declarations);
+				}
+			}
+			const variantRequired = stringEntries(variant.required);
+			if (conjunctive) {
+				for (const name of variantRequired) required.add(name);
+			} else {
+				shared = new Set(shared ? variantRequired.filter(name => shared?.has(name)) : variantRequired);
+			}
+			if (variant.additionalProperties !== undefined && variant.additionalProperties !== false) open = true;
+		}
+		for (const name of shared ?? []) required.add(name);
+		// A key the root (or an earlier combinator) already declares keeps that
+		// declaration: both must hold, so either alone admits every valid value.
+		for (const [name, declarations] of declared) {
+			if (Object.hasOwn(properties, name)) continue;
+			properties[name] =
+				declarations.length === 1 ? declarations[0] : { [conjunctive ? "allOf" : "anyOf"]: declarations };
+		}
+	}
+
+	const folded: Record<string, unknown> = { ...schema };
+	if (Object.keys(properties).length > 0 || isRecord(schema.properties)) folded.properties = properties;
+	if (required.size > 0) folded.required = [...required];
+	if (open && folded.additionalProperties === undefined && isRecord(folded.properties)) {
+		folded.additionalProperties = true;
+	}
+	return folded;
+}
+
+/**
+ * Normalize a tool parameter schema into an Anthropic `input_schema`: root
+ * combinators fold into the root object ({@link foldAnthropicRootCombinators}),
+ * then {@link normalizeAnthropicToolSchemaNode} applies the keyword whitelist.
+ */
 export function normalizeAnthropicToolSchema(schema: unknown): unknown {
-	return normalizeAnthropicToolSchemaNode(schema, new WeakMap(), true);
+	const root = isRecord(schema) ? foldAnthropicRootCombinators(schema) : schema;
+	return normalizeAnthropicToolSchemaNode(root, new WeakMap(), true);
 }
 
 type AnthropicToolSchemaPlan = {
@@ -6944,9 +7043,7 @@ function buildAnthropicBaseToolInputSchema(tool: Tool): Record<string, unknown> 
 		...jsonSchema,
 		type: "object",
 		properties: isRecord(jsonSchema.properties) ? jsonSchema.properties : {},
-		required: Array.isArray(jsonSchema.required)
-			? jsonSchema.required.filter((entry): entry is string => typeof entry === "string")
-			: [],
+		required: stringEntries(jsonSchema.required),
 	}) as Record<string, unknown>;
 }
 

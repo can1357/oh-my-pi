@@ -29,6 +29,7 @@
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../error/gateway";
@@ -148,6 +149,37 @@ function serializeTools(context: Context): string | undefined {
 	return context.tools && context.tools.length > 0 ? JSON.stringify(context.tools) : undefined;
 }
 
+/**
+ * Fit a client-requested effort to the resolved model. Clients speak their own
+ * effort vocabulary: omp's `lowest-effort` reasoning-off sends `minimal` to a
+ * generic OpenAI-compatible endpoint, and Claude ladders have no `minimal`.
+ * `streamSimple` throws on an effort the model cannot serve, so clamp it to the
+ * nearest supported tier as in-process callers do. Efforts the model maps onto
+ * its wire values, and models without an effort ladder, pass through unchanged.
+ * Carry the requested tier's budget with a clamp unless the destination tier
+ * already has an explicit budget (including zero).
+ */
+function normalizeGatewayThinking(model: Model<Api>, options: SimpleStreamOptions): void {
+	const requested = options.reasoning;
+	if (requested === undefined) return;
+	const efforts = getSupportedEfforts(model);
+	if (efforts.length === 0 || efforts.includes(requested)) return;
+	if (model.thinking?.effortMap?.[requested] !== undefined) return;
+	if (
+		model.compat &&
+		"reasoningEffortMap" in model.compat &&
+		model.compat.reasoningEffortMap[requested] !== undefined
+	) {
+		return;
+	}
+	const reasoning = clampThinkingLevelForModel(model, requested) ?? requested;
+	options.reasoning = reasoning;
+	const budgets = options.thinkingBudgets;
+	if (reasoning !== requested && budgets?.[requested] !== undefined && budgets[reasoning] === undefined) {
+		options.thinkingBudgets = { ...budgets, [reasoning]: budgets[requested] };
+	}
+}
+
 function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, signal: AbortSignal): SimpleStreamOptions {
 	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
@@ -203,12 +235,13 @@ function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, sign
 	if (options.thinkingBudgets) {
 		opts.thinkingBudgets = { ...opts.thinkingBudgets, ...options.thinkingBudgets };
 	}
+	normalizeGatewayThinking(model, opts);
 	if (options.explicitThinkingBudgetTokens !== undefined) {
 		// Mirror Rust's `resolve_thinking_budget`: explicit budget pins onto
 		// whichever effort the client requested (or High when unspecified) and
 		// ALSO sets the effort so providers that gate on `reasoning` actually
 		// surface the budget.
-		const effort = options.reasoning ?? Effort.High;
+		const effort = opts.reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
 			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
@@ -583,9 +616,8 @@ async function handlePiNative(
 		account: resolveGatewayAccount(apiKey),
 		client: bootOpts.client?.name,
 	});
-	// Build the SimpleStreamOptions actually handed to `streamSimple`. We
-	// trust the client's options (already allow-listed by `parseRequest`) and
-	// only inject server-controlled fields. The sampling strip mirrors
+	// Build the SimpleStreamOptions actually handed to `streamSimple`, then
+	// normalize thinking against the resolved model. The sampling strip mirrors
 	// `buildStreamOptions` — backends with `supportsSamplingParams: false` 400 on them (#3117).
 	const streamOpts: SimpleStreamOptions = {
 		...parsed.options,
@@ -593,6 +625,7 @@ async function handlePiNative(
 		cursorExternalToolExecutor: true,
 		providerSessionState: lease.states,
 	};
+	normalizeGatewayThinking(model, streamOpts);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
 		bootOpts,

@@ -7,17 +7,10 @@ import * as path from "node:path";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { renderProgressBar } from "../components/progress-bar";
 import { Text } from "../components/text";
-import {
-	Ellipsis,
-	fileHyperlink,
-	getTreeBranch,
-	renderStatusLine,
-	renderTreeList,
-	truncateToWidth,
-	uriHyperlink,
-} from "../render";
+import { fileHyperlink, getTreeBranch, renderStatusLine, renderTreeList, uriHyperlink } from "../render";
 import {
 	createCachedComponent,
+	fitHeaderedRows,
 	formatCount,
 	formatEmptyMessage,
 	formatErrorMessage,
@@ -357,7 +350,7 @@ export const findToolRenderer = {
 					extra.push(uiTheme.fg("dim", `keywords: ${details.keywords.join(", ")}`));
 					for (const failure of stats.failures) extra.push(uiTheme.fg("warning", failure));
 				}
-				return [header, ...hitLines, ...extra].map(line => truncateToWidth(line, width, Ellipsis.Omit));
+				return fitHeaderedRows(header, [...hitLines, ...extra], width);
 			},
 		);
 	},

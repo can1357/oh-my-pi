@@ -87,15 +87,16 @@ function createHarness(): Harness {
 		getComposerShapes: () => [],
 	};
 
+	const messages: AgentMessage[] = [];
 	const sessionMock = {
 		isStreaming: false,
+		messages,
 		extensionRunner: fakeRunner,
 		/**
 		 * Mirror `AgentSession.sendCustomMessage` non-streaming
 		 * `deliverAs: "nextTurn"` / no-trigger path: persist the message as a
-		 * `custom_message` session entry. (The real implementation also calls
-		 * `agent.appendMessage`, but that path is silent — no event, no render —
-		 * so the bug surface is unaffected by omitting it here.)
+		 * `custom_message` session entry and append it to the session messages
+		 * (silently — no event, no render).
 		 */
 		sendCustomMessage: async (msg: {
 			customType: string;
@@ -106,6 +107,14 @@ function createHarness(): Harness {
 		}) => {
 			const parent = entries.length === 0 ? null : entries[entries.length - 1].id;
 			entries.push(makeCustomEntry(entries.length + 1, extractText(msg.content), parent));
+			messages.push({
+				role: "custom",
+				customType: msg.customType,
+				content: msg.content,
+				display: msg.display ?? false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
 		},
 	};
 

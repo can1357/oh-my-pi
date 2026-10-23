@@ -685,6 +685,41 @@ describe("Image budget integration", () => {
 		expect(olderLines.join("")).not.toContain("\x1b_G");
 		expect(newerLines.at(-1) ?? "").toContain("\x1b_G");
 	});
+
+	it("demotes the oldest transcript images when the viewport measures blocks newest-first (#16660)", () => {
+		const budget = new ImageBudget(2, () => {});
+		const transcript = new TranscriptContainer();
+		// A text block at the frontier: the retirement peek renders it before
+		// walking the live tail newest-first.
+		transcript.addChild(new Text("prompt", 0, 0));
+		for (const name of ["oldest", "middle", "newest"]) {
+			transcript.addChild(
+				new Image(
+					BASE64_ONE_PIXEL_PNG,
+					"image/png",
+					{ fallbackColor: t => t },
+					{ maxWidthCells: 4, maxHeightCells: 2, budget, imageKey: name, filename: `${name}.png` },
+				),
+			);
+		}
+
+		let viewport: readonly string[] = [];
+		let passes = 0;
+		do {
+			passes++;
+			budget.beginPass();
+			const frame = { now: passes, tick: passes };
+			transcript.beginFrame(frame);
+			transcript.peekFinalizedBatch(80, 50);
+			viewport = transcript.renderViewport(80, 50, frame);
+		} while (budget.endPass() && passes < 5);
+
+		const text = viewport.join("\n");
+		expect(text).toContain("[Image: oldest.png");
+		expect(text).not.toContain("[Image: middle.png");
+		expect(text).not.toContain("[Image: newest.png");
+		expect(viewport.filter(row => row.includes("\x1b_G")).length).toBe(2);
+	});
 });
 
 describe("Image budget + Unicode placeholders", () => {

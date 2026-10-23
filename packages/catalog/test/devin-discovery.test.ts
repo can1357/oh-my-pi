@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
@@ -506,6 +506,57 @@ describe("devin native discovery request", () => {
 		const fetchImpl: FetchImpl = async () =>
 			new Response(filteredPayload, { status: 200, headers: { "content-type": "application/proto" } });
 		expect(await fetchDevinModels({ apiKey: SESSION_TOKEN, fetch: fetchImpl })).toBeNull();
+	});
+
+	describe("default request timeout", () => {
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		// `GetCliModelConfigs` routinely takes 7-15s before sending headers; a
+		// shorter default silently drops discovery back to the seed models.
+		function slowCatalog() {
+			const payload = toBinary(
+				GetCliModelConfigsResponseSchema,
+				create(GetCliModelConfigsResponseSchema, {
+					clientModelConfigs: [config({ uid: "swe-1-6" }), config({ uid: "swe-1-6-fast" })],
+				}),
+			);
+			let signal: AbortSignal | undefined;
+			const headers = Promise.withResolvers<Response>();
+			const fetchImpl: FetchImpl = (_input, init) => {
+				signal = init?.signal ?? undefined;
+				signal?.addEventListener("abort", () => headers.reject(signal?.reason));
+				return headers.promise;
+			};
+			return {
+				fetch: fetchImpl,
+				signal: () => signal,
+				respond: () =>
+					headers.resolve(
+						new Response(payload, { status: 200, headers: { "content-type": "application/proto" } }),
+					),
+			};
+		}
+
+		it("keeps waiting for a catalog whose headers arrive after 5s", async () => {
+			vi.useFakeTimers();
+			const catalog = slowCatalog();
+			const pending = fetchDevinModels({ apiKey: SESSION_TOKEN, fetch: catalog.fetch });
+			vi.advanceTimersByTime(14_999);
+			expect(catalog.signal()?.aborted).toBe(false);
+			catalog.respond();
+			expect((await pending)?.map(entry => entry.id)).toEqual(["swe-1-6", "swe-1-6-fast"]);
+		});
+
+		it("gives up at 15s and reports failed discovery", async () => {
+			vi.useFakeTimers();
+			const catalog = slowCatalog();
+			const pending = fetchDevinModels({ apiKey: SESSION_TOKEN, fetch: catalog.fetch });
+			vi.advanceTimersByTime(15_000);
+			expect(catalog.signal()?.aborted).toBe(true);
+			expect(await pending).toBeNull();
+		});
 	});
 });
 

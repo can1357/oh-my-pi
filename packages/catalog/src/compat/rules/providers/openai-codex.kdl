@@ -209,10 +209,10 @@ provider "openai-codex" {
 	models "gpt-5.6-sol*" "gpt-5.6" {
 		long-context-cost {
 			input-threshold 272000
-			input 10.0
-			output 45.0
-			cache-read 1.0
-			cache-write 12.5
+			input 8.0
+			output 30.0
+			cache-read 0.8
+			cache-write 10.0
 		}
 	}
 	models "gpt-5.6-terra*" {

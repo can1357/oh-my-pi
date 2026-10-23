@@ -8,14 +8,14 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Ellipsis } from "@oh-my-pi/pi-natives";
+import { Ellipsis } from "@oh-my-pi/pi-natives";
 import { expandWindowsLongPath, getWindowsShortPath } from "@oh-my-pi/pi-natives/path";
 import { pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatKeyHint, type KeyId } from "../app-keybindings";
 import { getKeybindings } from "../keybindings";
 import type { Theme } from "../theme/theme";
 import type { Component } from "../tui";
-import { replaceTabs, sliceByColumn, truncateToWidth, visibleWidth } from "../utils";
+import { replaceTabs, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { Hasher } from "./utils";
 
 export { Ellipsis } from "@oh-my-pi/pi-natives";
@@ -1146,6 +1146,15 @@ export function createCachedComponent(
 			cached = undefined;
 		},
 	};
+}
+
+/**
+ * Fit a status header plus body rows to `width` for search-style results. The
+ * header soft-wraps so its trailing summary meta (counts, `truncated`) stays
+ * visible behind a long pattern; body rows keep single-row truncation.
+ */
+export function fitHeaderedRows(header: string, rows: readonly string[], width: number): string[] {
+	return [...wrapTextWithAnsi(header, width), ...rows.map(row => truncateToWidth(row, width, Ellipsis.Omit))];
 }
 
 /**

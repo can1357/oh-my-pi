@@ -1762,5 +1762,11 @@ describe("AgentSession aside delivery", () => {
 		);
 		expect(notice).toBeDefined();
 		expect(notice && typeof notice.content === "string" ? notice.content : "").toContain("m1");
+		// One-at-a-time steering must deliver the notice and the steer it announces
+		// in the same model call; split, the model answers the notice alone first.
+		expect(mock.calls.length).toBe(2);
+		const steerCall = JSON.stringify(mock.calls[1]!.context.messages);
+		expect(steerCall).toContain("Now available:");
+		expect(steerCall).toContain("delegate to");
 	});
 });

@@ -204,7 +204,9 @@ export const CRITICAL_BASH_PATTERNS = [
 	// Disk / filesystem destruction.
 	/>\s*\/dev\/sd[a-z]/i, // write to disk device.
 	/\bmkfs(\.|\b)/i, // format filesystem.
-	/\bdd\s+if=.+of=\/dev\//i, // dd to a device.
+	// dd to a device. Write-only pseudo-device sinks (`of=/dev/null`, `/dev/stdout`, `/dev/fd/1`, …) are
+	// excluded: they cannot destroy data, and `dd … of=/dev/null` is the standard read-throughput idiom.
+	/\bdd\s+if=.+of=\/dev\/(?!(?:null|zero|stdout|stderr|tty|fd\/\d+)(?:[\s;&|)<>]|$))/i,
 	/\bshred\s+\/dev\//i,
 	/\bcryptsetup\b/i,
 

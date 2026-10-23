@@ -115,6 +115,17 @@ describe("eval tool description", () => {
 		expect(pyOnly.helpers).not.toContain("await budget.total()");
 	});
 
+	it("tells every runtime to await session tool calls", () => {
+		// Python's `tool.<name>()` returns a coroutine, so an un-awaited call never runs the tool.
+		for (const runtimes of [
+			{ py: true, js: false },
+			{ py: false, js: true },
+			{ py: true, js: true },
+		]) {
+			expect(getEvalToolDescription(runtimes)).toContain("await tool.<name>(args)");
+		}
+	});
+
 	it("inlines every topic when the session cannot read xd:// URLs", () => {
 		const linked = new EvalTool(makeSession({})).description;
 		const inlined = new EvalTool(makeSession({ readActive: false })).description;

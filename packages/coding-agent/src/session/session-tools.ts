@@ -56,6 +56,7 @@ import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridg
 import { toolReadsSkillUris } from "../system-prompt";
 
 import type { CustomMessage } from "./messages";
+import { SESSION_AGENT_NOTICE_TYPE } from "./queued-messages";
 import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
@@ -254,7 +255,6 @@ export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRou
 const TOOL_ROSTER_NOTICE_MESSAGE_TYPE = "tool-roster-notice";
 const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
 const EVAL_PRELUDE_NOTICE_MESSAGE_TYPE = "eval-prelude-notice";
-const SESSION_AGENT_NOTICE_MESSAGE_TYPE = "session-agent-notice";
 
 /** Custom entry holding the digest of the base prompt the branch's primary model calls are built from. */
 const SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE = "system-prompt-digest";
@@ -295,7 +295,7 @@ interface EvalPreludeNoticeDetails {
 	removed: string[];
 }
 
-/** Agent pseudonyms added/removed by one hidden {@link SESSION_AGENT_NOTICE_MESSAGE_TYPE} message. */
+/** Agent pseudonyms added/removed by one hidden {@link SESSION_AGENT_NOTICE_TYPE} message. */
 interface SessionAgentNoticeDetails {
 	added: string[];
 	removed: string[];
@@ -1756,7 +1756,7 @@ export class SessionTools {
 	takeSessionAgentNotice(): CustomMessage<SessionAgentNoticeDetails> | undefined {
 		const known = new Set(this.#promptSurface.sessionAgents.map(agent => agent.name));
 		for (const message of this.#host.agent.state.messages) {
-			if (message.role !== "custom" || message.customType !== SESSION_AGENT_NOTICE_MESSAGE_TYPE) continue;
+			if (message.role !== "custom" || message.customType !== SESSION_AGENT_NOTICE_TYPE) continue;
 			const details = message.details;
 			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
 			for (const name of details.added) if (typeof name === "string") known.add(name);
@@ -1769,7 +1769,7 @@ export class SessionTools {
 		if (added.length === 0 && removed.length === 0) return undefined;
 		return {
 			role: "custom",
-			customType: SESSION_AGENT_NOTICE_MESSAGE_TYPE,
+			customType: SESSION_AGENT_NOTICE_TYPE,
 			content: prompt.render(sessionAgentNoticePrompt, {
 				added: added.map(agent => ({ name: agent.name, description: agent.description })),
 				removed,

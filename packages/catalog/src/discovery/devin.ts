@@ -296,7 +296,7 @@ export interface DevinModelDiscoveryOptions {
 	apiKey?: string;
 	/** Optional Codeium API base URL override. */
 	baseUrl?: string;
-	/** Optional request timeout in milliseconds (default 5000). */
+	/** Optional request timeout in milliseconds (default 15000). */
 	timeoutMs?: number;
 	/** Optional caller abort signal, combined with the internal timeout. */
 	signal?: AbortSignal;
@@ -314,7 +314,10 @@ export interface DevinModelDiscoveryOptions {
 export async function fetchDevinModels(
 	options: DevinModelDiscoveryOptions,
 ): Promise<ModelSpec<"devin-agent">[] | null> {
-	const timeoutMs = options.timeoutMs ?? 5_000;
+	// `GetCliModelConfigs` returns the full per-account catalog (600+ configs)
+	// and often takes 7-15s to send headers; 5s silently fell back to the seed.
+	// 15s matches coding-agent's runtime discovery bound.
+	const timeoutMs = options.timeoutMs ?? 15_000;
 	const resolvedBaseUrl = options.baseUrl ?? DEVIN_DEFAULT_BASE_URL;
 	const requestUrl = `${resolvedBaseUrl.replace(/\/+$/, "")}${DEVIN_GET_CLI_MODEL_CONFIGS_PATH}`;
 

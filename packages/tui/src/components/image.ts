@@ -67,6 +67,31 @@ export function renderForScrollback<T>(render: () => T): T {
 	}
 }
 
+/** Renders in progress that measure rows outside display order; see {@link measureRender}. */
+let measureRenderDepth = 0;
+/** Budgeted image observations made under {@link measureRender}; only differences are meaningful. */
+let measuredImageObservations = 0;
+
+/**
+ * Run `render` to measure rows outside display order — a newest-first height
+ * walk, say. {@link ImageBudget} derives demotion from the order images are
+ * observed in, so a budgeted {@link Image} inside this scope claims no display
+ * slot: it replays the decision its slot in the surface's last full pass
+ * implies. `images` reports whether any budgeted image was observed; the caller
+ * MUST render every such block it lays out again, outside this scope and in
+ * display order, or its images keep no slot in the pass.
+ */
+export function measureRender<T>(render: () => T): { value: T; images: boolean } {
+	const before = measuredImageObservations;
+	measureRenderDepth++;
+	try {
+		const value = render();
+		return { value, images: measuredImageObservations !== before };
+	} finally {
+		measureRenderDepth--;
+	}
+}
+
 const EMPTY_IDS: readonly number[] = [];
 const EMPTY_TRANSMITS: readonly string[] = [];
 const SAVE_CURSOR = "\x1b7";
@@ -104,16 +129,16 @@ interface SurfaceSplit {
 	/** Images the last full pass on this surface observed. */
 	lastTotal: number;
 	/**
-	 * Image ids shown as text in the frame currently on this surface: the
-	 * display-order prefix [0, onTerminal) of its last full pass, snapshotted by
-	 * id so a partial pass reproduces the on-screen live/text split without a
-	 * full, correctly-ordered walk.
+	 * Display slot of every image the last full pass on this surface observed,
+	 * keyed by id. A pass that cannot derive display order from its own walk — a
+	 * partial `stable` pass, or a {@link measureRender} scope — replays its
+	 * decisions from these slots instead.
 	 */
-	readonly suppressedIds: Set<number>;
+	readonly slots: Map<number, number>;
 }
 
 function newSurfaceSplit(): SurfaceSplit {
-	return { onTerminal: 0, planned: 0, lastTotal: 0, suppressedIds: new Set() };
+	return { onTerminal: 0, planned: 0, lastTotal: 0, slots: new Map() };
 }
 
 /** Return a split to "nothing has been painted on this surface yet", in place. */
@@ -121,7 +146,7 @@ function resetSurfaceSplit(split: SurfaceSplit): void {
 	split.onTerminal = 0;
 	split.planned = 0;
 	split.lastTotal = 0;
-	if (split.suppressedIds.size > 0) split.suppressedIds.clear();
+	if (split.slots.size > 0) split.slots.clear();
 }
 
 let nextImageBudgetSeed = Math.floor(Math.random() * 0xffffff);
@@ -336,16 +361,23 @@ export class ImageBudget {
 	 * During a `stable` pass ({@link beginPass}) the call order and visible subset
 	 * are not authoritative, so the decision is the surface's committed
 	 * on-terminal split, keyed by id — order- and partiality-independent.
+	 *
+	 * Inside {@link measureRender} the call claims no slot: it answers what the
+	 * image's slot in the last full pass implies under the planned threshold,
+	 * which is what the display-order render that follows will decide once the
+	 * split has converged.
 	 */
 	observe(imageId: number): boolean {
+		if (measureRenderDepth > 0) measuredImageObservations++;
 		const existing = this.#passSuppression.get(imageId);
 		if (existing !== undefined) return existing;
 		if (this.#stablePass) {
-			const suppressed = this.#cap > 0 && this.#split.suppressedIds.has(imageId);
+			const suppressed = this.#cap > 0 && this.#lastSlotBelow(imageId, this.#split.onTerminal);
 			this.#passSuppression.set(imageId, suppressed);
 			if (suppressed) this.#forgetKeyForId(imageId);
 			return suppressed;
 		}
+		if (measureRenderDepth > 0) return this.#cap > 0 && this.#lastSlotBelow(imageId, this.#split.planned);
 		const index = this.#passIds.length;
 		this.#passIds.push(imageId);
 		const suppressed = this.#cap > 0 && index < this.#split.planned;
@@ -353,6 +385,12 @@ export class ImageBudget {
 		this.#passIndex.set(imageId, index);
 		if (suppressed) this.#forgetKeyForId(imageId);
 		return suppressed;
+	}
+
+	/** Whether `imageId` held a display slot below `threshold` in the last full pass on this surface. */
+	#lastSlotBelow(imageId: number, threshold: number): boolean {
+		const slot = this.#split.slots.get(imageId);
+		return slot !== undefined && slot < threshold;
 	}
 
 	/**
@@ -373,14 +411,12 @@ export class ImageBudget {
 			this.#applyingReset = false;
 		}
 		const retry = this.#reconcile(total);
-		// Snapshot the committed display-order suppression by id: the prefix
-		// [0, onTerminal) is what this surface currently shows as text. Partial
-		// passes replay this per id (see #stablePass) instead of re-deriving it
-		// from a reversed, tail-only walk.
-		const suppressedIds = split.suppressedIds;
-		if (suppressedIds.size > 0) suppressedIds.clear();
-		const suppressedCount = Math.min(total, split.onTerminal);
-		for (let i = 0; i < suppressedCount; i++) suppressedIds.add(this.#passIds[i]);
+		// Snapshot display order by id. Partial passes (see #stablePass) and
+		// measuring renders replay their decisions from it instead of
+		// re-deriving them from a reversed or tail-only walk.
+		const slots = split.slots;
+		if (slots.size > 0) slots.clear();
+		for (let i = 0; i < total; i++) slots.set(this.#passIds[i], i);
 		return retry;
 	}
 

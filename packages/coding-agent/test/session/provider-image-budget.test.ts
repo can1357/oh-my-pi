@@ -63,6 +63,13 @@ const XAI_OAUTH_MODEL = getBundledModel("xai-oauth", "grok-4.7");
 const CURSOR_CLAUDE_MODEL = getBundledModel("cursor", "claude-opus-5-high");
 const CURSOR_GPT_MODEL = getBundledModel("cursor", "gpt-5.5");
 const CURSOR_DEFAULT_MODEL = getBundledModel("cursor", "default");
+const DEEPSEEK_MODEL = buildModel({
+	...toModelSpec(getBundledModel("deepseek", "deepseek-flash")),
+});
+const DEEPSEEK_PROXY_MODEL = buildModel({
+	...toModelSpec(getBundledModel("deepseek", "deepseek-flash")),
+	baseUrl: "https://deepseek-proxy.example/v1",
+});
 
 function factoryDroidModel(baseUrl: string) {
 	return buildModel({
@@ -148,6 +155,8 @@ describe("provider context image budgets", () => {
 		["Claude on Cursor", CURSOR_CLAUDE_MODEL, 20],
 		["GPT on Cursor", CURSOR_GPT_MODEL, 60],
 		["Cursor's default route", CURSOR_DEFAULT_MODEL, 20],
+		["the official DeepSeek API", DEEPSEEK_MODEL, 600],
+		["a DeepSeek proxy", DEEPSEEK_PROXY_MODEL, 5],
 	] as const)("keeps the newest images up to the count %s allows", (_label, model, budget) => {
 		const context: Context = {
 			systemPrompt: [],
@@ -162,6 +171,22 @@ describe("provider context image budgets", () => {
 		const clamped = clampProviderContextImages(context, model);
 
 		expect(imageData(clamped)).toEqual(Array.from({ length: budget }, (_, index) => `image-${index + 1}`));
+	});
+
+	it("drops the oldest images over DeepSeek's 40 MiB inline-image budget", () => {
+		const fourteenMegabytes = "A".repeat(14_000_000);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: Array.from({ length: 3 }, (_, index) => ({
+				role: "user",
+				content: [text(`image-${index}`), image(fourteenMegabytes)],
+				timestamp: index,
+			})),
+		};
+		const clamped = clampProviderContextImageBytes(context, DEEPSEEK_MODEL);
+		expect(imageData(clamped)).toEqual([fourteenMegabytes, fourteenMegabytes]);
+		expect(textData(clamped)).toEqual(["image-0", "image-1", "image-2"]);
 	});
 
 	it.each([

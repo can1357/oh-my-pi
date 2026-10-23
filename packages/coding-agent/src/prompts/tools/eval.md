@@ -10,7 +10,7 @@ Printing an image{{#if py}} or figure{{/if}} attaches it.
 ```
 print(value, ...)  log(message)  phase(title)
 read(path, offset?, limit?)  write(path, content)  env(key?, value?)  output(*ids, format?, query?, offset?, limit?)
-{{#if js}}await {{/if}}tool.<name>(args) — session tool; `args` is its parameter object
+await tool.<name>(args) — session tool; `args` is its parameter object
 wait(handles, timeout?=None, raise_errors?=True) — agent/completion barrier, ordered results{{#if js}}; JS: wait(handles, { timeout, raiseErrors }){{/if}}; `raise_errors=False` retains failures.
 ```
 </prelude>

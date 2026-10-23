@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{GridCoord, NodeId};
 
@@ -77,6 +77,9 @@ struct SearchBounds {
 const MOVE_DIRS: [GridCoord; 4] =
 	[GridCoord::new(1, 0), GridCoord::new(-1, 0), GridCoord::new(0, 1), GridCoord::new(0, -1)];
 const MIN_ROUTING_MARGIN: i32 = 8;
+/// Extra step cost for entering an avoided cell: outweighs any realistic
+/// detour, so overlap is only chosen when no way around exists.
+const AVOID_PENALTY: i32 = 1_000;
 const MIN_EXPANSION_BUDGET: i64 = 256;
 const MAX_EXPANSION_BUDGET: i64 = 50_000;
 
@@ -130,6 +133,17 @@ pub fn get_path<S: ::std::hash::BuildHasher>(
 	from: GridCoord,
 	to: GridCoord,
 ) -> Option<Vec<GridCoord>> {
+	get_path_avoiding(grid, from, to, &HashSet::new())
+}
+
+/// [`get_path`] that steps onto `avoid` cells (another edge's route) only when
+/// no route around them exists.
+pub fn get_path_avoiding<S: ::std::hash::BuildHasher, A: ::std::hash::BuildHasher>(
+	grid: &HashMap<GridCoord, NodeId, S>,
+	from: GridCoord,
+	to: GridCoord,
+	avoid: &HashSet<GridCoord, A>,
+) -> Option<Vec<GridCoord>> {
 	let bounds = search_bounds_for(grid, from, to);
 	let mut queue = MinHeap::default();
 	queue.push(QueueItem { coord: from, priority: 0 });
@@ -170,7 +184,12 @@ pub fn get_path<S: ::std::hash::BuildHasher>(
 				continue;
 			}
 
-			let new_cost = current_cost + 1;
+			let penalty = if avoid.contains(&next) {
+				AVOID_PENALTY
+			} else {
+				0
+			};
+			let new_cost = current_cost + 1 + penalty;
 			if cost_so_far
 				.get(&next)
 				.is_none_or(|&existing| new_cost < existing)
