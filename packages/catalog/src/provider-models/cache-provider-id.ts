@@ -217,7 +217,9 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// v2: rows cached before Fusion pairings carried their lead uid as
 			// `requestModelId` send the composite uid and fail with
 			// `permission_denied: no API providers are available`.
-			return "devin:models-v2";
+			// v3: rows cached before discovery read `ModelInfo.maxTokens` hold a
+			// 200K window on every model.
+			return "devin:models-v3";
 		default:
 			return providerId;
 	}
