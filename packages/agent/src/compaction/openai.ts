@@ -100,18 +100,13 @@ interface RemoteEstimateParts {
 	imageTokens: number;
 }
 
-function collectRemoteCompactionEstimate(
-	value: unknown,
-	tokenizer: Tokenizer,
-	dropEncrypted: boolean,
-	parts: RemoteEstimateParts,
-): void {
+function collectRemoteCompactionEstimate(value: unknown, tokenizer: Tokenizer, parts: RemoteEstimateParts): void {
 	if (typeof value === "string") {
 		if (value) parts.fragments.push(value);
 		return;
 	}
 	if (Array.isArray(value)) {
-		for (const item of value) collectRemoteCompactionEstimate(item, tokenizer, dropEncrypted, parts);
+		for (const item of value) collectRemoteCompactionEstimate(item, tokenizer, parts);
 		return;
 	}
 	if (value === null || typeof value !== "object") {
@@ -141,9 +136,9 @@ function collectRemoteCompactionEstimate(
 		// Opaque encrypted reasoning/compaction state: its local base64 size far
 		// exceeds what the provider bills, so it stays out of the fit estimate
 		// (same policy as `MessageCountOptions.excludeEncryptedReasoning`).
-		if (item === undefined || (dropEncrypted && key === "encrypted_content" && typeof item === "string")) continue;
+		if (item === undefined || (key === "encrypted_content" && typeof item === "string")) continue;
 		parts.framing.push(key);
-		collectRemoteCompactionEstimate(item, tokenizer, dropEncrypted, parts);
+		collectRemoteCompactionEstimate(item, tokenizer, parts);
 	}
 }
 
@@ -155,21 +150,20 @@ function collectRemoteCompactionEstimate(
 function remoteCompactionEstimateParts(
 	value: unknown,
 	tokenizer: Tokenizer,
-	dropEncrypted: boolean,
 ): { fragments: string[]; imageTokens: number } {
 	const parts: RemoteEstimateParts = { fragments: [], framing: [], imageTokens: 0 };
-	collectRemoteCompactionEstimate(value, tokenizer, dropEncrypted, parts);
+	collectRemoteCompactionEstimate(value, tokenizer, parts);
 	if (parts.framing.length > 0) parts.fragments.push(parts.framing.join(" "));
 	return { fragments: parts.fragments, imageTokens: parts.imageTokens };
 }
 
 /**
  * Tokens of stored Responses replacement history. Retained `input_image` parts
- * count at their image estimate rather than as base64 text; everything else,
- * opaque compaction state included, counts as decoded text.
+ * count at their image estimate, not their base64 size. Opaque encrypted state
+ * stays excluded, matching ordinary message estimates and remote fit checks.
  */
 export function countResponsesHistoryTokens(items: unknown[], tokenizer: Tokenizer): number {
-	const { fragments, imageTokens } = remoteCompactionEstimateParts(items, tokenizer, false);
+	const { fragments, imageTokens } = remoteCompactionEstimateParts(items, tokenizer);
 	return (fragments.length === 0 ? 0 : tokenizer.countTokens(fragments)) + imageTokens;
 }
 
@@ -214,7 +208,6 @@ function probeRemoteCompactionInputBudget(
 	const { fragments, imageTokens } = remoteCompactionEstimateParts(
 		{ instructions, input, ...(tools ? { tools } : {}) },
 		tokenizer,
-		true,
 	);
 	const flatTokens = imageTokens + REMOTE_COMPACTION_REQUEST_OVERHEAD_TOKENS;
 	if (!contextWindow || contextWindow <= 0) {

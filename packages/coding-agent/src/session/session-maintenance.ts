@@ -544,13 +544,13 @@ export class SessionMaintenance {
 	 * point exists; {@link maintainContextMidRun} re-arms the entry once a later
 	 * tool result makes `prepareCompaction` viable again.
 	 */
-	readonly #midTurnCompactionDeadEnds = new WeakSet<AgentMessage[]>();
+	readonly #midTurnCompactionDeadEnds = new WeakMap<AgentMessage[], string | null>();
 	/**
 	 * Carries a mid-turn dead end across the loop's final answer to the next
 	 * pre-prompt check. That check must not warn again for the same oversized
 	 * persisted turn, but a new agent loop still gets its own live-array guard.
 	 */
-	#midTurnDeadEndPendingPrePrompt = false;
+	#midTurnDeadEndPendingPrePrompt: string | null | undefined = undefined;
 	/** In-flight or armed background speculative compaction, if any. */
 	#speculation: SpeculationRun | undefined;
 	/**
@@ -2391,21 +2391,43 @@ export class SessionMaintenance {
 			const type = branch[i].type;
 			if (type === "compaction" || type === "reset_boundary") return false;
 		}
+		const nativeAnthropic = isRecord(armed.result.preserveData?.anthropicCompaction);
 		if (leafIdx < branch.length - 1) {
 			const keptIdx = branch.findIndex(entry => entry.id === armed.result.firstKeptEntryId);
-			const nativeAnthropic = isRecord(armed.result.preserveData?.anthropicCompaction);
 			if (keptIdx < 0 && !(nativeAnthropic && armed.result.firstKeptEntryId === "")) return false;
-			// The signed Anthropic block replaces exactly its snapshot prefix.
-			// Extra turns are outside the block, so growth alone cannot stale it.
-			if (nativeAnthropic) return true;
-
-			const projected = this.#projectCompactedContextTokens({
-				...armed.result,
-				method: armed.method,
-				providerReplayThroughEntryId:
-					armed.result.providerReplayThroughEntryId ??
-					(isRecord(armed.result.preserveData?.openaiRemoteCompaction) ? armed.snapshotLeafId : undefined),
-			});
+		}
+		const projected = this.#projectCompactedContextTokens({
+			...armed.result,
+			method: armed.method,
+			providerReplayThroughEntryId:
+				armed.result.providerReplayThroughEntryId ??
+				(isRecord(armed.result.preserveData?.openaiRemoteCompaction) ||
+				(nativeAnthropic && leafIdx < branch.length - 1)
+					? armed.snapshotLeafId
+					: undefined),
+		});
+		const branchCurrentTokens = this.#projectCurrentBranchContextTokens(branch);
+		const nonMessageTokens = computeNonMessageTokens(
+			this.#host.nonMessageTokenSource(),
+			this.#tokenizer,
+			this.#host.settings.revision,
+		);
+		const emptyWrapperTokens = this.#countProjectedMessages([
+			createCompactionSummaryMessage("", 0, new Date(0).toISOString(), { method: armed.method }),
+		]);
+		const maxArmedBaseline = Math.max(
+			branchCurrentTokens,
+			armed.contextTokensAtStart,
+			armed.result.tokensBefore,
+			triggerContextTokens ?? 0,
+		);
+		if (maxArmedBaseline > emptyWrapperTokens && projected >= maxArmedBaseline) {
+			return false;
+		}
+		if (branchCurrentTokens - nonMessageTokens > emptyWrapperTokens && projected >= branchCurrentTokens) {
+			return false;
+		}
+		if (leafIdx < branch.length - 1 && !nativeAnthropic) {
 			const pendingTokens = Math.max(0, pendingContextTokens ?? 0);
 			const projectedWithPending = projected + pendingTokens;
 			const contextWindow = model.contextWindow ?? 0;
@@ -2619,20 +2641,27 @@ export class SessionMaintenance {
 		const compactionSettings = this.#compactionSettings;
 		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
 		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
-		this.#midTurnDeadEndPendingPrePrompt = false;
+		this.#midTurnDeadEndPendingPrePrompt = undefined;
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 			return;
 		}
-		if (
-			pendingMidTurnDeadEnd &&
-			prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
-				undefined
-		) {
-			// The prior tool loop already attempted the rescue and warned for this
-			// persisted oversized turn. Only a later persisted cut point makes a
-			// pre-prompt retry useful; the new agent loop may warn for its own turn.
-			return;
+		if (pendingMidTurnDeadEnd !== undefined) {
+			const prep = prepareCompaction(
+				this.#host.sessionManager.getBranch(),
+				compactionSettings,
+				model,
+				this.#tokenizer,
+			);
+			if (
+				prep === undefined ||
+				(pendingMidTurnDeadEnd !== null && prep.firstKeptEntryId === pendingMidTurnDeadEnd)
+			) {
+				// The prior tool loop already attempted compaction/rescue at this
+				// exact cut point and could not make progress. Only a later
+				// persisted cut point makes a pre-prompt retry useful.
+				return;
+			}
 		}
 		// Grace band: a live (or just-started) background speculation absorbs the
 		// blocking summarization; the user's prompt goes out immediately and the
@@ -2727,8 +2756,8 @@ export class SessionMaintenance {
 			});
 
 			if (result.automaticContinuationBlocked) {
-				this.#midTurnCompactionDeadEnds.add(activeMessages);
-				this.#midTurnDeadEndPendingPrePrompt = true;
+				this.#midTurnCompactionDeadEnds.set(activeMessages, null);
+				this.#midTurnDeadEndPendingPrePrompt = null;
 			}
 			if (signal?.aborted) return;
 			const compactedMessages = this.#host.agent.state.messages;
@@ -2745,20 +2774,39 @@ export class SessionMaintenance {
 		if (!lastAssistant || lastAssistant.stopReason === "aborted" || lastAssistant.stopReason === "error") return;
 
 		// Decide from the live agent context before waiting for the asynchronous
-		// session journal. The persistence barrier is required only when maintenance
-		// will actually rewrite history; awaiting it on every ordinary tool turn lets
+		// session journal. Ordinary turns and grace-band deferrals do not await
+		// persistence; rewrites and dead-end cut-point rechecks do. Awaiting it on every tool turn lets
 		// a slow message_end listener leave the TUI "generating" with no provider
 		// request or tool running.
 		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
 		const storedContextTokens = this.#estimateStoredContextTokens();
 		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
+		const persistedDeadEnd = this.#midTurnCompactionDeadEnds.has(activeMessages);
+		if (persistedDeadEnd) {
+			if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
+			if (signal?.aborted || this.#host.isDisposed()) return;
+			// A prior boundary already ran maintenance/rescue and could not reduce
+			// this turn. Re-running on every following tool boundary is wasted work
+			// while no new cut point exists. Once a later tool turn advances the
+			// cut point (`firstKeptEntryId`), compaction can summarize new history
+			// and MUST re-arm rather than stay suppressed until provider overflow.
+			const deadEndFirstKeptId = this.#midTurnCompactionDeadEnds.get(activeMessages);
+			const prep = model
+				? prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer)
+				: undefined;
+			if (prep === undefined || (deadEndFirstKeptId !== null && prep.firstKeptEntryId === deadEndFirstKeptId)) {
+				return;
+			}
+			this.#midTurnCompactionDeadEnds.delete(activeMessages);
+			this.#midTurnDeadEndPendingPrePrompt = undefined;
+		}
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 			return;
 		}
 		// Grace band: keep the tool loop moving while a background speculation
-		// (live or started here) produces the summary; checked before the
-		// persistence barrier so deferred boundaries never await the journal.
+		// (live or started here) produces the summary. Unless a prior dead end
+		// needed its cut point rechecked, deferred boundaries never await the journal.
 		if (this.deferThresholdCompactionToSpeculation(contextTokens, contextWindow)) {
 			logger.debug("Mid-run threshold deferred to speculative compaction", {
 				contextTokens,
@@ -2767,27 +2815,7 @@ export class SessionMaintenance {
 			return;
 		}
 
-		if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
-		if (this.#midTurnCompactionDeadEnds.has(activeMessages)) {
-			// A prior boundary already ran the dead-end rescue and could not reduce
-			// this turn. Re-running the rescue and re-emitting its warning on every
-			// following tool boundary is wasted work while nothing summarizable
-			// exists. But the tool loop keeps appending turns: once a later
-			// (smaller) tool result gives prepareCompaction a cut point before the
-			// now-older oversized turn, compaction can finally make progress and
-			// MUST run rather than stay suppressed until provider overflow (#7153
-			// review). Stay parked only while no cut point is available; re-arm as
-			// soon as one appears.
-			if (
-				!model ||
-				prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
-					undefined
-			) {
-				return;
-			}
-			this.#midTurnCompactionDeadEnds.delete(activeMessages);
-			this.#midTurnDeadEndPendingPrePrompt = false;
-		}
+		if (!persistedDeadEnd && !(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
 
 		// Promote to a larger-context sibling before compacting, mirroring the
 		// pre-prompt (runPrePromptCompactionIfNeeded) and post-turn threshold
@@ -2813,8 +2841,12 @@ export class SessionMaintenance {
 			detachPostCommit: true,
 		});
 		if (result.automaticContinuationBlocked) {
-			this.#midTurnCompactionDeadEnds.add(activeMessages);
-			this.#midTurnDeadEndPendingPrePrompt = true;
+			const deadEndFirstKeptId = model
+				? (prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer)
+						?.firstKeptEntryId ?? null)
+				: null;
+			this.#midTurnCompactionDeadEnds.set(activeMessages, deadEndFirstKeptId);
+			this.#midTurnDeadEndPendingPrePrompt = deadEndFirstKeptId;
 		}
 
 		if (signal?.aborted) return;
@@ -3989,40 +4021,98 @@ export class SessionMaintenance {
 		const rebuilt = buildSessionContext([...branch, pending], undefined, undefined, {
 			maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model),
 		});
-		const rebuiltTokens = this.#countProjectedMessages(rebuilt.messages);
-		const providerPayload = getOpenAiRemoteCompactionPayload(pending);
-		if (!providerPayload) {
-			return nonMessageTokens + rebuiltTokens;
-		}
-
-		const summaryMessage = createCompactionSummaryMessage(args.summary, args.tokensBefore, new Date().toISOString(), {
-			shortSummary: args.shortSummary,
-			providerPayload,
-			method: args.method,
-			blocks,
-		});
-		const summaryTokens = this.#countProjectedMessages([summaryMessage]);
-		const nativeHistoryTokens = countResponsesHistoryTokens(providerPayload.items, this.#tokenizer);
-		return nonMessageTokens + rebuiltTokens - summaryTokens + nativeHistoryTokens;
+		return nonMessageTokens + this.#countProjectedMessages(rebuilt.messages);
 	}
 
 	/**
 	 * Count a rebuilt context the way {@link #estimateStoredContextTokens} will once it is committed:
 	 * a summary carrying frames is counted as itself so each frame gets the active model's frame
-	 * price, not the generic image estimate `convertToLlm` would give it.
+	 * price. Native Responses history replaces the display summary and excludes opaque ciphertext.
 	 */
 	#countProjectedMessages(messages: AgentMessage[]): number {
 		const options = { excludeEncryptedReasoning: true } as const;
 		const archives: AgentMessage[] = [];
 		const rest: AgentMessage[] = [];
+		let nativeHistoryTokens = 0;
 		for (const message of messages) {
+			if (message.role === "compactionSummary" && message.providerPayload?.type === "openaiResponsesHistory") {
+				nativeHistoryTokens += countResponsesHistoryTokens(message.providerPayload.items, this.#tokenizer);
+				continue;
+			}
 			const hasFrames =
 				message.role === "compactionSummary" && (message.blocks !== undefined || message.images !== undefined);
 			(hasFrames ? archives : rest).push(message);
 		}
 		return (
-			this.#tokenizer.countMessages(archives, options) + this.#tokenizer.countMessages(convertToLlm(rest), options)
+			nativeHistoryTokens +
+			this.#tokenizer.countMessages(archives, options) +
+			this.#tokenizer.countMessages(convertToLlm(rest), options)
 		);
+	}
+
+	/**
+	 * Current branch context tokens in the same `buildSessionContext` +
+	 * {@link #countProjectedMessages} domain as {@link #projectCompactionContextTokens}.
+	 */
+	#projectCurrentBranchContextTokens(branch: SessionEntry[] = this.#host.sessionManager.getBranch()): number {
+		const nonMessageTokens = computeNonMessageTokens(
+			this.#host.nonMessageTokenSource(),
+			this.#tokenizer,
+			this.#host.settings.revision,
+		);
+		if (branch.length === 0) return nonMessageTokens;
+		const current = buildSessionContext(branch, undefined, undefined, {
+			maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model),
+		});
+		return nonMessageTokens + this.#countProjectedMessages(current.messages);
+	}
+
+	/**
+	 * Whether a candidate compaction genuinely shrinks the context. Checks both
+	 * the trigger/usage baseline (`effectiveTokensBefore`) and — whenever the
+	 * replaced branch region exceeds the fixed summary wrapper overhead or
+	 * already carries a previous summary — the local branch projection
+	 * (`#projectCurrentBranchContextTokens`).
+	 */
+	#compactionReducesContext(
+		preparation: CompactionPreparation,
+		branch: SessionEntry[],
+		branchBefore: number,
+		firstKeptEntryId: string,
+		projectedAfter: number,
+		effectiveTokensBefore: number,
+		method?: CompactionMethod,
+	): boolean {
+		const nonMessageTokens = computeNonMessageTokens(
+			this.#host.nonMessageTokenSource(),
+			this.#tokenizer,
+			this.#host.settings.revision,
+		);
+		const firstKeptIdx = firstKeptEntryId ? branch.findIndex(entry => entry.id === firstKeptEntryId) : -1;
+		const keptEntries = firstKeptIdx >= 0 ? branch.slice(firstKeptIdx) : [];
+		const keptContext =
+			keptEntries.length > 0
+				? buildSessionContext(keptEntries, undefined, undefined, {
+						maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model),
+					})
+				: undefined;
+		const keptTokens = keptContext
+			? this.#countProjectedMessages(keptContext.messages)
+			: this.#countProjectedMessages(preparation.recentMessages);
+		const replacedBranchTokens = Math.max(0, branchBefore - nonMessageTokens - keptTokens);
+		const emptyWrapperTokens = this.#countProjectedMessages([
+			createCompactionSummaryMessage("", 0, new Date(0).toISOString(), { method }),
+		]);
+		const hasRealReplacedHistory =
+			replacedBranchTokens > emptyWrapperTokens || preparation.previousSummary !== undefined;
+		const maxBaseline = Math.max(effectiveTokensBefore, branchBefore);
+		if ((hasRealReplacedHistory || effectiveTokensBefore > emptyWrapperTokens) && projectedAfter >= maxBaseline) {
+			return false;
+		}
+		if (hasRealReplacedHistory && projectedAfter >= branchBefore) {
+			return false;
+		}
+		return true;
 	}
 
 	/**
@@ -4780,7 +4870,11 @@ export class SessionMaintenance {
 			break;
 		}
 
-		if (!method) return COMPACTION_CHECK_NONE;
+		if (!method) {
+			return startIndex > 0 && reason === "threshold"
+				? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION
+				: COMPACTION_CHECK_NONE;
+		}
 
 		// A speculative pass may have already produced this compaction's summary
 		// in the background. Claiming consumes the slot either way: an in-flight
@@ -4849,11 +4943,16 @@ export class SessionMaintenance {
 					action,
 					reason,
 				});
+				const liveTriggerBefore =
+					options.triggerContextTokens !== undefined
+						? Math.max(0, options.triggerContextTokens - (options.pendingContextTokens ?? 0))
+						: undefined;
+				const branchBefore = this.#projectCurrentBranchContextTokens();
 				return await this.#commitAutoCompactionResult({
 					summary: armedSpec.result.summary,
 					shortSummary: armedSpec.result.shortSummary,
 					firstKeptEntryId: armedSpec.result.firstKeptEntryId,
-					tokensBefore: options.triggerContextTokens ?? armedSpec.result.tokensBefore,
+					tokensBefore: Math.max(armedSpec.result.tokensBefore, liveTriggerBefore ?? 0, branchBefore),
 					details: armedSpec.result.details,
 					preserveData: armedSpec.result.preserveData,
 					fromExtension: false,
@@ -5238,7 +5337,18 @@ export class SessionMaintenance {
 									? reductionBaseline
 									: Math.max(0, reductionBaseline - options.preparedContextTokens) +
 										this.#projectPreSnapcompactContextTokens(preparation);
-							if (projectedForReduction >= preparedReductionBaseline) {
+							if (
+								projectedForReduction >= preparedReductionBaseline ||
+								!this.#compactionReducesContext(
+									preparation,
+									pathEntriesForCompaction,
+									this.#projectCurrentBranchContextTokens(pathEntriesForCompaction),
+									snapcompactResult.firstKeptEntryId,
+									projectedForReduction,
+									preparedReductionBaseline,
+									"snapcompact",
+								)
+							) {
 								logger.warn("Snapcompact projection would not reduce context", {
 									model: this.#model?.id,
 									projected: projectedForReduction,
@@ -5545,6 +5655,83 @@ export class SessionMaintenance {
 				providerReplayThroughEntryId = compactResult.providerReplayThroughEntryId;
 			}
 
+			const liveTriggerTokensBefore =
+				options.triggerContextTokens !== undefined
+					? Math.max(0, options.triggerContextTokens - (options.pendingContextTokens ?? 0))
+					: undefined;
+			const branchTokensBefore = this.#projectCurrentBranchContextTokens(pathEntriesForCompaction);
+			const effectiveTokensBefore = Math.max(tokensBefore, liveTriggerTokensBefore ?? 0);
+			const candidateTokensBefore = Math.max(effectiveTokensBefore, branchTokensBefore);
+			const projectedAfter = this.#projectCompactedContextTokens({
+				summary,
+				shortSummary,
+				firstKeptEntryId,
+				tokensBefore: candidateTokensBefore,
+				details,
+				preserveData,
+				method: fromExtension ? undefined : method,
+				providerReplayThroughEntryId,
+			});
+			if (
+				compactionPrep.kind !== "fromHook" &&
+				!this.#compactionReducesContext(
+					preparation,
+					pathEntriesForCompaction,
+					branchTokensBefore,
+					firstKeptEntryId,
+					projectedAfter,
+					effectiveTokensBefore > 0 ? effectiveTokensBefore : branchTokensBefore,
+					method,
+				)
+			) {
+				logger.warn("Compaction projection would not reduce context", {
+					model: this.#model?.id,
+					method,
+					projected: projectedAfter,
+					branchTokensBefore,
+					effectiveTokensBefore,
+				});
+				const laterMethodUsable = methods
+					.slice(methodIndex + 1)
+					.some(next =>
+						isCompactionMethodUsable(
+							next,
+							reason,
+							this.#model,
+							compactionSettings,
+							options.excludeMediaMethods === true,
+						),
+					);
+				const noReductionMessage = laterMethodUsable
+					? `${action} compaction would not reduce context; trying the next preferred compaction method.`
+					: `${action} compaction would not reduce context.`;
+				this.#host.emitNotice("warning", noReductionMessage, "compaction");
+				await this.#emitLifecycleEvent(
+					{
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: false,
+						willRetry: false,
+						skipped: !laterMethodUsable,
+						errorMessage: noReductionMessage,
+					},
+					options.detachPostCommit === true,
+				);
+				if (laterMethodUsable) {
+					return await this.runAutoCompaction(reason, willRetry, {
+						...options,
+						methodIndex: methodIndex + 1,
+					});
+				}
+				return reason === "threshold" ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
+			}
+			if (projectedAfter < candidateTokensBefore) {
+				tokensBefore = candidateTokensBefore;
+			} else if (liveTriggerTokensBefore !== undefined && liveTriggerTokensBefore > tokensBefore) {
+				tokensBefore = liveTriggerTokensBefore;
+			}
+
 			return await this.#commitAutoCompactionResult({
 				summary,
 				shortSummary,
@@ -5779,6 +5966,19 @@ export class SessionMaintenance {
 			}
 		}
 
+		if (
+			savedCompactionEntry &&
+			getLatestCompactionEntry(this.#host.sessionManager.getBranch())?.id === savedCompactionEntry.id
+		) {
+			const postRescueTokensAfter =
+				isRecord(args.details) && args.details.kind === "experimental-context-rollover"
+					? this.#projectExperimentalContextRolloverTokens(args)
+					: this.#projectCompactedContextTokens(args);
+			if (savedCompactionEntry.tokensAfter !== postRescueTokensAfter) {
+				savedCompactionEntry.tokensAfter = postRescueTokensAfter;
+				await this.#host.sessionManager.rewriteEntries();
+			}
+		}
 		const deadEndWarning = noProgressDeadEnd ? this.#compactionDeadEndWarning("clear large tool output") : undefined;
 		if (deadEndWarning) {
 			// Stamp the divider: the compaction bar badges the dead-end and

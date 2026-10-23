@@ -414,7 +414,23 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 		return promptBudgetTokens(contextWindow, settings);
 	}
 	const clampedThresholdPercent = Math.min(99, Math.max(1, thresholdPercent));
-	return Math.floor(contextWindow * (clampedThresholdPercent / 100));
+	const percentThreshold = Math.floor(contextWindow * (clampedThresholdPercent / 100));
+	const keepRecentTokens = Math.max(0, settings.keepRecentTokens);
+	if (keepRecentTokens <= 0) return percentThreshold;
+	// A percentage trigger scales down with small or long-context-capped windows
+	// while `keepRecentTokens` and the reserve floor stay fixed. Floor the
+	// percentage trigger so `2 × keepRecentTokens + reserveFloor` (kept tail +
+	// at least `keepRecentTokens` of summarizable growth + fixed prompt/summary
+	// overhead) fits inside the 80% recovery band, capped by the window's prompt budget.
+	const reserveFloor = Math.min(
+		resolveBudgetReserveTokens(contextWindow, settings),
+		settings.reserveTokens ?? DEFAULT_RESERVE_TOKENS,
+	);
+	const minViableThreshold = Math.min(
+		promptBudgetTokens(contextWindow, settings),
+		Math.ceil((2 * keepRecentTokens + reserveFloor) / 0.8),
+	);
+	return Math.max(percentThreshold, minViableThreshold);
 }
 
 // ============================================================================
@@ -1457,9 +1473,18 @@ export function prepareCompaction(
 		compactionMessages.push(message);
 	}
 
-	const lastUsage = getLastAssistantUsage(pathEntries);
+	const postCompactionStart = Math.max(prevCompactionIndex, resetBoundaryIndex) + 1;
+	const lastUsage = getLastAssistantUsage(
+		postCompactionStart > 0 ? pathEntries.slice(postCompactionStart) : pathEntries,
+	);
 	const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;
 	let keepRecentTokens = settings.keepRecentTokens;
+	if (activeModel?.contextWindow && activeModel.contextWindow > 0) {
+		keepRecentTokens = Math.min(
+			keepRecentTokens,
+			Math.max(1, Math.floor(promptBudgetTokens(activeModel.contextWindow, settings) * 0.5)),
+		);
+	}
 	if (lastUsage) {
 		const estimatedTokens = tokenizer.countMessages(compactionMessages);
 		const promptTokens = calculatePromptTokens(lastUsage);

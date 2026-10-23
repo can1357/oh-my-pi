@@ -503,6 +503,8 @@ Post-navigation event exposing new/old leaf and optional summary entry.
    - overflow path emits `Context overflow recovery failed: ...`
    - incomplete-output path emits `Incomplete response recovery failed: ...`
    - threshold/idle paths emit `Auto-compaction failed: ...`
+- Automatic summary candidates, including armed speculative results, are checked for context reduction before commit. Non-shrinking candidates advance to the next configured method; if none makes progress, no compaction entry is committed. Mid-turn retries, including new speculative requests, stay suppressed until the retained-history cut point advances.
+  Native Responses replay counts visible replacement history and image estimates, not opaque encrypted-state bytes. Both sides use the rebuilt active context, so history before `/clear` cannot inflate the reduction baseline. These are local estimates, not provider-billed token counts.
 - Branch summarization can be cancelled via abort signal (e.g., Escape), returning canceled/aborted navigation result.
 
 ## Settings and defaults
@@ -514,7 +516,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `compaction.methodOrder` = `["remote", "snapcompact", "handoff", "shake", "soft"]`. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta, including Bedrock Converse's Runtime side request) when available; unavailable or failed methods advance to the next preference.
 - `compaction.asyncEnabled` = `true`. Async (speculative) compaction: when context enters the pre-threshold band `[threshold − lead, threshold)` (lead = `clamp(threshold × 0.125, 8192, 32000)`), maintenance starts a background summarization for the first configured LLM-backed method (`remote`, `handoff`, or `soft`) off a branch snapshot, isolated from the live turn by a side session id. The armed result is committed instantly when the threshold is actually crossed, hiding summarization latency; post-snapshot turns are appended after the summary unchanged. Armed results are discarded when the branch prefix changes (new compaction, reset boundary, `/tree` navigation), when a provider-native replay payload is no longer readable by the active model, or when context grows past `keepRecentTokens` since compute (a fresh speculation replaces it). Speculation is skipped while an extension registers `session_before_compact`. The status line pulses the auto-compact icon while a speculation runs and holds it in accent when a result is armed.
 - `compaction.reserveTokens` is unset by default. The effective reserve is `max(floor(contextWindow × 0.15), configuredReserve ?? 16384)`. Budget checks use the proportional reserve when the unset default is impractical on a small window, or when the effective reserve reaches/exceeds the whole window. Explicit reserves otherwise retain the 15% floor.
-- `compaction.keepRecentTokens` = `20000`
+- `compaction.keepRecentTokens` = `20000`. Preparation caps this budget at half the active window's prompt budget before adjusting for measured usage, so retained history cannot consume the entire budget on tiny windows.
 - `compaction.autoContinue` = `true`
 - `compaction.midTurnEnabled` = `true`; a `false` value applies to the session that configured it, not to spawned subagents — each subagent keeps mid-run checks so its single-turn assignment still compacts at the configured threshold.
 - `compaction.handoffSaveToDisk` = `false`
@@ -523,6 +525,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `compaction.remoteStreamingV2Enabled` = `true`
 - `compaction.v2RetainedMessageBudget` = `64000`
 - `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; a positive fixed token limit takes precedence over percentage, and otherwise the reserve-based threshold is used.
+- Positive percentage triggers have a headroom floor tied to `keepRecentTokens` and the reserve floor, capped at the prompt budget. With a 100k window, 40%, 20k retained history and a 16,384-token reserve, the trigger is 70,480 tokens. Explicit fixed triggers bypass this floor. See [Settings](./settings.md#context-compaction-and-memory) for the formula.
 - `compaction.modelThresholds` = `{}`; `provider/model-id` or `provider/…*` prefix → a token base the threshold policy scales in place of the window (dropping a global `thresholdTokens`), a fixed trigger (`"f90000"`), or a percentage replacing both thresholds, while that model is active. Editable from the `/models` Roles view (`k`). See [Settings](./settings.md#context-compaction-and-memory).
 - `task.agentCompactionThresholdOverrides` = `{}`; exact-name task/eval agent → token count (`90000`) or percentage (`"80%"`) replacing both thresholds for that agent only. See [Settings](./settings.md#context-compaction-and-memory).
 - `compaction.idleEnabled` = `false`
