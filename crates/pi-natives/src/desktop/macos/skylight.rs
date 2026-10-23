@@ -753,13 +753,15 @@ impl ClickPlacer {
 	/// the button counters `buttons`. The readings come every few milliseconds
 	/// and never wait on a hit-test, so this is where a click went down or up
 	/// even when the placer's own pass comes late, after a hit-test that
-	/// blocked while the user moved on.
+	/// blocked while the user moved on. The first reading's point stands: the
+	/// lock is held through the read, so a second reader of the same counters
+	/// neither reads the pointer again nor replaces it.
 	fn saw(&self, buttons: [u32; 6], point: impl FnOnce() -> Option<CGPoint>) {
-		if self.seen.lock().is_some_and(|(seen, _)| seen == buttons) {
+		let mut seen = self.seen.lock();
+		if seen.is_some_and(|(seen, _)| seen == buttons) {
 			return;
 		}
-		let point = point();
-		*self.seen.lock() = Some((buttons, point));
+		*seen = Some((buttons, point()));
 	}
 
 	/// Where the pointer was at the first switch reading of `buttons`; `None`
@@ -809,13 +811,17 @@ impl ClickPlacer {
 		}
 		let point = self.seen_at(buttons).or_else(point);
 		if let Some(place) = latest {
+			let in_place = place.point.zip(point).is_some_and(|(from, to)| {
+				(to.x - from.x).abs() <= CLICK_SLOP && (to.y - from.y).abs() <= CLICK_SLOP
+			});
+			// A press placed nowhere (too old by the time the placer came to it)
+			// stays nowhere through a release away from it: the release of a drag
+			// begun who knows where must not place that click in the user's app.
 			let carried = !pressed(place.buttons, buttons)
 				&& match place.hit {
 					Some(false) => true,
-					Some(true) => place.point.zip(point).is_some_and(|(from, to)| {
-						(to.x - from.x).abs() <= CLICK_SLOP && (to.y - from.y).abs() <= CLICK_SLOP
-					}),
-					None => false,
+					Some(true) => in_place,
+					None => !in_place,
 				};
 			if carried {
 				*self.latest.lock() = Some(ClickPlace { buttons, ..place });
@@ -2840,6 +2846,45 @@ mod tests {
 		// Counters no reading has seen yet are placed where the pointer is.
 		placer.place_at([2, 1, 0, 0, 0, 0], at(150.0), |point| Some(point.x == 150.0));
 		assert_eq!(placer.hit([2, 1, 0, 0, 0, 0]), Some(true));
+	}
+
+	#[test]
+	fn a_press_placed_nowhere_stays_nowhere_through_a_release_away_from_it() {
+		// The placer reached the press too late to place it; the user then
+		// dragged into their own app and let go there.
+		assert_eq!(place_blocked(None, 40.0, Some(true)).hit(RELEASED), None);
+		// A release where it went down is a click of its own to place.
+		assert_eq!(place_blocked(None, 0.0, Some(true)).hit(RELEASED), Some(true));
+	}
+
+	#[test]
+	fn the_first_reading_of_a_button_change_keeps_its_point() {
+		// Two readers see the same release: the first reads the pointer
+		// before the user moves on; the second comes while it is still reading.
+		let placer = ClickPlacer::new(None);
+		let placer = &placer;
+		let (reading, read_started) = std::sync::mpsc::channel();
+		let (second_read, second_started) = std::sync::mpsc::channel();
+		std::thread::scope(|scope| {
+			scope.spawn(move || {
+				placer.saw(RELEASED, || {
+					reading.send(()).unwrap();
+					// Wait for the second reader to read the pointer too, or
+					// give up once it is evidently held off.
+					let _ = second_started.recv_timeout(Duration::from_millis(200));
+					Some(CGPoint::new(100.0, 100.0))
+				});
+			});
+			read_started.recv().unwrap();
+			scope.spawn(|| {
+				placer.saw(RELEASED, || {
+					second_read.send(()).unwrap();
+					std::thread::sleep(Duration::from_millis(50));
+					Some(CGPoint::new(200.0, 100.0))
+				});
+			});
+		});
+		assert_eq!(placer.seen_at(RELEASED).map(|point| point.x), Some(100.0));
 	}
 
 	#[test]
