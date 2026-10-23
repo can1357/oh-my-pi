@@ -654,6 +654,53 @@ return { value: await tab.value("#q"), reported: await tab.evaluate(() => window
 		}
 	}, 40_000);
 
+	// Regression (#16833): a long fill/type that hits its per-op deadline used to reject while
+	// Puppeteer kept typing the rest, and blamed actionability for a field that was taking input.
+	test("stops typing when a long fill or type times out and reports how far it got", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `long-type-${crypto.randomUUID()}`;
+		const context = { session, toolCallId: "browser-long-type" };
+		await prelude.invoke(
+			{
+				action: "open",
+				name: tabName,
+				url: `data:text/html,${encodeURIComponent("<textarea id=area></textarea>")}`,
+			},
+			context,
+		);
+		const run = async <T>(code: string): Promise<T> =>
+			valueFrom<T>(await prelude.invoke({ action: "run", name: tabName, code, timeout: 3 }, context));
+		const readLength = `return (await tab.value("#area")).length;`;
+		try {
+			for (const action of ["fill", "type"]) {
+				await run(`await tab.evaluate(() => { document.querySelector("#area").value = ""; });`);
+				// A 3 s cell caps the per-op deadline at 2 s, far short of typing 20,000 characters.
+				const message = await run<string>(`try {
+	await tab.${action}("#area", "x".repeat(20000));
+	return "typed";
+} catch (error) {
+	return error.message;
+}`);
+				expect(message).toMatch(
+					new RegExp(
+						`^tab\\.${action}\\("#area"\\) timed out after \\d+ms; typing stopped after \\d+ of 20000 characters`,
+					),
+				);
+				// Real Chromium input cannot run under fake timers, and "no more keys arrive" is only
+				// observable over wall time. One key in flight at the deadline may still land; nothing after it.
+				await Bun.sleep(300);
+				const settled = await run<number>(readLength);
+				await Bun.sleep(1000);
+				expect(settled).toBeGreaterThan(0);
+				expect(settled).toBeLessThan(20000);
+				expect(await run<number>(readLength)).toBe(settled);
+			}
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
 	test("fills colour, date, time and range inputs with their value instead of typing into them", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);

@@ -13,7 +13,6 @@ import type {
 	HTTPRequest,
 	HTTPResponse,
 	JSHandle,
-	KeyboardTypeOptions,
 	KeyInput,
 	Page,
 	Protocol,
@@ -173,7 +172,6 @@ import {
 	composedContains,
 	clickQueryHandlerText,
 	fillViaHandle,
-	focusTextEntryTarget,
 	highlightElement,
 	type HighlightOptions,
 	type InteractionHandle,
@@ -188,6 +186,8 @@ import {
 	type PreparedUpload,
 	prepareElementUpload,
 	type ScrollOptions,
+	TypingInterruptedError,
+	typeIntoElement,
 	wheel,
 } from "./interactions";
 import {
@@ -579,7 +579,6 @@ type RawHandleMethod = (...args: unknown[]) => Promise<unknown>;
 
 interface RawHandleMethods {
 	interactive: Partial<Record<GuardedHandleMethod, RawHandleMethod>>;
-	type: ElementHandle["type"];
 	invalidatedBy?: string;
 }
 
@@ -624,8 +623,10 @@ async function runGuardedHandleAction<T>(
 			HANDLE_ACTION_INVALIDATION_TIMEOUT_MS,
 			`Timed out invalidating ${label}`,
 		).catch(() => undefined);
-		// A click still refused when the deadline hit carries the reason on its own abort error.
-		throw actionError instanceof ClickRefusedError ? actionError : error;
+		// A click still refused, or typing cut short, when the deadline hit carries that on its own abort error.
+		throw actionError instanceof ClickRefusedError || actionError instanceof TypingInterruptedError
+			? actionError
+			: error;
 	}
 }
 
@@ -748,7 +749,7 @@ export function toActionableHandle(
 				if (original) methods[method] = original;
 			}
 		}
-		enriched.fill = value => fillViaHandle(enriched, value, undefined, preserved?.type);
+		enriched.fill = value => fillViaHandle(enriched, value);
 		enriched.click = options =>
 			clickElement(enriched, "handle.click()", undefined, {
 				button: options?.button,
@@ -780,7 +781,7 @@ export function toActionableHandle(
 			};
 			interactive.press = press as RawHandleMethod;
 		}
-		originals = { interactive, type: enriched.type.bind(enriched) };
+		originals = { interactive };
 		enriched[RAW_HANDLE_METHODS] = originals;
 	}
 
@@ -807,7 +808,7 @@ export function toActionableHandle(
 				originals,
 				"handle.type()",
 				signal,
-				() => typeViaHandle(enriched, text, options, signal),
+				() => typeIntoElement(enriched, text, signal, options),
 				invalidate,
 			),
 		);
@@ -818,7 +819,7 @@ export function toActionableHandle(
 				originals,
 				"handle.fill()",
 				signal,
-				() => fillViaHandle(enriched, value, signal, text => typeViaHandle(enriched, text, { delay: 0 }, signal)),
+				() => fillViaHandle(enriched, value, signal),
 				invalidate,
 			),
 		);
@@ -904,20 +905,6 @@ export function toActionableHandle(
 		};
 	}
 	return enrichElementQueries(enriched, guard);
-}
-
-/** Focus once, then type one code point at a time so abort stops before the next key dispatch. */
-async function typeViaHandle(
-	handle: ElementHandle,
-	text: string,
-	options: Readonly<KeyboardTypeOptions> | undefined,
-	signal: AbortSignal,
-): Promise<void> {
-	await focusTextEntryTarget(handle, "type into", signal);
-	for (const character of text) {
-		throwIfAborted(signal);
-		await untilAborted(signal, () => handle.frame.page().keyboard.type(character, options));
-	}
 }
 
 /**
@@ -2208,7 +2195,9 @@ export class WorkerCore {
 			// Cell-budget aborts and uncapped helpers (goto/evaluate) keep their native errors.
 			if (capped && !cellSignal.aborted && (opTimeout?.aborted || isPuppeteerTimeout(err))) {
 				const refusal = err instanceof ClickRefusedError ? err.refusal : undefined;
-				const probe = selector ? await this.#selectorMatchCount(selector) : undefined;
+				// Typing that had started proves the element was actionable; the match count would only mislead.
+				const interrupted = err instanceof TypingInterruptedError ? err : undefined;
+				const probe = selector && !interrupted ? await this.#selectorMatchCount(selector) : undefined;
 				const countNote =
 					probe === undefined
 						? undefined
@@ -2216,7 +2205,9 @@ export class WorkerCore {
 							? `selector matches ${probe.count} element(s)`
 							: `could not count matches: ${probe.failure}`;
 				let hint = "";
-				if (refusal)
+				if (interrupted)
+					hint = `; typing stopped after ${interrupted.typed} of ${interrupted.total} characters (the field keeps what was typed)`;
+				else if (refusal)
 					hint = `; the element never became clickable (last check: ${refusal}${countNote ? `; ${countNote}` : ""})`;
 				else if (probe && "count" in probe) hint = formatSelectorMatchHint(probe.count);
 				else if (countNote) hint = `; ${countNote}`;
@@ -2437,8 +2428,7 @@ export class WorkerCore {
 					async sig => {
 						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
 						try {
-							await focusTextEntryTarget(handle, "type into", sig);
-							await untilAborted(sig, () => handle.type(text, { delay: 0 }));
+							await typeIntoElement(handle, text, sig);
 						} finally {
 							await handle.dispose().catch(() => undefined);
 						}
