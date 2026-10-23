@@ -256,6 +256,8 @@ function lerpHex(from: string, to: string, t: number): string {
  */
 export class AssistantMessageComponent extends Container {
 	readonly transcriptBlockMode = "appendOnly" as const;
+	/** Whether named links append their target URL in parentheses (`tui.showLinkUrl`). */
+	linkUrls: boolean;
 	#contentContainer: Container;
 	#markerSlot: Container;
 	#cacheMarker?: CacheInvalidationMarkerComponent;
@@ -539,6 +541,7 @@ export class AssistantMessageComponent extends Container {
 		proseOnlyThinking = true,
 		linkTargets?: ReadonlyMap<string, string>,
 		expandThinkingBlocks = false,
+		linkUrls = true,
 	) {
 		super();
 		this.#hideThinkingBlock = hideThinkingBlock;
@@ -547,6 +550,7 @@ export class AssistantMessageComponent extends Container {
 		this.#imageBudget = imageBudget;
 		this.#proseOnlyThinking = proseOnlyThinking;
 		this.#expandThinkingBlocks = expandThinkingBlocks;
+		this.linkUrls = linkUrls;
 
 		ensureThemeSync();
 		this.#transcriptBlockFinalized = message !== undefined;
@@ -1369,12 +1373,15 @@ export class AssistantMessageComponent extends Container {
 
 	/** Markdown for a text or thinking block; live children and stable-row renders share it so stable rows prefix the block render. */
 	#createMarkdown(kind: StablePartKind, text: string): Markdown {
-		return kind === "text"
-			? new Markdown(text, 1, 0, this.#getProseTheme(), this.#getProseTextStyle(), 0)
-			: new Markdown(text, 1, 0, getMarkdownTheme(), {
-					color: (value: string) => theme.fg("thinkingText", value),
-					italic: true,
-				});
+		const markdown =
+			kind === "text"
+				? new Markdown(text, 1, 0, this.#getProseTheme(), this.#getProseTextStyle(), 0)
+				: new Markdown(text, 1, 0, getMarkdownTheme(), {
+						color: (value: string) => theme.fg("thinkingText", value),
+						italic: true,
+					});
+		markdown.linkUrls = this.linkUrls;
+		return markdown;
 	}
 
 	/**
