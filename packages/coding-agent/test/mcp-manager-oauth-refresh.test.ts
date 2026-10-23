@@ -223,26 +223,20 @@ describe("MCPManager OAuth refresh failure", () => {
 		expect(remaining).toMatchObject({ type: "oauth", access: "fresh-access", refresh: "fresh-refresh" });
 	});
 
-	test("aborts a timed-out token fetch and waits for it before releasing refresh ownership", async () => {
+	test("stops waiting at the budget but keeps refresh ownership until the exchange settles", async () => {
 		vi.useFakeTimers();
 		const fetchCalled = Promise.withResolvers<void>();
 		const abortObserved = Promise.withResolvers<void>();
 		const allowFetchReject = Promise.withResolvers<void>();
 		let capturedSignal: AbortSignal | undefined;
-		let preparedSettled = false;
 		const releaseSpy = vi.spyOn(store, "releaseCredentialRefreshLease");
 		const fetchImpl = Object.assign(
 			async (_input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
 				capturedSignal = init?.signal ?? undefined;
 				if (!capturedSignal) throw new Error("token refresh fetch did not receive an AbortSignal");
 				fetchCalled.resolve();
-				capturedSignal.addEventListener(
-					"abort",
-					() => {
-						abortObserved.resolve();
-					},
-					{ once: true },
-				);
+				capturedSignal.addEventListener("abort", () => abortObserved.resolve(), { once: true });
+				// Ignores the abort until the test lets it settle.
 				await allowFetchReject.promise;
 				throw capturedSignal.reason ?? new Error("fetch aborted");
 			},
@@ -250,31 +244,25 @@ describe("MCPManager OAuth refresh failure", () => {
 		);
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchImpl);
 
-		const prepared = manager.prepareConfig(serverConfig).finally(() => {
-			preparedSettled = true;
-		});
+		const prepared = manager.prepareConfig(serverConfig);
 		await fetchCalled.promise;
 		expect(capturedSignal).toBeDefined();
 
-		vi.advanceTimersByTime(9_999);
-		await drainMicrotasks();
+		// At the 10 s budget the caller proceeds with the stored token; the exchange runs on.
+		vi.advanceTimersByTime(10_000);
+		const preparedConfig = await prepared;
+		expect(getAuthorizationHeader(preparedConfig)).toBe(`Bearer ${STALE_ACCESS}`);
 		expect(capturedSignal!.aborted).toBe(false);
-		expect(preparedSettled).toBe(false);
 		expect(releaseSpy).not.toHaveBeenCalled();
 
-		vi.advanceTimersByTime(1);
+		// Only the exchange backstop aborts the token fetch, and it releases the lease
+		// even though the fetch has not settled.
+		vi.advanceTimersByTime(50_000);
 		await abortObserved.promise;
 		expect(capturedSignal!.aborted).toBe(true);
 		await drainMicrotasks();
-		expect(preparedSettled).toBe(false);
-		expect(releaseSpy).not.toHaveBeenCalled();
-
-		allowFetchReject.resolve();
-		const preparedConfig = await prepared;
-
-		expect(preparedSettled).toBe(true);
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
-		expect(getAuthorizationHeader(preparedConfig)).toBe(`Bearer ${STALE_ACCESS}`);
+		allowFetchReject.resolve();
 	});
 });
 

@@ -120,11 +120,12 @@ export async function loginCursorHook(callbacks: OAuthController): Promise<OAuth
 	return withCursorAccountEmail(credentials, callbacks.fetch ?? fetch, callbacks.signal);
 }
 
-export async function refreshCursorToken(refreshToken: string): Promise<OAuthCredentials> {
+export async function refreshCursorToken(refreshToken: string, signal?: AbortSignal): Promise<OAuthCredentials> {
 	const response = await fetch(CURSOR_REFRESH_URL, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ grant_type: "refresh_token", client_id: CURSOR_CLIENT_ID, refresh_token: refreshToken }),
+		signal,
 	});
 
 	if (!response.ok) {
@@ -163,7 +164,7 @@ export async function refreshCursorHook(
 	credentials: OAuthCredentials,
 	signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
-	const refreshed = await refreshCursorToken(credentials.refresh);
+	const refreshed = await refreshCursorToken(credentials.refresh, signal);
 	// A stored email survives the refresh merge; rows stored before email capture gain it here.
 	return credentials.email ? refreshed : withCursorAccountEmail(refreshed, fetch, signal);
 }
