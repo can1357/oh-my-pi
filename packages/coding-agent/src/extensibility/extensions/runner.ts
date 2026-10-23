@@ -28,7 +28,7 @@ import {
 import { addKeyAliases, canonicalKeyId, type KeyId, type Keybinding } from "@oh-my-pi/pi-tui";
 import { KEYBINDINGS, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appApproveKeys, appFollowUpKeys } from "@oh-my-pi/pi-tui/keybinding-matchers";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
 import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -147,6 +147,18 @@ export interface ToolCallPreflight {
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
 let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
+
+/**
+ * Call an extension handler under a loop phase naming it, so a block of the
+ * event loop inside it is logged (`ui.loop-blocked`) with that phase rather
+ * than "unknown". Only the synchronous part, up to the handler's first
+ * `await`, runs under the phase: that part freezes the UI (input echo,
+ * rendering) for every session in the process, in-process subagents
+ * included, and no handler timeout can interrupt it.
+ */
+function invokeExtensionHandler<R>(ext: Extension, eventType: string, call: () => R): R {
+	return withLoopPhase(`extension:${ext.path}:${eventType}`, call);
+}
 
 function throwUnsupportedServiceTierAction(): never {
 	throw new Error("This extension host does not support service-tier actions");
@@ -1896,7 +1908,7 @@ export class ExtensionRunner {
 								event.type === "tool_call" ? budget : undefined,
 							);
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
-								handler(event, handlerContext),
+								invokeExtensionHandler(ext, event.type, () => handler(event, handlerContext)),
 							);
 						} catch (error) {
 							handlerFailure = { error };

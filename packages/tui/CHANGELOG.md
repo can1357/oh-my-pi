@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Tern sessions looking frozen while the terminal is slow to acknowledge frames (typically with many subagents streaming): typed keys were handled but their echo waited behind credit-held output for up to 5 seconds, and once a stall was detected the screen updated only once every 5 seconds. A key or pointer event now sends its frame past the credits (spaced at most 200 ms apart), and a stalled surface keeps receiving coalesced frames at most every 200 ms until the terminal acknowledges one again ([#18280](https://github.com/can1357/oh-my-pi/pull/18280) by [@aleister1102](https://github.com/aleister1102))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes

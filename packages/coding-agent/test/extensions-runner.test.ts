@@ -33,7 +33,13 @@ import type {
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
+import {
+	getProjectAgentDir,
+	logger,
+	resetLoopPhaseWindow,
+	TempDir,
+	takeLoopPhaseAttribution,
+} from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 describe("ExtensionRunner", () => {
@@ -487,6 +493,36 @@ describe("ExtensionRunner", () => {
 			expect(errors.length).toBe(1);
 			expect(errors[0].error).toContain("Handler error!");
 			expect(errors[0].event).toBe("context");
+		});
+	});
+
+	describe("event loop attribution", () => {
+		it("names an extension handler that blocks the event loop", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("context", () => {
+						const until = performance.now() + 300;
+						while (performance.now() < until) {}
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "busy.ts"), extCode);
+			const result = await loadTestExtensions();
+			const extensionPath = result.extensions[0]!.path;
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			try {
+				resetLoopPhaseWindow(performance.now());
+				await runner.emitContext([]);
+				expect(takeLoopPhaseAttribution()?.label).toBe(`extension:${extensionPath}:context`);
+			} finally {
+				resetLoopPhaseWindow();
+			}
 		});
 	});
 
