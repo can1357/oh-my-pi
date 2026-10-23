@@ -106,6 +106,7 @@ function createStubInputControllerContext(opts: {
 		editor,
 		ui: { requestRender },
 		skillCommands: opts.skillCommands,
+		fileSlashCommands: new Set<string>(),
 		session: {
 			isStreaming: opts.isStreaming,
 			isCompacting: opts.isCompacting ?? false,

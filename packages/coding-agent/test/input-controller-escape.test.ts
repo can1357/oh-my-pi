@@ -7,6 +7,7 @@ import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-co
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import type { FileSlashCommand } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
 
 import { cfgDoubleEscapeAction } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -30,6 +31,8 @@ type FakeEditor = {
 	onChange?: (text: string) => void;
 	setText(text: string): void;
 	getText(): string;
+	getExpandedText(): string;
+	clearDraft(historyText?: string): void;
 	addToHistory(text: string): void;
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
@@ -121,6 +124,15 @@ function createContext(): {
 		},
 		getText() {
 			return editorText;
+		},
+		getExpandedText() {
+			return editorText;
+		},
+		clearDraft(historyText?: string) {
+			if (historyText !== undefined) this.addToHistory(historyText);
+			editorText = "";
+			this.pendingImages = [];
+			this.pendingImageLinks = [];
 		},
 		addToHistory: vi.fn(),
 		setActionKeys: vi.fn(),
@@ -380,6 +392,199 @@ describe("InputController escape behavior", () => {
 		expect(spies.prompt).not.toHaveBeenCalled();
 		expect(editor.addToHistory).toHaveBeenCalledWith("/btw why is it doing that?");
 		expect(editor.getText()).toBe("");
+	});
+
+	describe("side file commands", () => {
+		const sitrep: FileSlashCommand = {
+			name: "sitrep",
+			description: "Situation report",
+			content: "Situation report. Focus: $ARGUMENTS",
+			side: true,
+			source: "via OMP User",
+		};
+		const plain: FileSlashCommand = { ...sitrep, name: "plain", side: undefined };
+
+		type SideCommandHarness = {
+			fileSlashCommands: Set<string>;
+			session: { isStreaming: boolean; slashCommands: FileSlashCommand[]; extensionRunner: unknown };
+		};
+
+		function withFileCommands(ctx: InteractiveModeContext, commands: FileSlashCommand[]): SideCommandHarness {
+			// Test harness installs a mutable fake context and AgentSession; keep the unchecked cast named.
+			const harness = ctx as unknown as SideCommandHarness;
+			harness.fileSlashCommands = new Set(commands.map(cmd => cmd.name));
+			harness.session.slashCommands = commands;
+			return harness;
+		}
+
+		it("answers a bare side command as a /btw side question while a turn streams", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]).session.isStreaming = true;
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			editor.setText("/sitrep");
+			await editor.onSubmit?.("/sitrep");
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus:", "/sitrep");
+			expect(spies.prompt).not.toHaveBeenCalled();
+			expect(editor.addToHistory).toHaveBeenCalledWith("/sitrep");
+			expect(editor.getText()).toBe("");
+		});
+
+		it("passes arguments into the side question", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep the migration");
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith(
+				"Situation report. Focus: the migration",
+				"/sitrep the migration",
+			);
+			expect(spies.onInputCallback).not.toHaveBeenCalled();
+		});
+
+		it("sends a file command without side frontmatter to the main session", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [plain]);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/plain");
+
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(spies.onInputCallback).toHaveBeenCalledTimes(1);
+		});
+
+		it("lets an extension command of the same name win over a side file command", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]).session.extensionRunner = {
+				getCommand: (name: string) => (name === "sitrep" ? { name } : undefined),
+				hasHandlers: () => false,
+			};
+			Object.assign(editor, { clearDraft: vi.fn() });
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep");
+
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(spies.prompt).toHaveBeenCalledWith("/sitrep", { images: undefined });
+		});
+
+		const image: ImageContent = { type: "image", data: "aGk=", mimeType: "image/png" };
+
+		function compacting(ctx: InteractiveModeContext): Spy {
+			// Test harness installs a mutable fake context and AgentSession; keep the unchecked cast named.
+			const harness = ctx as unknown as { session: { isCompacting: boolean }; queueCompactionMessage: Spy };
+			harness.session.isCompacting = true;
+			harness.queueCompactionMessage = vi.fn();
+			return harness.queueCompactionMessage;
+		}
+
+		it("answers a Ctrl+Enter side command during compaction instead of queueing it as a prompt", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]);
+			const queueCompactionMessage = compacting(ctx);
+			const controller = new InputController(ctx);
+
+			editor.setText("/sitrep the migration");
+			await controller.handleFollowUp();
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith(
+				"Situation report. Focus: the migration",
+				"/sitrep the migration",
+			);
+			expect(queueCompactionMessage).not.toHaveBeenCalled();
+			expect(editor.getText()).toBe("");
+		});
+
+		it("still queues Ctrl+Enter non-side and builtin-named commands during compaction", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [plain, { ...sitrep, name: "compact" }]);
+			const queueCompactionMessage = compacting(ctx);
+			const controller = new InputController(ctx);
+
+			editor.setText("/plain");
+			await controller.handleFollowUp();
+			editor.setText("/compact");
+			await controller.handleFollowUp();
+
+			expect(spies.handleBtwCommand).not.toHaveBeenCalled();
+			expect(queueCompactionMessage.mock.calls.map(call => call[0])).toEqual(["/plain", "/compact"]);
+		});
+
+		it("answers an Enter side command during compaction instead of queueing it", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]);
+			const queueCompactionMessage = compacting(ctx);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep");
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith("Situation report. Focus:", "/sitrep");
+			expect(queueCompactionMessage).not.toHaveBeenCalled();
+		});
+
+		it("routes a namespaced side command by its full name", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [{ ...sitrep, name: "acme:sitrep" }]);
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/acme:sitrep the migration");
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledWith(
+				"Situation report. Focus: the migration",
+				"/acme:sitrep the migration",
+			);
+			expect(spies.onInputCallback).not.toHaveBeenCalled();
+		});
+
+		it("does not carry an Enter side command's attached image into the next submission", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]);
+			editor.pendingImages = [image];
+			editor.pendingImageLinks = [undefined];
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep [Image #1]");
+			expect(spies.handleBtwCommand).toHaveBeenCalledTimes(1);
+			expect(editor.pendingImages).toEqual([]);
+
+			await editor.onSubmit?.("next message");
+			expect(spies.startPendingSubmission).toHaveBeenCalledWith(
+				expect.objectContaining({ text: "next message", images: undefined }),
+				expect.anything(),
+			);
+		});
+
+		it("keeps text typed while an input hook delays a side command", async () => {
+			const { ctx, editor, spies } = createContext();
+			withFileCommands(ctx, [sitrep]).session.extensionRunner = {
+				getCommand: () => undefined,
+				hasHandlers: (event: string) => event === "input",
+				emitInput: vi.fn(async () => {
+					editor.setText("typed while the hook ran");
+					return undefined;
+				}),
+			};
+			editor.pendingImages = [image];
+			editor.pendingImageLinks = [undefined];
+			const controller = new InputController(ctx);
+
+			controller.setupEditorSubmitHandler();
+			await editor.onSubmit?.("/sitrep [Image #1]");
+
+			expect(spies.handleBtwCommand).toHaveBeenCalledTimes(1);
+			expect(editor.getText()).toBe("typed while the hook ran");
+			expect(editor.pendingImages).toEqual([]);
+		});
 	});
 
 	it("falls back to aborting the active session when no pending optimistic submission exists", () => {

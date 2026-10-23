@@ -31,6 +31,11 @@ export interface FileSlashCommand {
 	/** Argument hint from `argument-hint`/`argumentHint` frontmatter, shown as inline ghost text. */
 	argumentHint?: string;
 	content: string;
+	/**
+	 * `side: true` frontmatter: the interactive TUI answers the expanded command as a `/btw`
+	 * side question (off the transcript, runnable mid-turn). Other modes expand it as a prompt.
+	 */
+	side?: boolean;
 	source: string; // e.g., "via Claude Code (User)"
 	/** Source metadata for display */
 	_source?: { providerName: string; level: "user" | "project" | "native" };
@@ -41,7 +46,7 @@ const EMBEDDED_SLASH_COMMANDS = EMBEDDED_COMMAND_TEMPLATES;
 function parseCommandTemplate(
 	content: string,
 	options: { source: string; level?: "off" | "warn" | "fatal" },
-): { description: string; body: string; argumentHint?: string } {
+): { description: string; body: string; argumentHint?: string; side: boolean } {
 	const { frontmatter, body } = parseFrontmatter(content, options);
 	const { description: frontmatterDesc, argumentHint } = slashCommandFrontmatterDisplay(frontmatter);
 
@@ -55,7 +60,7 @@ function parseCommandTemplate(
 		}
 	}
 
-	return { description, body, argumentHint };
+	return { description, body, argumentHint, side: frontmatter.side === true };
 }
 
 export interface LoadSlashCommandsOptions {
@@ -76,7 +81,7 @@ export async function loadSlashCommands(options: LoadSlashCommandsOptions = {}):
 	});
 
 	const fileCommands: FileSlashCommand[] = result.items.map(cmd => {
-		const { description, body, argumentHint } = parseCommandTemplate(cmd.content, {
+		const { description, body, argumentHint, side } = parseCommandTemplate(cmd.content, {
 			source: cmd.path ?? `slash-command:${cmd.name}`,
 			level: cmd.level === "native" ? "fatal" : "warn",
 		});
@@ -91,6 +96,7 @@ export async function loadSlashCommands(options: LoadSlashCommandsOptions = {}):
 			argumentHint: cmd.argumentHint ?? argumentHint,
 			content: body,
 			source: sourceStr,
+			...(side || cmd.side === true ? { side: true } : {}),
 			_source: { providerName: cmd._source.providerName, level: cmd.level },
 		};
 	});
@@ -100,7 +106,7 @@ export async function loadSlashCommands(options: LoadSlashCommandsOptions = {}):
 		const name = cmd.name.replace(/\.md$/, "");
 		if (seenNames.has(name)) continue;
 
-		const { description, body, argumentHint } = parseCommandTemplate(cmd.content, {
+		const { description, body, argumentHint, side } = parseCommandTemplate(cmd.content, {
 			source: `embedded:${cmd.name}`,
 			level: "fatal",
 		});
@@ -109,6 +115,7 @@ export async function loadSlashCommands(options: LoadSlashCommandsOptions = {}):
 			description,
 			argumentHint,
 			content: body,
+			...(side ? { side } : {}),
 			source: "bundled",
 		});
 		seenNames.add(name);
@@ -118,25 +125,33 @@ export async function loadSlashCommands(options: LoadSlashCommandsOptions = {}):
 }
 
 /**
- * Expand a slash command if it matches a file-based command.
- * Returns the expanded content or the original text if not a slash command.
+ * Resolve `text` to the file-based slash command it invokes, rendered with its arguments.
+ * Returns undefined when `text` is not an invocation of one of `fileCommands`.
  */
-export function expandSlashCommand(text: string, fileCommands: FileSlashCommand[]): string {
-	if (!text.startsWith("/")) return text;
+export function resolveFileSlashCommand(
+	text: string,
+	fileCommands: readonly FileSlashCommand[],
+): { command: FileSlashCommand; text: string } | undefined {
+	if (!text.startsWith("/")) return undefined;
 
 	const spaceIndex = text.indexOf(" ");
 	const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
 	const argsString = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
 
-	const fileCommand = fileCommands.find(cmd => cmd.name === commandName);
-	if (fileCommand) {
-		const args = parseCommandArgs(argsString);
-		const argsText = args.join(" ");
-		const usesInlineArgPlaceholders = templateUsesInlineArgPlaceholders(fileCommand.content);
-		const substituted = substituteArgs(fileCommand.content, args);
-		const rendered = prompt.render(substituted, { args, ARGUMENTS: argsText, arguments: argsText });
-		return appendInlineArgsFallback(rendered, argsText, usesInlineArgPlaceholders);
-	}
+	const command = fileCommands.find(cmd => cmd.name === commandName);
+	if (!command) return undefined;
+	const args = parseCommandArgs(argsString);
+	const argsText = args.join(" ");
+	const usesInlineArgPlaceholders = templateUsesInlineArgPlaceholders(command.content);
+	const substituted = substituteArgs(command.content, args);
+	const rendered = prompt.render(substituted, { args, ARGUMENTS: argsText, arguments: argsText });
+	return { command, text: appendInlineArgsFallback(rendered, argsText, usesInlineArgPlaceholders) };
+}
 
-	return text;
+/**
+ * Expand a slash command if it matches a file-based command.
+ * Returns the expanded content or the original text if not a slash command.
+ */
+export function expandSlashCommand(text: string, fileCommands: readonly FileSlashCommand[]): string {
+	return resolveFileSlashCommand(text, fileCommands)?.text ?? text;
 }

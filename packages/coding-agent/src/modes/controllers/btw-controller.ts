@@ -350,8 +350,9 @@ export class BtwController {
 		}
 	}
 
-	async start(question: string): Promise<void> {
-		await this.#start(question);
+	/** `title` heads the topic instead of the question, e.g. `/sitrep` rather than its expanded template. */
+	async start(question: string, title?: string): Promise<void> {
+		await this.#start(question, undefined, undefined, title);
 	}
 
 	async startFollowUp(recordId: string, question: string, signal?: AbortSignal): Promise<boolean> {
@@ -359,7 +360,7 @@ export class BtwController {
 		return this.#start(question, recordId, signal);
 	}
 
-	async #start(question: string, recordId?: string, signal?: AbortSignal): Promise<boolean> {
+	async #start(question: string, recordId?: string, signal?: AbortSignal, title?: string): Promise<boolean> {
 		if (signal?.aborted) return false;
 		const trimmedQuestion = question.trim();
 		if (this.#starting || this.#branchInFlight || this.#transitionCount > 0) {
@@ -425,10 +426,11 @@ export class BtwController {
 			this.#activeRequest?.component.close();
 			this.#clearCompletedState();
 			const leafId = this.#sessionManager.getLeafId();
-			const { record, history, conversationKey } = beginBtwTurn(trimmedQuestion, leafId, previous);
+			const { record, history, conversationKey } = beginBtwTurn(trimmedQuestion, leafId, previous, title);
 			const request: BtwRequest = {
 				component: new BtwPanelComponent({
 					question: trimmedQuestion,
+					title,
 					tui: this.ctx.ui,
 					canBranch: () => this.canBranch(),
 					canFollowUp: () => this.canFollowUp(),

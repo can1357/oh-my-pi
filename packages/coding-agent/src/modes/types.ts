@@ -558,7 +558,8 @@ export interface InteractiveModeContext {
 		message: string,
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
 	): Promise<void>;
-	handleBtwCommand(question: string): Promise<void>;
+	/** `title` heads the side question instead of its text, e.g. a side file command's `/sitrep the migration`. */
+	handleBtwCommand(question: string, title?: string): Promise<void>;
 	handleTanCommand(work: string): Promise<void>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;

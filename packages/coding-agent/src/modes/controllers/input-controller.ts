@@ -39,6 +39,7 @@ import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-
 import { createModelBrowserSource } from "../model-browser-source";
 import { parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
+import { resolveFileSlashCommand } from "../../extensibility/slash-commands";
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { AgentRegistry } from "../../registry/agent-registry";
@@ -958,6 +959,9 @@ export class InputController {
 	setupEditorSubmitHandler(): void {
 		this.ctx.editor.onSubmit = async (text: string) => {
 			const submittedText = text;
+			// The Editor resets before calling onSubmit, so this is normally empty;
+			// different editor text after an await below is a newer draft.
+			const draftText = this.ctx.editor.getText();
 			const armed = this.#armedBareCommand;
 			this.#armedBareCommand = undefined;
 			const armedBareCommand =
@@ -1015,6 +1019,7 @@ export class InputController {
 				this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedImages = inputImages;
+			const submittedImageLinks = inputImageLinks;
 
 			// A startup-deferred extension's input hook must see the first submission.
 			if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
@@ -1128,6 +1133,17 @@ export class InputController {
 				// No local render: the prompt comes back from the host as a
 				// collab-prompt event/entry and renders with the author badge.
 				this.ctx.collabGuest.sendPrompt(text, images);
+				return;
+			}
+
+			// `side: true` file commands answer as a /btw side question: off the
+			// transcript and runnable mid-turn, so they never steer the running work.
+			// The side question carries text only, so the submitted attachments drop.
+			if (
+				await this.#runSideFileCommand(text, () =>
+					this.#detachSideSubmission(draftText, submittedImages, submittedImageLinks),
+				)
+			) {
 				return;
 			}
 
@@ -1420,6 +1436,55 @@ export class InputController {
 		);
 	}
 
+	/**
+	 * Answer `text` as a /btw side question when it invokes a `side: true` file command.
+	 * Extension and custom commands keep precedence over a file command of the same name.
+	 * `detachDraft` releases the submission's remaining editor state before the side question runs.
+	 */
+	async #runSideFileCommand(text: string, detachDraft?: () => void): Promise<boolean> {
+		if (!text.startsWith("/")) return false;
+		// Match the whole token the way resolveFileSlashCommand() does: namespaced
+		// file commands (`/plugin:cmd`) are registered by their full name, while
+		// parseSlashCommand() stops at the colon.
+		const spaceIndex = text.indexOf(" ");
+		const token = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+		if (!this.ctx.fileSlashCommands.has(token)) return false;
+		const session = this.ctx.session;
+		if (session.extensionRunner?.getCommand(token) !== undefined) return false;
+		if (session.customCommands.some(loaded => loaded.command.name === token)) return false;
+		const resolved = resolveFileSlashCommand(text, session.slashCommands);
+		if (!resolved?.command.side) return false;
+		const name = resolved.command.name;
+		this.ctx.editor.addToHistory(text);
+		detachDraft?.();
+		const args = text.slice(name.length + 1).trim();
+		await this.ctx.handleBtwCommand(resolved.text, args ? `/${name} ${args}` : `/${name}`);
+		return true;
+	}
+
+	/**
+	 * Detach a side command's submission without erasing input that arrived while it
+	 * awaited dispatch: the whole draft clears only while the editor still holds
+	 * `draftText`; otherwise only the submitted attachments drop, and only while they
+	 * are still the live prefix.
+	 */
+	#detachSideSubmission(
+		draftText: string,
+		images: ImageContent[] | undefined,
+		imageLinks: (string | undefined)[] | undefined,
+	): void {
+		if (this.ctx.editor.getText() === draftText) this.ctx.editor.clearDraft();
+		else this.#dropSubmittedPending(images, imageLinks);
+	}
+
+	/** Whether `text` dispatches to a builtin, matching executeBuiltinSlashCommand(). */
+	#matchesBuiltinSlashCommand(text: string): boolean {
+		const parsed = parseSlashCommand(text);
+		if (!parsed) return false;
+		const builtin = lookupBuiltinSlashCommand(parsed.name);
+		return builtin !== undefined && (builtin.allowArgs === true || !parsed.args);
+	}
+
 	/** Whether `text` invokes a registered extension command, which runs locally instead of prompting the model. */
 	#isLocalExtensionCommand(text: string): boolean {
 		const extensionCommandSpace = text.indexOf(" ");
@@ -1434,6 +1499,7 @@ export class InputController {
 	/** Submit editor text to the focused subagent session (chat and continue shortcuts only). */
 	async #submitToFocusedSession(text: string, streamingBehavior: "steer" | "followUp"): Promise<void> {
 		const target = this.ctx.viewSession;
+		const draftText = this.ctx.editor.getText();
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 		const imageLinks =
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
@@ -1460,6 +1526,12 @@ export class InputController {
 					return;
 				}
 			}
+		}
+		if (
+			text &&
+			(await this.#runSideFileCommand(text, () => this.#detachSideSubmission(draftText, images, imageLinks)))
+		) {
+			return;
 		}
 		if (text && (text.startsWith("/") || text.startsWith("!") || parsePythonCommandInput(text))) {
 			this.ctx.showStatus(
@@ -1912,7 +1984,10 @@ export class InputController {
 		// skill typed during compaction is not lost or short-circuited through
 		// `promptCustomMessage`. The compaction-resume path re-parses the
 		// queued text into a user-attributed skill invocation before delivery.
+		// Side commands answer now instead: the queue would deliver them as a
+		// main-turn prompt. Builtins keep precedence, as in the dispatch below.
 		if (this.ctx.session.isCompacting) {
+			if (text && !this.#matchesBuiltinSlashCommand(text) && (await this.#runSideFileCommand(text))) return;
 			this.ctx.queueCompactionMessage(text, "followUp", images, { preserveDraft: true });
 			return;
 		}
@@ -1938,6 +2013,9 @@ export class InputController {
 				return;
 			}
 		}
+
+		// The draft is already detached, so there is no editor state to release.
+		if (text && (await this.#runSideFileCommand(text))) return;
 
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;

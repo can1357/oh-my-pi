@@ -17,13 +17,18 @@ export interface BtwTurnStart {
 	conversationKey: string;
 }
 
-/** Start a new topic, or append a follow-up turn to `previous`. */
-export function beginBtwTurn(question: string, leafId: string | null, previous?: BtwHistoryRecord): BtwTurnStart {
+/** Start a new topic headed by `title` when given, or append a follow-up turn to `previous`. */
+export function beginBtwTurn(
+	question: string,
+	leafId: string | null,
+	previous?: BtwHistoryRecord,
+	title?: string,
+): BtwTurnStart {
 	const now = Date.now();
 	const turn: BtwHistoryTurn = { question, answer: "", status: "running", createdAt: now, updatedAt: now };
 	const record: BtwHistoryRecord = previous
 		? { ...previous, followUps: [...(previous.followUps ?? []), turn] }
-		: { ...turn, id: Snowflake.next(), leafId };
+		: { ...turn, id: Snowflake.next(), leafId, ...(title ? { title } : {}) };
 	const history = previous ? getBtwTurns(previous) : undefined;
 	// A cancelled/failed transport may still be unwinding. Start a fresh
 	// lineage after that boundary, while successful follow-ups share one.

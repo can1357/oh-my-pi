@@ -25,6 +25,7 @@ import type {
 	RpcAvailableCommandsUpdateFrame,
 	RpcAvailableSlashCommand,
 	RpcBtwDeltaFrame,
+	RpcBtwHistoryRecord,
 	RpcBtwRecordFrame,
 	RpcCommand,
 	RpcExtensionUIRequest,
@@ -58,7 +59,7 @@ import type {
 import type * as Wire from "@oh-my-pi/pi-coding-agent/modes/rpc/wire/rpc-wire.generated";
 import type { RestoredQueuedMessage } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import type { SessionStats } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { BtwHistoryRecord, BtwHistoryTurn } from "@oh-my-pi/pi-coding-agent/session/btw-history";
+import type { BtwHistoryTurn } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import type { UsageLimitState } from "@oh-my-pi/pi-coding-agent/session/usage-limit";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
@@ -271,7 +272,7 @@ export type State = Assert<
 		slashSubcommand: Outbound<NonNullable<RpcAvailableSlashCommand["subcommands"]>[number], Wire.SlashSubcommand>;
 		subagentSnapshot: Outbound<RpcSubagentSnapshot, Wire.SubagentSnapshot>;
 		subagentMessages: Outbound<RpcSubagentMessagesResult, Wire.SubagentMessages>;
-		btwHistoryRecord: Outbound<BtwHistoryRecord, Wire.BtwHistoryRecord>;
+		btwHistoryRecord: Outbound<RpcBtwHistoryRecord, Wire.BtwHistoryRecord>;
 		btwHistoryTurn: Outbound<BtwHistoryTurn, Wire.BtwHistoryTurn>;
 		logoutAccount: Outbound<LogoutAccount, Wire.LogoutAccount>;
 		btwStatuses: Same<BtwHistoryTurn["status"], Wire.BtwStatus>;

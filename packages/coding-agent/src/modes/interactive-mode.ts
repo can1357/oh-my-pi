@@ -8573,8 +8573,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#inputController.handleQueueCommand(message, detached);
 	}
 
-	handleBtwCommand(question: string): Promise<void> {
-		return this.#btwController.start(question);
+	handleBtwCommand(question: string, title?: string): Promise<void> {
+		return this.#btwController.start(question, title);
 	}
 
 	handleTanCommand(work: string): Promise<void> {

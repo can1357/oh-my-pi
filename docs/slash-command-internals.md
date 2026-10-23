@@ -143,8 +143,9 @@ For each command:
 3. keep parsed body as executable template content
 4. compute a display source string like `via Claude Code Project`
 5. preserve `argumentHint` from discovery, or parse `argumentHint`/`argument-hint` frontmatter for autocomplete ghost text and ACP input hints
+6. set `side` when the frontmatter has the boolean `side: true` (a quoted `"true"` does not count)
 
-Codex/OpenCode providers strip frontmatter before this stage. Their discovered argument hints survive, but the runtime description currently falls back to the body rather than using the separately discovered description.
+Codex/OpenCode providers strip frontmatter before this stage. Their discovered argument hints and `side` flags survive, but the runtime description currently falls back to the body rather than using the separately discovered description.
 
 Frontmatter parse severity is level-dependent:
 
@@ -246,6 +247,21 @@ The parser is simple quote-aware splitting:
 - empty quoted arguments are discarded in this default, non-strict parsing mode
 
 Argument substitution is one pass over the template; dollar placeholders inside argument values are not substituted again. Missing positional values, zero start/length slices, and out-of-range slice starts render as empty strings.
+
+### Side commands (`side: true`)
+
+A file command with `side: true` frontmatter runs as a [`/btw`](#11-built-in-command-note-btw) side question in the interactive TUI. The expanded template, after the same argument substitution, is the question. It works the same with or without arguments. The question and answer stay off the transcript, the command runs while a turn streams without steering it, and the answer gets `/btw` history, follow-ups and branching. The panel and history show the typed invocation (`/sitrep`, `/sitrep the migration`) as the topic's title while the model receives the expanded template. The title lives in an `entry-<id>.title` file beside the record's JSON, which keeps the record readable by older builds. Use it for read-only questions about the session, such as status reports or explanations:
+
+```markdown
+---
+description: Situation report for this session
+argument-hint: "[focus]"
+side: true
+---
+Situation report. Focus on $ARGUMENTS if given, else the whole session.
+```
+
+This routing applies to Enter, Ctrl+Enter, and focused subagent views; a focused view answers about the agent being viewed. An extension or TypeScript custom command of the same name still takes precedence. Other modes (RPC, ACP, print) have no `/btw` surface, so they expand a side command as an ordinary prompt.
 
 ## 7) Unknown `/...` behavior
 

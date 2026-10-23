@@ -10,7 +10,14 @@ export interface BtwHistoryTurn {
 export interface BtwHistoryRecord extends BtwHistoryTurn {
 	id: string;
 	leafId: string | null;
+	/** Display heading for the topic, e.g. `/sitrep`; `question` keeps the full text sent to the model. */
+	title?: string;
 	followUps?: readonly BtwHistoryTurn[];
+}
+
+/** The topic's display heading: its title, else the opening question. */
+export function getBtwTopicLabel(record: BtwHistoryRecord): string {
+	return record.title ?? record.question;
 }
 
 export function getBtwLatestTurn(record: BtwHistoryRecord): BtwHistoryTurn {

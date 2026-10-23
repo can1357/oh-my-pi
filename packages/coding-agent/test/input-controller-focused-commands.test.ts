@@ -141,6 +141,32 @@ describe("focused subagent view slash commands", () => {
 		expect(prompt).not.toHaveBeenCalled();
 	});
 
+	it("answers a side file command from the focused view and releases its draft", async () => {
+		const focused = createFocusedContext();
+		Object.assign(focused.raw, { fileSlashCommands: new Set(["sitrep"]) });
+		Object.assign(focused.raw.session, {
+			slashCommands: [
+				{
+					name: "sitrep",
+					description: "",
+					content: "Report. Focus: $ARGUMENTS",
+					side: true,
+					source: "via OMP User",
+				},
+			],
+		});
+		const controller = new InputController(focused.ctx);
+		controller.setupEditorSubmitHandler();
+		focused.editor.setText("/sitrep the migration");
+		await focused.ctx.editor.onSubmit?.("/sitrep the migration");
+		expect(focused.raw.handleBtwCommand).toHaveBeenCalledWith(
+			"Report. Focus: the migration",
+			"/sitrep the migration",
+		);
+		expect(focused.editor.clearDraft).toHaveBeenCalledTimes(1);
+		expect(focused.prompt).not.toHaveBeenCalled();
+	});
+
 	it("sets the focused agent's thinking level with /effort, leaving the main session alone", async () => {
 		const focused = createFocusedContext();
 		const setFocusedThinking = vi.fn();

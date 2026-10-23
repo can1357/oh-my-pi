@@ -15,6 +15,7 @@ import {
 	type BtwHistoryTurn,
 	getBtwCopyText,
 	getBtwLatestTurn,
+	getBtwTopicLabel,
 	getBtwTurns,
 } from "./btw-history";
 import { getMarkdownTheme, type ThemeColor, theme } from "../theme/theme";
@@ -38,6 +39,12 @@ import type { TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
 import type { NativeChild, NativeNode, NativeScroll, NativeUiEvent } from "../native/node";
 import { col, md, node, span, text } from "../native/describe";
 import { actionBar, actionButton } from "../native/overlay";
+
+/** The turns as shown: a titled topic's opening question displays as its title, e.g. `/sitrep`. */
+function getDisplayTurns(record: BtwHistoryRecord): readonly BtwHistoryTurn[] {
+	const turns = getBtwTurns(record);
+	return record.title === undefined ? turns : [{ ...turns[0]!, question: record.title }, ...turns.slice(1)];
+}
 
 interface BtwHistoryPanelOptions {
 	records: readonly BtwHistoryRecord[];
@@ -564,7 +571,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 			if (followUps > 0) detail.push(span(` · ${followUps} follow-up${followUps === 1 ? "" : "s"}`));
 			const status = describeStatus(getBtwLatestTurn(record).status);
 			// The question is markdown: its `code` reads as mono, without the backticks.
-			const label = sanitizeDisplayLine(record.question)
+			const label = sanitizeDisplayLine(getBtwTopicLabel(record))
 				.split(/`([^`]+)`/)
 				.flatMap((part, index) => (part ? [span(part, index % 2 === 1 ? "mono" : undefined)] : []));
 			return node("item", { label, detail, ...(status ? { value: status } : {}) }, undefined, record.id);
@@ -580,7 +587,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 
 	/** The selected side question as a short document: the asked question titles each answer. */
 	#describeThread(record: BtwHistoryRecord): NativeNode {
-		const turns = getBtwTurns(record);
+		const turns = getDisplayTurns(record);
 		const children: NativeChild[] = turns.map((turn, index) => this.#describeTurn(turn, index, `turn-${index}`));
 		if (this.#composer) children.push(this.#describeComposer(this.#composer));
 		return node("col", { role: "omp.btw.thread" }, children, "thread");
@@ -703,7 +710,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 			const time = theme.fg("dim", this.#timeFormat.format(record.createdAt));
 			const badge = theme.fg(status.color, status.label);
 			const prefix = `${cursor} ${time} ${badge} `;
-			const question = sanitizeDisplayLine(record.question);
+			const question = sanitizeDisplayLine(getBtwTopicLabel(record));
 			const snippet = truncateToWidth(
 				question,
 				Math.max(0, contentWidth - (rowSpan === 2 ? 2 : visibleWidth(prefix))),
@@ -796,7 +803,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 				lines.push(...wrapTextWithAnsi(theme.fg("success", "✓ Copied to clipboard"), inner), "");
 			}
 			if (record) {
-				const turns = getBtwTurns(record);
+				const turns = getDisplayTurns(record);
 				for (let index = 0; index < turns.length; index++) {
 					const cached = this.#renderTurn(turns[index]!, this.#turns[index], inner);
 					this.#turns[index] = cached;
@@ -871,7 +878,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 			const availableRows = Math.max(1, height - chrome - 1);
 			if (availableRows >= 2) {
 				composerLines.push(
-					theme.fg("dim", truncateToWidth(`Topic: ${sanitizeDisplayLine(record?.question ?? "")}`, inner)),
+					theme.fg(
+						"dim",
+						truncateToWidth(`Topic: ${sanitizeDisplayLine(record ? getBtwTopicLabel(record) : "")}`, inner),
+					),
 				);
 			}
 			if (composer.notice && availableRows >= 3) {

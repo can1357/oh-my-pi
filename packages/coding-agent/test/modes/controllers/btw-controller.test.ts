@@ -351,6 +351,46 @@ describe("BtwController", () => {
 		}
 	});
 
+	it("heads a titled side question with its title while the model answers the full text", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-btw-title-"));
+		const runEphemeralTurn = vi.fn(async (_args: RunEphemeralTurnArgs) => ({
+			replyText: "Status answer",
+			assistantMessage: createAssistantMessage("Status answer"),
+		}));
+		const btwContainer = new Container();
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
+		const showOverlay = vi.spyOn(ctx.ui, "showOverlay");
+		const manager = SessionManager.create(directory, directory);
+		ctx.sessionManager = manager;
+		const controller = new BtwController(ctx);
+		const template = "Sitrep template: list milestones and ETAs.";
+		try {
+			await controller.start(template, "/sitrep");
+			await drainBtwRequest();
+			await controller.flush();
+
+			expect(runEphemeralTurn.mock.calls[0]?.[0].promptText).toContain(template);
+			const panel = btwContainer.children[0];
+			if (!(panel instanceof BtwPanelComponent)) throw new Error("Expected the BTW panel");
+			expect(panel.title).toBe("/sitrep");
+			expect(Bun.stripANSI(panel.render(100).join("\n"))).not.toContain("Sitrep template");
+
+			const saved = (await BtwHistoryStore.open(manager.getArtifactsDir()!)).getRecords();
+			expect(saved.map(record => [record.title, record.question])).toEqual([["/sitrep", template]]);
+
+			await controller.start("");
+			const history = showOverlay.mock.calls.at(-1)?.[0];
+			if (!(history instanceof BtwHistoryPanel)) throw new Error("Expected BTW history");
+			const rendered = Bun.stripANSI(history.render(120).join("\n"));
+			expect(rendered).toContain("/sitrep");
+			expect(rendered).not.toContain("Sitrep template");
+		} finally {
+			await controller.dispose();
+			await manager.flush();
+			await fs.rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps rendering a focused answer after returning to main, parking follow-ups until re-focus", async () => {
 		const pending = Promise.withResolvers<RunEphemeralTurnResult>();
 		const focusedTurn = vi.fn((_args: RunEphemeralTurnArgs) => pending.promise);

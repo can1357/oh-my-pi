@@ -177,6 +177,44 @@ describe("BtwHistoryStore", () => {
 		expect(await Bun.file(filePath).exists()).toBe(false);
 	});
 
+	it("keeps a titled topic's heading in a sidecar so the record JSON stays readable by older builds", async () => {
+		const store = await BtwHistoryStore.open(artifactsDir);
+		const titled = record("titled", { question: "Expanded /sitrep template", title: "/sitrep the migration" });
+		await store.upsert(titled);
+		await store.upsert({ ...titled, answer: "Revised answer", updatedAt: 3 });
+		const { title: _title, ...fields } = titled;
+
+		const historyDir = path.join(artifactsDir, "btw-history");
+		expect(await Bun.file(path.join(historyDir, "entry-titled.json")).json()).toEqual({
+			...fields,
+			answer: "Revised answer",
+			updatedAt: 3,
+		});
+		expect(await Bun.file(path.join(historyDir, "entry-titled.title")).text()).toBe("/sitrep the migration");
+		expect((await BtwHistoryStore.open(artifactsDir)).getRecords()).toEqual([
+			{ ...titled, answer: "Revised answer", updatedAt: 3 },
+		]);
+	});
+
+	it("opens history beside orphaned and unreadable title sidecars", async () => {
+		const historyDir = path.join(artifactsDir, "btw-history");
+		await fs.mkdir(path.join(historyDir, "entry-unreadable.title"), { recursive: true });
+		await Bun.write(path.join(historyDir, "entry-unreadable.json"), JSON.stringify(record("unreadable")));
+		await Bun.write(path.join(historyDir, "entry-orphan.title"), "/orphan");
+
+		expect((await BtwHistoryStore.open(artifactsDir)).getRecords()).toEqual([record("unreadable")]);
+	});
+
+	it("does not title a new topic with a vanished record's leftover sidecar", async () => {
+		const historyDir = path.join(artifactsDir, "btw-history");
+		await Bun.write(path.join(historyDir, "entry-reused.title"), "/stale");
+		const store = await BtwHistoryStore.open(artifactsDir);
+		await store.upsert(record("reused"));
+
+		expect(await Bun.file(path.join(historyDir, "entry-reused.title")).exists()).toBe(false);
+		expect((await BtwHistoryStore.open(artifactsDir)).getRecords()).toEqual([record("reused")]);
+	});
+
 	it("captures streaming snapshots before queued writes and keeps old views stable", async () => {
 		const store = await BtwHistoryStore.open(artifactsDir);
 		const streaming = record("streaming", { status: "running", answer: "Captured partial" });
