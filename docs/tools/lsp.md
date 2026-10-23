@@ -182,7 +182,7 @@ Uses the same location normalization and output shape as `definition`, but sends
 - Optional: `line`, `symbol`, `query`, `apply`, `timeout`.
 
 **Execution**
-- Uses cached diagnostics for the open URI; when disk reconciliation sent a `didChange`, it first waits for fresh diagnostics at the reconciled version (falling back to the cache on non-abort failure). Sends `textDocument/codeAction` for a zero-width range at the resolved position.
+- Uses cached diagnostics for the open URI; when disk reconciliation sent a `didChange` or reopened a document closed for idleness, it first waits for fresh diagnostics at that version (falling back to the cache on non-abort failure). Sends `textDocument/codeAction` for a zero-width range at the resolved position.
 - When `apply !== true`, `query` is passed as `context.only: [query]`; this is a server-side kind filter.
 - When `apply === true` and `query` is non-empty, it is a client-side selector: either a zero-based numeric index or a case-insensitive substring of the action title.
 - When `apply === true` but `query` is omitted, the current implementation falls through to list mode and does not apply an action.
@@ -269,6 +269,7 @@ Uses the same location normalization and output shape as `definition`, but sends
   - Caches LSP clients by spawn/initialization identity and cwd, with `pendingRequests`, `diagnostics`, `openFiles`, `serverCapabilities`, and project-load state. The transport may represent a shared mux link rather than an owned process.
   - Caches custom linter clients by `serverName:cwd`.
   - Updates client `lastActivity`; optional idle-timeout cleanup is driven by workspace `idleTimeoutMs` or `setIdleTimeout()`.
+  - Stamps each open document's `lastUsedAt` when an operation opens, syncs, saves, reconciles, or explicitly refreshes it. Before sending a `didOpen`, the client sends `didClose` for documents unused for 5 minutes, so the server can drop their projects; a queued close is written even if the opener is cancelled first, so a later use always reopens with a `didOpen` of the current text, and a close whose write is in flight when the opener is cancelled tears down a server that stopped reading stdin. A reopen resumes past the old version, and within the deferred-diagnostics window diagnostics waits treat an empty publish, or one versioned before the reopen, as provisional, since it may predate the close. Overlays ahead of disk and documents mid-operation stay open, and refreshing every open document after a watched-file change or `reload` does not count as a use.
 - Background work / cancellation
   - Every request has an abortable timeout signal.
   - Aborting an in-flight LSP request sends `$/cancelRequest`.
@@ -280,6 +281,7 @@ Uses the same location normalization and output shape as `definition`, but sends
 - Warmup initialize timeout default: `5_000ms` — `WARMUP_TIMEOUT_MS` in `packages/coding-agent/src/lsp/client.ts`.
 - Project-load wait fallback: `15_000ms` — `PROJECT_LOAD_TIMEOUT_MS` in `packages/coding-agent/src/lsp/client.ts`.
 - Idle-client sweep interval when enabled: `60_000ms` — `IDLE_CHECK_INTERVAL_MS` in `packages/coding-agent/src/lsp/client.ts`.
+- Open-document idle window: `5 * 60 * 1000ms` — `OPEN_FILE_IDLE_MS` in `packages/coding-agent/src/lsp/client.ts`.
 - Failed initialization backoff: `3 * 60 * 1000ms` — `INIT_FAILURE_BACKOFF_MS`; a matching single-file or workspace `reload` clears this negative cache so retry is immediate.
 - Single-file diagnostics wait: `3_000ms` normally (`SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS` in `diagnostics.ts`); for project-aware servers the `lsp.requestTimeout` setting (default `10` seconds) or the call's `timeout`. Both are bounded by the tool timeout.
 - Late post-edit diagnostics (edit/write writethrough, delivered after the tool result): per-server wait `max(12_000ms, lsp.requestTimeout)` — `deferredDiagnosticsWaitMs()` in `diagnostics.ts`.

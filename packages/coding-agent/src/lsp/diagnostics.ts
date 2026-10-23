@@ -244,14 +244,22 @@ function requestDocumentDiagnostics(
 
 function isProvisionalColdPublish(
 	client: LspClient,
+	uri: string,
 	published: PublishedDiagnostics,
 	expectedDocumentVersion: number | undefined,
 	now: number,
 ): boolean {
+	if (expectedDocumentVersion === undefined) return false;
+	// A document reopened after an idle close can still receive publishes from before
+	// the close: the empty one that cleared it, or one versioned for its earlier life.
+	const reopenedAt = client.openFiles.get(uri)?.reopenedAt;
+	if (reopenedAt !== undefined && now - reopenedAt < DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS) {
+		if (published.diagnostics.length === 0) return true;
+		if (published.version !== null && published.version < expectedDocumentVersion) return true;
+	}
+	if (published.diagnostics.length > 0) return false;
 	return (
-		expectedDocumentVersion !== undefined &&
 		published.version === null &&
-		published.diagnostics.length === 0 &&
 		client.startedAt !== undefined &&
 		now - client.startedAt < DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS
 	);
@@ -285,15 +293,16 @@ export async function waitForDiagnostics(
 				return published.diagnostics;
 			}
 			// An empty unversioned publish from a newly started server is often its
-			// pre-analysis placeholder. Keep waiting so the writethrough crosses its
-			// inline deadline and preserves this fetch for deferred delivery.
+			// pre-analysis placeholder, and a publish for a reopened document may
+			// predate its close. Keep waiting so the writethrough
+			// crosses its inline deadline and preserves this fetch for deferred delivery.
 			const now = Date.now();
 			if (published !== settledRef) {
 				settledRef = published;
 				settledAt = now;
 			} else if (
 				now - settledAt >= settleMs &&
-				!isProvisionalColdPublish(client, published, expectedDocumentVersion, now)
+				!isProvisionalColdPublish(client, uri, published, expectedDocumentVersion, now)
 			) {
 				return published.diagnostics;
 			}
@@ -329,7 +338,7 @@ export async function waitForDiagnostics(
 		if (
 			published === settledRef &&
 			now - settledAt >= settleMs &&
-			!isProvisionalColdPublish(client, published, expectedDocumentVersion, now)
+			!isProvisionalColdPublish(client, uri, published, expectedDocumentVersion, now)
 		) {
 			return published.diagnostics;
 		}

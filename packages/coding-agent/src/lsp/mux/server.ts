@@ -386,6 +386,8 @@ export class LspMuxServer {
 		const uri = parseUri(message.params);
 		if (!uri) return;
 		session.openUris.delete(uri);
+		// Safe to forward: a server is reused only once its session count is zero (see connect),
+		// so no other session holds an overlay of this document on this server.
 		server.documents.delete(uri);
 		await this.#writeServer(server, message);
 	}

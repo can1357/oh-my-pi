@@ -290,6 +290,27 @@ describe("LspMuxServer", () => {
 		}, "session-specific document contents");
 	}, 10_000);
 
+	it("keeps a concurrent session's document open when another session closes the same uri", async () => {
+		const first = await link();
+		const second = await link();
+		await Promise.all([initialize(first.client), initialize(second.client)]);
+		const uri = "file:///shared.ts";
+		first.client.notify("textDocument/didOpen", {
+			textDocument: { uri, languageId: "typescript", version: 1, text: "first" },
+		});
+		second.client.notify("textDocument/didOpen", {
+			textDocument: { uri, languageId: "typescript", version: 1, text: "second" },
+		});
+		first.client.notify("textDocument/didClose", { textDocument: { uri } });
+
+		await pollUntil(
+			async () => (await state(first.client)).didClose.includes(uri),
+			"first session's close to reach its server",
+		);
+		expect(await second.client.request<string | null>("test/documentText", { uri })).toBe("second");
+		expect((await state(second.client)).didClose).toEqual([]);
+	}, 10_000);
+
 	it("replays cached diagnostics when an idle server is reused", async () => {
 		const first = await link();
 		await initialize(first.client);
