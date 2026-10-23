@@ -15,7 +15,7 @@ Otherwise call `respond` with:
 - `blocks` (1–4, most important first), each on a `field`:
   - `spark`: numbers over time. `label`, `key?` (one key value, e.g. `gpt-5`), `unit?`, `better?` (`higher`|`lower`), `target?` + `targetLabel?` (goal line from the brief), `min?`, `max?`.
   - `bars`: one bar per key, reduced by `agg`. `label`, `unit?`, `max?`, `better?`.
-  - `meter`: `agg` out of a `total` (a value ref, or a number the job or its output states; never a guess), `label`, `unit?`.
+  - `meter`: `agg` out of a `total` (a value ref, or a number the job or its output states; never a guess), `label`, `unit?`. For unscaled numbers carrying `%` in the samples, `total:100` is valid with `last`, `first`, `min`, `max` or `mean`.
   - `stat`: `items`, 1–4 value refs with `label`.
   - `grid`: a cell per key, coloured by latest text. `label`, `tones`: lowercase status substring → `success`|`error`|`warning`|`pending`|`info`|`muted`|`neutral`.
   - `text`: the field's latest text.

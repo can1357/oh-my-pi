@@ -678,4 +678,133 @@ describe("job widget spec validation", () => {
 		// The output states the total, the brief the goal (`1.2k` reads as 1200).
 		expect(validateJobWidgetSpec(spec(75, 1200), samples, "bench --rps, goal 1.2k req/s").ok).toBe(true);
 	});
+
+	describe("percent meter totals", () => {
+		const percent: JobWidgetSpec = {
+			title: "progress",
+			rules: [{ from: "out", match: String.raw`progress (?P<pct>[\d.]+)` }],
+			blocks: [{ kind: "meter", field: "pct", agg: "last", total: 100, label: "progress" }],
+		};
+
+		it("accepts a total of 100 only for a percentage-preserving aggregation", () => {
+			for (const agg of ["last", "first", "min", "max", "mean", "sum", "count", "rate", "delta", "change"]) {
+				const checked = validateJobWidgetSpec(
+					{ ...percent, blocks: [{ ...percent.blocks[0], agg }] },
+					[{ id: "out", lines: ["progress 42%"] }],
+					"report progress",
+				);
+				expect({ agg, ok: checked.ok }).toEqual({
+					agg,
+					ok: ["last", "first", "min", "max", "mean"].includes(agg),
+				});
+			}
+		});
+
+		it("accepts the percent sign inside or immediately after the numeric capture", () => {
+			for (const match of [
+				String.raw`progress (?P<pct>[\d.]+)`,
+				String.raw`progress (?<pct>[\d.]+)\s*%`,
+				String.raw`progress (?P<pct>[\d.]+\s*%)`,
+			]) {
+				for (const line of ["progress 42%", "progress 42.5 %"]) {
+					const checked = validateJobWidgetSpec(
+						{ ...percent, rules: [{ from: "out", match, scale: 1 }] },
+						[{ id: "out", lines: [line] }],
+						"report progress",
+					);
+					expect({ match, line, ok: checked.ok }).toEqual({ match, line, ok: true });
+				}
+			}
+		});
+
+		it("keeps invented totals rejected without percentage evidence for the captured value", () => {
+			for (const { match, lines, scale, from } of [
+				{ lines: ["progress 42"] },
+				{ lines: ["progress 42 items, CPU 5%"] },
+				{ lines: ["progress 42%", "progress 73 items"] },
+				{ lines: ["progress 42%"], scale: 0.01 },
+				{ lines: ["progress 42%"], from: "pipe:1" },
+				{ lines: ["progress 42%"], match: String.raw`progress (?P<pct>\d)\d%` },
+				{ lines: ["progress 42k%"], match: String.raw`progress (?P<pct>\S+)` },
+				{ lines: ["progress 42 items %"], match: String.raw`progress (?P<pct>.+)` },
+			]) {
+				const checked = validateJobWidgetSpec(
+					{
+						...percent,
+						rules: [{ ...percent.rules[0], match: match ?? percent.rules[0].match, from: from ?? "out", scale }],
+						blocks: [{ ...percent.blocks[0], unit: "%" }],
+					},
+					[{ id: "out", lines }],
+					"report progress",
+				);
+				expect(checked.ok).toBe(false);
+				if (!checked.ok)
+					expect(checked.errors).toContain(
+						"blocks[0] (meter).total: 100 appears nowhere in the job or its output; read the total from a line (a value ref) or show the value as a stat",
+					);
+			}
+		});
+
+		it("requires percentage evidence from every numeric feeding rule", () => {
+			const spec = {
+				...percent,
+				rules: [...percent.rules, { from: "out", match: String.raw`done (?P<pct>\d+)%` }],
+			};
+			expect(validateJobWidgetSpec(spec, [{ id: "out", lines: ["progress 42%"] }], "report progress").ok).toBe(
+				false,
+			);
+			expect(
+				validateJobWidgetSpec(spec, [{ id: "out", lines: ["progress 42%", "done 73%"] }], "report progress").ok,
+			).toBe(true);
+		});
+
+		it("rejects an unmatched scaled rule feeding a percentage", () => {
+			const spec = {
+				...percent,
+				rules: [...percent.rules, { from: "out", match: String.raw`frac (?P<pct>[\d.]+)`, scale: 100 }],
+			};
+			expect(validateJobWidgetSpec(spec, [{ id: "out", lines: ["progress 42%"] }], "report progress").ok).toBe(
+				false,
+			);
+		});
+
+		it("does not grant percentage totals to other fields, count feeds, targets or totals", () => {
+			for (const spec of [
+				{
+					...percent,
+					rules: [{ from: "out", match: String.raw`progress (?P<pct>\d+)% items (?P<items>\d+)` }],
+					blocks: [{ ...percent.blocks[0], field: "items" }],
+				},
+				{ ...percent, rules: [{ ...percent.rules[0], count: "pct" }] },
+				{ ...percent, blocks: [{ ...percent.blocks[0], total: 200 }] },
+				{ ...percent, blocks: [{ kind: "spark", field: "pct", label: "progress", target: 100 }] },
+			]) {
+				expect(
+					validateJobWidgetSpec(spec, [{ id: "out", lines: ["progress 42% items 7"] }], "report progress").ok,
+				).toBe(false);
+			}
+		});
+
+		it("charts recorded pytest progress from bash and subagent sources", () => {
+			// Retained tool output from a subagent whose widget rejected total: 100.
+			const lines = [
+				"........................................................................ [ 18%]",
+				"........................................................................ [ 37%]",
+			];
+			for (const id of ["out", "tools"]) {
+				const checked = validateJobWidgetSpec(
+					{ ...percent, rules: [{ from: id, match: String.raw`\[\s*(?P<pct>\d+)%\]` }] },
+					[{ id, lines: id === "tools" ? ["» bash run tests", ...lines] : lines }],
+					"run tests",
+				);
+				expect(checked.ok).toBe(true);
+				if (!checked.ok) continue;
+				const source = new ScriptedSource(id);
+				const h = harness(checked.spec, source);
+				source.append(`${lines.join("\n")}\n`);
+				h.ingest();
+				expect(block(h.view(), "meter").value).toBe(0.37);
+			}
+		});
+	});
 });
