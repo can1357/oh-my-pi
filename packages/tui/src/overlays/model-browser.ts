@@ -752,7 +752,7 @@ function isFreeModel(model: Model): boolean {
 	const declared = declaredPricingStatus(model);
 	if (declared !== undefined) return declared === "free";
 	const cost = model.cost ? getEffectiveTokenCost(model.cost) : undefined;
-	const credits = model.factoryDroidCredits;
+	const credits = getFactoryDroidCreditRate(model)?.rate;
 	return (!cost || (cost.input === 0 && cost.output === 0)) && (credits === undefined || credits === 0);
 }
 
