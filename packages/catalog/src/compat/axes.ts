@@ -663,15 +663,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"region-limits-eu": { key: "regionLimitsEu", set: "catalog", shape: "object" },
 	/**
 	 * Subscription credit rates: `input` is the per-token credit weight shown
-	 * as the model's multiplier; `output` and `cache-read` multiply it.
+	 * as the model's multiplier; `output` and `cache-read` multiply it. An
+	 * `effective-rates` block of dated cards overwrites them from each card's
+	 * `effective-from`, as on `cost-patch`.
 	 */
 	"credit-rates": { key: "creditRates", set: "catalog", shape: "object" },
-	/**
-	 * Factory's dated Standard Credits discount: `discount` (a fraction in
-	 * (0, 1)), `starts` and `ends` (UTC instants) and a `label`. Discovery
-	 * applies it to the shown `credit-rates` multiplier only inside the window.
-	 */
-	"credit-promotion": { key: "creditPromotion", set: "catalog", shape: "object" },
 	/**
 	 * List price borrowed from a bundled catalog row: provider id, then the
 	 * row id when it differs from the model's own. Absent means no list price.

@@ -1,7 +1,7 @@
 import { classifyModel } from "./compat/taxonomy";
 import { getCatalogProvider, getCatalogProviders, openModelCatalog } from "./model-catalog-format";
 import modelsData from "./models.json" with { type: "json" };
-import { dueEffectiveRate } from "./pricing";
+import { dueDatedCard, dueEffectiveRate } from "./pricing";
 import type {
 	Api,
 	EffectiveTokenCost,
@@ -77,30 +77,35 @@ export function getModelPricingStatus(model: Pick<Model<Api>, "cost" | "pricingS
 	return model.pricingStatus ?? "unknown";
 }
 
-/** Factory Droid credit rate in force at a time, and the promotion behind it when one applies. */
+/** Factory Droid credit rate in force at a time, and the next dated change to it. */
 export interface FactoryDroidCreditRate {
 	rate: number;
-	promotion?: { label: string; endsAt: number };
+	/** The earliest later `credit-rates` card that changes `rate`: the rate it sets and when (Unix ms). */
+	next?: { rate: number; at: number };
 }
 
 /**
  * Factory Droid Standard Credits rate at `timestamp` (Unix ms, default now):
- * the base rate, discounted and rounded to 4 places (as Factory bills it)
- * while the model's credit promotion is in its `[startsAt, endsAt)` window.
- * Undefined for models without a credit rate.
+ * the `input` of the `credit-rates` card due then (the latest at or before
+ * it, as for cost cards), else the base rate. Undefined for models without a
+ * credit rate.
  */
 export function getFactoryDroidCreditRate(
-	model: Pick<Model, "factoryDroidCredits" | "factoryDroidCreditPromotion">,
+	model: Pick<Model, "factoryDroidCredits" | "factoryDroidCreditCards">,
 	timestamp = Date.now(),
 ): FactoryDroidCreditRate | undefined {
 	const base = model.factoryDroidCredits;
 	if (base === undefined) return undefined;
-	const promotion = model.factoryDroidCreditPromotion;
-	if (!promotion || timestamp < promotion.startsAt || timestamp >= promotion.endsAt) return { rate: base };
-	return {
-		rate: Number((base * (1 - promotion.discount)).toFixed(4)),
-		promotion: { label: promotion.label, endsAt: promotion.endsAt },
-	};
+	const cards = model.factoryDroidCreditCards ?? [];
+	const rate = dueDatedCard(cards, timestamp)?.input ?? base;
+	let next: FactoryDroidCreditRate["next"];
+	for (const card of cards) {
+		const cardRate = card.input ?? base;
+		if (card.effectiveFrom > timestamp && cardRate !== rate && !(next && next.at <= card.effectiveFrom)) {
+			next = { rate: cardRate, at: card.effectiveFrom };
+		}
+	}
+	return next ? { rate, next } : { rate };
 }
 
 /**

@@ -445,8 +445,11 @@ provider "factory-droid" {
 
 	// Per-model registry entries: live-routing family, upstream rotation (first
 	// entry is the default `x-api-provider`), region overrides, Standard Credits
-	// rates and dated credit promotions, list-price source, org-policy aliases, the effort ladder (an off/none
-	// rung means `thinking-requires-effort #false`), and account gates.
+	// rates, list-price source, org-policy aliases, the effort ladder (an off/none
+	// rung means `thinking-requires-effort #false`), and account gates. A credit
+	// promotion is two dated `effective-rates` cards copied from the droid
+	// release's model registry: the discounted `input` from its start and the
+	// base again from its end.
 	models "claude-fable-5.1" {
 		routing-family "anthropic"
 		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
@@ -655,8 +658,20 @@ provider "factory-droid" {
 		routing-family "openai"
 		upstream-rotation "openai" "bedrock_openai" "azure_openai" "snowflake" "databricks"
 		region-upstreams-eu "openai"
-		credit-rates { input 2; output 5 }
-		credit-promotion { discount 0.2; starts "2026-08-22T00:00:00Z"; ends "2026-11-22T00:00:00Z"; label "20% off" }
+		credit-rates {
+			input 2
+			output 5
+			effective-rates {
+				promotion {
+					effective-from "2026-08-22T00:00:00Z"
+					input 1.6
+				}
+				standard {
+					effective-from "2026-11-22T00:00:00Z"
+					input 2
+				}
+			}
+		}
 		list-price-from "openai"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #false
@@ -665,8 +680,20 @@ provider "factory-droid" {
 	models "gpt-5.6-sol-fast" {
 		routing-family "openai"
 		upstream-rotation "openai" "azure_openai"
-		credit-rates { input 4; output 5 }
-		credit-promotion { discount 0.2; starts "2026-08-22T00:00:00Z"; ends "2026-11-22T00:00:00Z"; label "20% off" }
+		credit-rates {
+			input 4
+			output 5
+			effective-rates {
+				promotion {
+					effective-from "2026-08-22T00:00:00Z"
+					input 3.2
+				}
+				standard {
+					effective-from "2026-11-22T00:00:00Z"
+					input 4
+				}
+			}
+		}
 		policy-aliases "gpt-5.6-fast"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #false
@@ -818,8 +845,20 @@ provider "factory-droid" {
 		routing-family "google"
 		upstream-rotation "google"
 		region-upstreams-eu "google"
-		credit-rates { input 0.6; output 5 }
-		credit-promotion { discount 0.5; starts "2026-08-17T21:10:19Z"; ends "2027-01-01T08:00:00Z"; label "50% off" }
+		credit-rates {
+			input 0.6
+			output 5
+			effective-rates {
+				promotion {
+					effective-from "2026-08-17T21:10:19Z"
+					input 0.3
+				}
+				standard {
+					effective-from "2027-01-01T08:00:00Z"
+					input 0.6
+				}
+			}
+		}
 		list-price-from "google"
 		thinking-efforts "low" "medium" "high"
 		thinking-requires-effort #true
@@ -829,8 +868,20 @@ provider "factory-droid" {
 		routing-family "google"
 		upstream-rotation "google"
 		region-upstreams-eu "google"
-		credit-rates { input 0.6; output 5 }
-		credit-promotion { discount 0.5; starts "2026-08-17T21:10:19Z"; ends "2027-01-01T08:00:00Z"; label "50% off" }
+		credit-rates {
+			input 0.6
+			output 5
+			effective-rates {
+				promotion {
+					effective-from "2026-08-17T21:10:19Z"
+					input 0.3
+				}
+				standard {
+					effective-from "2027-01-01T08:00:00Z"
+					input 0.6
+				}
+			}
+		}
 		list-price-from "google"
 		thinking-efforts "low" "medium" "high"
 		thinking-requires-effort #true

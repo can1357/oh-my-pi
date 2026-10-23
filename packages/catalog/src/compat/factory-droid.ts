@@ -6,7 +6,8 @@
  * to bind a model to the account serving it.
  */
 import { isRecord, once } from "@oh-my-pi/pi-utils";
-import type { Api, FactoryDroidCreditPromotion, ModelSpec } from "../types";
+import { type DatedCostCard, parseDatedCostCards } from "../pricing";
+import type { Api, ModelSpec } from "../types";
 import { FACTORY_DROID_WIRES, type FactoryDroidRegion, type FactoryDroidWire } from "../wire/factory-droid";
 import { apiRouteFor } from "./behavior";
 import { seedModels } from "./providers";
@@ -20,11 +21,16 @@ export interface FactoryDroidLimits {
 	maxTokens: number | null;
 }
 
-/** Standard Credits rates: `input` is the per-token weight; `output` and `cacheRead` multiply it. */
+/**
+ * Standard Credits rates: `input` is the per-token weight; `output` and
+ * `cacheRead` multiply it. `effectiveRates` are dated cards (ascending) that
+ * overwrite those legs from their date, as on `cost-patch`.
+ */
 export interface FactoryDroidCreditRates {
 	input: number;
 	output?: number;
 	cacheRead?: number;
+	effectiveRates?: readonly DatedCostCard[];
 }
 
 /** Account gates on one registry model (the `entitlement` axis). */
@@ -50,7 +56,6 @@ export interface FactoryDroidModelPolicy {
 	limits: FactoryDroidLimits;
 	euLimits: Partial<FactoryDroidLimits>;
 	creditRates?: FactoryDroidCreditRates;
-	creditPromotion?: FactoryDroidCreditPromotion;
 	/** Bundled catalog row whose list price the model shows. */
 	listPriceFrom?: { provider: string; modelId: string };
 	/** Provider family whose live routing defaults apply. */
@@ -90,13 +95,13 @@ function readPolicy(spec: ModelSpec<"factory-droid-agent">): FactoryDroidModelPo
 	const euLimits = isRecord(catalog.regionLimitsEu) ? catalog.regionLimitsEu : {};
 	const credits = isRecord(catalog.creditRates) ? catalog.creditRates : {};
 	const entitlement = isRecord(catalog.entitlement) ? catalog.entitlement : {};
-	const promotion = isRecord(catalog.creditPromotion) ? catalog.creditPromotion : undefined;
 	const creditInput = numberField(credits, "input");
 	const [priceProvider, priceModelId] = stringList(catalog.listPriceFrom) ?? [];
 	const euContextWindow = numberField(euLimits, "contextWindow");
 	const euMaxTokens = numberField(euLimits, "maxTokens");
 	const creditOutput = numberField(credits, "output");
 	const creditCacheRead = numberField(credits, "cacheRead");
+	const creditCards = parseDatedCostCards(credits, "credit-rates");
 	const featureFlag = stringField(entitlement, "featureFlag");
 	const deprecationFlag = stringField(entitlement, "deprecationFlag");
 	const baseVariant = stringField(entitlement, "baseVariant");
@@ -118,14 +123,7 @@ function readPolicy(spec: ModelSpec<"factory-droid-agent">): FactoryDroidModelPo
 				input: creditInput,
 				...(creditOutput !== undefined && { output: creditOutput }),
 				...(creditCacheRead !== undefined && { cacheRead: creditCacheRead }),
-			},
-		}),
-		...(promotion && {
-			creditPromotion: {
-				discount: Number(promotion.discount),
-				startsAt: Date.parse(String(promotion.starts)),
-				endsAt: Date.parse(String(promotion.ends)),
-				label: String(promotion.label),
+				...(creditCards.length > 0 && { effectiveRates: creditCards }),
 			},
 		}),
 		...(priceProvider !== undefined && {

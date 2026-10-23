@@ -593,17 +593,15 @@ describe("Factory Droid credits badge", () => {
 		expect(browser.visibleCount).toBe(0);
 	});
 
-	test("discounts the row rate during a promotion and names it in the detail, never cutting other facts", () => {
+	test("shows the dated credit rate due now and names the next one in the detail, never cutting other facts", () => {
 		const promoted = {
 			...makeDroidModel("gpt-5.6-sol", 2),
 			reasoning: true,
 			input: ["text", "image"] as Model["input"],
-			factoryDroidCreditPromotion: {
-				discount: 0.2,
-				startsAt: Date.now() - 86_400_000,
-				endsAt: Date.parse("2099-11-22T00:00:00Z"),
-				label: "20% off",
-			},
+			factoryDroidCreditCards: [
+				{ effectiveFrom: Date.now() - 86_400_000, input: 1.6 },
+				{ effectiveFrom: Date.parse("2099-11-22T00:00:00Z"), input: 2 },
+			],
 		};
 		for (const width of [80, 120]) {
 			const rows = makeBrowser([promoted], [])
@@ -611,26 +609,29 @@ describe("Factory Droid credits badge", () => {
 				.map(line => Bun.stripANSI(line));
 			const row = rows.find(line => line.includes("gpt-5.6-sol"));
 			expect(row).toContain("$1.25/10 1.6×");
-			expect(row).not.toContain("20% off");
+			expect(row).not.toContain("from 2099-11-22");
 			expect(rows.some(line => line.includes("reasoning · vision"))).toBe(true);
 		}
 		const wide = makeBrowser([promoted], [])
 			.render(160)
 			.map(line => Bun.stripANSI(line));
-		expect(wide.some(line => line.includes("· 20% off until 2099-11-22"))).toBe(true);
+		expect(wide.some(line => line.includes("· 2× from 2099-11-22"))).toBe(true);
 		const ended = {
 			...promoted,
-			factoryDroidCreditPromotion: { ...promoted.factoryDroidCreditPromotion, endsAt: Date.now() - 1 },
+			factoryDroidCreditCards: [
+				{ effectiveFrom: Date.now() - 86_400_000, input: 1.6 },
+				{ effectiveFrom: Date.now() - 1, input: 2 },
+			],
 		};
 		const endedRows = makeBrowser([ended], [])
 			.render(160)
 			.map(line => Bun.stripANSI(line));
 		expect(endedRows.find(line => line.includes("gpt-5.6-sol"))).toContain("$1.25/10 2×");
-		expect(endedRows.some(line => line.includes("20% off"))).toBe(false);
+		expect(endedRows.some(line => line.includes("× from "))).toBe(false);
 	});
 });
 
-describe("Factory Droid credit promotion over time", () => {
+describe("Factory Droid dated credit rates over time", () => {
 	beforeAll(async () => {
 		await initTheme(false);
 	});
@@ -641,11 +642,14 @@ describe("Factory Droid credit promotion over time", () => {
 		...makeModel("factory-droid", "gpt-5.6-sol"),
 		cost: { input: 1.25, output: 10, cacheRead: 0, cacheWrite: 0 },
 		factoryDroidCredits: 2,
-		factoryDroidCreditPromotion: { discount: 0.2, startsAt, endsAt, label: "20% off" },
+		factoryDroidCreditCards: [
+			{ effectiveFrom: startsAt, input: 1.6 },
+			{ effectiveFrom: endsAt, input: 2 },
+		],
 	};
 	const text = (value: unknown) => JSON.stringify(value);
 
-	test("an open browser drops the discount from rows, picker and preview once the promotion ends", () => {
+	test("an open browser drops the discount from rows, picker and preview once the next card takes over", () => {
 		try {
 			setSystemTime(new Date(endsAt - 1000));
 			const browser = makeBrowser([promoted], []);
@@ -658,20 +662,20 @@ describe("Factory Droid credit promotion over time", () => {
 			expect(row()).toContain("1.6×");
 			expect(text(browser.describe())).toContain("1.6×");
 			expect(text(browser.pickerItems(catalogue))).toContain("1.6×");
-			expect(text(browser.pickerPreview("compact"))).toContain("20% off until 2026-11-22");
+			expect(text(browser.pickerPreview("compact"))).toContain("2× from 2026-11-22");
 
 			setSystemTime(new Date(endsAt));
-			// A refresh that re-tracks the same items first must not swallow the passed end.
+			// A refresh that re-tracks the same items first must not swallow the passed card date.
 			expect(text(browser.pickerItems([...catalogue]))).not.toContain("1.6×");
 			expect(row()).toContain("$1.25/10 2×");
 			expect(text(browser.describe())).not.toContain("1.6×");
-			expect(text(browser.pickerPreview("compact"))).not.toContain("20% off");
+			expect(text(browser.pickerPreview("compact"))).not.toContain("× from ");
 		} finally {
 			setSystemTime();
 		}
 	});
 
-	test("a row hidden while its promotion starts shows the discount when it comes back", () => {
+	test("a row hidden while its discounted card takes effect shows the discount when it comes back", () => {
 		try {
 			setSystemTime(new Date(startsAt - 1000));
 			const other: Model = { ...makeModel("factory-droid", "claude-opus-5"), factoryDroidCredits: 2 };

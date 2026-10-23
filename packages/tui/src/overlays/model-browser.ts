@@ -766,17 +766,17 @@ function formatCostLeg(n: number): string {
 	return s.includes(".") ? s.replace(/\.?0+$/, "") : s;
 }
 
-/** `20% off until 2026-11-22` for a Factory Droid credit promotion in force now; undefined otherwise. */
-function creditPromotionNote(model: Model): string | undefined {
-	const promotion = getFactoryDroidCreditRate(model)?.promotion;
-	return promotion ? `${promotion.label} until ${new Date(promotion.endsAt).toISOString().slice(0, 10)}` : undefined;
+/** `2× from 2026-11-22` when a dated Factory Droid credit card changes the rate in force now; undefined otherwise. */
+function nextCreditRateNote(model: Model): string | undefined {
+	const next = getFactoryDroidCreditRate(model)?.next;
+	return next ? `${formatCostLeg(next.rate)}× from ${new Date(next.at).toISOString().slice(0, 10)}` : undefined;
 }
 
 /**
- * Adds Factory Droid's `N×` Standard Credits rate in force now (any live
- * promotion applied) to a dollar price, replacing the price when the model has
- * no dollar reference. The dollar reference never includes promotions; the
- * preview and detail facts name the promotion (`creditPromotionNote`).
+ * Adds Factory Droid's `N×` Standard Credits rate in force now (its dated
+ * `credit-rates` card applied) to a dollar price, replacing the price when the
+ * model has no dollar reference. The dollar reference never includes vendor
+ * promotions; the preview and detail facts name the next rate (`nextCreditRateNote`).
  */
 function withCreditBadge(model: Model, price: string): string {
 	const credits = getFactoryDroidCreditRate(model);
@@ -833,7 +833,7 @@ function previewPrice(model: Model): string {
 	const parts = [`$${formatCostLeg(cost.input)} in`, `$${formatCostLeg(cost.output)} out`];
 	if (cost.cacheRead > 0) parts.push(`$${formatCostLeg(cost.cacheRead)} cache`);
 	const priced = withCreditBadge(model, parts.join(" · "));
-	const note = creditPromotionNote(model);
+	const note = nextCreditRateNote(model);
 	return note ? `${priced} (${note})` : priced;
 }
 
@@ -1039,7 +1039,7 @@ export class ModelBrowser implements Component {
 		| undefined;
 	/** Theme-formatted catalog metric cells per item; rebuilt when the item's model or the theme changes. */
 	#metricCells = new WeakMap<ModelBrowserItem, MetricCells>();
-	/** Earliest credit promotion start or end among models whose rows are memoized; passing it rebuilds them. */
+	/** Earliest dated credit-rate change among models whose rows are memoized; passing it rebuilds them. */
 	#nextCreditChange = Number.POSITIVE_INFINITY;
 	/** Non-separator items of the last ranked visible list, for {@link queryMatches}. */
 	#queryMatches: { visible: readonly ModelBrowserItem[]; matches: readonly ModelBrowserItem[] } | undefined;
@@ -1645,8 +1645,8 @@ export class ModelBrowser implements Component {
 			facts.push(`~${formatTps(model.tps)}`);
 		}
 		// Last fact before prose, so narrow widths cut it before capability and perf facts.
-		const promotion = creditPromotionNote(model);
-		if (promotion) facts.push(promotion);
+		const nextCredits = nextCreditRateNote(model);
+		if (nextCredits) facts.push(nextCredits);
 		if (model.description) {
 			const description = formatDescription(model.description);
 			if (description) facts.push(description);
@@ -1770,17 +1770,13 @@ export class ModelBrowser implements Component {
 
 	invalidate(): void {}
 
-	/** Called before a row of `model` is memoized: its credit rate changes at its promotion's next start or end. */
+	/** Called before a row of `model` is memoized: its credit rate changes at its next dated card. */
 	#noteCreditChange(model: Model): void {
-		const promotion = model.factoryDroidCreditPromotion;
-		if (!promotion) return;
-		const now = Date.now();
-		for (const at of [promotion.startsAt, promotion.endsAt]) {
-			if (at > now && at < this.#nextCreditChange) this.#nextCreditChange = at;
-		}
+		const at = getFactoryDroidCreditRate(model)?.next?.at;
+		if (at !== undefined && at < this.#nextCreditChange) this.#nextCreditChange = at;
 	}
 
-	/** A credit promotion started or ended since rows were memoized: rebuild every memoized row. */
+	/** A dated credit rate took effect since rows were memoized: rebuild every memoized row. */
 	#syncCreditClock(): void {
 		if (Date.now() < this.#nextCreditChange) return;
 		this.#nextCreditChange = Number.POSITIVE_INFINITY;
@@ -1946,8 +1942,8 @@ export class ModelBrowser implements Component {
 			} else if (model.tps != null && Number.isFinite(model.tps) && model.tps > 0) {
 				facts.push(`~${formatTps(model.tps)}`);
 			}
-			const promotion = creditPromotionNote(model);
-			if (promotion) facts.push(promotion);
+			const nextCredits = nextCreditRateNote(model);
+			if (nextCredits) facts.push(nextCredits);
 			children.push(text([span(facts.join(" · "), "muted")], { wrap: "word" }));
 			const description = model.description ? formatDescription(model.description) : "";
 			if (description) children.push(text([span(description, "dim")], { wrap: "word", lines: 2 }));
@@ -2281,8 +2277,8 @@ export class ModelBrowser implements Component {
 			if (ctx > 0) facts.push({ k: "ctx", v: formatNumber(ctx).toLowerCase() });
 			if (out > 0) facts.push({ k: "out", v: formatNumber(out).toLowerCase() });
 			facts.push({ k: "price", v: isFreeModel(model) ? "free" : formatCostDetail(model) });
-			const promotion = creditPromotionNote(model);
-			if (promotion) facts.push({ k: "promo", v: promotion });
+			const nextCredits = nextCreditRateNote(model);
+			if (nextCredits) facts.push({ k: "then", v: nextCredits });
 			facts.push({ k: "reasoning", v: model.reasoning ? "yes" : "no" });
 			const children: NativeChild[] = [node("kv", { items: facts, layout: "inline" })];
 			const chips: NativeChild[] = [];

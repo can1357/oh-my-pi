@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Factory Droid's dated credit rates: the credit rate follows Factory's promotions, discounted from a promotion's start and back to the base rate at its end, using the same dated rate cards as dollar prices (currently GPT-5.6 Sol and Gemini 3.7/3.8 Flash) ([#16309](https://github.com/can1357/oh-my-pi/pull/16309) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed Cursor's DeepSeek V4.1 Flash 1017 reporting zero cost; every effort level now bills at Cursor's API rate of $0.30/$1.20 per million tokens, with cache reads at $0.006 ([#17390](https://github.com/can1357/oh-my-pi/pull/17390) by [@eggpeat](https://github.com/eggpeat))
@@ -72,7 +76,6 @@
 - OpenCode Go `muse-spark-1.3-contributor`, `muse-spark-1.2-contributor`, `gpt-5.6-luna`, `gpt-6-luna`, `grok-4.6` (Responses) and `deepseek-v4-pro`, `omen-alpha` (Completions) opt into shared prompt caching; lanes that warmed under any key stay off ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
 - Added `CatalogPolicyInputs` so catalog-policy lookups accept a reduced model view ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
 - Added a catalog conformance test that fails the build when a `bundle="always"` seed row is missing from the bundled `models.json`, so a stale-snapshot regeneration can no longer silently drop an engine the way `web/deepseek` was lost in 18.12.2 ([#16610](https://github.com/can1357/oh-my-pi/issues/16610), [#17053](https://github.com/can1357/oh-my-pi/pull/17053) by [@ouyangjiahong26](https://github.com/ouyangjiahong26))
-- Added Factory Droid's dated credit promotions: the credit rate is discounted while a promotion runs and returns to the base rate when it ends (currently GPT-5.6 Sol and Gemini 3.7/3.8 Flash) ([#16309](https://github.com/can1357/oh-my-pi/pull/16309) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
