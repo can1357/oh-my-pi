@@ -165,7 +165,7 @@ describe("streamDevin router assignment", () => {
 			ideName: "devin-cli",
 			ideType: "chisel",
 			extensionName: "chisel",
-			extensionVersion: "3000.11.3",
+			extensionVersion: "3000.11.205",
 			apiKey: "devin-session-token$header.payload.signature",
 			userJwt: "",
 		});
