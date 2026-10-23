@@ -190,6 +190,19 @@ const FOCUSED_VIEW_COMMAND_LIST = Object.keys(FOCUSED_VIEW_COMMANDS)
 	.map(name => `/${name}`)
 	.join(", ");
 
+/** Commands whose handler owns the submitted draft, images included: Enter takes it out of the editor first. */
+const DETACHED_DRAFT_COMMANDS = new Set([
+	"plan",
+	"vibe",
+	"goal",
+	"guided-goal",
+	"tan",
+	"btw",
+	"omfg",
+	"handoff",
+	"cleanse",
+]);
+
 function looksLikePastedShellPrompt(code: string): boolean {
 	const firstLine = code.split("\n", 1)[0]?.trimStart() ?? "";
 	return (
@@ -926,17 +939,18 @@ export class InputController {
 		return compacted.text.trim();
 	}
 
-	#dropSubmittedPending(images: ImageContent[] | undefined, links: (string | undefined)[] | undefined): void {
+	#dropSubmittedPending(images: ImageContent[] | undefined): void {
 		if (!images?.length) return;
-		const pending = this.ctx.editor.pendingImages;
+		const editor = this.ctx.editor;
 		// Drop the snapshot only while it is still the live prefix: attachments
-		// added while the handler was pending stay in place.
-		if (!images.every((image, index) => pending[index] === image)) return;
-		pending.splice(0, images.length);
-		const linkCount = Math.min(links?.length ?? 0, this.ctx.editor.pendingImageLinks.length);
-		this.ctx.editor.pendingImageLinks.splice(0, linkCount);
-		this.ctx.editor.imageLinks =
-			this.ctx.editor.pendingImageLinks.length > 0 ? this.ctx.editor.pendingImageLinks : undefined;
+		// added while the handler was pending stay in place, renumbered from #1.
+		if (!images.every((image, index) => editor.pendingImages[index] === image)) return;
+		const newerDraft = editor.getExpandedText();
+		editor.pendingImages.splice(0, images.length);
+		editor.pendingImageLinks.splice(0, images.length);
+		editor.imageLinks = editor.pendingImageLinks.length > 0 ? editor.pendingImageLinks : undefined;
+		const renumbered = shiftImageMarkers(newerDraft, -images.length);
+		if (renumbered !== newerDraft) editor.setCollapsedText(renumbered);
 	}
 
 	async #runInputHandlers(
@@ -1025,28 +1039,15 @@ export class InputController {
 					// before this callback ran, so anything in it now is a newer draft;
 					// only the submitted attachments are dropped, and only while they
 					// are still the live prefix.
-					this.#dropSubmittedPending(inputImages, inputImageLinks);
+					this.#dropSubmittedPending(inputImages);
 					return;
 				}
 				({ text, images: inputImages, imageLinks: inputImageLinks } = input);
 				hasInputImages = (inputImages?.length ?? 0) > 0;
 			}
 			const submittedMode = parseSlashCommand(text)?.name;
-			const draftDetached =
-				submittedMode === "plan" ||
-				submittedMode === "vibe" ||
-				submittedMode === "goal" ||
-				submittedMode === "guided-goal";
-			if (
-				draftDetached &&
-				submittedImages?.length &&
-				submittedImages.every((image, index) => this.ctx.editor.pendingImages[index] === image)
-			) {
-				this.ctx.editor.pendingImages.splice(0, submittedImages.length);
-				this.ctx.editor.pendingImageLinks.splice(0, submittedImages.length);
-				this.ctx.editor.imageLinks =
-					this.ctx.editor.pendingImageLinks.length > 0 ? this.ctx.editor.pendingImageLinks : undefined;
-			}
+			const draftDetached = submittedMode !== undefined && DETACHED_DRAFT_COMMANDS.has(submittedMode);
+			if (draftDetached) this.#dropSubmittedPending(submittedImages);
 
 			if (!text && !hasInputImages) return;
 
@@ -1455,7 +1456,8 @@ export class InputController {
 				// without a way to cancel them, /usage reports account-wide limits, and
 				// /model, /switch, /effort change the focused agent's model and thinking.
 				this.#recordSlashCommandUsage(text);
-				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx })) === true) {
+				const input = images ? { images, imageLinks } : undefined;
+				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx, input })) === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					return;
 				}

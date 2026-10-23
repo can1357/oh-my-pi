@@ -719,6 +719,8 @@ export interface BtwHistoryTurn {
 	status: BtwStatus;
 	createdAt: number;
 	updatedAt: number;
+	/** Images attached to the question. */
+	images?: ImageContent[];
 	error?: string;
 }
 
@@ -731,6 +733,8 @@ export interface BtwHistoryRecord {
 	updatedAt: number;
 	id: string;
 	leafId: string | null;
+	/** Images attached to the question. */
+	images?: ImageContent[];
 	error?: string;
 	followUps?: BtwHistoryTurn[];
 }

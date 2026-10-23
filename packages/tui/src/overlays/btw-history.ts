@@ -1,5 +1,9 @@
+import type { ImageContent } from "@oh-my-pi/pi-ai";
+
 export interface BtwHistoryTurn {
 	question: string;
+	/** Images attached to the question, sent again with it on later follow-ups. */
+	images?: readonly ImageContent[];
 	answer: string;
 	status: "running" | "complete" | "cancelled" | "error" | "interrupted";
 	createdAt: number;

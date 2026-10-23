@@ -558,8 +558,8 @@ export interface InteractiveModeContext {
 		message: string,
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
 	): Promise<void>;
-	handleBtwCommand(question: string): Promise<void>;
-	handleTanCommand(work: string): Promise<void>;
+	handleBtwCommand(question: string, images?: ImageContent[]): Promise<boolean>;
+	handleTanCommand(work: string, images?: ImageContent[]): Promise<boolean>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
 	handleBtwBranchKey(): Promise<boolean>;
@@ -574,6 +574,7 @@ export interface InteractiveModeContext {
 		assistantMessage: AssistantMessage,
 		leafId: string,
 		sessionId: string,
+		images?: ImageContent[],
 	): Promise<void>;
 	handleOmfgCommand(complaint: string): Promise<void>;
 	hasActiveOmfg(): boolean;

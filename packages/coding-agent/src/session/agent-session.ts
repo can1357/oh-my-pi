@@ -7653,13 +7653,20 @@ export class AgentSession implements SettingsScope {
 	 * let abort() cancel it. Either way the image stays saved and the notice says the
 	 * description is unavailable.
 	 */
-	async #buildImageDescriptionNotice(normalizedImages: ImageContent[]): Promise<CustomMessage | undefined> {
+	async #buildImageDescriptionNotice(
+		normalizedImages: ImageContent[],
+		signal?: AbortSignal,
+	): Promise<CustomMessage | undefined> {
 		const controller = new AbortController();
 		this.#imageDescriptionAbortControllers.add(controller);
 		try {
 			return await this.#providerBoundary.buildImageDescriptionNotice(
 				normalizedImages,
-				AbortSignal.any([controller.signal, AbortSignal.timeout(IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS)]),
+				AbortSignal.any([
+					controller.signal,
+					AbortSignal.timeout(IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS),
+					...(signal ? [signal] : []),
+				]),
 			);
 		} finally {
 			this.#imageDescriptionAbortControllers.delete(controller);
@@ -12093,9 +12100,16 @@ export class AgentSession implements SettingsScope {
 				`Model ${modelDescription} does not support tools: false for ephemeral turns because its transport requires native tools.`,
 			);
 		}
+		// Images, those of earlier side turns too, get a prompt's handling: normalized
+		// for the model, and described by a vision model for a text-only one.
+		const promptImages = await this.#normalizeImagesForModel(args.promptImages);
+		const imageDescriptionNotice = promptImages?.length
+			? await this.#buildImageDescriptionNotice(promptImages, args.signal)
+			: undefined;
+		const history = args.history && (await this.#prepareSideHistory(args.history, args.signal));
 		assertEphemeralTurnReady();
 		const cacheSessionId = this.sessionId;
-		const snapshot = this.#buildEphemeralSnapshot(args.promptText, args.history);
+		const snapshot = this.#buildEphemeralSnapshot(args.promptText, history, promptImages, imageDescriptionNotice);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		assertEphemeralTurnReady();
 		const sideContext = await this.agent.buildSideRequestContext(llmMessages);
@@ -12232,13 +12246,33 @@ export class AgentSession implements SettingsScope {
 		};
 	}
 
+	async #prepareSideHistory(history: readonly Message[], signal?: AbortSignal): Promise<AgentMessage[]> {
+		const prepared: AgentMessage[] = [];
+		for (const message of history) {
+			const normalized = await this.#normalizeAgentMessageImages(message);
+			const images =
+				normalized.role === "user" && Array.isArray(normalized.content)
+					? normalized.content.filter((part): part is ImageContent => part.type === "image")
+					: [];
+			const notice = images.length > 0 ? await this.#buildImageDescriptionNotice(images, signal) : undefined;
+			if (notice) prepared.push(notice);
+			prepared.push(normalized);
+		}
+		return prepared;
+	}
+
 	/**
 	 * Build a message snapshot for an ephemeral side-channel turn.  Includes
 	 * the in-flight streaming assistant message (if any) so the model sees
 	 * the partial response in context, then appends detached side-channel history
 	 * and the current prompt after the no-tools reminder.
 	 */
-	#buildEphemeralSnapshot(promptText: string, history?: readonly Message[]): AgentMessage[] {
+	#buildEphemeralSnapshot(
+		promptText: string,
+		history?: readonly AgentMessage[],
+		images?: ImageContent[],
+		imageDescriptionNotice?: CustomMessage,
+	): AgentMessage[] {
 		const messages = [...this.messages];
 		const streaming = this.agent.state.streamMessage;
 		if (streaming && streaming.role === "assistant" && Array.isArray(streaming.content)) {
@@ -12279,9 +12313,10 @@ export class AgentSession implements SettingsScope {
 			// Detach before the conversion pipeline can await or mutate caller-owned messages.
 			messages.push(...structuredClone(history));
 		}
+		if (imageDescriptionNotice) messages.push(imageDescriptionNotice);
 		messages.push({
 			role: "user",
-			content: [{ type: "text", text: promptText }],
+			content: [{ type: "text", text: promptText }, ...(images ?? [])],
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
@@ -12903,6 +12938,7 @@ export class AgentSession implements SettingsScope {
 		assistantMessage: AssistantMessage,
 		leafId: string,
 		sessionId: string,
+		images?: ImageContent[],
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
 		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionFile;
@@ -12931,6 +12967,12 @@ export class AgentSession implements SettingsScope {
 		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 			throw new Error("Cannot branch /btw: session changed since /btw started");
 		}
+
+		// The promoted question gets a prompt's image handling, description included.
+		const promotedImages = await this.#normalizeImagesForModel(images);
+		const imageDescriptionNotice = promotedImages?.length
+			? await this.#buildImageDescriptionNotice(promotedImages)
+			: undefined;
 
 		await withTimeout(
 			this.#cancelPostPromptTasks(),
@@ -12975,9 +13017,10 @@ export class AgentSession implements SettingsScope {
 			this.#clearSessionScopedToolState();
 
 			this.#rehydrateCheckpointRewindState();
+			if (imageDescriptionNotice) this.sessionManager.appendMessage(imageDescriptionNotice);
 			this.sessionManager.appendMessage({
 				role: "user",
-				content: [{ type: "text", text: question }],
+				content: [{ type: "text", text: question }, ...(promotedImages ?? [])],
 				attribution: "user",
 				timestamp: Date.now(),
 			});

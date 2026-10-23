@@ -3240,7 +3240,9 @@ type BtwHistoryTurn struct {
 	Status    BtwStatus `json:"status"`
 	CreatedAt int64     `json:"createdAt"`
 	UpdatedAt int64     `json:"updatedAt"`
-	Error     *string   `json:"error,omitempty"`
+	// Images attached to the question.
+	Images []ImageContent `json:"images,omitempty"`
+	Error  *string        `json:"error,omitempty"`
 }
 
 func (v *BtwHistoryTurn) UnmarshalJSON(data []byte) error {
@@ -3255,6 +3257,7 @@ func (v *BtwHistoryTurn) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("status", &out.Status)
 	d.required("createdAt", &out.CreatedAt)
 	d.required("updatedAt", &out.UpdatedAt)
+	d.optional("images", &out.Images)
 	d.optional("error", &out.Error)
 	if d.err != nil {
 		return d.err
@@ -3265,13 +3268,15 @@ func (v *BtwHistoryTurn) decodeFrom(raw map[string]json.RawMessage) error {
 
 // A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record.
 type BtwHistoryRecord struct {
-	Question  string           `json:"question"`
-	Answer    string           `json:"answer"`
-	Status    BtwStatus        `json:"status"`
-	CreatedAt int64            `json:"createdAt"`
-	UpdatedAt int64            `json:"updatedAt"`
-	ID        string           `json:"id"`
-	LeafID    *string          `json:"leafId"`
+	Question  string    `json:"question"`
+	Answer    string    `json:"answer"`
+	Status    BtwStatus `json:"status"`
+	CreatedAt int64     `json:"createdAt"`
+	UpdatedAt int64     `json:"updatedAt"`
+	ID        string    `json:"id"`
+	LeafID    *string   `json:"leafId"`
+	// Images attached to the question.
+	Images    []ImageContent   `json:"images,omitempty"`
 	Error     *string          `json:"error,omitempty"`
 	FollowUps []BtwHistoryTurn `json:"followUps,omitempty"`
 }
@@ -3290,6 +3295,7 @@ func (v *BtwHistoryRecord) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("updatedAt", &out.UpdatedAt)
 	d.required("id", &out.ID)
 	d.nullable("leafId", &out.LeafID)
+	d.optional("images", &out.Images)
 	d.optional("error", &out.Error)
 	d.optional("followUps", &out.FollowUps)
 	if d.err != nil {

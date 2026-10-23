@@ -13,8 +13,10 @@ export {
 	getBtwTurns,
 } from "@oh-my-pi/pi-tui/overlays/btw-history";
 
+const imageSchema = type({ type: "'image'", data: "string", mimeType: "string" });
 const turnFields = {
 	question: "string",
+	"images?": imageSchema.array(),
 	answer: "string",
 	status: "'running' | 'complete' | 'cancelled' | 'error' | 'interrupted'",
 	createdAt: "0 <= number <= 8640000000000000",

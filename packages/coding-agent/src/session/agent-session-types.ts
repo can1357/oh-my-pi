@@ -594,6 +594,8 @@ export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
 /** Options for the same ephemeral side turn used by /btw. */
 export interface EphemeralTurnOptions {
 	promptText: string;
+	/** Images sent with `promptText`, normalized for the model like a prompt's attachments. */
+	promptImages?: ImageContent[];
 	/** Detached prior side-turn messages to prepend to this request. They are copied and never appended to the session history. */
 	history?: readonly Message[];
 	/** Opaque provider-lineage key for a series of related side turns. Rotate it after cancellation or failure before retrying. */

@@ -898,6 +898,8 @@ class BtwHistoryTurn:
     status: BtwStatus
     created_at: int
     updated_at: int
+    images: tuple[ImageContent, ...] | None = None
+    """Images attached to the question."""
     error: str | None = None
 
 
@@ -911,6 +913,8 @@ class BtwHistoryRecord:
     updated_at: int
     id: str
     leaf_id: str | None
+    images: tuple[ImageContent, ...] | None = None
+    """Images attached to the question."""
     error: str | None = None
     follow_ups: tuple[BtwHistoryTurn, ...] | None = None
 
@@ -2208,6 +2212,7 @@ def parse_btw_history_turn(value: object, path: str = "BtwHistoryTurn") -> BtwHi
         status=required(payload, "status", _decode_btw_status, path),
         created_at=required(payload, "createdAt", decode_int, path),
         updated_at=required(payload, "updatedAt", decode_int, path),
+        images=optional(payload, "images", array(parse_image_content), path),
         error=optional(payload, "error", decode_str, path),
     )
 
@@ -2222,6 +2227,7 @@ def parse_btw_history_record(value: object, path: str = "BtwHistoryRecord") -> B
         updated_at=required(payload, "updatedAt", decode_int, path),
         id=required(payload, "id", decode_str, path),
         leaf_id=required(payload, "leafId", nullable(decode_str), path),
+        images=optional(payload, "images", array(parse_image_content), path),
         error=optional(payload, "error", decode_str, path),
         follow_ups=optional(payload, "followUps", array(parse_btw_history_turn), path),
     )

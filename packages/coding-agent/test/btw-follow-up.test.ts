@@ -2,7 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AssistantMessage, Message, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -167,6 +167,19 @@ async function harness(spaceHoldKeys: readonly KeyId[] = ["space"]) {
 }
 
 describe("BTW follow-up lifecycle", () => {
+	it("keeps a question's images in BTW history and sends them again with every follow-up", async () => {
+		const h = await harness();
+		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+		await h.controller.start("What is wrong here? [Image #1]", [screenshot]);
+		await h.complete("The button covers the title.");
+		const topic = (await records(h.manager))[0]!;
+		expect(topic.images).toEqual([screenshot]);
+
+		expect(await h.controller.startFollowUp(topic.id, "How do I fix it?")).toBe(true);
+
+		expect(h.requests.at(-1)?.args.history?.[0]?.content).toContainEqual(screenshot);
+	});
+
 	it("blocks flushing, relocation, branching and disposal after a terminal CAS failure without losing the answer", async () => {
 		const h = await harness();
 		await h.controller.start("Keep the final answer");

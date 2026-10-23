@@ -2,7 +2,7 @@
  * Headless `/btw` turn lifecycle shared by the TUI controller and RPC mode:
  * record bookkeeping for a new topic or follow-up, and the ephemeral model turn.
  */
-import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message } from "@oh-my-pi/pi-ai";
 import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import btwUserPrompt from "../prompts/system/btw-user.md" with { type: "text" };
 import type { AgentSession } from "./agent-session";
@@ -18,9 +18,21 @@ export interface BtwTurnStart {
 }
 
 /** Start a new topic, or append a follow-up turn to `previous`. */
-export function beginBtwTurn(question: string, leafId: string | null, previous?: BtwHistoryRecord): BtwTurnStart {
+export function beginBtwTurn(
+	question: string,
+	leafId: string | null,
+	previous?: BtwHistoryRecord,
+	images?: ImageContent[],
+): BtwTurnStart {
 	const now = Date.now();
-	const turn: BtwHistoryTurn = { question, answer: "", status: "running", createdAt: now, updatedAt: now };
+	const turn: BtwHistoryTurn = {
+		question,
+		...(images?.length ? { images } : {}),
+		answer: "",
+		status: "running",
+		createdAt: now,
+		updatedAt: now,
+	};
 	const record: BtwHistoryRecord = previous
 		? { ...previous, followUps: [...(previous.followUps ?? []), turn] }
 		: { ...turn, id: Snowflake.next(), leafId };
@@ -48,6 +60,8 @@ export function runBtwTurn(
 	session: Pick<AgentSession, "model" | "runEphemeralTurn">,
 	args: {
 		question: string;
+		/** Images attached to this question; earlier turns replay their own. */
+		images?: ImageContent[];
 		history?: readonly BtwHistoryTurn[];
 		conversationKey: string;
 		onTextDelta: (delta: string) => void;
@@ -60,7 +74,10 @@ export function runBtwTurn(
 	for (const turn of args.history ?? []) {
 		history.push({
 			role: "user",
-			content: [{ type: "text", text: prompt.render(btwUserPrompt, { question: turn.question }) }],
+			content: [
+				{ type: "text", text: prompt.render(btwUserPrompt, { question: turn.question }) },
+				...(turn.images ?? []),
+			],
 			attribution: "agent",
 			timestamp: turn.createdAt,
 		});
@@ -87,6 +104,7 @@ export function runBtwTurn(
 	}
 	return session.runEphemeralTurn({
 		promptText: prompt.render(btwUserPrompt, { question: args.question }),
+		promptImages: args.images,
 		history,
 		conversationKey: args.conversationKey,
 		// /btw answers are read in full and saved to history: keep the

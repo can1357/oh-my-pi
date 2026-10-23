@@ -100,7 +100,7 @@ function createContext(): {
 	const showStatus = vi.fn();
 	const inputListeners: Array<(data: string) => { consume?: boolean; data?: string } | undefined> = [];
 	const sessionListeners: Array<(event: { type: string }) => void> = [];
-	const handleBtwCommand = vi.fn(async () => {});
+	const handleBtwCommand = vi.fn(async () => true);
 	const handleBtwEscape = vi.fn(() => true);
 	const hasActiveBtw = vi.fn(() => false);
 	const handleOmfgEscape = vi.fn(() => true);
@@ -373,13 +373,11 @@ describe("InputController escape behavior", () => {
 		const controller = new InputController(ctx);
 
 		controller.setupEditorSubmitHandler();
-		editor.setText("/btw why is it doing that?");
 		await editor.onSubmit?.("/btw why is it doing that?");
 
-		expect(spies.handleBtwCommand).toHaveBeenCalledWith("why is it doing that?");
+		expect(spies.handleBtwCommand).toHaveBeenCalledWith("why is it doing that?", undefined);
 		expect(spies.prompt).not.toHaveBeenCalled();
 		expect(editor.addToHistory).toHaveBeenCalledWith("/btw why is it doing that?");
-		expect(editor.getText()).toBe("");
 	});
 
 	it("falls back to aborting the active session when no pending optimistic submission exists", () => {

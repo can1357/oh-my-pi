@@ -1,3 +1,4 @@
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
 	type Focusable,
@@ -17,6 +18,9 @@ import {
 	getBtwLatestTurn,
 	getBtwTurns,
 } from "./btw-history";
+import { compactImageMarkers, formatVisionMarker } from "../prompt/composer-attachments";
+import { extractImagePastePathsFromText } from "../prompt/custom-editor";
+import { BracketedPasteHandler } from "../bracketed-paste";
 import { getMarkdownTheme, type ThemeColor, theme } from "../theme/theme";
 import {
 	matchesSelectCancel,
@@ -45,7 +49,16 @@ interface BtwHistoryPanelOptions {
 	onCopy: (record: BtwHistoryRecord) => void;
 	onCancel: (record: BtwHistoryRecord) => void;
 	canFollowUp?: (record: BtwHistoryRecord) => boolean;
-	onFollowUp?: (record: BtwHistoryRecord, question: string, signal: AbortSignal) => Promise<boolean>;
+	onFollowUp?: (
+		record: BtwHistoryRecord,
+		question: string,
+		signal: AbortSignal,
+		images?: ImageContent[],
+	) => Promise<boolean>;
+	/** Read a clipboard image into the follow-up (an empty paste, as terminals send for one). */
+	onPasteImage?: () => Promise<unknown>;
+	/** Attach an image file whose path was pasted or dropped into the follow-up. */
+	onPasteImagePath?: (path: string) => Promise<void>;
 	/** Configured push-to-talk keys for a follow-up composer. */
 	spaceHoldKeys?: readonly KeyId[];
 	spaceHold?: (input: Input) => SpaceHoldHandler;
@@ -63,6 +76,11 @@ interface FollowUpComposer {
 	recordId: string;
 	input: Input;
 	abortController: AbortController;
+	/** Images pasted into this follow-up, numbered by their `[Image #N]` markers. */
+	images: ImageContent[];
+	/** Image pastes still loading, in paste order; Enter waits for them. */
+	pendingPastes: { settled: boolean; text: string | undefined }[];
+	submitQueued: boolean;
 	notice?: string;
 }
 
@@ -126,6 +144,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 	#listHeight = 1;
 	#focused = false;
 	#composer: FollowUpComposer | undefined;
+	readonly #pasteHandler = new BracketedPasteHandler();
 	#followUpPending = false;
 	#followLatest = false;
 	#turns: RenderedTurn[] = [];
@@ -305,7 +324,14 @@ export class BtwHistoryPanel implements Component, Focusable {
 		input.placeholder = "Ask about this answer…";
 		if (this.#options.spaceHoldKeys !== undefined) input.spaceHold.keys = this.#options.spaceHoldKeys;
 		input.spaceHold.handler = this.#options.spaceHold?.(input);
-		const composer: FollowUpComposer = { recordId: record.id, input, abortController: new AbortController() };
+		const composer: FollowUpComposer = {
+			recordId: record.id,
+			input,
+			abortController: new AbortController(),
+			images: [],
+			pendingPastes: [],
+			submitQueued: false,
+		};
 		input.onEscape = () => {
 			composer.abortController.abort();
 			this.#composer = undefined;
@@ -322,7 +348,11 @@ export class BtwHistoryPanel implements Component, Focusable {
 
 	async #submitFollowUp(composer: FollowUpComposer, value: string): Promise<void> {
 		if (this.#followUpPending || this.#composer !== composer) return;
-		const question = value.trim();
+		if (composer.pendingPastes.length > 0) {
+			composer.submitQueued = true;
+			return;
+		}
+		let question = value.trim();
 		if (!question) {
 			composer.notice = "Enter a follow-up question.";
 			return;
@@ -335,8 +365,20 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#followUpPending = true;
 		composer.notice = "Starting follow-up…";
 		this.#options.requestRender();
+		let images: ImageContent[] | undefined;
+		if (composer.images.length > 0) {
+			// Path pastes attach as they finish loading; submit numbers images in text order.
+			const compacted = compactImageMarkers(question, composer.images.length, { byAppearance: true });
+			images = compacted ? compacted.keep.map(index => composer.images[index]!) : composer.images;
+			if (compacted) question = compacted.text.trim();
+		}
 		try {
-			const accepted = await this.#options.onFollowUp!(record, question, composer.abortController.signal);
+			const accepted = await this.#options.onFollowUp!(
+				record,
+				question,
+				composer.abortController.signal,
+				images?.length ? images : undefined,
+			);
 			if (this.#composer !== composer) return;
 			if (accepted) {
 				this.#composer = undefined;
@@ -361,14 +403,74 @@ export class BtwHistoryPanel implements Component, Focusable {
 		return this.#composer?.input.capturesInput(data) ?? false;
 	}
 
-	/** Enhanced clipboard pastes belong only to the active composer. */
+	/** False while a follow-up is sent: it already took its images, and the composer clears after. */
+	get acceptsImages(): boolean {
+		return this.#composer !== undefined && !this.#followUpPending;
+	}
+
+	/** Attach an image to the follow-up; returns its `[Image #N, WxH]` marker to paste. */
+	attachImage(image: ImageContent, dims?: { width: number; height: number }): string | undefined {
+		const composer = this.#composer;
+		if (!composer || this.#followUpPending) return undefined;
+		composer.images.push(image);
+		return formatVisionMarker("image", composer.images.length, dims);
+	}
+
+	/** Reserve ordered delivery for an image paste. Completion delivers its marker once, or releases on undefined. */
+	beginPaste(): (text: string | undefined) => boolean {
+		const composer = this.#composer;
+		if (!composer) return () => false;
+		const pending: { settled: boolean; text: string | undefined } = { settled: false, text: undefined };
+		composer.pendingPastes.push(pending);
+		return text => {
+			if (this.#composer !== composer || pending.settled) return false;
+			pending.settled = true;
+			pending.text = text;
+			// A failed read releases the wait, but must not send the follow-up without its image.
+			if (!text) composer.submitQueued = false;
+			let delivered = 0;
+			for (const paste of composer.pendingPastes) {
+				if (!paste.settled) break;
+				if (paste.text) composer.input.pasteText(paste.text);
+				delivered++;
+			}
+			composer.pendingPastes.splice(0, delivered);
+			if (composer.pendingPastes.length === 0 && composer.submitQueued) {
+				composer.submitQueued = false;
+				void this.#submitFollowUp(composer, composer.input.getValue());
+			}
+			this.#options.requestRender();
+			return !!text;
+		};
+	}
+
+	/** Enhanced clipboard pastes belong only to the active composer, behind any image still loading. */
 	pasteText(text: string): void {
-		if (!this.#composer) return;
-		this.#composer.input.pasteText(text);
+		const composer = this.#composer;
+		if (!composer) return;
+		if (composer.pendingPastes.length > 0) this.beginPaste()(text);
+		else composer.input.pasteText(text);
 		this.#options.requestRender();
 	}
+
+	/** A pasted image path or an empty (clipboard image) paste attaches an image; other text is typed. */
+	#paste(content: string): void {
+		const imagePaths = extractImagePastePathsFromText(content);
+		if (content.length === 0 && this.#options.onPasteImage) void this.#options.onPasteImage();
+		else if (imagePaths && this.#options.onPasteImagePath) {
+			for (const path of imagePaths) void this.#options.onPasteImagePath(path);
+		} else this.pasteText(content);
+	}
+
 	handleInput(data: string): void {
 		if (this.#composer) {
+			const paste = this.#pasteHandler.process(data);
+			if (paste.handled) {
+				if (paste.pasteContent !== undefined) this.#paste(paste.pasteContent);
+				if (paste.remaining.length > 0) this.handleInput(paste.remaining);
+				this.#options.requestRender();
+				return;
+			}
 			// The input owns every key it handles, including panel shortcuts and
 			// pasted text; the line keys it ignores still scroll the answer above.
 			if (!this.#composer.input.handleInput(data)) this.#scrollDetail(data);
