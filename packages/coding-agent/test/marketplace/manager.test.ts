@@ -118,6 +118,16 @@ function createTestContext(): TestContext {
 	return { manager, tmpDir, clearCount: () => count };
 }
 
+/** Shares `ctx`'s user-level paths but has no project registry, like running omp outside the project. */
+function createOutsideProjectManager(tmpDir: string): MarketplaceManager {
+	return new MarketplaceManager({
+		marketplacesRegistryPath: path.join(tmpDir, "marketplaces.json"),
+		installedRegistryPath: path.join(tmpDir, "installed_plugins.json"),
+		marketplacesCacheDir: path.join(tmpDir, "cache", "marketplaces"),
+		pluginsCacheDir: path.join(tmpDir, "cache", "plugins"),
+	});
+}
+
 function mockPluginManagerPaths(root: string) {
 	return [
 		spyOn(piUtils, "getPluginsDir").mockReturnValue(root),
@@ -1183,6 +1193,19 @@ describe("MarketplaceManager", () => {
 		expect(fs.existsSync(userEntry.installPath)).toBe(true);
 	});
 
+	it("user-scope uninstall outside the project keeps the cache dir a project install links to", async () => {
+		await ctx.manager.addMarketplace(FIXTURE_DIR);
+		await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "user" });
+		const projectEntry = await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "project" });
+
+		await createOutsideProjectManager(ctx.tmpDir).uninstallPlugin("hello-plugin@test-marketplace", "user");
+		expect(fs.existsSync(projectEntry.installPath)).toBe(true);
+
+		// Once the project drops it too, nothing references the cache dir and it is collected.
+		await ctx.manager.uninstallPlugin("hello-plugin@test-marketplace", "project");
+		expect(fs.existsSync(projectEntry.installPath)).toBe(false);
+	});
+
 	it("listInstalledPlugins marks user entry as shadowed when project entry exists for same ID", async () => {
 		await ctx.manager.addMarketplace(FIXTURE_DIR);
 		await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "user" });
@@ -1338,6 +1361,23 @@ describe("MarketplaceManager", () => {
 			const entry = await ctx.manager.upgradePlugin("hello-plugin@test-marketplace");
 			expect(entry.scope).toBe("project");
 			expect(entry.version).toBe("2.0.0");
+		});
+
+		it("user-scope upgrade outside the project keeps the old cache dir a project install links to", async () => {
+			await ctx.manager.addMarketplace(mktDir);
+			await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "user" });
+			const projectEntry = await ctx.manager.installPlugin("hello-plugin", "test-marketplace", {
+				scope: "project",
+			});
+			await setPluginJsonVersion("2.0.0");
+
+			const upgraded = await createOutsideProjectManager(ctx.tmpDir).upgradePlugin(
+				"hello-plugin@test-marketplace",
+				"user",
+			);
+
+			expect(upgraded.installPath).not.toBe(projectEntry.installPath);
+			expect(fs.existsSync(projectEntry.installPath)).toBe(true);
 		});
 
 		it("upgradeAllPlugins upgrades outdated plugins and returns results", async () => {

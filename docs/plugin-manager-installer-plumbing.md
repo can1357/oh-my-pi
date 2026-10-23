@@ -64,6 +64,7 @@ Marketplace installs add registry and cache state alongside those runtime entrie
 - user plugins data root `installed_plugins.json` (`~/.omp/plugins/installed_plugins.json` by default) — user-scoped marketplace installs
 - `<anchor>/.omp/plugins/installed_plugins.json` — project-scoped marketplace installs
 - user plugins data root `cache/{marketplaces,plugins}/` — cached catalogs and plugin directories
+- user plugins data root `project_registries.json` — project `installed_plugins.json` files whose installs link into the shared plugin cache; consulted before a cached plugin directory is deleted, so cleanup run outside a project does not remove a directory that project still uses
 - `<scope>/plugins/node_modules/<package>` — symlink to the cached plugin, allowing its `package.json` `omp.extensions` and tools to load
 - `<scope>/plugins/omp-plugins.lock.json` — enablement and feature state shared with the runtime plugin loader
 
