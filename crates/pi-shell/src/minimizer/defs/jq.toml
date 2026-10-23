@@ -5,12 +5,16 @@
 # error last, after whatever output came before it. A run that reported an
 # input's error and still exited 0, as jq does when it is not the last input,
 # is never minimized: the built-in tells the shell, which skips every filter.
+#
+# A result of up to 16 KiB (`primitives::WHOLE_OUTPUT_BYTES`) is the answer the
+# agent asked for and stays whole; the caps apply past that.
 
 [filters.jq]
 description = "Compact jq output — truncate large JSON results (exit 0 only)"
 match_command = "^jq$"
 strip_ansi = true
 only_on_exit = [0]
+keep_whole_up_to_bytes = 16384
 strip_lines_matching = [
   "^\\s*$",
 ]

@@ -341,7 +341,7 @@ fn apply_identity(
 		if pipeline.skipped_by_exit(exit_code) {
 			return MinimizerOutput::passthrough(captured).labeled("exit-skip");
 		}
-		if is_below_minimize_threshold(captured) {
+		if is_below_minimize_threshold(captured) || pipeline.skipped_by_size(captured.len()) {
 			return MinimizerOutput::passthrough(captured).labeled("too-short");
 		}
 		let text = catch_unwind(AssertUnwindSafe(|| pipeline.apply(captured).into_owned()))
@@ -456,7 +456,7 @@ fn apply_pipeline_overlay(
 	let Some(pipeline) = resolve_pipeline(config, program, subcommand) else {
 		return inner.labeled(primary_label);
 	};
-	if pipeline.skipped_by_exit(exit_code) {
+	if pipeline.skipped_by_exit(exit_code) || pipeline.skipped_by_size(inner.input_bytes) {
 		return inner.labeled(primary_label);
 	}
 	let text = catch_unwind(AssertUnwindSafe(|| pipeline.apply(&inner.text).into_owned()))
@@ -487,6 +487,21 @@ fn resolve_pipeline<'a>(
 		return Some(pipeline);
 	}
 	builtin_pipelines().find(program, subcommand)
+}
+
+/// Whether the pipeline overlaid on a Rust filter's output for this command
+/// drops whole lines. A filter that would return output whole checks this
+/// first: such an overlay cuts a whole patch partway through, where it would
+/// have kept the head of a summary that starts with the stat.
+pub(crate) fn overlay_caps_lines(
+	config: &MinimizerConfig,
+	program: &str,
+	subcommand: Option<&str>,
+	exit_code: i32,
+	input_bytes: usize,
+) -> bool {
+	resolve_pipeline(config, program, subcommand)
+		.is_some_and(|pipeline| pipeline.caps_lines(exit_code, input_bytes))
 }
 
 // Atomic counter for commands that reached `apply` without a matching filter.
@@ -547,6 +562,14 @@ fn minimizable_input(input: &str) -> String {
 		output.push('\n');
 	}
 	output
+}
+
+/// Pad `input` past
+/// [`WHOLE_OUTPUT_BYTES`](crate::minimizer::primitives::WHOLE_OUTPUT_BYTES)
+/// with blank lines, which no patch parser counts.
+#[cfg(test)]
+fn past_whole_budget(input: &str) -> String {
+	format!("{input}{}", "\n".repeat(crate::minimizer::primitives::WHOLE_OUTPUT_BYTES))
 }
 
 #[cfg(test)]
@@ -651,7 +674,7 @@ only_on_exit = [0]
 		assert_ne!(status.filter, "pipeline+builtin");
 		assert!(status.text.contains("unstaged 1"));
 
-		let failed = apply("git diff", &diff_input, 1, &cfg);
+		let failed = apply("git diff", &past_whole_budget(&diff_input), 1, &cfg);
 		assert_ne!(failed.filter, "pipeline+builtin");
 		assert!(failed.text.contains("file changed"));
 	}
@@ -660,7 +683,7 @@ only_on_exit = [0]
 	fn failing_jq_keeps_the_error_after_long_output() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let mut input = String::new();
-		for i in 0..100 {
+		for i in 0..1000 {
 			let _ = writeln!(input, "{{\"id\": {i}, \"name\": \"row {i}\"}}");
 		}
 		input.push_str("Error: cannot use 1 as object key\n");
@@ -700,6 +723,134 @@ only_on_exit = [0]
 		let out = apply("ssh host cat records.txt", &input, 0, &cfg);
 		assert!(out.changed, "the banner line is stripped");
 		assert_eq!(out.text, remote);
+	}
+
+	#[test]
+	fn output_within_whole_budget_is_returned_whole() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut patch = String::from(
+			"diff --git a/src/lib.rs b/src/lib.rs\nindex 1..2 100644\n--- a/src/lib.rs\n+++ \
+			 b/src/lib.rs\n@@ -1,40 +1,40 @@\n",
+		);
+		for i in 0..40 {
+			let _ = writeln!(patch, " context {i}\n-old line {i}\n+new line {i}");
+		}
+		let show = format!("commit abcdef1234567890\nAuthor: Somebody\n\n    fix: thing\n\n{patch}");
+		let mut rows = String::new();
+		for i in 0..100 {
+			let _ = writeln!(rows, "{{\"id\": {i}, \"name\": \"row {i}\"}}");
+		}
+		let mut remote = String::new();
+		for i in 0..300 {
+			let _ = writeln!(remote, "remote line {i}");
+		}
+		for (command, input, exit) in [
+			("git diff HEAD~1", &patch, 0),
+			("git show HEAD", &show, 0),
+			("diff -u a b", &patch, 1),
+			("jq -c '.[]' rows.json", &rows, 0),
+			("ssh host cat log.txt", &remote, 0),
+		] {
+			assert!(input.len() > MIN_MINIMIZE_CHARS, "{command}");
+			let out = apply(command, input, exit, &cfg);
+			assert_eq!(&out.text, input, "{command}");
+		}
+	}
+
+	#[test]
+	fn output_past_whole_budget_is_still_shortened() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut rows = String::new();
+		let mut remote = String::new();
+		for i in 0..1000 {
+			let _ = writeln!(rows, "{{\"id\": {i}, \"name\": \"row {i}\"}}");
+			let _ = writeln!(remote, "remote line {i} of a log long enough to pass the budget");
+		}
+		let jq = apply("jq -c '.[]' rows.json", &rows, 0, &cfg);
+		assert_eq!(jq.text.lines().count(), 41, "{:?}", jq.text);
+		assert!(jq.text.ends_with("[…960ln elided…]\n"), "{:?}", jq.text);
+		let ssh = apply("ssh host cat log.txt", &remote, 0, &cfg);
+		assert!(ssh.text.contains("ln elided"), "{:?}", ssh.text);
+	}
+
+	#[test]
+	fn ssh_whole_budget_counts_the_captured_bytes() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		// 256 lines of 64 bytes, the last newline swapped for a character.
+		let mut at_budget = String::new();
+		for i in 0..256 {
+			let _ = writeln!(at_budget, "{i:063}");
+		}
+		at_budget.pop();
+		at_budget.push('x');
+		assert_eq!(at_budget.len(), crate::minimizer::primitives::WHOLE_OUTPUT_BYTES);
+		let out = apply("ssh host cat log.txt", &at_budget, 0, &cfg);
+		assert_eq!(out.text.lines().count(), 256, "{:?}", out.text);
+
+		let past_budget = format!("{at_budget}\n");
+		let out = apply("ssh host cat log.txt", &past_budget, 0, &cfg);
+		assert!(out.text.contains("ln elided"), "{:?}", out.text);
+	}
+
+	#[test]
+	fn jq_whole_budget_ends_at_the_shared_constant() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		// 256 lines of 64 bytes: exactly the budget.
+		let mut at_budget = String::new();
+		for i in 0..256 {
+			let _ = writeln!(at_budget, "{i:063}");
+		}
+		assert_eq!(at_budget.len(), crate::minimizer::primitives::WHOLE_OUTPUT_BYTES);
+		let out = apply("jq -r '.[]' rows.json", &at_budget, 0, &cfg);
+		assert_eq!(out.text, at_budget);
+
+		let past_budget = format!("{at_budget}x");
+		let out = apply("jq -r '.[]' rows.json", &past_budget, 0, &cfg);
+		assert_eq!(out.text.lines().count(), 41, "{:?}", out.text);
+		assert!(out.text.ends_with("[…217ln elided…]\n"), "{:?}", out.text);
+	}
+
+	#[test]
+	fn yadm_patch_keeps_its_summary_under_its_line_cap() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut patch = String::from(
+			"diff --git a/.zshrc b/.zshrc\n--- a/.zshrc\n+++ b/.zshrc\n@@ -1,90 +1,90 @@\n",
+		);
+		for i in 0..90 {
+			let _ = writeln!(patch, "-old {i}\n+new {i}");
+		}
+		patch.push_str(
+			"diff --git a/.vimrc b/.vimrc\n--- a/.vimrc\n+++ b/.vimrc\n@@ -1 +1 @@\n-a\n+b\n",
+		);
+		let out = apply("yadm diff", &patch, 0, &cfg);
+		assert!(out.text.contains(".vimrc"), "{:?}", out.text);
+	}
+
+	#[test]
+	fn line_capping_user_overlay_keeps_the_patch_summary() {
+		let capped = |program: &str| {
+			config_from_settings(&format!(
+				"schema_version = 1\n[filters.cap]\nmatch_command = \"^{program}$\"\nmax_lines = 20\n"
+			))
+		};
+		let mut patch = String::from(
+			"diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,100 +1,100 @@\n",
+		);
+		for i in 0..100 {
+			let _ = writeln!(patch, "-old {i}\n+new {i}");
+		}
+		patch.push_str(
+			"diff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1 +1 @@\n-a\n+b\n",
+		);
+		// `gt diff` runs the git filter, but the overlay the engine applies is
+		// the one for `gt`.
+		for (program, command) in [("git", "git diff"), ("gt", "gt diff")] {
+			let out = apply(command, &patch, 0, &capped(program));
+			assert!(out.text.contains("src/b.rs | 2"), "{command}: {:?}", out.text);
+			assert!(out.text.contains("2 files changed"), "{command}: {:?}", out.text);
+		}
+		let out = apply("gt diff", &patch, 0, &capped("git"));
+		assert_eq!(out.text, patch, "a git-only cap leaves gt output whole");
 	}
 
 	// Regression guards for the builtin npx catch-all def (defs/npx.toml). Its
@@ -774,7 +925,7 @@ only_on_exit = [0]
 	fn enabled_known_filter_minimizes() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		assert!(should_minimize("git diff", &cfg));
-		let input = minimizable_input("diff --git a/file.rs b/file.rs\n@@\n-old\n+new\n");
+		let input = past_whole_budget("diff --git a/file.rs b/file.rs\n@@\n-old\n+new\n");
 		let out = apply("git diff", &input, 0, &cfg);
 		assert!(out.changed);
 		assert!(out.text.contains("file changed"));

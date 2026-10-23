@@ -6625,7 +6625,7 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			let output: String = rx.drain().collect();
 			(result, output)
 		};
-		let rows = r#"range(0; 100) | "row with many fields and a longer string value""#;
+		let rows = r#"range(0; 200) | "row with many fields and a longer string value""#;
 		// `stderr` writes no newline, so the error lands mid-line
 		let failing = format!(
 			r#"jq -r 'if . == 2 then "prefix" | stderr | error("boom") else {rows} end' in.jsonl"#
@@ -6635,9 +6635,15 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			assert_eq!(result.exit_code, Some(0), "{command}");
 			assert!(output.contains("prefixError: \"boom\""), "{command}: {output:?}");
 			assert!(result.minimized.is_none(), "{command}: {:?}", result.minimized);
+			// Without the reported error the jq filter would shorten this capture.
+			let filtered = minimizer::apply(&failing, &output, 0, &minimizer::MinimizerConfig {
+				enabled: true,
+				..Default::default()
+			});
+			assert!(filtered.changed, "{command}");
 		}
 		for value in ["Error: expected user data", "jq: error is data"] {
-			let command = format!(r#"jq -nr 'range(0; 200) | "{value}"'"#);
+			let command = format!(r#"jq -nr 'range(0; 1000) | "{value}"'"#);
 			let (result, _) = run(&command).await;
 			assert_eq!(result.exit_code, Some(0), "{command}");
 			assert!(result.minimized.is_some(), "{command} is shortened");
