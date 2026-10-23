@@ -98,13 +98,20 @@ pub struct LinkedWorktree {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeEntry {
 	/// Checkout root of the worktree.
-	pub path:     PathBuf,
+	pub path:        PathBuf,
+	/// The worktree's git directory: `<common dir>/worktrees/<id>` for a linked
+	/// worktree, unchanged by `git worktree move`; the common git dir for the
+	/// main one.
+	pub git_dir:     PathBuf,
 	/// HEAD commit, when known.
-	pub head:     Option<String>,
+	pub head:        Option<String>,
 	/// Checked-out branch ref, when not detached.
-	pub branch:   Option<String>,
+	pub branch:      Option<String>,
 	/// Whether the worktree is on a detached HEAD.
-	pub detached: bool,
+	pub detached:    bool,
+	/// Owner an unfinished setup left in the setup mark (see
+	/// [`WorktreeAddOptions::setup_owner`]); `None` once it is done.
+	pub setup_owner: Option<String>,
 }
 
 /// Clone strategy for linked-worktree creation.
@@ -119,7 +126,7 @@ pub enum WorktreeClone {
 }
 
 /// Options for linked-worktree creation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeAddOptions {
 	pub detach:       bool,
 	pub clone:        WorktreeClone,
@@ -127,6 +134,11 @@ pub struct WorktreeAddOptions {
 	/// into the new worktree instead of starting from a clean tree. Requires
 	/// the target ref to resolve to the source `HEAD` commit.
 	pub keep_changes: bool,
+	/// Mark the new worktree as still being set up by this owner, from before
+	/// it is listed until `GitRepo::worktree_end_setup`, so another process
+	/// does not take it over. Unlike git's `initializing` lock, which is lifted
+	/// once the worktree is created, the mark leaves git commands alone.
+	pub setup_owner:  Option<String>,
 }
 
 /// Outcome of linked-worktree creation.

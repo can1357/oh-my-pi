@@ -6,6 +6,11 @@
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
+- `/wt` (including the worktree `worktree.onStart` creates) and `github` `pr_checkout` now run the new worktree's `post-checkout` hook, like `git worktree add`; Esc cancels a hanging one in `/wt`, a hook that fails or can't run shows a warning, a failed one also keeps `worktree.cleanSource` from cleaning the source checkout, a branch the hook renames is the one reported and, for a PR, reused, or removed with the worktree when setup is cut short, and a successful hook that breaks the new worktree's `.git`, detaches its HEAD or switches it to another branch fails the setup ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- `omp worktree add` now warns when the `post-checkout` hook exists but didn't run, and gives the hook the terminal's output like `git worktree add` instead of collecting it ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- Git hooks in a `core.hooksPath` written with `~/` are now found for commits and the bash `git worktree add` rewrite, as git finds them ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- `github` `pr_checkout` no longer takes over a PR worktree another omp process is still setting up, so a failed setup there can't delete its work, and recreates one a dead omp process left with a missing or broken `.git` instead of reusing it ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- `omp worktree clear` no longer drops the registration of a worktree git has locked, e.g. one on an offline drive ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Fixed
 

@@ -145,7 +145,8 @@ Worktree and metadata behavior:
 - Local branch name is always `pr-<number>`.
 - Worktree path is `getWorktreeDir("<number>-<repo-hash>")` = `path.join(getWorktreesDir(), "<number>-<repo-hash>")`, where `<number>` is the PR number and `<repo-hash>` is `hashPath(primaryRepoRoot)` (a 7-hex digest of the primary repo root). `getWorktreesDir()` resolves the base in this order: a valid `OMP_WORKTREE_DIR`, the applied `worktree.base` setting, then the profile/XDG-aware data-root default (normally `~/.omp/wt`). Both overrides expand a leading `~` and must resolve to an absolute path; an invalid relative value is ignored and resolution falls through. `resolveAvailableWorktreePath()` appends a `-2`/`-3`… suffix when the resulting path is already registered with git or present on disk.
 - Existing worktree detection is by branch ref `refs/heads/pr-<number>` from `repository.worktrees()` (`@oh-my-pi/pi-natives/vcs`).
-- New worktree creation calls `repository.worktreeAdd(finalWorktreePath, localBranch, { detach: false, clone, backend }, signal)` after choosing an unused path. `clone` follows `worktree.clone` (default `true`); `backend` follows `isolation.backend` (default `"auto"`). Clone failure falls back to plain checkout with a warning; successful clone metadata appears as `clonedWith`.
+- New worktree creation calls `repository.worktreeAdd(finalWorktreePath, localBranch, { detach: false, clone, backend, setupOwner })` after choosing an unused path, without the abort signal: the native checkout runs to completion regardless, and only a worktree this call created may be discarded. `clone` follows `worktree.clone` (default `true`); `backend` follows `isolation.backend` (default `"auto"`). Clone failure falls back to plain checkout with a warning; successful clone metadata appears as `clonedWith`. `setupOwner` (`vcs.worktreeSetupOwner()`, this process's pid scope (machine, and on Linux boot and pid namespace), pid and, on Linux and macOS, start time, so a reused pid isn't mistaken for it; an owner from an earlier boot of this machine counts as gone) marks the worktree as still being set up, from before it is listed until its hook is done (`worktreeEndSetup`); git commands, the hook's included, ignore the mark.
+- A new worktree then gets its `post-checkout` hook, as with `git worktree add` (`addWorktreeWithHook` in `src/utils/worktree-hook.ts`). A failing hook keeps the worktree and adds a `Warning:` line to the result, as does a hook that exists but can't run. If the hook stage throws or is aborted before the setup mark is removed, the worktree is discarded and `pr-<number>` put back where the checkout left it, so a retry starts over; once the mark is gone another omp process may reuse the worktree, so a later abort keeps it. The discard takes no signal and runs to completion under the repo lock. A reused worktree's path lookup is raced against the abort as well.
 - For same-repo PRs, remote is `origin`. For cross-repo PRs, the tool resolves a clone URL for the head repo, reuses an existing remote with the same URL when possible, or creates `fork-<owner>` / `fork-<owner>-<n>`.
 - The branch push metadata is persisted with `git config` under the repository's shared `.git/config` as:
   - `branch.pr-<number>.remote`
@@ -156,7 +157,7 @@ Worktree and metadata behavior:
   - `branch.pr-<number>.ompPrIsCrossRepository`
   - `branch.pr-<number>.ompPrMaintainerCanModify`
 - When no matching worktree exists, an existing `refs/heads/pr-<number>` at a different commit fails unless `force=true`, which resets the branch to the fetched head.
-- An existing matching worktree is reused with `reused: true`; the remote is fetched and push metadata refreshed, but its local branch is not reset, even with `force=true`.
+- An existing matching worktree is reused with `reused: true`; the remote is fetched and push metadata refreshed, but its local branch is not reset, even with `force=true`. One another omp process is still setting up (its `setupOwner` is alive, or in another host or container) is refused with a `ToolError` before anything changes, since that process discards it if its setup fails; one whose setting-up omp is gone is reused, and its mark cleared, or, if that omp's rollback already removed its checkout or it was killed while the checkout was still being written (git's `initializing` lock is still there), the leftover is removed and the worktree created afresh (a registration git keeps, e.g. locked, fails with a `ToolError`). A setup mark that can't be read fails the checkout before anything changes, rather than counting as a finished setup.
 
 ### `pr_push`
 
@@ -261,7 +262,7 @@ Watch flow:
   - `pr_push` uses git network transport to the configured remote.
 - Subprocesses / native bindings
   - All `gh` calls use `Bun.spawn(["gh", ...args])`.
-  - `pr_checkout` and `pr_push` invoke git operations via `@oh-my-pi/pi-natives/vcs` (`vcs.requireGit()`). Checkout mutations use in-process `withRepoLock()`; `pr_push` does not acquire that lock.
+  - `pr_checkout` and `pr_push` invoke git operations via `@oh-my-pi/pi-natives/vcs`. `pr_checkout` finds the repository with `vcs.discoverGit()`, off the JS thread and raced against the abort, as `withRepoLock()` does for its key; `pr_push` uses `vcs.requireGit()`. Checkout mutations use in-process `withRepoLock()`; `pr_push` does not acquire that lock.
 - Session state (transcript, memory, jobs, checkpoints, registries)
   - `run_watch` consumes `session.allocateOutputArtifact()` when failed-job logs are persisted.
   - Returned `details` objects carry run/checkouts metadata for the renderer/UI.
@@ -302,6 +303,7 @@ Watch flow:
   - missing git repo / branch / HEAD context for checkout, push, or watch
   - `pr_push` on a branch without `ompPrHeadRef` metadata
   - an existing PR branch at a different commit without `force` when no matching worktree exists, or exhaustion of the 100 worktree-path candidates
+  - a matching worktree another omp process is still setting up
   - PR identifiers beginning with `-`
   - an absolute `file_read` path (a leading `/`) or a contents-API response that is not a file
   - `run_watch` without `branch` / `run` when the current checkout does not match the requested repo
@@ -313,7 +315,7 @@ Watch flow:
 - `normalizePrIdentifierList()` accepts `reviewer`, `assignee`, and `label` arrays too; the helper name is broader than its callers.
 - `pr_push` depends on `pr_checkout` having run first for that local branch; there is no alternate metadata source.
 - `pr_checkout` stores push metadata in branch config, not in the worktree directory. Reusing the same `pr-<number>` branch reuses those config keys.
-- Checkout write serialization is in-process and keyed by the primary repo root, not the current worktree path, because git worktrees share `.git/config`, `packed-refs`, commit-graph, and worktree metadata files.
+- Checkout write serialization is in-process and keyed by the primary repo root, not the current worktree path, because git worktrees share `.git/config`, `packed-refs`, commit-graph, and worktree metadata files. Across processes, only the setup mark keeps a new worktree from being reused while it is set up, and `worktreeAdd` holds a lock file (`omp-worktree-add.lock` in the shared git dir) so two omp processes can't add the same path at once; an add waits up to 10 s for another holding it, then fails naming the file. Where the filesystem has no file locks, an exclusively created `omp-worktree-add.claim` stands in, removed when the add ends; on a signal exit, exit cleanup (`vcs.releaseWorktreeAddClaims()`) waits up to 9 s for running adds to finish and leaves the claim of one still running, since removing it would let another process add the same path while this one still writes it. Another add waits up to 10 s for a claim, then fails naming the file, which only a killed process, or an exit while an add ran longer than 9 s, leaves behind.
 - `search_repos` is the only search op that never forwards `repo`; repository scoping must be expressed in the query itself.
 - `run_watch` success on commit mode means “all observed runs succeeded and no additional runs appeared one poll later”, not merely “latest poll looked green”.
 - The TUI renderer collapses failed log previews unless the result view is expanded; the underlying text result still contains the same tailed lines plus any artifact reference.

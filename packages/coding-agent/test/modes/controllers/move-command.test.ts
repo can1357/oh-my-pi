@@ -7,6 +7,7 @@ import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import * as sessionWorktree from "@oh-my-pi/pi-coding-agent/session/session-worktree";
 import { Container } from "@oh-my-pi/pi-tui";
+import type { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
 
 function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void>) {
 	const state = { cwd: sourceDir, movedTo: undefined as string | undefined, completedBtwVisible: true };
@@ -35,6 +36,10 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		if (moved) state.completedBtwVisible = false;
 		return moved;
 	});
+	// The editor starts in its container, as in the TUI; /wt swaps in its loader and must put it back.
+	const editor = new Container();
+	const editorContainer = new Container();
+	editorContainer.addChild(editor);
 	const ctx = {
 		session: { isStreaming: false, moveSession },
 		sessionManager: {
@@ -51,12 +56,15 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		showHookConfirm: vi.fn(),
 		showError: vi.fn(),
 		showWarning: vi.fn(),
+		showStatus: vi.fn(),
 		applyCwdChange,
 		withBtwSessionMove,
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
+		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn(), setFocus: vi.fn() },
 		statusContainer: new Container(),
+		editor,
+		editorContainer,
 		present,
 		shutdown,
 	} as unknown as InteractiveModeContext;
@@ -89,7 +97,7 @@ describe("CommandController /move", () => {
 			expect(state.completedBtwVisible).toBe(true);
 			expect(ctx.session.moveSession).not.toHaveBeenCalled();
 			expect(ctx.present).not.toHaveBeenCalled();
-			expect(ctx.statusContainer.children).toHaveLength(0);
+			expect(ctx.editorContainer.children).toEqual([ctx.editor]);
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}
@@ -151,11 +159,39 @@ describe("CommandController /move", () => {
 			expect(commits).toBe(1);
 			expect(state.cwd).toBe(target);
 			expect(ctx.present).toHaveBeenCalled();
-			expect(ctx.statusContainer.children).toHaveLength(0);
+			expect(ctx.editorContainer.children).toEqual([ctx.editor]);
 		} finally {
 			created.resolve();
 			relocated.resolve();
 			await command;
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the source checkout when the worktree's post-checkout hook failed", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-hookfail-"));
+		try {
+			const { ctx, state } = createMoveContext(sourceDir);
+			const target = path.join(sourceDir, "checkout");
+			const hookError = "post-checkout hook exited with 1: setup failed";
+			vi.spyOn(sessionWorktree, "createSessionWorktree").mockImplementation(async () => {
+				await fs.mkdir(target);
+				return {
+					path: target,
+					branch: "feature",
+					sourceCwd: sourceDir,
+					baseCommit: "0",
+					keptChanges: true,
+					hook: { error: hookError },
+				};
+			});
+			const cleanup = vi.spyOn(sessionWorktree, "cleanSourceCheckoutIfConfigured");
+			await new CommandController(ctx).handleWorktreeCommand("feature");
+
+			expect(state.cwd).toBe(target);
+			expect(cleanup).not.toHaveBeenCalled();
+			expect(ctx.showWarning).toHaveBeenCalledWith(expect.stringContaining(hookError));
+		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}
 	});
@@ -171,8 +207,37 @@ describe("CommandController /move", () => {
 			expect(state.cwd).toBe(sourceDir);
 			expect(state.completedBtwVisible).toBe(true);
 			expect(ctx.session.moveSession).not.toHaveBeenCalled();
-			expect(ctx.statusContainer.children).toHaveLength(0);
+			expect(ctx.editorContainer.children).toEqual([ctx.editor]);
 			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("Branch already exists"));
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("Esc while the worktree is being set up cancels it without an error and without relocating", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-cancel-"));
+		try {
+			const { ctx, state } = createMoveContext(sourceDir);
+			const started = Promise.withResolvers<void>();
+			vi.spyOn(sessionWorktree, "createSessionWorktree").mockImplementation(
+				async (_cwd, _settings, _branch, options) => {
+					const aborted = Promise.withResolvers<never>();
+					options?.signal?.addEventListener("abort", () => aborted.reject(options.signal?.reason), { once: true });
+					started.resolve();
+					return aborted.promise;
+				},
+			);
+			const command = new CommandController(ctx).handleWorktreeCommand("feature");
+			await started.promise;
+			const loader = ctx.editorContainer.children[0] as BorderedLoader;
+			loader.handleInput("\x1b");
+
+			expect(await command).toBeUndefined();
+			expect(state.cwd).toBe(sourceDir);
+			expect(ctx.session.moveSession).not.toHaveBeenCalled();
+			expect(ctx.showError).not.toHaveBeenCalled();
+			expect(ctx.showStatus).toHaveBeenCalledWith("Worktree creation cancelled");
+			expect(ctx.editorContainer.children).toEqual([ctx.editor]);
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}

@@ -34,6 +34,7 @@ import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-mes
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import { releaseWorktreeAddClaims } from "@oh-my-pi/pi-natives/vcs";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
@@ -1433,6 +1434,15 @@ function registerEvalCleanup(): void {
 	postmortem.register("python-cleanup", disposeAllKernelSessions);
 }
 
+let worktreeAddClaimCleanupRegistered = false;
+
+/** `/wt`, `pr_checkout`, the bash `git worktree add` builtin and security scans add worktrees in this process. */
+function registerWorktreeAddClaimCleanup(): void {
+	if (worktreeAddClaimCleanupRegistered) return;
+	worktreeAddClaimCleanupRegistered = true;
+	postmortem.register("worktree-add-claims", () => releaseWorktreeAddClaims(), { exitOnly: true });
+}
+
 export function customToolToDefinition(tool: CustomTool, sourcePath?: string): ToolDefinition {
 	const definition: ToolDefinition & { [TOOL_DEFINITION_MARKER]: true } = {
 		name: tool.name,
@@ -1775,6 +1785,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	registerSshCleanup();
 	registerEvalCleanup();
+	registerWorktreeAddClaimCleanup();
 
 	const settings = await (options.settings ??
 		options.settingsManager ??

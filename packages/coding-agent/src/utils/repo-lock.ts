@@ -17,7 +17,8 @@ const repoWriteChain = new Map<string, Promise<unknown>>();
  * Not reentrant: do NOT nest acquisitions for the same repo.
  */
 export async function withRepoLock<T>(cwd: string, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-	const key = vcs.repo(cwd)?.primaryRoot() ?? cwd;
+	// Off the JS thread and abortable: a stalled checkout must not freeze the caller before it even queues.
+	const key = (await vcs.discoverRepo(cwd, signal))?.primaryRoot() ?? cwd;
 	const prior = repoWriteChain.get(key);
 	const run = (async () => {
 		if (prior) {

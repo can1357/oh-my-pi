@@ -491,6 +491,7 @@ impl Plan {
 				detach:       self.detach,
 				clone:        WorktreeClone::Auto,
 				keep_changes: false,
+				setup_owner:  None,
 			})?;
 		let linked = GitRepo::require(&self.path)?;
 		if let Some(reason) = &self.lock {

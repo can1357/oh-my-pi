@@ -72,7 +72,9 @@ import {
 	createSessionWorktree,
 	defaultSessionWorktreeBranch,
 	formatSessionWorktreeSummary,
+	mayCleanSourceAfter,
 	type SessionWorktree,
+	sessionWorktreeWarnings,
 } from "../../session/session-worktree";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import {
@@ -1712,25 +1714,30 @@ export class CommandController {
 		await this.#withSessionMove(async () => {
 			const branchName = branch?.trim() || defaultSessionWorktreeBranch();
 			const cwd = this.ctx.sessionManager.getCwd();
-			this.ctx.statusContainer.disposeChildren();
-			const loader = new Loader(
-				this.ctx.ui,
-				spinner => theme.fg("accent", spinner),
-				text => theme.fg("muted", text),
-				`Creating worktree on ${branchName}…`,
-				getSymbolTheme().spinnerFrames,
-			);
-			this.ctx.statusContainer.addChild(loader);
+			// Esc aborts a hook that hangs (e.g. a stalled `npm install`); the new worktree is then discarded.
+			const loader = new BorderedLoader(this.ctx.ui, theme, `Creating worktree on ${branchName}…`);
+			// The native checkout itself runs to completion; Esc takes effect at the next step.
+			loader.onAbort = () => this.ctx.showStatus("Cancelling worktree creation…");
+			this.ctx.editorContainer.clear();
+			this.ctx.editorContainer.addChild(loader);
+			this.ctx.ui.setFocus(loader);
 			this.ctx.ui.requestRender();
 			let worktree: SessionWorktree;
 			try {
-				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, options);
+				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, {
+					...options,
+					signal: loader.signal,
+				});
 			} catch (err) {
-				this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
+				if (loader.signal.aborted) this.ctx.showStatus("Worktree creation cancelled");
+				else this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
 				return false;
 			} finally {
-				loader.stop();
-				this.ctx.statusContainer.disposeChildren();
+				loader.dispose();
+				this.ctx.editorContainer.clear();
+				this.ctx.editorContainer.addChild(this.ctx.editor);
+				this.ctx.ui.setFocus(this.ctx.editor);
+				this.ctx.ui.requestRender();
 			}
 			if (worktree.cloneError) {
 				logger.warn("worktree clone fell back to plain checkout", {
@@ -1740,11 +1747,11 @@ export class CommandController {
 			}
 			if (!(await this.#relocateSession(worktree.path))) return false;
 			created = worktree;
-			const cleanup = worktree.keptChanges
+			const cleanup = mayCleanSourceAfter(worktree)
 				? await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings)
 				: { cleaned: false, errorMessage: undefined };
-			if (cleanup.errorMessage !== undefined) {
-				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
+			for (const warning of sessionWorktreeWarnings(worktree, cleanup.errorMessage)) {
+				this.ctx.showWarning(`Worktree created, but ${warning}`);
 			}
 			this.ctx.present([
 				new Spacer(1),

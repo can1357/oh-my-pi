@@ -23,7 +23,7 @@ use std::{
 };
 
 pub use cli::{COMMAND_TIMEOUT, NETWORK_TIMEOUT, OUTPUT_LIMIT_BYTES, SYNC_TIMEOUT, clone};
-pub use mutate::detach_git_dir;
+pub use mutate::{detach_git_dir, release_worktree_add_claims};
 pub use patch::{join_patches, validate_hunk_selections};
 
 use crate::{
@@ -277,6 +277,21 @@ fn resolve_common_dir(git_dir: &Path) -> PathBuf {
 
 fn read_optional(path: &Path) -> Option<String> {
 	std::fs::read_to_string(path).ok()
+}
+
+/// File in a linked worktree's administration directory naming the owner of a
+/// setup that is not finished yet.
+pub(crate) const SETUP_MARK: &str = "omp-setup";
+
+/// Owner in the setup mark of the administration directory `admin`; `None`
+/// only when there is none. A mark that can't be read is an error, never taken
+/// for a finished setup.
+pub(crate) fn read_setup_mark(admin: &Path) -> Result<Option<String>> {
+	match std::fs::read_to_string(admin.join(SETUP_MARK)) {
+		Ok(owner) => Ok(Some(owner.trim_end().to_owned())),
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+		Err(err) => Err(err.into()),
+	}
 }
 
 /// Lexically normalize `.`/`..` segments without touching the filesystem, so

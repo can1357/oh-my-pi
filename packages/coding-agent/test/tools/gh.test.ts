@@ -15,7 +15,11 @@ import {
 	resolveDefaultRepoMemoized,
 } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import { parseIssueUrl, parsePullRequestUrl } from "@oh-my-pi/pi-coding-agent/tools/gh-common";
-import { sanitizeRemoteName } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-checkout";
+import {
+	checkoutPullRequest,
+	type PrCheckoutOutcome,
+	sanitizeRemoteName,
+} from "@oh-my-pi/pi-coding-agent/tools/gh-pr-checkout";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withRepoLock } from "@oh-my-pi/pi-coding-agent/utils/repo-lock";
@@ -94,6 +98,18 @@ function runGit(cwd: string, args: string[]): string {
 	}
 
 	return new TextDecoder().decode(result.stdout).trim();
+}
+
+/** The `git worktree list --porcelain` record of the worktree on `branch`, as git itself reports it. */
+function worktreeRecord(repoRoot: string, branch: string): string {
+	const records = runGit(repoRoot, ["worktree", "list", "--porcelain"]).split("\n\n");
+	return records.find(record => record.split("\n").includes(`branch refs/heads/${branch}`)) ?? "";
+}
+
+/** Owner of the unfinished setup of the worktree on `branch`, as other omp processes see it. */
+async function setupOwnerOf(repoRoot: string, branch: string): Promise<string | undefined> {
+	const entries = await vcs.requireGit(repoRoot).worktrees();
+	return entries.find(entry => entry.branch === `refs/heads/${branch}`)?.setupOwner;
 }
 
 interface PrFixture {
@@ -1171,6 +1187,13 @@ describe("github tool", () => {
 					sshUrl: fixture.forkBare,
 					url: fixture.forkBare,
 				});
+			const runsHooks = process.platform !== "win32";
+			if (runsHooks) {
+				const hooks = path.join(fixture.baseDir, "hooks");
+				await Bun.write(path.join(hooks, "post-checkout"), '#!/bin/sh\necho "$2" > .post-checkout-ran\n');
+				await fs.chmod(path.join(hooks, "post-checkout"), 0o755);
+				runGit(fixture.repoRoot, ["config", "core.hooksPath", hooks]);
+			}
 
 			const tool = new GithubTool(createSession(fixture.repoRoot));
 			const result = await tool.execute("pr-checkout", { op: "pr_checkout", pr: "123" });
@@ -1190,7 +1213,627 @@ describe("github tool", () => {
 				.filter(line => line.startsWith("worktree "))
 				.map(line => normalizePathForComparison(line.slice("worktree ".length)));
 			expect(listedWorktrees).toContain(normalizePathForComparison(worktreePath));
+			// Set up: other omp processes no longer wait for it.
+			expect(await setupOwnerOf(fixture.repoRoot, "pr-123")).toBeUndefined();
 			expect(runGit(worktreePath, ["branch", "--show-current"])).toBe("pr-123");
+			if (runsHooks) {
+				expect((await Bun.file(path.join(worktreePath, ".post-checkout-ran")).text()).trim()).toBe(
+					fixture.headRefOid,
+				);
+			}
+		});
+
+		describe.skipIf(process.platform === "win32")("a new worktree whose setup is cut short", () => {
+			/** Puts the shared fixture's config back if a test failed with it replaced, so later tests fail instead of hanging. */
+			let restoreConfig: (() => Promise<void>) | undefined;
+			afterEach(async () => {
+				await restoreConfig?.();
+				restoreConfig = undefined;
+			});
+			const mockPrView = (number: number) =>
+				vi
+					.spyOn(github, "json")
+					.mockResolvedValueOnce({
+						number,
+						title: "Contributor fix",
+						url: `https://ghe.example.com/base/repo/pull/${number}`,
+						baseRefName: "main",
+						headRefName: fixture.headRefName,
+						headRefOid: fixture.headRefOid,
+						headRepository: { nameWithOwner: "contrib/repo" },
+						headRepositoryOwner: { login: "contrib" },
+						isCrossRepository: true,
+						maintainerCanModify: true,
+					})
+					.mockResolvedValueOnce({
+						nameWithOwner: "contrib/repo",
+						sshUrl: fixture.forkBare,
+						url: fixture.forkBare,
+					});
+			const checkout = (number: number, signal: AbortSignal) =>
+				checkoutPullRequest(createSession(fixture.repoRoot), signal, {
+					prRef: String(number),
+					repo: undefined,
+					force: false,
+				});
+			/** Run `body` with a `post-checkout` hook that signals `started` and then waits until it is killed. */
+			const withBlockingHook = async (name: string, prelude: string, body: (started: string) => Promise<void>) => {
+				const hooks = path.join(fixture.baseDir, `hooks-${name}`);
+				const started = path.join(fixture.baseDir, `${name}-started`);
+				expect(Bun.spawnSync(["mkfifo", started]).exitCode).toBe(0);
+				await Bun.write(
+					path.join(hooks, "post-checkout"),
+					`#!/bin/sh\n${prelude}\necho started > "${started}"\nsleep 30 &\nwait\n`,
+				);
+				await fs.chmod(path.join(hooks, "post-checkout"), 0o755);
+				const previous = Bun.spawnSync(["git", "config", "--get", "core.hooksPath"], { cwd: fixture.repoRoot })
+					.stdout.toString()
+					.trim();
+				runGit(fixture.repoRoot, ["config", "core.hooksPath", hooks]);
+				try {
+					await body(started);
+				} finally {
+					if (previous) runGit(fixture.repoRoot, ["config", "core.hooksPath", previous]);
+					else runGit(fixture.repoRoot, ["config", "--unset", "core.hooksPath"]);
+				}
+			};
+			/** The worktree is neither registered nor on disk, so a retry creates it afresh and reruns the hook. */
+			const expectDiscarded = async (number: number) => {
+				const primaryRoot = vcs.requireGit(fixture.repoRoot).primaryRoot() ?? fixture.repoRoot;
+				const dir = path.join(tempHome.home, ".omp", "wt", `${number}-${hashPath(primaryRoot)}`);
+				expect(runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"])).not.toContain(
+					`branch refs/heads/pr-${number}`,
+				);
+				expect(
+					await fs.stat(dir).then(
+						() => true,
+						() => false,
+					),
+				).toBe(false);
+			};
+
+			const hookRows: [name: string, number: number, prelude: string][] = [
+				["is removed when its hook is aborted", 124, ""],
+				// Discovery then fails, so removal reports false instead of throwing.
+				["is removed when its aborted hook had deleted the worktree's .git", 125, "rm -f .git"],
+			];
+			const abortDuringHook = async (number: number, prelude: string, during?: () => Promise<void>) => {
+				mockPrView(number);
+				await withBlockingHook(`pr-${number}`, prelude, async started => {
+					const controller = new AbortController();
+					const pending = checkout(number, controller.signal);
+					await fs.readFile(started, "utf8");
+					try {
+						await during?.();
+					} finally {
+						controller.abort();
+						await expect(pending).rejects.toThrow();
+					}
+				});
+			};
+			it.each(hookRows)("%s", async (_name, number, prelude) => {
+				await abortDuringHook(number, prelude);
+				await expectDiscarded(number);
+			});
+			it("is removed with its registration when, its .git deleted, the checkout around it is found instead", async () => {
+				// `worktree.base` inside another checkout, as with a home directory kept in git.
+				runGit(tempHome.home, ["init", "-q"]);
+				try {
+					await abortDuringHook(132, "rm -f .git");
+				} finally {
+					await fs.rm(path.join(tempHome.home, ".git"), { recursive: true, force: true });
+				}
+				await expectDiscarded(132);
+			});
+			it("leaves git commands to its hook, while other omp processes see it as being set up", async () => {
+				await abortDuringHook(130, 'git worktree lock --reason by-hook "$PWD"', async () => {
+					// The hook could lock it, as under `git worktree add`: git's own lock is already lifted.
+					expect(worktreeRecord(fixture.repoRoot, "pr-130")).toContain("locked by-hook");
+					expect(await setupOwnerOf(fixture.repoRoot, "pr-130")).toBe(vcs.worktreeSetupOwner());
+				});
+				await expectDiscarded(130);
+			});
+			const ownerRows: [name: string, number: number, alive: boolean][] = [
+				["is not taken over while another omp process is still setting it up", 131, true],
+				["is taken over once the omp process setting it up is gone", 133, false],
+			];
+			it.each(ownerRows)("%s", async (_name, number, alive) => {
+				mockPrView(number);
+				const primaryRoot = vcs.requireGit(fixture.repoRoot).primaryRoot() ?? fixture.repoRoot;
+				const dir = path.join(tempHome.home, ".omp", "wt", `${number}-${hashPath(primaryRoot)}`);
+				const branch = `pr-${number}`;
+				runGit(fixture.repoRoot, ["worktree", "add", "-q", "-b", branch, dir, fixture.headRefOid]);
+				// Another omp process's mark, of this host: one still running, or one that crashed mid-setup.
+				const other = alive ? Bun.spawn(["sleep", "30"]) : Bun.spawnSync(["sh", "-c", "exit 0"]);
+				// No start time: how an older build wrote it.
+				const owner = vcs.worktreeSetupOwner().replace(/-\d+(-\d+)?$/, `-${other.pid}`);
+				await Bun.write(path.join(runGit(dir, ["rev-parse", "--absolute-git-dir"]), "omp-setup"), `${owner}\n`);
+				try {
+					const checkedOut = checkout(number, new AbortController().signal);
+					if (alive) {
+						await expect(checkedOut).rejects.toThrow("is still being set up by another omp process");
+						expect(await setupOwnerOf(fixture.repoRoot, branch)).toBe(owner);
+					} else {
+						await checkedOut;
+						expect(await setupOwnerOf(fixture.repoRoot, branch)).toBeUndefined();
+					}
+					expect(runGit(dir, ["rev-parse", "HEAD"])).toBe(fixture.headRefOid);
+				} finally {
+					if ("kill" in other) other.kill();
+					runGit(fixture.repoRoot, ["worktree", "remove", "--force", dir]);
+				}
+			});
+			it("recreates a worktree whose dead owner's rollback removed the checkout but left its registration", async () => {
+				mockPrView(134);
+				const primaryRoot = vcs.requireGit(fixture.repoRoot).primaryRoot() ?? fixture.repoRoot;
+				const dir = path.join(tempHome.home, ".omp", "wt", `134-${hashPath(primaryRoot)}`);
+				const branch = "pr-134";
+				runGit(fixture.repoRoot, ["worktree", "add", "-q", "-b", branch, dir, fixture.headRefOid]);
+				const owner = vcs
+					.worktreeSetupOwner()
+					.replace(/-\d+(-\d+)?$/, `-${Bun.spawnSync(["sh", "-c", "exit 0"]).pid}`);
+				await Bun.write(path.join(runGit(dir, ["rev-parse", "--absolute-git-dir"]), "omp-setup"), `${owner}\n`);
+				await fs.rm(dir, { recursive: true, force: true });
+
+				const outcome = await checkout(134, new AbortController().signal);
+
+				try {
+					expect(runGit(outcome.worktreePath, ["rev-parse", "HEAD"])).toBe(fixture.headRefOid);
+					expect(runGit(outcome.worktreePath, ["branch", "--show-current"])).toBe(branch);
+					expect(await setupOwnerOf(fixture.repoRoot, branch)).toBeUndefined();
+				} finally {
+					runGit(fixture.repoRoot, ["worktree", "remove", "--force", outcome.worktreePath]);
+				}
+			});
+			it("recreates a worktree whose dead owner was killed while its add was still initializing", async () => {
+				mockPrView(135);
+				const primaryRoot = vcs.requireGit(fixture.repoRoot).primaryRoot() ?? fixture.repoRoot;
+				const dir = path.join(tempHome.home, ".omp", "wt", `135-${hashPath(primaryRoot)}`);
+				const branch = "pr-135";
+				runGit(fixture.repoRoot, ["worktree", "add", "-q", "-b", branch, dir, fixture.headRefOid]);
+				const owner = vcs
+					.worktreeSetupOwner()
+					.replace(/-\d+(-\d+)?$/, `-${Bun.spawnSync(["sh", "-c", "exit 0"]).pid}`);
+				const gitDir = runGit(dir, ["rev-parse", "--absolute-git-dir"]);
+				await Bun.write(path.join(gitDir, "omp-setup"), `${owner}\n`);
+				await Bun.write(path.join(gitDir, "locked"), "initializing\n");
+				const tracked = runGit(dir, ["ls-files"]).split("\n")[0];
+				await fs.rm(path.join(dir, tracked));
+
+				const outcome = await checkout(135, new AbortController().signal);
+
+				try {
+					expect(outcome.reused).toBe(false);
+					expect(await Bun.file(path.join(outcome.worktreePath, tracked)).exists()).toBe(true);
+					expect(await setupOwnerOf(fixture.repoRoot, branch)).toBeUndefined();
+					expect(worktreeRecord(fixture.repoRoot, branch)).not.toContain("locked");
+				} finally {
+					runGit(fixture.repoRoot, ["worktree", "remove", "--force", outcome.worktreePath]);
+				}
+			});
+			it("keeps the dead owner's mark and lock when removing its partial checkout fails, so a retry recreates it", async () => {
+				mockPrView(136);
+				const primaryRoot = vcs.requireGit(fixture.repoRoot).primaryRoot() ?? fixture.repoRoot;
+				const dir = path.join(tempHome.home, ".omp", "wt", `136-${hashPath(primaryRoot)}`);
+				const branch = "pr-136";
+				runGit(fixture.repoRoot, ["worktree", "add", "-q", "-b", branch, dir, fixture.headRefOid]);
+				const owner = vcs
+					.worktreeSetupOwner()
+					.replace(/-\d+(-\d+)?$/, `-${Bun.spawnSync(["sh", "-c", "exit 0"]).pid}`);
+				const gitDir = runGit(dir, ["rev-parse", "--absolute-git-dir"]);
+				await Bun.write(path.join(gitDir, "omp-setup"), `${owner}\n`);
+				await Bun.write(path.join(gitDir, "locked"), "initializing\n");
+				const tracked = runGit(dir, ["ls-files"]).split("\n")[0];
+				await fs.rm(path.join(dir, tracked));
+
+				const repoProto = Object.getPrototypeOf(vcs.requireGit(fixture.repoRoot));
+				const removeSpy = vi
+					.spyOn(repoProto, "worktreeRemove")
+					.mockRejectedValueOnce(Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" }));
+				try {
+					await expect(checkout(136, new AbortController().signal)).rejects.toThrow("EPERM");
+				} finally {
+					removeSpy.mockRestore();
+				}
+
+				// The failed call never asked for the head repository: drop its queued answer.
+				vi.spyOn(github, "json").mockReset();
+				mockPrView(136);
+				const outcome = await checkout(136, new AbortController().signal);
+				try {
+					expect(outcome.reused).toBe(false);
+					expect(await Bun.file(path.join(outcome.worktreePath, tracked)).exists()).toBe(true);
+					expect(await setupOwnerOf(fixture.repoRoot, branch)).toBeUndefined();
+					expect(worktreeRecord(fixture.repoRoot, branch)).not.toContain("locked");
+				} finally {
+					runGit(fixture.repoRoot, ["worktree", "remove", "--force", outcome.worktreePath]);
+				}
+			});
+			/** Sets up PR `number`'s worktree as an omp process that has since died left it: marked, nothing else touched. */
+			async function deadOwnersWorktree(number: number): Promise<{ dir: string; gitDir: string; branch: string }> {
+				const primaryRoot = vcs.requireGit(fixture.repoRoot).primaryRoot() ?? fixture.repoRoot;
+				const dir = path.join(tempHome.home, ".omp", "wt", `${number}-${hashPath(primaryRoot)}`);
+				const branch = `pr-${number}`;
+				runGit(fixture.repoRoot, ["worktree", "add", "-q", "-b", branch, dir, fixture.headRefOid]);
+				const owner = vcs
+					.worktreeSetupOwner()
+					.replace(/-\d+(-\d+)?$/, `-${Bun.spawnSync(["sh", "-c", "exit 0"]).pid}`);
+				const gitDir = runGit(dir, ["rev-parse", "--absolute-git-dir"]);
+				await Bun.write(path.join(gitDir, "omp-setup"), `${owner}\n`);
+				return { dir, gitDir, branch };
+			}
+			it("recreates a dead owner's PR worktree whose .git the hook removed instead of reusing a plain directory", async () => {
+				mockPrView(142);
+				const { dir, branch } = await deadOwnersWorktree(142);
+				await fs.rm(path.join(dir, ".git"));
+
+				const outcome = await checkout(142, new AbortController().signal);
+				try {
+					expect(outcome.reused).toBe(false);
+					expect(runGit(outcome.worktreePath, ["rev-parse", "--absolute-git-dir"])).toContain(
+						path.join(".git", "worktrees"),
+					);
+					expect(await setupOwnerOf(fixture.repoRoot, branch)).toBeUndefined();
+				} finally {
+					await fs.rm(outcome.worktreePath, { recursive: true, force: true });
+					runGit(fixture.repoRoot, ["worktree", "prune"]);
+				}
+			});
+			it("recreates a dead owner's PR worktree whose .git points at another worktree, leaving that worktree alone", async () => {
+				mockPrView(143);
+				const victim = path.join(fixture.baseDir, "victim-143");
+				runGit(fixture.repoRoot, [
+					"-c",
+					"core.hooksPath=/dev/null",
+					"worktree",
+					"add",
+					"-q",
+					"-b",
+					"victim-143",
+					victim,
+					fixture.headRefOid,
+				]);
+				try {
+					const victimGitDir = runGit(victim, ["rev-parse", "--absolute-git-dir"]);
+					const { dir } = await deadOwnersWorktree(143);
+					await Bun.write(path.join(dir, ".git"), `gitdir: ${victimGitDir}\n`);
+
+					const outcome = await checkout(143, new AbortController().signal);
+					try {
+						expect(outcome.reused).toBe(false);
+						expect(runGit(outcome.worktreePath, ["rev-parse", "--absolute-git-dir"])).not.toBe(victimGitDir);
+						const listed = runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"]);
+						expect(listed).toContain(`worktree ${await fs.realpath(victim)}`);
+						expect(await Bun.file(path.join(victimGitDir, "HEAD")).exists()).toBe(true);
+						expect((await fs.stat(victim)).isDirectory()).toBe(true);
+					} finally {
+						await fs.rm(outcome.worktreePath, { recursive: true, force: true });
+					}
+				} finally {
+					runGit(fixture.repoRoot, ["worktree", "remove", "--force", victim]);
+					runGit(fixture.repoRoot, ["worktree", "prune"]);
+				}
+			});
+			it("an abort during stale cleanup leaves no registration that the next checkout would reuse", async () => {
+				mockPrView(144);
+				const { dir, gitDir, branch } = await deadOwnersWorktree(144);
+				await Bun.write(path.join(gitDir, "locked"), "initializing\n");
+				const tracked = runGit(dir, ["ls-files"]).split("\n")[0];
+				await fs.rm(dir, { recursive: true, force: true });
+
+				const controller = new AbortController();
+				const repoProto = Object.getPrototypeOf(vcs.requireGit(fixture.repoRoot));
+				const original = repoProto.worktreeReplaceSetupOwner;
+				const spy = vi.spyOn(repoProto, "worktreeReplaceSetupOwner").mockImplementation(async function (
+					this: unknown,
+					...args: unknown[]
+				) {
+					const result = await original.apply(this, args);
+					// The claim passes our own mark; the clearing call passes none.
+					if (args[2] == null) controller.abort();
+					return result;
+				});
+				try {
+					await expect(checkout(144, controller.signal)).rejects.toThrow();
+				} finally {
+					spy.mockRestore();
+				}
+
+				// The aborted call never asked for the head repository: drop its queued answer.
+				vi.spyOn(github, "json").mockReset();
+				mockPrView(144);
+				const outcome = await checkout(144, new AbortController().signal);
+				try {
+					expect(outcome.reused).toBe(false);
+					expect(await Bun.file(path.join(outcome.worktreePath, tracked)).exists()).toBe(true);
+					expect(await setupOwnerOf(fixture.repoRoot, branch)).toBeUndefined();
+					expect(worktreeRecord(fixture.repoRoot, branch)).not.toContain("locked");
+				} finally {
+					runGit(fixture.repoRoot, ["worktree", "remove", "--force", outcome.worktreePath]);
+				}
+			});
+			it("refuses this process's own mark on a complete checkout, whose hook never finished", async () => {
+				mockPrView(138);
+				const primaryRoot = vcs.requireGit(fixture.repoRoot).primaryRoot() ?? fixture.repoRoot;
+				const dir = path.join(tempHome.home, ".omp", "wt", `138-${hashPath(primaryRoot)}`);
+				const branch = "pr-138";
+				runGit(fixture.repoRoot, ["worktree", "add", "-q", "-b", branch, dir, fixture.headRefOid]);
+				const gitDir = runGit(dir, ["rev-parse", "--absolute-git-dir"]);
+				await Bun.write(path.join(gitDir, "omp-setup"), `${vcs.worktreeSetupOwner()}\n`);
+				try {
+					await expect(checkout(138, new AbortController().signal)).rejects.toThrow("still being set up");
+					expect(await Bun.file(path.join(dir, runGit(dir, ["ls-files"]).split("\n")[0])).exists()).toBe(true);
+					expect(await setupOwnerOf(fixture.repoRoot, branch)).toBe(vcs.worktreeSetupOwner());
+				} finally {
+					runGit(fixture.repoRoot, ["worktree", "remove", "--force", dir]);
+				}
+			});
+			it("refuses a dead owner's worktree that another process claimed after the listing, leaving its checkout alone", async () => {
+				mockPrView(137);
+				const primaryRoot = vcs.requireGit(fixture.repoRoot).primaryRoot() ?? fixture.repoRoot;
+				const dir = path.join(tempHome.home, ".omp", "wt", `137-${hashPath(primaryRoot)}`);
+				const branch = "pr-137";
+				runGit(fixture.repoRoot, ["worktree", "add", "-q", "-b", branch, dir, fixture.headRefOid]);
+				const owner = vcs
+					.worktreeSetupOwner()
+					.replace(/-\d+(-\d+)?$/, `-${Bun.spawnSync(["sh", "-c", "exit 0"]).pid}`);
+				const gitDir = runGit(dir, ["rev-parse", "--absolute-git-dir"]);
+				await Bun.write(path.join(gitDir, "omp-setup"), `${owner}\n`);
+				await Bun.write(path.join(gitDir, "locked"), "initializing\n");
+				const tracked = runGit(dir, ["ls-files"]).split("\n")[0];
+
+				const repoProto = Object.getPrototypeOf(vcs.requireGit(fixture.repoRoot));
+				const realWorktrees = repoProto.worktrees;
+				const worktreesSpy = vi.spyOn(repoProto, "worktrees").mockImplementationOnce(async function (
+					this: unknown,
+					...args: unknown[]
+				) {
+					const listing = await realWorktrees.apply(this, args);
+					// Another process takes the setup over after this listing was read.
+					await Bun.write(path.join(gitDir, "omp-setup"), `${vcs.worktreeSetupOwner()}\n`);
+					return listing;
+				});
+				try {
+					await expect(checkout(137, new AbortController().signal)).rejects.toThrow(
+						"still being set up by another omp process",
+					);
+				} finally {
+					worktreesSpy.mockRestore();
+				}
+
+				try {
+					expect(await Bun.file(path.join(dir, tracked)).exists()).toBe(true);
+					expect(await setupOwnerOf(fixture.repoRoot, branch)).toBe(vcs.worktreeSetupOwner());
+				} finally {
+					runGit(fixture.repoRoot, ["worktree", "remove", "--force", "--force", dir]);
+				}
+			});
+			it("reuses the worktree of a PR whose hook renamed the local branch instead of adding a second one", async () => {
+				const hooks = path.join(fixture.baseDir, "hooks-rename-139");
+				await Bun.write(path.join(hooks, "post-checkout"), "#!/bin/sh\ngit branch -m pr-139 renamed-139\n");
+				await fs.chmod(path.join(hooks, "post-checkout"), 0o755);
+				const previous = Bun.spawnSync(["git", "config", "--get", "core.hooksPath"], { cwd: fixture.repoRoot })
+					.stdout.toString()
+					.trim();
+				runGit(fixture.repoRoot, ["config", "core.hooksPath", hooks]);
+				let first: PrCheckoutOutcome | undefined;
+				try {
+					mockPrView(139);
+					first = await checkout(139, new AbortController().signal);
+					vi.spyOn(github, "json").mockReset();
+					mockPrView(139);
+					const second = await checkout(139, new AbortController().signal);
+
+					expect(first.localBranch).toBe("renamed-139");
+					expect(first.reused).toBe(false);
+					expect(second.reused).toBe(true);
+					expect(second.localBranch).toBe("renamed-139");
+					expect(second.worktreePath).toBe(first.worktreePath);
+					const listed = runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"]);
+					expect(listed.split("\n").filter(line => line === "branch refs/heads/renamed-139")).toHaveLength(1);
+					expect(listed).not.toContain("branch refs/heads/pr-139");
+				} finally {
+					if (previous) runGit(fixture.repoRoot, ["config", "core.hooksPath", previous]);
+					else runGit(fixture.repoRoot, ["config", "--unset", "core.hooksPath"]);
+					if (first) runGit(fixture.repoRoot, ["worktree", "remove", "--force", "--force", first.worktreePath]);
+				}
+			});
+			it("refuses a PR worktree whose hook switched it to another branch, leaving the PR branch at its head", async () => {
+				const hooks = path.join(fixture.baseDir, "hooks-switch-141");
+				await Bun.write(
+					path.join(hooks, "post-checkout"),
+					"#!/bin/sh\ngit -c core.hooksPath=/dev/null switch other-141\n",
+				);
+				await fs.chmod(path.join(hooks, "post-checkout"), 0o755);
+				const previous = Bun.spawnSync(["git", "config", "--get", "core.hooksPath"], { cwd: fixture.repoRoot })
+					.stdout.toString()
+					.trim();
+				runGit(fixture.repoRoot, ["branch", "other-141"]);
+				runGit(fixture.repoRoot, ["config", "core.hooksPath", hooks]);
+				try {
+					mockPrView(141);
+					await expect(checkout(141, new AbortController().signal)).rejects.toThrow(
+						/switched the new worktree at .* from pr-141 to other-141/,
+					);
+
+					const listed = runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"]);
+					expect(listed).not.toContain("branch refs/heads/pr-141");
+					expect(listed).not.toContain("branch refs/heads/other-141");
+					expect(runGit(fixture.repoRoot, ["rev-parse", "refs/heads/pr-141"])).toBe(fixture.headRefOid);
+					expect(
+						Bun.spawnSync(["git", "rev-parse", "--verify", "--quiet", "refs/heads/other-141"], {
+							cwd: fixture.repoRoot,
+						}).exitCode,
+					).toBe(0);
+				} finally {
+					if (previous) runGit(fixture.repoRoot, ["config", "core.hooksPath", previous]);
+					else runGit(fixture.repoRoot, ["config", "--unset", "core.hooksPath"]);
+					Bun.spawnSync(["git", "branch", "-D", "other-141"], { cwd: fixture.repoRoot });
+				}
+			});
+			it.skipIf(!/^[^-]+-\d+-\d+$/.test(vcs.worktreeSetupOwner()))(
+				"counts an owner whose pid now belongs to a process that started at another time as gone",
+				() => {
+					const own = vcs.worktreeSetupOwner();
+					expect(vcs.isWorktreeSetupOwnerAlive(own)).toBe(true);
+					// Start times are never 1: this is the pid of a process that has since been replaced.
+					expect(vcs.isWorktreeSetupOwnerAlive(own.replace(/-\d+$/, "-1"))).toBe(false);
+				},
+			);
+			it.skipIf(process.platform !== "linux")(
+				"counts an owner from an earlier boot of this machine as gone, one in another pid namespace as alive",
+				async () => {
+					const own = vcs.worktreeSetupOwner();
+					const machineId = (
+						await Bun.file("/etc/machine-id")
+							.text()
+							.catch(() => "")
+					).trim();
+					// Same machine, earlier boot: its process ended with that boot, even if the pid is in use now.
+					const earlierBoot = own.replace(/^([^.]+)\.[^.]+\./, "$1.0.");
+					// Without a machine id another machine with this hostname looks the same, so it can't be judged.
+					expect(vcs.isWorktreeSetupOwnerAlive(earlierBoot)).toBe(machineId === "");
+					// This boot, another pid namespace (a sidecar container): its pids aren't ours to check.
+					const exited = Bun.spawnSync(["sh", "-c", "exit 0"]).pid;
+					const sidecar = own.replace(/\.[^.-]+-\d+(-\d+)?$/, `.0-${exited}`);
+					expect(vcs.isWorktreeSetupOwnerAlive(sidecar)).toBe(true);
+				},
+			);
+			it.each([
+				[
+					"committed to",
+					"git -c user.name=t -c user.email=t@example.com -c commit.gpgsign=false commit -q --allow-empty -m hook",
+				],
+				["deleted", "git update-ref -d refs/heads/pr-128"],
+			])(
+				"puts back the PR branch a cut-short hook %s, so a retry finds it at the PR head",
+				async (name, prelude) => {
+					mockPrView(128);
+					await withBlockingHook(`pr-128-${name.replaceAll(" ", "-")}`, prelude, async started => {
+						const controller = new AbortController();
+						const pending = checkout(128, controller.signal);
+						await fs.readFile(started, "utf8");
+						controller.abort();
+						await expect(pending).rejects.toThrow();
+					});
+
+					await expectDiscarded(128);
+					expect(runGit(fixture.repoRoot, ["rev-parse", "refs/heads/pr-128"])).toBe(fixture.headRefOid);
+				},
+			);
+			it("an abort after the hook renamed the PR branch leaves neither the renamed branch nor its config", async () => {
+				mockPrView(140);
+				try {
+					await withBlockingHook("pr-140", "git branch -m pr-140 renamed-140", async started => {
+						const controller = new AbortController();
+						const pending = checkout(140, controller.signal);
+						await fs.readFile(started, "utf8");
+						controller.abort();
+						await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+					});
+
+					await expectDiscarded(140);
+					const renamedRef = Bun.spawnSync(["git", "rev-parse", "--verify", "--quiet", "refs/heads/renamed-140"], {
+						cwd: fixture.repoRoot,
+					});
+					expect(renamedRef.exitCode).not.toBe(0);
+					const renamedConfig = Bun.spawnSync(["git", "config", "--get", "branch.renamed-140.ompPrUrl"], {
+						cwd: fixture.repoRoot,
+					});
+					expect(renamedConfig.stdout.toString().trim()).toBe("");
+				} finally {
+					Bun.spawnSync(["git", "branch", "-D", "renamed-140"], { cwd: fixture.repoRoot });
+					Bun.spawnSync(["git", "config", "--remove-section", "branch.renamed-140"], { cwd: fixture.repoRoot });
+				}
+			});
+
+			it("is removed when the checkout is aborted after the worktree exists but before its hook starts", async () => {
+				mockPrView(126);
+				const controller = new AbortController();
+				const repoProto = Object.getPrototypeOf(vcs.requireGit(fixture.repoRoot));
+				const resolveRef = repoProto.resolveRef;
+				vi.spyOn(repoProto, "resolveRef").mockImplementation(function (
+					this: unknown,
+					ref: string,
+					signal?: AbortSignal,
+				) {
+					// The head lookup right after `worktreeAdd`.
+					if (ref !== "refs/heads/pr-126") return resolveRef.call(this, ref, signal);
+					controller.abort();
+					return Promise.reject(controller.signal.reason);
+				});
+				await expect(checkout(126, controller.signal)).rejects.toThrow();
+				await expectDiscarded(126);
+			});
+
+			it("is cancelled while the repository is still being found, as on a stalled checkout", async () => {
+				mockPrView(134);
+				// A named pipe stalls the read of the shared config, as a stalled filesystem would.
+				const config = path.join(fixture.repoRoot, ".git", "config");
+				await fs.rename(config, `${config}.real`);
+				restoreConfig = () => fs.rename(`${config}.real`, config);
+				expect(Bun.spawnSync(["mkfifo", config]).exitCode).toBe(0);
+				const controller = new AbortController();
+				const pending = checkout(134, controller.signal);
+				// Opening the writing end waits until the lookup opened the pipe; its read then stalls.
+				const writer = await fs.open(config, "w");
+				try {
+					controller.abort();
+					await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+				} finally {
+					// The real config first: the abandoned lookup may open it again, and must not meet the pipe.
+					await restoreConfig();
+					restoreConfig = undefined;
+					await writer.close();
+				}
+				await expectDiscarded(134);
+			});
+
+			it("is cancelled while its worktree path is still being chosen, as on a stalled worktree.base", async () => {
+				mockPrView(129);
+				const candidates = path.join(tempHome.home, ".omp", "wt", "129-");
+				const reached = Promise.withResolvers<void>();
+				const stalled = Promise.withResolvers<never>();
+				const realStat = fs.stat;
+				vi.spyOn(fs, "stat").mockImplementation(((file: string, ...rest: []) => {
+					if (!String(file).startsWith(candidates)) return realStat(file, ...rest);
+					reached.resolve();
+					return stalled.promise;
+				}) as never);
+				const controller = new AbortController();
+				const pending = checkout(129, controller.signal);
+				try {
+					await reached.promise;
+					controller.abort();
+					await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+				} finally {
+					// Failing, not ENOENT: the abandoned lookup then stops without creating anything.
+					stalled.reject(Object.assign(new Error("released"), { code: "EIO" }));
+				}
+				await expectDiscarded(129);
+			});
+
+			it("leaves alone a worktree another process created at the chosen path first", async () => {
+				mockPrView(127);
+				const repoProto = Object.getPrototypeOf(vcs.requireGit(fixture.repoRoot));
+				const worktreeAdd = repoProto.worktreeAdd;
+				let taken = "";
+				// Another process wins the race for the same free path, so this attempt's add fails.
+				vi.spyOn(repoProto, "worktreeAdd").mockImplementation(function (this: unknown, ...args: unknown[]) {
+					taken = String(args[0]);
+					runGit(fixture.repoRoot, ["worktree", "add", "-q", "--detach", taken, "HEAD"]);
+					return worktreeAdd.apply(this, args);
+				});
+				try {
+					await expect(checkout(127, new AbortController().signal)).rejects.toThrow();
+
+					expect(await Bun.file(path.join(taken, ".git")).exists()).toBe(true);
+					expect(runGit(taken, ["rev-parse", "--is-inside-work-tree"])).toBe("true");
+				} finally {
+					// Tolerant: a regression has already deleted it, and that failure should be the one reported.
+					if (taken) Bun.spawnSync(["git", "worktree", "remove", "--force", taken], { cwd: fixture.repoRoot });
+				}
+			});
 		});
 
 		// These assertions are non-mutating (a no-op add and rejected adds), so

@@ -2,8 +2,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `vcsGitHookLocation(dir, name, signal?)`, where git looks for a hook in the checkout containing `dir` (`core.hooksPath`, with `~/` and `%(prefix)/` expanded, or the shared hooks directory) whether or not one exists there, found entirely off the JS thread ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- Added a `setupOwner` option for `worktreeAdd` that marks the new worktree as still being set up until `VcsGitRepo.worktreeEndSetup(path, signal?)`, `setupOwner` on `worktrees()` entries, and `vcs.worktreeSetupOwner()`/`vcs.isWorktreeSetupOwnerAlive(owner)` ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- Added `vcs.discoverGit(dir, signal?)` and `vcs.discoverRepo(dir, signal?)`, which find the repository off the JS thread and reject as soon as `signal` aborts ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- Added `vcs.releaseWorktreeAddClaims()`, exit cleanup that waits up to 9 s for running adds holding the claim file `worktreeAdd` uses where the filesystem has no file locks ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- Added `gitDir` to `worktrees()` entries, the worktree's git directory, which stays the same when `git worktree move` moves it ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- Added `VcsGitRepo.worktreeReplaceSetupOwner(gitDir, expected, replacement?, signal?)`, which swaps or clears a worktree's setup mark only while it is still `expected`'s, atomically against worktree adds ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- Added `VcsGitRepo.branchRenamedFrom(name, from, signal?)`, whether the branch's reflog shows `git branch -m` renamed it from `from` ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- Added `VcsGitRepo.swapBranch(name, expected?, target?, signal?)`, which creates, moves or deletes a local branch through `git update-ref` only while it is still at `expected` (or absent), never one checked out in a worktree ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+
+### Changed
+
+- `vcs.runPostCheckoutHook` takes `{ signal, env, detached, inheritOutput }`, reports a hook that exists but didn't run as `skipped`, keeps the hook's output in the worktree's git directory when TMPDIR has no room for it, returns once `git hook run` exits even if the hook left a background process running, and returns at most the last 64 KiB of each output stream, whose capture files stay bounded while the hook, or a background process it left running, writes to them (on Windows, where that volume has no sparse files, the output is read through pipes instead, nothing on disk); `inheritOutput` gives the hook this process's stdout and stderr instead ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- `worktreeAdd` locks a new worktree as `initializing` while creating it and removes a half-written registration on failure, as git does, and serializes adds into one repository across processes (waiting up to 10 s for another), so two adding the same path can't share one checkout ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- `deleteBranch` also removes the deleted branch's `branch.<name>` config section, as `git branch -D` does, under git's `config.lock` ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+- `configSet` writes under git's `config.lock` like `git config` (failing while another writer holds it instead of overwriting its change), keeps the config file's permissions, and edits a symlinked config at its target ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+
 ### Fixed
 
+- `worktreePrune` keeps locked worktrees, as git does, and ones another omp process is still setting up, instead of dropping the registration of one on an offline volume ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
 - Fixed a UTF-8 char-boundary panic when parsing `stateDiagram-v2` lines where `>` follows a multibyte character ([#16749](https://github.com/can1357/oh-my-pi/pull/16749) by [@berney](https://github.com/berney))
 - Fixed the bash tool's `rg` and `fd` on macOS and Linux finding nothing under a path that is a symlink to a directory, such as `/tmp` or `/etc` on macOS or a symlinked skill folder; like ripgrep and fd, they now search the folder the link points to ([#16598](https://github.com/can1357/oh-my-pi/pull/16598) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed minimized `git diff`, `git show` and `diff -u` output dropping a hunk's changes and listing a made-up file when a changed line starts with `-- ` or `++ ` (SQL comments, Markdown `---` rules) ([#16588](https://github.com/can1357/oh-my-pi/pull/16588) by [@will-bogusz](https://github.com/will-bogusz))

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
 	$envExact,
 	filterChildShellEnv,
+	filterChildShellEnvAsync,
 	filterProcessEnv,
 	getDbBusyTimeoutMs,
 	parseEnvFile,
@@ -198,6 +199,30 @@ describe("filterChildShellEnv", () => {
 				cwd,
 			),
 		).toEqual({ UNCHANGED: "parent-value" });
+	});
+
+	it("drops the same dotenv values when reading the files off the JS thread", async () => {
+		const cwd = path.dirname(writeTempEnv('MULTILINE="first\nsecond"\n'));
+		fs.writeFileSync(path.join(cwd, ".env.local"), "LOCAL_ONLY=from-local\n");
+		fs.writeFileSync(path.join(cwd, ".env.staging"), "MODE_ONLY=from-mode\n");
+		const env = {
+			MULTILINE: "first\nsecond",
+			LOCAL_ONLY: "from-local",
+			MODE_ONLY: "from-mode",
+			NODE_ENV: "staging",
+			UNCHANGED: "parent-value",
+		};
+
+		expect(await filterChildShellEnvAsync(env, cwd)).toEqual({ NODE_ENV: "staging", UNCHANGED: "parent-value" });
+
+		const devCwd = path.dirname(writeTempEnv("NODE_ENV=production\n"));
+		fs.writeFileSync(path.join(devCwd, ".env.development.local"), "DEV_SECRET=from-dev-local\n");
+		const devEnv = { NODE_ENV: "production", DEV_SECRET: "from-dev-local", UNCHANGED: "parent-value" };
+		const filtered = await filterChildShellEnvAsync(devEnv, devCwd);
+
+		expect(filtered).toEqual(filterChildShellEnv(devEnv, devCwd));
+		expect(filtered).not.toHaveProperty("DEV_SECRET");
+		expect(filtered.UNCHANGED).toBe("parent-value");
 	});
 
 	it("uses the supplied mode for an isolated environment and cwd", async () => {

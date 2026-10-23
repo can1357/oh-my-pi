@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseEnv } from "node:util";
+import { untilAborted } from "./abortable";
 import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
 import { isBunTestRuntime } from "./test-runtime";
 
@@ -152,19 +153,28 @@ function expandDotenvValues(values: Record<string, string>, env: Record<string, 
 	return expanded;
 }
 
+/** Parsed values of the project dotenv file `name` (`.env`, `.env.local`, …); empty when it can't be read. */
+type DotenvFiles = (name: string) => Record<string, string>;
+
+/** Name of the NODE_ENV-specific dotenv file Bun loads for `env`. */
+function dotenvModeFile(env: Record<string, string | undefined>): string {
+	const runtimeLaunchEnvValues = env === Bun.env || env === process.env ? launchEnvValues : undefined;
+	const launchNodeEnv = runtimeLaunchEnvValues ? runtimeLaunchEnvValues.get("NODE_ENV") : env.NODE_ENV;
+	return `.env.${launchNodeEnv || "development"}`;
+}
+
 function filterChildShellEnvInternal(
 	env: Record<string, string | undefined>,
-	cwd: string,
+	dotenv: DotenvFiles,
 	onDotenvValue?: (value: string) => void,
 ): Record<string, string> {
 	const runtimeLaunchEnvValues = env === Bun.env || env === process.env ? launchEnvValues : undefined;
 	const result = filterProcessEnv(env);
-	const projectEnv = parseEnvFile(path.join(cwd, ".env"));
-	const launchNodeEnv = runtimeLaunchEnvValues ? runtimeLaunchEnvValues.get("NODE_ENV") : env.NODE_ENV;
-	const nodeEnvName = `.env.${launchNodeEnv || "development"}`;
-	const modeEnv = parseEnvFile(path.join(cwd, nodeEnvName));
-	const localEnv = parseEnvFile(path.join(cwd, ".env.local"));
-	const modeLocalEnv = parseEnvFile(path.join(cwd, `${nodeEnvName}.local`));
+	const projectEnv = dotenv(".env");
+	const nodeEnvName = dotenvModeFile(env);
+	const modeEnv = dotenv(nodeEnvName);
+	const localEnv = dotenv(".env.local");
+	const modeLocalEnv = dotenv(`${nodeEnvName}.local`);
 	const launchEnv = { ...projectEnv, ...modeEnv, ...localEnv, ...modeLocalEnv };
 	const expandedLaunchEnv = {
 		...expandDotenvValues(projectEnv, result),
@@ -175,8 +185,8 @@ function filterChildShellEnvInternal(
 	let fallbackLaunchEnv: Record<string, string> | undefined;
 	let expandedFallbackLaunchEnv: Record<string, string> | undefined;
 	if (!runtimeLaunchEnvValues && nodeEnvName !== ".env.development") {
-		const fallbackModeEnv = parseEnvFile(path.join(cwd, ".env.development"));
-		const fallbackModeLocalEnv = parseEnvFile(path.join(cwd, ".env.development.local"));
+		const fallbackModeEnv = dotenv(".env.development");
+		const fallbackModeLocalEnv = dotenv(".env.development.local");
 		const candidate = { ...projectEnv, ...fallbackModeEnv, ...localEnv, ...fallbackModeLocalEnv };
 		const expandedCandidate = {
 			...expandDotenvValues(projectEnv, result),
@@ -246,7 +256,29 @@ export function filterChildShellEnv(
 	env: Record<string, string | undefined>,
 	cwd: string = getProjectDir(),
 ): Record<string, string> {
-	return filterChildShellEnvInternal(env, cwd);
+	return filterChildShellEnvInternal(env, name => parseEnvFile(path.join(cwd, name)));
+}
+
+/**
+ * {@link filterChildShellEnv} with `cwd`'s dotenv files read off the JS thread, so a stalled
+ * project directory can't block it. Rejects with an `AbortError` as soon as `signal` aborts.
+ */
+export async function filterChildShellEnvAsync(
+	env: Record<string, string | undefined>,
+	cwd: string = getProjectDir(),
+	signal?: AbortSignal,
+): Promise<Record<string, string>> {
+	const mode = dotenvModeFile(env);
+	const names = new Set([".env", mode, ".env.local", `${mode}.local`, ".env.development", ".env.development.local"]);
+	const files = await untilAborted(signal, async () => {
+		// Sequential: an abandoned stalled read pins one fs pool thread; parallel reads would pin several.
+		const parsed = new Map<string, Record<string, string>>();
+		for (const name of names) {
+			parsed.set(name, parseEnvText(await fs.promises.readFile(path.join(cwd, name), "utf-8").catch(() => "")));
+		}
+		return parsed;
+	});
+	return filterChildShellEnvInternal(env, name => files.get(name) ?? {});
 }
 
 /** Return every value defined by `cwd`'s dotenv files, plus environment values that came from them. */
@@ -255,7 +287,11 @@ export function getDotenvEnvValues(
 	env: Record<string, string | undefined> = process.env,
 ): string[] {
 	const values = new Set<string>();
-	filterChildShellEnvInternal(env, cwd, value => values.add(value));
+	filterChildShellEnvInternal(
+		env,
+		name => parseEnvFile(path.join(cwd, name)),
+		value => values.add(value),
+	);
 	return [...values];
 }
 
@@ -265,15 +301,26 @@ export function getDotenvEnvValues(
  * `OMP_` variables to their `PI_` aliases.
  */
 export function parseEnvFile(filePath: string): Record<string, string> {
+	let text = "";
+	try {
+		text = fs.readFileSync(filePath, "utf-8");
+	} catch {
+		// File doesn't exist or can't be read - return empty result
+	}
+	return parseEnvText(text);
+}
+
+/** {@link parseEnvFile} for a dotenv file's contents. */
+function parseEnvText(text: string): Record<string, string> {
 	const result: Record<string, string> = {};
 	try {
-		const parsed = parseEnv(fs.readFileSync(filePath, "utf-8"));
+		const parsed = parseEnv(text);
 		for (const key in parsed) {
 			const value = parsed[key];
 			if (value !== undefined && isValidEnvName(key) && isSafeEnvValue(value)) result[key] = value;
 		}
 	} catch {
-		// File doesn't exist or can't be read - return empty result
+		// Unparsable: no values
 	}
 
 	// OMP_ overrides PI_

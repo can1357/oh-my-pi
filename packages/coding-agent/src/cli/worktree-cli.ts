@@ -20,11 +20,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { filterChildShellEnv, getWorktreesDir, isEnoent, postmortem } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
+import { describeSkippedHook } from "../utils/worktree-hook";
 
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
 
@@ -147,6 +148,8 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 				: `checking out '${ref}'`;
 		console.log(`Preparing worktree (${preparation})`);
 	}
+	// Ctrl-C mid-add ends the process without the add's own cleanup.
+	postmortem.register("worktree-add-claims", () => vcs.releaseWorktreeAddClaims(), { exitOnly: true });
 	const result = await repository.worktreeAdd(worktreePath, ref, {
 		detach,
 		clone: cfgWorktreeClone.get(settings),
@@ -161,9 +164,12 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 	if (result.cloneError) {
 		console.error(chalk.dim(`warning: worktree clone fell back to plain checkout: ${result.cloneError}`));
 	}
-	const hook = await vcs.runPostCheckoutHook(worktreePath, commit.sha);
-	process.stderr.write(hook.stdout);
-	process.stderr.write(hook.stderr);
+	// Like `git worktree add`, the hook gets the terminal (it may prompt) and nothing is captured: a background process it leaves writes there, not to a file.
+	const hook = await vcs.runPostCheckoutHook(worktreePath, commit.sha, {
+		env: filterChildShellEnv(process.env),
+		inheritOutput: true,
+	});
+	if (hook.skipped) console.error(chalk.dim(`warning: ${describeSkippedHook(hook.skipped)}`));
 	if (hook.exitCode !== 0) process.exitCode = hook.exitCode;
 }
 

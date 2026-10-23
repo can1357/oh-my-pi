@@ -118,10 +118,17 @@ pub struct VcsLinkedWorktree {
 /// One worktree listing row.
 #[napi(object)]
 pub struct VcsWorktreeEntry {
-	pub path:     String,
-	pub head:     Option<String>,
-	pub branch:   Option<String>,
-	pub detached: bool,
+	pub path:        String,
+	pub head:        Option<String>,
+	pub branch:      Option<String>,
+	pub detached:    bool,
+	/// Owner of a setup that is not finished yet (`setupOwner` when it was
+	/// added); unset once it is done.
+	pub setup_owner: Option<String>,
+	/// The worktree's git directory: `<common dir>/worktrees/<id>` for a linked
+	/// worktree, which stays the same when `git worktree move` moves it; the
+	/// common git dir for the main one.
+	pub git_dir:     String,
 }
 /// Worktree creation options.
 #[napi(object)]
@@ -132,6 +139,9 @@ pub struct VcsWorktreeAddOptions {
 	/// Carry the source checkout's uncommitted changes into the new worktree
 	/// (target must be the source `HEAD`).
 	pub keep_changes: Option<bool>,
+	/// Mark the new worktree as still being set up by this owner, from before
+	/// it is listed until `worktreeEndSetup`. Git commands ignore the mark.
+	pub setup_owner:  Option<String>,
 }
 /// Worktree creation outcome.
 #[napi(object)]
@@ -295,10 +305,12 @@ impl From<core::LinkedWorktree> for VcsLinkedWorktree {
 impl From<core::WorktreeEntry> for VcsWorktreeEntry {
 	fn from(v: core::WorktreeEntry) -> Self {
 		Self {
-			path:     path_string(v.path),
-			head:     v.head,
-			branch:   v.branch,
-			detached: v.detached,
+			path:        path_string(v.path),
+			head:        v.head,
+			branch:      v.branch,
+			detached:    v.detached,
+			setup_owner: v.setup_owner,
+			git_dir:     path_string(v.git_dir),
 		}
 	}
 }
@@ -511,6 +523,20 @@ pub fn vcs_discover_for_display(env: Env, dir: String) -> Result<Option<VcsRepo>
 		.map_err(|err| rich_error(env, err))
 }
 
+/// [`vcs_discover`] off the JS thread, so a stalled checkout can't block it.
+#[napi]
+pub fn vcs_discover_async(dir: String, signal: Option<Unknown>) -> Promise<Option<VcsRepo>> {
+	let ct = task::CancelToken::new(None, signal);
+	task::blocking_mapped("vcs.discoverAsync", ct, rich_error, canceled_error, move |ct| {
+		if ct.heartbeat().is_err() {
+			return Err(pi_vcs::Error::Canceled);
+		}
+		catch_panic("vcs.discoverAsync", || {
+			pi_vcs::detect(Path::new(&dir)).map(|repo| repo.map(|inner| VcsRepo { inner }))
+		})
+	})
+}
+
 #[napi]
 impl VcsRepo {
 	/// Backend kind (`"git"` or `"jj"`).
@@ -712,12 +738,279 @@ pub fn vcs_git_discover(env: Env, dir: String) -> Result<Option<VcsGitRepo>> {
 		.map(|v| v.map(|inner| VcsGitRepo { inner: Arc::new(inner) }))
 		.map_err(|err| rich_error(env, err))
 }
+/// [`vcs_git_discover`] off the JS thread, so a stalled checkout can't block
+/// it.
+#[napi]
+pub fn vcs_git_discover_async(dir: String, signal: Option<Unknown>) -> Promise<Option<VcsGitRepo>> {
+	let ct = task::CancelToken::new(None, signal);
+	task::blocking_mapped("vcs.gitDiscoverAsync", ct, rich_error, canceled_error, move |ct| {
+		if ct.heartbeat().is_err() {
+			return Err(pi_vcs::Error::Canceled);
+		}
+		catch_panic("vcs.gitDiscoverAsync", || {
+			pi_vcs::git::GitRepo::discover(Path::new(&dir))
+				.map(|v| v.map(|inner| VcsGitRepo { inner: Arc::new(inner) }))
+		})
+	})
+}
 /// Discover Git metadata without opening the repository.
 #[napi]
 pub fn vcs_git_repo_info(env: Env, dir: String) -> Result<Option<VcsGitRepoInfo>> {
 	pi_vcs::git::discover_info(Path::new(&dir))
 		.map(|v| v.map(Into::into))
 		.map_err(|err| rich_error(env, err))
+}
+/// Where Git looks for hook `name` in the checkout containing `dir`.
+///
+/// `core.hooksPath` or the shared hooks directory, whether or not a file
+/// exists there; `null` outside any checkout. Discovery runs off the JS thread
+/// too, so a stalled repository can't block it.
+#[napi]
+pub fn vcs_git_hook_location(
+	dir: String,
+	name: String,
+	signal: Option<Unknown>,
+) -> Promise<Option<String>> {
+	let ct = task::CancelToken::new(None, signal);
+	task::blocking_mapped("vcs.gitHookLocation", ct, rich_error, canceled_error, move |ct| {
+		if ct.heartbeat().is_err() {
+			return Err(pi_vcs::Error::Canceled);
+		}
+		catch_panic("vcs.gitHookLocation", || {
+			let Some(repo) = pi_vcs::git::GitRepo::discover(Path::new(&dir))? else {
+				return Ok(None);
+			};
+			repo
+				.hook_location(&name)
+				.map(|location| Some(path_string(location)))
+		})
+	})
+}
+
+/// Deallocate the head of a capture file another process is still writing,
+/// so it stops taking disk space.
+///
+/// The size and the last `keep_bytes` bytes are unchanged. Windows only:
+/// resolves `false` elsewhere, and on a filesystem without sparse files.
+#[napi]
+pub fn vcs_drop_capture_head(
+	path: String,
+	keep_bytes: u32,
+	signal: Option<Unknown>,
+) -> Promise<bool> {
+	let ct = task::CancelToken::new(None, signal);
+	task::blocking_mapped("vcs.dropCaptureHead", ct, rich_error, canceled_error, move |ct| {
+		if ct.heartbeat().is_err() {
+			return Err(pi_vcs::Error::Canceled);
+		}
+		catch_panic("vcs.dropCaptureHead", || {
+			drop_capture_head(Path::new(&path), u64::from(keep_bytes)).map_err(pi_vcs::Error::from)
+		})
+	})
+}
+
+/// Whether another process still has the file open (Windows only; `false`
+/// elsewhere or when it can't be told), so a capture a lingering child writes
+/// to isn't deleted, which would only hide it.
+///
+/// The open runs off the JS thread, so a stalled network `TMPDIR` can't freeze
+/// the process.
+#[napi]
+pub fn vcs_capture_held(path: String, signal: Option<Unknown>) -> Promise<bool> {
+	let ct = task::CancelToken::new(None, signal);
+	task::blocking_mapped("vcs.captureHeld", ct, rich_error, canceled_error, move |ct| {
+		if ct.heartbeat().is_err() {
+			return Err(pi_vcs::Error::Canceled);
+		}
+		catch_panic("vcs.captureHeld", || Ok::<_, pi_vcs::Error>(capture_held(Path::new(&path))))
+	})
+}
+
+#[allow(clippy::missing_const_for_fn, reason = "the Windows signature")]
+#[cfg(not(windows))]
+fn capture_held(_path: &Path) -> bool {
+	false
+}
+
+#[cfg(windows)]
+fn capture_held(path: &Path) -> bool {
+	use std::os::windows::fs::OpenOptionsExt as _;
+
+	use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+
+	// Sharing none: the open fails while any other handle to the file exists.
+	std::fs::OpenOptions::new()
+		.read(true)
+		.share_mode(0)
+		.open(path)
+		.is_err_and(|err| err.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32))
+}
+
+#[allow(clippy::unnecessary_wraps, clippy::missing_const_for_fn, reason = "the Windows signature")]
+#[cfg(not(windows))]
+fn drop_capture_head(_path: &Path, _keep: u64) -> std::io::Result<bool> {
+	Ok(false)
+}
+
+#[cfg(windows)]
+fn drop_capture_head(path: &Path, keep: u64) -> std::io::Result<bool> {
+	use std::{ffi::c_void, os::windows::io::AsRawHandle as _};
+
+	use windows_sys::Win32::{
+		Foundation::{ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED},
+		System::{
+			IO::DeviceIoControl,
+			Ioctl::{
+				FILE_SET_SPARSE_BUFFER, FILE_ZERO_DATA_INFORMATION, FSCTL_SET_SPARSE,
+				FSCTL_SET_ZERO_DATA,
+			},
+		},
+	};
+
+	fn control<I>(file: &std::fs::File, code: u32, input: &I) -> std::io::Result<()> {
+		let mut returned = 0u32;
+		// SAFETY: the handle is valid for the call, `input` is a live `I` of the
+		// stated size, there is no output buffer, and the call is synchronous.
+		let ok = unsafe {
+			DeviceIoControl(
+				file.as_raw_handle() as _,
+				code,
+				std::ptr::from_ref(input).cast::<c_void>(),
+				size_of::<I>() as u32,
+				std::ptr::null_mut(),
+				0,
+				&raw mut returned,
+				std::ptr::null_mut(),
+			)
+		};
+		if ok == 0 {
+			Err(std::io::Error::last_os_error())
+		} else {
+			Ok(())
+		}
+	}
+
+	// std opens with read|write|delete sharing, so the writing child isn't
+	// disturbed.
+	let file = std::fs::OpenOptions::new().write(true).open(path)?;
+	if let Err(err) = control(&file, FSCTL_SET_SPARSE, &FILE_SET_SPARSE_BUFFER { SetSparse: true }) {
+		return match err.raw_os_error().map(|code| code as u32) {
+			Some(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED | ERROR_INVALID_PARAMETER) => Ok(false),
+			_ => Err(err),
+		};
+	}
+	let len = file.metadata()?.len();
+	if len > keep {
+		let zero =
+			FILE_ZERO_DATA_INFORMATION { FileOffset: 0, BeyondFinalZero: (len - keep) as i64 };
+		control(&file, FSCTL_SET_ZERO_DATA, &zero)?;
+	}
+	Ok(true)
+}
+
+/// Wait up to 9 s for the worktree adds still running in this process to
+/// finish.
+///
+/// Only filesystems without file locks use claim files; this is for an exit
+/// that would end those adds without their own cleanup. The claims of adds
+/// still running then are left in place: removing them would let another
+/// process add the same path while this one still writes it. Such a leftover
+/// makes a later add fail naming the file.
+#[napi]
+pub fn vcs_release_worktree_add_claims() -> Promise<()> {
+	let ct = task::CancelToken::new(None, None);
+	task::blocking_mapped("vcs.releaseWorktreeAddClaims", ct, rich_error, canceled_error, |_| {
+		catch_panic("vcs.releaseWorktreeAddClaims", || {
+			// Just under postmortem's 10 s cleanup deadline.
+			pi_vcs::git::release_worktree_add_claims(Duration::from_secs(9));
+			Ok(())
+		})
+	})
+}
+
+/// Opaque start identity of process `pid`, to tell it from a later process
+/// reusing the pid.
+///
+/// `None` where the platform reports none, or when the process is gone.
+#[napi]
+pub fn vcs_process_start_time(pid: u32) -> Option<String> {
+	#[cfg(target_os = "linux")]
+	{
+		pi_builtins::proc_sys::start_time(i32::try_from(pid).ok()?).map(|ticks| ticks.to_string())
+	}
+	#[cfg(target_os = "macos")]
+	{
+		let info = pi_builtins::proc_sys::bsdinfo(i32::try_from(pid).ok()?)?;
+		Some((info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec).to_string())
+	}
+	#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+	{
+		let _ = pid;
+		None
+	}
+}
+
+/// Identifies this machine (macOS hardware UUID, Windows machine GUID), so pid
+/// scopes of two machines with the same hostname differ.
+///
+/// The macOS id survives reboots, so a setup owner from before a restart isn't
+/// taken for another machine.
+///
+/// `None` where the platform reports none (Linux reads `/proc` in JS).
+#[allow(clippy::missing_const_for_fn, reason = "not const on macOS and Windows")]
+#[napi]
+pub fn vcs_machine_id() -> Option<String> {
+	#[cfg(target_os = "macos")]
+	{
+		let mut uuid = [0u8; 16];
+		let wait = libc::timespec { tv_sec: 1, tv_nsec: 0 };
+		// SAFETY: `uuid` is the 16 writable bytes of a `uuid_t`; `wait` is a
+		// valid timespec.
+		if unsafe { libc::gethostuuid(uuid.as_mut_ptr(), &raw const wait) } != 0 {
+			return None;
+		}
+		Some(uuid.iter().map(|byte| format!("{byte:02x}")).collect())
+	}
+	#[cfg(windows)]
+	{
+		use windows_sys::Win32::System::Registry::{
+			HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY, RegGetValueW,
+		};
+
+		let subkey: Vec<u16> = "SOFTWARE\\Microsoft\\Cryptography"
+			.encode_utf16()
+			.chain(Some(0))
+			.collect();
+		let value: Vec<u16> = "MachineGuid".encode_utf16().chain(Some(0)).collect();
+		let mut buffer = [0u16; 128];
+		let mut bytes = std::mem::size_of_val(&buffer) as u32;
+		// SAFETY: both names are NUL-terminated; `buffer`/`bytes` describe a
+		// writable buffer of `bytes` bytes.
+		let status = unsafe {
+			RegGetValueW(
+				HKEY_LOCAL_MACHINE,
+				subkey.as_ptr(),
+				value.as_ptr(),
+				RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+				std::ptr::null_mut(),
+				buffer.as_mut_ptr().cast(),
+				&raw mut bytes,
+			)
+		};
+		if status != 0 {
+			return None;
+		}
+		let units = &buffer[..(bytes as usize / 2).min(buffer.len())];
+		let end = units
+			.iter()
+			.position(|&unit| unit == 0)
+			.unwrap_or(units.len());
+		Some(String::from_utf16_lossy(&units[..end]))
+	}
+	#[cfg(not(any(target_os = "macos", windows)))]
+	{
+		None
+	}
 }
 
 #[napi]
@@ -790,6 +1083,22 @@ impl VcsGitRepo {
 	#[napi]
 	pub fn ref_exists(&self, name: String, signal: Option<Unknown>) -> Promise<bool> {
 		blocking("vcs.refExists", self.inner.clone(), signal, move |r| r.ref_exists(&name))
+	}
+
+	/// Whether the reflog of `refs/heads/<name>` holds the entry
+	/// `Branch: renamed refs/heads/<from> to refs/heads/<name>` that
+	/// `git branch -m` writes, proving the branch was renamed from `from`.
+	/// False when the branch, its reflog, or a matching entry is absent.
+	#[napi]
+	pub fn branch_renamed_from(
+		&self,
+		name: String,
+		from: String,
+		signal: Option<Unknown>,
+	) -> Promise<bool> {
+		blocking("vcs.branchRenamedFrom", self.inner.clone(), signal, move |r| {
+			r.branch_renamed_from(&name, &from)
+		})
 	}
 
 	/// Tags pointing at a revision.
@@ -895,6 +1204,7 @@ impl VcsGitRepo {
 				detach: options.detach,
 				clone,
 				keep_changes: options.keep_changes.unwrap_or(false),
+				setup_owner: options.setup_owner,
 			})
 			.map(|result| VcsWorktreeAddResult {
 				cloned_with: result.cloned_with.map(to_napi_kind),
@@ -920,6 +1230,31 @@ impl VcsGitRepo {
 	#[napi]
 	pub fn worktree_prune(&self, signal: Option<Unknown>) -> Promise<()> {
 		blocking("vcs.worktreePrune", self.inner.clone(), signal, |r| r.worktree_prune())
+	}
+
+	/// Clear the setup mark `setupOwner` left on the worktree at `path`, also
+	/// once its `.git` is gone.
+	#[napi]
+	pub fn worktree_end_setup(&self, path: String, signal: Option<Unknown>) -> Promise<()> {
+		blocking("vcs.worktreeEndSetup", self.inner.clone(), signal, move |r| {
+			r.worktree_end_setup(Path::new(&path))
+		})
+	}
+
+	/// Compare-and-swap of a setup mark: replaces (or, with no replacement,
+	/// clears) it only while it is still `expected`'s, under the worktree-add
+	/// lock. `false` when the mark is missing or another owner's.
+	#[napi]
+	pub fn worktree_replace_setup_owner(
+		&self,
+		git_dir: String,
+		expected: String,
+		replacement: Option<String>,
+		signal: Option<Unknown>,
+	) -> Promise<bool> {
+		blocking("vcs.worktreeReplaceSetupOwner", self.inner.clone(), signal, move |r| {
+			r.worktree_replace_setup_owner(Path::new(&git_dir), &expected, replacement.as_deref())
+		})
 	}
 
 	/// Recent subjects.
@@ -1210,6 +1545,28 @@ impl VcsGitRepo {
 	) -> Promise<bool> {
 		blocking("vcs.deleteBranch", self.inner.clone(), signal, move |r| {
 			r.delete_branch(&name, force)
+		})
+	}
+
+	/// Compare-and-swap a local branch through `git update-ref`, which checks
+	/// the old value under the ref lock (git must be on `PATH`).
+	///
+	/// `expected` of `null`/absent requires the branch not to exist;
+	/// otherwise it must resolve to exactly that full object id. `target`
+	/// sets the branch to that commit, or deletes it (and its
+	/// `[branch "<name>"]` config) when `null`/absent. Resolves `false`,
+	/// changing nothing, when `expected` does not hold or when `expected` is
+	/// set and the branch is checked out in any worktree.
+	#[napi]
+	pub fn swap_branch(
+		&self,
+		name: String,
+		expected: Option<String>,
+		target: Option<String>,
+		signal: Option<Unknown>,
+	) -> Promise<bool> {
+		blocking("vcs.swapBranch", self.inner.clone(), signal, move |r| {
+			r.swap_branch(&name, expected.as_deref(), target.as_deref())
 		})
 	}
 

@@ -694,6 +694,13 @@ export declare class VcsGitRepo {
   resolveRef(name: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
   /** Test revision existence. */
   refExists(name: string, signal?: unknown | undefined | null): Promise<boolean>
+  /**
+   * Whether the reflog of `refs/heads/<name>` holds the entry
+   * `Branch: renamed refs/heads/<from> to refs/heads/<name>` that
+   * `git branch -m` writes, proving the branch was renamed from `from`.
+   * False when the branch, its reflog, or a matching entry is absent.
+   */
+  branchRenamedFrom(name: string, from: string, signal?: unknown | undefined | null): Promise<boolean>
   /** Tags pointing at a revision. */
   tagsAt(rev: string, signal?: unknown | undefined | null): Promise<Array<string>>
   /** List branches. */
@@ -725,6 +732,17 @@ export declare class VcsGitRepo {
   worktreeRemove(path: string, force: boolean, signal?: unknown | undefined | null): Promise<boolean>
   /** Prune worktrees. */
   worktreePrune(signal?: unknown | undefined | null): Promise<undefined>
+  /**
+   * Clear the setup mark `setupOwner` left on the worktree at `path`, also
+   * once its `.git` is gone.
+   */
+  worktreeEndSetup(path: string, signal?: unknown | undefined | null): Promise<undefined>
+  /**
+   * Compare-and-swap of a setup mark: replaces (or, with no replacement,
+   * clears) it only while it is still `expected`'s, under the worktree-add
+   * lock. `false` when the mark is missing or another owner's.
+   */
+  worktreeReplaceSetupOwner(gitDir: string, expected: string, replacement?: string | undefined | null, signal?: unknown | undefined | null): Promise<boolean>
   /** Recent subjects. */
   logSubjects(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
   /** Recent one-line commits. */
@@ -780,6 +798,18 @@ export declare class VcsGitRepo {
   createBranch(name: string, start: string, force: boolean, signal?: unknown | undefined | null): Promise<undefined>
   /** Delete branch. */
   deleteBranch(name: string, force: boolean, signal?: unknown | undefined | null): Promise<boolean>
+  /**
+   * Compare-and-swap a local branch through `git update-ref`, which checks
+   * the old value under the ref lock (git must be on `PATH`).
+   *
+   * `expected` of `null`/absent requires the branch not to exist;
+   * otherwise it must resolve to exactly that full object id. `target`
+   * sets the branch to that commit, or deletes it (and its
+   * `[branch "<name>"]` config) when `null`/absent. Resolves `false`,
+   * changing nothing, when `expected` does not hold or when `expected` is
+   * set and the branch is checked out in any worktree.
+   */
+  swapBranch(name: string, expected?: string | undefined | null, target?: string | undefined | null, signal?: unknown | undefined | null): Promise<boolean>
   /** Create and checkout branch. */
   checkoutNewBranch(name: string, signal?: unknown | undefined | null): Promise<undefined>
   /** Restore paths. */
@@ -3922,6 +3952,16 @@ export interface VcsApplyOptions {
   threeWay?: boolean
 }
 
+/**
+ * Whether another process still has the file open (Windows only; `false`
+ * elsewhere or when it can't be told), so a capture a lingering child writes
+ * to isn't deleted, which would only hide it.
+ *
+ * The open runs off the JS thread, so a stalled network `TMPDIR` can't freeze
+ * the process.
+ */
+export declare function vcsCaptureHeld(path: string, signal?: unknown | undefined | null): Promise<boolean>
+
 /** Clean options. */
 export interface VcsCleanOptions {
   ignoredOnly?: boolean
@@ -3982,17 +4022,44 @@ export interface VcsDiffOptions {
 /** Discover the repository owning a directory. */
 export declare function vcsDiscover(dir: string): VcsRepo | null
 
+/** [`vcs_discover`] off the JS thread, so a stalled checkout can't block it. */
+export declare function vcsDiscoverAsync(dir: string, signal?: unknown | undefined | null): Promise<VcsRepo | undefined | null>
+
 /**
  * Discover the repository presenting a directory: equal-root jj+git ties
  * prefer Jujutsu. Git-safe automation must keep using [`vcs_discover`].
  */
 export declare function vcsDiscoverForDisplay(dir: string): VcsRepo | null
 
+/**
+ * Deallocate the head of a capture file another process is still writing,
+ * so it stops taking disk space.
+ *
+ * The size and the last `keep_bytes` bytes are unchanged. Windows only:
+ * resolves `false` elsewhere, and on a filesystem without sparse files.
+ */
+export declare function vcsDropCaptureHead(path: string, keepBytes: number, signal?: unknown | undefined | null): Promise<boolean>
+
 /** Clone a Git repository. */
 export declare function vcsGitClone(url: string, target: string, options: VcsCloneOptions, signal?: unknown | undefined | null): Promise<void>
 
 /** Discover the Git checkout containing a directory. */
 export declare function vcsGitDiscover(dir: string): VcsGitRepo | null
+
+/**
+ * [`vcs_git_discover`] off the JS thread, so a stalled checkout can't block
+ * it.
+ */
+export declare function vcsGitDiscoverAsync(dir: string, signal?: unknown | undefined | null): Promise<VcsGitRepo | undefined | null>
+
+/**
+ * Where Git looks for hook `name` in the checkout containing `dir`.
+ *
+ * `core.hooksPath` or the shared hooks directory, whether or not a file
+ * exists there; `null` outside any checkout. Discovery runs off the JS thread
+ * too, so a stalled repository can't block it.
+ */
+export declare function vcsGitHookLocation(dir: string, name: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
 
 /** Discover Git metadata without opening the repository. */
 export declare function vcsGitRepoInfo(dir: string): VcsGitRepoInfo | null
@@ -4045,6 +4112,17 @@ export interface VcsLinkedWorktree {
   primaryRoot: string
 }
 
+/**
+ * Identifies this machine (macOS hardware UUID, Windows machine GUID), so pid
+ * scopes of two machines with the same hostname differ.
+ *
+ * The macOS id survives reboots, so a setup owner from before a restart isn't
+ * taken for another machine.
+ *
+ * `None` where the platform reports none (Linux reads `/proc` in JS).
+ */
+export declare function vcsMachineId(): string | null
+
 /** Per-file line counts. */
 export interface VcsNumstatEntry {
   path: string
@@ -4052,12 +4130,32 @@ export interface VcsNumstatEntry {
   removed?: number
 }
 
+/**
+ * Opaque start identity of process `pid`, to tell it from a later process
+ * reusing the pid.
+ *
+ * `None` where the platform reports none, or when the process is gone.
+ */
+export declare function vcsProcessStartTime(pid: number): string | null
+
 /** Push options. */
 export interface VcsPushOptions {
   remote?: string
   refspec?: string
   forceWithLease?: boolean
 }
+
+/**
+ * Wait up to 9 s for the worktree adds still running in this process to
+ * finish.
+ *
+ * Only filesystems without file locks use claim files; this is for an exit
+ * that would end those adds without their own cleanup. The claims of adds
+ * still running then are left in place: removing them would let another
+ * process add the same path while this one still writes it. Such a leftover
+ * makes a later add fail naming the file.
+ */
+export declare function vcsReleaseWorktreeAddClaims(): Promise<undefined>
 
 /** Restore options. */
 export interface VcsRestoreOptions {
@@ -4100,6 +4198,11 @@ export interface VcsWorktreeAddOptions {
    * (target must be the source `HEAD`).
    */
   keepChanges?: boolean
+  /**
+   * Mark the new worktree as still being set up by this owner, from before
+   * it is listed until `worktreeEndSetup`. Git commands ignore the mark.
+   */
+  setupOwner?: string
 }
 
 /** Worktree creation outcome. */
@@ -4114,6 +4217,17 @@ export interface VcsWorktreeEntry {
   head?: string
   branch?: string
   detached: boolean
+  /**
+   * Owner of a setup that is not finished yet (`setupOwner` when it was
+   * added); unset once it is done.
+   */
+  setupOwner?: string
+  /**
+   * The worktree's git directory: `<common dir>/worktrees/<id>` for a linked
+   * worktree, which stays the same when `git worktree move` moves it; the
+   * common git dir for the main one.
+   */
+  gitDir: string
 }
 
 /**

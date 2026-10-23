@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `filterChildShellEnvAsync(env, cwd?, signal?)`, which reads the project's dotenv files off the JS thread and rejects as soon as `signal` aborts ([#16123](https://github.com/can1357/oh-my-pi/pull/16123) by [@Dangerboi](https://github.com/Dangerboi))
+
 ## [18.12.6] - 2026-10-21
 
 ### Added

@@ -10,6 +10,7 @@ use gix::bstr::ByteSlice;
 use super::{
 	GitRepo,
 	open::{load_index_or_empty, status_with_fresh_index},
+	read_setup_mark,
 };
 use crate::{
 	error::{Error, Result},
@@ -122,6 +123,51 @@ impl GitRepo {
 	/// Test whether a ref or revision resolves.
 	pub fn ref_exists(&self, name: &str) -> Result<bool> {
 		Ok(self.resolve_ref(name)?.is_some())
+	}
+
+	/// Whether the reflog of `refs/heads/<name>` records that this branch was
+	/// renamed from `refs/heads/<from>`.
+	///
+	/// `git branch -m` moves the old branch's reflog to the new name and
+	/// appends an entry whose message is exactly
+	/// `Branch: renamed refs/heads/<from> to refs/heads/<name>`; this is true
+	/// iff such an entry exists anywhere in the log (later commits do not hide
+	/// it). A missing ref, a missing reflog, or no matching entry is
+	/// `Ok(false)`, never an error.
+	///
+	/// In-process this reads the reflog through gix
+	/// (`Reference::log_iter().all()`), skipping unparsable lines. On reftable
+	/// repositories, which gix cannot read, it runs
+	/// `git reflog show --format=%gs refs/heads/<name>` through the same CLI
+	/// helper as [`Self::list_branches`] and compares each line.
+	pub fn branch_renamed_from(&self, name: &str, from: &str) -> Result<bool> {
+		let full = format!("refs/heads/{name}");
+		let expected = format!("Branch: renamed refs/heads/{from} to {full}");
+		if self.is_reftable() {
+			// `git reflog show` errors on an unknown ref, so probe it first.
+			if self.resolve_ref(&full)?.is_none() {
+				return Ok(false);
+			}
+			let lines = cli_lines(self.root(), &["reflog", "show", "--format=%gs", &full])?;
+			return Ok(lines.contains(&expected));
+		}
+		let repo = self.gix()?;
+		let Some(reference) = repo
+			.try_find_reference(full.as_str())
+			.map_err(|err| Error::backend("git reflog", err))?
+		else {
+			return Ok(false);
+		};
+		let mut platform = reference.log_iter();
+		let Some(lines) = platform
+			.all()
+			.map_err(|err| Error::backend("git reflog", err))?
+		else {
+			return Ok(false);
+		};
+		Ok(lines
+			.filter_map(std::result::Result::ok)
+			.any(|line| line.message == expected.as_bytes()))
 	}
 
 	/// List tags pointing at `rev`, peeled through annotated tags.
@@ -494,11 +540,17 @@ impl GitRepo {
 	/// List the primary and linked worktrees.
 	pub fn worktrees(&self) -> Result<Vec<WorktreeEntry>> {
 		if self.is_reftable() {
-			return Ok(parse_worktree_cli(&cli_text(self.root(), &[
-				"worktree",
-				"list",
-				"--porcelain",
-			])?));
+			let mut entries = parse_worktree_cli(
+				&cli_text(self.root(), &["worktree", "list", "--porcelain"])?,
+				&self.info().common_dir,
+			);
+			for entry in &mut entries {
+				if let Some(admin) = self.worktree_admin(&entry.path)? {
+					entry.setup_owner = read_setup_mark(&admin)?;
+					entry.git_dir = admin;
+				}
+			}
+			return Ok(entries);
 		}
 		let primary_root = self
 			.info()
@@ -515,7 +567,8 @@ impl GitRepo {
 			.to_owned();
 		let primary_head =
 			parse_head_with_refs(&self.info().common_dir.join("HEAD"), &self.info().common_dir)?;
-		let mut out = vec![entry_from_head(primary_root, &primary_head)];
+		let mut out =
+			vec![entry_from_head(primary_root, self.info().common_dir.clone(), &primary_head, None)];
 		let admin_root = self.info().common_dir.join("worktrees");
 		let Ok(admins) = std::fs::read_dir(admin_root) else {
 			return Ok(out);
@@ -532,7 +585,8 @@ impl GitRepo {
 				continue;
 			};
 			let head = parse_head_with_refs(&dir.join("HEAD"), &self.info().common_dir)?;
-			out.push(entry_from_head(root, &head));
+			let setup_owner = read_setup_mark(&dir)?;
+			out.push(entry_from_head(root, dir, &head, setup_owner));
 		}
 		Ok(out)
 	}
@@ -1200,15 +1254,22 @@ fn version_key(value: &str) -> Vec<(bool, String)> {
 		.collect()
 }
 
-fn entry_from_head(path: PathBuf, head: &HeadState) -> WorktreeEntry {
+fn entry_from_head(
+	path: PathBuf,
+	git_dir: PathBuf,
+	head: &HeadState,
+	setup_owner: Option<String>,
+) -> WorktreeEntry {
 	WorktreeEntry {
 		path,
+		git_dir,
 		head: head.commit().map(str::to_owned),
 		branch: match head {
 			HeadState::Ref { ref_name, .. } => Some(ref_name.clone()),
 			HeadState::Detached { .. } => None,
 		},
 		detached: matches!(head, HeadState::Detached { .. }),
+		setup_owner,
 	}
 }
 fn parse_head_with_refs(head_path: &Path, common_dir: &Path) -> Result<HeadState> {
@@ -1234,7 +1295,7 @@ fn parse_head_with_refs(head_path: &Path, common_dir: &Path) -> Result<HeadState
 		Ok(HeadState::Detached { commit: nonempty(value) })
 	}
 }
-fn parse_worktree_cli(raw: &str) -> Vec<WorktreeEntry> {
+fn parse_worktree_cli(raw: &str, common_dir: &Path) -> Vec<WorktreeEntry> {
 	let mut out = Vec::new();
 	for record in raw.split("\n\n") {
 		let mut path = None;
@@ -1253,7 +1314,14 @@ fn parse_worktree_cli(raw: &str) -> Vec<WorktreeEntry> {
 			}
 		}
 		if let Some(path) = path {
-			out.push(WorktreeEntry { path, head, branch, detached });
+			out.push(WorktreeEntry {
+				path,
+				git_dir: common_dir.to_owned(),
+				head,
+				branch,
+				detached,
+				setup_owner: None,
+			});
 		}
 	}
 	out
@@ -1713,6 +1781,25 @@ mod tests {
 		assert_eq!(repo.remote_url("origin")?.as_deref(), Some("https://example.test/repo"));
 		assert_eq!(repo.lfs_media_dir()?, Some(repo.info().common_dir.join("lfs").join("objects")));
 		assert_eq!(repo.head_watch_target(), repo.info().head_path);
+		Ok(())
+	}
+
+	#[test]
+	fn read_branch_renamed_from_needs_reflog_rename_entry() -> TestResult {
+		let (dir, repo) = repo()?;
+		commit(dir.path(), "one", "one\n", "first")?;
+		git(dir.path(), &["branch", "a"])?;
+		git(dir.path(), &["branch", "c"])?;
+		git(dir.path(), &["branch", "-m", "a", "b"])?;
+		git(dir.path(), &["switch", "b"])?;
+		commit(dir.path(), "two", "two\n", "second")?;
+
+		assert!(repo.branch_renamed_from("b", "a")?);
+		assert!(!repo.branch_renamed_from("b", "x")?);
+		assert!(!repo.branch_renamed_from("b", "c")?);
+		assert!(!repo.branch_renamed_from("c", "a")?);
+		assert!(!repo.branch_renamed_from("c", "c")?);
+		assert!(!repo.branch_renamed_from("missing", "a")?);
 		Ok(())
 	}
 

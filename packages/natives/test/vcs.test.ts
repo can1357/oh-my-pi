@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { vcsDiscover, vcsGitClone, vcsGitDiscover, vcsGitRepoInfo } from "../native/index.js";
 import * as vcs from "../native/vcs.js";
 
@@ -209,5 +209,28 @@ describe("VcsRepo", () => {
 			if (!(error instanceof Error)) throw error;
 			expect(error.message).toContain("valid: stagedDiff, revDiff");
 		}
+	});
+});
+
+describe("vcs.js on an addon older than its identity bindings", () => {
+	test("imports, so omp still starts, and names a setup owner without a start time", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-natives-stale-addon-"));
+		roots.push(root);
+		const native = join(dirname(import.meta.dir), "native");
+		// A copy of vcs.js whose loader returns the real bindings minus one the module must not need at load.
+		await writeFile(join(root, "vcs.js"), await Bun.file(join(native, "vcs.js")).text());
+		await writeFile(
+			join(root, "loader-state.js"),
+			`import { loadNative as real } from ${JSON.stringify(join(native, "loader-state.js"))};\nexport function loadNative() { return { ...real(), vcsProcessStartTime: undefined }; }\n`,
+		);
+		await writeFile(
+			join(root, "main.js"),
+			'import { worktreeSetupOwner } from "./vcs.js";\nconsole.log(worktreeSetupOwner());\n',
+		);
+		const run = Bun.spawnSync([process.execPath, join(root, "main.js")], { stderr: "pipe", stdout: "pipe" });
+
+		expect(run.stderr.toString()).toBe("");
+		expect(run.exitCode).toBe(0);
+		expect(run.stdout.toString().trim()).toMatch(/^[^-]+-\d+$/);
 	});
 });

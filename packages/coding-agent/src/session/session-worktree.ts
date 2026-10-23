@@ -12,11 +12,18 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { IsoBackendKind } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getWorktreeDir, hashPath, logger } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, hashPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { Settings } from "../config/settings";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { resolveAvailableWorktreePath } from "../tools/gh-pr-checkout";
+import {
+	addWorktreeWithHook,
+	type WorktreeCheckoutHookResult,
+	WorktreeRemovedByHookError,
+	type WorktreeSetup,
+	worktreeHookWarnings,
+} from "../utils/worktree-hook";
 
 import { cfgIsolationBackend, cfgWorktreeCleanSource, cfgWorktreeClone } from "../task/settings";
 
@@ -29,6 +36,8 @@ export interface SessionWorktree {
 	clonedWith?: IsoBackendKind;
 	/** Why the clone fell back to a plain checkout, when it did. */
 	cloneError?: string;
+	/** Outcome of the worktree's `post-checkout` hook; a failed hook keeps the worktree, as with `git worktree add`. */
+	hook?: WorktreeCheckoutHookResult;
 	/** Checkout the worktree was forked from. */
 	sourceCwd: string;
 	/** Source `HEAD` the worktree branch was created at. */
@@ -109,15 +118,33 @@ export async function cleanSourceCheckoutIfConfigured(
 		};
 	}
 }
+
+/**
+ * Whether `/wt` may clean the source checkout after moving into `worktree`: only when changes were
+ * carried over and the hook did not fail, since a failed hook may have left the carried-over files
+ * half-rewritten and the source is then the intact copy.
+ */
+export function mayCleanSourceAfter(worktree: SessionWorktree): boolean {
+	return worktree.keptChanges && !worktree.hook?.error;
+}
+
+/** Warnings to show after `/wt` moved into `worktree`; each completes "Worktree created, but …". */
+export function sessionWorktreeWarnings(worktree: SessionWorktree, cleanupError: string | undefined): string[] {
+	const cleanup = cleanupError === undefined ? [] : [`cleaning source checkout failed: ${cleanupError}`];
+	return [...cleanup, ...worktreeHookWarnings(worktree.hook)];
+}
+
 /**
  * Create the worktree for `/wt`. Throws with a user-facing message when `cwd`
- * is not a git checkout, `branch` already exists, or git refuses.
+ * is not a git checkout, `branch` already exists, or git refuses. If creating the
+ * worktree or running its `post-checkout` hook fails or `signal` aborts, the new
+ * worktree and branch are discarded first, so a retry with the same name starts over.
  */
 export async function createSessionWorktree(
 	cwd: string,
 	settings: Settings,
 	branch: string,
-	options: { keepChanges?: boolean } = {},
+	options: { keepChanges?: boolean; signal?: AbortSignal } = {},
 ): Promise<SessionWorktree> {
 	const keepChanges = options.keepChanges ?? true;
 	try {
@@ -125,7 +152,7 @@ export async function createSessionWorktree(
 	} catch (err) {
 		throw new Error(`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`);
 	}
-	const repository = vcs.git(cwd);
+	const repository = await vcs.discoverGit(cwd, options.signal);
 	if (!repository) {
 		throw new Error(`Not inside a git repository: ${cwd}`);
 	}
@@ -133,31 +160,69 @@ export async function createSessionWorktree(
 		throw new Error(`Invalid branch name: ${branch}`);
 	}
 	const branchRef = `refs/heads/${branch}`;
-	if (await repository.refExists(branchRef)) {
-		throw new Error(`Branch '${branch}' already exists; pick another name.`);
-	}
-	const baseCommit = await repository.headSha();
-	if (!baseCommit) {
-		throw new Error(`Cannot create a worktree: ${cwd} has no commits.`);
-	}
-	const primaryRoot = repository.primaryRoot() ?? repository.info().repoRoot;
-	const slug = branch.replaceAll(/[^A-Za-z0-9._-]+/g, "-");
-	const basePath = getWorktreeDir(`${slug}-${hashPath(primaryRoot)}`);
-	const worktreePath = await resolveAvailableWorktreePath(basePath, await repository.worktrees());
-	await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+	// Only reads (and the base directory) until the branch is created, so a stalled ref lookup or
+	// `worktree.base` is simply abandoned on abort.
+	const { baseCommit, worktreePath } = await untilAborted(options.signal, async () => {
+		if (await repository.refExists(branchRef)) {
+			throw new Error(`Branch '${branch}' already exists; pick another name.`);
+		}
+		const baseCommit = await repository.headSha();
+		if (!baseCommit) {
+			throw new Error(`Cannot create a worktree: ${cwd} has no commits.`);
+		}
+		const primaryRoot = repository.primaryRoot() ?? repository.info().repoRoot;
+		const slug = branch.replaceAll(/[^A-Za-z0-9._-]+/g, "-");
+		const basePath = getWorktreeDir(`${slug}-${hashPath(primaryRoot)}`);
+		const worktreePath = await resolveAvailableWorktreePath(basePath, await repository.worktrees());
+		await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+		return { baseCommit, worktreePath };
+	});
 
 	await repository.createBranch(branch, baseCommit, false);
-	const result = await repository.worktreeAdd(worktreePath, branch, {
-		detach: false,
-		clone: cfgWorktreeClone.get(settings),
-		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
-		keepChanges,
-	});
+	let setUp: WorktreeSetup;
+	try {
+		setUp = await addWorktreeWithHook(
+			repository,
+			worktreePath,
+			branch,
+			{
+				detach: false,
+				clone: cfgWorktreeClone.get(settings),
+				backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
+				keepChanges,
+			},
+			options.signal,
+		);
+	} catch (error) {
+		if (error instanceof WorktreeRemovedByHookError) {
+			// The hook freed the path and branch, so another process may own them now; deleting would take its branch.
+			logger.warn("the post-checkout hook removed a /wt worktree; leaving its branch alone", { branch });
+			throw error;
+		}
+		// Created at `baseCommit` just above and never moved by the add (`worktreeAdd` only creates a missing
+		// branch, and `keepChanges` requires `baseCommit` to be the source HEAD), so it is deleted only while
+		// still there: another process's branch of that name is kept.
+		await repository
+			.swapBranch(branch, baseCommit, null)
+			.then(deleted => {
+				if (!deleted) {
+					logger.warn("a /wt worktree's branch moved since its setup began; keeping it", { branch });
+				}
+			})
+			.catch(deleteError => {
+				logger.warn("could not delete the branch of a /wt worktree whose setup was cut short", {
+					branch,
+					error: String(deleteError),
+				});
+			});
+		throw error;
+	}
 	return {
-		path: await fs.realpath(worktreePath),
-		branch,
-		clonedWith: result.clonedWith ?? undefined,
-		cloneError: result.cloneError ?? undefined,
+		path: setUp.path,
+		branch: setUp.branch,
+		clonedWith: setUp.added.clonedWith ?? undefined,
+		cloneError: setUp.added.cloneError ?? undefined,
+		hook: setUp.hook,
 		sourceCwd: cwd,
 		baseCommit,
 		keptChanges: keepChanges,
