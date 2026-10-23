@@ -5,7 +5,7 @@
 ### Added
 
 - Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
-- Added Factory Droid's dated credit promotions: the credit rate is discounted while a promotion runs and returns to the base rate when it ends (currently GPT-5.6 Sol and Gemini 3.7/3.8 Flash) ([#16309](https://github.com/can1357/oh-my-pi/pull/16309) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Factory Droid's dated credit rates: the credit rate follows Factory's promotions, discounted from a promotion's start and back to the base rate at its end, using the same dated rate cards as dollar prices (currently GPT-5.6 Sol and Gemini 3.7/3.8 Flash) ([#16309](https://github.com/can1357/oh-my-pi/pull/16309) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 

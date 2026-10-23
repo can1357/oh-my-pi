@@ -54,44 +54,6 @@ function objectValue(children: KdlNodeView[], verbatim: boolean): Record<string,
 	return object;
 }
 
-/**
- * `starts`/`ends` of a credit promotion: an ISO-8601 UTC instant that names a
- * real calendar time (`Date.parse` rolls `2026-02-30` over to March, so the
- * parsed instant must print back to the same fields).
- */
-function isUtcInstant(value: unknown): value is string {
-	if (typeof value !== "string") return false;
-	const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})(?::(\d{2})(\.\d+)?)?Z$/.exec(value);
-	if (!match) return false;
-	const time = Date.parse(value);
-	if (Number.isNaN(time)) return false;
-	const printed = new Date(time).toISOString();
-	return printed.slice(0, 16) === match[1] && printed.slice(17, 19) === (match[2] ?? "00");
-}
-
-/**
- * `credit-promotion` payload: exactly `discount` (a fraction in (0, 1)),
- * `starts` and `ends` (UTC instants, ending after the start) and a non-empty
- * `label`.
- */
-function creditPromotionValue(node: KdlNodeView, children: KdlNodeView[]): Record<string, unknown> {
-	const promotion = objectValue(children, false);
-	const { discount, starts, ends, label, ...extra } = promotion;
-	if (
-		Object.keys(extra).length > 0 ||
-		typeof discount !== "number" ||
-		!(discount > 0 && discount < 1) ||
-		!isUtcInstant(starts) ||
-		!isUtcInstant(ends) ||
-		Date.parse(ends) <= Date.parse(starts) ||
-		typeof label !== "string" ||
-		!label.trim()
-	) {
-		malformed(node);
-	}
-	return promotion;
-}
-
 function axisValue(node: KdlNodeView, axis: AxisDef): unknown {
 	const allowed = (value: unknown): value is string | boolean =>
 		(typeof value === "string" || typeof value === "boolean") && (axis.values?.includes(value) ?? false);
@@ -117,7 +79,6 @@ function axisValue(node: KdlNodeView, axis: AxisDef): unknown {
 		}
 		case "object":
 			if (node.args.length > 0 || !node.children) malformed(node);
-			if (axis.key === "creditPromotion") return creditPromotionValue(node, node.children);
 			return objectValue(node.children, axis.verbatimKeys === true);
 	}
 }
@@ -138,10 +99,6 @@ export function collectAxis(node: KdlNodeView, axes: RuleAxes): void {
 	const map = axes[axis.set];
 	if (axis.key in map) {
 		throw new CompatCompileError(node.file, node.line, `axis \`${axis.key}\` assigned twice in one block`);
-	}
-	// A promotion discounts the block's own rates, so it follows them in the same block.
-	if (axis.key === "creditPromotion" && !("creditRates" in map)) {
-		throw new CompatCompileError(node.file, node.line, "`credit-promotion` must follow `credit-rates` in its block");
 	}
 	map[axis.key] = axisValue(node, axis);
 }
