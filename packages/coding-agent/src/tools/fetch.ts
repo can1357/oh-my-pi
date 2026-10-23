@@ -456,6 +456,22 @@ function extractDocumentLinks(html: string, baseUrl: string): string[] {
 	return links;
 }
 
+/** Markdown link destination: `](dest` or `](<dest>`. */
+const MARKDOWN_LINK_DEST_RE = /\]\(\s*(?:<([^>]*)>|([^)\s]+))/g;
+
+/** Link targets a rendering kept, as written and resolved against the page, to match {@link extractDocumentLinks}. */
+function renderedLinkTargets(markdown: string, baseUrl: string): Set<string> {
+	const targets = new Set<string>();
+	for (const match of markdown.matchAll(MARKDOWN_LINK_DEST_RE)) {
+		const dest = match[1] ?? match[2];
+		targets.add(dest);
+		try {
+			targets.add(new URL(dest, baseUrl).href);
+		} catch {}
+	}
+	return targets;
+}
+
 /**
  * Strip CDATA wrapper and clean text
  */
@@ -588,9 +604,9 @@ const FETCH_PROVIDER_ORDER: readonly FetchProvider[] = [
  * (in-process), trafilatura, lynx, Parallel, Firecrawl, then Jina. The
  * `providers.fetch` setting picks the order — `auto` uses the default above; any
  * specific backend is tried first, then the remaining backends as fallbacks.
- * Every backend's output must clear the same quality gate (>100 non-whitespace
- * chars and not {@link isLowQualityOutput}) before it is accepted, otherwise the
- * next backend is tried.
+ * Every backend's output must clear the same length and JavaScript-gate checks,
+ * and a lynx dump the navigation check too ({@link isLowQualityOutput}), before
+ * it is accepted, otherwise the next backend is tried.
  *
  * The overall `timeout` budget bounds the whole call; remote backends (Parallel,
  * Firecrawl, Jina) are additionally capped at `REMOTE_READER_MAX_MS` so a hung
@@ -696,7 +712,7 @@ export async function renderHtmlToText(
 			if (!rendered) continue;
 			const content = stripDataUriImages(rendered);
 			if (content.trim().length <= 100) continue;
-			if (!isLowQualityOutput(content)) {
+			if (!isLowQualityOutput(content, method)) {
 				return { content, ok: true, method };
 			}
 			lowQuality ??= { content, method };
@@ -712,9 +728,19 @@ export async function renderHtmlToText(
 }
 
 /**
- * Check if lynx output looks JS-gated or mostly navigation
+ * True when most lines are short: menus in a lynx dump, or a wrapper page around
+ * a linked document. In a reader's markdown, tables, code and lists look the same.
  */
-function isLowQualityOutput(content: string): boolean {
+function isMostlyShortLines(content: string): boolean {
+	const lines = content.split("\n").filter(l => l.trim());
+	const shortLines = lines.filter(l => l.trim().length < 40);
+	return lines.length > 10 && shortLines.length / lines.length > 0.7;
+}
+
+/**
+ * Check if rendered output looks JS-gated, or, for a lynx dump, mostly navigation.
+ */
+function isLowQualityOutput(content: string, method: string): boolean {
 	const lower = content.toLowerCase();
 
 	// JS-gated indicators
@@ -729,14 +755,9 @@ function isLowQualityOutput(content: string): boolean {
 		return true;
 	}
 
-	// Mostly navigation (high link/menu density)
-	const lines = content.split("\n").filter(l => l.trim());
-	const shortLines = lines.filter(l => l.trim().length < 40);
-	if (lines.length > 10 && shortLines.length / lines.length > 0.7) {
-		return true;
-	}
-
-	return false;
+	// Only lynx dumps the whole page, menus included; the reader backends already drop
+	// navigation, so their short lines are content and must not send the page to a weaker reader.
+	return method === "lynx" && isMostlyShortLines(content);
 }
 
 /**
@@ -1528,37 +1549,49 @@ async function renderUrl(
 			};
 		}
 
-		// Step 6: If rendered output is low quality, try more targeted fallbacks
-		if (isLowQualityOutput(htmlResult.content)) {
-			const docLinks = extractDocumentLinks(rawContent, finalUrl);
-			if (docLinks.length > 0) {
-				const docUrl = docLinks[0];
-				const binary = await fetchBinary(docUrl, timeout, signal);
-				if (binary.ok) {
-					const ext = getExtensionHint(docUrl, binary.contentDisposition);
-					const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
-					if (converted.ok && converted.content.trim().length > htmlResult.content.length) {
-						notes.push(`Extracted and converted document: ${docUrl}`);
-						const output = finalizeOutput(converted.content);
-						return {
-							url,
-							finalUrl,
-							contentType: "application/document",
-							method: "extracted-document",
-							content: output,
-							fetchedAt,
-							truncated: false,
-							notes,
-						};
-					}
-					if (!converted.ok && converted.error) {
-						notes.push(`markit conversion failed: ${converted.error}`);
-					}
-				} else if (binary.error) {
-					notes.push(`Binary fetch failed: ${binary.error}`);
+		// Step 6: If rendered output is low quality, try more targeted fallbacks. A reader's
+		// rendering passes the quality gate even for a wrapper page around a PDF or DOCX, so a
+		// short-line rendering under one displayed page still has its document tried, when the
+		// link sits in the content the reader kept rather than in a dropped nav or footer.
+		const lowQuality = isLowQualityOutput(htmlResult.content, htmlResult.method);
+		const wrapperShaped =
+			!lowQuality &&
+			isMostlyShortLines(htmlResult.content) &&
+			htmlResult.content.split("\n").length <= FETCH_DEFAULT_MAX_LINES;
+		let docLinks = lowQuality || wrapperShaped ? extractDocumentLinks(rawContent, finalUrl) : [];
+		if (wrapperShaped) {
+			const rendered = renderedLinkTargets(htmlResult.content, finalUrl);
+			docLinks = docLinks.filter(link => rendered.has(link));
+		}
+		if (docLinks.length > 0) {
+			const docUrl = docLinks[0];
+			const binary = await fetchBinary(docUrl, timeout, signal);
+			if (binary.ok) {
+				const ext = getExtensionHint(docUrl, binary.contentDisposition);
+				const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
+				if (converted.ok && converted.content.trim().length > htmlResult.content.length) {
+					notes.push(`Extracted and converted document: ${docUrl}`);
+					const output = finalizeOutput(converted.content);
+					return {
+						url,
+						finalUrl,
+						contentType: "application/document",
+						method: "extracted-document",
+						content: output,
+						fetchedAt,
+						truncated: false,
+						notes,
+					};
 				}
+				if (!converted.ok && converted.error) {
+					notes.push(`markit conversion failed: ${converted.error}`);
+				}
+			} else if (binary.error) {
+				notes.push(`Binary fetch failed: ${binary.error}`);
 			}
+		}
 
+		if (lowQuality) {
 			const llmResult = await tryLlmEndpoints(finalUrl, timeout, signal);
 			if (llmResult) {
 				notes.push(`Used llms.txt fallback: ${llmResult.endpoint}`);
