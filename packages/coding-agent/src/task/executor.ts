@@ -380,7 +380,11 @@ function installSubagentRetryFallbackChain(args: {
 	installRetryFallbackRole(
 		settings,
 		role,
-		{ primary: candidates[selectedIndex].selector, chain: fallbackChain },
+		{
+			primary: candidates[selectedIndex].selector,
+			chain: fallbackChain,
+			shadowPrimaryKeys: fallbackSelectors.length > 0,
+		},
 		modelRegistry,
 	);
 	return role;

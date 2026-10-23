@@ -187,10 +187,19 @@ export interface RetryFallbackRole {
 	primary: string;
 	/** Fallback selectors walked after the primary; empty explicitly disables fallbacks. */
 	chain: string[];
+	/**
+	 * When true, suppresses inherited exact model-selector and wildcard keys
+	 * in settings that match `primary` so this explicit chain is not shadowed.
+	 */
+	shadowPrimaryKeys?: boolean;
 }
+
+const installedRetryFallbackRoles = new WeakMap<Settings, Map<string, RetryFallbackRole>>();
 
 /** Reads the primary and chain installed for `role`, including an explicitly empty chain. */
 export function getRetryFallbackRole(settings: Settings, role: string): RetryFallbackRole | undefined {
+	const installed = installedRetryFallbackRoles.get(settings)?.get(role);
+	if (installed) return { ...installed };
 	const primary = settings.getModelRole(role);
 	const chain = cfgRetryFallbackChains.get(settings)[role];
 	if (!primary || !Array.isArray(chain)) return undefined;
@@ -204,7 +213,7 @@ export function getRetryFallbackRole(settings: Settings, role: string): RetryFal
  * would be preferred by {@link resolveRetryFallbackChainKey} ahead of the
  * child role (issue #13550).
  */
-export function isShadowingRetryFallbackKey(
+function isShadowingRetryFallbackKey(
 	chainKey: string,
 	primary: RetryFallbackSelector,
 	modelLookup?: RetryFallbackModelLookup,
@@ -232,7 +241,7 @@ export function isShadowingRetryFallbackKey(
 export function installRetryFallbackRole(
 	settings: Settings,
 	role: string,
-	{ primary, chain }: RetryFallbackRole,
+	{ primary, chain, shadowPrimaryKeys }: RetryFallbackRole,
 	modelLookup?: RetryFallbackModelLookup,
 ): void {
 	const modelRoles: Record<string, string> = {};
@@ -243,16 +252,20 @@ export function installRetryFallbackRole(
 	}
 	modelRoles[role] = primary;
 	cfgModelRoles.override(settings, modelRoles);
+
+	let rolesMap = installedRetryFallbackRoles.get(settings);
+	if (!rolesMap) {
+		rolesMap = new Map();
+		installedRetryFallbackRoles.set(settings, rolesMap);
+	}
+	rolesMap.set(role, { primary, chain, shadowPrimaryKeys });
+
 	const parsedPrimary = parseRetryFallbackSelector(primary, modelLookup);
 	const fallbackChains: RetryFallbackChains = { [role]: chain };
 	const existingChains = cfgRetryFallbackChains.get(settings);
 	for (const key in existingChains) {
 		if (key === role) continue;
-		if (
-			role.startsWith("subagent:") &&
-			parsedPrimary &&
-			isShadowingRetryFallbackKey(key, parsedPrimary, modelLookup)
-		) {
+		if (shadowPrimaryKeys && parsedPrimary && isShadowingRetryFallbackKey(key, parsedPrimary, modelLookup)) {
 			continue;
 		}
 		fallbackChains[key] = existingChains[key];
@@ -489,17 +502,6 @@ export function resolveRetryFallbackChainKey(
 		currentPlainSelector && currentPlainSelector !== currentSelector
 			? (parseRetryFallbackSelector(currentPlainSelector, context.modelLookup) ?? parsedCurrent)
 			: undefined;
-
-	// 0. Subagent-pinned role hint: when a subagent is explicitly pinned to its
-	//    own role and chain, that child-scoped routing must not be shadowed by
-	//    an inherited model-selector or wildcard key (issue #13550).
-	if (roleHint?.startsWith("subagent:") && Array.isArray(context.chains[roleHint])) {
-		const rolePrimary = getRetryFallbackPrimarySelector(context, roleHint);
-		const match = selectorMatchKind(rolePrimary, parsedCurrent, parsedPlainCurrent, currentModel);
-		if (match === "exact" || match === "normalized" || match === "base") {
-			return roleHint;
-		}
-	}
 
 	// 1. Model-selector keys — most specific. Parsed exact effort beats
 	//    model-normalized effort, which beats a suffixless (any-effort) key,
