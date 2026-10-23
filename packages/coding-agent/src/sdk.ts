@@ -610,6 +610,18 @@ export interface CreateAgentSessionOptions {
 	modelPatternFallbackRole?: string;
 	/** Validated inherited retry chain for a deferred singleton pattern; empty explicitly disables fallbacks. */
 	modelPatternDefaultFallbackChain?: string[];
+	/**
+	 * Called with the model of every main-loop request before it is sent; throw to
+	 * refuse it. Per-call `model` subagents use it so no switch reaches a model the
+	 * operator did not approve.
+	 */
+	assertDispatchModel?: (model: Model) => void;
+	/** Never switch to a retry fallback model; the turn fails instead. Per-call `model` subagents set it unless runtime fallbacks are allowed. */
+	disableModelFallback?: boolean;
+	/** Never promote to a larger-context model (implied by {@link disableModelFallback}). Per-call `model` subagents set it. */
+	disableContextPromotion?: boolean;
+	/** Chain key every fallback walk consults first; per-call `model` subagents pin their own `subagent:<id>` chain. */
+	pinnedRetryFallbackRole?: string;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
@@ -4557,6 +4569,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getToolContext: tc => toolContextStore.getContext(tc),
 			getApiKey: effectiveGetApiKey,
 			streamFn: (streamModel, context, streamOptions) => {
+				options.assertDispatchModel?.(streamModel);
 				if (notifyFirstChatDispatch) {
 					const cb = notifyFirstChatDispatch;
 					notifyFirstChatDispatch = undefined;
@@ -4770,6 +4783,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agent,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
+			disableModelFallback: options.disableModelFallback,
+			disableContextPromotion: options.disableContextPromotion,
+			pinnedRetryFallbackRole: options.pinnedRetryFallbackRole,
 			initialRetryFallback,
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
 			prewalk,

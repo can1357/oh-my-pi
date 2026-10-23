@@ -1607,14 +1607,38 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 
 /**
  * Resolve a list of override patterns to the first matching model.
+ *
+ * `exactOnly` matches each pattern only as a literal `provider/model-id`,
+ * optionally followed by a supported `:level`: no role aliases, globs, or fuzzy ids.
  */
 export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
+	options?: { exactOnly?: boolean },
 ): { model?: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel; explicitThinkingLevel: boolean; warning?: string } {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
+	if (options?.exactOnly) {
+		const find = (selector: string) => availableModels.find(model => `${model.provider}/${model.id}` === selector);
+		for (const pattern of modelPatterns) {
+			const selector = pattern.trim();
+			// Some real ids end in a level-shaped segment, so the literal id wins over a suffix split.
+			const literal = find(selector);
+			if (literal) return { model: literal, explicitThinkingLevel: false };
+			const { base, level } = splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS);
+			if (!level) continue;
+			const model = find(base);
+			if (!model) continue;
+			return {
+				model,
+				thinkingLevel:
+					level === AUTO_THINKING ? AUTO_THINKING : (resolveThinkingLevelForModel(model, level) ?? level),
+				explicitThinkingLevel: true,
+			};
+		}
+		return { explicitThinkingLevel: false };
+	}
 	const matchPreferences = getModelMatchPreferences(settings);
 	let warning: string | undefined;
 	for (const pattern of modelPatterns) {
@@ -1721,6 +1745,10 @@ export function sessionModelDiscoveryProviders(
  * If neither the subagent nor the parent has working auth, returns the
  * primary resolution unchanged so the existing error path still surfaces
  * a meaningful failure downstream.
+ *
+ * `exactOnly` lists (per-call `model` candidates) walk their own candidates
+ * for working credentials even without a parent pattern, matching each one
+ * exactly; they never fall back to a model outside the list.
  */
 export async function resolveModelOverrideWithAuthFallback(
 	modelPatterns: string[],
@@ -1728,6 +1756,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
 	settings?: Settings,
 	sessionId?: string,
+	options?: { exactOnly?: boolean },
 ): Promise<{
 	model?: Model<Api>;
 	thinkingLevel?: ConfiguredThinkingLevel;
@@ -1741,8 +1770,8 @@ export async function resolveModelOverrideWithAuthFallback(
 		const enabledModels = modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider));
 		lookupRegistry = { getAvailable: () => enabledModels };
 	}
-	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings);
-	if (!primary.model || !parentActiveModelPattern) {
+	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings, options);
+	if (!primary.model || (!parentActiveModelPattern && !options?.exactOnly)) {
 		return { ...primary, authFallbackUsed: false };
 	}
 
@@ -1752,13 +1781,19 @@ export async function resolveModelOverrideWithAuthFallback(
 	}
 	// The ordered override list is the caller's own fallback chain: an
 	// authenticated later entry beats the parent's model.
-	for (const pattern of resolveConfiguredModelPatterns(modelPatterns, settings)) {
-		const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
+	const candidatePatterns = options?.exactOnly
+		? modelPatterns
+		: resolveConfiguredModelPatterns(modelPatterns, settings);
+	for (const pattern of candidatePatterns) {
+		const candidate = resolveModelOverride([pattern], lookupRegistry, settings, options);
 		if (!candidate.model || modelsAreEqual(candidate.model, primary.model)) continue;
 		const candidateKey = await modelRegistry.getApiKey(candidate.model, sessionId);
 		if (candidateKey === kNoAuth || isAuthenticated(candidateKey)) {
 			return { ...candidate, authFallbackUsed: false };
 		}
+	}
+	if (!parentActiveModelPattern) {
+		return { ...primary, authFallbackUsed: false };
 	}
 
 	const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);

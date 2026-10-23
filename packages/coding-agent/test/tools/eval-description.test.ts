@@ -9,7 +9,7 @@ import { EvalTool, getEvalDocTopics, getEvalToolDescription } from "@oh-my-pi/pi
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
-import { cfgTaskMaxRecursionDepth } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { cfgTaskMaxRecursionDepth, cfgTaskPerCallModel } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 function makeSession(opts: {
 	spawns?: string | null;
@@ -100,6 +100,17 @@ describe("eval tool description", () => {
 		expect(disabled.helpers).toContain("budget.total");
 		expect(disabled.judge).toContain("completion(prompt");
 		expect(disabled.agents).not.toContain("tools?=None");
+	});
+
+	it("advertises agent()/workpool() `model` only while task.perCallModel is not off", () => {
+		const agentsTopic = (perCallModel: "off" | "on" | "eval") => {
+			const session = makeSession({});
+			cfgTaskPerCallModel.set(session.settings, perCallModel);
+			return new EvalTool(session).docTopics().agents ?? "";
+		};
+		expect(agentsTopic("off")).not.toContain("model?=None");
+		expect(agentsTopic("on")).toContain("model?=None");
+		expect(agentsTopic("eval")).toContain("model?=None");
 	});
 
 	it("renders helper syntax only for available runtimes", () => {

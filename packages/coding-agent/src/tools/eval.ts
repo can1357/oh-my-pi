@@ -56,7 +56,7 @@ import {
 	cfgEvalAutoProvision,
 	cfgEvalToolsEnabled,
 } from "../eval/settings";
-import { cfgTaskMaxRecursionDepth } from "../task/settings";
+import { cfgTaskMaxRecursionDepth, cfgTaskPerCallModelFallbacks, perCallModelEnabled } from "../task/settings";
 import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
@@ -173,6 +173,10 @@ export interface EvalToolDescriptionOptions {
 	inlineTopics?: boolean;
 	/** Whether missing runtimes and environments may be provisioned automatically. */
 	autoProvision?: boolean;
+	/** `task.perCallModel` accepts `model` for eval: advertise it on `agent()`/`workpool()`. Default: false. */
+	perCallModel?: boolean;
+	/** `task.perCallModelFallbacks: runtime` lets a per-call worker fall back to configured chain models. Default: false. */
+	perCallModelFallbacks?: boolean;
 }
 
 function evalTemplateContext(options: EvalToolDescriptionOptions) {
@@ -188,6 +192,8 @@ function evalTemplateContext(options: EvalToolDescriptionOptions) {
 		spawnDefaultAgent: spawnPolicy.defaultAgent,
 		spawnAllowedAgentsText: spawnPolicy.allowedPromptText,
 		autoProvision: options.autoProvision ?? true,
+		perCallModel: options.perCallModel ?? false,
+		perCallModelFallbacks: options.perCallModelFallbacks ?? false,
 	};
 }
 
@@ -349,6 +355,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			preludes: this.#advertisedPreludes(session),
 			inlineTopics: session.isToolActive?.("read") === false,
 			autoProvision: cfgEvalAutoProvision.get(session.settings),
+			perCallModel: perCallModelEnabled(session.settings, "eval"),
+			perCallModelFallbacks: cfgTaskPerCallModelFallbacks.get(session.settings) === "runtime",
 		};
 	}
 

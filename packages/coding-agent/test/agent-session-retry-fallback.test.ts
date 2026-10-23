@@ -5942,6 +5942,92 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels.filter(id => id === `${primaryModel.provider}/${primaryModel.id}`)).toHaveLength(1);
 	});
 
+	it.each([
+		{
+			label: "promotes while model switching is allowed",
+			disableModelFallback: false,
+			disableContextPromotion: false,
+		},
+		{
+			label: "never promotes a session with disableModelFallback",
+			disableModelFallback: true,
+			disableContextPromotion: false,
+		},
+		{
+			label: "never promotes a session with only disableContextPromotion",
+			disableModelFallback: false,
+			disableContextPromotion: true,
+		},
+	])("context promotion: $label", async ({ disableModelFallback, disableContextPromotion }) => {
+		const modelsConfigPath = path.join(
+			tempDir.path(),
+			`promotion-disabled-${disableModelFallback}-${disableContextPromotion}.json`,
+		);
+		await Bun.write(
+			modelsConfigPath,
+			JSON.stringify({
+				providers: {
+					openai: {
+						modelOverrides: {
+							"gpt-4o-mini": { contextWindow: 4000, contextPromotionTarget: "openai/gpt-4o" },
+							"gpt-4o": { contextWindow: 1_000_000 },
+						},
+					},
+				},
+			}),
+		);
+		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
+		const small = modelRegistry.find("openai", "gpt-4o-mini");
+		const large = modelRegistry.find("openai", "gpt-4o");
+		if (!small || !large) throw new Error("Expected override models to resolve");
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: small, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push({ content: ["ok"] });
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": true,
+			"compaction.methodOrder": ["soft"],
+			"compaction.thresholdPercent": 80,
+			"compaction.thresholdTokens": -1,
+			"contextPromotion.enabled": true,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			disableModelFallback,
+			disableContextPromotion,
+		});
+
+		// Grow the history past the small model's window, then prompt again.
+		session.agent.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "lorem ipsum ".repeat(5000) }],
+			timestamp: Date.now(),
+		});
+		await session.prompt("continue");
+		await session.waitForIdle();
+
+		const smallId = `${small.provider}/${small.id}`;
+		const largeId = `${large.provider}/${large.id}`;
+		if (disableModelFallback || disableContextPromotion) {
+			expect(requestedModels).not.toContain(largeId);
+			expect(session.model?.id).toBe(small.id);
+		} else {
+			expect(requestedModels).toContain(largeId);
+			expect(requestedModels).not.toContain(smallId);
+		}
+	});
+
 	it("does not send oversized context to a smaller retry fallback model", async () => {
 		// Regression for #8065: the forward counterpart of #7952. A retryable
 		// error on a large-window primary switches to a retry-fallback candidate,

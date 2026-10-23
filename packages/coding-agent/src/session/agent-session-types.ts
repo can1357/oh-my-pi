@@ -205,6 +205,15 @@ export interface AgentSessionConfig {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */
 	thinkingLevelCeiling?: Effort;
+	/** Never switch to a retry fallback model; the turn fails instead. */
+	disableModelFallback?: boolean;
+	/** Never promote to a larger-context model; implied by {@link disableModelFallback}. */
+	disableContextPromotion?: boolean;
+	/**
+	 * Chain key every fallback walk consults first, ahead of model-keyed and wildcard chains
+	 * that cover the current model. Per-call `model` subagents pin their `subagent:<id>` chain.
+	 */
+	pinnedRetryFallbackRole?: string;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
 	/** Skip retry.fallbackChains validation at construction; the host calls `validateRetryFallbackChains()` later. */
