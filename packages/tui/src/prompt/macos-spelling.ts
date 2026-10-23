@@ -62,7 +62,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	#availabilityChecked = false;
 	#cacheGeneration = 0;
 	#typoCache = new Map<string, readonly native.SpellingRange[]>();
-	/** {@link #projectTypoRanges} answers for the current {@link #typoCache}; segments re-ask every frame. */
+	/** {@link #projectTypoRanges} answers for the current {@link #typoCache}; render segments re-ask every frame. */
 	#projectionMemo = new Map<string, readonly native.SpellingRange[] | undefined>();
 	#typoInFlight = new Map<string, Promise<readonly native.SpellingRange[]>>();
 	#automaticTypoActive = false;
@@ -120,39 +120,48 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	/**
 	 * Misspelled prose ranges in `text` (offsets into it), in order and
 	 * non-overlapping, except ones touching `context.typing` (the word still
-	 * being typed). Schedules the verification check for uncached text; its
-	 * result arrives through {@link onUpdate}.
+	 * being typed). Checks the full logical line so rendering cuts cannot
+	 * change spelling or prose boundaries. Uncached lines arrive through {@link onUpdate}.
 	 */
 	typoRanges(text: string, context: SpellingDecorationContext): readonly native.SpellingRange[] {
 		if (!this.#available || !this.#features.typoDetection || text.length === 0) return [];
-		if (!this.#prose.isProse(context, context.startCol, context.startCol + text.length)) return [];
-		const lane = `${context.line}:${context.startCol}`;
-		const cached = this.#typoCache.get(text);
+		const line = context.lines[context.line];
+		const segmentEnd = context.startCol + text.length;
+		if (
+			line === undefined ||
+			context.startCol < 0 ||
+			segmentEnd > line.length ||
+			!line.startsWith(text, context.startCol)
+		)
+			return [];
+		if (!this.#prose.isProse(context, context.startCol, segmentEnd)) return [];
+		const lane = `${context.line}:0`;
+		const cached = this.#typoCache.get(line);
 		// A cache hit obsoletes any older text queued for this lane. A miss must
 		// keep its just-scheduled entry alive: deleting it here used to cancel the
 		// verification check whenever a stale projection painted ranges while
 		// another check was in flight, freezing the projected undercurl (e.g. the
 		// "eac" of a fast-typed "each") until an unrelated repaint rescheduled it.
-		if (cached === undefined) this.#scheduleTypoRanges(text, lane);
+		if (cached === undefined) this.#scheduleTypoRanges(line, lane);
 		else this.#automaticTypoQueue.delete(lane);
-		const ranges = cached ?? this.#projectTypoRanges(text);
+		const ranges = cached ?? this.#projectTypoRanges(line);
 		if (!ranges || ranges.length === 0) return [];
 		const kept: native.SpellingRange[] = [];
 		const typing = context.typing?.line === context.line ? context.typing : undefined;
 		let cursor = 0;
 		for (const range of ranges) {
 			const end = range.start + range.length;
-			if (typing && context.startCol + range.start <= typing.end && typing.start <= context.startCol + end) {
-				continue;
-			}
+			if (typing && range.start <= typing.end && typing.start <= end) continue;
 			// Overlapping or out-of-bounds ranges (stale native data, edit projection)
 			// must never re-emit already-rendered text: that doubles it on screen and
 			// desyncs the rendered width from the measured width (cursor drift).
-			if (range.start < cursor || end > text.length) continue;
-			if (!this.#prose.isProse(context, context.startCol + range.start, context.startCol + end)) {
-				continue;
+			if (range.start < cursor || end > line.length) continue;
+			if (!this.#prose.isProse(context, range.start, end)) continue;
+			const start = Math.max(range.start, context.startCol);
+			const clippedEnd = Math.min(end, segmentEnd);
+			if (start < clippedEnd) {
+				kept.push({ start: start - context.startCol, length: clippedEnd - start });
 			}
-			kept.push(range);
 			cursor = end;
 		}
 		return kept;
