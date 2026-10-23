@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -1276,7 +1277,7 @@ describe("structured subagent primitive", () => {
 	});
 });
 
-describe("agent frontmatter structured opt-in", () => {
+describe("task execution model and structured contracts", () => {
 	const MOCK_API_SOURCE = "test/structured-subagent-opt-in";
 	const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
 	let savedEnv: Record<string, string | undefined> = {};
@@ -1338,6 +1339,95 @@ describe("agent frontmatter structured opt-in", () => {
 		closeModelCache();
 		await removeWithRetries(root);
 	});
+
+	it.each([
+		{
+			label: "flat explicit model overrides agent settings",
+			batchEnabled: false,
+			model: "router/claude-opus-5-5",
+			expected: "router/claude-opus-5-5",
+		},
+		{
+			label: "batch ordered selectors skip unavailable and unauthenticated entries before the parent",
+			batchEnabled: true,
+			model: ["missing-provider/absent", "task-no-auth/no-auth", "router/claude-opus-5-5"],
+			expected: "router/claude-opus-5-5",
+		},
+		{
+			label: "batch retains the parent model auth fallback",
+			batchEnabled: true,
+			model: ["task-no-auth/no-auth"],
+			expected: "mock/parent",
+		},
+	])(
+		"$label",
+		async ({ batchEnabled, model, expected }) => {
+			const cwd = path.join(root, "home", "work");
+			await fs.mkdir(cwd, { recursive: true });
+			await Bun.write(path.join(root, "home", ".omp", "agent", "agents", "plain.md"), agentFile("plain", false));
+			const authStorage = createInMemoryAuthStorage();
+			authStorage.keys.setRuntime("mock", "test-key");
+			authStorage.keys.setRuntime("router", "test-key");
+			const modelRegistry = new ModelRegistry(authStorage);
+			const parent = createMockModel({ id: "parent", handler: { content: ["parent model report"] } });
+			const override = createMockModel({
+				provider: "router",
+				id: "claude-opus-5-5",
+				handler: { content: ["override model report"] },
+			});
+			const noAuth = createMockModel({
+				provider: "task-no-auth",
+				id: "no-auth",
+				handler: { content: ["wrong model"] },
+			});
+			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([parent, override, noAuth]);
+			try {
+				const tool = await TaskTool.create({
+					cwd,
+					hasUI: false,
+					settings: Settings.isolated({
+						"task.batch": batchEnabled,
+						"task.structured": false,
+						"task.disabledAgents": ["seance"],
+						"task.agentModelOverrides": { plain: "mock/parent" },
+						"async.enabled": false,
+						"task.agentIdleTtlMs": 0,
+						"compaction.enabled": false,
+						"retry.enabled": false,
+						"todo.enabled": false,
+						"todo.reminders": false,
+						"advisor.enabled": false,
+						modelRoles: { default: "mock/parent" },
+					}),
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					getActiveModelString: () => "mock/parent",
+					getModelString: () => "mock/parent",
+					modelRegistry,
+					authStorage,
+					enableLsp: false,
+					enableMCP: false,
+					enableIrc: false,
+				} as unknown as ToolSession);
+				const item = { agent: "plain", name: "ModelOverride", task: "Report.", solutionSpace: "one report", model };
+				const parsed = tool.parameters(
+					batchEnabled ? { context: "Report using the selected model.", tasks: [item] } : item,
+				);
+				if (parsed instanceof type.errors) throw new Error(parsed.summary);
+				const settled = await tool.execute("tc-model-override", parsed);
+				expect(settled.details?.results[0]).toMatchObject({
+					exitCode: 0,
+					resolvedModelIdentity: expected,
+					output: expected === "mock/parent" ? "parent model report" : "override model report",
+				});
+				expect(noAuth.calls).toHaveLength(0);
+				expect(expected === "mock/parent" ? parent.calls.length : override.calls.length).toBeGreaterThan(0);
+			} finally {
+				authStorage.close();
+			}
+		},
+		30_000,
+	);
 
 	it.each([
 		{ setting: false, structured: { reporter: true, plain: false } },

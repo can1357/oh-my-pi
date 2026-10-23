@@ -156,10 +156,8 @@ export async function resolveSeanceSource(
 	}
 	throw new Error(`Session "${label}" was not found.`);
 }
-const modelSelectorInputSchema = type("string | string[]");
 export const seanceTaskSchemaFields = {
 	"sourceSession?": type("string"),
-	"model?": modelSelectorInputSchema,
 };
 export const seanceTaskGuidance = seanceTaskGuidanceTemplate;
 
@@ -172,7 +170,6 @@ function validateSeanceFields(
 	if (agent !== SEANCE_AGENT_NAME) {
 		if (item.sourceSession !== undefined)
 			return `\`sourceSession\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
-		if (item.model !== undefined) return `\`model\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
 		return undefined;
 	}
 	// Hidden bundled seance (plan mode, policy) is rejected at spawn; a custom shadow is an ordinary agent.
@@ -206,7 +203,7 @@ export function validateSeanceParams(context: {
 	const { params, batchEnabled, defaultAgent, seanceAdvertised } = context;
 	if (batchEnabled && params.tasks !== undefined) {
 		if (params.sourceSession !== undefined || params.model !== undefined) {
-			return `Put \`sourceSession\` and \`model\` on the individual \`${SEANCE_AGENT_NAME}\` item inside \`tasks[]\`.`;
+			return "Put `sourceSession` and `model` on the individual items inside `tasks[]`.";
 		}
 		for (let index = 0; index < params.tasks.length; index++) {
 			const item = params.tasks[index]!;

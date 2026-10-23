@@ -42,6 +42,7 @@ export interface SubagentEventPayload {
 
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
+const modelSelectorInputSchema = type("string | string[]");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
 
@@ -50,6 +51,7 @@ export const taskItemSchema = type({
 	agent: "string = 'task'",
 	task: "string",
 	solutionSpace: "string",
+	"model?": modelSelectorInputSchema,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -60,6 +62,7 @@ const taskItemSchemaIsolated = type({
 	agent: "string = 'task'",
 	task: "string",
 	solutionSpace: "string",
+	"model?": modelSelectorInputSchema,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -72,6 +75,7 @@ export const taskSchema = type({
 	agent: "string = 'task'",
 	task: "string",
 	solutionSpace: "string",
+	"model?": modelSelectorInputSchema,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -83,6 +87,7 @@ const taskSchemaNoIsolation = type({
 	agent: "string = 'task'",
 	task: "string",
 	solutionSpace: "string",
+	"model?": modelSelectorInputSchema,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -134,7 +139,6 @@ function taskAgentSchemaRule(defaultAgent: string): string {
 
 type SeanceTaskSchemaFields = {
 	"sourceSession?"?: FluentType<string>;
-	"model?"?: FluentType<string | string[]>;
 };
 
 function createTaskSchema(options: {
@@ -160,6 +164,7 @@ function createTaskSchema(options: {
 				agent,
 				task: "string",
 				solutionSpace: "string",
+				"model?": modelSelectorInputSchema,
 				...effortField,
 				...schemaFields,
 				...toolsField,
@@ -180,6 +185,7 @@ function createTaskSchema(options: {
 			agent,
 			task: "string",
 			solutionSpace: "string",
+			"model?": modelSelectorInputSchema,
 			...effortField,
 			...schemaFields,
 			...toolsField,
@@ -200,6 +206,7 @@ function createTaskSchema(options: {
 			agent,
 			task: "string",
 			solutionSpace: "string",
+			"model?": modelSelectorInputSchema,
 			...effortField,
 			...schemaFields,
 			...toolsField,
@@ -213,6 +220,7 @@ function createTaskSchema(options: {
 		agent,
 		task: "string",
 		solutionSpace: "string",
+		"model?": modelSelectorInputSchema,
 		...effortField,
 		...schemaFields,
 		...toolsField,
@@ -231,7 +239,7 @@ export function getTaskSchema(options: {
 	/** Advertise `outputSchema`/`schemaMode` (`task.structured`); default on. */
 	structured?: boolean;
 	defaultAgent?: string;
-	/** Advertise historical source/model fields for the bundled seance agent. */
+	/** Advertise the historical source session field for the bundled seance agent. */
 	seanceFields?: SeanceTaskSchemaFields;
 }): TaskToolSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";

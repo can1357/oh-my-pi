@@ -59,12 +59,13 @@ describe("task schema (single-spawn)", () => {
 		}
 	});
 
-	it("retains caller outputSchema, schemaMode, and eval tool names while stripping stale keys", () => {
+	it("retains caller model, outputSchema, schemaMode, and eval tool names while stripping stale keys", () => {
 		const outputSchema = { type: "object", properties: { answer: { type: "string" } } };
 		const parsed = taskSchema({
 			agent: "scout",
 			task: "Map the auth module.",
 			solutionSpace: "c",
+			model: "router/claude-opus-5-5",
 			outputSchema,
 			schemaMode: "strict",
 			tools: ["word_count"],
@@ -74,6 +75,7 @@ describe("task schema (single-spawn)", () => {
 		});
 		expect(parsed instanceof type.errors).toBe(false);
 		if (!(parsed instanceof type.errors)) {
+			expect(parsed.model).toBe("router/claude-opus-5-5");
 			expect(parsed.outputSchema).toEqual(outputSchema);
 			expect(parsed.schemaMode).toBe("strict");
 			expect(parsed.tools).toEqual(["word_count"]);
@@ -127,13 +129,19 @@ describe("task schema seance fields", () => {
 			}
 		}
 	});
-	it("omits seance fields when they are not enabled", () => {
+	it("keeps model overrides available when historical source fields are disabled", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
 				const wireSchema = JSON.stringify(schema.toJsonSchema());
 				expect(wireSchema).not.toContain('"sourceSession"');
-				expect(wireSchema).not.toContain('"model"');
+				expect(wireSchema).toContain('"model"');
+				const model = batchEnabled ? ["router/claude-opus-5-5", "default"] : "router/claude-opus-5-5";
+				const item = { task: "Implement the change.", solutionSpace: "one implementation", model };
+				const parsed = schema(batchEnabled ? { context: "Shared implementation context", tasks: [item] } : item);
+				expect(parsed instanceof type.errors).toBe(false);
+				if (parsed instanceof type.errors) continue;
+				expect(parsed).toMatchObject(batchEnabled ? { tasks: [{ model }] } : { model });
 			}
 		}
 	});
@@ -173,7 +181,7 @@ Custom prompt.`,
 		expect(JSON.stringify(overridden.parameters.toJsonSchema())).not.toContain('"sourceSession"');
 	});
 
-	it("hides seance fields, listing, and guidance in plan mode", async () => {
+	it("hides historical seance fields and guidance but retains model overrides in plan mode", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [bundledSeance],
 			projectAgentsDir: null,
@@ -182,7 +190,7 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
-		expect(planSchema).not.toContain('"model"');
+		expect(planSchema).toContain('"model"');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 
@@ -219,19 +227,8 @@ describe("task spawn validation", () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
 	});
-	it("rejects a model override for an ordinary task after the enabled schema accepts it", async () => {
-		const schema = getTaskSchema({
-			isolationEnabled: false,
-			batchEnabled: false,
-			seanceFields: seanceTaskSchemaFields,
-		});
-		const params = {
-			agent: "scout",
-			task: "Map the auth module.",
-			solutionSpace: "focused inspection",
-			model: "anthropic/claude-sonnet-4-5",
-		};
-		expect(schema(params) instanceof type.errors).toBe(false);
-		expect(await executeText(params, [bundledSeance])).toContain("`model` is only accepted for the `seance` agent.");
+	it("keeps historical source sessions restricted to seance", async () => {
+		const text = await executeText({ task: "Implement the change.", sourceSession: "/sessions/source.jsonl" });
+		expect(text).toContain("`sourceSession` is only accepted for the `seance` agent.");
 	});
 });
