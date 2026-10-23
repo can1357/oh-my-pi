@@ -95,7 +95,7 @@ export const cfgAdvisorWipDelivery = register({
 		group: "Advisor",
 		label: "Advisor WIP Delivery",
 		description:
-			"How advisor nits and concerns raised while the agent is mid-run reach it. Aside delivers them at the agent's next step without interrupting; Defer holds them until the agent's final answer (legacy).",
+			"How advisor nits and concerns raised while the agent is mid-run reach it. Aside delivers them at the agent's next step without interrupting; Defer holds them until the agent's final answer (legacy). Changing this takes effect in the advisor's own guidance on its next session.",
 		options: [
 			{
 				value: "aside",

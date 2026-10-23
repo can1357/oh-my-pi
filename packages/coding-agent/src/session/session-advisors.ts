@@ -702,13 +702,14 @@ export class SessionAdvisors {
 				// Delivery never pauses: advice already produced against work the
 				// reviewers saw still reaches the primary during an advisor continuation.
 				for (const advisor of this.#advisors) advisor.adviseTool.flushDeferredNotes();
-				// A stale WIP aside (stamped with an earlier turn) left in the queue from
-				// a prior streaming step — the dispatcher is skipIdleFlush, so no idle
+				// A WIP aside (stamped with its review turn) left in the queue from a
+				// prior streaming step — the dispatcher is skipIdleFlush, so no idle
 				// flush drains it — would be shipped stampless by the loop's generic
 				// aside drain, and a stale nit would spuriously continue the run. Pull
-				// only those (not fresh, this-turn asides the loop still delivers in
-				// this run) into the boundary merge so they ship under continueSeverity
-				// with their original turn stamp.
+				// those into the boundary merge so they ship under continueSeverity with
+				// their original turn stamp. The predicate skips only untagged asides (no
+				// turn stamp); a stamped WIP aside's review turn is always earlier than
+				// this terminal turn, so every one is drained here.
 				for (const note of this.#host.yieldQueue.drain<AdvisorNote>(
 					"advisor",
 					n => n.turn !== undefined && n.turn < this.#advisorPrimaryTurnsCompleted,
