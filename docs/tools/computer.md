@@ -24,6 +24,7 @@ User setup, permissions, safety guidance, examples, and platform limitations: [S
 - The prelude is available only through enabled Eval runtimes; it is not an AgentTool.
 - The worker permits one active run; concurrent direct helpers/runs fail with `Computer worker is busy`. Capability inspection remains available during a run. The active Eval documentation and globals update with the current enabled state.
 - Unlike `browser`, this prelude can operate IDEs, terminals, native applications, browser windows, and system dialogs. It has no browser DOM or web ARIA surface; its accessibility methods use the host OS.
+- When enabled at session start, the computer guide is included in the Eval tool description before the first call. It also remains readable at `xd://eval/computer`. Enabling it mid-session announces that link instead, since the advertised description is frozen.
 
 ## Settings
 
