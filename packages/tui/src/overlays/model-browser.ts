@@ -1132,6 +1132,7 @@ export class ModelBrowser implements Component {
 
 	/** Replace the scope's base items; the live query re-applies and selection is pinned by selector. */
 	setItems(items: ModelBrowserItem[]): void {
+		for (const item of items) this.#noteCreditChange(item.model);
 		const selectedKey = this.getSelected()?.selector;
 		this.#menu.setItems(this.#insertSeparator(items), selectedKey);
 		this.onSelectionChange?.(this.getSelected());
@@ -1770,19 +1771,28 @@ export class ModelBrowser implements Component {
 
 	invalidate(): void {}
 
-	/** Called before a row of `model` is memoized: its credit rate changes at its next dated card. */
+	/** Called for every listed model and before a row is memoized: its credit rate changes at its next dated card. */
 	#noteCreditChange(model: Model): void {
 		const at = getFactoryDroidCreditRate(model)?.next?.at;
 		if (at !== undefined && at < this.#nextCreditChange) this.#nextCreditChange = at;
 	}
 
-	/** A dated credit rate took effect since rows were memoized: rebuild every memoized row. */
+	/**
+	 * A dated credit rate took effect since rows were memoized: rebuild every
+	 * memoized row, and re-rank the list, whose `free` search word follows the
+	 * rate too.
+	 */
 	#syncCreditClock(): void {
 		if (Date.now() < this.#nextCreditChange) return;
 		this.#nextCreditChange = Number.POSITIVE_INFINITY;
 		this.#metricCells = new WeakMap();
 		this.#pickerPreview = undefined;
 		this.#bumpPickerEpoch();
+		this.#ranker = undefined;
+		this.#menu.setItems(this.#menu.items);
+		for (const item of this.#menu.items) {
+			if (item.id !== "separator") this.#noteCreditChange(item.model);
+		}
 	}
 
 	#bumpNativeEpoch(): void {
