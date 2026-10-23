@@ -202,10 +202,26 @@ export function stripRawOutputArtifactNotice(text: string): { text: string; arti
 	return artifactId === undefined ? { text } : { text: stripped, artifactId };
 }
 
+/** The column-cap clause {@link formatOutputNotice} puts in a notice, alone or after other parts. */
+const COLUMN_TRUNCATION_CLAUSE = "Some lines truncated to ";
+
 /** Whether `line` is the column-cap notice {@link formatOutputNotice} emits (`[Some lines truncated to …]`). */
 export function isColumnTruncationNotice(line: string): boolean {
 	const trimmed = line.trim();
-	return trimmed.startsWith("[Some lines truncated to ") && trimmed.endsWith("]");
+	return trimmed.startsWith(`[${COLUMN_TRUNCATION_CLAUSE}`) && trimmed.endsWith("]");
+}
+
+/**
+ * Whether the bracketed notice `line` carries the column-cap clause: alone, or after the parts
+ * {@link formatOutputNotice} joins before it (`[Showing lines 1-4 of 5. … Some lines truncated to …]`).
+ */
+export function hasColumnTruncationClause(line: string): boolean {
+	const trimmed = line.trim();
+	if (!trimmed.endsWith("]")) return false;
+	return (
+		isColumnTruncationNotice(trimmed) ||
+		(trimmed.startsWith("[") && trimmed.includes(`. ${COLUMN_TRUNCATION_CLAUSE}`))
+	);
 }
 
 function isGeneratedOutputNoticeLine(line: string): boolean {
@@ -346,7 +362,7 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 		// notices always read "chars", so default missing units to it. Otherwise
 		// a resumed legacy session renders "… 768 undefined" and stripOutputNotice
 		// stops matching the persisted "… 768 chars" text.
-		let columnNotice = `Some lines truncated to ${c.maxColumn} ${c.unit ?? "chars"}`;
+		let columnNotice = `${COLUMN_TRUNCATION_CLAUSE}${c.maxColumn} ${c.unit ?? "chars"}`;
 		// An artifact cut to a head/tail sample renumbers its lines, so only a complete one names a line.
 		const selectorBase =
 			c.selectorBase ?? (c.artifactId != null && !c.artifactElidedBytes ? `artifact://${c.artifactId}` : undefined);

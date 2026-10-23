@@ -40,7 +40,7 @@ import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
-import { isColumnTruncationNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { hasColumnTruncationClause, isColumnTruncationNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { recoverConflictUriPrefix } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 
@@ -323,8 +323,9 @@ function assertNotShorterReadProjection(
 	const rawPayloadLength = readProjectionPayloadLength(rawContent);
 	if (rawPayloadLength === undefined || currentContent === undefined) return;
 	// A column-cap notice proves the page lossy at any length: a cut line ends in `…` in place of
-	// its tail, and a line one column past the cap renders exactly as long as its source.
-	const columnCut = isColumnTruncationNotice(lastContentLine(rawContent) ?? "");
+	// its tail, and a line one column past the cap renders exactly as long as its source. So does
+	// a truncation notice carrying the column clause, whose line-number prefixes pad the payload.
+	const columnCut = hasColumnTruncationClause(lastContentLine(rawContent) ?? "");
 	if (!columnCut) {
 		const payloadLength = writeContent === rawContent ? rawPayloadLength : lfNormalizedLength(writeContent);
 		if (payloadLength >= lfNormalizedLength(currentContent)) return;
