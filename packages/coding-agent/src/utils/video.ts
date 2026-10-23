@@ -78,7 +78,7 @@ export function parseVideoTimestamp(value: string): number | null {
 }
 
 /**
- * Split a trailing video selector off a raw read path (`clip.mp4:1h5m42s`).
+ * Split a trailing video selector (`clip.mp4:1h5m42s`) or `:transcript` off a raw read path.
  * Pure string split — the caller checks the base resolves to a video file so
  * real filenames containing colons keep precedence.
  */
@@ -89,7 +89,7 @@ export function splitVideoReadTarget(rawPath: string): { path: string; sel: stri
 	if (!match) return null;
 	const base = match[1]!;
 	const sel = match[2]!;
-	if (!isVideoPath(base) || parseVideoSelector(sel) === null) return null;
+	if (!isVideoPath(base) || (sel !== "transcript" && parseVideoSelector(sel) === null)) return null;
 	return { path: base, sel };
 }
 
