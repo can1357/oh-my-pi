@@ -841,6 +841,35 @@ describe("advisor tool-call loop guard", () => {
 		expect(session.yieldQueue.hasDeliverable("advisor")).toBe(false);
 	});
 
+	it("preserves a late WIP nit after the terminal boundary instead of starting an extra turn", async () => {
+		const { advisor } = createAdvisor({ "advisor.syncBacklog": "strict" }, 0);
+		if (!session) throw new Error("Expected live session");
+		const advise = advisor.state.tools.find(tool => tool.name === "advise");
+		if (!(advise instanceof AdviseTool)) throw new Error("Expected advise tool");
+
+		let raised = false;
+		// The core loop has completed its terminal-boundary callback but still
+		// reports streaming until the final aside poll. Simulate a delayed WIP
+		// review reaching advise in that gap.
+		session.agent.setOnBeforeYield(async () => {
+			if (raised) return;
+			raised = true;
+			advise.beginUpdate(true, 0);
+			await advise.execute("late-wip-nit", { note: "The earlier change needs a regression test.", severity: "nit" });
+		});
+
+		await session.prompt("make one update");
+		await session.waitForIdle();
+		expect(raised).toBe(true);
+		expect(session.agent.state.messages.filter(message => message.role === "assistant")).toHaveLength(1);
+		const cards = session.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "advisor",
+		);
+		expect(cards).toHaveLength(1);
+		expect(JSON.stringify(cards[0])).toContain("The earlier change needs a regression test.");
+		expect(session.yieldQueue.hasDeliverable("advisor")).toBe(false);
+	});
+
 	it("holds a final-review continuation during the post-interrupt cooldown", async () => {
 		// The boundary flush decides steering through the same delivery policy as
 		// live routing: inside the post-interrupt immune window a final-review

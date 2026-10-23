@@ -1876,15 +1876,14 @@ export class SessionAdvisors {
 			return;
 		}
 		// WIP aside (advisor.wipDelivery = aside): a mid-run non-blocker must reach
-		// the primary at its NEXT step without interrupting. While the loop is
-		// genuinely streaming — not aborting, not a preserved terminal yield — force
-		// it onto the non-interrupting aside queue regardless of severity and never
-		// arm the post-interrupt immune window (it did not interrupt). If the loop is
-		// no longer streaming (a terminal boundary opened between review start and
-		// this emission) fall through to the normal routing so the note is neither
-		// stranded nor wrongly steered.
+		// the primary at its NEXT step without interrupting. Only queue it while
+		// the loop is genuinely working — not during terminal unwind (the loop
+		// still reports streaming after the boundary callback closes), abort, or
+		// a preserved terminal yield. Late notes take the existing finished-run
+		// continuation policy below, not the loop's generic aside drain.
 		if (
 			opts?.wip &&
+			!this.#terminalUnwindActive &&
 			this.#host.agent.state.isStreaming &&
 			!this.#preserveTerminalYieldAdvice &&
 			!this.#host.abortInProgress()
