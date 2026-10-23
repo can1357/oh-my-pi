@@ -1020,6 +1020,16 @@ export function directPlacementLift(line: string): number {
 }
 
 /**
+ * Re-anchor an {@link Image} direct-placement line `lift` rows above its own
+ * row instead of its encoded `CUU(rows-1)`. The renderer lowers the lift when
+ * the block's top is clipped by the frame: the cursor-up would otherwise climb
+ * past the frame's first row into whatever the terminal shows above it.
+ */
+export function withDirectPlacementLift(line: string, lift: number): string {
+	return line.replace(DIRECT_PLACEMENT_LIFT, lift > 0 ? `\x1b7\x1b[${lift}A` : "\x1b7");
+}
+
+/**
  * Rebuild an {@link Image} direct-placement line for the viewport row it is
  * written at. The component-rendered line encodes `CUU(rows-1)`, which clamps
  * at the viewport top once the block's leading rows have scrolled out — the
