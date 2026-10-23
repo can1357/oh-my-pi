@@ -1,5 +1,6 @@
 import type { PlanGate, UsageReport } from "../usage";
-import type { AuthCredential, ApiKeyCredential, OAuthCredential } from "./types";
+import type { AuthCredential, ApiKeyCredential, OAuthCredential, UsageFundingTier } from "./types";
+import { fundingTierRank } from "./usage-report";
 
 /** Selected stored credential and its pool index. */
 export type CredentialSelection<T extends AuthCredential> = {
@@ -21,7 +22,12 @@ export type UsageCandidate<T extends AuthCredential> = {
 	/** True only when reserve ranking had a usable remaining-fraction measurement. */
 	reserveMeasured?: boolean;
 	/**
-	 * Present after ranking: the account's renewable allowance for this request is
+	 * Present after funding-aware ranking: whether plan allowance, paid extra
+	 * usage, or neither can fund this request.
+	 */
+	fundingTier?: UsageFundingTier;
+	/**
+	 * Present after policy-aware ranking: the account's renewable allowance for this request is
 	 * spent, so if it still serves it draws on paid overage such as Codex credits.
 	 */
 	allowanceSpent?: boolean;
@@ -48,6 +54,7 @@ export type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> &
 	reserveMeasured?: boolean;
 	accountPriority: number;
 	hasPriorityBoost: boolean;
+	fundingTier?: UsageFundingTier;
 	allowanceSpent: boolean;
 	usageMeasured: boolean;
 	planPriority: number;
@@ -100,9 +107,16 @@ function compareUsageRankedCandidatePriority(
 	if (planGated && left.planPriority !== right.planPriority) {
 		return left.planPriority - right.planPriority;
 	}
-	// Paid overage (Codex credits) never renews, so an account serving past its
-	// allowance yields to any sibling whose renewable allowance is left (#13889).
-	if (left.allowanceSpent !== right.allowanceSpent) return left.allowanceSpent ? 1 : -1;
+	const leftFundingTier = fundingTierRank(left.fundingTier);
+	const rightFundingTier = fundingTierRank(right.fundingTier);
+	if (leftFundingTier !== rightFundingTier) return leftFundingTier - rightFundingTier;
+	const samePaidTier =
+		(left.fundingTier === "extra" || left.fundingTier === "extra-past-floor") &&
+		left.fundingTier === right.fundingTier;
+	if (samePaidTier) {
+		if (left.accountPriority !== right.accountPriority) return right.accountPriority - left.accountPriority;
+		return 0;
+	}
 	if (left.inReserve !== right.inReserve) return left.inReserve ? 1 : -1;
 	if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
 	// Short-window guard: candidates whose primary (e.g. 5h) window is
@@ -143,7 +157,7 @@ function compareUsageRankedCandidates(
 	return priority !== 0 ? priority : left.orderPos - right.orderPos;
 }
 
-/** Sort ranked candidates by blocks, plan, spent allowance, reserve, boost, hot window, usage and drain. */
+/** Sort ranked candidates by blocks, plan, funding tier, reserve, boost, hot window, usage and drain. */
 export function orderUsageRankedCandidates<T extends AuthCredential>(
 	candidates: UsageRankedCandidate<T>[],
 	planGated: boolean,
@@ -155,6 +169,7 @@ export function orderUsageRankedCandidates<T extends AuthCredential>(
 		usageChecked: candidate.usageChecked,
 		inReserve: candidate.inReserve,
 		reserveMeasured: candidate.reserveMeasured,
+		fundingTier: candidate.fundingTier,
 		allowanceSpent: candidate.allowanceSpent,
 		accountPriority: candidate.accountPriority,
 		reclaimReady: candidate.reclaimReady,

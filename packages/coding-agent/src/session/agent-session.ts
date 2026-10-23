@@ -64,6 +64,7 @@ import type {
 	Message,
 	MessageAttribution,
 	Model,
+	ModelUsageHealth,
 	OAuthAccountIdentity,
 	ProviderResponseMetadata,
 	ProviderSessionState,
@@ -87,6 +88,7 @@ import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-pre
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
 import { requiresNativeTools, requiresToolFreeHistoryForToolOptOut } from "@oh-my-pi/pi-catalog/compat/tools";
@@ -120,6 +122,7 @@ import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { SessionAccountPoolScope } from "../config/account-pools";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
+import type { ApiKeyResolverOptions } from "../config/api-key-resolver";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
@@ -466,7 +469,7 @@ import { resolveOpenAIWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
-import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
+import { priorityOrderedSavedResetAccounts, TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -514,15 +517,17 @@ import {
 	cfgProvidersCacheWarming,
 	cfgProvidersCacheRetention,
 	cfgProvidersAntigravityEndpoint,
+	cfgProvidersAnthropicSlowMode,
+	cfgRetryAccountOrder,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
+	cfgRetryUsageReservePct,
 	cfgSampling,
 	cfgSkillful,
 	cfgTierAdvisor,
 	cfgTierAnthropic,
 	cfgTierGoogle,
 	cfgTierOpenai,
-	cfgProvidersAnthropicSlowMode,
 	type ResetAutoRedeemMode,
 } from "./settings";
 import { type AnthropicSlowModeController, anthropicSlowModeLanes, formatUsageLimitLabel } from "./anthropic-slow-mode";
@@ -2004,7 +2009,9 @@ export class AgentSession implements SettingsScope {
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
-			maybeAutoRedeemReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemReset(activeBlockUnblockAtMs),
+			maybeAutoRedeemReset: activeBlockUnblockAtMs =>
+				this.#maybeAutoRedeemReset({ trigger: "blocked", activeBlockUnblockAtMs }),
+			redeemSavedReset: options => this.#redeemSavedReset(options),
 			runAutoCompaction: (reason, willRetry, options) =>
 				this.#maintenance.runAutoCompaction(reason, willRetry, options),
 			shakeForRequestBodyReadTimeout: generation => this.#maintenance.shakeForRequestBodyReadTimeout(generation),
@@ -2018,7 +2025,7 @@ export class AgentSession implements SettingsScope {
 		});
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (
-				!cfgRetryUsageAwareFallback.get(this.settings) ||
+				(!cfgRetryUsageAwareFallback.get(this.settings) && cfgRetryAccountOrder.get(this.settings) !== "tiered") ||
 				(this.#usagePreflightReadyForNextModelCall && this.#usagePreflightReadyModel === this.model)
 			) {
 				return;
@@ -2030,7 +2037,9 @@ export class AgentSession implements SettingsScope {
 		});
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
-			if (!cfgRetryUsageAwareFallback.get(this.settings)) return;
+			if (!cfgRetryUsageAwareFallback.get(this.settings) && cfgRetryAccountOrder.get(this.settings) !== "tiered") {
+				return;
+			}
 			if (this.#usagePreflightReadyForNextModelCall) {
 				const checkedModel = this.#usagePreflightReadyModel;
 				this.#usagePreflightReadyForNextModelCall = false;
@@ -6373,6 +6382,28 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
+	 * Per-request auth routing for the active session. Tiered account order
+	 * carries the paid-usage allowance into selection and can redeem a saved
+	 * reset before auth retry rotates to a sibling.
+	 */
+	apiKeyResolverOptions(model: Model): Pick<ApiKeyResolverOptions, "extraUsage" | "beforeRotate"> {
+		const extraUsage = this.#recovery.extraUsageAllowanceFor(model);
+		if (
+			cfgRetryAccountOrder.get(this.settings) !== "tiered" ||
+			(model.provider !== "anthropic" && model.provider !== "openai-codex")
+		) {
+			return { extraUsage };
+		}
+		const resetConfig =
+			model.provider === "anthropic" ? cfgClaudeResets.get(this.settings) : cfgCodexResets.get(this.settings);
+		if (resetConfig.autoRedeem === "no") return { extraUsage };
+		return {
+			extraUsage,
+			beforeRotate: (error, signal) => this.#redeemSavedResetBeforeRotation(model, error, signal),
+		};
+	}
+
+	/**
 	 * On the first successful response from a lazy-load local model, re-probe its
 	 * runtime context window and fold the result into the live session model.
 	 *
@@ -8412,9 +8443,19 @@ export class AgentSession implements SettingsScope {
 				);
 			}
 
-			// Validate API key
-			const apiKey = await this.#modelRegistry.getApiKey(this.model, this.sessionId);
-			if (!apiKey) {
+			// Validate API key. A paid-usage floor hold is a usage limit, not a missing
+			// credential: dispatch, so the request resolver raises it and the retry layer
+			// walks retry.fallbackChains (or a terminal model applies retry.extraUsageBelowFloor).
+			let hasCredential: boolean;
+			try {
+				hasCredential = Boolean(
+					await this.#modelRegistry.getApiKey(this.model, this.sessionId, { rejectWithheld: true }),
+				);
+			} catch (error) {
+				if (!(error instanceof AIError.ExtraUsageWithheldError)) throw error;
+				hasCredential = true;
+			}
+			if (!hasCredential) {
 				throw new Error(
 					`No API key found for ${this.model.provider}.\n\n` +
 						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
@@ -13742,6 +13783,7 @@ export class AgentSession implements SettingsScope {
 		identity: OAuthAccountIdentity | undefined,
 		coordinator: CodexAutoRedeemCoordinator,
 		activeBlockUnblockAtMs?: number,
+		targetCredentialId?: number,
 	): CodexResetPlan {
 		const cfg = cfgCodexResets.get(this.settings);
 		const model = this.model;
@@ -13752,6 +13794,7 @@ export class AgentSession implements SettingsScope {
 			modelId: model?.id ?? "",
 			settings: resetPlanSettings(cfg),
 			identity,
+			targetCredentialId,
 			permitsCredential: credentialId =>
 				this.#modelRegistry.authStorage.sessions.permits("openai-codex", this.sessionId, credentialId),
 			reports,
@@ -13772,6 +13815,7 @@ export class AgentSession implements SettingsScope {
 		statuses: readonly ResetCreditAccountStatus[],
 		coordinator: CodexAutoRedeemCoordinator,
 		activeBlockUnblockAtMs?: number,
+		targetCredentialId?: number,
 	): ClaudeResetPlan {
 		const cfg = cfgClaudeResets.get(this.settings);
 		const model = this.model;
@@ -13783,6 +13827,7 @@ export class AgentSession implements SettingsScope {
 			settings: resetPlanSettings(cfg),
 			reports,
 			statuses,
+			targetCredentialId,
 			permitsCredential: credentialId =>
 				this.#modelRegistry.authStorage.sessions.permits("anthropic", this.sessionId, credentialId),
 			attemptedKeys: coordinator.attemptedKeys,
@@ -13812,9 +13857,11 @@ export class AgentSession implements SettingsScope {
 	async #adoptRecentReset(
 		statuses: readonly ResetCreditAccountStatus[],
 		coordinator: CodexAutoRedeemCoordinator,
+		targetCredentialId?: number,
 	): Promise<number | undefined> {
 		for (const status of statuses) {
 			if (status.provider !== this.model?.provider) continue;
+			if (targetCredentialId !== undefined && status.credentialId !== targetCredentialId) continue;
 			// A peer's reset of an account outside the session's pool cannot serve its retry.
 			if (!this.#modelRegistry.authStorage.sessions.permits(status.provider, this.sessionId, status.credentialId)) {
 				continue;
@@ -13998,73 +14045,213 @@ export class AgentSession implements SettingsScope {
 		return { restoredCredentialIds: restored, poolLimited };
 	}
 
-	async #maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult> {
+	async #redeemSavedReset(options: {
+		provider: "anthropic" | "openai-codex";
+		credentialId: number;
+		signal?: AbortSignal;
+	}): Promise<boolean> {
+		if (this.model?.provider !== options.provider) return false;
+		const result = await this.#maybeAutoRedeemReset({
+			trigger: "allowance-spent",
+			targetCredentialId: options.credentialId,
+			signal: options.signal,
+		});
+		return result.restoredCredentialIds?.includes(options.credentialId) === true;
+	}
+
+	async #redeemSavedResetBeforeRotation(model: Model, error: unknown, signal?: AbortSignal): Promise<boolean> {
+		if (!this.model || !modelsAreEqual(this.model, model)) return false;
+		if (
+			cfgRetryAccountOrder.get(this.settings) !== "tiered" ||
+			(model.provider !== "anthropic" && model.provider !== "openai-codex")
+		) {
+			return false;
+		}
+		const resetConfig =
+			model.provider === "anthropic" ? cfgClaudeResets.get(this.settings) : cfgCodexResets.get(this.settings);
+		if (resetConfig.autoRedeem === "no") return false;
+		let health: ModelUsageHealth;
+		try {
+			health = await this.#modelRegistry.authStorage.health.model(model.provider, {
+				modelId: model.id,
+				sessionId: this.sessionId,
+				baseUrl: model.baseUrl,
+				reserveFraction: cfgRetryUsageReservePct.get(this.settings) / 100,
+				extraUsage: this.#recovery.extraUsageAllowanceFor(model),
+				signal,
+			});
+		} catch {
+			return false;
+		}
+		if (signal?.aborted) return false;
+		const selected = health.accounts.find(account => account.selected);
+		if (!selected || (selected.savedResets ?? 0) < 1) return false;
+		const errorMessage = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+		const retryAfterMs = extractProviderRetryHint(model.provider, errorMessage);
+		const result = await this.#maybeAutoRedeemReset({
+			trigger: "blocked",
+			targetCredentialId: selected.credentialId,
+			activeBlockUnblockAtMs: retryAfterMs === undefined ? undefined : Date.now() + retryAfterMs,
+			signal,
+		});
+		return result.restoredCredentialIds?.includes(selected.credentialId) === true;
+	}
+
+	async #maybeAutoRedeemReset(options: {
+		trigger: CodexResetTrigger;
+		targetCredentialId?: number;
+		activeBlockUnblockAtMs?: number;
+		signal?: AbortSignal;
+	}): Promise<ResetRecoveryResult> {
 		const provider = this.model?.provider;
 		if (provider !== "anthropic" && provider !== "openai-codex") return { restored: false };
 		const cfg = (provider === "anthropic" ? cfgClaudeResets : cfgCodexResets).get(this.settings);
 		if (!shouldEvaluateCodexAutoRedeem(cfg.autoRedeem)) return { restored: false };
 		const coordinator = this.#resetCoordinator;
 		const authStorage = this.#modelRegistry.authStorage;
-		const identity = authStorage.oauth.identity(provider, this.sessionId);
+		const accounts = authStorage.oauth.accounts(provider, this.sessionId);
+		const targetAccount =
+			options.targetCredentialId === undefined
+				? undefined
+				: accounts.find(account => account.credentialId === options.targetCredentialId);
+		if (options.targetCredentialId !== undefined && !targetAccount) return { restored: false };
+		const identity =
+			targetAccount === undefined
+				? authStorage.oauth.identity(provider, this.sessionId)
+				: {
+						accountId: targetAccount.accountId,
+						email: targetAccount.email,
+						projectId: targetAccount.projectId,
+						orgId: targetAccount.orgId,
+						orgName: targetAccount.orgName,
+					};
 		const identityValue = (identity?.accountId ?? identity?.email ?? identity?.orgId)?.trim().toLowerCase();
 		if (!identityValue) return { restored: false };
 		const accountKey = `${provider}|${identity?.orgId?.trim().toLowerCase() ?? "-"}|${identityValue}`;
+		const plannerAccountKey = targetAccount
+			? `${provider}|${targetAccount.orgId?.trim().toLowerCase() ?? "-"}|${targetAccount.credentialId}`
+			: undefined;
+		const nowMs = Date.now();
+		if (plannerAccountKey) {
+			const lastAttemptAt = coordinator.lastAttemptAtByAccount.get(plannerAccountKey);
+			if (lastAttemptAt !== undefined && nowMs - lastAttemptAt < ATTEMPT_COOLDOWN_MS) return { restored: false };
+			const deferred = [...coordinator.deferredUntilByKey].some(
+				([key, until]) => until > nowMs && key.startsWith(`block|${plannerAccountKey}|`),
+			);
+			if (deferred) return { restored: false };
+		}
 		// A pass plans within its own session's account pool. A session joining it
 		// keeps its outcome only if the pass restored an account this session may
 		// use, or restored nothing without its pool excluding a candidate.
 		let existing = coordinator.inFlightByAccount.get(accountKey);
 		while (existing) {
 			const shared = await existing;
-			const serves = shared.restored
-				? shared.restoredCredentialIds?.some(id => authStorage.sessions.permits(provider, this.sessionId, id))
-				: !shared.poolLimited;
+			const serves =
+				options.targetCredentialId === undefined
+					? shared.restored
+						? shared.restoredCredentialIds?.some(id => authStorage.sessions.permits(provider, this.sessionId, id))
+						: !shared.poolLimited
+					: shared.restoredCredentialIds?.includes(options.targetCredentialId) === true;
 			if (serves) return shared;
 			existing = coordinator.inFlightByAccount.get(accountKey);
 		}
 
 		const run = (async (): Promise<ResetRecoveryResult> => {
+			options.signal?.throwIfAborted();
 			let reports: UsageReport[] | null = null;
 			if (provider === "openai-codex") {
 				await authStorage.usage.invalidate(provider);
 				reports = await this.fetchUsageReports();
 			}
+			options.signal?.throwIfAborted();
 			// Claude's live reset listing includes the same response's quota
 			// windows; a second broker usage poll adds no evidence and can 429.
-			const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), provider);
-			const plan =
-				provider === "anthropic"
-					? this.#planClaudeResets("blocked", reports, statuses, coordinator, activeBlockUnblockAtMs)
-					: this.#planCodexResets(
-							"blocked",
-							overlayLiveResetCredits(reports, statuses, { synthesizeActive: true, nowMs: Date.now() }),
-							identity,
-							coordinator,
-							activeBlockUnblockAtMs,
-						);
-			const poolLimited = plan.skipped.some(skip => skip.reason === "outside-account-pool");
-			if (plan.actions.length === 0) {
-				const adoptedId = await this.#adoptRecentReset(statuses, coordinator);
-				if (adoptedId !== undefined) return { restored: true, restoredCredentialIds: [adoptedId] };
-				let retryAfterMs: number | undefined;
-				if (provider === "anthropic" && cfg.autoRedeem === "yes") {
-					for (const status of statuses) {
-						if (!status.error || status.retryAfterMs === undefined || !Number.isFinite(status.retryAfterMs))
-							continue;
-						const delay = Math.max(0, status.retryAfterMs);
-						retryAfterMs = retryAfterMs === undefined ? delay : Math.min(retryAfterMs, delay);
+			const statuses = await this.listResetCredits(options.signal ?? AbortSignal.timeout(10_000), provider);
+			const effectiveReports =
+				provider === "openai-codex"
+					? overlayLiveResetCredits(reports, statuses, { synthesizeActive: true, nowMs: Date.now() })
+					: reports;
+			const orderedTieredBlockedBackstop =
+				cfgRetryAccountOrder.get(this.settings) === "tiered" &&
+				options.trigger === "blocked" &&
+				options.targetCredentialId === undefined;
+			const activeCredentialId = accounts.find(account => account.active)?.credentialId;
+			const recoverTarget = async (targetCredentialId: number | undefined): Promise<ResetRecoveryResult> => {
+				const activeBlockUnblockAtMs =
+					!orderedTieredBlockedBackstop || targetCredentialId === activeCredentialId
+						? options.activeBlockUnblockAtMs
+						: undefined;
+				const plan =
+					provider === "anthropic"
+						? this.#planClaudeResets(
+								options.trigger,
+								effectiveReports,
+								statuses,
+								coordinator,
+								activeBlockUnblockAtMs,
+								targetCredentialId,
+							)
+						: this.#planCodexResets(
+								options.trigger,
+								effectiveReports,
+								identity,
+								coordinator,
+								activeBlockUnblockAtMs,
+								targetCredentialId,
+							);
+				const poolLimited = plan.skipped.some(skip => skip.reason === "outside-account-pool");
+				if (plan.actions.length === 0) {
+					const adoptedId = await this.#adoptRecentReset(statuses, coordinator, targetCredentialId);
+					if (adoptedId !== undefined) return { restored: true, restoredCredentialIds: [adoptedId] };
+					if (targetCredentialId === options.targetCredentialId && plannerAccountKey) {
+						coordinator.lastAttemptAtByAccount.set(plannerAccountKey, Date.now());
 					}
+					let retryAfterMs: number | undefined;
+					if (provider === "anthropic" && cfg.autoRedeem === "yes") {
+						for (const status of statuses) {
+							if (targetCredentialId !== undefined && status.credentialId !== targetCredentialId) {
+								continue;
+							}
+							if (!status.error || status.retryAfterMs === undefined || !Number.isFinite(status.retryAfterMs)) {
+								continue;
+							}
+							const delay = Math.max(0, status.retryAfterMs);
+							retryAfterMs = retryAfterMs === undefined ? delay : Math.min(retryAfterMs, delay);
+						}
+					}
+					return { restored: false, retryAfterMs, poolLimited };
 				}
-				return { restored: false, retryAfterMs, poolLimited };
-			}
-			const executed = await this.#redeemConsentedResets(provider, cfg.autoRedeem, plan.actions, coordinator);
-			return {
-				restored: executed.restoredCredentialIds.length > 0,
-				restoredCredentialIds: executed.restoredCredentialIds,
-				poolLimited: poolLimited || executed.poolLimited,
+				const executed = await this.#redeemConsentedResets(provider, cfg.autoRedeem, plan.actions, coordinator);
+				const restoredCredentialIds =
+					targetCredentialId === undefined
+						? executed.restoredCredentialIds
+						: executed.restoredCredentialIds.filter(id => id === targetCredentialId);
+				return {
+					restored: restoredCredentialIds.length > 0,
+					restoredCredentialIds,
+					poolLimited: poolLimited || executed.poolLimited,
+				};
 			};
+			if (!orderedTieredBlockedBackstop) return recoverTarget(options.targetCredentialId);
+
+			let poolLimited = false;
+			for (const account of priorityOrderedSavedResetAccounts(authStorage, provider, this.sessionId)) {
+				if (!authStorage.sessions.permits(provider, this.sessionId, account.credentialId)) continue;
+				const result = await recoverTarget(account.credentialId);
+				poolLimited ||= result.poolLimited === true;
+				if (result.restored || result.retryAfterMs !== undefined) {
+					return { ...result, poolLimited };
+				}
+			}
+			return { restored: false, poolLimited };
 		})()
 			.catch((error): ResetRecoveryResult => {
-				logger.warn("auto-reset: blocked pass failed", { provider, account: accountKey, error: String(error) });
+				logger.warn("auto-reset pass failed", {
+					provider,
+					trigger: options.trigger,
+					account: accountKey,
+					error: String(error),
+				});
 				return { restored: false };
 			})
 			.finally(() => coordinator.inFlightByAccount.delete(accountKey));

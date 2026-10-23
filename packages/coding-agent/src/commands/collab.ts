@@ -1,12 +1,24 @@
 /**
  * Discover local Collab hosts and retrieve a link on explicit request.
  */
-import { Args, CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { Args, type CliConfig, CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { runCollabLinkCommand, runCollabListCommand } from "../cli/collab-cli";
 import { collabHelp as commandHelp } from "../cli/command-help";
-import { CollabLinkError } from "../collab/registry";
+import { type CollabListOptions, CollabLinkError } from "../collab/registry";
+
+export interface CollabCommandRuntime {
+	registry?: CollabListOptions;
+	print?: (line: string) => void;
+}
 
 export default class Collab extends Command {
+	#runtime: CollabCommandRuntime | undefined;
+
+	constructor(argv: string[], config: CliConfig, runtime?: CollabCommandRuntime) {
+		super(argv, config);
+		this.#runtime = runtime;
+	}
+
 	static description = commandHelp.description;
 
 	static args = {
@@ -39,7 +51,7 @@ export default class Collab extends Command {
 			if (argv.length > 1 || flags.view) {
 				throw new CliUsageError("collab list accepts no selector or --view (usage: collab list [--json])");
 			}
-			await runCollabListCommand({ json: flags.json });
+			await runCollabListCommand({ json: flags.json, registry: this.#runtime?.registry }, this.#runtime?.print);
 			return;
 		}
 
@@ -49,7 +61,10 @@ export default class Collab extends Command {
 			);
 		}
 		try {
-			await runCollabLinkCommand({ selector: args.selector, view: flags.view, json: flags.json });
+			await runCollabLinkCommand(
+				{ selector: args.selector, view: flags.view, json: flags.json, registry: this.#runtime?.registry },
+				this.#runtime?.print,
+			);
 		} catch (error) {
 			if (!(error instanceof CollabLinkError)) throw error;
 			process.stderr.write(`error: ${error.message}\n`);

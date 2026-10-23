@@ -127,7 +127,9 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 				key !== "account" &&
 				key !== "priority" &&
 				key !== "reservePct" &&
-				key !== "reclaimAbovePct",
+				key !== "reclaimAbovePct" &&
+				key !== "extraUsageFloor" &&
+				key !== "extraUsageBudget",
 		);
 		if (unknownPolicyFields.length > 0) {
 			throw new AIError.ConfigurationError(`${path} has unknown fields: ${unknownPolicyFields.join(", ")}`);
@@ -182,6 +184,12 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 		) {
 			throw new AIError.ConfigurationError(`${path}.reclaimAbovePct must be a finite number`);
 		}
+		for (const field of ["extraUsageFloor", "extraUsageBudget"] as const) {
+			const value = policy[field];
+			if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
+				throw new AIError.ConfigurationError(`${path}.${field} must be a finite number greater than or equal to 0`);
+			}
+		}
 
 		return {
 			provider,
@@ -194,6 +202,8 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 			...(typeof policy.priority === "number" ? { priority: policy.priority } : {}),
 			...(typeof policy.reservePct === "number" ? { reservePct: policy.reservePct } : {}),
 			...(typeof policy.reclaimAbovePct === "number" ? { reclaimAbovePct: policy.reclaimAbovePct } : {}),
+			...(typeof policy.extraUsageFloor === "number" ? { extraUsageFloor: policy.extraUsageFloor } : {}),
+			...(typeof policy.extraUsageBudget === "number" ? { extraUsageBudget: policy.extraUsageBudget } : {}),
 		};
 	});
 }

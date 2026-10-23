@@ -1,7 +1,17 @@
-import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import type { PaidUsageView, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { cfgRetryExtraUsageBelowFloor } from "../../session/settings";
+import {
+	collapseSharedUsageReports,
+	formatPaidUsageCaveat,
+	formatPaidUsageLine,
+	pairPaidUsage,
+	paidUsageLimit,
+	paidUsageLineText,
+	planUsageLimits,
+	summarizeUsageResetCredits,
+} from "@oh-my-pi/pi-tui/overlays/usage-display";
 import type { SlashCommandRuntime } from "../types";
 import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
@@ -29,7 +39,7 @@ function formatUsageAmount(limit: UsageLimit): string {
 function formatUsageReportAccount(
 	report: UsageReport,
 	peers: readonly UsageReport[],
-	limit: UsageLimit,
+	limit: UsageLimit | undefined,
 	index: number,
 ): string {
 	const codex = report.provider === "openai-codex";
@@ -44,20 +54,30 @@ function formatUsageReportAccount(
 	if (typeof email === "string" && email) return label(email, true);
 	// Empty metadata must not hide a valid scoped identity.
 	const metaAccountId = report.metadata?.accountId;
-	const accountId = typeof metaAccountId === "string" && metaAccountId ? metaAccountId : limit.scope.accountId;
+	const accountId = typeof metaAccountId === "string" && metaAccountId ? metaAccountId : limit?.scope.accountId;
 	if (typeof accountId === "string" && accountId) return label(accountId, true);
 	const metaProjectId = report.metadata?.projectId;
-	const projectId = typeof metaProjectId === "string" && metaProjectId ? metaProjectId : limit.scope.projectId;
+	const projectId = typeof metaProjectId === "string" && metaProjectId ? metaProjectId : limit?.scope.projectId;
 	return label(typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`, false);
 }
 
-function renderUsageReports(
+/**
+ * The `/usage` text ACP clients show. `paidUsage` is index-aligned with
+ * `reports`: each account's paid row leaves the limit list for a `Paid usage`
+ * block under its provider; without views the text is exactly the plan list.
+ * `extraUsageBelowFloor` is `retry.extraUsageBelowFloor`, which the block's
+ * caveat mentions.
+ */
+export function renderAcpUsageReports(
 	reports: UsageReport[],
 	nowMs: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
 	usageModelSelectors: readonly string[] = [],
+	paidUsage: readonly (PaidUsageView | undefined)[] = [],
+	extraUsageBelowFloor = false,
 ): string {
 	const displayReports = collapseSharedUsageReports(reports);
+	const paidByReport = pairPaidUsage(displayReports, paidUsage);
 	const latestFetchedAt = Math.max(...displayReports.map(report => report.fetchedAt ?? 0));
 	const lines = [`Usage${latestFetchedAt ? ` (${formatCoarseDuration(nowMs - latestFetchedAt)} ago)` : ""}`];
 	const grouped = new Map<string, UsageReport[]>();
@@ -123,15 +143,16 @@ function renderUsageReports(
 					lines.push(`  unavailable: ${reason}`);
 				}
 			}
-			if (report.limits.length === 0) {
+			const limits = planUsageLimits(report, paidByReport.get(report));
+			if (limits.length === 0) {
 				const email = typeof report.metadata?.email === "string" ? report.metadata.email : "account";
 				const label =
 					report.provider === "openai-codex" ? formatCodexUsageReportLabel(report, providerReports, email) : email;
 				lines.push(`- ${label}: no limits reported`);
 				continue;
 			}
-			for (let index = 0; index < report.limits.length; index++) {
-				const limit = report.limits[index]!;
+			for (let index = 0; index < limits.length; index++) {
+				const limit = limits[index]!;
 				const window = limit.window?.label ?? limit.scope.windowId;
 				// Skip the tier suffix when the label already names it (e.g. Anthropic's
 				// "Claude 7 Day (Fable)" with scope.tier "fable") — mirrors limitTitle in usage-cli.
@@ -155,6 +176,23 @@ function renderUsageReports(
 					);
 			}
 		}
+		// Paid extra usage, once any account of this provider reports it: every
+		// account gets a line, so one that reports nothing still says so.
+		const views = providerReports.map(report => paidByReport.get(report));
+		if (views.some(view => view !== undefined)) {
+			lines.push("- Paid usage", `  ${formatPaidUsageCaveat(extraUsageBelowFloor)}`);
+			providerReports.forEach((report, index) => {
+				const view = views[index];
+				const account = formatUsageReportAccount(
+					report,
+					providerReports,
+					paidUsageLimit(report, view) ?? report.limits[0],
+					index,
+				);
+				const inUse = reportMatchesActiveAccount(report, activeAccount) ? "  ← in use by this session" : "";
+				lines.push(`  ${account}: ${paidUsageLineText(formatPaidUsageLine(view, nowMs))}${inUse}`);
+			});
+		}
 	}
 	return ["```", ...lines, "```"].join("\n");
 }
@@ -173,15 +211,18 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 		const reports = await provider.fetchUsageReports();
 		if (reports && reports.length > 0) {
 			const currentProvider = runtime.session.model?.provider;
+			const authStorage = runtime.session.modelRegistry.authStorage;
 			const activeAccount = currentProvider
-				? runtime.session.modelRegistry.authStorage.oauth.identity(currentProvider, runtime.session.sessionId)
+				? authStorage.oauth.identity(currentProvider, runtime.session.sessionId)
 				: undefined;
 			const usageModelSelectors = provider.getUsageReportingModelSelectors?.(reports) ?? [];
-			return renderUsageReports(
+			return renderAcpUsageReports(
 				reports,
 				Date.now(),
 				providerId => (providerId === currentProvider ? activeAccount : undefined),
 				usageModelSelectors,
+				authStorage.usage.paidUsage(reports),
+				cfgRetryExtraUsageBelowFloor.get(runtime.settings),
 			);
 		}
 	}

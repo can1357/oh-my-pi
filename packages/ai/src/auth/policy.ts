@@ -108,12 +108,20 @@ export class AccountPolicies {
 					);
 				}
 			}
+			for (const field of ["extraUsageFloor", "extraUsageBudget"] as const) {
+				const value = policy[field];
+				if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+					throw new AIError.ConfigurationError(
+						`${path}.${field} must be a finite number greater than or equal to 0`,
+					);
+				}
+			}
 		}
 	}
 
 	validateUsageCapability(provider: string, canFetchUsage: boolean): void {
 		if (canFetchUsage) return;
-		for (const field of ["reservePct", "reclaimAbovePct"] as const) {
+		for (const field of ["reservePct", "reclaimAbovePct", "extraUsageFloor", "extraUsageBudget"] as const) {
 			const policyIndex = this.#accountPolicies.findIndex(
 				policy => policy.provider === provider && policy[field] !== undefined,
 			);

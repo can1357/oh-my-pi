@@ -11,6 +11,7 @@ import type {
 	AssistantRetryRecoveryKind,
 	CodexCompactionContext,
 	Effort,
+	ExtraUsageAllowance,
 	Model,
 	ModelUsageHealth,
 	TextContent,
@@ -45,6 +46,7 @@ import {
 } from "@oh-my-pi/pi-tui/thinking";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { AgentSessionEvent } from "./agent-session-events";
+import type { AuthStorage, OAuthAccountSummary } from "./auth-storage";
 import type { ResetRecoveryResult } from "./codex-auto-reset";
 import type {
 	InitialRetryFallbackState,
@@ -79,10 +81,14 @@ import { journalJudgmentUsage } from "../judgment";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 
 import {
+	cfgClaudeResets,
+	cfgCodexResets,
 	cfgFeaturesUnexpectedStopDetection,
 	cfgModelLoopGuardEnabled,
 	cfgRetry,
+	cfgRetryAccountOrder,
 	cfgRetryEnabled,
+	cfgRetryExtraUsageBelowFloor,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
 	cfgRetryUsageReservePct,
@@ -125,6 +131,22 @@ const GENERIC_ABORT_MESSAGES: Record<string, true> = {
 	"The operation was aborted": true,
 	"The operation was aborted.": true,
 };
+
+export function priorityOrderedSavedResetAccounts(
+	authStorage: AuthStorage,
+	provider: string,
+	sessionId: string | undefined,
+): OAuthAccountSummary[] {
+	return authStorage.oauth.accounts(provider, sessionId).toSorted((left, right) => {
+		const leftPolicyPriority = authStorage.oauth.policy(provider, left)?.priority;
+		const rightPolicyPriority = authStorage.oauth.policy(provider, right)?.priority;
+		const leftPriority =
+			typeof leftPolicyPriority === "number" && Number.isFinite(leftPolicyPriority) ? leftPolicyPriority : 0;
+		const rightPriority =
+			typeof rightPolicyPriority === "number" && Number.isFinite(rightPolicyPriority) ? rightPolicyPriority : 0;
+		return rightPriority - leftPriority || left.position - right.position;
+	});
+}
 
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
@@ -279,6 +301,12 @@ export interface TurnRecoveryHost {
 	 * usage-limit error and never substitutes for live grant eligibility.
 	 */
 	maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult>;
+	/** Redeem a saved reset for one exact credential before it rotates to a sibling. */
+	redeemSavedReset(options: {
+		provider: "anthropic" | "openai-codex";
+		credentialId: number;
+		signal?: AbortSignal;
+	}): Promise<boolean>;
 	runAutoCompaction(
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
 		willRetry: boolean,
@@ -782,6 +810,7 @@ export class TurnRecovery {
 	 */
 	async recordUsageLimitOutcome(message: AssistantMessage): Promise<boolean> {
 		if (message.stopReason !== "error") return false;
+		if (AIError.isExtraUsageWithheldMessage(message)) return false;
 		const id = this.#classifyRetryMessage(message);
 		const activeModel = this.#host.model();
 		if (!activeModel || !AIError.is(id, AIError.Flag.UsageLimit)) return false;
@@ -1930,9 +1959,12 @@ export class TurnRecovery {
 	}
 
 	async #maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {
-		if (!cfgRetryUsageAwareFallback.get(this.#host.settings)) return false;
+		const usageAwareFallback = cfgRetryUsageAwareFallback.get(this.#host.settings);
+		const tiered = cfgRetryAccountOrder.get(this.#host.settings) === "tiered";
+		if (!usageAwareFallback && !tiered) return false;
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
+		const extraUsage = tiered ? this.extraUsageAllowanceFor(currentModel) : undefined;
 		const sessionId = this.#host.sessionManager.getSessionId();
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
 		let health: ModelUsageHealth;
@@ -1942,6 +1974,7 @@ export class TurnRecovery {
 				sessionId: this.#host.sessionId(),
 				baseUrl: currentModel.baseUrl,
 				reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
+				extraUsage,
 				signal,
 			});
 		} catch (error) {
@@ -1955,6 +1988,55 @@ export class TurnRecovery {
 		}
 		if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
 		const selectedAccount = health.accounts.find(account => account.selected);
+		if (tiered) {
+			const resetProvider =
+				currentModel.provider === "anthropic" || currentModel.provider === "openai-codex"
+					? currentModel.provider
+					: undefined;
+			if (resetProvider && selectedAccount?.fundingTier !== "allowance") {
+				const authStorage = this.#host.modelRegistry.authStorage;
+				const keep = Math.max(
+					0,
+					Math.trunc(
+						(resetProvider === "anthropic" ? cfgClaudeResets : cfgCodexResets).get(this.#host.settings)
+							.keepCredits,
+					),
+				);
+				const summaries = priorityOrderedSavedResetAccounts(authStorage, resetProvider, sessionId);
+				const remainingHealthAccountsByCredentialId = new Map(
+					health.accounts.map(account => [account.credentialId, account] as const),
+				);
+				const rankedAccounts: typeof health.accounts = [];
+				for (const summary of summaries) {
+					const account = remainingHealthAccountsByCredentialId.get(summary.credentialId);
+					if (!account) continue;
+					remainingHealthAccountsByCredentialId.delete(summary.credentialId);
+					rankedAccounts.push(account);
+				}
+				rankedAccounts.push(...remainingHealthAccountsByCredentialId.values());
+				for (const account of rankedAccounts) {
+					if (account.fundingTier === "allowance") break;
+					if (
+						(account.savedResets ?? 0) - keep < 1 ||
+						!authStorage.sessions.permits(resetProvider, sessionId, account.credentialId)
+					) {
+						continue;
+					}
+					if (
+						await this.#host.redeemSavedReset({
+							provider: resetProvider,
+							credentialId: account.credentialId,
+							signal,
+						})
+					) {
+						return false;
+					}
+					if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
+				}
+			}
+			if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
+		}
+		if (!usageAwareFallback) return false;
 		if (health.state === "healthy") {
 			// A healthy sibling does not end the selected account's reserve episode.
 			if (selectedAccount?.state === "healthy") this.#usageReserveApproval = undefined;
@@ -2010,6 +2092,7 @@ export class TurnRecovery {
 							sessionId: this.#host.sessionId(),
 							baseUrl: candidateModel.baseUrl,
 							reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
+							extraUsage: tiered ? this.extraUsageAllowanceFor(candidateModel) : undefined,
 							signal,
 						},
 					);
@@ -2035,7 +2118,10 @@ export class TurnRecovery {
 				if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
 				let apiKey: string | undefined;
 				try {
-					apiKey = await this.#host.modelRegistry.getApiKey(candidateModel, this.#host.sessionId(), { signal });
+					apiKey = await this.#host.modelRegistry.getApiKey(candidateModel, this.#host.sessionId(), {
+						signal,
+						extraUsage: this.extraUsageAllowanceFor(candidateModel),
+					});
 				} catch {
 					if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
 					continue;
@@ -2138,7 +2224,10 @@ export class TurnRecovery {
 		}
 		const apiKey =
 			options?.apiKey ??
-			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options?.signal }));
+			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), {
+				signal: options?.signal,
+				extraUsage: this.extraUsageAllowanceFor(candidate),
+			}));
 		if (!apiKey) {
 			throw new Error(`No API key for retry fallback ${selector.raw}`);
 		}
@@ -2296,7 +2385,9 @@ export class TurnRecovery {
 				// exactly like one without a credential.
 				let apiKey: string | undefined;
 				try {
-					apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+					apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), {
+						extraUsage: this.extraUsageAllowanceFor(candidate),
+					});
 				} catch (error) {
 					if (!(error instanceof AIError.MissingApiKeyError)) throw error;
 				}
@@ -2373,6 +2464,35 @@ export class TurnRecovery {
 		return this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id)) !== undefined;
 	}
 
+	/** Whether any configured retry-chain candidate follows `model`. */
+	#hasRetryFallbackCandidate(model: Model): boolean {
+		const currentSelector = formatRetryFallbackSelector(model, this.#host.thinkingLevel());
+		return this.retryFallbackChainKeys(currentSelector, model).some(
+			role => this.findRetryFallbackCandidates(role, currentSelector, model).length > 0,
+		);
+	}
+
+	/**
+	 * Whether a configured retry chain can follow `model` for a usage-limit
+	 * failure. The last entry has no successor, even when an earlier entry did.
+	 */
+	hasRetryFallbackSuccessor(model: Model): boolean {
+		const retrySettings = cfgRetry.get(this.#host.settings);
+		return (
+			retrySettings.enabled &&
+			retrySettings.modelFallback &&
+			retryFallbackAdmits(retrySettings.fallbackOn, true) &&
+			this.#hasRetryFallbackCandidate(model)
+		);
+	}
+
+	/** Paid usage below an account floor is a last resort only when no model can follow. */
+	extraUsageAllowanceFor(model: Model): ExtraUsageAllowance {
+		return cfgRetryExtraUsageBelowFloor.get(this.#host.settings) && !this.hasRetryFallbackSuccessor(model)
+			? "past-floor"
+			: "to-floor";
+	}
+
 	/**
 	 * True when a turn failed with a hard (non-retryable) provider error but a
 	 * configured `retry.fallbackChains` entry covers the active model: the same
@@ -2400,18 +2520,18 @@ export class TurnRecovery {
 		if (this.isClassifierRefusal(message)) return false;
 		const id = this.#classifyRetryMessage(message);
 		if (AIError.is(id, AIError.Flag.Abort) || AIError.is(id, AIError.Flag.UserInterrupt)) return false;
-		if (!retryFallbackAdmits(retrySettings.fallbackOn, AIError.is(id, AIError.Flag.UsageLimit))) return false;
+		const usageLimit = AIError.is(id, AIError.Flag.UsageLimit);
+		if (!retryFallbackAdmits(retrySettings.fallbackOn, usageLimit)) return false;
+		if (usageLimit ? !this.hasRetryFallbackSuccessor(model) : !this.#hasRetryFallbackCandidate(model)) {
+			return false;
+		}
 		// Text-ambiguous overflows waive the veto; usage-backed do not — see AIError.isTextAmbiguousContextOverflow (#9235).
 		const contextWindow = model.contextWindow ?? 0;
 		const textAmbiguousOverflow = AIError.isTextAmbiguousContextOverflow(id, message, contextWindow);
 		if (!textAmbiguousOverflow && AIError.isContextOverflow(message, contextWindow)) {
 			return false;
 		}
-		if (this.#hasReplayUnsafeOutput(message)) return false;
-		const currentSelector = formatRetryFallbackSelector(model, this.#host.thinkingLevel());
-		return this.retryFallbackChainKeys(currentSelector).some(
-			role => this.findRetryFallbackCandidates(role, currentSelector).length > 0,
-		);
+		return !this.#hasReplayUnsafeOutput(message);
 	}
 
 	/**

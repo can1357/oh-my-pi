@@ -39,12 +39,31 @@ function tierLimit(tier: string, usedFraction: number): UsageLimit {
 	};
 }
 
-function claudeReport(limits: UsageLimit[], fetchedAt = Date.now()): UsageReport {
+function extraUsageLimit(exhausted = false): UsageLimit {
+	return {
+		id: "anthropic:extra",
+		label: "Claude Extra Usage",
+		scope: { provider: "anthropic", windowId: "extra" },
+		amount: exhausted
+			? {
+					used: 200,
+					limit: 200,
+					remaining: 0,
+					usedFraction: 1,
+					remainingFraction: 0,
+					unit: "usd",
+				}
+			: { used: 402.88, unit: "usd" },
+		...(exhausted ? { status: "exhausted" as const } : {}),
+	};
+}
+
+function claudeReport(limits: UsageLimit[], fetchedAt = Date.now(), source?: "ratelimit-headers"): UsageReport {
 	return {
 		provider: "anthropic",
 		fetchedAt,
 		limits,
-		metadata: { accountId: "account-1" },
+		metadata: { accountId: "account-1", ...(source ? { source } : {}) },
 	};
 }
 
@@ -235,6 +254,55 @@ describe("claude usage-block healing", () => {
 		expect(health.accounts[0]?.state).toBe("healthy");
 		expect(await storage.keys.get("anthropic", "global-heal", { modelId: "claude-fable-5-1" })).toBe("access-1");
 	});
+
+	it("heals an account-wide block when uncapped paid usage covers a spent plan allowance", async () => {
+		const { storage, blocks, clearedScopes } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 1), extraUsageLimit()]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		await storage.health.model("anthropic", { modelId: "claude-opus-4-8", reserveFraction: 0.1 });
+
+		expect(clearedScopes).toEqual([""]);
+		expect(blocks.has("1:")).toBe(false);
+	});
+
+	for (const { name, buildReport } of [
+		{
+			name: "the report came from rate-limit headers",
+			buildReport: () =>
+				claudeReport(
+					[sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 1), extraUsageLimit()],
+					Date.now(),
+					"ratelimit-headers",
+				),
+		},
+		{
+			name: "paid usage is exhausted",
+			buildReport: () =>
+				claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 1), extraUsageLimit(true)]),
+		},
+		{
+			name: "the endpoint did not report paid usage",
+			buildReport: () => claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 1)]),
+		},
+	]) {
+		it(`retains an account-wide block when ${name}`, async () => {
+			const { storage, blocks, clearedScopes } = makeHarness(buildReport(), "");
+			storages.push(storage);
+			await storage.credentials.reload();
+
+			await storage.health.model("anthropic", { modelId: "claude-opus-4-8", reserveFraction: 0.1 });
+
+			expect(clearedScopes).toEqual([]);
+			expect(blocks.has("1:")).toBe(true);
+			expect(await storage.keys.get("anthropic", `paid-global-${name}`, { modelId: "claude-opus-4-8" })).toBe(
+				"access-2",
+			);
+		});
+	}
 
 	for (const scope of ["auth", "account-policy"]) {
 		it(`does not heal an independent ${scope} block`, async () => {

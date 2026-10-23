@@ -133,8 +133,8 @@ export function resetPlanSettings(cfg: {
 	};
 }
 
-/** What woke the planner. `sweep` may only salvage; `blocked` may also restore. */
-export type CodexResetTrigger = "blocked" | "sweep";
+/** What woke the planner. `sweep` may only salvage; restore triggers may spend one reset. */
+export type CodexResetTrigger = "blocked" | "sweep" | "allowance-spent";
 
 /** Why one account produced no action (or, with `accountKey: "*"`, a whole rule was off). */
 export type CodexResetSkipReason =
@@ -176,6 +176,8 @@ export interface CodexResetPlanInput {
 	};
 	/** Active account (marks the preferred restore candidate); may be undefined. */
 	identity: OAuthAccountIdentity | undefined;
+	/** Restrict restoration to this exact credential and stop before expiry salvage. */
+	targetCredentialId?: number;
 	/** `blocked-account`: whether a stored credential may serve the blocked session; absent allows every account. */
 	permitsCredential?: (credentialId: number) => boolean;
 	/** Usage reports for ALL stored accounts (one per account for Codex). */
@@ -349,7 +351,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 	// Rule-wide gates for `blocked-account`: a redeem can only unblock the turn
 	// when the turn is actually on Codex, and it is unknown whether a credit
 	// resets the separate Spark meter.
-	let blockedRuleActive = input.trigger === "blocked";
+	let blockedRuleActive = input.trigger === "blocked" || input.trigger === "allowance-spent";
 	if (blockedRuleActive && input.provider !== "openai-codex") {
 		blockedRuleActive = false;
 		skipped.push({ accountKey: "*", rule: "blocked-account", reason: "wrong-provider" });
@@ -434,6 +436,9 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		for (const snapshot of snapshots) {
 			const rule = "blocked-account" as const;
 			const skip = (reason: CodexResetSkipReason) => skipped.push({ accountKey: snapshot.accountKey, rule, reason });
+			if (input.targetCredentialId !== undefined && snapshot.target.credentialId !== input.targetCredentialId) {
+				continue;
+			}
 			// Restoring an account the session may not use cannot unblock it.
 			if (input.permitsCredential && !input.permitsCredential(snapshot.target.credentialId)) {
 				skip("outside-account-pool");
@@ -441,10 +446,11 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			}
 			// Live evidence: the 429 that triggered this pass names the active
 			// account directly, outranking a possibly pre-block report snapshot.
-			const liveUnblockAtMs = snapshot.active ? input.activeBlockUnblockAtMs : undefined;
+			const liveUnblockAtMs =
+				input.trigger === "allowance-spent" || !snapshot.active ? undefined : input.activeBlockUnblockAtMs;
 			// The wire's own blocked flag must confirm the 429 for THIS account,
 			// unless the live block evidence already does.
-			if (!snapshot.limitReached && liveUnblockAtMs === undefined) {
+			if (input.trigger !== "allowance-spent" && !snapshot.limitReached && liveUnblockAtMs === undefined) {
 				skip("not-limit-reached");
 				continue;
 			}
@@ -555,6 +561,9 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				active: best.snapshot.active,
 			};
 		}
+	}
+	if (input.targetCredentialId !== undefined) {
+		return { actions: restore ? [restore] : [], skipped };
 	}
 
 	// --- expiring-credit: salvage every credit that would otherwise die.

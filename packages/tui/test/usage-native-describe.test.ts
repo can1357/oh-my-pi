@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { PaidUsageView, UsageReport } from "@oh-my-pi/pi-ai";
 import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
 import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
@@ -117,6 +117,66 @@ describe("UsageDashboardComponent.describe", () => {
 				{ t: " left", s: "dim" },
 			],
 		]);
+	});
+
+	it("describes paid usage in existing card and detail roles without a paid quota row", () => {
+		const paidRow = limit("anthropic", "extra", "Claude Extra Usage", 0.92, "warning");
+		const paid: PaidUsageView = {
+			limitId: paidRow.id,
+			unit: "usd",
+			capacity: "spend-cap",
+			state: "available",
+			remaining: 4,
+			cap: 50,
+			headroom: 4,
+			boundBy: "provider",
+			uncapped: false,
+			floorIgnored: false,
+			unbounded: false,
+			stale: false,
+		};
+		const component = new UsageDashboardComponent({
+			reports: [report("anthropic", "paid@test", [limit("anthropic", "5h", "Claude 5h", 0.2, "ok"), paidRow])],
+			paidUsage: () => [paid],
+			renderDetail: () => "",
+			loadActivity: async push => {
+				push([]);
+			},
+			requestRender: () => {},
+			onClose: () => {},
+		});
+		try {
+			const overview = component.describe(cx);
+			const paidMeta = findAll(
+				overview,
+				node =>
+					node.k === "text" &&
+					node.p?.role === "omp.usage.provider.meta" &&
+					plain(node).includes("paid $4.00 left"),
+			)[0];
+			expect(paidMeta?.p).toEqual(
+				expect.objectContaining({
+					role: "omp.usage.provider.meta",
+					title: expect.stringContaining("paid@test: $4.00 left of $50.00 cap"),
+				}),
+			);
+
+			component.handleNativeEvent({ type: "select", key: "head/tabs", item: "detail" });
+			const detail = component.describe(cx);
+			const facts = findAll(detail, node => node.k === "kv" && node.p?.role === "omp.usage.facts");
+			expect(JSON.stringify(facts)).toContain("Paid · paid@test");
+			expect(JSON.stringify(facts)).toContain("$4.00 left of $50.00 cap");
+			expect(
+				findAll(detail, node => node.k === "text")
+					.map(plain)
+					.join("\n"),
+			).toContain("Paid figures are provider-reported and refresh about every 5 minutes");
+			const table = findAll(detail, node => node.k === "table" && node.p?.role === "omp.usage.limits")[0];
+			expect(JSON.stringify(table)).toContain("Claude 5h");
+			expect(JSON.stringify(table)).not.toContain("Claude Extra Usage");
+		} finally {
+			component.dispose();
+		}
 	});
 
 	it("leads with the tightest quota and the activity's headline figures", () => {

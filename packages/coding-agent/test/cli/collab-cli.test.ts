@@ -1,8 +1,7 @@
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as collabCli from "@oh-my-pi/pi-coding-agent/cli/collab-cli";
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import {
 	COLLAB_REGISTRY_VERSION,
@@ -61,26 +60,52 @@ const BRAVO: HostFixture = {
 	viewUrl: "https://collab.test/#bravo-VIEW-url",
 };
 
-const publications: CollabHostPublication[] = [];
-const tmpDirs: string[] = [];
 const CONFIG: CliConfig = { bin: "omp", version: "0.0.0-test", commands: new Map() };
 
-async function makeTmpDir(): Promise<string> {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-collab-cli-"));
-	tmpDirs.push(dir);
-	return dir;
+interface CollabFixture {
+	dir: string;
+	publish(fixture: HostFixture): Promise<void>;
+	close(): Promise<void>;
 }
 
-async function publish(dir: string, fixture: HostFixture): Promise<void> {
-	const pub = await publishCollabHost(
-		{
-			snapshot: () => fixture.snapshot,
-			link: access =>
-				access === "view" ? fixture.viewUrl : fixture.snapshot.access === "control" ? fixture.controlUrl : null,
+async function createFixture(): Promise<CollabFixture> {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-collab-cli-"));
+	const publications: CollabHostPublication[] = [];
+	return {
+		dir,
+		async publish(fixture: HostFixture): Promise<void> {
+			const publication = await publishCollabHost(
+				{
+					snapshot: () => fixture.snapshot,
+					link: access =>
+						access === "view"
+							? fixture.viewUrl
+							: fixture.snapshot.access === "control"
+								? fixture.controlUrl
+								: null,
+				},
+				{ dir, instanceId: fixture.snapshot.instanceId },
+			);
+			publications.push(publication);
 		},
-		{ dir, instanceId: fixture.snapshot.instanceId },
-	);
-	publications.push(pub);
+		async close(): Promise<void> {
+			try {
+				await Promise.all(publications.map(publication => publication.close()));
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		},
+	};
+}
+
+async function withFixture<T>(callback: (fixture: CollabFixture) => Promise<T>): Promise<T> {
+	const fixture = await createFixture();
+	try {
+		const result = await callback(fixture);
+		return result;
+	} finally {
+		await fixture.close();
+	}
 }
 
 interface Collector {
@@ -98,176 +123,187 @@ function collector(): Collector {
 	};
 }
 
-/** Exercise parsing and real handlers while keeping registry and output isolated. */
+/** Exercise the real parser and handlers while keeping registry and output isolated. */
 async function runCommand(argv: string[], dir: string, out: Collector): Promise<void> {
-	const list = collabCli.runCollabListCommand;
-	const link = collabCli.runCollabLinkCommand;
-	const listSpy = spyOn(collabCli, "runCollabListCommand").mockImplementation(args =>
-		list({ ...args, registry: { dir } }, out.print),
-	);
-	const linkSpy = spyOn(collabCli, "runCollabLinkCommand").mockImplementation(args =>
-		link({ ...args, registry: { dir } }, out.print),
-	);
-	try {
-		await new Collab(argv, CONFIG).run();
-	} finally {
-		listSpy.mockRestore();
-		linkSpy.mockRestore();
-	}
+	await new Collab(argv, CONFIG, { registry: { dir }, print: out.print }).run();
 }
-
-afterEach(async () => {
-	vi.restoreAllMocks();
-	await Promise.all(publications.splice(0).map(pub => pub.close()));
-	for (const dir of tmpDirs.splice(0)) {
-		await fs.rm(dir, { recursive: true, force: true });
-	}
-});
 
 describe("Collab CLI", () => {
 	it("reports no active hosts against an empty registry", async () => {
-		const dir = await makeTmpDir();
-		const out = collector();
-		await runCommand(["list"], dir, out);
+		await withFixture(async fixture => {
+			const out = collector();
+			await runCommand(["list"], fixture.dir, out);
 
-		expect(out.plain()).toBe("No active Collab hosts.");
+			expect(out.plain()).toBe("No active Collab hosts.");
+		});
 	});
 
 	it("lists host identities, sessions, generations and attention state without either capability", async () => {
-		const dir = await makeTmpDir();
-		await publish(dir, BRAVO);
-		await publish(dir, ALPHA);
-		const out = collector();
-		await runCommand(["list"], dir, out);
+		await withFixture(async fixture => {
+			await fixture.publish(BRAVO);
+			await fixture.publish(ALPHA);
+			const out = collector();
+			await runCommand(["list"], fixture.dir, out);
 
-		const text = out.plain();
-		expect(text).toContain("2 active Collab hosts");
-		expect(text).toContain("host-alpha  Alpha Session (sess-alpha)  /tmp/work/alpha");
-		expect(text).toContain("host-bravo  sess-bravo  /tmp/work/bravo");
-		expect(text).toContain(`pid ${process.pid}`);
-		expect(text).toContain("gen 2 · test/alpha-model");
-		expect(text).toContain("gen 7 · no model");
-		expect(text).toContain("2 guests · control · relay connected · input required · working");
-		expect(text).toContain("0 guests · view · relay reconnecting · idle");
-		expect(text.indexOf(ALPHA.snapshot.instanceId)).toBeLessThan(text.indexOf(BRAVO.snapshot.instanceId));
-		for (const fixture of [ALPHA, BRAVO]) {
-			expect(text).not.toContain(fixture.controlUrl);
-			expect(text).not.toContain(fixture.viewUrl);
-		}
+			const text = out.plain();
+			expect(text).toContain("2 active Collab hosts");
+			expect(text).toContain("host-alpha  Alpha Session (sess-alpha)  /tmp/work/alpha");
+			expect(text).toContain("host-bravo  sess-bravo  /tmp/work/bravo");
+			expect(text).toContain(`pid ${process.pid}`);
+			expect(text).toContain("gen 2 · test/alpha-model");
+			expect(text).toContain("gen 7 · no model");
+			expect(text).toContain("2 guests · control · relay connected · input required · working");
+			expect(text).toContain("0 guests · view · relay reconnecting · idle");
+			expect(text.indexOf(ALPHA.snapshot.instanceId)).toBeLessThan(text.indexOf(BRAVO.snapshot.instanceId));
+			for (const host of [ALPHA, BRAVO]) {
+				expect(text).not.toContain(host.controlUrl);
+				expect(text).not.toContain(host.viewUrl);
+			}
+		});
+	});
+
+	it("keeps concurrent commands bound to their own registry and collector", async () => {
+		await withFixture(async alphaFixture => {
+			await withFixture(async bravoFixture => {
+				await Promise.all([alphaFixture.publish(ALPHA), bravoFixture.publish(BRAVO)]);
+				const alphaOut = collector();
+				const bravoOut = collector();
+
+				await Promise.all([
+					runCommand(["list"], alphaFixture.dir, alphaOut),
+					runCommand(["list"], bravoFixture.dir, bravoOut),
+				]);
+
+				expect(alphaOut.plain()).toContain(ALPHA.snapshot.instanceId);
+				expect(alphaOut.plain()).not.toContain(BRAVO.snapshot.instanceId);
+				expect(bravoOut.plain()).toContain(BRAVO.snapshot.instanceId);
+				expect(bravoOut.plain()).not.toContain(ALPHA.snapshot.instanceId);
+			});
+		});
 	});
 
 	it("renders no activity token for a host that does not report busy", async () => {
-		const dir = await makeTmpDir();
-		const legacy: HostFixture = {
-			snapshot: { ...BRAVO.snapshot, instanceId: "host-charlie", sessionId: "sess-charlie", busy: null },
-			controlUrl: "https://collab.test/#charlie-CONTROL-url",
-			viewUrl: "https://collab.test/#charlie-VIEW-url",
-		};
-		await publish(dir, legacy);
-		const out = collector();
-		await runCommand(["list"], dir, out);
+		await withFixture(async fixture => {
+			const legacy: HostFixture = {
+				snapshot: { ...BRAVO.snapshot, instanceId: "host-charlie", sessionId: "sess-charlie", busy: null },
+				controlUrl: "https://collab.test/#charlie-CONTROL-url",
+				viewUrl: "https://collab.test/#charlie-VIEW-url",
+			};
+			await fixture.publish(legacy);
+			const out = collector();
+			await runCommand(["list"], fixture.dir, out);
 
-		const text = out.plain();
-		expect(text).toContain("host-charlie");
-		// An older host reports nothing, and the row guesses nothing.
-		expect(text).not.toMatch(/working|idle/);
+			const text = out.plain();
+			expect(text).toContain("host-charlie");
+			// An older host reports nothing, and the row guesses nothing.
+			expect(text).not.toMatch(/working|idle/);
+		});
 	});
 
 	it("emits repeatable, two-space metadata-only JSON for list and the default action with -j", async () => {
-		const dir = await makeTmpDir();
-		await publish(dir, BRAVO);
-		await publish(dir, ALPHA);
-		const out = collector();
-		await runCommand(["list", "--json"], dir, out);
+		await withFixture(async fixture => {
+			await fixture.publish(BRAVO);
+			await fixture.publish(ALPHA);
+			const out = collector();
+			await runCommand(["list", "--json"], fixture.dir, out);
 
-		const expected = { version: COLLAB_REGISTRY_VERSION, hosts: [ALPHA.snapshot, BRAVO.snapshot] };
-		expect(out.plain()).toBe(JSON.stringify(expected, null, 2));
-		for (const fixture of [ALPHA, BRAVO]) {
-			expect(out.plain()).not.toContain(fixture.controlUrl);
-			expect(out.plain()).not.toContain(fixture.viewUrl);
-		}
-		const again = collector();
-		await runCommand(["-j"], dir, again);
-		expect(again.plain()).toBe(out.plain());
+			const expected = { version: COLLAB_REGISTRY_VERSION, hosts: [ALPHA.snapshot, BRAVO.snapshot] };
+			expect(out.plain()).toBe(JSON.stringify(expected, null, 2));
+			for (const host of [ALPHA, BRAVO]) {
+				expect(out.plain()).not.toContain(host.controlUrl);
+				expect(out.plain()).not.toContain(host.viewUrl);
+			}
+			const again = collector();
+			await runCommand(["-j"], fixture.dir, again);
+			expect(again.plain()).toBe(out.plain());
+		});
 	});
 
 	it("prints only the control URL when linking by instance ID", async () => {
-		const dir = await makeTmpDir();
-		await publish(dir, ALPHA);
-		const out = collector();
-		await runCommand(["link", ALPHA.snapshot.instanceId], dir, out);
+		await withFixture(async fixture => {
+			await fixture.publish(ALPHA);
+			const out = collector();
+			await runCommand(["link", ALPHA.snapshot.instanceId], fixture.dir, out);
 
-		expect(out.calls).toEqual([ALPHA.controlUrl]);
+			expect(out.calls).toEqual([ALPHA.controlUrl]);
+		});
 	});
 
 	it("prints only the view URL when --view is requested", async () => {
-		const dir = await makeTmpDir();
-		await publish(dir, ALPHA);
-		const out = collector();
-		await runCommand(["link", ALPHA.snapshot.instanceId, "--view"], dir, out);
+		await withFixture(async fixture => {
+			await fixture.publish(ALPHA);
+			const out = collector();
+			await runCommand(["link", ALPHA.snapshot.instanceId, "--view"], fixture.dir, out);
 
-		expect(out.calls).toEqual([ALPHA.viewUrl]);
-		expect(out.plain()).not.toContain(ALPHA.controlUrl);
+			expect(out.calls).toEqual([ALPHA.viewUrl]);
+			expect(out.plain()).not.toContain(ALPHA.controlUrl);
+		});
 	});
 
 	it("emits a versioned link JSON response with identity, generation and access", async () => {
-		const dir = await makeTmpDir();
-		await publish(dir, ALPHA);
-		const out = collector();
-		await runCommand(["link", ALPHA.snapshot.instanceId, "-j"], dir, out);
+		await withFixture(async fixture => {
+			await fixture.publish(ALPHA);
+			const out = collector();
+			await runCommand(["link", ALPHA.snapshot.instanceId, "-j"], fixture.dir, out);
 
-		expect(out.plain()).toBe(
-			JSON.stringify(
-				{
-					version: COLLAB_REGISTRY_VERSION,
-					instanceId: ALPHA.snapshot.instanceId,
-					generation: ALPHA.snapshot.generation,
-					access: "control",
-					url: ALPHA.controlUrl,
-				},
-				null,
-				2,
-			),
-		);
+			expect(out.plain()).toBe(
+				JSON.stringify(
+					{
+						version: COLLAB_REGISTRY_VERSION,
+						instanceId: ALPHA.snapshot.instanceId,
+						generation: ALPHA.snapshot.generation,
+						access: "control",
+						url: ALPHA.controlUrl,
+					},
+					null,
+					2,
+				),
+			);
+		});
 	});
 
 	it("accepts a unique PID selector", async () => {
-		const dir = await makeTmpDir();
-		await publish(dir, ALPHA);
-		const out = collector();
-		await runCommand(["link", String(process.pid)], dir, out);
+		await withFixture(async fixture => {
+			await fixture.publish(ALPHA);
+			const out = collector();
+			await runCommand(["link", String(process.pid)], fixture.dir, out);
 
-		expect(out.calls).toEqual([ALPHA.controlUrl]);
+			expect(out.calls).toEqual([ALPHA.controlUrl]);
+		});
 	});
 
 	it.each([
 		{ code: "not_found", selector: "missing-host", fixtures: [] },
 		{ code: "ambiguous", selector: String(process.pid), fixtures: [ALPHA, BRAVO] },
 	])("surfaces $code as a nonzero failure with the registry message and no URL or stack", async testCase => {
-		const dir = await makeTmpDir();
-		for (const fixture of testCase.fixtures) await publish(dir, fixture);
-		const error = await resolveCollabHostLink(testCase.selector, "control", { dir }).catch((error: unknown) => error);
-		if (!(error instanceof CollabLinkError)) throw new Error("expected a registry selection failure");
-		expect(error.code).toBe(testCase.code);
-		const errors: string[] = [];
-		spyOn(process.stderr, "write").mockImplementation(chunk => {
-			errors.push(String(chunk));
-			return true;
-		});
-		const previousExitCode = process.exitCode;
-		const out = collector();
-		try {
-			await runCommand(["link", testCase.selector, "--json"], dir, out);
-			expect(process.exitCode).toBe(1);
-			expect(errors.join("")).toBe(`error: ${error.message}\n`);
-			expect(out.calls).toEqual([]);
-			for (const fixture of [ALPHA, BRAVO]) {
-				expect(errors.join("")).not.toContain(fixture.controlUrl);
-				expect(errors.join("")).not.toContain(fixture.viewUrl);
+		await withFixture(async fixture => {
+			for (const host of testCase.fixtures) await fixture.publish(host);
+			const error = await resolveCollabHostLink(testCase.selector, "control", { dir: fixture.dir }).catch(
+				(error: unknown) => error,
+			);
+			if (!(error instanceof CollabLinkError)) throw new Error("expected a registry selection failure");
+			expect(error.code).toBe(testCase.code);
+			const errors: string[] = [];
+			const stderrSpy = spyOn(process.stderr, "write").mockImplementation(chunk => {
+				errors.push(String(chunk));
+				return true;
+			});
+			const previousExitCode = process.exitCode;
+			const out = collector();
+			try {
+				await runCommand(["link", testCase.selector, "--json"], fixture.dir, out);
+				expect(process.exitCode).toBe(1);
+				expect(errors.join("")).toBe(`error: ${error.message}\n`);
+				expect(out.calls).toEqual([]);
+				for (const host of [ALPHA, BRAVO]) {
+					expect(errors.join("")).not.toContain(host.controlUrl);
+					expect(errors.join("")).not.toContain(host.viewUrl);
+				}
+			} finally {
+				stderrSpy.mockRestore();
+				process.exitCode = previousExitCode ?? 0;
 			}
-		} finally {
-			process.exitCode = previousExitCode ?? 0;
-		}
+		});
 	});
 
 	const usageRejections: string[][] = [["list", "--view"], ["list", "extra"], ["link"], ["link", "a", "b"]];
@@ -276,10 +312,14 @@ describe("Collab CLI", () => {
 			const unexpected = new Error("registry must not be invoked for invalid usage");
 			const listSpy = spyOn(registry, "listCollabHosts").mockRejectedValue(unexpected);
 			const linkSpy = spyOn(registry, "resolveCollabHostLink").mockRejectedValue(unexpected);
-
-			await expect(new Collab(argv, CONFIG).run()).rejects.toBeInstanceOf(CliUsageError);
-			expect(listSpy).not.toHaveBeenCalled();
-			expect(linkSpy).not.toHaveBeenCalled();
+			try {
+				await expect(new Collab(argv, CONFIG).run()).rejects.toBeInstanceOf(CliUsageError);
+				expect(listSpy).not.toHaveBeenCalled();
+				expect(linkSpy).not.toHaveBeenCalled();
+			} finally {
+				listSpy.mockRestore();
+				linkSpy.mockRestore();
+			}
 		});
 	}
 });

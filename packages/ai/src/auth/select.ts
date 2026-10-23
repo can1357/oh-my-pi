@@ -11,6 +11,7 @@ import {
 	AUTH_BLOCK_SCOPE,
 	credentialBlockScopesForRequest,
 	DEFAULT_BLOCK_MS,
+	EXTRA_USAGE_BLOCK_SCOPE,
 	providerTypeKey,
 	type CredentialBlocks,
 } from "./blocks";
@@ -39,6 +40,10 @@ import {
 } from "./types";
 import type { UsageService } from "./usage";
 import {
+	assessFunding,
+	currentUsageLimits,
+	fundingTierAllowed,
+	fundingTierRank,
 	isUsageLimitReached,
 	normalizeUsageFraction,
 	remainingUsageFraction,
@@ -67,6 +72,8 @@ export type TryOAuthOptions = {
 	blockScopes?: readonly string[];
 	/** When false, a definitive failure of THIS credential returns undefined instead of falling back to the ranked/round-robin selector (target-only resolution). */
 	allowFallback?: boolean;
+	/** When a paid-usage floor or budget withholds this candidate, receives its plan reset deadline. */
+	onExtraUsageWithheld?: (allowanceResetsAt: number | undefined) => void;
 	/** Receives a non-definitive refresh failure that left this credential unusable; the caller filters for retryable ones. */
 	onTransientRefreshFailure?: (error: unknown) => void;
 };
@@ -100,6 +107,31 @@ export class CredentialSelector {
 				this.#providerRoundRobinIndex.delete(key);
 			}
 		}
+	}
+
+	/** Assess plan and paid-extra funding for one selection using only its exact paid-usage block. */
+	#assessFunding(
+		provider: string,
+		providerKey: string,
+		selection: { credential: AuthCredential; index: number },
+		strategy: CredentialRankingStrategy | undefined,
+		report: UsageReport | null,
+		rankingContext: CredentialRankingContext,
+		nowMs: number,
+	) {
+		return assessFunding({
+			strategy,
+			report,
+			context: rankingContext,
+			nowMs,
+			policy: this.#deps.policies.forCredential(provider, selection.credential),
+			extraUsageBlockedUntil: this.#deps.blocks.exactBlockedUntil(
+				provider,
+				providerKey,
+				selection.index,
+				EXTRA_USAGE_BLOCK_SCOPE,
+			),
+		});
 	}
 
 	/**
@@ -257,7 +289,17 @@ export class CredentialSelector {
 			let { blockedUntil } = result;
 			let blocked = blockedUntil !== undefined;
 			const scopedLimits = usage ? scopedUsageLimits(strategy, usage, args.rankingContext) : undefined;
-			if (!blocked && scopedLimits && isUsageLimitReached(scopedLimits)) {
+			const funding = this.#assessFunding(
+				args.provider,
+				args.providerKey,
+				selection,
+				strategy,
+				usage,
+				args.rankingContext,
+				nowMs,
+			);
+			const servesThroughPaidUsage = funding?.tier === "extra" || funding?.tier === "extra-past-floor";
+			if (!blocked && !servesThroughPaidUsage && scopedLimits && isUsageLimitReached(scopedLimits)) {
 				const resetAtMs = usageResetAtMs(scopedLimits, nowMs);
 				blockedUntil = resetAtMs ?? Date.now() + DEFAULT_BLOCK_MS;
 				this.#deps.blocks.mark(
@@ -283,7 +325,11 @@ export class CredentialSelector {
 				blockedUntil,
 				inReserve: false,
 				accountPriority: 0,
-				allowanceSpent: remainingUsageFraction(strategy, usage, args.rankingContext, nowMs) === 0,
+				fundingTier: funding?.tier,
+				allowanceSpent:
+					funding?.tier === undefined
+						? remainingUsageFraction(strategy, usage, args.rankingContext, nowMs) === 0
+						: funding.tier !== "allowance",
 				usageMeasured,
 				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: 0,
@@ -449,8 +495,22 @@ export class CredentialSelector {
 			const { selection, usage, usageChecked } = result;
 			let { blockedUntil } = result;
 			let blocked = blockedUntil !== undefined;
-			const scopedLimits = usage && strategy ? scopedUsageLimits(strategy, usage, args.rankingContext) : undefined;
-			if (!blocked && scopedLimits && isUsageLimitReached(scopedLimits)) {
+			const scopedLimits =
+				usage && strategy
+					? currentUsageLimits(scopedUsageLimits(strategy, usage, args.rankingContext), usage.fetchedAt, nowMs)
+					: undefined;
+			const policy = this.#deps.policies.forCredential(args.provider, selection.credential);
+			const funding = this.#assessFunding(
+				args.provider,
+				args.providerKey,
+				selection,
+				strategy,
+				usage,
+				args.rankingContext,
+				nowMs,
+			);
+			const servesThroughPaidUsage = funding?.tier === "extra" || funding?.tier === "extra-past-floor";
+			if (!blocked && !servesThroughPaidUsage && scopedLimits && isUsageLimitReached(scopedLimits)) {
 				const resetAtMs = usageResetAtMs(scopedLimits, nowMs);
 				blockedUntil = resetAtMs ?? Date.now() + DEFAULT_BLOCK_MS;
 				this.#deps.blocks.mark(
@@ -470,7 +530,6 @@ export class CredentialSelector {
 			const usageMeasured =
 				strategy === undefined ? remainingFraction !== undefined : primary !== undefined || secondary !== undefined;
 			const primaryUncapped = primary === undefined && secondary !== undefined;
-			const policy = this.#deps.policies.forCredential(args.provider, selection.credential);
 			const reservePct = policy?.reservePct ?? args.defaultReservePct;
 			const reserveFraction =
 				reservePct === undefined || !Number.isFinite(reservePct)
@@ -488,7 +547,8 @@ export class CredentialSelector {
 					isWithinUsageReserve(remainingFraction, reserveFraction),
 				reserveMeasured: reserveFraction !== undefined && remainingFraction !== undefined,
 				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
-				allowanceSpent: remainingFraction === 0,
+				fundingTier: funding?.tier,
+				allowanceSpent: funding?.tier === undefined ? remainingFraction === 0 : funding.tier !== "allowance",
 				reclaimReady:
 					!blocked &&
 					policy?.reclaimAbovePct !== undefined &&
@@ -572,13 +632,18 @@ export class CredentialSelector {
 		const hasAccountPolicy = credentials.some(
 			({ credential }) => this.#deps.policies.forCredential(provider, credential) !== undefined,
 		);
+		const hasExtraUsagePolicy = credentials.some(({ credential }) => {
+			const policy = this.#deps.policies.forCredential(provider, credential);
+			return policy?.extraUsageFloor !== undefined || policy?.extraUsageBudget !== undefined;
+		});
 		const hasPriorityPolicy = credentials.some(
 			({ credential }) => this.#deps.policies.forCredential(provider, credential)?.priority !== undefined,
 		);
 		const canFetchPolicyUsage = strategy !== undefined || this.#deps.usage.canFetchOAuthUsage(provider);
 		const policyReserveEnabled = hasAccountPolicy && canFetchPolicyUsage;
 		const checkUsage =
-			(strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || hasPlanRequirement);
+			(strategy !== undefined || policyReserveEnabled) &&
+			(credentials.length > 1 || hasPlanRequirement || hasExtraUsagePolicy);
 		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
 		const sessionPreferredCredential =
@@ -610,10 +675,9 @@ export class CredentialSelector {
 			!sessionPreferredIsWarm ||
 			hasPlanRequirement ||
 			(policyReserveEnabled && !sessionPinIsExplicit);
-		// A warm automatic pin whose allowance is spent keeps serving on paid overage
-		// (Codex credits) and is never blocked, so check it and rank when spent: a
-		// sibling with renewable allowance left must take over (#13889). tryOAuth
-		// reads this same report for the pin, so it is handed on below.
+		// A warm automatic pin must be re-ranked once it leaves renewable allowance:
+		// a sibling with a better funding tier, or a higher-priority paid account,
+		// must take over before the request spends more paid usage.
 		const sessionPreferredUsage =
 			checkUsage && !rankDespitePin && !sessionPinIsExplicit && sessionPreferredCredential
 				? await this.#deps.usage.report(provider, sessionPreferredCredential, {
@@ -621,11 +685,23 @@ export class CredentialSelector {
 						timeoutMs: this.#deps.usage.requestTimeoutMs,
 					})
 				: undefined;
+		const sessionPreferredFunding =
+			sessionPreferredUsage === undefined ||
+			sessionPreferredCredential === undefined ||
+			sessionPreferredIndex === undefined
+				? undefined
+				: this.#assessFunding(
+						provider,
+						providerKey,
+						{ credential: sessionPreferredCredential, index: sessionPreferredIndex },
+						strategy,
+						sessionPreferredUsage,
+						rankingContext,
+						Date.now(),
+					);
 		const shouldRank =
 			checkUsage &&
-			(rankDespitePin ||
-				(sessionPreferredUsage !== undefined &&
-					remainingUsageFraction(strategy, sessionPreferredUsage, rankingContext, Date.now()) === 0));
+			(rankDespitePin || fundingTierRank(sessionPreferredFunding?.tier) > fundingTierRank("allowance"));
 		// When ranking, seed the pinned credential first in the evaluation order so it wins genuine
 		// ties (the ranked comparator falls back to `orderPos`) without overriding a strictly-better
 		// sibling — this respects the residual value of a same-account shared static prefix that other
@@ -694,28 +770,40 @@ export class CredentialSelector {
 				candidate.selection.index === sessionPreferredIndex,
 		);
 		const preferredCandidate = sessionPreferredCandidate === -1 ? undefined : candidates[sessionPreferredCandidate];
-		// A warm automatic pin normally wins. Three policies may evict it, each only
-		// while a sibling is confirmed better: reserve (sibling measured outside
-		// reserve), spent allowance (unblocked sibling with allowance left), and
-		// opt-in reclaim (the sibling ranking picks next has higher priority and is
-		// measured at or above its `reclaimAbovePct`).
+		// A warm automatic pin normally wins. A selectable sibling takes over when
+		// it has a better funding tier, or when both accounts use paid extra usage
+		// and the sibling has higher configured priority. Existing reserve and
+		// reclaim safeguards still apply to allowance accounts.
 		const automaticPinWouldBeEvicted = (excludePreflightFailures: boolean): boolean => {
 			if (sessionPinIsExplicit || preferredCandidate === undefined) return false;
-			const rankedWinner = candidates.find(
+			const selectableSiblings = candidates.filter(
 				candidate =>
 					candidate !== preferredCandidate &&
 					!(excludePreflightFailures && preflightFailures.has(candidate)) &&
-					!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes),
+					!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes) &&
+					fundingTierAllowed(candidate.fundingTier, options?.extraUsage ?? "to-floor"),
 			);
+			const rankedWinner = selectableSiblings[0];
+			if (
+				rankedWinner !== undefined &&
+				fundingTierRank(rankedWinner.fundingTier) < fundingTierRank(preferredCandidate.fundingTier)
+			) {
+				return true;
+			}
+			if (
+				rankedWinner?.fundingTier === "extra" &&
+				preferredCandidate.fundingTier === "extra" &&
+				(rankedWinner.accountPriority ?? 0) > (preferredCandidate.accountPriority ?? 0)
+			) {
+				return true;
+			}
 			if (
 				rankedWinner?.reclaimReady === true &&
 				(rankedWinner.accountPriority ?? 0) > (preferredCandidate.accountPriority ?? 0)
 			) {
 				return true;
 			}
-			return candidates.some(candidate => {
-				if (candidate === preferredCandidate) return false;
-				if (excludePreflightFailures && preflightFailures.has(candidate)) return false;
+			return selectableSiblings.some(candidate => {
 				if (
 					preferredCandidate.inReserve === true &&
 					candidate.reserveMeasured === true &&
@@ -726,8 +814,7 @@ export class CredentialSelector {
 				return (
 					preferredCandidate.allowanceSpent === true &&
 					candidate.usage !== null &&
-					candidate.allowanceSpent === false &&
-					!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes)
+					candidate.allowanceSpent === false
 				);
 			});
 		};
@@ -926,13 +1013,67 @@ export class CredentialSelector {
 		const lastResortCandidates = explicitPin
 			? [explicitPin, ...candidates.filter(candidate => candidate !== explicitPin)]
 			: candidates;
+		let extraUsageWithheld = false;
+		let earliestAllowanceResetAt: number | undefined;
+		const recordExtraUsageWithheld = (allowanceResetsAt: number | undefined): void => {
+			extraUsageWithheld = true;
+			if (
+				allowanceResetsAt !== undefined &&
+				(earliestAllowanceResetAt === undefined || allowanceResetsAt < earliestAllowanceResetAt)
+			) {
+				earliestAllowanceResetAt = allowanceResetsAt;
+			}
+		};
+
+		const allowance = options?.extraUsage ?? "to-floor";
+		const admits = (pass: { enforceAccounts: boolean }, candidate: OAuthCandidate): boolean => {
+			if (preflightFailures.has(candidate)) return false;
+			const candidateAccountKey = oauthAccountKey(candidate.selection.credential);
+			return (
+				!pass.enforceAccounts ||
+				(candidateAccountKey !== undefined && accountIds?.has(candidateAccountKey) === true)
+			);
+		};
 
 		for (const pass of passes) {
+			if (
+				pass.allowBlocked &&
+				!extraUsageWithheld &&
+				allowance === "to-floor" &&
+				strategy !== undefined &&
+				hasExtraUsagePolicy
+			) {
+				for (const candidate of lastResortCandidates) {
+					if (!admits(pass, candidate)) continue;
+					const policy = this.#deps.policies.forCredential(provider, candidate.selection.credential);
+					if (policy?.extraUsageFloor === undefined && policy?.extraUsageBudget === undefined) continue;
+					let report =
+						(candidate.usageChecked ? candidate.usage : null) ??
+						this.#deps.usage.cachedReport(provider, candidate.selection.credential, options?.baseUrl);
+					if (report === null) {
+						report = await this.#deps.usage.report(provider, candidate.selection.credential, {
+							...options,
+							timeoutMs: this.#deps.usage.requestTimeoutMs,
+						});
+					}
+					if (pass.enforcePlanRequirement && planGate?.(report) !== true) continue;
+					const funding = this.#assessFunding(
+						provider,
+						providerKey,
+						candidate.selection,
+						strategy,
+						report,
+						rankingContext,
+						Date.now(),
+					);
+					if (!fundingTierAllowed(funding?.tier, allowance)) {
+						recordExtraUsageWithheld(funding?.allowanceResetsAt);
+					}
+				}
+			}
+			if (extraUsageWithheld && pass.allowBlocked) break;
 			for (const candidate of pass.allowBlocked ? lastResortCandidates : candidates) {
-				if (preflightFailures.has(candidate)) continue;
-				const candidateAccountKey = oauthAccountKey(candidate.selection.credential);
-				if (pass.enforceAccounts && (candidateAccountKey === undefined || !accountIds?.has(candidateAccountKey)))
-					continue;
+				if (!admits(pass, candidate)) continue;
 				const resolved = await this.tryOAuth(provider, candidate.selection, providerKey, sessionId, options, {
 					checkUsage,
 					allowBlocked: pass.allowBlocked,
@@ -944,12 +1085,16 @@ export class CredentialSelector {
 					rankingContext,
 					blockScope,
 					blockScopes,
+					onExtraUsageWithheld: recordExtraUsageWithheld,
 					onTransientRefreshFailure: recordTransientRefreshFailure,
 				});
 				if (resolved) return resolved;
 			}
 		}
 
+		if (extraUsageWithheld) {
+			throw new AIError.ExtraUsageWithheldError(provider, earliestAllowanceResetAt);
+		}
 		if (transientRefreshFailure !== undefined) {
 			throw new AIError.OAuthRefreshUnavailableError(provider, transientRefreshFailure);
 		}
@@ -1026,6 +1171,7 @@ export class CredentialSelector {
 			blockScope,
 			blockScopes,
 			allowFallback = true,
+			onExtraUsageWithheld,
 		} = usageOptions;
 		if (
 			!allowBlocked &&
@@ -1063,15 +1209,33 @@ export class CredentialSelector {
 			if (applyPlanFilter && planGate?.(usage) !== true) {
 				return undefined;
 			}
-			if (checkUsage && !allowBlocked && usage && strategy && rankingContext) {
-				const scopedLimits = scopedUsageLimits(strategy, usage, rankingContext);
-				if (isUsageLimitReached(scopedLimits)) {
-					const resetAtMs = usageResetAtMs(scopedLimits, Date.now());
+			if (checkUsage && !allowBlocked && strategy && rankingContext) {
+				const nowMs = Date.now();
+				const funding = this.#assessFunding(
+					provider,
+					providerKey,
+					selection,
+					strategy,
+					usage,
+					rankingContext,
+					nowMs,
+				);
+				if (!fundingTierAllowed(funding?.tier, options?.extraUsage ?? "to-floor")) {
+					onExtraUsageWithheld?.(funding?.allowanceResetsAt);
+					return undefined;
+				}
+				const servesThroughPaidUsage = funding?.tier === "extra" || funding?.tier === "extra-past-floor";
+				const scopedLimits =
+					usage === null
+						? undefined
+						: currentUsageLimits(scopedUsageLimits(strategy, usage, rankingContext), usage.fetchedAt, nowMs);
+				if (!servesThroughPaidUsage && scopedLimits && isUsageLimitReached(scopedLimits)) {
+					const resetAtMs = usageResetAtMs(scopedLimits, nowMs);
 					this.#deps.blocks.mark(
 						provider,
 						providerKey,
 						selection.index,
-						resetAtMs ?? Date.now() + DEFAULT_BLOCK_MS,
+						resetAtMs ?? nowMs + DEFAULT_BLOCK_MS,
 						blockScope,
 						resetAtMs !== undefined,
 					);
@@ -1132,15 +1296,33 @@ export class CredentialSelector {
 				if (applyPlanFilter && planGate?.(usage) !== true) {
 					return undefined;
 				}
-				if (checkUsage && !allowBlocked && usage && strategy && rankingContext) {
-					const scopedLimits = scopedUsageLimits(strategy, usage, rankingContext);
-					if (isUsageLimitReached(scopedLimits)) {
-						const resetAtMs = usageResetAtMs(scopedLimits, Date.now());
+				if (checkUsage && !allowBlocked && strategy && rankingContext) {
+					const nowMs = Date.now();
+					const funding = this.#assessFunding(
+						provider,
+						providerKey,
+						{ credential: updated, index: selection.index },
+						strategy,
+						usage,
+						rankingContext,
+						nowMs,
+					);
+					if (!fundingTierAllowed(funding?.tier, options?.extraUsage ?? "to-floor")) {
+						onExtraUsageWithheld?.(funding?.allowanceResetsAt);
+						return undefined;
+					}
+					const servesThroughPaidUsage = funding?.tier === "extra" || funding?.tier === "extra-past-floor";
+					const scopedLimits =
+						usage === null
+							? undefined
+							: currentUsageLimits(scopedUsageLimits(strategy, usage, rankingContext), usage.fetchedAt, nowMs);
+					if (!servesThroughPaidUsage && scopedLimits && isUsageLimitReached(scopedLimits)) {
+						const resetAtMs = usageResetAtMs(scopedLimits, nowMs);
 						this.#deps.blocks.mark(
 							provider,
 							providerKey,
 							selection.index,
-							resetAtMs ?? Date.now() + DEFAULT_BLOCK_MS,
+							resetAtMs ?? nowMs + DEFAULT_BLOCK_MS,
 							blockScope,
 							resetAtMs !== undefined,
 						);

@@ -139,7 +139,7 @@ import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-
 import { cfgAdvisorSyncBacklog } from "../../advisor/settings";
 import { cfgBranchSummaryEnabled } from "../../session/context-settings";
 import { cfgCycleOrder, cfgDisabledProviders, cfgModelRoleStorage } from "../../config/model-settings";
-import { cfgDefaultThinkingLevel, cfgRetryFallbackChains } from "../../session/settings";
+import { cfgDefaultThinkingLevel, cfgRetryExtraUsageBelowFloor, cfgRetryFallbackChains } from "../../session/settings";
 import {
 	cfgStatusLineCompactThinkingLevel,
 	cfgStatusLineContextLine,
@@ -455,10 +455,13 @@ export class SelectorController {
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
+		const extraUsageBelowFloor = cfgRetryExtraUsageBelowFloor.get(this.ctx.settings);
 		const dashboard = new UsageDashboardComponent({
 			reports,
 			unavailableAccounts,
-			renderDetail: (width, current) =>
+			paidUsage: current => authStorage.usage.paidUsage(current),
+			extraUsageBelowFloor,
+			renderDetail: (width, current, paid) =>
 				renderUsageReports(
 					current,
 					theme,
@@ -467,6 +470,8 @@ export class SelectorController {
 					provider => (provider === currentProvider ? activeAccount : undefined),
 					usageModelSelectors,
 					unavailableAccounts,
+					paid,
+					extraUsageBelowFloor,
 				),
 			loadActivity: loadDailyActivity,
 			refresh: () => this.ctx.session.fetchUsageReports(),

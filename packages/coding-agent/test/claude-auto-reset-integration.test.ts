@@ -6,6 +6,7 @@ import type {
 	SessionRestrictionLease,
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
+import { resolvedApiKeyBearer } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -27,7 +28,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
-import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgClaudeResetsAutoRedeem, cfgRetryAccountOrder } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 const ACCOUNT_ID = "claude-account";
 const EMAIL = "claude@example.com";
@@ -415,6 +416,202 @@ describe("Claude saved-reset trigger integration", () => {
 					),
 			);
 		expect(recovered).toBe(true);
+	});
+
+	it("redeems the active reset before resolver rotation and observes the account cooldown", async () => {
+		const { session, targets, listCalls } = buildSession({
+			report: claudeReport(1),
+			status: claudeStatus(true),
+			autoRedeem: "yes",
+		});
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled anthropic model");
+		cfgRetryAccountOrder.set(session.settings, "tiered");
+		vi.spyOn(authStorage.health, "model").mockResolvedValue({
+			state: "healthy",
+			accounts: [
+				{
+					credentialId: CREDENTIAL_ID,
+					credentialType: "oauth",
+					selected: true,
+					state: "healthy",
+					fundingTier: "extra",
+					savedResets: 1,
+				},
+			],
+		});
+		const rotate = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue({ switched: false });
+		const options = session.apiKeyResolverOptions(model);
+		if (!options.beforeRotate) throw new Error("Expected tiered reset hook");
+		const resolver = modelRegistry.resolver(model, { sessionId: session.sessionId, ...options });
+		const initial = await resolver({ lastChance: false, error: undefined });
+		const retried = await resolver({
+			lastChance: true,
+			error: new Error(CLAUDE_USAGE_LIMIT_ERROR),
+			previousKey: resolvedApiKeyBearer(initial),
+		});
+
+		expect(resolvedApiKeyBearer(retried)).toBe(resolvedApiKeyBearer(initial));
+		expect(targets).toEqual([
+			expect.objectContaining({ provider: "anthropic", credentialId: CREDENTIAL_ID, creditId: "cedar-grant-1" }),
+		]);
+		expect(rotate).not.toHaveBeenCalled();
+		expect(listCalls()).toBe(1);
+		expect(await options.beforeRotate(new Error(CLAUDE_USAGE_LIMIT_ERROR))).toBe(false);
+		expect(listCalls()).toBe(1);
+	});
+
+	it("keeps the resolver reset hook on its selected account and skips it for 401", async () => {
+		const target = claudeStatus(true);
+		const targetWeekly = target.report?.limits.find(limit => limit.id === "anthropic:7d");
+		if (!targetWeekly?.window) throw new Error("Expected target weekly reset");
+		targetWeekly.window.resetsAt = Date.now() + 40 * 60_000;
+		target.credits = target.credits.map(credit => ({
+			...credit,
+			expiresAt: new Date(Date.now() + 20 * 24 * HOUR).toISOString(),
+		}));
+		const siblingReport = claudeReport(1);
+		siblingReport.metadata = {
+			accountId: "claude-sibling",
+			email: "sibling@example.com",
+			orgId: "22222222-2222-4222-8222-222222222222",
+		};
+		const sibling: ResetCreditAccountStatus = {
+			...claudeStatus(true),
+			credentialId: CREDENTIAL_ID + 1,
+			accountId: "claude-sibling",
+			email: "sibling@example.com",
+			orgId: "22222222-2222-4222-8222-222222222222",
+			active: false,
+			report: siblingReport,
+			credits: [
+				{
+					...claudeStatus(true).credits[0]!,
+					id: "cedar-sibling",
+					expiresAt: new Date(Date.now() + 20 * 24 * HOUR).toISOString(),
+				},
+			],
+			nextCreditId: "cedar-sibling",
+		};
+		const expiringReport = claudeReport(0.1);
+		expiringReport.metadata = {
+			accountId: "claude-expiring",
+			email: "expiring@example.com",
+			orgId: "33333333-3333-4333-8333-333333333333",
+		};
+		const expiring: ResetCreditAccountStatus = {
+			...claudeStatus(false),
+			credentialId: CREDENTIAL_ID + 2,
+			accountId: "claude-expiring",
+			email: "expiring@example.com",
+			orgId: "33333333-3333-4333-8333-333333333333",
+			active: false,
+			report: expiringReport,
+			credits: [
+				{
+					...claudeStatus(false).credits[0]!,
+					id: "cedar-expiring",
+					clears: ["anthropic:7d"],
+					usedFractions: { "anthropic:7d": 0.1 },
+					expiresAt: new Date(Date.now() + 2 * HOUR).toISOString(),
+				},
+			],
+			nextCreditId: "cedar-expiring",
+		};
+		const { session, targets } = buildSession({
+			report: target.report ?? null,
+			status: target,
+			autoRedeem: "yes",
+		});
+		cfgRetryAccountOrder.set(session.settings, "tiered");
+		let creditListings = 0;
+		vi.spyOn(authStorage.resets, "list").mockImplementation(async request => {
+			if (request?.provider !== "anthropic") return [];
+			creditListings++;
+			return [target, sibling, expiring];
+		});
+		vi.spyOn(authStorage.health, "model").mockResolvedValue({
+			state: "healthy",
+			accounts: [
+				{
+					credentialId: CREDENTIAL_ID,
+					credentialType: "oauth",
+					selected: true,
+					state: "healthy",
+					fundingTier: "extra",
+					savedResets: 1,
+				},
+			],
+		});
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled anthropic model");
+		const options = session.apiKeyResolverOptions(model);
+		if (!options.beforeRotate) throw new Error("Expected tiered reset hook");
+
+		expect(await options.beforeRotate(new Error(CLAUDE_USAGE_LIMIT_ERROR))).toBe(false);
+		expect(targets).toEqual([]);
+
+		creditListings = 0;
+		const rotate = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue({ switched: false });
+		const resolver = modelRegistry.resolver(model, { sessionId: session.sessionId, ...options });
+		const initial = await resolver({ lastChance: false, error: undefined });
+		await resolver({
+			lastChance: true,
+			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
+			previousKey: resolvedApiKeyBearer(initial),
+		});
+
+		expect(creditListings).toBe(0);
+		expect(targets).toEqual([]);
+		expect(rotate).toHaveBeenCalled();
+	});
+
+	it("redeems a targeted saved reset before a tiered model call", async () => {
+		const { session, targets, modelCalls } = buildSession({
+			report: claudeReport(1),
+			status: claudeStatus(true),
+			autoRedeem: "yes",
+		});
+		cfgRetryAccountOrder.set(session.settings, "tiered");
+		vi.spyOn(authStorage.health, "model").mockResolvedValue({
+			state: "healthy",
+			accounts: [
+				{
+					credentialId: CREDENTIAL_ID,
+					credentialType: "oauth",
+					selected: true,
+					state: "healthy",
+					fundingTier: "extra",
+					savedResets: 1,
+				},
+			],
+		});
+
+		await session.prompt("redeem before the request");
+		await session.waitForIdle();
+
+		expect(targets).toEqual([
+			expect.objectContaining({ provider: "anthropic", credentialId: CREDENTIAL_ID, creditId: "cedar-grant-1" }),
+		]);
+		expect(modelCalls()).toBe(1);
+	});
+
+	it("does not list saved resets before a usage-order model call", async () => {
+		const { session, targets, listCalls, modelCalls } = buildSession({
+			report: claudeReport(1),
+			status: claudeStatus(true),
+			autoRedeem: "yes",
+		});
+		vi.spyOn(authStorage.health, "model").mockImplementation(async () => {
+			throw new Error("usage ordering must not preflight reset health");
+		});
+
+		await session.prompt("skip tiered reset preflight");
+		await session.waitForIdle();
+
+		expect(targets).toEqual([]);
+		expect(listCalls()).toBe(0);
+		expect(modelCalls()).toBe(1);
 	});
 
 	it("continues the task using live reset evidence when broker usage polling is unavailable", async () => {

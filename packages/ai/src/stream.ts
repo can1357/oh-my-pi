@@ -1319,13 +1319,18 @@ function streamSimpleRequest<TApi extends Api>(
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
-				// key — surface the cause instead of masking it as "No API key".
-				outer.fail(
-					new AIError.ConfigurationError(
-						`Failed to resolve API key for provider ${model.provider}: ${error instanceof Error ? error.message : String(error)}`,
-						{ cause: error },
-					),
-				);
+				// key. Preserve usage limits so retry policy can classify and recover
+				// them instead of wrapping them as configuration failures.
+				if (AIError.isUsageLimit(error)) {
+					outer.fail(error);
+				} else {
+					outer.fail(
+						new AIError.ConfigurationError(
+							`Failed to resolve API key for provider ${model.provider}: ${error instanceof Error ? error.message : String(error)}`,
+							{ cause: error },
+						),
+					);
+				}
 				return;
 			}
 			if (lastKey === undefined) {

@@ -5,6 +5,12 @@
 ### Added
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- Added opt-in `retry.accountOrder: "usage" | "tiered"`: tiered mode uses plan allowance before paid extra usage, redeems a saved reset before moving to a sibling, and admits below-floor paid usage only when `retry.extraUsageBelowFloor` is on and no retry fallback successor exists ([#16704](https://github.com/can1357/oh-my-pi/pull/16704) by [@jwaldrip](https://github.com/jwaldrip)).
+- `/usage` and `omp usage` now show each account's paid extra usage. `omp usage --json` adds `paidUsage`, and paid rows no longer affect plan remaining, reserve state, or capacity ([#16704](https://github.com/can1357/oh-my-pi/pull/16704) by [@jwaldrip](https://github.com/jwaldrip)).
+
+### Fixed
+
+- Fixed macOS session GC compression copying APFS clones instead of creating compressed copies by passing `--noclone` to `ditto --hfsCompression`.
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 
 ### Fixed

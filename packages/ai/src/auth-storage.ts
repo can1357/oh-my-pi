@@ -202,6 +202,7 @@ export class AuthStorage {
 		const affinity = new SessionAffinity(store, pool, overrides, this.#restrictions);
 		const usage = new UsageService({
 			store,
+			policies,
 			pool,
 			overrides,
 			refresher,

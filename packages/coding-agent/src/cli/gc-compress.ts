@@ -312,7 +312,7 @@ async function compressBatch(
 		scratch = await fs.mkdtemp(path.join(dir, COMPRESS_SCRATCH_PREFIX));
 		await Bun.write(path.join(scratch, SCRATCH_OWNER_MARKER), "");
 		const digests = await sha256Files(batch.map(candidate => candidate.path));
-		const copy = await $`ditto --hfsCompression ${batch.map(candidate => candidate.path)} ${scratch}`
+		const copy = await $`ditto --hfsCompression --noclone ${batch.map(candidate => candidate.path)} ${scratch}`
 			.quiet()
 			.nothrow();
 		if (copy.exitCode !== 0) {

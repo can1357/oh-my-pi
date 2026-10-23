@@ -1,4 +1,9 @@
-import { type ApiKeyResolution, type ApiKeyResolver, markAfterSiblingWait } from "@oh-my-pi/pi-ai/auth-retry";
+import {
+	type ApiKeyResolution,
+	type ApiKeyResolver,
+	markAfterReset,
+	markAfterSiblingWait,
+} from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
 import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
@@ -14,6 +19,10 @@ export interface ApiKeyResolverOptions {
 	baseUrl?: string;
 	/** Provider model id forwarded to model-scoped usage ranking/backoff. */
 	modelId?: string;
+	/** Whether this request may spend paid extra usage below configured account floors or budgets. */
+	extraUsage?: AuthApiKeyOptions["extraUsage"];
+	/** Gives a tiered account a saved-reset recovery chance for usage-limit failures before sibling rotation. */
+	beforeRotate?: (error: unknown, signal?: AbortSignal) => Promise<boolean>;
 }
 
 /**
@@ -42,7 +51,7 @@ export interface ApiKeyResolverRegistry {
 	 * `resolveApiKeyOnce(resolver)`.
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
-	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
+	resolver(model: ApiKeyResolverModel, sessionIdOrOptions?: string | ApiKeyResolverOptions): ApiKeyResolver;
 }
 
 /**
@@ -54,7 +63,7 @@ export function createApiKeyResolver(
 	provider: string,
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
-	const { sessionId, baseUrl, modelId } = options;
+	const { sessionId, baseUrl, modelId, extraUsage, beforeRotate } = options;
 	const resolveKey = (
 		forceRefresh: boolean | undefined,
 		signal?: AbortSignal,
@@ -63,6 +72,7 @@ export function createApiKeyResolver(
 		registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
 			modelId,
+			extraUsage,
 			forceRefresh,
 			signal,
 			refreshReason,
@@ -78,6 +88,12 @@ export function createApiKeyResolver(
 			// sleeps out a sibling block that clears within seconds. Longer
 			// no-sibling backoff is owned by `markUsageLimitReached` (default +
 			// server usage-report reset) and the outer whole-turn retry layer.
+			const status = AIError.status(error);
+			const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+			const usageLimit = AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message);
+			if (usageLimit && (await beforeRotate?.(error, signal))) {
+				return markAfterReset(await resolveKey(undefined, signal));
+			}
 			const rotation = await registry.authStorage.limits.rotate(provider, sessionId, {
 				error,
 				modelId,
@@ -85,12 +101,10 @@ export function createApiKeyResolver(
 				apiKey: previousKey,
 			});
 			if (!rotation.switched) {
-				const status = AIError.status(error);
-				const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 				// No sibling for an account-quota failure: stop so the outer
 				// whole-turn retry layer can honor the recorded backoff. A hard
 				// auth decline can instead mean a peer refreshed the bearer.
-				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
+				if (usageLimit) return undefined;
 			}
 			const resolved = await resolveKey(undefined);
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;

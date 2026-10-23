@@ -355,6 +355,7 @@ export class KeyCascade implements KeysApi {
 		try {
 			return await this.#resolve(provider, sessionId, options);
 		} catch (error) {
+			if (error instanceof AIError.ExtraUsageWithheldError) return undefined;
 			if (!(error instanceof AIError.OAuthRefreshUnavailableError)) throw error;
 			logger.debug("API key probe skipped transient OAuth refresh failure", { provider, error: error.message });
 			return undefined;

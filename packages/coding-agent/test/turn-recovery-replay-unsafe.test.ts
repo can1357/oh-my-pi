@@ -13,6 +13,7 @@ import {
 	TurnRecovery,
 	type TurnRecoveryHost,
 } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
+import { cfgRetryExtraUsageBelowFloor, cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createProviderErrorMessage } from "../../ai/src/providers/error-message";
 import { streamFactoryDroidGemini } from "../../ai/src/providers/factory-droid/gemini";
@@ -106,6 +107,7 @@ function createHost(
 		syncAfterModelChange: async () => {},
 		resetCurrentResponsesProviderSession: () => {},
 		maybeAutoRedeemReset: async () => ({ restored: false }),
+		redeemSavedReset: async () => false,
 		runAutoCompaction: async () => ({ continuationScheduled: false }) as RecoveryCompactionResult,
 		shakeForRequestBodyReadTimeout: async () => options.shakeSucceeds === true,
 		withBashBranchTransition: <T>(operation: () => T): T => operation(),
@@ -380,6 +382,30 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			errorMessage: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000",
 		} as AssistantMessage;
 		expect(recovery.isRetryableError(message)).toBe(false);
+	});
+
+	it("permits paid usage past a floor only after the final retry-chain entry", () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model");
+		const fallbackChains = {
+			[`${model.provider}/${model.id}`]: [`${fallback.provider}/${fallback.id}`],
+		};
+
+		const withSuccessor = createHost(model, modelRegistry, { fallbackChains });
+		cfgRetryExtraUsageBelowFloor.set(withSuccessor.settings, true);
+		expect(new TurnRecovery(withSuccessor).extraUsageAllowanceFor(model)).toBe("to-floor");
+
+		const finalEntry = createHost(fallback, modelRegistry, { fallbackChains });
+		cfgRetryExtraUsageBelowFloor.set(finalEntry.settings, true);
+		expect(new TurnRecovery(finalEntry).extraUsageAllowanceFor(fallback)).toBe("past-floor");
+
+		const disabledFallback = createHost(model, modelRegistry, { fallbackChains });
+		cfgRetryExtraUsageBelowFloor.set(disabledFallback.settings, true);
+		cfgRetryModelFallback.set(disabledFallback.settings, false);
+		expect(new TurnRecovery(disabledFallback).extraUsageAllowanceFor(model)).toBe("past-floor");
+
+		const settingOff = createHost(fallback, modelRegistry, { fallbackChains });
+		expect(new TurnRecovery(settingOff).extraUsageAllowanceFor(fallback)).toBe("to-floor");
 	});
 
 	it("allows replay-safe hard fallback and excludes committed text with a configured chain", () => {

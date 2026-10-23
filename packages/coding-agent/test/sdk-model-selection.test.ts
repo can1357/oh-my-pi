@@ -1179,6 +1179,64 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("does not run startup usage health merely because tiered account order is on", async () => {
+		const settings = Settings.isolated({
+			"retry.accountOrder": "tiered",
+			"retry.usageAwareFallback": false,
+			"retry.usageReservePolicy": "confirm",
+		});
+		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");
+		const options = buildSessionOptions("task");
+		const usageHealth = vi.spyOn(options.authStorage.health, "model").mockResolvedValue({
+			state: "depleted",
+			accounts: [{ credentialId: 1, credentialType: "oauth", state: "depleted" }],
+		});
+
+		const { session, modelFallbackMessage } = await createAgentSession({
+			...options,
+			modelPatternFallbackRole: "subagent:tiered-startup",
+			settings,
+			hasUI: false,
+		});
+		try {
+			expect(usageHealth).not.toHaveBeenCalled();
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-model");
+			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("passes the tiered to-floor allowance to usage-aware startup health", async () => {
+		const settings = Settings.isolated({
+			"retry.accountOrder": "tiered",
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePolicy": "confirm",
+		});
+		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");
+		const options = buildSessionOptions("task");
+		const usageHealth = vi.spyOn(options.authStorage.health, "model").mockResolvedValue({
+			state: "healthy",
+			accounts: [{ credentialId: 1, credentialType: "oauth", state: "healthy" }],
+		});
+
+		const { session } = await createAgentSession({
+			...options,
+			modelPatternFallbackRole: "subagent:tiered-startup",
+			settings,
+			hasUI: false,
+		});
+		try {
+			expect(usageHealth).toHaveBeenCalledWith(
+				"runtime-provider",
+				expect.objectContaining({ extraUsage: "to-floor" }),
+			);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test.each([
 		["depleted", "runtime-model"],
 		["reserve", "runtime-provider/runtime-m*"],

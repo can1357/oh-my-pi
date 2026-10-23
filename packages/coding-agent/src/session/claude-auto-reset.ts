@@ -73,6 +73,8 @@ export interface ClaudeResetPlanInput {
 	 * any spend, or the usage reports' inventory to find salvage candidates.
 	 */
 	statuses: readonly ResetCreditAccountStatus[];
+	/** Restrict restoration to this exact credential and stop before expiry salvage. */
+	targetCredentialId?: number;
 	/** Blocked recovery: whether a stored credential may serve the blocked session; absent allows every account. */
 	permitsCredential?: (credentialId: number) => boolean;
 	attemptedKeys: ReadonlySet<string>;
@@ -278,7 +280,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 	if (!input.settings.enabled) {
 		return { actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] };
 	}
-	if (input.trigger === "blocked" && input.provider !== CLAUDE_PROVIDER) {
+	if ((input.trigger === "blocked" || input.trigger === "allowance-spent") && input.provider !== CLAUDE_PROVIDER) {
 		return { actions: [], skipped: [{ accountKey: "*", rule: "blocked-account", reason: "wrong-provider" }] };
 	}
 
@@ -357,7 +359,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 		// has no such request context, so consider every reported scope rather
 		// than accidentally treating an unrelated current model as authoritative.
 		const limits =
-			input.trigger === "blocked"
+			input.trigger !== "sweep"
 				? (claudeRankingStrategy.scopeLimitsForReserve?.(report, { modelId: input.modelId }) ?? report.limits)
 				: report.limits;
 		const baseLabel = status.email ?? status.accountId ?? status.orgId ?? accountKey;
@@ -383,7 +385,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 	}
 
 	let restore: ClaudeResetAction | undefined;
-	if (input.trigger === "blocked") {
+	if (input.trigger !== "sweep") {
 		interface RestoreCandidate {
 			snapshot: ClaudeAccountSnapshot;
 			blockers: string[];
@@ -394,6 +396,9 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 		for (const snapshot of snapshots) {
 			const skip = (reason: ClaudeResetSkipReason) =>
 				skipped.push({ accountKey: snapshot.accountKey, rule: "blocked-account", reason });
+			if (input.targetCredentialId !== undefined && snapshot.target.credentialId !== input.targetCredentialId) {
+				continue;
+			}
 			// Restoring an account the session may not use cannot unblock it.
 			if (input.permitsCredential && !input.permitsCredential(snapshot.target.credentialId)) {
 				skip("outside-account-pool");
@@ -506,6 +511,9 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				requiresLimit: best.snapshot.credit.requiresLimit === true,
 			};
 		}
+	}
+	if (input.targetCredentialId !== undefined) {
+		return { actions: restore ? [restore] : [], skipped };
 	}
 
 	const salvages: ClaudeResetAction[] = [];

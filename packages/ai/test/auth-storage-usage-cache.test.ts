@@ -1161,6 +1161,8 @@ describe("AuthStorage usage cache: header ingestion", () => {
 
 	it("merges header umbrella windows onto the last real report and preserves tier limits", async () => {
 		const realReport = makeTieredReport("a@example.com");
+		const payloadFetchedAt = realReport.fetchedAt - 5_000;
+		realReport.metadata = { ...realReport.metadata, payloadFetchedAt };
 		let calls = 0;
 		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => {
 			calls += 1;
@@ -1183,6 +1185,7 @@ describe("AuthStorage usage cache: header ingestion", () => {
 		expect(mergedReport.metadata?.email).toBe("a@example.com");
 		expect(mergedReport.metadata?.accountId).toBe("account-a@example.com");
 		expect(mergedReport.metadata?.headersUpdatedAt).toBeGreaterThanOrEqual(beforeIngest);
+		expect(mergedReport.metadata?.payloadFetchedAt).toBe(payloadFetchedAt);
 		expect(mergedReport.metadata?.source).toBeUndefined();
 		expect(requireLimit(mergedReport, "anthropic:5h").amount.used).toBe(5);
 		expect(requireLimit(mergedReport, "anthropic:7d").amount.used).toBe(90);

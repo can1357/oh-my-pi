@@ -5,6 +5,7 @@ import {
 	isApiKeyResolver,
 	isAuthRetryableError,
 	resolveApiKeyOnce,
+	markAfterReset,
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
@@ -478,6 +479,31 @@ describe("withAuth", () => {
 			),
 		).rejects.toBe(original);
 		expect(keys).toEqual(["same"]);
+	});
+
+	it("retries a repeated bearer only after a saved reset restored its allowance", async () => {
+		const rejected = usageLimitError();
+		await expect(
+			withAuth(
+				() => "same",
+				async () => {
+					throw rejected;
+				},
+			),
+		).rejects.toBe(rejected);
+
+		const attempts: string[] = [];
+		const restored = await withAuth(
+			ctx => (ctx.error === undefined ? "same" : markAfterReset("same")),
+			async key => {
+				attempts.push(key);
+				if (attempts.length === 2) return "restored";
+				throw usageLimitError();
+			},
+		);
+
+		expect(restored).toBe("restored");
+		expect(attempts).toEqual(["same", "same"]);
 	});
 
 	it("propagates non-auth errors without retrying", async () => {

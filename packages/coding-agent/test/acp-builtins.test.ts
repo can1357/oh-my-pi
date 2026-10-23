@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type {
+	PaidUsageView,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
 	ResetCreditTarget,
@@ -75,6 +76,10 @@ interface FakeAcpBuiltinSession {
 	getAvailableModels(): Array<{ provider: string; id: string; contextWindow?: number }>;
 	scopedModels: Array<{ model: { provider: string; id: string } }>;
 	modelRegistry: {
+		authStorage: {
+			usage: { paidUsage(reports: readonly UsageReport[]): (PaidUsageView | undefined)[] };
+			oauth: { identity(provider: string, sessionId: string): undefined };
+		};
 		getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
 		getAvailable(): Array<{ provider: string; id: string; contextWindow?: number }>;
 	};
@@ -183,6 +188,10 @@ function createRuntime() {
 		getAvailableModels: () => [] as Array<{ provider: string; id: string; contextWindow?: number }>,
 		scopedModels: [],
 		modelRegistry: {
+			authStorage: {
+				usage: { paidUsage: reports => reports.map(() => undefined) },
+				oauth: { identity: (_provider: string, _sessionId: string) => undefined },
+			},
 			getAll: () => session.getAvailableModels(),
 			getAvailable: () => session.getAvailableModels(),
 		},
@@ -338,6 +347,58 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("5 hours (prolite)");
 		expect(output[0]).toContain("user@example.com: 0.24 unknown used (76.0% left)");
 		expect(output[0]).toContain("resets in");
+	});
+
+	it("renders paid usage from the ACP storage contract outside the limit list", async () => {
+		const { output, runtime } = createRuntime();
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: Date.now(),
+			metadata: { email: "paid@example.test" },
+			limits: [
+				{
+					id: "anthropic:5h",
+					label: "Claude 5 Hour",
+					scope: { provider: "anthropic", windowId: "5h" },
+					amount: { usedFraction: 0.2, unit: "percent" },
+					status: "ok",
+				},
+				{
+					id: "anthropic:extra",
+					label: "Claude Extra Usage",
+					scope: { provider: "anthropic", windowId: "extra" },
+					amount: { used: 46, remaining: 4, limit: 50, usedFraction: 0.92, unit: "usd" },
+					status: "warning",
+				},
+			],
+		};
+		const paid: PaidUsageView = {
+			limitId: "anthropic:extra",
+			unit: "usd",
+			capacity: "spend-cap",
+			state: "available",
+			used: 46,
+			cap: 50,
+			remaining: 4,
+			headroom: 4,
+			boundBy: "provider",
+			uncapped: false,
+			floorIgnored: false,
+			unbounded: false,
+			stale: false,
+		};
+		runtime.session.fetchUsageReports = async () => [report];
+		runtime.session.modelRegistry.authStorage.usage.paidUsage = reports =>
+			reports.map(current => (current === report ? paid : undefined));
+
+		const result = await executeAcpBuiltinSlashCommand("/usage", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("Paid usage");
+		expect(output[0]).toContain("Paid figures are provider-reported and refresh about every 5 minutes");
+		expect(output[0]).toContain("paid@example.test: $4.00 left of $50.00 cap");
+		expect(output[0]).not.toContain("Claude Extra Usage");
+		expect(output[0]).not.toContain("unknown used");
 	});
 
 	it("suppresses redundant usage window suffixes while retaining legitimate ones", async () => {

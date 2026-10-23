@@ -122,6 +122,32 @@ type RpcFrame = Record<string, unknown>;
 async function withRpcServer<T>(
 	run: (send: (frame: object) => void, next: () => Promise<RpcFrame>, sendRaw: (line: string) => void) => Promise<T>,
 ): Promise<T> {
+	await using fixture = await TempDir.create("@rpc-compatible-primitives-");
+	const cwd = fixture.path();
+	const home = fixture.path();
+	const agentDir = fixture.join("agent");
+	const env: Record<string, string | undefined> = {
+		PATH: process.env.PATH,
+		TMPDIR: process.env.TMPDIR,
+		TMP: process.env.TMP,
+		TEMP: process.env.TEMP,
+		SystemRoot: process.env.SystemRoot,
+		WINDIR: process.env.WINDIR,
+		HOME: home,
+		USERPROFILE: home,
+		OMP_PROFILE: "",
+		PI_PROFILE: "",
+		PI_CODING_AGENT_DIR: agentDir,
+		PI_CONFIG_DIR: ".omp",
+		XDG_CACHE_HOME: fixture.join("xdg-cache"),
+		XDG_CONFIG_HOME: fixture.join("xdg-config"),
+		XDG_DATA_HOME: fixture.join("xdg-data"),
+		XDG_STATE_HOME: fixture.join("xdg-state"),
+		PI_TEST_RUNTIME: "1",
+		PI_NO_TITLE: "1",
+		NO_COLOR: "1",
+		AWS_EC2_METADATA_DISABLED: "true",
+	};
 	const child = Bun.spawn(
 		[
 			"bun",
@@ -130,6 +156,7 @@ async function withRpcServer<T>(
 			"rpc",
 			"--no-extensions",
 			"--no-skills",
+			"--no-rules",
 			"--no-tools",
 			"--no-session",
 			"--provider",
@@ -138,8 +165,8 @@ async function withRpcServer<T>(
 			"claude-sonnet-4-5",
 		],
 		{
-			cwd: path.join(import.meta.dir, ".."),
-			env: { ...Bun.env, PI_NO_TITLE: "1" } as unknown as Record<string, string | undefined>,
+			cwd,
+			env,
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
@@ -181,9 +208,18 @@ async function withRpcServer<T>(
 		}
 		throw new Error("Timed out waiting for RPC frame");
 	};
+	let callbackFailed = false;
+	let callbackFailure: unknown;
+	let childStderr = "";
+	let result!: T;
 	try {
 		await child.stdin.flush?.();
-		return await run(send, next, sendRaw);
+		try {
+			result = await run(send, next, sendRaw);
+		} catch (error) {
+			callbackFailed = true;
+			callbackFailure = error;
+		}
 	} finally {
 		try {
 			child.stdin.end();
@@ -191,8 +227,13 @@ async function withRpcServer<T>(
 		child.kill();
 		await child.exited.catch(() => {});
 		await pump.catch(() => {});
-		await stderrPromise.catch(() => {});
+		childStderr = await stderrPromise.catch(error => `Unable to collect child stderr: ${String(error)}`);
 	}
+	if (callbackFailed) {
+		const message = callbackFailure instanceof Error ? callbackFailure.message : String(callbackFailure);
+		throw new Error(`${message}\n\nRPC child stderr:\n${childStderr}`, { cause: callbackFailure });
+	}
+	return result;
 }
 
 describe("RpcWordPredictor", () => {
@@ -272,7 +313,14 @@ describe("RPC Pi-compatible primitives (live server)", () => {
 	test("set_slow_mode rejects a non-boolean enabled before touching the persisted Claude setting", async () => {
 		await withRpcServer(async (send, next) => {
 			send({ type: "get_state", id: "slow-state" });
-			const state = (await next()).data as { slowModeSupported: unknown; slowModeScope: unknown };
+			const slowState = await next();
+			expect(slowState, JSON.stringify(slowState)).toMatchObject({
+				id: "slow-state",
+				type: "response",
+				command: "get_state",
+				success: true,
+			});
+			const state = slowState.data as { slowModeSupported: unknown; slowModeScope: unknown };
 			expect([state.slowModeSupported, state.slowModeScope]).toEqual([true, "global"]);
 			send({ type: "set_slow_mode", id: "slow-bad", enabled: "false" });
 			expect(await next()).toEqual({
@@ -323,6 +371,12 @@ describe("RPC Pi-compatible primitives (live server)", () => {
 			expect(setOff.success).toBe(true);
 			send({ type: "get_state", id: "state-off" });
 			const stateOff = await next();
+			expect(stateOff, JSON.stringify(stateOff)).toMatchObject({
+				id: "state-off",
+				type: "response",
+				command: "get_state",
+				success: true,
+			});
 			expect((stateOff.data as { thinkingLevel: unknown }).thinkingLevel).toBe("off");
 
 			// Command discovery stays an OMP dialect: the Pi-spelled alias is
@@ -371,6 +425,12 @@ describe("RPC Pi-compatible primitives (live server)", () => {
 
 			send({ type: "get_state", id: "after-malformed" });
 			const ok = await next();
+			expect(ok, JSON.stringify(ok)).toMatchObject({
+				id: "after-malformed",
+				type: "response",
+				command: "get_state",
+				success: true,
+			});
 			expect(ok.id).toBe("after-malformed");
 			expect(ok.success).toBe(true);
 		});

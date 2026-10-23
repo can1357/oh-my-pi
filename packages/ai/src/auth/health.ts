@@ -2,6 +2,7 @@ import type { Provider } from "../types";
 import { isWithinUsageReserve, resolveUsedFraction } from "../usage";
 import type {
 	CredentialRankingContext,
+	CredentialRankingStrategy,
 	UsageCredential,
 	UsageFetchContext,
 	UsageFetchParams,
@@ -10,10 +11,11 @@ import type {
 import type { RankingStrategyResolver } from "../usage/registry";
 import { raceSignal } from "./abort";
 import type { SessionAffinity } from "./affinity";
-import { credentialBlockScopesForRequest, providerTypeKey } from "./blocks";
+import { credentialBlockScopesForRequest, EXTRA_USAGE_BLOCK_SCOPE, providerTypeKey } from "./blocks";
 import type { CredentialBlocks } from "./blocks";
 import type { KeyCascade, KeyOverrides } from "./cascade";
 import type { AccountPolicies } from "./policy";
+import type { AuthAccountPolicy, ExtraUsageAllowance } from "./types";
 import type { CredentialPool, StoredCredential } from "./pool";
 import type { OAuthRefresher } from "./refresh";
 import type { AuthCredentialStore } from "./store";
@@ -31,7 +33,14 @@ import type { UsageService } from "./usage";
 import { REMOTE_REFRESH_SENTINEL } from "./types";
 import { oauthUsageRequest, usageCacheIdentity, usageRequest } from "./usage-cache";
 import type { UsageRequestDescriptor } from "./usage-cache";
-import { isUsageLimitExhausted, reserveUsageLimits, usageReportMetadataValue } from "./usage-report";
+import {
+	assessFunding,
+	classifyExtraUsage,
+	currentUsageLimits,
+	isUsageLimitExhausted,
+	reserveUsageLimits,
+	usageReportMetadataValue,
+} from "./usage-report";
 
 /** Dependencies for model pool health and stored credential probes. */
 export interface CredentialHealthDeps {
@@ -45,6 +54,41 @@ export interface CredentialHealthDeps {
 	refresher: OAuthRefresher;
 	overrides: KeyOverrides;
 	strategies: RankingStrategyResolver;
+}
+
+/**
+ * Determine whether paid usage can keep a reserve account eligible after its
+ * plan allowance is exhausted. `assessFunding` deliberately stops at plan
+ * allowance, so reserve health evaluates the same paid gates separately.
+ */
+function paidExtraUsageTier(
+	strategy: CredentialRankingStrategy | undefined,
+	report: UsageReport,
+	context: CredentialRankingContext,
+	policy: Pick<AuthAccountPolicy, "extraUsageFloor" | "extraUsageBudget"> | undefined,
+	extraUsageBlockedUntil: number | undefined,
+	nowMs: number,
+): "extra" | "extra-past-floor" | undefined {
+	const extra = classifyExtraUsage({
+		extraUsage: strategy?.extraUsage?.(report, context),
+		policy,
+		extraUsageBlockedUntil,
+		nowMs,
+	}).extra;
+	return extra === "available" ? "extra" : extra === "past-floor" ? "extra-past-floor" : undefined;
+}
+
+function paidExtraUsageAllowed(
+	strategy: CredentialRankingStrategy | undefined,
+	report: UsageReport,
+	context: CredentialRankingContext,
+	policy: Pick<AuthAccountPolicy, "extraUsageFloor" | "extraUsageBudget"> | undefined,
+	extraUsageBlockedUntil: number | undefined,
+	nowMs: number,
+	allowance: ExtraUsageAllowance,
+): boolean {
+	const tier = paidExtraUsageTier(strategy, report, context, policy, extraUsageBlockedUntil, nowMs);
+	return tier === "extra" || (tier === "extra-past-floor" && allowance === "past-floor");
 }
 
 /** Model-level pool health and per-credential auth probes. */
@@ -177,6 +221,7 @@ export class CredentialHealth implements HealthApi {
 				if (planGate) {
 					planEligibilityByCredential.set(entry.id, planGate(report));
 				}
+				const savedResets = report?.resetCredits?.redeemableCount ?? report?.resetCredits?.availableCount;
 
 				if (this.#deps.blocks.supportsHealing(provider)) {
 					blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, index, blockScopes);
@@ -187,28 +232,60 @@ export class CredentialHealth implements HealthApi {
 						credentialType,
 						state: "depleted",
 						resetsAt: blockedUntil,
+						...(savedResets === undefined ? {} : { savedResets }),
 					};
 				}
 				if (!report) return { credentialId: entry.id, credentialType, state: "unknown" };
 
-				const limits = reserveUsageLimits(strategy, report, rankingContext);
-				if (limits.length === 0) return { credentialId: entry.id, credentialType, state: "unknown" };
-
-				const currentLimits = limits.filter(limit => {
-					const resetsAt = limit.window?.resetsAt;
-					return resetsAt === undefined || resetsAt > nowMs || report.fetchedAt >= resetsAt;
+				const policy = this.#deps.policies.forCredential(provider, entry.credential);
+				const extraUsageBlockedUntil = this.#deps.blocks.exactBlockedUntil(
+					provider,
+					providerKey,
+					index,
+					EXTRA_USAGE_BLOCK_SCOPE,
+				);
+				const funding = assessFunding({
+					strategy,
+					report,
+					context: rankingContext,
+					nowMs,
+					policy,
+					extraUsageBlockedUntil,
 				});
+				const account = {
+					credentialId: entry.id,
+					credentialType,
+					...(funding === undefined ? {} : { fundingTier: funding.tier }),
+					...(savedResets === undefined ? {} : { savedResets }),
+				};
+
+				const limits = reserveUsageLimits(strategy, report, rankingContext);
+				if (limits.length === 0) return { ...account, state: "unknown" };
+
+				const currentLimits = currentUsageLimits(limits, report.fetchedAt, nowMs);
 				if (currentLimits.length === 0) {
-					return { credentialId: entry.id, credentialType, state: "unknown" };
+					return { ...account, state: "unknown" };
 				}
+
+				if (funding?.tier === "extra") {
+					if (options.extraUsage !== undefined) return { ...account, state: "healthy" };
+					return {
+						...account,
+						state: "depleted",
+						resetsAt: funding.allowanceResetsAt,
+					};
+				}
+				if (funding?.tier === "extra-past-floor" && options.extraUsage === "past-floor") {
+					return { ...account, state: "healthy" };
+				}
+
 				const activeExhausted = currentLimits.filter(limit => isUsageLimitExhausted(limit));
 				if (activeExhausted.length > 0) {
 					const futureResets = activeExhausted
 						.map(limit => limit.window?.resetsAt)
 						.filter((resetsAt): resetsAt is number => resetsAt !== undefined && resetsAt > nowMs);
 					return {
-						credentialId: entry.id,
-						credentialType,
+						...account,
 						state: "depleted",
 						resetsAt: futureResets.length > 0 ? Math.min(...futureResets) : undefined,
 					};
@@ -218,13 +295,25 @@ export class CredentialHealth implements HealthApi {
 					.map(resolveUsedFraction)
 					.filter((fraction): fraction is number => fraction !== undefined);
 				if (usedFractions.length === 0) {
-					return { credentialId: entry.id, credentialType, state: "unknown" };
+					return { ...account, state: "unknown" };
 				}
 				const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
+				const inReserve = isWithinUsageReserve(remainingFraction, resolveReserveFraction(entry));
+				const reserveAdmittedByPaidUsage =
+					inReserve &&
+					options.extraUsage !== undefined &&
+					paidExtraUsageAllowed(
+						strategy,
+						report,
+						rankingContext,
+						policy,
+						extraUsageBlockedUntil,
+						nowMs,
+						options.extraUsage,
+					);
 				return {
-					credentialId: entry.id,
-					credentialType,
-					state: isWithinUsageReserve(remainingFraction, resolveReserveFraction(entry)) ? "reserve" : "healthy",
+					...account,
+					state: reserveAdmittedByPaidUsage ? "healthy" : inReserve ? "reserve" : "healthy",
 					remainingFraction,
 				};
 			}),

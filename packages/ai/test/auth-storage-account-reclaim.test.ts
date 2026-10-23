@@ -212,18 +212,24 @@ describe("accountPolicies reclaimAbovePct", () => {
 		expect(await next(auth, A, "S1")).toBe("b");
 	});
 
-	test("requires a usage provider", async () => {
+	test("requires a usage provider for policy fields that use account diagnostics", async () => {
 		if (!store) throw new Error("test setup failed");
-		const auth = new AuthStorage(store, {
-			usageProviderResolver: () => undefined,
-			accountPolicies: [{ provider: A, account: { accountId: "a" }, reclaimAbovePct: 40 }],
-		});
-		await auth.credentials.set(A, [
-			{ type: "oauth", access: "x", refresh: "y", expires: Date.now() + WEEK, accountId: "a" },
-		]);
-		await expect(auth.keys.get(A, "S1")).rejects.toThrow(
-			"auth.accountPolicies[0].reclaimAbovePct requires a usage provider for anthropic",
-		);
+		for (const [field, value] of [
+			["reclaimAbovePct", 40],
+			["extraUsageFloor", 10],
+			["extraUsageBudget", 100],
+		] as const) {
+			const auth = new AuthStorage(store, {
+				usageProviderResolver: () => undefined,
+				accountPolicies: [{ provider: A, account: { accountId: "a" }, [field]: value }],
+			});
+			await auth.credentials.set(A, [
+				{ type: "oauth", access: "x", refresh: "y", expires: Date.now() + WEEK, accountId: "a" },
+			]);
+			await expect(auth.keys.get(A, "S1")).rejects.toThrow(
+				`auth.accountPolicies[0].${field} requires a usage provider for anthropic`,
+			);
+		}
 	});
 	test("reclaims a Codex session whose pins never go cold", async () => {
 		const C = "openai-codex" as const;
@@ -260,6 +266,23 @@ describe("accountPolicies reclaimAbovePct", () => {
 			"above the account's reserve (25%)",
 		);
 		expect(() => build({ provider: A, account: { accountId: "a" }, reclaimAbovePct: 101 })).toThrow("at most 100");
+	});
+
+	test("rejects invalid extra-usage floors and budgets", () => {
+		if (!store) throw new Error("test setup failed");
+		const activeStore = store;
+		const build = (policy: AuthAccountPolicies[number]) =>
+			new AuthStorage(activeStore, { accountPolicies: [policy] });
+		for (const field of ["extraUsageFloor", "extraUsageBudget"] as const) {
+			for (const value of [-1, "high", Infinity] as const) {
+				const policy = {
+					provider: A,
+					account: { accountId: "a" },
+					[field]: value,
+				} as unknown as AuthAccountPolicies[number];
+				expect(() => build(policy)).toThrow(`auth.accountPolicies[0].${field}`);
+			}
+		}
 	});
 
 	test("reclaims at exactly reclaimAbovePct", async () => {

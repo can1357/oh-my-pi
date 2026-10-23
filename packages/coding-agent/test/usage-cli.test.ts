@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import {
 	AuthStorage,
+	type PaidUsageView,
 	type OAuthCredential,
 	SqliteAuthCredentialStore,
 	type UsageReport,
@@ -74,6 +75,19 @@ function makeLimit(opts: {
 
 function makeReport(provider: string, email: string, limits: UsageReport["limits"], notes?: string[]): UsageReport {
 	return { provider, fetchedAt: Date.now(), limits, ...(notes ? { notes } : {}), metadata: { email } };
+}
+
+function paidView(overrides: Partial<PaidUsageView> = {}): PaidUsageView {
+	return {
+		...overrides,
+		unit: overrides.unit ?? "usd",
+		capacity: overrides.capacity ?? "spend-cap",
+		state: overrides.state ?? "available",
+		uncapped: overrides.uncapped ?? false,
+		floorIgnored: overrides.floorIgnored ?? false,
+		unbounded: overrides.unbounded ?? false,
+		stale: overrides.stale ?? false,
+	};
 }
 
 function codexResetReport(opts: {
@@ -581,7 +595,7 @@ describe("formatUsageBreakdown", () => {
 		expect(text).not.toContain("policy:");
 	});
 
-	it("shows an explicit priority, reserve override and reclaim line with the observed eligibility reason", () => {
+	it("shows an explicit priority, reserve override, reclaim line, and paid safeguards with the observed eligibility reason", () => {
 		const report = makeReport("openai-codex", "protected@example.test", [
 			makeLimit({
 				id: "5h",
@@ -601,6 +615,8 @@ describe("formatUsageBreakdown", () => {
 							priority: 100,
 							reservePct: 50,
 							reclaimAbovePct: 70,
+							extraUsageFloor: 15,
+							extraUsageBudget: 125,
 						}
 					: undefined,
 		};
@@ -610,7 +626,111 @@ describe("formatUsageBreakdown", () => {
 		);
 
 		expect(text).toContain(
-			"policy: priority 100 · reserve 50% (override) · reclaim above 70% · eligible · 80.0% left",
+			"policy: priority 100 · reserve 50% (override) · reclaim above 70% · paid floor 15 · paid budget 125 · eligible · 80.0% left",
+		);
+	});
+
+	it("keeps paid extra usage out of plan reserve state and capacity", () => {
+		const report = makeReport("anthropic", "paid@example.test", [
+			makeLimit({
+				id: "anthropic:5h",
+				label: "Claude 5 Hour",
+				usedFraction: 0.2,
+				durationMs: FIVE_HOURS,
+				windowId: "5h",
+			}),
+			{
+				id: "anthropic:extra",
+				label: "Claude Extra Usage",
+				scope: { provider: "anthropic", windowId: "extra" },
+				amount: { used: 46, remaining: 4, limit: 50, usedFraction: 0.92, unit: "usd" },
+				status: "warning",
+			},
+		]);
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: () => ({
+				provider: "anthropic",
+				account: { email: "paid@example.test" },
+				priority: 11,
+				reservePct: 0,
+				extraUsageFloor: 3,
+				extraUsageBudget: 50,
+			}),
+		};
+		const paid = paidView({
+			limitId: "anthropic:extra",
+			used: 46,
+			cap: 50,
+			remaining: 4,
+			floor: 3,
+			budget: 50,
+			budgetLeft: 4,
+			headroom: 1,
+			boundBy: "floor",
+		});
+
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], Date.now(), undefined, [], policyOptions, undefined, [paid]),
+		);
+
+		expect(text).toContain("Claude Extra Usage");
+		expect(text).toContain(
+			"$4.00 left of $50.00 cap · floor $3.00 · budget $50.00, $4.00 left → $1.00 usable before floor",
+		);
+		expect(text).toContain(
+			"policy: priority 11 · reserve 0% (override) · paid floor $3.00 · paid budget $50.00 · eligible · 80.0% left",
+		);
+		const capacity = text.split("\n").find(line => line.includes("capacity:"));
+		expect(capacity).toContain("5h → 0.20/1 account used (0.80× quota left)");
+		expect(capacity).not.toContain("extra");
+	});
+
+	it("prints credit floors and budgets in the paid account's provider unit", () => {
+		const report = makeReport("openai-codex", "credits@example.test", [
+			makeLimit({
+				id: "openai-codex:5h",
+				label: "Codex 5 Hour",
+				provider: "openai-codex",
+				usedFraction: 0.2,
+				durationMs: FIVE_HOURS,
+				windowId: "5h",
+			}),
+			{
+				id: "openai-codex:credits",
+				label: "Codex Credits",
+				scope: { provider: "openai-codex", windowId: "credits" },
+				amount: { remaining: 100, unit: "credits" },
+				status: "warning",
+			},
+		]);
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: () => ({
+				provider: "openai-codex",
+				account: { email: "credits@example.test" },
+				extraUsageFloor: 15,
+				extraUsageBudget: 125,
+			}),
+		};
+		const paid = paidView({
+			limitId: "openai-codex:credits",
+			unit: "credits",
+			capacity: "balance",
+			remaining: 100,
+			floor: 15,
+			budget: 125,
+			state: "past-floor",
+			stop: "budget-unreported",
+		});
+
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([report], [], Date.now(), undefined, [], policyOptions, undefined, [paid]),
+		);
+
+		expect(text).toContain("100 credits left · floor 15 credits · budget 125 credits → held, spend not reported");
+		expect(text).toContain(
+			"policy: priority 0 · reserve 10% (global) · paid floor 15 credits · paid budget 125 credits · eligible · 80.0% left",
 		);
 	});
 
@@ -1567,6 +1687,109 @@ describe("formatUsageHistory", () => {
 		const text = stripVTControlCharacters(formatUsageHistory(history, SINCE, NOW, redaction));
 		for (const secret of ["dummy.shared@example.test", "acct-team", "acct-pro"]) expect(text).not.toContain(secret);
 		for (const id of ["acct-team", "acct-pro"]) expect(text).toContain(redaction.get(id) ?? id);
+	});
+});
+
+describe("omp usage paid JSON", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		process.exitCode = 0;
+	});
+
+	it("keeps paid usage and capacity aligned with the reports after provider filtering", async () => {
+		const authStorage = await AuthStorage.create(":memory:");
+		await authStorage.credentials.set("anthropic", {
+			type: "oauth",
+			access: "anthropic-access",
+			refresh: "anthropic-refresh",
+			expires: Date.now() + HOUR,
+			email: "anthropic@example.test",
+		});
+		await authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "codex-access",
+			refresh: "codex-refresh",
+			expires: Date.now() + HOUR,
+			email: "codex@example.test",
+		});
+		const reports: UsageReport[] = [
+			{
+				provider: "anthropic",
+				fetchedAt: Date.now(),
+				metadata: { email: "anthropic@example.test" },
+				limits: [
+					makeLimit({
+						id: "anthropic:5h",
+						label: "Claude 5 Hour",
+						usedFraction: 0.2,
+						durationMs: FIVE_HOURS,
+						windowId: "5h",
+					}),
+					{
+						id: "anthropic:extra",
+						label: "Claude Extra Usage",
+						scope: { provider: "anthropic", windowId: "extra" },
+						amount: { used: 46, remaining: 4, limit: 50, usedFraction: 0.92, unit: "usd" },
+						status: "warning",
+					},
+				],
+			},
+			{
+				provider: "openai-codex",
+				fetchedAt: Date.now(),
+				metadata: { email: "codex@example.test" },
+				limits: [
+					makeLimit({
+						id: "openai-codex:5h",
+						label: "Codex 5 Hour",
+						provider: "openai-codex",
+						usedFraction: 0.3,
+						durationMs: FIVE_HOURS,
+						windowId: "5h",
+					}),
+				],
+			},
+		];
+		const anthropicPaid = paidView({
+			limitId: "anthropic:extra",
+			used: 46,
+			cap: 50,
+			remaining: 4,
+			headroom: 4,
+			boundBy: "provider",
+		});
+		vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated());
+		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		vi.spyOn(authStorage.credentials, "revalidate").mockResolvedValue();
+		vi.spyOn(authStorage.usage, "reports").mockResolvedValue(reports);
+		const paidUsage = vi
+			.spyOn(authStorage.usage, "paidUsage")
+			.mockImplementation(current =>
+				current.map(report => (report.provider === "anthropic" ? anthropicPaid : undefined)),
+			);
+		vi.spyOn(authStorage, "close").mockImplementation(() => {});
+		let stdout = "";
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			stdout += String(chunk);
+			return true;
+		});
+
+		try {
+			await runUsageCommand({ provider: "anthropic", json: true, noExtensions: true });
+			const payload = JSON.parse(stdout) as {
+				reports: UsageReport[];
+				paidUsage: Array<PaidUsageView | null>;
+				capacity: Record<string, Array<{ window: string }>>;
+			};
+
+			expect(paidUsage).toHaveBeenCalledWith([reports[0]]);
+			expect(payload.reports.map(report => report.provider)).toEqual(["anthropic"]);
+			expect(payload.paidUsage).toEqual([expect.objectContaining({ limitId: "anthropic:extra", remaining: 4 })]);
+			expect(payload.capacity.anthropic?.map(stat => stat.window)).toEqual(["5h"]);
+		} finally {
+			vi.restoreAllMocks();
+			authStorage.close();
+		}
 	});
 });
 

@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { DailyActivityPoint, UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { PaidUsageView, UsageReport } from "@oh-my-pi/pi-ai";
 import {
 	buildHeatmapLayout,
 	buildProviderCards,
@@ -35,6 +35,19 @@ function limit(
 		window: { id: windowId, label: windowId, resetsAt },
 		amount: { usedFraction, unit: "percent" },
 		status,
+	};
+}
+
+function paidView(overrides: Partial<PaidUsageView> = {}): PaidUsageView {
+	return {
+		...overrides,
+		unit: overrides.unit ?? "usd",
+		capacity: overrides.capacity ?? "spend-cap",
+		state: overrides.state ?? "available",
+		uncapped: overrides.uncapped ?? false,
+		floorIgnored: overrides.floorIgnored ?? false,
+		unbounded: overrides.unbounded ?? false,
+		stale: overrides.stale ?? false,
 	};
 }
 
@@ -262,6 +275,57 @@ describe("buildProviderCards", () => {
 			"Gemini — 7d",
 		]);
 	});
+
+	it("keeps paid rows out of plan windows only when paid views are supplied", () => {
+		const reports = [
+			report("anthropic", "claude@example.test", [
+				limit("anthropic", "claude", "5h", "Claude 5 Hour", 0.2, "ok"),
+				limit("anthropic", "claude", "extra", "Claude Extra Usage", 0.92, "warning"),
+			]),
+			report("openai-codex", "codex@example.test", [
+				limit("openai-codex", "codex", "5h", "Codex 5 Hour", 0.2, "ok"),
+				limit("openai-codex", "codex", "credits", "Codex Credits", 0.5, "warning"),
+			]),
+		];
+		const withoutViews = buildProviderCards(reports, now);
+		expect(withoutViews.find(card => card.provider === "anthropic")?.windows.map(window => window.label)).toContain(
+			"Claude Extra Usage",
+		);
+		expect(
+			withoutViews.find(card => card.provider === "openai-codex")?.windows.map(window => window.label),
+		).toContain("Codex Credits");
+		expect(withoutViews.every(card => card.paid === undefined)).toBe(true);
+
+		const cards = buildProviderCards(
+			reports,
+			now,
+			[],
+			[
+				paidView({
+					limitId: "anthropic:claude:extra",
+					cap: 50,
+					remaining: 4,
+					headroom: 4,
+					boundBy: "provider",
+				}),
+				paidView({
+					unit: "credits",
+					capacity: "balance",
+					limitId: "openai-codex:codex:credits",
+					remaining: 9,
+					headroom: 9,
+					boundBy: "provider",
+				}),
+			],
+		);
+		const anthropic = cards.find(card => card.provider === "anthropic");
+		const codex = cards.find(card => card.provider === "openai-codex");
+		expect(anthropic?.windows.map(window => window.label)).toEqual(["Claude 5 Hour"]);
+		expect(anthropic?.paid?.summary.parts).toEqual(["$4.00 left"]);
+		expect(anthropic?.idle).toBe(false);
+		expect(codex?.windows.map(window => window.label)).toEqual(["Codex 5 Hour"]);
+		expect(codex?.paid?.summary.parts).toEqual(["9 credits left"]);
+	});
 });
 describe("UsageDashboardComponent", () => {
 	beforeAll(async () => {
@@ -282,6 +346,43 @@ describe("UsageDashboardComponent", () => {
 			onClose: () => {},
 		});
 	}
+
+	it("fits the paid card summary at narrow and wide widths without restoring its window row", () => {
+		const component = new UsageDashboardComponent({
+			reports: [
+				report("anthropic", "paid@example.test", [
+					limit("anthropic", "paid", "5h", "Claude 5 Hour", 0.2, "ok"),
+					limit("anthropic", "paid", "extra", "Claude Extra Usage", 0.92, "warning"),
+				]),
+			],
+			paidUsage: () => [
+				paidView({
+					limitId: "anthropic:paid:extra",
+					cap: 50,
+					remaining: 4,
+					headroom: 4,
+					boundBy: "provider",
+				}),
+			],
+			renderDetail: () => "",
+			loadActivity: async push => {
+				push([]);
+			},
+			requestRender: () => {},
+			onClose: () => {},
+		});
+		try {
+			for (const width of [36, 60, 100]) {
+				const lines = component.render(width);
+				const output = Bun.stripANSI(lines.join("\n"));
+				expect(output).toContain("paid $4.00 left");
+				expect(output).not.toContain("Claude Extra Usage");
+				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			}
+		} finally {
+			component.dispose();
+		}
+	});
 
 	it("keeps usable bars and matching label rows across multi-column cards", () => {
 		const component = dashboard([

@@ -9,6 +9,7 @@ import {
 	ACCOUNT_POLICY_BLOCK_SCOPE,
 	AUTH_BLOCK_SCOPE,
 	DEFAULT_BLOCK_MS,
+	EXTRA_USAGE_BLOCK_SCOPE,
 	credentialBlockScopesForRequest,
 	modelAccountPolicyBlockScope,
 	providerTypeKey,
@@ -29,6 +30,7 @@ import type {
 } from "./types";
 import type { UsageService } from "./usage";
 import {
+	assessFunding,
 	isUsageLimitExhausted,
 	isUsageLimitReached,
 	scopedUsageLimits,
@@ -261,6 +263,8 @@ export class RateLimits implements LimitsApi {
 		// independently of whether the report extends the hint so a shorter
 		// authoritative window still counts as provider timing.
 		let reportResetAtMs: number | undefined;
+		let paidUsageRejected = false;
+		let allowanceResetsAt: number | undefined;
 		if (target && routing.strategy) {
 			const report = await raceSignal(
 				this.#deps.usage.report(provider, target.credential, options),
@@ -268,6 +272,28 @@ export class RateLimits implements LimitsApi {
 				"usage fetch aborted",
 			);
 			if (report) {
+				const reportTargetIndex = this.#deps.pool
+					.entries(provider)
+					.findIndex(entry => entry.id === targetCredentialId && entry.credential.type === credentialType);
+				const extraUsageBlockedUntil =
+					reportTargetIndex < 0
+						? undefined
+						: this.#deps.blocks.exactBlockedUntil(
+								provider,
+								routing.providerKey,
+								reportTargetIndex,
+								EXTRA_USAGE_BLOCK_SCOPE,
+							);
+				const funding = assessFunding({
+					strategy: routing.strategy,
+					report,
+					context: routing.rankingContext,
+					nowMs: Date.now(),
+					extraUsageBlockedUntil,
+				});
+				paidUsageRejected = funding?.tier === "extra" || funding?.tier === "extra-past-floor";
+				allowanceResetsAt = funding?.allowanceResetsAt;
+
 				const scopedLimits = scopedUsageLimits(routing.strategy, report, routing.rankingContext);
 				if (isUsageLimitReached(scopedLimits)) {
 					const resetAtMs = usageResetAtMs(scopedLimits, Date.now());
@@ -286,6 +312,11 @@ export class RateLimits implements LimitsApi {
 				}
 			}
 		}
+		if (paidUsageRejected && allowanceResetsAt !== undefined && allowanceResetsAt > blockedUntil) {
+			blockedUntil = allowanceResetsAt;
+			providerTimed = true;
+		}
+
 		options?.signal?.throwIfAborted();
 
 		// Usage lookup may refresh, disable, or remove a row. Re-resolve its
@@ -302,6 +333,16 @@ export class RateLimits implements LimitsApi {
 			routing,
 			providerTimed,
 		);
+		if (paidUsageRejected && targetIndex >= 0) {
+			this.#deps.blocks.mark(
+				provider,
+				routing.providerKey,
+				targetIndex,
+				rotation.blockedUntilMs ?? blockedUntil,
+				EXTRA_USAGE_BLOCK_SCOPE,
+				providerTimed,
+			);
+		}
 		return {
 			...rotation,
 			requestedBlockedUntilMs,

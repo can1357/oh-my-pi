@@ -70,6 +70,8 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				account: { email: "policy@example.com" },
 				reservePct: 25,
 				reclaimAbovePct: 60,
+				extraUsageFloor: 15,
+				extraUsageBudget: 125,
 			},
 		] satisfies AuthAccountPolicies;
 		await Bun.write(
@@ -256,6 +258,42 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 					"",
 				].join("\n"),
 				error: "auth.accountPolicies[0].reclaimAbovePct must be a finite number",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: preferred@example.com",
+					"      extraUsageFloor: -1",
+					"",
+				].join("\n"),
+				error: "auth.accountPolicies[0].extraUsageFloor must be a finite number greater than or equal to 0",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: preferred@example.com",
+					"      extraUsageBudget: high",
+					"",
+				].join("\n"),
+				error: "auth.accountPolicies[0].extraUsageBudget must be a finite number greater than or equal to 0",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: preferred@example.com",
+					"      extraUsageFloor: .inf",
+					"",
+				].join("\n"),
+				error: "auth.accountPolicies[0].extraUsageFloor must be a finite number greater than or equal to 0",
 			},
 			{
 				yaml: [

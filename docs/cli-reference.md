@@ -282,7 +282,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `stats` | View usage statistics. | |
 | `stream` | Broadcast local OMP session screens and chat to a public live channel. | |
 | `update` | Check for and install updates; `--canary`/`--stable` switch release channels. | |
-| `usage` | Show provider usage limits for every authenticated account, flagging saved resets close to expiry; `usage clients` breaks token burn down per client (with `--days`), `usage invalidate` drops cached reports, `usage accounts` lists each OAuth account's provider and identity key (the key `task.agentAccountPools` and broker account pools take; no tokens, `--json` supported), and `usage reset` lists each Codex and Claude account's saved rate-limit resets by `<provider>/<credential id>` (`--json`, `--redact`) and `usage reset <provider>/<credential id>` spends one, also from an auth-broker client. | [Task agent discovery](./task-agent-discovery.md#model-and-structured-output-precedence), [saved resets](./settings.md#saved-reset-auto-consumption) |
+| `usage` | Show provider usage limits for every authenticated account, flagging saved resets close to expiry, plus each Anthropic and Codex account's paid extra usage against its floor and budget (see [paid extra usage](#paid-extra-usage-in-omp-usage)); `usage clients` breaks token burn down per client (with `--days`), `usage invalidate` drops cached reports, `usage accounts` lists each OAuth account's provider and identity key (the key `task.agentAccountPools` and broker account pools take; no tokens, `--json` supported), and `usage reset` lists each Codex and Claude account's saved rate-limit resets by `<provider>/<credential id>` (`--json`, `--redact`) and `usage reset <provider>/<credential id>` spends one, also from an auth-broker client. | [Task agent discovery](./task-agent-discovery.md#model-and-structured-output-precedence), [saved resets](./settings.md#saved-reset-auto-consumption) |
 | `tiny-models` | Download tiny local models for session titles, memory, and word completion. | [local models](./local-models.md) |
 | `token` | Get the API key or OAuth token for a provider. | [secrets](./secrets.md) |
 | `toks` | Count file or text tokens with the embedded offline tokenizers. | |
@@ -296,3 +296,40 @@ Run `omp <command> --help` for each command's own flags and examples.
 > `packages/coding-agent/src/cli-commands.ts`.
 
 `__complete` is an internal, hidden subcommand used by shell completion scripts.
+
+### Paid extra usage in `omp usage`
+
+Under each Anthropic and Codex account, after its plan rows, `omp usage` prints one paid line: `Claude Extra Usage` or `Codex Credits`, a bar when the spend cap reports a used fraction, then what the provider reports, the account's `extraUsageFloor` and `extraUsageBudget` from `auth.accountPolicies`, and what omp may still spend automatically:
+
+```
+● Claude Extra Usage  █████████████████████░░░░░░░  $50.00 left of $200.00 cap · floor $10.00 · budget $400.00, $250.00 left → $40.00 usable before floor
+● Codex Credits       ····························  489.25 credits left · floor 200 credits → 289.25 credits usable before floor
+```
+
+The figure reads `$350.00 spent, no cap reported` when Anthropic reports no spend cap, `paid usage off` or `no credits` when the provider says paid usage is off, and `$200.00 cap reached` or `0 credits left` when it is used up. After `→`, `held at floor`, `held at budget` or `refused by provider, held 3h` means automatic selection does not spend paid usage on that account. An account in the same provider that reports no paid figures prints `○ … not reported`. Once the paid figures are more than 90 seconds old the line ends in `as of 4m ago`, `stale, as of 2h ago`, or `age unknown` when omp cannot tell how old they are.
+
+The figures are the provider's cached metering, refreshed about every 5 minutes, so spend between refreshes can pass a floor or budget. With `retry.extraUsageBelowFloor` on, a held account still serves when no fallback model remains. The paid row no longer counts toward an account's plan `% left`, reserve state or the provider's `capacity` line. `/usage` shows the same lines in its Details view and sums them on each provider's card, e.g. `paid $90.00 left · 1 uncapped · 1 held`.
+
+`omp usage --json` adds `paidUsage`, index-aligned with `reports` and `null` where a report has no paid usage. Its `capacity` counts plan rows only. Each entry carries:
+
+| Field | Meaning |
+| --- | --- |
+| `limitId` | Id of the report's paid limit row; absent when paid usage is off. |
+| `unit` | `usd` or `credits`. |
+| `capacity` | `spend-cap` (Anthropic: `remaining` is room under a spend cap) or `balance` (Codex: `remaining` is a credit balance). |
+| `state` | Selection's answer once plan allowance is spent: `available`, `past-floor` (held by the floor or budget) or `unavailable`. |
+| `stop` | Why `state` is not `available`: `disabled`, `cap-reached`, `refused`, `floor`, `floor-unreported`, `budget` or `budget-unreported`. |
+| `used` | Spend the provider reports for its period. |
+| `cap` | The spend cap, when one is reported. |
+| `remaining` | As reported: cap minus spend, or the balance. |
+| `uncapped` | No cap is reported (Anthropic) or credits are unlimited (Codex). |
+| `floor` | The account's `extraUsageFloor`. |
+| `floorIgnored` | A floor is set but not applied, because no cap is reported. |
+| `budget` | The account's `extraUsageBudget`. |
+| `budgetLeft` | Budget minus reported spend, never below 0; absent without a budget or a reported spend. |
+| `headroom` | What omp may still spend automatically; 0 unless `state` is `available`. |
+| `boundBy` | The limit that sets `headroom`: `floor`, `budget` or `provider`. |
+| `unbounded` | Available with no cap and no budget. |
+| `blockedUntil` | When a provider refusal lifts (epoch ms), with `stop: "refused"`. |
+| `asOf` | When the provider reported these figures (epoch ms); absent when that is unknowable. |
+| `stale` | `asOf` is more than 1.25 times the 5-minute refresh interval old. |

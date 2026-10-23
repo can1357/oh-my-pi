@@ -778,6 +778,41 @@ export const cfgRetryUsageAwareFallback = register({
 	},
 });
 
+export const cfgRetryAccountOrder = register({
+	id: "retry.accountOrder",
+	type: "enum",
+	values: ["usage", "tiered"] as const,
+	default: "usage",
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Account Usage Order",
+		description:
+			"Keep current account ranking, or use each account's plan allowance and saved resets before paid extra usage.",
+		options: [
+			{ value: "usage", label: "Current ranking", description: "Preserve the existing account selection behavior" },
+			{
+				value: "tiered",
+				label: "Plan, then paid usage",
+				description: "Spend plan allowance and saved resets across accounts before paid extra usage",
+			},
+		],
+	},
+});
+
+export const cfgRetryExtraUsageBelowFloor = register({
+	id: "retry.extraUsageBelowFloor",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Use Extra Usage Below Floor",
+		description:
+			"Allow paid extra usage beyond a configured account floor or budget only when the current model has no retry fallback.",
+	},
+});
+
 export const cfgRetryUsageReservePct = register({
 	id: "retry.usageReservePct",
 	type: "number",
@@ -874,6 +909,8 @@ export const cfgRetry = combine({
 	modelFallback: cfgRetryModelFallback,
 	fallbackOn: cfgRetryFallbackOn,
 	usageAwareFallback: cfgRetryUsageAwareFallback,
+	accountOrder: cfgRetryAccountOrder,
+	extraUsageBelowFloor: cfgRetryExtraUsageBelowFloor,
 	usageReservePct: cfgRetryUsageReservePct,
 	usageReservePolicy: cfgRetryUsageReservePolicy,
 });

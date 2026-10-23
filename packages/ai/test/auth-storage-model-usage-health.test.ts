@@ -1,13 +1,21 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import {
 	type ApiKeyCredential,
+	type AuthAccountPolicies,
 	type AuthCredential,
 	type AuthCredentialStore,
 	AuthStorage,
+	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
-import type { CredentialRankingStrategy, UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
-import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
+import type {
+	CredentialRankingStrategy,
+	UsageLimit,
+	UsageProvider,
+	UsageReport,
+	UsageResetCredits,
+} from "@oh-my-pi/pi-ai/usage";
+import { claudeRankingStrategy, parseClaudeUsagePayload } from "@oh-my-pi/pi-ai/usage/claude";
 import { logger } from "@oh-my-pi/pi-utils";
 
 interface CacheEntry {
@@ -398,6 +406,283 @@ describe("AuthStorage model usage health", () => {
 		controller.abort();
 		await expect(health).rejects.toThrow("usage fetch aborted");
 		pending.resolve(report("key-1", [limit("short", 0.2)]));
+	});
+});
+
+interface TieredHealthAccount {
+	accountId: string;
+	payload: Record<string, unknown>;
+	resetCredits?: UsageResetCredits;
+}
+
+function tieredClaudePayload(args: {
+	planUsed: number;
+	spend?: { used: number; limit: number | null };
+}): Record<string, unknown> {
+	const resetsAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+	return {
+		five_hour: { utilization: args.planUsed, resets_at: resetsAt },
+		seven_day: { utilization: args.planUsed, resets_at: resetsAt },
+		...(args.spend === undefined
+			? {}
+			: {
+					spend: {
+						enabled: true,
+						used: {
+							amount_minor: Math.round(args.spend.used * 100),
+							currency: "USD",
+							exponent: 2,
+						},
+						limit:
+							args.spend.limit === null
+								? null
+								: {
+										amount_minor: Math.round(args.spend.limit * 100),
+										currency: "USD",
+										exponent: 2,
+									},
+					},
+				}),
+	};
+}
+
+describe("AuthStorage tiered paid usage health", () => {
+	const storages: AuthStorage[] = [];
+	afterEach(() => {
+		for (const storage of storages) storage.close();
+		storages.length = 0;
+	});
+
+	async function createTieredStorage(
+		accounts: readonly TieredHealthAccount[],
+		accountPolicies: AuthAccountPolicies = [],
+	): Promise<AuthStorage> {
+		const byAccount = new Map(accounts.map(account => [account.accountId, account]));
+		const store = await SqliteAuthCredentialStore.open(":memory:");
+		const storage = new AuthStorage(store, {
+			accountPolicies,
+			configValueResolver: async value => value,
+			rankingStrategyResolver: provider => (provider === "anthropic" ? claudeRankingStrategy : undefined),
+			usageProviderResolver: provider =>
+				provider === "anthropic"
+					? {
+							id: "anthropic",
+							fetchUsage: async params => {
+								const accountId = params.credential.accountId;
+								const account = accountId === undefined ? undefined : byAccount.get(accountId);
+								if (!account) return null;
+								const parsed = parseClaudeUsagePayload(account.payload, { accountId });
+								if (!parsed) throw new Error(`expected parsed Claude usage for ${accountId}`);
+								return {
+									...parsed,
+									...(account.resetCredits === undefined ? {} : { resetCredits: account.resetCredits }),
+								};
+							},
+						}
+					: undefined,
+		});
+		await storage.credentials.set(
+			"anthropic",
+			accounts.map(account => ({
+				type: "oauth" as const,
+				access: `access-${account.accountId}`,
+				refresh: `refresh-${account.accountId}`,
+				expires: Date.now() + 60 * 60_000,
+				accountId: account.accountId,
+			})),
+		);
+		storages.push(storage);
+		return storage;
+	}
+
+	it("uses paid capacity only when the caller opts tiered health into it", async () => {
+		const storage = await createTieredStorage([
+			{ accountId: "gmail", payload: tieredClaudePayload({ planUsed: 100 }) },
+			{
+				accountId: "thebushido",
+				payload: tieredClaudePayload({ planUsed: 100, spend: { used: 402.88, limit: null } }),
+				resetCredits: { availableCount: 3, redeemableCount: 2 },
+			},
+			{
+				accountId: "waldrip-org-a",
+				payload: tieredClaudePayload({ planUsed: 100, spend: { used: 190.74, limit: 200 } }),
+				resetCredits: { availableCount: 1 },
+			},
+			{
+				accountId: "waldrip-org-b",
+				payload: tieredClaudePayload({ planUsed: 100, spend: { used: 119.85, limit: null } }),
+			},
+		]);
+
+		const planOnly = await storage.health.model("anthropic", {
+			modelId: "claude-sonnet-4-5",
+			reserveFraction: 0.05,
+		});
+		expect(planOnly.state).toBe("depleted");
+		expect(planOnly.accounts.map(account => account.state)).toEqual(["depleted", "depleted", "depleted", "depleted"]);
+		expect(planOnly.accounts.map(account => account.fundingTier)).toEqual(["spent", "extra", "extra", "extra"]);
+		expect(planOnly.accounts.map(account => account.savedResets)).toEqual([undefined, 2, 1, undefined]);
+
+		const withPaidUsage = await storage.health.model("anthropic", {
+			modelId: "claude-sonnet-4-5",
+			reserveFraction: 0.05,
+			extraUsage: "to-floor",
+		});
+		expect(withPaidUsage.state).toBe("healthy");
+		expect(withPaidUsage.accounts.map(account => account.state)).toEqual([
+			"depleted",
+			"healthy",
+			"healthy",
+			"healthy",
+		]);
+	});
+
+	it("requires explicit past-floor admission before health counts paid usage below a floor", async () => {
+		const storage = await createTieredStorage(
+			[
+				{
+					accountId: "floor",
+					payload: tieredClaudePayload({ planUsed: 100, spend: { used: 95, limit: 100 } }),
+				},
+			],
+			[
+				{
+					provider: "anthropic",
+					account: { accountId: "floor" },
+					extraUsageFloor: 10,
+				},
+			],
+		);
+
+		const toFloor = await storage.health.model("anthropic", {
+			modelId: "claude-sonnet-4-5",
+			reserveFraction: 0.05,
+			extraUsage: "to-floor",
+		});
+		expect(toFloor).toMatchObject({
+			state: "depleted",
+			accounts: [{ state: "depleted", fundingTier: "extra-past-floor" }],
+		});
+
+		const pastFloor = await storage.health.model("anthropic", {
+			modelId: "claude-sonnet-4-5",
+			reserveFraction: 0.05,
+			extraUsage: "past-floor",
+		});
+		expect(pastFloor).toMatchObject({
+			state: "healthy",
+			accounts: [{ state: "healthy", fundingTier: "extra-past-floor" }],
+		});
+	});
+
+	it("treats a reserve account with admitted paid capacity as healthy", async () => {
+		const storage = await createTieredStorage([
+			{
+				accountId: "reserve",
+				payload: tieredClaudePayload({ planUsed: 97, spend: { used: 50, limit: 100 } }),
+			},
+		]);
+
+		const planOnly = await storage.health.model("anthropic", {
+			modelId: "claude-sonnet-4-5",
+			reserveFraction: 0.05,
+		});
+		expect(planOnly).toMatchObject({
+			state: "reserve",
+			accounts: [{ state: "reserve", fundingTier: "allowance" }],
+		});
+		expect(planOnly.accounts[0]?.remainingFraction).toBeCloseTo(0.03);
+
+		const withPaidUsage = await storage.health.model("anthropic", {
+			modelId: "claude-sonnet-4-5",
+			reserveFraction: 0.05,
+			extraUsage: "to-floor",
+		});
+		expect(withPaidUsage).toMatchObject({
+			state: "healthy",
+			accounts: [{ state: "healthy", fundingTier: "allowance" }],
+		});
+		expect(withPaidUsage.accounts[0]?.remainingFraction).toBeCloseTo(0.03);
+	});
+	it("A9 retains a fetched blocked account's saved reset without exposing funding state", async () => {
+		const storage = await createTieredStorage([
+			{
+				accountId: "a",
+				payload: tieredClaudePayload({ planUsed: 100 }),
+				resetCredits: { availableCount: 1, redeemableCount: 1 },
+			},
+			{ accountId: "b", payload: tieredClaudePayload({ planUsed: 20 }) },
+		]);
+		const a = storage.oauth.accounts("anthropic").find(account => account.accountId === "a");
+		if (!a) throw new Error("Expected account a");
+
+		expect(await storage.keys.get("anthropic", "a9", { modelId: "claude-sonnet-4-5" })).toBe("access-b");
+		expect(storage.blocks.list([a.credentialId]).some(block => block.credentialId === a.credentialId)).toBe(true);
+
+		const health = await storage.health.model("anthropic", {
+			modelId: "claude-sonnet-4-5",
+			reserveFraction: 0.05,
+		});
+		const aHealth = health.accounts.find(account => account.credentialId === a.credentialId);
+		expect(health.state).toBe("healthy");
+		expect(aHealth).toMatchObject({ state: "depleted", savedResets: 1 });
+		expect(aHealth?.resetsAt).toEqual(expect.any(Number));
+		expect(aHealth && "fundingTier" in aHealth).toBe(false);
+	});
+
+	it("A10 does not fetch usage for an AUTH-blocked health account", async () => {
+		let fetches = 0;
+		const store = await SqliteAuthCredentialStore.open(":memory:");
+		const storage = new AuthStorage(store, {
+			rankingStrategyResolver: provider => (provider === "anthropic" ? claudeRankingStrategy : undefined),
+			usageProviderResolver: provider =>
+				provider === "anthropic"
+					? {
+							id: "anthropic",
+							async fetchUsage(params) {
+								fetches += 1;
+								const parsed = parseClaudeUsagePayload(tieredClaudePayload({ planUsed: 20 }), {
+									accountId: params.credential.accountId,
+								});
+								if (!parsed) throw new Error("Expected usage report");
+								return parsed;
+							},
+						}
+					: undefined,
+		});
+		await storage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "access-auth",
+				refresh: "refresh-auth",
+				expires: Date.now() + 60 * 60_000,
+				accountId: "auth",
+			},
+		]);
+		storages.push(storage);
+		const account = storage.oauth.accounts("anthropic")[0];
+		if (!account) throw new Error("Expected account");
+		const blockedUntilMs = Date.now() + 60_000;
+		storage.blocks.upsert({
+			credentialId: account.credentialId,
+			providerKey: "anthropic:oauth",
+			blockScope: "auth",
+			blockedUntilMs,
+		});
+
+		const health = await storage.health.model("anthropic", {
+			modelId: "claude-sonnet-4-5",
+			reserveFraction: 0.05,
+		});
+		expect(fetches).toBe(0);
+		expect(health.accounts).toEqual([
+			{
+				credentialId: account.credentialId,
+				credentialType: "oauth",
+				state: "depleted",
+				resetsAt: blockedUntilMs,
+			},
+		]);
 	});
 });
 

@@ -277,7 +277,7 @@ describe("single-instance menus", () => {
 					modelRegistry: {
 						authStorage: {
 							credentials: { all: () => ({}) },
-							usage: { providerFor: () => undefined },
+							usage: { providerFor: () => undefined, paidUsage: () => [] },
 							oauth: { identity: () => undefined },
 						},
 					},

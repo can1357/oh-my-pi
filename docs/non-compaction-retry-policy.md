@@ -198,8 +198,12 @@ Defined in `packages/coding-agent/src/session/settings.ts`:
 - `retry.fallbackChains`
 - `retry.fallbackRevertPolicy` (`"cooldown-expiry"` by default; `"never"` disables automatic restoration)
 - `retry.usageAwareFallback` (default `false`; runs a preflight for supported coding-plan usage reports)
+- `retry.accountOrder` (default `"usage"`; `"tiered"` uses each `auth.accountPolicies` priority account's plan allowance and eligible saved reset before moving from A to B to C, then uses A, B, and C paid extra usage down to each floor or budget before the retry fallback chain)
+- `retry.extraUsageBelowFloor` (default `false`; in tiered mode permits paid usage past a floor or budget only when the active model has no retry fallback successor)
 - `retry.usageReservePct` (default `10`; remaining-quota reserve threshold)
 - `retry.usageReservePolicy` (default `"confirm"`; `"auto"` and `"fail-closed"` are also supported)
+
+With `retry.accountOrder: "tiered"`, the exact order is A plan allowance and an eligible saved reset, then B, then C; A paid extra usage to its configured floor or budget, then B, then C; optional paid usage past that floor only when `retry.extraUsageBelowFloor` is on and the active model has no successor; then `retry.fallbackChains`. A paid account with no floor or budget stays available until its provider refuses it.
 
 Programmatic toggles in session:
 

@@ -153,6 +153,20 @@ export interface UsageReport {
 	raw?: unknown;
 }
 
+/** Provider-reported paid extra-usage capacity for one account. */
+export interface ExtraUsageState {
+	enabled: boolean;
+	exhausted: boolean;
+	unit: "usd" | "credits";
+	used?: number;
+	remaining?: number;
+	uncapped: boolean;
+	/** Whether `remaining` measures spend-cap headroom or a prepaid balance. */
+	capacity: "spend-cap" | "balance";
+	/** Usage-limit identifier carrying these figures; absent when paid usage is disabled. */
+	limitId?: string;
+}
+
 /**
  * Resolve a limit's used fraction (0..1; >1 means overage) from whichever
  * amount fields the provider populated. Precedence mirrors the usage UIs:
@@ -454,6 +468,8 @@ export interface CredentialRankingStrategy {
 	 * `undefined` when every plan may serve the model.
 	 */
 	planGate?(context: CredentialRankingContext): PlanGate | undefined;
+	/** Provider-reported paid extra-usage capacity for this account and request context. */
+	extraUsage?(report: UsageReport, context?: CredentialRankingContext): ExtraUsageState | undefined;
 	/** Idle window after which a session pin stops suppressing usage re-ranking because the provider's prompt cache cannot still be warm; omit for indefinite stickiness. */
 	stickyWarmMs?: number;
 	/** Extract the primary (short) and secondary (long) window limits from a usage report. */

@@ -48,6 +48,12 @@ export interface ResolvedApiKey {
 	 * already sent it before that block.
 	 */
 	afterSiblingWait?: boolean;
+	/**
+	 * Resolved after the active account redeemed a saved reset. The retry driver
+	 * may resend the same bearer because its funding state changed.
+	 */
+	afterReset?: boolean;
+
 	/** Non-secret request scope belonging to this bearer, replaced on account rotation. */
 	oauthIdentity?: OAuthRequestIdentity;
 }
@@ -72,6 +78,16 @@ export function markAfterSiblingWait(resolved: ApiKeyResolution): ApiKeyResoluti
 	return typeof resolved === "string"
 		? { apiKey, afterSiblingWait: true }
 		: { ...resolved, apiKey, afterSiblingWait: true };
+}
+
+/**
+ * Mark a post-reset resolution so the retry driver may resend a bearer it
+ * already tried before the reset restored its allowance.
+ */
+export function markAfterReset(resolved: ApiKeyResolution): ApiKeyResolution {
+	const apiKey = resolvedApiKeyBearer(resolved);
+	if (apiKey === undefined) return resolved;
+	return typeof resolved === "string" ? { apiKey, afterReset: true } : { ...resolved, apiKey, afterReset: true };
 }
 
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
@@ -196,8 +212,12 @@ function acceptRetryKey(
 	key: string,
 	refreshedCurrent: boolean,
 	afterSiblingWait = false,
+	afterReset = false,
 ): string | undefined {
-	if ((!afterSiblingWait && state.attemptedKeys.has(key)) || state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) {
+	if (
+		(!afterSiblingWait && !afterReset && state.attemptedKeys.has(key)) ||
+		state.attempts >= AUTH_RETRY_MAX_ATTEMPTS
+	) {
 		return undefined;
 	}
 	state.attemptedKeys.add(key);
@@ -239,12 +259,14 @@ export async function resolveNextAuthRetryKey(
 
 	if (signal?.aborted) return undefined;
 	let afterSiblingWait = false;
+	let afterReset = false;
 	const rotated = await resolveRetryKey(resolver, true, error, signal, state.lastKey, resolved => {
 		afterSiblingWait = typeof resolved === "object" && resolved.afterSiblingWait === true;
+		afterReset = typeof resolved === "object" && resolved.afterReset === true;
 		onResolved?.(resolved);
 	});
 	if (signal?.aborted || rotated === undefined) return undefined;
-	return acceptRetryKey(state, rotated, !directRotation, afterSiblingWait);
+	return acceptRetryKey(state, rotated, !directRotation, afterSiblingWait, afterReset);
 }
 
 function oauthCredentialIdentity(access: OAuthAccess): string {

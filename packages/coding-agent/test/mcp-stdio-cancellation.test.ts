@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import type { BunFile } from "bun";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -36,14 +36,14 @@ describe("StdioTransport cancellation", () => {
 	let tempDir: string;
 	let logPath: string;
 	let frameLog: BunFile;
-
+	let resolveTimeout: Mock<typeof mcpTimeout.resolveMCPTimeoutMs>;
 	beforeEach(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-cancellation-"));
 		logPath = path.join(tempDir, "frames.jsonl");
 		frameLog = Bun.file(logPath);
 		await Bun.write(frameLog, "");
-		// Keep caller-configured deadlines hermetic without mutating the environment.
-		spyOn(mcpTimeout, "resolveMCPTimeoutMs").mockImplementation(timeout => timeout ?? 0);
+		// Each case opts into a deadline only for the request it exercises.
+		resolveTimeout = spyOn(mcpTimeout, "resolveMCPTimeoutMs").mockImplementation(() => 0);
 	});
 
 	afterEach(async () => {
@@ -61,8 +61,8 @@ describe("StdioTransport cancellation", () => {
 			type: "stdio",
 			command: process.execPath,
 			args: [FIXTURE, logPath, mode],
-			timeout: 0,
 			...config,
+			timeout: 0,
 		});
 		await transport.connect();
 		if (mode === "normal") {
@@ -70,6 +70,10 @@ describe("StdioTransport cancellation", () => {
 			await transport.notify("notifications/initialized");
 		}
 		return transport;
+	}
+
+	function armDeadline(): void {
+		resolveTimeout.mockImplementationOnce(() => DEADLINE_MS);
 	}
 
 	async function frames(): Promise<Frame[]> {
@@ -162,8 +166,9 @@ describe("StdioTransport cancellation", () => {
 	});
 
 	it("keeps the hard-deadline error and sends only one cancellation when the caller aborts later", async () => {
-		const client = await start({ timeout: DEADLINE_MS });
+		const client = await start();
 		const caller = new AbortController();
+		armDeadline();
 		const outcome = client
 			.request("tools/call", { name: "hang" }, { signal: caller.signal })
 			.catch((error: unknown) => error);
@@ -191,16 +196,44 @@ describe("StdioTransport cancellation", () => {
 	});
 
 	it("clears the hard deadline after abort so it cannot send a second cancellation", async () => {
-		const client = await start({ timeout: DEADLINE_MS });
+		const client = await start();
 		const caller = new AbortController();
 		const reason = new Error("cancel first");
-		const outcome = client
-			.request("tools/call", { name: "hang" }, { signal: caller.signal })
-			.catch((error: unknown) => error);
+		// Call through so these spies retain and expose the native timer handle.
+		const nativeSetTimeout = globalThis.setTimeout;
+		const nativeClearTimeout = globalThis.clearTimeout;
+		const setTimeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(nativeSetTimeout);
+		const clearTimeoutSpy = spyOn(globalThis, "clearTimeout").mockImplementation(nativeClearTimeout);
+		let outcome: Promise<unknown> | undefined;
+		try {
+			armDeadline();
+			outcome = client
+				.request("tools/call", { name: "hang" }, { signal: caller.signal })
+				.catch((error: unknown) => error);
+			caller.abort(reason);
+
+			expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+			expect(setTimeoutSpy).toHaveBeenLastCalledWith(expect.any(Function), DEADLINE_MS);
+			const deadlineTimer = setTimeoutSpy.mock.results[0];
+			if (deadlineTimer?.type !== "return") throw new Error("Expected the native hard-deadline timer");
+			const deadlineHandle = deadlineTimer.value;
+			expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+			expect(clearTimeoutSpy).toHaveBeenCalledWith(deadlineHandle);
+		} finally {
+			setTimeoutSpy.mockRestore();
+			clearTimeoutSpy.mockRestore();
+		}
+
+		if (!outcome) throw new Error("Expected the hanging request to start");
 		const original = await sentRequest("tools/call", "hang");
-		caller.abort(reason);
 		expect(await within(outcome)).toBe(reason);
-		await waitForCancellation();
+		expect(await waitForCancellation()).toEqual([
+			{
+				jsonrpc: "2.0",
+				method: "notifications/cancelled",
+				params: { requestId: original.id, reason: "Request cancelled by the client" },
+			},
+		]);
 		// Cross the original deadline, then use a response as a barrier for all earlier frames.
 		await Bun.sleep(DEADLINE_MS + POLL_MS);
 		await echo(client);
@@ -211,6 +244,7 @@ describe("StdioTransport cancellation", () => {
 				params: { requestId: original.id, reason: "Request cancelled by the client" },
 			},
 		]);
+		expect(client.connected).toBe(true);
 	});
 
 	it("writes neither the request nor a cancellation when the signal is already aborted", async () => {
@@ -267,9 +301,10 @@ describe("StdioTransport cancellation", () => {
 	});
 
 	it.each(["abort", "deadline"] as const)("never sends cancellation for initialize settled by %s", async cause => {
-		const client = await start({ timeout: cause === "deadline" ? DEADLINE_MS : 0 }, "hang-initialize");
+		const client = await start({}, "hang-initialize");
 		const caller = new AbortController();
 		const reason = new Error("cancel initialization locally");
+		if (cause === "deadline") armDeadline();
 		const outcome = client
 			.request("initialize", undefined, { signal: caller.signal })
 			.catch((error: unknown) => error);
@@ -283,12 +318,13 @@ describe("StdioTransport cancellation", () => {
 	});
 
 	it("registers no waiter or cancellation when request serialization throws", async () => {
-		const client = await start({ timeout: DEADLINE_MS });
+		const client = await start();
 		const tracker = trackUnhandled();
 		try {
 			const caller = new AbortController();
 			const params: Record<string, unknown> = { name: "hang" };
 			params.circular = params;
+			armDeadline();
 			await expect(client.request("tools/call", params, { signal: caller.signal })).rejects.toBeInstanceOf(
 				TypeError,
 			);

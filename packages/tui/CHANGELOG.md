@@ -4,6 +4,7 @@
 
 ### Added
 
+- Usage dashboard cards summarize paid extra usage, and the Details view lists it for each account ([#16704](https://github.com/can1357/oh-my-pi/pull/16704) by [@jwaldrip](https://github.com/jwaldrip)).
 - Added `modelEnds` to `GroupedFileSection`: per file, the model-line index just past its last line, so a caller cutting the output can tell which files it shows whole ([#16594](https://github.com/can1357/oh-my-pi/pull/16594) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed

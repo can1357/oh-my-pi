@@ -14,6 +14,7 @@ import {
 	type DisabledCredentialSummary,
 	type OAuthAccountIdentity,
 	type OAuthAccountSummary,
+	type PaidUsageView,
 	type ResetCreditRedeemOutcome,
 	isWithinUsageReserve,
 	resolveCredentialIdentityKey,
@@ -35,7 +36,17 @@ import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { resetAccountLockKey } from "../session/codex-auto-reset";
 import { checkCodexBalance, type ResetMarker, resetLockPath, withResetFence } from "../session/reset-fence";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import {
+	collapseSharedUsageReports,
+	formatPaidUsageAmount,
+	formatPaidUsageCaveat,
+	formatPaidUsageLine,
+	type PaidUsageTone,
+	pairPaidUsage,
+	paidUsageLimit,
+	summarizeUsageResetCredits,
+	withPlanUsageLimits,
+} from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { reportMatchesStatus } from "../session/claude-auto-reset";
 import {
 	classifyResetExpiry,
@@ -63,7 +74,7 @@ import {
 	type UsageAccountIdentity,
 } from "../slash-commands/helpers/usage-accounts";
 
-import { cfgRetryUsageReservePct } from "../session/settings";
+import { cfgRetryExtraUsageBelowFloor, cfgRetryUsageReservePct } from "../session/settings";
 
 const BAR_WIDTH = 28;
 
@@ -290,13 +301,54 @@ function describeAmount(limit: UsageLimit): string {
 	return parts.join(" · ");
 }
 
-function renderBar(limit: UsageLimit): string {
-	const fraction = resolveUsedFraction(limit);
+/** Used-fraction bar; dotted when the fraction is unknown. */
+function renderFractionBar(fraction: number | undefined, color: (text: string) => string): string {
 	if (fraction === undefined) return chalk.dim("·".repeat(BAR_WIDTH));
 	const clamped = Math.min(Math.max(fraction, 0), 1);
 	const filled = Math.round(clamped * BAR_WIDTH);
-	const color = STATUS_COLOR[resolveStatus(limit)];
 	return color("█".repeat(filled)) + chalk.dim("░".repeat(BAR_WIDTH - filled));
+}
+
+function renderBar(limit: UsageLimit): string {
+	return renderFractionBar(resolveUsedFraction(limit), STATUS_COLOR[resolveStatus(limit)]);
+}
+
+const PAID_TONE_COLOR: Record<PaidUsageTone, (text: string) => string> = {
+	success: chalk.green,
+	warning: chalk.yellow,
+	error: chalk.red,
+	dim: chalk.dim,
+};
+
+/**
+ * One account's paid extra usage under its plan rows: the dot, bar and line
+ * toned by the verdict, the bar filled from the paid row when it reports a
+ * used fraction. An account without a view prints a hollow `not reported` row.
+ */
+function formatPaidUsageRow(
+	title: string,
+	labelWidth: number,
+	row: UsageLimit | undefined,
+	view: PaidUsageView | undefined,
+	nowMs: number,
+): string {
+	const padded = title.padEnd(labelWidth);
+	if (!view)
+		return `      ${chalk.dim("○")} ${padded}  ${chalk.dim("·".repeat(BAR_WIDTH))}  ${chalk.dim("not reported")}`;
+	const line = formatPaidUsageLine(view, nowMs);
+	const color = PAID_TONE_COLOR[line.tone];
+	const age = line.age ? `${chalk.dim(" · ")}${PAID_TONE_COLOR[line.age.tone](line.age.text)}` : "";
+	const bar = renderFractionBar(row ? resolveUsedFraction(row) : undefined, color);
+	return `      ${color("●")} ${padded}  ${bar}  ${color(line.text)}${age}`;
+}
+
+/** The provider's paid row label (`Claude Extra Usage`, `Codex Credits`), or `Paid usage` when no account has a paid row. */
+function paidUsageTitle(reports: readonly UsageReport[], views: readonly (PaidUsageView | undefined)[]): string {
+	for (let index = 0; index < reports.length; index++) {
+		const row = paidUsageLimit(reports[index]!, views[index]);
+		if (row) return limitTitle(row);
+	}
+	return "Paid usage";
 }
 
 /** Append the window label when the limit label doesn't already carry it. */
@@ -664,11 +716,17 @@ function policyEnabledProviders(
 	return providers;
 }
 
+/**
+ * `limits` are the account's plan rows: its paid row never counts toward the
+ * reserve state or `% left`. `paid` supplies the unit the floor and budget
+ * print in; without it they print as configured.
+ */
 function formatPolicyLine(
 	provider: string,
 	identity: OAuthAccountIdentity,
 	limits: UsageLimit[] | undefined,
 	options: UsagePolicyDiagnosticsOptions,
+	paid?: PaidUsageView,
 ): string {
 	const policy = options.getAccountPolicy(provider, identity);
 	const priority = policy?.priority ?? 0;
@@ -676,7 +734,12 @@ function formatPolicyLine(
 	const inherited = configuredReservePct === undefined;
 	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
 	const reclaimLabel = policy?.reclaimAbovePct === undefined ? "" : ` · reclaim above ${policy.reclaimAbovePct}%`;
-	const reserveLabel = `${reservePct}% ${inherited ? "(global)" : "(override)"}${reclaimLabel}`;
+	const paidAmount = (value: number): string => (paid ? formatPaidUsageAmount(value, paid.unit) : `${value}`);
+	const floorLabel =
+		policy?.extraUsageFloor === undefined ? "" : ` · paid floor ${paidAmount(policy.extraUsageFloor)}`;
+	const budgetLabel =
+		policy?.extraUsageBudget === undefined ? "" : ` · paid budget ${paidAmount(policy.extraUsageBudget)}`;
+	const reserveLabel = `${reservePct}% ${inherited ? "(global)" : "(override)"}${reclaimLabel}${floorLabel}${budgetLabel}`;
 	// `omp usage` has no model/session context, so report the conservative
 	// account-wide state from the most-consumed visible window. Actual routing
 	// still scopes limits and selection in AuthStorage.
@@ -761,6 +824,12 @@ function formatResetExpiryBanner(
  * Render the full text breakdown: per provider, per account, every limit
  * with a bar, amounts, and reset times; unattributed credentials trail
  * each provider section as "no usage data" rows.
+ *
+ * `paidUsage` is index-aligned with `reports`. In a provider where any account
+ * reports paid extra usage, each account's paid row prints after its plan rows
+ * (and never counts toward the dot, reserve state or capacity), with the
+ * paid-figures caveat under the provider header. `extraUsageBelowFloor` is
+ * `retry.extraUsageBelowFloor`, which that caveat mentions.
  */
 export function formatUsageBreakdown(
 	reports: UsageReport[],
@@ -770,8 +839,11 @@ export function formatUsageBreakdown(
 	disabled: DisabledCredentialSummary[] = [],
 	policyOptions?: UsagePolicyDiagnosticsOptions,
 	resetOptions?: UsageResetExpiryOptions,
+	paidUsage?: readonly (PaidUsageView | undefined)[],
+	extraUsageBelowFloor = false,
 ): string {
 	const displayReports = collapseSharedUsageReports(reports);
+	const paidByReport = pairPaidUsage(displayReports, paidUsage ?? []);
 	const reportsByProvider = new Map<string, UsageReport[]>();
 	for (const report of displayReports) {
 		const list = reportsByProvider.get(report.provider) ?? [];
@@ -822,35 +894,48 @@ export function formatUsageBreakdown(
 		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
 		for (const note of providerNotes)
 			lines.push(`  ${chalk.dim(sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  ")))}`);
+		const paidViews = providerReports.map(report => paidByReport.get(report));
+		const paidTitle = paidViews.some(view => view !== undefined)
+			? paidUsageTitle(providerReports, paidViews)
+			: undefined;
+		if (paidTitle !== undefined) lines.push(`  ${chalk.dim(formatPaidUsageCaveat(extraUsageBelowFloor))}`);
+		// The plan rows alone: dot, rows, templates, reserve and capacity never see a paid row.
+		const planReports = providerReports.map((report, index) => withPlanUsageLimits(report, paidViews[index]));
 
-		const limitRowKey = createLimitRowKey(providerReports);
-		const providerLimitTemplates = collectProviderLimitTemplates(providerReports, limitRowKey);
+		const limitRowKey = createLimitRowKey(planReports);
+		const providerLimitTemplates = collectProviderLimitTemplates(planReports, limitRowKey);
 		// Rows sharing a key can carry different titles (plan tiers), so measure every rendered title.
 		const labelWidth = Math.max(
 			0,
 			...providerLimitTemplates.map(template => template.title.length),
-			...providerReports.flatMap(report => report.limits.map(limit => limitTitle(limit).length)),
+			...planReports.flatMap(report => report.limits.map(limit => limitTitle(limit).length)),
+			paidTitle?.length ?? 0,
 		);
 
-		providerReports.forEach((report, index) => {
-			lines.push(`  ${formatAccountHeader(report, providerReports, index, nowMs, redaction)}`);
+		planReports.forEach((report, index) => {
+			const reported = providerReports[index]!;
+			lines.push(`  ${formatAccountHeader(report, planReports, index, nowMs, redaction)}`);
 			if (policyOptions && policyProviders.has(provider)) {
 				lines.push(
-					`      ${chalk.dim(formatPolicyLine(provider, usageReportIdentity(report), report.limits, policyOptions))}`,
+					`      ${chalk.dim(formatPolicyLine(provider, usageReportIdentity(reported), report.limits, policyOptions, paidViews[index]))}`,
 				);
 			}
 			if (report.limits.length === 0) {
 				lines.push(`      ${chalk.dim("no limits reported")}`);
-				return;
-			}
-			const limitsByKey = Map.groupBy(report.limits, limitRowKey);
-			for (const template of providerLimitTemplates) {
-				const limits = limitsByKey.get(template.key);
-				if (!limits) {
-					lines.push(formatMissingLimitLine(template, labelWidth));
-					continue;
+			} else {
+				const limitsByKey = Map.groupBy(report.limits, limitRowKey);
+				for (const template of providerLimitTemplates) {
+					const limits = limitsByKey.get(template.key);
+					if (!limits) {
+						lines.push(formatMissingLimitLine(template, labelWidth));
+						continue;
+					}
+					for (const limit of limits) lines.push(...formatLimitLine(limit, labelWidth, nowMs));
 				}
-				for (const limit of limits) lines.push(...formatLimitLine(limit, labelWidth, nowMs));
+			}
+			if (paidTitle !== undefined) {
+				const view = paidViews[index];
+				lines.push(formatPaidUsageRow(paidTitle, labelWidth, paidUsageLimit(reported, view), view, nowMs));
 			}
 		});
 
@@ -878,7 +963,7 @@ export function formatUsageBreakdown(
 			if (warning) lines.push(warning);
 		}
 
-		const stats = computeProviderWindowStats(providerReports);
+		const stats = computeProviderWindowStats(planReports);
 		if (stats.length > 0) {
 			const parts = stats.map(stat => {
 				const meterLabel = stat.meter ? ` (${stat.meter.charAt(0).toUpperCase()}${stat.meter.slice(1)})` : "";
@@ -1606,6 +1691,8 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			accounts = accounts.filter(account => account.provider.toLowerCase() === wanted);
 			disabled = disabled.filter(summary => summary.provider.toLowerCase() === wanted);
 		}
+		// Each report's paid extra usage, aligned with the filtered reports both outputs print.
+		const paidUsage = authStorage.usage.paidUsage(filteredReports);
 
 		const redaction = cmd.redact
 			? buildRedactionMap(collectIdentityStrings(filteredReports, accounts, disabled))
@@ -1628,10 +1715,11 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 					orgName: maskIdentity(redaction, account.orgName),
 				}));
 			}
+			const planReports = filteredReports.map((report, index) => withPlanUsageLimits(report, paidUsage[index]));
 			const capacity: Record<string, ProviderWindowStat[]> = {};
-			for (const report of filteredReports) {
+			for (const report of planReports) {
 				if (capacity[report.provider]) continue;
-				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
+				const stats = computeProviderWindowStats(planReports.filter(peer => peer.provider === report.provider));
 				if (stats.length > 0) capacity[report.provider] = stats;
 			}
 			let disabledForJson = disabled.filter(summary => isActionableDisable(summary, accounts));
@@ -1647,6 +1735,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			const payload = {
 				generatedAt: Date.now(),
 				reports: trimmed,
+				paidUsage: paidUsage.map(view => view ?? null),
 				accountsWithoutUsage: unreportedAccounts,
 				disabledCredentials: disabledForJson,
 				capacity,
@@ -1677,7 +1766,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			accounts: provider => authStorage.oauth.accounts(provider),
 		};
 		process.stdout.write(
-			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, resetOptions)}\n`,
+			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, resetOptions, paidUsage, cfgRetryExtraUsageBelowFloor.get(settings))}\n`,
 		);
 	} catch (error) {
 		// Broker-backed reads (`clients`, `--history`) fail on an unreachable or

@@ -54,6 +54,47 @@ export interface AuthAccountSelector {
 	readonly orgId?: string;
 }
 
+/** Account funding standing after plan allowance and paid extra usage are evaluated. */
+export type UsageFundingTier = "allowance" | "extra" | "extra-past-floor" | "spent";
+
+/** Whether selection may spend paid usage that is below a configured floor or budget. */
+export type ExtraUsageAllowance = "to-floor" | "past-floor";
+
+/** Why paid usage cannot serve automatically at the configured limit. */
+export type PaidUsageStop =
+	| "disabled"
+	| "cap-reached"
+	| "refused"
+	| "floor"
+	| "floor-unreported"
+	| "budget"
+	| "budget-unreported";
+
+/** Provider-reported paid capacity and the account-policy result selection would use. */
+export interface PaidUsageView {
+	limitId?: string;
+	unit: "usd" | "credits";
+	capacity: "spend-cap" | "balance";
+	/** Selection's result once plan allowance is spent, stopping paid usage at the floor by default. */
+	state: "available" | "past-floor" | "unavailable";
+	/** First applicable reason in paid-usage rule order when the state is not available. */
+	stop?: PaidUsageStop;
+	used?: number;
+	cap?: number;
+	remaining?: number;
+	uncapped: boolean;
+	floor?: number;
+	floorIgnored: boolean;
+	budget?: number;
+	budgetLeft?: number;
+	headroom?: number;
+	boundBy?: "floor" | "budget" | "provider";
+	unbounded: boolean;
+	blockedUntil?: number;
+	asOf?: number;
+	stale: boolean;
+}
+
 /** Priority and reserve policy for a provider account. */
 export interface AuthAccountPolicy {
 	readonly provider: string;
@@ -64,6 +105,10 @@ export interface AuthAccountPolicy {
 	readonly reservePct?: number;
 	/** Remaining quota percentage, above the reserve, at which this account takes back lower-priority warm pins. */
 	readonly reclaimAbovePct?: number;
+	/** Minimum paid extra-usage capacity that remains available to automatic selection. */
+	readonly extraUsageFloor?: number;
+	/** Maximum paid extra-usage spend during the provider's reported period. */
+	readonly extraUsageBudget?: number;
 }
 
 /** Read-only set of per-account routing policies. */
@@ -459,6 +504,10 @@ export interface ModelUsageAccountHealth {
 	state: ModelUsageHealthState;
 	remainingFraction?: number;
 	resetsAt?: number;
+	/** Funding standing after plan allowance and paid extra usage are evaluated. */
+	fundingTier?: UsageFundingTier;
+	/** Saved resets currently available for this credential. */
+	savedResets?: number;
 }
 
 /** Aggregate model usage health and account detail. */
@@ -473,6 +522,9 @@ export interface ModelUsageHealthOptions {
 	sessionId?: string;
 	baseUrl?: string;
 	reserveFraction: number;
+	/** Whether paid extra usage counts as usable model capacity. Omitted keeps plan-window-only health. */
+	extraUsage?: ExtraUsageAllowance;
+
 	signal?: AbortSignal;
 }
 
@@ -480,6 +532,8 @@ export interface ModelUsageHealthOptions {
 export type AuthApiKeyOptions = {
 	baseUrl?: string;
 	modelId?: string;
+	/** Whether selection may use paid extra usage below configured account floors or budgets. */
+	extraUsage?: ExtraUsageAllowance;
 	/** {@link oauthAccountKey}s of accounts known to serve `modelId` from multi-account discovery; OAuth selection prefers them and tries other accounts only as a last resort. */
 	accountIds?: readonly string[];
 	/**
@@ -1223,6 +1277,12 @@ export interface UsageApi {
 		baseUrlResolver?: (provider: Provider) => string | undefined;
 		signal?: AbortSignal;
 	}): Promise<UsageReport[] | null>;
+	/**
+	 * Paid extra-usage data per input report, attributed through the same
+	 * credential policy and exact paid-usage block selection reads. This never
+	 * fetches provider data and preserves the input order.
+	 */
+	paidUsage(reports: readonly UsageReport[], options?: { nowMs?: number }): (PaidUsageView | undefined)[];
 	/** Ingest provider usage limits from response headers. */
 	ingestHeaders(
 		provider: Provider,

@@ -26,6 +26,9 @@ export function scopedBackoffKey(providerKey: string, blockScope: string | undef
 export const AUTH_BLOCK_SCOPE = "auth";
 /** Account-policy backoffs apply to every model and survive quota resets. */
 export const ACCOUNT_POLICY_BLOCK_SCOPE = "account-policy";
+/** Paid extra usage was refused for this account and must not be retried until its allowance resets. */
+export const EXTRA_USAGE_BLOCK_SCOPE = "extra-usage";
+
 const PROTECTED_BLOCK_SCOPES = [AUTH_BLOCK_SCOPE, ACCOUNT_POLICY_BLOCK_SCOPE] as const;
 
 const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";
@@ -285,6 +288,18 @@ export class CredentialBlocks implements BlocksApi {
 			blockScopeOrScopes,
 			this.#readPersistedCredentialBlockScopes(credentialId, providerKey),
 		);
+	}
+
+	/** Returns the active block expiry for one exact scope without merging any other scopes. */
+	exactBlockedUntil(
+		provider: string,
+		providerKey: string,
+		credentialIndex: number,
+		scope: string | undefined,
+	): number | undefined {
+		const credentialId = this.#deps.pool.entries(provider)[credentialIndex]?.id;
+		if (credentialId === undefined) return undefined;
+		return this.#exactBlockedUntil(credentialId, providerKey, scope);
 	}
 
 	#blockedUntilById(

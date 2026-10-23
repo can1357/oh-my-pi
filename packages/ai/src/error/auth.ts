@@ -1,5 +1,38 @@
 import { attach, create, Flag } from "./flags";
 
+/** Prefix used for an internal paid-usage safety stop that routes through usage-limit recovery. */
+export const EXTRA_USAGE_WITHHELD_PREFIX = "Extra usage withheld:";
+
+/**
+ * Every account has exhausted plan allowance and paid usage may not cross its
+ * configured floor or budget. This is a usage limit so normal model fallback
+ * can continue without treating the account as a missing credential.
+ */
+export class ExtraUsageWithheldError extends Error {
+	readonly provider: string;
+	readonly retryAt: number | undefined;
+
+	constructor(provider: string, retryAt?: number) {
+		const retryAfterMs =
+			typeof retryAt === "number" && Number.isFinite(retryAt) && retryAt > Date.now()
+				? Math.ceil(retryAt - Date.now())
+				: undefined;
+		super(
+			`${EXTRA_USAGE_WITHHELD_PREFIX} usage limit reached for ${provider}: plan allowance is spent on every account and paid extra usage is at its floor` +
+				(retryAfterMs === undefined ? "" : ` retry-after-ms=${retryAfterMs}`),
+		);
+		this.name = "ExtraUsageWithheldError";
+		this.provider = provider;
+		this.retryAt = retryAt;
+		attach(this, create(Flag.UsageLimit));
+	}
+}
+
+/** Whether an assistant error message describes a withheld paid-usage account pool. */
+export function isExtraUsageWithheldMessage(message: { errorMessage?: string }): boolean {
+	return message.errorMessage?.startsWith(EXTRA_USAGE_WITHHELD_PREFIX) === true;
+}
+
 /**
  * No API key / credential was available to dispatch a request.
  *

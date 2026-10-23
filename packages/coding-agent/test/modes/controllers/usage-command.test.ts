@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { AuthStorage, type UsageReport } from "@oh-my-pi/pi-ai";
+import { AuthStorage, type PaidUsageView, type UsageReport } from "@oh-my-pi/pi-ai";
 import { CommandController, renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import * as activityClient from "@oh-my-pi/pi-coding-agent/stats/activity-client";
@@ -306,6 +306,55 @@ describe("renderUsageReports content", () => {
 		expect(output).not.toContain("\r");
 		expect(output).not.toContain("\t");
 	});
+
+	it("keeps paid rows out of the quota matrix and renders them in the details section", () => {
+		const now = 1_800_000_000_000;
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: now,
+			metadata: { email: "paid@example.test" },
+			limits: [
+				{
+					id: "anthropic:5h",
+					label: "Claude 5 Hour",
+					scope: { provider: "anthropic", windowId: "5h" },
+					window: { id: "5h", label: "5 hours" },
+					amount: { usedFraction: 0.2, unit: "percent" },
+					status: "ok",
+				},
+				{
+					id: "anthropic:extra",
+					label: "Claude Extra Usage",
+					scope: { provider: "anthropic", windowId: "extra" },
+					amount: { used: 46, remaining: 4, limit: 50, usedFraction: 0.92, unit: "usd" },
+					status: "warning",
+				},
+			],
+		};
+		const paid: PaidUsageView = {
+			limitId: "anthropic:extra",
+			unit: "usd",
+			capacity: "spend-cap",
+			state: "available",
+			used: 46,
+			cap: 50,
+			remaining: 4,
+			headroom: 4,
+			boundBy: "provider",
+			uncapped: false,
+			floorIgnored: false,
+			unbounded: false,
+			stale: false,
+		};
+
+		const output = stripVTControlCharacters(renderUsageReports([report], theme, now, 120, undefined, [], [], [paid]));
+
+		expect(output).toContain("Claude 5 Hour");
+		expect(output).toContain("Paid usage");
+		expect(output).toContain("Paid figures are provider-reported and refresh about every 5 minutes");
+		expect(output).toContain("paid@example.test: $4.00 left of $50.00 cap");
+		expect(output).not.toContain("Claude Extra Usage");
+	});
 });
 
 describe("interactive /usage account visibility", () => {
@@ -395,6 +444,56 @@ describe("interactive /usage account visibility", () => {
 	function display(): string {
 		return stripVTControlCharacters(mounted?.render(120).join("\n") ?? "");
 	}
+
+	it("wires storage paid usage into the interactive overview and details", async () => {
+		const report: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: now,
+			metadata: { email, accountId: "shared-account", orgId: "org-team" },
+			limits: [
+				{
+					id: "anthropic:5h",
+					label: "Claude 5 Hour",
+					scope: { provider: "anthropic", accountId: "shared-account", orgId: "org-team", windowId: "5h" },
+					window: { id: "5h", label: "5 hours" },
+					amount: { usedFraction: 0.2, unit: "percent" },
+					status: "ok",
+				},
+				{
+					id: "anthropic:extra",
+					label: "Claude Extra Usage",
+					scope: { provider: "anthropic", accountId: "shared-account", orgId: "org-team", windowId: "extra" },
+					amount: { used: 46, remaining: 4, limit: 50, usedFraction: 0.92, unit: "usd" },
+					status: "warning",
+				},
+			],
+		};
+		const paid: PaidUsageView = {
+			limitId: "anthropic:extra",
+			unit: "usd",
+			capacity: "spend-cap",
+			state: "available",
+			used: 46,
+			cap: 50,
+			remaining: 4,
+			headroom: 4,
+			boundBy: "provider",
+			uncapped: false,
+			floorIgnored: false,
+			unbounded: false,
+			stale: false,
+		};
+		const paidUsage = vi.spyOn(authStorage.usage, "paidUsage").mockReturnValue([paid]);
+
+		await command(async () => [report]).handleUsageCommand();
+
+		expect(paidUsage).toHaveBeenCalledWith([report]);
+		expect(display()).toContain("paid $4.00 left");
+		expect(display()).not.toContain("Claude Extra Usage");
+		mounted?.handleInput("\r");
+		expect(display()).toContain("Paid usage");
+		expect(display()).toContain("$4.00 left of $50.00 cap");
+	});
 
 	it("renders advisor status before usage refresh returns", async () => {
 		const refresh = Promise.withResolvers<UsageReport[] | null>();

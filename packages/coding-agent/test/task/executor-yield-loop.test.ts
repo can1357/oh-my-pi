@@ -288,16 +288,44 @@ describe("runSubprocess incremental yield loops", () => {
 
 	it("fails explicitly when a dropped assignment never reaches idle", async () => {
 		const id = "WedgedScout";
-		const handle = createMockSession(() => "dropped");
-		handle.session.waitForIdle = () => Promise.withResolvers<void>().promise;
+		const deadline = new AbortController();
+		const idleEntered = Promise.withResolvers<void>();
+		const idle = Promise.withResolvers<void>();
+		let timeoutMs: number | undefined;
+		let timeoutSpy: { mockRestore(): void } | undefined;
+		const handle = createMockSession(() => {
+			timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementationOnce(ms => {
+				timeoutMs = ms;
+				return deadline.signal;
+			});
+			return "dropped";
+		});
+		handle.session.waitForIdle = () => {
+			idleEntered.resolve();
+			return idle.promise;
+		};
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id, 0));
+		const run = runSubprocess(baseOptions(id, 0));
+		try {
+			await idleEntered.promise;
+			timeoutSpy?.mockRestore();
+			expect(timeoutMs).toBe(5_000);
+			deadline.abort(new DOMException("idle deadline elapsed", "TimeoutError"));
 
-		expect(handle.prompts).toHaveLength(1);
-		expect(result.exitCode).toBe(1);
-		expect(result.error).toContain("initial prompt dropped before provider dispatch; session did not become idle");
+			const result = await run;
+
+			expect(handle.prompts).toHaveLength(1);
+			expect(result.exitCode).toBe(1);
+			expect(result.aborted).toBe(false);
+			expect(result.error).toContain("initial prompt dropped before provider dispatch; session did not become idle");
+		} finally {
+			timeoutSpy?.mockRestore();
+			if (!deadline.signal.aborted) deadline.abort(new DOMException("fixture cleanup", "TimeoutError"));
+			idle.resolve();
+			await run.catch(() => {});
+		}
 	}, 10_000);
 
 	it("retries a dropped yield reminder without consuming another reminder", async () => {

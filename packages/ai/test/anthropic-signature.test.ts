@@ -189,7 +189,7 @@ function v4Signature(kind: string, ciphertextBytes = 4): string {
 		...header,
 		0x12,
 		...varint(ciphertextBytes),
-		...new Array<number>(ciphertextBytes).fill(0xab),
+		...Array.from({ length: ciphertextBytes }, () => 0xab),
 	];
 	return Buffer.from([0x08, 0x04, 0x12, ...varint(envelope.length), ...envelope]).toString("base64");
 }

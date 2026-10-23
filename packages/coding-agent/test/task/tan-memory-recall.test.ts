@@ -55,7 +55,9 @@ it("sends the parent's recalled system prompt unchanged from a /tan clone", asyn
 	let startCount = 0;
 	vi.spyOn(mnemopiBackend, "start").mockImplementation(async options => {
 		await realStart.call(mnemopiBackend, options);
-		mnemopiStarts[startCount++]?.resolve();
+		const start = mnemopiStarts[startCount];
+		startCount += 1;
+		start?.resolve();
 	});
 	const settings = Settings.isolated({
 		"async.enabled": true,

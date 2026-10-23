@@ -7,7 +7,7 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oaut
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
-import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
+import { ExtraUsageWithheldError, OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
 import type {
 	Api,
 	Context,
@@ -3265,11 +3265,15 @@ export class ModelRegistry {
 		);
 	}
 
-	/** Resolve a model's request credential or the no-auth sentinel. */
+	/**
+	 * Resolve a model's request credential or the no-auth sentinel. With
+	 * `rejectWithheld`, a paid-usage floor hold reaches request paths instead
+	 * of resolving as an unavailable credential.
+	 */
 	async getApiKey(
 		model: Model<Api>,
 		sessionId?: string,
-		options?: { signal?: AbortSignal },
+		options?: Pick<AuthApiKeyOptions, "extraUsage" | "signal"> & { rejectWithheld?: boolean },
 	): Promise<string | undefined> {
 		// A disabled provider gets no credential, so no request reaches it however
 		// its model was obtained.
@@ -3277,12 +3281,22 @@ export class ModelRegistry {
 		if (this.#isKeylessProvider(model.provider)) {
 			return kNoAuth;
 		}
-		return this.authStorage.keys.get(model.provider, sessionId, {
+		const keyOptions = {
 			baseUrl: model.baseUrl,
 			modelId: model.id,
+			extraUsage: options?.extraUsage,
 			accountIds: model.accountAccess && Object.keys(model.accountAccess),
 			signal: options?.signal,
-		});
+		};
+		if (!options?.rejectWithheld) {
+			return this.authStorage.keys.get(model.provider, sessionId, keyOptions);
+		}
+		try {
+			return (await this.authStorage.keys.getWithCredential(model.provider, sessionId, keyOptions))?.apiKey;
+		} catch (error) {
+			if (error instanceof OAuthRefreshUnavailableError) return undefined;
+			throw error;
+		}
 	}
 
 	/** Resolve request authentication through the historical Pi extension facade. */
@@ -3301,8 +3315,8 @@ export class ModelRegistry {
 
 	/**
 	 * Resolve a provider's credential or the no-auth sentinel, for availability
-	 * checks. A transient OAuth refresh failure resolves `undefined` (like
-	 * `authStorage.keys.get`); request paths use
+	 * checks. A transient OAuth refresh failure or paid-usage floor hold resolves
+	 * `undefined` (like `authStorage.keys.get`); request paths use
 	 * {@link getApiKeyWithCredentialForProvider}, which surfaces it.
 	 *
 	 * `options.forceRefresh` re-mints the session-sticky OAuth token even when
@@ -3317,7 +3331,8 @@ export class ModelRegistry {
 		try {
 			return (await this.getApiKeyWithCredentialForProvider(provider, sessionId, options))?.apiKey;
 		} catch (error) {
-			if (error instanceof OAuthRefreshUnavailableError) return undefined;
+			if (error instanceof OAuthRefreshUnavailableError || error instanceof ExtraUsageWithheldError)
+				return undefined;
 			throw error;
 		}
 	}
@@ -3343,6 +3358,7 @@ export class ModelRegistry {
 		return this.authStorage.keys.getWithCredential(provider, sessionId, {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,
+			extraUsage: options?.extraUsage,
 			accountIds: accountAccess && Object.keys(accountAccess),
 			forceRefresh: options?.forceRefresh,
 			refreshReason: options?.refreshReason,
@@ -3358,7 +3374,7 @@ export class ModelRegistry {
 	 * `resolveApiKeyOnce(resolver)`.
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
-	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
+	resolver(model: ApiKeyResolverModel, sessionIdOrOptions?: string | ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(target: string | ApiKeyResolverModel, optionsOrSessionId?: ApiKeyResolverOptions | string): ApiKeyResolver {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
 		if (typeof target === "string") {

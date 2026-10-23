@@ -775,6 +775,118 @@ describe("AgentSession retry fallback", () => {
 		expect(succeededFromExtension).toEqual(succeededFromSubscribe.map(({ model, role }) => ({ model, role })));
 	});
 
+	it("keeps tiered paid capacity on the current model but falls back in usage mode", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled tiered fallback models");
+
+		const health = vi
+			.spyOn(modelRegistry.authStorage.health, "model")
+			.mockImplementation(async (provider, options) => {
+				if (provider !== primaryModel.provider) return { state: "healthy", accounts: [] };
+				const account = {
+					credentialId: 1,
+					credentialType: "oauth" as const,
+					selected: true as const,
+					state: options.extraUsage === "to-floor" ? ("healthy" as const) : ("depleted" as const),
+					fundingTier: "extra" as const,
+				};
+				return {
+					state: options.extraUsage === "to-floor" ? ("healthy" as const) : ("depleted" as const),
+					accounts: [account],
+				};
+			});
+
+		for (const [accountOrder, expectedModel] of [
+			["tiered", primaryModel] as const,
+			["usage", fallbackModel] as const,
+		]) {
+			const requestedModels: string[] = [];
+			const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.accountOrder": accountOrder,
+				"retry.usageAwareFallback": true,
+				"retry.usageReservePolicy": "auto",
+				"retry.fallbackChains": {
+					[`${primaryModel.provider}/${primaryModel.id}`]: [`${fallbackModel.provider}/${fallbackModel.id}`],
+				},
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			const localSession = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+			try {
+				await localSession.prompt(`run in ${accountOrder} mode`);
+				await localSession.waitForIdle();
+				expect(requestedModels).toEqual([`${expectedModel.provider}/${expectedModel.id}`]);
+			} finally {
+				await localSession.dispose();
+			}
+		}
+
+		expect(health).toHaveBeenCalledWith(primaryModel.provider, expect.objectContaining({ extraUsage: "to-floor" }));
+	});
+
+	it("routes a withheld paid-usage error to the fallback without marking the primary reached", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled withheld fallback models");
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const retryAfterMs = 30_000;
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const markReached = vi.spyOn(modelRegistry.authStorage.limits, "markReached");
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push(
+					model.provider === primaryModel.provider && model.id === primaryModel.id
+						? { throw: new AIError.ExtraUsageWithheldError(primaryModel.provider, now + retryAfterMs) }
+						: { content: ["recovered on fallback"] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.fallbackOn": "usage-limit",
+			"retry.fallbackChains": { [primarySelector]: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		await session.prompt("paid usage is held at the floor");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, `${fallbackModel.provider}/${fallbackModel.id}`]);
+		expect(markReached).not.toHaveBeenCalled();
+		expect(modelRegistry.isSelectorSuppressed(primarySelector)).toBe(true);
+		now += retryAfterMs;
+		expect(modelRegistry.isSelectorSuppressed(primarySelector)).toBe(false);
+	});
+
 	it("confirms before crossing models when every pooled account is inside reserve", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");

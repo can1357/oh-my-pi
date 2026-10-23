@@ -5,6 +5,7 @@ import { CompactionCancelledError, type CompactionOutcome } from "@oh-my-pi/pi-a
 import {
 	getEnvApiKey,
 	getProviderDetails,
+	type PaidUsageView,
 	type ProviderDetails,
 	resolveUsedFraction,
 	type UsageLimit,
@@ -103,6 +104,10 @@ import { setSessionTerminalTitle } from "../../utils/title-generator";
 import {
 	collapseSharedUsageReports,
 	formatLimitTitle,
+	formatPaidUsageCaveat,
+	formatPaidUsageLine,
+	pairPaidUsage,
+	planUsageLimits,
 	summarizeUsageResetCredits,
 } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "@oh-my-pi/pi-tui/prompt/usage-amounts";
@@ -2282,9 +2287,12 @@ export function renderProviderSection(details: ProviderDetails, uiTheme: Pick<Th
 	return `${lines.join("\n")}\n`;
 }
 
-function resolveProviderUsageTotal(reports: UsageReport[]): number {
+function resolveProviderUsageTotal(
+	reports: UsageReport[],
+	paidByReport: ReadonlyMap<UsageReport, PaidUsageView>,
+): number {
 	return reports
-		.flatMap(report => report.limits)
+		.flatMap(report => planUsageLimits(report, paidByReport.get(report)))
 		.map(limit => resolveUsedFraction(limit) ?? 0)
 		.reduce((sum, value) => sum + value, 0);
 }
@@ -2542,6 +2550,13 @@ function resolveColumnWidth(count: number, available: number, trailing: number):
 	return ideal;
 }
 
+/**
+ * The classic per-account `/usage` report (the dashboard's Details view).
+ * `paidUsage` is index-aligned with `reports`: each account's paid row leaves
+ * the quota matrix for a `Paid usage` block under its provider, and passing no
+ * views renders exactly the report without it. `extraUsageBelowFloor` is
+ * `retry.extraUsageBelowFloor`, which the block's caveat mentions.
+ */
 export function renderUsageReports(
 	reports: UsageReport[],
 	uiTheme: Theme,
@@ -2550,8 +2565,11 @@ export function renderUsageReports(
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
 	usageModelSelectors: readonly string[] = [],
 	unavailableAccounts: readonly UnavailableUsageAccount[] = [],
+	paidUsage: readonly (PaidUsageView | undefined)[] = [],
+	extraUsageBelowFloor = false,
 ): string {
 	const displayReports = collapseSharedUsageReports(reports);
+	const paidByReport = pairPaidUsage(displayReports, paidUsage);
 	const lines: string[] = [];
 	const latestFetchedAt = Math.max(0, ...reports.map(report => report.fetchedAt ?? 0));
 	const headerSuffix = latestFetchedAt ? ` (${formatDuration(nowMs - latestFetchedAt)} ago)` : "";
@@ -2569,7 +2587,7 @@ export function renderUsageReports(
 		.map(([provider, providerReports]) => ({
 			provider,
 			providerReports,
-			totalUsage: resolveProviderUsageTotal(providerReports),
+			totalUsage: resolveProviderUsageTotal(providerReports, paidByReport),
 		}))
 		.sort((a, b) => {
 			if (a.totalUsage !== b.totalUsage) return a.totalUsage - b.totalUsage;
@@ -2586,7 +2604,7 @@ export function renderUsageReports(
 			{ label: string; windowLabel: string; limits: UsageLimit[]; reports: UsageReport[] }
 		>();
 		for (const report of providerReports) {
-			for (const limit of report.limits) {
+			for (const limit of planUsageLimits(report, paidByReport.get(report))) {
 				const windowId = limit.window?.id ?? limit.scope.windowId ?? "default";
 				const key = `${formatLimitTitle(limit)}|${windowId}`;
 				const windowLabel = limit.window?.label ?? windowId;
@@ -2657,10 +2675,9 @@ export function renderUsageReports(
 			);
 		}
 
-		const resetAccountLines: string[] = [];
-		for (const report of providerReports) {
-			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
-			if (!resets || resets.bankedCount <= 0) continue;
+		// Saved-reset and paid lines name an account the same way and mark the
+		// one this session uses.
+		const accountLineLabel = (report: UsageReport): string => {
 			const identityLabel =
 				typeof report.metadata?.email === "string" && report.metadata.email
 					? report.metadata.email
@@ -2677,17 +2694,27 @@ export function renderUsageReports(
 					: orgLabel && orgLabel !== identityLabel
 						? `${identityLabel} (${orgLabel})`
 						: identityLabel;
-			const label = sanitizeText(rawLabel.replace(/[\r\n\t]+/g, " "));
+			return sanitizeText(rawLabel.replace(/[\r\n\t]+/g, " "));
+		};
+		const isActiveAccountReport = (report: UsageReport): boolean => {
+			if (provider === "openai-codex") return activeReport === report;
 			const activeOrg = activeAccount?.orgId;
 			const reportOrg = typeof report.metadata?.orgId === "string" ? report.metadata.orgId : undefined;
 			const orgMatches = !activeOrg && !reportOrg ? true : activeOrg === reportOrg;
-			const isActive =
-				provider === "openai-codex"
-					? activeReport === report
-					: orgMatches &&
-						!!activeAccount &&
-						((!!activeAccount.accountId && activeAccount.accountId === report.metadata?.accountId) ||
-							(!!activeAccount.email && activeAccount.email === report.metadata?.email));
+			return (
+				orgMatches &&
+				!!activeAccount &&
+				((!!activeAccount.accountId && activeAccount.accountId === report.metadata?.accountId) ||
+					(!!activeAccount.email && activeAccount.email === report.metadata?.email))
+			);
+		};
+
+		const resetAccountLines: string[] = [];
+		for (const report of providerReports) {
+			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
+			if (!resets || resets.bankedCount <= 0) continue;
+			const label = accountLineLabel(report);
+			const isActive = isActiveAccountReport(report);
 			const availability =
 				resets.redeemableCount === resets.bankedCount ? "" : ` · ${resets.redeemableCount} usable now`;
 			resetAccountLines.push(
@@ -2715,6 +2742,26 @@ export function renderUsageReports(
 			for (const line of resetAccountLines) lines.push(uiTheme.fg("dim", line));
 		}
 
+		// Paid extra usage, once any account of this provider reports it: every
+		// account gets a line, so one that reports nothing still says so.
+		const paidViews = providerReports.map(report => paidByReport.get(report));
+		if (paidViews.some(view => view !== undefined)) {
+			lines.push(`  ${uiTheme.fg("accent", "Paid usage")}`);
+			const bodyWidth = Math.max(1, availableWidth - 6);
+			for (const line of wrapTextWithAnsi(formatPaidUsageCaveat(extraUsageBelowFloor), bodyWidth)) {
+				lines.push(`      ${uiTheme.fg("dim", line)}`);
+			}
+			providerReports.forEach((report, index) => {
+				const paid = formatPaidUsageLine(paidViews[index], nowMs);
+				const age = paid.age ? uiTheme.fg("dim", " · ") + uiTheme.fg(paid.age.tone, paid.age.text) : "";
+				const active = isActiveAccountReport(report) ? uiTheme.fg("dim", " (active)") : "";
+				const body = `${uiTheme.fg("dim", `${accountLineLabel(report)}:`)} ${uiTheme.fg(paid.tone, paid.text)}${age}${active}`;
+				wrapTextWithAnsi(body, bodyWidth).forEach((line, row) => {
+					lines.push(`${row === 0 ? `    ${uiTheme.fg("dim", "•")} ` : "      "}${line}`);
+				});
+			});
+		}
+
 		// Order account columns ONCE per provider (worst-first), then apply that
 		// same order to every window group. Sorting each group independently by
 		// its own used fraction (issue #6067) desynchronized the columns: an
@@ -2724,7 +2771,7 @@ export function renderUsageReports(
 		// exhausted limit appeared under a sibling that still had quota.
 		const accountRank = new Map<UsageReport, number>();
 		providerReports.forEach((report, position) => {
-			const worst = report.limits.reduce((max, limit) => {
+			const worst = planUsageLimits(report, paidByReport.get(report)).reduce((max, limit) => {
 				const fraction = resolveUsedFraction(limit) ?? -1;
 				return fraction > max ? fraction : max;
 			}, -1);
@@ -2787,8 +2834,10 @@ export function renderUsageReports(
 			}
 		}
 
-		// Render accounts with no rate limits (e.g. business/enterprise plans).
-		const unlimitedReports = providerReports.filter(report => report.limits.length === 0);
+		// Render accounts with no plan rate limits (e.g. business/enterprise plans).
+		const unlimitedReports = providerReports.filter(
+			report => planUsageLimits(report, paidByReport.get(report)).length === 0,
+		);
 		for (const report of unlimitedReports) {
 			const label = formatUnlimitedReportLabel(report, providerReports, 0);
 			const tier = report.provider === "openai-codex" ? undefined : report.metadata?.planType;

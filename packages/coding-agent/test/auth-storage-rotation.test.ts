@@ -294,6 +294,65 @@ describe("AuthStorage account rotation", () => {
 		expect(rotationTargets).toEqual(["stale-access"]);
 	});
 
+	test("forwards paid-usage allowance and retries the reset account without rotating", async () => {
+		const getKey = vi.fn(async () => ({ apiKey: "same-bearer" }));
+		const beforeRotate = vi.fn(async () => true);
+		const rotate = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue({ switched: false });
+		const registry: Parameters<typeof createApiKeyResolver>[0] = {
+			getApiKeyWithCredentialForProvider: getKey,
+			authStorage,
+		};
+		const resolver = createApiKeyResolver(registry, "anthropic", {
+			sessionId: "tiered-reset",
+			extraUsage: "past-floor",
+			beforeRotate,
+		});
+
+		const retried = await resolver({
+			lastChance: true,
+			error: Object.assign(new Error("429 usage limit"), { status: 429 }),
+			previousKey: "same-bearer",
+		});
+
+		expect(beforeRotate).toHaveBeenCalledWith(expect.any(Error), undefined);
+		expect(getKey).toHaveBeenCalledWith(
+			"anthropic",
+			"tiered-reset",
+			expect.objectContaining({ extraUsage: "past-floor", forceRefresh: undefined }),
+		);
+		expect(retried).toEqual({ apiKey: "same-bearer", afterReset: true });
+		expect(rotate).not.toHaveBeenCalled();
+	});
+
+	test("runs saved-reset recovery only for usage-limit failures", async () => {
+		const getKey = vi.fn(async () => ({ apiKey: "rotated-bearer" }));
+		const beforeRotate = vi.fn(async () => true);
+		const rotate = vi.spyOn(authStorage.limits, "rotate").mockResolvedValue({ switched: true });
+		const registry: Parameters<typeof createApiKeyResolver>[0] = {
+			getApiKeyWithCredentialForProvider: getKey,
+			authStorage,
+		};
+		const resolver = createApiKeyResolver(registry, "openai-codex", {
+			sessionId: "tiered-reset-non-usage",
+			beforeRotate,
+		});
+
+		for (const error of [
+			Object.assign(new Error("401 authentication_error"), { status: 401 }),
+			Object.assign(
+				new Error(
+					"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)",
+				),
+				{ status: 403 },
+			),
+		]) {
+			await resolver({ lastChance: true, error, previousKey: "failed-bearer" });
+		}
+
+		expect(beforeRotate).not.toHaveBeenCalled();
+		expect(rotate).toHaveBeenCalledTimes(2);
+	});
+
 	test("API key resolver stops when a usage-limit rotation has no unblocked sibling", async () => {
 		const resolvedKeys = ["quota-blocked-B", "quota-blocked-A"];
 		vi.spyOn(authStorage.limits, "rotate").mockResolvedValue({ switched: false });

@@ -158,6 +158,7 @@ describe("openai-codex usage parser", () => {
 			primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
 			secondary_window: null,
 		};
+		payload.additional_rate_limits = [];
 		payload.credits = { has_credits: true, unlimited: false, overage_limit_reached: false, balance: "489.25" };
 		payload.spend_control = { reached: false };
 		const report = await openaiCodexUsageProvider.fetchUsage(
@@ -169,17 +170,41 @@ describe("openai-codex usage parser", () => {
 		);
 
 		const primary = report?.limits.find(limit => limit.id === "openai-codex:primary");
+		const creditLimit = report?.limits.find(limit => limit.id === "openai-codex:credits");
+		expect(report?.limits.map(limit => limit.id)).toEqual(["openai-codex:primary", "openai-codex:credits"]);
 		expect(primary?.amount.usedFraction).toBe(1);
 		expect(primary?.status).toBe("warning");
-		expect(report?.metadata).toMatchObject({ allowed: true, limitReached: false });
-		expect(report?.metadata?.meterStates).toMatchObject({ chat: { allowed: true, limitReached: false } });
+		expect(creditLimit).toMatchObject({
+			scope: { provider: "openai-codex", windowId: "credits" },
+			amount: { remaining: 489.25, unit: "credits" },
+		});
+		expect(report?.metadata).toMatchObject({
+			allowed: true,
+			limitReached: false,
+			creditOverage: true,
+			creditsUnlimited: false,
+			creditsEnabled: true,
+			payloadFetchedAt: expect.any(Number),
+		});
+		expect(report ? codexRankingStrategy.extraUsage?.(report, { modelId: "gpt-5.3-codex" }) : undefined).toEqual({
+			enabled: true,
+			exhausted: false,
+			unit: "credits",
+			remaining: 489.25,
+			uncapped: false,
+			capacity: "balance",
+			limitId: "openai-codex:credits",
+		});
+		expect(
+			report ? codexRankingStrategy.extraUsage?.(report, { modelId: "gpt-5.3-codex-spark" }) : undefined,
+		).toBeUndefined();
 	});
 
 	it.each([
-		["no credit balance", { has_credits: false, balance: "0" }, undefined],
-		["overage cap hit", { has_credits: true, overage_limit_reached: true, balance: "12" }, undefined],
-		["spend control tripped", { has_credits: true, balance: "12" }, { reached: true }],
-	])("keeps a plan-exhausted account blocked with %s", async (_name, credits, spendControl) => {
+		["no credit balance", { has_credits: false, balance: "0" }, undefined, false],
+		["overage cap hit", { has_credits: true, overage_limit_reached: true, balance: "12" }, undefined, true],
+		["spend control tripped", { has_credits: true, balance: "12" }, { reached: true }, true],
+	])("keeps a plan-exhausted account blocked with %s", async (_name, credits, spendControl, hasCreditLimit) => {
 		const payload: Record<string, unknown> = makePayload();
 		payload.rate_limit = {
 			allowed: false,
@@ -198,7 +223,53 @@ describe("openai-codex usage parser", () => {
 		);
 
 		expect(report?.limits.find(limit => limit.id === "openai-codex:primary")?.status).toBe("exhausted");
+		const creditLimit = report?.limits.find(limit => limit.id === "openai-codex:credits");
+		if (hasCreditLimit) {
+			expect(creditLimit).toMatchObject({ amount: { remaining: 12, unit: "credits" }, status: "exhausted" });
+		} else {
+			expect(creditLimit).toBeUndefined();
+		}
 		expect(report?.metadata).toMatchObject({ allowed: false, limitReached: true });
+		if (_name === "no credit balance") {
+			expect(report?.metadata).toMatchObject({ creditsEnabled: false, payloadFetchedAt: expect.any(Number) });
+			expect(report ? codexRankingStrategy.extraUsage?.(report, { modelId: "gpt-5.3-codex" }) : undefined).toEqual({
+				enabled: false,
+				exhausted: false,
+				unit: "credits",
+				uncapped: false,
+				capacity: "balance",
+			});
+		}
+	});
+
+	it("surfaces unlimited credits as uncapped paid usage", async () => {
+		const payload: Record<string, unknown> = makePayload();
+		payload.rate_limit = {
+			allowed: false,
+			limit_reached: true,
+			primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+			secondary_window: null,
+		};
+		payload.credits = { has_credits: false, unlimited: true };
+		payload.spend_control = { reached: false };
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+
+		expect(report?.limits.find(limit => limit.id === "openai-codex:credits")?.amount).toEqual({ unit: "credits" });
+		expect(report?.metadata).toMatchObject({ creditsUnlimited: true, creditsEnabled: true });
+		expect(report ? codexRankingStrategy.extraUsage?.(report, { modelId: "gpt-5.3-codex" }) : undefined).toEqual({
+			enabled: true,
+			exhausted: false,
+			unit: "credits",
+			uncapped: true,
+			capacity: "balance",
+			limitId: "openai-codex:credits",
+		});
 	});
 
 	// Credits pay for plan overage, nothing else. A refusal that is not plan

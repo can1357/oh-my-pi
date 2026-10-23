@@ -293,6 +293,109 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 			reason: "outside-account-pool",
 		});
 	});
+	it("restores only the target's exhausted allowance-spent window", () => {
+		const target = status();
+		const sibling = status({ credentialId: 12, email: "sibling@example.com", orgId: "org-b", active: false });
+		const plan = planClaudeResetRedemptions(
+			input({
+				trigger: "allowance-spent",
+				targetCredentialId: 11,
+				reports: [report(), report({ email: "sibling@example.com", orgId: "org-b" })],
+				statuses: [target, sibling],
+			}),
+		);
+
+		expect(plan.actions).toEqual([
+			expect.objectContaining({
+				reason: "blocked-account",
+				target: expect.objectContaining({ credentialId: 11 }),
+			}),
+		]);
+	});
+	it("keeps a blocked target isolated from sibling restores and expiry salvage", () => {
+		const targetReport = report();
+		const targetWeekly = targetReport.limits.find(limit => limit.id === "anthropic:7d");
+		if (!targetWeekly?.window) throw new Error("Expected target weekly reset");
+		targetWeekly.window.resetsAt = NOW + 40 * 60_000;
+		const target = status({
+			credit: { expiresAt: new Date(NOW + 20 * 24 * HOUR).toISOString() },
+		});
+		const sibling = status({
+			credentialId: 12,
+			email: "sibling@example.com",
+			orgId: "org-b",
+			active: false,
+			credit: { id: "cedar-sibling", expiresAt: new Date(NOW + 20 * 24 * HOUR).toISOString() },
+		});
+		const expiring = status({
+			credentialId: 13,
+			email: "expiring@example.com",
+			orgId: "org-c",
+			active: false,
+			credit: {
+				id: "cedar-expiring",
+				requiresLimit: false,
+				blocking: [],
+				usedFractions: { "anthropic:7d": 0.4 },
+				expiresAt: new Date(NOW + 2 * HOUR).toISOString(),
+			},
+		});
+
+		const plan = planClaudeResetRedemptions(
+			input({
+				targetCredentialId: 11,
+				reports: [
+					targetReport,
+					report({ email: "sibling@example.com", orgId: "org-b" }),
+					report({ email: "expiring@example.com", orgId: "org-c", weeklyUsed: 0.4 }),
+				],
+				statuses: [target, sibling, expiring],
+			}),
+		);
+
+		expect(plan.actions).toEqual([]);
+	});
+
+	it("returns only an eligible blocked target before expiry salvage", () => {
+		const target = status({
+			credit: { expiresAt: new Date(NOW + 20 * 24 * HOUR).toISOString() },
+		});
+		const sibling = status({
+			credentialId: 12,
+			email: "sibling@example.com",
+			orgId: "org-b",
+			active: false,
+			credit: { id: "cedar-sibling", expiresAt: new Date(NOW + 20 * 24 * HOUR).toISOString() },
+		});
+		const expiring = status({
+			credentialId: 13,
+			email: "expiring@example.com",
+			orgId: "org-c",
+			active: false,
+			credit: {
+				id: "cedar-expiring",
+				requiresLimit: false,
+				blocking: [],
+				usedFractions: { "anthropic:7d": 0.4 },
+				expiresAt: new Date(NOW + 2 * HOUR).toISOString(),
+			},
+		});
+
+		const plan = planClaudeResetRedemptions(
+			input({
+				targetCredentialId: 11,
+				reports: [
+					report(),
+					report({ email: "sibling@example.com", orgId: "org-b" }),
+					report({ email: "expiring@example.com", orgId: "org-c", weeklyUsed: 0.4 }),
+				],
+				statuses: [target, sibling, expiring],
+			}),
+		);
+
+		expect(plan.actions).toMatchObject([{ reason: "blocked-account", target: { credentialId: 11 } }]);
+		expect(plan.actions).toHaveLength(1);
+	});
 });
 
 describe("planClaudeResetRedemptions: expiry salvage", () => {

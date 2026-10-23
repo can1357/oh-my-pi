@@ -6,7 +6,7 @@
  * Enter flips into the classic full per-account report, scrollable in place.
  */
 import * as os from "node:os";
-import { resolveUsedFraction, type UsageLimit, type UsageReport } from "@oh-my-pi/pi-ai";
+import { type PaidUsageView, resolveUsedFraction, type UsageLimit, type UsageReport } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
 	matchesKey,
@@ -22,8 +22,18 @@ import { formatProviderName } from "../chrome/format";
 import {
 	collapseSharedUsageReports,
 	formatLimitTitle,
+	formatPaidUsageCaveat,
+	formatPaidUsageLine,
+	formatPaidUsageSummary,
+	type PaidUsageLine,
+	type PaidUsageSummary,
+	pairPaidUsage,
+	paidUsageLineText,
+	planUsageLimits,
+	summarizePaidUsage,
 	summarizeUsageResetCredits,
 	type UsageResetSummary,
+	wrapPaidUsageSummary,
 } from "./usage-display";
 import { colorToAnsi } from "../theme/color";
 import { ensureThemeSync, theme } from "../theme/theme";
@@ -84,7 +94,10 @@ export interface ProviderCard {
 	/** Number of represented accounts, including unavailable usage lookups. */
 	accounts: number;
 	unavailableAccounts: string[];
-	/** Window rows in provider-declared order (e.g. 5h → weekly → monthly); the fullest CARD_MAX_WINDOWS lead. */
+	/**
+	 * Plan window rows in provider-declared order (e.g. 5h → weekly → monthly); the fullest CARD_MAX_WINDOWS
+	 * lead. A paid extra-usage row is never one of them: it lives in `paid`.
+	 */
 	windows: CardWindowRow[];
 	/** True when every account reports no limits (e.g. enterprise plans, providers without a quota API). */
 	unlimited: boolean;
@@ -100,6 +113,14 @@ export interface ProviderCard {
 	};
 	/** Labels of accounts with verified Daybreak access. */
 	daybreakAccounts?: string[];
+	/** Paid extra usage across the accounts; present when any of them reports it, and then the card is never idle. */
+	paid?: ProviderPaidUsage;
+}
+
+/** A provider's paid extra usage: the card summary, and each account's line for the native tooltip. */
+export interface ProviderPaidUsage {
+	summary: PaidUsageSummary;
+	accounts: { label: string; line: PaidUsageLine }[];
 }
 
 /**
@@ -152,13 +173,19 @@ function compactWindowTag(window: NonNullable<UsageLimit["window"]>): string {
  * order so 5h → week → month reads the same every time; cards sort by their
  * fullest window so what's burning is on top-left; fully idle providers
  * collapse into a tick.
+ *
+ * `paid` is index-aligned with `reports`: each account's paid row stays out of
+ * the windows, sort order and idle state, and the provider's accounts add up
+ * to the card's paid summary instead.
  */
 export function buildProviderCards(
 	reports: UsageReport[],
 	nowMs: number,
 	unavailableAccounts: readonly UnavailableUsageAccount[] = [],
+	paid: readonly (PaidUsageView | undefined)[] = [],
 ): ProviderCard[] {
 	const displayReports = collapseSharedUsageReports(reports);
+	const paidByReport = pairPaidUsage(displayReports, paid);
 	const grouped = new Map<string, UsageReport[]>();
 	for (const report of displayReports) {
 		const list = grouped.get(report.provider) ?? [];
@@ -176,7 +203,7 @@ export function buildProviderCards(
 			.map(account => account.label);
 		const buckets = new Map<string, { label: string; limits: UsageLimit[] }>();
 		for (const report of providerReports) {
-			for (const limit of report.limits) {
+			for (const limit of planUsageLimits(report, paidByReport.get(report))) {
 				const label = formatLimitTitle(limit);
 				const key = `${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}`;
 				const entry = buckets.get(key) ?? { label, limits: [] };
@@ -257,6 +284,15 @@ export function buildProviderCards(
 					]
 				: [],
 		);
+		const views = providerReports.map(report => paidByReport.get(report));
+		const paidSummary = summarizePaidUsage(views);
+		const paidUsage: ProviderPaidUsage | undefined = paidSummary && {
+			summary: paidSummary,
+			accounts: providerReports.map((report, index) => ({
+				label: reportAccountLabel(report, report.limits[0], index),
+				line: formatPaidUsageLine(views[index], nowMs),
+			})),
+		};
 		cards.push({
 			provider,
 			name: formatProviderName(provider),
@@ -268,10 +304,12 @@ export function buildProviderCards(
 			idle:
 				unavailable.length === 0 &&
 				!resetCredits &&
+				!paidUsage &&
 				daybreakAccounts.length === 0 &&
 				windows.every(window => window.fraction !== undefined && window.fraction < IDLE_FRACTION),
 			resetCredits,
 			...(daybreakAccounts.length > 0 ? { daybreakAccounts } : {}),
+			...(paidUsage ? { paid: paidUsage } : {}),
 		});
 	}
 
@@ -623,9 +661,17 @@ export interface UsageDashboardOptions {
 	unavailableAccounts?: readonly UnavailableUsageAccount[];
 	/**
 	 * Full classic `/usage` report of `reports` (the latest refresh) for the
-	 * expanded detail view; re-invoked per terminal width.
+	 * expanded detail view; re-invoked per terminal width. `paid` is the
+	 * {@link paidUsage} answer for those reports, index-aligned with them.
 	 */
-	renderDetail: (width: number, reports: UsageReport[]) => string;
+	renderDetail: (width: number, reports: UsageReport[], paid: readonly (PaidUsageView | undefined)[]) => string;
+	/**
+	 * Each report's paid extra usage, index-aligned with `reports`; asked again
+	 * on every refresh. Omitted, no paid usage shows and every row is a plan row.
+	 */
+	paidUsage?: (reports: readonly UsageReport[]) => (PaidUsageView | undefined)[];
+	/** `retry.extraUsageBelowFloor`: the Details caveat adds that held accounts still serve as a last resort. */
+	extraUsageBelowFloor?: boolean;
 	/**
 	 * Stream daily activity into the heatmap: push cached DB rows immediately,
 	 * then push again after an incremental session sync. Resolves when the sync
@@ -673,6 +719,8 @@ export class UsageDashboardComponent implements Component {
 	readonly nativeOverlay = { role: "omp.overlay.usage", size: "lg", anchor: "center", head: "Usage" } as const;
 	#options: UsageDashboardOptions;
 	#reports: UsageReport[];
+	/** Paid extra usage of `#reports`, index-aligned with them. */
+	#paid: (PaidUsageView | undefined)[];
 	#cards: ProviderCard[];
 	#nowMs: number;
 	#refreshing = false;
@@ -700,8 +748,9 @@ export class UsageDashboardComponent implements Component {
 		ensureThemeSync();
 		this.#options = options;
 		this.#reports = options.reports;
+		this.#paid = options.paidUsage?.(this.#reports) ?? [];
 		this.#nowMs = Date.now();
-		this.#cards = buildProviderCards(this.#reports, this.#nowMs, options.unavailableAccounts);
+		this.#cards = buildProviderCards(this.#reports, this.#nowMs, options.unavailableAccounts, this.#paid);
 		this.#panel = new OverlayPanel("Usage");
 		this.#header = new PanelRows();
 		this.#header.setHeight(1);
@@ -804,6 +853,13 @@ export class UsageDashboardComponent implements Component {
 			if (resets.redeemableCount === 0 && resets.unavailableReasons.length > 0) {
 				const reason = sanitizeText(resets.unavailableReasons.join(" • ").replace(/[\r\n\t]+/g, " "));
 				lines.push(`  ${theme.fg("dim", truncateToWidth(`unavailable: ${reason}`, width - 2))}`);
+			}
+		}
+
+		if (card.paid) {
+			const summary = card.paid.summary;
+			for (const line of wrapPaidUsageSummary(summary, Math.max(1, width - 2))) {
+				lines.push(`  ${theme.fg(summary.tone, line)}`);
 			}
 		}
 
@@ -1024,7 +1080,7 @@ export class UsageDashboardComponent implements Component {
 		if (this.#detailCache?.width !== innerWidth) {
 			this.#detailCache = {
 				width: innerWidth,
-				lines: this.#options.renderDetail(innerWidth, this.#reports).split("\n"),
+				lines: this.#options.renderDetail(innerWidth, this.#reports, this.#paid).split("\n"),
 			};
 		}
 		return this.#detailCache.lines;
@@ -1166,7 +1222,10 @@ export class UsageDashboardComponent implements Component {
 		const unmetered: ProviderCard[] = [];
 		for (const entry of this.#cards) {
 			const shown =
-				entry.windows.length > 0 || entry.resetCredits !== undefined || entry.daybreakAccounts !== undefined;
+				entry.windows.length > 0 ||
+				entry.resetCredits !== undefined ||
+				entry.daybreakAccounts !== undefined ||
+				entry.paid !== undefined;
 			if (!shown) (entry.unavailableAccounts.length > 0 ? unreported : unmetered).push(entry);
 			else if (entry.idle) untouched.push(entry);
 			else framed.push(entry);
@@ -1402,6 +1461,19 @@ export class UsageDashboardComponent implements Component {
 				}),
 			);
 		}
+		if (entry.paid) {
+			// One line per account on hover: the card keeps the summary, Details the full lines.
+			const title = entry.paid.accounts
+				.map(account => `${account.label}: ${paidUsageLineText(account.line)}`)
+				.join("\n");
+			who.push(
+				text([span(formatPaidUsageSummary(entry.paid.summary), entry.paid.summary.tone)], {
+					role: "omp.usage.provider.meta",
+					wrap: "word",
+					title,
+				}),
+			);
+		}
 		for (const account of entry.daybreakAccounts ?? []) {
 			const name = sanitizeDisplayLine(account);
 			who.push(
@@ -1599,14 +1671,16 @@ export class UsageDashboardComponent implements Component {
 	}
 
 	/**
-	 * Per provider: a head like the overview's provider column, notes and
-	 * saved resets as a `kv`, the limit buckets as a `table` (one row per
-	 * account).
+	 * Per provider: a head like the overview's provider column, notes, saved
+	 * resets and each account's paid usage as a `kv` (then the paid-figures
+	 * caveat), the plan limit buckets as a `table` (one row per account).
 	 */
 	#describeDetail(): NativeChild[] {
 		const nowMs = this.#nowMs;
+		const displayReports = collapseSharedUsageReports(this.#reports);
+		const paidByReport = pairPaidUsage(displayReports, this.#paid);
 		const grouped = new Map<string, UsageReport[]>();
-		for (const report of collapseSharedUsageReports(this.#reports)) {
+		for (const report of displayReports) {
 			const list = grouped.get(report.provider) ?? [];
 			list.push(report);
 			grouped.set(report.provider, list);
@@ -1669,14 +1743,28 @@ export class UsageDashboardComponent implements Component {
 					v: value,
 				});
 			}
+			const views = reports.map(report => paidByReport.get(report));
+			const paid = views.some(view => view !== undefined);
+			if (paid) {
+				for (const [index, report] of reports.entries()) {
+					const line = formatPaidUsageLine(views[index], nowMs);
+					const value: TspSpan[] = [span(line.text, line.tone)];
+					if (line.age) value.push(span(` · ${line.age.text}`, line.age.tone));
+					facts.push({
+						k: [span(`Paid · ${reportAccountLabel(report, report.limits[0], index)}`, "muted")],
+						v: value,
+					});
+				}
+			}
 			if (facts.length > 0) {
 				children.push(node("kv", { items: facts, layout: "grid", role: "omp.usage.facts" }, undefined, "facts"));
 			}
+			if (paid) children.push(mutedText(formatPaidUsageCaveat(this.#options.extraUsageBelowFloor === true), true));
 
 			const buckets = new Map<string, { label: string; window?: string; rows: Record<string, TspText>[] }>();
 			const limitNotes: string[] = [];
 			for (const [index, report] of reports.entries()) {
-				for (const limit of report.limits) {
+				for (const limit of planUsageLimits(report, views[index])) {
 					const label = sanitizeDisplayLine(formatLimitTitle(limit));
 					const key = `${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}`;
 					let bucket = buckets.get(key);
@@ -1747,8 +1835,9 @@ export class UsageDashboardComponent implements Component {
 			if (this.#closed) return;
 			if (reports) {
 				this.#reports = reports;
+				this.#paid = this.#options.paidUsage?.(reports) ?? [];
 				this.#nowMs = Date.now();
-				this.#cards = buildProviderCards(reports, this.#nowMs, this.#options.unavailableAccounts);
+				this.#cards = buildProviderCards(reports, this.#nowMs, this.#options.unavailableAccounts, this.#paid);
 				this.#detailCache = null;
 			}
 		} catch (error) {

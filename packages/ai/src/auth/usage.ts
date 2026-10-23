@@ -9,6 +9,7 @@ import type {
 	ClientUsageReport,
 	ClientUsageSummary,
 	CredentialRankingContext,
+	CredentialRankingStrategy,
 	UsageCredential,
 	UsageFetchParams,
 	UsageHistoryEntry,
@@ -21,6 +22,7 @@ import type {
 import { DEFAULT_USAGE_PROVIDERS } from "../usage/registry";
 import { raceSignal } from "./abort";
 import type { SessionAffinity } from "./affinity";
+import { EXTRA_USAGE_BLOCK_SCOPE, providerTypeKey } from "./blocks";
 import type { CredentialBlocks } from "./blocks";
 import type { KeyOverrides } from "./cascade";
 import {
@@ -32,16 +34,19 @@ import {
 	usageRequest,
 } from "./usage-cache";
 import type { UsageCache, UsageRequestDescriptor } from "./usage-cache";
+import type { AccountPolicies } from "./policy";
 import type { CredentialPool } from "./pool";
 import type { RankingStrategyResolver } from "../usage/registry";
 import { mergeRefreshedOrganizationScope, OAUTH_REFRESH_SKEW_MS } from "./refresh";
 import type { OAuthRefresher } from "./refresh";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
-import type { AuthCredential, OAuthCredential, ObservedUsageInput, UsageApi } from "./types";
+import type { AuthCredential, OAuthCredential, ObservedUsageInput, PaidUsageView, UsageApi } from "./types";
 import {
 	dedupeUsageReports,
+	describePaidUsage,
 	isUsageLimitExhausted,
+	matchUsageReport,
 	scopedUsageLimits,
 	usageReportMetadataValue,
 	usageReportScopeAccountId,
@@ -99,6 +104,7 @@ export interface UsageServiceDeps {
 	blocks: CredentialBlocks;
 	affinity: SessionAffinity;
 	strategies: RankingStrategyResolver;
+	policies: AccountPolicies;
 	usageProviders: (provider: Provider) => UsageProvider | undefined;
 	fetch: typeof fetch;
 	requestTimeoutMs: number;
@@ -109,6 +115,8 @@ type UsageReportsOptions = {
 	baseUrlResolver?: (provider: Provider) => string | undefined;
 	signal?: AbortSignal;
 };
+
+type AttributedUsageCredential = { credential: OAuthCredential; index: number };
 
 /** Usage reports: per-credential cached fetches, aggregate reports, header ingestion, history. */
 export class UsageService implements UsageApi {
@@ -447,6 +455,80 @@ export class UsageService implements UsageApi {
 	}
 
 	/**
+	 * Paid extra-usage data aligned with `reports`, using the same stored
+	 * credential policy and exact paid-usage block selection evaluates.
+	 */
+	paidUsage(reports: readonly UsageReport[], options?: { nowMs?: number }): (PaidUsageView | undefined)[] {
+		if (reports.length === 0) return [];
+
+		const attributedByReport = new Map<UsageReport, AttributedUsageCredential[]>();
+		const strategiesByProvider = new Map<Provider, CredentialRankingStrategy | undefined>();
+		for (const report of reports) {
+			const provider = report.provider;
+			if (strategiesByProvider.has(provider)) continue;
+			const strategy = this.#deps.strategies(provider);
+			strategiesByProvider.set(provider, strategy);
+			if (strategy?.extraUsage === undefined) continue;
+			const entries = this.#deps.pool.entries(provider);
+			for (let index = 0; index < entries.length; index += 1) {
+				const entry = entries[index];
+				if (!entry || entry.credential.type !== "oauth") continue;
+				const matched = matchUsageReport(reports, provider, entry.credential);
+				if (!matched) continue;
+				const attributed = attributedByReport.get(matched);
+				if (attributed) {
+					attributed.push({ credential: entry.credential, index });
+				} else {
+					attributedByReport.set(matched, [{ credential: entry.credential, index }]);
+				}
+			}
+		}
+
+		const nowMs = options?.nowMs ?? Date.now();
+		return reports.map(report => {
+			const strategy = strategiesByProvider.get(report.provider);
+			if (strategy?.extraUsage === undefined) return undefined;
+
+			const attributed = attributedByReport.get(report);
+			let policy;
+			let extraUsageBlockedUntil: number | undefined;
+			if (attributed && attributed.length > 0) {
+				policy = this.#deps.policies.forCredential(report.provider, attributed[0]!.credential);
+				const providerKey = providerTypeKey(report.provider, "oauth");
+				for (const entry of attributed) {
+					const blockedUntil = this.#deps.blocks.exactBlockedUntil(
+						report.provider,
+						providerKey,
+						entry.index,
+						EXTRA_USAGE_BLOCK_SCOPE,
+					);
+					if (
+						blockedUntil !== undefined &&
+						(extraUsageBlockedUntil === undefined || blockedUntil > extraUsageBlockedUntil)
+					) {
+						extraUsageBlockedUntil = blockedUntil;
+					}
+				}
+			} else {
+				policy = this.#deps.policies.find(report.provider, {
+					email: usageReportMetadataValue(report, "email"),
+					accountId: usageReportMetadataValue(report, "accountId") ?? usageReportScopeAccountId(report),
+					projectId: usageReportMetadataValue(report, "projectId"),
+					orgId: usageReportMetadataValue(report, "orgId"),
+				});
+			}
+
+			return describePaidUsage({
+				strategy,
+				report,
+				policy,
+				extraUsageBlockedUntil,
+				nowMs,
+			});
+		});
+	}
+
+	/**
 	 * Forward one completed request's usage to the store's observer hook.
 	 * Broker-backed stores batch these into per-install reports so the broker
 	 * can track actual token burn per client; local stores have no hook and
@@ -660,6 +742,14 @@ export class UsageService implements UsageApi {
 		}
 
 		return requests;
+	}
+
+	/** Return a cached OAuth report without calling a provider or broker. */
+	cachedReport(provider: Provider, credential: AuthCredential, baseUrl?: string): UsageReport | null {
+		if (credential.type !== "oauth") return null;
+		const cacheKey = this.#deps.cache.reportKey(oauthUsageRequest(provider, credential, baseUrl));
+		const cached = this.#deps.cache.get<UsageReport | null>(cacheKey);
+		return cached && cached.expiresAt > Date.now() ? cached.value : this.#deps.cache.lastGood(cacheKey);
 	}
 
 	/** Fetch the best available report for one stored credential. */

@@ -23,6 +23,8 @@ const SERVER_ERROR_BACKOFF_MS = 20 * 1000; // 20s
 
 const ACCOUNT_RATE_LIMIT_PATTERN =
 	/\baccount(?:'s)?\b[^\n]{0,80}\brate.?limit\b|\brate.?limit\b[^\n]{0,80}\baccount\b/i;
+const EXTRA_USAGE_WITHHELD_PATTERN = /^Extra usage withheld:/;
+
 const INSUFFICIENT_BALANCE_PATTERN = /insufficient.?balance/i;
 // Prepaid-credit exhaustion phrased around the credit balance rather than a
 // quota: Anthropic "This request would exceed your available credits given
@@ -433,6 +435,7 @@ export function isOpaqueStatusBody(message: string): boolean {
  * {@link isUsageLimitOutcome} uses it for the account-rotation decision.
  */
 export function matchesUsageLimitText(errorMessage: string): boolean {
+	if (EXTRA_USAGE_WITHHELD_PATTERN.test(errorMessage)) return true;
 	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
 	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
 	if (isDashScopeTokenLimitText(errorMessage)) return false;

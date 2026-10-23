@@ -26,6 +26,12 @@ import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage";
 import { raceSignal } from "../auth/abort";
+import {
+	matchUsageReport,
+	readMetadataString,
+	reportHasComparableIdentity,
+	reportMatchesIdentity,
+} from "../auth/usage-report";
 import { type AuthBrokerClient, AuthBrokerError, AuthBrokerStreamUnsupportedError } from "./client";
 import { compareCredentialBlockSnapshots } from "./protocol";
 import type {
@@ -1644,83 +1650,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 }
 
-/**
- * Match a broker-supplied usage report to a specific OAuth credential. The
- * broker returns aggregate reports across all credentials it manages, so we
- * pick the one whose identity (accountId / email / projectId) lines up with
- * the credential the caller is asking about.
- *
- * Falls back to the provider's lone report when it shares no identity field
- * with the credential; falls through to `null` when nothing matches, which
- * `AuthStorage` treats as "no usage data" (ranking proceeds without a usage
- * signal for this credential).
- */
-function matchUsageReport(reports: UsageReport[], provider: Provider, credential: OAuthCredential): UsageReport | null {
-	const all = reports.filter(report => report.provider === provider);
-	if (all.length === 0) return null;
-	// Org precedence, decisive on EITHER side: an org-scoped credential may
-	// only take its own org's report, and an org-less (legacy) credential may
-	// only take org-less reports — the shared email/account would otherwise
-	// hand one subscription the OTHER subscription's pool (e.g. mark healthy
-	// Max exhausted via Team's report, or rank a legacy row on a sibling's
-	// numbers).
-	const orgId = credential.orgId?.trim().toLowerCase();
-	const accountId = credential.accountId?.trim().toLowerCase();
-	const email = credential.email?.trim().toLowerCase();
-	const projectId = credential.projectId?.trim().toLowerCase();
-	if (orgId) {
-		const sameOrg: UsageReport[] = [];
-		let sawReportOrg = false;
-		for (const report of all) {
-			const metaOrg = readMetadataString((report.metadata ?? {}) as Record<string, unknown>, "orgId");
-			if (metaOrg) {
-				sawReportOrg = true;
-				if (metaOrg.toLowerCase() === orgId) sameOrg.push(report);
-			}
-		}
-		// Org-attributed reports exist: the shared org is a GATE, not a match.
-		// Two Team members share the org id while drawing on per-user pools,
-		// so the credential's own base identity must still line up inside the
-		// same-org subset — a lone sibling report is NOT ours. An org-only
-		// credential (no base identifiers) takes the lone same-org report and
-		// treats several as ambiguous. None in our org → "no usage data"
-		// rather than mis-attributing another org's pool.
-		if (sawReportOrg) {
-			if (accountId || email || projectId) {
-				for (const report of sameOrg) {
-					if (reportMatchesIdentity(report, accountId, email, projectId)) return report;
-				}
-				return null;
-			}
-			return sameOrg.length === 1 ? sameOrg[0]! : null;
-		}
-		// No surviving report carries an org at all: presence mismatch is a
-		// non-match too — the sole org-less report may be a legacy sibling
-		// row's pool, and handing it to a scoped credential would rank/block
-		// on the wrong quota. "No usage data" degrades gracefully instead.
-		return null;
-	}
-	const candidates = all.filter(
-		report => !readMetadataString((report.metadata ?? {}) as Record<string, unknown>, "orgId"),
-	);
-	if (candidates.length === 0) return null;
-	// The sole report stands in for a credential it shares no identity field
-	// with; otherwise identity decides, because a report naming another email,
-	// account or project is a sibling's pool whose fetch succeeded where this
-	// credential's failed.
-	if (
-		all.length === 1 &&
-		candidates.length === 1 &&
-		!reportHasComparableIdentity(candidates[0], accountId, email, projectId)
-	) {
-		return candidates[0];
-	}
-	for (const report of candidates) {
-		if (reportMatchesIdentity(report, accountId, email, projectId)) return report;
-	}
-	return null;
-}
-
 function usageReportMatchesCredential(report: UsageReport, credential: OAuthCredential): boolean {
 	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
 	const credentialOrg = credential.orgId?.trim().toLowerCase();
@@ -1789,57 +1718,4 @@ function findMatchingReportIndex(reports: UsageReport[], overlay: UsageReport): 
 		if (reportMatchesIdentity(candidate.report, accountId, email, projectId)) return candidate.index;
 	}
 	return -1;
-}
-
-function reportMatchesIdentity(
-	report: UsageReport,
-	accountId: string | undefined,
-	email: string | undefined,
-	projectId: string | undefined,
-): boolean {
-	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
-	const metaEmail = readMetadataString(metadata, "email")?.toLowerCase();
-	// Email identifies the member within shared Team workspace account/org ids.
-	// When both sides provide it, a mismatch is decisive.
-	if (email && metaEmail) return metaEmail === email;
-	if (accountId) {
-		const metaAccount = readMetadataString(metadata, "accountId") ?? readMetadataString(metadata, "account_id");
-		if (metaAccount && metaAccount.toLowerCase() === accountId) return true;
-		for (const limit of report.limits) {
-			if (limit.scope.accountId?.trim().toLowerCase() === accountId) return true;
-		}
-	}
-	if (projectId) {
-		const metaProject = readMetadataString(metadata, "projectId") ?? readMetadataString(metadata, "project_id");
-		if (metaProject && metaProject.toLowerCase() === projectId) return true;
-		for (const limit of report.limits) {
-			if (limit.scope.projectId?.trim().toLowerCase() === projectId) return true;
-		}
-	}
-	return false;
-}
-
-/** Whether the report names an email, account or project the caller can compare against. */
-function reportHasComparableIdentity(
-	report: UsageReport,
-	accountId: string | undefined,
-	email: string | undefined,
-	projectId: string | undefined,
-): boolean {
-	const metadata = report.metadata ?? {};
-	if (email && readMetadataString(metadata, "email")) return true;
-	if (accountId) {
-		if (readMetadataString(metadata, "accountId") ?? readMetadataString(metadata, "account_id")) return true;
-		if (report.limits.some(limit => limit.scope.accountId?.trim())) return true;
-	}
-	if (projectId) {
-		if (readMetadataString(metadata, "projectId") ?? readMetadataString(metadata, "project_id")) return true;
-		if (report.limits.some(limit => limit.scope.projectId?.trim())) return true;
-	}
-	return false;
-}
-
-function readMetadataString(metadata: Record<string, unknown>, key: string): string | undefined {
-	const value = metadata[key];
-	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
