@@ -385,6 +385,29 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		}
 	}, 60_000);
 
+	it("closes a persist tab whose close joins its session's end", async () => {
+		const fixture = await launchRelayFixture();
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
+		const owner = `relay-joined-session-${process.pid}`;
+		const name = `relay-joined-close-${process.pid}`;
+		try {
+			const { tab } = await acquireTab(name, relay, {
+				url: `${fixture.origin}/first`,
+				timeoutMs: 15_000,
+				ownerSessionId: owner,
+				persist: true,
+			});
+			const ending = releaseTabsForOwner(owner, { kill: true });
+			expect(await releaseTab(name)).toBe(true);
+			await ending;
+			expect(await chromeTab(fixture, chromeTabId(tab.targetId))).toBeNull();
+		} finally {
+			await releaseTab(name).catch(() => undefined);
+			await releaseBrowser(relay, { kill: false });
+			await fixture.close();
+		}
+	}, 60_000);
+
 	it("closes an owned relay tab whose debugger the user dismissed", async () => {
 		const detached = Promise.withResolvers<void>();
 		let ownedTabId = 0;

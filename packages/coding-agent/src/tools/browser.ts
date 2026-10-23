@@ -144,7 +144,7 @@ const browserSchema = type({
 	"all?": type("boolean").describe("release every managed tab"),
 	"kill?": type("boolean").describe("also kill spawned-app browsers"),
 	"persist?": type("boolean").describe(
-		"keep tab live across turn settle and idle close, and open in a relay or connected browser after the session ends",
+		"keep tab live across turn settle and idle close; on a relay tab omp opened, keep it open after the session ends",
 	),
 });
 
