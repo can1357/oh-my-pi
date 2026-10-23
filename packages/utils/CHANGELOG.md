@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Moved `sanitizeCarriageReturns` and `disambiguateDisplayLabels` from `pi-tui` into `pi-utils` so the Cursor provider labels native `AskQuestion` options the same way as the `ask` dialog; `pi-tui` re-exports both ([#16497](https://github.com/can1357/oh-my-pi/pull/16497) by [@morali](https://github.com/morali)).
+
 ## [18.12.6] - 2026-10-21
 
 ### Added

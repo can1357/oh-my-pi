@@ -1,11 +1,20 @@
 import { describe, expect, it } from "bun:test";
 import { type BlockState, handleServerMessage, type ToolCallState } from "@oh-my-pi/pi-ai/providers/cursor";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	CursorAskQuestionCall,
+	CursorAskQuestionResult,
+	CursorExecHandlers,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import {
 	type AgentClientMessage,
 	AgentClientMessageSchema,
 	AgentServerMessageSchema,
+	AskQuestionArgs_OptionSchema,
+	AskQuestionArgs_QuestionSchema,
+	AskQuestionArgsSchema,
 	AskQuestionInteractionQuerySchema,
 	CreatePlanRequestQuerySchema,
 	ExaFetchRequestQuerySchema,
@@ -75,7 +84,13 @@ function decodeConnectFrame(frame: Buffer): AgentClientMessage {
 	return fromBinary(AgentClientMessageSchema, frame.subarray(5));
 }
 
-async function dispatchQuery(query: InteractionQuery): Promise<Buffer[]> {
+async function dispatchQuery(
+	query: InteractionQuery,
+	execHandlers?: CursorExecHandlers,
+	onToolResult?: (result: ToolResultMessage) => ToolResultMessage | undefined,
+	output: AssistantMessage = cursorAssistantMessage(),
+	signal?: AbortSignal,
+): Promise<Buffer[]> {
 	const frames: Buffer[] = [];
 	const h2Request = {
 		write(chunk: Buffer) {
@@ -88,18 +103,313 @@ async function dispatchQuery(query: InteractionQuery): Promise<Buffer[]> {
 	});
 	await handleServerMessage(
 		serverMsg,
-		cursorAssistantMessage(),
+		output,
 		new AssistantMessageEventStream(),
 		emptyBlockState(),
 		new Map(),
 		h2Request,
-		undefined,
-		undefined,
+		execHandlers,
+		onToolResult,
 		{ sawTokenDelta: false },
 		[],
+		[],
+		undefined,
+		false,
+		signal,
 	);
 	return frames;
 }
+
+function askQuery(
+	id: number,
+	asyncFlags: { runAsync?: boolean; asyncOriginalToolCallId?: string } = {},
+): InteractionQuery {
+	return create(InteractionQuerySchema, {
+		id,
+		query: {
+			case: "askQuestionInteractionQuery",
+			value: create(AskQuestionInteractionQuerySchema, {
+				toolCallId: "tool_ask_1",
+				args: create(AskQuestionArgsSchema, {
+					title: "Pick storage",
+					...asyncFlags,
+					questions: [
+						create(AskQuestionArgs_QuestionSchema, {
+							id: "db",
+							prompt: "Database?",
+							options: [
+								create(AskQuestionArgs_OptionSchema, { id: "sqlite", label: "SQLite" }),
+								create(AskQuestionArgs_OptionSchema, { id: "pg", label: "Postgres" }),
+							],
+						}),
+						create(AskQuestionArgs_QuestionSchema, {
+							id: "extras",
+							prompt: "Extras?",
+							allowMultiple: true,
+							options: [
+								create(AskQuestionArgs_OptionSchema, { id: "cache", label: "Cache" }),
+								create(AskQuestionArgs_OptionSchema, { id: "queue", label: "Queue" }),
+							],
+						}),
+					],
+				}),
+			}),
+		},
+	});
+}
+
+function askToolResult(text: string, isError = false): ToolResultMessage {
+	return {
+		role: "toolResult",
+		toolCallId: "tool_ask_1",
+		toolName: "ask",
+		content: [{ type: "text", text }],
+		isError,
+		timestamp: 1,
+	};
+}
+
+describe("cursor native AskQuestion bridge", () => {
+	it("answers through the host ask handler and maps labels back to option ids", async () => {
+		const calls: CursorAskQuestionCall[] = [];
+		const recorded: ToolResultMessage[] = [];
+		const output = cursorAssistantMessage();
+		const frames = await dispatchQuery(
+			askQuery(30),
+			{
+				askQuestion: async (call): Promise<CursorAskQuestionResult> => {
+					calls.push(call);
+					return {
+						toolResult: askToolResult("User answers: …"),
+						answers: [
+							{ selectedOptions: ["Postgres"] },
+							{ selectedOptions: ["Cache", "Queue"], customInput: "and a CDN" },
+						],
+					};
+				},
+			},
+			result => {
+				recorded.push(result);
+			},
+			output,
+		);
+
+		expect(calls).toEqual([
+			{
+				toolCallId: "tool_ask_1",
+				args: {
+					i: "Pick storage",
+					questions: [
+						{ id: "db", question: "Database?", options: [{ label: "SQLite" }, { label: "Postgres" }] },
+						{ id: "extras", question: "Extras?", options: [{ label: "Cache" }, { label: "Queue" }], multi: true },
+					],
+				},
+			},
+		]);
+		expect(output.content).toMatchObject([{ type: "toolCall", id: "tool_ask_1", name: "ask" }]);
+		expect(recorded).toMatchObject([{ toolCallId: "tool_ask_1", toolName: "ask", isError: false }]);
+		expect(decodeConnectFrame(frames[0]!).message.value).toMatchObject({
+			id: 30,
+			result: {
+				case: "askQuestionInteractionResponse",
+				value: {
+					result: {
+						result: {
+							case: "success",
+							value: {
+								answers: [
+									{ questionId: "db", selectedOptionIds: ["pg"], freeformText: "" },
+									{ questionId: "extras", selectedOptionIds: ["cache", "queue"], freeformText: "and a CDN" },
+								],
+							},
+						},
+					},
+				},
+			},
+		});
+	});
+
+	it("records the cancellation inside the abort event and drops the handler's late result", async () => {
+		// The Agent finalizes an aborted turn without waiting for the provider; the
+		// resolved `ask` block is paired only if its result is reserved by then.
+		const controller = new AbortController();
+		const recorded: ToolResultMessage[] = [];
+		const handlerStarted = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const dispatched = dispatchQuery(
+			askQuery(37),
+			{
+				askQuestion: async () => {
+					handlerStarted.resolve();
+					await release.promise;
+					return { toolResult: askToolResult("Ask input was cancelled", true) };
+				},
+			},
+			result => {
+				recorded.push(result);
+				return result;
+			},
+			undefined,
+			controller.signal,
+		);
+		await handlerStarted.promise;
+		controller.abort();
+
+		expect(recorded).toMatchObject([
+			{
+				toolCallId: "tool_ask_1",
+				toolName: "ask",
+				isError: true,
+				content: [{ type: "text", text: "Question was cancelled" }],
+			},
+		]);
+		release.resolve();
+		const frames = await dispatched;
+		expect(recorded).toHaveLength(1);
+		expect(decodeConnectFrame(frames[0]!).message.value).toMatchObject({
+			id: 37,
+			result: {
+				case: "askQuestionInteractionResponse",
+				value: { result: { result: { case: "rejected", value: { reason: "Question was cancelled" } } } },
+			},
+		});
+	});
+
+	it("rejects a question that arrives after the abort without filing it", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const output = cursorAssistantMessage();
+		let called = false;
+		const frames = await dispatchQuery(
+			askQuery(38),
+			{
+				askQuestion: async () => {
+					called = true;
+					return { toolResult: askToolResult("unreachable") };
+				},
+			},
+			undefined,
+			output,
+			controller.signal,
+		);
+		expect(called).toBe(false);
+		expect(output.content).toEqual([]);
+		expect(decodeConnectFrame(frames[0]!).message.value).toMatchObject({
+			result: { value: { result: { result: { case: "rejected" } } } },
+		});
+	});
+
+	it("calls a class-method handler with its own receiver", async () => {
+		class Handlers implements CursorExecHandlers {
+			#answer = "Postgres";
+			async askQuestion(): Promise<CursorAskQuestionResult> {
+				return { toolResult: askToolResult("User answers: …"), answers: [{ selectedOptions: [this.#answer] }] };
+			}
+		}
+		const frames = await dispatchQuery(askQuery(33), new Handlers());
+		expect(decodeConnectFrame(frames[0]!).message.value).toMatchObject({
+			id: 33,
+			result: {
+				case: "askQuestionInteractionResponse",
+				value: {
+					result: {
+						result: {
+							case: "success",
+							value: {
+								answers: [
+									{ questionId: "db", selectedOptionIds: ["pg"] },
+									{ questionId: "extras", selectedOptionIds: [] },
+								],
+							},
+						},
+					},
+				},
+			},
+		});
+	});
+
+	it("rejects with the host-rewritten text when ask fails", async () => {
+		const frames = await dispatchQuery(
+			askQuery(35),
+			{ askQuestion: async () => ({ toolResult: askToolResult("token sk-123 rejected", true) }) },
+			result => ({ ...result, content: [{ type: "text", text: "token [redacted] rejected" }] }),
+		);
+		expect(decodeConnectFrame(frames[0]!).message.value).toMatchObject({
+			id: 35,
+			result: {
+				case: "askQuestionInteractionResponse",
+				value: { result: { result: { case: "rejected", value: { reason: "token [redacted] rejected" } } } },
+			},
+		});
+	});
+
+	it("records a failed ask and rejects with the host-rewritten text when the handler throws", async () => {
+		const recorded: ToolResultMessage[] = [];
+		const frames = await dispatchQuery(
+			askQuery(36),
+			{
+				askQuestion: async () => {
+					throw new Error("dialog crashed at /secret/path");
+				},
+			},
+			result => {
+				recorded.push(result);
+				return { ...result, content: [{ type: "text", text: "dialog crashed" }] };
+			},
+		);
+		expect(recorded).toMatchObject([{ toolCallId: "tool_ask_1", toolName: "ask", isError: true }]);
+		expect(decodeConnectFrame(frames[0]!).message.value).toMatchObject({
+			id: 36,
+			result: {
+				case: "askQuestionInteractionResponse",
+				value: { result: { result: { case: "rejected", value: { reason: "dialog crashed" } } } },
+			},
+		});
+	});
+
+	it("does not send the original answers when the host rewrites a successful ask", async () => {
+		const frames = await dispatchQuery(
+			askQuery(39),
+			{
+				askQuestion: async () => ({
+					toolResult: askToolResult('User answers: db: "my password is hunter2"'),
+					answers: [{ selectedOptions: [], customInput: "my password is hunter2" }, { selectedOptions: [] }],
+				}),
+			},
+			result => ({ ...result, content: [{ type: "text", text: "User answers: db: [redacted]" }] }),
+		);
+		const response = decodeConnectFrame(frames[0]!).message.value;
+		expect(response).toMatchObject({
+			id: 39,
+			result: {
+				case: "askQuestionInteractionResponse",
+				value: { result: { result: { case: "rejected", value: { reason: "User answers: db: [redacted]" } } } },
+			},
+		});
+		expect(JSON.stringify(response)).not.toContain("hunter2");
+	});
+
+	it.each([
+		["async questions", { runAsync: true }],
+		["an async question's completion frame", { asyncOriginalToolCallId: "tool_ask_0" }],
+	])("rejects %s without opening the dialog", async (_label, asyncFlags) => {
+		let called = false;
+		const frames = await dispatchQuery(askQuery(32, asyncFlags), {
+			askQuestion: async () => {
+				called = true;
+				return { toolResult: askToolResult("unreachable") };
+			},
+		});
+		expect(called).toBe(false);
+		expect(decodeConnectFrame(frames[0]!).message.value).toMatchObject({
+			id: 32,
+			result: {
+				case: "askQuestionInteractionResponse",
+				value: { result: { result: { case: "rejected", value: { reason: expect.stringContaining("Async") } } } },
+			},
+		});
+	});
+});
 
 describe("cursor interaction query handshake", () => {
 	it("approves hosted web search so the Run RPC can continue", async () => {
@@ -221,5 +531,88 @@ describe("cursor interaction query handshake", () => {
 		const empty = await dispatchQuery(create(InteractionQuerySchema, { id: 17 }));
 		expect(vm).toEqual([]);
 		expect(empty).toEqual([]);
+	});
+});
+
+describe("cursor native AskQuestion label mapping", () => {
+	function collidingQuery(): InteractionQuery {
+		const option = (id: string, label: string) => create(AskQuestionArgs_OptionSchema, { id, label });
+		return create(InteractionQuerySchema, {
+			id: 40,
+			query: {
+				case: "askQuestionInteractionQuery",
+				value: create(AskQuestionInteractionQuerySchema, {
+					toolCallId: "tool_ask_1",
+					args: create(AskQuestionArgsSchema, {
+						questions: [
+							create(AskQuestionArgs_QuestionSchema, {
+								id: "go",
+								prompt: "Proceed?",
+								options: [option("yes_now", "Yes"), option("yes_later", "Yes"), option("other", "Other")],
+							}),
+							create(AskQuestionArgs_QuestionSchema, {
+								id: "go",
+								prompt: "Which parts?",
+								allowMultiple: true,
+								options: [option("done", "Done"), option("all", "All")],
+							}),
+							create(AskQuestionArgs_QuestionSchema, {
+								prompt: "Notes?",
+								options: [option("none", "Other")],
+							}),
+						],
+					}),
+				}),
+			},
+		});
+	}
+
+	it("renames colliding labels and ids so every Cursor option id is reachable", async () => {
+		const calls: CursorAskQuestionCall[] = [];
+		const frames = await dispatchQuery(collidingQuery(), {
+			askQuestionReservedLabels: multi => (multi ? ["Other", "Done"] : ["Other"]),
+			askQuestion: async (call): Promise<CursorAskQuestionResult> => {
+				calls.push(call);
+				return {
+					toolResult: askToolResult("User answers: …"),
+					answers: [
+						{ selectedOptions: ["Yes (2)"] },
+						{ selectedOptions: ["Done (2)", "All"] },
+						{ selectedOptions: ["Other (2)"] },
+					],
+				};
+			},
+		});
+
+		expect(calls[0]?.args).toEqual({
+			i: "Question from the model",
+			questions: [
+				{
+					id: "go",
+					question: "Proceed?",
+					options: [{ label: "Yes" }, { label: "Yes (2)" }, { label: "Other (2)" }],
+				},
+				{ id: "go (2)", question: "Which parts?", options: [{ label: "Done (2)" }, { label: "All" }], multi: true },
+				{ id: "q3", question: "Notes?", options: [{ label: "Other (2)" }] },
+			],
+		});
+		expect(decodeConnectFrame(frames[0]!).message.value).toMatchObject({
+			result: {
+				value: {
+					result: {
+						result: {
+							case: "success",
+							value: {
+								answers: [
+									{ questionId: "go", selectedOptionIds: ["yes_later"] },
+									{ questionId: "go", selectedOptionIds: ["done", "all"] },
+									{ questionId: "", selectedOptionIds: ["none"] },
+								],
+							},
+						},
+					},
+				},
+			},
+		});
 	});
 });

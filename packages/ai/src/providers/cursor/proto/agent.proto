@@ -1124,6 +1124,8 @@ message AskQuestionSuccess_Answer {
    string question_id = 1;
    // empty if unanswered
    repeated string selected_option_ids = 2;
+   // typed answer from the "Other" row
+   string freeform_text = 3;
 }
 
 message AskQuestionError {

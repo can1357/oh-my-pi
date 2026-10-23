@@ -643,8 +643,11 @@ function createCursorExecHandlersCodec(handlers: CursorExecHandlers, onEncoded: 
 					return piFind;
 				case "piLs":
 					return piLs;
-				default:
-					return Reflect.get(target, property, receiver);
+				default: {
+					const value = Reflect.get(target, property, receiver);
+					// A method called on the proxy cannot reach the class's `#private` fields.
+					return typeof value === "function" ? value.bind(target) : value;
+				}
 			}
 		},
 	});

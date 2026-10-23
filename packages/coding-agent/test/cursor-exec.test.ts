@@ -12,11 +12,15 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { type BlockState, handleServerMessage, type ToolCallState } from "@oh-my-pi/pi-ai/providers/cursor";
 import { buildPiReadResult, piTruncation } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
+import { cursorAskToolArgs } from "@oh-my-pi/pi-ai/providers/cursor/interaction-query";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import {
 	AgentClientMessageSchema,
 	AgentServerMessageSchema,
+	AskQuestionArgs_OptionSchema,
+	AskQuestionArgs_QuestionSchema,
+	AskQuestionArgsSchema,
 	DeleteArgsSchema,
 	ExecServerMessageSchema,
 	McpArgsSchema,
@@ -39,7 +43,9 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { BUILTIN_TOOLS, GrepTool, ReadTool, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { OTHER_OPTION, recoverAskQuestions } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import type { TruncationMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
@@ -2437,5 +2443,257 @@ describe("CursorExecHandlers passive tool context", () => {
 			// The carrier is symbol-keyed and never reaches serialized history.
 			expect(JSON.stringify(result)).not.toContain("tool context");
 		}
+	});
+});
+
+describe("CursorExecHandlers.askQuestion bridge", () => {
+	const fakeAsk = (details: unknown, received: unknown[] = []): Tool =>
+		({
+			name: "ask",
+			label: "Ask",
+			description: "fake ask dialog",
+			parameters: type({}),
+			async execute(_id: string, args: unknown) {
+				received.push(args);
+				return { content: [{ type: "text", text: "User answers: …" }], details };
+			},
+		}) as unknown as Tool;
+	const call = { toolCallId: "tool_ask_1", args: { i: "Pick", questions: [] } };
+
+	it("runs the session ask tool and returns single-question answers", async () => {
+		const received: unknown[] = [];
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([["ask", fakeAsk({ selectedOptions: ["Postgres"], note: "keep it small" }, received)]]),
+		});
+		const result = await handlers.askQuestion(call);
+		expect(received).toEqual([call.args]);
+		expect(result.toolResult).toMatchObject({ toolCallId: "tool_ask_1", toolName: "ask", isError: false });
+		expect(result.answers).toEqual([{ selectedOptions: ["Postgres"], customInput: "keep it small" }]);
+	});
+
+	it("returns multi-question answers in question order", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([
+				[
+					"ask",
+					fakeAsk({
+						results: [
+							{ id: "db", question: "DB?", options: [], multi: false, selectedOptions: ["SQLite"] },
+							{ id: "x", question: "X?", options: [], multi: true, selectedOptions: [], customInput: "CDN" },
+						],
+					}),
+				],
+			]),
+		});
+		const result = await handlers.askQuestion(call);
+		expect(result.answers).toEqual([
+			{ selectedOptions: ["SQLite"], customInput: undefined },
+			{ selectedOptions: [], customInput: "CDN" },
+		]);
+	});
+
+	it("runs one question at a time", async () => {
+		const events: string[] = [];
+		const { promise: firstAnswered, resolve: answerFirst } = Promise.withResolvers<void>();
+		const ask = {
+			name: "ask",
+			label: "Ask",
+			description: "fake ask dialog",
+			parameters: type({}),
+			async execute(id: string) {
+				events.push(`open ${id}`);
+				if (id === "first") await firstAnswered;
+				events.push(`close ${id}`);
+				return { content: [{ type: "text", text: "User answers: …" }], details: { selectedOptions: [id] } };
+			},
+		} as unknown as Tool;
+		const handlers = new CursorExecHandlers({ cwd: ".", tools: new Map([["ask", ask]]) });
+		const first = handlers.askQuestion({ ...call, toolCallId: "first" });
+		const second = handlers.askQuestion({ ...call, toolCallId: "second" });
+		await Bun.sleep(10);
+		expect(events).toEqual(["open first"]);
+		answerFirst();
+		expect((await second).answers).toEqual([{ selectedOptions: ["second"], customInput: undefined }]);
+		expect((await first).answers).toEqual([{ selectedOptions: ["first"], customInput: undefined }]);
+		expect(events).toEqual(["open first", "close first", "open second", "close second"]);
+	});
+
+	it("queues an MCP ask call behind an open native question", async () => {
+		const events: string[] = [];
+		const { promise: firstAnswered, resolve: answerFirst } = Promise.withResolvers<void>();
+		const ask = {
+			name: "ask",
+			label: "Ask",
+			description: "fake ask dialog",
+			parameters: type({}),
+			async execute(id: string) {
+				events.push(`open ${id}`);
+				if (id === "native") await firstAnswered;
+				events.push(`close ${id}`);
+				return { content: [{ type: "text", text: "User answers: …" }], details: { selectedOptions: [id] } };
+			},
+		} as unknown as Tool;
+		const handlers = new CursorExecHandlers({ cwd: ".", tools: new Map([["ask", ask]]) });
+		const native = handlers.askQuestion({ ...call, toolCallId: "native" });
+		const viaMcp = handlers.mcp({
+			name: "ask",
+			toolName: "ask",
+			toolCallId: "mcp",
+			providerIdentifier: "pi-agent",
+			args: { questions: [] },
+			rawArgs: {},
+		});
+		await Bun.sleep(10);
+		expect(events).toEqual(["open native"]);
+		answerFirst();
+		expect((await viaMcp).isError).toBe(false);
+		await native;
+		expect(events).toEqual(["open native", "close native", "open mcp", "close mcp"]);
+	});
+
+	it("closes an MCP ask dialog when the turn is aborted and moves on to the next question", async () => {
+		const events: string[] = [];
+		const ask = {
+			name: "ask",
+			label: "Ask",
+			description: "fake ask dialog",
+			parameters: type({}),
+			async execute(id: string, _args: unknown, signal?: AbortSignal) {
+				events.push(`open ${id}`);
+				if (id === "mcp") {
+					const { promise, reject } = Promise.withResolvers<never>();
+					signal?.addEventListener("abort", () => reject(new Error("Ask input was cancelled")), { once: true });
+					await promise;
+				}
+				events.push(`close ${id}`);
+				return { content: [{ type: "text", text: "User answers: …" }], details: { selectedOptions: [id] } };
+			},
+		} as unknown as Tool;
+		const handlers = new CursorExecHandlers({ cwd: ".", tools: new Map([["ask", ask]]) });
+		const controller = new AbortController();
+		const viaMcp = handlers.mcp({
+			name: "ask",
+			toolName: "ask",
+			toolCallId: "mcp",
+			providerIdentifier: "pi-agent",
+			args: { questions: [] },
+			rawArgs: {},
+			signal: controller.signal,
+		});
+		const native = handlers.askQuestion({ ...call, toolCallId: "native" });
+		await Bun.sleep(10);
+		expect(events).toEqual(["open mcp"]);
+		controller.abort();
+		expect((await viaMcp).isError).toBe(true);
+		expect((await native).answers).toEqual([{ selectedOptions: ["native"], customInput: undefined }]);
+		expect(events).toEqual(["open mcp", "open native", "close native"]);
+	});
+
+	it("closes the dialog when the turn is aborted and moves on to the next question", async () => {
+		const events: string[] = [];
+		const ask = {
+			name: "ask",
+			label: "Ask",
+			description: "fake ask dialog",
+			parameters: type({}),
+			async execute(id: string, _args: unknown, signal?: AbortSignal) {
+				events.push(`open ${id}`);
+				if (id === "first") {
+					const { promise, reject } = Promise.withResolvers<never>();
+					signal?.addEventListener("abort", () => reject(new Error("Ask input was cancelled")), { once: true });
+					await promise;
+				}
+				events.push(`close ${id}`);
+				return { content: [{ type: "text", text: "User answers: …" }], details: { selectedOptions: [id] } };
+			},
+		} as unknown as Tool;
+		const handlers = new CursorExecHandlers({ cwd: ".", tools: new Map([["ask", ask]]) });
+		const controller = new AbortController();
+		const first = handlers.askQuestion({ ...call, toolCallId: "first", signal: controller.signal });
+		const second = handlers.askQuestion({ ...call, toolCallId: "second" });
+		await Bun.sleep(10);
+		expect(events).toEqual(["open first"]);
+		controller.abort();
+		const aborted = await first;
+		expect(aborted.answers).toBeUndefined();
+		expect(aborted.toolResult.isError).toBe(true);
+		expect((await second).answers).toEqual([{ selectedOptions: ["second"], customInput: undefined }]);
+		expect(events).toEqual(["open first", "open second", "close second"]);
+	});
+
+	it("skips a queued question whose turn was aborted before it was shown", async () => {
+		const opened: string[] = [];
+		const { promise: firstAnswered, resolve: answerFirst } = Promise.withResolvers<void>();
+		const ask = {
+			name: "ask",
+			label: "Ask",
+			description: "fake ask dialog",
+			parameters: type({}),
+			async execute(id: string) {
+				opened.push(id);
+				if (id === "first") await firstAnswered;
+				return { content: [{ type: "text", text: "User answers: …" }], details: { selectedOptions: [id] } };
+			},
+		} as unknown as Tool;
+		const handlers = new CursorExecHandlers({ cwd: ".", tools: new Map([["ask", ask]]) });
+		const controller = new AbortController();
+		const first = handlers.askQuestion({ ...call, toolCallId: "first" });
+		const second = handlers.askQuestion({ ...call, toolCallId: "second", signal: controller.signal });
+		await Bun.sleep(10);
+		controller.abort();
+		answerFirst();
+		await first;
+		const skipped = await second;
+		expect(opened).toEqual(["first"]);
+		expect(skipped.answers).toBeUndefined();
+		expect(skipped.toolResult).toMatchObject({ toolCallId: "second", toolName: "ask", isError: true });
+	});
+
+	it("renames Cursor labels that collide with the ask dialog's own rows", async () => {
+		await initTheme();
+		const handlers = new CursorExecHandlers({ cwd: ".", tools: new Map() });
+		const singleReserved = handlers.askQuestionReservedLabels(false);
+		const multiReserved = handlers.askQuestionReservedLabels(true);
+		const doneLabel = multiReserved.find(label => !singleReserved.includes(label));
+		expect(singleReserved).toContain(OTHER_OPTION);
+		expect(doneLabel).toBeDefined();
+
+		const option = (id: string, label: string) => create(AskQuestionArgs_OptionSchema, { id, label });
+		const { args } = cursorAskToolArgs(
+			create(AskQuestionArgsSchema, {
+				questions: [
+					create(AskQuestionArgs_QuestionSchema, {
+						id: "single",
+						prompt: "Pick",
+						options: singleReserved.map((label, index) => option(`s${index}`, label)),
+					}),
+					create(AskQuestionArgs_QuestionSchema, {
+						id: "multi",
+						prompt: "Pick some",
+						allowMultiple: true,
+						options: multiReserved.map((label, index) => option(`m${index}`, label)),
+					}),
+				],
+			}),
+			multi => handlers.askQuestionReservedLabels(multi),
+		);
+		const questions = recoverAskQuestions(args);
+		expect(questions?.[0]?.options.map(o => o.label)).toEqual(singleReserved.map(label => `${label} (2)`));
+		expect(questions?.[1]?.options.map(o => o.label)).toEqual(multiReserved.map(label => `${label} (2)`));
+	});
+
+	it("returns no answers for a chat redirect or a session without ask", async () => {
+		const redirected = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([["ask", fakeAsk({ chatRedirect: true, questions: ["DB?"] })]]),
+		});
+		expect((await redirected.askQuestion(call)).answers).toBeUndefined();
+
+		const headless = new CursorExecHandlers({ cwd: ".", tools: new Map() });
+		const result = await headless.askQuestion(call);
+		expect(result.answers).toBeUndefined();
+		expect(result.toolResult.isError).toBe(true);
 	});
 });

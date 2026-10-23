@@ -140,6 +140,16 @@ function getDoneOptionLabel(): string {
 	return `${theme.status.success} Done selecting`;
 }
 
+/**
+ * Option labels the dialog keeps for its own rows; a question's options must not
+ * use them. The Done row is theme-labeled, and without a theme there is no dialog.
+ */
+export function askReservedOptionLabels(multi: boolean): string[] {
+	const labels = Object.keys(RESERVED_OPTION_LABELS);
+	if (multi && theme !== undefined) labels.push(getDoneOptionLabel());
+	return labels;
+}
+
 /** Add "(Recommended)" suffix to the option at the given index if not already present */
 function addRecommendedSuffix(options: AskOption[], recommendedIndex?: number): ExtensionUISelectItem[] {
 	if (recommendedIndex === undefined || recommendedIndex < 0 || recommendedIndex >= options.length) {

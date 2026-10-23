@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `CursorExecHandlers.askQuestion`: Cursor's native `AskQuestion` is answered through the host instead of being rejected, with typed "Other" answers sent as `freeform_text` and duplicate or host-reserved option labels renamed so every option stays answerable. Hosts without the handler, and async questions, are still rejected ([#16497](https://github.com/can1357/oh-my-pi/pull/16497) by [@morali](https://github.com/morali))
 - Added `PI_ANTHROPIC_API_VERSION=2026-10-21` to send Anthropic API version 2026-10-21 to the official Anthropic API; sampling parameters are omitted under that version, which rejects them ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed

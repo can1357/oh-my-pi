@@ -1418,6 +1418,28 @@ export interface CursorMcpCall {
 	 * not yet been asked about (and fire it twice once the real call arrives).
 	 */
 	approvalOnly?: boolean;
+	/** Aborted when the request is aborted or the Cursor stream ends; no result can reach Cursor after that. */
+	signal?: AbortSignal;
+}
+
+/** A native Cursor `AskQuestion` interaction, translated to local `ask` kwargs. */
+export interface CursorAskQuestionCall {
+	toolCallId: string;
+	args: Record<string, unknown>;
+	/** Aborted when the request is aborted or the Cursor stream ends; the answer is discarded after that. */
+	signal?: AbortSignal;
+}
+
+/** One answer to a {@link CursorAskQuestionCall}, by option label. */
+export interface CursorAskAnswer {
+	selectedOptions: string[];
+	customInput?: string;
+}
+
+export interface CursorAskQuestionResult {
+	toolResult: ToolResultMessage;
+	/** Answers in question order; absent when the question was not answered. */
+	answers?: CursorAskAnswer[];
 }
 
 export interface CursorTodoSnapshotItem {
@@ -1576,6 +1598,23 @@ export interface CursorExecHandlers {
 		 */
 		downloadPath?: string;
 	}) => Promise<CursorMcpResourceContent | null>;
+	/**
+	 * Answer Cursor's native `AskQuestion` with the local `ask` dialog. Without
+	 * a handler the provider rejects the question; a handler whose session has
+	 * no `ask` tool (subagents, headless) returns an error result, which is
+	 * rejected too.
+	 *
+	 * The provider calls this once per query as it arrives and does not wait
+	 * for an open question; a handler backed by a single dialog must queue the
+	 * calls itself. A handler that delegates to omp's `ask` must also provide
+	 * {@link askQuestionReservedLabels}, or Cursor labels that collide with the
+	 * dialog's own rows are rejected by `ask`. If `onToolResult` replaces a
+	 * successful result, Cursor receives a rejection with the replacement's
+	 * text instead of the answers.
+	 */
+	askQuestion?: (call: CursorAskQuestionCall) => Promise<CursorAskQuestionResult>;
+	/** Option labels the `ask` dialog keeps for its own rows; Cursor labels that collide are renamed. */
+	askQuestionReservedLabels?: (multi: boolean) => readonly string[];
 	/** Mirror Cursor's server-owned todo list into local session state. */
 	todoSync?: CursorTodoSyncHandler;
 	onToolResult?: CursorToolResultHandler;

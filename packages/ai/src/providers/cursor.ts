@@ -4,6 +4,8 @@ import { cursorModelParameters } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { isCursorMaxModeWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { classifyModel, collapseVariantId } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type {
+	AskQuestionInteractionQuery,
+	AskQuestionResult,
 	ConversationStep,
 	CursorRule,
 	McpToolDefinition,
@@ -189,6 +191,7 @@ import type {
 	Api,
 	AssistantMessage,
 	Context,
+	CursorAskQuestionResult,
 	CursorExecHandlerResult,
 	CursorExecHandlers,
 	CursorExecPairing,
@@ -263,7 +266,13 @@ import {
 	piTimeout,
 	shellDeadlineSeconds,
 } from "./cursor/exec-modern";
-import { handleInteractionQuery, protoUnknownFields } from "./cursor/interaction-query";
+import {
+	askQuestionRejected,
+	askQuestionSuccess,
+	cursorAskToolArgs,
+	handleInteractionQuery,
+	protoUnknownFields,
+} from "./cursor/interaction-query";
 
 export const CURSOR_API_URL = CURSOR_DEFAULT_BASE_URL;
 export { CURSOR_CLIENT_VERSION };
@@ -1081,6 +1090,13 @@ function streamCursorWithWireMode(
 		// transport fails, and the error path finalizes the synthesized call just
 		// like the success path does.
 		const inFlightDispatches = new Set<Promise<void>>();
+		// Handlers that wait on the user (questions) would otherwise hold the
+		// drain until answered, and once the transport is done the answer has
+		// nowhere to go. Aborted on both exits, before their first drain.
+		const transportDone = new AbortController();
+		const dispatchSignal = options?.signal
+			? AbortSignal.any([options.signal, transportDone.signal])
+			: transportDone.signal;
 		// A dispatch can spawn another (a handler that decodes a nested frame), so
 		// re-check rather than awaiting one snapshot. Each dispatch already
 		// swallows its own rejection, so this only waits.
@@ -1489,6 +1505,7 @@ function streamCursorWithWireMode(
 							requestContextRules,
 							onConversationCheckpoint,
 							options?.externalToolExecutor,
+							dispatchSignal,
 						).catch(error => {
 							log("error", "handleServerMessage", { error: String(error) });
 						});
@@ -1560,6 +1577,7 @@ function streamCursorWithWireMode(
 			runTransport.write(frameConnectMessage(requestBytes));
 			heartbeatTimer = setInterval(sendHeartbeat, 5000);
 			await h2Completion.promise;
+			transportDone.abort();
 			if (conversationId && baseConversationId && conversationId !== baseConversationId) {
 				successfulRotatedConversationIds.add(conversationId);
 				freshRotatedConversationIds.delete(conversationId);
@@ -1620,6 +1638,7 @@ function streamCursorWithWireMode(
 			});
 			stream.end();
 		} catch (caughtError) {
+			transportDone.abort(caughtError);
 			let error = caughtError;
 			const h2Unavailable = transportMode === "http2" && isHttp2Unavailable(error);
 			if (
@@ -1988,6 +2007,7 @@ export async function handleServerMessage(
 	requestContextRules: CursorRule[] = [],
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 	externalToolExecutor = false,
+	signal?: AbortSignal,
 ): Promise<void> {
 	const msgCase = msg.message.case;
 
@@ -2014,6 +2034,7 @@ export async function handleServerMessage(
 				stream,
 				state,
 				externalToolExecutor,
+				signal,
 			),
 		);
 	} else if (msgCase === "interactionQuery") {
@@ -2022,8 +2043,28 @@ export async function handleServerMessage(
 		// waiting on a reply that never comes; the lazy idle watchdog then
 		// aborts a live stream with "Provider stream stalled while waiting for
 		// the next event" (cursor-grok-4.6-xhigh after a WebFetch/WebSearch
-		// permission prompt).
-		handleInteractionQuery(msg.message.value, runTransport);
+		// permission prompt). A question waits on the user, so it counts as
+		// local work for the idle watchdog.
+		const askQuestion = execHandlers?.askQuestion?.bind(execHandlers);
+		const askReservedLabels = execHandlers?.askQuestionReservedLabels?.bind(execHandlers);
+		await stream.trackLocalWork(
+			handleInteractionQuery(
+				msg.message.value,
+				runTransport,
+				askQuestion &&
+					(query =>
+						answerAskQuestion(
+							query,
+							askQuestion,
+							askReservedLabels,
+							onToolResult,
+							output,
+							stream,
+							state,
+							signal,
+						)),
+			),
+		);
 	} else if (msgCase === "conversationCheckpointUpdate") {
 		handleConversationCheckpointUpdate(msg.message.value, output, onConversationCheckpoint);
 	}
@@ -2426,6 +2467,7 @@ async function handleExecServerMessage(
 	stream: AssistantMessageEventStream,
 	state: BlockState,
 	externalToolExecutor: boolean,
+	signal?: AbortSignal,
 ): Promise<void> {
 	const execCase = execMsg.message.case;
 	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
@@ -2772,7 +2814,7 @@ async function handleExecServerMessage(
 		}
 		case "mcpArgs": {
 			const args = execMsg.message.value;
-			const mcpCall = decodeMcpCall(args);
+			const mcpCall: CursorMcpCall = { ...decodeMcpCall(args), signal };
 			// An approval probe, not an invocation: the frame asks whether the
 			// call would be permitted. Running the tool to find out fires a side
 			// effect the user has not been asked about, and fires it again when
@@ -5150,7 +5192,7 @@ async function pairSynthesizedExecResult(
 	toolName: string,
 	text: string,
 	isError = true,
-): Promise<void> {
+): Promise<ToolResultMessage> {
 	const synthesized: ToolResultMessage = {
 		role: "toolResult",
 		toolCallId,
@@ -5159,9 +5201,63 @@ async function pairSynthesizedExecResult(
 		isError,
 		timestamp: Date.now(),
 	};
-	const sink = onToolResult ?? state.onToolResult;
-	if (!sink) return;
-	await sink(synthesized);
+	return (await applyToolResultHandler(synthesized, onToolResult ?? state.onToolResult)) ?? synthesized;
+}
+
+const QUESTION_CANCELLED = "Question was cancelled";
+
+/**
+ * Run Cursor's native `AskQuestion` through the host's `ask` dialog and file
+ * it in the transcript as an `ask` call, like any other bridged native tool.
+ *
+ * An abort lets the Agent finalize the turn without waiting for the handler,
+ * and the synthesized block is already resolved, so nothing else pairs it. The
+ * cancellation result is therefore reported inside the abort event, before the
+ * Agent drains its Cursor result buffer; the handler's own late result is
+ * dropped.
+ */
+async function answerAskQuestion(
+	query: AskQuestionInteractionQuery,
+	handler: NonNullable<CursorExecHandlers["askQuestion"]>,
+	reservedLabels: CursorExecHandlers["askQuestionReservedLabels"],
+	onToolResult: CursorToolResultHandler | undefined,
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	state: BlockState,
+	signal: AbortSignal | undefined,
+): Promise<AskQuestionResult> {
+	if (signal?.aborted) return askQuestionRejected(QUESTION_CANCELLED);
+	const toolCallId = query.toolCallId || crypto.randomUUID();
+	const { args, optionIds } = cursorAskToolArgs(query.args, reservedLabels);
+	synthesizeCursorExecToolCall(output, stream, state, toolCallId, "ask", args);
+	let cancellation: Promise<ToolResultMessage> | undefined;
+	const onAbort = (): void => {
+		cancellation = pairSynthesizedExecResult(state, onToolResult, toolCallId, "ask", QUESTION_CANCELLED);
+	};
+	signal?.addEventListener("abort", onAbort, { once: true });
+	let outcome: CursorAskQuestionResult | undefined;
+	let failure = "";
+	try {
+		outcome = await handler({ toolCallId, args, signal });
+	} catch (error) {
+		failure = error instanceof Error ? error.message : String(error);
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+	}
+	if (cancellation) return askQuestionRejected(toolResultToText(await cancellation) || QUESTION_CANCELLED);
+	if (!outcome) {
+		const recorded = await pairSynthesizedExecResult(state, onToolResult, toolCallId, "ask", failure);
+		return askQuestionRejected(toolResultToText(recorded) || failure);
+	}
+	const toolResult =
+		(await applyToolResultHandler(outcome.toolResult, onToolResult ?? state.onToolResult)) ?? outcome.toolResult;
+	// The answers are structured and cannot be re-derived from a rewritten
+	// result, so a host rewrite reaches Cursor as a rejection carrying its text
+	// rather than letting the original answers bypass it.
+	if (toolResult.isError || !outcome.answers || toolResult !== outcome.toolResult) {
+		return askQuestionRejected(toolResultToText(toolResult) || "Question was not answered");
+	}
+	return askQuestionSuccess(query.args, optionIds, outcome.answers);
 }
 
 /** Exported for tests: drives one Cursor interaction update through the streaming state machine. */

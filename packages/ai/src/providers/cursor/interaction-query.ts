@@ -1,8 +1,13 @@
 import {
 	AgentClientMessageSchema,
+	type AskQuestionArgs,
+	type AskQuestionInteractionQuery,
 	AskQuestionInteractionResponseSchema,
 	AskQuestionRejectedSchema,
+	type AskQuestionResult,
 	AskQuestionResultSchema,
+	AskQuestionSuccess_AnswerSchema,
+	AskQuestionSuccessSchema,
 	CreatePlanErrorSchema,
 	CreatePlanRequestResponseSchema,
 	CreatePlanResultSchema,
@@ -21,7 +26,8 @@ import {
 	WebSearchRequestResponseSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-import { $env, logger } from "@oh-my-pi/pi-utils";
+import { $env, disambiguateDisplayLabels, logger } from "@oh-my-pi/pi-utils";
+import type { CursorAskAnswer } from "../../types";
 import { frameConnectMessage } from "../connect-frame";
 
 const NOT_IMPLEMENTED_SUFFIX = "not implemented by this client";
@@ -92,6 +98,83 @@ function sendUnknownApprovedInteractionResponse(
 	log("interactionResponse", "unknownApproved", { id: queryId, field: fieldNo });
 }
 
+/** Answers a native `AskQuestion` query; resolves with the result Cursor receives. */
+export type CursorAskQuestionResponder = (query: AskQuestionInteractionQuery) => Promise<AskQuestionResult>;
+
+export function askQuestionRejected(reason: string): AskQuestionResult {
+	return create(AskQuestionResultSchema, {
+		result: { case: "rejected", value: create(AskQuestionRejectedSchema, { reason }) },
+	});
+}
+
+/** Labels the local `ask` dialog keeps for its own rows, by whether the question is multi-select. */
+export type CursorAskReservedLabels = (multi: boolean) => readonly string[];
+
+/** Local `ask` kwargs for a Cursor `AskQuestion`, plus each question's display label → Cursor option id. */
+export interface CursorAskPlan {
+	args: Record<string, unknown>;
+	optionIds: Map<string, string>[];
+}
+
+/**
+ * Cursor allows duplicate labels and question ids; `ask` rejects them and
+ * answers by label. Colliding labels — including the dialog's own rows — and
+ * missing or repeated ids take a numeric suffix, so every Cursor option keeps
+ * a label that maps back to its id.
+ */
+export function cursorAskToolArgs(
+	args: AskQuestionArgs | undefined,
+	reservedLabels?: CursorAskReservedLabels,
+): CursorAskPlan {
+	const source = args?.questions ?? [];
+	const questionIds = disambiguateDisplayLabels(
+		source.map((question, index) => question.id || `q${index + 1}`),
+		[],
+	);
+	const optionIds: Map<string, string>[] = [];
+	const questions = source.map((question, index) => {
+		const multi = question.allowMultiple;
+		const labels = disambiguateDisplayLabels(
+			question.options.map(option => option.label),
+			reservedLabels?.(multi) ?? [],
+		);
+		optionIds.push(new Map(labels.map((label, i) => [label, question.options[i]!.id])));
+		const options = labels.map(label => ({ label }));
+		return {
+			id: questionIds[index],
+			question: question.prompt,
+			options,
+			...(multi ? { multi: true } : {}),
+		};
+	});
+	return { args: { i: args?.title || "Question from the model", questions }, optionIds };
+}
+
+/** `ask` answers by label, Cursor by option id. A label the question does not carry is dropped rather than guessed. */
+export function askQuestionSuccess(
+	args: AskQuestionArgs | undefined,
+	optionIds: Map<string, string>[],
+	answers: CursorAskAnswer[],
+): AskQuestionResult {
+	const questions = args?.questions ?? [];
+	return create(AskQuestionResultSchema, {
+		result: {
+			case: "success",
+			value: create(AskQuestionSuccessSchema, {
+				answers: questions.map((question, index) => {
+					const answer = answers[index];
+					const idByLabel = optionIds[index];
+					return create(AskQuestionSuccess_AnswerSchema, {
+						questionId: question.id,
+						selectedOptionIds: (answer?.selectedOptions ?? []).flatMap(label => idByLabel?.get(label) ?? []),
+						freeformText: answer?.customInput ?? "",
+					});
+				}),
+			}),
+		},
+	});
+}
+
 /**
  * Answer a Cursor `interaction_query` so the Run RPC can continue.
  *
@@ -101,10 +184,16 @@ function sendUnknownApprovedInteractionResponse(
  * on heartbeats that are not semantic progress; the lazy idle watchdog then
  * aborts with "Provider stream stalled while waiting for the next event".
  *
- * Unsupported interactive queries are rejected so the server is not stranded.
- * VM setup is left unanswered rather than reporting a fake success.
+ * `AskQuestion` goes to `askQuestion` when the host can ask the user; async
+ * questions and hosts without a responder are rejected. Other unsupported
+ * interactive queries are rejected so the server is not stranded. VM setup is
+ * left unanswered rather than reporting a fake success.
  */
-export function handleInteractionQuery(query: InteractionQuery, h2Request: CursorInteractionWriter): void {
+export async function handleInteractionQuery(
+	query: InteractionQuery,
+	h2Request: CursorInteractionWriter,
+	askQuestion?: CursorAskQuestionResponder,
+): Promise<void> {
 	const queryCase = query.query.case;
 	log("interactionQuery", queryCase, query.query.value);
 	if (!queryCase) {
@@ -153,21 +242,27 @@ export function handleInteractionQuery(query: InteractionQuery, h2Request: Curso
 				}),
 			});
 			return;
-		case "askQuestionInteractionQuery":
+		case "askQuestionInteractionQuery": {
+			const ask = query.query.value;
+			let result: AskQuestionResult;
+			if (!askQuestion) {
+				result = askQuestionRejected(`Interactive questions are ${NOT_IMPLEMENTED_SUFFIX}`);
+			} else if (ask.args?.runAsync || ask.args?.asyncOriginalToolCallId) {
+				// `asyncOriginalToolCallId` marks the synthetic completion of an earlier async question.
+				result = askQuestionRejected(`Async questions are ${NOT_IMPLEMENTED_SUFFIX}`);
+			} else {
+				try {
+					result = await askQuestion(ask);
+				} catch (error) {
+					result = askQuestionRejected(error instanceof Error ? error.message : String(error));
+				}
+			}
 			sendInteractionResponse(h2Request, query.id, {
 				case: "askQuestionInteractionResponse",
-				value: create(AskQuestionInteractionResponseSchema, {
-					result: create(AskQuestionResultSchema, {
-						result: {
-							case: "rejected",
-							value: create(AskQuestionRejectedSchema, {
-								reason: `Interactive questions are ${NOT_IMPLEMENTED_SUFFIX}`,
-							}),
-						},
-					}),
-				}),
+				value: create(AskQuestionInteractionResponseSchema, { result }),
 			});
 			return;
+		}
 		case "switchModeRequestQuery":
 			sendInteractionResponse(h2Request, query.id, {
 				case: "switchModeRequestResponse",

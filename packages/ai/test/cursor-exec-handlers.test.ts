@@ -1510,6 +1510,62 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 		expect(written.length).toBe(1);
 	});
 
+	it("passes the request abort signal to the MCP handler", async () => {
+		const controller = new AbortController();
+		const signals: (AbortSignal | undefined)[] = [];
+		const serverMsg = create(AgentServerMessageSchema, {
+			message: {
+				case: "execServerMessage",
+				value: create(ExecServerMessageSchema, {
+					id: 1,
+					execId: "exec-mcp-ask",
+					message: {
+						case: "mcpArgs",
+						value: create(McpArgsSchema, {
+							name: "ask",
+							toolName: "ask",
+							toolCallId: "call-mcp-ask",
+							providerIdentifier: "pi-agent",
+							args: {},
+						}),
+					},
+				}),
+			},
+		});
+		const execHandlers: CursorExecHandlers = {
+			async mcp(call) {
+				signals.push(call.signal);
+				return {
+					role: "toolResult",
+					toolCallId: call.toolCallId,
+					toolName: call.toolName,
+					content: [{ type: "text", text: "Ask input was cancelled" }],
+					isError: true,
+					timestamp: 1,
+				};
+			},
+		};
+
+		await handleServerMessage(
+			serverMsg,
+			cursorAssistantMessage(),
+			new AssistantMessageEventStream(),
+			newBlockState(),
+			new Map(),
+			{ write: () => true } as unknown as Parameters<typeof handleServerMessage>[5],
+			execHandlers,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+			[],
+			undefined,
+			false,
+			controller.signal,
+		);
+
+		expect(signals).toEqual([controller.signal]);
+	});
+
 	it("synthesizes an MCP call while preserving opaque string arguments", async () => {
 		const output = cursorAssistantMessage();
 		const stream = new AssistantMessageEventStream();

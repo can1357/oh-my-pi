@@ -13,6 +13,9 @@ import {
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	CursorAskAnswer,
+	CursorAskQuestionCall,
+	CursorAskQuestionResult,
 	CursorMcpCall,
 	CursorMcpResource,
 	CursorMcpResourceContent,
@@ -33,17 +36,19 @@ import {
 	piTimeout,
 	shellDeadlineSeconds,
 } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { Serial, sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
 import { resolveApproval, resolveApprovalFromContext } from "./tools/approval";
 import { getApprovalGrants } from "./tools/approval-cache";
+import { askReservedOptionLabels } from "./tools/ask";
 import {
 	confineToWorkspace,
 	resolveReadPathAsync,
 	resolveToCwd,
 	splitPathAndSelPreferringLiteral,
 } from "./tools/path-utils";
+import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
@@ -285,6 +290,7 @@ async function executeTool(
 	toolCallId: string,
 	args: Record<string, unknown>,
 	overrideTool?: CursorBridgeTool,
+	signal?: AbortSignal,
 ): Promise<ToolResultMessage> {
 	const tool = overrideTool ?? options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
 	if (!tool) {
@@ -325,7 +331,7 @@ async function executeTool(
 			name: toolName,
 			arguments: toolArgs,
 		});
-		result = await tool.execute(toolCallId, validatedArgs, undefined, onUpdate, bridgeContext.context);
+		result = await tool.execute(toolCallId, validatedArgs, signal, onUpdate, bridgeContext.context);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		result = buildToolErrorResult(message);
@@ -462,6 +468,19 @@ function decodeToolCallId(toolCallId?: string): string {
 	return toolCallId && toolCallId.length > 0 ? toolCallId : randomUUID();
 }
 
+/**
+ * `ask` answers in question order. A chat redirect is not an answer: Cursor
+ * gets it as a rejection carrying `ask`'s own explanation.
+ */
+function cursorAskAnswers(details: AskToolDetails | undefined): CursorAskAnswer[] | undefined {
+	if (!details || details.chatRedirect) return undefined;
+	const results = details.results ?? (details.selectedOptions ? [details] : undefined);
+	return results?.map(result => ({
+		selectedOptions: result.selectedOptions ?? [],
+		customInput: [result.customInput, result.note].filter(Boolean).join("\n\n") || undefined,
+	}));
+}
+
 function decodeMcpArgs(rawArgs: Record<string, Uint8Array>): Record<string, unknown> {
 	const decoded: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(rawArgs)) {
@@ -524,6 +543,9 @@ function buildTodoSyncResult(
 }
 
 export class CursorExecHandlers implements ICursorExecHandlers {
+	/** `ask` owns one shared dialog; overlapping Cursor questions would clobber each other. */
+	#askSerial = new Serial();
+
 	constructor(private options: CursorExecBridgeOptions) {}
 
 	/**
@@ -1045,6 +1067,35 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		return result;
 	}
 
+	/**
+	 * Cursor's native `AskQuestion`. Sessions without `ask` (subagents, headless)
+	 * answer with an error result, which the provider sends as a rejection.
+	 */
+	async askQuestion(call: CursorAskQuestionCall): Promise<CursorAskQuestionResult> {
+		const toolResult = await this.#runAsk("ask", call.toolCallId, call.args, call.signal);
+		return { toolResult, answers: cursorAskAnswers(toolResult.details as AskToolDetails | undefined) };
+	}
+
+	/** Native and MCP questions share the queue; one whose turn was aborted while it waited is not shown. */
+	#runAsk(
+		toolName: string,
+		toolCallId: string,
+		args: Record<string, unknown>,
+		signal: AbortSignal | undefined,
+	): Promise<ToolResultMessage> {
+		return this.#askSerial.run(async () => {
+			if (signal?.aborted) {
+				const result = buildToolErrorResult("Question was cancelled before it was shown");
+				return createToolResultMessage(toolCallId, toolName, result, true);
+			}
+			return await executeTool(this.options, toolName, toolCallId, args, undefined, signal);
+		});
+	}
+
+	askQuestionReservedLabels(multi: boolean): string[] {
+		return askReservedOptionLabels(multi);
+	}
+
 	async mcp(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
 		const toolCallId = decodeToolCallId(call.toolCallId);
@@ -1066,6 +1117,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			return createToolResultMessage(toolCallId, toolName, result, true);
 		}
 
+		if (tool.name === "ask") return await this.#runAsk(toolName, toolCallId, args, call.signal);
 		const toolResultMessage = await executeTool(this.options, toolName, toolCallId, args);
 		return toolResultMessage;
 	}
