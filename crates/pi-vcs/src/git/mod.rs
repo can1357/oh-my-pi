@@ -19,7 +19,7 @@ mod patch;
 mod read;
 use std::{
 	path::{Path, PathBuf},
-	sync::OnceLock,
+	sync::{Mutex, OnceLock},
 };
 
 pub use cli::{COMMAND_TIMEOUT, NETWORK_TIMEOUT, OUTPUT_LIMIT_BYTES, SYNC_TIMEOUT, clone};
@@ -41,6 +41,48 @@ pub struct GitRepo {
 	/// object database, index, or config access. Never populated for reftable
 	/// repositories (operations route through the CLI fallback instead).
 	pub(crate) gix: OnceLock<gix::ThreadSafeRepository>,
+	/// One ref-pair result per handle; concurrent refreshes share the same walk.
+	divergence:     Mutex<Option<DivergenceCache>>,
+}
+
+struct DivergenceCache {
+	head:             String,
+	upstream:         String,
+	shallow:          Option<Vec<u8>>,
+	/// Metadata of the packed-refs files and loose replacement refs that
+	/// produced `replacements`. Status polls compare this instead of rereading
+	/// packed-refs contents.
+	replace_stamp:    ReplaceStamp,
+	replacements:     Option<Vec<u8>>,
+	use_replace_refs: Option<String>,
+	/// Raw `.git/info/grafts` bytes, when the file exists. Grafts change
+	/// reachability without moving either tip.
+	grafts:           Option<Vec<u8>>,
+	counts:           (u32, u32),
+}
+
+/// Cheap identity of the replacement-ref inputs. `packed` and `loose` follow
+/// [`GitRepo`]'s ref stores, common dir then the worktree git dir when they
+/// differ, so a linked worktree is not scanned twice when they are the same
+/// path.
+#[derive(Clone, PartialEq, Eq)]
+struct ReplaceStamp {
+	base:   String,
+	packed: Vec<Option<FileStamp>>,
+	loose:  Vec<Vec<LooseStamp>>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct FileStamp {
+	len:      u64,
+	modified: std::time::SystemTime,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct LooseStamp {
+	name:     String,
+	len:      u64,
+	modified: std::time::SystemTime,
 }
 
 impl std::fmt::Debug for GitRepo {
@@ -64,7 +106,7 @@ impl GitRepo {
 		let Some(info) = discover_info(dir)? else {
 			return Ok(None);
 		};
-		Ok(Some(Self { info, gix: OnceLock::new() }))
+		Ok(Some(Self { info, gix: OnceLock::new(), divergence: Mutex::new(None) }))
 	}
 
 	/// Like [`GitRepo::discover`], but errors with [`Error::NotARepository`]

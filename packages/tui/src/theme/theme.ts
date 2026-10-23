@@ -345,6 +345,25 @@ export function setThemeInstance(themeInstance: Theme): void {
 }
 
 /**
+ * Install `next` as the active theme object and return the previous one.
+ * Unlike {@link setThemeInstance}, this does not clear auto-detection, rewrite
+ * the theme name to `<in-memory>`, or stop the theme watcher, so a test can
+ * render another symbol preset and put the previous object back without
+ * poisoning the process-global theme manager.
+ */
+export function exchangeTheme(next: Theme): Theme | undefined {
+	const previous = typeof theme === "undefined" ? undefined : theme;
+	const preview = previewThemeName;
+	theme = next;
+	previewThemeName = preview;
+	setActiveSymbolTheme(next);
+	if (themeBindings) {
+		for (const binding of themeBindings) binding(next);
+	}
+	return previous;
+}
+
+/**
  * Set the symbol preset override, recreating the theme with the new preset.
  */
 export async function setSymbolPreset(preset: SymbolPreset): Promise<void> {

@@ -656,6 +656,12 @@ const gitSegment: StatusLineSegment = {
 		// Add status indicators
 		if (gitStatus) {
 			const indicators: string[] = [];
+			if (opts.showAheadBehind !== false && gitStatus.ahead !== undefined && gitStatus.ahead > 0) {
+				indicators.push(theme.fg("statusLineStaged", `${theme.icon.ahead}${gitStatus.ahead}`));
+			}
+			if (opts.showAheadBehind !== false && gitStatus.behind !== undefined && gitStatus.behind > 0) {
+				indicators.push(theme.fg("statusLineDirty", `${theme.icon.behind}${gitStatus.behind}`));
+			}
 			if (opts.showUnstaged !== false && gitStatus.unstaged > 0) {
 				indicators.push(theme.fg("statusLineDirty", `*${gitStatus.unstaged}`));
 			}
@@ -694,6 +700,10 @@ const gitSegment: StatusLineSegment = {
 			const push = (text: string, token: string): void => {
 				spans.push(span(spans.length > 0 ? ` ${text}` : text, token));
 			};
+			if (opts.showAheadBehind !== false && status.ahead !== undefined && status.ahead > 0)
+				push(`${theme.icon.ahead}${status.ahead}`, "statusLineStaged");
+			if (opts.showAheadBehind !== false && status.behind !== undefined && status.behind > 0)
+				push(`${theme.icon.behind}${status.behind}`, "statusLineDirty");
 			if (opts.showUnstaged !== false && status.unstaged > 0) push(`*${status.unstaged}`, "statusLineDirty");
 			if (opts.showStaged !== false && status.staged > 0) push(`+${status.staged}`, "statusLineStaged");
 			if (opts.showUntracked !== false && status.untracked > 0) push(`?${status.untracked}`, "statusLineUntracked");
