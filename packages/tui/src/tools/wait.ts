@@ -66,6 +66,14 @@ export interface JobSnapshot {
 	completionPercent?: number;
 	/** The task agent's latest stage in its own words; see `AgentProgress.stage`. */
 	stage?: string;
+	/** Running task only: assistant requests so far; see `AgentProgress.requests`. */
+	requests?: number;
+	/** Running task only: cumulative cost in USD; see `AgentProgress.cost`. */
+	cost?: number;
+	/** Running task only: latest per-turn context size; see `AgentProgress.contextTokens`. */
+	contextTokens?: number;
+	/** Running task only: the model's context window; see `AgentProgress.contextWindow`. */
+	contextWindow?: number;
 	/** The job's live widget, while one is being drawn; frozen at its last state once the job settles. */
 	widget?: JobWidgetView;
 	resultText?: string;

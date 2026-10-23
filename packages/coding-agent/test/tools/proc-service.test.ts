@@ -414,6 +414,42 @@ describe("proc:// background jobs", () => {
 		}
 	});
 
+	it("shows a running task's progress in the proc:// listing and its own read, but not a bash job's", async () => {
+		const manager = new AsyncJobManager({});
+		const pending = Promise.withResolvers<string>();
+		const reported = Promise.withResolvers<void>();
+		const taskId = manager.register(
+			"task",
+			"AcpSurface",
+			async ({ jobId, reportProgress }) => {
+				await reportProgress("running", {
+					progress: [{ id: jobId, requests: 90, cost: 18.4, contextTokens: 160_000, contextWindow: 1_000_000 }],
+				});
+				reported.resolve();
+				return pending.promise;
+			},
+			{ ownerId: "Main" },
+		);
+		const bashId = manager.register("bash", "sleep 60", () => pending.promise, { ownerId: "Main" });
+		const session = toolSession(process.cwd(), manager, { launch: false });
+		try {
+			await reported.promise;
+			const proc = new ProcProtocolHandler();
+			const rows = (await proc.resolve(parseInternalUrl("proc://"), { session })).content.split("\n");
+			expect(rows.find(row => row.startsWith(taskId))).toMatch(
+				/ \[task\] running up \S+ — AcpSurface — 90 req · \$18\.40 · ctx 160K\/1M$/,
+			);
+			expect(rows.find(row => row.startsWith(bashId))).toMatch(/ \[bash\] running up \S+ — sleep 60$/);
+			const single = await proc.resolve(parseInternalUrl(`proc://${taskId}`), { session });
+			expect(single.content.split("\n")[0]).toMatch(
+				new RegExp(`^${taskId} \\[task\\] — running — AcpSurface — \\S+ · 90 req · \\$18\\.40 · ctx 160K/1M$`),
+			);
+		} finally {
+			pending.resolve("done");
+			await manager.dispose();
+		}
+	});
+
 	it("keeps listing jobs and agents when the daemon broker hangs, flagging agents with no live turn", async () => {
 		const broker = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue({
 			request: async () => {
