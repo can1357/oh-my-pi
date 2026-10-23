@@ -751,7 +751,7 @@ impl ClickPlacer {
 		let Some(user) = self.user else {
 			return;
 		};
-		self.place_at(hid_buttons(), pointer(), |at| {
+		self.place_at(hid_buttons(), pointer, |at| {
 			since_last_click()
 				.is_some_and(|since| since <= CLICK_PLACE)
 				.then(|| point_over(at, user))
@@ -759,8 +759,10 @@ impl ClickPlacer {
 	}
 
 	/// Places the click that left the HID button counters at `buttons`, by
-	/// `hit_test` at the pointer's `point` (`None`: too old to place, so
-	/// nowhere), unless it is placed already. A release counted since the last
+	/// `hit_test` at the pointer's position `point` reads (`None`: too old to
+	/// place, so nowhere), unless it is placed already: the placer runs every
+	/// few milliseconds, and reading the pointer costs a Core Graphics event,
+	/// so an unchanged reading never reads it. A release counted since the last
 	/// placement ends the click its press began, so it keeps that press's
 	/// place: a hit-test that blocked past the release would otherwise leave
 	/// the press placed under counters no reading has any more, and the release
@@ -769,14 +771,15 @@ impl ClickPlacer {
 	fn place_at(
 		&self,
 		buttons: [u32; 6],
-		point: Option<CGPoint>,
+		point: impl FnOnce() -> Option<CGPoint>,
 		hit_test: impl FnOnce(CGPoint) -> Option<bool>,
 	) {
 		let latest = *self.latest.lock();
+		if latest.is_some_and(|place| place.buttons == buttons) {
+			return;
+		}
+		let point = point();
 		if let Some(place) = latest {
-			if place.buttons == buttons {
-				return;
-			}
 			let carried = !pressed(place.buttons, buttons)
 				&& match place.hit {
 					Some(false) => true,
@@ -2673,8 +2676,8 @@ mod tests {
 	/// would place as `release`.
 	fn place_blocked(press: Option<bool>, moved: f64, release: Option<bool>) -> ClickPlacer {
 		let placer = ClickPlacer::new(None);
-		placer.place_at(PRESSED, Some(CGPoint::new(100.0, 100.0)), |_| press);
-		placer.place_at(RELEASED, Some(CGPoint::new(100.0 + moved, 100.0)), |_| release);
+		placer.place_at(PRESSED, || Some(CGPoint::new(100.0, 100.0)), |_| press);
+		placer.place_at(RELEASED, || Some(CGPoint::new(100.0 + moved, 100.0)), |_| release);
 		placer
 	}
 
@@ -2741,18 +2744,40 @@ mod tests {
 			guard.observe(PREVIOUS, Some(42), read(up, t0 + ms(8)), t0 + ms(15)),
 			FocusDecision::Observe
 		);
-		placer.place_at(down, at, |_| Some(true));
+		placer.place_at(down, || at, |_| Some(true));
 		// The placer's next round comes past `CLICK_PLACE`, where a hit-test
 		// of the release would find nothing: the release keeps its press's
 		// place.
-		placer.place_at(up, at, |_| None);
+		placer.place_at(up, || at, |_| None);
 		let placed = read(up, t0 + ms(8));
 		assert_eq!(guard.observe(PREVIOUS, Some(43), placed, t0 + ms(60)), FocusDecision::Observe);
 		assert_eq!(guard.observe(TARGET, None, placed, t0 + ms(70)), FocusDecision::Restore);
 		// A new press is hit-tested afresh.
 		let again = [2, 1, 0, 0, 0, 0];
-		placer.place_at(again, at, |_| Some(false));
+		placer.place_at(again, || at, |_| Some(false));
 		assert_eq!(placer.hit(again), Some(false));
+	}
+
+	#[test]
+	fn an_unchanged_reading_never_reads_the_pointer() {
+		// The placer runs every few milliseconds while the mouse is idle; only
+		// a button change may read the pointer, which costs a Core Graphics
+		// event.
+		let placer = ClickPlacer::new(None);
+		let reads = std::cell::Cell::new(0);
+		let read = || {
+			reads.set(reads.get() + 1);
+			Some(CGPoint::new(100.0, 100.0))
+		};
+		placer.place_at(PRESSED, read, |_| Some(true));
+		assert_eq!(reads.get(), 1);
+		for _ in 0..3 {
+			placer.place_at(PRESSED, read, |_| unreachable!("an unchanged click is placed already"));
+		}
+		assert_eq!(reads.get(), 1);
+		placer.place_at(RELEASED, read, |_| None);
+		assert_eq!(reads.get(), 2);
+		assert_eq!(placer.hit(RELEASED), Some(true));
 	}
 
 	#[test]
