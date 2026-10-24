@@ -201,7 +201,7 @@ const fn no_context_match(confidence: f64) -> ContextLineResult {
 }
 
 #[allow(clippy::suspicious_operation_groupings, reason = "paired index bounds are intentional")]
-fn levenshtein_chars(a: &[char], b: &[char]) -> usize {
+fn levenshtein_slices<T: PartialEq>(a: &[T], b: &[T]) -> usize {
 	if a == b {
 		return 0;
 	}
@@ -229,13 +229,13 @@ fn levenshtein_chars(a: &[char], b: &[char]) -> usize {
 	}
 
 	let mut row: Vec<usize> = (0..=shorter.len()).collect();
-	for (line, &a_char) in longer.iter().enumerate() {
+	for (line, a_elem) in longer.iter().enumerate() {
 		let mut diagonal = row[0];
 		row[0] = line + 1;
-		for (column, &b_char) in shorter.iter().enumerate() {
+		for (column, b_elem) in shorter.iter().enumerate() {
 			let cell = column + 1;
 			let above = row[cell];
-			row[cell] = if a_char == b_char {
+			row[cell] = if a_elem == b_elem {
 				diagonal
 			} else {
 				(above + 1).min(row[cell - 1] + 1).min(diagonal + 1)
@@ -246,14 +246,32 @@ fn levenshtein_chars(a: &[char], b: &[char]) -> usize {
 	row[shorter.len()]
 }
 
+#[inline]
+#[cfg(test)]
+fn levenshtein_chars(a: &[char], b: &[char]) -> usize {
+	levenshtein_slices(a, b)
+}
+
 /// Levenshtein edit distance over Unicode scalar values.
 ///
 /// The TypeScript source used UTF-16 code units. Rust deliberately uses
 /// Unicode scalar values, so astral characters count as one element.
 pub fn levenshtein_distance(a: &str, b: &str) -> usize {
+	if a == b {
+		return 0;
+	}
+	if a.is_empty() {
+		return b.chars().count();
+	}
+	if b.is_empty() {
+		return a.chars().count();
+	}
+	if a.is_ascii() && b.is_ascii() {
+		return levenshtein_slices(a.as_bytes(), b.as_bytes());
+	}
 	let a_chars: Vec<char> = a.chars().collect();
 	let b_chars: Vec<char> = b.chars().collect();
-	levenshtein_chars(&a_chars, &b_chars)
+	levenshtein_slices(&a_chars, &b_chars)
 }
 
 /// [`levenshtein_distance`] over pre-collected chars, or `None` above `max`.
@@ -412,13 +430,21 @@ impl PatternDistance {
 
 /// Similarity in `[0, 1]`: `1 - distance / max_len`.
 pub fn similarity(a: &str, b: &str) -> f64 {
+	if a == b {
+		return 1.0;
+	}
+	if a.is_empty() || b.is_empty() {
+		return 0.0;
+	}
+	if a.is_ascii() && b.is_ascii() {
+		let max_len = a.len().max(b.len());
+		let dist = levenshtein_slices(a.as_bytes(), b.as_bytes());
+		return 1.0 - dist as f64 / max_len as f64;
+	}
 	let a_chars: Vec<char> = a.chars().collect();
 	let b_chars: Vec<char> = b.chars().collect();
 	let max_len = a_chars.len().max(b_chars.len());
-	if max_len == 0 {
-		return 1.0;
-	}
-	1.0 - levenshtein_chars(&a_chars, &b_chars) as f64 / max_len as f64
+	1.0 - levenshtein_slices(&a_chars, &b_chars) as f64 / max_len as f64
 }
 
 fn format_preview_window(lines: &[&str], center_index: usize) -> String {
@@ -1786,5 +1812,28 @@ mod tests {
 				.to_string(),
 			"oldText must not be empty."
 		);
+	}
+
+	#[test]
+	fn levenshtein_and_similarity_fast_paths_match_unicode_fallback() {
+		// Equal strings (including empty) take the O(1) equality fast path.
+		assert_eq!(levenshtein_distance("hello", "hello"), 0);
+		assert_eq!(similarity("", ""), 1.0);
+
+		// Empty vs non-empty counts Unicode scalar values, not UTF-8 byte length.
+		assert_eq!(levenshtein_distance("", "世界"), 2);
+		assert_eq!(levenshtein_distance("世界", ""), 2);
+		assert_eq!(similarity("abc", ""), 0.0);
+
+		// Pure ASCII uses the byte-slice path without Vec<char> allocation.
+		assert_eq!(levenshtein_distance("kitten", "sitting"), 3);
+		assert!((similarity("kitten", "sitting") - (1.0 - 3.0 / 7.0)).abs() < 1e-9);
+
+		// Non-ASCII falls back to char-level comparison across UTF-8 byte
+		// lengths.
+		assert_eq!(levenshtein_distance("café", "cafe"), 1);
+		assert!((similarity("café", "cafe") - 0.75).abs() < 1e-9);
+		assert_eq!(levenshtein_distance("世界", "世間"), 1);
+		assert!((similarity("世界", "世間") - 0.5).abs() < 1e-9);
 	}
 }
