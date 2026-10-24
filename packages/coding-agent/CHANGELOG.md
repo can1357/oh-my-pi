@@ -79,7 +79,7 @@
 
 ### Changed
 
-- Documented a map-reduce sub-call pattern for the eval tool (slice a long input inside the kernel, run one `completion` per slice, barrier with `wait`, aggregate in code, load large sources via in-kernel `read` rather than the outer `read` tool's `:raw` form) and routed bulk per-chunk semantic work there instead of subagent fan-out.
+- Agents now label, extract or summarize every chunk of a long input inside `eval` instead of spawning subagents or reading the whole input into the conversation, so bulk transforms no longer flood the main context ([#9954](https://github.com/can1357/oh-my-pi/pull/9954) by [@apoc](https://github.com/apoc))
 - Launches with `--config` draw the composer before startup finishes unless an overlay sets a setting that frame shows (`tui.screen`, theme, symbols, composer shape, vim mode, quiet startup); `PI_CONFIG_FILES` overlays that set one now skip it too
 - OTLP export runs on OpenTelemetry JS SDK 3; `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`, `OTEL_BSP_*` and the span limit variables are no longer read (the documented `OTEL_*` variables work as before)
 - On public sites, browser `tab.console()` and `tab.errors()` record from the first call on a tab (the result's `captureStartedAt` marks when), so pages cannot detect the capture; local and dev pages still record from load
