@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Clarified hashline edit instructions for current-session tags, raw reads, clipped lines, and re-reading reformatted writes ([#16000](https://github.com/can1357/oh-my-pi/issues/16000), [#16253](https://github.com/can1357/oh-my-pi/pull/16253) by [@apoc](https://github.com/apoc))
+
 ### Fixed
 
 - Fixed a UTF-8 char-boundary panic when parsing `stateDiagram-v2` lines where `>` follows a multibyte character ([#16749](https://github.com/can1357/oh-my-pi/pull/16749) by [@berney](https://github.com/berney))
