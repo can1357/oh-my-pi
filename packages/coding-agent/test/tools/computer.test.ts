@@ -1879,12 +1879,27 @@ describe("computer worker round trips", () => {
 			{ ...windowFixture, id: "9", app: "TextEdit", title: "draft.txt", pid: 10, focused: false },
 		];
 
-		async function missMessage(windows: DesktopWindow[], selector: string): Promise<string> {
+		class MacSession extends FakeNativeSession {
+			override get capabilities(): DesktopCapabilities {
+				return { ...super.capabilities, backend: "quartz" };
+			}
+		}
+
+		async function missMessage(
+			windows: DesktopWindow[],
+			selector: string,
+			options: { native?: FakeNativeSession; readOnly?: boolean } = {},
+		): Promise<string> {
 			const transport = new MemoryTransport();
-			const native = new FakeNativeSession();
+			const native = options.native ?? new FakeNativeSession();
 			native.listWindows = async () => windows;
 			new ComputerWorkerCore(transport, () => native);
-			const result = await runWorker(transport, "window-miss", `await desktop.window(${selector})`);
+			const result = await runWorker(
+				transport,
+				"window-miss",
+				`await desktop.window(${selector})`,
+				options.readOnly,
+			);
 			expect(result.ok).toBe(false);
 			return result.ok ? "" : result.error.message;
 		}
@@ -1901,9 +1916,44 @@ describe("computer worker round trips", () => {
 		it("says the app has no window and lists every app's windows, untitled ones included", async () => {
 			const lines = (await missMessage(desktopWindows, '{ app: "Calendar" }')).split("\n");
 			expect(lines).toContain('No open window belongs to an app matching "Calendar".');
+			expect(lines).toContain('computer.apps.open("Calendar") launches it by that exact name or ID.');
 			expect(lines).toContain('- Code: 42 "Editor", 43 ""');
 			expect(lines).toContain('- Finder: 7 "Downloads"');
 			expect(lines).toContain('- TextEdit: 8 "notes.txt", 9 "draft.txt"');
+		});
+
+		it("on macOS names apps.open as the call that also shows a running app's window and returns it", async () => {
+			const lines = (await missMessage(desktopWindows, '{ app: "Calendar" }', { native: new MacSession() })).split(
+				"\n",
+			);
+			const hint = lines.find(line => line.startsWith('computer.apps.open("Calendar")'));
+			expect(hint).toContain("shows a window of it if it runs without one");
+			expect(hint).toContain("window: null if none appears");
+		});
+
+		it("names apps.open when no window is open at all, and in a read-only run such as a direct window call", async () => {
+			expect(await missMessage([], '{ app: "Calendar" }')).toContain('computer.apps.open("Calendar")');
+			expect(await missMessage(desktopWindows, '{ app: "Calendar" }', { readOnly: true })).toContain(
+				'computer.apps.open("Calendar")',
+			);
+		});
+
+		it("names the missing selector when called with nothing, instead of matching undefined", async () => {
+			for (const windows of [desktopWindows, []]) {
+				const message = await missMessage(windows, "");
+				expect(message.split("\n")[0]).toContain("computer.window() without an id or { app, title } filter");
+				expect(message).not.toContain("undefined");
+			}
+		});
+
+		it("returns the only open window when called with nothing", async () => {
+			const transport = new MemoryTransport();
+			const native = new FakeNativeSession();
+			native.listWindows = async () => [windowFixture];
+			new ComputerWorkerCore(transport, () => native);
+			const result = await runWorker(transport, "window-only", "(await desktop.window()).id");
+			expect(result.ok).toBe(true);
+			if (result.ok) expect(result.payload.returnValue).toBe(windowFixture.id);
 		});
 
 		it("lists untitled windows by id after titled ones, as when macOS hides other apps' titles", async () => {
