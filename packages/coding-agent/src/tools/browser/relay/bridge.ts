@@ -1697,7 +1697,11 @@ export class RelayBridge {
 					} catch (err) {
 						this.#log("tab grouping failed", { error: err instanceof Error ? err.message : String(err) });
 					} finally {
-						for (const tab of tabs) tab.grouping = false;
+						for (const tab of tabs) {
+							tab.grouping = false;
+							// The claim may have gone while the RPC was in flight (its client closed): undo the grouping.
+							if (tab.grouped && !this.#groupWorthy(tab)) this.#syncTabGrouping(tab);
+						}
 					}
 				}
 			}
