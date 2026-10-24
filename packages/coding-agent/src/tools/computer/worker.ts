@@ -1375,7 +1375,7 @@ class Win {
 		};
 	}
 
-	async #menuTree(items: MenuItem[], signal: AbortSignal | undefined): Promise<MenuItem[]> {
+	async #menuTree(items: MenuItem[], signal: AbortSignal): Promise<MenuItem[]> {
 		const listed: MenuItem[] = [];
 		let budget = MENU_TREE_LIMIT - items.length;
 		const visit = async (level: MenuItem[]): Promise<void> => {
