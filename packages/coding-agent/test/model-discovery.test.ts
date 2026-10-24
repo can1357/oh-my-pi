@@ -3945,6 +3945,58 @@ describe("ModelRegistry runtime discovery", () => {
 		]);
 	});
 
+	test("configured litellm discovery routes decisions-mode groups to the judge role on both paths (#16939)", async () => {
+		writeRawModelsJson({
+			"litellm-rich": {
+				baseUrl: "http://127.0.0.1:4012/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "litellm" },
+			},
+			"litellm-fallback": {
+				baseUrl: "http://127.0.0.1:4013/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "litellm" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:4012/model_group/info") {
+				return Response.json({
+					data: [
+						{
+							model_group: "typesafe/jev-1.14",
+							mode: "decisions",
+							providers: ["typesafe"],
+							supports_vision: false,
+						},
+						{ model_group: "keep-chat", mode: "chat", providers: ["anthropic"], supports_vision: false },
+					],
+				});
+			}
+			if (url === "http://127.0.0.1:4013/v1/models") {
+				return Response.json({
+					data: [
+						{ id: "typesafe/jev-1.14", mode: "decisions" },
+						{ id: "keep-chat", mode: "chat" },
+					],
+				});
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		for (const provider of ["litellm-rich", "litellm-fallback"]) {
+			expect(registry.find(provider, "typesafe/jev-1.14")).toMatchObject({ api: "openai-decisions", kind: "judge" });
+			const chat = registry.find(provider, "keep-chat");
+			expect(chat?.api).toBe("openai-completions");
+			expect(chat?.kind).toBeUndefined();
+		}
+	});
+
 	test("litellm discovery reuses configured bearer on rich and fallback requests", async () => {
 		writeRawModelsJson({
 			"litellm-test": {

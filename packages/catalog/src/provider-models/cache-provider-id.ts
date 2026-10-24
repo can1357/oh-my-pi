@@ -160,6 +160,7 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			// rich-v13 moves `mode: decisions` groups off chat onto the Decisions runner.
 			// rich-v12 invalidates namespaced ids that missed bare catalog references.
 			// rich-v11 excluded ClinePass gateway metadata (issue #10932). rich-v10
 			// filtered known non-conversational LiteLLM modes, unioned compat across
@@ -167,7 +168,7 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// declaration into it; earlier versions invalidated rows whose
 			// `compatConfig` retained a colliding bundled model's provider-specific
 			// transport (e.g. Fireworks `wireModelIdMode`) (issue #9938).
-			return `litellm:rich-v12:${Bun.hash(baseUrl).toString(36)}`;
+			return `litellm:rich-v13:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		case "gmi-cloud":
 		case "siliconflow":

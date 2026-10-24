@@ -479,7 +479,7 @@ Its internal API is `apple-foundation-models`; no HTTP endpoint is used.
 When `litellm` is active (for example through `LITELLM_API_KEY` or stored auth), runtime discovery uses the LiteLLM proxy:
 
 - provider: `litellm`
-- api: `openai-responses` for OpenAI-backed models; `openai-completions` for other models
+- api: `openai-decisions` (kind `judge`) for model groups with `mode: decisions`; `openai-responses` for OpenAI-backed models; `openai-completions` for other models
 - base URL: explicit provider `baseUrl` / `models.yml` config, otherwise `LITELLM_BASE_URL`, otherwise `http://localhost:4000/v1`
 - auth mode: `LITELLM_API_KEY` or stored LiteLLM auth when the proxy requires a key
 

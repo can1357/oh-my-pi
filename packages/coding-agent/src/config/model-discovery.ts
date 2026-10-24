@@ -23,7 +23,7 @@ import {
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { KindApiKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import { type KindApiKind, type ModelSpec, type OpenAICompat, runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
@@ -1104,7 +1104,7 @@ export async function discoverOpenAIModelsList(
 		}
 		const api =
 			providerConfig.discovery.type === "litellm"
-				? resolveLiteLLMApi(undefined, id, providerConfig.api)
+				? resolveLiteLLMApi(item, id, providerConfig.api)
 				: providerConfig.api;
 		const contextWindow = reportedContextWindow ?? DISCOVERY_DEFAULT_CONTEXT_WINDOW;
 		// A row that advertises its own reasoning ladder (codex-lb `metadata`
@@ -1116,6 +1116,7 @@ export async function discoverOpenAIModelsList(
 			id,
 			name: reference?.name ?? id,
 			api,
+			kind: runnerApiKind(api),
 			provider: providerConfig.provider,
 			baseUrl,
 			reasoning: reference?.reasoning === true || advertisedReasoning !== undefined,
