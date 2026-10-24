@@ -284,6 +284,35 @@ describe("durable true running-window telemetry", () => {
 		expect(readActiveTime(reopened.getBranch())).toEqual(expected);
 	});
 
+	it("preserves transcript ownership and restores active time when reopening a killed generation", () => {
+		const manager = SessionManager.inMemory();
+		const observed = observableSession(manager);
+		const ref = registry.register({
+			id: "KilledWorker",
+			displayName: "Killed worker",
+			kind: "sub",
+			parentId: "main",
+			rootSessionId: "owning-transcript",
+			session: observed.session,
+			sessionFile: "/tmp/killed-worker.jsonl",
+		});
+		registry.syncSessionStatus(ref.id, observed.session);
+		observed.emitRunState("running");
+		now += 40;
+		expect(registry.detachSession(ref.id, observed.session)).toBe(true);
+		registry.setStatus(ref.id, "aborted", ref);
+
+		const reopened = registry.reopen(ref.id, ref);
+		expect(reopened).toBeDefined();
+		expect(reopened).not.toBe(ref);
+		expect(reopened?.rootSessionId).toBe("owning-transcript");
+		expect(reopened?.status).toBe("parked");
+		const revived = observableSession(manager);
+		expect(registry.attachSession(ref.id, revived.session, undefined, reopened)).toBe(true);
+		registry.syncSessionStatus(ref.id, revived.session);
+		expect(reopened?.activeTime).toEqual({ durationMs: 40, historicalUnavailable: false });
+	});
+
 	it("preserves only completed windows in a disk snapshot interrupted mid-run", async () => {
 		const temp = TempDir.createSync("@pi-stall-active-crash-");
 		tempDirs.push(temp);
