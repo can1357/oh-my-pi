@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added an opt-in bounded prompt-cache diagnostic journal with HMAC-derived request/prefix fingerprints, Anthropic attempt correlation, captured-wire/prepared-body provenance, honest usage estimates, reset classifications, and no persisted prompt content (`PI_PROMPT_CACHE_DEBUG=1`) ([#11938](https://github.com/can1357/oh-my-pi/pull/11938) by [@pedropaulovc](https://github.com/pedropaulovc)).
 - Added `PI_ANTHROPIC_API_VERSION=2026-10-21` to send Anthropic API version 2026-10-21 to the official Anthropic API; sampling parameters are omitted under that version, which rejects them ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
