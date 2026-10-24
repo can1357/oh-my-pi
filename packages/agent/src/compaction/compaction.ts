@@ -1205,6 +1205,14 @@ export async function generateHandoff(
 	);
 }
 
+/** Result of the short-summary request before it is mapped to the optional field. */
+type ShortSummaryOutcome = { kind: "text"; text: string } | { kind: "failed"; error: string } | { kind: "aborted" };
+
+/**
+ * Generate the optional display summary. Cancellation propagates as an
+ * `AbortError`; every other failure or an empty answer yields `undefined`, so
+ * a completed full summary is never discarded for this display-only field.
+ */
 async function generateShortSummary(
 	recentMessages: AgentMessage[],
 	historySummary: string | undefined,
@@ -1213,7 +1221,7 @@ async function generateShortSummary(
 	apiKey: ApiKey,
 	signal?: AbortSignal,
 	options?: SummaryOptions,
-): Promise<string> {
+): Promise<string | undefined> {
 	const maxTokens = Math.min(512, Math.floor(0.2 * reserveTokens));
 	const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(recentMessages);
 	const conversationText = serializeConversationForSummary(
@@ -1229,57 +1237,97 @@ async function generateShortSummary(
 	promptText += formatAdditionalContext(options?.extraContext);
 	promptText += SHORT_SUMMARY_PROMPT;
 
-	if (options?.remoteEndpoint) {
-		const endpoint = options.remoteEndpoint;
-		const remote = await withAuth(
-			apiKey,
-			key =>
-				requestRemoteCompaction(
-					endpoint,
-					{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
+	let outcome: ShortSummaryOutcome;
+	try {
+		if (options?.remoteEndpoint) {
+			const endpoint = options.remoteEndpoint;
+			const remote = await withAuth(
+				apiKey,
+				key =>
+					requestRemoteCompaction(
+						endpoint,
+						{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
+						signal,
+						{ fetch: options?.fetch, model, apiKey: key },
+					),
+				{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
+			);
+			outcome = { kind: "text", text: remote.summary };
+		} else {
+			const response = await instrumentedCompleteSimple(
+				model,
+				{
+					systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT],
+					messages: [{ role: "user", content: [{ type: "text", text: promptText }], timestamp: Date.now() }],
+				},
+				{
+					maxTokens,
 					signal,
-					{ fetch: options?.fetch, model, apiKey: key },
-				),
-			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
-		);
-		return remote.summary;
+					apiKey,
+					reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
+					initiatorOverride: options?.initiatorOverride,
+					metadata: options?.metadata,
+					fetch: options?.fetch,
+					sessionId: options?.sessionId,
+					promptCacheKey: options?.promptCacheKey,
+					providerSessionState: options?.providerSessionState,
+					codexCompaction: localCodexCompaction(options),
+				},
+				{
+					telemetry: options?.telemetry,
+					oneshotKind: "compaction_short_summary",
+					completeImpl: options?.completeImpl,
+					retry: summaryOneshotRetry(options),
+				},
+			);
+			switch (response.stopReason) {
+				case "aborted":
+					outcome = { kind: "aborted" };
+					break;
+				case "error":
+					outcome = { kind: "failed", error: response.errorMessage || "Unknown error" };
+					break;
+				case "stop":
+				case "length":
+				case "toolUse":
+					outcome = {
+						kind: "text",
+						text: response.content
+							.filter((c): c is { type: "text"; text: string } => c.type === "text")
+							.map(c => c.text)
+							.join("\n"),
+					};
+					break;
+			}
+		}
+	} catch (err) {
+		outcome = signal?.aborted
+			? { kind: "aborted" }
+			: { kind: "failed", error: err instanceof Error ? err.message : String(err) };
 	}
 
-	const response = await instrumentedCompleteSimple(
-		model,
-		{
-			systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT],
-			messages: [{ role: "user", content: [{ type: "text", text: promptText }], timestamp: Date.now() }],
-		},
-		{
-			maxTokens,
-			signal,
-			apiKey,
-			reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
-			initiatorOverride: options?.initiatorOverride,
-			metadata: options?.metadata,
-			fetch: options?.fetch,
-			sessionId: options?.sessionId,
-			promptCacheKey: options?.promptCacheKey,
-			providerSessionState: options?.providerSessionState,
-			codexCompaction: localCodexCompaction(options),
-		},
-		{
-			telemetry: options?.telemetry,
-			oneshotKind: "compaction_short_summary",
-			completeImpl: options?.completeImpl,
-			retry: summaryOneshotRetry(options),
-		},
-	);
-
-	if (response.stopReason === "error") {
-		throw createSummarizationError("Short summary failed", response);
+	if (signal?.aborted) outcome = { kind: "aborted" };
+	switch (outcome.kind) {
+		case "aborted":
+			throw new AIError.AbortError("Short summary aborted", { cause: signal?.reason });
+		case "failed":
+			logger.warn("Compaction short summary skipped", {
+				error: outcome.error,
+				model: model.id,
+				provider: model.provider,
+			});
+			return undefined;
+		case "text":
+			if (outcome.text.trim() === "") {
+				logger.warn("Compaction short summary skipped", {
+					error: "empty answer",
+					model: model.id,
+					provider: model.provider,
+				});
+				return undefined;
+			}
+			return outcome.text;
 	}
-
-	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map(c => c.text)
-		.join("\n");
 }
 
 // ============================================================================
@@ -2272,7 +2320,7 @@ export async function compact(
 
 	return {
 		summary,
-		shortSummary,
+		...(shortSummary !== undefined ? { shortSummary } : {}),
 		firstKeptEntryId: nativeSummary !== undefined ? nativeFirstKeptEntryId : firstKeptEntryId,
 		tokensBefore,
 		details: { readFiles, modifiedFiles } as CompactionDetails,
