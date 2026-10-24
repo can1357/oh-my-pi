@@ -23,9 +23,17 @@ export interface TabSnapshot {
 
 /** RPCs the relay may ask the extension to perform. */
 export type RelayRpcRequest =
-	| { op: "attach"; tabId: number }
+	/** `clearForeignFrames`: the tab is one omp drives, so another extension's frames may be emptied past a refusal. */
+	| { op: "attach"; tabId: number; clearForeignFrames?: boolean }
 	| { op: "detach"; tabId: number }
-	| { op: "send"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
+	| {
+			op: "send";
+			tabId: number;
+			sessionId?: string;
+			method: string;
+			params?: Record<string, unknown>;
+			clearForeignFrames?: boolean;
+	  }
 	/** `active: false` opens the tab without selecting it; absent keeps Chrome's default (selected). */
 	| { op: "createTab"; url: string; active?: boolean }
 	| { op: "removeTab"; tabId: number }
