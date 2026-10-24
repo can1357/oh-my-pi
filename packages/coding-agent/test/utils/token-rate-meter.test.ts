@@ -142,3 +142,112 @@ describe("TokenRateMeter", () => {
 		expect(blended).toBeLessThan(60);
 	});
 });
+
+describe("TokenRateMeter objective average", () => {
+	it("rolls across messages and holds when the objective is done", () => {
+		const meter = new TokenRateMeter(words);
+		expect(meter.objectiveRate(0)).toBeNull();
+		meter.begin(0);
+		stream(meter, 0, 1_000, 5);
+		meter.end(100, 1_000);
+		expect(meter.objectiveRate(1_000)).toBeCloseTo(100, 0);
+
+		meter.begin(5_000);
+		stream(meter, 5_000, 7_000, 5);
+		// The open message's streamed estimate counts while it runs.
+		expect(meter.objectiveRate(6_000)!).toBeGreaterThan(50);
+		meter.end(300, 7_000);
+		// (100 + 300) tokens over (1 + 2) s, and it holds once nothing streams.
+		expect(meter.objectiveRate(9_000)).toBeCloseTo(400 / 3, 1);
+
+		meter.reset();
+		expect(meter.objectiveRate(9_000)).toBeNull();
+	});
+});
+
+describe("TokenRateMeter fastest window", () => {
+	it("remembers the fastest 1 s of streamed tokens and holds it", () => {
+		const meter = new TokenRateMeter(words);
+		meter.begin(0);
+		stream(meter, 0, 2_000, 5); // 50 tok/s
+		const slow = meter.fastestRate();
+		expect(slow).not.toBeNull();
+		expect(slow!).toBeGreaterThan(30);
+		expect(slow!).toBeLessThan(70);
+
+		stream(meter, 2_000, 3_000, 20); // 200 tok/s
+		const fast = meter.fastestRate()!;
+		expect(fast).toBeGreaterThan(slow! + 20);
+		expect(fast).toBeGreaterThan(120);
+		expect(fast).toBeLessThan(300);
+
+		stream(meter, 3_000, 6_000, 1); // 10 tok/s: the peak stays remembered
+		const remembered = meter.fastestRate()!;
+		expect(remembered).toBeGreaterThanOrEqual(fast);
+		meter.end(400, 6_000);
+		expect(meter.fastestRate()).toBe(remembered);
+
+		meter.reset();
+		expect(meter.fastestRate()).toBeNull();
+	});
+});
+
+describe("TokenRateMeter short requests", () => {
+	it("measures a request that finishes inside the 1 s window", () => {
+		const meter = new TokenRateMeter(words);
+		meter.begin(0);
+		stream(meter, 0, 500, 5); // 25 streamed words over 500 ms
+		meter.end(25, 500);
+		// 25 billed tokens over its own half second, not a 1 s denominator.
+		expect(meter.objectiveRate(500)).toBeCloseTo(50, 0);
+		expect(meter.fastestRate()).toBeCloseTo(50, 0);
+	});
+
+	it("keeps the average exact for a request under the live reading floor", () => {
+		const meter = new TokenRateMeter(words);
+		meter.begin(0);
+		stream(meter, 0, 150, 5); // 10 words in 150 ms
+		meter.end(10, 150);
+		expect(meter.objectiveRate(150)).toBeCloseTo(66.7, 0);
+	});
+});
+
+describe("TokenRateMeter objective reset", () => {
+	it("restarts the average and peak per request while holding between requests", () => {
+		const meter = new TokenRateMeter(words);
+		meter.begin(0);
+		stream(meter, 0, 1_000, 10); // 100 tok/s
+		meter.end(100, 1_000);
+		expect(meter.objectiveRate(1_000)).toBeCloseTo(100, 0);
+		// The finished stat holds until the next request resets it.
+		expect(meter.objectiveRate(60_000)).toBeCloseTo(100, 0);
+		expect(meter.fastestRate()).not.toBeNull();
+
+		meter.resetObjective();
+		expect(meter.objectiveRate(60_000)).toBeNull();
+		expect(meter.fastestRate()).toBeNull();
+
+		meter.begin(60_000);
+		stream(meter, 60_000, 61_000, 5); // 50 tok/s: only this request counts
+		meter.end(50, 61_000);
+		expect(meter.objectiveRate(61_000)).toBeCloseTo(50, 0);
+	});
+});
+
+describe("TokenRateMeter window rate", () => {
+	it("reports the trailing 1 s, not the running average", () => {
+		const meter = new TokenRateMeter(words);
+		meter.begin(0);
+		stream(meter, 0, 4_000, 10); // 100 tok/s for 4 s
+		expect(meter.windowRate(4_000)).toBeCloseTo(100, 0);
+		expect(meter.objectiveRate(4_000)).toBeCloseTo(100, 0);
+
+		stream(meter, 4_000, 6_000, 1); // 10 tok/s: the window follows at once
+		expect(meter.windowRate(6_000)).toBeCloseTo(10, 0);
+		// The average still carries the whole run.
+		expect(meter.objectiveRate(6_000)!).toBeGreaterThan(40);
+
+		meter.end(250, 6_000);
+		expect(meter.windowRate(6_000)).toBeNull();
+	});
+});

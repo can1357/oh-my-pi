@@ -142,6 +142,8 @@ export interface SegmentContext {
 		/** Portion of `cost` carried by completed subagent task results. */
 		subagentCost?: number;
 		tokensPerSecond: number | null;
+		/** `tokensPerSecond` is the objective's average (request done), not the live 1 s window. */
+		tokensPerSecondIsAverage?: boolean;
 	};
 	/** Context usage percent, or null when unknown (e.g. right after compaction). */
 	contextPercent: number | null;

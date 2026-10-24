@@ -4089,15 +4089,25 @@ export class AgentSession implements SettingsScope {
 	/** Re-seed the rate meter from the last completed assistant turn after a conversation swap (resume, branch switch). */
 	#reseedTokenRate(): void {
 		const messages = this.agent.state.messages;
+		let seeded = false;
+		let objectiveTokens = 0;
+		let objectiveMs = 0;
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];
+			// The objective starts at the last prompt: earlier turns belong to other objectives.
+			if (message?.role === "user") break;
 			if (message?.role !== "assistant") continue;
 			const assistant = message as AssistantMessage;
 			if (assistant.duration === undefined) continue;
-			this.tokenRate.seed(assistant.usage.output, assistant.duration);
-			return;
+			objectiveTokens += assistant.usage.output;
+			objectiveMs += assistant.duration;
+			if (!seeded) {
+				this.tokenRate.seed(assistant.usage.output, assistant.duration);
+				seeded = true;
+			}
 		}
-		this.tokenRate.reset();
+		this.tokenRate.seedObjective(objectiveTokens, objectiveMs);
+		if (!seeded) this.tokenRate.seed(0, 0);
 	}
 
 	#todoCallArguments(toolCallId: string): Record<string, unknown> | undefined {
@@ -4154,6 +4164,10 @@ export class AgentSession implements SettingsScope {
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
 			this.#activeAgentPromptGeneration = eventPromptGeneration;
+			// A new request starts a new objective: the rolling average and the
+			// peak restart, while the finished reading held until now stays
+			// visible until the first message of this run lands.
+			this.tokenRate.resetObjective();
 			// A run resumed from an unpaired assistant tail (retry of a failed tool
 			// batch) executes that turn's calls without a new message_end.
 			this.#runToolCallIds = new Set(event.resumedToolCallIds);

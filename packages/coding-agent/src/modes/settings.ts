@@ -138,13 +138,13 @@ effect(cfgComposerShape, setEditorGapComposerShape);
 export const cfgComposerTokenRate = register({
 	id: "composer.tokenRate",
 	type: "boolean",
-	default: false,
+	default: true,
 	ui: {
 		tab: "appearance",
 		group: "Composer",
 		label: "Generation Rate",
 		description:
-			"Show a live generation tok/s readout: on the working row next to the session title, or in the native composer bar right after the thinking level, where the last reading stays between turns. Estimated from streamed deltas and corrected by the provider's billed output count as each message completes.",
+			"Show a live generation tok/s readout: on the working row next to the session title, and in the native composer bar beside the session cost, where the last reading stays between turns. Estimated from streamed deltas and corrected by the provider's billed output count as each message completes.",
 	},
 });
 

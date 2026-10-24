@@ -87,6 +87,10 @@ const METER_MIN_TOKENS = 200;
 const METER_MIN_TIME_MS = 4_000;
 /** Streamed text is batched and tokenized once per bucket. */
 const METER_BUCKET_MS = 250;
+/** Shortest span the objective average divides by, so a message's first ticks cannot spike it. */
+const METER_MIN_READING_SPAN_MS = 250;
+/** Sliding window of the peak readout: the fastest 1 s of streamed tokens in the objective. */
+const METER_FAST_WINDOW_MS = 1_000;
 /** Longest tail deferred to the next bucket so a token split across two buckets is counted once. */
 const METER_CARRY_MAX_CHARS = 32;
 /** Weight kept from earlier messages when a new billed count refines the hidden-token rate. */
@@ -176,6 +180,13 @@ export class TokenRateMeter {
 	/** Decayed sums behind the hidden-token rate estimate. */
 	#hiddenTokens = 0;
 	#hiddenSpanMs = 0;
+	/** Billed output tokens and generation span of every finished message in this objective. */
+	#objectiveTokens = 0;
+	#objectiveMs = 0;
+	/** Buckets flushed inside the peak window, oldest first ({@link fastestRate}). */
+	#recent: { at: number; tokens: number }[] = [];
+	/** Fastest 1 s window reading seen in this objective. */
+	#fastest: number | null = null;
 
 	constructor(count: (text: string) => number) {
 		this.#count = count;
@@ -184,6 +195,7 @@ export class TokenRateMeter {
 	/** Open a message at wall time `nowMs`; a message still open is dropped unbilled. */
 	begin(nowMs: number = Date.now()): void {
 		this.#clearInflight();
+		this.#recent = [];
 		this.#startedAt = nowMs;
 		this.#advancedTo = nowMs;
 		this.#inflightHiddenRate = Math.max(0, this.#hiddenTokens / (this.#hiddenSpanMs + METER_HIDDEN_PRIOR_MS));
@@ -227,23 +239,49 @@ export class TokenRateMeter {
 			this.#history[k].tokens += Math.max(0, corrected);
 			this.#history[k].time += live.time;
 		}
+		this.#objectiveTokens += billed ? (outputTokens ?? this.#inflightLocal) : this.#inflightLocal;
+		this.#objectiveMs += Math.max(0, spanMs);
 		this.#clearInflight();
 	}
 
-	/** Drop the window; the readout goes blank until a new run accumulates enough tokens. */
+	/** Drop the window and the objective's accumulated average; the readout goes blank. */
 	reset(): void {
-		this.#clearInflight();
-		for (const sums of this.#history) sums.reset();
+		this.resetObjective();
+	}
+
+	/**
+	 * Start a new objective: the rolling average, the peak and the speedometer
+	 * window restart from the next streamed message. Until this runs,
+	 * {@link objectiveRate} holds the previous objective's reading, so the
+	 * finished stat stays visible between requests.
+	 */
+	resetObjective(): void {
+		this.#clearWindow();
+		this.#objectiveTokens = 0;
+		this.#objectiveMs = 0;
+		this.#recent = [];
+		this.#fastest = null;
+	}
+
+	/**
+	 * Adopt the objective's running average from a transcript (resume, branch
+	 * switch): billed output tokens over their generation spans, summed by the
+	 * caller. Leaves the in-flight message and the speedometer window alone.
+	 */
+	seedObjective(outputTokens: number, spanMs: number): void {
+		this.#objectiveTokens = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
+		this.#objectiveMs = Number.isFinite(spanMs) && spanMs > 0 ? spanMs : 0;
 	}
 	/**
-	 * Seed the window from a completed turn (`outputTokens` over `durationMs`),
-	 * scaled past the evidence gate so even short turns read immediately. Like
-	 * a just-finished turn, the reading holds until the next message blends
-	 * with it or {@link reset} blanks it.
+	 * Seed the speedometer window from a completed turn (`outputTokens` over
+	 * `durationMs`), scaled past the evidence gate so even short turns read
+	 * immediately. Leaves the objective's running average alone. Like a
+	 * just-finished turn, the reading holds until the next message blends with
+	 * it or {@link reset} blanks it.
 	 */
 	seed(outputTokens: number, durationMs: number): void {
 		if (!Number.isFinite(outputTokens) || outputTokens <= 0 || !Number.isFinite(durationMs) || durationMs <= 0) {
-			this.reset();
+			this.#clearWindow();
 			return;
 		}
 		this.#clearInflight();
@@ -277,6 +315,34 @@ export class TokenRateMeter {
 		return (tokens * 1000) / time;
 	}
 
+	/**
+	 * Rolling average generation throughput of this objective: every finished
+	 * message's billed output over its generation span, plus the open message's
+	 * streamed estimate, divided by the same spans. It updates as the objective
+	 * progresses and holds when it is done — the speedometer's reading in every
+	 * state. Only {@link reset} clears it.
+	 */
+	objectiveRate(nowMs: number = Date.now()): number | null {
+		const openMs = this.#startedAt === null ? 0 : Math.max(0, nowMs - this.#startedAt);
+		const openTokens =
+			this.#startedAt === null
+				? 0
+				: Math.max(this.#inflightLocal + this.#countPending(), this.#inflightHiddenRate * openMs);
+		const tokens = this.#objectiveTokens + openTokens;
+		const ms = this.#objectiveMs + openMs;
+		if (tokens <= 0 || ms <= 0) return null;
+		// A finished span is exact at any length — a request that completes in
+		// 150 ms still divides by its own 150 ms. The floor only keeps the very
+		// first live ticks of an open message (no finished span yet) from spiking.
+		if (this.#objectiveMs === 0 && ms < METER_MIN_READING_SPAN_MS) return null;
+		return (tokens * 1000) / ms;
+	}
+
+	/** The fastest 1 s window reading of this objective, or null before one was measured. */
+	fastestRate(): number | null {
+		return this.#fastest;
+	}
+
 	/** Age every sum to wall time `nowMs` (stream time only advances inside a message). */
 	#advance(nowMs: number): void {
 		const dtMs = nowMs - this.#advancedTo;
@@ -286,6 +352,11 @@ export class TokenRateMeter {
 			this.#history[k].advance(dtMs, false, 0);
 			this.#inflight[k].advance(dtMs, true, this.#inflightHiddenRate);
 		}
+	}
+
+	#clearWindow(): void {
+		this.#clearInflight();
+		for (const sums of this.#history) sums.reset();
 	}
 
 	#clearInflight(): void {
@@ -323,5 +394,40 @@ export class TokenRateMeter {
 		const tokens = this.#count(text);
 		for (const sums of this.#inflight) sums.tokens += tokens;
 		this.#inflightLocal += tokens;
+		this.#recent.push({ at: nowMs, tokens });
+		while (this.#recent.length > 0 && nowMs - this.#recent[0]!.at > METER_FAST_WINDOW_MS * 2) {
+			this.#recent.shift();
+		}
+		this.#sampleFastest(nowMs);
+	}
+
+	/**
+	 * Live throughput over the trailing window — 1 s, or the message's span
+	 * when it is shorter — of streamed text. This is what the speedometer shows
+	 * while tokens are arriving; {@link objectiveRate} is the program average.
+	 */
+	windowRate(nowMs: number = Date.now()): number | null {
+		if (this.#startedAt === null) return null;
+		const windowMs = Math.min(METER_FAST_WINDOW_MS, nowMs - this.#startedAt);
+		if (windowMs < METER_MIN_READING_SPAN_MS) return null;
+		const from = nowMs - windowMs;
+		let tokens = this.#countPending();
+		for (let i = this.#recent.length - 1; i >= 0; i--) {
+			const bucket = this.#recent[i]!;
+			if (bucket.at <= from) break;
+			tokens += bucket.tokens;
+		}
+		if (tokens <= 0) return null;
+		return (tokens * 1000) / windowMs;
+	}
+
+	/**
+	 * Keep the fastest window reading — the objective's best 1 s (or the span,
+	 * when a request finishes inside the window) — so it survives the turn.
+	 */
+	#sampleFastest(nowMs: number): void {
+		const rate = this.windowRate(nowMs);
+		if (rate === null) return;
+		if (this.#fastest === null || rate > this.#fastest) this.#fastest = rate;
 	}
 }

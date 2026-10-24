@@ -26,6 +26,11 @@ export interface StatusLineSession {
 	messages?: readonly AgentMessage[];
 	sessionFile?: string;
 	isStreaming: boolean;
+	/**
+	 * Live generation meter fed by streamed deltas (the composer's tok/s source);
+	 * absent on display-only sessions, where the message-based estimate leads.
+	 */
+	tokenRate?: { rate(): number | null; objectiveRate?(): number | null; windowRate?(): number | null };
 	isAutoThinking: boolean;
 	contextUsageRevision?: number;
 	systemPrompt?: readonly string[];

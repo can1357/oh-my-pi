@@ -9,6 +9,7 @@ import { setNativeRendering } from "../src/native/state";
 import type { StatusLineComponent } from "../src/status-line/component";
 import { describeSegment, type SegmentContext } from "../src/status-line/segments";
 import { createStartupStatusLine } from "../src/status-line/startup";
+import { STATUS_LINE_PRESETS } from "../src/status-line/presets";
 import type { StatusLineSettings } from "../src/status-line/types";
 import { initTheme } from "../src/theme";
 
@@ -135,5 +136,13 @@ describe("native composer facts", () => {
 		line.setPlanModeStatus({ enabled: true, paused: false });
 		expect(line.describeComposerFacts()).not.toBe(first);
 		expect(facts(line).map(seg => seg.key)).toEqual(["mode"]);
+	});
+});
+
+describe("status line presets", () => {
+	it("puts the token rate beside the session cost in the default preset", () => {
+		const left = STATUS_LINE_PRESETS.default.leftSegments;
+		expect(left.at(-1)).toBe("cost");
+		expect(left.at(-2)).toBe("token_rate");
 	});
 });

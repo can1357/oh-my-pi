@@ -31,7 +31,12 @@ import type { SettingProvenance, Settings } from "./settings";
 // Definitions
 // ═══════════════════════════════════════════════════════════════════════════
 
-export interface UiBoolean extends UiBase {}
+export interface UiBoolean extends UiBase {
+	/** Action row: activation runs the settings host's `run` for this path instead of storing a value. */
+	action?: true;
+	/** Label of the row's control; omitted action rows read "Run…". */
+	actionLabel?: string;
+}
 
 export interface UiEnum<T extends readonly string[]> extends UiBase {
 	/** Submenu options. When omitted, the enum renders as an inline toggle derived from `values`. */

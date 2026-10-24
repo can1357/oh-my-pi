@@ -63,6 +63,8 @@ export interface ComposerNativeState {
 	readonly thinkingInModel?: boolean;
 	/** Generation tok/s after the thinking level (live while running, else the last reading); undefined hides it. */
 	readonly rate?: number;
+	/** The rate is the objective's average (request done) rather than the live 1 s window. */
+	readonly rateAvg?: boolean;
 	/** A turn is running: the send keycap becomes a Stop button. */
 	readonly running: boolean;
 	/** Native dictation control; undefined hides it for hosts without speech-to-text. */
@@ -1093,6 +1095,7 @@ export class CustomEditor extends Editor {
 				chips: Component | undefined;
 				input: NativeNode;
 				rate: number | undefined;
+				rateAvg: boolean;
 				controls: ComposerControls;
 				bar: NativeNode;
 				layout: NativeEditorLayout;
@@ -1104,8 +1107,9 @@ export class CustomEditor extends Editor {
 	 * a turn runs) over the context hairline, the viewing header while a
 	 * subagent is focused, the attachment chips, a `line` row of the
 	 * shell-mode chip and the input, and the `bar`: model chip, effort chip
-	 * (or the effort glyph as the model chip's icon), the generation rate,
-	 * the other status facts, usage, dictation, then send (Stop while a turn runs).
+	 * (or the effort glyph as the model chip's icon), the other status facts,
+	 * the generation rate beside the session cost, dictation, then send
+	 * (Stop while a turn runs).
 	 * Clicks come back as `status.model`, `thinking.cycle`, `dictation.toggle`,
 	 * `submit`, `interrupt` and `focus:<id>` actions.
 	 */
@@ -1129,8 +1133,10 @@ export class CustomEditor extends Editor {
 			state.viewing?.join("\u0001"),
 			effortGlyph,
 			state.thinkingInModel,
+			state.rateAvg,
 		].join("\0");
 		const rate = state.rate;
+		const rateAvg = state.rateAvg === true;
 		const chips = this.attachmentChips;
 		const memo = this.#nativeComposer;
 		if (
@@ -1149,22 +1155,34 @@ export class CustomEditor extends Editor {
 				: this.#describeComposerControls(state, facts, thinkingKey, modelKey, interruptKey, effortGlyph);
 		// The rate ticks while a turn streams: only the bar follows it.
 		const bar =
-			memo?.controls === controls && memo.rate === rate
+			memo?.controls === controls && memo.rate === rate && memo.rateAvg === rateAvg
 				? memo.bar
 				: keyed(
 						row(
 							compact([
 								controls.model,
 								controls.effort,
-								rate !== undefined &&
-									node(
-										"rate",
-										{ value: rate, unit: "tok/s", role: "omp.composer.rate", title: "Generation rate" },
-										undefined,
-										"rate",
-									),
 								// The status facts are the bar's flexible space; without them a spacer keeps send at the end.
 								facts?.extras ?? node("row", { grow: 1 }, [], "gap"),
+								// Live: the 1 s window in tok/s. Done: the objective's average as Ø… t/s.
+								rate !== undefined &&
+									(rateAvg
+										? node(
+												"text",
+												{
+													role: "omp.composer.rate",
+													spans: [span(`Ø${rate.toFixed(1)} t/s`, "muted")],
+													wrap: "none",
+												},
+												undefined,
+												"rate",
+											)
+										: node(
+												"rate",
+												{ value: rate, unit: "tok/s", role: "omp.composer.rate", title: "Generation rate" },
+												undefined,
+												"rate",
+											)),
 								facts?.usage,
 								controls.dictation,
 								controls.submit,
@@ -1183,7 +1201,7 @@ export class CustomEditor extends Editor {
 			children: compact([facts?.context, controls.focus, chips, line, bar]),
 			caret: "line/input",
 		};
-		this.#nativeComposer = { key, facts, chips, input, rate, controls, bar, layout };
+		this.#nativeComposer = { key, facts, chips, input, rate, rateAvg, controls, bar, layout };
 		return layout;
 	};
 

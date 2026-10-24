@@ -42,6 +42,8 @@ export interface WorkingRowSpec {
 	readonly palette?: ShimmerPalette;
 	/** Key id that interrupts (`escape`); undefined hides the stop control (Esc would not cancel). */
 	readonly interruptKey?: KeyId;
+	/** Muted text right-docked after the fill (the objective's fastest tok/s), before the stop control. */
+	readonly trailer?: string;
 }
 
 /**
@@ -68,6 +70,16 @@ export function describeWorkingRow(spec: WorkingRowSpec, cx: DescribeContext, no
 		node("row", { grow: 1 }, undefined, "fill"),
 	);
 	if (variant?.kind === "compaction") children.push(node("progress", { value: null }, undefined, "progress"));
+	if (spec.trailer) {
+		children.push(
+			node(
+				"text",
+				{ spans: [span(spec.trailer, "muted")], role: "omp.working.trailer" },
+				undefined,
+				"trailer",
+			),
+		);
+	}
 	if (spec.interruptKey !== undefined) {
 		const verb = variant?.kind === "retry" ? "Cancel" : "Stop";
 		children.push(

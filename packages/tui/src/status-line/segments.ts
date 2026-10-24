@@ -767,23 +767,32 @@ const tokenTotalSegment: StatusLineSegment = {
 const tokenRateSegment: StatusLineSegment = {
 	id: "token_rate",
 	render(ctx) {
-		const { tokensPerSecond } = ctx.usageStats;
+		const { tokensPerSecond, tokensPerSecondIsAverage } = ctx.usageStats;
 		if (!tokensPerSecond) return { content: "", visible: false };
 
 		const content = formatMetric({
 			leading: theme.icon.throughput || undefined,
-			value: `${tokensPerSecond.toFixed(1)} tok/s`,
+			value: tokensPerSecondIsAverage
+				? `Ø${tokensPerSecond.toFixed(1)} t/s`
+				: `${tokensPerSecond.toFixed(1)} tok/s`,
 		});
 		return { content: theme.fg("statusLineOutput", content ?? ""), visible: true };
 	},
 	describe(ctx) {
-		const { tokensPerSecond } = ctx.usageStats;
+		const { tokensPerSecond, tokensPerSecondIsAverage } = ctx.usageStats;
 		if (!tokensPerSecond) return null;
 		// The terminal eases the readout between updates.
 		return {
 			spans: [],
 			icon: "throughput",
-			motion: [node("rate", { value: Number(tokensPerSecond.toFixed(1)), unit: "tok/s" }, undefined, "rate")],
+			motion: [
+				node(
+					"rate",
+					{ value: Number(tokensPerSecond.toFixed(1)), unit: tokensPerSecondIsAverage ? "t/s" : "tok/s" },
+					undefined,
+					"rate",
+				),
+			],
 		};
 	},
 };

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- `AgentTool` gained the optional `approvalCacheTargets` and `approvalCacheScopes` hooks: the seams the `always-ask-cached` approval mode uses to check a call against remembered grants and to record them when the user approves.
 ### Fixed
 
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))

@@ -31,7 +31,7 @@ function assistantMessage(overrides?: Partial<AssistantMessage>): AssistantMessa
 	};
 }
 
-function ctxWithTokenRate(tokensPerSecond: number | null): SegmentContext {
+function ctxWithTokenRate(tokensPerSecond: number | null, isAverage = false): SegmentContext {
 	return {
 		usageStats: {
 			input: 0,
@@ -41,6 +41,7 @@ function ctxWithTokenRate(tokensPerSecond: number | null): SegmentContext {
 			premiumRequests: 0,
 			cost: 0,
 			tokensPerSecond,
+			tokensPerSecondIsAverage: isAverage,
 		},
 	} as unknown as SegmentContext;
 }
@@ -55,6 +56,15 @@ describe("token_rate status-line segment", () => {
 		expect(content).toMatch(/(?:\/s|\bs\b|\bsec(?:ond)?s?\b|\btps\b)/i);
 		expect(content).not.toContain("35.5/s");
 		expect(content).not.toMatch(/\b\d+(?:\.\d+)?\/s\b/);
+	});
+
+	it("shows the live window in tok/s and the finished objective as Ø… t/s", () => {
+		const live = stripVTControlCharacters(renderSegment("token_rate", ctxWithTokenRate(35.5)).content);
+		expect(live).toContain("35.5 tok/s");
+		expect(live).not.toContain("Ø");
+
+		const done = stripVTControlCharacters(renderSegment("token_rate", ctxWithTokenRate(69, true)).content);
+		expect(done).toContain("Ø69.0 t/s");
 	});
 });
 

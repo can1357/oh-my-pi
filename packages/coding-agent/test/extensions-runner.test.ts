@@ -2624,50 +2624,11 @@ describe("ExtensionRunner", () => {
 			]);
 			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
 				"Approve",
-				"Approve dangerous_tool for this session",
 				"Deny",
 			]);
 			delete globalState.__approvalEvents;
 		});
 
-		it("approving for this session skips later mode prompts of that tool and tier, until the session changes", async () => {
-			const runner = new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry);
-			const select = vi.fn(async (_title: string, options: string[]) => options[1]);
-			initializeRunner(runner, select);
-			const context = () => ({
-				sessionManager,
-				modelRegistry,
-				model: undefined,
-				isIdle: () => true,
-				hasQueuedMessages: () => false,
-				abort: () => {},
-				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
-			});
-			const run = (tool: typeof approvalTool | AgentTool, id: string) =>
-				(new ExtensionToolWrapper(tool, runner) as ExtensionToolWrapper<any>).execute(
-					id,
-					{},
-					undefined,
-					undefined,
-					context(),
-				);
-			await run(approvalTool, "call-grant");
-			await run(approvalTool, "call-granted");
-			expect(select).toHaveBeenCalledTimes(1);
-			// The grant covers that tool at that tier only: its write-tier calls and other tools still ask.
-			await run({ ...approvalTool, approval: "write" as const }, "call-write-tier");
-			await run({ ...approvalTool, name: "other_tool" }, "call-other");
-			expect(select).toHaveBeenCalledTimes(3);
-			// A critical override asks every time and never offers the session choice.
-			const critical = { ...approvalTool, approval: () => ({ tier: "exec" as const, override: true }) };
-			select.mockImplementationOnce(async () => "Approve");
-			await run(critical, "call-critical");
-			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"]);
-			// A new session starts without the grant.
-			await sessionManager.newSession();
-			await run(approvalTool, "call-new-session");
-			expect(select).toHaveBeenCalledTimes(5);
-		});
 		it("runs bridged preflight before approval and cancels denied state", async () => {
 			const runner = new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry);
 			const order: string[] = [];
