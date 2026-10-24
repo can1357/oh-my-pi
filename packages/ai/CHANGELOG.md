@@ -9,6 +9,8 @@
 ### Changed
 
 - `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added an opt-in bounded prompt-cache diagnostic journal with HMAC-derived request/prefix fingerprints, Anthropic attempt correlation, captured-wire/prepared-body provenance, honest usage estimates, reset classifications, and no persisted prompt content (`PI_PROMPT_CACHE_DEBUG=1`) ([#11938](https://github.com/can1357/oh-my-pi/pull/11938) by [@pedropaulovc](https://github.com/pedropaulovc)).
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

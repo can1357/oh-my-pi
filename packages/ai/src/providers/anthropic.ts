@@ -102,6 +102,16 @@ import {
 	parseAnthropicSlowModeHeaders,
 } from "./anthropic-slow-mode";
 import { notifyProviderResponse } from "../utils/provider-response";
+import {
+	PromptCacheDebugJournal,
+	createPromptCacheDiagnosticController,
+	isPromptCacheCutoff,
+	isPromptCacheDebugEnabled,
+	type PromptCacheDiagnosticAttempt,
+	type PromptCacheDiagnosticController,
+	type PromptCacheDiagnosticFailure,
+	type PromptCacheDiagnosticUsage,
+} from "../utils/prompt-cache-debug";
 import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
@@ -233,6 +243,7 @@ export { resolvesToOfficialAnthropicEndpoint, supportsAnthropicCompaction, suppo
  * (https://platform.claude.com/docs/en/build-with-claude/fallback-credit).
  */
 const FALLBACK_CREDIT_TTL_MS = 5 * 60 * 1000;
+const promptCacheDiagnosticJournalOption = "promptCacheDiagnosticJournal";
 
 /**
  * The two betas that only make sense alongside a `cache_control` breakpoint.
@@ -1422,6 +1433,17 @@ export function applyAnthropicUsageExtras(usage: Usage, source: AnthropicUsageLi
 	}
 }
 
+function updatePromptCacheDiagnosticUsage(
+	target: PromptCacheDiagnosticUsage,
+	source: AnthropicWireUsage | undefined,
+): void {
+	if (source === undefined) return;
+	if (typeof source.input_tokens === "number") target.input = source.input_tokens;
+	if (typeof source.output_tokens === "number") target.output = source.output_tokens;
+	if (typeof source.cache_read_input_tokens === "number") target.cacheRead = source.cache_read_input_tokens;
+	if (typeof source.cache_creation_input_tokens === "number") target.cacheWrite = source.cache_creation_input_tokens;
+}
+
 function parseAnthropicFallbackWireBlock(value: unknown): AnthropicFallbackContent | undefined {
 	if (!isRecord(value) || value.type !== "fallback") return undefined;
 	const from = isRecord(value.from) && typeof value.from.model === "string" ? value.from.model : undefined;
@@ -1945,6 +1967,14 @@ const streamAnthropicOnce = (
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
 		let transportPayload: unknown;
+		let promptCacheDiagnosticAttempt: PromptCacheDiagnosticAttempt | undefined;
+		let promptCacheDiagnostic: PromptCacheDiagnosticController | undefined;
+		let promptCacheUsage: PromptCacheDiagnosticUsage = {
+			input: null,
+			cacheRead: null,
+			cacheWrite: null,
+			output: null,
+		};
 		let activeAbortTracker = createAbortSourceTracker(options?.signal);
 
 		const onSseEvent = options?.onSseEvent;
@@ -1981,6 +2011,22 @@ const streamAnthropicOnce = (
 			heldToolCallEvents.length = 0;
 			return withoutDeclinedFallbackOutput(output.content);
 		};
+		const failPromptCacheDiagnostic = (failure: PromptCacheDiagnosticFailure): void => {
+			const attempt = promptCacheDiagnosticAttempt;
+			promptCacheDiagnosticAttempt = undefined;
+			// The cache warmer aborts its replay once generation starts; message_start
+			// already carried the cache usage, so that attempt is a cutoff, not a failure.
+			const usage = promptCacheUsage;
+			const observedUsage =
+				usage.input !== null || usage.cacheRead !== null || usage.cacheWrite !== null || usage.output !== null;
+			if (observedUsage && isPromptCacheCutoff(options?.signal)) {
+				attempt?.cutoff(usage);
+				promptCacheDiagnostic?.cutoff(usage);
+				return;
+			}
+			attempt?.fail(failure);
+			promptCacheDiagnostic?.fail(failure);
+		};
 
 		try {
 			// Built inside the try so a copilot credential/header failure surfaces as
@@ -2013,6 +2059,25 @@ const streamAnthropicOnce = (
 				output.usage.premiumRequests = copilotDynamicHeaders.premiumRequests;
 			}
 			const baseUrl = copilotBaseUrl ?? resolveAnthropicBaseUrl(model, apiKey) ?? "https://api.anthropic.com";
+			const effectiveSessionId =
+				options?.sessionId ?? extractClaudeMetadataSessionId(options?.metadata?.user_id) ?? options?.promptCacheKey;
+			const cacheAffinitySeed = options?.promptCacheKey ?? effectiveSessionId;
+			const effectiveCacheAffinity = cacheAffinitySeed === undefined ? null : `${baseUrl}|${cacheAffinitySeed}`;
+			if (!transport && isPromptCacheDebugEnabled()) {
+				const configuredJournal = options?.providerOptions?.[promptCacheDiagnosticJournalOption];
+				promptCacheDiagnostic = createPromptCacheDiagnosticController({
+					journal: configuredJournal instanceof PromptCacheDebugJournal ? configuredJournal : undefined,
+					provider: model.provider,
+					model: model.id,
+					api: model.api,
+					endpoint: `${baseUrl.replace(/\/+$/, "")}/v1/messages`,
+					baseFetch: options?.fetch,
+					cacheAffinity: effectiveCacheAffinity,
+					sessionScope: effectiveSessionId,
+					retention: options?.cacheRetention,
+					context: options?.promptCacheDiagnosticContext,
+				});
+			}
 			const supportsEagerToolInputStreaming = resolveEagerToolInputStreamingSupport(model, baseUrl);
 			// A caller-owned client decides the endpoint itself (its `baseURL`, or an
 			// explicit opt-in); it receives the compaction beta per request. A transport
@@ -2301,14 +2366,11 @@ const streamAnthropicOnce = (
 						context.tools?.some(tool => ANTHROPIC_BUFFERED_INPUT_TOOLS.has(tool.name)) ?? false,
 					thinkingEnabled: options?.thinkingEnabled,
 					thinkingDisplay: options?.thinkingDisplay,
-					fetch: options?.fetch,
+					fetch: promptCacheDiagnostic?.fetch ?? options?.fetch,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					copilotCacheKey,
 					copilotCacheSnapshot: copilotCached ?? null,
-					sessionId:
-						options?.sessionId ??
-						extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
-						options?.promptCacheKey,
+					sessionId: effectiveSessionId,
 					parentSessionId: options?.parentSessionId,
 					disableStrictTools,
 					dropPromptCacheBetas: dropCacheControl || dropCacheControlOptions,
@@ -2637,6 +2699,8 @@ const streamAnthropicOnce = (
 			let slowWaitAttempts = 0;
 			let sentSlow = false;
 			while (true) {
+				promptCacheUsage = { input: null, cacheRead: null, cacheWrite: null, output: null };
+				promptCacheDiagnosticAttempt = undefined;
 				activeAbortTracker = createAbortSourceTracker(options?.signal);
 				const { requestSignal } = activeAbortTracker;
 				// The provider loop owns retries: pin the client's internal retry loop
@@ -2802,16 +2866,42 @@ const streamAnthropicOnce = (
 					}
 					const prewarmBody = { ...wireParams, max_tokens: 0, stream: false };
 					if (rawRequestDump) rawRequestDump.body = prewarmBody;
+					if (options?.client && promptCacheDiagnostic) {
+						const injectedEndpoint =
+							injectedClientBaseUrl(options.client) ?? `${baseUrl.replace(/\/+$/, "")}/v1/messages`;
+						promptCacheDiagnosticAttempt = promptCacheDiagnostic.begin({
+							body: JSON.stringify(prewarmBody),
+							bodySource: "prepared",
+							endpoint: injectedEndpoint,
+						});
+					}
 					const prewarmRequest: unknown =
 						isOAuthToken && client.beta
 							? client.beta.messages.create(prewarmBody, requestOptions)
 							: client.messages.create(prewarmBody, requestOptions);
 					const prewarmed = await getAnthropicMessageResponse(prewarmRequest);
+					promptCacheDiagnosticAttempt?.observeResponse({
+						status: prewarmed.response.status,
+						requestId: prewarmed.requestId,
+					});
 					await notifyProviderResponse(options, prewarmed.response, sourceModel, prewarmed.requestId);
 					applyAnthropicPrewarmResponse(output, prewarmed.message, sourceModel);
+					if (isRecord(prewarmed.message) && isRecord(prewarmed.message.usage)) {
+						updatePromptCacheDiagnosticUsage(promptCacheUsage, prewarmed.message.usage as AnthropicWireUsage);
+					}
+					promptCacheDiagnostic?.complete(promptCacheUsage);
 					// Zero output tokens always stop at the cap (`stop_reason: "max_tokens"`).
 					output.stopReason = "length";
 					break;
+				}
+				if (options?.client && promptCacheDiagnostic) {
+					const injectedEndpoint =
+						injectedClientBaseUrl(options.client) ?? `${baseUrl.replace(/\/+$/, "")}/v1/messages`;
+					promptCacheDiagnosticAttempt = promptCacheDiagnostic.begin({
+						body: JSON.stringify({ ...wireParams, stream: true }),
+						bodySource: "prepared",
+						endpoint: injectedEndpoint,
+					});
 				}
 				const anthropicRequest: unknown =
 					isOAuthToken && client.beta
@@ -2849,6 +2939,7 @@ const streamAnthropicOnce = (
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
 					output.requestId = requestId ?? undefined;
+					promptCacheDiagnosticAttempt?.observeResponse({ status: response.status, requestId });
 					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
 						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
@@ -2958,6 +3049,7 @@ const streamAnthropicOnce = (
 								providerSessionState,
 							);
 							const startUsage = startMessage?.usage;
+							updatePromptCacheDiagnosticUsage(promptCacheUsage, startUsage);
 							if (startUsage) {
 								applyAnthropicUsageExtras(output.usage, startUsage);
 								output.usage.input = startUsage.input_tokens || 0;
@@ -3322,6 +3414,7 @@ const streamAnthropicOnce = (
 								}
 							}
 							const deltaUsage = event.usage;
+							updatePromptCacheDiagnosticUsage(promptCacheUsage, deltaUsage);
 							if (deltaUsage) {
 								if (deltaUsage.input_tokens != null) {
 									output.usage.input = deltaUsage.input_tokens;
@@ -3406,11 +3499,16 @@ const streamAnthropicOnce = (
 							kind: "output",
 						});
 					}
+					promptCacheDiagnostic?.complete(promptCacheUsage);
 					break;
 				} catch (streamError) {
 					const localAbortReason = activeAbortTracker.getLocalAbortReason();
 					const preserveTransportStatus = transport && AIError.status(streamError) !== undefined;
 					const streamFailure = preserveTransportStatus ? streamError : (localAbortReason ?? streamError);
+					failPromptCacheDiagnostic({
+						status: AIError.status(streamFailure) ?? null,
+						code: streamFailure instanceof Error ? streamFailure.name : "stream-error",
+					});
 					if (transport) throw streamFailure;
 					const threadRecovery = firstTokenTime === undefined ? threadTurn?.recover(streamFailure) : undefined;
 					if (threadRecovery) {
@@ -3945,6 +4043,7 @@ const streamAnthropicOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
+			failPromptCacheDiagnostic({ status: result.status ?? null, code: result.stopReason });
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({

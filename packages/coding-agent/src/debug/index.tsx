@@ -10,6 +10,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as url from "node:url";
+import { formatPromptCacheDebugView, getPromptCacheDebugSnapshot } from "@oh-my-pi/pi-ai";
 import { getWorkProfile } from "@oh-my-pi/pi-natives";
 import { type JSXNode, nativeRendering, signal } from "@oh-my-pi/pi-tui";
 import { isNotificationSuppressed, type TerminalNotification } from "@oh-my-pi/pi-tui/driver/notify";
@@ -81,6 +82,7 @@ const DEBUG_MENU_ITEMS = [
 	{ id: "system", label: "View: system info", detail: "Show environment details" },
 	{ id: "terminal", label: "View: terminal state", detail: "Subprotocols, geometry, scrollback strategy" },
 	{ id: "protocols", label: "Test: terminal protocols", detail: "Styling, links, text sizing, graphics, notify" },
+	{ id: "cache", label: "View: prompt-cache diagnostics", detail: "Show bounded cache churn report" },
 	{ id: "raw-sse", label: "View: raw SSE stream", detail: "Show live provider SSE frames" },
 	{
 		id: "remote-debugger",
@@ -169,6 +171,8 @@ export class DebugTools {
 				return this.#viewRawSse();
 			case "remote-debugger":
 				return this.#startRemoteDebugger();
+			case "cache":
+				return this.#viewPromptCache();
 			case "system":
 				return this.#viewSystemInfo();
 			case "terminal":
@@ -242,6 +246,7 @@ export class DebugTools {
 					sessionFile: this.#host.sessionManager.getSessionFile(),
 					settings: this.#resolvedSettings(),
 					rawSseText: this.#rawSseText(),
+					promptCacheDebug: getPromptCacheDebugSnapshot(),
 					cpuProfile,
 					workProfile: getWorkProfile(30),
 				});
@@ -275,6 +280,7 @@ export class DebugTools {
 					sessionFile: this.#host.sessionManager.getSessionFile(),
 					settings: this.#resolvedSettings(),
 					rawSseText: this.#rawSseText(),
+					promptCacheDebug: getPromptCacheDebugSnapshot(),
 				}),
 			);
 			this.#present(reportLines("Report bundle saved", result));
@@ -292,6 +298,7 @@ export class DebugTools {
 					sessionFile: this.#host.sessionManager.getSessionFile(),
 					settings: this.#resolvedSettings(),
 					rawSseText: this.#rawSseText(),
+					promptCacheDebug: getPromptCacheDebugSnapshot(),
 					memoryStats,
 				});
 			});
@@ -369,6 +376,11 @@ export class DebugTools {
 			};
 		});
 		await this.#host.showDebugSelector();
+	}
+
+	#viewPromptCache(): void {
+		const formatted = formatPromptCacheDebugView().join("\n");
+		this.#host.present(() => <Framed text={formatted} />);
 	}
 
 	async #startRemoteDebugger(): Promise<void> {

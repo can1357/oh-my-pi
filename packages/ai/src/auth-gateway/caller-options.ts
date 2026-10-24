@@ -89,6 +89,8 @@ const OPTION_TIERS = {
 	onPayload: "server",
 	onResponse: "server",
 	onSseEvent: "server",
+	// Local debug-bundle facts for this process's own requests; a wire caller must not steer them.
+	promptCacheDiagnosticContext: "server",
 	execHandlers: "server",
 	cursorExecHandlers: "server",
 	cursorOnToolResult: "server",

@@ -104,7 +104,7 @@ describe("inline selectors in a Tern terminal", () => {
 		expect(has(ui, "editor")).toBe(false);
 		const list = () => ui.node("list", "list");
 		expect(list().p).toMatchObject({ empty: "No items", max: { lines: 7 } });
-		expect(list().c).toHaveLength(13);
+		expect(list().c).toHaveLength(14);
 		expect(list().p.selected).toBe(ui.node("item", "open-artifacts").id);
 		expect(ui.node("text", "status").p.spans).toEqual([{ s: "muted", t: "Type to search" }]);
 
@@ -113,7 +113,7 @@ describe("inline selectors in a Tern terminal", () => {
 		ui.type("log");
 		expect(list().p.filter).toBe("log");
 		expect(ui.node("text", "status").p.spans).toEqual([{ s: "muted", t: "Search: log" }]);
-		expect(list().c.length).toBeLessThan(13);
+		expect(list().c.length).toBeLessThan(14);
 		expect(list().c).toContain(ui.node("item", "logs").id);
 
 		ui.type(ESCAPE);
