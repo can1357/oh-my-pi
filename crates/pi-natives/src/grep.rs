@@ -116,6 +116,11 @@ pub struct GrepOptions<'env> {
 	/// Glob filter for file paths (e.g., "*.ts"); a matched directory selects
 	/// every file under it.
 	pub glob:               Option<String>,
+	/// Glob patterns of files and directories to leave out, relative to `path`:
+	/// one without `/` matches at any depth (`*.test.ts`, `vendor`), a leading
+	/// `/` anchors it to `path` (`/vendor`); a matched directory is not
+	/// searched.
+	pub exclude:            Option<Vec<String>>,
 	/// Match simple glob patterns at any depth (default: true; `*.ts` ->
 	/// `**/*.ts`). Set false when `glob` is already relative to `path`.
 	pub recursive:          Option<bool>,
@@ -1037,6 +1042,7 @@ pub(crate) struct GrepConfig {
 	pub(crate) pattern:            String,
 	pub(crate) path:               String,
 	pub(crate) glob:               Option<String>,
+	pub(crate) exclude:            Option<Vec<String>>,
 	pub(crate) recursive:          Option<bool>,
 	pub(crate) type_filter:        Option<String>,
 	pub(crate) ignore_case:        Option<bool>,
@@ -1368,15 +1374,10 @@ fn search_file_bytes<M: Matcher + Sync>(
 	run_search_in(searcher, matcher, Haystack::Slice(bytes), params).ok()
 }
 
-fn build_grep_walk_request(
-	fs: &BlockingFs,
-	search_path: &Path,
-	glob: Option<&str>,
-	include_hidden: bool,
-	use_gitignore: bool,
-	skip_node_modules: bool,
-	order: pi_walker::WalkOrder,
-) -> Result<pi_walker::WalkRequest> {
+/// Files-only walk filter for `glob` (a matched directory selects every file
+/// under it) and `exclude` (a matched file or directory is left out), compiled
+/// once per search.
+fn grep_walk_filter(glob: Option<&str>, exclude: &[String]) -> Result<pi_walker::WalkFilter> {
 	let mut filter = pi_walker::WalkFilter::files_only();
 	if let Some(pattern) = glob {
 		let compiled =
@@ -1384,8 +1385,43 @@ fn build_grep_walk_request(
 				.map_err(|err| Error::from_reason(format!("Invalid glob pattern: {err}")))?;
 		filter = filter.glob(compiled);
 	}
+	let exclude: Vec<String> = exclude
+		.iter()
+		.map(|pattern| pattern.trim().replace('\\', "/"))
+		.map(|pattern| pattern.trim_end_matches('/').to_owned())
+		.filter(|pattern| !pattern.is_empty())
+		.map(|pattern| match pattern.strip_prefix('/') {
+			Some(anchored) => anchored.to_owned(),
+			// Slashless patterns match at any depth, exact brace unions (`{vendor,gen}`)
+			// included, which `build_glob_pattern` keeps root-relative for scope globs.
+			None if !pattern.contains('/') && !pattern.starts_with("**") => {
+				glob_util::build_glob_pattern(&format!("**/{pattern}"), true)
+			},
+			None => glob_util::build_glob_pattern(&pattern, true),
+		})
+		.collect();
+	if !exclude.is_empty() {
+		let compiled = pi_walker::CompiledWalkGlob::new(exclude)
+			.map_err(|err| Error::from_reason(format!("Invalid exclude pattern: {err}")))?;
+		filter = filter.exclude(compiled);
+	}
+	Ok(filter)
+}
 
-	Ok(pi_walker::WalkRequest::new(search_path)
+fn build_grep_walk_request(
+	fs: &BlockingFs,
+	search_path: &Path,
+	filter: Option<&pi_walker::WalkFilter>,
+	include_hidden: bool,
+	use_gitignore: bool,
+	skip_node_modules: bool,
+	order: pi_walker::WalkOrder,
+) -> pi_walker::WalkRequest {
+	let filter = filter
+		.cloned()
+		.unwrap_or_else(pi_walker::WalkFilter::files_only);
+
+	pi_walker::WalkRequest::new(search_path)
 		.filesystem(fs.clone())
 		.hidden(include_hidden)
 		.gitignore(use_gitignore)
@@ -1399,13 +1435,13 @@ fn build_grep_walk_request(
 		.depth(1, usize::MAX)
 		.directory_errors(pi_walker::DirectoryErrorMode::SkipSkippable)
 		.cache(false)
-		.filter(filter))
+		.filter(filter)
 }
 
 fn collect_grep_candidates(
 	fs: &BlockingFs,
 	search_path: &Path,
-	glob: Option<&str>,
+	filter: Option<&pi_walker::WalkFilter>,
 	type_filter: Option<&TypeFilter>,
 	include_hidden: bool,
 	use_gitignore: bool,
@@ -1416,12 +1452,12 @@ fn collect_grep_candidates(
 	let request = build_grep_walk_request(
 		fs,
 		search_path,
-		glob,
+		filter,
 		include_hidden,
 		use_gitignore,
 		skip_node_modules,
 		order,
-	)?;
+	);
 	let mut candidates = match request.collect_file_candidates_with_heartbeat(|| ct.heartbeat()) {
 		Ok(candidates) => candidates,
 		Err(err) => return Err(iofs::map_walker_error(err)),
@@ -1792,7 +1828,7 @@ fn run_sequential_grep<M: Matcher + Sync>(
 	fs: &BlockingFs,
 	search_path: &Path,
 	matcher: &M,
-	glob: Option<&str>,
+	filter: Option<&pi_walker::WalkFilter>,
 	type_filter: Option<&TypeFilter>,
 	params: SearchParams,
 	include_hidden: bool,
@@ -1804,7 +1840,7 @@ fn run_sequential_grep<M: Matcher + Sync>(
 	let Some(candidates) = collect_grep_candidates(
 		fs,
 		search_path,
-		glob,
+		filter,
 		type_filter,
 		include_hidden,
 		use_gitignore,
@@ -1826,7 +1862,7 @@ fn run_parallel_streaming_grep<M: Matcher + Sync>(
 	state: &PassState<'_>,
 	search_path: &Path,
 	matcher: &M,
-	glob: Option<&str>,
+	filter: Option<&pi_walker::WalkFilter>,
 	type_filter: Option<&TypeFilter>,
 	params: SearchParams,
 	include_hidden: bool,
@@ -1837,12 +1873,12 @@ fn run_parallel_streaming_grep<M: Matcher + Sync>(
 	let request = build_grep_walk_request(
 		&state.fs,
 		search_path,
-		glob,
+		filter,
 		include_hidden,
 		use_gitignore,
 		skip_node_modules,
 		pi_walker::WalkOrder::Unordered,
-	)?;
+	);
 	let file_params = per_file_params(params);
 
 	request
@@ -1913,7 +1949,7 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 	fs: &BlockingFs,
 	search_path: &Path,
 	matcher: &M,
-	glob: Option<&str>,
+	filter: Option<&pi_walker::WalkFilter>,
 	type_filter: Option<&TypeFilter>,
 	params: SearchParams,
 	include_hidden: bool,
@@ -1925,12 +1961,12 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 	let request = build_grep_walk_request(
 		fs,
 		search_path,
-		glob,
+		filter,
 		include_hidden,
 		use_gitignore,
 		skip_node_modules,
 		pi_walker::WalkOrder::Path,
-	)?;
+	);
 	let file_params = per_file_params(params);
 	let state = PassState::new(fs);
 	let mut window = Vec::with_capacity(GREP_STREAM_WINDOW);
@@ -2010,7 +2046,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 	fs: &BlockingFs,
 	search_path: &Path,
 	matcher: &M,
-	glob: Option<&str>,
+	filter: Option<&pi_walker::WalkFilter>,
 	type_filter: Option<&TypeFilter>,
 	params: SearchParams,
 	include_hidden: bool,
@@ -2026,7 +2062,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 				&state,
 				search_path,
 				matcher,
-				glob,
+				filter,
 				type_filter,
 				params,
 				include_hidden,
@@ -2045,7 +2081,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 				fs,
 				search_path,
 				matcher,
-				glob,
+				filter,
 				type_filter,
 				params,
 				include_hidden,
@@ -2059,7 +2095,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 			fs,
 			search_path,
 			matcher,
-			glob,
+			filter,
 			type_filter,
 			params,
 			include_hidden,
@@ -2517,13 +2553,14 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 	}
 
 	let mentions_node_modules = glob.is_some_and(|g| g.contains("node_modules"));
+	let walk_filter = grep_walk_filter(glob, options.exclude.as_deref().unwrap_or_default())?;
 	if let Some(sink) = stream {
 		let state = PassState::with_sink(fs, Some(sink));
 		run_parallel_streaming_grep(
 			&state,
 			&search_path,
 			matcher,
-			glob,
+			Some(&walk_filter),
 			type_filter.as_ref(),
 			params,
 			include_hidden,
@@ -2537,7 +2574,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 		fs,
 		&search_path,
 		matcher,
-		glob,
+		Some(&walk_filter),
 		type_filter.as_ref(),
 		params,
 		include_hidden,
@@ -2806,6 +2843,7 @@ pub fn grep<'env>(
 		pattern,
 		path,
 		glob,
+		exclude,
 		recursive,
 		r#type,
 		ignore_case,
@@ -2838,6 +2876,7 @@ pub fn grep<'env>(
 			pattern,
 			path,
 			glob,
+			exclude,
 			recursive,
 			type_filter: r#type,
 			ignore_case,
@@ -2938,6 +2977,7 @@ mod tests {
 			pattern:            "needle".to_string(),
 			path:               path.to_string_lossy().into_owned(),
 			glob:               None,
+			exclude:            None,
 			recursive:          None,
 			type_filter:        None,
 			ignore_case:        None,
@@ -3495,6 +3535,60 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
+	fn grep_exclude_drops_matching_files_and_directories() {
+		let root = TempDirGuard::new();
+		write_file(&root.path().join("src/app.ts"), "needle app\n");
+		write_file(&root.path().join("src/app.test.ts"), "needle test\n");
+		write_file(&root.path().join("src/vendor/lib.ts"), "needle vendored\n");
+		write_file(&root.path().join("vendor/pkg/index.ts"), "needle vendor\n");
+		write_file(&root.path().join("gen/schema.ts"), "needle gen\n");
+
+		for (exclude, glob, expected) in [
+			(&["*.test.ts", "vendor"][..], None, &["gen/schema.ts", "src/app.ts"][..]),
+			(
+				&["gen/"][..],
+				None,
+				&["src/app.test.ts", "src/app.ts", "src/vendor/lib.ts", "vendor/pkg/index.ts"][..],
+			),
+			(&["src/vendor/**"][..], Some("src"), &["src/app.test.ts", "src/app.ts"][..]),
+			(
+				&["/vendor"][..],
+				None,
+				&["gen/schema.ts", "src/app.test.ts", "src/app.ts", "src/vendor/lib.ts"][..],
+			),
+			(&["{vendor,gen}"][..], None, &["src/app.test.ts", "src/app.ts"][..]),
+		] {
+			// `max_count` runs the sequential path, whose walk collects every
+			// entry before filtering; `None` streams in parallel and
+			// prunes directories.
+			for max_count in [None, Some(10)] {
+				let mut config = base_grep_config(root.path());
+				config.exclude = Some(
+					exclude
+						.iter()
+						.map(|pattern| (*pattern).to_owned())
+						.collect(),
+				);
+				config.glob = glob.map(str::to_owned);
+				config.max_count = max_count;
+				let result = grep_sync(config, None, task::CancelToken::default())
+					.expect("excluding grep should succeed");
+				let mut paths: Vec<&str> = result.matches.iter().map(|m| m.path.as_str()).collect();
+				paths.sort_unstable();
+				assert_eq!(paths, expected, "exclude {exclude:?}, max_count {max_count:?}");
+			}
+		}
+
+		let mut config = base_grep_config(root.path());
+		config.exclude = Some(vec!["[".to_owned()]);
+		let Err(err) = grep_sync(config, None, task::CancelToken::default()) else {
+			panic!("an unparsable exclude pattern must fail");
+		};
+		assert!(err.to_string().contains("Invalid exclude pattern"), "{err}");
+	}
+
+	#[cfg(unix)]
+	#[test]
 	fn grep_files_with_matches_counts_all_searched_files_when_none_match() {
 		let root = TempDirGuard::new();
 		write_file(&root.path().join("a.txt"), "haystack a\n");
@@ -3624,6 +3718,7 @@ mod tests {
 			pattern:            "needle".to_string(),
 			path:               file.to_string_lossy().into_owned(),
 			glob:               None,
+			exclude:            None,
 			recursive:          None,
 			type_filter:        None,
 			ignore_case:        None,

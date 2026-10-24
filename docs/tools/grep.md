@@ -109,6 +109,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 3. **Multiple explicit paths/globs**
    - `resolveExplicitSearchPaths()` collapses them into a common base and either a brace-union glob, an explicit file list, or per-target searches when the common ancestor is not itself a requested scope (or a plain-file entry would be demoted into a directory walk).
    - Missing entries are skipped non-fatally unless all are missing.
+   - An entry starting with `!` (unless it names an existing path) is an exclusion glob, not a search root: `!*.test.ts` drops matching files at any depth, `!vendor` drops that folder anywhere, `!src/legacy` (or `!./gen`) drops it relative to cwd only. Like `rg -g '!…'`, exclusions filter what is walked below each named path, never a named path itself (`src/app.test.ts;!*.test.ts` searches that file). With only exclusions the search covers `.`. `exclusionsForRoot()` rebases them onto each native search root as `exclude`, marking a cwd-relative one as root-anchored with a leading `/`; the walker's `WalkFilter::exclude` skips matching files and does not walk matching folders, so excluded files never count toward the match cap or the 20-file page. `approvalCacheTargets` drops exclusion entries, so they grant nothing, and keys cwd as well for any list holding one, since execution may search cwd.
 4. **Archive member paths**
    - Supported for UTF-8 text entries only. The member is extracted to a temporary scratch file for native grep, then displayed as `archive.ext:member`.
 5. **Internal URL paths**

@@ -223,6 +223,7 @@ pub struct WalkFilter {
 	skip_node_modules_unless_seen: bool,
 	mentions_node_modules: bool,
 	glob: Option<CompiledWalkGlob>,
+	exclude: Option<CompiledWalkGlob>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -246,6 +247,7 @@ impl fmt::Debug for WalkFilter {
 			.field("skip_node_modules_unless_seen", &self.skip_node_modules_unless_seen)
 			.field("mentions_node_modules", &self.mentions_node_modules)
 			.field("glob", &self.glob)
+			.field("exclude", &self.exclude)
 			.finish()
 	}
 }
@@ -257,6 +259,7 @@ impl PartialEq for WalkFilter {
 			&& self.skip_node_modules_unless_seen == other.skip_node_modules_unless_seen
 			&& self.mentions_node_modules == other.mentions_node_modules
 			&& self.glob == other.glob
+			&& self.exclude == other.exclude
 	}
 }
 
@@ -269,6 +272,7 @@ impl Hash for WalkFilter {
 		self.skip_node_modules_unless_seen.hash(state);
 		self.mentions_node_modules.hash(state);
 		self.glob.hash(state);
+		self.exclude.hash(state);
 	}
 }
 
@@ -281,6 +285,7 @@ impl WalkFilter {
 			skip_node_modules_unless_seen: false,
 			mentions_node_modules: false,
 			glob: None,
+			exclude: None,
 		}
 	}
 
@@ -292,6 +297,7 @@ impl WalkFilter {
 			skip_node_modules_unless_seen: false,
 			mentions_node_modules: false,
 			glob: None,
+			exclude: None,
 		}
 	}
 
@@ -303,6 +309,7 @@ impl WalkFilter {
 			skip_node_modules_unless_seen: false,
 			mentions_node_modules: false,
 			glob: None,
+			exclude: None,
 		}
 	}
 
@@ -323,6 +330,26 @@ impl WalkFilter {
 	pub fn glob(mut self, glob: CompiledWalkGlob) -> Self {
 		self.glob = Some(glob);
 		self
+	}
+
+	/// Drop entries whose normalized relative path matches `exclude`: a matching
+	/// directory is not descended, so everything under it is dropped too.
+	pub fn exclude(mut self, exclude: CompiledWalkGlob) -> Self {
+		self.exclude = Some(exclude);
+		self
+	}
+
+	/// Whether `exclude` matches `relative_path` or one of its ancestor
+	/// directories. Collected walks gather every entry before filtering, so a
+	/// directory's `SkipDescend` prunes nothing there and its files must be
+	/// matched through their ancestors.
+	fn excluded(&self, relative_path: &str) -> bool {
+		self.exclude.as_ref().is_some_and(|exclude| {
+			exclude.is_match(relative_path)
+				|| relative_path
+					.match_indices('/')
+					.any(|(end, _)| exclude.is_match(&relative_path[..end]))
+		})
 	}
 
 	fn accepts_path(&self, relative_path: &str) -> bool {
@@ -347,6 +374,13 @@ impl WalkFilter {
 				.split('/')
 				.any(|component| component == "node_modules")
 		{
+			return if file_type == FileType::Dir {
+				WalkDecision::SkipDescend
+			} else {
+				WalkDecision::Skip
+			};
+		}
+		if self.excluded(relative_path) {
 			return if file_type == FileType::Dir {
 				WalkDecision::SkipDescend
 			} else {
