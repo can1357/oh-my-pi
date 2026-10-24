@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { getReportsDir, logger } from "@oh-my-pi/pi-utils";
+import { decodeRequestBodyBytes } from "./request-body";
 
 export const PROMPT_CACHE_DEBUG_ENV = "PI_PROMPT_CACHE_DEBUG";
 export const PROMPT_CACHE_DEBUG_FILE = "prompt-cache-debug.jsonl";
@@ -1630,11 +1631,17 @@ async function requestBody(
 	input: string | URL | Request,
 	init?: RequestInit,
 ): Promise<string | Uint8Array | ArrayBuffer | null> {
-	const initBody = bodyInitBytes(init?.body);
-	if (initBody !== null) return initBody;
-	if (!(input instanceof Request) || init?.body !== undefined) return null;
 	try {
-		return new Uint8Array(await input.clone().arrayBuffer());
+		const initBody = bodyInitBytes(init?.body);
+		const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+		if (initBody !== null) {
+			if (typeof initBody === "string") return initBody;
+			const bytes = initBody instanceof Uint8Array ? initBody : new Uint8Array(initBody);
+			return decodeRequestBodyBytes(bytes, headers.get("content-encoding"));
+		}
+		if (!(input instanceof Request) || init?.body !== undefined) return null;
+		const bytes = new Uint8Array(await input.clone().arrayBuffer());
+		return decodeRequestBodyBytes(bytes, headers.get("content-encoding"));
 	} catch {
 		return null;
 	}
