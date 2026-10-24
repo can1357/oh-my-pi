@@ -7,7 +7,7 @@ text = read("local://paste-1.md")
 chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
 handles = [completion(f"One word — BUG|FEATURE|QUESTION:\n{c}", model="smol") for c in chunks]
 labels = wait(handles)
-display({l: labels.count(l) for l in set(labels)})
+print({l: labels.count(l) for l in set(labels)})
 ```
 {{else}}{{#if js}}
 ```
@@ -16,7 +16,7 @@ const codePoints = Array.from(text);
 const chunks = Array.from({length: Math.ceil(codePoints.length/4000)}, (_, i) => codePoints.slice(i*4000, (i+1)*4000).join(""));
 const handles = chunks.map(c => completion(`One word — BUG|FEATURE|QUESTION:\n${c}`, {model: "smol"}));
 const labels = await wait(handles);
-display(Object.fromEntries([...new Set(labels)].map(l => [l, labels.filter(x => x === l).length])));
+print(Object.fromEntries([...new Set(labels)].map(l => [l, labels.filter(x => x === l).length])));
 ```
 {{/if}}{{/if}}
 </map-reduce>
