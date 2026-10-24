@@ -99,9 +99,12 @@ function fakeSharedBroker(
 					daemon = { ...daemon, state: (await hooks.onStop?.()) ?? "exited" };
 					return { op: "stop", daemon };
 				}
-				case "restart":
+				case "restart": {
 					if (!daemon) throw unknown(operation.name);
-					return { op: "restart", daemon: await launch(operation.name) };
+					// Mirror the broker: a terminal record is replaced, a live one continues.
+					const incarnation = daemon.state === "exited" || daemon.state === "failed" ? "replaced" : "continued";
+					return { op: "restart", daemon: await launch(operation.name), incarnation };
+				}
 				default:
 					throw new Error(`Unexpected broker op ${operation.op}`);
 			}

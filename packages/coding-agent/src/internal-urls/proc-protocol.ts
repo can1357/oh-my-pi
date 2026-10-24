@@ -6,13 +6,16 @@ import {
 	agentStaleNote,
 	cancelAgentRegistration,
 	executeCancel,
+	retuneJobProgress,
 	runningAgentsOutsideJobs,
 	snapshotJobs,
 } from "../async/job-control";
+import { watcherLabel } from "../launch/service-monitor";
 import {
 	findService,
 	listServicesTolerant,
 	modeService,
+	monitorService,
 	sendService,
 	serviceLogPath,
 	serviceLogsWithRows,
@@ -35,8 +38,11 @@ import type {
 
 import { cfgLaunchEnabled } from "../tools/settings";
 
+const ACTIONS = { "/mode": "mode", "/kill": "kill", "/progress": "progress" } as const;
+type ProcAction = (typeof ACTIONS)[keyof typeof ACTIONS] | "stdin";
+
 type ProcTarget =
-	| { id: string; action: "stdin" | "mode" | "kill" }
+	| { id: string; action: ProcAction }
 	/** `proc://<id>/streams` lists a bash job's pipe streams; `/streams/<n>` reads one. */
 	| { id: string; action: "streams"; stream?: number };
 
@@ -45,9 +51,9 @@ const STREAMS_PATH = /^\/streams(?:\/(\d+))?\/?$/;
 function target(url: InternalUrl): ProcTarget {
 	const path = url.rawPathname ?? url.pathname;
 	const streams = STREAMS_PATH.exec(path);
-	if (url.search || url.hash || (!streams && path !== "" && path !== "/" && path !== "/mode" && path !== "/kill"))
+	if (url.search || url.hash || (!streams && path !== "" && path !== "/" && !Object.hasOwn(ACTIONS, path)))
 		throw new Error(
-			`Invalid proc:// URL: ${url.rawHref ?? url.href}. Use proc://, proc://<id>, proc://<id>/streams[/<n>], proc://<id>/kill, or proc://<id>/mode.`,
+			`Invalid proc:// URL: ${url.rawHref ?? url.href}. Use proc://, proc://<id>, proc://<id>/streams[/<n>], proc://<id>/kill, proc://<id>/mode, or proc://<id>/progress.`,
 		);
 	const id = url.rawHost;
 	if (id.includes("/") || id === "." || id === "..") throw new Error(`Invalid process id: ${id}`);
@@ -55,7 +61,7 @@ function target(url: InternalUrl): ProcTarget {
 		if (!id) throw new Error("proc://<id>/streams needs a job id, e.g. proc://bg_3/streams");
 		return { id, action: "streams", stream: streams[1] === undefined ? undefined : Number(streams[1]) };
 	}
-	return { id, action: path === "/mode" ? "mode" : path === "/kill" ? "kill" : "stdin" };
+	return { id, action: Object.hasOwn(ACTIONS, path) ? ACTIONS[path as keyof typeof ACTIONS] : "stdin" };
 }
 
 /** `proc://<id>/kill`: cancels a job, agent, or service; needs no content and touches no files. */
@@ -69,9 +75,11 @@ function killCall(id: string): string {
 }
 
 /** Reading a write-only action never acts (reads may be speculative); the error names the write that does. */
-function writeOnlyError(id: string, action: "kill" | "mode"): string {
+function writeOnlyError(id: string, action: "kill" | "mode" | "progress"): string {
 	if (action === "kill")
 		return `proc://${id}/kill is write-only; reading it did not stop anything. To cancel ${id}, ${killCall(id)}; read proc://${id} for its status.`;
+	if (action === "progress")
+		return `proc://${id}/progress is write-only. To retune its progress, call write with ${JSON.stringify({ path: `proc://${id}/progress`, content: "ambient" })} (wake, ambient, or off); read proc://${id} for its current progress.`;
 	return `proc://${id}/mode is write-only. To set a service's mode, call write with ${JSON.stringify({ path: `proc://${id}/mode`, content: "persist" })} (persist, session, or detached); read proc://${id} for its current mode.`;
 }
 
@@ -170,9 +178,15 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		if (procTarget.action !== "stdin") throw new Error(writeOnlyError(id || "<id>", procTarget.action));
 		const jobs = ownerJobs(session);
 		// Jobs and agents are in-process; a hung broker must not hide them.
-		const { services, error: servicesError } = cfgLaunchEnabled.get(session.settings)
+		const {
+			services,
+			monitors,
+			error: servicesError,
+		} = cfgLaunchEnabled.get(session.settings)
 			? await listServicesTolerant(session, context?.signal)
-			: { services: [], error: undefined };
+			: { services: [], monitors: undefined, error: undefined };
+		const sessionOwner = session.getSessionId?.() ?? session.getAgentId?.();
+		const watchersOf = (name: string) => monitors?.filter(watcher => watcher.name === name) ?? [];
 		if (!id) {
 			const now = Date.now();
 			const rows = [
@@ -181,26 +195,43 @@ export class ProcProtocolHandler implements ProtocolHandler {
 						job.endTime === undefined
 							? `up ${formatDuration(now - job.startTime)}`
 							: `in ${formatDuration(job.endTime - job.startTime)}`;
-					return `${job.id} [${job.type}] ${job.status} ${duration} — ${job.label.replace(/\s+/g, " ")}`;
+					const progress = job.progressDelivery ? ` progress=${job.progressDelivery}` : "";
+					return `${job.id} [${job.type}] ${job.status} ${duration}${progress} — ${job.label.replace(/\s+/g, " ")}`;
 				}),
 				...runningAgentsOutsideJobs(session).map(
 					agent =>
 						`${agent.id} [task] running up ${formatDuration(agent.ageMs)} — ${agent.activity ?? "agent"}${agentStaleNote(agent)}`,
 				),
-				...services.map(service => serviceStatus(service)),
+				...services.flatMap(service => {
+					const watchers = watchersOf(service.name);
+					return watchers.length === 0
+						? [serviceStatus(service)]
+						: [
+								serviceStatus(service),
+								`  watched by: ${watchers.map(watcher => watcherLabel(watcher, service, sessionOwner)).join("; ")}`,
+							];
+				}),
 				...(servicesError ? [`Services unavailable (daemon broker): ${servicesError}`] : []),
 			];
 			return textResource(url, rows.join("\n") || "No background jobs or services.", undefined, true, {
 				jobs: snapshotJobs(session, jobs, { includeResults: true }),
 				agents: runningAgentsOutsideJobs(session),
 				daemons: services,
+				...(monitors ? { monitors } : {}),
 			});
 		}
 		const job = jobs.find(item => item.id === id);
 		const service = services.find(item => item.name === id);
 		if (job && service) throw new Error(`proc://${id} is ambiguous: both job ${id} and service ${id} exist.`);
 		if (service) {
-			const header = `${serviceStatus(service)}\nready=${service.readyAt !== undefined || service.state === "ready" || service.state === "running"} persist=${service.persist} detached=${service.detached}${service.exitCode === undefined ? "" : ` exit=${service.exitCode}`}`;
+			const watchers = monitors ? watchersOf(id) : undefined;
+			const watcherLines =
+				watchers === undefined
+					? ""
+					: watchers.length === 0
+						? "\nwatchers: none"
+						: `\nwatchers:\n${watchers.map(watcher => `- ${watcherLabel(watcher, service, sessionOwner)}`).join("\n")}`;
+			const header = `${serviceStatus(service)}\nready=${service.readyAt !== undefined || service.state === "ready" || service.state === "running"} persist=${service.persist} detached=${service.detached}${service.exitCode === undefined ? "" : ` exit=${service.exitCode}`}${watcherLines}`;
 			const sourcePath = await serviceLogPath(session, id);
 			const logs = await serviceLogsWithRows(session, id, context?.signal);
 			return textResource(
@@ -208,11 +239,17 @@ export class ProcProtocolHandler implements ProtocolHandler {
 				`${header}${logs.text ? `\n${logs.text}` : ""}`,
 				(await Bun.file(sourcePath).exists()) ? sourcePath : undefined,
 				undefined,
-				{ daemon: service, log: logs.text, ...("terminalRows" in logs ? { terminalRows: logs.terminalRows } : {}) },
+				{
+					daemon: service,
+					log: logs.text,
+					...(watchers ? { monitors: watchers } : {}),
+					...("terminalRows" in logs ? { terminalRows: logs.terminalRows } : {}),
+				},
 			);
 		}
 		if (job) {
-			const lines = [`${job.id} [${job.type}] — ${job.status} — ${job.label}`];
+			const progress = job.progressDelivery ? ` — progress=${job.progressDelivery}` : "";
+			const lines = [`${job.id} [${job.type}] — ${job.status}${progress} — ${job.label}`];
 			if (job.resultText) lines.push(job.resultText);
 			if (job.errorText) lines.push(`Error: ${job.errorText}`);
 			if (job.status === "running") {
@@ -246,7 +283,8 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		if (!session) throw new Error("proc:// requires a tool session");
 		const { id, action } = target(url);
 		if (action === "streams") throw new Error(`proc://${id}/streams is read-only`);
-		if (!id) throw new Error("Write requires proc://<id>, proc://<id>/kill, or proc://<id>/mode");
+		if (!id)
+			throw new Error("Write requires proc://<id>, proc://<id>/kill, proc://<id>/mode, or proc://<id>/progress");
 		const ownerId = session.getAgentId?.() ?? undefined;
 		const job = ownerJobs(session).find(item => item.id === id);
 		const agent = runningAgentsOutsideJobs(session).find(item => item.id === id);
@@ -276,6 +314,41 @@ export class ProcProtocolHandler implements ProtocolHandler {
 				content: [{ type: "text", text: `${serviceStatus(updated)}; mode=${content}` }],
 				details: { proc: { action: "mode", daemon: updated, mode: content } },
 			};
+		}
+		if (action === "progress") {
+			if (content !== "wake" && content !== "ambient" && content !== "off")
+				throw new Error("Progress must be wake, ambient, or off");
+			if (service) {
+				const monitored = await monitorService(session, id, content, context?.signal);
+				const text =
+					content === "off"
+						? `${monitored.detached ? "Stopped monitoring" : "No active monitor for"} ${serviceStatus(monitored.daemon)}`
+						: `Monitoring ${serviceStatus(monitored.daemon)}; progress=${content}`;
+				return {
+					content: [{ type: "text", text }],
+					details: {
+						proc: {
+							action: "progress",
+							daemon: monitored.daemon,
+							progress: content,
+							...(monitored.detached !== undefined ? { detached: monitored.detached } : {}),
+						},
+					},
+				};
+			}
+			if (job && session.asyncJobManager) {
+				if (content === "off")
+					throw new Error(
+						`A background job's progress channel cannot be detached; write ambient to proc://${id}/progress, or cancel it with proc://${id}/kill.`,
+					);
+				const result = retuneJobProgress(session, session.asyncJobManager, ownerId, [id], content);
+				return {
+					content: result.content,
+					details: { proc: result.details },
+					...(result.isError ? { isError: true } : {}),
+				};
+			}
+			throw new Error(`Background job or service not found: ${id}`);
 		}
 		if (action === "stdin") {
 			if (!service) throw new Error(`stdin is only available for services. To cancel, ${killCall(id)}.`);
