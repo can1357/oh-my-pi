@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Forced `tool_choice` rejections (HTTP 400) now downgrade to automatic tool selection and retry once instead of failing the turn, on Anthropic, OpenAI Completions and OpenAI Responses ([#13248](https://github.com/can1357/oh-my-pi/pull/13248) by [@jwaldrip](https://github.com/jwaldrip)).
 ### Added
 
 - Added `PI_ANTHROPIC_API_VERSION=2026-10-21` to send Anthropic API version 2026-10-21 to the official Anthropic API; sampling parameters are omitted under that version, which rejects them ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
