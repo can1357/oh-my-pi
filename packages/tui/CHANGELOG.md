@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `PI_LINK_SCHEME` and `PI_LINK_HOST` environment variables for host-qualified OSC 8 file links in remote terminal sessions ([#15497](https://github.com/can1357/oh-my-pi/issues/15497), [#15855](https://github.com/can1357/oh-my-pi/pull/15855) by [@KunoLu](https://github.com/KunoLu)).
 - Added `modelEnds` to `GroupedFileSection`: per file, the model-line index just past its last line, so a caller cutting the output can tell which files it shows whole ([#16594](https://github.com/can1357/oh-my-pi/pull/16594) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
