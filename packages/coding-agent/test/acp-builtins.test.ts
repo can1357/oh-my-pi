@@ -12,6 +12,7 @@ import type {
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
 import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
+import * as mcpConfigWriter from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
 import type { AgentSession, AsyncJobTree } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionDumpArchive } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -1447,12 +1448,19 @@ describe("wave 4 commands", () => {
 		expect(output[0]).toContain("reload");
 	});
 
-	it("/mcp resources: outputs server list or no-server message", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/mcp resources", runtime);
-		expect(result).toEqual({ consumed: true });
-		// No servers configured in tmp project dir — should report that
-		expect(output[0]).toMatch(/No MCP servers configured|No resources/);
+	it("/mcp resources: reports no servers for empty user and project configurations", async () => {
+		// Isolate both scopes at the config-reader boundary: a temporary cwd
+		// alone still discovers the developer's real user-level MCP servers.
+		const readConfig = spyOn(mcpConfigWriter, "readMCPConfigFile").mockResolvedValue({ mcpServers: {} });
+		try {
+			const { output, runtime } = createRuntime();
+			const result = await executeAcpBuiltinSlashCommand("/mcp resources", runtime);
+			expect(result).toEqual({ consumed: true });
+			expect(readConfig).toHaveBeenCalledTimes(2);
+			expect(output).toEqual(["No MCP servers configured."]);
+		} finally {
+			readConfig.mockRestore();
+		}
 	});
 
 	it("/mcp unknown-verb: returns usage pointing to help", async () => {
@@ -1709,12 +1717,12 @@ describe("wave 5 — adapters and polish", () => {
 		expect(detailTools).toBe(Number(aggregateTools));
 	});
 
-	it("/context rejects unsupported arguments as a consumed command", async () => {
+	it("/context rejects unsupported arguments as a failed consumed command", async () => {
 		const { output, runtime } = createRuntime();
 
 		const result = await executeAcpBuiltinSlashCommand("/context verbose", runtime);
 
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output).toEqual(["Usage: /context [all]"]);
 	});
 
