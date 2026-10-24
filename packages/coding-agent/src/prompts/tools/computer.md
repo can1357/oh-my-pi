@@ -3,7 +3,7 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
 <instruction>
 - Direct helpers each run one approved call in the persistent desktop session and return real structured values; screenshots auto-display as Eval images.
 - Desktop root: `displays`, `windows({app?, title?})`, `screenshot`, `zoom({x, y, width, height}, {silent?})`, `click`, `doubleClick`, `move`, `drag`, `scroll`, `type`, `press`, `elementAt(x, y)`, `focusedElement`, `clipboard.read`/`clipboard.write`, `capabilities`, `close`.
-- To start on an app, `const { window: win } = await computer.apps.open("Reminders")` returns its frontmost window handle whether or not the app was running (it launches or reopens only when needed, in the background; `null` when no window appeared within 3 s); read it in the same call (`await win.ax()`). `computer.window({app})` only finds an open window and throws when the app has none.
+- On macOS, to start on an app, `const { window: win } = await computer.apps.open("Reminders")` returns its frontmost window handle whether or not the app was running (it launches or reopens only when needed, in the background; `null` when no window appeared within 3 s); if non-null, read it in the same call (`await win.ax()`). Other platforms return `window: null`: open the app, then resolve its window with `computer.window({app})`. That lookup only finds an open window and throws when the app has none; use `{app, title}` when the task needs a specific window.
 - `await computer.window(idOrFilter)` resolves exactly one window (ambiguous → throws listing candidates) and returns a `ComputerWindow` with `id`, `app`, `title`, `pid`, `bounds`, `focused`; `await computer.focusedWindow()` returns one or null. Window helpers: `screenshot({silent?})`, `zoom({x, y, width, height}, {silent?})`, `click(x, y, {button?, count?, modifiers?})`, `doubleClick`, `move`, `drag([[x,y],…], {modifiers?})`, `scroll(x, y, {dx?, dy?})`, `type(text)`, `press("cmd+shift+p")`, `raise`, `ax({all?, maxDepth?})`, `find({role?, title?, value?, limit?})`, `ref("e5")`.
 - `windows()` returns plain records `{id, app, title, pid?, x, y, width, height, focused}`, not handles: no `bounds`, no handle methods. Python: dicts (`w["x"]`, `w.get("pid")`). Handle: `await computer.window(w["id"])`.
 - `windows()` lists at most 48 matches. On macOS `window(id | {app})` searches every window; on Linux and Windows it searches the first 48. On macOS without Screen Recording, other apps' window titles are empty: resolve by `app` or id and read `ax()`. A failed `title` filter does not prove the window is absent.
@@ -25,7 +25,7 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
 
 <examples>
 ```javascript
-const { window: win } = await computer.apps.open("Code");
+const win = (await computer.apps.open("Code")).window ?? await computer.window({ app: "Code" });
 await win.screenshot();
 const tree = await win.ax({ maxDepth: 6 });
 const save = await win.ref("e12");
@@ -41,7 +41,7 @@ await computer.run(async ({ desktop, wait }) => {
 ```
 
 ```python
-win = await computer.window(app="Code")
+win = (await computer.apps.open("Code"))["window"] or await computer.window(app="Code")
 await win.screenshot(silent=True)
 tree = await win.ax(maxDepth=6)
 await win.ref("e12").press()
