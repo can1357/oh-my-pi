@@ -16,6 +16,7 @@ import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/displa
 import type { InteractiveModeContext } from "../modes/types";
 import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { CollabHost, CollabHostStoppedError, CollabRelayUnavailableError } from "./host";
+import { getInFlightCollabHosting, hasInFlightCollabHosting, stopCollabHosting } from "./start-hosting";
 import type { CollabAccess } from "./registry";
 
 import { cfgCollabAutoStart, cfgCollabRelayUrl, cfgCollabWebUrl } from "./settings";
@@ -71,8 +72,45 @@ export class CollabController {
 
 	/** The live room for the current session; stale or ending rooms are absent. */
 	get host(): CollabHost | undefined {
-		const host = this.#host;
+		const host = this.#host ?? this.#ctx.collabHost;
 		return host && !host.ending && host.sessionId === this.#ctx.sessionManager.getSessionId() ? host : undefined;
+	}
+
+	/** Whether guest actions in this process may drive the session yet. */
+	get isGuestActionsReady(): boolean {
+		return this.#startupComplete && !this.#ctx.session.isSessionTransitioning;
+	}
+
+	/** Increment and claim the next registry generation for this process. */
+	nextGeneration(): number {
+		return ++this.#generation;
+	}
+
+	/** Reclaim generation if a room never opened on the relay. */
+	rollbackGeneration(generation: number): void {
+		if (this.#generation === generation) {
+			this.#generation--;
+		}
+	}
+
+	/**
+	 * Adopt an API-hosted room as this process's live room, invalidating
+	 * stale launches and observing session changes.
+	 */
+	adoptHost(host: CollabHost): void {
+		this.#host = host;
+		this.#ctx.collabHost = host;
+		this.#generation = Math.max(this.#generation, host.generation);
+		this.#stopEpoch++;
+		this.#observeSessionChanges();
+		host.addOnEnded(() => this.#onHostEnded(host));
+	}
+
+	#activeLaunch: Promise<CollabHost> | null = null;
+
+	/** In-flight #launch promise, if any room is currently connecting. */
+	get activeLaunch(): Promise<CollabHost> | null {
+		return this.#activeLaunch;
 	}
 
 	/** Registry generation of the most recently started room; 0 before the first. */
@@ -154,6 +192,16 @@ export class CollabController {
 			await stopping;
 			if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
 			if (stopEpoch !== this.#stopEpoch) throw new CollabHostStoppedError("collab controller stopped");
+			if (hasInFlightCollabHosting(this.#ctx)) {
+				const pending = getInFlightCollabHosting(this.#ctx);
+				if (pending) {
+					try {
+						await pending.promise;
+					} catch {
+						// Ignored
+					}
+				}
+			}
 			// A preceding manual start or rotation may have installed a room while
 			// this request waited. Reuse or upgrade it rather than racing its launch.
 			const current = this.host;
@@ -172,6 +220,9 @@ export class CollabController {
 	/** Cancel pending launches and stop the current room, including a stop already in flight. */
 	async stop(reason: string): Promise<void> {
 		this.#stopEpoch++;
+		if (hasInFlightCollabHosting(this.#ctx)) {
+			await stopCollabHosting(this.#ctx, reason);
+		}
 		if (this.#host) await this.#stopHost(this.#host, reason);
 	}
 
@@ -221,6 +272,17 @@ export class CollabController {
 	 * and state first. Connect only after the previous room is fully gone.
 	 */
 	async #launch(access: CollabAccess, stopEpoch: number, relay?: string): Promise<CollabHost> {
+		const promise = this.#doLaunch(access, stopEpoch, relay);
+		this.#activeLaunch = promise;
+		promise.catch(() => {});
+		try {
+			return await promise;
+		} finally {
+			if (this.#activeLaunch === promise) this.#activeLaunch = null;
+		}
+	}
+
+	async #doLaunch(access: CollabAccess, stopEpoch: number, relay?: string): Promise<CollabHost> {
 		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
 		if (stopEpoch !== this.#stopEpoch) throw new CollabHostStoppedError("collab controller stopped");
 		// Identity cleanup callbacks can precede awaited hooks and message replacement.
@@ -234,6 +296,19 @@ export class CollabController {
 		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
 		if (stopEpoch !== this.#stopEpoch) throw new CollabHostStoppedError("collab controller stopped");
 		if (this.#ctx.collabGuest) throw new CollabHostStoppedError("collab guest owns the session");
+		while (hasInFlightCollabHosting(this.#ctx)) {
+			const pending = getInFlightCollabHosting(this.#ctx);
+			if (!pending) break;
+			try {
+				await pending.promise;
+			} catch {
+				// Ignored
+			}
+			if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
+			if (stopEpoch !== this.#stopEpoch) throw new CollabHostStoppedError("collab controller stopped");
+			if (this.#ctx.collabGuest) throw new CollabHostStoppedError("collab guest owns the session");
+			if (this.host) return this.host;
+		}
 		const relayUrl = this.#resolveRelayUrl(relay);
 		const webUrl = cfgCollabWebUrl.get(this.#ctx.settings) || "";
 		this.#observeSessionChanges();
@@ -348,6 +423,17 @@ export class CollabController {
 		this.#ops = this.#ops
 			.then(async () => {
 				await stopping;
+				if (this.#shutdown || stopEpoch !== this.#stopEpoch || this.host || this.#ctx.collabGuest) return;
+				if (hasInFlightCollabHosting(this.#ctx)) {
+					const pending = getInFlightCollabHosting(this.#ctx);
+					if (pending) {
+						try {
+							await pending.promise;
+						} catch {
+							// In-flight start failed, continue with auto-start
+						}
+					}
+				}
 				if (this.#shutdown || stopEpoch !== this.#stopEpoch || this.host || this.#ctx.collabGuest) return;
 				const access = this.autoStartMode;
 				if (access !== "off") await this.#launchReporting(access, stopEpoch);

@@ -5,6 +5,7 @@ import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { type CollabHostSnapshot, listCollabHosts } from "../collab/registry";
+import { hasInFlightCollabHosting, stopCollabHosting } from "../collab/start-hosting";
 import { settings } from "../config/settings";
 import { parseExportArgs } from "../export/html/args";
 import { shareSession } from "../export/share";
@@ -328,7 +329,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			const host = runtime.ctx.collabController.host;
+			const host =
+				runtime.ctx.collabController.host ??
+				(runtime.ctx.collabHost && !runtime.ctx.collabHost.ending ? runtime.ctx.collabHost : undefined);
 			if (host) {
 				return `Collab: hosting (${Math.max(0, host.participants.length - 1)} guests)`;
 			}
@@ -343,11 +346,13 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			const { verb, rest } = parseSubcommand(args);
 			if (verb === "stop") {
 				await ctx.collabController.stop("host stopped");
+				await stopCollabHosting(ctx);
 				ctx.showStatus("Collab stopped");
 				return;
 			}
 			if (verb === "status") {
-				const host = ctx.collabController.host;
+				const host =
+					ctx.collabController.host ?? (ctx.collabHost && !ctx.collabHost.ending ? ctx.collabHost : undefined);
 				if (host) {
 					const names = host.participants.map(p =>
 						p.role === "host" ? `${p.name} (host)` : p.readOnly ? `${p.name} (view-only)` : p.name,
@@ -430,6 +435,18 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			}
 			const knownStartVerb = verb === "start" || verb === "view";
 			const view = verb === "view";
+			const currentHost =
+				ctx.collabHost && !ctx.collabHost.ending && ctx.collabHost.sessionId === ctx.sessionManager.getSessionId()
+					? ctx.collabHost
+					: undefined;
+			if (currentHost && !ctx.collabController.host) {
+				showCollabLink(ctx, currentHost, view ? "Read-only collab session active" : "Collab session active", view);
+				return;
+			}
+			if (hasInFlightCollabHosting(ctx)) {
+				ctx.showError("A collab hosting session is already starting");
+				return;
+			}
 			const access = view ? "view" : "control";
 			const existing = ctx.collabController.host;
 			let host: CollabHost;
@@ -458,6 +475,10 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				ctx.showError("Usage: /join <link>");
 				return;
 			}
+			if (hasInFlightCollabHosting(ctx)) {
+				ctx.showError("Stop hosting first (/collab stop)");
+				return;
+			}
 			if (ctx.collabGuest) {
 				ctx.showError("Already in a collab session (/leave first)");
 				return;
@@ -467,6 +488,16 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				if (!ctx.collabController.host) await ctx.collabController.stop("joining another session");
 				// Recheck after teardown: a concurrent manual start may have won.
 				if (ctx.collabController.host) {
+					ctx.showError("Stop hosting first (/collab stop)");
+					return;
+				}
+				const activeProgrammaticHost =
+					ctx.collabHost &&
+					!ctx.collabHost.ending &&
+					ctx.collabHost.sessionId === ctx.sessionManager.getSessionId()
+						? ctx.collabHost
+						: undefined;
+				if (activeProgrammaticHost) {
 					ctx.showError("Stop hosting first (/collab stop)");
 					return;
 				}
@@ -481,7 +512,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		icon: "signOut",
 		description: "Leave the collab session",
 		getTuiAutocompleteDescription: runtime => {
-			if (runtime.ctx.collabController.host) return "Leave collab: hosting";
+			if (runtime.ctx.collabController.host || (runtime.ctx.collabHost && !runtime.ctx.collabHost.ending)) {
+				return "Leave collab: hosting";
+			}
 			if (runtime.ctx.collabGuest) return "Leave collab: guest";
 			return "Leave collab: not in collab";
 		},
@@ -492,8 +525,9 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				await ctx.collabGuest.leave("left");
 				return;
 			}
-			const wasHosting = ctx.collabHost !== undefined;
+			const wasHosting = ctx.collabHost !== undefined || hasInFlightCollabHosting(ctx);
 			await ctx.collabController.stop("host stopped");
+			await stopCollabHosting(ctx);
 			if (wasHosting) {
 				ctx.showStatus("Collab stopped");
 				return;

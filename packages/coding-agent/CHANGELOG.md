@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added extension-facing collab hosting methods (`pi.startCollab()`, `pi.getCollabLinks()`, and `pi.stopCollab()`) to start, inspect, and stop live session sharing programmatically without routing through terminal commands ([#9525](https://github.com/can1357/oh-my-pi/pull/9525) by [@jwaldrip](https://github.com/jwaldrip)).
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 

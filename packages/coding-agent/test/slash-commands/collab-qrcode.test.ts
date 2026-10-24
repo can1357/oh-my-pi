@@ -51,11 +51,15 @@ async function createRuntimeHarness(options?: { collabHost?: NonNullable<Interac
 		showError,
 		present,
 		settings: Settings.isolated({ "collab.relayUrl": "wss://relay.example.com" }),
-		session: { registerSessionChangeCallback: () => () => {} },
+		session: {
+			registerSessionChangeCallback: () => () => {},
+			isSessionTransitionInFlight: false,
+			registerSessionTransitionSettledCallback: () => () => {},
+		},
 		sessionManager: { getSessionId: () => "sess-qrcode" },
 		statusLine: { setCollabStatus: () => {}, invalidate: () => {} },
 		ui: { requestRender: () => {} },
-		collabHost: undefined,
+		collabHost: options?.collabHost,
 	} as unknown as InteractiveModeContext;
 	// `/collab` starts rooms through the controller, which builds a real CollabHost.
 	ctx.collabController = new CollabController(ctx);

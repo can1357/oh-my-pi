@@ -126,11 +126,13 @@ Core methods:
 - `getSessionName`, `setSessionName`
 - `setModel`, `getThinkingLevel`, `setThinkingLevel`
 - `getServiceTiers`, `setServiceTier`
+- `startCollab`, `getCollabLinks`, `stopCollab`
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
 - `events` (shared event bus)
 
 `ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
+`pi.startCollab({ relayUrl })` starts hosting this session's collab room, or returns the links of the room already hosted on that relay. Interactive TUI only; other extension hosts throw. The returned `{ link, viewLink, webLink, webViewLink }` are credentials (the full link can steer the session): unlike `/collab`, nothing is printed, so the extension owns where the links go. `pi.getCollabLinks()` reads the current links without starting anything, and answers `undefined` right after a session switch while the previous session's room winds down, and `pi.stopCollab()` stops hosting, disconnecting every guest.
 
 `setLabel(label)` sets the extension's display label. It is not a session-entry
 labeling action. `getAllTools()` returns tool schemas and source metadata, while
