@@ -4,6 +4,7 @@
 
 ### Added
 
+- Approval prompts now trigger a terminal and desktop notification while they are waiting for an answer, like the Ask/Completion notifications, controlled by the new `approval.notify` setting (default `on`) ([#3386](https://github.com/can1357/oh-my-pi/issues/3386), [#16949](https://github.com/can1357/oh-my-pi/pull/16949) by [@michaelprager](https://github.com/michaelprager))
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 

@@ -1279,6 +1279,19 @@ export const cfgAskNotify = register({
 	},
 });
 
+export const cfgApprovalNotify = register({
+	id: "approval.notify",
+	type: "enum",
+	values: ["on", "off"] as const,
+	default: "on",
+	ui: {
+		tab: "interaction",
+		group: "Notifications",
+		label: "Approval Notification",
+		description: "Notify when the agent is waiting for an approval",
+	},
+});
+
 export const cfgRecapEnabled = register({
 	id: "recap.enabled",
 	type: "boolean",

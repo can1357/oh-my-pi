@@ -1,8 +1,9 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
-import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { Container, Spacer, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import type { CollabHost } from "../../collab/host";
+import { cfgApprovalNotify } from "../settings";
 import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type {
 	CompactOptions,
@@ -710,6 +711,19 @@ export class ExtensionUiController {
 		try {
 			const choice = await this.#raceCollabDialog(request, signal, localSignal =>
 				this.#presentDialog(localSignal, settle => {
+					// A pending approval needs the human, like ask and completion:
+					// flag the terminal and the desktop so a backgrounded session
+					// is findable. Only when notifications are enabled.
+					if (cfgApprovalNotify.get(this.ctx.settings) === "on") {
+						const sessionName = this.ctx.sessionManager.getSessionName();
+						TERMINAL.sendNotification({
+							title: sessionName || "omp",
+							body: "Waiting for approval",
+							type: "approval",
+							urgency: "normal",
+							actions: "focus",
+						});
+					}
 					const editor = this.ctx.editor;
 					const dialog = new ApprovalDialogComponent(
 						prompt.compact,
