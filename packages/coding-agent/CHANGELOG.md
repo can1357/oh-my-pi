@@ -5,6 +5,7 @@
 ### Added
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- Added `startup.announceXdevMounts` (default `true`) to hide visible `xd://` mount and unmount notices independently of the startup splash and MCP connection status, without suppressing tool discovery or hidden model inventory updates ([#16634](https://github.com/can1357/oh-my-pi/issues/16634), [#16761](https://github.com/can1357/oh-my-pi/pull/16761) by [@SAKANA-MOONLIGHT](https://github.com/SAKANA-MOONLIGHT))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 
 ### Fixed

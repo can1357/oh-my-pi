@@ -20,7 +20,7 @@ import { listXdevTools, XDEV_EXTERNAL_DESCRIPTION_CAP, type XdevState } from "@o
 import { logger } from "@oh-my-pi/pi-utils";
 
 import { cfgSkillful } from "@oh-my-pi/pi-coding-agent/session/settings";
-import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgStartupAnnounceXdevMounts, cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgToolsXdevDocs, cfgToolsXdevInlineDevices } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 // Cache-stability invariant: when MCP servers reconnect with byte-identical tool
@@ -1456,6 +1456,65 @@ These tools became available:
 		expect(notices).toHaveLength(1);
 		const text = typeof notices[0].content === "string" ? notices[0].content : "";
 		expect(text).toContain("xd://mcp__nucleus_search");
+	});
+
+	it.each([
+		{ mode: "default", announce: undefined },
+		{ mode: "disabled", announce: false },
+	])("preserves xd:// device lifecycle and hidden notices with $mode announcements", async ({ announce }) => {
+		const { session, contexts, toolRegistry } = newSession(async names => `tools:${names.join(",")}`, {
+			xdev: createTestXdevState(),
+			responses: [{ content: ["ok"] }, { content: ["ok"] }],
+		});
+		cfgStartupQuiet.set(session.settings, false);
+		if (announce !== undefined) cfgStartupAnnounceXdevMounts.set(session.settings, announce);
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		const catalog = {
+			...createBasicTool("catalog_lookup", "Catalog Lookup"),
+			loadMode: "discoverable" as const,
+		};
+		toolRegistry.set(catalog.name, catalog);
+		await session.refreshMCPTools([search]);
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice" && event.source === "xdev") notices.push(event.message);
+		});
+
+		await session.setActiveToolPresentation(
+			["read", "write", search.name, catalog.name],
+			[search.name, catalog.name],
+		);
+		expect(notices).toEqual(announce === false ? [] : ["xd://: mounted catalog_lookup"]);
+		expect(session.getMountedXdevToolNames()).toContain(catalog.name);
+		expect(session.getToolByName("xd://catalog_lookup")).toBe(catalog);
+		expect(contexts).toHaveLength(0);
+
+		await session.prompt("first");
+		expect(mountNoticesIn(contexts[0]).at(-1)).toContain("xd://catalog_lookup");
+		const mountedNotice = session.agent.state.messages
+			.filter(
+				(message): message is CustomMessage =>
+					message.role === "custom" && message.customType === "xdev-mount-notice",
+			)
+			.at(-1);
+		expect(mountedNotice).toMatchObject({ details: { added: [catalog.name], removed: [] }, display: false });
+
+		await session.setActiveToolPresentation(["read", "write", search.name], [search.name]);
+		expect(notices).toEqual(
+			announce === false ? [] : ["xd://: mounted catalog_lookup", "xd://: unmounted catalog_lookup"],
+		);
+		expect(session.getMountedXdevToolNames()).not.toContain(catalog.name);
+		expect(contexts).toHaveLength(1);
+
+		await session.prompt("second");
+		expect(mountNoticesIn(contexts[1]).at(-1)).toContain("xd://catalog_lookup");
+		const unmountedNotice = session.agent.state.messages
+			.filter(
+				(message): message is CustomMessage =>
+					message.role === "custom" && message.customType === "xdev-mount-notice",
+			)
+			.at(-1);
+		expect(unmountedNotice).toMatchObject({ details: { added: [], removed: [catalog.name] }, display: false });
 	});
 
 	it("keeps xd:// mount deltas model-visible without rendering them during quiet startup", async () => {

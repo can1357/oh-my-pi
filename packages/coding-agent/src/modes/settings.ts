@@ -1082,6 +1082,19 @@ export const cfgStartupQuiet = register({
 	},
 });
 
+export const cfgStartupAnnounceXdevMounts = register({
+	id: "startup.announceXdevMounts",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Announce xd:// Mounts",
+		description:
+			"Show xd:// device mount and unmount notices, including mid-session changes. Quiet Startup still suppresses them.",
+	},
+});
+
 export const cfgStartupShowSplash = register({
 	id: "startup.showSplash",
 	type: "boolean",
