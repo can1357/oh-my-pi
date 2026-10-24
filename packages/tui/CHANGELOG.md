@@ -2,9 +2,18 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced the `app.session.observe` keybinding action with `app.agents.hub`; saved observer shortcuts migrate automatically, and API consumers must use the new action ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
+
 ### Added
 
+- Added the `app.editor.stash` shortcut and editor draft snapshot APIs to preserve text, cursor state, pastes, and attachments when swapping drafts ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
 - Added `modelEnds` to `GroupedFileSection`: per file, the model-line index just past its last line, so a caller cutting the output can tell which files it shows whole ([#16594](https://github.com/can1357/oh-my-pi/pull/16594) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Ctrl+S now stashes a prompt instead of opening Agent Hub; Alt+A still opens Hub, including after migrating saved observer shortcuts ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ### Fixed
 
