@@ -807,12 +807,12 @@ export class RelayBridge {
 		const parsed = claim ? parseTargetId(claim) : null;
 		const tab = parsed ? this.#tabs.get(parsed.key) : undefined;
 		if (tab) {
+			// Chrome refused the tab over another extension's frame; claimed, the extension may now empty it. Cleared
+			// before the claim, which groups only an eligible tab.
+			const foreignFrameRefusal = tab.refusal !== undefined && FOREIGN_FRAME_REFUSAL.test(tab.refusal);
+			if (foreignFrameRefusal) tab.refusal = undefined;
 			this.#claimTab(conn, tab.tabKey);
-			// Chrome refused the tab over another extension's frame; claimed, the extension may now empty it.
-			if (tab.refusal && FOREIGN_FRAME_REFUSAL.test(tab.refusal)) {
-				tab.refusal = undefined;
-				if (!tab.announced && this.#eligible(tab) && !tab.discarded) this.#announceTab(tab);
-			}
+			if (foreignFrameRefusal && !tab.announced && this.#eligible(tab) && !tab.discarded) this.#announceTab(tab);
 		}
 		return conn.id;
 	}
