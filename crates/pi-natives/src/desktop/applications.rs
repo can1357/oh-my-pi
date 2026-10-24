@@ -99,6 +99,18 @@ pub(crate) fn list(options: ApplicationQuery) -> CoreResult<Vec<Application>> {
 /// Resolve identity before display name; ambiguity never launches an arbitrary
 /// app.
 fn resolve<'a>(apps: &'a [Application], input: &str) -> CoreResult<Option<&'a Application>> {
+	resolve_by(apps, input, is_helper)
+}
+
+/// [`resolve`], with `is_helper` naming the inventory entries no one opens by
+/// name. A display name that one regular app and only helpers share names the
+/// regular app: macOS calls both Contacts and its `PeopleViewService`
+/// "Contacts", and Messages and its running assistant extension "Messages".
+fn resolve_by<'a>(
+	apps: &'a [Application],
+	input: &str,
+	is_helper: impl Fn(&Application) -> bool,
+) -> CoreResult<Option<&'a Application>> {
 	let mut exact = apps
 		.iter()
 		.filter(|app| app.id == input || app.path == input);
@@ -107,10 +119,37 @@ fn resolve<'a>(apps: &'a [Application], input: &str) -> CoreResult<Option<&'a Ap
 	}
 	let folded = input.to_lowercase();
 	let mut names = apps.iter().filter(|app| app.name.to_lowercase() == folded);
-	names
-		.next()
-		.map(|first| unique(first, names.next(), input))
-		.transpose()
+	let Some(first) = names.next() else {
+		return Ok(None);
+	};
+	let Some(second) = names.next() else {
+		return Ok(Some(first));
+	};
+	// Bundle flags are read only once a name ties, and only for its matches.
+	let mut regular = [first, second]
+		.into_iter()
+		.chain(names)
+		.filter(|app| !is_helper(app));
+	match (regular.next(), regular.next()) {
+		(Some(only), None) => Ok(Some(only)),
+		// The error names two apps the caller could mean, never a helper.
+		(Some(one), Some(other)) => unique(one, Some(other), input).map(Some),
+		(None, _) => unique(first, Some(second), input).map(Some),
+	}
+}
+
+/// Whether `app` is a helper rather than an application a user opens: an
+/// agent (`LSUIElement`), a background-only app (`LSBackgroundOnly`) or a
+/// running bundle that is not an `.app`, such as an app extension.
+#[cfg(target_os = "macos")]
+fn is_helper(app: &Application) -> bool {
+	platform::is_helper(Path::new(&app.path))
+}
+
+/// Other platforms list no helpers apart from their applications.
+#[cfg(not(target_os = "macos"))]
+const fn is_helper(_: &Application) -> bool {
+	false
 }
 
 fn unique<'a>(
@@ -215,6 +254,75 @@ mod tests {
 		assert!(resolve(&apps, "EDITOR").is_err());
 		assert!(resolve(&apps, "same").is_err());
 		assert_eq!(resolve(&apps, "/B.app").unwrap().unwrap().path, "/B.app");
+	}
+
+	#[test]
+	fn a_name_shared_with_helpers_names_the_regular_app() {
+		let helper = app("helper", "Contacts", "/H.app");
+		let contacts = app("contacts", "Contacts", "/C.app");
+		let is_helper = |app: &Application| app.id == "helper";
+		let apps = [helper.clone(), contacts.clone()];
+		assert_eq!(
+			resolve_by(&apps, "contacts", is_helper)
+				.unwrap()
+				.unwrap()
+				.path,
+			"/C.app"
+		);
+		// Helpers alone still need a path; two regular apps do too, and the
+		// error names those two, not the helper.
+		assert!(resolve_by(&apps, "Contacts", |_| true).is_err());
+		let apps = [helper, contacts, app("copy", "Contacts", "/D.app")];
+		let error = resolve_by(&apps, "Contacts", is_helper).unwrap_err();
+		assert!(
+			error.message.contains("/C.app") && error.message.contains("/D.app"),
+			"{}",
+			error.message
+		);
+		assert!(!error.message.contains("/H.app"), "{}", error.message);
+	}
+
+	/// Bundles whose Info.plist declares `flags`, under a fresh temporary
+	/// directory.
+	#[cfg(target_os = "macos")]
+	fn bundles(test: &str, entries: &[(&str, &str)]) -> (std::path::PathBuf, Vec<String>) {
+		let root = std::env::temp_dir().join(format!("pi-natives-{test}-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&root);
+		let paths = entries
+			.iter()
+			.map(|(name, flags)| {
+				let contents = root.join(name).join("Contents");
+				std::fs::create_dir_all(&contents).unwrap();
+				std::fs::write(
+					contents.join("Info.plist"),
+					format!(
+						"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist \
+						 version=\"1.0\"><dict>{flags}</dict></plist>\n"
+					),
+				)
+				.unwrap();
+				root.join(name).to_str().unwrap().to_owned()
+			})
+			.collect();
+		(root, paths)
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn agents_background_apps_and_extensions_lose_a_shared_name_to_the_app() {
+		let (root, paths) = bundles("helpers", &[
+			("Notes.app", "<key>LSUIElement</key><false/>"),
+			("Agent.app", "<key>LSUIElement</key><string>1</string>"),
+			("Daemon.app", "<key>LSBackgroundOnly</key><true/>"),
+			("Notes.appex", ""),
+			("Other.app", ""),
+		]);
+		let named = |path: &String| app(path, "Notes", path);
+		let helpers_and_app: Vec<_> = paths[..4].iter().map(named).collect();
+		assert_eq!(resolve(&helpers_and_app, "Notes").unwrap().unwrap().path, paths[0]);
+		let two_apps = [named(&paths[0]), named(&paths[4])];
+		assert!(resolve(&two_apps, "Notes").is_err());
+		std::fs::remove_dir_all(root).unwrap();
 	}
 
 	#[test]
