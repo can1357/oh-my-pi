@@ -1528,6 +1528,8 @@ export class WorkerCore {
 	#emulation?: BrowserEmulationController;
 	#screenshotHistory = new Map<string, ScreenshotHistory>();
 	#webmcp?: WebMcpController;
+	/** Session holding `ignore_https_errors`; Chromium drops the override once it detaches. */
+	#certificateOverride?: CDPSession;
 	readonly #recording = new RecordingController();
 	/**
 	 * A back/forward cache restore brings a document back without loading it, so the frame keeps the
@@ -1739,7 +1741,7 @@ export class WorkerCore {
 			this.#webmcp = await installWebMcp(this.#page);
 			await installVitalsObservers(this.#page);
 			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
-			if (payload.ignoreHttpsErrors) await applyIgnoreHttpsErrors(this.#page);
+			if (payload.ignoreHttpsErrors) this.#certificateOverride = await applyIgnoreHttpsErrors(this.#page);
 			this.#targetId = await targetIdForPage(this.#page);
 			this.#initScripts = new InitScriptManager(this.#page);
 			for (const source of payload.initScripts ?? []) await this.#initScripts.add(source);
@@ -3468,6 +3470,9 @@ export class WorkerCore {
 		await this.#downloads?.close();
 		await this.#tracing?.dispose();
 		await this.#consoleCapture.detach();
+		// A borrowed page outlives this tab; detaching restores its certificate checks.
+		await this.#certificateOverride?.detach().catch(() => undefined);
+		this.#certificateOverride = undefined;
 		this.#emulation?.dispose();
 		if (this.#ownsPage && page && !page.isClosed()) await page.close().catch(() => undefined);
 		if (this.#browser?.connected) this.#browser.disconnect();

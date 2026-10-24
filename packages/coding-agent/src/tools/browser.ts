@@ -418,6 +418,12 @@ async function openOnKind(
 			`Tab ${JSON.stringify(name)} is bound to a different browser (${describeKind(existing.browser.kind)}). Close it first.`,
 		);
 	}
+	// Chrome's extension debugger API exposes no Security domain, so the relay cannot honor the override.
+	if (params.ignore_https_errors && kind.kind === "relay") {
+		throw new ToolError(
+			"ignore_https_errors is not supported through the Chrome relay: the extension debugger API does not expose the CDP Security domain. Pass app.relay:false to use omp's Chromium instead.",
+		);
+	}
 
 	// First browser use may have to download Chrome for Testing (~180 MB).
 	// That is a one-time install, not part of the open, so it runs before the
