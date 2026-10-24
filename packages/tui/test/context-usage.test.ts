@@ -19,6 +19,7 @@ import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import {
 	type ContextBreakdown,
 	type NonMessageTokenSource,
+	computeContextUsageDetails,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
 	estimateSkillsTokens,
@@ -29,6 +30,30 @@ import {
 } from "../src/status-line/context-usage";
 
 const tokenizer = new Tokenizer();
+
+describe("computeContextUsageDetails", () => {
+	it("omits deferred tool schemas and refreshes details when the model policy changes", () => {
+		const tools = [{ name: "read", description: "Read files.", parameters: { type: "object" } }];
+		const skills = [
+			{ name: "visible", description: "Visible skill." },
+			{ name: "hidden", hide: true },
+		];
+		const session = {
+			model: { toolSchemasInContext: false } as Model,
+			agent: { tokenizer, state: { tools } },
+			skills,
+		};
+
+		const deferred = computeContextUsageDetails(session);
+		expect(deferred.tools).toEqual([]);
+		expect(deferred.skills.map(skill => skill.name)).toEqual(["visible"]);
+
+		session.model = { toolSchemasInContext: true } as Model;
+		const inline = computeContextUsageDetails(session);
+		expect(inline.tools).toEqual([{ name: "read", tokens: estimateToolSchemaTokens(tools, tokenizer) }]);
+		expect(computeContextUsageDetails(session, { skillful: false }).skills).toEqual([]);
+	});
+});
 
 describe("estimateToolSchemaTokens", () => {
 	it("counts arktype tool schemas by their wire JSON Schema, not arktype internals", () => {
@@ -123,10 +148,10 @@ describe("estimateToolSchemaTokens", () => {
 });
 
 /**
- * Contract: the /context panel surfaces estimated snapcompact wire savings —
- * applied swaps show "saves" figures, inactive states say why.
+ * Contract: the /context panel surfaces estimated snapcompact wire savings and
+ * keeps `/context all` item counts precise enough to compare.
  */
-describe("renderContextUsage snapcompact section", () => {
+describe("renderContextUsage", () => {
 	const themeStub = {
 		fg: (_color: string, text: string) => text,
 		bold: (text: string) => text,
@@ -176,6 +201,20 @@ describe("renderContextUsage snapcompact section", () => {
 	it("omits the section entirely when no snapcompact setting is on", () => {
 		const output = renderContextUsage(breakdownWith(undefined), themeStub);
 		expect(output).not.toContain("Snapcompact");
+	});
+
+	it("shows exact per-item token estimates instead of rounded buckets", () => {
+		const output = renderContextUsage(breakdownWith(undefined), themeStub, {
+			tools: [
+				{ name: "larger", tokens: 1449 },
+				{ name: "smaller", tokens: 1351 },
+			],
+			skills: [],
+		});
+
+		expect(output).toContain("├ larger: 1449 tokens");
+		expect(output).toContain("└ smaller: 1351 tokens");
+		expect(output).not.toContain("1.4K");
 	});
 });
 
