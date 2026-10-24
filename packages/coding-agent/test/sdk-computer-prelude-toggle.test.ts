@@ -12,6 +12,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import computerPrompt from "../src/prompts/tools/computer.md" with { type: "text" };
 
 import { cfgBrowserEnabled } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
 import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
@@ -89,6 +90,38 @@ describe("AgentSession eval preludes", () => {
 		await session.setModel(gemini);
 		expect(session.model).toBe(gemini);
 		expect(session.getEvalPreludes().map(definition => definition.name)).toEqual(["browser"]);
+	});
+
+	it("sends the computer guide before the first call in computer-enabled sessions", async () => {
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"browser.enabled": false,
+				"archive.enabled": false,
+				"computer.enabled": true,
+			}),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		sessions.push(session);
+		const mock = createMockModel({ handler: { content: ["ok"] } });
+		session.agent.streamFn = mock.stream;
+		await session.prompt("first");
+
+		const description = mock.calls[0]?.context.tools?.find(tool => tool.name === "eval")?.description;
+		expect(description).toContain("<computer>");
+		expect(description).toContain(computerPrompt.trim().split("\n", 1)[0]!);
+		expect(description).not.toContain("xd://eval/computer");
 	});
 
 	// `/computer on` mid-session used to rebuild the system prompt and eval
