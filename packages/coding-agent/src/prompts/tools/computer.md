@@ -3,13 +3,13 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
 <instruction>
 - Direct helpers each run one approved call in the persistent desktop session and return real structured values; screenshots auto-display as Eval images.
 - Desktop root: `displays`, `windows({app?, title?})`, `screenshot`, `zoom({x, y, width, height}, {silent?})`, `click`, `doubleClick`, `move`, `drag`, `scroll`, `type`, `press`, `elementAt(x, y)`, `focusedElement`, `clipboard.read`/`clipboard.write`, `capabilities`, `close`.
-- On macOS, to start on an app, `const { window: win } = await computer.apps.open("Reminders")` returns its frontmost window handle whether or not the app was running (it launches or reopens only when needed, in the background; `null` when no window appeared within 3 s); if non-null, read it in the same call (`await win.ax()`). Other platforms return `window: null`: open the app, then resolve its window with `computer.window({app})`. That lookup only finds an open window and throws when the app has none; use `{app, title}` when the task needs a specific window.
+- On macOS, when an app may not be open or may have no window, start with `const { window: win } = await computer.apps.open("Reminders")`; if `win` is non-null, read it in the same call (`await win.ax()`). If null, report that no window appeared rather than immediately looking it up again. For known-open windows and read-only work, use `computer.window({app})`; it only finds an open window and throws when the app has none. Use `{app, title}` when the task needs a specific window. On Linux and Windows, look for an existing window first; open the app only if needed.
 - `await computer.window(idOrFilter)` resolves exactly one window (ambiguous → throws listing candidates) and returns a `ComputerWindow` with `id`, `app`, `title`, `pid`, `bounds`, `focused`; `await computer.focusedWindow()` returns one or null. Window helpers: `screenshot({silent?})`, `zoom({x, y, width, height}, {silent?})`, `click(x, y, {button?, count?, modifiers?})`, `doubleClick`, `move`, `drag([[x,y],…], {modifiers?})`, `scroll(x, y, {dx?, dy?})`, `type(text)`, `press("cmd+shift+p")`, `raise`, `ax({all?, maxDepth?})`, `find({role?, title?, value?, limit?})`, `ref("e5")`.
 - `windows()` returns plain records `{id, app, title, pid?, x, y, width, height, focused}`, not handles: no `bounds`, no handle methods. Python: dicts (`w["x"]`, `w.get("pid")`). Handle: `await computer.window(w["id"])`.
 - `windows()` lists at most 48 matches. On macOS `window(id | {app})` searches every window; on Linux and Windows it searches the first 48. On macOS without Screen Recording, other apps' window titles are empty: resolve by `app` or id and read `ax()`. A failed `title` filter does not prove the window is absent.
 - `await win.observe({silent?, all?, maxDepth?})` returns/emits the full screenshot and AX tree together (`ax`, `nodeCount`, `truncated`, plus screenshot metadata). Use it when you need both visual and semantic context.
 - `await win.menu.items(path?)` lists native menu items; `await win.menu.select(["File", "Export…"])` selects an enabled, unambiguous command in that window's menu context. Matching is case-insensitive and tolerates a trailing ellipsis; missing/disabled/ambiguous paths fail rather than guessing shortcuts.
-- `computer.apps.list({query?, runningOnly?})` discovers native application IDs, paths and running PIDs; `computer.apps.open(idOrNameOrNativeAppPath, {activate?})` launches an exact ID/path or unique name and returns it with `window`, its frontmost `ComputerWindow` (null if none appeared within 3 s). On macOS a running app without a window is shown behind the user's app, so it never needs `activate`; deliberate activation defaults off, and an app may still activate itself.
+- `computer.apps.list({query?, runningOnly?})` discovers native application IDs, paths and running PIDs; `computer.apps.open(idOrNameOrNativeAppPath, {activate?})` launches an exact ID/path or unique exact name. On macOS it launches or reopens only when needed, behind the user's app, and returns the app with `window`, its frontmost `ComputerWindow` (null if none appeared within 3 s); other platforms return `window: null`. It requires exec approval and cannot run with `read_only: true`. Deliberate activation defaults off, and an app may still activate itself.
 - `await computer.display(id | "active" | "all")` returns a live display target with screenshot/zoom/input helpers and its own coordinate frame. Full screenshots reselect `"active"`; later input/zoom stay pinned to that delivered frame. Keyboard input refuses a focused window on another monitor.
 - `holdKeys(keys, {duration, takeover?})` and `holdMouse(x, y, {button?, duration, keys?, takeover?})` hold input for 0–100 seconds and release it on every exit. `drag(points, {keys?, modifiers?, takeover?})` supports Space-drag and other held-key gestures. Do not invent cross-call key-down/button-down state.
 - `computer.control.acquire({reason})` requires live human confirmation for task-scoped control and returns `{active: true}` or `{active: false, reason}`: `"denied"` (the user declined or the confirmation was cancelled), `"no-ui"` (this session has nobody to ask, e.g. a subagent or headless run; asking again cannot succeed, so tell the user or your parent the step needs foreground control), or `"unanswered"` (nobody answered before the confirmation expired, shortly before the call's timeout; tell the user the step is waiting on their approval before asking again). It does not change delivery: omitted takeover stays background; only `takeover: true` takes over. Use `control.release()` in `finally`; interruption, task completion and disposal also revoke. `control.state()` reads the live grant. This is not authorization for consequential external effects.
@@ -25,7 +25,7 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
 
 <examples>
 ```javascript
-const win = (await computer.apps.open("Code")).window ?? await computer.window({ app: "Code" });
+const win = await computer.window({ app: "Code" });
 await win.screenshot();
 const tree = await win.ax({ maxDepth: 6 });
 const save = await win.ref("e12");
@@ -41,7 +41,7 @@ await computer.run(async ({ desktop, wait }) => {
 ```
 
 ```python
-win = (await computer.apps.open("Code"))["window"] or await computer.window(app="Code")
+win = await computer.window(app="Code")
 await win.screenshot(silent=True)
 tree = await win.ax(maxDepth=6)
 await win.ref("e12").press()

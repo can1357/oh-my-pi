@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Computer-use tasks on macOS now start with an app's returned window instead of first looking for a window that may not be open ([#16925](https://github.com/can1357/oh-my-pi/pull/16925) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS computer-use tasks now open apps that may have no window and inspect the returned window in one call, while known-open windows and read-only work keep window lookup ([#16925](https://github.com/can1357/oh-my-pi/pull/16925) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `omp gc --compress` exiting with "the event loop drained while it was still pending" on Bun 1.3.14 when a session artifact is pretty-printed JSON larger than 1 MiB, and session header probes (gc, session move and transfer) reading whole artifacts on Windows ([#15745](https://github.com/can1357/oh-my-pi/issues/15745), [#16754](https://github.com/can1357/oh-my-pi/pull/16754) by [@wolfiesch](https://github.com/wolfiesch))
 - `/resume` into another session now cancels the previous session's background jobs, as `/new` does, instead of delivering their results into the resumed session and starting a turn there ([#16760](https://github.com/can1357/oh-my-pi/pull/16760) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the models config migration writing `models.yml` readable by other users on the machine, and dropping every custom provider when the write was interrupted; the migrated file is now published atomically with owner-only permissions ([#16654](https://github.com/can1357/oh-my-pi/pull/16654) by [@adi-IL](https://github.com/adi-IL))
