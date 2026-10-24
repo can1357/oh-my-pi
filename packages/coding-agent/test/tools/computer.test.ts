@@ -3948,6 +3948,132 @@ describe("display hold follows the agent turn", () => {
 	});
 });
 
+describe("menu.items beneath a named menu", () => {
+	class MenuSession extends FakeNativeSession {
+		readonly read: string[] = [];
+		override async menuItems(_target: string, path: string[] = []) {
+			this.read.push(path.join("/") || "<bar>");
+			const item = (title: string, hasSubmenu = false, enabled = true) => ({
+				title,
+				path: [...path, title],
+				enabled,
+				checked: false,
+				hasSubmenu,
+			});
+			switch (path.join("/")) {
+				case "":
+					return [item("Edit", true), item("View", true)];
+				case "Edit":
+					return [item("Undo"), item("List", true), item("Speech", true, false), item("Services", true)];
+				case "Edit/List":
+					return [item("Local", true)];
+				case "Edit/List/Local":
+					return [item("Groceries"), item("Errands")];
+				default:
+					throw new Error(`AxFailed: menu ${path.join("/")} has no items until it opens`);
+			}
+		}
+	}
+
+	async function items(native: FakeNativeSession, code: string): Promise<string[]> {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const message = await runWorker(transport, crypto.randomUUID(), code);
+		if (!message.ok) throw new Error(`menu run failed: ${JSON.stringify(message)}`);
+		return (message.payload.returnValue as Array<{ path: string[] }>).map(entry => entry.path.join("/"));
+	}
+
+	it("lists enabled descendants depth-first while retaining unreadable and disabled submenus", async () => {
+		const native = new MenuSession();
+		expect(await items(native, 'return await (await desktop.window("42")).menu.items("Edit")')).toEqual([
+			"Edit/Undo",
+			"Edit/List",
+			"Edit/List/Local",
+			"Edit/List/Local/Groceries",
+			"Edit/List/Local/Errands",
+			"Edit/Speech",
+			"Edit/Services",
+		]);
+		expect(native.read).toEqual(["Edit", "Edit/List", "Edit/List/Local", "Edit/Services"]);
+	});
+
+	it("keeps the menu bar one level", async () => {
+		const bar = new MenuSession();
+		expect(await items(bar, 'return await (await desktop.window("42")).menu.items()')).toEqual(["Edit", "View"]);
+		expect(bar.read).toEqual(["<bar>"]);
+	});
+
+	it("leaves oversized submenus unexpanded without dropping sibling commands", async () => {
+		class LargeMenuSession extends FakeNativeSession {
+			override async menuItems(_target: string, path: string[] = []) {
+				return Array.from({ length: path.length === 1 ? 149 : 2 }, (_, index) => ({
+					title: `${index}`,
+					path: [...path, `${index}`],
+					enabled: true,
+					checked: false,
+					hasSubmenu: path.length === 1 && index === 0,
+				}));
+			}
+		}
+		const paths = await items(new LargeMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")');
+		expect(paths).toHaveLength(149);
+		expect(paths[0]).toBe("Edit/0");
+		expect(paths[148]).toBe("Edit/148");
+	});
+
+	it("expands a submenu that exactly fills the remaining budget", async () => {
+		class ExactMenuSession extends FakeNativeSession {
+			override async menuItems(_target: string, path: string[] = []) {
+				return Array.from({ length: path.length === 1 ? 148 : 2 }, (_, index) => ({
+					title: `${index}`,
+					path: [...path, `${index}`],
+					enabled: true,
+					checked: false,
+					hasSubmenu: path.length === 1 && index === 0,
+				}));
+			}
+		}
+		const paths = await items(new ExactMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")');
+		expect(paths).toHaveLength(150);
+		expect(paths.slice(0, 3)).toEqual(["Edit/0", "Edit/0/0", "Edit/0/1"]);
+		expect(paths[149]).toBe("Edit/147");
+	});
+
+	it("keeps an unexposed Windows submenu available for an explicit path read", async () => {
+		class UnexposedMenuSession extends MenuSession {
+			override async menuItems(target: string, path: string[] = []) {
+				if (path.join("/") === "Edit/Services") throw new Error("BackgroundUnavailable: menu is unexposed");
+				return await super.menuItems(target, path);
+			}
+		}
+		expect(
+			await items(new UnexposedMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")'),
+		).toContain("Edit/Services");
+	});
+
+	for (const code of ["UserIntervened", "WindowNotFound", "PermissionDenied", "Timeout", "Closed", "Internal"]) {
+		it(`propagates ${code} during expansion without reading another submenu`, async () => {
+			class FailingMenuSession extends MenuSession {
+				override async menuItems(target: string, path: string[] = []) {
+					if (path.join("/") === "Edit/List") throw new Error(`${code}: submenu read failed`);
+					return await super.menuItems(target, path);
+				}
+			}
+			const native = new FailingMenuSession();
+			const transport = new MemoryTransport();
+			new ComputerWorkerCore(transport, () => native);
+			const message = await runWorker(
+				transport,
+				crypto.randomUUID(),
+				'return await (await desktop.window("42")).menu.items("Edit")',
+			);
+			expect(message.ok).toBe(false);
+			expect(message.ok ? undefined : message.error.message).toContain(`${code}:`);
+			expect(native.read).toEqual(["Edit"]);
+		});
+	}
+});
+
 describe("computer background fallback", () => {
 	const reason = "window 42 (Wish) reads the hardware pointer for button presses";
 	const ran = `click ran in takeover because ${reason}; the input was delivered, and `;
@@ -5033,130 +5159,4 @@ describe("window() waiting for a window to appear", () => {
 		expect(result.output.trim().split("\n").at(-1)).toBe("151");
 		expect(native.listings).toBe(3);
 	});
-});
-
-describe("menu.items beneath a named menu", () => {
-	class MenuSession extends FakeNativeSession {
-		readonly read: string[] = [];
-		override async menuItems(_target: string, path: string[] = []) {
-			this.read.push(path.join("/") || "<bar>");
-			const item = (title: string, hasSubmenu = false, enabled = true) => ({
-				title,
-				path: [...path, title],
-				enabled,
-				checked: false,
-				hasSubmenu,
-			});
-			switch (path.join("/")) {
-				case "":
-					return [item("Edit", true), item("View", true)];
-				case "Edit":
-					return [item("Undo"), item("List", true), item("Speech", true, false), item("Services", true)];
-				case "Edit/List":
-					return [item("Local", true)];
-				case "Edit/List/Local":
-					return [item("Groceries"), item("Errands")];
-				default:
-					throw new Error(`AxFailed: menu ${path.join("/")} has no items until it opens`);
-			}
-		}
-	}
-
-	async function items(native: FakeNativeSession, code: string): Promise<string[]> {
-		const transport = new MemoryTransport();
-		new ComputerWorkerCore(transport, () => native);
-		const message = await runWorker(transport, crypto.randomUUID(), code);
-		if (!message.ok) throw new Error(`menu run failed: ${JSON.stringify(message)}`);
-		return (message.payload.returnValue as Array<{ path: string[] }>).map(entry => entry.path.join("/"));
-	}
-
-	it("lists enabled descendants depth-first while retaining unreadable and disabled submenus", async () => {
-		const native = new MenuSession();
-		expect(await items(native, 'return await (await desktop.window("42")).menu.items("Edit")')).toEqual([
-			"Edit/Undo",
-			"Edit/List",
-			"Edit/List/Local",
-			"Edit/List/Local/Groceries",
-			"Edit/List/Local/Errands",
-			"Edit/Speech",
-			"Edit/Services",
-		]);
-		expect(native.read).toEqual(["Edit", "Edit/List", "Edit/List/Local", "Edit/Services"]);
-	});
-
-	it("keeps the menu bar one level", async () => {
-		const bar = new MenuSession();
-		expect(await items(bar, 'return await (await desktop.window("42")).menu.items()')).toEqual(["Edit", "View"]);
-		expect(bar.read).toEqual(["<bar>"]);
-	});
-
-	it("leaves oversized submenus unexpanded without dropping sibling commands", async () => {
-		class LargeMenuSession extends FakeNativeSession {
-			override async menuItems(_target: string, path: string[] = []) {
-				return Array.from({ length: path.length === 1 ? 149 : 2 }, (_, index) => ({
-					title: `${index}`,
-					path: [...path, `${index}`],
-					enabled: true,
-					checked: false,
-					hasSubmenu: path.length === 1 && index === 0,
-				}));
-			}
-		}
-		const paths = await items(new LargeMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")');
-		expect(paths).toHaveLength(149);
-		expect(paths[0]).toBe("Edit/0");
-		expect(paths[148]).toBe("Edit/148");
-	});
-
-	it("expands a submenu that exactly fills the remaining budget", async () => {
-		class ExactMenuSession extends FakeNativeSession {
-			override async menuItems(_target: string, path: string[] = []) {
-				return Array.from({ length: path.length === 1 ? 148 : 2 }, (_, index) => ({
-					title: `${index}`,
-					path: [...path, `${index}`],
-					enabled: true,
-					checked: false,
-					hasSubmenu: path.length === 1 && index === 0,
-				}));
-			}
-		}
-		const paths = await items(new ExactMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")');
-		expect(paths).toHaveLength(150);
-		expect(paths.slice(0, 3)).toEqual(["Edit/0", "Edit/0/0", "Edit/0/1"]);
-		expect(paths[149]).toBe("Edit/147");
-	});
-
-	it("keeps an unexposed Windows submenu available for an explicit path read", async () => {
-		class UnexposedMenuSession extends MenuSession {
-			override async menuItems(target: string, path: string[] = []) {
-				if (path.join("/") === "Edit/Services") throw new Error("BackgroundUnavailable: menu is unexposed");
-				return await super.menuItems(target, path);
-			}
-		}
-		expect(
-			await items(new UnexposedMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")'),
-		).toContain("Edit/Services");
-	});
-
-	for (const code of ["UserIntervened", "WindowNotFound", "PermissionDenied", "Timeout", "Closed", "Internal"]) {
-		it(`propagates ${code} during expansion without reading another submenu`, async () => {
-			class FailingMenuSession extends MenuSession {
-				override async menuItems(target: string, path: string[] = []) {
-					if (path.join("/") === "Edit/List") throw new Error(`${code}: submenu read failed`);
-					return await super.menuItems(target, path);
-				}
-			}
-			const native = new FailingMenuSession();
-			const transport = new MemoryTransport();
-			new ComputerWorkerCore(transport, () => native);
-			const message = await runWorker(
-				transport,
-				crypto.randomUUID(),
-				'return await (await desktop.window("42")).menu.items("Edit")',
-			);
-			expect(message.ok).toBe(false);
-			expect(message.ok ? undefined : message.error.message).toContain(`${code}:`);
-			expect(native.read).toEqual(["Edit"]);
-		});
-	}
 });
