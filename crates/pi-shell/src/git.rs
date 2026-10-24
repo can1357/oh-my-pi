@@ -202,7 +202,7 @@ impl AddRequest {
 					Some((name, value)) => (name, Some(value)),
 					None => (long, None),
 				};
-				let (option, negated) = long_option(name)?;
+				let (option, negated) = long_option(&LONG_OPTIONS, name)?;
 				if option == "reason" && !negated {
 					reason = Some(match inline {
 						Some(value) => value.to_owned(),
@@ -430,10 +430,11 @@ impl AddRequest {
 }
 
 /// Resolves a long option spelling — exact, or a unique abbreviation as git's
-/// parse-options accepts — to its name and whether it was negated.
-fn long_option(spelled: &str) -> Option<(&'static str, bool)> {
+/// parse-options accepts — among `options` to its name and whether it was
+/// negated.
+fn long_option(options: &[&'static str], spelled: &str) -> Option<(&'static str, bool)> {
 	let spellings = || {
-		LONG_OPTIONS.into_iter().flat_map(|option| {
+		options.iter().copied().flat_map(|option| {
 			[(option, false), (option, true)].map(|(option, negated)| {
 				let name = if negated {
 					format!("no-{option}")

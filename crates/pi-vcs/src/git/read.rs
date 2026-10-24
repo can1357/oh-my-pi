@@ -223,16 +223,12 @@ impl GitRepo {
 	/// Whether a merge, rebase, cherry-pick, revert, or `am` is underway in
 	/// this checkout: the index holds unmerged entries, or the operation's
 	/// state files remain because it is resolved but not yet committed or
-	/// aborted (a phase `git ls-files --unmerged` no longer reports).
+	/// aborted (a phase `git ls-files --unmerged` no longer reports). A rebase
+	/// is underway while its state directory exists; git leaves `REBASE_HEAD`
+	/// behind after one finishes.
 	pub fn operation_in_progress(&self) -> Result<bool> {
-		const STATE: [&str; 6] = [
-			"MERGE_HEAD",
-			"CHERRY_PICK_HEAD",
-			"REVERT_HEAD",
-			"REBASE_HEAD",
-			"rebase-merge",
-			"rebase-apply",
-		];
+		const STATE: [&str; 5] =
+			["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"];
 		if STATE
 			.iter()
 			.any(|name| self.info.git_dir.join(name).exists())
