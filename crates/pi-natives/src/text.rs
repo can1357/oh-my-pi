@@ -1078,18 +1078,40 @@ const fn is_kinsoku_no_end(cp: u32) -> bool {
 	)
 }
 
+/// Collection of tokens stored in a single contiguous buffer with span ranges.
+struct LineTokens {
+	buf:   Vec<u16>,
+	spans: SmallVec<[std::ops::Range<usize>; 16]>,
+}
+
+impl LineTokens {
+	fn iter(&self) -> impl Iterator<Item = &[u16]> {
+		self.spans.iter().map(|range| &self.buf[range.clone()])
+	}
+}
+
 /// Splits a line into wrap tokens: runs of spaces, and runs of visible
 /// graphemes with no break opportunity inside (see [`BreakClass`]).
 struct TokenSplitter {
-	tokens:        SmallVec<[Vec<u16>; 4]>,
-	current:       Vec<u16>,
+	tokens:        LineTokens,
+	token_start:   usize,
 	pending_ansi:  SmallVec<[u16; 32]>,
 	in_whitespace: bool,
-	/// Class of the last grapheme in `current`; `None` inside whitespace.
+	/// Class of the last grapheme in current token; `None` inside whitespace.
 	prev:          Option<BreakClass>,
 }
 
 impl TokenSplitter {
+	fn with_capacity(capacity: usize) -> Self {
+		Self {
+			tokens:        LineTokens { buf: Vec::with_capacity(capacity), spans: SmallVec::new() },
+			token_start:   0,
+			pending_ansi:  SmallVec::new(),
+			in_whitespace: false,
+			prev:          None,
+		}
+	}
+
 	fn push_ansi(&mut self, seq: &[u16]) {
 		// A sequence that follows visible content closes it (color reset,
 		// underline off) and must ride along with that token so the closer
@@ -1098,55 +1120,56 @@ impl TokenSplitter {
 		// waits for it: gluing it to the whitespace token would keep that
 		// space alive past the wrap point and open the style on the line
 		// being broken instead of the one carrying the styled word.
-		if self.current.is_empty() || self.in_whitespace {
+		if self.tokens.buf.len() == self.token_start || self.in_whitespace {
 			self.pending_ansi.extend_from_slice(seq);
 		} else {
-			self.current.extend_from_slice(seq);
+			self.tokens.buf.extend_from_slice(seq);
 		}
 	}
 
 	fn push_grapheme(&mut self, grapheme: &[u16], width: usize) {
 		let is_space = grapheme == [b' ' as u16];
 		let class = (!is_space).then(|| BreakClass::of(grapheme, width));
-		if !self.current.is_empty() {
+		if self.tokens.buf.len() > self.token_start {
 			let boundary = match (self.prev, class) {
 				(Some(prev), Some(next)) => prev.breaks_before(next),
 				_ => is_space != self.in_whitespace,
 			};
 			if boundary {
-				self.tokens.push(std::mem::take(&mut self.current));
+				self
+					.tokens
+					.spans
+					.push(self.token_start..self.tokens.buf.len());
+				self.token_start = self.tokens.buf.len();
 			}
 		}
 
 		if !self.pending_ansi.is_empty() {
-			self.current.extend_from_slice(&self.pending_ansi);
+			self.tokens.buf.extend_from_slice(&self.pending_ansi);
 			self.pending_ansi.clear();
 		}
 
 		self.in_whitespace = is_space;
 		self.prev = class;
-		self.current.extend_from_slice(grapheme);
+		self.tokens.buf.extend_from_slice(grapheme);
 	}
 
-	fn finish(mut self) -> SmallVec<[Vec<u16>; 4]> {
+	fn finish(mut self) -> LineTokens {
 		if !self.pending_ansi.is_empty() {
-			self.current.extend_from_slice(&self.pending_ansi);
+			self.tokens.buf.extend_from_slice(&self.pending_ansi);
 		}
-		if !self.current.is_empty() {
-			self.tokens.push(self.current);
+		if self.tokens.buf.len() > self.token_start {
+			self
+				.tokens
+				.spans
+				.push(self.token_start..self.tokens.buf.len());
 		}
 		self.tokens
 	}
 }
 
-fn split_into_tokens_with_ansi(line: &[u16], tab_width: usize) -> SmallVec<[Vec<u16>; 4]> {
-	let mut splitter = TokenSplitter {
-		tokens:        SmallVec::new(),
-		current:       Vec::new(),
-		pending_ansi:  SmallVec::new(),
-		in_whitespace: false,
-		prev:          None,
-	};
+fn split_into_tokens_with_ansi(line: &[u16], tab_width: usize) -> LineTokens {
+	let mut splitter = TokenSplitter::with_capacity(line.len());
 	let mut i = 0usize;
 
 	while i < line.len() {
@@ -1293,10 +1316,9 @@ fn wrap_single_line(line: &[u16], width: usize, tab_width: usize) -> SmallVec<[V
 	let mut current_width = 0usize;
 	let mut state = WrapState::new();
 
-	for token in tokens {
-		let token_width = visible_width_u16(&token, tab_width);
-		let is_whitespace = token_is_whitespace(&token);
-
+	for token in tokens.iter() {
+		let token_width = visible_width_u16(token, tab_width);
+		let is_whitespace = token_is_whitespace(token);
 		if token_width > width && !is_whitespace {
 			if !current_line.is_empty() {
 				write_line_end_reset(&state, &mut current_line);
@@ -1305,7 +1327,7 @@ fn wrap_single_line(line: &[u16], width: usize, tab_width: usize) -> SmallVec<[V
 				current_width = 0;
 			}
 
-			let mut broken = break_long_word(&token, width, tab_width, &mut state);
+			let mut broken = break_long_word(token, width, tab_width, &mut state);
 			if let Some(last) = broken.pop() {
 				wrapped.extend(broken);
 				current_line = last;
@@ -1326,15 +1348,15 @@ fn wrap_single_line(line: &[u16], width: usize, tab_width: usize) -> SmallVec<[V
 			if is_whitespace {
 				current_width = 0;
 			} else {
-				current_line.extend_from_slice(&token);
+				current_line.extend_from_slice(token);
 				current_width = token_width;
 			}
 		} else {
-			current_line.extend_from_slice(&token);
+			current_line.extend_from_slice(token);
 			current_width += token_width;
 		}
 
-		update_state_from_text(&token, &mut state);
+		update_state_from_text(token, &mut state);
 	}
 
 	if !current_line.is_empty() {

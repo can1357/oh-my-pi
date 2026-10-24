@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Faster native ANSI text wrapping on long lines with many words ([#16927](https://github.com/can1357/oh-my-pi/pull/16927) by [@GTanger](https://github.com/GTanger))
+
 ### Fixed
 
 - Fixed a UTF-8 char-boundary panic when parsing `stateDiagram-v2` lines where `>` follows a multibyte character ([#16749](https://github.com/can1357/oh-my-pi/pull/16749) by [@berney](https://github.com/berney))
