@@ -97,6 +97,8 @@ Selectors accept CSS and Puppeteer `aria/…`, `text/…`, `xpath/…`, `pierce/
 
 `observe()` lists interactive elements and assigns numeric ids consumed by `tab.id`; `includeAll: true` adds non-interactive accessibility nodes, and `viewportOnly: true` keeps only elements intersecting the viewport (ignored on cmux). `ariaSnapshot()` assigns `[ref=eN]` ids consumed by `tab.ref`; `diff: true` returns a revisioned full, unchanged, or delta object. Navigation and re-rendering invalidate handles; re-observe and act in the same Eval cell.
 
+On Chromium-backed tabs, a page read, a selector action, `evaluate`, or a wait for page content (`waitFor`, `waitForSelector`, `waitForText`, `waitForUrl`) issued while a navigation the page asked for is on its way (a link or submit button just clicked, a script setting `location`) first waits for the new document to commit and finish parsing, so a click and the read of, or the next step on, the page it loads can share one cell. Raw pointer input (`clickAt`, `wheel`, `mouse*`) and waits for events (`waitForNavigation`, `waitForResponse`, `waitForDownload`) run at once. A request that never starts loading holds a call at most 5 s. A built-in read that loses its document to a navigation mid-call runs once more on the new one; `evaluate` never runs your code twice.
+
 ### `tab.run(fnOrCode, options?)`
 
 A run accepts either a serialized function or a JavaScript function-body string, plus `{ args?, timeout? }`:

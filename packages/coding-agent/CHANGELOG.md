@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Fixed browser calls right after a click that navigates (headless, connected and relay Chrome) reaching the page being left: reads and screenshots returned the old page or failed with `Execution context was destroyed` or `Cannot find context with specified id`, and a `fill` could land on the old form; they now wait for the new page ([#16907](https://github.com/can1357/oh-my-pi/pull/16907) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `omp gc --compress` exiting with "the event loop drained while it was still pending" on Bun 1.3.14 when a session artifact is pretty-printed JSON larger than 1 MiB, and session header probes (gc, session move and transfer) reading whole artifacts on Windows ([#15745](https://github.com/can1357/oh-my-pi/issues/15745), [#16754](https://github.com/can1357/oh-my-pi/pull/16754) by [@wolfiesch](https://github.com/wolfiesch))
 - `/resume` into another session now cancels the previous session's background jobs, as `/new` does, instead of delivering their results into the resumed session and starting a turn there ([#16760](https://github.com/can1357/oh-my-pi/pull/16760) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the models config migration writing `models.yml` readable by other users on the machine, and dropping every custom provider when the write was interrupted; the migrated file is now published atomically with owner-only permissions ([#16654](https://github.com/can1357/oh-my-pi/pull/16654) by [@adi-IL](https://github.com/adi-IL))

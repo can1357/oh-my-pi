@@ -215,10 +215,19 @@ import {
 	type BrowserFrameInfo,
 	captureFrameScreenshot,
 	createFrameApi,
+	devtoolsFrameId,
 	listFrames,
 	resolveFrame,
 } from "./frames";
-import { navigateMainFrame, pushState, reloadPage, traverseHistory, type NavigationWaitUntil } from "./navigation";
+import {
+	isNavigatedContextError,
+	type NavigationWaitUntil,
+	navigateMainFrame,
+	pushState,
+	reloadPage,
+	traverseHistory,
+	waitForMainFrameDocument,
+} from "./navigation";
 
 import { cloneSafe, RunOutput } from "./run-output";
 import { type UploadRoute, UploadStaging } from "./upload-files";
@@ -332,6 +341,15 @@ const FRAME_SNAPSHOT_TIMEOUT_MS = 5_000;
 const ATTACHED_TARGET_EXPOSE_TIMEOUT_MS = 5_000;
 /** Bound on counting a timed-out selector's matches for its error message. */
 const MATCH_COUNT_PROBE_TIMEOUT_MS = 1_000;
+/** Longest a page call waits for a main-frame navigation the page requested to replace the document. */
+const REQUESTED_NAVIGATION_WAIT_MS = 5_000;
+
+/** Options for one tab helper run through `WorkerCore.#runOp`. */
+interface OpOptions {
+	selector?: string;
+	zeroMatchAfterMs?: number;
+	awaitNavigation?: boolean;
+}
 
 /** Queue a wheel event without treating a delayed renderer acknowledgement as dispatch failure. */
 export async function dispatchScroll(
@@ -1530,12 +1548,39 @@ export class WorkerCore {
 	#webmcp?: WebMcpController;
 	readonly #recording = new RecordingController();
 	/**
+	 * The page asked to navigate its main frame (a link, a submit button, a script setting `location`) and the new
+	 * document has neither committed nor been abandoned. Chromium reports the request before the click that caused it
+	 * returns, while the network request and commit come later.
+	 */
+	#mainFrameNavigationRequested = false;
+	/**
 	 * A back/forward cache restore brings a document back without loading it, so the frame keeps the
 	 * loader id of the document it replaced and the ids observed there would still pass as current.
 	 */
 	readonly #onFrameNavigated = (event: Protocol.Page.FrameNavigatedEvent): void => {
 		if (event.type === "BackForwardCacheRestore") this.#clearElementCache();
+		if (event.frame.parentId === undefined) this.#mainFrameNavigationRequested = false;
 	};
+	readonly #onFrameRequestedNavigation = (event: Protocol.Page.FrameRequestedNavigationEvent): void => {
+		if (event.disposition === "currentTab" && this.#isMainFrame(event.frameId))
+			this.#mainFrameNavigationRequested = true;
+	};
+	/** A same-document navigation, or a load that stopped without a new document (a download, a 204, a cancel). */
+	readonly #onMainFrameNavigationSettled = (event: { frameId: string }): void => {
+		if (this.#isMainFrame(event.frameId)) this.#mainFrameNavigationRequested = false;
+	};
+	/** A `beforeunload` prompt is open; dismissing it cancels the navigation that raised it. */
+	#beforeUnloadOpen = false;
+	readonly #onDialogOpening = (event: Protocol.Page.JavascriptDialogOpeningEvent): void => {
+		this.#beforeUnloadOpen = event.type === "beforeunload";
+	};
+	readonly #onDialogClosed = (event: Protocol.Page.JavascriptDialogClosedEvent): void => {
+		if (this.#beforeUnloadOpen && !event.result) this.#mainFrameNavigationRequested = false;
+		this.#beforeUnloadOpen = false;
+	};
+	#isMainFrame(frameId: string): boolean {
+		return this.#page !== undefined && devtoolsFrameId(this.#page.mainFrame()) === frameId;
+	}
 
 	/** The renderer crashed; the supervisor recycles this worker, so it runs nothing more. */
 	#crashed = false;
@@ -1727,8 +1772,14 @@ export class WorkerCore {
 				this.#observeDialogs();
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			}
-			this.#page.mainFrame().client.on("Page.frameNavigated", this.#onFrameNavigated);
-			this.#page.mainFrame().client.on("OMP.debuggerDetached", this.#onDebuggerDetached);
+			const client = this.#page.mainFrame().client;
+			client.on("Page.frameNavigated", this.#onFrameNavigated);
+			client.on("Page.frameRequestedNavigation", this.#onFrameRequestedNavigation);
+			client.on("Page.navigatedWithinDocument", this.#onMainFrameNavigationSettled);
+			client.on("Page.frameStoppedLoading", this.#onMainFrameNavigationSettled);
+			client.on("Page.javascriptDialogOpening", this.#onDialogOpening);
+			client.on("Page.javascriptDialogClosed", this.#onDialogClosed);
+			client.on("OMP.debuggerDetached", this.#onDebuggerDetached);
 			this.#page.on("error", this.#onPageCrashed);
 			if (this.#ownsPage) {
 				// Background Chromium tabs stop producing frames, stalling rAF,
@@ -2162,7 +2213,9 @@ export class WorkerCore {
 	 * carry puppeteer's own `.setTimeout(timeoutMs)`). When the op targets a `selector`,
 	 * the fail-fast timeout carries a best-effort match-count hint, and — when
 	 * `zeroMatchAfterMs` is set — a watchdog aborts the op early once the selector has
-	 * matched nothing for that long.
+	 * matched nothing for that long. With `awaitNavigation`, the op first waits for a
+	 * main-frame navigation the page requested to replace the document, so it works on
+	 * the page that navigation brings rather than the one it leaves.
 	 */
 	async #runOp<T>(
 		active: ActiveRun,
@@ -2170,7 +2223,7 @@ export class WorkerCore {
 		cellSignal: AbortSignal,
 		perOpTimeoutMs: number,
 		fn: (signal: AbortSignal) => Promise<T>,
-		opts?: { selector?: string; zeroMatchAfterMs?: number },
+		opts?: OpOptions,
 	): Promise<T> {
 		const opId = active.opCounter++;
 		active.inflight.set(opId, { label, startedAt: Date.now() });
@@ -2195,6 +2248,7 @@ export class WorkerCore {
 					opSignal,
 					arming.catch(() => undefined),
 				);
+			if (opts?.awaitNavigation) await this.#awaitRequestedNavigation(opSignal, perOpTimeoutMs);
 			if (!watchdog) return await fn(opSignal);
 			const racedSignal = AbortSignal.any([opSignal, earlyAc.signal]);
 			return await Promise.race([
@@ -2287,6 +2341,37 @@ export class WorkerCore {
 		}
 	}
 
+	/**
+	 * Wait for a main-frame navigation the page requested (a link or submit button just clicked, a script setting
+	 * `location`) to replace the document and for the new one to finish parsing. Chromium reports the request before
+	 * the click that caused it returns, while the response and commit come later, so a call made right after the
+	 * click would otherwise reach the page being left. Bounded by half the op's deadline, at most
+	 * {@link REQUESTED_NAVIGATION_WAIT_MS}: past that, Chromium itself holds evaluations on the old document until a
+	 * navigation that started loading commits, and a request that never started loading holds no later call.
+	 * `contextLost` waits even with no request seen.
+	 */
+	async #awaitRequestedNavigation(signal: AbortSignal, perOpMs: number, contextLost = false): Promise<void> {
+		const settled = await waitForMainFrameDocument(
+			this.#requirePage(),
+			() => this.#mainFrameNavigationRequested,
+			Math.min(REQUESTED_NAVIGATION_WAIT_MS, perOpMs / 2),
+			signal,
+			contextLost,
+		);
+		if (!settled) this.#mainFrameNavigationRequested = false;
+	}
+
+	/** Run one of our own page reads once more on the new document when a navigation took its execution context. */
+	async #rereadAfterNavigation<T>(signal: AbortSignal, perOpMs: number, read: () => Promise<T>): Promise<T> {
+		try {
+			return await read();
+		} catch (error) {
+			if (signal.aborted || !isNavigatedContextError(error)) throw error;
+			await this.#awaitRequestedNavigation(signal, perOpMs, true);
+			return await read();
+		}
+	}
+
 	#createTabApi(
 		name: string,
 		timeoutMs: number,
@@ -2306,8 +2391,20 @@ export class WorkerCore {
 			label: string,
 			perOpMs: number,
 			fn: (sig: AbortSignal) => Promise<T>,
-			selectorOpts?: { selector?: string; zeroMatchAfterMs?: number },
+			selectorOpts?: OpOptions,
 		): Promise<T> => markHandled(this.#runOp(active, label, signal, perOpMs, fn, selectorOpts));
+		// Calls on the document (reads, actions, waits for its content) reach the page a navigation the page requested
+		// brings, not the one it leaves; `read` also reruns once when a navigation takes its context mid-call. Waits for
+		// events (navigation, response, download), dialogs and network setup run at once: they may be what the
+		// navigation waits on, or must catch its first request.
+		const read = <T>(label: string, perOpMs: number, fn: (sig: AbortSignal) => Promise<T>): Promise<T> =>
+			op(label, perOpMs, sig => this.#rereadAfterNavigation(sig, perOpMs, () => fn(sig)), { awaitNavigation: true });
+		const act = <T>(
+			label: string,
+			perOpMs: number,
+			fn: (sig: AbortSignal) => Promise<T>,
+			selectorOpts?: OpOptions,
+		): Promise<T> => op(label, perOpMs, fn, { ...selectorOpts, awaitNavigation: true });
 		// Hand user-facing handles the fail-fast per-op guard so their interactive
 		// methods (`.click()`, `.type()`, …) can't outrun the cell budget (issue #9535).
 		const enrich = (handle: ElementHandle): ActionableHandle =>
@@ -2340,7 +2437,7 @@ export class WorkerCore {
 			page,
 			signal,
 			url: () => page.url(),
-			title: () => op("tab.title()", INF, sig => untilAborted(sig, () => page.title())),
+			title: () => read("tab.title()", INF, sig => untilAborted(sig, () => page.title())),
 			goto: (url, opts) =>
 				op(`tab.goto(${JSON.stringify(url)})`, INF, async sig => {
 					this.#clearElementCache();
@@ -2363,9 +2460,9 @@ export class WorkerCore {
 						throw err;
 					}
 				}),
-			observe: opts => op("tab.observe()", quickOpMs, sig => this.#collectObservation({ ...opts, signal: sig })),
+			observe: opts => read("tab.observe()", quickOpMs, sig => this.#collectObservation({ ...opts, signal: sig })),
 			ariaSnapshot: (selector, opts) =>
-				op(
+				read(
 					selector ? `tab.ariaSnapshot(${JSON.stringify(selector)})` : "tab.ariaSnapshot()",
 					quickOpMs,
 					async sig => {
@@ -2390,11 +2487,11 @@ export class WorkerCore {
 					},
 				),
 			screenshot: opts =>
-				op(describeScreenshot(opts), quickOpMs, sig =>
+				read(describeScreenshot(opts), quickOpMs, sig =>
 					this.#captureScreenshot(session, output, screenshots, sig, opts),
 				),
 			extract: (format = "markdown", opts) =>
-				op(`tab.extract(${JSON.stringify(format)})`, quickOpMs, async sig => {
+				read(`tab.extract(${JSON.stringify(format)})`, quickOpMs, async sig => {
 					const html = (await untilAborted(sig, () => page.content())) as string;
 					const result = await extractReadableFromHtml(html, page.url(), format, opts);
 					if (!result) {
@@ -2411,7 +2508,7 @@ export class WorkerCore {
 					return content;
 				}),
 			click: selector =>
-				op(
+				act(
 					`tab.click(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
@@ -2431,7 +2528,7 @@ export class WorkerCore {
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			type: (selector, text) =>
-				op(
+				act(
 					`tab.type(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
@@ -2446,7 +2543,7 @@ export class WorkerCore {
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			fill: (selector, value) =>
-				op(
+				act(
 					`tab.fill(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
@@ -2460,7 +2557,7 @@ export class WorkerCore {
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			press: (key, opts) =>
-				op(`tab.press(${JSON.stringify(key)})`, actionOpMs, async sig => {
+				act(`tab.press(${JSON.stringify(key)})`, actionOpMs, async sig => {
 					assertTabPressArgs(key, opts);
 					const selector = opts?.selector;
 					if (selector) {
@@ -2476,7 +2573,7 @@ export class WorkerCore {
 					await untilAborted(sig, () => pressKey(page, key));
 				}),
 			scroll: (deltaX, deltaY, opts) =>
-				op("tab.scroll()", actionOpMs, async sig => {
+				act("tab.scroll()", actionOpMs, async sig => {
 					if (!opts?.selector) {
 						await untilAborted(sig, () => dispatchScroll(() => page.mouse.wheel({ deltaX, deltaY })));
 						return;
@@ -2499,10 +2596,10 @@ export class WorkerCore {
 						await handle.dispose().catch(() => undefined);
 					}
 				}),
-			drag: (from, to) => op("tab.drag()", actionOpMs, sig => this.#drag(from, to, sig)),
+			drag: (from, to) => act("tab.drag()", actionOpMs, sig => this.#drag(from, to, sig)),
 			waitFor: (selector, opts) => {
 				const w = waitMs(opts?.timeout);
-				return op(
+				return act(
 					`tab.waitFor(${JSON.stringify(selector)})`,
 					w,
 					async sig => enrich(await this.#resolveActionHandle(selector, w, sig)),
@@ -2511,7 +2608,7 @@ export class WorkerCore {
 			},
 			waitForSelector: (selector, opts) => {
 				const w = waitMs(opts?.timeout);
-				return op(
+				return act(
 					`tab.waitForSelector(${JSON.stringify(selector)})`,
 					w,
 					async sig => {
@@ -2542,7 +2639,9 @@ export class WorkerCore {
 				);
 			},
 			evaluate: (fn, ...args) =>
-				op("tab.evaluate()", INF, sig =>
+				// User code may have side effects and may throw any message, so it waits for a requested navigation but
+				// never runs again.
+				act("tab.evaluate()", INF, sig =>
 					untilAborted(sig, async () => {
 						const realm = page.mainFrame().mainRealm();
 						// Puppeteer evaluates strings as expressions and ignores extra args; preserve
@@ -2558,7 +2657,7 @@ export class WorkerCore {
 					}),
 				) as never,
 			scrollIntoView: selector =>
-				op(
+				act(
 					`tab.scrollIntoView(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
@@ -2579,7 +2678,7 @@ export class WorkerCore {
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			select: (selector, ...values) =>
-				op(
+				act(
 					`tab.select(${JSON.stringify(selector)})`,
 					actionOpMs,
 					sig => this.#select(selector, values, actionOpMs, sig),
@@ -2594,7 +2693,7 @@ export class WorkerCore {
 						const route = await op(`${label} checking how the browser takes files`, actionOpMs, sig =>
 							this.#requireUploads().route(page, sig),
 						);
-						const prepared = await op(
+						const prepared = await act(
 							label,
 							actionOpMs,
 							sig => this.#prepareTabUpload(selector, filePaths, label, route, actionOpMs, sig, session),
@@ -2612,7 +2711,7 @@ export class WorkerCore {
 			},
 			waitForUrl: (pattern, opts) => {
 				const w = waitMs(opts?.timeout);
-				return op("tab.waitForUrl()", w, sig => this.#waitForUrl(pattern, w, sig));
+				return act("tab.waitForUrl()", w, sig => this.#waitForUrl(pattern, w, sig));
 			},
 			waitForResponse: (pattern, opts) => {
 				const w = waitMs(opts?.timeout);
@@ -2620,10 +2719,10 @@ export class WorkerCore {
 			},
 			id: async id => enrich(await this.#resolveCachedHandle(id)),
 			ref: async id => enrich(await this.#resolveAriaRef(id)),
-			cookies: opts => op("tab.cookies()", quickOpMs, sig => readCookies(page, opts, sig)),
+			cookies: opts => act("tab.cookies()", quickOpMs, sig => readCookies(page, opts, sig)),
 			setCookies: (...cookies) => op("tab.setCookies()", actionOpMs, sig => setPageCookies(page, cookies, sig)),
 			clearCookies: opts => op("tab.clearCookies()", actionOpMs, sig => clearPageCookies(page, opts, sig)),
-			storage: (kind, opts) => op("tab.storage()", quickOpMs, sig => readStorage(page, kind, opts, sig)),
+			storage: (kind, opts) => act("tab.storage()", quickOpMs, sig => readStorage(page, kind, opts, sig)),
 			setStorage: (kind, keyOrEntries, value) =>
 				op("tab.setStorage()", actionOpMs, sig => setPageStorage(page, kind, keyOrEntries, value, sig)),
 			clearStorage: kind => op("tab.clearStorage()", actionOpMs, sig => clearPageStorage(page, kind, sig)),
@@ -2663,7 +2762,7 @@ export class WorkerCore {
 			},
 			webmcpEvents: opts => op("tab.webmcpEvents()", quickOpMs, sig => untilAborted(sig, () => webmcp.events(opts))),
 			a11y: opts =>
-				op("tab.a11y()", budgetBound, async sig => {
+				read("tab.a11y()", budgetBound, async sig => {
 					const result = await untilAborted(sig, () => runA11yAudit(page, opts));
 					output.push({ type: "text", text: formatA11ySummary(result) });
 					return result;
@@ -2694,9 +2793,9 @@ export class WorkerCore {
 					this.#clearElementCache();
 					return await pushState(page, url, sig);
 				}),
-			frames: () => op("tab.frames()", quickOpMs, sig => listFrames(page, sig)),
+			frames: () => act("tab.frames()", quickOpMs, sig => listFrames(page, sig)),
 			frame: selectorOrNameOrUrl =>
-				op(`tab.frame(${JSON.stringify(selectorOrNameOrUrl)})`, quickOpMs, async sig => {
+				act(`tab.frame(${JSON.stringify(selectorOrNameOrUrl)})`, quickOpMs, async sig => {
 					const frame = await resolveFrame(page, selectorOrNameOrUrl, normalizeSelector, sig);
 					return createFrameApi(frame, {
 						quickOpMs,
@@ -2771,10 +2870,10 @@ export class WorkerCore {
 					return this.#requireNetwork().allowedDomains();
 				}),
 			diffScreenshot: (baselinePath, opts) =>
-				op("tab.diffScreenshot()", quickOpMs, sig =>
+				read("tab.diffScreenshot()", quickOpMs, sig =>
 					this.#diffScreenshot(session, output, screenshots, sig, baselinePath, opts),
 				),
-			pdf: opts => op("tab.pdf()", quickOpMs, sig => this.#pdf(session, sig, opts)),
+			pdf: opts => read("tab.pdf()", quickOpMs, sig => this.#pdf(session, sig, opts)),
 			addInitScript: source =>
 				op("tab.addInitScript()", actionOpMs, sig =>
 					untilAborted(sig, () => this.#requireInitScripts().add(source)),
@@ -2798,48 +2897,48 @@ export class WorkerCore {
 					return this.#requireDownloads().list();
 				}),
 			text: (selector = "body") =>
-				op(`tab.text(${JSON.stringify(selector)})`, quickOpMs, sig =>
+				read(`tab.text(${JSON.stringify(selector)})`, quickOpMs, sig =>
 					queryText(page, normalizeSelector(selector), sig),
 				),
 			html: (selector = "body") =>
-				op(`tab.html(${JSON.stringify(selector)})`, quickOpMs, sig =>
+				read(`tab.html(${JSON.stringify(selector)})`, quickOpMs, sig =>
 					queryHtml(page, normalizeSelector(selector), sig),
 				),
 			value: selector =>
-				op(`tab.value(${JSON.stringify(selector)})`, quickOpMs, sig =>
+				read(`tab.value(${JSON.stringify(selector)})`, quickOpMs, sig =>
 					queryValue(page, normalizeSelector(selector), sig),
 				),
 			attr: (selector, attribute) =>
-				op(`tab.attr(${JSON.stringify(selector)}, ${JSON.stringify(attribute)})`, quickOpMs, sig =>
+				read(`tab.attr(${JSON.stringify(selector)}, ${JSON.stringify(attribute)})`, quickOpMs, sig =>
 					queryAttribute(page, normalizeSelector(selector), attribute, sig),
 				),
 			count: selector =>
-				op(`tab.count(${JSON.stringify(selector)})`, quickOpMs, sig =>
+				read(`tab.count(${JSON.stringify(selector)})`, quickOpMs, sig =>
 					queryCount(page, normalizeSelector(selector), sig),
 				),
 			box: selector =>
-				op(`tab.box(${JSON.stringify(selector)})`, quickOpMs, sig =>
+				read(`tab.box(${JSON.stringify(selector)})`, quickOpMs, sig =>
 					queryBox(page, normalizeSelector(selector), sig),
 				),
 			styles: (selector, props) =>
-				op(`tab.styles(${JSON.stringify(selector)})`, quickOpMs, sig =>
+				read(`tab.styles(${JSON.stringify(selector)})`, quickOpMs, sig =>
 					queryStyles(page, normalizeSelector(selector), props, sig),
 				),
 			isVisible: selector =>
-				op(`tab.isVisible(${JSON.stringify(selector)})`, quickOpMs, sig =>
+				read(`tab.isVisible(${JSON.stringify(selector)})`, quickOpMs, sig =>
 					queryVisible(page, normalizeSelector(selector), sig),
 				),
 			isEnabled: selector =>
-				op(`tab.isEnabled(${JSON.stringify(selector)})`, quickOpMs, sig =>
+				read(`tab.isEnabled(${JSON.stringify(selector)})`, quickOpMs, sig =>
 					queryEnabled(page, normalizeSelector(selector), sig),
 				),
 			isChecked: selector =>
-				op(`tab.isChecked(${JSON.stringify(selector)})`, quickOpMs, sig =>
+				read(`tab.isChecked(${JSON.stringify(selector)})`, quickOpMs, sig =>
 					queryChecked(page, normalizeSelector(selector), sig),
 				),
 			waitForText: (text, opts) => {
 				const w = waitMs(opts?.timeout);
-				return op(`tab.waitForText(${JSON.stringify(text)})`, w, sig =>
+				return act(`tab.waitForText(${JSON.stringify(text)})`, w, sig =>
 					waitForPageText(page, text, {
 						timeout: w,
 						selector: opts?.selector ? normalizeSelector(opts.selector) : undefined,
@@ -2872,7 +2971,7 @@ export class WorkerCore {
 			metrics: () =>
 				op("tab.metrics()", quickOpMs, sig => untilAborted(sig, () => this.#requireTracing().metrics())),
 			dblclick: selector =>
-				op(
+				act(
 					`tab.dblclick(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
@@ -2886,7 +2985,7 @@ export class WorkerCore {
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			hover: selector =>
-				op(
+				act(
 					`tab.hover(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
@@ -2900,7 +2999,7 @@ export class WorkerCore {
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			focus: selector =>
-				op(
+				act(
 					`tab.focus(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
@@ -2914,7 +3013,7 @@ export class WorkerCore {
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			check: selector =>
-				op(
+				act(
 					`tab.check(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
@@ -2928,7 +3027,7 @@ export class WorkerCore {
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			uncheck: selector =>
-				op(
+				act(
 					`tab.uncheck(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
@@ -2946,10 +3045,12 @@ export class WorkerCore {
 			mouseMove: (x, y, opts) => op("tab.mouseMove()", actionOpMs, sig => mouseMove(page, x, y, opts, sig)),
 			mouseDown: opts => op("tab.mouseDown()", actionOpMs, sig => mouseDown(page, opts, sig)),
 			mouseUp: opts => op("tab.mouseUp()", actionOpMs, sig => mouseUp(page, opts, sig)),
+			// Raw pointer input runs at once, as on main: sent the moment a new document had parsed, a click did not
+			// reach it.
 			clickAt: (x, y, opts) => op("tab.clickAt()", actionOpMs, sig => clickAt(page, x, y, opts, sig)),
 			wheel: (deltaX, deltaY) => op("tab.wheel()", actionOpMs, sig => wheel(page, deltaX, deltaY, sig)),
 			highlight: (selector, opts) =>
-				op(
+				act(
 					`tab.highlight(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
