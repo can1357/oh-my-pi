@@ -12,6 +12,7 @@ import {
 	previewWindowRows,
 	replaceTabs,
 } from "../render/render-utils";
+import { displayDaemonExitReason } from "./daemon";
 import {
 	formatStyledTruncationWarning,
 	type OutputMeta,
@@ -28,7 +29,7 @@ import type {
 } from "./renderer";
 import { INTENT_FIELD, type TspTone } from "@oh-my-pi/pi-wire";
 import { plainText } from "../native/spans";
-import { resultText, runBox, runFoot, runInput, runOutput, type RunState } from "./native-view";
+import { noteText, resultText, runBox, runFoot, runInput, runOutput, type RunState } from "./native-view";
 
 /** Default collapsed shell output preview height. */
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
@@ -37,19 +38,20 @@ export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
  * LLM-facing footer appended when a tool call becomes a background job. It states the job's kill
  * deadline (`timeoutSec`, `undefined` when disabled) so the model knows the job will die at it before
  * it waits on the result. The deadline counts the job's whole run time, not time left from now: an
- * auto-backgrounded call has already spent its foreground wait.
+ * auto-backgrounded call has already spent its foreground wait. The optional label keeps parallel
+ * jobs attributable in completion order.
  */
-export function formatBackgroundNotice(jobId: string, timeoutSec: number | undefined): string {
+export function formatBackgroundNotice(jobId: string, timeoutSec: number | undefined, label?: string): string {
 	const deadline =
 		timeoutSec === undefined
 			? " (no deadline)"
 			: ` (killed once it has run ${timeoutSec}s in total; \`timeout: 0\` disables the deadline)`;
-	return `Backgrounded as job ${jobId}${deadline}; its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no \`sleep\`, \`ps\`, \`pgrep\`, \`top\`, \`pidwait\`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.`;
+	return `Backgrounded as job ${jobId}${label ? ` (${label})` : ""}${deadline}; its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no \`sleep\`, \`ps\`, \`pgrep\`, \`top\`, \`pidwait\`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.`;
 }
 
 /**
- * Whether `line` is `formatBackgroundNotice(jobId, …)` for any deadline, including the deadline-less
- * `Backgrounded as job <id>; …` form persisted in older transcripts.
+ * Whether `line` is `formatBackgroundNotice(jobId, …)` for any deadline or label, including the
+ * deadline-less `Backgrounded as job <id>; …` form persisted in older transcripts.
  */
 function isBackgroundNotice(line: string, jobId: string): boolean {
 	const prefix = `Backgrounded as job ${jobId}`;
@@ -77,6 +79,12 @@ export interface BashToolDetails {
 		ready: boolean;
 		timedOut: boolean;
 		pid?: number;
+		/** Terminal launch diagnostic, independent of the output preview. */
+		exitReason?: string;
+		/** Live output monitor delivery attached at start; absent when unmonitored. */
+		progress?: "wake" | "ambient";
+		/** Reason live output monitoring stopped; progress is absent once stopped. */
+		monitorStopped?: string;
 	};
 	/** Background job behind the call; `cancelled`: killed (`proc://<id>/kill`) before it finished. */
 	async?: {
@@ -350,6 +358,7 @@ function bashStatsParts(
 		statsParts.push(`Service: ${service.name}`, `State: ${service.state}`);
 		statsParts.push(`Ready: ${service.ready ? "yes" : service.timedOut ? "timed out" : "no"}`);
 		if (service.pid !== undefined) statsParts.push(`PID: ${service.pid}`);
+		if (service.progress) statsParts.push(`Progress: ${service.progress}`);
 	}
 	if (wallTimeMs !== undefined) {
 		statsParts.push(`Wall: ${formatWallTimeSeconds(wallTimeMs)}s`);
@@ -414,6 +423,7 @@ function shellFootParts(details: BashToolDetails | undefined, artifactId: string
 		parts.push(`Service ${service.name}`, service.state);
 		parts.push(service.ready ? "ready" : service.timedOut ? "ready timed out" : "not ready");
 		if (service.pid !== undefined) parts.push(`PID ${service.pid}`);
+		if (service.progress) parts.push(`Progress ${service.progress}`);
 	}
 	if (artifactId) parts.push(`Artifact ${artifactId}`);
 	return parts;
@@ -622,6 +632,12 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						uiTheme,
 					);
 					const outputLines: string[] = [...formatted.lines];
+					const serviceReason = displayDaemonExitReason(details?.service?.exitReason);
+					if (serviceReason) outputLines.push(uiTheme.fg("error", `Reason: ${serviceReason}`));
+					const monitorStopped = displayDaemonExitReason(details?.service?.monitorStopped);
+					if (monitorStopped) {
+						outputLines.push(uiTheme.fg("warning", `Progress monitoring stopped: ${monitorStopped}`));
+					}
 					if (warningLine) outputLines.push(warningLine);
 
 					const snapshot: ToolCardSnapshot = {
@@ -704,10 +720,14 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					? undefined
 					: (details?.wallTimeMs ?? options.elapsedMs);
 			const meta = details?.meta;
+			const serviceReason = displayDaemonExitReason(details?.service?.exitReason);
+			const monitorStopped = displayDaemonExitReason(details?.service?.monitorStopped);
 			const box = runBox(
 				[
 					runInput(command, SHELL_INPUT),
 					output.trim().length > 0 && runOutput(output, { role: "omp.tool.bash.output", previewLines }),
+					serviceReason ? noteText(`Reason: ${serviceReason}`, "error") : undefined,
+					monitorStopped ? noteText(`Progress monitoring stopped: ${monitorStopped}`, "warning") : undefined,
 					runFoot({
 						state,
 						exitCode: details?.exitCode,

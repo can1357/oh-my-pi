@@ -2638,7 +2638,6 @@ function b() {
 			expect(getTextOutput(result)).toContain(
 				"(killed once it has run 3600s in total; `timeout: 0` disables the deadline)",
 			);
-
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {
 				throw new Error("expected an auto-backgrounded job id");
