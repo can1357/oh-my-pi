@@ -9,7 +9,7 @@
 
 ### Changed
 
-- Sessions started with computer use enabled receive the desktop guide before their first call, avoiding a separate documentation read before starting a desktop task
+- Sessions started with computer use enabled receive the desktop guide before their first call, avoiding a separate documentation read before starting a desktop task ([#16918](https://github.com/can1357/oh-my-pi/pull/16918) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
