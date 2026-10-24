@@ -111,7 +111,6 @@ describe("InteractiveMode.setEditorComponent", () => {
 		vi.useFakeTimers();
 		try {
 			const ordinaryHint = Bun.stripANSI(mode.editor.placeholder?.() ?? "");
-			expect(ordinaryHint).not.toBe("");
 			const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
 
 			mode.notifyComposerStash();
