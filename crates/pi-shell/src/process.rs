@@ -793,24 +793,19 @@ impl Process {
 	/// with no cleanup and no `session_exit` record (#7452, related #4605).
 	fn signal_tree_excluding(&self, signal: i32, protected: &HashSet<i32>) -> u32 {
 		let descendants = self.signalable_descendants(protected);
-		let mut signaled = 0u32;
 		// If self leads its own process group, also signal the group — this
 		// catches grandchildren reparented to init when their immediate parent
 		// died inside the descendant walk.
-		if let Some(pgid) = self.group_id()
-			&& pgid == self.inner.pid()
-		{
-			let _ = kill_process_group(pgid, signal);
-		}
-		for child in &descendants {
-			if child.inner.kill(signal) {
-				signaled += 1;
-			}
-		}
-		if !protected.contains(&self.pid()) && self.inner.kill(signal) {
-			signaled += 1;
-		}
-		signaled
+		let pgid = self
+			.group_id()
+			.filter(|&pgid| pgid == self.pid() && !protected.contains(&pgid));
+		signal_processes(
+			descendants
+				.iter()
+				.chain(std::iter::once(self).filter(|process| !protected.contains(&process.pid()))),
+			pgid,
+			signal,
+		)
 	}
 
 	/// Live descendants with every protected subtree pruned, not just the exact
@@ -845,20 +840,26 @@ impl Process {
 			return Ok(true);
 		}
 
-		let process_group = if group { self.group_id() } else { None };
 		let protected = host_protected_pids();
+		let process_group = if group && !protected.contains(&self.pid()) {
+			self.group_id()
+		} else {
+			None
+		};
+		let signal_wave = |descendants: &[Self], signal| {
+			signal_processes(
+				descendants
+					.iter()
+					.chain(std::iter::once(self).filter(|process| !protected.contains(&process.pid()))),
+				process_group,
+				signal,
+			)
+		};
 
-		// Polite wave: SIGTERM the group, every live descendant, then the root.
-		if let Some(pgid) = process_group {
-			let _ = kill_process_group(pgid, TERM_SIGNAL);
-		}
+		// Snapshot before signalling: a TERM trap can create cleanup children
+		// that must not be picked up and terminated by the same polite wave.
 		let mut descendants = self.signalable_descendants(&protected);
-		for child in &descendants {
-			let _ = child.inner.kill(TERM_SIGNAL);
-		}
-		if !protected.contains(&self.pid()) {
-			let _ = self.inner.kill(TERM_SIGNAL);
-		}
+		signal_wave(&descendants, TERM_SIGNAL);
 
 		// Optional grace wait. A negative `graceful_ms` skips the wait entirely
 		// (we still emit the polite signal so cleanup handlers can run before
@@ -878,20 +879,45 @@ impl Process {
 
 		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
 		// period — or any process re-parented to the root — is signalled too.
-		if let Some(pgid) = process_group {
-			let _ = kill_process_group(pgid, KILL_SIGNAL);
-		}
 		descendants = self.signalable_descendants(&protected);
-		for child in &descendants {
-			let _ = child.inner.kill(KILL_SIGNAL);
-		}
-		if !protected.contains(&self.pid()) {
-			let _ = self.inner.kill(KILL_SIGNAL);
-		}
+		signal_wave(&descendants, KILL_SIGNAL);
 
 		wait_for_exit(self, &descendants, Some(Duration::from_millis(u64::from(timeout_ms))), ct)
 			.await
 	}
+}
+
+/// Signal each known process once across overlapping groups and trees.
+/// Snapshot group membership before sending anything, so a cleanup handler
+/// cannot add its newly spawned children to this wave. Processes outside the
+/// successfully signalled groups still need their pinned, individual signal.
+fn signal_processes<'a>(
+	processes: impl IntoIterator<Item = &'a Process>,
+	pgids: impl IntoIterator<Item = i32>,
+	signal: i32,
+) -> u32 {
+	let mut seen_pids = HashSet::new();
+	let processes: Vec<_> = processes
+		.into_iter()
+		.filter(|process| seen_pids.insert(process.pid()))
+		.map(|process| (process, process.group_id()))
+		.collect();
+	let mut seen_pgids = HashSet::new();
+	let signaled_groups: HashSet<_> = pgids
+		.into_iter()
+		.filter(|&pgid| seen_pgids.insert(pgid) && kill_process_group(pgid, signal))
+		.collect();
+	let mut signaled = 0;
+	for (process, pgid) in processes {
+		let covered_by_group = pgid.is_some_and(|pgid| {
+			signaled_groups.contains(&pgid)
+				&& (process.status() != ProcessStatus::Running || process.group_id() == Some(pgid))
+		});
+		if covered_by_group || process.inner.kill(signal) {
+			signaled += 1;
+		}
+	}
+	signaled
 }
 
 /// The harness pid — the one process a run-cancellation sweep must never
@@ -1124,12 +1150,19 @@ impl TerminationTargets {
 	/// targets routinely exit between collection and signalling, and
 	/// the caller's policy is "best effort".
 	pub fn signal(&self, signal: i32) {
-		for &pgid in &self.pgids {
-			let _ = kill_process_group(pgid, signal);
-		}
+		let protected = host_protected_pids();
+		let mut pgids = self.pgids.clone();
+		let mut processes = Vec::new();
 		for process in &self.processes {
-			let _ = process.signal_tree(signal);
+			processes.extend(process.signalable_descendants(&protected));
+			if !protected.contains(&process.pid()) {
+				if let Some(pgid) = process.group_id().filter(|&pgid| pgid == process.pid()) {
+					pgids.push(pgid);
+				}
+				processes.push(process.clone());
+			}
 		}
+		let _ = signal_processes(&processes, pgids, signal);
 	}
 }
 
@@ -1648,6 +1681,120 @@ mod tests {
 		targets.add_process(pinned);
 		targets.add_pid(self_pid);
 		assert_eq!(targets.processes.len(), 1, "duplicate pids must be deduped");
+	}
+
+	/// TERM can coalesce, hiding duplicate delivery until a trap happens to
+	/// start between two sends. A blocked, queued signal makes the same group
+	/// and tree overlap observable without depending on scheduler timing.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn signal_waves_deliver_once_per_process() {
+		use std::{fs, io::Read as _, process::Stdio};
+
+		use tokio::{io::AsyncWriteExt as _, process::Command, time};
+
+		const PROBE_DIRECTORY: &str = "PI_SHELL_SIGNAL_DELIVERY_PROBE";
+		let signal = libc::SIGRTMIN();
+		// SAFETY: a zeroed sigset_t is valid storage for sigemptyset, and both
+		// functions only write to that initialized local set.
+		let signals = unsafe {
+			let mut signals: libc::sigset_t = std::mem::zeroed();
+			assert_eq!(libc::sigemptyset(&raw mut signals), 0);
+			assert_eq!(libc::sigaddset(&raw mut signals, signal), 0);
+			signals
+		};
+
+		if let Some(directory) = std::env::var_os(PROBE_DIRECTORY) {
+			let directory = std::path::PathBuf::from(directory);
+			fs::write(directory.join("ready"), []).expect("probe ready");
+			std::io::stdin()
+				.read_exact(&mut [0])
+				.expect("parent finished sending signals");
+			let timeout = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+			let mut received = 0;
+			loop {
+				// SAFETY: signals and timeout are initialized and live for the
+				// call; a null siginfo pointer discards the optional metadata.
+				let result = unsafe {
+					libc::sigtimedwait(&raw const signals, std::ptr::null_mut(), &raw const timeout)
+				};
+				if result == signal {
+					received += 1;
+				} else {
+					let error = std::io::Error::last_os_error().raw_os_error();
+					if error == Some(libc::EINTR) {
+						continue;
+					}
+					assert_eq!(error, Some(libc::EAGAIN), "drain queued signals");
+					break;
+				}
+			}
+			fs::write(directory.join("received"), received.to_string()).expect("signal count");
+			return;
+		}
+
+		for own_process_group in [true, false] {
+			let directory = tempfile::tempdir().expect("signal probe directory");
+			let mut command = Command::new(std::env::current_exe().expect("test executable"));
+			command
+				.args(["--exact", "process::tests::signal_waves_deliver_once_per_process"])
+				.env(PROBE_DIRECTORY, directory.path())
+				.stdin(Stdio::piped())
+				.stdout(Stdio::null())
+				.kill_on_drop(true);
+			if own_process_group {
+				command.process_group(0);
+			}
+			// SAFETY: the forked child calls only async-signal-safe mask
+			// operations before exec. Every thread in the new test process
+			// inherits this mask, so queued signals cannot kill the probe.
+			unsafe {
+				command.pre_exec(move || {
+					if libc::sigprocmask(libc::SIG_BLOCK, &raw const signals, std::ptr::null_mut()) == 0
+					{
+						Ok(())
+					} else {
+						Err(std::io::Error::last_os_error())
+					}
+				});
+			}
+			let mut child = command.spawn().expect("signal probe");
+			let pid = i32::try_from(child.id().expect("probe pid")).expect("pid fits");
+			let process = Process::from_pid(pid).expect("pin probe");
+			time::timeout(Duration::from_secs(5), async {
+				while !directory.path().join("ready").exists() {
+					time::sleep(Duration::from_millis(10)).await;
+				}
+			})
+			.await
+			.expect("probe ready");
+
+			let mut targets = TerminationTargets::new();
+			targets.add_pgid(process.group_id().expect("probe process group"));
+			targets.add_process(process.clone());
+			targets.signal(signal);
+			// A later wave must still deliver its signal; deduplication is
+			// local to one call. In the inherited-group case the group send
+			// is refused by the host guard, so the pinned process is needed.
+			assert_eq!(process.kill_tree(Some(signal)), 1, "one known process signalled");
+			child
+				.stdin
+				.take()
+				.expect("probe stdin")
+				.write_all(b"x")
+				.await
+				.expect("release signal probe");
+			let status = time::timeout(Duration::from_secs(5), child.wait())
+				.await
+				.expect("probe exits")
+				.expect("reap probe");
+			assert!(status.success(), "signal probe failed: {status}");
+			assert_eq!(
+				fs::read_to_string(directory.path().join("received")).expect("signal count"),
+				"2",
+				"each wave must deliver once (own process group: {own_process_group})"
+			);
+		}
 	}
 
 	/// Regression test for the review on PR #4606: a long-running shell

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- SVG figures and table charts now fit overlay heights and caller-provided row limits, including zero; hidden charts no longer delay transcript completion, and visible SIXEL figures stay drawn while shrinking ([#15661](https://github.com/can1357/oh-my-pi/issues/15661), [#15853](https://github.com/can1357/oh-my-pi/pull/15853) by [@KunoLu](https://github.com/KunoLu)).
+
 ### Added
 
 - Added `modelEnds` to `GroupedFileSection`: per file, the model-line index just past its last line, so a caller cutting the output can tell which files it shows whole ([#16594](https://github.com/can1357/oh-my-pi/pull/16594) by [@will-bogusz](https://github.com/will-bogusz))
