@@ -82,6 +82,8 @@ interface ControllerContextState {
 	firstStatus: PromiseWithResolvers<string>;
 	/** Session-change callbacks registered by the controller under test. */
 	sessionChangeCallbacks: Set<() => void>;
+	/** Persistence-notice observers registered by the controller under test. */
+	sessionMoveCallbacks: Set<() => void>;
 	/** Resolves each time a host clears its status-line segment (tore down). */
 	tornDown: (() => void)[];
 	/** Guest prompts a host forwarded into the session. */
@@ -109,6 +111,7 @@ function makeControllerContext(over: { autoStart?: "off" | "view" | "control"; r
 		showStatus: [],
 		firstStatus: Promise.withResolvers<string>(),
 		sessionChangeCallbacks: new Set(),
+		sessionMoveCallbacks: new Set(),
 		tornDown: [],
 		prompts: [],
 		prompted: [],
@@ -128,6 +131,10 @@ function makeControllerContext(over: { autoStart?: "off" | "view" | "control"; r
 				entries: [],
 			}),
 			onEntryAppended: undefined,
+			onPersistenceNotice: (cb: () => void) => {
+				state.sessionMoveCallbacks.add(cb);
+				return () => state.sessionMoveCallbacks.delete(cb);
+			},
 		},
 		session: {
 			get isSessionTransitioning() {
@@ -178,6 +185,16 @@ function makeControllerContext(over: { autoStart?: "off" | "view" | "control"; r
 function switchSession(state: ControllerContextState, sessionId: string): void {
 	state.sessionId = sessionId;
 	for (const cb of state.sessionChangeCallbacks) cb();
+}
+
+/**
+ * Simulate SessionManager moving the session to a sibling file because the
+ * original is open in another omp process: it re-ids, then raises a
+ * persistence notice; AgentSession's session-change callbacks never run.
+ */
+function moveSessionFile(state: ControllerContextState, sessionId: string): void {
+	state.sessionId = sessionId;
+	for (const cb of state.sessionMoveCallbacks) cb();
 }
 
 /** Join `host`'s room through the relay as a writer; resolves after `welcome`. */
@@ -990,6 +1007,31 @@ describe("CollabController", () => {
 			registry.resolveCollabHostLink(controller.instanceId, "control", { dir: tmp }).then(link => link.generation),
 		).resolves.toBe(2);
 		expect(second!.webLink).not.toBe(first.webLink);
+	});
+
+	it("rotates the room when the session moves to a new file because another omp process has it open", async () => {
+		const { ctx, state } = makeControllerContext({ autoStart: "control" });
+		controller = new CollabController(ctx);
+		controller.autoStart();
+		await settled(publishSpy, 1);
+		const first = ctx.collabHost;
+		if (!first) throw new Error("first room missing");
+		const goodbye = Promise.withResolvers<"bye">();
+		await joinAsWriter(first, frame => {
+			if (frame.t === "bye") goodbye.resolve(frame.t);
+		});
+
+		moveSessionFile(state, `sess-moved-${crypto.randomUUID()}`);
+		await settled(publishSpy, 2);
+
+		// Guests of the old room are told it closed instead of waiting forever.
+		expect(await goodbye.promise).toBe("bye");
+		expect(first.stopped).toBe(true);
+		// The moved session is shared again and the old registry entry is gone.
+		expect(ctx.collabHost?.sessionId).toBe(state.sessionId);
+		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
+			{ instanceId: controller.instanceId, generation: 2, sessionId: state.sessionId },
+		]);
 	});
 
 	it("stops a manually started room on session switch when auto-start is off", async () => {
