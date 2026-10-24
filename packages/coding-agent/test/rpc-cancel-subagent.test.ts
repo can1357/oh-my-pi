@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { createSessionDefaults } from "./helpers/session-defaults";
 
 describe("handleRpcCancelSubagent", () => {
 	let registry: RpcSubagentRegistry;
@@ -215,11 +216,11 @@ describe("handleRpcCancelSubagent", () => {
 		const listeners: Array<(event: AgentSessionEvent) => void> = [];
 		// Minimal session whose turn never finishes on its own: only a cancel can end the run.
 		const session = {
+			...createSessionDefaults(),
 			state: { messages: [] },
 			agent: { state: { systemPrompt: ["test"] } },
 			model: undefined,
 			extensionRunner: undefined,
-			sessionManager: { appendSessionInit: () => {} },
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
 			getToolByName: () => undefined,
@@ -242,11 +243,8 @@ describe("handleRpcCancelSubagent", () => {
 			getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
 			settleAsyncWork: async () => {},
 			abort: async () => {},
-			dispose: async () => {},
 			setIrcWakeTurnObserver: () => {},
 			trackIrcReply: () => {},
-			subscribeRunState: () => () => {},
-			addDisposer: () => {},
 		} as unknown as AgentSession;
 		AgentRegistry.global().register({
 			id,

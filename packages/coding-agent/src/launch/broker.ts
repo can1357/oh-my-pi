@@ -41,6 +41,7 @@ import {
 } from "./protocol";
 import { resolveDaemonSpawnOptions } from "./spawn-options";
 import { renderTerminalOutput } from "./terminal-output";
+import type { DaemonObservationNotification } from "./protocol";
 import { quotePosixArgv } from "../utils/shell-quote";
 
 const DEFAULT_IDLE_GRACE_MS = 3_000;
@@ -422,6 +423,8 @@ function connectPort(host: string, port: number): Promise<boolean> {
 }
 
 class DaemonBroker {
+	readonly #observerOwners = new Map<IpcConnection, Set<string>>();
+	readonly #observedBackoffs = new WeakSet<DaemonSnapshot>();
 	readonly #projectDir: string;
 	readonly #runtimeDir: string;
 	readonly #endpoint: string;
@@ -505,6 +508,7 @@ class DaemonBroker {
 		this.#sockets.clear();
 		this.#clients.clear();
 		await this.#server?.close();
+		this.#observerOwners.clear();
 		this.#finished.resolve();
 	}
 
@@ -536,6 +540,7 @@ class DaemonBroker {
 					this.#inFlight.delete(requestId);
 					inFlight.controller.abort();
 				}
+				this.#observerOwners.delete(socket);
 			},
 		);
 	}
@@ -550,6 +555,12 @@ class DaemonBroker {
 			if (isRecord(decoded) && typeof decoded.id === "string") id = decoded.id;
 			const request = parseDaemonWireRequest(decoded);
 			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
+			// Apply the diagnostic scope before owned registration can yield to persistence.
+			// An awaited request is therefore a barrier for observing every later settlement.
+			if (request.observedOwners !== undefined) {
+				if (request.observedOwners.length === 0) this.#observerOwners.delete(socket);
+				else this.#observerOwners.set(socket, new Set(request.observedOwners));
+			}
 			onAuthenticated();
 			for (const owner of request.completionUnsubscribes ?? []) {
 				const subscriptionId = this.#completionSubscriptions.get(owner);
@@ -1037,6 +1048,28 @@ class DaemonBroker {
 		}
 	}
 
+	#notifyObservers(snapshot: DaemonSnapshot, completion?: DaemonCompletionNotification): void {
+		const owner = snapshot.owner;
+		if (owner === undefined) return;
+		let line: string | undefined;
+		for (const [socket, owners] of this.#observerOwners) {
+			if (socket.closed || !owners.has(owner)) continue;
+			if (line === undefined) {
+				const observation: DaemonObservationNotification = {
+					event: "daemon-observed",
+					notification: completion ?? {
+						event: "daemon-completed",
+						completionId: crypto.randomUUID(),
+						owner,
+						daemon: { ...snapshot },
+					},
+				};
+				line = JSON.stringify(observation);
+			}
+			socket.send(line);
+		}
+	}
+
 	#markReady(record: ManagedDaemon): void {
 		if (!record.spec.ready || record.snapshot.state !== "starting") return;
 		if (!record.logReady || !record.portReady) return;
@@ -1097,6 +1130,7 @@ class DaemonBroker {
 				`\n[daemon exited${exitCode === undefined ? "" : ` with code ${exitCode}`}; restarting in ${delay}ms]\n`,
 			);
 			this.#persist(record);
+			this.#notifyObservers(record.snapshot);
 			record.restartTimer = setTimeout(() => {
 				record.restartTimer = undefined;
 				void this.#launch(record);
@@ -1115,6 +1149,7 @@ class DaemonBroker {
 						daemon: { ...record.snapshot },
 					} satisfies DaemonCompletionNotification)
 				: undefined;
+		this.#notifyObservers(record.snapshot, completion);
 		if (completion) record.pendingCompletions.push(completion);
 		this.#persist(record);
 		await record.log?.close();
@@ -1371,11 +1406,19 @@ class DaemonBroker {
 	}
 
 	#persist(record: ManagedDaemon): void {
+		// A stopped restart timer has no child exit callback. Observe its
+		// persisted restarting -> exited transition once, before log shutdown.
+		const leftBackoff = this.#observedBackoffs.delete(record.snapshot);
+		if (record.snapshot.state === "restarting") this.#observedBackoffs.add(record.snapshot);
+		const stoppedBackoff = leftBackoff && record.stopRequested && record.snapshot.state === "exited";
 		const spec = JSON.stringify(record.spec);
 		const metadata = this.#serializeMetadata(record);
 		const writeSpec = spec !== record.persistedSpec;
 		const writeMeta = metadata !== record.persistedMeta;
-		if (!writeSpec && !writeMeta) return;
+		if (!writeSpec && !writeMeta) {
+			if (stoppedBackoff) this.#notifyObservers(record.snapshot);
+			return;
+		}
 		record.persistedSpec = spec;
 		record.persistedMeta = metadata;
 		record.persistQueue = record.persistQueue
@@ -1393,6 +1436,7 @@ class DaemonBroker {
 					error: error instanceof Error ? error.message : String(error),
 				});
 			});
+		if (stoppedBackoff) this.#notifyObservers(record.snapshot);
 	}
 
 	async #setRecordCompletionCapability(owner: string, capable: boolean): Promise<void> {
@@ -1477,7 +1521,9 @@ class DaemonBroker {
 						if ("pendingCompletions" in decoded && Array.isArray(decoded.pendingCompletions)) {
 							return decoded.pendingCompletions.map(value => {
 								const message = parseDaemonWireMessage(value);
-								if (!("event" in message)) throw new Error("Pending daemon completion is not an event");
+								if (!("event" in message) || message.event !== "daemon-completed") {
+									throw new Error("Pending daemon completion is not a completion event");
+								}
 								return message;
 							});
 						}

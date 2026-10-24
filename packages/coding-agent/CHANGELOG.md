@@ -6,6 +6,7 @@
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
+- Added opt-in periodic stall assessments for the main agent, with todo changes, transcript-backed agent histories and active time that remain available after parked sessions are released, preserved transcript ownership when killed agents are revived, background job completions, non-owning service completion observations, and configurable idle waking (`stallReminders`, default interval: 60 minutes) ([#15078](https://github.com/can1357/oh-my-pi/pull/15078) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ### Fixed
 

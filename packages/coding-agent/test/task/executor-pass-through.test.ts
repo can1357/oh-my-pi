@@ -47,7 +47,6 @@ function createMockSession(
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
 		extensionRunner: undefined,
-		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
@@ -823,6 +822,7 @@ describe("runSubprocess follows the parent's MCP manager", () => {
 			await onPrompt({ refreshedWith });
 			emitYield(emit);
 		});
+		const addDisposer = session.addDisposer.bind(session);
 		Object.assign(session, {
 			refreshMCPTools: async (tools: CustomTool[]) => {
 				const names = tools.map(tool => tool.name);
@@ -834,6 +834,7 @@ describe("runSubprocess follows the parent's MCP manager", () => {
 			},
 			addDisposer: (dispose: () => void) => {
 				disposers.push(dispose);
+				addDisposer(dispose);
 			},
 		});
 		return { session, refreshed, disposers };
