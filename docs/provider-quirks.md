@@ -1951,12 +1951,12 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/xiao
 
 ### Auth & usage
 - **Registry & Provider Definitions**: Primary provider is declared in `packages/catalog/src/compat/rules/auth/xiaomi.kdl`; regional Token Plan providers are declared in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-{ams,cn,sgp}.kdl`.
-- **Interactive Key Prompts & Validation**: Standard Xiaomi login (`loginXiaomi` in `packages/ai/src/registry/oauth/xiaomi.ts`) prompts for standard (`sk-...`) or Token Plan (`tp-...`) API keys and validates them via `validateXiaomiApiKey`, while regional Token Plan providers use declarative `login "api-key"` rules in their respective `.kdl` files.
+- **Interactive Key Prompts & Validation**: Standard Xiaomi login (`loginXiaomi` in `packages/ai/src/registry/oauth/xiaomi.ts`) prompts for standard (`sk-...`) or Token Plan (`tp-...`) API keys and validates them via `validateXiaomiApiKey`, while regional Token Plan providers use declarative `login "api-key"` rules in their respective `.kdl` files. Both paths validate with `mimo-v2.6-flash`; generic Token Plan login reuses the regional auth rules' validation URLs and models, while standard `sk-` login uses the Xiaomi catalog default.
 - **Token Plan Validation Fallback**: Standard `xiaomi` login with `tp-` keys falls back sequentially through SGP (`https://token-plan-sgp.xiaomimimo.com/v1`) → AMS (`https://token-plan-ams.xiaomimimo.com/v1`) → CN (`https://token-plan-cn.xiaomimimo.com/v1`), using fresh per-endpoint `AbortSignal.timeout(15_000)` signals so regional timeouts do not abort subsequent fallback endpoints. Regional `xiaomi-token-plan-*` logins validate against their specific cluster.
 - **Environment Variables**: `XIAOMI_API_KEY` for standard `xiaomi`, and `XIAOMI_TOKEN_PLAN_AMS_API_KEY`, `XIAOMI_TOKEN_PLAN_CN_API_KEY`, `XIAOMI_TOKEN_PLAN_SGP_API_KEY` for regional Token Plan providers (`packages/catalog/src/compat/rules/providers/xiaomi.kdl`).
 
 ### Catalog model handling
-- **Provider entry (`xiaomi`)**: `packages/catalog/src/compat/rules/providers/xiaomi.kdl` declares default model `mimo-v2.5`. Environment keys: `XIAOMI_API_KEY`.
+- **Provider entry (`xiaomi`)**: `packages/catalog/src/compat/rules/providers/xiaomi.kdl` declares default model `mimo-v2.6-flash`. Environment keys: `XIAOMI_API_KEY`.
 - **Dynamic Model Discovery**: `xiaomiModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts` inspects keys (`tp-` vs `sk-`) and provider IDs to query standard or regional `/models` endpoints (`XIAOMI_TOKEN_PLAN_BASE_URLS`), preserving regional provider IDs on returned models.
 - **Audio Model Filtering**: Speech and audio models are excluded from discovery and catalog generation (`!model.id.includes("-tts") && !model.id.includes("-asr")`) in `xiaomiModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) and `scripts/generate-models.ts`.
 - **Host Matching**: `modelMatchesHost` (`packages/catalog/src/hosts.ts`) matches `xiaomi` provider IDs, `xiaomi-token-plan-` provider prefixes, and `xiaomimimo.com` URL markers to the `xiaomi` host class.
@@ -1976,11 +1976,11 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/xiao
 ### Auth & usage
 - **Registry Provider & Auth Policy**: Declared in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-ams.kdl` with ID `"xiaomi-token-plan-ams"` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`).
 - **Region Console Instructions**: Interactive CLI login declared in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-ams.kdl` prompts users for a `tp-` prefix API key and directs them to the Token Plan console URL (`https://platform.xiaomimimo.com/console/plan-manage`).
-- **Single-Cluster Validation**: Validates keys directly against `https://token-plan-ams.xiaomimimo.com/v1` (using `mimo-v2.5` via `validate "chat-completions"` in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-ams.kdl`), bypassing the multi-region fallback sequence used by generic `loginXiaomi`.
+- **Single-Cluster Validation**: Validates keys directly against `https://token-plan-ams.xiaomimimo.com/v1` (using `mimo-v2.6-flash` via `validate "chat-completions"` in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-ams.kdl`), bypassing the multi-region fallback sequence used by generic `loginXiaomi`.
 - **Headers & Errors**: Requests pass standard `Authorization: Bearer tp-...` headers. Authentication or network failures throw `AIError.OAuthError` or `AIError.ApiKeyRequiredError`.
 
 ### Catalog model handling
-- **Provider entry (`xiaomi-token-plan-ams`)**: `packages/catalog/src/compat/rules/providers/xiaomi-token-plan-ams.kdl` declares default model `mimo-v2.5`. Environment keys: `XIAOMI_TOKEN_PLAN_AMS_API_KEY`.
+- **Provider entry (`xiaomi-token-plan-ams`)**: `packages/catalog/src/compat/rules/providers/xiaomi-token-plan-ams.kdl` declares default model `mimo-v2.6-flash`. Environment keys: `XIAOMI_TOKEN_PLAN_AMS_API_KEY`.
 - **Dynamic Model Manager**: `xiaomiModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) maps `tokenPlanRegion: "ams"` to base URL `https://token-plan-ams.xiaomimimo.com/v1` for `fetchDynamicModels`, utilizing `createBundledReferenceMap("xiaomi")` for baseline specs.
 - **Pre-packaged Catalog Models**: Bundled models (e.g. `mimo-v2-omni`, `mimo-v2.5`) are registered in `packages/catalog/src/models.json` under key `"xiaomi-token-plan-ams"`, setting `baseUrl: "https://token-plan-ams.xiaomimimo.com/v1"` with `api: "openai-completions"`.
 
@@ -2000,11 +2000,11 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/xiao
 
 ### Auth & usage
 - **Environment variable & login**: Authenticates via `XIAOMI_TOKEN_PLAN_CN_API_KEY`. Declared in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-cn.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`).
-- **Regional API key validation**: Prompts for a `tp-...` key from `https://platform.xiaomimimo.com/console/plan-manage` and validates it via `validateXiaomiApiKey` by sending a `POST /v1/chat/completions` request for `mimo-v2.5` strictly against `https://token-plan-cn.xiaomimimo.com/v1` with a 15-second timeout (`VALIDATION_TIMEOUT_MS`).
+- **Regional API key validation**: Prompts for a `tp-...` key from `https://platform.xiaomimimo.com/console/plan-manage` and validates it through the declarative API-key login rule by sending a `POST /v1/chat/completions` request for `mimo-v2.6-flash` strictly against `https://token-plan-cn.xiaomimimo.com/v1` with a 15-second timeout (`VALIDATION_TIMEOUT_MS`).
 - **Usage accounting**: Standard OpenAI Chat Completions usage accounting applies (`calculateOpenAIUsageAccounting`); no provider-specific usage or quota module exists.
 
 ### Catalog model handling
-- **Provider entry (`xiaomi-token-plan-cn`)**: `packages/catalog/src/compat/rules/providers/xiaomi-token-plan-cn.kdl` declares default model `mimo-v2.5`. Environment keys: `XIAOMI_TOKEN_PLAN_CN_API_KEY`.
+- **Provider entry (`xiaomi-token-plan-cn`)**: `packages/catalog/src/compat/rules/providers/xiaomi-token-plan-cn.kdl` declares default model `mimo-v2.6-flash`. Environment keys: `XIAOMI_TOKEN_PLAN_CN_API_KEY`.
 - **Authored seeds**: `mimo-v2.6-pro`, `mimo-v2.6-flash`, `mimo-v2.6-pro-ultraspeed`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - **Regional discovery & model manager**: `xiaomiModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts` pins discovery to `XIAOMI_TOKEN_PLAN_BASE_URLS.cn` (`https://token-plan-cn.xiaomimimo.com/v1`). Dynamic model discovery preserves `providerId: "xiaomi-token-plan-cn"`, filters `-tts` and `-asr` models, and merges metadata from bundled `xiaomi` reference specs using `createBundledReferenceMap("xiaomi")`.
 
@@ -2022,11 +2022,11 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/xiao
 ### Auth & usage
 - **Pinned Regional Validation**: Validates keys strictly against the Singapore endpoint `https://token-plan-sgp.xiaomimimo.com/v1` (via `validate "chat-completions"` in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-sgp.kdl`). Unlike generic `loginXiaomi` (which performs SGP -> AMS -> CN fallback for `tp-` keys), `xiaomi-token-plan-sgp` disables cross-region fallback during auth validation.
 - **Plan Management Auth URL**: Declared in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-sgp.kdl`, prompting users with instructions pointing to `https://platform.xiaomimimo.com/console/plan-manage` for acquiring regional `tp-` keys (`placeholder="tp-..."`), contrasting with standard `https://platform.xiaomimimo.com/#/console/api-keys`.
-- **Validation Handshake**: Validation tests credentials via `POST /chat/completions` using model `mimo-v2.5` (`validate "chat-completions"` in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-sgp.kdl`), `max_tokens: 1`, and `messages: [{ role: "user", content: "ping" }]`, enforcing a 15-second timeout.
+- **Validation Handshake**: Validation tests credentials via `POST /chat/completions` using model `mimo-v2.6-flash` (`validate "chat-completions"` in `packages/catalog/src/compat/rules/auth/xiaomi-token-plan-sgp.kdl`), `max_tokens: 1`, and `messages: [{ role: "user", content: "ping" }]`, enforcing a 15-second timeout.
 - **Usage Accounting**: Token consumption and cache metrics are calculated using standard OpenAI Chat Completions accounting via `calculateOpenAIUsageAccounting` (`packages/ai/src/providers/openai-shared.ts`).
 
 ### Catalog model handling
-- **Provider entry (`xiaomi-token-plan-sgp`)**: `packages/catalog/src/compat/rules/providers/xiaomi-token-plan-sgp.kdl` declares default model `mimo-v2.5`. Environment keys: `XIAOMI_TOKEN_PLAN_SGP_API_KEY`.
+- **Provider entry (`xiaomi-token-plan-sgp`)**: `packages/catalog/src/compat/rules/providers/xiaomi-token-plan-sgp.kdl` declares default model `mimo-v2.6-flash`. Environment keys: `XIAOMI_TOKEN_PLAN_SGP_API_KEY`.
 - **Bundled Spec Mapping**: Dynamic model mapping uses `createBundledReferenceMap` (`packages/catalog/src/provider-models/openai-compat.ts`) to merge dynamic models with static reference specs defined under `"xiaomi"` in `packages/catalog/src/models.json`.
 
 ## Z.AI (GLM Coding Plan) (`zai`)

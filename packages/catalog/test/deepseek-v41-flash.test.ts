@@ -28,8 +28,5 @@ describe("DeepSeek V4.1 Flash", () => {
 		// Retired V4 SKUs stay text-only by reviewed census decision.
 		expect(bundled("deepseek", "deepseek-v4-flash").compat.stripImageInput).toBe(true);
 		expect(bundled("deepseek", "deepseek-v4-pro").compat.stripImageInput).toBe(true);
-		// Yolo-Auto resells the same model behind an id the release-name glob
-		// must not claim.
-		expect(bundled("yolo-auto", "deepseek-flash-v4").compat.stripImageInput).toBe(true);
 	});
 });

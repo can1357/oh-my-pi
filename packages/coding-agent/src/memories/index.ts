@@ -317,12 +317,12 @@ export async function buildMemoryToolDeveloperInstructions(
 }
 
 /**
- * Clear all persisted memory state and generated artifacts.
+ * Clear the persisted memory state and generated artifacts of one project.
  */
 export async function clearMemoryData(agentDir: string, cwd: string): Promise<void> {
 	const db = openMemoryDb(getAgentDbPath(agentDir));
 	try {
-		clearMemoryDataInDb(db);
+		clearMemoryDataInDb(db, cwd);
 	} finally {
 		closeMemoryDb(db);
 	}
@@ -760,9 +760,19 @@ function extractPersistableMessages(payload: string): AgentMessage[] {
 		const maybeMessage = entry.message;
 		if (!maybeMessage || typeof maybeMessage !== "object") continue;
 		const message = maybeMessage as AgentMessage;
-		if (shouldPersistResponseItemForMemories(message)) {
+		if (!shouldPersistResponseItemForMemories(message)) continue;
+		if (message.role !== "assistant") {
 			messages.push(message);
+			continue;
 		}
+		const content = message.content.some(block => block.type === "thinking" || block.type === "redactedThinking")
+			? message.content.filter(block => block.type !== "thinking" && block.type !== "redactedThinking")
+			: message.content;
+		messages.push(
+			content === message.content && !message.providerPayload
+				? message
+				: { ...message, content, providerPayload: undefined },
+		);
 	}
 	return messages;
 }

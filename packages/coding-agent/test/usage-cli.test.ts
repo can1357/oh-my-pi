@@ -429,6 +429,17 @@ describe("collectUnreportedAccounts", () => {
 		expect(unreported).toEqual([{ provider: "cerebras", type: "api_key" }]);
 	});
 
+	it("does not list identity-less OAuth accounts as missing beside an org-attributed report", () => {
+		const account: UsageAccountIdentity = { provider: "devin", type: "oauth" };
+		const report = {
+			...makeReport("devin", "devin@example.test", []),
+			metadata: { email: "devin@example.test", accountId: "account-devin", orgId: "devin-team$account-devin" },
+		};
+
+		expect(collectUnreportedAccounts([report], [account])).toEqual([]);
+		expect(collectUnreportedAccounts([], [account])).toEqual([account]);
+	});
+
 	it("attributes org-decisively when either side carries an org", () => {
 		const shared = "shared@example.test";
 		const orgAccounts: UsageAccountIdentity[] = [

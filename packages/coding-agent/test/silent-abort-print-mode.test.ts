@@ -150,7 +150,7 @@ describe("Print-mode exit status", () => {
 		const session = createMockSession([errorMsg], async options => {
 			disposeOptions = options;
 		});
-		const exitCode = await runPrintMode(session, { mode: "text" });
+		const exitCode = await runPrintMode(session, { mode: "text", messages: ["hello"] });
 
 		// A real error SHOULD be written to stderr
 		const stderrText = stderrOutput.join("");
@@ -176,7 +176,7 @@ describe("Print-mode exit status", () => {
 		};
 		vi.spyOn(session, "getLastAssistantMessage").mockImplementation(() => (settled ? failure : incomplete));
 
-		expect(await runPrintMode(session, { mode: "text" })).toBe(1);
+		expect(await runPrintMode(session, { mode: "text", messages: ["hello"] })).toBe(1);
 		expect(stderrOutput.join("")).toContain("Length-stop recovery gave up");
 	});
 
@@ -195,9 +195,12 @@ describe("Print-mode exit status", () => {
 		};
 		vi.spyOn(session, "getLastAssistantMessage").mockImplementation(() => (settled ? recovered : retryError));
 
-		expect(await runPrintMode(session, { mode: "text" })).toBe(0);
+		expect(await runPrintMode(session, { mode: "text", messages: ["hello"] })).toBe(0);
 		expect(stdoutOutput.join("")).toBe("Recovered\n");
-		expect(stderrOutput.join("")).toBe("");
+		// The admitted prompt turn writes the text working indicator to
+		// stderr; the pinned contract is that the recovered turn's error
+		// line never reaches it.
+		expect(stderrOutput.join("")).not.toContain("Temporary API failure");
 	});
 
 	it("prints thinking blocks only when printThoughts is enabled", async () => {
@@ -208,11 +211,11 @@ describe("Print-mode exit status", () => {
 			],
 		});
 
-		await runPrintMode(createMockSession([message]), { mode: "text" });
+		await runPrintMode(createMockSession([message]), { mode: "text", messages: ["hello"] });
 		expect(stdoutOutput.join("")).toBe("final answer\n");
 
 		stdoutOutput = [];
-		await runPrintMode(createMockSession([message]), { mode: "text", printThoughts: true });
+		await runPrintMode(createMockSession([message]), { mode: "text", printThoughts: true, messages: ["hello"] });
 		expect(stdoutOutput.join("")).toBe("inspect hidden branch\nfinal answer\n");
 	});
 });

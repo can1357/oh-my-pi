@@ -48,6 +48,16 @@ class "minimax" {
 			}
 		}
 	}
+	// MiniMax's standard API doubles every rate above 512K input tokens;
+	// subscription hosts retain the same rates only as usage estimates.
+	on "minimax" "minimax-cn" "minimax-code" "minimax-code-cn" {
+		models "MiniMax-M3" {
+			long-context-cost {
+				input-threshold 512000
+				multiplier 2.0
+			}
+		}
+	}
 	on "alibaba-coding-plan" "minimax-code" "minimax-code-cn" "wafer-serverless" {
 		supports-developer-role #false
 	}

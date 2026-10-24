@@ -1429,6 +1429,29 @@ export async function reconcileFileFromDisk(
 }
 
 /**
+ * Reconciles every document the client holds open against disk.
+ *
+ * A project-wide request answers with ranges for every file it touches. An
+ * already-open consumer that was edited outside OMP keeps a stale overlay, so
+ * the server's ranges still point at the old text — applying them to the
+ * current disk text writes the new identifier into the wrong lines while the
+ * request reports success (#15772). Reconciling only the requested target
+ * leaves those consumers stale, so sync all open documents first.
+ *
+ * Files with an in-flight OMP write are skipped by
+ * {@link reconcileFileFromDisk} (their overlay leads disk), and unchanged files
+ * send nothing. Returns the number of documents that were re-synced.
+ */
+export async function reconcileOpenFilesFromDisk(client: LspClient, signal?: AbortSignal): Promise<number> {
+	let reconciled = 0;
+	for (const uri of Array.from(client.openFiles.keys())) {
+		if (!uri.startsWith("file://")) continue;
+		if (await reconcileFileFromDisk(client, uriToFile(uri), signal)) reconciled++;
+	}
+	return reconciled;
+}
+
+/**
  * Wait for the server's initial project loading to complete.
  * Races the server's $/progress tracking against the abort signal.
  * Returns immediately if loading already completed or timed out.

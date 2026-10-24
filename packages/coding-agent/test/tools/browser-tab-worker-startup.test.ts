@@ -664,13 +664,18 @@ describe("browser tabs whose renderer crashed", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"cancels an inline worker's run whose renderer crashed instead of letting it go on after its caller was told",
 		async () => {
-			let requests = 0;
+			let gateOpen = false;
 			const started = Promise.withResolvers<void>();
+			// Whichever the run reaches once the gate opens: `stopped` when its wait was cancelled, `continued` when not.
+			const outcome = Promise.withResolvers<"stopped" | "continued">();
 			const server = Bun.serve({
 				port: 0,
 				fetch: request => {
-					if (new URL(request.url).pathname === "/started") started.resolve();
-					else requests++;
+					const { pathname } = new URL(request.url);
+					if (pathname === "/started") started.resolve();
+					else if (pathname === "/gate") return new Response(null, { status: gateOpen ? 200 : 503 });
+					else if (pathname === "/stopped") outcome.resolve("stopped");
+					else outcome.resolve("continued");
 					return new Response("ok");
 				},
 			});
@@ -694,17 +699,22 @@ describe("browser tabs whose renderer crashed", () => {
 					globalThis.Worker = RealWorker;
 				}
 				expect(getTab(name)).toMatchObject({ worker: { mode: "inline" } });
+				// The run holds at a gate the test opens only once its caller was told of the crash, however long the
+				// crash takes to land; a run left going passes it into the second fetch, a cancelled one reports it stopped.
+				const origin = `http://127.0.0.1:${server.port}`;
 				const run = runInTab(name, {
-					code: `await fetch("http://127.0.0.1:${server.port}/started"); await wait(2_000); await fetch("http://127.0.0.1:${server.port}/after-crash");`,
+					code: `await fetch("${origin}/started"); try { await wait(async () => (await fetch("${origin}/gate")).ok, { timeout: 8_000, interval: 20 }); } catch (error) { await fetch("${origin}/stopped"); throw error; } await fetch("${origin}/after-crash");`,
 					timeoutMs: 10_000,
 					session,
 				}).catch((error: unknown) => error);
 				await started.promise;
 				await crashRenderer(browser, url);
 				expect(String(await run)).toContain("the tab could not be reattached and was closed");
-				// A run left going reaches the second fetch two seconds after it started; nothing marks that it did not.
-				await Bun.sleep(2_500);
-				expect(requests).toBe(0);
+				gateOpen = true;
+				// A run left going passes the 20 ms gate poll at once; a run torn down harder than a cancelled wait
+				// (worker terminated, fetches aborted) never reports, which is no less stopped. Only `continued` is the bug.
+				const reported = await Promise.race([outcome.promise, Bun.sleep(2_000).then(() => "no-report" as const)]);
+				expect(["stopped", "no-report"]).toContain(reported);
 			} finally {
 				await releaseTab(name, { kill: true });
 				if ("browser" in browser && browser.browser.connected) await releaseBrowser(browser, { kill: true });

@@ -89,7 +89,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 12. Native result paths are root-relative with raw entry names; below a URL root `resolveSearchResultPath()` joins them back into full URLs with percent-encoded segments (`local://notes/a%20b.md`). Archive scratch paths are remapped back to user-facing selectors before rendering.
 13. JS output shaping then:
    - caps multi-file output to 20 files per page (`DEFAULT_FILE_LIMIT`), using `skip` as the next file offset;
-   - caps matches per file to 20 for multi-file scopes and 200 for single-file scopes;
+   - caps matches per file to 20 for multi-file scopes and 200 for single-file scopes, and names the rendered files the cap trimmed in a closing line placed past the byte cap (`More than 20 matches in a.ts; grep keeps the first 20 per file when searching several. Search one file alone for up to 200.`; a single file gets `More than 200 matches; …` with a line-range hint). The page label's total reads `N+` only when native grep stopped at `INTERNAL_TOTAL_CAP`, not when a per-file cap bit;
    - round-robins selected per-file matches so one file does not monopolize the page;
    - formats lines through `formatMatchLine()` for the model and `formatCodeFrameLine()` for TUI;
    - in hashline mode, calls `getEditStore(session).recordSnapshotFile()` for each eligible rendered file to mint the `#TAG` anchor, then records emitted lines with `recordSeenLinesFromBody()`. Archive entries, immutable external materializations, and immutable URL schemes are skipped; a mutable file-backed URL (`local://`) is snapshotted against its backing host file (`resultSnapshotPath()`). Files too large or unreadable for snapshots fall back to plain line output.

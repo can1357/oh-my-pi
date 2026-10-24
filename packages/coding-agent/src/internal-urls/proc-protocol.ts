@@ -63,6 +63,18 @@ function isKill(url: InternalUrl): boolean {
 	return (url.rawPathname ?? url.pathname).endsWith("/kill");
 }
 
+/** The write call that cancels `id`, as error messages quote it. */
+function killCall(id: string): string {
+	return `call write with ${JSON.stringify({ path: `proc://${id}/kill` })} (no content needed)`;
+}
+
+/** Reading a write-only action never acts (reads may be speculative); the error names the write that does. */
+function writeOnlyError(id: string, action: "kill" | "mode"): string {
+	if (action === "kill")
+		return `proc://${id}/kill is write-only; reading it did not stop anything. To cancel ${id}, ${killCall(id)}; read proc://${id} for its status.`;
+	return `proc://${id}/mode is write-only. To set a service's mode, call write with ${JSON.stringify({ path: `proc://${id}/mode`, content: "persist" })} (persist, session, or detached); read proc://${id} for its current mode.`;
+}
+
 function ownerJobs(session: ToolSession): AsyncJob[] {
 	return session.asyncJobManager?.getAllJobs({ ownerId: session.getAgentId?.() ?? undefined }) ?? [];
 }
@@ -153,9 +165,9 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		const session = context?.session;
 		if (!session) throw new Error("proc:// requires a tool session");
 		const procTarget = target(url);
-		const { id, action } = procTarget;
+		const { id } = procTarget;
 		if (procTarget.action === "streams") return streamsResource(url, session, id, procTarget.stream);
-		if (action !== "stdin") throw new Error(`proc://<id>/${action} is writable only`);
+		if (procTarget.action !== "stdin") throw new Error(writeOnlyError(id || "<id>", procTarget.action));
 		const jobs = ownerJobs(session);
 		// Jobs and agents are in-process; a hung broker must not hide them.
 		const { services, error: servicesError } = cfgLaunchEnabled.get(session.settings)
@@ -266,10 +278,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			};
 		}
 		if (action === "stdin") {
-			if (!service)
-				throw new Error(
-					`stdin is only available for services. To cancel, call write with ${JSON.stringify({ path: `proc://${id}/kill` })} (no content needed).`,
-				);
+			if (!service) throw new Error(`stdin is only available for services. To cancel, ${killCall(id)}.`);
 			const updated = await sendService(session, id, content, context?.signal);
 			return {
 				content: [{ type: "text", text: `Sent input to ${serviceStatus(updated)}` }],

@@ -1181,7 +1181,13 @@ fn build_walk(host: &mut Host, cli: &Rg, root: &Path) -> Result<RgWalk, String> 
 		.gitignore(!no_ignore)
 		.skip_git(!no_ignore)
 		.skip_node_modules(false)
-		.follow_links(pi_walker::FollowLinks::from(cli.follow && !cli.no_follow))
+		// ripgrep always follows a path operand that is itself a symlink (even with
+		// `--no-follow`); `-L` extends that to links found during the walk.
+		.follow_links(if cli.follow && !cli.no_follow {
+			pi_walker::FollowLinks::Always
+		} else {
+			pi_walker::FollowLinks::Roots
+		})
 		.detail(if filters.max_filesize.is_some() {
 			pi_walker::WalkDetail::Full
 		} else {
@@ -1992,6 +1998,35 @@ mod tests {
 		assert_eq!(code, 0, "{}", capture.err());
 		assert!(capture.out().contains("keep.txt:hit\n"));
 		assert!(!capture.out().contains("skip.txt"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn follows_a_symlinked_root_operand_but_not_nested_links() {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(tree.path().join("real/sub")).unwrap();
+		std::fs::write(tree.path().join("real/a.txt"), "hit\n").unwrap();
+		std::fs::write(tree.path().join("real/sub/b.txt"), "hit\n").unwrap();
+		std::os::unix::fs::symlink("real", tree.path().join("link")).unwrap();
+		std::fs::create_dir(tree.path().join("parent")).unwrap();
+		std::os::unix::fs::symlink("../real", tree.path().join("parent/inner")).unwrap();
+		let files = |args: &[&str]| {
+			let (code, capture) = run_util::<Rg>(args, "", tree.path());
+			let mut lines: Vec<String> = capture.out().lines().map(str::to_owned).collect();
+			lines.sort();
+			(code, lines)
+		};
+
+		let linked = (0, vec!["link/a.txt".to_owned(), "link/sub/b.txt".to_owned()]);
+		assert_eq!(files(&["-l", "hit", "link"]), linked);
+		assert_eq!(files(&["-l", "--no-follow", "hit", "link"]), linked);
+		assert_eq!(files(&["--files", "link"]), linked);
+		// Links met during the walk stay unfollowed unless -L asks for them.
+		assert_eq!(files(&["-l", "hit", "parent"]), (1, Vec::new()));
+		assert_eq!(
+			files(&["-l", "-L", "hit", "parent"]),
+			(0, vec!["parent/inner/a.txt".to_owned(), "parent/inner/sub/b.txt".to_owned()])
+		);
 	}
 
 	#[test]

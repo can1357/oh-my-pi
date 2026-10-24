@@ -2750,6 +2750,19 @@ describe("runGcCommand session compression", () => {
 		expect(result.compress).toMatchObject({ skippedLive: 0, compressed: 3 });
 	});
 
+	test.skipIf(!supported)("a dry run reads past a large JSON artifact with no session header", async () => {
+		const { artifact } = await writeIdleSession(Bun.randomUUIDv7());
+		// Pretty-printed JSON opens like a record but completes none within the header
+		// read cap, and the file continues well past it.
+		const output = path.join(path.dirname(artifact), "2.mcp_search.log");
+		await Bun.write(output, `{\n  "results": [\n${'    "row",\n'.repeat(160_000)}    "end"\n  ]\n}\n`);
+		await agePathSubMs(output, 30);
+
+		const result = await runGcCommand({ flags: { agentDir: root, compress: true } });
+
+		expect(result.compress).toMatchObject({ skippedLive: 0, sessions: 1, wouldCompress: 3, errors: [] });
+	});
+
 	test.skipIf(!supported)("--compress-after-days overrides gc.compressAfterDays", async () => {
 		await writeConfig(root, ["gc:", "  compressAfterDays: 60", ""].join("\n"));
 		await writeIdleSession(Bun.randomUUIDv7(), "complete", 30);

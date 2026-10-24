@@ -167,8 +167,11 @@ class TabState {
 	groupId: number;
 	/** Whether `chrome.debugger` is currently attached to this tab. */
 	attached = false;
-	/** Set when attach failed or the user cancelled the debugger bar; cleared on navigation. */
-	banned = false;
+	/**
+	 * Why Chrome refused omp this tab (its attach error, or the user cancelling the debugger bar); while set the
+	 * tab is not adoptable. Cleared on navigation.
+	 */
+	refusal: string | undefined;
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
 	attaching: Promise<boolean> | null = null;
@@ -1062,7 +1065,8 @@ export class RelayBridge {
 					return;
 				}
 				if (!(await this.#ensureAttached(tab))) {
-					this.#replyError(conn, msg, `Cannot attach to tab ${tab.tabKey} (${tab.url})`);
+					const reason = tab.refusal ? `: ${tab.refusal}` : "";
+					this.#replyError(conn, msg, `Cannot attach to tab ${tab.tabKey} (${tab.url})${reason}`);
 					return;
 				}
 				const sessionId = this.#mintSession(conn, parsed.kind, tab);
@@ -1114,6 +1118,15 @@ export class RelayBridge {
 				// Creating a tab is an explicit act of driving it.
 				const createdKey = tabKeyOf(inst.code, result.tab.tabId);
 				this.#claimTab(conn, createdKey);
+				// Puppeteer waits for the new page's auto-attach. Answer once it settled: a tab Chrome refuses (an
+				// extension debugger policy refuses every tab) would otherwise hold the open for its whole timeout.
+				const created = this.#tabs.get(createdKey);
+				if (conn.autoAttach && created && !(await this.#ensureAttached(created)) && created.refusal) {
+					const refusal = created.refusal;
+					await this.#closeTab(createdKey, created.tabId, inst).catch(() => undefined);
+					this.#replyError(conn, msg, `Chrome refused to attach to the new tab: ${refusal}`);
+					return;
+				}
 				this.#reply(conn, msg, { targetId: pageTargetIdFromKey(createdKey) });
 				return;
 			}
@@ -1301,7 +1314,7 @@ export class RelayBridge {
 		// another extension's frame (a password manager's inline menu) starts loading in the tab: that tab
 		// stays adoptable and is announced again at once; an attach Chrome refuses still bans it (#ensureAttached).
 		const cancelledByUser = reason === "canceled_by_user";
-		if (cancelledByUser) tab.banned = true;
+		if (cancelledByUser) tab.refusal = "the user cancelled Chrome's debugging bar";
 		// A user cancel releases the tab's omp-group membership; any other detach keeps it.
 		this.#syncTabGrouping(tab);
 		// Relay-private event, ahead of the sessions' detach: a client driving the tab learns that Chrome
@@ -1339,7 +1352,7 @@ export class RelayBridge {
 			tab = new TabState(instanceId, inst.code, snap.tabId, snap);
 			this.#tabs.set(key, tab);
 		} else {
-			if (tab.url !== snap.url) tab.banned = false;
+			if (tab.url !== snap.url) tab.refusal = undefined;
 			// The user dragging a tab out of the omp group is an opt-out; the
 			// relay never fights the user over grouping.
 			if (tab.grouped && tab.ompGroupId !== undefined && snap.groupId !== tab.ompGroupId) {
@@ -1403,9 +1416,9 @@ export class RelayBridge {
 		if (!hasAutoAttach) return;
 		void this.#ensureAttached(tab, { retryAfterDiscard: true }).then(ok => {
 			if (!ok) {
-				// A refused attach banned the tab until its URL changes. Withdraw the announcement too, or the URL change
+				// A refused attach bars the tab until its URL changes. Withdraw the announcement too, or the URL change
 				// finds the tab already announced and neither announces nor attaches it again.
-				if (tab.banned && tab.announced && this.#tabs.get(tab.tabKey) === tab) this.#retractTab(tab);
+				if (tab.refusal && tab.announced && this.#tabs.get(tab.tabKey) === tab) this.#retractTab(tab);
 				return;
 			}
 			if (tab.discarded || !this.#eligible(tab) || this.#tabs.get(tab.tabKey) !== tab) {
@@ -1706,12 +1719,11 @@ export class RelayBridge {
 				return !tab.discarded;
 			})
 			.catch(err => {
-				this.#log("attach failed", {
-					tabKey: tab.tabKey,
-					url: tab.url,
-					error: err instanceof Error ? err.message : String(err),
-				});
-				if (!(err instanceof ExtensionReplacedError) && generation === tab.attachGeneration) tab.banned = true;
+				const error = err instanceof Error ? err.message : String(err);
+				this.#log("attach failed", { tabKey: tab.tabKey, url: tab.url, error });
+				if (!(err instanceof ExtensionReplacedError) && generation === tab.attachGeneration) {
+					tab.refusal = error || "Chrome refused the attach";
+				}
 				return false;
 			})
 			.finally(() => {
@@ -1732,7 +1744,7 @@ export class RelayBridge {
 	}
 
 	#eligible(tab: TabState): boolean {
-		if (tab.banned) return false;
+		if (tab.refusal) return false;
 		const instance = this.#instances.get(tab.instanceId);
 		if (!instance?.socket || instance.info?.discardedTabsProtocol !== DISCARDED_TABS_PROTOCOL_VERSION) return false;
 		if (!tab.url) return true;

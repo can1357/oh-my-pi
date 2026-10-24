@@ -360,6 +360,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	registerProvider(name: string, config: ProviderConfig): void {
+		this.extension.registersProviders = true;
 		this.runtime.registerProvider(name, config, this.extension.path);
 	}
 
@@ -482,21 +483,30 @@ export async function loadExtensionFromFactory(
  * sequentially in the original path order, so registration semantics
  * (last-wins collisions, shared runtime flag defaults) stay deterministic.
  */
-export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
+export async function loadExtensions(
+	paths: string[],
+	cwd: string,
+	eventBus?: EventBus,
+	runtime?: IExtensionRuntime,
+): Promise<LoadExtensionsResult> {
 	const preparedExtensions = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
-	return bindPreparedExtensions(preparedExtensions, cwd, eventBus);
+	return bindPreparedExtensions(preparedExtensions, cwd, eventBus, runtime);
 }
 
-/** Bind previously imported extension factories to a fresh session runtime. */
+/**
+ * Bind previously imported extension factories. A fresh session runtime is
+ * created unless `runtime` is given: deferred startup extensions bind into the
+ * live session's runtime so they share its flag values and wired actions.
+ */
 export async function bindPreparedExtensions(
 	preparedExtensions: readonly PreparedExtension[],
 	cwd: string,
 	eventBus?: EventBus,
+	runtime: IExtensionRuntime = new ExtensionRuntime(),
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedEventBus = eventBus ?? new EventBus();
-	const runtime = new ExtensionRuntime();
 
 	for (const prepared of preparedExtensions) {
 		const { extension, error } = await bindExtension(prepared.path, prepared, cwd, resolvedEventBus, runtime);

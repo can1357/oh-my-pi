@@ -461,6 +461,16 @@ Canonical event unions and payload types are in `types.ts`.
 - `session_before_tree` / `session_tree`
 - `session_shutdown`
 
+In the interactive TUI, an extension whose factory registers no providers,
+shortcuts, composer shapes, or file fallbacks is loaded after the composer
+accepts input, once a previous launch has recorded that about its current
+source. Its `session_start` still runs (it is delivered when the extension
+binds), and the first submitted message and every model turn wait until it is
+loaded, so its tools, commands, and `input`/`before_agent_start` hooks apply from
+the first request. Events emitted before it binds are not replayed. Resumed
+sessions, `--tools`, and launches with flags omp does not recognize load every
+extension before the session starts.
+
 `session.compacting` receives `{ sessionId, messages }` and can return
 `{ context?: string[]; prompt?: string; preserveData?: Record<string, unknown> }`
 to customize summary context, the summarizer prompt, and stored compaction data.

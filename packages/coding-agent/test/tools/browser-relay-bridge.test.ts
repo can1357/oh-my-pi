@@ -305,6 +305,33 @@ describe("RelayBridge tab grouping", () => {
 		expect(groups[0]!.tabIds).toEqual([9]);
 	});
 
+	it("fails Target.createTarget with Chrome's refusal and closes the tab when the new tab cannot be attached", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, []);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach", params: {} }));
+		await flush();
+		const createId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: createId, method: "Target.createTarget", params: { url: "about:blank" } }),
+		);
+		ack(bridge, ext, "createTab", { tab: tab({ tabId: 9, url: "about:blank" }) });
+		await flush();
+		// Chrome 155+ under an ExtensionSettings runtime_blocked_hosts policy refuses every chrome.debugger.attach.
+		nack(bridge, ext, "attach", "Host access is restricted by policy.");
+		await flush();
+		expect(ext.rpcs("removeTab").map(rpc => rpc.tabId)).toEqual([9]);
+		ack(bridge, ext, "removeTab");
+		await flush();
+		const reply = cdp.messages.find(m => m.id === createId);
+		expect(reply).toMatchObject({
+			error: { message: expect.stringContaining("Host access is restricted by policy.") },
+		});
+	});
+
 	it("creates a Target.createTarget background tab without selecting it", () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

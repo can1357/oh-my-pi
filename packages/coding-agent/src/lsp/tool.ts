@@ -26,6 +26,7 @@ import {
 	type LspServerStatus,
 	reconcileFileFromDisk,
 	reconcileIdleChecker,
+	reconcileOpenFilesFromDisk,
 	refreshFile,
 	sendNotification,
 	sendRequest,
@@ -1510,6 +1511,15 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							details: { action, serverName, success: false },
 						};
 					}
+
+					// A project-wide rename answers with ranges for every file it
+					// touches. An already-open consumer that was edited outside OMP
+					// still holds its stale overlay, so those ranges point at the old
+					// text and the edit lands on the wrong lines while the rename
+					// reports success (#15772). Sync every open document, not just
+					// the requested target, so the server computes the workspace
+					// edit against current disk text.
+					await reconcileOpenFilesFromDisk(client, signal);
 
 					const result = (await sendRequest(
 						client,

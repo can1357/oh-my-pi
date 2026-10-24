@@ -31,6 +31,8 @@ export interface GroupedFileSection {
 export interface GroupedFilesOutput {
 	model: string[];
 	display: string[];
+	/** Per file, the `model` index just past its last line: a head cut keeping `n` lines shows it whole when this is <= n. */
+	modelEnds: Map<string, number>;
 }
 
 /**
@@ -66,6 +68,7 @@ export function formatGroupedFiles(
 	const tree = buildPathTree(inputs);
 	const model: string[] = [];
 	const display: string[] = [];
+	const modelEnds = new Map<string, number>();
 	let emitted = false;
 
 	for (const event of walkPathTree(tree)) {
@@ -86,9 +89,10 @@ export function formatGroupedFiles(
 		const header = `${hashes} ${event.name}${section.headerSuffix ?? ""}`;
 		model.push(header, ...section.modelLines);
 		display.push(header, ...(section.displayLines ?? section.modelLines));
+		modelEnds.set(event.key, model.length);
 	}
 
-	return { model, display };
+	return { model, display, modelEnds };
 }
 
 /** One file's rendered search matches, plus its hashline tag when editable. */
@@ -122,6 +126,7 @@ export function formatFileMatches(
 	}
 	const model: string[] = [];
 	const display: string[] = [];
+	const modelEnds = new Map<string, number>();
 	for (const filePath of files) {
 		const rendered = renderFile(filePath);
 		if (rendered.model.length === 0) continue;
@@ -132,8 +137,9 @@ export function formatFileMatches(
 		if (rendered.tag) model.push(formatHashlineHeader(filePath, rendered.tag));
 		model.push(...rendered.model);
 		display.push(...rendered.display);
+		modelEnds.set(filePath, model.length);
 	}
-	return { model, display };
+	return { model, display, modelEnds };
 }
 
 // =============================================================================

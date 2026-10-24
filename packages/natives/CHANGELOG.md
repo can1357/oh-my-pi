@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a UTF-8 char-boundary panic when parsing `stateDiagram-v2` lines where `>` follows a multibyte character ([#16749](https://github.com/can1357/oh-my-pi/pull/16749) by [@berney](https://github.com/berney))
+- Fixed the bash tool's `rg` and `fd` on macOS and Linux finding nothing under a path that is a symlink to a directory, such as `/tmp` or `/etc` on macOS or a symlinked skill folder; like ripgrep and fd, they now search the folder the link points to ([#16598](https://github.com/can1357/oh-my-pi/pull/16598) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed minimized `git diff`, `git show` and `diff -u` output dropping a hunk's changes and listing a made-up file when a changed line starts with `-- ` or `++ ` (SQL comments, Markdown `---` rules) ([#16588](https://github.com/can1357/oh-my-pi/pull/16588) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the bash tool's minimizer summarizing word diffs (`git diff --word-diff`, `--color-words`, `--word-diff-regex`), which carry no per-line `+`/`-` markers; word-diff patches are now passed through unsummarized ([#16588](https://github.com/can1357/oh-my-pi/pull/16588) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Mermaid flowcharts drawing two edges between the same pair of nodes as one line, with their labels written over each other; each edge now gets its own route, line style, arrowhead and label ([#16731](https://github.com/can1357/oh-my-pi/issues/16731))
+- Fixed `renderMermaidAscii` starting an edge one cell away from its node's side when a labeled sibling edge leaves the same node from another side ([#16730](https://github.com/can1357/oh-my-pi/issues/16730))
+- Fixed Mermaid flowchart parsing swallowing leading dashes of spaceless arrows (`A-->B`, `B-.->C`, `C:::cls-->D`) into the preceding node ID or class name ([#16750](https://github.com/can1357/oh-my-pi/pull/16750) by [@berney](https://github.com/berney))
+
 ## [18.12.5] - 2026-10-21
 
 ### Fixed
