@@ -693,7 +693,18 @@ fn word_tokens(text: &[u16]) -> Vec<&[u16]> {
 /// jsdiff `WordDiff.join`: concatenate, stripping leading whitespace from
 /// every token after the first.
 fn word_join(tokens: &[&[u16]]) -> Vec<u16> {
-	let mut out = Vec::new();
+	let cap: usize = tokens
+		.iter()
+		.enumerate()
+		.map(|(i, t)| {
+			if i == 0 {
+				t.len()
+			} else {
+				trim_leading_ws(t).len()
+			}
+		})
+		.sum();
+	let mut out = Vec::with_capacity(cap);
 	for (i, token) in tokens.iter().enumerate() {
 		if i == 0 {
 			out.extend_from_slice(token);
@@ -719,37 +730,18 @@ fn longest_common_suffix<'a>(a: &'a [u16], b: &[u16]) -> &'a [u16] {
 	&a[a.len() - len..]
 }
 
-fn remove_prefix(s: &[u16], prefix: &[u16]) -> Vec<u16> {
-	s.strip_prefix(prefix)
-		.expect("value must start with recorded prefix")
-		.to_vec()
+fn remove_prefix_in_place(vec: &mut Vec<u16>, len: usize) {
+	vec.drain(..len);
 }
 
-fn remove_suffix(s: &[u16], suffix: &[u16]) -> Vec<u16> {
-	s.strip_suffix(suffix)
-		.expect("value must end with recorded suffix")
-		.to_vec()
+fn remove_suffix_in_place(vec: &mut Vec<u16>, len: usize) {
+	vec.truncate(vec.len() - len);
 }
 
-fn replace_prefix(s: &[u16], old_prefix: &[u16], new_prefix: &[u16]) -> Vec<u16> {
-	let rest = s
-		.strip_prefix(old_prefix)
-		.expect("value must start with recorded prefix");
-	let mut out = Vec::with_capacity(new_prefix.len() + rest.len());
-	out.extend_from_slice(new_prefix);
-	out.extend_from_slice(rest);
-	out
-}
-
-fn replace_suffix(s: &[u16], old_suffix: &[u16], new_suffix: &[u16]) -> Vec<u16> {
-	let rest = s
-		.strip_suffix(old_suffix)
-		.expect("value must end with recorded suffix");
-	let mut out = Vec::with_capacity(rest.len() + new_suffix.len());
-	out.extend_from_slice(rest);
-	out.extend_from_slice(new_suffix);
-	out
-}
+// In-place prefix/suffix trimming replaces allocating `replace_prefix` /
+// `replace_suffix`: every replacement in `dedupe_whitespace` substitutes a
+// prefix of `old_suffix` (at the end of `start_keep`) or a suffix of
+// `old_prefix` (at the start of `end_keep`).
 
 /// jsdiff `maximumOverlap`: the longest prefix of `b` that is also a suffix
 /// of `a`, via the KMP failure function over code units.
@@ -797,60 +789,82 @@ fn dedupe_whitespace(
 ) {
 	match (deletion, insertion) {
 		(Some(del), Some(ins)) => {
-			let old_ws_prefix = leading_ws(&changes[del].value).to_vec();
-			let old_ws_suffix = trailing_ws(&changes[del].value).to_vec();
-			let new_ws_prefix = leading_ws(&changes[ins].value).to_vec();
-			let new_ws_suffix = trailing_ws(&changes[ins].value).to_vec();
+			let (new_prefix_len, new_suffix_len, common_prefix_len, common_suffix_len) = {
+				let old_ws_prefix = leading_ws(&changes[del].value);
+				let old_ws_suffix = trailing_ws(&changes[del].value);
+				let new_ws_prefix = leading_ws(&changes[ins].value);
+				let new_ws_suffix = trailing_ws(&changes[ins].value);
+				if let Some(start) = start_keep {
+					assert!(
+						changes[start].value.ends_with(new_ws_prefix),
+						"value must end with recorded suffix"
+					);
+				}
+				if let Some(end) = end_keep {
+					assert!(
+						changes[end].value.starts_with(new_ws_suffix),
+						"value must start with recorded prefix"
+					);
+				}
+				(
+					new_ws_prefix.len(),
+					new_ws_suffix.len(),
+					longest_common_prefix(old_ws_prefix, new_ws_prefix).len(),
+					longest_common_suffix(old_ws_suffix, new_ws_suffix).len(),
+				)
+			};
 			if let Some(start) = start_keep {
-				let common_ws_prefix = longest_common_prefix(&old_ws_prefix, &new_ws_prefix).to_vec();
-				changes[start].value =
-					replace_suffix(&changes[start].value, &new_ws_prefix, &common_ws_prefix);
-				changes[del].value = remove_prefix(&changes[del].value, &common_ws_prefix);
-				changes[ins].value = remove_prefix(&changes[ins].value, &common_ws_prefix);
+				remove_suffix_in_place(&mut changes[start].value, new_prefix_len - common_prefix_len);
+				remove_prefix_in_place(&mut changes[del].value, common_prefix_len);
+				remove_prefix_in_place(&mut changes[ins].value, common_prefix_len);
 			}
 			if let Some(end) = end_keep {
-				let common_ws_suffix = longest_common_suffix(&old_ws_suffix, &new_ws_suffix).to_vec();
-				changes[end].value =
-					replace_prefix(&changes[end].value, &new_ws_suffix, &common_ws_suffix);
-				changes[del].value = remove_suffix(&changes[del].value, &common_ws_suffix);
-				changes[ins].value = remove_suffix(&changes[ins].value, &common_ws_suffix);
+				remove_prefix_in_place(&mut changes[end].value, new_suffix_len - common_suffix_len);
+				remove_suffix_in_place(&mut changes[del].value, common_suffix_len);
+				remove_suffix_in_place(&mut changes[ins].value, common_suffix_len);
 			}
 		},
 		(None, Some(ins)) => {
 			if start_keep.is_some() {
 				let ws_len = leading_ws(&changes[ins].value).len();
-				changes[ins].value = changes[ins].value[ws_len..].to_vec();
+				remove_prefix_in_place(&mut changes[ins].value, ws_len);
 			}
 			if let Some(end) = end_keep {
 				let ws_len = leading_ws(&changes[end].value).len();
-				changes[end].value = changes[end].value[ws_len..].to_vec();
+				remove_prefix_in_place(&mut changes[end].value, ws_len);
 			}
 		},
 		(Some(del), None) => match (start_keep, end_keep) {
 			(Some(start), Some(end)) => {
-				let new_ws_full = leading_ws(&changes[end].value).to_vec();
-				let del_ws_start = leading_ws(&changes[del].value).to_vec();
-				let del_ws_end = trailing_ws(&changes[del].value).to_vec();
-				let new_ws_start = longest_common_prefix(&new_ws_full, &del_ws_start).to_vec();
-				changes[del].value = remove_prefix(&changes[del].value, &new_ws_start);
-				let new_ws_end =
-					longest_common_suffix(&new_ws_full[new_ws_start.len()..], &del_ws_end).to_vec();
-				changes[del].value = remove_suffix(&changes[del].value, &new_ws_end);
-				changes[end].value = replace_prefix(&changes[end].value, &new_ws_full, &new_ws_end);
-				let start_ws = &new_ws_full[..new_ws_full.len() - new_ws_end.len()];
-				changes[start].value = replace_suffix(&changes[start].value, &new_ws_full, start_ws);
+				let (full_len, new_ws_start_len, new_ws_end_len) = {
+					let new_ws_full = leading_ws(&changes[end].value);
+					let del_ws_start = leading_ws(&changes[del].value);
+					let del_ws_end = trailing_ws(&changes[del].value);
+					assert!(
+						changes[start].value.ends_with(new_ws_full),
+						"value must end with recorded suffix"
+					);
+					let new_ws_start_len = longest_common_prefix(new_ws_full, del_ws_start).len();
+					let new_ws_end_len =
+						longest_common_suffix(&new_ws_full[new_ws_start_len..], del_ws_end).len();
+					(new_ws_full.len(), new_ws_start_len, new_ws_end_len)
+				};
+				remove_prefix_in_place(&mut changes[del].value, new_ws_start_len);
+				remove_suffix_in_place(&mut changes[del].value, new_ws_end_len);
+				remove_prefix_in_place(&mut changes[end].value, full_len - new_ws_end_len);
+				remove_suffix_in_place(&mut changes[start].value, new_ws_end_len);
 			},
 			(None, Some(end)) => {
-				let end_keep_ws_prefix = leading_ws(&changes[end].value).to_vec();
-				let deletion_ws_suffix = trailing_ws(&changes[del].value).to_vec();
-				let overlap = maximum_overlap(&deletion_ws_suffix, &end_keep_ws_prefix).to_vec();
-				changes[del].value = remove_suffix(&changes[del].value, &overlap);
+				let end_keep_ws_prefix = leading_ws(&changes[end].value);
+				let deletion_ws_suffix = trailing_ws(&changes[del].value);
+				let overlap_len = maximum_overlap(deletion_ws_suffix, end_keep_ws_prefix).len();
+				remove_suffix_in_place(&mut changes[del].value, overlap_len);
 			},
 			(Some(start), None) => {
-				let start_keep_ws_suffix = trailing_ws(&changes[start].value).to_vec();
-				let deletion_ws_prefix = leading_ws(&changes[del].value).to_vec();
-				let overlap = maximum_overlap(&start_keep_ws_suffix, &deletion_ws_prefix).to_vec();
-				changes[del].value = remove_prefix(&changes[del].value, &overlap);
+				let start_keep_ws_suffix = trailing_ws(&changes[start].value);
+				let deletion_ws_prefix = leading_ws(&changes[del].value);
+				let overlap_len = maximum_overlap(start_keep_ws_suffix, deletion_ws_prefix).len();
+				remove_prefix_in_place(&mut changes[del].value, overlap_len);
 			},
 			(None, None) => {},
 		},
@@ -966,16 +980,46 @@ mod tests {
 
 	#[test]
 	fn word_diff_dedupes_boundary_whitespace() {
-		let changes = diff_words_u16(&u16s("foo bar baz"), &u16s("foo qux baz"));
-		let shaped: Vec<(String, bool, bool)> = changes
-			.into_iter()
-			.map(|change| (String::from_utf16(&change.value).unwrap(), change.added, change.removed))
-			.collect();
-		assert_eq!(shaped, vec![
+		let words = |old: &str, new: &str| -> Vec<(String, bool, bool)> {
+			diff_words_u16(&u16s(old), &u16s(new))
+				.into_iter()
+				.map(|change| {
+					(String::from_utf16(&change.value).unwrap(), change.added, change.removed)
+				})
+				.collect()
+		};
+		assert_eq!(words("foo bar baz", "foo qux baz"), vec![
 			("foo ".into(), false, false),
 			("bar".into(), false, true),
 			("qux".into(), true, false),
 			(" baz".into(), false, false),
+		]);
+		// Asymmetric whitespace around replacement
+		assert_eq!(words("foo  bar\tbaz", "foo   qux\t\tbaz"), vec![
+			("foo  ".into(), false, false),
+			("bar".into(), false, true),
+			(" qux\t".into(), true, false),
+			("\tbaz".into(), false, false),
+		]);
+		// Pure insertion between keeps
+		assert_eq!(words("foo baz", "foo bar baz"), vec![
+			("foo ".into(), false, false),
+			("bar ".into(), true, false),
+			("baz".into(), false, false),
+		]);
+		// Pure deletion between keeps, at start, and at end
+		assert_eq!(words("foo bar baz", "foo baz"), vec![
+			("foo ".into(), false, false),
+			("bar ".into(), false, true),
+			("baz".into(), false, false),
+		]);
+		assert_eq!(words("foo bar", "bar"), vec![
+			("foo ".into(), false, true),
+			("bar".into(), false, false),
+		]);
+		assert_eq!(words("foo bar", "foo"), vec![
+			("foo".into(), false, false),
+			(" bar".into(), false, true),
 		]);
 	}
 
