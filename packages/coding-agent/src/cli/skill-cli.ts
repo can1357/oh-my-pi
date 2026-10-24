@@ -20,6 +20,7 @@ import { StencilCredential } from "../stencil/credential";
 import { parseSkillSpec, type SkillSpec, SkillshareClient, SkillshareError } from "../skillshare/client";
 import { installSkills, searchSkills, showSkillInfo, uninstallSkills, updateSkills } from "../skillshare/installer";
 import { bumpVersion, type PackResult, packSkill, SEMVER_RE } from "../skillshare/pack";
+import { addRemoteSkills, listRemoteSkills, removeRemoteSkills, syncRemoteSkills } from "../skills/remote/sync";
 import { handleSkillList } from "./skill-list";
 
 export type SkillAction =
@@ -36,7 +37,8 @@ export type SkillAction =
 	| "uninstall"
 	| "search"
 	| "info"
-	| "list";
+	| "list"
+	| "remote";
 
 export const SKILL_ACTIONS: readonly SkillAction[] = [
 	"publish",
@@ -53,6 +55,7 @@ export const SKILL_ACTIONS: readonly SkillAction[] = [
 	"search",
 	"info",
 	"list",
+	"remote",
 ];
 
 export interface SkillCommandArgs {
@@ -84,6 +87,12 @@ Install and discover:
   search <query> [--sort relevance|downloads|recent] [--json]
   info <@scope/name[@version]> [--json]
   list [dir] [--json]                             Skills a session in dir resolves, with warnings
+
+Remote sources (GitHub):
+  remote add <owner/repo[@ref][#dir]> [-g]        Register every SKILL.md under dir at a pinned commit
+  remote list [--json]                            Registered remote skills and their commits
+  remote sync [name...] [-g]                      Re-resolve refs and repin changed commits
+  remote remove <name...> [-g]                    Unregister remote skills
 
 Publish and manage:
   publish [dir] [--scope s] [--tag t] [--dry-run] [--allow-secrets]
@@ -465,6 +474,72 @@ async function handleImport(cmd: SkillCommandArgs): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// remote
+// ---------------------------------------------------------------------------
+
+async function handleRemote(cmd: SkillCommandArgs): Promise<number> {
+	const [sub, ...rest] = cmd.args;
+	const global = cmd.flags.global === true;
+	switch (sub) {
+		case "add": {
+			const spec = rest[0];
+			if (!spec) throw new CliUsageError("usage: omp skill remote add <owner/repo[@ref][#dir]> [-g]");
+			const result = await addRemoteSkills(spec, { cwd: cmd.cwd, global });
+			for (const name of result.added)
+				process.stdout.write(`${chalk.green("+")} ${name} @ ${result.commit.slice(0, 7)}\n`);
+			for (const name of result.updated) {
+				process.stdout.write(`${chalk.cyan("~")} ${name} @ ${result.commit.slice(0, 7)}\n`);
+			}
+			process.stdout.write(chalk.dim(`Saved ${result.file}\n`));
+			return 0;
+		}
+		case "list": {
+			const skills = await listRemoteSkills({ cwd: cmd.cwd });
+			if (cmd.flags.json === true) {
+				process.stdout.write(`${JSON.stringify(skills, null, 2)}\n`);
+				return 0;
+			}
+			if (skills.length === 0) {
+				process.stdout.write("No remote skills registered.\n");
+				return 0;
+			}
+			for (const { descriptor, level } of skills) {
+				const where = descriptor.directory === "" ? "." : descriptor.directory;
+				process.stdout.write(
+					`${chalk.bold.cyan(descriptor.name)} ${descriptor.repository}#${where} @ ${descriptor.ref} → ${descriptor.commit.slice(0, 7)} ${chalk.dim(`(${level})`)}\n`,
+				);
+			}
+			return 0;
+		}
+		case "sync": {
+			const { changes } = await syncRemoteSkills({
+				cwd: cmd.cwd,
+				names: rest,
+				...(cmd.flags.global === undefined ? {} : { global: cmd.flags.global }),
+			});
+			if (changes.length === 0) {
+				process.stdout.write("All remote skills are up to date.\n");
+				return 0;
+			}
+			for (const change of changes) {
+				process.stdout.write(
+					`${chalk.bold.cyan(change.name)} ${change.from.slice(0, 7)} → ${change.to.slice(0, 7)}\n`,
+				);
+			}
+			return 0;
+		}
+		case "remove": {
+			if (rest.length === 0) throw new CliUsageError("usage: omp skill remote remove <name...> [-g]");
+			const { removed } = await removeRemoteSkills({ cwd: cmd.cwd, global, names: rest });
+			for (const name of removed) process.stdout.write(`- ${name}\n`);
+			return 0;
+		}
+		default:
+			throw new CliUsageError("usage: omp skill remote add|list|sync|remove ...");
+	}
+}
+
+// ---------------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------------
 
@@ -501,6 +576,8 @@ async function dispatch(cmd: SkillCommandArgs): Promise<number> {
 		}
 		case "list":
 			return handleSkillList(args, cwd, flags.json === true);
+		case "remote":
+			return handleRemote(cmd);
 		case "info": {
 			const spec = args[0];
 			if (!spec) throw new CliUsageError("usage: omp skill info <@scope/name[@version]>");

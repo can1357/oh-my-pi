@@ -37,6 +37,7 @@ import "./opencode";
 import "./github";
 import "./mcp-json";
 import "./omp-plugins";
+import "./remote";
 import "./skillshare";
 import "./ssh";
 import "./vscode";

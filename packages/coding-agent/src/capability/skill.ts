@@ -4,6 +4,7 @@
  * Skills provide specialized knowledge or workflows that extend agent capabilities.
  */
 import { defineCapability } from ".";
+import type { RemoteSkillSource } from "../skills/remote/types";
 import type { SourceMeta } from "./types";
 
 /**
@@ -41,6 +42,12 @@ export interface Skill {
 	path: string;
 	/** Skill content (markdown) */
 	content: string;
+	/**
+	 * GitHub source for a remote skill whose body is fetched on demand at
+	 * `commit`. When set, `path` is the cache location the file materializes
+	 * into, not a file that exists at discovery time.
+	 */
+	remote?: RemoteSkillSource;
 	/** Parsed frontmatter */
 	frontmatter?: SkillFrontmatter;
 	/**
