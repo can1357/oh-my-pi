@@ -1263,9 +1263,12 @@ class Win {
 				try {
 					children = await nativeCall(signal, () => this.#session.menuItems(this.id, item.path));
 				} catch (error) {
-					throwIfAborted(signal);
 					// Lazy submenus stay listed so their paths can be requested explicitly.
-					if (error instanceof ToolError) continue;
+					if (
+						error instanceof ToolError &&
+						["AxFailed:", "BackgroundUnavailable:", "InvalidTarget:"].some(code => error.message.startsWith(code))
+					)
+						continue;
 					throw error;
 				}
 				if (children.length > budget) continue;
