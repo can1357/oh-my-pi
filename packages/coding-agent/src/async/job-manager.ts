@@ -3,6 +3,7 @@ import type { PipeStreams } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { IrcBus } from "../irc/bus";
 import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";
 
 const DELIVERY_RETRY_BASE_MS = 500;
@@ -426,6 +427,7 @@ export class AsyncJobManager {
 				} else {
 					job.status = "completed";
 					job.resultText = text;
+					this.#recordAgentReply(job);
 					this.#enqueueDelivery(id, text);
 				}
 			} catch (error) {
@@ -435,6 +437,7 @@ export class AsyncJobManager {
 				job.errorText = errorText;
 				if (job.status !== "cancelled") {
 					job.status = "failed";
+					this.#recordAgentReply(job);
 					this.#enqueueDelivery(id, errorText);
 				}
 			}
@@ -474,9 +477,19 @@ export class AsyncJobManager {
 			structured: result.structured,
 		};
 		this.#jobs.set(id, job);
+		this.#recordAgentReply(job);
 		this.#enqueueDelivery(id, result.text);
 		this.#scheduleEviction(id);
 		return id;
+	}
+
+	/**
+	 * A settled job that runs a subagent carries that agent's outcome to the
+	 * job's owner, which answers whatever the owner asked the agent before now:
+	 * a reply `wait` must not keep reporting as owed.
+	 */
+	#recordAgentReply(job: AsyncJob): void {
+		if (job.agentId !== undefined && job.ownerId !== undefined) IrcBus.recordReply(job.agentId, job.ownerId);
 	}
 
 	/**

@@ -45,10 +45,11 @@ interface PendingReplies {
 
 /**
  * Agents the caller messaged during its current run that have not answered
- * yet, split by whether a reply can still come. Only a running agent can
- * answer: one that went idle after the question has finished the turn it got
- * it in, and any automatic reply (a woken subagent's relayed output) has
- * arrived by then.
+ * yet, split by whether a reply can still come. A message back answers, and
+ * so does a settled job of the agent the caller owns, which delivers its
+ * result. Only a running agent can answer: one that went idle after the
+ * question has finished the turn it got it in, and any automatic reply (a
+ * woken subagent's relayed output) has arrived by then.
  */
 function pendingReplies(messaging: WaitMessaging): PendingReplies {
 	const { registry, senderId } = messaging;
