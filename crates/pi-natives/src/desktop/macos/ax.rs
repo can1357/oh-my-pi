@@ -1286,10 +1286,7 @@ fn perform_choosing(
 	let native = action_name(action);
 	let actions = copy_strings_from_action_names(element)?;
 	if !actions.contains(&native) {
-		return Err(DesktopError::ax_failed(format!(
-			"AX action '{native}' is not supported by this element; available actions: {}",
-			actions.join(", "),
-		)));
+		return Err(unsupported_action(&native, &actions));
 	}
 	// AXRaise is an explicit request to change stacking, including the
 	// takeover preparation path. Other semantic actions must stay background.
@@ -1354,6 +1351,22 @@ fn perform_choosing(
 			},
 		)
 	})
+}
+
+/// The refusal of `native`, an action the element does not list among
+/// `actions`; nothing was sent. A control without a press action still takes
+/// a click, `menu` path included.
+fn unsupported_action(native: &str, actions: &[String]) -> DesktopError {
+	let instead = if native == "AXPress" {
+		"; nothing was sent: if this is the control you meant, click() it instead, passing the same \
+		 menu option if you gave one"
+	} else {
+		""
+	};
+	DesktopError::ax_failed(format!(
+		"AX action '{native}' is not supported by this element; available actions: {}{instead}",
+		actions.join(", "),
+	))
 }
 
 /// Makes the window holding `element` key within its background
@@ -2362,9 +2375,9 @@ mod tests {
 		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
 		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, TextField, TextSurface, VALUE,
 		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
-		focused_window, may_borrow_focus, menu_window, replace_utf16_selection, replace_whole_value,
-		required_string, secure_subrole, select_attached, stringify_value, takes_inserted_text,
-		target_window, text_readback, window_records_of,
+		focused_window, may_borrow_focus, menu_window, perform_choosing, replace_utf16_selection,
+		replace_whole_value, required_string, secure_subrole, select_attached, stringify_value,
+		takes_inserted_text, target_window, text_readback, window_records_of,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
 
@@ -2576,6 +2589,20 @@ mod tests {
 		for (start, length) in [(-1, 0), (0, -1), (2, 0), (1, 1), (4, 9), (6, 0)] {
 			assert_eq!(replace_utf16_selection("a😀bc", start, length, "X"), None);
 		}
+	}
+
+	#[test]
+	fn an_element_without_a_press_action_is_pointed_at_click() {
+		// The system-wide element lists no actions, as a Chrome page's button
+		// lists no AXPress.
+		let element = create_system_wide();
+		let press = perform_choosing(&element, "press", None).unwrap_err();
+		assert_eq!(press.code, ErrorCode::AxFailed);
+		assert!(press.message.contains("'AXPress' is not supported"), "{}", press.message);
+		assert!(press.message.contains("click()"), "{}", press.message);
+		let other = perform_choosing(&element, "AXIncrement", None).unwrap_err();
+		assert!(other.message.contains("'AXIncrement' is not supported"), "{}", other.message);
+		assert!(!other.message.contains("click()"), "{}", other.message);
 	}
 
 	#[test]
