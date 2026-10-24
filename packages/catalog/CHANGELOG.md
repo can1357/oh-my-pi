@@ -5,6 +5,7 @@
 ### Added
 
 - Added `resolveAnthropicApiVersion()`: Anthropic model discovery sends API version 2026-10-21 to the official API when `PI_ANTHROPIC_API_VERSION=2026-10-21` is set ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- Added Kimi K3.1 Pro and K3.1 Pro Highspeed support on Kimi Code (`k3.1-pro`, `k3.1-pro-highspeed`) and the Moonshot API (`kimi-k3.1-pro`, `kimi-k3.1-pro-highspeed`): official pricing ($2/$10 and $4/$20 per MTok), a 131K output cap, and K3's reasoning and wire contract ([#16901](https://github.com/can1357/oh-my-pi/pull/16901) by [@eggpeat](https://github.com/eggpeat))
 
 ### Changed
 

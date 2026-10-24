@@ -51,6 +51,22 @@ provider "kimi-code" {
 			cache-read 0.3
 		}
 	}
+	models "k3.1-pro" {
+		cost-fallback {
+			input 2.0
+			output 10.0
+			cache-read 0.2
+			cache-write 2.0
+		}
+	}
+	models "k3.1-pro-highspeed" {
+		cost-fallback {
+			input 4.0
+			output 20.0
+			cache-read 0.2
+			cache-write 4.0
+		}
+	}
 	models "kimi-for-coding" {
 		cost-fallback {
 			input 0.95

@@ -325,11 +325,14 @@ behavior {
 	}
 	// Kimi Code's /coding/v1/models envelope carries no output-limit field;
 	// these are the documented per-family caps (models.dev `kimi-for-coding`
-	// and `moonshotai` kimi-k3 entries, #6711). Legacy K2 rows keep their
+	// and `moonshotai` kimi-k3 entries, #6711; K3.1 Pro's documented
+	// `max_completion_tokens` default). Legacy K2 rows keep their
 	// discovery-reported values.
 	model-limits provider="kimi-code" {
 		limits "k3" max-tokens=131072
 		limits "k3-256k" max-tokens=131072
+		limits "k3.1-pro" max-tokens=131072
+		limits "k3.1-pro-highspeed" max-tokens=131072
 		limits "kimi-for-coding" max-tokens=32768
 		limits "kimi-for-coding-highspeed" max-tokens=32768
 	}
