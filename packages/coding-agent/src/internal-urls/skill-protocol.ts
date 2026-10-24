@@ -17,6 +17,7 @@ import { resolveContainedPath } from "../discovery/contained-path";
 import { getActiveSkills, type Skill } from "../extensibility/skills";
 import { MCPManager } from "../mcp/manager";
 import skillDoc from "../prompts/internal-urls/skill.md" with { type: "text" };
+import { ensureRemoteSkillResource } from "../skills/remote/store";
 import {
 	buildDirectoryResource,
 	contentTypeForPath,
@@ -57,7 +58,7 @@ async function skillTargetPath(
 	skills: readonly Skill[],
 	directory: boolean,
 	create = false,
-): Promise<string> {
+): Promise<{ targetPath: string; skill: Skill }> {
 	const skillName = url.rawHost || url.hostname;
 	if (!skillName) {
 		throw new Error("skill:// URL requires a skill name: skill://<name>");
@@ -97,11 +98,11 @@ async function skillTargetPath(
 	// Agent Plugin skills (§4.1): every target, including the bare instruction
 	// file and base directory, must canonically resolve within the plugin root.
 	// Symlinks may target other files inside the same package.
-	if (!skill.containRoot) return resolvedPath;
+	if (!skill.containRoot) return { targetPath: resolvedPath, skill };
 	const escape = `skill:// path resolves outside the plugin root: ${url.href}`;
 	const contained = await resolveContainedPath(skill.containRoot, resolvedPath);
 	if (contained.status === "outside") throw new UrlContainmentError(escape);
-	if (contained.status === "ok") return contained.realPath;
+	if (contained.status === "ok") return { targetPath: contained.realPath, skill };
 	if (create) {
 		try {
 			await ensureCreatableWithinRoot(resolvedPath, skill.containRoot, "skill", url.href);
@@ -110,7 +111,35 @@ async function skillTargetPath(
 			throw error instanceof UrlContainmentError ? new UrlContainmentError(escape) : error;
 		}
 	}
-	return resolvedPath;
+	return { targetPath: resolvedPath, skill };
+}
+
+/**
+ * Materialize one resource of a remote skill, pinned to the commit discovery saw.
+ *
+ * Returns false when this skill is local, the path escapes its root, or the URL
+ * addresses the skill root itself. A root directory request creates the cache
+ * directory so a listing works before any file has been fetched.
+ */
+async function materializeRemoteSkill(
+	skill: Skill,
+	targetPath: string,
+	directory: boolean,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	const remote = skill.remote;
+	if (!remote) return false;
+	const baseDir = path.resolve(skill.baseDir);
+	const resolved = path.resolve(targetPath);
+	const relative = path.relative(baseDir, resolved);
+	if (relative.startsWith("..") || path.isAbsolute(relative)) return false;
+	if (relative === "") {
+		if (!directory) return false;
+		await fs.mkdir(baseDir, { recursive: true });
+		return true;
+	}
+	await ensureRemoteSkillResource(remote, relative.split(path.sep).join("/"), { signal });
+	return true;
 }
 
 /**
@@ -132,9 +161,9 @@ export class SkillProtocolHandler implements ProtocolHandler {
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
-		let targetPath: string;
+		let target: { targetPath: string; skill: Skill };
 		try {
-			targetPath = await skillTargetPath(url, context?.skills ?? getActiveSkills(), false);
+			target = await skillTargetPath(url, context?.skills ?? getActiveSkills(), false);
 		} catch (error) {
 			if (!(error instanceof UnknownSkillError)) throw error;
 			// Loaded skills always win; otherwise serve the resource an MCP server advertises under
@@ -168,14 +197,17 @@ export class SkillProtocolHandler implements ProtocolHandler {
 			return { ...resource, unbounded: false };
 		}
 
+		const targetPath = target.targetPath;
 		let stats: fsTypes.Stats;
 		try {
 			stats = await fs.stat(targetPath);
 		} catch (error) {
-			if (isEnoent(error)) {
+			if (!isEnoent(error)) throw error;
+			// Remote skill: fetch the resource at the pinned commit, then read it from the cache.
+			if (!(await materializeRemoteSkill(target.skill, targetPath, false, context?.signal))) {
 				throw new Error(`File not found: ${targetPath}`);
 			}
-			throw error;
+			stats = await fs.stat(targetPath);
 		}
 
 		if (stats.isDirectory()) {
@@ -204,20 +236,30 @@ export class SkillProtocolHandler implements ProtocolHandler {
 	 */
 	async locate(url: InternalUrl, context?: ResolveContext, options?: LocateOptions): Promise<string | null> {
 		const skills = context?.skills ?? getActiveSkills();
-		let targetPath: string;
+		let target: { targetPath: string; skill: Skill };
 		try {
-			targetPath = await skillTargetPath(url, skills, options?.directory === true, options?.create === true);
+			target = await skillTargetPath(url, skills, options?.directory === true, options?.create === true);
 		} catch (error) {
 			if (error instanceof UnknownSkillError && !options?.localOnly && MCPManager.available()) return null;
 			throw error;
 		}
+		const targetPath = target.targetPath;
 		if (options?.create) return targetPath;
 		try {
 			await fs.stat(targetPath);
 			return targetPath;
 		} catch (error) {
-			if (isEnoent(error)) return null;
-			throw error;
+			if (!isEnoent(error)) throw error;
+			if (!(await materializeRemoteSkill(target.skill, targetPath, options?.directory === true, context?.signal))) {
+				return null;
+			}
+			try {
+				await fs.stat(targetPath);
+				return targetPath;
+			} catch (retryError) {
+				if (isEnoent(retryError)) return null;
+				throw retryError;
+			}
 		}
 	}
 

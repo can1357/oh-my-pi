@@ -99,7 +99,8 @@ Current registered skill providers:
    - `codex`
 7. `opencode` (priority 55)
 8. `github` (priority 30) — `.github/skills/<name>/SKILL.md` (GitHub Agent Skills layout, project-only)
-9. `omp-managed` (priority 5) — auto-learn skills under `~/.omp/agent/managed-skills`, registered in `src/discovery/builtin.ts` and discovered unconditionally (only writing/nudging is gated by `autolearn.enabled`); always defers to a same-named authored skill
+9. `remote` (priority 25) — GitHub skills registered by `omp skill remote add`, pinned to a commit and fetched on demand; every authored provider above outranks it
+10. `omp-managed` (priority 5) — auto-learn skills under `~/.omp/agent/managed-skills`, registered in `src/discovery/builtin.ts` and discovered unconditionally (only writing/nudging is gated by `autolearn.enabled`); always defers to a same-named authored skill
 
 Capability dedup key is skill name; the first item with a given name wins in the deduped `items` view. `loadSkills()` resolves same-name collisions itself (see "Collision and duplicate handling").
 
@@ -133,6 +134,18 @@ The `agents` provider (`.agent[s]/skills`) has its own `enableAgentsUser`/`enabl
 - Namespaced skills resolve through `skill://<namespace>/<name>[/<path>]` and the `/skill:<namespace>/<name>` token, both leading and mid-prompt (a mid-prompt token accepts exactly one `/`; deeper paths are left as prose). Because skill names never contain `/`, an exact `<host>/<first segment>` match is unambiguous and takes precedence over reading that segment as a path relative to a bare skill of the same name as the namespace.
 - Custom-directory skills are merged after provider skills and outrank a same-named default-path provider skill regardless of admission order (#7190): the custom-directory skill keeps the bare name, and the provider skill is re-admitted under its namespaced name (suffixed if that slot is taken) when it differs or dropped when it is identical. Among two custom directories, the first one in `skills.customDirectories` keeps the bare name and the other is namespaced.
 - `disabledExtensions` (`skill:<name>`) and `skills.ignoredSkills` are applied to both the raw and the final name, so a namespaced alias cannot bypass an exclusion. `skills.includeSkills` is applied to the final listing only, after every name is resolved, so `second/*` selects a namespaced skill even though the bare skill it collided with is not itself included.
+
+## Remote skills (GitHub sources)
+
+`omp skill remote add <owner/repo[@ref][#dir]>` registers every directory containing `SKILL.md` under the given path. Registration resolves the ref to a single commit, reads each `SKILL.md` frontmatter for its descriptor, and writes a local index; discovery then exposes the skills without touching the network.
+
+- **Index**: `<project>/.omp/remote-skills.json` (project scope) or `<agent-dir>/remote-skills.json` (`-g`). Commit it to pin a team to the same revisions.
+- **Pinning**: every descriptor stores the resolved commit. `omp skill remote sync [name...]` re-resolves branches and tags and repins changed commits; an explicit 40-hex `@commit` is never re-resolved. A descriptor a session already discovered keeps reading its own commit even when `sync` runs mid-session.
+- **Loading**: `read skill://<name>` and `read skill://<name>/<path>` fetch from the pinned commit on first use and cache under `<agent-dir>/../cache/remote-skills/<owner>/<repo>/<commit>/<skill-directory>/`. No new tool is involved: the existing `skill://` scheme is the loader.
+- **Cache policy**: read-through, keyed by repository, commit, and path. There is no `no-store` mode, TTL, or background refresh yet; `sync` is the explicit update step. A cache hit never contacts GitHub.
+- **Metadata**: no repository-side index or extra file is required. A skill is `<dir>/SKILL.md`; `name` and `description` come from the spec frontmatter, and the commit *is* the version. Optional `metadata.version` stays available for humans and matches the registry publish convention (`omp skill version`).
+- **Limits and errors**: `SKILL.md` 256 KiB, other resources 10 MiB, 15 s per request with two retries. Failures are explicit: `INVALID_SOURCE`, `INVALID_SKILL`, `AUTH_REQUIRED`, `ACCESS_DENIED`, `NOT_FOUND`, `RATE_LIMITED`, `PATH_DENIED`, `RESOURCE_LIMIT_EXCEEDED`, and `OFFLINE_RESOURCE_MISSING` (names the uncached path).
+- **Collisions**: a same-named local skill keeps the bare name; the remote skill becomes `skill://<owner>-<repo>/<name>`.
 
 ## Runtime usage behavior
 
