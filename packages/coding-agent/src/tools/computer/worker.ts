@@ -425,6 +425,7 @@ async function entryExists(local: string): Promise<boolean> {
 
 const MENU_ROUTE =
 	"Use the window's menu bar with win.menu.select(...), or an element action such as press(), instead.";
+const MENU_TREE_LIMIT = 150;
 /** AX roles of the controls that open a menu when pressed, as native's `open_menu` reads them. */
 const MENU_CONTROL_ROLES = ["AXPopUpButton", "AXMenuButton"];
 const MENU_CONTROL_ROUTE =
@@ -1239,7 +1240,8 @@ class Win {
 					path.length <= 1 && path[0] === undefined
 						? undefined
 						: menuPath("menu.items", path, { allowEmpty: true });
-				return await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
+				const items = await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
+				return segments?.length ? await this.#menuTree(items, context.signal) : items;
 			},
 			select: async (...path: [string, ...string[]] | [string[]]): Promise<void> => {
 				const context = this.#getContext();
@@ -1248,6 +1250,31 @@ class Win {
 				await nativeCall(context.signal, () => this.#session.menuSelect(this.id, segments));
 			},
 		};
+	}
+
+	async #menuTree(items: MenuItem[], signal: AbortSignal | undefined): Promise<MenuItem[]> {
+		const listed: MenuItem[] = [];
+		let budget = MENU_TREE_LIMIT - items.length;
+		const visit = async (level: MenuItem[]): Promise<void> => {
+			for (const item of level) {
+				listed.push(item);
+				if (!item.hasSubmenu || !item.enabled || budget <= 0) continue;
+				let children: MenuItem[];
+				try {
+					children = await nativeCall(signal, () => this.#session.menuItems(this.id, item.path));
+				} catch (error) {
+					throwIfAborted(signal);
+					// Lazy submenus stay listed so their paths can be requested explicitly.
+					if (error instanceof ToolError) continue;
+					throw error;
+				}
+				if (children.length > budget) continue;
+				budget -= children.length;
+				await visit(children);
+			}
+		};
+		await visit(items);
+		return listed;
 	}
 
 	async bringToCurrentSpace(): Promise<void> {

@@ -5034,3 +5034,79 @@ describe("window() waiting for a window to appear", () => {
 		expect(native.listings).toBe(3);
 	});
 });
+
+describe("menu.items beneath a named menu", () => {
+	class MenuSession extends FakeNativeSession {
+		readonly read: string[] = [];
+		override async menuItems(_target: string, path: string[] = []) {
+			this.read.push(path.join("/") || "<bar>");
+			const item = (title: string, hasSubmenu = false, enabled = true) => ({
+				title,
+				path: [...path, title],
+				enabled,
+				checked: false,
+				hasSubmenu,
+			});
+			switch (path.join("/")) {
+				case "":
+					return [item("Edit", true), item("View", true)];
+				case "Edit":
+					return [item("Undo"), item("List", true), item("Speech", true, false), item("Services", true)];
+				case "Edit/List":
+					return [item("Local", true)];
+				case "Edit/List/Local":
+					return [item("Groceries"), item("Errands")];
+				default:
+					throw new Error(`AxFailed: menu ${path.join("/")} has no items until it opens`);
+			}
+		}
+	}
+
+	async function items(native: FakeNativeSession, code: string): Promise<string[]> {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const id = crypto.randomUUID();
+		transport.inbound({ type: "run", id, code, timeoutMs: 2_000, session: snapshot(false), escape: escapeScope() });
+		const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+		if (message.type !== "result" || !message.ok) throw new Error(`menu run failed: ${JSON.stringify(message)}`);
+		return (message.payload.returnValue as Array<{ path: string[] }>).map(entry => entry.path.join("/"));
+	}
+
+	it("lists enabled descendants depth-first while retaining unreadable and disabled submenus", async () => {
+		const native = new MenuSession();
+		expect(await items(native, 'return await (await desktop.window("42")).menu.items("Edit")')).toEqual([
+			"Edit/Undo",
+			"Edit/List",
+			"Edit/List/Local",
+			"Edit/List/Local/Groceries",
+			"Edit/List/Local/Errands",
+			"Edit/Speech",
+			"Edit/Services",
+		]);
+		expect(native.read).toEqual(["Edit", "Edit/List", "Edit/List/Local", "Edit/Services"]);
+	});
+
+	it("keeps the menu bar one level", async () => {
+		const bar = new MenuSession();
+		expect(await items(bar, 'return await (await desktop.window("42")).menu.items()')).toEqual(["Edit", "View"]);
+		expect(bar.read).toEqual(["<bar>"]);
+	});
+
+	it("leaves oversized submenus unexpanded without dropping sibling commands", async () => {
+		class LargeMenuSession extends FakeNativeSession {
+			override async menuItems(_target: string, path: string[] = []) {
+				return Array.from({ length: path.length === 1 ? 149 : 2 }, (_, index) => ({
+					title: `${index}`,
+					path: [...path, `${index}`],
+					enabled: true,
+					checked: false,
+					hasSubmenu: path.length === 1 && index === 0,
+				}));
+			}
+		}
+		const paths = await items(new LargeMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")');
+		expect(paths).toHaveLength(149);
+		expect(paths[0]).toBe("Edit/0");
+		expect(paths[148]).toBe("Edit/148");
+	});
+});
