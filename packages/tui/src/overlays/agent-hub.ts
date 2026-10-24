@@ -200,10 +200,18 @@ const DATA_CHANGE_RENDER_COALESCE_MS = 100;
 /** Double-tap window for the table's left-left "close hub" gesture. */
 const LEFT_TAP_WINDOW_MS = 500;
 
-function compareRosterAgents(a: AgentRecordLike, b: AgentRecordLike): number {
+type RosterRankKey = Pick<AgentRecordLike, "id" | "status" | "lastActivity">;
+
+function compareRosterAgents(a: RosterRankKey, b: RosterRankKey): number {
 	return (
 		STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || b.lastActivity - a.lastActivity || a.id.localeCompare(b.id)
 	);
+}
+
+/** The rank frozen when the hub first saw a generation: its spawn batch, status and recency of that moment. */
+interface FrozenRank extends RosterRankKey {
+	/** 0 for agents the hub opened with or found on disk; each later batch of spawns gets a lower number. */
+	batch: number;
 }
 
 function activityGlyph(row: AgentActivityRow): string {
@@ -364,10 +372,14 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#rows: TRecord[] = [];
 	#statusCounts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
 	#selectedRow = 0;
-	/** Initial status/recency rank stays fixed while open; new generations
-	 *  prepend without changing the relative order of existing rows. */
-	#rowOrder: Map<TRecord, number> | undefined;
-	#nextNewRowOrder = 0;
+	/**
+	 * A generation's rank is frozen when the hub first sees it, so heartbeats and
+	 * status changes cannot move rows. Agents found on disk take their place in the
+	 * status/recency ranking; agents spawned while the hub is open go on top.
+	 */
+	#frozenRank = new Map<TRecord, FrozenRank>();
+	#openedAt = Date.now();
+	#spawnBatches = 0;
 	#hoveredRow: number | null = null;
 	/** Per-render screen-line to agent-row map, shared by click and hover routing. */
 	#hitRows: Array<number | undefined> = [];
@@ -519,8 +531,6 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 						logger.warn("Failed to register persisted subagents", { error });
 					})
 					.finally(() => {
-						// Clear the loading flag first so this refresh captures the
-						// full status/recency ranking rather than a partial roster.
 						this.#loadingPersistedSubagents = false;
 						if (!this.#disposed) {
 							this.#refreshRows();
@@ -1537,36 +1547,24 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID);
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);
-		// Capture the status+recency ranking once so keyboard navigation does
-		// not jump on heartbeats. Defer until persisted-subagent discovery
-		// settles so a partial roster is not frozen in readdir order.
-		const rowOrder = this.#rowOrder;
-		let ordered: TRecord[];
-		if (!rowOrder) {
-			ordered = refs.sort(compareRosterAgents);
-			if (!this.#loadingPersistedSubagents && ordered.length > 0) {
-				const rowOrder = new Map<TRecord, number>();
-				for (const [index, ref] of ordered.entries()) rowOrder.set(ref, index);
-				this.#rowOrder = rowOrder;
-			}
-		} else {
-			for (const rankedRef of rowOrder.keys()) {
-				if (!refs.includes(rankedRef)) rowOrder.delete(rankedRef);
-			}
-			// Each batch of newly appearing generations uses the initial sort,
-			// then takes ranks above every agent already on screen.
-			let newcomers: TRecord[] | undefined;
-			for (const ref of refs) {
-				if (!rowOrder.has(ref)) (newcomers ??= []).push(ref);
-			}
-			if (newcomers) {
-				newcomers.sort(compareRosterAgents);
-				for (let i = newcomers.length - 1; i >= 0; i--) {
-					rowOrder.set(newcomers[i]!, --this.#nextNewRowOrder);
-				}
-			}
-			ordered = refs.sort((a, b) => rowOrder.get(a)! - rowOrder.get(b)!);
+		const live = new Set(refs);
+		for (const ref of this.#frozenRank.keys()) if (!live.has(ref)) this.#frozenRank.delete(ref);
+		let spawnBatch: number | undefined;
+		for (const ref of refs) {
+			if (this.#frozenRank.has(ref)) continue;
+			const spawned = ref.createdAt > this.#openedAt;
+			this.#frozenRank.set(ref, {
+				batch: spawned ? (spawnBatch ??= --this.#spawnBatches) : 0,
+				id: ref.id,
+				status: ref.status,
+				lastActivity: ref.lastActivity,
+			});
 		}
+		const ordered = refs.sort((a, b) => {
+			const rankA = this.#frozenRank.get(a)!;
+			const rankB = this.#frozenRank.get(b)!;
+			return rankA.batch - rankB.batch || compareRosterAgents(rankA, rankB);
+		});
 		const query = this.#agentFilter.getValue().trim();
 		const rosterRows =
 			query.length > 0
@@ -1574,7 +1572,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 				: ordered;
 
 		if (this.#viewMode === "tree") {
-			const tree = projectAgentTree(rosterRows, rowOrder);
+			const tree = projectAgentTree(rosterRows, ref => this.#frozenRank.get(ref)!.batch < 0);
 			this.#rows = tree.rows;
 			this.#treeDepthById = tree.depthById;
 			this.#treeParentById = tree.parentById;

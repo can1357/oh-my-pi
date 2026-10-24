@@ -242,6 +242,53 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
+	it("keeps rows still while saved agents load; found agents rank in place and spawns go on top", async () => {
+		vi.useFakeTimers();
+		geometry = stubStdoutGeometry(120);
+		const agents = new AgentRegistry();
+		setSystemTime(1000);
+		agents.register({ id: "A", displayName: "Alpha", kind: "sub", session: {} as AgentSession });
+		setSystemTime(2000);
+		agents.register({ id: "B", displayName: "Beta", kind: "sub", session: {} as AgentSession });
+		setSystemTime(3000);
+		const load = Promise.withResolvers<void>();
+		const hub = makeHub(agents, { sessionFile: "/tmp/hub/session.jsonl", loadPersisted: () => load.promise });
+		try {
+			expect(renderedAgentIds(hub)).toEqual(["B", "A"]);
+			hub.handleInput("j");
+			expect(selectedAgentId(hub)).toBe("A");
+
+			// A heartbeat during the scan must not move the rows.
+			setSystemTime(4000);
+			agents.setActivity("A", "still running");
+			vi.advanceTimersByTime(100);
+			expect(renderedAgentIds(hub)).toEqual(["B", "A"]);
+			expect(selectedAgentId(hub)).toBe("A");
+
+			// An agent the scan finds on disk takes its place in the ranking; a spawn goes on top.
+			setSystemTime(5000);
+			agents.register({
+				id: "Saved",
+				displayName: "Saved",
+				kind: "sub",
+				session: null,
+				status: "parked",
+				createdAt: 500,
+				lastActivity: 900,
+			});
+			agents.register({ id: "Fresh", displayName: "Fresh", kind: "sub", session: {} as AgentSession });
+			vi.advanceTimersByTime(100);
+			expect(renderedAgentIds(hub)).toEqual(["Fresh", "B", "A", "Saved"]);
+			expect(selectedAgentId(hub)).toBe("A");
+
+			load.resolve();
+			await hub.persistedSubagentsReady;
+			expect(renderedAgentIds(hub)).toEqual(["Fresh", "B", "A", "Saved"]);
+		} finally {
+			hub.dispose();
+		}
+	});
+
 	it("filters agents with a fuzzy query and clears on Escape", () => {
 		vi.useFakeTimers();
 		let hub: AgentHubOverlayComponent | undefined;
