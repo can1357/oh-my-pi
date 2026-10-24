@@ -1,0 +1,26 @@
+name: Sync guard
+
+# Red while the conflict PR's fork-stack files still carry conflict markers.
+# Spec: docs/superpowers/specs/2026-10-17-fork-rebase-stack-design.md §4
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  markers:
+    if: github.head_ref == 'sync/rebase'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: No conflict markers left in fork-stack files
+        run: |
+          git fetch -q https://github.com/can1357/oh-my-pi.git main
+          UPSTREAM_REF=FETCH_HEAD bash .github/scripts/check-sync-markers.sh

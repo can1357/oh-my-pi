@@ -1,0 +1,60 @@
+name: Fork promote
+
+# Label `promote` on the sync/rebase PR -> force-push sync/rebase to main, close the PR.
+# The merge button would merge upstream history into the old stack; this replaces it.
+# Spec: docs/superpowers/specs/2026-10-17-fork-rebase-stack-design.md §4
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-sync # never race the daily rebase
+  cancel-in-progress: false
+
+env:
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  promote:
+    if: github.event.label.name == 'promote' && github.head_ref == 'sync/rebase' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Guard, then force-push sync/rebase to main
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BODY: ${{ github.event.pull_request.body }}
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.FORK_SYNC_TOKEN }}@github.com/.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/
+        run: |
+          unlabel() { gh api -X DELETE "repos/$GH_REPO/issues/$PR/labels/promote" --silent || true; }
+          git fetch -q https://github.com/can1357/oh-my-pi.git main
+          if ! UPSTREAM_REF=FETCH_HEAD bash .github/scripts/check-sync-markers.sh; then
+            unlabel
+            echo "::error::conflict markers remain in fork-stack files; not promoted"
+            exit 1
+          fi
+          OLD=$(printf '%s\n' "$BODY" | sed -n 's/^<!-- fork-sync-old: \([0-9a-f]\{40\}\) -->$/\1/p')
+          if [ -z "$OLD" ]; then
+            unlabel
+            echo "::error::PR body has no fork-sync-old marker; not promoted"
+            exit 1
+          fi
+          git push -q --force https://github.com/$GH_REPO.git "$OLD:refs/heads/main-prev"
+          if ! git push -q --force-with-lease="main:$OLD" https://github.com/$GH_REPO.git "$HEAD_SHA:refs/heads/main"; then
+            unlabel
+            echo "::error::main moved since this rebase was staged ($OLD); not overwritten. The next sync run restages."
+            exit 1
+          fi
+          gh pr close "$PR" --comment "Promoted: \`main\` is now $HEAD_SHA (previous stack kept as \`main-prev\`)." --delete-branch

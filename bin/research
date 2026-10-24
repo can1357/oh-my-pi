@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# Research-mode launcher: loads persisted settings, exports the research env,
+# and starts omp (the fork's dev wrapper when runnable, else the installed omp)
+# with the research system prompt.
+# Usage: research [omp args...] | research doctor
+set -euo pipefail
+
+CONFIG="$HOME/.research-harness/config.env"
+if [ -f "$CONFIG" ]; then
+	# shellcheck disable=SC1090
+	. "$CONFIG"
+fi
+
+# Resolve the repo root even when settings are missing (script may be a symlink).
+if [ -z "${RESEARCH_HARNESS_HOME:-}" ] || [ ! -d "${RESEARCH_HARNESS_HOME:-}" ]; then
+	src="${BASH_SOURCE[0]}"
+	while [ -L "$src" ]; do src="$(readlink "$src")"; done
+	RESEARCH_HARNESS_HOME="$(cd "$(dirname "$src")/.." && pwd)"
+fi
+
+export RESEARCH_HARNESS_HOME
+export PAPER_GRAPH_DB="${PAPER_GRAPH_DB:-$HOME/.research-harness/papers.db}"
+if [ -n "${RESEARCH_CORPUS_DIR:-}" ]; then
+	export RESEARCH_CORPUS_DIR
+fi
+
+# Brand the TUI welcome screen (consumed by packages/utils/src/branding.ts).
+BRAND_DIR="$RESEARCH_HARNESS_HOME/research/branding"
+export RESEARCHHARNESS_BRAND_NAME="${RESEARCHHARNESS_BRAND_NAME:-Research Harness}"
+if [ -f "$BRAND_DIR/logo.txt" ]; then
+	export RESEARCHHARNESS_BRAND_LOGO="$BRAND_DIR/logo.txt"
+fi
+if [ -f "$BRAND_DIR/tips.txt" ]; then
+	export RESEARCHHARNESS_BRAND_TIPS="$BRAND_DIR/tips.txt"
+fi
+
+SYSTEM_PROMPT="$RESEARCH_HARNESS_HOME/research/mode/system.md"
+OMP_AGENT_DIR="${OMP_AGENT_DIR:-$HOME/.omp/agent}"
+
+ok() { printf '  ok    %s\n' "$1"; }
+warn() { printf '  warn  %s\n' "$1"; }
+fail() {
+	printf '  FAIL  %s\n' "$1"
+	DOCTOR_FAILED=1
+}
+
+doctor() {
+	DOCTOR_FAILED=0
+	echo "research doctor"
+
+	if command -v omp >/dev/null 2>&1; then
+		ok "omp $(omp --version 2>/dev/null | head -1) at $(command -v omp)"
+	else
+		fail "omp not on PATH"
+	fi
+
+	if command -v omp >/dev/null 2>&1 && omp plugin list 2>/dev/null | grep -q "research-harness-tools"; then
+		ok "plugin research-harness-tools installed"
+	else
+		fail "plugin research-harness-tools not installed (run setup.sh)"
+	fi
+
+	ext="$HOME/.omp/plugins/node_modules/research-harness-tools/extensions/research-mode/index.ts"
+	if [ -f "$ext" ]; then
+		ok "extension research-mode (/help guide + statusline)"
+	else
+		fail "extension research-mode missing from the installed plugin (run setup.sh)"
+	fi
+
+	for a in scholar screener synthesizer librarian; do
+		if [ -f "$OMP_AGENT_DIR/agents/$a.md" ]; then
+			ok "agent $a"
+		else
+			fail "agent $a missing from $OMP_AGENT_DIR/agents/"
+		fi
+	done
+
+	local missing_prompts=0 n_prompts=0
+	for f in "$RESEARCH_HARNESS_HOME"/research/prompts/*.md; do
+		base="$(basename "$f")"
+		n_prompts=$((n_prompts + 1))
+		if [ ! -f "$OMP_AGENT_DIR/prompts/$base" ]; then
+			fail "prompt /${base%.md} missing from $OMP_AGENT_DIR/prompts/"
+			missing_prompts=$((missing_prompts + 1))
+		fi
+	done
+	if [ "$missing_prompts" -eq 0 ]; then
+		ok "prompts ($n_prompts commands installed)"
+	fi
+
+	if [ -f "$SYSTEM_PROMPT" ]; then
+		ok "mode system prompt $SYSTEM_PROMPT"
+	else
+		fail "mode system prompt missing: $SYSTEM_PROMPT"
+	fi
+
+	if [ -f "$CONFIG" ]; then
+		ok "config $CONFIG"
+	else
+		warn "config missing: $CONFIG (run setup.sh)"
+	fi
+
+	if [ -f "${RESEARCHHARNESS_BRAND_LOGO:-}" ] && [ -f "${RESEARCHHARNESS_BRAND_TIPS:-}" ]; then
+		ok "brand \"$RESEARCHHARNESS_BRAND_NAME\", logo ok, tips ok"
+	else
+		warn "brand \"$RESEARCHHARNESS_BRAND_NAME\" - logo or tips missing from $BRAND_DIR (welcome screen falls back to the stock omp mark/tips)"
+	fi
+
+	local jev_scripts jev_state
+	jev_scripts="$RESEARCH_HARNESS_HOME/research/skills/literature-search/scripts"
+	jev_state="$(python3 -c "
+import sys
+sys.path.insert(0, sys.argv[1])
+import jev_client
+key = jev_client.resolve_key()
+if not key:
+    print('off')
+else:
+    try:
+        print('ready ' + ','.join(jev_client.list_models(key)))
+    except Exception as exc:
+        print('unreachable ' + type(exc).__name__)
+" "$jev_scripts" 2>/dev/null || echo 'unreachable ImportError')"
+	case "$jev_state" in
+	ready*) ok "Jev first-pass enabled (models: ${jev_state#ready })" ;;
+	off) warn "Jev first-pass OFF (optional - set TYPESAFE_API_KEY to enable)" ;;
+	*) warn "Jev key set but API unreachable (${jev_state#unreachable }) - first pass will skip" ;;
+	esac
+
+	if [ -n "${RESEARCH_CORPUS_DIR:-}" ]; then
+		if [ -d "$RESEARCH_CORPUS_DIR" ]; then
+			ok "corpus $RESEARCH_CORPUS_DIR ($(find "$RESEARCH_CORPUS_DIR" -maxdepth 1 -name '*.pdf' 2>/dev/null | wc -l | tr -d ' ') PDFs)"
+		else
+			warn "corpus dir set but missing: $RESEARCH_CORPUS_DIR"
+		fi
+	else
+		warn "corpus not set — web-only mode"
+	fi
+
+	if [ -f "$PAPER_GRAPH_DB" ]; then
+		stats="$(python3 -c "
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+try:
+    p = c.execute('SELECT COUNT(*) FROM papers').fetchone()[0]
+    e = c.execute('SELECT COUNT(*) FROM edges').fetchone()[0]
+    print(f'{p} papers, {e} edges')
+except sqlite3.Error:
+    print('unreadable')
+" "$PAPER_GRAPH_DB" 2>/dev/null || echo unreadable)"
+		ok "paper graph $PAPER_GRAPH_DB ($stats)"
+	else
+		warn "paper graph db not created yet ($PAPER_GRAPH_DB — created on first add)"
+	fi
+
+	local projects_dir="$HOME/.research-harness/projects"
+	if [ -d "$projects_dir" ]; then
+		count="$(find "$projects_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+		active=""
+		if [ -f "$HOME/.research-harness/active-project" ]; then
+			active=" (active: $(cat "$HOME/.research-harness/active-project"))"
+		fi
+		ok "projects $count under $projects_dir$active"
+	else
+		warn "projects dir missing (run setup.sh)"
+	fi
+
+	if [ "$DOCTOR_FAILED" -ne 0 ]; then
+		echo "status: NOT READY — fix the FAIL lines above (usually: bash setup.sh)"
+		return 1
+	fi
+	echo "status: ready — run 'research' to start"
+	echo "        type /help in the TUI to see every command"
+}
+
+case "${1:-}" in
+doctor)
+	doctor
+	exit $?
+	;;
+esac
+
+if [ ! -f "$SYSTEM_PROMPT" ]; then
+	echo "research: mode system prompt not found at $SYSTEM_PROMPT — run setup.sh" >&2
+	exit 1
+fi
+
+args=(--append-system-prompt "$SYSTEM_PROMPT")
+# omp auto-switches out of ~; prefer the research state home as the working dir.
+if [ "$PWD" = "$HOME" ]; then
+	args+=(--cwd "$HOME/.research-harness")
+fi
+# Prefer the fork's dev wrapper (runs src/ through bun) so fork-level features,
+# including branding, are live; RESEARCH_HARNESS_OMP overrides; without bun or
+# the repo's node_modules the wrapper cannot start, so use the installed omp.
+DEV_OMP="$RESEARCH_HARNESS_HOME/packages/coding-agent/scripts/omp"
+if [ -n "${RESEARCH_HARNESS_OMP:-}" ]; then
+	OMP_BIN="$RESEARCH_HARNESS_OMP"
+elif [ -x "$DEV_OMP" ] && [ -d "$RESEARCH_HARNESS_HOME/node_modules" ] && command -v bun >/dev/null 2>&1; then
+	OMP_BIN="$DEV_OMP"
+else
+	OMP_BIN="omp"
+fi
+exec "$OMP_BIN" "${args[@]}" "$@"

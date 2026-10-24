@@ -474,6 +474,9 @@ Advisors review primary turns on a configurable cadence and can inject advice. E
 | `advisor.reviewInterval` | number | `1` | Default advisor only: review every Nth eligible update. Skipped updates are sent with the next scheduled review; pending advice delivery never depends on cadence. Applies live. |
 | `advisor.maxNotesPerUpdate` | number | `4` | Non-blocker notes accepted per advisor review, from 1–32. Higher-severity notes can replace only pending notes from the same review. `WATCHDOG.yml` top-level or per-advisor values override this default. |
 | `advisor.evictStaleResults` | boolean | `true` | Before each review, replace the advisor's `read`/`grep`/`glob` output from older reviews with a short placeholder. The latest review is kept. |
+| `advisor.judgeGate` | boolean | `false` | Experimental. Before each in-progress review, the `judge` model role scores the update for risk; low-risk updates are held for the next review instead of costing a full advisor turn. Final turns are never gated, but `advisor.reviewInterval` and `advisor.reviewMode` can still hold them; judge failures review anyway. |
+| `advisor.judgeGateMaxHolds` | number | `3` | Experimental, with `advisor.judgeGate`. After the gate has held this many in-progress updates in a row (minimum 1), the next one is reviewed without asking the judge, together with everything held. |
+| `advisor.judgeGateMaxHoldMs` | number | `120000` | Experimental, with `advisor.judgeGate`. When the oldest update the gate holds has waited longer than this many milliseconds, the next in-progress update is reviewed without asking the judge, together with everything held. `0` disables the time cap. |
 
 ### Thinking
 

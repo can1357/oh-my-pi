@@ -1,4 +1,5 @@
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
+import { getBrandDisplayName, getBrandLogo, getBrandTips } from "@oh-my-pi/pi-utils/branding";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatDoubleTap, formatKeyHint, formatKeyHints, type KeyName } from "../app-keybindings";
 import { editorKey } from "../chrome/keybinding-hints";
@@ -220,7 +221,7 @@ export class WelcomeComponent implements Component {
 		if (theme.getSymbolPreset() === "unicode" && this.#nagRoll < 0.1) {
 			return "Please use nerdfont 😭.";
 		}
-		return pickWeightedTip(isNativeRendering() ? TSP_TIPS : TIPS, this.#tipRoll) || undefined;
+		return pickWeightedTip(getBrandTips() ?? (isNativeRendering() ? TSP_TIPS : TIPS), this.#tipRoll) || undefined;
 	}
 
 	invalidate(): void {
@@ -242,6 +243,7 @@ export class WelcomeComponent implements Component {
 		// Brand lines are short and fixed; never wrap or truncate them.
 		const art = (spans: readonly TspSpan[], role: string): NativeNode =>
 			keyed(text(spans, { wrap: "none", role }), role);
+		const name = getBrandDisplayName() || APP_NAME;
 		const lockupRow = keyed(
 			row(
 				[
@@ -249,7 +251,7 @@ export class WelcomeComponent implements Component {
 						"image",
 						{
 							builtin: "omp",
-							alt: APP_NAME,
+							alt: name,
 							w: 128,
 							role: "omp.welcome.logo",
 						},
@@ -259,7 +261,7 @@ export class WelcomeComponent implements Component {
 					keyed(
 						col(
 							[
-								art([span(APP_NAME, "strong")], "omp.welcome.wordmark"),
+								art([span(name, "strong")], "omp.welcome.wordmark"),
 								art([span(`v${this.version}`, "dim mono")], "omp.welcome.version"),
 							],
 							{ role: "omp.welcome.mark" },
@@ -375,9 +377,12 @@ export class WelcomeComponent implements Component {
 		const room = termWidth - 2;
 		if (room < 4) return [];
 		const logo = this.#currentLogoFrame();
+		const logoWidth = blockWidth(logo);
+		const brandName = getBrandDisplayName();
+		const wordmark = brandName ? [brandName] : WORDMARK;
 		const version = theme.fg("dim", `v${this.version}`);
-		const lockupWidth = LOGO_WIDTH + LOCKUP_GAP + Math.max(WORDMARK_WIDTH, visibleWidth(version));
-		const art = room >= lockupWidth ? lockup(logo, version) : room >= LOGO_WIDTH ? logo : [];
+		const lockupWidth = logoWidth + LOCKUP_GAP + Math.max(blockWidth(wordmark), visibleWidth(version));
+		const art = room >= lockupWidth ? lockup(logo, logoWidth, wordmark, version) : room >= logoWidth ? logo : [];
 		const lines = centerBlock(art, termWidth);
 		const tip = termWidth >= TIP_MIN_COLUMNS ? this.#renderTip(room) : [];
 		if (tip.length > 0) lines.push("", ...tip.flatMap(line => centerBlock([line], termWidth)));
@@ -401,27 +406,22 @@ export class WelcomeComponent implements Component {
 
 	/** Pick the logo frame for the current intro phase, or the resting frame. */
 	#currentLogoFrame(): readonly string[] {
-		if (this.#animStart == null) return REST_FRAME;
+		const logo = getBrandLogo() ?? PI_LOGO;
+		if (this.#animStart == null) return gradientLogo(logo, 0);
 		const elapsed = performance.now() - this.#animStart;
-		if (elapsed >= INTRO_MS) return REST_FRAME;
-		return introLogoFrame(elapsed / INTRO_MS);
+		if (elapsed >= INTRO_MS) return gradientLogo(logo, 0);
+		return introLogoFrame(logo, elapsed / INTRO_MS);
 	}
 }
 
 /** Block-grid brand mark shared by the welcome and setup surfaces. */
 export const PI_LOGO = ["████████████", "   ██  ██   ", "   ██  ██   ", "   ▒▒  ██   ", "       ██   "];
 
-/** Columns of {@link PI_LOGO}. */
-const LOGO_WIDTH = Math.max(...PI_LOGO.map(row => row.length));
-
 /**
  * The `omp` wordmark in half-blocks, set beside {@link PI_LOGO} from its second
  * row: the `p` descends into the fourth, the version takes the fifth.
  */
 const WORDMARK = ["▄▀▀▄ █▀▄▀▄ █▀▀▄", "▀▄▄▀ █ █ █ █▄▄▀", "           █"];
-
-/** Columns of {@link WORDMARK}. */
-const WORDMARK_WIDTH = Math.max(...WORDMARK.map(row => row.length));
 
 /** Columns between the logo and the wordmark. */
 const LOCKUP_GAP = 4;
@@ -432,10 +432,22 @@ const TIP_MEASURE = 72;
 /** Narrowest terminal that still shows the tip; below it the banner is the logo alone. */
 const TIP_MIN_COLUMNS = 50;
 
-/** Logo frame `logo` with the wordmark beside it and `version` (styled) under the wordmark. */
-function lockup(logo: readonly string[], version: string): string[] {
-	const beside = ["", ...WORDMARK.map(row => theme.bold(theme.fg("text", row))), version];
-	return logo.map((row, index) => `${row}${padding(LOCKUP_GAP)}${beside[index] ?? ""}`);
+/**
+ * Logo frame `logo` (`logoWidth` columns) with `wordmark` beside it from the
+ * second row and `version` (styled) under the wordmark.
+ */
+function lockup(logo: readonly string[], logoWidth: number, wordmark: readonly string[], version: string): string[] {
+	const beside = ["", ...wordmark.map(row => theme.bold(theme.fg("text", row))), version];
+	// Brand logos come from a file: pad short or missing rows so the wordmark column stays aligned.
+	return Array.from({ length: Math.max(logo.length, beside.length) }, (_, index) => {
+		const row = logo[index] ?? "";
+		return `${row}${padding(logoWidth - visibleWidth(row) + LOCKUP_GAP)}${beside[index] ?? ""}`;
+	});
+}
+
+/** Columns of the widest line in `lines`. */
+function blockWidth(lines: readonly string[]): number {
+	return lines.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
 }
 
 /**
@@ -443,8 +455,7 @@ function lockup(logo: readonly string[], version: string): string[] {
  * columns; pass a single line to center it on its own.
  */
 function centerBlock(lines: readonly string[], width: number): string[] {
-	const widest = lines.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
-	const indent = padding(Math.max(0, Math.floor((width - widest) / 2)));
+	const indent = padding(Math.max(0, Math.floor((width - blockWidth(lines)) / 2)));
 	return lines.map(line => indent + line);
 }
 
@@ -573,16 +584,13 @@ const INTRO_SHINE_TRAVERSALS = 3;
  * fades with the same ease-out curve so the highlight is gone by the resting
  * frame.
  */
-function introLogoFrame(progress: number): string[] {
+function introLogoFrame(logo: readonly string[], progress: number): string[] {
 	const eased = 1 - (1 - progress) ** 3;
 	const phase = ((((1 - eased) * INTRO_SWEEPS) % 1) + 1) % 1;
 	const shinePos = (((progress * INTRO_SHINE_TRAVERSALS) % 1) + 1) % 1;
 	const shineStrength = (1 - eased) ** 1.5;
-	return gradientLogo(PI_LOGO, phase, {
+	return gradientLogo(logo, phase, {
 		strength: shineStrength,
 		pos: shinePos,
 	});
 }
-
-/** Resting gradient frame, cached for re-renders outside of the intro. */
-const REST_FRAME = gradientLogo(PI_LOGO, 0);

@@ -1,0 +1,44 @@
+{
+  "name": "research-harness-tools",
+  "version": "0.2.0",
+  "description": "Local-first literature research harness for oh-my-pi: search, screen, fetch OA, synthesize, and grow a second-brain paper graph.",
+  "license": "MIT",
+  "omp": {
+    "skills": ["skills/literature-search", "skills/paper-graph"],
+    "prompts": [
+      "prompts/litreview.md",
+      "prompts/scope.md",
+      "prompts/databases.md",
+      "prompts/searchstring.md",
+      "prompts/find.md",
+      "prompts/import.md",
+      "prompts/dedupe.md",
+      "prompts/screen.md",
+      "prompts/fulltext.md",
+      "prompts/review.md",
+      "prompts/graph.md",
+      "prompts/prisma.md",
+      "prompts/export.md"
+    ],
+    "extensions": ["extensions/research-mode"]
+  },
+  "pi": {
+    "skills": ["skills/literature-search", "skills/paper-graph"],
+    "prompts": [
+      "prompts/litreview.md",
+      "prompts/scope.md",
+      "prompts/databases.md",
+      "prompts/searchstring.md",
+      "prompts/find.md",
+      "prompts/import.md",
+      "prompts/dedupe.md",
+      "prompts/screen.md",
+      "prompts/fulltext.md",
+      "prompts/review.md",
+      "prompts/graph.md",
+      "prompts/prisma.md",
+      "prompts/export.md"
+    ],
+    "extensions": ["extensions/research-mode"]
+  }
+}

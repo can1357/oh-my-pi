@@ -1,0 +1,9 @@
+Type /help to see everything the research harness can do
+Start a review in plain words: "I'm doing a scoping review on X - where do I start?"
+/find searches OpenAlex and arXiv and brings back abstracts
+/import reads RIS, BibTeX and CSV exports from PubMed or Scopus
+/screen walks you through title-abstract screening with PCC criteria
+/graph opens your paper graph; /prisma derives the flow diagram from your review
+/review shows where the review stands and proposes the next step
+Local PDFs? Point RESEARCH_CORPUS_DIR at the folder and /find will search them too
+research doctor checks plugin, agents, prompts, corpus and databases

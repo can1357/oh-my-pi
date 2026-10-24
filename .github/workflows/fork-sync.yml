@@ -1,0 +1,144 @@
+name: Fork sync
+
+# Daily rebase of this fork's commit stack onto can1357/oh-my-pi:main.
+# Clean + green -> main is force-pushed (old main kept as main-prev). Conflicts or red tests
+# -> the rebased stack goes to sync/rebase with a PR; the `promote` label lands it.
+# Spec: docs/superpowers/specs/2026-10-17-fork-rebase-stack-design.md
+# Scheduled workflows only run from the default branch; keep this on main.
+on:
+  schedule:
+    - cron: '17 3 * * *' # daily 03:17 UTC = 10:17 +07
+  workflow_dispatch:
+    inputs:
+      ai:
+        description: Let the Command Code model try to resolve rebase conflicts
+        type: boolean
+        default: true
+
+# github.token stays read-only. Pushes and the PR use FORK_SYNC_TOKEN (contents +
+# workflows + pull-requests write): github.token cannot push upstream's workflow-file
+# changes, and PRs it opens never trigger other workflows.
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+env:
+  # Fork: gh defaults its base repo to the parent (can1357/oh-my-pi).
+  # ponytail: GH_REPO pins every gh call to this fork.
+  GH_REPO: ${{ github.repository }}
+  BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          # The AI step runs an agent: never leave a write token in .git/config.
+          # Push auth is step-scoped via GIT_CONFIG_* env instead.
+          persist-credentials: false
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "$BOT_EMAIL"
+
+      - name: Skip if the conflict PR carries human commits
+        id: preflight
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+        run: |
+          OPEN=$(gh pr list --head sync/rebase --state open --json number --jq 'length')
+          # Committer, not author: rebased stack commits keep their human author.
+          TIP=$(git log -1 --format=%ce origin/sync/rebase 2>/dev/null || true)
+          if [ "$OPEN" != "0" ] && [ -n "$TIP" ] && [ "$TIP" != "$BOT_EMAIL" ]; then
+            echo "Conflict PR has human commits (tip by $TIP) — skipping so they are never force-pushed away"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.preflight.outputs.skip != 'true'
+
+      - name: Install omp
+        if: steps.preflight.outputs.skip != 'true'
+        env:
+          HAS_KEY: ${{ secrets.COMMAND_CODE_API_KEY != '' }}
+          # Not `inputs.ai != false`: on schedule inputs.ai is null, and null == false in
+          # Actions' loose comparison, which would silently disable AI on every scheduled run.
+          WANT: ${{ github.event_name == 'schedule' || inputs.ai }}
+        run: |
+          if [ "$HAS_KEY" = "true" ] && [ "$WANT" = "true" ]; then
+            bun install -g @oh-my-pi/pi-coding-agent
+            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+            echo "AI=on" >> "$GITHUB_ENV"
+          fi
+
+      # No write credential in this step: ai-resolve.sh runs an agent inside it.
+      - name: Rebase the fork stack (AI resolves conflicts)
+        id: rebase
+        if: steps.preflight.outputs.skip != 'true'
+        timeout-minutes: 45
+        env:
+          COMMAND_CODE_API_KEY: ${{ env.AI == 'on' && secrets.COMMAND_CODE_API_KEY || '' }}
+          SYNC_AI_MODEL: ${{ vars.SYNC_AI_MODEL }}
+        run: bash .github/scripts/sync-upstream.sh
+
+      - name: Push main or stage sync/rebase
+        id: push
+        if: steps.rebase.outcome == 'success'
+        env:
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.FORK_SYNC_TOKEN }}@github.com/.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/
+        run: |
+          # Drop uncommitted leftovers: exactly the rebased commits get pushed.
+          git reset -q --hard HEAD
+          OUT=$(bash .github/scripts/sync-push.sh)
+          echo "$OUT"
+          echo "result=${OUT%% *}" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the conflict PR
+        if: steps.push.outputs.result == 'STAGED'
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+        run: |
+          bash .github/scripts/sync-pr-body.sh
+          . "$(git rev-parse --absolute-git-dir)/sync-report/result.env"
+          BODY="$(git rev-parse --absolute-git-dir)/sync-report/pr-body.md"
+          TITLE="Rebase fork stack onto upstream $(git rev-parse --short "$UP") ($(date +%F))"
+          PR=$(gh pr list --head sync/rebase --state open --json number --jq '.[0].number // empty')
+          if [ -z "$PR" ]; then
+            URL=$(gh pr create --base main --head sync/rebase --title "$TITLE" --body-file "$BODY")
+            PR=${URL##*/}
+          else
+            # REST, never `gh pr edit`: its GraphQL read of team reviewers needs read:org,
+            # which a repo+workflow PAT lacks.
+            gh api -X PATCH "repos/$GH_REPO/pulls/$PR" -f title="$TITLE" -F body=@"$BODY" --silent
+          fi
+          AI_R=$(wc -l < "$(git rev-parse --absolute-git-dir)/sync-report/ai-resolved.txt" 2>/dev/null || echo 0)
+          gh label create sync-conflicts --color B60205 --description "Fork rebase needs review" --force
+          gh label create ai-resolved --color 5319E7 --description "Conflicts resolved by the Command Code model" --force
+          gh label create promote --color 0E8A16 --description "Force-push this sync/rebase to main" --force
+          label() { # <count> <name>: the label is on the PR iff count > 0
+            if [ "$1" -gt 0 ]; then
+              gh api "repos/$GH_REPO/issues/$PR/labels" -f "labels[]=$2" --silent
+            else
+              gh api -X DELETE "repos/$GH_REPO/issues/$PR/labels/$2" --silent 2>/dev/null || true
+            fi
+          }
+          label "$K" sync-conflicts
+          label "$AI_R" ai-resolved
+
+      - name: Upload sync report
+        if: always() && steps.rebase.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-report
+          path: .git/sync-report/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 30
