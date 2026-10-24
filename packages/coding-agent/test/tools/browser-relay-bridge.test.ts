@@ -2359,4 +2359,25 @@ describe("RelayBridge foreign extension frames", () => {
 		expect(flags(1)).toEqual(new Set([true]));
 		expect(flags(2)).toEqual(new Set([false]));
 	});
+
+	it("takes the claim an older omp worker sends on its page session", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		// An older worker connects without `?claim=` and claims the page once it is attached.
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		const claimId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: claimId, sessionId, method: "OMP.claimTarget" }));
+		await flush();
+		expect(cdp.messages.find(m => m.id === claimId)).toEqual({ id: claimId, sessionId, result: {} });
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "Page.getFrameTree" }));
+		await flush();
+		expect(ext.rpcs("send").map(rpc => [rpc.method, rpc.clearForeignFrames])).toContainEqual([
+			"Page.getFrameTree",
+			true,
+		]);
+		expect(ext.rpcs("send").some(rpc => rpc.method === "OMP.claimTarget")).toBeFalse();
+	});
 });

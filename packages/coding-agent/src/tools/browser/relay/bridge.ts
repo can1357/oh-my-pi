@@ -1055,6 +1055,14 @@ export class RelayBridge {
 			this.#reply(conn, msg, {});
 			return true;
 		}
+		// Relay-private claim the omp tab worker sends on the page it adopted. A worker of this version claims at
+		// connect already (`/cdp?claim=`); one of an older version, sharing this relay, claims only here. Never
+		// forwarded — real Chrome rejects the unknown method.
+		if (msg.method === "OMP.claimTarget") {
+			this.#claimTab(conn, tabKey);
+			this.#reply(conn, msg, {});
+			return true;
+		}
 		const tab = this.#tabs.get(tabKey);
 		if (!tab) {
 			this.#replyError(conn, msg, `No tab with key ${tabKey}`);
