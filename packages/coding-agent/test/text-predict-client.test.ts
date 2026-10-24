@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,6 +10,12 @@ import { type TextPredictRequest, type TextPredictResponse, textPredictDaemon } 
 import { rejectionOf } from "./helpers/rejection";
 
 const cleanups: (() => Promise<void>)[] = [];
+
+beforeEach(() => {
+	// Earlier suites may have opened the process-wide client against the real
+	// daemon. Drop it before installing the fixture broker, not only afterward.
+	closeTextPrediction();
+});
 
 afterEach(async () => {
 	closeTextPrediction();
