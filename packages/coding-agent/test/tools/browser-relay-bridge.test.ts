@@ -394,6 +394,20 @@ describe("RelayBridge tab grouping", () => {
 		expect(ungroups[0]!.tabIds).toEqual([1]);
 	});
 
+	it("ungroups a tab whose claiming client closed while its group RPC was in flight", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		// A worker's socket claims the tab as it connects and closes before the group RPC answers.
+		const worker = bridge.cdpConnected(new FakeCdpSocket(), pageId(1));
+		expect(ext.pending("group").map(rpc => rpc.tabIds)).toEqual([[1]]);
+		bridge.cdpClosed(worker);
+		expect(ext.rpcs("ungroup")).toHaveLength(0);
+		ack(bridge, ext, "group", { grouped: { "1": 42 } });
+		await flush();
+		expect(ext.rpcs("ungroup").map(rpc => rpc.tabIds)).toEqual([[1]]);
+	});
+
 	it("never overlaps group RPCs: a tab claimed mid-flight waits for the pending group", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();
