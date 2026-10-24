@@ -6432,6 +6432,70 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		assert!(!still_written(output.path()).await, "`yes` kept running after kill %1");
 	}
 
+	/// VictorCano's #12309 follow-up trigger (2026-10-21): a backgrounded
+	/// compound loop — not a simple builtin command at job level — inside a
+	/// subshell must also end with the subshell, like a backgrounded `yes`.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn subshell_exit_ends_backgrounded_compound_loops() {
+		let _guard = shell_test_lock().lock().await;
+		let output = tempfile::NamedTempFile::new().expect("output file");
+		let shell = Shell::new(None);
+		let command =
+			format!("(while :; do echo x >> {}; done &)", quote_arg(&output.path().to_string_lossy()));
+
+		shell
+			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
+			.await
+			.expect("run compound loop");
+
+		assert!(
+			!still_written(output.path()).await,
+			"background compound loop outlived its subshell"
+		);
+	}
+
+	/// `kill %N` must reach a backgrounded compound loop in a retained session
+	/// (the bash-tool persistent shell keeps its job table alive, so the loop
+	/// legitimately outlives the call — the agent's only off-switch is the
+	/// jobspec). Uses a writing loop so liveness is observable without timing,
+	/// and bounds both calls: a hanging `kill %1` is exactly the wedge the
+	/// reporter hit on 18.12.5, not a pass.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_jobspec_ends_backgrounded_compound_loop_in_retained_session() {
+		let _guard = shell_test_lock().lock().await;
+		let output = tempfile::NamedTempFile::new().expect("output file");
+		let shell = Shell::new(None);
+		let sub =
+			format!("(while :; do echo x >> {}; done) &", quote_arg(&output.path().to_string_lossy()));
+
+		time::timeout(
+			Duration::from_secs(10),
+			shell.run(
+				ShellRunOptions { command: sub, ..Default::default() },
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("backgrounding a subshell loop must return promptly")
+		.expect("run backgrounded subshell loop");
+		assert!(still_written(output.path()).await, "loop never started");
+
+		let kill = time::timeout(
+			Duration::from_secs(10),
+			shell.run(
+				ShellRunOptions { command: "kill %1".into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			),
+		)
+		.await
+		.expect("kill %1 must return instead of wedging the session")
+		.expect("kill %1");
+		assert_eq!(kill.exit_code, Some(0), "kill %1 failed");
+		assert!(!still_written(output.path()).await, "kill %1 did not end the compound loop");
+	}
+
 	/// `live_background_job_count` reports 0 when the session has no live
 	/// external background jobs and 1 while one is running. The host relies on
 	/// this to retain a per-call shell whose `&`/`nohup` child is still alive

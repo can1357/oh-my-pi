@@ -608,12 +608,18 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 ) -> jobs::Job {
 	// Clone the inputs.
 	let mut cloned_shell = shell.clone();
-	let cloned_params = params.clone();
+	let mut cloned_params = params.clone();
 	let cloned_ao_list = ao_list.clone();
 
 	// Mark the child shell as not interactive; we don't want it messing with the
 	// terminal too much.
 	cloned_shell.options_mut().interactive = false;
+
+	// Let the job flag its own task for cancellation: the interpreter checks
+	// these parameters between commands and loop iterations, so `kill %N` also
+	// stops a body that never yields (a loop of synchronous builtins).
+	let cancellation = CancellationToken::new();
+	cloned_params.set_cancel_token(cancellation.clone());
 
 	let join_handle = tokio::spawn(async move {
 		cloned_ao_list
@@ -626,6 +632,7 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 		ao_list.to_string(),
 		jobs::JobState::Running,
 	)
+	.with_cancellation(cancellation)
 }
 
 #[async_trait::async_trait]
@@ -1167,6 +1174,10 @@ impl Execute for ast::CoprocessCommand {
 
 		let body = self.body.clone();
 		let cancel_token = child_params.cancel_token();
+		// Give the coprocess its own cancellation flag so `kill %N` ends it at its
+		// next interpreter check, even when the body never yields.
+		let cancellation = CancellationToken::new();
+		child_params.set_cancel_token(cancellation.clone());
 		let join_handle = tokio::spawn(async move {
 			let pipeline_context = PipelineExecutionContext {
 				shell:            commands::ShellForCommand::ParentShell(&mut child_shell),
@@ -1182,11 +1193,14 @@ impl Execute for ast::CoprocessCommand {
 			}
 		});
 
-		let job = shell.jobs_mut().add_as_current(jobs::Job::new(
-			[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
-			format!("coproc {name}"),
-			jobs::JobState::Running,
-		));
+		let job = shell.jobs_mut().add_as_current(
+			jobs::Job::new(
+				[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
+				format!("coproc {name}"),
+				jobs::JobState::Running,
+			)
+			.with_cancellation(cancellation),
+		);
 		let job_id = job.id;
 
 		// Fill out the fd variable.

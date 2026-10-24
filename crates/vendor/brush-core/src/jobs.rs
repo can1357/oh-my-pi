@@ -6,6 +6,7 @@ use std::{collections::VecDeque, fmt::Display, time::Duration};
 use std::os::windows::io::OwnedHandle;
 
 use futures::FutureExt;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::{ExecutionResult, error, processes, sys, trace_categories, traps};
@@ -405,6 +406,15 @@ pub struct Job {
 
 	/// The current operational state of the job.
 	pub state: JobState,
+
+	/// Cancels the job's in-process task at its next cancellation check.
+	///
+	/// `abort()` on the task handle only takes effect where the future yields;
+	/// a backgrounded compound loop of synchronous builtins never does, so it
+	/// would keep spinning after `kill %N` marked the job done. The token is
+	/// wired into the job's execution parameters, which the interpreter polls
+	/// (`ensure_not_cancelled`) on every loop iteration and command.
+	cancellation: Option<CancellationToken>,
 }
 
 impl Display for Job {
@@ -439,7 +449,15 @@ impl Job {
 			annotation: JobAnnotation::None,
 			command_line,
 			state,
+			cancellation: None,
 		}
+	}
+
+	/// Attaches a token that ends the job's in-process task at its next
+	/// cancellation check, regardless of whether the task yields.
+	pub(crate) fn with_cancellation(mut self, token: CancellationToken) -> Self {
+		self.cancellation = Some(token);
+		self
 	}
 
 	/// Returns a pid-style string for the job.
@@ -589,6 +607,12 @@ impl Job {
 	/// internal tasks are still responsible for signalling any process trees
 	/// those tasks may have spawned.
 	pub fn abort_internal_tasks(&mut self) {
+		// Flag the execution first: aborting the handle below only lands where the
+		// task yields, and a loop of synchronous builtins may run for a long time
+		// before that.
+		if let Some(token) = &self.cancellation {
+			token.cancel();
+		}
 		let mut aborted = false;
 		self.tasks.retain_mut(|task| {
 			if let JobTask::Internal(handle) = task {
