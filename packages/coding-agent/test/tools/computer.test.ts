@@ -5133,8 +5133,9 @@ describe("menu.items beneath a named menu", () => {
 				return await super.menuItems(target, path);
 			}
 		}
-		expect(await items(new UnexposedMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")'))
-			.toContain("Edit/Services");
+		expect(
+			await items(new UnexposedMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")'),
+		).toContain("Edit/Services");
 	});
 
 	for (const code of ["UserIntervened", "WindowNotFound", "PermissionDenied", "Timeout", "Closed", "Internal"]) {
