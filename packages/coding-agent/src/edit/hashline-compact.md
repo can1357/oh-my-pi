@@ -20,7 +20,7 @@ Rules:
 - `bash`/eval `read()` lines are UNSEEN; use `read` first.
 - `:raw` is tagless: reuse prior tag only if unchanged; no prior tagged view? Non-raw `read` first.
 - Body rows start `+`; lone `+` writes blank. Rest is verbatim, including indent. Never send removed `-` lines, bare context, or unchanged lines. Range/body lengths are independent. Literal leading `-`/`+`: `+- text`/`++ text`.
-- After edits, use response tag/rows or re-read. Write-drift/reformat warning, external write, stale tag or surprise? STOP, re-read. Touch only changed lines; split nonadjacent changes. Additions use gaps. Ranges never start/end mid-expression/block.
+- After edits, use a response tag only with its numbered post-edit rows; tag-only response (e.g. `ast_edit`)? `read` first. Write-drift/reformat warning, external write, stale tag or surprise? STOP, re-read. Touch only changed lines; split nonadjacent changes. Additions use gaps. Ranges never start/end mid-expression/block.
 - Block ops target the opener of one multi-line node, never its closer/last/inner line; use range/gap for one statement. Anchor decorators/attributes/doc-comments at the first decorator; standalone line comments stay separate.
 - Markdown heading blocks include deeper headings until the next same/higher heading; inserted sections end blank.
 - Move via `CUT` then `PUT`; registers persist across sections. Do not restyle unrelated code.

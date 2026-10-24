@@ -16,7 +16,7 @@ Hashline patches existing files; new files: `write`. Each file: `[PATH#TAG]`, `T
 - Column-cut row? `read` that line with `:raw`; build its replacement from the full text, NEVER the clipped copy.
 - `*` requires multi-line opener, NEVER closer/last/inner statement; use range/gap for one statement. Anchor first decorator/attribute/doc-comment to include it; standalone comments need explicit range.
 - Markdown heading blocks run through deeper headings until next same/higher; after section `PUT >N*:`, end body with blank line.
-- NEVER restyle unrelated code. After EVERY edit tag/numbers change: use edit response or fresh `read`, NEVER pre-edit memory. Write-drift/reformat warning, external write (job, checkout, background task), stale tag or surprise? STOP, re-read.
+- NEVER restyle unrelated code. After EVERY edit tag/numbers change: use edit response or fresh `read`, NEVER pre-edit memory. Tag-only response (e.g. `ast_edit`: header, no numbered post-edit rows)? Its printed rows are NOT anchors; fresh `read` before a hashline edit. Write-drift/reformat warning, external write (job, checkout, background task), stale tag or surprise? STOP, re-read.
 </rules>
 
 <example>
