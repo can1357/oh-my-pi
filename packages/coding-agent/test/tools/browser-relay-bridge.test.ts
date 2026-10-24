@@ -1946,8 +1946,8 @@ describe("RelayBridge auto-attach gating", () => {
 		expect(attachedTab1()).toBe(2);
 	});
 
-	it("attaches a tab Chrome refused over another extension's frame again once a worker claims it", async () => {
-		const bridge = new RelayBridge();
+	it("attaches and groups a tab Chrome refused over another extension's frame once a worker claims it", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })]);
 		const cdp = new FakeCdpSocket();
@@ -1970,6 +1970,7 @@ describe("RelayBridge auto-attach gating", () => {
 		bridge.cdpConnected(new FakeCdpSocket(), pageId(1));
 		await flush();
 		expect(ext.pending("attach").map(r => [r.tabId, r.clearForeignFrames])).toEqual([[1, true]]);
+		expect(ext.rpcs("group").map(r => r.tabIds)).toEqual([[1]]);
 		ack(bridge, ext, "attach");
 		await flush();
 		expect(bridge.listTargets().map(t => t.id)).toEqual([`PAGE${ANON}.1`, `PAGE${ANON}.2`]);
