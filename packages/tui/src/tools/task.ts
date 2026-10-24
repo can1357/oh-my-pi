@@ -290,19 +290,19 @@ export function formatTaskId(id: string): string {
 	return segments.length < 2 ? sanitizedId : segments.join(">");
 }
 
-const MISSING_YIELD_WARNING_PREFIX = "SYSTEM WARNING: Subagent exited without calling yield tool";
+const MISSING_YIELD_WARNINGS = {
+	initial: "SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.",
+	wake: "SYSTEM WARNING: Structured subagent replied without calling yield.",
+} as const;
 
-function extractMissingYieldWarning(output: string): { warning?: string; rest: string } {
-	const lines = output.split("\n");
-	const firstLine = lines[0]?.trim() ?? "";
-	if (!firstLine.startsWith(MISSING_YIELD_WARNING_PREFIX)) {
-		return { rest: output };
-	}
-	const rest = lines
-		.slice(1)
-		.join("\n")
-		.replace(/^\s*\n+/, "");
-	return { warning: firstLine, rest };
+function extractMissingYieldWarning(
+	output: string,
+	missingYield: SingleResult["missingYield"],
+): { warning?: string; rest: string } {
+	if (!missingYield) return { rest: output };
+	const warning = MISSING_YIELD_WARNINGS[missingYield];
+	const prefix = `${warning}\n\n`;
+	return { warning, rest: output.startsWith(prefix) ? output.slice(prefix.length) : output };
 }
 
 const BASH_WALL_TIME_NOTICE_RE = /^Wall time: \d+(?:\.\d+)? seconds$/u;
@@ -1048,7 +1048,10 @@ function renderAgentResult(
 ): string[] {
 	const lines: string[] = [];
 
-	const { warning: missingCompleteWarning, rest: outputWithoutWarning } = extractMissingYieldWarning(result.output);
+	const { warning: missingCompleteWarning, rest: outputWithoutWarning } = extractMissingYieldWarning(
+		result.output,
+		result.missingYield,
+	);
 	const aborted = result.aborted ?? false;
 	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
 	const success = !aborted && result.exitCode === 0 && !result.error;
@@ -1940,7 +1943,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 }
 
 function describeResultAgent(result: SingleResult, state: AgentDescribeState, depth: number): NativeNode {
-	const { warning, rest } = extractMissingYieldWarning(result.output);
+	const { warning, rest } = extractMissingYieldWarning(result.output, result.missingYield);
 	const aborted = result.aborted ?? false;
 	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
 	const success = !aborted && result.exitCode === 0 && !result.error;
@@ -2457,6 +2460,8 @@ export interface SingleResult {
 	output: string;
 	stderr: string;
 	truncated: boolean;
+	/** A structured child bypassed its required yield protocol. */
+	missingYield?: "initial" | "wake";
 	/**
 	 * Parsed structured completion and validation metadata, when this invocation
 	 * selected an output schema or strict schema mode.

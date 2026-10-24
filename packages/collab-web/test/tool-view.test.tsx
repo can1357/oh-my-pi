@@ -170,6 +170,52 @@ describe("ToolView xd:// dispatches", () => {
 	});
 });
 
+describe("ToolView task missing-yield provenance", () => {
+	const initialWarning = "SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
+	const wakeWarning = "SYSTEM WARNING: Structured subagent replied without calling yield.";
+
+	function renderTask(result: Record<string, unknown>): string {
+		return renderToStaticMarkup(
+			<ToolView
+				name="task"
+				defaultOpen
+				args={{}}
+				result={{ content: [], details: { results: [result], totalDurationMs: 1 } }}
+			/>,
+		);
+	}
+
+	it("renders metadata-backed initial and wake warnings as callouts", () => {
+		for (const [missingYield, warning] of [
+			["initial", initialWarning],
+			["wake", wakeWarning],
+		] as const) {
+			const html = renderTask({
+				id: missingYield,
+				agent: "task",
+				exitCode: 0,
+				output: `${warning}\n\nreport`,
+				missingYield,
+			});
+			expect(html).toContain("tv-note--warn");
+			expect(html).toContain(warning);
+			expect(html).toContain("1 succeeded");
+			expect(html).not.toContain("1 failed");
+		}
+	});
+
+	it("leaves warning-looking report text alone without provenance", () => {
+		const html = renderTask({
+			id: "yielded",
+			agent: "task",
+			exitCode: 0,
+			output: `${initialWarning}\n\nordinary yielded report`,
+		});
+		expect(html).not.toContain("tv-note--warn");
+		expect(html).toContain(initialWarning);
+	});
+});
+
 describe("ToolView ask renderer", () => {
 	const questions = [
 		{

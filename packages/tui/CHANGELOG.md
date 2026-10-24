@@ -12,6 +12,7 @@
 - Fixed the newest inline charts and images at the bottom of the screen showing as text placeholders while older ones stayed rendered once a session (or a resumed one) holds more than `tui.maxInlineImages` images ([#16660](https://github.com/can1357/oh-my-pi/issues/16660))
 - Fixed Markdown tables in the terminal ignoring their column alignment, so right-aligned and centered columns rendered flush left ([#16658](https://github.com/can1357/oh-my-pi/pull/16658) by [@adi-IL](https://github.com/adi-IL))
 - Grep, Glob, Find, and AST Grep result headers wrap a long pattern instead of cutting it off, so the match/file counts and `truncated` warning stay visible ([#16635](https://github.com/can1357/oh-my-pi/issues/16635))
+- Task results from a structured subagent that replied without calling `yield` now show the missing-yield warning line in both task views; without an output schema such a result still succeeds, shows a warning badge and counts as succeeded, while with an output schema (or with empty output) it fails and counts as failed, as before; report text that only looks like that warning is shown as ordinary output ([#16928](https://github.com/can1357/oh-my-pi/pull/16928) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.12.6] - 2026-10-21
 
