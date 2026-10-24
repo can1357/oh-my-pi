@@ -209,6 +209,7 @@ export class AgentRegistry {
 			displayName: current.displayName,
 			kind: current.kind,
 			parentId: current.parentId,
+			rootSessionId: current.rootSessionId,
 			session: null,
 			sessionFile: current.sessionFile,
 			status: "parked",
