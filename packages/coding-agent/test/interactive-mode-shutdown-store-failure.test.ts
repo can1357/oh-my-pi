@@ -144,6 +144,7 @@ describe("InteractiveMode shutdown when the session store keeps failing (#12238)
 		// The second Ctrl+C is the escape hatch: it quits rather than re-running
 		// the teardown that already failed once (dispose stays memoized at 1 call).
 		expect(quitSpy).toHaveBeenCalledTimes(1);
+		expect(quitSpy).toHaveBeenCalledWith(130);
 		expect(exitSpy).not.toHaveBeenCalled();
 		expect(disposeSpy).toHaveBeenCalledTimes(1);
 		// "Without writing the session log": the failed store is left as it was.
@@ -188,7 +189,9 @@ describe("InteractiveMode shutdown when the session store keeps failing (#12238)
 		await mode.shutdown();
 
 		expect(quitSpy).toHaveBeenCalledTimes(1);
+		expect(quitSpy).toHaveBeenCalledWith(130);
 		expect(exitSpy).toHaveBeenCalledTimes(1);
+		expect(exitSpy).toHaveBeenCalledWith(130);
 		expect(disposeSpy).toHaveBeenCalledTimes(1);
 	});
 });

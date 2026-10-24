@@ -250,6 +250,18 @@ function safeAbort(label: string, fn: () => void): void {
 const LEFT_DOUBLE_TAP_MIN_GAP_MS = 40;
 const LEFT_DOUBLE_TAP_MAX_GAP_MS = 500;
 
+/**
+ * Bounded grace for a host shutdown after a failed TUI restart before a hard exit.
+ * Long enough for the session log flush, short enough to end a wedged process.
+ */
+const RESUME_SHUTDOWN_GRACE_MS = 5_000;
+
+/**
+ * Bounded grace for the draft write started by the resume recovery before the
+ * hard exit runs, so a wedged storage call cannot keep the process alive.
+ */
+const RESUME_DRAFT_SAVE_GRACE_MS = 2_000;
+
 export class InputController {
 	constructor(
 		private ctx: InteractiveModeContext,
@@ -1575,9 +1587,57 @@ export class InputController {
 		// already-running TUI.
 		const onResume = (): void => {
 			clearInterval(suspendKeepalive);
-			this.ctx.ui.start();
-			this.ctx.ui.requestRender(true);
-			resendProgramStatus();
+			try {
+				this.ctx.ui.start();
+				this.ctx.ui.requestRender(true);
+				resendProgramStatus();
+			} catch (err) {
+				// A failed restart leaves stdin paused with the SIGCONT hook consumed.
+				// Surface the error and shut the host down.
+				// The session lives in the JSONL, so a restart recovers it.
+				const reason = err instanceof Error ? err.message : String(err);
+				// ui.start() can fail after ProcessTerminal.start() redirected fd 2 and
+				// pushed raw/Kitty modes. Hand the terminal back first: the diagnostic
+				// below must reach the real terminal, not the OMP log, and the parent
+				// shell must not be left in raw mode (the hard exit below skips the
+				// postmortem cleanups).
+				emergencyTerminalRestore();
+				logger.error("failed to resume after suspend", { error: reason });
+				process.stderr.write(`Failed to resume after suspend: ${reason}\n`);
+				// shutdown() persists the draft only inside #signalTeardown(), after
+				// the recorder, collab, live-command and BTW stops. A stall there,
+				// or the hard exit below (exitProcess skips postmortem cleanup),
+				// would drop unsent editor text, so write the draft here and let
+				// the hard exit wait for that write.
+				const draftSaved = Promise.resolve()
+					.then(() => this.ctx.sessionManager.saveDraft(this.getDraftText()))
+					.catch(error => {
+						logger.warn("failed to save the session draft during resume recovery", { error: String(error) });
+					});
+				// shutdown() exits through the host-owned fallback, but a retryable
+				// teardown failure returns without exiting, and no UI is left to
+				// retry close from. Bound the recovery: hard-exit once shutdown
+				// settles, or after the grace period if it hangs.
+				const hardExit = (): void => {
+					clearTimeout(watchdog);
+					// Wait for the draft write, bounded so a wedged storage call cannot
+					// keep the process alive.
+					void Promise.race([draftSaved, Bun.sleep(RESUME_DRAFT_SAVE_GRACE_MS)]).then(() => {
+						postmortem.exitProcess(1);
+					});
+				};
+				const watchdog = setTimeout(hardExit, RESUME_SHUTDOWN_GRACE_MS);
+				if (this.ctx.isShuttingDown) {
+					// A close/restart already inside #teardown(): chaining hardExit on
+					// this shutdown(1) would fire immediately (the guard returns a
+					// resolved promise) and cut that teardown short. The call still
+					// escalates its exit code to 1; the teardown exits on its own, and
+					// the watchdog stays as the bound if it hangs.
+					void this.ctx.shutdown(1);
+				} else {
+					void this.ctx.shutdown(1).then(hardExit, hardExit);
+				}
+			}
 		};
 		process.once("SIGCONT", onResume);
 

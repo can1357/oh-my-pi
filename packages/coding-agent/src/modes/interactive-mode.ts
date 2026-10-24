@@ -1606,6 +1606,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	get isShuttingDown(): boolean {
 		return this.#isShuttingDown;
 	}
+	/** Exit code the in-flight (or next) shutdown() quits with. A later
+	 *  shutdown() call escalates it when it passes a nonzero failure code. */
+	#shutdownExitCode = 0;
 	hookSelector: HookSelectorComponent | undefined = undefined;
 	hookInput: HookInputComponent | undefined = undefined;
 	hookEditor: HookEditorComponent | undefined = undefined;
@@ -7260,8 +7263,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.isInitialized = false;
 	}
 
-	async shutdown(): Promise<void> {
-		if (this.#isShuttingDown) return;
+	async shutdown(exitCode = 0): Promise<void> {
+		// A shutdown() while one is already in flight is not a full no-op: a
+		// nonzero code (the SIGCONT recovery passes 1) escalates the in-flight
+		// close, or its own clean exit 0 would mask the failure.
+		if (this.#isShuttingDown) {
+			if (exitCode !== 0) this.#shutdownExitCode = exitCode;
+			return;
+		}
+		this.#shutdownExitCode = exitCode;
 		// The previous graceful teardown failed AT the memoized session.dispose()
 		// (the session is already disposing), so it re-rejects identically forever
 		// and the process can never close (#12238: a corrupted session file makes
@@ -7269,13 +7279,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// escape hatch: quit without writing the session log. 130 = 128 + SIGINT,
 		// matching the Ctrl+C hard-abort exit code in input-controller.
 		if (this.#teardownFailed) {
-			try {
-				await postmortem.quit(130);
-			} catch {
-				// Extension/hook loading temporarily guards process.exit. Cleanup
-				// has already run; bypass that guard for this host-owned escape.
-				postmortem.exitProcess(130);
-			}
+			await this.#quitHostOwned(130);
 			return;
 		}
 		this.#beginClose();
@@ -7299,7 +7303,21 @@ export class InteractiveMode implements InteractiveModeContext {
 			process.stderr.write(`\n${chalk.dim("Resume this session with")}\n${chalk.dim(resumeCommand(sessionId))}\n`);
 		}
 
-		await postmortem.quit(0);
+		await this.#quitHostOwned(this.#shutdownExitCode);
+	}
+
+	/**
+	 * Exit the host after cleanup.
+	 * Extension/hook loading temporarily guards `process.exit` while a module loads.
+	 * Any throw from `quit()` (the guard, or a cleanup failure) would otherwise
+	 * leave the host alive, so fall back to the native exit.
+	 */
+	async #quitHostOwned(code: number): Promise<void> {
+		try {
+			await postmortem.quit(code);
+		} catch {
+			postmortem.exitProcess(code);
+		}
 	}
 
 	#handleTeardownError(action: "close" | "restart", error: unknown): void {
