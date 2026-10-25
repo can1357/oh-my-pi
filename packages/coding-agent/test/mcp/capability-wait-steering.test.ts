@@ -34,6 +34,9 @@ const POLL_MS = 5;
 const OBSERVE_MS = 5_000;
 // A blocked wait never settles on its own, so settling within this bound proves the abort settled it.
 const SETTLE_MS = 2_000;
+// bun's default 5s per-test timeout is shorter than the bounds above; each test
+// covers a child-process spawn plus up to two observe windows and one settle bound.
+const TEST_MS = 2 * OBSERVE_MS + SETTLE_MS + 5_000;
 const WAIT_TOOL: MCPToolDefinition = { name: "wait", inputSchema: { type: "object", properties: {} } };
 
 async function within<T>(promise: Promise<T>): Promise<T> {
@@ -127,7 +130,7 @@ describe("capability wait steering cancellation", () => {
 				params: { requestId: sent.id, reason: "Request cancelled by the client" },
 			},
 		]);
-	});
+	}, TEST_MS);
 
 	it("only the capability server's blocking wait is interruptible", async () => {
 		const capability = new MCPTool(await connect(CAPABILITY_SERVER_NAME), WAIT_TOOL);
@@ -148,5 +151,5 @@ describe("capability wait steering cancellation", () => {
 		expect(wrappedCapability.loadMode).toBe("essential");
 		expect(isMountableUnderXdev(wrappedCapability)).toBe(false);
 		expect(isMountableUnderXdev(wrappedOther)).toBe(true);
-	});
+	}, TEST_MS);
 });
