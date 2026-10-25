@@ -1007,6 +1007,19 @@ export const cfgToolsXdevInlineDevices = register({
 	},
 });
 
+export const cfgToolsXdevAlwaysOn = register({
+	id: "tools.xdevAlwaysOn",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "xd:// Always-On Tools",
+		description:
+			"Glob patterns matched against tool names (for example mcp__server_alpha_*). A matching enabled tool stays a top-level tool with its own schema instead of mounting under xd://.",
+	},
+});
+
 export const cfgDevAutoqa = register({
 	id: "dev.autoqa",
 	type: "boolean",
@@ -1092,4 +1105,5 @@ export const cfgSessionToolGates = combine({
 	generateImage: cfgGenerateImageEnabled,
 	speechgen: cfgSpeechgenEnabled,
 	xdev: cfgToolsXdev,
+	xdevAlwaysOn: cfgToolsXdevAlwaysOn,
 });

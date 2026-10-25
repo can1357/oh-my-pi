@@ -21,7 +21,11 @@ import { logger } from "@oh-my-pi/pi-utils";
 
 import { cfgSkillful } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import { cfgToolsXdevDocs, cfgToolsXdevInlineDevices } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import {
+	cfgToolsXdevAlwaysOn,
+	cfgToolsXdevDocs,
+	cfgToolsXdevInlineDevices,
+} from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 // Cache-stability invariant: when MCP servers reconnect with byte-identical tool
 // definitions, `refreshMCPTools` must not rebuild the system prompt. A rebuild
@@ -1106,6 +1110,57 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain("## mcp__nucleus_search");
 		expect(notices[0]).toContain("## Schema");
+	});
+
+	describe("tools.xdevAlwaysOn", () => {
+		const alpha = () => createMcpCustomTool("mcp__server_alpha_run", "server_alpha", "run", "Run alpha");
+		const beta = () => createMcpCustomTool("mcp__server_beta_other", "server_beta", "other", "Other beta");
+
+		it("mounts every discoverable MCP tool when the setting is unset", async () => {
+			const { session } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+				xdev: createTestXdevState(),
+			});
+			await session.refreshMCPTools([alpha(), beta()]);
+
+			expect(session.getMountedXdevToolNames()).toEqual(
+				expect.arrayContaining(["mcp__server_alpha_run", "mcp__server_beta_other"]),
+			);
+			expect(session.getActiveToolNames()).not.toContain("mcp__server_alpha_run");
+			expect(session.getActiveToolNames()).not.toContain("mcp__server_beta_other");
+		});
+
+		it("keeps a matching tool top-level and out of mountedNames while others still mount", async () => {
+			const { session } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+				xdev: createTestXdevState(),
+			});
+			cfgToolsXdevAlwaysOn.set(session.settings, ["mcp__server_alpha_*"]);
+			await session.refreshMCPTools([alpha(), beta()]);
+
+			expect(session.getMountedXdevToolNames()).not.toContain("mcp__server_alpha_run");
+			expect(session.getMountedXdevToolNames()).toContain("mcp__server_beta_other");
+			// Provider tool list carries the pinned tool's schema, not the mounted one's.
+			expect(session.getActiveToolNames()).toContain("mcp__server_alpha_run");
+			expect(session.getActiveToolNames()).not.toContain("mcp__server_beta_other");
+			// Both stay enabled, so `write xd://<tool>` can still reach either.
+			expect(session.getEnabledToolNames()).toEqual(
+				expect.arrayContaining(["mcp__server_alpha_run", "mcp__server_beta_other"]),
+			);
+		});
+
+		it("re-partitions a mounted tool when the pattern is added later", async () => {
+			const { session } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+				xdev: createTestXdevState(),
+			});
+			await session.refreshMCPTools([alpha(), beta()]);
+			expect(session.getMountedXdevToolNames()).toContain("mcp__server_alpha_run");
+
+			cfgToolsXdevAlwaysOn.set(session.settings, ["mcp__server_alpha_*"]);
+			await session.refreshMCPTools([alpha(), beta()]);
+
+			expect(session.getMountedXdevToolNames()).not.toContain("mcp__server_alpha_run");
+			expect(session.getActiveToolNames()).toContain("mcp__server_alpha_run");
+			expect(session.getMountedXdevToolNames()).toContain("mcp__server_beta_other");
+		});
 	});
 
 	it("defers a mount delta queued after its pre-prompt preview", async () => {

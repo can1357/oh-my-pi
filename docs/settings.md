@@ -619,6 +619,7 @@ tools:
 | `tools.xdev` | boolean | `true` | Mount discoverable tools under `xd://` device URLs instead of exposing every schema directly. Disabling it exposes enabled tools top-level. |
 | `tools.xdevDocs` | enum | `catalog` | `inline` includes all mounted docs/schemas, `builtins` inlines built-ins only, `catalog` lists devices with docs fetched on demand. |
 | `tools.xdevInlineDevices` | array | `[]` | Dynamic-device name globs to inline in `builtins` mode; ignored in `catalog` mode. |
+| `tools.xdevAlwaysOn` | array | `[]` | Glob patterns matched against tool names (for example `mcp__server_alpha_*`). A matching enabled tool stays a top-level tool with its own schema instead of mounting under `xd://`; it is still reachable through `write xd://<tool>`. Applies to built-in, MCP and extension tools, like the built-in always-top-level set (`todo`, `yield`, `ask`, `grep`, `web_search`). Changes apply live. |
 | `async.enabled` | boolean | `true` | Enable async bash commands and background task execution. |
 | `async.maxJobs` | number | `100` | Running background-job cap, floored to at least 1; parked/queued jobs do not consume execution slots. |
 | `async.widgets` | boolean | `true` | Live widgets for running background jobs (charts, bars, status grids derived from the job's output) in the `wait` card, the jobs pill and its hover card, and the jobs sheet. The `widget` model role writes one spec per job; every later update is computed locally without model calls. Off: plain job rows. |

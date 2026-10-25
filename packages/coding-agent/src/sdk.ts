@@ -276,6 +276,7 @@ import {
 	createVibeTools,
 	createXdevState,
 	type DeferredDiagnosticsEntry,
+	compileXdevGlobs,
 	defaultLoadModeForToolName,
 	discoverStartupLspServers,
 	EditTool,
@@ -341,6 +342,7 @@ import {
 	cfgToolsIntentTracing,
 	cfgToolsMaxTimeout,
 	cfgToolsXdev,
+	cfgToolsXdevAlwaysOn,
 	cfgToolsXdevDocs,
 	cfgToolsXdevInlineDevices,
 	cfgSessionToolGates,
@@ -4320,10 +4322,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (toolSession.xdev) {
 			const topLevelToolNames: string[] = [];
 			const mountedNames: string[] = [];
+			const xdevAlwaysOn = compileXdevGlobs(cfgToolsXdevAlwaysOn.get(settings));
 			for (const name of initialToolNames) {
 				const tool = toolRegistry.get(name);
 				const explicitlyRequested = presentationPinnedToolNames?.has(name) === true;
-				if (tool && xdevReadAvailable && xdevWriteAvailable && !explicitlyRequested && isMountableUnderXdev(tool))
+				if (
+					tool &&
+					xdevReadAvailable &&
+					xdevWriteAvailable &&
+					!explicitlyRequested &&
+					isMountableUnderXdev(tool, xdevAlwaysOn)
+				)
 					mountedNames.push(name);
 				else topLevelToolNames.push(name);
 			}
@@ -5057,7 +5066,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						builtInRegistryToolNames.has("write") &&
 						enabled.includes("read") &&
 						(enabled.includes("write") || toolSession.deviceOnlyWrite === true) &&
-						isMountableUnderXdev(liveTool);
+						isMountableUnderXdev(liveTool, compileXdevGlobs(cfgToolsXdevAlwaysOn.get(settings)));
 					const nextMounted = shouldMount
 						? mounted.includes(name)
 							? mounted

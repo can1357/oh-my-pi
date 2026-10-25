@@ -74,7 +74,7 @@ import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool } from "./todo";
 import { WriteTool } from "./write";
-import { isMountableUnderXdev, resolveXdevTool, type XdevState } from "./xdev";
+import { compileXdevGlobs, isMountableUnderXdev, resolveXdevTool, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
 
 import {
@@ -91,6 +91,7 @@ import {
 	cfgSecurityEnabled,
 	cfgTodoEnabled,
 	cfgToolsXdev,
+	cfgToolsXdevAlwaysOn,
 	cfgWebSearchEnabled,
 } from "./settings";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
@@ -899,8 +900,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	if (xdevEnabled) {
 		const mountedNames = new Set<string>();
 		const kept: Tool[] = [];
+		const xdevAlwaysOn = compileXdevGlobs(cfgToolsXdevAlwaysOn.get(session.settings));
 		for (const tool of tools) {
-			const mountable = mountBuiltinTools && isMountableUnderXdev(tool) && tool.name in BUILTIN_TOOLS;
+			const mountable = mountBuiltinTools && isMountableUnderXdev(tool, xdevAlwaysOn) && tool.name in BUILTIN_TOOLS;
 			if (mountable) mountedNames.add(tool.name);
 			else kept.push(tool);
 		}
