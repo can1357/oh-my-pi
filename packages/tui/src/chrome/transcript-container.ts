@@ -570,7 +570,10 @@ export class TranscriptContainer extends Container {
 	}
 
 	#measureEntry(entry: TranscriptEntry, width: number): MeasuredBlock {
-		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+		// The render only sizes the block: the viewport has not decided whether
+		// to show it, and a block it then omits never reaches the terminal. It
+		// is not a paint, so the block must not treat it as one.
+		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame, true);
 		const { value: rows, images } = measureRender(() => this.#renderEntry(entry, width));
 		return { rows, images };
 	}
