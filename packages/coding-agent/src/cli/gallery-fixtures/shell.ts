@@ -64,6 +64,24 @@ export const shellFixtures: Record<string, GalleryFixture> = {
 		},
 	},
 
+	// The model wrote the directory into the command instead of using `cwd`; the
+	// tool routes it through `cwd`, and the card shows it as the workdir prefix.
+	bash_leading_cd: {
+		label: "Bash · leading cd",
+		renderer: "bash",
+		streamingArgs: { command: "cd packages/tui && bun test test/bash-re" },
+		args: { command: "cd packages/tui && bun test test/bash-render.test.ts" },
+		result: {
+			content: [
+				{
+					type: "text",
+					text: [" 12 pass", " 0 fail", " 41 expect() calls", "Ran 12 tests across 1 file. [214.00ms]"].join("\n"),
+				},
+			],
+			details: { exitCode: 0, wallTimeMs: 214 },
+		},
+	},
+
 	bash_service: {
 		label: "Bash service",
 		renderer: "bash",

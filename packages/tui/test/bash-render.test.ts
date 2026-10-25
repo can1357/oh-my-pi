@@ -1,3 +1,5 @@
+import { RunTrace } from "@oh-my-pi/pi-natives";
+import { defaultShellVizPreferences, readShellPresentation } from "../src/tools/shell-viz";
 import { afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,7 +8,7 @@ import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/t
 import { bashToolRenderer, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import { previewWindowRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 
 type MutableTerminalInfo = {
 	imageProtocol: ImageProtocol | null;
@@ -466,5 +468,94 @@ describe("bashToolRenderer", () => {
 		} finally {
 			home.mockRestore();
 		}
+	});
+
+	describe("leading cd prefix", () => {
+		// The bash tool routes a leading `cd <dir> &&` through its structured `cwd`
+		// parameter, so the card names that directory as the call's working
+		// directory instead of leaving the raw path inside the command body.
+		const nestedDir = path.join(getProjectDir(), "test");
+		const options: RenderResultOptions = { expanded: false, isPartial: false };
+
+		it("shows the cd target as the workdir prefix while the call streams", () => {
+			const rendered = sanitizeText(
+				bashToolRenderer
+					.renderCall({ command: `cd ${nestedDir} && bun test` }, options, uiTheme)
+					.render(120)
+					.join("\n"),
+			);
+			expect(rendered).toContain("cd test && bun test");
+			expect(rendered).not.toContain(nestedDir);
+		});
+
+		it("keeps the projected workdir in the settled result card", () => {
+			const rendered = sanitizeText(
+				bashToolRenderer
+					.renderResult(
+						{ content: [{ type: "text", text: "ok" }], details: { exitCode: 0 }, isError: false },
+						options,
+						uiTheme,
+						{ command: `cd ${nestedDir} && bun test` },
+					)
+					.render(120)
+					.join("\n"),
+			);
+			expect(rendered).toContain("cd test && bun test");
+			expect(rendered).not.toContain(nestedDir);
+		});
+
+		it("retains the exact original command string for Copy command in native views", () => {
+			const view = bashToolRenderer.describeCall({ command: `cd ${nestedDir} && bun test` }, options);
+			expect(view.tool?.command).toBe(`cd ${nestedDir} && bun test`);
+		});
+
+		it("does not duplicate cd when shell visualization is active", () => {
+			const cmd = `cd ${nestedDir} && bun test`;
+			const trace = new RunTrace(cmd);
+			const presentation = readShellPresentation(trace, defaultShellVizPreferences());
+			const rendered = sanitizeText(
+				bashToolRenderer
+					.renderCall({ command: cmd }, { ...options, shellPresentation: presentation }, uiTheme)
+					.render(120)
+					.join("\n"),
+			);
+			// When visualization is active, the presentation renders the script itself,
+			// so visualCommandLines suppresses the projected prefix and does not print duplicate cd.
+			expect(rendered).not.toContain("$ cd test &&");
+			expect(rendered).toContain(`cd ${nestedDir} && bun test`);
+		});
+
+		it("labels a cd to the project directory itself instead of dropping the cd", () => {
+			const project = getProjectDir();
+			const label = project.startsWith(os.homedir()) ? `~${project.slice(os.homedir().length)}` : project;
+			const args = { command: `cd ${project} && bun check` };
+			const rendered = sanitizeText(bashToolRenderer.renderCall(args, options, uiTheme).render(120).join("\n"));
+			// The relative workdir label for this target is empty, so the prefix falls
+			// back to the home-shortened directory; an empty label would render
+			// `bun check` for a call whose command was `cd <project> && bun check`.
+			expect(rendered).toContain(`cd ${label} && bun check`);
+			// The native view keeps the exact original command for Copy command.
+			expect(bashToolRenderer.describeCall(args, options).tool?.command).toBe(`cd ${project} && bun check`);
+		});
+
+		it("keeps a caller-supplied cwd ahead of a leading cd", () => {
+			const view = bashToolRenderer.describeCall({ command: "cd /elsewhere && make", cwd: "test" }, options);
+			expect(view.tool?.command).toBe("cd test && cd /elsewhere && make");
+		});
+
+		it("leaves a cd target that needs shell expansion in the command body", () => {
+			const view = bashToolRenderer.describeCall({ command: "cd $HOME && ls" }, options);
+			expect(view.tool?.command).toBe("cd $HOME && ls");
+		});
+
+		it("leaves a scheme-qualified cd target in the command body", () => {
+			const view = bashToolRenderer.describeCall({ command: "cd file:///tmp && ls" }, options);
+			expect(view.tool?.command).toBe("cd file:///tmp && ls");
+		});
+
+		it("leaves an @-shorthand cd target in the command body", () => {
+			const view = bashToolRenderer.describeCall({ command: "cd @/tmp && ls" }, options);
+			expect(view.tool?.command).toBe("cd @/tmp && ls");
+		});
 	});
 });

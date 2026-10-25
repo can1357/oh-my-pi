@@ -28,6 +28,10 @@
 - The `devin-cli` login imports Devin CLI credentials into a stored `devin` account, so the provider no longer requires `DEVIN_API_KEY` ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - The `devin-windsurf` login lets Windsurf Enterprise users authenticate the `devin` provider with their existing Windsurf account ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 
+### Changed
+
+- A `bash` call that names its directory as a leading `cd <dir> &&` inside the command now shows that directory as the call's working directory (`$ cd packages/tui && bun test`) instead of leaving the model's absolute path in the command body ([#18152](https://github.com/can1357/oh-my-pi/pull/18152) by [@DuncanBetts](https://github.com/DuncanBetts))
+
 ### Fixed
 
 - Thin tool images are padded to the vision model's minimum height or width instead of causing a 400 on the next turn ([#18081](https://github.com/can1357/oh-my-pi/issues/18081))

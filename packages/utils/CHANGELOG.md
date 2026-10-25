@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the shared leading `cd <path> &&` parser `extractLeadingCdTarget` (barrel and `@oh-my-pi/pi-utils/shell-cd-prefix`), the single implementation the bash executor and the transcript card both read ([#18152](https://github.com/can1357/oh-my-pi/pull/18152) by [@DuncanBetts](https://github.com/DuncanBetts))
+
 ### Fixed
 
 - `ptree` commands spawned with `subreaper: true` no longer leave a descendant that ignores SIGTERM running after a graceful stop (an `AbortSignal`, `kill()` without a hard grace, or dispose); the subreaper stays alive through the grace period and the hard sweep then ends every descendant ([#18018](https://github.com/can1357/oh-my-pi/pull/18018) by [@sjawhar](https://github.com/sjawhar))
@@ -95,7 +99,6 @@
 - `setProcessName()` no longer assigns `process.title` on Windows, where it overwrites the shared console title ([#16842](https://github.com/can1357/oh-my-pi/issues/16842))
 - `setProcessName()` no longer assigns `process.title` on Windows, where it overwrites the shared console title ([#16842](https://github.com/can1357/oh-my-pi/issues/16842))
 - Fixed inline code spans rendering flush against the surrounding text when a backslash preceded the closing backtick ([#16972](https://github.com/can1357/oh-my-pi/pull/16972) by [@akainth015](https://github.com/akainth015))
-
 ## [18.12.6] - 2026-10-21
 
 ### Added
