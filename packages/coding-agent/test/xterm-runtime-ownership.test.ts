@@ -39,11 +39,6 @@ describe("launch vterm runtime ownership", () => {
 		expect(result.modules, JSON.stringify(result)).toBe(0);
 	});
 
-	test("static wait import evaluates no vterm module", async () => {
-		const result = await runProbe(fixture("xterm-cache-wait-probe.ts"));
-		expect(result.modules, JSON.stringify(result)).toBe(0);
-	});
-
 	test("legacy replay evaluates vterm outside the client process", async () => {
 		const result = await runProbe(fixture("xterm-cache-legacy-replay-probe.ts"));
 		expect(result.terminalRows).toEqual(["\x1b[0m\x1b[1;38;5;2mready"]);

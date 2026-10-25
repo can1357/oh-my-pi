@@ -553,16 +553,15 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	// `takeDisplaceableComponents()` to hand back a manually built block only
 	// proves `#finalizeSnapshot` calls whatever function sits at that name --
 	// not that the real tracker holds and clears the right component -- so
-	// this drives an actual `wait` (still running, so it stays
-	// displaceable) through a real `EventController`, the same tracker
-	// `job-poll-displacement.test.ts` exercises in isolation.
-	it("folds a displaceable poll/todo block into orphan cleanup when guest resync staging fails", async () => {
+	// this drives an actual `todo` snapshot (which stays displaceable) through
+	// a real `EventController`, the same tracker `job-poll-displacement.test.ts`
+	// exercises in isolation.
+	it("folds a displaceable todo block into orphan cleanup when guest resync staging fails", async () => {
 		installInMemoryRelay();
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
 		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		try {
 			vi.useFakeTimers();
-			const tickerArmed = watchSpinnerTicker();
 
 			const chatContainer = new TranscriptContainer();
 			await Settings.init({ inMemory: true });
@@ -576,32 +575,39 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			const takeDisplaceableComponents = vi.spyOn(controller, "takeDisplaceableComponents");
 			await controller.handleEvent({
 				type: "tool_execution_start",
-				toolCallId: "wait-1",
-				toolName: "wait",
-				args: {},
+				toolCallId: "todo-1",
+				toolName: "todo",
+				args: { op: "view" },
 			} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>);
 			await controller.handleEvent({
 				type: "tool_execution_end",
-				toolCallId: "wait-1",
-				toolName: "wait",
+				toolCallId: "todo-1",
+				toolName: "todo",
 				isError: false,
 				result: {
 					content: [{ type: "text", text: "" }],
 					details: {
-						op: "wait",
-						jobs: [{ id: "j0", type: "task", status: "running", label: "job 0", durationMs: 1_000 }],
+						phases: [
+							{
+								name: "Workflow",
+								tasks: [
+									{ content: "investigate", status: "in_progress" },
+									{ content: "fix", status: "pending" },
+								],
+							},
+						],
+						storage: "memory",
 					},
 				},
 			} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
 
-			// The wait is still running, so the block left `pendingTools` for the
-			// controller's own displaceable tracker rather than a settled slot.
+			// A successful todo snapshot left `pendingTools` for the controller's
+			// own displaceable tracker rather than a settled slot.
 			expect(controllerCtx.pendingTools.size).toBe(0);
 			const displaceableBlock = chatContainer.children.find(
 				(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
 			);
-			if (!displaceableBlock) throw new Error("expected the wait to render a live block");
-			expect(tickerArmed()).toBe(true);
+			if (!displaceableBlock) throw new Error("expected the todo to render a live block");
 
 			const ctx = {
 				settings: Settings.isolated(),
@@ -727,18 +733,18 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				// #finalizeSnapshot folded the real displaceable tracker into its
 				// orphan accounting.
 				expect(takeDisplaceableComponents).toHaveBeenCalledTimes(1);
-				// The tracker actually cleared its private fields, not merely handed
+				// The tracker actually cleared its private field, not merely handed
 				// back the card once: a regression that returns the card without
-				// clearing #displaceablePollComponent/#displaceableTodoComponent would
-				// still pass every assertion above (the card is sealed and its timer
-				// stopped once) while leaving EventController holding a stale
+				// clearing #displaceableTodoComponent would still pass every
+				// assertion above while leaving EventController holding a stale
 				// reference across the failed resync.
 				expect(controller.takeDisplaceableComponents()).toEqual([]);
 				// The block was stopped in place, not disposed from the tree: its
 				// rendered row survives the failed resync untouched.
 				expect(chatContainer.children).toContain(displaceableBlock);
-				// ...but it no longer holds the shared ticker open.
-				expect(tickerArmed()).toBe(false);
+				// (The tracked block is a settled todo snapshot, so no spinner ticker
+				// is involved; the built-in wait poll that used to be tracked here
+				// was removed with the tool.)
 			} finally {
 				hostSocket.close();
 				await guest.leave("test cleanup").catch(() => {});

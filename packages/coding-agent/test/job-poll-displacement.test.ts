@@ -1,14 +1,14 @@
 /**
- * Repeated `wait` calls must not stack "waiting on N jobs" frames in the
- * transcript: a wait whose watched jobs are all still running stays live
- * (displaceable) and the next `wait` call replaces it — one persistent wait.
+ * Waiting-poll and todo blocks in the transcript.
  *
  * Contracts under test:
  *  - ToolExecutionComponent: a waiting-poll result stays displaceable but
  *    finalizes like any other settled result (so it can retire as history
  *    instead of pinning the live viewport); seal() always freezes.
- *  - EventController: a follow-up `wait` call removes the tracked waiting
- *    poll from the transcript; any other tool seals it in place.
+ *  - EventController: a later todo update displaces the prior live todo
+ *    snapshot, and a poll is never displaced by later work. Displacing one
+ *    `wait` card with the next was the built-in wait's behavior and went away
+ *    with it (the capability wait replaced the tool).
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -147,7 +147,7 @@ describe("wait block lifecycle", () => {
 	});
 });
 
-describe("EventController displaces consecutive waiting polls", () => {
+describe("EventController poll and todo displacement", () => {
 	const created: ToolExecutionComponent[] = [];
 
 	beforeEach(async () => {
@@ -207,21 +207,6 @@ describe("EventController displaces consecutive waiting polls", () => {
 		return component;
 	}
 
-	it("removes the previous waiting poll when the next wait call starts", async () => {
-		const { controller, children } = createFixture();
-
-		const first = await runPoll(controller, children, "t1");
-		expect(children).toContain(first);
-
-		const second = await runPoll(controller, children, "t2");
-
-		// The stale "waiting" frame is gone; only the fresh poll remains.
-		expect(children).not.toContain(first);
-		expect(children).toContain(second);
-		// The displaced block is sealed so its spinner interval is stopped.
-		expect(first.isTranscriptBlockFinalized()).toBe(true);
-	});
-
 	it("keeps a waiting snapshot beside its completed turn's usage when the next wait starts", async () => {
 		const { controller, children } = createFixture();
 		const first = await runPoll(controller, children, "t1");
@@ -239,26 +224,6 @@ describe("EventController displaces consecutive waiting polls", () => {
 		expect(children.indexOf(first)).toBe(children.indexOf(metrics) - 1);
 		expect(Bun.stripANSI(first.render(100).join("\n"))).toContain("waiting on");
 		expect(Bun.stripANSI(metrics.render(100).join("\n"))).toContain("4.2K");
-	});
-
-	it("seals the waiting poll in place when a different tool runs next", async () => {
-		const { controller, children } = createFixture();
-
-		const poll = await runPoll(controller, children, "t1");
-		expect(poll.isDisplaceableBlock()).toBe(true);
-
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId: "t2",
-			toolName: "bash",
-			args: { command: "ls" },
-		});
-		trackComponent(created, children[children.length - 1] as ToolExecutionComponent);
-
-		// The poll frame stays — it is final history now, not displaceable.
-		expect(children).toContain(poll);
-		expect(poll.isTranscriptBlockFinalized()).toBe(true);
-		expect(poll.isDisplaceableBlock()).toBe(false);
 	});
 
 	it("removes the previous todo snapshot when a later todo update lands in the same turn", async () => {

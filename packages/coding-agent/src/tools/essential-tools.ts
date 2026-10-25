@@ -29,7 +29,6 @@ export const ESSENTIAL_BUILTIN_TOOL_NAMES: Record<string, true> = {
 	find: true,
 	eval: true,
 	task: true,
-	wait: true,
 	learn: true,
 	manage_skill: true,
 	context_notes: true,

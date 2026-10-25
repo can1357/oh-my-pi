@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-/** A stdio MCP server that logs raw frames and leaves `hang` calls pending. */
+/** A stdio MCP server that logs raw frames and leaves `hang` and `wait` calls pending. */
 import * as readline from "node:readline";
 
 interface Request {
@@ -51,7 +51,8 @@ async function startServer(): Promise<void> {
 					};
 					break;
 				case "tools/call":
-					if (request.params?.name === "hang") continue;
+					// `wait` stands in for the capability wait: it blocks until cancelled.
+					if (request.params?.name === "hang" || request.params?.name === "wait") continue;
 					result = { content: [{ type: "text", text: request.params?.arguments?.text ?? "" }] };
 					break;
 				default:

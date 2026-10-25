@@ -41,6 +41,8 @@ export interface MCPToolsLoadOptions {
 	cacheStorage?: AgentStorage | null;
 	/** Auth storage used to resolve OAuth credentials before initial MCP connect */
 	authStorage?: AuthStorage;
+	/** Harness-stamped env providers applied to named servers before connecting. */
+	serverEnvStamps?: Record<string, () => Record<string, string>>;
 }
 
 async function resolveToolCache(storage: AgentStorage | null | undefined): Promise<MCPToolCache | null> {
@@ -66,6 +68,9 @@ export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoa
 	const manager = new MCPManager(cwd, toolCache);
 	if (options?.authStorage) {
 		manager.setAuthStorage(options.authStorage);
+	}
+	for (const [name, provider] of Object.entries(options?.serverEnvStamps ?? {})) {
+		manager.setServerEnvStamp(name, provider);
 	}
 
 	let result: MCPLoadResult;

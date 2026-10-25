@@ -51,6 +51,12 @@ import {
 	formatAdvisorMemoryPrompt,
 } from "./advisor";
 import { AsyncJobManager } from "./async";
+import {
+	channelIdentity,
+	ensureCapabilitySessionRecord,
+	jobCompletionEvent,
+	recordChannelCompletion,
+} from "./channels/records";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability, reset as resetCapabilities } from "./capability";
@@ -89,6 +95,7 @@ import { buildServiceTierByFamily } from "./config/service-tier";
 import { bindEffects, combine } from "./config/registry";
 import { Settings } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
+import { CAPABILITY_SERVER_NAME } from "./discovery/capability-server";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
 import { LiveImageUrlService } from "./blob-broker/service";
@@ -2282,6 +2289,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const asyncJobManager = !options.parentTaskPrefix
 		? new AsyncJobManager({
 				maxRunningJobs: () => Math.min(100, cfgAsyncMaxJobs.get(settings)),
+				// Event port: every settled job — bash, eval, or a subagent task
+				// with an ownerId — lands in the capability channel store, so the
+				// capability wait settles on it exactly where the built-in wait did.
+				onJobSettled: job => {
+					recordChannelCompletion(channelIdentity(sessionManager.getSessionId(), cwd), jobCompletionEvent(job));
+				},
 			})
 		: undefined;
 	if (asyncJobManager) {
@@ -2312,6 +2325,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}),
 		});
 	}
+	// The capability server adopts this session's id (stamped into its env at
+	// connect time) and settles its wait on the completion records this session
+	// writes; the session record is what the capability boot reader adopts.
+	if (asyncJobManager) ensureCapabilitySessionRecord(channelIdentity(sessionManager.getSessionId(), cwd));
 	const scopedAsyncJobManager = asyncJobManager ?? options.asyncJobManager;
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
@@ -2620,6 +2637,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				configured: cfgExtensions.get(settings),
 				configuredLevel: settings.extensionsSourceLevel(),
 			}));
+		// Harness stamps the capability server with this root's session identity
+		// (design §6): the server adopts it via CAPABILITY_SESSION_ID so its wait
+		// reads the records this session writes. Children reuse the root's stamped
+		// manager, so only roots stamp.
+		const capabilitySessionEnv = (): Record<string, string> => ({
+			CAPABILITY_SESSION_ID: sessionManager.getSessionId(),
+		});
 		const mcpDiscoverOptions = {
 			onStatus: onMCPStatus,
 			startupTimeoutMs: cfgMcpStartupTimeoutMs.get(settings),
@@ -2629,12 +2653,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Filter browser MCP only when Eval can expose the built-in browser prelude.
 			filterBrowser: initialBrowserPreludeAvailable,
 			extensionRoots: buildSessionExtensionRoots(),
+			...(options.parentTaskPrefix ? {} : { serverEnvStamps: { [CAPABILITY_SERVER_NAME]: capabilitySessionEnv } }),
 		};
 		if (enableMCP && !mcpManager) {
 			if (deferMCPDiscoveryForUI) {
 				const cacheStorage = settings.getStorage();
 				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
 				mcpManager.setAuthStorage(authStorage);
+				if (!options.parentTaskPrefix) mcpManager.setServerEnvStamp(CAPABILITY_SERVER_NAME, capabilitySessionEnv);
 				toolSession.mcpManager = mcpManager;
 
 				if (cfgMcpNotifications.get(settings)) {

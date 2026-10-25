@@ -10,7 +10,8 @@
  */
 
 import { type IrcDeliveryReceipt, type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { getProjectDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { channelIdentity, messageArrivalEvent, recordChannelCompletion } from "../channels/records";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
@@ -132,6 +133,26 @@ export class IrcBus {
 		return unanswered;
 	}
 
+	/**
+	 * Whether an arrival answers a direct message the recipient sent this run
+	 * (a reply it was owed) or is a fresh inbox message. Mirrors the reply
+	 * classification the built-in wait used to decide what it could settle on.
+	 */
+	#arrivalKind(message: IrcMessage): "reply" | "inbox" {
+		const since = this.#registry.get(message.to)?.session?.runStartedAt ?? 0;
+		return this.unansweredSends(message.to, since).some(send => send.to === message.from) ? "reply" : "inbox";
+	}
+
+	/** Land an arrival in the recipient's capability channel, so the capability wait settles on it. */
+	#recordArrival(message: IrcMessage, outcome: string): void {
+		const session = this.#registry.get(message.to)?.session;
+		if (!session) return;
+		recordChannelCompletion(
+			channelIdentity(session.sessionId, getProjectDir()),
+			messageArrivalEvent(message, this.#arrivalKind(message), outcome),
+		);
+	}
+
 	async #deliver(message: IrcMessage, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
@@ -190,6 +211,7 @@ export class IrcBus {
 		const waiter = this.#takeMatchingWaiter(message.to, message.from);
 		if (waiter) {
 			waiter.resolve(message);
+			this.#recordArrival(message, "delivered");
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : "injected" };
 		}
@@ -198,9 +220,9 @@ export class IrcBus {
 		if (!session) {
 			return { to: message.to, outcome: "failed", error: `Agent "${message.to}" has no live session.` };
 		}
-
 		try {
 			const delivery = await session.deliverIrcMessage(message);
+			this.#recordArrival(message, delivery);
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
@@ -209,6 +231,7 @@ export class IrcBus {
 			// pick it up. The receipt stays "failed" — the recipient has not
 			// seen it.
 			this.#enqueue(message);
+			this.#recordArrival(message, "buffered");
 			return {
 				to: message.to,
 				outcome: "failed",

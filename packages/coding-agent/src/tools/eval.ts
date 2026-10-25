@@ -45,7 +45,7 @@ import { recordStatusEvent, type StatusEventLog } from "@oh-my-pi/pi-tui/tools/e
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
-import { hasWaitTool } from "./wait";
+import { hasCapabilityWaitTool } from "./capability-wait";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
@@ -345,7 +345,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			autoBackgroundEnabled: cfgEvalAutoBackgroundEnabled.get(session.settings),
 			evalTools: cfgEvalToolsEnabled.get(session.settings),
 			eagerDelegation: sessionDelegationBias(session) === "eager",
-			waitTool: hasWaitTool(session),
+			waitTool: hasCapabilityWaitTool(session),
 			preludes: this.#advertisedPreludes(session),
 			inlineTopics: session.isToolActive?.("read") === false,
 			autoProvision: cfgEvalAutoProvision.get(session.settings),

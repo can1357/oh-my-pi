@@ -6,6 +6,13 @@
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
+- The local `capability` CLI's MCP server is registered by default (lowest priority, so a same-named entry in your MCP config wins; `disabledServers` turns it off) with its request timeout disabled, since its blocking `wait` runs up to 30 minutes. The server is stamped with the session's identity through `CAPABILITY_SESSION_ID`
+- Background jobs, subagent tasks, owned services, IRC inbox arrivals, and replies owed to the session now write completion records to the capability channel store (`~/.local/state/capability-channels/completions.jsonl`), so the capability wait settles on omp's in-run events
+- Steering (or an interrupting peer message) now cancels an in-flight capability `wait` call: the MCP request is aborted and the server receives `notifications/cancelled`. The capability wait stays a top-level tool like the built-in wait it replaces, since a call routed through `write xd://` cannot be steered
+
+### Removed
+
+- The built-in `wait` tool. The capability server's `wait` (`mcp__capability_wait`) replaces it in every harness; agents that start background work are no longer force-granted `wait`, and `wait` no longer counts as a read-only tool
 
 ### Fixed
 

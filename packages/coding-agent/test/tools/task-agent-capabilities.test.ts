@@ -19,10 +19,12 @@ describe("task agent capability descriptions", () => {
 		}
 	});
 
-	it("keeps `wait` read-only while any exec-tier tool disqualifies the agent", () => {
+	it("keeps read tools read-only while any exec-tier or unknown tool disqualifies the agent", () => {
 		const scout = agentByName(loadBundledAgents(), "scout");
 
-		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "wait", "yield"] })).toBe(true);
-		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "wait", "bash"] })).toBe(false);
+		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "yield"] })).toBe(true);
+		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "bash"] })).toBe(false);
+		// The removed built-in `wait` is now an unknown name: fail-safe, not read-only.
+		expect(isReadOnlyAgent({ ...scout, tools: ["read", "grep", "wait"] })).toBe(false);
 	});
 });

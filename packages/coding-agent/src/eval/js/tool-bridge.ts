@@ -38,8 +38,8 @@ import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } f
 import type { RuntimeCallIdentity } from "./shared/runtime";
 import type { JsStatusEvent } from "./shared/types";
 
-/** These tools await delegated subagents/jobs, not the cell runtime's own work. */
-const DELEGATED_WORK_TOOLS = new Set(["task", "wait"]);
+/** The tool that awaits delegated subagents, not the cell runtime's own work. */
+const DELEGATED_WORK_TOOL = "task";
 
 export type { JsStatusEvent } from "./shared/types";
 
@@ -317,7 +317,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		// A delegated-work tool pauses only the cell's runtime-work watchdog; the turn's
 		// signal still reaches it. Without a status sink the pause wrapper is a no-op.
 		const result = await withBridgeTimeoutPause(
-			DELEGATED_WORK_TOOLS.has(name) ? options.emitStatus : undefined,
+			name === DELEGATED_WORK_TOOL ? options.emitStatus : undefined,
 			async () => {
 				try {
 					return await tool.execute(

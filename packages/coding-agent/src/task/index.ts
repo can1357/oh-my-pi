@@ -37,7 +37,7 @@ import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specializa
 import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import { truncateForPrompt } from "../tools/approval";
-import { hasWaitTool } from "../tools/wait";
+import { hasCapabilityWaitTool } from "../tools/capability-wait";
 import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
@@ -732,7 +732,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (!cfgAsyncEnabled.get(this.session.settings)) return "";
 		return prompt.render(taskAsyncContractTemplate, {
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
-			waitTool: hasWaitTool(this.session),
+			waitTool: hasCapabilityWaitTool(this.session),
 		});
 	}
 

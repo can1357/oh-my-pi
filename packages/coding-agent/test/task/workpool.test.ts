@@ -4,7 +4,6 @@ import { Settings } from "../../src/config/settings";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import type { AgentSession } from "../../src/session/agent-session";
-import { WaitTool } from "../../src/tools/wait";
 import type { CustomMessage } from "../../src/session/messages";
 import * as executor from "../../src/task/executor";
 import type { EffectiveSubagentPolicy, StructuredSubagentResult } from "../../src/task/structured-subagent";
@@ -336,11 +335,9 @@ describe("WorkPool dispatch", () => {
 		const poolJob = manager.getJob("waiter");
 		expect(poolJob?.id).toBe("waiter");
 		expect(poolJob?.label).toBe("waiter");
-		const polled = await new WaitTool(session).execute("wait-workpool", {});
-		const details = polled.details;
-		if (!details?.jobs) throw new Error("Expected a background-job wait result");
-		expect(details.jobs?.map(job => job.id)).toEqual(["waiter"]);
-		expect(details.jobs?.map(job => job.status)).toEqual(["completed"]);
+		// The aggregate job settles under the pool name once its one batch completes.
+		await poolJob?.promise;
+		expect(poolJob?.status).toBe("completed");
 		expect(workpool.peek().pending).toBe(0);
 		expect(workpool.peek().batches).toHaveLength(1);
 		expect(consume).toHaveBeenCalledWith([workpool.batches[0]!.jobId]);

@@ -26,8 +26,6 @@ import {
 	runSubprocess,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -694,14 +692,6 @@ describe("runSubprocess result acceptance", () => {
 			attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
 			const observer = harness.wakeObserver();
 			if (!observer) throw new Error("wake-turn observer was not registered");
-			const parent = {
-				cwd: "/tmp",
-				settings: Settings.isolated({ "launch.enabled": false }),
-				agentRegistry: registry,
-				asyncJobManager: manager,
-				getAgentId: () => "Parent",
-			} as unknown as ToolSession;
-
 			try {
 				const finish = observer([
 					{
@@ -721,11 +711,11 @@ describe("runSubprocess result acceptance", () => {
 					expect(receipt.outcome).not.toBe("failed");
 					expect((await reply)?.body).toBe("Found the cause.");
 				}
-				const waiting = new WaitTool(parent).execute("parent-wait", {});
+				const settled = manager.getJob(AGENT_ID)?.promise;
 				// No yield or assistant prose: only the optional IRC message above.
 				await finish?.(undefined);
-				const result = await waiting;
-				const job = result.details?.jobs?.[0];
+				await settled;
+				const job = manager.getJob(AGENT_ID);
 				expect(job?.status).toBe("completed");
 				expect(job?.resultText).toContain(`history://${AGENT_ID}`);
 				if (alreadyMessaged) {
@@ -740,7 +730,7 @@ describe("runSubprocess result acceptance", () => {
 		},
 	);
 
-	it("blocks the parent's wait on a turn its message woke and returns the turn's answer once", async () => {
+	it("returns a woken turn's answer as the job result once", async () => {
 		const manager = new AsyncJobManager({});
 		const harness = createHarness({ asyncJobManager: manager });
 		AgentRegistry.global().register({
@@ -754,14 +744,6 @@ describe("runSubprocess result acceptance", () => {
 		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
 		const observer = harness.wakeObserver();
 		if (!observer) throw new Error("wake-turn observer was not registered");
-		const parent = {
-			cwd: "/tmp",
-			settings: Settings.isolated({ "launch.enabled": false }),
-			agentRegistry: AgentRegistry.global(),
-			asyncJobManager: manager,
-			getAgentId: () => "Parent",
-		} as unknown as ToolSession;
-
 		try {
 			const finish = observer([
 				{
@@ -774,13 +756,13 @@ describe("runSubprocess result acceptance", () => {
 					timestamp: Date.now(),
 				} as unknown as AgentMessage,
 			]);
-			const waiting = new WaitTool(parent).execute("parent-wait", {});
+			const settled = manager.getJob(AGENT_ID)?.promise;
 			// A conversational answer: the turn ends without a yield.
 			harness.emitAssistantText("mask path fixed too");
 			await finish?.(undefined);
 
-			const result = await waiting;
-			expect(result.details?.jobs?.[0]).toMatchObject({
+			await settled;
+			expect(manager.getJob(AGENT_ID)).toMatchObject({
 				id: AGENT_ID,
 				status: "completed",
 				resultText: "mask path fixed too",

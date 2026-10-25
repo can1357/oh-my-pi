@@ -9,6 +9,7 @@ import { type DaemonBrokerClient, daemonClientForProject } from "./client";
 import { canonicalProjectDir } from "./paths";
 import type { DaemonOperation, DaemonRpcResult } from "./protocol";
 import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
+import { channelIdentityForSession, recordChannelCompletion, serviceCompletionEvent } from "../channels/records";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
 import { isSharedBrowserDaemonName } from "../tools/browser/shared-daemon";
@@ -65,6 +66,17 @@ export function waitForOwnedServiceCompletion(session: ToolSession, signal?: Abo
 	return promise;
 }
 
+/**
+ * Land an owned service's terminal state in the capability channel store, so
+ * the capability wait settles on it the way the built-in wait settled on
+ * `waitForOwnedServiceCompletion`.
+ */
+export function recordServiceCompletion(session: ToolSession, daemon: DaemonSnapshot): void {
+	const identity = channelIdentityForSession(session);
+	if (!identity || !TERMINAL_STATES[daemon.state]) return;
+	recordChannelCompletion(identity, serviceCompletionEvent(daemon));
+}
+
 function serviceOwner(session: ToolSession): string | null | undefined {
 	return session.getSessionId?.() ?? session.getAgentId?.();
 }
@@ -87,6 +99,7 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
 		const tracked = serviceState(session).owned.get(notification.daemon.name);
 		if (tracked?.id === notification.daemon.id && tracked.startedAt === notification.daemon.startedAt) {
 			track(session, notification.daemon);
+			recordServiceCompletion(session, notification.daemon);
 			for (const listener of serviceState(session).listeners) listener();
 		}
 		return session.queueLaunchCompletion?.(notification);
