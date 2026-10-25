@@ -52,7 +52,7 @@ async function startServer(): Promise<void> {
 					break;
 				case "tools/call":
 					// `wait` stands in for the capability wait: it blocks until cancelled.
-					if (request.params?.name === "hang" || request.params?.name === "wait") continue;
+					if (request.params?.name === "hang" || request.params?.name === "agentmux_capability_wait") continue;
 					result = { content: [{ type: "text", text: request.params?.arguments?.text ?? "" }] };
 					break;
 				default:

@@ -37,7 +37,12 @@ const SETTLE_MS = 2_000;
 // bun's default 5s per-test timeout is shorter than the bounds above; each test
 // covers a child-process spawn plus up to two observe windows and one settle bound.
 const TEST_MS = 2 * OBSERVE_MS + SETTLE_MS + 5_000;
-const WAIT_TOOL: MCPToolDefinition = { name: "wait", inputSchema: { type: "object", properties: {} } };
+// The real server publishes its tools as agentmux_capability_<name> (snapshot:
+// fixtures/capability-tools-list.jsonl), so the wait is not named plain "wait".
+const WAIT_TOOL: MCPToolDefinition = {
+	name: "agentmux_capability_wait",
+	inputSchema: { type: "object", properties: {} },
+};
 
 async function within<T>(promise: Promise<T>): Promise<T> {
 	const expired = Promise.withResolvers<never>();
@@ -101,55 +106,63 @@ describe("capability wait steering cancellation", () => {
 		return received;
 	}
 
-	it("a steering abort of the zero-arg capability wait sends notifications/cancelled for its request", async () => {
-		const tool = new MCPTool(await connect(CAPABILITY_SERVER_NAME), WAIT_TOOL);
-		// The agent loop only hands steering aborts to interruptible tools.
-		expect(tool.interruptible({})).toBe(true);
+	it(
+		"a steering abort of the zero-arg capability wait sends notifications/cancelled for its request",
+		async () => {
+			const tool = new MCPTool(await connect(CAPABILITY_SERVER_NAME), WAIT_TOOL);
+			// The agent loop only hands steering aborts to interruptible tools.
+			expect(tool.interruptible({})).toBe(true);
 
-		const steering = new AbortController();
-		const outcome = tool.execute("wait-1", {}, undefined, {} as never, steering.signal).then(
-			() => "settled",
-			(error: unknown) => error,
-		);
-		const isWaitCall = (frame: Frame) =>
-			"id" in frame && frame.method === "tools/call" && frame.params?.name === "wait";
-		const sent = (await loggedUntil(log => log.some(isWaitCall))).find(isWaitCall) as JsonRpcRequest;
-		expect(sent).toHaveProperty("id");
+			const steering = new AbortController();
+			const outcome = tool.execute("wait-1", {}, undefined, {} as never, steering.signal).then(
+				() => "settled",
+				(error: unknown) => error,
+			);
+			const isWaitCall = (frame: Frame) =>
+				"id" in frame && frame.method === "tools/call" && frame.params?.name === WAIT_TOOL.name;
+			const sent = (await loggedUntil(log => log.some(isWaitCall))).find(isWaitCall) as JsonRpcRequest;
+			expect(sent).toHaveProperty("id");
 
-		steering.abort(TOOL_INTERRUPT_ABORT_REASON);
+			steering.abort(TOOL_INTERRUPT_ABORT_REASON);
 
-		// The call settles promptly as aborted instead of blocking for 30 minutes.
-		expect(await within(outcome)).toBeInstanceOf(Error);
-		const cancelled = (
-			await loggedUntil(log => log.some(frame => frame.method === "notifications/cancelled"))
-		).filter(frame => frame.method === "notifications/cancelled");
-		expect(cancelled).toEqual([
-			{
-				jsonrpc: "2.0",
-				method: "notifications/cancelled",
-				params: { requestId: sent.id, reason: "Request cancelled by the client" },
-			},
-		]);
-	}, TEST_MS);
+			// The call settles promptly as aborted instead of blocking for 30 minutes.
+			expect(await within(outcome)).toBeInstanceOf(Error);
+			const cancelled = (
+				await loggedUntil(log => log.some(frame => frame.method === "notifications/cancelled"))
+			).filter(frame => frame.method === "notifications/cancelled");
+			expect(cancelled).toEqual([
+				{
+					jsonrpc: "2.0",
+					method: "notifications/cancelled",
+					params: { requestId: sent.id, reason: "Request cancelled by the client" },
+				},
+			]);
+		},
+		TEST_MS,
+	);
 
-	it("only the capability server's blocking wait is interruptible", async () => {
-		const capability = new MCPTool(await connect(CAPABILITY_SERVER_NAME), WAIT_TOOL);
-		expect(capability.interruptible({ action: "status" })).toBe(true);
-		// Quick writes keep today's non-interruptible semantics.
-		expect(capability.interruptible({ action: "arm" })).toBe(false);
-		// A same-named tool on another server never sees steering aborts.
-		const other = new MCPTool(
-			{ name: "other", transport, capabilities: {} } as unknown as MCPServerConnection,
-			WAIT_TOOL,
-		);
-		expect(other.interruptible({})).toBe(false);
-		// Steering only reaches a direct call: an `xd://`-mounted tool is called
-		// through `write`, whose signal steering never aborts. The capability wait
-		// therefore stays top-level, like the built-in wait it replaced.
-		const wrappedCapability = CustomToolAdapter.wrap(capability, () => ({}) as never);
-		const wrappedOther = CustomToolAdapter.wrap(other, () => ({}) as never);
-		expect(wrappedCapability.loadMode).toBe("essential");
-		expect(isMountableUnderXdev(wrappedCapability)).toBe(false);
-		expect(isMountableUnderXdev(wrappedOther)).toBe(true);
-	}, TEST_MS);
+	it(
+		"only the capability server's blocking wait is interruptible",
+		async () => {
+			const capability = new MCPTool(await connect(CAPABILITY_SERVER_NAME), WAIT_TOOL);
+			expect(capability.interruptible({ action: "status" })).toBe(true);
+			// Quick writes keep today's non-interruptible semantics.
+			expect(capability.interruptible({ action: "arm" })).toBe(false);
+			// A same-named tool on another server never sees steering aborts.
+			const other = new MCPTool(
+				{ name: "other", transport, capabilities: {} } as unknown as MCPServerConnection,
+				WAIT_TOOL,
+			);
+			expect(other.interruptible({})).toBe(false);
+			// Steering only reaches a direct call: an `xd://`-mounted tool is called
+			// through `write`, whose signal steering never aborts. The capability wait
+			// therefore stays top-level, like the built-in wait it replaced.
+			const wrappedCapability = CustomToolAdapter.wrap(capability, () => ({}) as never);
+			const wrappedOther = CustomToolAdapter.wrap(other, () => ({}) as never);
+			expect(wrappedCapability.loadMode).toBe("essential");
+			expect(isMountableUnderXdev(wrappedCapability)).toBe(false);
+			expect(isMountableUnderXdev(wrappedOther)).toBe(true);
+		},
+		TEST_MS,
+	);
 });

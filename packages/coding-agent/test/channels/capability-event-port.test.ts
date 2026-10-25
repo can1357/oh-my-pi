@@ -21,6 +21,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/channels/records";
 import {
 	CAPABILITY_SERVER_NAME,
+	CAPABILITY_WAIT_TOOL_NAME,
 	isCapabilityWaitTool,
 	isInterruptibleCapabilityWaitCall,
 	setCapabilityCommandResolverForTests,
@@ -222,9 +223,12 @@ describe("capability event port", () => {
 
 describe("capability wait steering surface", () => {
 	test("the capability wait is the interruptible MCP tool; arm and cancel are not", () => {
-		expect(isCapabilityWaitTool(CAPABILITY_SERVER_NAME, "wait")).toBe(true);
+		// The real server publishes agentmux_capability_<name> (snapshot fixture),
+		// so the wait is not addressed as plain "wait" anywhere in omp.
+		expect(isCapabilityWaitTool(CAPABILITY_SERVER_NAME, CAPABILITY_WAIT_TOOL_NAME)).toBe(true);
+		expect(isCapabilityWaitTool(CAPABILITY_SERVER_NAME, "wait")).toBe(false);
 		expect(isCapabilityWaitTool(CAPABILITY_SERVER_NAME, "run_command")).toBe(false);
-		expect(isCapabilityWaitTool("other-server", "wait")).toBe(false);
+		expect(isCapabilityWaitTool("other-server", CAPABILITY_WAIT_TOOL_NAME)).toBe(false);
 		// `{}` is the whole zero-arg call — it must be cancellable by steering.
 		expect(isInterruptibleCapabilityWaitCall({})).toBe(true);
 		expect(isInterruptibleCapabilityWaitCall({ action: "wait" })).toBe(true);

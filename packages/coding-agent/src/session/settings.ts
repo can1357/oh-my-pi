@@ -1,4 +1,6 @@
 import { combine, effect, register, type SettingValueOf } from "../config/registry";
+import { CAPABILITY_SERVER_NAME, CAPABILITY_WAIT_TOOL_NAME } from "../discovery/capability-server";
+import { createMCPToolName } from "../mcp/tool-name";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -29,7 +31,12 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
 
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
-const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
+// The loop guard sees tool calls under the name the model emitted — MCP tools
+// mint as `mcp__<server>__<tool>` (createMCPToolName) — so the exemption keys on
+// the minted capability wait, not the removed built-in `wait`.
+const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = [
+	createMCPToolName(CAPABILITY_SERVER_NAME, CAPABILITY_WAIT_TOOL_NAME),
+];
 
 // Power assertions: macOS IOKit, Linux login1/ScreenSaver, Windows execution state.
 export const cfgPowerSleepPrevention = register({

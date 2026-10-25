@@ -52,8 +52,15 @@ export function isCapabilityServerAvailable(): boolean {
 	return resolveCapabilityCommand() !== null;
 }
 
-/** The MCP tool name the capability server serves its wait under. */
-export const CAPABILITY_WAIT_TOOL_NAME = "wait";
+/**
+ * The MCP tool name the capability server serves its wait under. The real
+ * server publishes its tools namespaced as `agentmux_capability_<name>`
+ * (snapshot: test/fixtures/capability-tools-list.jsonl, asserted by a
+ * contract test), so the wait is not addressed as plain "wait" anywhere in
+ * omp: steering, wait detection and the loop-guard exemption all flow from
+ * this one constant.
+ */
+export const CAPABILITY_WAIT_TOOL_NAME = "agentmux_capability_wait";
 
 /** Whether `serverName`/`toolName` address the capability-native wait. */
 export function isCapabilityWaitTool(serverName: string, toolName: string): boolean {

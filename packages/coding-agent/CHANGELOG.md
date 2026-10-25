@@ -12,10 +12,11 @@
 
 ### Removed
 
-- The built-in `wait` tool. The capability server's `wait` (`mcp__capability_wait`) replaces it in every harness; agents that start background work are no longer force-granted `wait`, and `wait` no longer counts as a read-only tool
+- The built-in `wait` tool. The capability server's `wait` (`mcp__capability_agentmux_capability_wait`) replaces it in every harness; agents that start background work are no longer force-granted `wait`, and `wait` no longer counts as a read-only tool
 
 ### Fixed
 
+- The capability wait is matched by the name the real server publishes (`agentmux_capability_wait`, minted for the model as `mcp__capability_agentmux_capability_wait`), not a plain `wait`: steering cancellation, agent wait detection and the tool-call-loop exemption all keyed on a name the server never served. A contract test pins the name against a real tools/list snapshot so a server-side rename fails tests instead of production
 - Fixed `omp gc --compress` exiting with "the event loop drained while it was still pending" on Bun 1.3.14 when a session artifact is pretty-printed JSON larger than 1 MiB, and session header probes (gc, session move and transfer) reading whole artifacts on Windows ([#15745](https://github.com/can1357/oh-my-pi/issues/15745), [#16754](https://github.com/can1357/oh-my-pi/pull/16754) by [@wolfiesch](https://github.com/wolfiesch))
 - `/resume` into another session now cancels the previous session's background jobs, as `/new` does, instead of delivering their results into the resumed session and starting a turn there ([#16760](https://github.com/can1357/oh-my-pi/pull/16760) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the models config migration writing `models.yml` readable by other users on the machine, and dropping every custom provider when the write was interrupted; the migrated file is now published atomically with owner-only permissions ([#16654](https://github.com/can1357/oh-my-pi/pull/16654) by [@adi-IL](https://github.com/adi-IL))

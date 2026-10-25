@@ -25,11 +25,11 @@ it("updates async guidance when the capability wait, messaging, or background ex
 	for (const ircEnabled of [true, false]) {
 		cfgTaskMaxRecursionDepth.override(settings, ircEnabled ? -1 : 0);
 		for (const waitTool of [true, false]) {
-			if (waitTool) toolRegistry.set("mcp__capability_wait", {});
-			else toolRegistry.delete("mcp__capability_wait");
+			if (waitTool) toolRegistry.set("mcp__capability_agentmux_capability_wait", {});
+			else toolRegistry.delete("mcp__capability_agentmux_capability_wait");
 			const description = tool.description;
 			expect(description).toContain("Results auto-deliver");
-			expect(description.includes("mcp__capability_wait")).toBe(waitTool);
+			expect(description.includes("mcp__capability_agentmux_capability_wait")).toBe(waitTool);
 			expect(description.includes("write agent://")).toBe(ircEnabled);
 			expect(description).toContain("read proc://");
 		}
