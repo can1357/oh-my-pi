@@ -167,6 +167,10 @@
 
 - Command and eval output panes no longer re-style and re-join their whole output on every frame, so a long command's output stops costing frame time while it sits in the transcript ([#16779](https://github.com/can1357/oh-my-pi/pull/16779) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+### Changed
+
+- The live transcript reuses its per-block walk list across each frame's readers instead of rebuilding it three times per frame, so settled transcripts cost fewer short-lived allocations per frame ([#XXXXX](https://github.com/can1357/oh-my-pi/pull/XXXXX) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ### Fixed
 
 - Fixed typo underlines changing when the cursor or selection splits a word ([#16821](https://github.com/can1357/oh-my-pi/issues/16821))
@@ -178,7 +182,6 @@
 - Fixed the newest inline charts and images at the bottom of the screen showing as text placeholders while older ones stayed rendered once a session (or a resumed one) holds more than `tui.maxInlineImages` images ([#16660](https://github.com/can1357/oh-my-pi/issues/16660))
 - Fixed Markdown tables in the terminal ignoring their column alignment, so right-aligned and centered columns rendered flush left ([#16658](https://github.com/can1357/oh-my-pi/pull/16658) by [@adi-IL](https://github.com/adi-IL))
 - Grep, Glob, Find, and AST Grep result headers wrap a long pattern instead of cutting it off, so the match/file counts and `truncated` warning stay visible ([#16635](https://github.com/can1357/oh-my-pi/issues/16635))
-
 ## [18.12.6] - 2026-10-21
 
 ### Changed
