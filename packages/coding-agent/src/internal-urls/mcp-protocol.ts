@@ -176,8 +176,14 @@ async function settleExactCatalogs(mcpManager: MCPManager, uri: string): Promise
 			: mcpManager.getConnectedServers();
 	await mcpManager.waitForPendingConnections();
 	if (await loadConnectedCatalogs(mcpManager, uri, failures)) return;
+	// Re-read the inventory after the wait: a server registered during it whose
+	// handshake then failed is the same unknown as one known from the start.
+	const knownAfterWait =
+		typeof mcpManager.getAllServerNames === "function"
+			? mcpManager.getAllServerNames()
+			: mcpManager.getConnectedServers();
 	const connected = new Set(mcpManager.getConnectedServers());
-	const failedHandshake = knownBeforeWait.some(name => !connected.has(name));
+	const failedHandshake = [...knownBeforeWait, ...knownAfterWait].some(name => !connected.has(name));
 	// Failed resources/list leaves no match and no proof the URI is absent — same
 	// as a spent wait budget: refuse to authorize semicolon fan-out.
 	if (failedHandshake || failures.size > 0) {
@@ -186,9 +192,11 @@ async function settleExactCatalogs(mcpManager: MCPManager, uri: string): Promise
 }
 
 /** Load connected catalogs before waiting on unrelated servers; check again after pending connects settle. */
-async function settleCatalogs(mcpManager: MCPManagerApi, uri: string, exact: boolean): Promise<void> {
+async function settleCatalogs(mcpManager: MCPManagerApi, uri: string): Promise<void> {
 	await Promise.allSettled(mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)));
-	if (resolveTargetServer(mcpManager, uri, exact)) return;
+	// Only an exact hit may end settling early: a template match must not win
+	// over a server still handshaking that advertises this URI exactly.
+	if (resolveTargetServer(mcpManager, uri, true)) return;
 	await mcpManager.waitForPendingConnections();
 	await Promise.allSettled(mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)));
 }
@@ -207,12 +215,14 @@ export async function readMcpResource(
 ): Promise<InternalResource | undefined> {
 	const { exact = false, waitMs, signal } = options ?? {};
 	const uri = extractResourceUri(url);
-	let targetServer = resolveTargetServer(mcpManager, uri, exact);
+	// Only an exact hit shortcuts discovery: a template match must not win over a
+	// server still handshaking that advertises this URI exactly.
+	let targetServer = resolveTargetServer(mcpManager, uri, true);
 	if (!targetServer) {
 		// A server may already be connected but have an unloaded catalog, while another is still
 		// handshaking after the startup race. Check connected catalogs first so unrelated pending
 		// work cannot delay an advertised resource; then wait for late servers and retry.
-		const settling = settleCatalogs(mcpManager, uri, exact);
+		const settling = settleCatalogs(mcpManager, uri);
 		// `settleCatalogs` never rejects, so the only rejection to swallow is the spent budget.
 		await untilAborted(
 			signal,

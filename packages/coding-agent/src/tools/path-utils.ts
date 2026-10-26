@@ -707,9 +707,11 @@ function hasAmbiguousInternalUrlTail(parts: readonly string[], isUrl: (part: str
 	// HTTPS path's semicolon attached.
 	let seenInternalOrRoutedUrl = false;
 	for (const [index, part] of parts.entries()) {
-		if (isInternalUrlPath(part)) {
+		if (isInternalUrlPath(part) || (isUrl(part) && !isReadableUrlPath(part))) {
 			seenInternalOrRoutedUrl = true;
-			const url = parseInternalUrl(InternalUrlRouter.instance().normalize(expandPath(part)));
+			const url = parseInternalUrl(
+				isInternalUrlPath(part) ? InternalUrlRouter.instance().normalize(expandPath(part)) : part,
+			);
 			// Any following delimiter is inside this URL’s query or fragment.
 			if (index < parts.length - 1 && (url.search || url.hash)) return true;
 			urlHasPath = urlHasPath || (url.pathname !== "" && url.pathname !== "/");
@@ -726,10 +728,6 @@ function hasAmbiguousInternalUrlTail(parts: readonly string[], isUrl: (part: str
 					// Malformed readable-URL spelling: treat as a non-path URL component.
 				}
 			}
-			continue;
-		}
-		if (isUrl(part)) {
-			seenInternalOrRoutedUrl = true;
 			continue;
 		}
 		// Expand first so tolerated colon-prefixed relatives (`:./b.md`, `:..\b`)
@@ -773,18 +771,15 @@ export async function splitDelimitedPathEntry(
 	if (!hasTopLevelPathDelimiter(normalizedEntry)) return null;
 	const splitter = options.splitter ?? parseSearchPath;
 	if (options.routedUrlPredicate?.(normalizedEntry)) {
-		// Internal URLs must use the full mixed-list classifier so exact MCP /
-		// file-backed literal precedence cannot be bypassed by a weaker retry
-		// (e.g. ReadTool after splitMixedUrlPathList already declined the split).
-		if (isInternalUrlPath(normalizedEntry)) {
-			return splitMixedUrlPathList(normalizedEntry, cwd, options.routedUrlPredicate, options.context);
-		}
-		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
-		const routed = options.routedUrlPredicate;
-		return parts && parts.length >= 2 && parts.every(part => routed(part) || (options.exclusionParts === true && isExclusionPart(part))) &&
-			!hasAmbiguousInternalUrlTail(parts.filter(part => !(options.exclusionParts && isExclusionPart(part))), options.routedUrlPredicate)
-			? parts
-			: null;
+		// Every routed URL, including a native MCP scheme, uses the same
+		// literal/exact-resource precedence as initial mixed-list recovery.
+		return splitMixedUrlPathList(
+			normalizedEntry,
+			cwd,
+			options.routedUrlPredicate,
+			options.context,
+			options.exclusionParts,
+		);
 	}
 	// An internal URL that still carries a top-level `;` is a flattened list
 	// (`history://A;history://B`, `skill://x;/abs/path`): fan it out the same way
@@ -833,13 +828,17 @@ async function internalUrlLocatesExisting(entry: string, cwd: string, context?: 
 }
 
 async function internalUrlIsExactMcpResource(entry: string, signal?: AbortSignal): Promise<boolean> {
-	// Only skill:// (exact MCP fallback in SkillProtocolHandler) and mcp:// can
-	// resolve through MCP catalogs among registered schemes. local://, history://,
-	// and the rest never do — skip the discovery wait so a pending MCP server cannot
-	// block or fail an ordinary list such as `local://notes;/tmp/x`.
+	// Registered schemes other than skill:// and mcp:// cannot fall back to
+	// MCP. Native unregistered MCP schemes can, but ordinary readable URLs and
+	// file URLs must never wait on unrelated MCP discovery.
 	const { path: barePath } = InternalUrlRouter.instance().split(entry);
-	const scheme = extractUriScheme(barePath)?.toLowerCase();
-	if (scheme !== "skill" && scheme !== "mcp") return false;
+	const scheme = extractUriScheme(barePath);
+	if (!scheme) return false;
+	if (
+		scheme !== "skill" &&
+		scheme !== "mcp" &&
+		(isInternalUrlPath(barePath) || isReadableUrlPath(barePath) || scheme === "file")
+	) return false;
 	if (!MCPManager.available()) return false;
 	const deadline = Date.now() + MCP_RESOURCE_DISCOVERY_WAIT_MS;
 	const manager = await withTimeout(
@@ -874,17 +873,14 @@ export async function splitMixedUrlPathList(
 	const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, parseSearchPath, "semicolon", "none");
 	if (!parts || parts.length < 2) return null;
 	for (const part of parts) {
-		if (isUrl(part) || isReadableUrlPath(part)) continue;
-		const partPath = splitPathAndSel(part).path;
+		if (isUrl(part) || isReadableUrlPath(part) || (exclusionParts && isExclusionPart(part))) continue;
+		const partPath = (await splitPathAndSelPreferringLiteral(part, cwd)).path;
 		if (hasGlobPathChars(partPath) || (await probeLiteralPathExists(partPath, cwd)) !== "exists") return null;
 	}
-	if (hasAmbiguousInternalUrlTail(parts, isUrl)) return null;
+	if (hasAmbiguousInternalUrlTail(parts.filter(part => !(exclusionParts && isExclusionPart(part))), isUrl)) return null;
 	if (isInternalUrlPath(normalizedEntry)) {
 		// Existing file-backed resources keep literal precedence over list recovery.
 		if (await internalUrlLocatesExisting(normalizedEntry, cwd, context)) return null;
-		// An exact MCP URI may be non-locatable locally; its advertised identity
-		// still takes precedence over interpreting its semicolon as a list.
-		if (await internalUrlIsExactMcpResource(normalizedEntry, context?.signal)) return null;
 	} else {
 		if ((await probeLiteralPathExists(normalizedEntry, cwd)) !== "missing") return null;
 		const selectorSplit = splitPathAndSel(normalizedEntry);
@@ -892,6 +888,9 @@ export async function splitMixedUrlPathList(
 			return null;
 		}
 	}
+	// Native fallback schemes have the same exact advertised identity as
+	// skill:// and mcp:// resources, including through routed read retries.
+	if (await internalUrlIsExactMcpResource(normalizedEntry, context?.signal)) return null;
 	return parts;
 }
 

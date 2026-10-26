@@ -15,7 +15,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { withTimeout } from "@oh-my-pi/pi-utils";
-import { hasExactMcpResource } from "../../src/internal-urls/mcp-protocol";
+import { hasExactMcpResource, MCP_RESOURCE_DISCOVERY_WAIT_MS } from "../../src/internal-urls/mcp-protocol";
 
 function createMockManager(opts: {
 	servers?: string[];
@@ -221,6 +221,50 @@ describe("McpProtocolHandler", () => {
 		await expect(hasExactMcpResource(manager, parseInternalUrl("skill://figma/foo;/tmp/x"))).rejects.toThrow(
 			"cannot safely split",
 		);
+	});
+
+	it("treats a server registered during the wait whose handshake failed as unknown discovery", async () => {
+		let registered = false;
+		const manager = createMockManager({
+			servers: [],
+			waitForPendingConnections: async () => {
+				registered = true;
+			},
+		});
+		// The server enters the inventory only after the wait begins, then never
+		// connects: the inventory snapshot taken before the wait must not clear it.
+		manager.getAllServerNames = () => (registered ? ["late"] : []);
+		await expect(hasExactMcpResource(manager, parseInternalUrl("skill://demo;/tmp/x"))).rejects.toThrow(
+			"cannot safely split",
+		);
+	});
+
+	it("lets a late server's exact URI win over an already-loaded matching template", async () => {
+		const uri = "custom://host/doc?q=x";
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		resources.set("broad", {
+			resources: [],
+			templates: [{ uriTemplate: "custom://host/{path}", name: "broad" }],
+		});
+		let settled = false;
+		const manager = createMockManager({
+			resources,
+			waitForPendingConnections: async () => {
+				settled = true;
+				resources.set("late", { resources: [{ uri, name: "exact" }], templates: [] });
+			},
+		});
+		const readServers: string[] = [];
+		manager.getConnectedServers = () => (settled ? ["broad", "late"] : ["broad"]);
+		manager.readServerResource = async (name: string, requested: string) => {
+			readServers.push(name);
+			return { contents: [{ uri: requested, text: "routed resource" }] };
+		};
+		const resource = await readMcpResource(manager, parseInternalUrl(uri));
+		// A template match on a connected catalog must not end discovery before a
+		// still-handshaking server can advertise the exact URI.
+		expect(resource?.notes).toEqual(["MCP server: late"]);
+		expect(readServers).toEqual(["late"]);
 	});
 
 	it("keeps a source-less failed handshake unknown during exact URI discovery", async () => {
@@ -898,7 +942,8 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 					(error: unknown) => (error instanceof Error ? error.message : String(error)),
 				);
 			await started.promise;
-			vi.advanceTimersByTime(5_000);
+			// The unknown-skill consumer spends exactly the shared MCP discovery budget.
+			vi.advanceTimersByTime(MCP_RESOURCE_DISCOVERY_WAIT_MS);
 			expect(await outcome).toContain("Unknown skill: nope");
 		} finally {
 			vi.useRealTimers();
