@@ -823,6 +823,26 @@ describe("IRC", () => {
 			expect(String(session.agent.peekFollowUpQueue()[0]!.content)).not.toContain("Active interruptible wait stopped");
 		});
 
+		it("lets an explicit inbox read consume a pre-brief parent message", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session, initialPromptPending: true });
+			await session.deliverIrcMessage({ id: "inbox-before-brief", from: "Main", to: "0-Child", body: "inspect me", ts: Date.now() });
+			expect(session.drainPendingIrcInboxMessages("0-Child")).toMatchObject([{ id: "inbox-before-brief", body: "inspect me" }]);
+			expect(session.agent.peekFollowUpQueue()).toHaveLength(0);
+			expect(session.drainPendingIrcInboxMessages("0-Child")).toEqual([]);
+		});
+
+		it("persists undelivered pre-brief messages if setup is disposed before dispatch", async () => {
+			const { session, sessionManager } = createRealSession();
+			sessions.push(session);
+			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session, initialPromptPending: true });
+			await session.deliverIrcMessage({ id: "abort-before-brief", from: "Main", to: "0-Child", body: "retain me", ts: Date.now() });
+			await session.dispose();
+			expect(JSON.stringify(sessionManager.getEntries())).toContain("retain me");
+			expect(session.agent.peekFollowUpQueue()).toHaveLength(0);
+		});
+
 		it("wakes a stale running child rather than stranding its message behind a nonexistent brief", async () => {
 			const { session } = createRealSession();
 			sessions.push(session);

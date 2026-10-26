@@ -19,6 +19,7 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import { runSubagentFollowUpTurn, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -206,6 +207,30 @@ function gate(n: number) {
 		},
 	};
 }
+
+it("keeps the initial brief's report when a peer writes immediately after the real session attaches", async () => {
+	const createSession = sdkModule.createAgentSession;
+	let outcome: string | undefined;
+	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+		const created = await createSession(options);
+		if (options?.agentId === AGENT_ID) {
+			outcome = (await IrcBus.global().send({ from: PEER_ID, to: AGENT_ID, body: PEER_BODY })).outcome;
+		}
+		return created;
+	});
+	const child = await startRun({});
+	try {
+		const result = await child.run;
+		expect(outcome).toBe("injected");
+		expect(result.output).toBe(REPORT);
+		expect((await child.peerInbox)?.body).toBe("PEER_REPLY");
+		await settle();
+		expect(await Bun.file(child.artifact).text()).toBe(REPORT);
+		expect(child.deliveries.join("\n")).not.toContain("PEER_REPLY");
+	} finally {
+		child.close();
+	}
+}, 20_000);
 
 it("keeps the report when a peer message arrives during the final report turn, and relays the reply to the peer", async () => {
 	const report = gate(1);
