@@ -706,6 +706,16 @@ export class SessionTools {
 		return [...(this.#xdev?.mountedNames ?? [])];
 	}
 
+	/** True when `write` is only the agent:// reply transport of a read-only agent. */
+	get isAgentOnlyWrite(): boolean {
+		return this.#isAgentOnlyWrite?.() === true;
+	}
+
+	/** True when `write` is currently transport-only (xd:// devices / agent:// reply). */
+	get isDeviceOnlyWrite(): boolean {
+		return this.#isDeviceOnlyWrite?.() === true;
+	}
+
 	/** Whether the edit tool is registered. */
 	get hasEditTool(): boolean {
 		return this.#toolRegistry.has("edit");

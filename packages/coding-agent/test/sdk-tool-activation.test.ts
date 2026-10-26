@@ -34,6 +34,7 @@ import { logger, removeSyncWithRetries, Snowflake, untilAborted } from "@oh-my-p
 import { cfgExternalThinking } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 import { cfgToolsXdev } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgTaskMaxRecursionDepth } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 const toolActivationExtension: ExtensionFactory = pi => {
 	pi.registerTool({
@@ -1938,6 +1939,92 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 		}
 	});
+	it("reconciles the agent:// reply write transport with live messaging availability", async () => {
+		const tempDir = makeTempDir();
+		const settings = Settings.isolated();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings,
+			toolNames: ["read", "grep"],
+		});
+
+		try {
+			// Messaging available at top level (default max recursion depth) → the
+			// read-only agent's synthetic agent:// reply transport is present.
+			expect(session.getActiveToolNames()).toContain("write");
+			const write = session.getToolByName("write");
+			expect(write?.description).toContain("agent://");
+			await expect(
+				write!.execute("reconcile-live-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
+			).rejects.toThrow("agent:// messages");
+
+			// Flip messaging off (no recursion allowed → IRC unavailable at depth 0);
+			// reconcile must drop the synthetic transport.
+			cfgTaskMaxRecursionDepth.set(settings, 0);
+			await session.reconcileBuiltinTools({ refreshPrompt: false });
+
+			// Flip messaging back on; reconcile must restore the native transport.
+			cfgTaskMaxRecursionDepth.set(settings, 2);
+			await session.reconcileBuiltinTools({ refreshPrompt: false });
+			expect(session.getActiveToolNames()).toContain("write");
+			const restored = session.getToolByName("write");
+			expect(restored?.description).toContain("agent://");
+			await expect(
+				restored!.execute("reconcile-live-fs-2", { path: path.join(tempDir, "nope2.txt"), content: "x" }),
+			).rejects.toThrow("agent:// messages");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("retains the native reply write when an extension shadows write during messaging-on reconcile", async () => {
+		const tempDir = makeTempDir();
+		// An extension that registers the literal name `write` (hidden/defaultInactive)
+		// replaces the built-in in the registry; turning messaging on (0→2) must
+		// retain the NATIVE built-in reply transport, never the imposter.
+		const shadowWriteExtension: ExtensionFactory = pi => {
+			pi.registerTool({
+				name: "write",
+				label: "Shadow Write",
+				description: "An extension-provided write that must not gain the agent:// reply grant.",
+				parameters: type({}),
+				defaultInactive: true,
+				async execute() {
+					return { content: [{ type: "text", text: "shadow write" }] };
+				},
+			});
+		};
+
+		const settings = Settings.isolated();
+		// Start with messaging unavailable (depth 0) so no native reply transport yet,
+		// and the extension's default-inactive write is not in the active set.
+		cfgTaskMaxRecursionDepth.set(settings, 0);
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings,
+			extensions: [shadowWriteExtension],
+			toolNames: ["read", "grep"],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).not.toContain("write");
+
+			// Flip messaging on → reconcile must register the native agent:// reply
+			// write as a built-in (not the extension shadow), refusing filesystem paths.
+			cfgTaskMaxRecursionDepth.set(settings, 2);
+			await session.reconcileBuiltinTools({ refreshPrompt: false });
+			expect(session.getActiveToolNames()).toContain("write");
+			expect(session.hasBuiltInTool("write")).toBe(true);
+			const write = session.getToolByName("write");
+			expect(write?.description).toContain("agent://");
+			await expect(
+				write!.execute("shadow-native-fs", { path: path.join(tempDir, "nope.txt"), content: "x" }),
+			).rejects.toThrow("agent:// messages");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("registers vibe tools only during explicit vibe activation and exposes parent Todo bookkeeping", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession(baseOptions(tempDir));

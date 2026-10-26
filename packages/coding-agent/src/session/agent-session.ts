@@ -6983,6 +6983,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.getMountedXdevToolNames();
 	}
 
+	/** True when `write` is only the agent:// reply transport of a read-only agent. */
+	get isAgentOnlyWrite(): boolean {
+		return this.#tools.isAgentOnlyWrite;
+	}
+
+	/** True when `write` is currently transport-only (xd:// devices / agent:// reply). */
+	get isDeviceOnlyWrite(): boolean {
+		return this.#tools.isDeviceOnlyWrite;
+	}
+
 	/** Whether the edit tool is registered in this session. */
 	get hasEditTool(): boolean {
 		return this.#tools.hasEditTool;
