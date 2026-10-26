@@ -117,7 +117,7 @@
 ## [18.13.1] - 2026-10-27
 ### Changed
 
-- Reduced the per-request work of preparing long transcripts for providers, so requests with many assistant turns start faster ([#XXXXX](https://github.com/can1357/oh-my-pi/pull/XXXXX) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Reduced the per-request work of preparing long transcripts for providers, so requests with many assistant turns start faster ([#17095](https://github.com/can1357/oh-my-pi/pull/17095) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
