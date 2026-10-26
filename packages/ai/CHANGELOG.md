@@ -74,22 +74,16 @@
 ## [18.13.1] - 2026-10-27
 
 ### Fixed
+- Fixed `.local` LAN hosts being tunnelled through `PI_PROXY`; they now bypass the egress proxy like the other local hosts, and a `NO_PROXY` exemption written with a trailing DNS root label matches the dotted host too ([#13591](https://github.com/can1357/oh-my-pi/issues/13591), [#16457](https://github.com/can1357/oh-my-pi/pull/16457) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Codex accounts whose spend cap is used up are no longer picked through credit overage or from usage cached before the upgrade ([#16973](https://github.com/can1357/oh-my-pi/pull/16973) by [@DusKing1](https://github.com/DusKing1))
 - Fixed Codex capacity 429s (`turn_rate_limit_exceeded`, "Codex is at capacity") reporting "Try again in ~N min" from the plan's usage-window reset, which made retries wait hours instead of the response's Retry-After ([#17087](https://github.com/can1357/oh-my-pi/pull/17087) by [@H4vC](https://github.com/H4vC))
 
 ## [18.13.0] - 2026-10-26
-- Reduced the CPU spent preparing tool schemas on every model call, so requests with many tools start faster ([#16780](https://github.com/can1357/oh-my-pi/pull/16780) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed tool schema normalization modifying the caller's schema in place, which added the folded `const` value to a tool's own `enum` array ([#16780](https://github.com/can1357/oh-my-pi/pull/16780) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Breaking Changes
 
 - `OpenAIRequestSetupModel` now requires the catalog-policy fields (`api`, `reasoning`), so callers building a reduced model for `resolveOpenAIRequestSetup` must pass them ([#16988](https://github.com/can1357/oh-my-pi/pull/16988) by [@rafalopilowski1](https://github.com/rafalopilowski1))
-
-### Fixed
-- Fixed `.local` LAN hosts being tunnelled through `PI_PROXY`; they now bypass the egress proxy like the other local hosts, and a `NO_PROXY` exemption written with a trailing DNS root label matches the dotted host too ([#13591](https://github.com/can1357/oh-my-pi/issues/13591), [#16457](https://github.com/can1357/oh-my-pi/pull/16457) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
-- Anthropic-compatible endpoints that require a `thinking` block on every turn of the current turn no longer replay a 400 when the history holds a turn an upstream answered without reasoning; the serializer pads those turns ([#16739](https://github.com/can1357/oh-my-pi/pull/16739) by [@lz37](https://github.com/lz37))
 
 ### Added
 
