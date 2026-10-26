@@ -69,6 +69,7 @@ export async function* workspaceMembers(
 			const memberRoot = path.dirname(path.join(root, match));
 			if (seen.has(memberRoot)) continue;
 			const relativeDir = path.dirname(match).split(path.sep).join("/");
+			if (relativeDir.split("/").includes("node_modules")) continue;
 			if (excluded.some(glob => glob.match(relativeDir) || glob.match(`${relativeDir}/package.json`))) continue;
 			seen.add(memberRoot);
 			const manifest = await readManifest(memberRoot);

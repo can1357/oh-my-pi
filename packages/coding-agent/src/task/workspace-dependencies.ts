@@ -43,8 +43,13 @@ async function linkPath(target: string, destination: string): Promise<void> {
 		if (linkTarget !== undefined) await fs.symlink(path.resolve(path.dirname(target), linkTarget), destination);
 		return;
 	}
-	const type = stat.isDirectory() ? (process.platform === "win32" ? "junction" : "dir") : "file";
-	await fs.symlink(target, destination, type);
+	if (stat.isDirectory()) {
+		await fs.symlink(target, destination, process.platform === "win32" ? "junction" : "dir");
+	} else if (process.platform === "win32") {
+		await fs.copyFile(target, destination, fs.constants.COPYFILE_FICLONE);
+	} else {
+		await fs.symlink(target, destination, "file");
+	}
 }
 
 async function linkPackageEntry(
@@ -52,13 +57,62 @@ async function linkPackageEntry(
 	sourceEntry: string,
 	destination: string,
 	packages: ReadonlyMap<string, string>,
+	rebindings: ReadonlyMap<string, string>,
+	finalDestination: string,
 ): Promise<void> {
 	const workspacePath = packages.get(name);
 	if (workspacePath) return;
-	// External packages stay linked into the borrowed tree on purpose: copying a registry cache per
-	// worker is the cost this repair exists to avoid. A package there that itself imports a workspace
-	// package resolves it from the borrowed checkout, not the worker.
-	await linkPath(sourceEntry, destination);
+	// Node resolves imports from the real package directory, not the symlink's parent.
+	// Give registry packages a worker-local directory too; reflinks share storage where
+	// supported without making worker writes mutate the borrowed installation.
+	await materializePackage(sourceEntry, destination, rebindings, finalDestination);
+}
+
+async function materializePackage(
+	source: string,
+	destination: string,
+	rebindings: ReadonlyMap<string, string>,
+	finalDestination: string,
+	ancestors: ReadonlyMap<string, string> = new Map(),
+): Promise<void> {
+	const realSource = await fs.realpath(source).catch(error => {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	});
+	if (!realSource) {
+		await linkPath(source, destination);
+		return;
+	}
+	const workspace = rebindings.get(realSource);
+	if (workspace) {
+		await linkPath(workspace, destination);
+		return;
+	}
+	const stat = await fs.stat(realSource);
+	if (!stat.isDirectory()) {
+		await fs.copyFile(realSource, destination, fs.constants.COPYFILE_FICLONE);
+		return;
+	}
+	const ancestor = ancestors.get(realSource);
+	if (ancestor) {
+		await fs.symlink(
+			process.platform === "win32" ? ancestor : path.relative(path.dirname(finalDestination), ancestor),
+			destination,
+			process.platform === "win32" ? "junction" : "dir",
+		);
+		return;
+	}
+	await fs.mkdir(destination);
+	const nextAncestors = new Map(ancestors).set(realSource, finalDestination);
+	for (const entry of await fs.readdir(realSource)) {
+		await materializePackage(
+			path.join(realSource, entry),
+			path.join(destination, entry),
+			rebindings,
+			path.join(finalDestination, entry),
+			nextAncestors,
+		);
+	}
 }
 
 /**
@@ -88,7 +142,25 @@ async function rebindWorkspaceBins(
 	for (const entry of entries) {
 		const name = entry.replace(/\.(cmd|ps1)$/i, "");
 		if (workspaceBinNames.has(name)) continue;
-		await linkPath(path.join(source, entry), path.join(destination, entry));
+		const sourceEntry = path.join(source, entry);
+		const realTarget = await fs.realpath(sourceEntry).catch(() => undefined);
+		const relative = realTarget ? path.relative(borrowedRoot, realTarget) : undefined;
+		if (
+			relative &&
+			!relative.startsWith(`.bin${path.sep}`) &&
+			relative !== ".." &&
+			!relative.startsWith(`..${path.sep}`) &&
+			!path.isAbsolute(relative)
+		) {
+			const target = path.join(stagingRoot, relative);
+			if (process.platform === "win32") {
+				await fs.copyFile(target, path.join(destination, entry), fs.constants.COPYFILE_FICLONE);
+			} else {
+				await fs.symlink(path.relative(destination, target), path.join(destination, entry));
+			}
+		} else {
+			await linkPath(sourceEntry, path.join(destination, entry));
+		}
 	}
 	for (const [name, target] of bins) {
 		const launcher = path.join(destination, name);
@@ -101,6 +173,13 @@ async function rebindWorkspaceBins(
 				`${launcher}.ps1`,
 				`& "${runtime}" "$PSScriptRoot\\${relativeTarget}" @args\nexit $LASTEXITCODE\n`,
 			);
+			const shellRuntime = runtime.replaceAll("\\", "/").replaceAll("'", "'\\''");
+			const shellTarget = relativeTarget.replaceAll("\\", "/").replaceAll("'", "'\\''");
+			await fs.writeFile(
+				launcher,
+				`#!/bin/sh\nbasedir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec '${shellRuntime}' "$basedir/"'${shellTarget}' "$@"\n`,
+				{ mode: 0o755 },
+			);
 			continue;
 		}
 		await linkPath(target, launcher);
@@ -109,9 +188,9 @@ async function rebindWorkspaceBins(
 
 /**
  * Rebind workspace package links when an isolated checkout inherited a
- * symlink to another checkout's node_modules. Registry packages remain linked
- * to that external cache; workspace packages and their commands resolve to
- * the worker checkout.
+ * symlink to another checkout's node_modules. Registry package directories
+ * are materialized locally so their imports share the worker's workspace
+ * identity; reflink-capable filesystems continue sharing cached file data.
  */
 export async function repairBorrowedWorkspaceNodeModules(workerRoot: string): Promise<void> {
 	const nodeModules = path.join(workerRoot, "node_modules");
@@ -137,6 +216,11 @@ export async function repairBorrowedWorkspaceNodeModules(workerRoot: string): Pr
 
 	const packages = await workspacePackages(workerRoot);
 	if (packages.paths.size === 0) return;
+	const rebindings = new Map<string, string>();
+	for (const [name, workerPackage] of packages.paths) {
+		const borrowedPackage = await fs.realpath(path.join(borrowedRoot, ...name.split("/"))).catch(() => undefined);
+		if (borrowedPackage) rebindings.set(borrowedPackage, workerPackage);
+	}
 	const entries = await fs.readdir(borrowedRoot);
 	const stagingRoot = await fs.mkdtemp(path.join(workerRoot, ".omp-node_modules-"));
 	try {
@@ -158,11 +242,20 @@ export async function repairBorrowedWorkspaceNodeModules(workerRoot: string): Pr
 						path.join(sourceEntry, member),
 						path.join(destination, member),
 						packages.paths,
+						rebindings,
+						path.join(nodeModules, packageName, member),
 					);
 				}
 				continue;
 			}
-			await linkPackageEntry(packageName, sourceEntry, destination, packages.paths);
+			await linkPackageEntry(
+				packageName,
+				sourceEntry,
+				destination,
+				packages.paths,
+				rebindings,
+				path.join(nodeModules, entry),
+			);
 		}
 
 		for (const [name, packageRoot] of packages.paths) {

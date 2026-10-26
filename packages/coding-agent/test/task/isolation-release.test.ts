@@ -144,11 +144,11 @@ describe("isolated agent release", () => {
 			);
 			await fs.writeFile(
 				path.join(checkout, "packages", "ai", "index.js"),
-				`export const source = ${JSON.stringify(source)};\n`,
+				`export const source = ${JSON.stringify(source)}; export const singleton = {};\n`,
 			);
 			await fs.writeFile(
 				path.join(checkout, "packages", "app", "resolve.mjs"),
-				`import { source } from "${workspaceName}";\nconsole.log(source);\n`,
+				`import { source, singleton } from "${workspaceName}"; import { singleton as peer, nested } from "external";\nconsole.log(JSON.stringify({source,direct:singleton===peer,nested:singleton===nested}));\n`,
 			);
 		}
 		const oldNodeModules = path.join(oldCheckout, "node_modules");
@@ -158,6 +158,12 @@ describe("isolated agent release", () => {
 			path.join(oldNodeModules, "@oh-my-pi", "pi-ai"),
 			"dir",
 		);
+		await fs.mkdir(path.join(oldNodeModules, "external/node_modules/nested"), { recursive: true });
+		for (const member of ["external", "external/node_modules/nested"]) {
+			await fs.writeFile(path.join(oldNodeModules, member, "package.json"), JSON.stringify({ type: "module", exports: "./index.js" }));
+		}
+		await fs.writeFile(path.join(oldNodeModules, "external/index.js"), `export { singleton } from "${workspaceName}"; export { singleton as nested } from "nested";`);
+		await fs.writeFile(path.join(oldNodeModules, "external/node_modules/nested/index.js"), `export { singleton } from "${workspaceName}";`);
 		await fs.symlink(oldNodeModules, path.join(currentCheckout, "node_modules"), "dir");
 		await fs.cp(currentCheckout, workerCheckout, { recursive: true });
 		await fs.mkdir(artifactsDir);
@@ -192,6 +198,7 @@ describe("isolated agent release", () => {
 				stdout: "pipe",
 				stderr: "pipe",
 			});
+			console.error(`isolation consumer PID=${child.pid}`);
 			const [stdout, stderr] = await Promise.all([
 				new Response(child.stdout).text(),
 				new Response(child.stderr).text(),
@@ -219,7 +226,7 @@ describe("isolated agent release", () => {
 		});
 
 		expect(run.exitCode).toBe(0);
-		expect(observed).toBe("current");
+		expect(JSON.parse(observed ?? "null")).toEqual({ source: "current", direct: true, nested: true });
 	});
 
 	it("lets held peer messages wake the agent only after the run-end branch is committed", async () => {
