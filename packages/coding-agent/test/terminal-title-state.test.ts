@@ -204,14 +204,27 @@ describe("session label carries the project", () => {
 		expect(buildSessionTerminalLabel("Deep fix", link)).toBe("demo-repo · Deep fix");
 	});
 
-	it("resolves the root through the shared VCS API, not a private .git walk", () => {
+	it("uses the discovered project even when the cwd does not exist", () => {
 		const project = makeProject("demo-repo");
-		const spy = spyOn(vcs, "repo");
+		expect(buildSessionTerminalLabel("Fix", path.join(project, "never-created"))).toBe("demo-repo · Fix");
+	});
+
+	it("revalidates the project when a nearer repository appears or disappears", () => {
+		const cwd = makePlainDir("new");
+		let root: string | undefined = "/work/outer";
+		const repoSpy = spyOn(vcs, "repo").mockImplementation(() =>
+			root ? ({ root: () => root } as unknown as VcsRepo) : null,
+		);
 		try {
-			buildSessionTerminalLabel("Fix", path.join(project, "never-created"));
-			expect(spy).toHaveBeenCalled();
+			expect(buildSessionTerminalLabel("Fix", cwd)).toBe("outer · Fix");
+			root = cwd;
+			expect(buildSessionTerminalLabel("Fix", cwd)).toBe("new · Fix");
+			root = undefined;
+			expect(buildSessionTerminalLabel("Fix", cwd)).toBe("new · Fix");
+			root = "/work/restored";
+			expect(buildSessionTerminalLabel("Fix", cwd)).toBe("restored · Fix");
 		} finally {
-			spy.mockRestore();
+			repoSpy.mockRestore();
 		}
 	});
 
@@ -336,6 +349,32 @@ describe("label tracks what the session is doing now", () => {
 		expect(lastTitle()).toBe(`${BRAND} > demo-repo · Collect statistics`);
 		setTerminalTitleTaskNow(undefined);
 		expect(lastTitle()).toBe(`${BRAND} > demo-repo · Topic A`);
+	});
+
+	it("refreshes the OSC project after native repository discovery changes at the same cwd", () => {
+		const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "tabtitle-native-"));
+		scratchDirs.push(scratch);
+		const outer = path.join(scratch, "outer");
+		const inner = path.join(outer, "new");
+		fs.mkdirSync(inner, { recursive: true });
+		const initialize = (dir: string): void => {
+			fs.mkdirSync(path.join(dir, ".git", "objects"), { recursive: true });
+			fs.mkdirSync(path.join(dir, ".git", "refs", "heads"), { recursive: true });
+			fs.writeFileSync(path.join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
+			fs.writeFileSync(path.join(dir, ".git", "config"), "[core]\nrepositoryformatversion = 0\nbare = false\n");
+		};
+		initialize(outer);
+		setSessionTerminalTitle("Fix", inner);
+		expect(lastTitle()).toBe(`${BRAND} > outer · Fix`);
+		initialize(inner);
+		setTerminalTitleTaskNow("New task");
+		expect(lastTitle()).toBe(`${BRAND} > new · New task`);
+		fs.rmSync(path.join(inner, ".git"), { recursive: true });
+		setTerminalTitleTaskNow(undefined);
+		expect(lastTitle()).toBe(`${BRAND} > outer · Fix`);
+		fs.rmSync(path.join(outer, ".git"), { recursive: true });
+		setSessionTerminalTitle("Plain", inner);
+		expect(lastTitle()).toBe(`${BRAND} > new · Plain`);
 	});
 
 	it("composes the task half against the focused session, then returns to the main one", () => {
