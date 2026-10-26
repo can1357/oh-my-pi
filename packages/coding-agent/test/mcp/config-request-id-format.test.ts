@@ -80,6 +80,26 @@ test("requestIdFormat from .omp/mcp.json reaches the transport config", async ()
   expect(configs.plain?.requestIdFormat).toBeUndefined();
 });
 
+test("deferred from .omp/mcp.json reaches the transport config", async () => {
+  const configs = await loadFrom(path.join(".omp", "mcp.json"), {
+    contextforge: { type: "stdio", command: "/bin/echo", deferred: false },
+    extra: { type: "stdio", command: "/bin/true", deferred: true },
+    plain: { type: "stdio", command: "/bin/false" },
+  });
+
+  expect(configs.contextforge?.deferred).toBe(false);
+  expect(configs.extra?.deferred).toBe(true);
+  expect(configs.plain?.deferred).toBeUndefined();
+});
+
+test("deferred from a standalone .mcp.json reaches the transport config", async () => {
+  const configs = await loadFrom(".mcp.json", {
+    contextforge: { type: "stdio", command: "/bin/echo", deferred: false },
+  });
+
+  expect(configs.contextforge?.deferred).toBe(false);
+});
+
 test("requestIdFormat from a standalone .mcp.json reaches the transport config", async () => {
   const configs = await loadFrom(".mcp.json", {
     xcode: { type: "stdio", command: "/usr/bin/xcrun", args: ["mcpbridge"], requestIdFormat: "number" },
@@ -128,9 +148,9 @@ for (
       path.join(tempCwd, file),
       JSON.stringify({
         mcpServers: {
-          disabled: { command: "/bin/echo", args: ["disabled"], instructions: false },
-          enabled: { command: "/bin/echo", args: ["enabled"], instructions: true },
-          "quoted-bool": { command: "/bin/echo", args: ["quoted-bool"], instructions: "false" },
+          disabled: { command: "/bin/echo", args: ["disabled"], instructions: false, deferred: false },
+          enabled: { command: "/bin/echo", args: ["enabled"], instructions: true, deferred: true },
+          "quoted-bool": { command: "/bin/echo", args: ["quoted-bool"], instructions: "false", deferred: "false" },
           "integer-ids": { command: "/bin/echo", args: ["integer-ids"], requestIdFormat: "integer" },
         },
       }),
@@ -147,6 +167,7 @@ for (
     expect(configs.disabled?.instructions).toBe(false);
     expect(configs.enabled?.instructions).toBe(true);
     expect(configs["quoted-bool"]?.instructions).toBeUndefined();
+    expect(configs["quoted-bool"]?.deferred).toBeUndefined();
     expect(configs["integer-ids"]?.requestIdFormat).toBeUndefined();
     // A dropped value is reported once, naming the server and the option, so
     // a typo cannot silently re-enable instructions or revert the id encoding.
@@ -155,6 +176,7 @@ for (
     );
     expect(warnings.filter(text => text.includes("quoted-bool") && text.includes("instructions"))).toHaveLength(1);
     expect(warnings.filter(text => text.includes("integer-ids") && text.includes("requestIdFormat"))).toHaveLength(1);
+    expect(warnings.filter(text => text.includes("quoted-bool") && text.includes("deferred"))).toHaveLength(1);
   });
 }
 
@@ -184,6 +206,12 @@ for (
     expect(
       validateJsonSchemaValue(mcpSchema, { mcpServers: { fixture: { ...server, instructions: "false" } } }).success,
     ).toBe(false);
+    expect(
+      validateJsonSchemaValue(mcpSchema, { mcpServers: { fixture: { ...server, deferred: false } } }).success,
+    ).toBe(true);
+    expect(
+      validateJsonSchemaValue(mcpSchema, { mcpServers: { fixture: { ...server, deferred: "false" } } }).success,
+    ).toBe(false);
   });
 
   test(server.type + " schema accepts every shared server field and still rejects unknown keys", () => {
@@ -195,6 +223,7 @@ for (
       timeout: 120_000,
       requestIdFormat: "string",
       instructions: false,
+      deferred: false,
       auth: { type: "oauth" },
       oauth: { clientId: "client" },
     };

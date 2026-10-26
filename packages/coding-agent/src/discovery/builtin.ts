@@ -194,12 +194,20 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
         );
       }
 
+      const deferred = typeof serverConfig.deferred === "boolean" ? serverConfig.deferred : undefined;
+      if (deferred === undefined && serverConfig.deferred != null) {
+        logger.warn(
+          `MCP server "${serverName}": invalid deferred ${JSON.stringify(serverConfig.deferred)}, ignoring`,
+        );
+      }
+
       result.push({
         name: serverName,
         enabled,
         timeout,
         requestIdFormat,
         instructions,
+        deferred,
         command: serverConfig.command as string | undefined,
         args: serverConfig.args as string[] | undefined,
         env: serverConfig.env as Record<string, string> | undefined,

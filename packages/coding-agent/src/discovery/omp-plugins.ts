@@ -278,6 +278,7 @@ interface RawMcpServer {
   timeout?: number;
   requestIdFormat?: unknown;
   instructions?: unknown;
+  deferred?: unknown;
   command?: string;
   args?: string[];
   env?: Record<string, string>;
@@ -348,12 +349,21 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
           }, ignoring`,
         );
       }
+      const deferred = typeof cfg.deferred === "boolean" ? cfg.deferred : undefined;
+      if (deferred === undefined && cfg.deferred != null) {
+        logger.warn(
+          `[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid deferred ${
+            JSON.stringify(cfg.deferred)
+          }, ignoring`,
+        );
+      }
       items.push({
         name: serverName,
         ...(cfg.enabled !== undefined && { enabled: cfg.enabled }),
         ...(cfg.timeout !== undefined && { timeout: cfg.timeout }),
         ...(requestIdFormat !== undefined && { requestIdFormat }),
         ...(instructions !== undefined && { instructions }),
+        ...(deferred !== undefined && { deferred }),
         ...(rooted.command !== undefined && { command: rooted.command }),
         ...(cfg.args !== undefined && { args: cfg.args }),
         ...(cfg.env !== undefined && { env: cfg.env }),
