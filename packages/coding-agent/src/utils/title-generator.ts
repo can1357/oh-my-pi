@@ -610,19 +610,6 @@ const SESSION_TASK_MAX_COLUMNS = 40;
 const SESSION_LABEL_PROJECT_SEPARATOR = " · ";
 
 /**
- * Basename of the repo root containing each resolved cwd, cached so a title
- * write never walks the filesystem twice for the same directory and never
- * spawns a subprocess. Entries live for the process lifetime: renames are
- * already covered because a rename re-emits the title through a fresh cwd.
- */
-const gitProjectCache = new Map<string, string | undefined>();
-
-/** Test seam: drop cached repo-root lookups. */
-export function clearSessionTitleProjectCache(): void {
-	gitProjectCache.clear();
-}
-
-/**
  * Root of the Git/Jujutsu repository containing `from`, through the shared VCS
  * API (sync, no subprocess). Starts from the real path so a symlinked cwd
  * resolves inside the repo it points into.
@@ -657,10 +644,9 @@ function remoteBasename(remotePath: string): string | undefined {
 function resolveProjectName(cwd: string, remote = false): string | undefined {
 	if (remote) return sanitizeTerminalTitlePart(remoteBasename(cwd));
 	const resolved = path.resolve(cwd);
-	if (gitProjectCache.has(resolved)) return gitProjectCache.get(resolved);
-	const project = sanitizeTerminalTitlePart(path.basename(findRepoRoot(resolved) ?? resolved));
-	gitProjectCache.set(resolved, project);
-	return project;
+	// Re-discover on session/task updates: an agent can initialize a nearer
+	// repository or remove one without changing cwd. Spinner frames reuse label.
+	return sanitizeTerminalTitlePart(path.basename(findRepoRoot(resolved) ?? resolved));
 }
 
 /**
@@ -680,8 +666,7 @@ function resolveProjectName(cwd: string, remote = false): string | undefined {
  *       from the filesystem, never from a literal.
  *   R5. The task part shows what the session is doing now: the current
  *       in-progress todo row when one exists, the session title otherwise.
- * Pure (no I/O beyond the cached repo-root lookup) so the contract is
- * directly testable.
+ * Repository discovery runs only when composing a new session/task label.
  */
 export function buildSessionTerminalLabel(
 	sessionName: string | undefined,
@@ -829,7 +814,7 @@ export function nerdGlyphsActive(): boolean {
  */
 export function setTerminalTitleTaskNow(
 	task: string | undefined,
-	source?: { sessionName: string | undefined; cwd: string },
+	source?: { sessionName: string | undefined; cwd: string; remoteCwd?: boolean },
 ): void {
 	terminalTitleRuntime.taskNow = sanitizeTerminalTitlePart(task);
 	// The todo list belongs to the session the UI displays, which is a focused subagent (with its own
@@ -837,6 +822,7 @@ export function setTerminalTitleTaskNow(
 	if (source && terminalTitleRuntime.titleClaimed) {
 		terminalTitleRuntime.sessionName = sanitizeTerminalTitlePart(source.sessionName);
 		terminalTitleRuntime.cwd = source.cwd;
+		terminalTitleRuntime.remoteCwd = source.remoteCwd === true;
 	}
 	// Initial TODO loading precedes the shell-title push. Keep the task pending
 	// until ownership is claimed and the session supplies its project/cwd.

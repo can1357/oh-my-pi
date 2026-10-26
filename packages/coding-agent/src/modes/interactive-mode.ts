@@ -2704,7 +2704,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 			this.sessionManager.onPersistenceNotice(notice => this.showWarning(formatPersistenceNotice(notice))),
 			this.sessionManager.onSessionNameChanged(() => {
-				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+				// Background main-session titling cannot replace the session being viewed.
+				if (!this.collabGuest?.titleState && this.viewSession === this.session) {
+					setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+				}
 				this.#handleSessionAccentInputsChanged();
 			}),
 			// Fork and branch adopt a new session file without retitling.
@@ -5041,9 +5044,13 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#syncTodoHudState(owner: AgentViewSession): void {
 		const activeTask = this.todoPhases.flatMap(phase => phase.tasks).find(task => task.status === "in_progress");
+		// A guest link remains installed during local restoration; only its replica
+		// uses host metadata. Restored local TODOs must regain local title authority.
+		const remote = this.collabGuest?.titleState;
 		setTerminalTitleTaskNow(activeTask?.content, {
-			sessionName: owner.sessionManager.getSessionName(),
-			cwd: owner.sessionManager.getCwd(),
+			sessionName: remote ? remote.sessionName : owner.sessionManager.getSessionName(),
+			cwd: remote?.cwd ?? owner.sessionManager.getCwd(),
+			remoteCwd: remote !== undefined,
 		});
 		this.#cancelTodoAutoClearTimer();
 		const phases = this.todoPhases;
