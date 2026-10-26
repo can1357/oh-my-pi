@@ -619,6 +619,149 @@ describe("LiteLLM provider discovery", () => {
 		});
 	});
 
+	test("discovers the full paginated /v2/model/info roster before later metadata endpoints", async () => {
+		const calls: string[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = inputUrl(input);
+			calls.push(url);
+			if (url === MODELS_DEV_URL) return Response.json({});
+			expect(init?.headers).toMatchObject({ Authorization: "Bearer sk-paginated" });
+			if (url === "http://primary:4000/model_group/info" || url === "http://primary:4000/model/info") {
+				return new Response("Not Found", { status: 404 });
+			}
+			if (url === "http://primary:4000/v2/model/info") {
+				return Response.json({
+					current_page: 1,
+					total_pages: 2,
+					total_count: 67,
+					size: 50,
+					data: Array.from({ length: 50 }, (_, index) => ({
+						model_name: `chat-${index + 1}`,
+						model_info: { mode: "chat", supports_vision: index === 0 ? null : false },
+					})),
+				});
+			}
+			if (url === "http://primary:4000/v2/model/info?page=2") {
+				return Response.json({
+					current_page: 2,
+					total_pages: 2,
+					total_count: 67,
+					size: 50,
+					data: Array.from({ length: 17 }, (_, index) => ({
+						model_name: index === 16 ? "embedding-only" : `chat-${index + 51}`,
+						model_info: { mode: index === 16 ? "embedding" : "chat", supports_vision: false },
+					})),
+				});
+			}
+			if (url === "http://primary:4000/v1/model/info") {
+				return Response.json({
+					data: [
+						{ model_name: "chat-1", model_info: { supports_vision: true, max_input_tokens: 200_000 } },
+						{ model_name: "unlisted", model_info: { mode: "chat", supports_vision: false } },
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		}) as FetchImpl;
+		const models = await litellmModelManagerOptions({
+			apiKey: "sk-paginated",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(models).toHaveLength(66);
+		expect(models?.map(model => model.id)).toContain("chat-66");
+		expect(models?.map(model => model.id)).not.toContain("embedding-only");
+		expect(models?.map(model => model.id)).not.toContain("unlisted");
+		expect(models?.find(model => model.id === "chat-1")).toMatchObject({
+			contextWindow: 200_000,
+			input: ["text", "image"],
+		});
+		expect(calls).toEqual([
+			MODELS_DEV_URL,
+			"http://primary:4000/model_group/info",
+			"http://primary:4000/v2/model/info",
+			"http://primary:4000/v2/model/info?page=2",
+			"http://primary:4000/model/info",
+			"http://primary:4000/v1/model/info",
+		]);
+	});
+
+	test.each([
+		{ current_page: 2, total_pages: 2 },
+		{ current_page: 1, total_pages: 2.5 },
+		{ current_page: 1, total_pages: 101 },
+		{ current_page: 1, total_pages: 1, total_count: 2 },
+	])("rejects invalid or unbounded LiteLLM pagination metadata: %j", async pagination => {
+		const calls: string[] = [];
+		const models = await litellmModelManagerOptions({
+			baseUrl: "http://primary:4000/v1",
+			fetch: vi.fn(async (input: string | URL | Request) => {
+				const url = inputUrl(input);
+				calls.push(url);
+				if (url === MODELS_DEV_URL) return Response.json({});
+				if (url === "http://primary:4000/v2/model/info") {
+					return Response.json({ ...pagination, data: [{ model_name: "page-one-only", mode: "chat" }] });
+				}
+				if (url === "http://primary:4000/v1/models") return Response.json({ data: [{ id: "fallback-chat" }] });
+				return new Response("Not Found", { status: 404 });
+			}) as FetchImpl,
+		}).fetchDynamicModels?.();
+		expect(models?.map(model => model.id)).toEqual(["fallback-chat"]);
+		expect(calls).not.toContain("http://primary:4000/v2/model/info?page=2");
+	});
+
+	test("does not use a truncated rich roster when a later page fails", async () => {
+		const calls: string[] = [];
+		const models = await litellmModelManagerOptions({
+			baseUrl: "http://primary:4000/v1",
+			fetch: vi.fn(async (input: string | URL | Request) => {
+				const url = inputUrl(input);
+				calls.push(url);
+				if (url === MODELS_DEV_URL) return Response.json({});
+				if (url === "http://primary:4000/v2/model/info") {
+					return Response.json({ current_page: 1, total_pages: 2, data: [{ model_name: "page-one-only" }] });
+				}
+				if (url === "http://primary:4000/v2/model/info?page=2") {
+					return new Response("Forbidden", { status: 403 });
+				}
+				if (url === "http://primary:4000/v1/models") return Response.json({ data: [{ id: "fallback-chat" }] });
+				return new Response("Not Found", { status: 404 });
+			}) as FetchImpl,
+		}).fetchDynamicModels?.();
+		expect(models?.map(model => model.id)).toEqual(["fallback-chat"]);
+		expect(calls).toContain("http://primary:4000/v2/model/info?page=2");
+	});
+
+	test("rejects duplicate or malformed later page metadata without publishing partial models", async () => {
+		const models = await litellmModelManagerOptions({
+			baseUrl: "http://primary:4000/v1",
+			fetch: vi.fn(async (input: string | URL | Request) => {
+				const url = inputUrl(input);
+				if (url === MODELS_DEV_URL) return Response.json({});
+				if (url === "http://primary:4000/v2/model/info") {
+					return Response.json({
+						current_page: 1,
+						total_pages: 2,
+						total_count: 2,
+						data: [{ model_name: "first" }],
+					});
+				}
+				if (url === "http://primary:4000/v2/model/info?page=2") {
+					return Response.json({
+						current_page: 1,
+						total_pages: 2,
+						total_count: 2,
+						data: [{ model_name: "second" }],
+					});
+				}
+				if (url === "http://primary:4000/v1/models") return Response.json({ data: [{ id: "fallback-chat" }] });
+				return new Response("Not Found", { status: 404 });
+			}) as FetchImpl,
+		}).fetchDynamicModels?.();
+		expect(models?.map(model => model.id)).toEqual(["fallback-chat"]);
+	});
+
 	test("filters only known non-conversational modes from rich discovery", async () => {
 		const fetchMock = vi.fn(async (input: string | URL | Request) => {
 			const url = inputUrl(input);
@@ -671,6 +814,72 @@ describe("LiteLLM provider discovery", () => {
 			"keep-realtime",
 			"keep-responses",
 			"keep-unknown",
+		]);
+	});
+
+	test("routes decisions-mode groups to the Decisions runner as judge rows (#16939)", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			// The first endpoint leaves vision unreported, so discovery merges the
+			// next one, which omits `mode` and reports an OpenAI backend.
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({
+					data: [
+						{ model_group: "typesafe/jev-1.14", mode: "decisions", providers: ["typesafe"] },
+						{ model_group: "luna", mode: "decisions", providers: ["openai"] },
+						{ model_group: "claude-proxy", mode: "chat", providers: ["anthropic"], supports_vision: false },
+					],
+				});
+			}
+			if (url === "http://primary:4000/v2/model/info") {
+				return Response.json({
+					data: [{ model_group: "luna", providers: ["openai"], supports_vision: true }],
+				});
+			}
+			return new Response("Not Found", { status: 404 });
+		}) as FetchImpl;
+
+		const models = await litellmModelManagerOptions({
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		const routes = models?.map(model => ({ id: model.id, api: model.api, kind: model.kind }));
+		expect(routes).toEqual([
+			{ id: "claude-proxy", api: "openai-completions", kind: undefined },
+			{ id: "luna", api: "openai-decisions", kind: "judge" },
+			{ id: "typesafe/jev-1.14", api: "openai-decisions", kind: "judge" },
+		]);
+	});
+
+	test("keeps probing for a decisions mode that only a later endpoint reports (#16939)", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			// Vision and provider routing are complete here; only `mode` is missing.
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({
+					data: [{ model_group: "typesafe/jev-1.14", providers: ["typesafe"], supports_vision: false }],
+				});
+			}
+			if (url === "http://primary:4000/v2/model/info") {
+				return Response.json({ data: [{ model_group: "typesafe/jev-1.14", model_info: { mode: "decisions" } }] });
+			}
+			return new Response("Not Found", { status: 404 });
+		}) as FetchImpl;
+
+		const models = await litellmModelManagerOptions({
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(models?.map(model => ({ id: model.id, api: model.api, kind: model.kind }))).toEqual([
+			{ id: "typesafe/jev-1.14", api: "openai-decisions", kind: "judge" },
 		]);
 	});
 
@@ -1034,6 +1243,7 @@ describe("LiteLLM provider discovery", () => {
 							model_group: "example-real-model",
 							model_name: "Example Real Model",
 							providers: ["anthropic"],
+							mode: "chat",
 							max_input_tokens: 96_000,
 							max_output_tokens: 8_000,
 							supports_function_calling: true,
@@ -1620,6 +1830,35 @@ describe("LiteLLM provider discovery", () => {
 			"keep-realtime",
 			"keep-responses",
 			"keep-unknown",
+		]);
+	});
+
+	test("routes decisions-mode rows from the /v1/models fallback to the Decisions runner (#16939)", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			if (url === "http://fallback:4000/v1/models") {
+				return Response.json({
+					data: [
+						{ id: "typesafe/jev-1.14", mode: "decisions" },
+						{ id: "keep-chat", mode: "chat" },
+					],
+				});
+			}
+			return new Response("Not Found", { status: 404 });
+		}) as FetchImpl;
+
+		const models = await litellmModelManagerOptions({
+			baseUrl: "http://fallback:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		const routes = models?.map(model => ({ id: model.id, api: model.api, kind: model.kind }));
+		expect(routes).toEqual([
+			{ id: "keep-chat", api: "openai-completions", kind: undefined },
+			{ id: "typesafe/jev-1.14", api: "openai-decisions", kind: "judge" },
 		]);
 	});
 

@@ -8,11 +8,13 @@ use std::{
 	time::Duration,
 };
 
-use brush_core::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
 use clap::Parser;
 use tokio::time;
 
-use crate::proc_snapshot::{ProcInfo, sanitize_process_command};
+use crate::{
+	host::{INTERRUPTED_EXIT_CODE, ProcContext, Process},
+	proc_snapshot::{ProcInfo, sanitize_process_command},
+};
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum TopSortKey {
@@ -204,20 +206,12 @@ fn normalize_top_flag(arg: String) -> String {
 	arg
 }
 
-impl builtins::Command for TopCommand {
-	type Error = brush_core::Error;
-
-	fn new<I>(args: I) -> Result<Self, clap::Error>
-	where
-		I: IntoIterator<Item = String>,
-	{
-		Self::try_parse_from(args.into_iter().map(normalize_top_flag))
+impl Process for TopCommand {
+	fn rewrite_argv(argv: Vec<String>) -> Vec<String> {
+		argv.into_iter().map(normalize_top_flag).collect()
 	}
 
-	fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
+	fn run(&self, context: &ProcContext) -> impl Future<Output = std::io::Result<i32>> + Send {
 		let iterations = self.iterations;
 		let delay = self.delay;
 		let row_limit = self.rows;
@@ -234,16 +228,16 @@ impl builtins::Command for TopCommand {
 		async move {
 			if !delay.is_finite() || delay < 0.0 || delay > Duration::MAX.as_secs_f64() {
 				writeln!(context.stderr(), "top: invalid delay '{delay}'")?;
-				return Ok(ExecutionResult::new(1));
+				return Ok(1);
 			}
 			if row_limit == Some(0) {
 				writeln!(context.stderr(), "top: row count must be greater than zero")?;
-				return Ok(ExecutionResult::new(1));
+				return Ok(1);
 			}
 			#[cfg(target_os = "windows")]
 			if user.is_some() {
 				writeln!(context.stderr(), "top: user filtering is unavailable on Windows")?;
-				return Ok(ExecutionResult::new(2));
+				return Ok(2);
 			}
 
 			let delay = Duration::from_secs_f64(delay);
@@ -254,7 +248,7 @@ impl builtins::Command for TopCommand {
 
 			loop {
 				if context.is_cancelled() {
-					return Ok(ExecutionExitCode::Interrupted.into());
+					return Ok(INTERRUPTED_EXIT_CODE);
 				}
 
 				let now = std::time::Instant::now();
@@ -321,16 +315,21 @@ impl builtins::Command for TopCommand {
 
 				sort_top_rows(&mut rows, sort);
 				let output = render_top_snapshot(&rows, row_limit, sample + 1, &stats);
-				if let Err(err) = write!(context.stdout(), "{output}") {
+				let write_result = context.stdout().write_all(output.as_bytes());
+				let written = match write_result {
+					Ok(()) => context.flush_output().await,
+					Err(err) => Err(err),
+				};
+				if let Err(err) = written {
 					if err.kind() == io::ErrorKind::BrokenPipe {
-						return Ok(ExecutionResult::new(crate::host::SIGPIPE_EXIT_CODE as u8));
+						return Ok(crate::host::SIGPIPE_EXIT_CODE);
 					}
-					return Err(err.into());
+					return Err(err);
 				}
 
 				sample += 1;
 				if iterations.is_some_and(|count| sample >= count) {
-					return Ok(ExecutionResult::success());
+					return Ok(0);
 				}
 				previous = next_previous;
 				previous_sample = now;
@@ -341,7 +340,7 @@ impl builtins::Command for TopCommand {
 					tokio::select! {
 						() = &mut sleep => {},
 						() = cancel_token.cancelled() => {
-							return Ok(ExecutionExitCode::Interrupted.into());
+							return Ok(INTERRUPTED_EXIT_CODE);
 						},
 					}
 				} else {
@@ -575,13 +574,16 @@ mod tests {
 
 	#[test]
 	fn parses_macos_single_dash_long_options() {
-		use brush_core::builtins::Command as _;
-		let cmd = TopCommand::new(
+		use clap::Parser as _;
+
+		use crate::host::Process as _;
+		let argv = TopCommand::rewrite_argv(
 			["top", "-pid", "56943,101", "-stats", "pid,cpu,th,mem,pstate"]
 				.into_iter()
-				.map(String::from),
-		)
-		.expect("macOS-style flags must parse");
+				.map(String::from)
+				.collect(),
+		);
+		let cmd = TopCommand::try_parse_from(argv).expect("macOS-style flags must parse");
 		assert_eq!(cmd.pids, vec![56943, 101]);
 		assert_eq!(cmd.stats, vec![
 			TopStat::Pid,

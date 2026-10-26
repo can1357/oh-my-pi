@@ -31,6 +31,9 @@
  */
 
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
+import { parseMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
+import { parseMotionMode } from "../config/motion-presets";
+import { parseSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
@@ -109,6 +112,14 @@ function parseMaxTimeSeconds(value: string): number {
 	);
 }
 
+function parseCostUsd(flag: string, value: string): number {
+	const usd = Number(value.trim());
+	if (Number.isFinite(usd) && usd > 0) return usd;
+	throw new CliUsageError(
+		`Invalid ${flag} value: ${JSON.stringify(value)}. Expected a positive USD amount, e.g. 0.50.`,
+	);
+}
+
 /**
  * Setters for flags with string values. Most built-ins consume the next argv
  * token even when it starts with `-`; flags listed in
@@ -165,6 +176,12 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--max-time": (result, value) => {
 		result.maxTime = parseMaxTimeSeconds(value);
 	},
+	"--warn-cost": (result, value) => {
+		result.warnCost = parseCostUsd("--warn-cost", value);
+	},
+	"--max-cost": (result, value) => {
+		result.maxCost = parseCostUsd("--max-cost", value);
+	},
 	"--service-tier": (result, value) => {
 		if (!isServiceTierOpenAISettingValue(value)) {
 			throw new CliUsageError(
@@ -172,6 +189,27 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			);
 		}
 		result.serviceTier = value;
+	},
+	"--spinner-interval": (result, value) => {
+		try {
+			result.spinnerInterval = parseSpinnerInterval(value);
+		} catch (error) {
+			throw new CliUsageError(`--spinner-interval: ${(error as Error).message}`);
+		}
+	},
+	"--max-fps": (result, value) => {
+		try {
+			result.maxFps = parseMaxFps(value);
+		} catch (error) {
+			throw new CliUsageError(`--max-fps: ${(error as Error).message}`);
+		}
+	},
+	"--motion": (result, value) => {
+		try {
+			result.motion = parseMotionMode(value);
+		} catch (error) {
+			throw new CliUsageError(`--motion: ${(error as Error).message}`);
+		}
 	},
 	"--api-key": (result, value) => {
 		result.apiKey = value;
@@ -320,6 +358,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-pty",
 	"--hide-thinking",
 	"--advisor",
+	"--wait-async",
 	"--external-thinking",
 	"--prewalk",
 	"--no-prewalk",
@@ -329,6 +368,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-extensions",
 	"--no-skills",
 	"--no-rules",
+	"--no-context-files",
 	"--no-title",
 	"--no-ui",
 	"--auto-approve",

@@ -118,7 +118,12 @@ export function selectSecurityAuth(
 export async function resolveExactSecurityOAuthAccess(
 	authStorage: AuthStorage,
 	account: SecurityAccountRef,
-	options: { forceRefresh: boolean; refreshReason?: OAuthRefreshReason; signal?: AbortSignal },
+	options: {
+		forceRefresh: boolean;
+		refreshReason?: OAuthRefreshReason;
+		rejectedAccessToken?: string;
+		signal?: AbortSignal;
+	},
 ): Promise<Extract<OAuthAccessResolution, { ok: true }>> {
 	const resolution = await authStorage.oauth.accessById(account.provider, account.credentialId, options);
 	if (!resolution) throw new Error("The pinned security OAuth credential is unavailable");
@@ -147,6 +152,7 @@ export function createExactSecurityOAuthResolver(
 			const resolution = await resolveExactSecurityOAuthAccess(authStorage, account, {
 				forceRefresh: context.error !== undefined,
 				refreshReason: AIError.status(context.error) === 401 ? "auth-recovery" : undefined,
+				rejectedAccessToken: context.previousKey,
 				signal: context.signal,
 			});
 			return resolution.accessToken;

@@ -263,6 +263,14 @@ pub struct AsciiEdge {
 	pub path_to_junction: Vec<GridCoord>,
 }
 
+impl AsciiEdge {
+	/// Whether both edges join the same two nodes, in either direction.
+	pub fn joins_same_pair(&self, other: &Self) -> bool {
+		(self.from, self.to) == (other.from, other.to)
+			|| (self.from, self.to) == (other.to, other.from)
+	}
+}
+
 /// A subgraph container with its canvas bounding box.
 #[derive(Clone, Debug)]
 pub struct AsciiSubgraph {

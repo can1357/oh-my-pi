@@ -434,6 +434,24 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			// giving up, in case the transcript lingers under an artifacts dir.
 			const disk = await this.#resolveFromDisk(ref.id, preferredArtifactDir, onlyPreferred);
 			if (disk) return { ...disk, url: url.href };
+			if (ref.status === "running") {
+				// Registered before its session or JSONL exists: the worker is alive,
+				// its transcript just has not been written yet.
+				const content = [
+					`# ${ref.id} (${ref.status})`,
+					"",
+					"No transcript has been written yet.",
+					`Started ${formatAgo(ref.createdAt)}.`,
+					"",
+				].join("\n");
+				return {
+					url: url.href,
+					content,
+					contentType: "text/markdown",
+					size: Buffer.byteLength(content, "utf-8"),
+					notes: ["Source: agent registry (no transcript yet)"],
+				};
+			}
 			throw new Error(`Agent ${ref.id} has no transcript: session is gone and no session file was retained`);
 		}
 

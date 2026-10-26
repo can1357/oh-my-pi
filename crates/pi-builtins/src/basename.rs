@@ -5,11 +5,10 @@
 
 use std::{ffi::OsString, io::Write, path::PathBuf};
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use uucore::{display::Quotable, line_ending::LineEnding};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes};
 
 mod options {
 	pub static MULTIPLE: &str = "multiple";
@@ -145,11 +144,6 @@ fn app() -> Command {
 				.action(ArgAction::SetTrue)
 				.overrides_with(options::ZERO),
 		)
-}
-
-/// Creates the `basename` builtin registration.
-pub(crate) fn basename_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Basename, SE>()
 }
 
 #[cfg(test)]

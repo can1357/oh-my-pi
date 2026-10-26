@@ -1206,7 +1206,9 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// the journal to prove the durable branch marker, rather than the discarded
 		// physical leaf, selects the active branch after a process restart.
 		vi.spyOn(telemetryExport, "flushTelemetryExport").mockResolvedValue();
-		const printModeExitCode = await runPrintMode(session, { mode: "json" });
+		// Print mode reads a turn's stop reason only after admitting a model turn; with
+		// `agent.prompt` mocked, that turn adds nothing and the capped failure stays last.
+		const printModeExitCode = await runPrintMode(session, { mode: "json", initialMessage: "continue" });
 		expect(printModeExitCode).toBe(1);
 		const reloaded = await SessionManager.open(sessionFile, sessionDir);
 		expect(reloaded.getBranch()).not.toContainEqual(

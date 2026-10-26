@@ -435,6 +435,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 				path: filePath,
 				content: body,
 				...slashCommandFrontmatterDisplay(frontmatter),
+				...(frontmatter.side === true ? { side: true } : {}),
 				level,
 				_source: source,
 			};

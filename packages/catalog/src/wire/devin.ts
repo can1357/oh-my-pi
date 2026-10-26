@@ -22,9 +22,9 @@ const DEVIN_LOCALE = "en";
 const DEVIN_CLI_METADATA = {
 	ideName: "devin-cli",
 	ideType: "chisel",
-	ideVersion: "3000.11.3",
+	ideVersion: "3000.11.205",
 	extensionName: "chisel",
-	extensionVersion: "3000.11.3",
+	extensionVersion: "3000.11.205",
 	locale: DEVIN_LOCALE,
 	os: DEVIN_OS,
 } as const;

@@ -385,6 +385,30 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 		expect(JSON.stringify(params.input)).not.toContain("prompt_cache_breakpoint");
 	});
 
+	it("maps long retention to the 12h lifetime instead of the legacy 24h field", () => {
+		const params = buildParams(
+			openAI56ResponsesModel,
+			historicalContext,
+			{ sessionId: "cache-key", cacheRetention: "long" },
+			undefined,
+		).params;
+
+		expect(params.prompt_cache_options).toEqual({ mode: "implicit", ttl: "12h" });
+		expect(params.prompt_cache_retention).toBeUndefined();
+		expect(JSON.stringify(params.input)).not.toContain("prompt_cache_breakpoint");
+	});
+
+	it("lets an explicit policy ttl override long retention", () => {
+		const params = buildParams(
+			openAI56ResponsesModel,
+			historicalContext,
+			{ sessionId: "cache-key", cacheRetention: "long", promptCache: { mode: "explicit", ttl: "30m" } },
+			undefined,
+		).params;
+
+		expect(params.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
+	});
+
 	it("marks the latest eligible stable history block", () => {
 		const params = buildParams(
 			openAI56ResponsesModel,

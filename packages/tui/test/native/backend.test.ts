@@ -282,4 +282,61 @@ describe("native backend", () => {
 		expect(sent[1]!.body).toEqual({ id: surface, keep: true });
 		expect(h.terminal.rowBytes.slice(rows)).not.toContain("probe rows");
 	});
+
+	it("fills a narrow pane with centered sheets whose content is tall, keeps them full, and leaves short or anchored ones", async () => {
+		const tall = Array.from({ length: 12 }, (_, i) => `line ${i}`).join("\n");
+		const sheet = (text: string, nativeOverlay?: Component["nativeOverlay"]): Probe =>
+			Object.assign(new Probe(md(text)), nativeOverlay ? { nativeOverlay } : {});
+		// An extension dialog without a description: measured through its `rows` fallback.
+		const rowsDialog = (lines: number): Component => ({
+			render: () => Array.from({ length: lines }, (_, i) => `row ${i}`),
+			invalidate: () => {},
+		});
+		const shrinking = sheet(tall, { role: "tall", size: "lg" });
+		harness = await TspHarness.start(
+			tui => {
+				tui.showOverlay(shrinking);
+				tui.showOverlay(sheet("short", { role: "short", size: "lg" }));
+				tui.showOverlay(sheet(tall, { role: "top-tall", size: "md", anchor: "top" }));
+				tui.showOverlay(rowsDialog(12), { width: "80%" });
+				tui.showOverlay(rowsDialog(2), { width: "80%" });
+			},
+			{ cols: 99, rows: 20 },
+		);
+		const h = harness;
+		await h.render();
+		// Role-less overlays are the generic dialogs, in show order.
+		const sizes = (): [string, unknown][] =>
+			h
+				.findAll(n => n.k === "overlay")
+				.map(n => [String(n.p?.role ?? "dialog"), n.p && "size" in n.p ? n.p.size : undefined]);
+		const narrow: [string, unknown][] = [
+			["tall", "full"],
+			["short", "lg"],
+			["top-tall", "md"],
+			["dialog", "full"],
+			["dialog", "lg"],
+		];
+		expect(sizes()).toEqual(narrow);
+
+		// Shrinking content (a filter, a reload) never makes a filled sheet jump back.
+		shrinking.current = md("one line");
+		await h.render();
+		expect(sizes()).toEqual(narrow);
+
+		h.event({ ev: "resize", cols: 100 });
+		await h.render();
+		expect(sizes()).toEqual([
+			["tall", "lg"],
+			["short", "lg"],
+			["top-tall", "md"],
+			["dialog", "lg"],
+			["dialog", "lg"],
+		]);
+
+		h.event({ ev: "resize", cols: 99 });
+		await h.render();
+		expect(sizes()).toEqual(narrow);
+		expect(h.errors).toEqual([]);
+	});
 });

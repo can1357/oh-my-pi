@@ -96,7 +96,8 @@ export function describeHubSidebar<TEntry extends SidebarEntry<string>>(
 			),
 		);
 	}
-	return node("list", { selected: selectedId }, items, key);
+	// The sidebar keeps its width: a body line wider than the pane must not squeeze it.
+	return node("list", { selected: selectedId, shrink: 0 }, items, key);
 }
 
 /**

@@ -282,6 +282,21 @@ describe("read surfaces conflicts as a warning footer", () => {
 		expect(text).toContain("No unresolved git merge conflicts");
 	});
 
+	it("`:conflicts` past the scan byte cap points to a ranged read that registers the rest", async () => {
+		// 10240 lines of exactly 1 KiB fill the 10 MiB scan cap, so the block at L10241 is never scanned.
+		const filler = `${"a".repeat(1023)}\n`.repeat(10_240);
+		await Bun.write(path.join(tempDir, "huge.ts"), filler + TWO_WAY);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+
+		const summary = getText(await read.execute("read-huge-conflicts", { path: "huge.ts:conflicts" }));
+		expect(summary).toContain("`huge.ts:10241-`");
+
+		await read.execute("read-huge-tail", { path: "huge.ts:10241-" });
+		const block = getText(await read.execute("read-huge-block", { path: "conflict://1" }));
+		expect(block).toContain("<<<<<<<");
+	});
+
 	it("window-mode warning shows visible-of-total when window misses some conflicts", async () => {
 		const filePath = path.join(tempDir, "wide.ts");
 		await Bun.write(filePath, TWO_BLOCKS);

@@ -17,6 +17,7 @@ import {
 	mergeTaskBranches,
 	parseIsolationBackend,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
+import { readRetainedMountBackend } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
@@ -73,6 +74,26 @@ describe("worktree isolation helpers", () => {
 		expect(parseIsolationBackend("projfs")).toBe(natives.IsoBackendKind.Projfs);
 		expect(parseIsolationBackend("block-clone")).toBe(natives.IsoBackendKind.WindowsBlockClone);
 		expect(parseIsolationBackend("rcopy")).toBe(natives.IsoBackendKind.Rcopy);
+	});
+
+	// #17644: a failed unmount used to be followed by `rm -rf` through the live mount.
+	it("retains a mount workspace with its backend sidecar when native stop fails", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cleanup-"));
+		tempDirs.push(root);
+		const stopError = new Error("fusermount3 -u -z (exit 1): Device or resource busy");
+		vi.spyOn(natives, "isoStop").mockRejectedValue(stopError);
+
+		const mounted = path.join(root, "overlay");
+		await fs.mkdir(path.join(mounted, "m"), { recursive: true });
+		await fs.mkdir(path.join(mounted, "upper"));
+		await cleanupIsolation({
+			mergedDir: path.join(mounted, "m"),
+			backend: natives.IsoBackendKind.Overlayfs,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		expect((await fs.readdir(mounted)).sort()).toEqual([".omp-retained-backend.json", "m", "upper"]);
+		expect(await readRetainedMountBackend(mounted)).toBe(natives.IsoBackendKind.Overlayfs);
 	});
 
 	// Regression for #8939: baseline capture buffered every untracked byte into
@@ -1389,6 +1410,68 @@ describe("commitToBranch preserves agent commits", () => {
 	// missing from HEAD's index (untracked WIP files, staged-new WIP files) or
 	// when --3way couldn't resolve the overlap. Each scenario below reproduced
 	// the failure before the fix.
+	// Untracked baseline WIP the agent never commits must not fail merge-back.
+	// The agent's commit tree lacks the WIP
+	// file, so the dirty-baseline replay recorded its deletion against
+	// `HEAD + WIP`, and applying that deletion to the clean baseline tree
+	// aborted with "patch does not apply: … does not exist".
+	it("lands a clean agent commit while untouched untracked baseline WIP stays out of the branch", async () => {
+		await fs.writeFile(path.join(parent, "user-wip.txt"), "baseline untracked wip\n");
+		await fs.writeFile(path.join(isolation, "user-wip.txt"), "baseline untracked wip\n");
+		const baseline = await captureBaseline(parent);
+
+		await fs.writeFile(
+			path.join(isolation, "EXP_CLEAN_COMMIT.txt"),
+			"line1\nline2\nline3\nline4\nLINE5-AGENT-WITH-MESSAGE\nline6\nline7\nline8\nline9\nline10\n",
+		);
+		await runGit(isolation, ["add", "EXP_CLEAN_COMMIT.txt"]);
+		await runGit(isolation, ["commit", "-q", "-m", "fix(test): clean commit beside untouched untracked wip"]);
+
+		const result = await commitToBranch(isolation, baseline, "clean-with-wip", undefined);
+		expect(result?.branchName).toBe("omp/task/clean-with-wip");
+
+		const files = (await runGit(parent, ["show", "--name-only", "--pretty=format:", result!.branchName!]))
+			.split("\n")
+			.filter(Boolean);
+		expect(files).toEqual(["EXP_CLEAN_COMMIT.txt"]);
+
+		const merge = await mergeTaskBranches(parent, [
+			{ branchName: result!.branchName!, taskId: "clean-with-wip", baseSha: result!.baseSha! },
+		]);
+		expect(merge).toEqual({ failed: [], merged: ["omp/task/clean-with-wip"] });
+	});
+
+	// Same failure with the untracked WIP present only in the parent checkout:
+	// the patch captures an untracked path from the parent checkout that is
+	// absent from the worktree, so the delta records a deletion the parent's
+	// own tree can never apply.
+	it("ignores parent-untracked paths the isolation never had", async () => {
+		await fs.mkdir(path.join(parent, "generated"), { recursive: true });
+		await fs.writeFile(path.join(parent, "generated/report.additive.patch"), "parent-only untracked baseline\n");
+		const baseline = await captureBaseline(parent);
+		expect(baseline.root.untracked).toContain("generated/report.additive.patch");
+
+		await fs.writeFile(
+			path.join(isolation, "EXP_CLEAN_COMMIT.txt"),
+			"line1\nline2\nline3\nline4\nLINE5-AGENT-WITH-MESSAGE\nline6\nline7\nline8\nline9\nline10\n",
+		);
+		await runGit(isolation, ["add", "EXP_CLEAN_COMMIT.txt"]);
+		await runGit(isolation, ["commit", "-q", "-m", "fix(test): clean commit beside parent-only untracked wip"]);
+
+		const result = await commitToBranch(isolation, baseline, "parent-only-wip", undefined);
+		expect(result?.branchName).toBe("omp/task/parent-only-wip");
+
+		const files = (await runGit(parent, ["show", "--name-only", "--pretty=format:", result!.branchName!]))
+			.split("\n")
+			.filter(Boolean);
+		expect(files).toEqual(["EXP_CLEAN_COMMIT.txt"]);
+
+		const merge = await mergeTaskBranches(parent, [
+			{ branchName: result!.branchName!, taskId: "parent-only-wip", baseSha: result!.baseSha! },
+		]);
+		expect(merge).toEqual({ failed: [], merged: ["omp/task/parent-only-wip"] });
+	});
+
 	describe("with baseline WIP overlapping the agent's changes (#4136)", () => {
 		async function seedWipFileFromParent(destRoot: string, relPath: string): Promise<void> {
 			await fs.mkdir(path.join(destRoot, path.dirname(relPath)), { recursive: true });

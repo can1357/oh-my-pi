@@ -96,12 +96,17 @@ function highlightCached(code: string, validLang: string | undefined, highlightT
 	return highlighted;
 }
 
+/** Whether {@link highlightCode} colors `lang`; text in any other language comes back unstyled. */
+export function isHighlightLanguage(lang: string | undefined): lang is string {
+	return lang !== undefined && nativeSupportsLanguage(lang);
+}
+
 /**
  * Highlight code with syntax coloring based on file extension or language.
  * Returns array of highlighted lines.
  */
 export function highlightCode(code: string, lang?: string, highlightTheme: Theme = theme): string[] {
-	const validLang = lang && nativeSupportsLanguage(lang) ? lang : undefined;
+	const validLang = isHighlightLanguage(lang) ? lang : undefined;
 	const highlighted = highlightCached(code, validLang, highlightTheme);
 	// Always return a fresh array: callers (e.g. renderCodeCell) push extra lines
 	// onto the result, which would corrupt the cached string otherwise.
@@ -110,7 +115,7 @@ export function highlightCode(code: string, lang?: string, highlightTheme: Theme
 
 /** Create a stateful highlighter for progressive terminal rendering. */
 export function createHighlightStream(lang?: string, highlightTheme: Theme = theme): NativeHighlightStream | null {
-	const validLang = lang && nativeSupportsLanguage(lang) ? lang : undefined;
+	const validLang = isHighlightLanguage(lang) ? lang : undefined;
 	if (!validLang) return null;
 	// Workspace loads skip the natives version sentinel, so a stale local
 	// `.node` can omit `HighlightStream` after a pull. Napi constructors can
@@ -305,7 +310,7 @@ export function getMarkdownTheme(): MarkdownTheme {
 					})
 			: undefined,
 		highlightCode: (code: string, lang?: string): string[] => {
-			const validLang = lang && nativeSupportsLanguage(lang) ? lang : undefined;
+			const validLang = isHighlightLanguage(lang) ? lang : undefined;
 			const highlighted = highlightCached(code, validLang, theme);
 			if (highlighted !== null) return highlighted.split("\n");
 			return code.split("\n").map(line => theme.fg("mdCodeBlock", line));

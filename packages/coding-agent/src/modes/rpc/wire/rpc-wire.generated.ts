@@ -378,7 +378,7 @@ export type QueuedMessageQueue = "steering" | "followUp";
 
 export type CacheWarmingMode = "off" | "streaming" | "idle";
 
-/** `set_event_filter` projection: `delta` drops the accumulated snapshots from `message_update`. */
+/** `set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches. */
 export type MessageUpdates = "full" | "delta";
 
 export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
@@ -532,9 +532,29 @@ export interface BashResult {
 	timedOut?: boolean;
 	artifactId?: string;
 	artifactElidedBytes?: number;
+	/** Bytes dropped from the middle of `output`, which keeps the head and tail. */
+	elidedBytes?: number;
+	/** Lines dropped from the middle of `output`. */
+	elidedLines?: number;
+	/** Bytes the per-line column cap cut from `output`, across all lines. */
+	columnDroppedBytes?: number;
+	/** Lines of `output` the per-line column cap cut; the artifact holds them whole. */
+	columnTruncatedLines?: number;
+	/** First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it. */
+	columnTruncatedRange?: LineRange;
+	/** The per-line column cap in UTF-8 bytes, set when it cut a line. */
+	columnMax?: number;
 	artifactError?: Record<string, unknown>;
+	minimized?: Record<string, unknown>;
 	workingDir?: string;
 	images?: ImageContent[];
+	/** The embedded shell's final `ShellTrace` of the run; only when the caller asked for one. */
+	trace?: Record<string, unknown>;
+}
+
+export interface LineRange {
+	first: number;
+	last: number;
 }
 
 export interface FastModeResult {
@@ -612,6 +632,14 @@ export interface BranchResult {
 	cancelled: boolean;
 }
 
+export interface NavigateTreeResult {
+	cancelled: boolean;
+	/** Only ever `true`: `abort_branch_summary` stopped the summary; nothing moved. */
+	aborted?: boolean;
+	/** The target was a user message: its text, for the editor; the leaf moved to its parent. */
+	editorText?: string;
+}
+
 export interface TokenUsage {
 	input: number;
 	output: number;
@@ -640,6 +668,8 @@ export interface SessionStats {
 	sessionFile?: string;
 	credits?: SessionCredits;
 	routedModels?: Record<string, number>;
+	/** Failed edits by the engine's `errorKind`. */
+	editRejections?: Record<string, number>;
 	contextUsage?: ContextUsage;
 }
 
@@ -719,6 +749,8 @@ export interface BtwHistoryTurn {
 	status: BtwStatus;
 	createdAt: number;
 	updatedAt: number;
+	/** Images attached to the question. */
+	images?: ImageContent[];
 	error?: string;
 }
 
@@ -731,6 +763,8 @@ export interface BtwHistoryRecord {
 	updatedAt: number;
 	id: string;
 	leafId: string | null;
+	/** Images attached to the question. */
+	images?: ImageContent[];
 	error?: string;
 	followUps?: BtwHistoryTurn[];
 }
@@ -873,6 +907,25 @@ export interface AutoCompactionEndEvent {
 	skipped?: boolean;
 }
 
+/** A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted. */
+export interface ManualCompactionStartEvent {
+	type: "manual_compaction_start";
+	/** The `/compact <mode>` subcommand, when one was given. */
+	mode?: string;
+}
+
+/** Outcome of the compaction announced by the matching `manual_compaction_start`. */
+export interface ManualCompactionEndEvent {
+	type: "manual_compaction_end";
+	/** The compaction was cancelled (abort, or a `session_before_compact` hook). */
+	aborted: boolean;
+	/** Present when the compaction committed. */
+	result?: CompactionResult;
+	/** There was nothing to compact; `errorMessage` says why. */
+	skipped?: boolean;
+	errorMessage?: string;
+}
+
 export interface AutoRetryStartEvent {
 	type: "auto_retry_start";
 	attempt: number;
@@ -942,6 +995,7 @@ export interface AdvisorYieldedEvent {
 	type: "advisor_yielded";
 }
 
+/** Rule injection: a TTSR rule matched the stream and its text was injected. Each rule carries at least `name`, `path`, and `content`. */
 export interface TtsrTriggeredEvent {
 	type: "ttsr_triggered";
 	rules: Record<string, unknown>[];
@@ -997,7 +1051,7 @@ export interface QueueUpdateEvent {
 }
 
 /** A session event, discriminated by `type`; `set_event_filter` selects which are sent. */
-export type RpcAgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent;
+export type RpcAgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent;
 
 /** First frame after startup; transport fields are absent on servers without protocol v2. */
 export interface ReadyEvent {
@@ -1018,6 +1072,8 @@ export interface PromptError {
 	provider?: string;
 	model?: string;
 	httpStatus?: number;
+	/** `cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request. */
+	code?: "cost_cap";
 }
 
 /** Terminal outcome of one accepted `prompt` / `abort_and_prompt`, keyed by request `id`. */
@@ -1131,6 +1187,28 @@ export interface LiveEndEvent {
 	error?: string;
 }
 
+/** State of one draft-only microphone capture. */
+export interface DictationStateEvent {
+	type: "dictation_state";
+	captureId: string;
+	state: "starting" | "recording" | "transcribing";
+}
+
+/** Full accumulated draft preview; replaces the previous preview for this capture. */
+export interface DictationTranscriptEvent {
+	type: "dictation_transcript";
+	captureId: string;
+	text: string;
+}
+
+/** Exactly one terminal frame per capture; text is the accumulated result. */
+export interface DictationEndEvent {
+	type: "dictation_end";
+	captureId: string;
+	text: string;
+	error?: string;
+}
+
 /** Text appended to the running side question's latest answer. */
 export interface BtwDeltaEvent {
 	type: "btw_delta";
@@ -1221,6 +1299,7 @@ export interface InputUiRequest {
 	title: string;
 	placeholder?: string;
 	timeout?: number;
+	secret?: boolean;
 }
 
 export interface EditorUiRequest {
@@ -1449,7 +1528,7 @@ export interface HostUriSchemeDefinition {
 }
 
 /** Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`. */
-export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
+export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
 
 /** Any frame the server writes to stdout (after reassembling `rpc_chunk` sequences), discriminated by `type`. */
 export type RpcServerFrame = RpcResponse | RpcHostRequest | RpcNotification;
@@ -1614,12 +1693,31 @@ export interface LiveStartResult {
 	voice: string;
 }
 
+export interface LiveConnectParams {
+	sdpOffer: string;
+	voice?: string;
+	instructions?: string;
+}
+
+export interface LiveConnectResult {
+	voice: string;
+	sdpAnswer: string;
+}
+
 export interface LiveMuteParams {
 	muted?: boolean;
 }
 
 export interface LiveMuteResult {
 	muted: boolean;
+}
+
+export interface DictationStartParams {
+	captureId: string;
+}
+
+export interface DictationStopResult {
+	text: string;
 }
 
 export interface SetModelParams {
@@ -1675,6 +1773,15 @@ export interface BashParams {
 	command: string;
 }
 
+export interface GetSessionLeaseParams {
+	sessionIds: string[];
+}
+
+export interface GetSessionLeaseResult {
+	held: string[];
+	unknown: string[];
+}
+
 export interface ExportHtmlParams {
 	outputPath?: string;
 }
@@ -1695,6 +1802,19 @@ export interface BranchParams {
 
 export interface ForkParams {
 	entryId?: string;
+}
+
+export interface NavigateTreeParams {
+	entryId: string;
+	/** Summarize the abandoned branch at the target. */
+	summarize?: boolean;
+	/** Instructions for the summarizer. */
+	customInstructions?: string;
+}
+
+export interface SetLabelParams {
+	entryId: string;
+	label?: string;
 }
 
 export interface GetBranchMessagesResult {
@@ -1819,8 +1939,11 @@ export interface RpcWireCommands {
 	cancel_subagent: { params: CancelSubagentParams; result: CancelSubagentResult };
 	steer_subagent: { params: SteerSubagentParams; result: undefined };
 	live_start: { params: LiveStartParams; result: LiveStartResult };
+	live_connect: { params: LiveConnectParams; result: LiveConnectResult };
 	live_stop: { params: undefined; result: undefined };
 	live_mute: { params: LiveMuteParams; result: LiveMuteResult };
+	dictation_start: { params: DictationStartParams; result: undefined };
+	dictation_stop: { params: undefined; result: DictationStopResult };
 	set_model: { params: SetModelParams; result: ModelInfo };
 	cycle_model: { params: undefined; result: ModelCycleResult | null };
 	get_available_models: { params: undefined; result: GetAvailableModelsResult };
@@ -1838,10 +1961,14 @@ export interface RpcWireCommands {
 	bash: { params: BashParams; result: BashResult };
 	abort_bash: { params: undefined; result: undefined };
 	get_session_stats: { params: undefined; result: SessionStats };
+	get_session_lease: { params: GetSessionLeaseParams; result: GetSessionLeaseResult };
 	export_html: { params: ExportHtmlParams; result: ExportHtmlResult };
 	switch_session: { params: SwitchSessionParams; result: CancellationResult };
 	branch: { params: BranchParams; result: BranchResult };
 	fork: { params: ForkParams; result: CancellationResult };
+	navigate_tree: { params: NavigateTreeParams; result: NavigateTreeResult };
+	abort_branch_summary: { params: undefined; result: undefined };
+	set_label: { params: SetLabelParams; result: undefined };
 	get_branch_messages: { params: undefined; result: GetBranchMessagesResult };
 	get_last_assistant_text: { params: undefined; result: GetLastAssistantTextResult };
 	set_session_name: { params: SetSessionNameParams; result: undefined };

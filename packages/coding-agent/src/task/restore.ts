@@ -22,8 +22,8 @@ import { hasRestorableTurn } from "../session/exit-diagnostics";
 import { extractSessionInit } from "../session/session-manager";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { EventBus } from "../utils/event-bus";
-import { runSubagentFollowUpTurn } from "./executor";
-import { persistedAgentDefinition } from "./persisted-revive";
+import { runSubagentFollowUpTurn, softRequestBudgetFor } from "./executor";
+import { persistedAgentDefinition, persistedAgentName } from "./persisted-revive";
 import { formatTaskResultSummary } from "./result-summary";
 import { cfgTaskMaxRuntimeMs } from "./settings";
 
@@ -64,8 +64,8 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 	if (!sessionFile || !manager) return [];
 	const registry = AgentRegistry.global();
 	await ensurePersistedRoster(registry, sessionFile);
-	const subSessions = await collectSubSessions(sessionFile, key => {
-		logger.warn("Subagent transcript unreadable; not restored", { key });
+	const subSessions = await collectSubSessions(sessionFile, {
+		onUnreadable: key => logger.warn("Subagent transcript unreadable; not restored", { key }),
 	});
 	// Parents first: a child's result is delivered to its parent's session.
 	const keys = Object.keys(subSessions).sort((a, b) => a.split("/").length - b.split("/").length);
@@ -81,6 +81,7 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 			continue;
 		}
 		const sessionFileOfRef = ref.sessionFile;
+		const agentName = persistedAgentName(ref.displayName, init);
 		const structured = init.tools.includes("yield");
 		manager.register(
 			"task",
@@ -100,6 +101,7 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 					subagentEventBus: options.subagentEventBus,
 					artifactsDir: path.dirname(sessionFileOfRef),
 					maxRuntimeMs: cfgTaskMaxRuntimeMs.get(session.settings),
+					...softRequestBudgetFor(agentName, session.settings),
 				});
 				const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 				const structuredOutput = result.structuredOutput;

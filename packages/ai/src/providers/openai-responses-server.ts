@@ -10,8 +10,13 @@
  */
 
 import { type } from "@oh-my-pi/omptype";
-import { logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
-import { resolvePromptCacheKey } from "../auth-gateway/http";
+import { isRecord, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import {
+	isOpenAIReasoningEffort,
+	isOpenAIServiceTier,
+	openAIErrorResponse,
+	resolvePromptCacheKey,
+} from "../auth-gateway/http";
 import type { AuthGatewayStreamControl, AuthGatewayParsedRequest as ParsedRequest } from "../auth-gateway/types";
 import * as AIError from "../error";
 import type {
@@ -64,37 +69,20 @@ function isOpenAIResponseInclude(value: unknown): value is keyof typeof OPENAI_R
 	return typeof value === "string" && value in OPENAI_RESPONSE_INCLUDES;
 }
 
-function isReasoningEffort(value: unknown): value is NonNullable<ParsedRequest["options"]["reasoning"]> {
-	return (
-		value === "minimal" ||
-		value === "low" ||
-		value === "medium" ||
-		value === "high" ||
-		value === "xhigh" ||
-		value === "max"
-	);
-}
-
-function isServiceTier(value: unknown): value is NonNullable<ParsedRequest["options"]["serviceTier"]> {
-	return value === "auto" || value === "default" || value === "flex" || value === "scale" || value === "priority";
-}
-
-function isObj(v: unknown): v is Record<string, unknown> {
-	return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
 const UNSUPPORTED_EXPLICIT_PROMPT_CACHE_MESSAGE =
 	"openai-responses: prompt_cache_options and prompt_cache_breakpoint are unsupported by this auth-gateway route; use /v1/pi/stream with options.promptCache instead";
 
 function hasUnsupportedExplicitPromptCacheFields(body: unknown): boolean {
-	if (!isObj(body)) return false;
+	if (!isRecord(body)) return false;
 	if ("prompt_cache_options" in body || "prompt_cache_breakpoint" in body) return true;
 	if (!Array.isArray(body.input)) return false;
 
 	return body.input.some(item => {
-		if (!isObj(item)) return false;
+		if (!isRecord(item)) return false;
 		if ("prompt_cache_breakpoint" in item) return true;
-		return Array.isArray(item.content) && item.content.some(part => isObj(part) && "prompt_cache_breakpoint" in part);
+		return (
+			Array.isArray(item.content) && item.content.some(part => isRecord(part) && "prompt_cache_breakpoint" in part)
+		);
 	});
 }
 
@@ -307,7 +295,7 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 		legacyText = "";
 	};
 	for (const raw of output) {
-		if (!isObj(raw)) continue;
+		if (!isRecord(raw)) continue;
 		const blockType = raw.type;
 		if (blockType === "input_text") {
 			flushLegacyText();
@@ -365,7 +353,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	// `resolvePromptCacheKey` call further down.
 
 	rejectUnsupportedExplicitPromptCacheFields(body);
-	coerceNullMessageContentInPlace(isObj(body) ? body.input : undefined);
+	coerceNullMessageContentInPlace(isRecord(body) ? body.input : undefined);
 	const data = openaiResponsesRequestSchema(body);
 	if (data instanceof type.errors) {
 		throw new AIError.ValidationError(`openai-responses: ${data.summary}`);
@@ -472,7 +460,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 				let args: Record<string, unknown>;
 				try {
 					const parsedArgs: unknown = JSON.parse(argsRaw);
-					args = isObj(parsedArgs) ? parsedArgs : {};
+					args = isRecord(parsedArgs) ? parsedArgs : {};
 				} catch {
 					throw new AIError.ValidationError(
 						`openai-responses: function_call ${call.call_id} has invalid JSON arguments`,
@@ -577,15 +565,15 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	};
 
 	const options: ParsedRequest["options"] = {};
-	if (data.max_output_tokens !== undefined) options.maxOutputTokens = data.max_output_tokens;
-	if (data.temperature !== undefined) options.temperature = data.temperature;
-	if (data.top_p !== undefined) options.topP = data.top_p;
+	if (typeof data.max_output_tokens === "number") options.maxOutputTokens = data.max_output_tokens;
+	if (typeof data.temperature === "number") options.temperature = data.temperature;
+	if (typeof data.top_p === "number") options.topP = data.top_p;
 	if (data.stop !== undefined && data.stop !== null) {
 		options.stopSequences = typeof data.stop === "string" ? [data.stop] : data.stop;
 	}
 	const toolChoice = mapToolChoice(data.tool_choice as ParsedToolChoice | undefined);
 	if (toolChoice !== undefined) options.toolChoice = toolChoice;
-	if (data.reasoning?.effort && isReasoningEffort(data.reasoning.effort)) {
+	if (data.reasoning?.effort && isOpenAIReasoningEffort(data.reasoning.effort)) {
 		options.reasoning = data.reasoning.effort;
 	}
 	// OpenAI summary: `none` → suppress; `auto`/`concise`/`detailed` → request
@@ -605,7 +593,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 			});
 		}
 	}
-	if (data.service_tier !== undefined && isServiceTier(data.service_tier)) {
+	if (data.service_tier !== undefined && isOpenAIServiceTier(data.service_tier)) {
 		options.serviceTier = data.service_tier;
 	}
 	if (data.presence_penalty !== undefined) options.presencePenalty = data.presence_penalty;
@@ -616,7 +604,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (cacheKey !== undefined) options.promptCacheKey = cacheKey;
 	if (data.previous_response_id !== undefined) options.previousResponseId = data.previous_response_id;
 	if (data.user !== undefined) options.user = data.user;
-	if (isObj(data.metadata)) options.metadata = data.metadata;
+	if (isRecord(data.metadata)) options.metadata = data.metadata;
 	// `store` is a stateful-storage hint that omp's gateway doesn't honour;
 	// silently accepted by the schema. No typed slot — drop.
 
@@ -641,12 +629,7 @@ function findToolNameById(messages: Message[], callId: string): string {
 
 // ─── formatError ────────────────────────────────────────────────────────────
 
-export function formatError(status: number, type: string, message: string): Response {
-	return new Response(JSON.stringify({ error: { message, type } }), {
-		status,
-		headers: { "Content-Type": "application/json" },
-	});
-}
+export const formatError = openAIErrorResponse;
 
 // ─── output item builders (shared by streaming + non-streaming encoders) ────
 
@@ -716,7 +699,7 @@ function buildReasoningItem(part: ThinkingContent): ReasoningOutputItem {
 	if (part.thinkingSignature) {
 		try {
 			const sigParsed: unknown = JSON.parse(part.thinkingSignature);
-			if (isObj(sigParsed) && sigParsed.type === "reasoning") {
+			if (isRecord(sigParsed) && sigParsed.type === "reasoning") {
 				const id = part.itemId ?? asString(sigParsed.id) ?? makeReasoningId();
 				// Preserve any extra fields (encrypted_content, …) the original carried,
 				// but normalize the summary into the canonical `{type, text}[]` shape.
@@ -743,7 +726,7 @@ function reasoningItemId(part: ThinkingContent): string {
 	if (part.thinkingSignature) {
 		try {
 			const sigParsed: unknown = JSON.parse(part.thinkingSignature);
-			if (isObj(sigParsed)) {
+			if (isRecord(sigParsed)) {
 				const id = asString(sigParsed.id);
 				if (id) return id;
 			}

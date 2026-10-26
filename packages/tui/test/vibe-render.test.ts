@@ -12,7 +12,8 @@
  *    repaint the block without re-invoking renderCall/renderResult.
  * 4. Every emitted line respects the render width (sanitized, truncated).
  */
-import { beforeAll, describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 import { createVibeToolRenderer, type VibeToolDetails } from "@oh-my-pi/pi-tui/tools/vibe";
 import type { VibeScreenSnapshot } from "@oh-my-pi/pi-tui/tools/vibe";
@@ -102,6 +103,44 @@ describe("vibe tool renderers", () => {
 		// Spinner glyphs for frames 0 and 5 differ; a component that baked its
 		// lines at build time would render byte-identical output.
 		expect(second).not.toBe(first);
+	});
+
+	it.each(["wait", "list"] as const)("completed %s walls do not re-emit retired worker rows as time advances", op => {
+		let now = 1_800_000_000_000;
+		const clock = spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			const renderer = createVibeToolRenderer(op);
+			const details: VibeToolDetails = {
+				op,
+				screens: ["Anna", "Bob"].map(id =>
+					makeScreen({
+						id,
+						turnStartedAt: now - 60_000,
+						turnMessage: "Build the widget",
+						trace: ["read(src/widget.ts)", "edit(src/widget.ts)"],
+						outputTail: ["Updating the widget"],
+					}),
+				),
+				...(op === "wait" ? { wait: { settled: [], stillRunning: ["Anna", "Bob"], timedOut: true } } : {}),
+			};
+			const options = { expanded: false, isPartial: false, spinnerFrame: 0 };
+			const component = renderer.renderResult({ content: [], details }, options, uiTheme);
+			const transcript = new TranscriptContainer();
+			transcript.addChild(component);
+			transcript.addChild({ render: () => ["director/editor"] });
+			const first = transcript.peekFinalizedBatch(100, 10)!;
+			expect(strip(first.rows).join("\n")).toContain("Anna");
+			transcript.acknowledgeFinalizedBatch(first.id);
+			transcript.renderViewport(100, 10, { tick: 0, now });
+			for (let tick = 1; tick <= 3; tick++) {
+				now += 1000;
+				options.spinnerFrame += 1;
+				expect(transcript.peekFinalizedBatch(100, 10)).toBeUndefined();
+				transcript.renderViewport(100, 10, { tick, now });
+			}
+		} finally {
+			clock.mockRestore();
+		}
 	});
 
 	it("send result frames the ack under the composer", () => {

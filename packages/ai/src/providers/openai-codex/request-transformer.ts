@@ -2,7 +2,13 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { Model } from "../../types";
-import { mapOpenAIReasoningEffort } from "../openai-shared";
+import { stripOpenAIResponsesInternalMetadataForReplay } from "../../utils";
+import {
+	mapOpenAIReasoningEffort,
+	type ResponsesToolCallKind,
+	responsesToolCallKind,
+	responsesToolOutputKind,
+} from "../openai-shared";
 
 /** Reasoning replay scope for the Codex Responses API (`reasoning.context`). */
 export type CodexReasoningContext = "auto" | "current_turn" | "all_turns";
@@ -50,6 +56,7 @@ export interface InputItem {
 	type?: string | null;
 	role?: string;
 	content?: unknown;
+	internal_chat_message_metadata_passthrough?: unknown;
 	call_id?: string | null;
 	name?: string;
 	output?: unknown;
@@ -179,14 +186,12 @@ function filterInput(input: InputItem[] | undefined): InputItem[] | undefined {
 
 	return input
 		.filter(item => item.type !== "item_reference")
-		.map(item => {
-			if (item.type === "computer_call") return item;
-			if (item.id != null) {
-				const { id: _id, ...rest } = item;
-				return rest as InputItem;
-			}
-			return item;
-		});
+		.map(item =>
+			stripOpenAIResponsesInternalMetadataForReplay(
+				item,
+				item.type !== "computer_call" && item.id != null ? "drop-id" : "preserve",
+			),
+		);
 }
 
 const CODEX_ORPHAN_OUTPUT_LIMIT = 16_000;
@@ -212,22 +217,6 @@ function orphanFunctionOutputToMessage(item: InputItem, callId: string): InputIt
 		role: "assistant",
 		content: `[Previous ${toolName} result; call_id=${callId}]: ${text}`,
 	} as InputItem;
-}
-
-type ToolCallKind = "function" | "custom" | "computer";
-
-function toolCallKind(type: unknown): ToolCallKind | undefined {
-	if (type === "function_call") return "function";
-	if (type === "custom_tool_call") return "custom";
-	if (type === "computer_call") return "computer";
-	return undefined;
-}
-
-function toolOutputKind(type: unknown): ToolCallKind | undefined {
-	if (type === "function_call_output") return "function";
-	if (type === "custom_tool_call_output") return "custom";
-	if (type === "computer_call_output") return "computer";
-	return undefined;
 }
 
 /**
@@ -279,13 +268,13 @@ export function sanitizeInputCallIds(input: InputItem[]): void {
 }
 
 function repairToolCallPairs(input: InputItem[]): InputItem[] {
-	const callKinds = new Map<string, ToolCallKind>();
-	const outputKinds = new Map<string, ToolCallKind>();
+	const callKinds = new Map<string, ResponsesToolCallKind>();
+	const outputKinds = new Map<string, ResponsesToolCallKind>();
 	for (const item of input) {
 		const callId = typeof item.call_id === "string" ? item.call_id : undefined;
 		if (callId === undefined) continue;
-		const callKind = toolCallKind(item.type);
-		const outputKind = toolOutputKind(item.type);
+		const callKind = responsesToolCallKind(item.type);
+		const outputKind = responsesToolOutputKind(item.type);
 		if (callKind) callKinds.set(callId, callKind);
 		if (outputKind) outputKinds.set(callId, outputKind);
 	}
@@ -293,8 +282,8 @@ function repairToolCallPairs(input: InputItem[]): InputItem[] {
 	const repaired: InputItem[] = [];
 	for (const item of input) {
 		const callId = typeof item.call_id === "string" ? item.call_id : undefined;
-		const callKind = toolCallKind(item.type);
-		const outputKind = toolOutputKind(item.type);
+		const callKind = responsesToolCallKind(item.type);
+		const outputKind = responsesToolOutputKind(item.type);
 
 		if (outputKind && callId !== undefined && callKinds.get(callId) !== outputKind) {
 			repaired.push(orphanFunctionOutputToMessage(item, callId));
