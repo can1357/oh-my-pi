@@ -121,6 +121,7 @@ export function exitProcess(code: number): never {
 }
 let cleanupPromise: Promise<void> | undefined;
 let stdioDisconnectRegistrations = 0;
+let stderrFailureLogged = false;
 
 /** User-facing command printed before fatal cleanup so interrupted work can be resumed. */
 export interface FatalRecoveryHint {
@@ -352,16 +353,37 @@ function onStdoutDisconnect(err: Error): void {
 }
 
 /**
- * Treat a closed stdout consumer as a graceful peer disconnect for the caller's
- * active lifetime. Attaches one shared `process.stdout` `error` listener,
- * ref-counted across registrants (the ACP protocol server, the one-shot CLI
- * entry). The returned callback removes the registration; the listener detaches
- * when the last registrant unregisters.
+ * Contain a write failure on `process.stderr`'s own `error` event.
+ *
+ * stderr carries best-effort diagnostics, never session output. A headless run
+ * whose launcher dropped its stderr reader (`omp -p ... 2>&1 | head`, a
+ * supervisor that closed its end) delivers the broken-pipe write here; with no
+ * listener Node/Bun rethrow it as an uncaught exception and the whole session
+ * dies mid-turn. Losing diagnostics is the only consequence of a dead stderr,
+ * so the failure is recorded once in the log file and the run continues —
+ * unlike {@link onStdoutDisconnect}, nothing is waiting on stderr to finish.
+ * Later writes to the destroyed stream re-emit to this same listener; only the
+ * first is logged.
+ */
+function onStderrDisconnect(err: Error): void {
+	if (stderrFailureLogged) return;
+	stderrFailureLogged = true;
+	logger.warn("Stderr write failed; further diagnostics on stderr are dropped", { err });
+}
+
+/**
+ * Treat a closed stdout consumer as a graceful peer disconnect, and a closed
+ * stderr consumer as dropped diagnostics, for the caller's active lifetime.
+ * Attaches one shared `process.stdout` and one `process.stderr` `error`
+ * listener, ref-counted across registrants (the ACP protocol server, the
+ * one-shot CLI entry). The returned callback removes the registration; the
+ * listeners detach when the last registrant unregisters.
  */
 export function registerStdioDisconnectHandling(): () => void {
 	let registered = true;
 	if (Bun.isMainThread && stdioDisconnectRegistrations === 0) {
 		process.stdout.on("error", onStdoutDisconnect);
+		process.stderr.on("error", onStderrDisconnect);
 	}
 	stdioDisconnectRegistrations++;
 	return () => {
@@ -370,6 +392,7 @@ export function registerStdioDisconnectHandling(): () => void {
 		stdioDisconnectRegistrations--;
 		if (Bun.isMainThread && stdioDisconnectRegistrations === 0) {
 			process.stdout.removeListener("error", onStdoutDisconnect);
+			process.stderr.removeListener("error", onStderrDisconnect);
 		}
 	};
 }

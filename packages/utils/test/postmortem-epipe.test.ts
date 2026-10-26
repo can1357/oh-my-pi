@@ -10,6 +10,7 @@ const attributionChildFlag = "--attribution-write-epipe-child";
 const unrelatedUncaughtChildFlag = "--unrelated-uncaught-child";
 const socketClosedChildFlag = "--socket-closed-child";
 const deferNonEpipeChildFlag = "--defer-non-epipe-stdout-child";
+const stderrDisconnectChildFlag = "--stderr-disconnect-child";
 
 const CHILD_FLAGS = [
 	uncaughtIpcChildFlag,
@@ -18,6 +19,7 @@ const CHILD_FLAGS = [
 	unrelatedUncaughtChildFlag,
 	socketClosedChildFlag,
 	deferNonEpipeChildFlag,
+	stderrDisconnectChildFlag,
 ];
 if (process.argv.includes(unrelatedUncaughtChildFlag)) {
 	// A synchronous throw with no stdio identity must stay fatal.
@@ -49,6 +51,22 @@ if (process.argv.includes(unrelatedUncaughtChildFlag)) {
 	// process.stdout's own `error` event, driving graceful runQuit(0) + cleanup.
 	for (let i = 0; i < 64; i++) process.stdout.write(`${"x".repeat(64 * 1024)}\n`);
 	await Promise.withResolvers<void>().promise;
+} else if (process.argv.includes(stderrDisconnectChildFlag)) {
+	const marker = process.argv[process.argv.indexOf(stderrDisconnectChildFlag) + 1];
+	if (!marker) throw new Error("Missing survival marker path");
+	postmortem.registerStdioDisconnectHandling();
+	// A real write to a stderr whose consumer already closed the pipe (a headless
+	// run whose launcher dropped its stderr reader) surfaces on process.stderr's
+	// own `error` event. Diagnostics are best-effort: the session must outlive it.
+	// The last write's callback settles once the stream has resolved the failure.
+	const settled = Promise.withResolvers<void>();
+	for (let i = 0; i < 64; i++) {
+		process.stderr.write(`${"x".repeat(64 * 1024)}\n`, i === 63 ? () => settled.resolve() : undefined);
+	}
+	await settled.promise;
+	await Bun.write(marker, "survived stderr disconnect");
+	// No explicit process.exit: a fatal path armed by the failed write must be
+	// allowed to run to completion and set the exit code.
 } else if (process.argv.includes(attributionChildFlag)) {
 	postmortem.registerStdioDisconnectHandling();
 	// A write EPIPE that did NOT come from stdout (a closed subprocess stdin or
@@ -203,6 +221,30 @@ if (!CHILD_FLAGS.some(flag => process.argv.includes(flag))) {
 				}
 			},
 		);
+
+		// Regression: `omp -p` whose stderr reader vanished (launcher closed its end;
+		// stdout and stdin unaffected) died with `[Uncaught Exception] Error: EPIPE:
+		// broken pipe, write` because nothing listened on process.stderr's `error`
+		// event. A dead diagnostics channel must not take the session down. `2>&1
+		// >/dev/null | true` routes only stderr into a pipe whose read end closes
+		// immediately; PIPESTATUS[0] is the child's exit code.
+		it.skipIf(process.platform === "win32")("survives a stderr consumer that closes early", async () => {
+			const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-postmortem-stderr-"));
+			const marker = path.join(tmpDir, "survived");
+			try {
+				const script = `"${process.execPath}" run "${import.meta.path}" "${stderrDisconnectChildFlag}" "${marker}" 2>&1 >/dev/null | true; echo "\${PIPESTATUS[0]}"`;
+				const proc = Bun.spawn(["bash", "-c", script], {
+					stdout: "pipe",
+					stderr: "pipe",
+					stdin: "ignore",
+				});
+				const [, pipestatusText] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+				expect(Number(pipestatusText.trim())).toBe(0);
+				expect(await fs.readFile(marker, "utf8")).toBe("survived stderr disconnect");
+			} finally {
+				await fs.rm(tmpDir, { recursive: true, force: true });
+			}
+		});
 
 		function makeSocketClosedErr(stack: string): Error {
 			const err = new Error("Socket is closed");
