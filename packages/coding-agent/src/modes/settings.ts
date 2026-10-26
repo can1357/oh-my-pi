@@ -483,6 +483,19 @@ export const cfgTuiRenderSvg = register({
 	},
 });
 
+export const cfgTuiRenderImages = register({
+	id: "tui.renderImages",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Render Image Files",
+		description:
+			"Draw a local image file the agent shows on a line of its own as an inline picture, on terminals that show graphics",
+	},
+});
+
 export const cfgTuiAutoGraph = register({
 	id: "tui.autoGraph",
 	type: "enum",

@@ -46,6 +46,7 @@ describe("visuals guidance in the system prompt", () => {
 		expect(tui).toContain("```mermaid");
 		expect(tui).toContain("```svg");
 		expect(tui).toContain("charts it underneath");
+		expect(tui).toContain("![what it shows](/absolute/path.png)");
 
 		// rpc-ui: a UI for dialogs, but replies are read by the client as text.
 		const rpc = await promptFor({ hasUI: true });
@@ -54,6 +55,7 @@ describe("visuals guidance in the system prompt", () => {
 			expect(prompt).not.toContain("```mermaid");
 			expect(prompt).not.toContain("```svg");
 			expect(prompt).not.toContain("charts it underneath");
+			expect(prompt).not.toContain("![what it shows]");
 		}
 	});
 });

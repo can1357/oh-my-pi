@@ -3,6 +3,8 @@ import type { ImageBudget } from "../components/image";
 import { type Markdown, streamingMarkdownSource, type TableLocks } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Container } from "../tui";
+import { splitImageFigures } from "./image-source";
+import { RasterFigure, rasterFigureRendering } from "./raster-figure";
 import { SvgFigure, svgFigureRendering } from "./svg-figure";
 import { type FigureSegment, splitSvgFences } from "./svg-source";
 import { type ChartSegment, hasChartTable, splitTableCharts, TableChartFigure } from "./table-chart";
@@ -28,13 +30,15 @@ export interface FigureMarkdownOptions {
 type Part =
 	| { readonly kind: "markdown"; readonly md: Markdown; text: string }
 	| { readonly kind: "svg"; readonly figure: SvgFigure; source: string; closed: boolean }
+	| { readonly kind: "image"; readonly figure: RasterFigure; path: string; alt: string }
 	| { readonly kind: "chart"; readonly figure: TableChartFigure; table: Tokens.Table };
 
 /**
  * Assistant Markdown whose top-level ```svg fences are lifted out of the prose
- * and drawn as images ({@link SvgFigure}), and whose numeric tables get a chart
- * drawn under them ({@link TableChartFigure}), with ordinary {@link Markdown}
- * for the prose between them. Stands in for Markdown on an assistant text
+ * and drawn as images ({@link SvgFigure}), whose lines naming a local picture
+ * file are drawn as that file ({@link RasterFigure}), and whose numeric tables
+ * get a chart drawn under them ({@link TableChartFigure}), with ordinary
+ * {@link Markdown} for the prose between them. Stands in for Markdown on an assistant text
  * block that holds an svg fence or a chartable table: {@link setText} streams
  * in place, reusing every part whose kind is unchanged, and
  * {@link transientRenderCache} marks the block's tail as still streaming — the
@@ -151,6 +155,21 @@ export class FigureMarkdown extends Container {
 				reshaped = true;
 				return { kind: "markdown", md: this.#proseRun(text, index), text };
 			}
+			if (segment.kind === "image") {
+				if (old?.kind === "image") {
+					old.path = segment.path;
+					old.alt = segment.alt;
+					return old;
+				}
+				reshaped = true;
+				const { markdown, budget, onChange } = this.#options;
+				return {
+					kind: "image",
+					figure: new RasterFigure({ markdown, budget, onChange }),
+					path: segment.path,
+					alt: segment.alt,
+				};
+			}
 			if (old?.kind === "svg") {
 				old.source = segment.source;
 				old.closed = segment.closed;
@@ -175,16 +194,22 @@ export class FigureMarkdown extends Container {
 	}
 
 	/**
-	 * The block as prose, ```svg fences (when figures are on) and charts after
-	 * complete tables (when charts are on); only the last run can still stream.
+	 * The block as prose, ```svg fences and local pictures (when those figures
+	 * are on), and charts after complete tables (when charts are on); only the
+	 * last run can still stream.
 	 */
 	#segments(): (FigureSegment | ChartSegment)[] {
 		const fences: FigureSegment[] = svgFigureRendering()
 			? splitSvgFences(this.#text)
 			: [{ kind: "markdown", text: this.#text }];
-		if (!this.#options.charts || !hasChartTable(this.#text)) return fences;
-		const last = fences.length - 1;
-		return fences.flatMap((segment, index): (FigureSegment | ChartSegment)[] =>
+		const lifted: FigureSegment[] = rasterFigureRendering()
+			? fences.flatMap((segment): FigureSegment[] =>
+					segment.kind === "markdown" ? splitImageFigures(segment.text) : [segment],
+				)
+			: fences;
+		if (!this.#options.charts || !hasChartTable(this.#text)) return lifted;
+		const last = lifted.length - 1;
+		return lifted.flatMap((segment, index): (FigureSegment | ChartSegment)[] =>
 			segment.kind === "markdown" ? splitTableCharts(segment.text, this.#transient && index === last) : [segment],
 		);
 	}
@@ -205,6 +230,7 @@ export class FigureMarkdown extends Container {
 			const streaming = this.#transient && index === last;
 			if (part.kind === "markdown") part.md.transientRenderCache = streaming;
 			else if (part.kind === "svg") part.figure.update(part.source, part.closed || !streaming);
+			else if (part.kind === "image") part.figure.update(part.path, part.alt);
 			else part.figure.update(part.table);
 		});
 	}

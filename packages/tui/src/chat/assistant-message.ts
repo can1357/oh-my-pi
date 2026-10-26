@@ -24,6 +24,7 @@ import { ensureThemeSync, getMarkdownTheme, getMarkdownThemeWithLinkTargets, get
 import { card, col, elapsed, node, span, text } from "../native/describe";
 import { hasTranscriptActions, runTranscriptAction, runTurnAction, turnHoldEntries } from "./transcript-actions";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { existsSync } from "node:fs";
 import { isNativeRendering } from "../native/state";
 import { NativeImageCache, nativeMediaNode } from "../native/blobs";
 import { linkedImageText } from "../prompt/image-references";
@@ -41,6 +42,8 @@ import { isReactionTarget, type ReactionSplit, type ReactionTarget, splitReactio
 import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "../chrome/transcript-container";
 import { formatTurnUsage, type TurnUsageSummary } from "../overlays/usage-row";
 import { FigureMarkdown } from "./figure-markdown";
+import { hasImageFigure, type ImageFigureSegment, splitImageFigures } from "./image-source";
+import { rasterFigureRendering } from "./raster-figure";
 import { svgFigureRendering } from "./svg-figure";
 import { hasSvgFence } from "./svg-source";
 import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from "./table-chart";
@@ -1006,22 +1009,44 @@ export class AssistantMessageComponent extends Container {
 						this.#nativeLinkSources.set(text, resolved);
 						return resolved;
 					};
-					if (!this.#showImages || !this.#showTableCharts || !hasChartTable(source)) {
+					const pictures = this.#showImages && media && rasterFigureRendering() && hasImageFigure(source);
+					if (!pictures && (!this.#showImages || !this.#showTableCharts || !hasChartTable(source))) {
 						children.push(markdown(`t${index}`, `t${index}`, linked(source, streaming), streaming));
 						continue;
 					}
-					// A chart follows its table as an ```svg figure the terminal colors; the prose splits around it.
-					const segments = splitTableCharts(source, streaming);
+					// Figures are drawn outside the markdown node: a local picture as a media node the
+					// terminal loads by path, a chart as the ```svg fence it colors, the prose split around both.
+					const segments: ImageFigureSegment[] = pictures
+						? splitImageFigures(source)
+						: [{ kind: "markdown", text: source }];
 					segments.forEach((segment, part) => {
 						const slot = part === 0 ? `t${index}` : `t${index}.${part}`;
-						if (segment.kind === "markdown") {
-							const live = streaming && part === segments.length - 1;
-							children.push(markdown(slot, slot, linked(segment.text.trim(), live), live));
+						if (segment.kind === "image" && existsSync(segment.path)) {
+							children.push(nativeMediaNode(segment.path, slot));
 							return;
 						}
-						const chart = lookupTableChart(segment.table);
-						if (chart instanceof Promise) this.#awaitChart(chart);
-						else if (chart) children.push(markdown(slot, slot, chartFence(chart), false));
+						// A file that is not there stays the line the model wrote, so the reader sees the path.
+						const prose = segment.kind === "image" ? `![${segment.alt}](${segment.path})` : segment.text.trim();
+						const live = streaming && part === segments.length - 1;
+						const text = linked(prose, live);
+						if (!this.#showImages || !this.#showTableCharts || !hasChartTable(text)) {
+							children.push(markdown(slot, slot, text, live));
+							return;
+						}
+						// A chart follows its table; the prose splits around it too.
+						const tables = splitTableCharts(text, live);
+						tables.forEach((table, at) => {
+							const tableSlot = at === 0 ? slot : `${slot}.${at}`;
+							if (table.kind === "markdown") {
+								children.push(
+									markdown(tableSlot, tableSlot, table.text.trim(), live && at === tables.length - 1),
+								);
+								return;
+							}
+							const chart = lookupTableChart(table.table);
+							if (chart instanceof Promise) this.#awaitChart(chart);
+							else if (chart) children.push(markdown(tableSlot, tableSlot, chartFence(chart), false));
+						});
 					});
 				} else if (content.type === "thinking") {
 					const display = resolveThinkingDisplay(content, this.#proseOnlyThinking);
@@ -1544,8 +1569,8 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * Whether `text` holds a ```svg fence this terminal draws as a figure, or a
-	 * table it draws a chart under. Native (TSP) terminals receive the fence
+	 * Whether `text` holds a ```svg fence or a local picture this terminal draws
+	 * as a figure, or a table it draws a chart under. Native (TSP) terminals receive the fence
 	 * verbatim in the `md` node and draw it themselves, and get charts as image
 	 * nodes from {@link describe}; image-less terminals keep fences as code and
 	 * tables as tables.
@@ -1555,7 +1580,9 @@ export class AssistantMessageComponent extends Container {
 			this.#showImages &&
 			TERMINAL.imageProtocol !== null &&
 			!isNativeRendering() &&
-			((svgFigureRendering() && hasSvgFence(text)) || (this.#showTableCharts && hasChartTable(text)))
+			((svgFigureRendering() && hasSvgFence(text)) ||
+				(rasterFigureRendering() && hasImageFigure(text)) ||
+				(this.#showTableCharts && hasChartTable(text)))
 		);
 	}
 
