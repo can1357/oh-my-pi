@@ -31,6 +31,7 @@ import { formatApprovalArguments } from "../tools/approval";
 import { throwIfAborted, ToolAbortError } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { callTool } from "./client";
+import { isDeferredMCPServer } from "./deferred-server";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
 import type {
   MCPAuthChallenge,
@@ -650,6 +651,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
   readonly mcpServerName: string;
   /** Server-declared read-only behavior for prewalk; approval stays conservative. */
   readonly mcpReadOnlyHint: boolean | undefined;
+  /** Resolved deferred flag: explicit config wins, otherwise the server-name default. */
+  readonly mcpDeferred: boolean;
   /**
    * The capability wait stays top-level (`essential`) like the built-in wait it
    * replaced: steering only reaches a direct call, never one routed through
@@ -694,6 +697,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
     this.mcpToolName = tool.name;
     this.mcpServerName = connection.name;
     this.mcpReadOnlyHint = tool.annotations?.readOnlyHint;
+    this.mcpDeferred = isDeferredMCPServer(connection.name, connection.config.deferred);
     this.loadMode = isCapabilityWaitTool(connection.name, tool.name) ? "essential" : undefined;
   }
 
@@ -803,6 +807,8 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
   readonly mcpServerName: string;
   /** See {@link MCPTool.mcpReadOnlyHint}. */
   readonly mcpReadOnlyHint: boolean | undefined;
+  /** See {@link MCPTool.mcpDeferred}. */
+  readonly mcpDeferred: boolean;
   /** See {@link MCPTool.loadMode}: the capability wait stays top-level. */
   readonly loadMode: ToolLoadMode | undefined;
   /** See {@link MCPTool.interruptible}: the capability wait must be steering-cancellable. */
@@ -825,8 +831,11 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
     getConnection: () => Promise<MCPServerConnection>,
     source?: SourceMeta,
     reconnect?: MCPReconnect,
+    deferred?: boolean,
   ): DeferredMCPTool[] {
-    return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect));
+    return tools.map(
+      tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect, deferred),
+    );
   }
 
   constructor(
@@ -835,6 +844,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
     private readonly getConnection: () => Promise<MCPServerConnection>,
     source?: SourceMeta,
     private readonly reconnect?: MCPReconnect,
+    deferred?: boolean,
   ) {
     this.name = createMCPToolName(serverName, tool.name);
     this.legacyName = createLegacyMCPToolName(serverName, tool.name);
@@ -844,6 +854,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
     this.mcpToolName = tool.name;
     this.mcpServerName = serverName;
     this.mcpReadOnlyHint = tool.annotations?.readOnlyHint;
+    this.mcpDeferred = isDeferredMCPServer(serverName, deferred);
     this.loadMode = isCapabilityWaitTool(serverName, tool.name) ? "essential" : undefined;
     this.#fallbackProvider = source?.provider;
     this.#fallbackProviderName = source?.providerName;

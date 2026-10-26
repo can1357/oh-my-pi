@@ -185,6 +185,7 @@ import {
   type MCPToolsLoadResult,
   shouldFilterBrowserMCPForPrelude,
 } from "./mcp";
+import { isDeferredMCPTool } from "./mcp/deferred-server";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
@@ -1451,7 +1452,7 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
     description: tool.description,
     parameters: tool.parameters,
     hidden: tool.hidden,
-    defaultInactive: tool.hidden === true,
+    defaultInactive: tool.hidden === true || isDeferredMCPTool(tool),
     loadMode: defaultLoadModeForToolName(tool.name, tool.loadMode),
     deferrable: tool.deferrable,
     readsSkillUris: tool.readsSkillUris,

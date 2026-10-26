@@ -93,6 +93,11 @@ interface MCPServerConfigBase {
    * parse this option; providers for other tools' formats ignore it.
    */
   instructions?: boolean;
+  /**
+   * Register this server's tools inactive until a prompt hook names them.
+   * Omitted: deferred for contextforge, contextforge-upstream, and capability-meta.
+   */
+  deferred?: boolean;
   /** Authentication configuration (optional) */
   auth?: MCPAuthConfig;
   /** OAuth configuration for servers requiring explicit client credentials */

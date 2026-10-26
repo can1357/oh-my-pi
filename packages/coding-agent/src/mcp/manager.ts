@@ -1051,7 +1051,14 @@ export class MCPManager {
             const reconnect = () => this.reconnectServer(name);
             this.#replaceServerTools(
               name,
-              DeferredMCPTool.fromTools(name, cached, () => this.waitForConnection(name), source, reconnect),
+              DeferredMCPTool.fromTools(
+                name,
+                cached,
+                () => this.waitForConnection(name),
+                source,
+                reconnect,
+                task.config.deferred,
+              ),
             );
           }
         }

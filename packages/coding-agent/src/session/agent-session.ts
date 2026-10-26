@@ -416,6 +416,7 @@ import {
   type PrewalkCoordinatorHost,
   type PrewalkRestartResult,
 } from "./prewalk";
+import { promptHookContextText, toolNamesFromPromptHookContext } from "./prompt-tool-activation";
 import {
   isAdvisorCard,
   isDisplayableQueuedMessage,
@@ -2604,6 +2605,11 @@ export class AgentSession implements SettingsScope {
       this.agent.addBeforeModelCallHook((_signal, context) =>
         this.#maintenance.renderArchiveForModel(context.messages)
       ),
+    );
+    this.addDisposer(
+      this.agent.addBeforeModelCallHook(async (_signal, context) => {
+        await this.applyPromptHookTools(promptHookContextText(context.messages));
+      }),
     );
 
     const handoffHost: SessionHandoffHost = {
@@ -6877,6 +6883,9 @@ export class AgentSession implements SettingsScope {
   /** Replaces connected MCP tools and enables them immediately. */
   refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
     return this.#tools.refreshMCPTools(mcpTools);
+  }
+  applyPromptHookTools(additionalContext: string): Promise<void> {
+    return this.#tools.applyPromptHookToolSelection(toolNamesFromPromptHookContext(additionalContext));
   }
 
   /** Makes turns wait, bounded, for in-flight MCP discovery before building their system prompt. */

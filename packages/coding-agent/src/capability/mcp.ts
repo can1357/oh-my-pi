@@ -23,6 +23,11 @@ export interface MCPServer {
   requestIdFormat?: MCPRequestIdFormat;
   /** Include server-provided instructions in the system prompt (default: true) */
   instructions?: boolean;
+  /**
+   * Register this server's tools inactive until a prompt hook names them.
+   * Omitted: deferred for contextforge, contextforge-upstream, and capability-meta.
+   */
+  deferred?: boolean;
   /** Command to run (for stdio transport) */
   command?: string;
   /** Command arguments */

@@ -20,6 +20,7 @@ import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/ext
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { loadSkills, setActiveSkills, type Skill, type SkillWarning } from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
+import { isDeferredMCPTool } from "../mcp/deferred-server";
 import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
@@ -55,6 +56,7 @@ import {
   PERMISSION_REQUIRED_TOOLS,
 } from "./acp-permission-gate";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
+import { activeToolNamesForTurn } from "./prompt-tool-activation";
 
 import type { CustomMessage } from "./messages";
 import { SESSION_AGENT_NOTICE_TYPE } from "./queued-messages";
@@ -2375,6 +2377,20 @@ export class SessionTools {
       this.#host.isDisposed() ? Promise.resolve() : this.#applyMCPToolRefresh(snapshot)
     );
   }
+  applyPromptHookToolSelection(hookMatches: readonly string[]): Promise<void> {
+    const deferredNames = new Set<string>();
+    for (const [name, tool] of this.#toolRegistry) {
+      if (isDeferredMCPTool(tool)) deferredNames.add(name);
+    }
+    return this.setActiveToolsByName(
+      activeToolNamesForTurn({
+        enabled: this.getEnabledToolNames(),
+        registered: new Set(this.#toolRegistry.keys()),
+        deferredNames,
+        hookMatches,
+      }),
+    );
+  }
 
   async #applyMCPToolRefresh(mcpTools: CustomTool[]): Promise<void> {
     const previousMcpTools = new Map<string, AgentTool>();
@@ -2409,17 +2425,26 @@ export class SessionTools {
       this.#toolRegistry.set(tool.name, tool);
       if (managerToolSet.has(tool)) this.#mcpManagerToolNames.add(tool.name);
     }
-
-    // Connected manager tools become active immediately. Extension-owned MCP
-    // tools retain their prior selection while both sets share one registry.
+    // Non-deferred manager tools become active immediately. Deferred tools
+    // register but stay inactive unless they were already selected.
     const retainedActiveExtensionToolNames = previousActiveMcpToolNames.filter(
       name => this.#extensionMcpTools.has(name) && this.#toolRegistry.has(name),
+    );
+    const deferredManagerToolNames = new Set(
+      managerTools.filter(tool => isDeferredMCPTool(tool)).map(tool => tool.name),
+    );
+    const enabledManagerToolNames = [...this.#mcpManagerToolNames].filter(
+      name => !deferredManagerToolNames.has(name),
+    );
+    const retainedActiveDeferredToolNames = previousActiveMcpToolNames.filter(
+      name => deferredManagerToolNames.has(name) && this.#toolRegistry.has(name),
     );
     const nextActive = [
       ...new Set([
         ...this.#getActiveNonMCPToolNames(),
-        ...this.#mcpManagerToolNames,
+        ...enabledManagerToolNames,
         ...retainedActiveExtensionToolNames,
+        ...retainedActiveDeferredToolNames,
       ]),
     ];
     try {

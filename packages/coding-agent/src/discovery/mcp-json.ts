@@ -28,6 +28,7 @@ interface MCPConfigFile {
       timeout?: number;
       requestIdFormat?: "string" | "number";
       instructions?: boolean;
+      deferred?: boolean;
       command?: string;
       args?: string[];
       env?: Record<string, string>;
@@ -93,6 +94,13 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
         });
       }
 
+      const deferred = typeof serverConfig.deferred === "boolean" ? serverConfig.deferred : undefined;
+      if (deferred === undefined && serverConfig.deferred !== undefined) {
+        logger.warn("MCP server has invalid 'deferred' value, ignoring", {
+          name,
+          value: serverConfig.deferred,
+        });
+      }
       const instructions = typeof serverConfig.instructions === "boolean" ? serverConfig.instructions : undefined;
       if (instructions === undefined && serverConfig.instructions !== undefined) {
         logger.warn("MCP server has invalid 'instructions' value, ignoring", {
@@ -107,6 +115,7 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
         timeout,
         requestIdFormat,
         instructions,
+        deferred,
         command: serverConfig.command,
         args: serverConfig.args,
         env: serverConfig.env,
