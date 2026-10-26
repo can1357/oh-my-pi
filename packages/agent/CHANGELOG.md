@@ -1,7 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
 
+- Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed a cursor tool result transform failure being swallowed silently; it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
 
@@ -58,8 +61,6 @@
 - Aside providers (`AgentLoopConfig.getAsideMessages`, `Agent.setAsideMessageProvider`) now receive which boundary is polled, `"work"` after tool calls or `"stop"` at the end of a turn, so they can keep a message out of a finished turn ([#16583](https://github.com/can1357/oh-my-pi/pull/16583) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
-- Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed a cursor tool result transform failure being swallowed silently; it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed `--max-time` values above about 596 hours (such as `600h`) aborting the first turn with "Deadline exceeded" right away ([#17054](https://github.com/can1357/oh-my-pi/pull/17054) by [@trukhinyuri](https://github.com/trukhinyuri))
 - Fixed repeated compaction on small or provider-capped context windows: compaction keeps only as much recent history as fits under the configured trigger, and no longer counts stale pre-compaction usage ([#16904](https://github.com/can1357/oh-my-pi/pull/16904) by [@eggpeat](https://github.com/eggpeat))
