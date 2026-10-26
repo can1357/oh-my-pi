@@ -115,6 +115,9 @@
 - Fixed Devin requests compressing the request body on the UI thread, which briefly froze the TUI on long conversations; requests under 1 KiB are now sent uncompressed
 
 ## [18.13.1] - 2026-10-27
+### Changed
+
+- Reduced the per-request work of preparing long transcripts for providers, so requests with many assistant turns start faster ([#XXXXX](https://github.com/can1357/oh-my-pi/pull/XXXXX) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
