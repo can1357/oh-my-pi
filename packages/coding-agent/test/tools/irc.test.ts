@@ -803,12 +803,11 @@ describe("IRC", () => {
 			expect(await session.agent.hasIrcInterrupts?.()).toBe(true);
 		});
 
-		it("queues parent IRC as a follow-up while a child prompt is still dispatching", async () => {
+		it("queues parent IRC behind an explicitly reserved idle child brief", async () => {
 			const { session } = createRealSession();
 			sessions.push(session);
 			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
-			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
-			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session });
+			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session, initialPromptPending: true });
 			const outcome = await session.deliverIrcMessage({
 				id: "msg-dispatching",
 				from: "Main",
@@ -821,6 +820,32 @@ describe("IRC", () => {
 			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
 			expect(session.agent.peekFollowUpQueue()).toHaveLength(1);
 			expect(session.agent.peekFollowUpQueue()[0]).toMatchObject({ customType: "irc:incoming" });
+			expect(String(session.agent.peekFollowUpQueue()[0]!.content)).not.toContain("Active interruptible wait stopped");
+		});
+
+		it("wakes a stale running child rather than stranding its message behind a nonexistent brief", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session });
+			const outcome = await session.deliverIrcMessage({ id: "stale", from: "Main", to: "0-Child", body: "wake now", ts: Date.now() });
+			expect(outcome).toBe("woken");
+			await Promise.resolve();
+			expect(promptSpy).toHaveBeenCalled();
+			expect(session.agent.peekFollowUpQueue()).toHaveLength(0);
+		});
+
+		it("keeps a pre-brief peer message outside the parent's accepted-result turn", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session, initialPromptPending: true });
+			const outcome = await session.deliverIrcMessage({ id: "peer-before-brief", from: "0-Peer", to: "0-Child", body: "answer separately", ts: Date.now() });
+			expect(outcome).toBe("injected");
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+			expect(session.agent.peekFollowUpQueue()).toHaveLength(0);
+			expect(session.ircWakesPending).toBe(true);
 		});
 
 		it("queues parent IRC as steering while a subagent turn is streaming", async () => {
@@ -828,7 +853,6 @@ describe("IRC", () => {
 			sessions.push(session);
 			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
-			session.agent.state.isStreaming = true;
 			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session });
 
 			const outcome = await session.deliverIrcMessage({

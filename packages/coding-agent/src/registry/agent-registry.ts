@@ -80,6 +80,8 @@ export interface AgentRef {
 	history?: AgentHistorySummary;
 	/** Run lifecycle milestones (launch is {@link createdAt}). */
 	lifecycle?: AgentRunLifecycle;
+	/** Executor owns the first prompt; cleared synchronously before dispatch, never inferred from running status. */
+	initialPromptPending?: boolean;
 }
 
 export type AgentRefExpectation = AgentRef | AgentSession;
@@ -120,6 +122,7 @@ export interface RegisterInput {
 	history?: AgentHistorySummary;
 	/** Run lifecycle milestones restored from persisted history, when known. */
 	lifecycle?: AgentRunLifecycle;
+	initialPromptPending?: boolean;
 }
 
 export class AgentRegistry {
@@ -166,6 +169,7 @@ export class AgentRegistry {
 			activity: input.activity,
 			history: input.history,
 			lifecycle: input.lifecycle,
+			initialPromptPending: input.initialPromptPending,
 		};
 		this.#refs.set(ref.id, ref);
 		this.#emit({ type: "registered", ref });

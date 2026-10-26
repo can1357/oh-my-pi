@@ -223,12 +223,11 @@ export class IrcBridge {
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
 		const recipient = AgentRegistry.global().get(msg.to);
-		// The task owns a running child before its first core prompt starts.
-		// Waking in that setup window steals the brief's dispatch ownership.
-		const dispatchPending =
-			recipient?.kind === "sub" && recipient.status === "running" && !this.#host.agent.state.isStreaming;
-		const streaming = this.#host.isStreaming() || dispatchPending;
-		const planModeIdle = !streaming && this.#host.planModeEnabled();
+		const streaming = this.#host.isStreaming();
+		// Only the executor's explicit reservation owns the pre-brief window.
+		// A prompt in flight still accepts parent steering; a stale running ref wakes normally.
+		const dispatchPending = recipient?.initialPromptPending === true && recipient.status === "running" && !streaming;
+		const planModeIdle = !streaming && !dispatchPending && this.#host.planModeEnabled();
 		const registry = AgentRegistry.global();
 		const parentId = registry.get(msg.to)?.parentId;
 		const fromParent = parentId === msg.from;
@@ -256,6 +255,7 @@ export class IrcBridge {
 		const relayOnStop =
 			!streaming &&
 			!planModeIdle &&
+			(!dispatchPending || peerMessage) &&
 			msg.to !== MAIN_AGENT_ID &&
 			msg.wakeRelay !== true &&
 			msg.broadcast !== true &&
@@ -292,11 +292,13 @@ export class IrcBridge {
 		};
 		if (peerMessage) this.#peerMessages.add(record);
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
+		if (dispatchPending) {
+			// Peers retain a separate monitored wake after publication, never the brief's result boundary.
+			if (peerMessage) this.queueDeferredWake([record]);
+			else this.#host.agent.followUp(record);
+			return "injected";
+		}
 		if (streaming) {
-			if (dispatchPending) {
-				this.#host.agent.followUp(record);
-				return "injected";
-			}
 			if (fromParent && !peerMessage) {
 				const steer: AgentMessage = {
 					role: "user",

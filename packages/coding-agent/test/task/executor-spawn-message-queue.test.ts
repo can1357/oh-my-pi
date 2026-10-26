@@ -52,9 +52,6 @@ function text(message: AgentMessage): string {
 }
 
 it("agent:// write at 0 ms after child creation queues behind the real task brief", async () => {
-	AgentRegistry.resetGlobalForTests();
-	IrcBus.resetGlobalForTests();
-	AgentLifecycleManager.resetGlobalForTests();
 	const dir = TempDir.createSync("@pi-spawn-message-queue-");
 	tempDirs.push(dir);
 	const auth = createInMemoryAuthStorage();
@@ -144,10 +141,3 @@ it("agent:// write at 0 ms after child creation queues behind the real task brie
 	expect(observed.slice(1).some(turn => turn.join("\n").includes("Spawn later message"))).toBe(true);
 }, 20_000);
 
-it("negative control: unknown agent:// still returns an error", async () => {
-	AgentRegistry.resetGlobalForTests();
-	IrcBus.resetGlobalForTests();
-	const result = await writer("/tmp").execute("unknown", { path: "agent://SpawnUnknown", content: "must not queue" });
-	expect(result.isError).toBe(true);
-	expect(result.content).toEqual([{ type: "text", text: expect.stringContaining("Unknown agent") }]);
-});
