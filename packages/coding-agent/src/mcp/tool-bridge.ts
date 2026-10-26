@@ -1,8 +1,8 @@
 import {
-	formatMCPProgress,
-	MCP_TOOL_NAME_PREFIX,
-	type MCPProgress,
-	type MCPToolDetails,
+  formatMCPProgress,
+  MCP_TOOL_NAME_PREFIX,
+  type MCPProgress,
+  type MCPToolDetails,
 } from "@oh-my-pi/pi-tui/tools/mcp";
 /**
  * MCP to CustomTool bridge.
@@ -12,34 +12,34 @@ import {
 import type { AgentToolUpdateCallback, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { normalizeSchemaForMCP } from "@oh-my-pi/pi-ai/utils/schema";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import { describeMCPCall, describeMCPResult, renderMCPCall, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { MCPContent } from "@oh-my-pi/pi-tui/tools/mcp";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { SourceMeta } from "../capability/types";
+import { isCapabilityWaitTool, isInterruptibleCapabilityWaitCall } from "../discovery/capability-server";
 import type {
-	CustomTool,
-	CustomToolContext,
-	CustomToolResult,
-	RenderResultOptions,
+  CustomTool,
+  CustomToolContext,
+  CustomToolResult,
+  RenderResultOptions,
 } from "../extensibility/custom-tools/types";
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
-import { isCapabilityWaitTool, isInterruptibleCapabilityWaitCall } from "../discovery/capability-server";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import { formatApprovalArguments } from "../tools/approval";
-import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { throwIfAborted, ToolAbortError } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import { callTool } from "./client";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
-import { describeMCPCall, describeMCPResult, renderMCPCall, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
 import type {
-	MCPAuthChallenge,
-	MCPRequestOptions,
-	MCPServerConnection,
-	MCPToolCallParams,
-	MCPToolCallResult,
-	MCPToolDefinition,
+  MCPAuthChallenge,
+  MCPRequestOptions,
+  MCPServerConnection,
+  MCPToolCallParams,
+  MCPToolCallResult,
+  MCPToolDefinition,
 } from "./types";
-import type { MCPContent } from "@oh-my-pi/pi-tui/tools/mcp";
 
 /** Reconnect callback: tears down a stale connection, optionally authorizing first. */
 export type MCPReconnect = (options?: { authChallenge?: MCPAuthChallenge }) => Promise<MCPServerConnection | null>;
@@ -50,67 +50,67 @@ export type MCPReconnect = (options?: { authChallenge?: MCPAuthChallenge }) => P
  * connection object is stale (dead SSE, expired session, refused after restart).
  */
 const RETRIABLE_PATTERNS = [
-	"econnrefused",
-	"econnreset",
-	"epipe",
-	"enetunreach",
-	"ehostunreach",
-	"fetch failed",
-	"transport not connected",
-	"transport closed",
-	"network error",
+  "econnrefused",
+  "econnreset",
+  "epipe",
+  "enetunreach",
+  "ehostunreach",
+  "fetch failed",
+  "transport not connected",
+  "transport closed",
+  "network error",
 ];
 export function isRetriableConnectionError(error: unknown): boolean {
-	if (!(error instanceof Error)) return false;
-	if (error instanceof MCPTransportError) {
-		if (
-			error.failure === "connect" ||
-			error.failure === "reset" ||
-			error.failure === "eof" ||
-			error.failure === "closed"
-		) {
-			return error.retryable;
-		}
-		return error.failure === "http_status" && (error.code === 404 || error.code === 502 || error.code === 503);
-	}
-	const msg = error.message.toLowerCase();
-	// Stale session (server restarted, old session ID is gone)
-	if (/^http (404|502|503):/.test(msg)) return true;
-	return RETRIABLE_PATTERNS.some(p => msg.includes(p));
+  if (!(error instanceof Error)) return false;
+  if (error instanceof MCPTransportError) {
+    if (
+      error.failure === "connect"
+      || error.failure === "reset"
+      || error.failure === "eof"
+      || error.failure === "closed"
+    ) {
+      return error.retryable;
+    }
+    return error.failure === "http_status" && (error.code === 404 || error.code === 502 || error.code === 503);
+  }
+  const msg = error.message.toLowerCase();
+  // Stale session (server restarted, old session ID is gone)
+  if (/^http (404|502|503):/.test(msg)) return true;
+  return RETRIABLE_PATTERNS.some(p => msg.includes(p));
 }
 
 type MCPToolArgs = NonNullable<MCPToolCallParams["arguments"]>;
 
 function normalizeToolArgs(value: unknown): MCPToolArgs {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		return {};
-	}
-	return value as MCPToolArgs;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {};
+  }
+  return value as MCPToolArgs;
 }
 
 function isUnusedOptionalPlaceholder(value: unknown): boolean {
-	return (
-		value === undefined ||
-		value === "" ||
-		(typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === 0)
-	);
+  return (
+    value === undefined
+    || value === ""
+    || (typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === 0)
+  );
 }
 
 function omitUnusedOptionalArgs(args: MCPToolArgs, inputSchema: MCPToolDefinition["inputSchema"]): MCPToolArgs {
-	const properties = inputSchema.properties;
-	if (!properties) return args;
+  const properties = inputSchema.properties;
+  if (!properties) return args;
 
-	let cleaned: MCPToolArgs | undefined;
-	const required = new Set(inputSchema.required ?? []);
-	for (const [key, value] of Object.entries(args)) {
-		if (required.has(key) || !Object.hasOwn(properties, key) || !isUnusedOptionalPlaceholder(value)) {
-			continue;
-		}
-		cleaned ??= { ...args };
-		delete cleaned[key];
-	}
+  let cleaned: MCPToolArgs | undefined;
+  const required = new Set(inputSchema.required ?? []);
+  for (const [key, value] of Object.entries(args)) {
+    if (required.has(key) || !Object.hasOwn(properties, key) || !isUnusedOptionalPlaceholder(value)) {
+      continue;
+    }
+    cleaned ??= { ...args };
+    delete cleaned[key];
+  }
 
-	return cleaned ?? args;
+  return cleaned ?? args;
 }
 
 /**
@@ -128,61 +128,61 @@ function omitUnusedOptionalArgs(args: MCPToolArgs, inputSchema: MCPToolDefinitio
  * constrains it, so legitimate tool data is not discarded at forwarding.
  */
 function stripHarnessIntent(args: MCPToolArgs, inputSchema: MCPToolDefinition["inputSchema"]): MCPToolArgs {
-	if (!Object.hasOwn(args, INTENT_FIELD)) return args;
-	if (schemaDeclaresIntentField(inputSchema)) return args;
-	const { [INTENT_FIELD]: _intent, ...rest } = args;
-	return rest;
+  if (!Object.hasOwn(args, INTENT_FIELD)) return args;
+  if (schemaDeclaresIntentField(inputSchema)) return args;
+  const { [INTENT_FIELD]: _intent, ...rest } = args;
+  return rest;
 }
 
 /** Replace string args that are file-backed internal URLs with the local path backing them. */
 async function resolveOutboundUrlArgs(
-	value: unknown,
-	context: CustomToolContext,
-	seen: WeakSet<object> = new WeakSet(),
+  value: unknown,
+  context: CustomToolContext,
+  seen: WeakSet<object> = new WeakSet(),
 ): Promise<unknown> {
-	if (typeof value === "string") {
-		// Only arguments that are themselves URLs: the router's repair of a
-		// cwd-prefixed `…/local://x` path must not rewrite free text that merely
-		// mentions one.
-		if (!extractUriScheme(value)) return value;
-		const router = InternalUrlRouter.instance();
-		const url = router.normalize(value);
-		if (!router.canHandle(url)) return value;
-		const scheme = extractUriScheme(url);
-		if (!scheme || router.spec(scheme)?.backing !== "file") return value;
-		const located = await router.locate(url, {
-			cwd: context.sessionManager?.getCwd?.(),
-			settings: context.settings,
-			localProtocolOptions: context.localProtocolOptions,
-		});
-		return located ?? value;
-	}
-	if (typeof value !== "object" || value === null) return value;
-	if (seen.has(value)) return value;
-	seen.add(value);
+  if (typeof value === "string") {
+    // Only arguments that are themselves URLs: the router's repair of a
+    // cwd-prefixed `…/local://x` path must not rewrite free text that merely
+    // mentions one.
+    if (!extractUriScheme(value)) return value;
+    const router = InternalUrlRouter.instance();
+    const url = router.normalize(value);
+    if (!router.canHandle(url)) return value;
+    const scheme = extractUriScheme(url);
+    if (!scheme || router.spec(scheme)?.backing !== "file") return value;
+    const located = await router.locate(url, {
+      cwd: context.sessionManager?.getCwd?.(),
+      settings: context.settings,
+      localProtocolOptions: context.localProtocolOptions,
+    });
+    return located ?? value;
+  }
+  if (typeof value !== "object" || value === null) return value;
+  if (seen.has(value)) return value;
+  seen.add(value);
 
-	if (Array.isArray(value)) {
-		let resolved: unknown[] | undefined;
-		for (let index = 0; index < value.length; index++) {
-			const item = value[index];
-			const next = await resolveOutboundUrlArgs(item, context, seen);
-			if (next === item && !resolved) continue;
-			resolved ??= value.slice();
-			resolved[index] = next;
-		}
-		return resolved ?? value;
-	}
+  if (Array.isArray(value)) {
+    let resolved: unknown[] | undefined;
+    for (let index = 0; index < value.length; index++) {
+      const item = value[index];
+      const next = await resolveOutboundUrlArgs(item, context, seen);
+      if (next === item && !resolved) continue;
+      resolved ??= value.slice();
+      resolved[index] = next;
+    }
+    return resolved ?? value;
+  }
 
-	const input = value as Record<string, unknown>;
-	let resolved: Record<string, unknown> | undefined;
-	for (const key in input) {
-		const item = input[key];
-		const next = await resolveOutboundUrlArgs(item, context, seen);
-		if (next === item && !resolved) continue;
-		resolved ??= { ...input };
-		resolved[key] = next;
-	}
-	return resolved ?? value;
+  const input = value as Record<string, unknown>;
+  let resolved: Record<string, unknown> | undefined;
+  for (const key in input) {
+    const item = input[key];
+    const next = await resolveOutboundUrlArgs(item, context, seen);
+    if (next === item && !resolved) continue;
+    resolved ??= { ...input };
+    resolved[key] = next;
+  }
+  return resolved ?? value;
 }
 
 /**
@@ -192,49 +192,49 @@ async function resolveOutboundUrlArgs(
  * external MCP servers can read.
  */
 async function prepareOutboundArgs(
-	params: unknown,
-	inputSchema: MCPToolDefinition["inputSchema"],
-	context: CustomToolContext,
+  params: unknown,
+  inputSchema: MCPToolDefinition["inputSchema"],
+  context: CustomToolContext,
 ): Promise<MCPToolArgs> {
-	const args = omitUnusedOptionalArgs(stripHarnessIntent(normalizeToolArgs(params), inputSchema), inputSchema);
-	return (await resolveOutboundUrlArgs(args, context)) as MCPToolArgs;
+  const args = omitUnusedOptionalArgs(stripHarnessIntent(normalizeToolArgs(params), inputSchema), inputSchema);
+  return (await resolveOutboundUrlArgs(args, context)) as MCPToolArgs;
 }
 
 /**
  * Convert MCP content to agent content while retaining image payloads.
  */
 function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageContent> {
-	const blocks: Array<TextContent | ImageContent> = [];
-	let text = "";
-	const flushText = () => {
-		if (!text) return;
-		blocks.push({ type: "text", text });
-		text = "";
-	};
-	const appendText = (value: string) => {
-		text += text ? `\n\n${value}` : value;
-	};
+  const blocks: Array<TextContent | ImageContent> = [];
+  let text = "";
+  const flushText = () => {
+    if (!text) return;
+    blocks.push({ type: "text", text });
+    text = "";
+  };
+  const appendText = (value: string) => {
+    text += text ? `\n\n${value}` : value;
+  };
 
-	for (const item of content) {
-		switch (item.type) {
-			case "text":
-				appendText(item.text);
-				break;
-			case "image":
-				flushText();
-				blocks.push(item);
-				break;
-			case "resource":
-				appendText(
-					item.resource.text
-						? `[Resource: ${item.resource.uri}]\n${item.resource.text}`
-						: `[Resource: ${item.resource.uri}]`,
-				);
-				break;
-		}
-	}
-	flushText();
-	return blocks.length > 0 ? blocks : [{ type: "text", text: "" }];
+  for (const item of content) {
+    switch (item.type) {
+      case "text":
+        appendText(item.text);
+        break;
+      case "image":
+        flushText();
+        blocks.push(item);
+        break;
+      case "resource":
+        appendText(
+          item.resource.text
+            ? `[Resource: ${item.resource.uri}]\n${item.resource.text}`
+            : `[Resource: ${item.resource.uri}]`,
+        );
+        break;
+    }
+  }
+  flushText();
+  return blocks.length > 0 ? blocks : [{ type: "text", text: "" }];
 }
 
 /**
@@ -245,13 +245,13 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
  * Programmatic consumers use details.structuredContent instead of parsing this rendering.
  */
 function formatStructuredContent(structured: Record<string, unknown>): string {
-	let json: string;
-	try {
-		json = JSON.stringify(structured, null, 2);
-	} catch {
-		return "";
-	}
-	return `\`\`\`json\n${json}\n\`\`\``;
+  let json: string;
+  try {
+    json = JSON.stringify(structured, null, 2);
+  } catch {
+    return "";
+  }
+  return `\`\`\`json\n${json}\n\`\`\``;
 }
 
 /**
@@ -260,90 +260,90 @@ function formatStructuredContent(structured: Record<string, unknown>): string {
  * for back-compat; detecting that avoids emitting the JSON twice.
  */
 function structuredContentAlreadyInText(structured: Record<string, unknown>, content: MCPContent[]): boolean {
-	for (const item of content) {
-		if (item.type !== "text") continue;
-		const trimmed = item.text.trim();
-		if (trimmed.length === 0) continue;
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(trimmed);
-		} catch {
-			continue;
-		}
-		if (Bun.deepEquals(parsed, structured)) return true;
-	}
-	return false;
+  for (const item of content) {
+    if (item.type !== "text") continue;
+    const trimmed = item.text.trim();
+    if (trimmed.length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (Bun.deepEquals(parsed, structured)) return true;
+  }
+  return false;
 }
 
 /** Build a CustomToolResult from a callTool response. */
 function buildResult(
-	result: MCPToolCallResult,
-	serverName: string,
-	mcpToolName: string,
-	provider?: string,
-	providerName?: string,
+  result: MCPToolCallResult,
+  serverName: string,
+  mcpToolName: string,
+  provider?: string,
+  providerName?: string,
 ): CustomToolResult<MCPToolDetails> {
-	const content = formatMCPContent(result.content);
-	const details: MCPToolDetails = {
-		serverName,
-		mcpToolName,
-		isError: result.isError,
-		rawContent: result.content,
-		mcpMeta: result._meta,
-		provider,
-		providerName,
-	};
-	if (result.isError) {
-		if (content[0]?.type === "text") {
-			content[0] = { type: "text", text: `Error: ${content[0].text}` };
-		} else {
-			content.unshift({ type: "text", text: "Error:" });
-		}
-	}
-	const structured = result.structuredContent;
-	if (structured !== undefined) details.structuredContent = structured;
-	if (structured !== undefined && !structuredContentAlreadyInText(structured, result.content)) {
-		const rendered = formatStructuredContent(structured);
-		if (rendered.length > 0) {
-			content.push({ type: "text", text: rendered });
-		}
-	}
-	const toolResult: CustomToolResult<MCPToolDetails> = { content, details };
-	if (result.isError) {
-		toolResult.isError = true;
-	}
-	return toolResult;
+  const content = formatMCPContent(result.content);
+  const details: MCPToolDetails = {
+    serverName,
+    mcpToolName,
+    isError: result.isError,
+    rawContent: result.content,
+    mcpMeta: result._meta,
+    provider,
+    providerName,
+  };
+  if (result.isError) {
+    if (content[0]?.type === "text") {
+      content[0] = { type: "text", text: `Error: ${content[0].text}` };
+    } else {
+      content.unshift({ type: "text", text: "Error:" });
+    }
+  }
+  const structured = result.structuredContent;
+  if (structured !== undefined) details.structuredContent = structured;
+  if (structured !== undefined && !structuredContentAlreadyInText(structured, result.content)) {
+    const rendered = formatStructuredContent(structured);
+    if (rendered.length > 0) {
+      content.push({ type: "text", text: rendered });
+    }
+  }
+  const toolResult: CustomToolResult<MCPToolDetails> = { content, details };
+  if (result.isError) {
+    toolResult.isError = true;
+  }
+  return toolResult;
 }
 
 /** Build an error CustomToolResult from a caught exception. */
 function buildErrorResult(
-	error: unknown,
-	serverName: string,
-	mcpToolName: string,
-	provider?: string,
-	providerName?: string,
+  error: unknown,
+  serverName: string,
+  mcpToolName: string,
+  provider?: string,
+  providerName?: string,
 ): CustomToolResult<MCPToolDetails> {
-	const message = formatMCPToolFailure(error, serverName, mcpToolName);
-	return {
-		content: [{ type: "text", text: message }],
-		details: { serverName, mcpToolName, isError: true, provider, providerName },
-		isError: true,
-	};
+  const message = formatMCPToolFailure(error, serverName, mcpToolName);
+  return {
+    content: [{ type: "text", text: message }],
+    details: { serverName, mcpToolName, isError: true, provider, providerName },
+    isError: true,
+  };
 }
 
 type MCPToolCallAttempt = {
-	connection: MCPServerConnection;
-	result?: MCPToolCallResult;
-	error?: unknown;
+  connection: MCPServerConnection;
+  result?: MCPToolCallResult;
+  error?: unknown;
 };
 
 /** Minimum spacing between one call's progress updates; a burst coalesces to its newest progress. */
 export const PROGRESS_UPDATE_INTERVAL_MS = 50;
 
 interface ProgressUpdater {
-	onProgress: NonNullable<MCPRequestOptions["onProgress"]>;
-	/** Stop updating once the call settles; a coalesced update still waiting is dropped. */
-	close(): void;
+  onProgress: NonNullable<MCPRequestOptions["onProgress"]>;
+  /** Stop updating once the call settles; a coalesced update still waiting is dropped. */
+  close(): void;
 }
 
 /**
@@ -353,105 +353,105 @@ interface ProgressUpdater {
  * (the same phase message) emit nothing.
  */
 function progressUpdater(
-	onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
-	serverName: string,
-	mcpToolName: string,
-	provider?: string,
-	providerName?: string,
+  onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
+  serverName: string,
+  mcpToolName: string,
+  provider?: string,
+  providerName?: string,
 ): ProgressUpdater | undefined {
-	if (!onUpdate) return undefined;
-	let lastText: string | undefined;
-	let waiting: MCPProgress | undefined;
-	let cooldown: NodeJS.Timeout | undefined;
-	let closed = false;
-	const show = (progress: MCPProgress) => {
-		const text = formatMCPProgress(progress);
-		if (text === lastText) return;
-		lastText = text;
-		onUpdate({
-			content: [{ type: "text", text }],
-			details: { serverName, mcpToolName, provider, providerName, progress },
-		});
-		cooldown = setTimeout(() => {
-			cooldown = undefined;
-			const next = waiting;
-			waiting = undefined;
-			if (next) show(next);
-		}, PROGRESS_UPDATE_INTERVAL_MS);
-	};
-	return {
-		onProgress: progress => {
-			if (closed) return;
-			if (cooldown) waiting = progress;
-			else show(progress);
-		},
-		close: () => {
-			closed = true;
-			clearTimeout(cooldown);
-			cooldown = undefined;
-			waiting = undefined;
-		},
-	};
+  if (!onUpdate) return undefined;
+  let lastText: string | undefined;
+  let waiting: MCPProgress | undefined;
+  let cooldown: NodeJS.Timeout | undefined;
+  let closed = false;
+  const show = (progress: MCPProgress) => {
+    const text = formatMCPProgress(progress);
+    if (text === lastText) return;
+    lastText = text;
+    onUpdate({
+      content: [{ type: "text", text }],
+      details: { serverName, mcpToolName, provider, providerName, progress },
+    });
+    cooldown = setTimeout(() => {
+      cooldown = undefined;
+      const next = waiting;
+      waiting = undefined;
+      if (next) show(next);
+    }, PROGRESS_UPDATE_INTERVAL_MS);
+  };
+  return {
+    onProgress: progress => {
+      if (closed) return;
+      if (cooldown) waiting = progress;
+      else show(progress);
+    },
+    close: () => {
+      closed = true;
+      clearTimeout(cooldown);
+      cooldown = undefined;
+      waiting = undefined;
+    },
+  };
 }
 
 function getMcpAuthChallenge(result: MCPToolCallResult): MCPAuthChallenge | undefined {
-	if (!result.isError) return undefined;
-	const values = result._meta?.["mcp/www_authenticate"];
-	if (!Array.isArray(values)) return undefined;
-	const wwwAuthenticate = values.filter((value): value is string => typeof value === "string" && value.trim() !== "");
-	return wwwAuthenticate.length > 0 ? { wwwAuthenticate } : undefined;
+  if (!result.isError) return undefined;
+  const values = result._meta?.["mcp/www_authenticate"];
+  if (!Array.isArray(values)) return undefined;
+  const wwwAuthenticate = values.filter((value): value is string => typeof value === "string" && value.trim() !== "");
+  return wwwAuthenticate.length > 0 ? { wwwAuthenticate } : undefined;
 }
 
 async function callToolWithAuthRetry(
-	connection: MCPServerConnection,
-	toolName: string,
-	args: MCPToolArgs,
-	reconnect: MCPReconnect | undefined,
-	signal?: AbortSignal,
-	onProgress?: MCPRequestOptions["onProgress"],
+  connection: MCPServerConnection,
+  toolName: string,
+  args: MCPToolArgs,
+  reconnect: MCPReconnect | undefined,
+  signal?: AbortSignal,
+  onProgress?: MCPRequestOptions["onProgress"],
 ): Promise<MCPToolCallAttempt> {
-	const result = await callTool(connection, toolName, args, { signal, onProgress });
-	const authChallenge = getMcpAuthChallenge(result);
-	if (!authChallenge || !reconnect) return { connection, result };
+  const result = await callTool(connection, toolName, args, { signal, onProgress });
+  const authChallenge = getMcpAuthChallenge(result);
+  if (!authChallenge || !reconnect) return { connection, result };
 
-	let newConnection: MCPServerConnection | null;
-	try {
-		newConnection = await reconnectWithAbort(reconnect, signal, { authChallenge });
-	} catch (error) {
-		rethrowIfAborted(error, signal);
-		return { connection, error };
-	}
-	if (!newConnection) return { connection, result };
+  let newConnection: MCPServerConnection | null;
+  try {
+    newConnection = await reconnectWithAbort(reconnect, signal, { authChallenge });
+  } catch (error) {
+    rethrowIfAborted(error, signal);
+    return { connection, error };
+  }
+  if (!newConnection) return { connection, result };
 
-	try {
-		return {
-			connection: newConnection,
-			result: await callTool(newConnection, toolName, args, { signal, onProgress }),
-		};
-	} catch (error) {
-		rethrowIfAborted(error, signal);
-		return { connection: newConnection, error };
-	}
+  try {
+    return {
+      connection: newConnection,
+      result: await callTool(newConnection, toolName, args, { signal, onProgress }),
+    };
+  } catch (error) {
+    rethrowIfAborted(error, signal);
+    return { connection: newConnection, error };
+  }
 }
 
 /** Re-throw abort-related errors so they bypass error-result handling. */
 function rethrowIfAborted(error: unknown, signal?: AbortSignal): void {
-	if (error instanceof ToolAbortError) throw error;
-	if (error instanceof Error && error.name === "AbortError") throw new ToolAbortError();
-	if (signal?.aborted) throw new ToolAbortError();
+  if (error instanceof ToolAbortError) throw error;
+  if (error instanceof Error && error.name === "AbortError") throw new ToolAbortError();
+  if (signal?.aborted) throw new ToolAbortError();
 }
 
 async function reconnectWithAbort(
-	reconnect: MCPReconnect,
-	signal?: AbortSignal,
-	options?: { authChallenge?: MCPAuthChallenge },
+  reconnect: MCPReconnect,
+  signal?: AbortSignal,
+  options?: { authChallenge?: MCPAuthChallenge },
 ): Promise<MCPServerConnection | null> {
-	try {
-		return await untilAborted(signal, () => reconnect(options));
-	} catch (error) {
-		rethrowIfAborted(error, signal);
-		return null;
-	}
+  try {
+    return await untilAborted(signal, () => reconnect(options));
+  } catch (error) {
+    rethrowIfAborted(error, signal);
+    return null;
+  }
 }
 
 // Name minting lives in ./tool-name (a settings-free leaf): session/settings
@@ -500,34 +500,34 @@ export { createLegacyMCPToolName, createMCPToolName } from "./tool-name";
  * candidate as an exact lookup and keep failing when none is registered.
  */
 export function canonicalMCPToolNameCandidates(name: string): string[] {
-	if (!name.startsWith(MCP_TOOL_NAME_PREFIX)) return [];
-	const suffix = name.slice(MCP_TOOL_NAME_PREFIX.length);
-	if (suffix.length === 0) return [];
-	const candidates: string[] = [];
-	const add = (candidate: string): void => {
-		if (candidate !== name && !candidates.includes(candidate)) candidates.push(candidate);
-	};
+  if (!name.startsWith(MCP_TOOL_NAME_PREFIX)) return [];
+  const suffix = name.slice(MCP_TOOL_NAME_PREFIX.length);
+  if (suffix.length === 0) return [];
+  const candidates: string[] = [];
+  const add = (candidate: string): void => {
+    if (candidate !== name && !candidates.includes(candidate)) candidates.push(candidate);
+  };
 
-	// A split needs both halves NONEMPTY — not to survive sanitization.
-	// `createMCPToolName` substitutes its `server`/`tool` placeholder for a part
-	// that sanitizes away, and it is the same function registration uses, so a
-	// server named `123` (valid per `validateServerName`) really does register as
-	// `mcp__server_bank`. Re-minting therefore reproduces that key instead of
-	// inventing one, and requiring the halves to survive sanitization would drop
-	// exactly the names that need recovering. Only a genuinely absent half
-	// (`mcp____bank`, `mcp__srv__`) describes no split at all.
-	for (let boundary = suffix.indexOf("__"); boundary >= 0; boundary = suffix.indexOf("__", boundary + 1)) {
-		const serverName = suffix.slice(0, boundary);
-		const toolName = suffix.slice(boundary + 2);
-		if (serverName.length > 0 && toolName.length > 0) add(createMCPToolName(serverName, toolName));
-	}
-	// The whole-suffix candidate has no boundary, so there is no minted fallback
-	// shape to reproduce: a suffix that sanitizes away is a dead end.
-	const sanitizedSuffix = sanitizeMCPToolNamePart(suffix, "", true);
-	if (sanitizedSuffix.length > 0) {
-		add(capMCPToolNameLength(`${MCP_TOOL_NAME_PREFIX}${sanitizedSuffix}`));
-	}
-	return candidates;
+  // A split needs both halves NONEMPTY — not to survive sanitization.
+  // `createMCPToolName` substitutes its `server`/`tool` placeholder for a part
+  // that sanitizes away, and it is the same function registration uses, so a
+  // server named `123` (valid per `validateServerName`) really does register as
+  // `mcp__server_bank`. Re-minting therefore reproduces that key instead of
+  // inventing one, and requiring the halves to survive sanitization would drop
+  // exactly the names that need recovering. Only a genuinely absent half
+  // (`mcp____bank`, `mcp__srv__`) describes no split at all.
+  for (let boundary = suffix.indexOf("__"); boundary >= 0; boundary = suffix.indexOf("__", boundary + 1)) {
+    const serverName = suffix.slice(0, boundary);
+    const toolName = suffix.slice(boundary + 2);
+    if (serverName.length > 0 && toolName.length > 0) add(createMCPToolName(serverName, toolName));
+  }
+  // The whole-suffix candidate has no boundary, so there is no minted fallback
+  // shape to reproduce: a suffix that sanitizes away is a dead end.
+  const sanitizedSuffix = sanitizeMCPToolNamePart(suffix, "", true);
+  if (sanitizedSuffix.length > 0) {
+    add(capMCPToolNameLength(`${MCP_TOOL_NAME_PREFIX}${sanitizedSuffix}`));
+  }
+  return candidates;
 }
 
 /**
@@ -559,27 +559,27 @@ export function canonicalMCPToolNameCandidates(name: string): string[] {
  * non-MCP name can never resolve at all.
  */
 export function resolveMCPToolAlias<T extends { readonly name: string }>(
-	name: string,
-	lookup: (candidate: string) => T | undefined,
+  name: string,
+  lookup: (candidate: string) => T | undefined,
 ): T | undefined {
-	const matches: T[] = [];
-	for (const candidate of canonicalMCPToolNameCandidates(name)) {
-		const match = lookup(candidate);
-		if (match !== undefined && !matches.some(seen => seen.name === match.name)) matches.push(match);
-	}
-	return matches.length === 1 ? matches[0] : undefined;
+  const matches: T[] = [];
+  for (const candidate of canonicalMCPToolNameCandidates(name)) {
+    const match = lookup(candidate);
+    if (match !== undefined && !matches.some(seen => seen.name === match.name)) matches.push(match);
+  }
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export interface MCPToolOriginSource {
-	readonly name: string;
-	readonly mcpServerName?: unknown;
-	readonly mcpToolName?: unknown;
+  readonly name: string;
+  readonly mcpServerName?: unknown;
+  readonly mcpToolName?: unknown;
 }
 
 /** Stable identity for a tool's original MCP route, before its public name was normalized. */
 export function getMCPToolOriginKey(tool: MCPToolOriginSource): string | undefined {
-	if (typeof tool.mcpServerName !== "string" || typeof tool.mcpToolName !== "string") return undefined;
-	return `${tool.mcpServerName}\u0000${tool.mcpToolName}`;
+  if (typeof tool.mcpServerName !== "string" || typeof tool.mcpToolName !== "string") return undefined;
+  return `${tool.mcpServerName}\u0000${tool.mcpToolName}`;
 }
 
 /**
@@ -591,381 +591,381 @@ export function getMCPToolOriginKey(tool: MCPToolOriginSource): string | undefin
  * unchanged.
  */
 export function deduplicateMCPToolsByName<T extends MCPToolOriginSource>(tools: readonly T[]): T[] {
-	const deduplicated: T[] = [];
-	const registered = new Map<string, { tool: T; originKey: string; index: number }>();
+  const deduplicated: T[] = [];
+  const registered = new Map<string, { tool: T; originKey: string; index: number }>();
 
-	for (const tool of tools) {
-		const originKey = getMCPToolOriginKey(tool);
-		if (originKey === undefined) {
-			deduplicated.push(tool);
-			continue;
-		}
-		const existing = registered.get(tool.name);
-		if (!existing) {
-			registered.set(tool.name, { tool, originKey, index: deduplicated.length });
-			deduplicated.push(tool);
-			continue;
-		}
+  for (const tool of tools) {
+    const originKey = getMCPToolOriginKey(tool);
+    if (originKey === undefined) {
+      deduplicated.push(tool);
+      continue;
+    }
+    const existing = registered.get(tool.name);
+    if (!existing) {
+      registered.set(tool.name, { tool, originKey, index: deduplicated.length });
+      deduplicated.push(tool);
+      continue;
+    }
 
-		if (existing.originKey === originKey) continue;
+    if (existing.originKey === originKey) continue;
 
-		// Deterministic winner regardless of encounter order across reconnects.
-		const keepExisting = existing.originKey < originKey;
-		const winner = keepExisting ? existing.tool : tool;
-		const loser = keepExisting ? tool : existing.tool;
-		if (!keepExisting) {
-			deduplicated[existing.index] = tool;
-			existing.tool = tool;
-			existing.originKey = originKey;
-		}
-		logger.warn("MCP tool name collision; keeping stable winner", {
-			name: tool.name,
-			keptServer: winner.mcpServerName,
-			keptTool: winner.mcpToolName,
-			ignoredServer: loser.mcpServerName,
-			ignoredTool: loser.mcpToolName,
-		});
-	}
+    // Deterministic winner regardless of encounter order across reconnects.
+    const keepExisting = existing.originKey < originKey;
+    const winner = keepExisting ? existing.tool : tool;
+    const loser = keepExisting ? tool : existing.tool;
+    if (!keepExisting) {
+      deduplicated[existing.index] = tool;
+      existing.tool = tool;
+      existing.originKey = originKey;
+    }
+    logger.warn("MCP tool name collision; keeping stable winner", {
+      name: tool.name,
+      keptServer: winner.mcpServerName,
+      keptTool: winner.mcpToolName,
+      ignoredServer: loser.mcpServerName,
+      ignoredTool: loser.mcpToolName,
+    });
+  }
 
-	return deduplicated;
+  return deduplicated;
 }
 
 /**
  * CustomTool wrapping an MCP tool with an active connection.
  */
 export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
-	readonly name: string;
-	/**
-	 * Name this tool had before digits were kept in minted names, if different.
-	 * Approval resolution honors `deny`/`prompt` user policies written against
-	 * this key so the rename cannot silently unblock a restricted MCP server.
-	 */
-	readonly legacyName?: string;
-	readonly label: string;
-	readonly description: string;
-	readonly parameters: TSchema;
-	/** Original MCP tool name (before normalization) */
-	readonly mcpToolName: string;
-	/** Server name */
-	readonly mcpServerName: string;
-	/** Server-declared read-only behavior for prewalk; approval stays conservative. */
-	readonly mcpReadOnlyHint: boolean | undefined;
-	/**
-	 * The capability wait stays top-level (`essential`) like the built-in wait it
-	 * replaced: steering only reaches a direct call, never one routed through
-	 * `write xd://`. Other MCP tools keep the discoverable default.
-	 */
-	readonly loadMode: ToolLoadMode | undefined;
-	/**
-	 * The capability wait is a pure block, so steering (or an interrupting peer
-	 * IRC) cancels the in-flight request — the stdio transport turns the abort
-	 * into `notifications/cancelled`. Every other MCP tool keeps today's
-	 * semantics: queued steering never hard-kills side-effecting work.
-	 */
-	readonly interruptible = (args: unknown): boolean =>
-		isCapabilityWaitTool(this.mcpServerName, this.mcpToolName) && isInterruptibleCapabilityWaitCall(args);
-	readonly approval = "write" as const;
-	/** Render completed MCP calls with the result header replacing the pending call header. */
-	readonly mergeCallAndResult = true;
-	/**
-	 * MCP-backed tools opt out of strict structured-output grammar. The server
-	 * owns validation, and strict mode makes OpenAI-family models over-fill
-	 * mutually exclusive optional fields (#4336/#4340). Serializers preserve an
-	 * explicit `false`; an omitted flag would leave nothing to preserve.
-	 */
-	readonly strict = false as const;
-	readonly formatApprovalDetails = formatApprovalArguments;
+  readonly name: string;
+  /**
+   * Name this tool had before digits were kept in minted names, if different.
+   * Approval resolution honors `deny`/`prompt` user policies written against
+   * this key so the rename cannot silently unblock a restricted MCP server.
+   */
+  readonly legacyName?: string;
+  readonly label: string;
+  readonly description: string;
+  readonly parameters: TSchema;
+  /** Original MCP tool name (before normalization) */
+  readonly mcpToolName: string;
+  /** Server name */
+  readonly mcpServerName: string;
+  /** Server-declared read-only behavior for prewalk; approval stays conservative. */
+  readonly mcpReadOnlyHint: boolean | undefined;
+  /**
+   * The capability wait stays top-level (`essential`) like the built-in wait it
+   * replaced: steering only reaches a direct call, never one routed through
+   * `write xd://`. Other MCP tools keep the discoverable default.
+   */
+  readonly loadMode: ToolLoadMode | undefined;
+  /**
+   * The capability wait is a pure block, so steering (or an interrupting peer
+   * IRC) cancels the in-flight request — the stdio transport turns the abort
+   * into `notifications/cancelled`. Every other MCP tool keeps today's
+   * semantics: queued steering never hard-kills side-effecting work.
+   */
+  readonly interruptible = (args: unknown): boolean =>
+    isCapabilityWaitTool(this.mcpServerName, this.mcpToolName) && isInterruptibleCapabilityWaitCall(args);
+  readonly approval = "write" as const;
+  /** Render completed MCP calls with the result header replacing the pending call header. */
+  readonly mergeCallAndResult = true;
+  /**
+   * MCP-backed tools opt out of strict structured-output grammar. The server
+   * owns validation, and strict mode makes OpenAI-family models over-fill
+   * mutually exclusive optional fields (#4336/#4340). Serializers preserve an
+   * explicit `false`; an omitted flag would leave nothing to preserve.
+   */
+  readonly strict = false as const;
+  readonly formatApprovalDetails = formatApprovalArguments;
 
-	/** Create MCPTool instances for all tools from an MCP server connection */
-	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[], reconnect?: MCPReconnect): MCPTool[] {
-		return tools.map(tool => new MCPTool(connection, tool, reconnect));
-	}
+  /** Create MCPTool instances for all tools from an MCP server connection */
+  static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[], reconnect?: MCPReconnect): MCPTool[] {
+    return tools.map(tool => new MCPTool(connection, tool, reconnect));
+  }
 
-	constructor(
-		private connection: MCPServerConnection,
-		private readonly tool: MCPToolDefinition,
-		private readonly reconnect?: MCPReconnect,
-	) {
-		this.name = createMCPToolName(connection.name, tool.name);
-		this.legacyName = createLegacyMCPToolName(connection.name, tool.name);
-		this.label = `${connection.name}/${tool.name}`;
-		this.description = tool.description ?? `MCP tool from ${connection.name}`;
-		this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;
-		this.mcpToolName = tool.name;
-		this.mcpServerName = connection.name;
-		this.mcpReadOnlyHint = tool.annotations?.readOnlyHint;
-		this.loadMode = isCapabilityWaitTool(connection.name, tool.name) ? "essential" : undefined;
-	}
+  constructor(
+    private connection: MCPServerConnection,
+    private readonly tool: MCPToolDefinition,
+    private readonly reconnect?: MCPReconnect,
+  ) {
+    this.name = createMCPToolName(connection.name, tool.name);
+    this.legacyName = createLegacyMCPToolName(connection.name, tool.name);
+    this.label = `${connection.name}/${tool.name}`;
+    this.description = tool.description ?? `MCP tool from ${connection.name}`;
+    this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;
+    this.mcpToolName = tool.name;
+    this.mcpServerName = connection.name;
+    this.mcpReadOnlyHint = tool.annotations?.readOnlyHint;
+    this.loadMode = isCapabilityWaitTool(connection.name, tool.name) ? "essential" : undefined;
+  }
 
-	renderCall(args: unknown, _options: RenderResultOptions, theme: Theme) {
-		return renderMCPCall(normalizeToolArgs(args), theme, this.label);
-	}
+  renderCall(args: unknown, _options: RenderResultOptions, theme: Theme) {
+    return renderMCPCall(normalizeToolArgs(args), theme, this.label);
+  }
 
-	renderResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, theme: Theme, args?: unknown) {
-		return renderMCPResult(result, options, theme, normalizeToolArgs(args));
-	}
+  renderResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, theme: Theme, args?: unknown) {
+    return renderMCPResult(result, options, theme, normalizeToolArgs(args));
+  }
 
-	describeCall(args: unknown, _options: RenderResultOptions) {
-		return describeMCPCall(normalizeToolArgs(args), this.label);
-	}
+  describeCall(args: unknown, _options: RenderResultOptions) {
+    return describeMCPCall(normalizeToolArgs(args), this.label);
+  }
 
-	describeResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, args?: unknown) {
-		return describeMCPResult(result, options, normalizeToolArgs(args));
-	}
+  describeResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, args?: unknown) {
+    return describeMCPResult(result, options, normalizeToolArgs(args));
+  }
 
-	async execute(
-		_toolCallId: string,
-		params: unknown,
-		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
-		_ctx: CustomToolContext,
-		signal?: AbortSignal,
-	): Promise<CustomToolResult<MCPToolDetails>> {
-		throwIfAborted(signal);
-		const args = await prepareOutboundArgs(params, this.tool.inputSchema, _ctx);
-		const provider = this.connection._source?.provider;
-		const providerName = this.connection._source?.providerName;
-		const progress = progressUpdater(onUpdate, this.connection.name, this.tool.name, provider, providerName);
-		const onProgress = progress?.onProgress;
+  async execute(
+    _toolCallId: string,
+    params: unknown,
+    onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
+    _ctx: CustomToolContext,
+    signal?: AbortSignal,
+  ): Promise<CustomToolResult<MCPToolDetails>> {
+    throwIfAborted(signal);
+    const args = await prepareOutboundArgs(params, this.tool.inputSchema, _ctx);
+    const provider = this.connection._source?.provider;
+    const providerName = this.connection._source?.providerName;
+    const progress = progressUpdater(onUpdate, this.connection.name, this.tool.name, provider, providerName);
+    const onProgress = progress?.onProgress;
 
-		try {
-			const attempt = await callToolWithAuthRetry(
-				this.connection,
-				this.tool.name,
-				args,
-				this.reconnect,
-				signal,
-				onProgress,
-			);
-			if (attempt.error !== undefined) {
-				return buildErrorResult(attempt.error, this.connection.name, this.tool.name, provider, providerName);
-			}
-			if (!attempt.result) {
-				return buildErrorResult(
-					new Error("MCP tool call returned no result"),
-					this.connection.name,
-					this.tool.name,
-					provider,
-					providerName,
-				);
-			}
-			this.connection = attempt.connection;
-			return buildResult(
-				attempt.result,
-				attempt.connection.name,
-				this.tool.name,
-				attempt.connection._source?.provider ?? provider,
-				attempt.connection._source?.providerName ?? providerName,
-			);
-		} catch (error) {
-			rethrowIfAborted(error, signal);
-			if (this.reconnect && isRetriableConnectionError(error)) {
-				const newConn = await reconnectWithAbort(this.reconnect, signal);
-				if (newConn) {
-					// Rebind so subsequent calls on this instance use the fresh connection
-					this.connection = newConn;
-					const retryProvider = newConn._source?.provider ?? provider;
-					const retryProviderName = newConn._source?.providerName ?? providerName;
-					try {
-						const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
-						return buildResult(result, newConn.name, this.tool.name, retryProvider, retryProviderName);
-					} catch (retryError) {
-						rethrowIfAborted(retryError, signal);
-						return buildErrorResult(
-							retryError,
-							this.connection.name,
-							this.tool.name,
-							retryProvider,
-							retryProviderName,
-						);
-					}
-				}
-			}
-			return buildErrorResult(error, this.connection.name, this.tool.name, provider, providerName);
-		} finally {
-			progress?.close();
-		}
-	}
+    try {
+      const attempt = await callToolWithAuthRetry(
+        this.connection,
+        this.tool.name,
+        args,
+        this.reconnect,
+        signal,
+        onProgress,
+      );
+      if (attempt.error !== undefined) {
+        return buildErrorResult(attempt.error, this.connection.name, this.tool.name, provider, providerName);
+      }
+      if (!attempt.result) {
+        return buildErrorResult(
+          new Error("MCP tool call returned no result"),
+          this.connection.name,
+          this.tool.name,
+          provider,
+          providerName,
+        );
+      }
+      this.connection = attempt.connection;
+      return buildResult(
+        attempt.result,
+        attempt.connection.name,
+        this.tool.name,
+        attempt.connection._source?.provider ?? provider,
+        attempt.connection._source?.providerName ?? providerName,
+      );
+    } catch (error) {
+      rethrowIfAborted(error, signal);
+      if (this.reconnect && isRetriableConnectionError(error)) {
+        const newConn = await reconnectWithAbort(this.reconnect, signal);
+        if (newConn) {
+          // Rebind so subsequent calls on this instance use the fresh connection
+          this.connection = newConn;
+          const retryProvider = newConn._source?.provider ?? provider;
+          const retryProviderName = newConn._source?.providerName ?? providerName;
+          try {
+            const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
+            return buildResult(result, newConn.name, this.tool.name, retryProvider, retryProviderName);
+          } catch (retryError) {
+            rethrowIfAborted(retryError, signal);
+            return buildErrorResult(
+              retryError,
+              this.connection.name,
+              this.tool.name,
+              retryProvider,
+              retryProviderName,
+            );
+          }
+        }
+      }
+      return buildErrorResult(error, this.connection.name, this.tool.name, provider, providerName);
+    } finally {
+      progress?.close();
+    }
+  }
 }
 
 /**
  * CustomTool wrapping an MCP tool with deferred connection resolution.
  */
 export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
-	readonly name: string;
-	/** See {@link MCPTool.legacyName}. */
-	readonly legacyName?: string;
-	readonly label: string;
-	readonly description: string;
-	readonly parameters: TSchema;
-	/** Original MCP tool name (before normalization) */
-	readonly mcpToolName: string;
-	/** Server name */
-	readonly mcpServerName: string;
-	/** See {@link MCPTool.mcpReadOnlyHint}. */
-	readonly mcpReadOnlyHint: boolean | undefined;
-	/** See {@link MCPTool.loadMode}: the capability wait stays top-level. */
-	readonly loadMode: ToolLoadMode | undefined;
-	/** See {@link MCPTool.interruptible}: the capability wait must be steering-cancellable. */
-	readonly interruptible = (args: unknown): boolean =>
-		isCapabilityWaitTool(this.mcpServerName, this.mcpToolName) && isInterruptibleCapabilityWaitCall(args);
-	readonly approval = "write" as const;
-	/** Render completed MCP calls with the result header replacing the pending call header. */
-	readonly mergeCallAndResult = true;
-	/** See {@link MCPTool.strict}: MCP servers own validation, so stay non-strict. */
-	readonly strict = false as const;
-	readonly formatApprovalDetails = formatApprovalArguments;
+  readonly name: string;
+  /** See {@link MCPTool.legacyName}. */
+  readonly legacyName?: string;
+  readonly label: string;
+  readonly description: string;
+  readonly parameters: TSchema;
+  /** Original MCP tool name (before normalization) */
+  readonly mcpToolName: string;
+  /** Server name */
+  readonly mcpServerName: string;
+  /** See {@link MCPTool.mcpReadOnlyHint}. */
+  readonly mcpReadOnlyHint: boolean | undefined;
+  /** See {@link MCPTool.loadMode}: the capability wait stays top-level. */
+  readonly loadMode: ToolLoadMode | undefined;
+  /** See {@link MCPTool.interruptible}: the capability wait must be steering-cancellable. */
+  readonly interruptible = (args: unknown): boolean =>
+    isCapabilityWaitTool(this.mcpServerName, this.mcpToolName) && isInterruptibleCapabilityWaitCall(args);
+  readonly approval = "write" as const;
+  /** Render completed MCP calls with the result header replacing the pending call header. */
+  readonly mergeCallAndResult = true;
+  /** See {@link MCPTool.strict}: MCP servers own validation, so stay non-strict. */
+  readonly strict = false as const;
+  readonly formatApprovalDetails = formatApprovalArguments;
 
-	readonly #fallbackProvider: string | undefined;
-	readonly #fallbackProviderName: string | undefined;
+  readonly #fallbackProvider: string | undefined;
+  readonly #fallbackProviderName: string | undefined;
 
-	/** Create DeferredMCPTool instances for all tools from an MCP server */
-	static fromTools(
-		serverName: string,
-		tools: MCPToolDefinition[],
-		getConnection: () => Promise<MCPServerConnection>,
-		source?: SourceMeta,
-		reconnect?: MCPReconnect,
-	): DeferredMCPTool[] {
-		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect));
-	}
+  /** Create DeferredMCPTool instances for all tools from an MCP server */
+  static fromTools(
+    serverName: string,
+    tools: MCPToolDefinition[],
+    getConnection: () => Promise<MCPServerConnection>,
+    source?: SourceMeta,
+    reconnect?: MCPReconnect,
+  ): DeferredMCPTool[] {
+    return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect));
+  }
 
-	constructor(
-		private readonly serverName: string,
-		private readonly tool: MCPToolDefinition,
-		private readonly getConnection: () => Promise<MCPServerConnection>,
-		source?: SourceMeta,
-		private readonly reconnect?: MCPReconnect,
-	) {
-		this.name = createMCPToolName(serverName, tool.name);
-		this.legacyName = createLegacyMCPToolName(serverName, tool.name);
-		this.label = `${serverName}/${tool.name}`;
-		this.description = tool.description ?? `MCP tool from ${serverName}`;
-		this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;
-		this.mcpToolName = tool.name;
-		this.mcpServerName = serverName;
-		this.mcpReadOnlyHint = tool.annotations?.readOnlyHint;
-		this.loadMode = isCapabilityWaitTool(serverName, tool.name) ? "essential" : undefined;
-		this.#fallbackProvider = source?.provider;
-		this.#fallbackProviderName = source?.providerName;
-	}
+  constructor(
+    private readonly serverName: string,
+    private readonly tool: MCPToolDefinition,
+    private readonly getConnection: () => Promise<MCPServerConnection>,
+    source?: SourceMeta,
+    private readonly reconnect?: MCPReconnect,
+  ) {
+    this.name = createMCPToolName(serverName, tool.name);
+    this.legacyName = createLegacyMCPToolName(serverName, tool.name);
+    this.label = `${serverName}/${tool.name}`;
+    this.description = tool.description ?? `MCP tool from ${serverName}`;
+    this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;
+    this.mcpToolName = tool.name;
+    this.mcpServerName = serverName;
+    this.mcpReadOnlyHint = tool.annotations?.readOnlyHint;
+    this.loadMode = isCapabilityWaitTool(serverName, tool.name) ? "essential" : undefined;
+    this.#fallbackProvider = source?.provider;
+    this.#fallbackProviderName = source?.providerName;
+  }
 
-	renderCall(args: unknown, _options: RenderResultOptions, theme: Theme) {
-		return renderMCPCall(normalizeToolArgs(args), theme, this.label);
-	}
+  renderCall(args: unknown, _options: RenderResultOptions, theme: Theme) {
+    return renderMCPCall(normalizeToolArgs(args), theme, this.label);
+  }
 
-	renderResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, theme: Theme, args?: unknown) {
-		return renderMCPResult(result, options, theme, normalizeToolArgs(args));
-	}
+  renderResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, theme: Theme, args?: unknown) {
+    return renderMCPResult(result, options, theme, normalizeToolArgs(args));
+  }
 
-	describeCall(args: unknown, _options: RenderResultOptions) {
-		return describeMCPCall(normalizeToolArgs(args), this.label);
-	}
+  describeCall(args: unknown, _options: RenderResultOptions) {
+    return describeMCPCall(normalizeToolArgs(args), this.label);
+  }
 
-	describeResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, args?: unknown) {
-		return describeMCPResult(result, options, normalizeToolArgs(args));
-	}
+  describeResult(result: CustomToolResult<MCPToolDetails>, options: RenderResultOptions, args?: unknown) {
+    return describeMCPResult(result, options, normalizeToolArgs(args));
+  }
 
-	async execute(
-		_toolCallId: string,
-		params: unknown,
-		onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
-		_ctx: CustomToolContext,
-		signal?: AbortSignal,
-	): Promise<CustomToolResult<MCPToolDetails>> {
-		throwIfAborted(signal);
-		const args = await prepareOutboundArgs(params, this.tool.inputSchema, _ctx);
-		const provider = this.#fallbackProvider;
-		const providerName = this.#fallbackProviderName;
-		const progress = progressUpdater(onUpdate, this.serverName, this.tool.name, provider, providerName);
-		const onProgress = progress?.onProgress;
+  async execute(
+    _toolCallId: string,
+    params: unknown,
+    onUpdate: AgentToolUpdateCallback<MCPToolDetails> | undefined,
+    _ctx: CustomToolContext,
+    signal?: AbortSignal,
+  ): Promise<CustomToolResult<MCPToolDetails>> {
+    throwIfAborted(signal);
+    const args = await prepareOutboundArgs(params, this.tool.inputSchema, _ctx);
+    const provider = this.#fallbackProvider;
+    const providerName = this.#fallbackProviderName;
+    const progress = progressUpdater(onUpdate, this.serverName, this.tool.name, provider, providerName);
+    const onProgress = progress?.onProgress;
 
-		try {
-			const connection = await untilAborted(signal, () => this.getConnection());
-			throwIfAborted(signal);
-			try {
-				const attempt = await callToolWithAuthRetry(
-					connection,
-					this.tool.name,
-					args,
-					this.reconnect,
-					signal,
-					onProgress,
-				);
-				if (attempt.error !== undefined) {
-					return buildErrorResult(
-						attempt.error,
-						this.serverName,
-						this.tool.name,
-						attempt.connection._source?.provider ?? provider,
-						attempt.connection._source?.providerName ?? providerName,
-					);
-				}
-				if (!attempt.result) {
-					return buildErrorResult(
-						new Error("MCP tool call returned no result"),
-						this.serverName,
-						this.tool.name,
-						provider,
-						providerName,
-					);
-				}
-				return buildResult(
-					attempt.result,
-					this.serverName,
-					this.tool.name,
-					attempt.connection._source?.provider ?? provider,
-					attempt.connection._source?.providerName ?? providerName,
-				);
-			} catch (callError) {
-				rethrowIfAborted(callError, signal);
-				if (this.reconnect && isRetriableConnectionError(callError)) {
-					const newConn = await reconnectWithAbort(this.reconnect, signal);
-					if (newConn) {
-						const retryProvider = newConn._source?.provider ?? provider;
-						const retryProviderName = newConn._source?.providerName ?? providerName;
-						try {
-							const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
-							return buildResult(result, this.serverName, this.tool.name, retryProvider, retryProviderName);
-						} catch (retryError) {
-							rethrowIfAborted(retryError, signal);
-							return buildErrorResult(
-								retryError,
-								this.serverName,
-								this.tool.name,
-								retryProvider,
-								retryProviderName,
-							);
-						}
-					}
-				}
-				return buildErrorResult(callError, this.serverName, this.tool.name, provider, providerName);
-			}
-		} catch (connError) {
-			// getConnection() failed — server never connected or connection lost.
-			// This is always worth a reconnect attempt for deferred tools, since the
-			// error ("MCP server not connected") isn't a network error from callTool.
-			rethrowIfAborted(connError, signal);
-			if (this.reconnect) {
-				const newConn = await reconnectWithAbort(this.reconnect, signal);
-				if (newConn) {
-					try {
-						const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
-						return buildResult(
-							result,
-							this.serverName,
-							this.tool.name,
-							newConn._source?.provider ?? provider,
-							newConn._source?.providerName ?? providerName,
-						);
-					} catch (retryError) {
-						rethrowIfAborted(retryError, signal);
-						return buildErrorResult(retryError, this.serverName, this.tool.name, provider, providerName);
-					}
-				}
-			}
-			return buildErrorResult(connError, this.serverName, this.tool.name, provider, providerName);
-		} finally {
-			progress?.close();
-		}
-	}
+    try {
+      const connection = await untilAborted(signal, () => this.getConnection());
+      throwIfAborted(signal);
+      try {
+        const attempt = await callToolWithAuthRetry(
+          connection,
+          this.tool.name,
+          args,
+          this.reconnect,
+          signal,
+          onProgress,
+        );
+        if (attempt.error !== undefined) {
+          return buildErrorResult(
+            attempt.error,
+            this.serverName,
+            this.tool.name,
+            attempt.connection._source?.provider ?? provider,
+            attempt.connection._source?.providerName ?? providerName,
+          );
+        }
+        if (!attempt.result) {
+          return buildErrorResult(
+            new Error("MCP tool call returned no result"),
+            this.serverName,
+            this.tool.name,
+            provider,
+            providerName,
+          );
+        }
+        return buildResult(
+          attempt.result,
+          this.serverName,
+          this.tool.name,
+          attempt.connection._source?.provider ?? provider,
+          attempt.connection._source?.providerName ?? providerName,
+        );
+      } catch (callError) {
+        rethrowIfAborted(callError, signal);
+        if (this.reconnect && isRetriableConnectionError(callError)) {
+          const newConn = await reconnectWithAbort(this.reconnect, signal);
+          if (newConn) {
+            const retryProvider = newConn._source?.provider ?? provider;
+            const retryProviderName = newConn._source?.providerName ?? providerName;
+            try {
+              const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
+              return buildResult(result, this.serverName, this.tool.name, retryProvider, retryProviderName);
+            } catch (retryError) {
+              rethrowIfAborted(retryError, signal);
+              return buildErrorResult(
+                retryError,
+                this.serverName,
+                this.tool.name,
+                retryProvider,
+                retryProviderName,
+              );
+            }
+          }
+        }
+        return buildErrorResult(callError, this.serverName, this.tool.name, provider, providerName);
+      }
+    } catch (connError) {
+      // getConnection() failed — server never connected or connection lost.
+      // This is always worth a reconnect attempt for deferred tools, since the
+      // error ("MCP server not connected") isn't a network error from callTool.
+      rethrowIfAborted(connError, signal);
+      if (this.reconnect) {
+        const newConn = await reconnectWithAbort(this.reconnect, signal);
+        if (newConn) {
+          try {
+            const result = await callTool(newConn, this.tool.name, args, { signal, onProgress });
+            return buildResult(
+              result,
+              this.serverName,
+              this.tool.name,
+              newConn._source?.provider ?? provider,
+              newConn._source?.providerName ?? providerName,
+            );
+          } catch (retryError) {
+            rethrowIfAborted(retryError, signal);
+            return buildErrorResult(retryError, this.serverName, this.tool.name, provider, providerName);
+          }
+        }
+      }
+      return buildErrorResult(connError, this.serverName, this.tool.name, provider, providerName);
+    } finally {
+      progress?.close();
+    }
+  }
 }
