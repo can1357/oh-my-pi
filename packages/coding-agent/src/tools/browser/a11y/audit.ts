@@ -1,3 +1,4 @@
+import axeBundlePath from "axe-core/axe.min.js" with { type: "file" };
 import type { Frame, Page } from "puppeteer-core";
 
 /** Options accepted by the browser accessibility audit helper. */
@@ -193,11 +194,12 @@ let axeEvaluators: Promise<AxeEvaluators> | undefined;
  * Load the axe-core bundle and build the page-side evaluators that embed it.
  *
  * axe-core ships ~567 KB of JavaScript that is only needed once an accessibility
- * audit actually runs, so it is imported here rather than at module load to keep
- * it out of the boot module graph.
+ * audit actually runs. The path is resolved statically (Bun's file loader embeds
+ * the asset in the compiled binary) but the bytes are read here, on the audit
+ * path, to keep them out of the boot module graph.
  */
 async function loadAxeEvaluators(): Promise<AxeEvaluators> {
-	const axeSource = (await import("axe-core/axe.min.js", { with: { type: "text" } })).default;
+	const axeSource = await Bun.file(axeBundlePath).text();
 	return {
 		partial: buildEvaluator(["request"], PARTIAL_EVALUATOR_BODY, axeSource),
 		finish: buildEvaluator(["partials", "request"], FINISH_EVALUATOR_BODY, axeSource),
