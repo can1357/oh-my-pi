@@ -92,7 +92,7 @@ root:
 ANDROID_NDK_HOME=/path/to/android-ndk bun scripts/bazel-natives.ts android-arm64
 ```
 
-The installer targets API level 24 and installs
+The installer targets Android 9 (API 28) and installs
 `packages/natives/native/pi_natives.android-arm64.node`. It only load-probes
 artifacts native to the current host, so a Linux builder never loads Android.
 
@@ -102,14 +102,13 @@ To cross-build a standalone coding-agent Android binary, use the optional Linux-
 ANDROID_NDK_HOME=/path/to/android-ndk bun --cwd=packages/coding-agent run build:android
 ```
 
-Use Android NDK 25b or newer and released Bun 1.4.3 on the Linux build host;
-that compiler version was verified to have the matching Android runtime asset.
+Use Android NDK 25b or newer and released Bun 1.4.4 on the Linux build host.
 The command builds the explicit Bazel `android-arm64` native target, then
 compiles the CLI for Bun's `bun-linux-arm64-android` target. The raw executable
 is written to `packages/coding-agent/dist/omp-android-arm64`; Bun's runtime is
-included, so it does not need an external Bun installation in Termux. The
-bundled Bun 1.4.3 runtime targets Android 9 (API 28), while the native addon
-targets API 24. The generic `build` and `CROSS_TARGET` paths remain for ordinary
+included, so it does not need an external Bun installation in Termux.
+The bundled Bun 1.4.4 runtime and native addon both target Android 9 (API 28).
+The generic `build` and `CROSS_TARGET` paths remain for ordinary
 host/cross-target builds.
 
 Install a published binary from Termux with:

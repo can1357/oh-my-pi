@@ -4,10 +4,9 @@
 //! Used by the spawner's leak checks and KILL escalation, and by
 //! conformance harnesses to clean up after each upstream test driver. A pid can
 //! be recycled between a scan and a signal; every signal here first pins the
-//! scanned process: on Linux through a pidfd plus a start-time recheck (the
-//! signal then cannot reach another process), on macOS through a start-time
-//! recheck immediately before `kill` (the remaining window is a pid wrapping
-//! around within microseconds).
+//! scanned process: on Linux and Android through a pidfd when available plus
+//! a start-time recheck (without a pidfd, only the recheck; like macOS, a pid
+//! wrapping around between that check and `kill` remains a narrow race).
 
 use std::io;
 
@@ -65,11 +64,11 @@ pub fn info(pid: i32) -> Option<ProcInfo> {
 /// exists has `start <= now()`, and one started after the call has
 /// `start >= ` the returned value (a "since" mark for containment checks).
 ///
-/// Linux: `CLOCK_BOOTTIME` floored to clock ticks with integer math, the
-/// same floor the kernel applies to `/proc/<pid>/stat` field 22 (parsing
-/// `/proc/uptime` as a float can be a tick off). macOS: µs since the epoch,
-/// like `pbi_start_tvsec`/`usec` (a wall clock: a step back in time breaks
-/// the second guarantee).
+/// Linux and Android: `CLOCK_BOOTTIME` floored to clock ticks with integer
+/// math, the same floor the kernel applies to `/proc/<pid>/stat` field 22
+/// (parsing `/proc/uptime` as a float can be a tick off). macOS: µs since the
+/// epoch, like `pbi_start_tvsec`/`usec` (a wall clock: a step back in time
+/// breaks the second guarantee).
 pub fn now() -> io::Result<u64> {
 	sys::now()
 }
@@ -124,8 +123,8 @@ pub fn signal_pinned(p: &ProcInfo, sig: Signal) -> io::Result<bool> {
 /// The command name may itself contain spaces and parentheses, so it ends at
 /// the *last* `)`.
 #[cfg_attr(
-	not(target_os = "linux"),
-	allow(dead_code, reason = "Linux-only outside tests; the parser is tested everywhere")
+	not(any(target_os = "linux", target_os = "android")),
+	allow(dead_code, reason = "Linux/Android-only outside tests; parser is tested everywhere")
 )]
 fn split_stat(line: &[u8]) -> Option<(&[u8], impl Iterator<Item = &[u8]>)> {
 	let open = line.iter().position(|&b| b == b'(')?;
@@ -169,7 +168,7 @@ fn parse_stat(pid: i32, line: &[u8]) -> Option<ProcInfo> {
 	})
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod sys {
 	use std::{
 		fs,
@@ -240,9 +239,15 @@ mod sys {
 		let pidfd = match pidfd_open(p.pid) {
 			Ok(fd) => Some(fd),
 			Err(e) if e.raw_os_error() == Some(libc::ESRCH) => return Ok(false),
-			// Kernels before 5.3: fall back to a start-time recheck.
+			// Kernels without pidfd support: fall back to the start-time recheck.
+			#[cfg(target_os = "linux")]
 			Err(e) if e.raw_os_error() == Some(libc::ENOSYS) => None,
+			#[cfg(target_os = "linux")]
 			Err(e) => return Err(e),
+			// Android may not provide or permit pidfds; the recheck below still
+			// prevents signalling a process whose scanned identity has changed.
+			#[cfg(target_os = "android")]
+			Err(_) => None,
 		};
 		// With the pidfd open the pid cannot be reused for another process
 		// while we check that it still names the scanned one.

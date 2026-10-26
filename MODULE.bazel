@@ -141,7 +141,7 @@ register_toolchains("@rust_toolchains//:all")
 # ANDROID_NDK_HOME. The installer opts into the C++ toolchain only when an
 # Android target is requested; rules_android_ndk 0.1.5 supports NDK 25b+.
 android_ndk = use_extension("@rules_android_ndk//:extension.bzl", "android_ndk_repository_extension")
-android_ndk.configure(api_level = 24)
+android_ndk.configure(api_level = 28)
 use_repo(android_ndk, "androidndk")
 
 # --- C/C++ toolchains ---------------------------------------------------------
@@ -233,7 +233,7 @@ crate.annotation_select(
     build_script_env = {
         "ANDROID_NDK_HOME": "$${pwd}/bazel/toolchains/android",
         "ANDROID_NDK_ROOT": "$${pwd}/external/rules_android_ndk++android_ndk_repository_extension+androidndk",
-        "ANDROID_PLATFORM": "android-24",
+        "ANDROID_PLATFORM": "android-28",
     },
     crate = "opusic-sys",
     triples = ["aarch64-linux-android"],

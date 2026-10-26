@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added standalone Android ARM64/Termux executables with Linux cross-build support.
+- Added standalone Android ARM64/Termux executables bundling Bun 1.4.4, with Linux cross-build support.
 
 ## [18.18.9] - 2026-11-11
 
