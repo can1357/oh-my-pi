@@ -178,6 +178,8 @@ function appendSegmentDuplicateSuffix(segment: string, suffix: string, maxLength
 	return `${segment.slice(0, prefixBudget)}${suffix}`;
 }
 
+type PendingToolResultRewrite = { replacementId: string } | undefined;
+
 type DedupToolCallBlock = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
 
 /**
