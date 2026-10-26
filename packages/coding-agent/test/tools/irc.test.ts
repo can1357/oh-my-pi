@@ -14,6 +14,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { attachIrcWakeTurnMonitor } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { createSessionDefaults } from "../helpers/session-defaults";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 type IrcWakeObserver = (records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined;
 
@@ -64,11 +65,10 @@ function makeFakeSession(): FakeSession {
 	};
 }
 
-function createRealSession(overrides: Record<string, unknown> = {}): {
+function createRealSession(overrides: Record<string, unknown> = {}, sessionManager = SessionManager.inMemory("/tmp")): {
 	session: AgentSession;
 	sessionManager: SessionManager;
 } {
-	const sessionManager = SessionManager.inMemory("/tmp");
 	const session = new AgentSession({
 		agent: new Agent({
 			initialState: {
@@ -834,13 +834,22 @@ describe("IRC", () => {
 		});
 
 		it("persists undelivered pre-brief messages if setup is disposed before dispatch", async () => {
-			const { session, sessionManager } = createRealSession();
+			const dir = TempDir.createSync("@pi-aborted-brief-");
+			const manager = SessionManager.create(dir.path(), dir.path());
+			const { session } = createRealSession({}, manager);
 			sessions.push(session);
-			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session, initialPromptPending: true });
-			await session.deliverIrcMessage({ id: "abort-before-brief", from: "Main", to: "0-Child", body: "retain me", ts: Date.now() });
-			await session.dispose();
-			expect(JSON.stringify(sessionManager.getEntries())).toContain("retain me");
-			expect(session.agent.peekFollowUpQueue()).toHaveLength(0);
+			try {
+				await manager.ensureOnDisk();
+				const sessionFile = manager.getSessionFile()!;
+				registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session, initialPromptPending: true });
+				await session.deliverIrcMessage({ id: "abort-before-brief", from: "Main", to: "0-Child", body: "retain me", ts: Date.now() });
+				await session.dispose();
+				expect(await Bun.file(sessionFile).text()).toContain("retain me");
+				expect(session.agent.peekFollowUpQueue()).toHaveLength(0);
+			} finally {
+				await session.dispose();
+				dir.removeSync();
+			}
 		});
 
 		it("wakes a stale running child rather than stranding its message behind a nonexistent brief", async () => {
