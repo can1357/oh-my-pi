@@ -1,0 +1,9 @@
+auth "refuseless" {
+	name "Refuseless"
+	login "api-key" {
+		auth-url "https://refuseless.com/"
+		instructions "Copy your API key from the Refuseless dashboard"
+		prompt "Paste your Refuseless API key" placeholder="abl_..."
+		validate "models-endpoint" label="Refuseless" url="https://api.refuseless.com/v1/models"
+	}
+}

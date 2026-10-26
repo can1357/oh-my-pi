@@ -8218,6 +8218,21 @@ export interface ScalewayModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+// ---------------------------------------------------------------------------
+// Refuseless (api.refuseless.com)
+// ---------------------------------------------------------------------------
+
+const REFUSELESS_STATIC_MODEL_BY_ID = new Map(
+	seedModels<"openai-completions">("refuseless").map(model => [model.id, model] as const),
+);
+const REFUSELESS_STATIC_MODEL_IDS = seedModels<"openai-completions">("refuseless").map(model => model.id);
+
+export interface RefuselessModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
 /**
  * Scaleway model manager: plain OpenAI-compatible chat completions at
  * `api.scaleway.ai/v1` (fr-par serverless Generative APIs). `/v1/models`
@@ -8238,4 +8253,80 @@ export function scalewayModelManagerOptions(
 		filterModel: (_entry, model) => !isExcludedModel("scaleway", model.id),
 		mapModel: mapWithBundledReference,
 	});
+}
+
+// ---------------------------------------------------------------------------
+// Refuseless (api.refuseless.com)
+// ---------------------------------------------------------------------------
+
+export function refuselessModelManagerOptions(
+	config?: RefuselessModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl;
+	const references = createBundledReferenceMap<"openai-completions">("refuseless");
+	return {
+		providerId: "refuseless",
+		dynamicModelsAuthoritative: true,
+		// A bundled snapshot must not resurrect reasoning the endpoint
+		// dropped: `existing || dynamic` merges would otherwise restore a
+		// stale ladder when `/models` stops advertising efforts.
+		dynamicReasoningAuthoritative: true,
+		// Same for modalities: without this, a same-id row on another host
+		// lends its image support to a text-only Refuseless deployment.
+		dynamicInputAuthoritative: true,
+		// Partition the model cache by discovery endpoint so a custom
+		// baseUrl (Refuseless-compatible proxy) never serves the canonical
+		// host's snapshot, and vice versa.
+		cacheProviderId: resolveModelCacheProviderId("refuseless", { baseUrl }),
+		dropCachedModelIdsOnStaticMismatch: REFUSELESS_STATIC_MODEL_IDS,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "refuseless",
+					baseUrl: config?.baseUrl ?? "https://api.refuseless.com/v1",
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const staticRef = REFUSELESS_STATIC_MODEL_BY_ID.get(defaults.id);
+						const reference = staticRef ?? references.get(defaults.id);
+						const model = mapWithBundledReference(entry, defaults, reference);
+						// Seeds own their rows outright. Every other id keeps
+						// its advertised ladder: a bundled snapshot must not
+						// freeze tiers the endpoint has since changed.
+						if (staticRef) return model;
+						const efforts = parseWireEfforts(entry.reasoning_efforts);
+						if (efforts.length === 0) return { ...model, reasoning: false };
+						const wireDefault =
+							typeof entry.reasoning_default === "string"
+								? EFFORT_BY_WIRE_VALUE[entry.reasoning_default]
+								: undefined;
+						const fallbackDefault = model.thinking?.defaultLevel;
+						const defaultLevel =
+							wireDefault !== undefined && efforts.includes(wireDefault)
+								? wireDefault
+								: fallbackDefault !== undefined && efforts.includes(fallbackDefault)
+									? fallbackDefault
+									: undefined;
+						return {
+							...model,
+							reasoning: true,
+							contextWindow: toPositiveNumber(entry.context_length, model.contextWindow),
+							maxTokens: toPositiveNumber(entry.max_completion_tokens, model.maxTokens),
+							compat: {
+								...model.compat,
+								trustExplicitThinkingOnly: true,
+							},
+							thinking: {
+								...model.thinking,
+								mode: model.thinking?.mode ?? "effort",
+								efforts,
+								defaultLevel,
+							},
+						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
 }

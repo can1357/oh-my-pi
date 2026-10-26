@@ -27,7 +27,7 @@ import { encodeModelCatalog } from "../src/model-catalog-format";
 import { createModelManager } from "../src/model-manager";
 import { resolveModelTokenizer } from "../src/model-tokenizer";
 import { getBundledModels, getBundledProviders } from "../src/models";
-import { toModelSpec } from "../src/provider-models/bundled-references";
+import { toModelSpec, toModelSpecPreservingRawCompat } from "../src/provider-models/bundled-references";
 import {
 	allowsUnauthenticatedCatalogDiscovery,
 	type CatalogDiscoveryConfig,
@@ -250,7 +250,12 @@ async function fetchProviderModelsFromCatalog(
 		}
 		console.log(`Fetched ${models.length} models from ${descriptor.catalogDiscovery.label} model manager`);
 		// Keep discovery rows as specs until policies finish; the final bundle is fully materialized below.
-		return { models: models.map(model => toModelSpec(model)), succeeded: true };
+		// Fetched rows are raw specs, so project them with raw-compat
+		// preservation; built Models keep going through toModelSpec directly.
+		return {
+			models: models.map(model => toModelSpecPreservingRawCompat(model)),
+			succeeded: true,
+		};
 	} catch (error) {
 		console.error(`Failed to fetch ${descriptor.catalogDiscovery.label} models:`, error);
 		return { models: [], succeeded: false };

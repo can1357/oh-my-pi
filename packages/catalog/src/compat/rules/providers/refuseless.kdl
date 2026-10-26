@@ -1,0 +1,72 @@
+// Provider-wire compat for "refuseless" (api.refuseless.com): an
+// OpenAI-compatible chat-completions gateway for abliterated open-weight
+// models (GLM-5.3, DeepSeek-V4.1-Flash, Minimax-M3.1-Flash).
+
+provider "refuseless" {
+	default-model "glm-5.3-abliterated"
+	env "REFUSELESS_API_KEY"
+	dynamic-models-authoritative #true
+	// Same-id rows on other hosts describe *their* deployment: without this
+	// opt-out a keyless generation borrows their modalities (minimax gains
+	// image input) and prices, contradicting the reviewed rows below.
+	skip-cross-provider-reference-fills #true
+	discovery label="Refuseless"
+
+	thinking-mode "effort"
+	models "glm-5.3-abliterated" "glm-5.3-flash-abliterated" "minimax-m3.1-flash" "deepseek-v4.1-flash-abliterated" "deepseek-v4.1-flash-fast" {
+		thinking-efforts "low" "high" "max"
+		thinking-default-level "low"
+	}
+
+	class "glm" {
+		revision ">=5" {
+			// Only the abliterated weights are modified; the stock-weight
+			// fast sibling keeps portable reasoning.
+			models "*-abliterated" {
+				portable-reasoning #false
+			}
+		}
+	}
+	class "deepseek" {
+		revision ">=4" {
+			models "*-abliterated" {
+				portable-reasoning #false
+			}
+		}
+	}
+	// Reviewed seed rows (refuseless.com/pricing + live /v1/models, 2026-10-25)
+	// bundled so the provider is usable when generation and first boot have no
+	// live key. The `/v1/models` response is authoritative once discovery runs.
+	seed api="openai-completions" base-url="https://api.refuseless.com/v1" bundle="fallback" {
+		model "glm-5.3-abliterated" name="GLM 5.3 Abliterated" {
+			reasoning #true
+			input "text"
+			cost input=2 output=3 cache-read=0.35 cache-write=0
+			limits context=1048576 max-tokens=131072
+		}
+		model "glm-5.3-flash-abliterated" name="GLM 5.3 Flash Abliterated" {
+			reasoning #true
+			input "text"
+			cost input=0.25 output=0.8 cache-read=0.15 cache-write=0
+			limits context=1048576 max-tokens=131072
+		}
+		model "deepseek-v4.1-flash-abliterated" name="DeepSeek V4.1 Flash 1017 Abliterated" {
+			reasoning #true
+			input "text"
+			cost input=0.22 output=0.75 cache-read=0.045 cache-write=0
+			limits context=1048576 max-tokens=130000
+		}
+		model "deepseek-v4.1-flash-fast" name="DeepSeek V4.1 Flash 1017" {
+			reasoning #true
+			input "text"
+			cost input=0.05 output=0.15 cache-read=0.003 cache-write=0
+			limits context=1048576 max-tokens=262144
+		}
+		model "minimax-m3.1-flash" name="Minimax M3.1 Flash" {
+			reasoning #true
+			input "text"
+			cost input=0.05 output=0.25 cache-read=0.002 cache-write=0
+			limits context=1048576 max-tokens=512000
+		}
+	}
+}

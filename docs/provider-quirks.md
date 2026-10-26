@@ -2701,3 +2701,19 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 - **Discovery replacement**: Successful authoritative discovery replaces fallback provider rows rather than retaining retired seed models.
 - **Authored seeds**: `deepseek-flash-v4`, `qwen3.8-flash`, `yolo`; bundle policy `fallback`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `yoloAutoModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.
+
+## Refuseless (`refuseless`)
+
+### Special casings
+- Uses `openai-completions`; credentialed `/models` discovery is authoritative and joins bundled/curated references.
+- Reasoning traces from the `*-abliterated` weights are provider-local: the provider rule opts them out of portable reasoning, while the stock-weight `deepseek-v4.1-flash-fast` and `minimax-m3.1-flash` keep it.
+- Models absent from the seed keep their advertised `reasoning_efforts` ladder instead of collapsing to a boolean, so unseeded ids neither gain unsupported tiers nor lose their default.
+
+### Auth & usage
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/refuseless.kdl`. Environment keys: `REFUSELESS_API_KEY`. Validation uses `models-endpoint`.
+
+### Catalog model handling
+- **Provider entry (`refuseless`)**: `packages/catalog/src/compat/rules/providers/refuseless.kdl` declares default model `glm-5.3-abliterated`. Environment keys: `REFUSELESS_API_KEY`.
+- **Discovery replacement**: Successful authoritative discovery replaces fallback provider rows rather than retaining retired seed models.
+- **Authored seeds**: `glm-5.3-abliterated`, `glm-5.3-flash-abliterated`, `deepseek-v4.1-flash-abliterated`, `deepseek-v4.1-flash-fast`, `minimax-m3.1-flash`; bundle policy `fallback`. Limits, capabilities, and prices are authored alongside these rows.
+- Runtime manager: `refuselessModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`.

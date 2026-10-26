@@ -232,7 +232,7 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 	return Array.from(deduped.values()).sort((left, right) => left.id.localeCompare(right.id));
 }
 
-function normalizeBaseUrl(baseUrl: string): string {
+export function normalizeBaseUrl(baseUrl: string): string {
 	const trimmed = baseUrl.trim();
 	if (!trimmed) {
 		return "";
