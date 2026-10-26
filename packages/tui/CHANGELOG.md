@@ -1,9 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
-
-- Fixed the `/usage` dashboard printing the remaining percentage next to bars filled by quota used; it now reads `N% used`, and the details table heads its quota column `Used`, `Left` or `Quota` to match the rows it holds ([#13971](https://github.com/can1357/oh-my-pi/issues/13971), [#16415](https://github.com/can1357/oh-my-pi/pull/16415) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
 
@@ -87,6 +84,7 @@
 - `StatusLineComponent.setRunningSubagents()` and `setSubagentTreeCost()` now report whether their state changed, allowing callers to skip redundant redraws ([#17131](https://github.com/can1357/oh-my-pi/pull/17131) by [@iliaal](https://github.com/iliaal)).
 
 ### Fixed
+- Fixed the `/usage` dashboard printing the remaining percentage next to bars filled by quota used; it now reads `N% used`, and the details table heads its quota column `Used`, `Left` or `Quota` to match the rows it holds ([#13971](https://github.com/can1357/oh-my-pi/issues/13971), [#16415](https://github.com/can1357/oh-my-pi/pull/16415) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed the ask dialog's Note (button or `n`) right after a pick moved to the next question annotating that question's highlighted row instead of the answer just picked ([#17126](https://github.com/can1357/oh-my-pi/pull/17126) by [@H4vC](https://github.com/H4vC))
 - Fixed the ask dialog's Next button reopening the custom-answer editor after Other was cancelled instead of moving on to the next question or Review tab
