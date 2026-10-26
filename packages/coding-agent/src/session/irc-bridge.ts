@@ -68,7 +68,8 @@ export class IrcBridge {
 
 	/** Whether any undelivered IRC record remains queued. */
 	hasPending(): boolean {
-		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
+		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0 ||
+			this.#host.agent.peekFollowUpQueue().some(record => record.role === "custom" && record.customType === "irc:incoming");
 	}
 
 	/** Whether an IRC message from `from` is still queued for a turn yet to run. */
@@ -182,9 +183,12 @@ export class IrcBridge {
 		const messages: IrcMessage[] = [];
 		const remainingInterrupts: AgentMessage[] = [];
 		const remainingAsides: AgentMessage[] = [];
+		const remainingFollowUps: AgentMessage[] = [];
+		const followUps = this.#host.agent.peekFollowUpQueue();
 		const queues = [
 			{ records: this.#interrupts, remaining: remainingInterrupts },
 			{ records: this.#asides, remaining: remainingAsides },
+			{ records: followUps, remaining: remainingFollowUps },
 		];
 		for (const queue of queues) {
 			for (const record of queue.records) {
@@ -226,6 +230,7 @@ export class IrcBridge {
 		if (opts?.ifAny && !messages.some(opts.ifAny)) return [];
 		this.#interrupts = remainingInterrupts;
 		this.#asides = remainingAsides;
+		if (remainingFollowUps.length !== followUps.length) this.#host.agent.replaceQueue("followUp", remainingFollowUps);
 		return messages;
 	}
 
@@ -350,7 +355,20 @@ export class IrcBridge {
 
 	/** Persists queued IRC records that missed their step-boundary injection. */
 	flushPending(): void {
-		for (const record of this.drainPending()) {
+		const records = this.drainPending();
+		// A failed setup never runs the loop that drains pre-brief follow-ups.
+		// Persist them at disposal, but never hoist them ahead of a live brief.
+		if (this.#host.isDisposed()) {
+			const followUps = this.#host.agent.peekFollowUpQueue();
+			const incoming = followUps.filter(record => record.role === "custom" && record.customType === "irc:incoming");
+			if (incoming.length > 0) {
+				const consumed = new Set(incoming);
+				this.#host.agent.replaceQueue("followUp", followUps.filter(record => !consumed.has(record)));
+				records.push(...incoming);
+			}
+			records.push(...this.drainDeferredWakes());
+		}
+		for (const record of records) {
 			this.#host.agent.emitExternalEvent({ type: "message_start", message: record });
 			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
 		}
