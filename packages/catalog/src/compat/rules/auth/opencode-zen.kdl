@@ -5,5 +5,6 @@ auth "opencode-zen" {
 		auth-url "https://opencode.ai/auth"
 		instructions "Log in to the OpenCode Zen console and copy your OpenCode Zen API key"
 		prompt "Paste your OpenCode Zen API key" placeholder="sk-..."
+		empty-fallback "public"
 	}
 }

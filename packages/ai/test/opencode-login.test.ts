@@ -56,4 +56,13 @@ describe("OpenCode login prompt (#8738)", () => {
 		};
 		await expect(loginOpenCodeGo(callbacks)).rejects.toThrow();
 	});
+
+	it("falls back to public key on empty prompt for OpenCode Zen", async () => {
+		const callbacks: OAuthLoginCallbacks = {
+			onAuth: () => {},
+			onPrompt: async () => "",
+		};
+		const key = await loginOpenCodeZen(callbacks);
+		expect(key).toBe("public");
+	});
 });

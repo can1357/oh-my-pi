@@ -603,6 +603,8 @@ function detectOpenAICompat(
 		zaiReasoningEffortDialect: false,
 		clampOutputToModelMax: d.isLocalOpenAICompatBackend,
 		stripImageInput: false,
+		requiresOpenCodeEnvironment: false,
+		thinkingLoopGuard: undefined,
 		rejectRootObjectUnion: false,
 		retryWithoutStrictOnGrammarError: false,
 		supportsPromptCacheKey: false,
@@ -769,6 +771,8 @@ function resolveOpenAIResponsesPolicy(
 		supportsSteering: false,
 		requiresReasoningOffJuiceInstruction: false,
 		stripImageInput: false,
+		requiresOpenCodeEnvironment: false,
+		thinkingLoopGuard: undefined,
 		reasoningEffortMap: {},
 		supportsReasoningParams: true,
 		supportsSamplingParams: true,
@@ -939,6 +943,7 @@ function resolveAnthropicPolicy(
 		escapeBuiltinToolNames: false,
 		injectClaudeCodeInstruction: true,
 		stripImageInput: false,
+		requiresOpenCodeEnvironment: false,
 		// Unset means "canonical Anthropic image contract"; the request builder
 		// owns those numbers. The keys must exist for a KDL rule or a
 		// user-authored `compat` block to override them.
