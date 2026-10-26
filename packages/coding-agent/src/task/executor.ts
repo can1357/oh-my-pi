@@ -2591,6 +2591,8 @@ async function driveSessionToResult(
 			// instead of hanging the batch.
 			let promptAttempts = 0;
 			for (;;) {
+				const ref = AgentRegistry.global().get(session.getAgentId() ?? "");
+				if (ref?.session === session) ref.initialPromptPending = false;
 				try {
 					if (restore) await awaitAbortable(session.restoreInterruptedTurn());
 					else await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
@@ -5028,6 +5030,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			try {
 				sessionPromise = createAgentSession(
 					buildSubagentSessionOptions(sessionSpec, subagentSettings, sessionManager, null, mcpFollower, {
+						initialPromptPending: true,
 						workPoolYieldItems: options.workPoolYieldItems ?? [],
 						// A revived session restores the tier history it persisted (including
 						// tiers a provider rejected or an extension changed since spawn); only

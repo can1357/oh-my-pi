@@ -82,6 +82,8 @@ export interface AgentRef {
 	history?: AgentHistorySummary;
 	/** Run lifecycle milestones (launch is {@link createdAt}). */
 	lifecycle?: AgentRunLifecycle;
+	/** Executor owns the first prompt; cleared synchronously before dispatch, never inferred from running status. */
+	initialPromptPending?: boolean;
 }
 
 export type AgentRefExpectation = AgentRef | AgentSessionHandle;
@@ -130,6 +132,7 @@ export interface RegisterInput {
 	history?: AgentHistorySummary;
 	/** Run lifecycle milestones restored from persisted history, when known. */
 	lifecycle?: AgentRunLifecycle;
+	initialPromptPending?: boolean;
 }
 
 /** Public surface of the process-global agent registry, implemented locally on main and by a proxy in workers. */
@@ -230,6 +233,7 @@ export class AgentRegistry implements AgentRegistryApi {
 			activity: input.activity,
 			history: input.history,
 			lifecycle: input.lifecycle,
+			initialPromptPending: input.initialPromptPending,
 		};
 		Object.defineProperty(ref, kMintedRef, { value: true });
 		this.#refs.set(ref.id, ref);
