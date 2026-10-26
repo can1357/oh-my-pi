@@ -974,6 +974,7 @@
 
 - Added `tools.restrictedFolders`: every action on a listed folder (the folder and everything below it) asks for an explicit Approve/Deny in every approval mode, `yolo` included, and no remembered grant, session approval, or ACP "Always allow" covers it; recursive searches rooted above a restricted folder ask too, commands are matched by the directory they run in, and a `deny` policy still denies ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
 - `/pause` shows draining turns and running jobs across the main agent's subagent tree, without waiting on finished turns, safely parked agents, or suspended advisor reviews ([#17073](https://github.com/can1357/oh-my-pi/pull/17073) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- A line in the agent's answer that is nothing but `![alt](/path.png)` now draws that file: PNG, JPEG, GIF and WebP are read from disk and placed inline within the shared image budget on a terminal that shows graphics, and a native terminal receives a `media` node it loads by path. A relative path or a URL stays text, a missing file falls back to the line as written, and the new `tui.renderImages` setting turns the lifting off. The system prompt now tells the agent the line it can write ([#17118](https://github.com/can1357/oh-my-pi/pull/17118) by [@iacore](https://github.com/iacore))
 
 ### Changed
 
