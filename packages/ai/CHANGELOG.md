@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+- Reduced the work done while a response streams, so long streaming replies no longer stutter as chunks arrive ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
@@ -124,7 +126,6 @@
 ## [18.13.0] - 2026-10-26
 - Reduced the CPU spent preparing tool schemas on every model call, so requests with many tools start faster ([#16780](https://github.com/can1357/oh-my-pi/pull/16780) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed tool schema normalization modifying the caller's schema in place, which added the folded `const` value to a tool's own `enum` array ([#16780](https://github.com/can1357/oh-my-pi/pull/16780) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Reduced the work done while a response streams, so long streaming replies no longer stutter as chunks arrive ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Breaking Changes
 
