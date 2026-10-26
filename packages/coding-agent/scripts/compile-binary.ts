@@ -13,7 +13,7 @@ export const COMPILED_EXTERNAL_DEPENDENCIES: readonly string[] = Object.freeze([
 	"onnxruntime-node",
 ]);
 
-/** Bun 1.4.3 supports Android cross-compilation; the installed Bun types lag this target. */
+/** Bun 1.4.4 supports Android cross-compilation; the installed Bun types lag this target. */
 export const ANDROID_COMPILE_TARGET = "bun-linux-arm64-android";
 
 /**

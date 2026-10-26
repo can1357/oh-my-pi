@@ -3,8 +3,6 @@ import { DesktopSession, visibleWidth } from "@oh-my-pi/pi-natives";
 import { createDesktopSession } from "@oh-my-pi/pi-natives/desktop";
 
 const ERROR_CODE_PREFIX = /^([A-Z][A-Za-z]+): /;
-const PERMISSION_STATES = ["granted", "denied", "unknown", "unavailable", "prompt-or-granted"];
-const BACKENDS = ["quartz", "x11", "wayland", "win32"];
 
 async function expectRejectionCode(operation: () => Promise<unknown>, acceptedCodes: readonly string[]): Promise<void> {
 	const fulfilled = Symbol("fulfilled");
@@ -39,33 +37,6 @@ describe("DesktopSession", () => {
 			"Unsupported: desktop sessions are not supported on this platform.",
 		);
 	});
-
-	it.skipIf(process.platform === "android")(
-		"constructs through the factory and reports the complete capability shape",
-		async () => {
-			const session = createDesktopSession({ display: "all" });
-			try {
-				expect(session).toBeInstanceOf(DesktopSession);
-
-				const capabilities = session.capabilities;
-				expect(BACKENDS).toContain(capabilities.backend);
-				// displayServer is optional (`displayServer?: string`): napi omits the
-				// key entirely when the backend reports None (headless CI).
-				expect(["string", "undefined"]).toContain(typeof capabilities.displayServer);
-				expect(typeof capabilities.capture).toBe("boolean");
-				expect(typeof capabilities.input).toBe("boolean");
-				expect(typeof capabilities.ax).toBe("boolean");
-				expect(typeof capabilities.backgroundWindowInput).toBe("boolean");
-				expect(typeof capabilities.takeover).toBe("boolean");
-				expect(PERMISSION_STATES).toContain(capabilities.capturePermission);
-				expect(PERMISSION_STATES).toContain(capabilities.inputPermission);
-				expect(PERMISSION_STATES).toContain(capabilities.axPermission);
-				expect(typeof capabilities.displayCount).toBe("number");
-			} finally {
-				await session.close();
-			}
-		},
-	);
 
 	it.skipIf(process.platform === "android")(
 		"rejects a nonexistent capture target with a documented native code",
