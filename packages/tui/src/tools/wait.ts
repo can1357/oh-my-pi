@@ -277,7 +277,7 @@ function progressForJob(job: JobSnapshot): AgentProgress | undefined {
 	if (job.type !== "task" || job.status !== "running") return undefined;
 	const progress = job.progress;
 	if (!progress || progress.length === 0) return undefined;
-	return progress.find(item => item.id === (job.agentUrlId ?? job.id) || item.id === job.id) ?? progress[0];
+	return progress.find(item => item.id === (job.agentUrlId ?? job.id)) ?? progress[0];
 }
 
 function renderSoleWorkerStream(
