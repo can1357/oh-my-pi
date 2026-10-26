@@ -109,13 +109,13 @@ mod unix {
 		(CtlChar::Start, libc::VSTART),
 		(CtlChar::Stop, libc::VSTOP),
 		(CtlChar::Susp, libc::VSUSP),
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(any(target_os = "linux", target_os = "android")))]
 		(CtlChar::Dsusp, libc::VDSUSP),
 		(CtlChar::Lnext, libc::VLNEXT),
 		(CtlChar::Werase, libc::VWERASE),
 		(CtlChar::Reprint, libc::VREPRINT),
 		(CtlChar::Discard, libc::VDISCARD),
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(any(target_os = "linux", target_os = "android")))]
 		(CtlChar::Status, libc::VSTATUS),
 		#[cfg(target_os = "linux")]
 		(CtlChar::Swtc, libc::VSWTC),

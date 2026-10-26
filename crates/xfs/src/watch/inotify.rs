@@ -258,8 +258,9 @@ impl State {
 					Some(&next) => next == b'/',
 				});
 			if gone {
-				// SAFETY: plain syscall on a live descriptor.
-				unsafe { libc::inotify_rm_watch(inotify, wd) };
+				// SAFETY: live descriptor; Bionic takes the watch descriptor as
+				// unsigned.
+				unsafe { libc::inotify_rm_watch(inotify, wd as _) };
 			}
 			!gone
 		});
@@ -368,8 +369,9 @@ impl State {
 			// kernel confirms.
 			let path = watch.path.clone();
 			self.forget_below(&path, false);
-			// SAFETY: plain syscall on a live descriptor.
-			unsafe { libc::inotify_rm_watch(self.inotify.as_raw_fd(), wd) };
+			// SAFETY: live descriptor; Bionic takes the watch descriptor as
+			// unsigned.
+			unsafe { libc::inotify_rm_watch(self.inotify.as_raw_fd(), wd as _) };
 		}
 		Ok(())
 	}

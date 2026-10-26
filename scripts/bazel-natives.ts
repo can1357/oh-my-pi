@@ -296,7 +296,7 @@ async function installAddon(
 		await fs.rename(tempPath, destPath); // atomic even if dest is a loaded addon
 		return stamp;
 	} catch (err) {
-		await fs.unlink(tempPath).catch(() => {});
+		await fs.unlink(tempPath).catch(() => { });
 		throw err;
 	}
 }
@@ -331,7 +331,7 @@ export async function verifyHostAddonLoads(
 		expectedVersion === undefined
 			? ""
 			: `const reported = typeof m.exports.__piNativesBuildVersion === "function" ? m.exports.__piNativesBuildVersion() : undefined; ` +
-				`if (reported !== ${JSON.stringify(expectedVersion)}) { console.error("addon reports build version " + JSON.stringify(reported) + ", expected " + ${JSON.stringify(JSON.stringify(expectedVersion))}); process.exit(1); }`;
+			`if (reported !== ${JSON.stringify(expectedVersion)}) { console.error("addon reports build version " + JSON.stringify(reported) + ", expected " + ${JSON.stringify(JSON.stringify(expectedVersion))}); process.exit(1); }`;
 	const probe =
 		`const m = { exports: {} }; try { process.dlopen(m, ${JSON.stringify(destPath)}); } ` +
 		"catch (error) { console.error(error && error.message ? error.message : String(error)); process.exit(1); } " +
@@ -527,8 +527,8 @@ async function main(): Promise<void> {
 			if (host.platform === "win32") {
 				throw new Error(
 					`Cannot bazel-build [${options.targets.join(", ")}] on a Windows host: the msvc cross ` +
-						"toolchain (bazel/toolchains/msvc) only runs on linux/mac exec hosts. Use `host` here " +
-						"(local napi build via VS Build Tools), or run this script from WSL/linux for cross targets.",
+					"toolchain (bazel/toolchains/msvc) only runs on linux/mac exec hosts. Use `host` here " +
+					"(local napi build via VS Build Tools), or run this script from WSL/linux for cross targets.",
 				);
 			}
 			throw new Error("OMP_NATIVE_BUILD_BACKEND=cargo supports only the host target");
@@ -550,7 +550,7 @@ async function main(): Promise<void> {
 			if (options.targets.length !== 1 || options.targets[0] !== "host") {
 				throw new Error(
 					`Neither \`bazelisk\` nor \`bazel\` found on PATH; Cargo fallback supports only the host target, not [${options.targets.join(", ")}]. ` +
-						"Install bazelisk or request `host` for a local Cargo/N-API build.",
+					"Install bazelisk or request `host` for a local Cargo/N-API build.",
 				);
 			}
 			console.log("bazelisk/bazel not found; falling back to the local Cargo/N-API host build");
@@ -614,7 +614,7 @@ async function main(): Promise<void> {
 			// installing both into one dest would silently clobber.
 			console.error(
 				`refusing to install ${output}: ${base} already provided by ${prior}. ` +
-					"Build gnu and musl targets in separate invocations with separate --dest dirs.",
+				"Build gnu and musl targets in separate invocations with separate --dest dirs.",
 			);
 			process.exit(1);
 		}
@@ -632,7 +632,9 @@ async function main(): Promise<void> {
 				? `installed ${path.basename(output)} (stamped ${version}) → ${destPath}`
 				: `installed ${path.basename(output)} (prebuilt without a version stamp slot; left unstamped) → ${destPath}`,
 		);
-		if (!options.source) await verifyLinuxAddon(destPath);
+		if (!options.source && path.basename(output).startsWith("pi_natives.linux-")) {
+			await verifyLinuxAddon(destPath);
+		}
 		if (probeFilename && path.basename(output) === probeFilename) {
 			await verifyHostAddonLoads(destPath, undefined, stamped ? version : undefined);
 		}

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added an explicit Android ARM64 native cross-build using the Android NDK (API level 24) for standalone Termux binaries.
+- Added an explicit Android ARM64 native cross-build using the Android NDK (API level 28) for standalone Termux binaries.
 
 ### Changed
 

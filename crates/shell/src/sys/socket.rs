@@ -385,7 +385,7 @@ fn reverse(addr: IpAddr) -> Option<BString> {
 			(&raw const ss).cast(),
 			len,
 			host.as_mut_ptr(),
-			host.len() as libc::socklen_t,
+			host.len() as _,
 			std::ptr::null_mut(),
 			0,
 			libc::NI_NAMEREQD,
