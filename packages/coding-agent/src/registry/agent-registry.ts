@@ -80,7 +80,7 @@ export interface AgentRef {
 	history?: AgentHistorySummary;
 	/** Run lifecycle milestones (launch is {@link createdAt}). */
 	lifecycle?: AgentRunLifecycle;
-	/** Executor owns the first prompt; cleared synchronously before dispatch, never inferred from running status. */
+	/** Executor owns the first prompt until provider dispatch or settlement, never inferred from running status. */
 	initialPromptPending?: boolean;
 }
 

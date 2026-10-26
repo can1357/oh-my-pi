@@ -355,6 +355,10 @@ export class IrcBridge {
 			records.push(...this.drainDeferredWakes());
 		}
 		for (const record of records) {
+			if (this.#host.isDisposed() && record.role === "custom") {
+				this.#host.sessionManager.appendCustomMessageEntry(record.customType, record.content, record.display, record.details, record.attribution ?? "agent");
+				continue;
+			}
 			this.#host.agent.emitExternalEvent({ type: "message_start", message: record });
 			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
 		}

@@ -2535,8 +2535,6 @@ async function driveSessionToResult(
 			// instead of hanging the batch.
 			let promptAttempts = 0;
 			for (;;) {
-				const ref = AgentRegistry.global().get(session.getAgentId() ?? "");
-				if (ref?.session === session) ref.initialPromptPending = false;
 				try {
 					if (restore) await awaitAbortable(session.restoreInterruptedTurn());
 					else await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
@@ -2557,6 +2555,9 @@ async function driveSessionToResult(
 			// failures keep the old path.
 			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
 			if (!recoverableStop || abortSignal.aborted || err instanceof PromptDispatchError) throw err;
+		} finally {
+			const ref = AgentRegistry.global().get(session.getAgentId() ?? "");
+			if (ref?.session === session) ref.initialPromptPending = false;
 		}
 
 		// The forced final turn must answer through `yield`, or with no tools at all.
@@ -4885,6 +4886,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						resolveServiceTierByFamily,
 						onFirstChatDispatch: () => {
 							firstChatDispatchAt ??= performance.now();
+							const ref = AgentRegistry.global().get(id);
+							if (ref?.session === session) ref.initialPromptPending = false;
 						},
 					}),
 				);
