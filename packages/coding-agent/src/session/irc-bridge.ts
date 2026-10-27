@@ -30,6 +30,8 @@ export class IrcBridge {
 	/** Queued broadcast legs and progress notes: they ask nothing of the recipient, so they
 	 *  inject at the next step boundary like any record but never cut a `wait` short. */
 	readonly #quietRecords = new WeakSet<AgentMessage>();
+	/** Follow-ups admitted here before a child receives its initial prompt. */
+	readonly #preBriefFollowUps = new WeakSet<AgentMessage>();
 
 	readonly #host: IrcBridgeHost;
 	#interrupts: AgentMessage[] = [];
@@ -319,7 +321,10 @@ export class IrcBridge {
 		if (dispatchPending) {
 			// Peers retain a separate monitored wake after publication, never the brief's result boundary.
 			if (peerMessage) this.queueDeferredWake([record]);
-			else this.#host.agent.followUp(record);
+			else {
+				this.#preBriefFollowUps.add(record);
+				this.#host.agent.followUp(record);
+			}
 			return "injected";
 		}
 		if (streaming) {
@@ -366,7 +371,7 @@ export class IrcBridge {
 		// Persist them at disposal, but never hoist them ahead of a live brief.
 		if (this.#host.isDisposed()) {
 			const followUps = this.#host.agent.peekFollowUpQueue();
-			const incoming = followUps.filter(record => record.role === "custom" && record.customType === "irc:incoming");
+			const incoming = followUps.filter(record => this.#preBriefFollowUps.has(record));
 			if (incoming.length > 0) {
 				const consumed = new Set(incoming);
 				this.#host.agent.replaceQueue(
