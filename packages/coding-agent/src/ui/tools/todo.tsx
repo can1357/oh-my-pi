@@ -14,7 +14,7 @@
  */
 import { signal } from "@oh-my-pi/pi-tui";
 import type { TspChecklistItem, TspChecklistPhase } from "@oh-my-pi/pi-wire";
-import { todoMatchesAnyDescription } from "../../tools/details/todo";
+import { todoMatchesAnyDescription, unwrappedTaskText } from "../../tools/details/todo";
 import type { ToolPresenter, ToolView } from "./contract";
 import { cleanText, countText, ErrorText, NoteText } from "./agent-common";
 import { resultText } from "./default";
@@ -163,7 +163,7 @@ function checklistPhases(phases: readonly TodoPhase[], descriptions: readonly st
 		title: cleanText(phase.name),
 		items: phase.tasks.map((task, t) => ({
 			id: `p${p}.${t}`,
-			text: cleanText(task.content),
+			text: cleanText(unwrappedTaskText(task.content)),
 			status: matched(task) ? "active" : STATUS[task.status],
 		})),
 		collapsed: phase.tasks.length > 0 && phase.tasks.every(isClosed),

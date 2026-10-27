@@ -32104,6 +32104,24 @@
 			]
 		},
 		{
+			"source": "`items` entries are plain strings",
+			"origin": "packages/coding-agent/src/prompts/tools/todo.md",
+			"variants": [
+				"`items` entries must be plain strings",
+				"`items` entries are plain text strings",
+				"`items` entries take plain strings only"
+			]
+		},
+		{
+			"source": "pass the task text directly, NOT objects like `{task: ...}`",
+			"origin": "packages/coding-agent/src/prompts/tools/todo.md",
+			"variants": [
+				"pass the task text directly, NOT an object like `{task: ...}`",
+				"pass the task text as plain text, NOT objects like `{task: ...}`",
+				"pass the task text directly, NOT objects such as `{task: ...}`"
+			]
+		},
+		{
 			"source": "Supply `phase` to target another phase",
 			"origin": "packages/coding-agent/src/prompts/tools/todo.md",
 			"variants": [

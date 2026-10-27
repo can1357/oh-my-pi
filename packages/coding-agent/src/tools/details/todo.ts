@@ -12,6 +12,31 @@ export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned";
 
 /** Operation names accepted by the todo tool and echoed in successful result details. */
 export type TodoOperation = "init" | "start" | "done" | "rm" | "drop" | "append" | "view";
+/**
+ * The text a todo item is about, for display surfaces. Wrapped item forms
+ * (JSON-stringified object items the lenient validation entry produces) are
+ * stored verbatim; every surface that renders a task shows this unwrapped
+ * text instead of the raw JSON. Strictly key-gated: only strings that parse
+ * as JSON objects carrying a task/content/description/text field unwrap;
+ * any other text — including a literal that merely starts with `{` — is
+ * returned unchanged.
+ */
+export function unwrappedTaskText(content: string): string {
+	if (!content.startsWith("{")) return content;
+	try {
+		const parsed: unknown = JSON.parse(content);
+		if (parsed !== null && typeof parsed === "object") {
+			for (const key of ["task", "content", "description", "text"]) {
+				if (typeof (parsed as Record<string, unknown>)[key] === "string") {
+					return (parsed as Record<string, unknown>)[key] as string;
+				}
+			}
+		}
+	} catch {
+		// Not JSON — the text is the content.
+	}
+	return content;
+}
 
 /** A task displayed within a todo phase. */
 export interface TodoItem {
