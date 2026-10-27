@@ -242,12 +242,12 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("second");
 		});
 
-		it("exits history mode at the history edit anchor before public insertText", () => {
+		it("exits history mode at the recalled prompt's end before public insertText", () => {
 			const editor = new Editor(defaultEditorTheme);
 
 			editor.addToHistory("line1\nline2");
-			editor.handleInput("\x1b[A"); // Up - recalls at the top edit anchor
-			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+			editor.handleInput("\x1b[A"); // Up - recalls at its end
+			expect(editor.getCursor()).toEqual({ line: 1, col: "line2".length });
 
 			editor.insertText("[Image #1] ");
 
@@ -373,46 +373,80 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("");
 		});
 
-		it("keeps a wrapped single-row history entry anchored at its top", () => {
+		it("recalls a multi-row prompt with the cursor at its end", () => {
 			const editor = new Editor(defaultEditorTheme);
-			const wrapped = "word ".repeat(40).trim(); // 199 cells: wraps past the 80-column default layout width
+
+			editor.addToHistory("line1\nline2");
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("line1\nline2");
+			expect(editor.getCursor()).toEqual({ line: 1, col: 5 });
+
+			editor.handleInput("!");
+			expect(editor.getText()).toBe("line1\nline2!");
+		});
+
+		it("walks up a recalled multi-row entry before stepping to the older entry", () => {
+			const editor = new Editor(defaultEditorTheme);
+
+			editor.addToHistory("older");
+			editor.addToHistory("line1\nline2");
+
+			editor.handleInput("\x1b[A"); // latest, anchored at its end
+			expect(editor.getCursor()).toEqual({ line: 1, col: 5 });
+
+			editor.handleInput("\x1b[A"); // move within the entry
+			expect(editor.getCursor()).toEqual({ line: 0, col: 5 });
+
+			editor.handleInput("\x1b[A"); // at its top, step to the older entry
+			expect(editor.getText()).toBe("older");
+		});
+
+		it("recalls a wrapped single-row prompt at its end and walks its rows before older history", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const wrapped = "word ".repeat(40).trim(); // 199 cells: wraps past the 80-column default caret width
 
 			editor.addToHistory("older");
 			editor.addToHistory(wrapped);
 
 			editor.handleInput("\x1b[A");
-			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+			expect(editor.getText()).toBe(wrapped);
+			expect(editor.getCursor()).toEqual({ line: 0, col: wrapped.length });
 
-			editor.handleInput("\x1b[A"); // one press still steps to the older entry
+			// Up walks the wrapped rows first, then reaches the older entry.
+			for (let i = 0; i < 5; i++) editor.handleInput("\x1b[A");
 			expect(editor.getText()).toBe("older");
 		});
 
-		it("anchors history entry at bottom when navigating with Down", () => {
+		it("steps to the newer entry with Down from a recalled entry's bottom line", () => {
 			const editor = new Editor(defaultEditorTheme);
 
-			editor.addToHistory("old1\nold2");
-			editor.addToHistory("line1\nline2\nline3");
+			editor.addToHistory("older");
+			editor.addToHistory("line1\nline2");
 
-			editor.handleInput("\x1b[A"); // latest, anchored at top
-			editor.handleInput("\x1b[A"); // older, anchored at top
-			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+			editor.handleInput("\x1b[A"); // latest, anchored at its end
+			editor.handleInput("\x1b[A"); // walk to its top
+			editor.handleInput("\x1b[A"); // older
+			expect(editor.getText()).toBe("older");
 
-			editor.handleInput("\x1b[B"); // walk down the older entry to its last row
-			editor.handleInput("\x1b[B"); // step to the newer entry, anchored at bottom
-			expect(editor.getText()).toBe("line1\nline2\nline3");
-			expect(editor.getCursor()).toEqual({ line: 2, col: 5 });
+			editor.handleInput("\x1b[B"); // back to the newer entry, anchored at its end
+			expect(editor.getText()).toBe("line1\nline2");
+			expect(editor.getCursor()).toEqual({ line: 1, col: 5 });
 		});
 
 		it("still allows in-entry cursor movement while browsing history", () => {
 			const editor = new Editor(defaultEditorTheme);
 
 			editor.addToHistory("line1\nline2\nline3");
-			editor.handleInput("\x1b[A"); // top anchor
+			editor.handleInput("\x1b[A"); // bottom anchor
+			expect(editor.getCursor()).toEqual({ line: 2, col: 5 });
 
-			editor.handleInput("\x1b[B"); // move within entry
-			expect(editor.getCursor()).toEqual({ line: 1, col: 0 });
+			editor.handleInput("\x1b[A"); // move within entry
+			expect(editor.getCursor()).toEqual({ line: 1, col: 5 });
 
-			editor.handleInput("\x1b[B");
+			editor.handleInput("\x1b[B"); // back down
+			expect(editor.getCursor()).toEqual({ line: 2, col: 5 });
+
 			editor.handleInput("\x1b[B"); // at bottom, exit history
 			expect(editor.getText()).toBe("");
 		});
