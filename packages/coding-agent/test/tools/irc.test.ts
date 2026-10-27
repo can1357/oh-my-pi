@@ -829,10 +829,10 @@ describe("IRC", () => {
 			expect(promptSpy).not.toHaveBeenCalled();
 			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
 			expect(session.agent.peekFollowUpQueue()).toHaveLength(1);
-			expect(session.agent.peekFollowUpQueue()[0]).toMatchObject({ customType: "irc:incoming" });
-			expect(String(session.agent.peekFollowUpQueue()[0]!.content)).not.toContain(
-				"Active interruptible wait stopped",
-			);
+			const queuedMessage = session.agent.peekFollowUpQueue()[0]!;
+			expect(queuedMessage).toMatchObject({ customType: "irc:incoming" });
+			if (!("content" in queuedMessage)) throw new Error("Queued IRC message has no content");
+			expect(String(queuedMessage.content)).not.toContain("Active interruptible wait stopped");
 		});
 
 		it("lets an explicit inbox read consume a pre-brief parent message", async () => {
