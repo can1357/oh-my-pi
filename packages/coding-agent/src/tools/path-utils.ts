@@ -838,7 +838,8 @@ async function internalUrlIsExactMcpResource(entry: string, signal?: AbortSignal
 		scheme !== "skill" &&
 		scheme !== "mcp" &&
 		(isInternalUrlPath(barePath) || isReadableUrlPath(barePath) || scheme === "file")
-	) return false;
+	)
+		return false;
 	if (!MCPManager.available()) return false;
 	const deadline = Date.now() + MCP_RESOURCE_DISCOVERY_WAIT_MS;
 	const manager = await withTimeout(
@@ -877,7 +878,13 @@ export async function splitMixedUrlPathList(
 		const partPath = (await splitPathAndSelPreferringLiteral(part, cwd)).path;
 		if (hasGlobPathChars(partPath) || (await probeLiteralPathExists(partPath, cwd)) !== "exists") return null;
 	}
-	if (hasAmbiguousInternalUrlTail(parts.filter(part => !(exclusionParts && isExclusionPart(part))), isUrl)) return null;
+	if (
+		hasAmbiguousInternalUrlTail(
+			parts.filter(part => !(exclusionParts && isExclusionPart(part))),
+			isUrl,
+		)
+	)
+		return null;
 	if (isInternalUrlPath(normalizedEntry)) {
 		// Existing file-backed resources keep literal precedence over list recovery.
 		if (await internalUrlLocatesExisting(normalizedEntry, cwd, context)) return null;

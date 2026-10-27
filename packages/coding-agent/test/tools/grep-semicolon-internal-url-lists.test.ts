@@ -97,9 +97,7 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 		expect(getResultText(result)).toContain(skillBodyNeedle);
 		expect(getResultText(result)).toContain("included directory needle");
 		expect(getResultText(result)).not.toContain("excluded directory needle");
-		expect(await expandDelimitedPathEntries(["skill://demo;!*.md"], tmpDir)).toEqual([
-			"skill://demo;!*.md",
-		]);
+		expect(await expandDelimitedPathEntries(["skill://demo;!*.md"], tmpDir)).toEqual(["skill://demo;!*.md"]);
 		expect(await expandDelimitedPathEntries(["skill://demo/a;"], tmpDir, { exclusionParts: true })).toEqual([
 			"skill://demo/a;",
 		]);
@@ -148,7 +146,10 @@ describe("GrepTool semicolon internal-URL path lists", () => {
 		MCPManager.setInstance({
 			getConnectedServers: () => ["custom"],
 			getServerResources: () => ({
-				resources: [{ uri, name: "exact" }, { uri: "custom:item", name: "prefix" }],
+				resources: [
+					{ uri, name: "exact" },
+					{ uri: "custom:item", name: "prefix" },
+				],
 				templates: [],
 			}),
 			waitForPendingConnections: async () => {},
