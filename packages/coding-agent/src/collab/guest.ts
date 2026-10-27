@@ -313,7 +313,7 @@ export class CollabGuestLink {
 
 	/** Host title metadata only while the displayed session is this guest's replica. */
 	get titleState(): CollabSessionState | undefined {
-		return this.#ctx.sessionManager.getSessionId() === this.#replicaId ? this.state ?? undefined : undefined;
+		return this.#ctx.sessionManager.getSessionId() === this.#replicaId ? (this.state ?? undefined) : undefined;
 	}
 
 	/** Shows the read-only status hint when applicable; true when the action must be dropped. */
