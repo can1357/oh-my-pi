@@ -3,17 +3,20 @@ import type { Agent } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import {
+	applyDirenvPreflight,
 	type BashPtyOptions,
 	type BashResult,
 	executeBash as executeBashCommand,
 	releaseShellSessions,
 } from "../exec/bash-executor";
 import type { ExtensionRunner } from "../extensibility/extensions";
+import { type BashInteractiveUi, runInteractiveBashPty } from "../tools/bash-interactive";
 import { outputMeta } from "../tools/output-meta";
 import { clampTimeout } from "../tools/tool-timeouts";
 import type { BashExecutionMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
+import { cfgBashDirenv, cfgBashDirenvLoadTimeoutMs } from "../exec/settings";
 import { cfgToolsMaxTimeout } from "../tools/settings";
 
 /** Destination that owns a bash result after a session or branch transition. */
@@ -76,7 +79,18 @@ export class BashRunner {
 	async executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
+		options?: {
+			excludeFromContext?: boolean;
+			useUserShell?: boolean;
+			pty?: BashPtyOptions;
+			/**
+			 * Run on the interactive PTY overlay instead of the headless executor.
+			 * A `doas`/`sudo` command run by the user's `!` shell needs a terminal
+			 * that forwards the typed password, exactly as the bash tool's own
+			 * auth-terminal routing does.
+			 */
+			interactivePty?: { ui: BashInteractiveUi };
+		},
 	): Promise<BashResult> {
 		const target = this.#captureSessionTarget();
 		let targetTransferred = false;
@@ -116,22 +130,31 @@ export class BashRunner {
 
 			const abortController = new AbortController();
 			this.#abortControllers.add(abortController);
+			const timeout = clampTimeout("bash", undefined, cfgToolsMaxTimeout.get(this.#host.settings)) * 1000;
 			let result: BashResult;
 			try {
-				result = await executeBashCommand(command, {
-					onChunk,
-					signal: abortController.signal,
-					sessionKey: target.sessionId,
-					// A command still pending when its session was left must not keep a
-					// shell under that session after the transition released its shells.
-					isSessionCurrent: () => this.#host.sessionManager.getSessionId() === target.sessionId,
-					cwd,
-					timeout: clampTimeout("bash", undefined, cfgToolsMaxTimeout.get(this.#host.settings)) * 1000,
-					onMinimizedSave: originalText => this.#saveOriginalArtifact(target, originalText),
-					env: shellEnv,
-					useUserShell: options?.useUserShell,
-					pty: options?.pty,
-				});
+				result = options?.interactivePty
+					? await this.#runInteractiveBash(command, {
+							ui: options.interactivePty.ui,
+							cwd,
+							env: shellEnv,
+							timeout,
+							signal: abortController.signal,
+						})
+					: await executeBashCommand(command, {
+							onChunk,
+							signal: abortController.signal,
+							sessionKey: target.sessionId,
+							// A command still pending when its session was left must not keep a
+							// shell under that session after the transition released its shells.
+							isSessionCurrent: () => this.#host.sessionManager.getSessionId() === target.sessionId,
+							cwd,
+							timeout,
+							onMinimizedSave: originalText => this.#saveOriginalArtifact(target, originalText),
+							env: shellEnv,
+							useUserShell: options?.useUserShell,
+							pty: options?.pty,
+						});
 			} finally {
 				this.#abortControllers.delete(abortController);
 			}
@@ -141,6 +164,39 @@ export class BashRunner {
 		} finally {
 			if (!targetTransferred) await this.#releaseSessionTarget(target);
 		}
+	}
+
+	/**
+	 * Run on the interactive PTY overlay. The overlay bypasses the one-shot
+	 * executor, so the direnv preflight `executeBash` would have applied is
+	 * folded in here once.
+	 */
+	async #runInteractiveBash(
+		command: string,
+		options: {
+			ui: BashInteractiveUi;
+			cwd: string;
+			env: Record<string, string> | undefined;
+			timeout: number;
+			signal: AbortSignal;
+		},
+	): Promise<BashResult> {
+		const settings = this.#host.settings;
+		const preflight = await applyDirenvPreflight(command, options.cwd, {
+			callerEnv: options.env,
+			signal: options.signal,
+			timeoutMs: cfgBashDirenvLoadTimeoutMs.get(settings),
+			callerTimeoutMs: options.timeout,
+			direnvSetting: cfgBashDirenv.get(settings),
+		});
+		return await runInteractiveBashPty(options.ui, {
+			command: preflight.command,
+			cwd: options.cwd,
+			// `0` is the executor's "deadline disabled"; the PTY spells that undefined.
+			timeoutMs: options.timeout === 0 ? undefined : options.timeout,
+			signal: options.signal,
+			env: preflight.env,
+		});
 	}
 
 	/** Records a bash result supplied outside executeBash in the current ownership scope. */

@@ -16,8 +16,11 @@ export interface BashInteractiveResult extends OutputSummary {
 	images?: ImageContent[];
 }
 
+/** The one UI capability the interactive PTY overlay needs: `custom`. */
+export type BashInteractiveUi = Pick<NonNullable<AgentToolContext["ui"]>, "custom">;
+
 export async function runInteractiveBashPty(
-	ui: Pick<NonNullable<AgentToolContext["ui"]>, "custom">,
+	ui: BashInteractiveUi,
 	options: {
 		command: string;
 		cwd: string;

@@ -89,6 +89,7 @@ import { formatCompactQuota } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { resolveTernPane } from "../../tools/browser/tern/kind";
 import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
+import { bashNeedsAuthTerminal, canUseInteractiveBashPty } from "../../tools/bash-pty-selection";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs, shortenEmbeddedPaths, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
@@ -1902,6 +1903,17 @@ export class CommandController {
 		}
 		this.ctx.ui.requestRender();
 
+		// `doas`/`sudo` read the password from the controlling terminal, which
+		// neither the plain executor nor the headless `!` PTY forwards. Give such
+		// a command the same interactive overlay the bash tool uses, so the typed
+		// password reaches it. Input is forwarded only in that overlay; an
+		// ordinary `!` command keeps the transcript PTY replay.
+		const toolUi = this.ctx.getToolUIContext();
+		const interactivePty =
+			toolUi && canUseInteractiveBashPty(bashNeedsAuthTerminal(command), { hasUI: true, ui: toolUi })
+				? { ui: toolUi }
+				: undefined;
+
 		try {
 			const result = await this.ctx.session.executeBash(
 				command,
@@ -1928,6 +1940,7 @@ export class CommandController {
 							this.ctx.ui.requestRender();
 						},
 					},
+					interactivePty,
 				},
 			);
 			if (this.ctx.bashComponent) {

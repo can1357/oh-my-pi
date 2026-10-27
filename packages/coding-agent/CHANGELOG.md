@@ -515,6 +515,7 @@
 - Fixed the `computer` tool prompt leaving `el.selectText` out of the element helpers; it now says a following `el.type` on that element replaces the selection ([#16769](https://github.com/can1357/oh-my-pi/pull/16769) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed language servers keeping every file omp ever opened loaded for the whole session; files unused for 5 minutes are now closed when omp opens another, so the server can free that memory ([#15418](https://github.com/can1357/oh-my-pi/pull/15418) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `write` turning a CRLF file into LF and dropping its UTF-8 BOM when it replaces the file; it now keeps both, as `edit` does ([#16575](https://github.com/can1357/oh-my-pi/pull/16575) by [@will-bogusz](https://github.com/will-bogusz))
+- A `doas` or `sudo` command now runs on an interactive terminal, so it can ask for the password instead of dying with `doas: Authentication failed`; the user shell's `!` commands get the same terminal, which they previously lacked ([#16103](https://github.com/can1357/oh-my-pi/pull/16103) by [@iacore](https://github.com/iacore)).
 
 ## [18.12.6] - 2026-10-21
 
@@ -843,9 +844,6 @@
 ### Removed
 
 - Removed the built-in `rs-parking-lot` rule; Rust edits using `std::sync::{Mutex, RwLock}` with `.lock().unwrap()` are no longer steered to `parking_lot`
-### Fixed
-
-- A `doas` or `sudo` command now runs on an interactive terminal, so it can ask for the password instead of dying with `doas: Authentication failed` ([#16103](https://github.com/can1357/oh-my-pi/pull/16103) by [@iacore](https://github.com/iacore)).
 
 ## [18.11.2] - 2026-10-16
 
