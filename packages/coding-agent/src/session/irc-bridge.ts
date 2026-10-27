@@ -65,8 +65,14 @@ export class IrcBridge {
 
 	/** Whether any undelivered IRC record remains queued. */
 	hasPending(): boolean {
-		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0 ||
-			this.#host.agent.peekFollowUpQueue().some(record => record.role === "custom" && record.customType === "irc:incoming");
+		return (
+			this.#interrupts.length > 0 ||
+			this.#asides.length > 0 ||
+			this.#deferredWakes.length > 0 ||
+			this.#host.agent
+				.peekFollowUpQueue()
+				.some(record => record.role === "custom" && record.customType === "irc:incoming")
+		);
 	}
 
 	/** Whether an IRC message from `from` is still queued for a turn yet to run. */
@@ -349,14 +355,23 @@ export class IrcBridge {
 			const incoming = followUps.filter(record => record.role === "custom" && record.customType === "irc:incoming");
 			if (incoming.length > 0) {
 				const consumed = new Set(incoming);
-				this.#host.agent.replaceQueue("followUp", followUps.filter(record => !consumed.has(record)));
+				this.#host.agent.replaceQueue(
+					"followUp",
+					followUps.filter(record => !consumed.has(record)),
+				);
 				records.push(...incoming);
 			}
 			records.push(...this.drainDeferredWakes());
 		}
 		for (const record of records) {
 			if (this.#host.isDisposed() && record.role === "custom") {
-				this.#host.sessionManager.appendCustomMessageEntry(record.customType, record.content, record.display, record.details, record.attribution ?? "agent");
+				this.#host.sessionManager.appendCustomMessageEntry(
+					record.customType,
+					record.content,
+					record.display,
+					record.details,
+					record.attribution ?? "agent",
+				);
 				continue;
 			}
 			this.#host.agent.emitExternalEvent({ type: "message_start", message: record });

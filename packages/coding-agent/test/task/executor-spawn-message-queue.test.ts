@@ -140,4 +140,3 @@ it("agent:// write at 0 ms after child creation queues behind the real task brie
 	expect(observed[0]?.join("\n")).not.toContain("Spawn later message");
 	expect(observed.slice(1).some(turn => turn.join("\n").includes("Spawn later message"))).toBe(true);
 }, 20_000);
-

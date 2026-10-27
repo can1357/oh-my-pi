@@ -65,7 +65,10 @@ function makeFakeSession(): FakeSession {
 	};
 }
 
-function createRealSession(overrides: Record<string, unknown> = {}, sessionManager = SessionManager.inMemory("/tmp")): {
+function createRealSession(
+	overrides: Record<string, unknown> = {},
+	sessionManager = SessionManager.inMemory("/tmp"),
+): {
 	session: AgentSession;
 	sessionManager: SessionManager;
 } {
@@ -807,7 +810,14 @@ describe("IRC", () => {
 			const { session } = createRealSession();
 			sessions.push(session);
 			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
-			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session, initialPromptPending: true });
+			registry.register({
+				id: "0-Child",
+				displayName: "task",
+				kind: "sub",
+				parentId: "Main",
+				session,
+				initialPromptPending: true,
+			});
 			const outcome = await session.deliverIrcMessage({
 				id: "msg-dispatching",
 				from: "Main",
@@ -820,15 +830,32 @@ describe("IRC", () => {
 			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
 			expect(session.agent.peekFollowUpQueue()).toHaveLength(1);
 			expect(session.agent.peekFollowUpQueue()[0]).toMatchObject({ customType: "irc:incoming" });
-			expect(String(session.agent.peekFollowUpQueue()[0]!.content)).not.toContain("Active interruptible wait stopped");
+			expect(String(session.agent.peekFollowUpQueue()[0]!.content)).not.toContain(
+				"Active interruptible wait stopped",
+			);
 		});
 
 		it("lets an explicit inbox read consume a pre-brief parent message", async () => {
 			const { session } = createRealSession();
 			sessions.push(session);
-			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session, initialPromptPending: true });
-			await session.deliverIrcMessage({ id: "inbox-before-brief", from: "Main", to: "0-Child", body: "inspect me", ts: Date.now() });
-			expect(session.drainPendingIrcInboxMessages("0-Child")).toMatchObject([{ id: "inbox-before-brief", body: "inspect me" }]);
+			registry.register({
+				id: "0-Child",
+				displayName: "task",
+				kind: "sub",
+				parentId: "Main",
+				session,
+				initialPromptPending: true,
+			});
+			await session.deliverIrcMessage({
+				id: "inbox-before-brief",
+				from: "Main",
+				to: "0-Child",
+				body: "inspect me",
+				ts: Date.now(),
+			});
+			expect(session.drainPendingIrcInboxMessages("0-Child")).toMatchObject([
+				{ id: "inbox-before-brief", body: "inspect me" },
+			]);
 			expect(session.agent.peekFollowUpQueue()).toHaveLength(0);
 			expect(session.drainPendingIrcInboxMessages("0-Child")).toEqual([]);
 		});
@@ -841,8 +868,21 @@ describe("IRC", () => {
 			try {
 				await manager.ensureOnDisk();
 				const sessionFile = manager.getSessionFile()!;
-				registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session, initialPromptPending: true });
-				await session.deliverIrcMessage({ id: "abort-before-brief", from: "Main", to: "0-Child", body: "retain me", ts: Date.now() });
+				registry.register({
+					id: "0-Child",
+					displayName: "task",
+					kind: "sub",
+					parentId: "Main",
+					session,
+					initialPromptPending: true,
+				});
+				await session.deliverIrcMessage({
+					id: "abort-before-brief",
+					from: "Main",
+					to: "0-Child",
+					body: "retain me",
+					ts: Date.now(),
+				});
 				await session.dispose();
 				expect(await Bun.file(sessionFile).text()).toContain("retain me");
 				expect(session.agent.peekFollowUpQueue()).toHaveLength(0);
@@ -857,7 +897,13 @@ describe("IRC", () => {
 			sessions.push(session);
 			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session });
-			const outcome = await session.deliverIrcMessage({ id: "stale", from: "Main", to: "0-Child", body: "wake now", ts: Date.now() });
+			const outcome = await session.deliverIrcMessage({
+				id: "stale",
+				from: "Main",
+				to: "0-Child",
+				body: "wake now",
+				ts: Date.now(),
+			});
 			expect(outcome).toBe("woken");
 			await Promise.resolve();
 			expect(promptSpy).toHaveBeenCalled();
@@ -868,8 +914,21 @@ describe("IRC", () => {
 			const { session } = createRealSession();
 			sessions.push(session);
 			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
-			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session, initialPromptPending: true });
-			const outcome = await session.deliverIrcMessage({ id: "peer-before-brief", from: "0-Peer", to: "0-Child", body: "answer separately", ts: Date.now() });
+			registry.register({
+				id: "0-Child",
+				displayName: "task",
+				kind: "sub",
+				parentId: "Main",
+				session,
+				initialPromptPending: true,
+			});
+			const outcome = await session.deliverIrcMessage({
+				id: "peer-before-brief",
+				from: "0-Peer",
+				to: "0-Child",
+				body: "answer separately",
+				ts: Date.now(),
+			});
 			expect(outcome).toBe("injected");
 			expect(promptSpy).not.toHaveBeenCalled();
 			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
