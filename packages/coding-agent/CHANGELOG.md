@@ -172,6 +172,7 @@
 - Nix builds cache Rust dependencies and the native addon in separate derivations, so Rust edits no longer recompile every dependency and TypeScript edits reuse the addon ([#13752](https://github.com/can1357/oh-my-pi/pull/13752) by [@n3oney](https://github.com/n3oney))
 
 ### Fixed
+- Fixed saved sessions losing or replaying stale content when a message carries an accessor-shaped image block, a signature or reasoning item the session cannot read, an array payload, a compaction archive, or a serializer hook, and when an entry's own metadata or payload is changed in place, or a value that changes on every read is stored a revision ahead of the write ([#15222](https://github.com/can1357/oh-my-pi/pull/15222) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed `ask` questions being unanswerable while the prompt held a draft: Up/Down now hand the keyboard to the question (typing still goes to the draft until then), and the untouched draft is back in the prompt once the question is answered or cancelled ([#17215](https://github.com/can1357/oh-my-pi/pull/17215) by [@H4vC](https://github.com/H4vC))
 - Fixed the Agent Hub becoming unreachable after the last subagent finished: the people icon now stays (muted) while the session has subagents to inspect, and `/subagents` opens the hub as an alias of `/hub` ([#17215](https://github.com/can1357/oh-my-pi/pull/17215) by [@H4vC](https://github.com/H4vC))
