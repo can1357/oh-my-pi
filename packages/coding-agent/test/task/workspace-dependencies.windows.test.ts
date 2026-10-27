@@ -10,7 +10,9 @@ describe.skipIf(process.platform !== "win32")("native Windows borrowed workspace
 		it(`runs native consumers (${compiled ? "compiled omp" : "Bun"})`, async () => {
 			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp Windows workspace "));
 			const runtime = process.execPath;
-			console.log(JSON.stringify({ pid: process.pid, platform: process.platform, runtime, compiled, bun: Bun.version }));
+			console.log(
+				JSON.stringify({ pid: process.pid, platform: process.platform, runtime, compiled, bun: Bun.version }),
+			);
 			try {
 				const borrowed = path.join(root, "borrowed");
 				const worker = path.join(root, "worker with spaces");
@@ -52,7 +54,10 @@ describe.skipIf(process.platform !== "win32")("native Windows borrowed workspace
 					path.join(modules, "external/index.js"),
 					'export {singleton} from "local"; export {singleton as nested} from "nested";',
 				);
-				await fs.writeFile(path.join(modules, "external/node_modules/nested/index.js"), 'export {singleton} from "local";');
+				await fs.writeFile(
+					path.join(modules, "external/node_modules/nested/index.js"),
+					'export {singleton} from "local";',
+				);
 				await fs.writeFile(path.join(modules, ".metadata"), "ordinary metadata");
 				await fs.writeFile(path.join(modules, ".bin/ordinary.cmd"), "@echo ordinary-started\r\n");
 				await fs.writeFile(path.join(modules, ".bin/local"), "borrowed extensionless launcher");
@@ -83,7 +88,9 @@ describe.skipIf(process.platform !== "win32")("native Windows borrowed workspace
 				}
 
 				const run = async (argv: string[]) => {
-					const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== "path"));
+					const env = Object.fromEntries(
+						Object.entries(process.env).filter(([key]) => key.toLowerCase() !== "path"),
+					);
 					env.Path = `${path.dirname(runtime)};${process.env.Path ?? process.env.PATH ?? ""}`;
 					const child = Bun.spawn(argv, {
 						cwd: worker,

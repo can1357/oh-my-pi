@@ -160,10 +160,19 @@ describe("isolated agent release", () => {
 		);
 		await fs.mkdir(path.join(oldNodeModules, "external/node_modules/nested"), { recursive: true });
 		for (const member of ["external", "external/node_modules/nested"]) {
-			await fs.writeFile(path.join(oldNodeModules, member, "package.json"), JSON.stringify({ type: "module", exports: "./index.js" }));
+			await fs.writeFile(
+				path.join(oldNodeModules, member, "package.json"),
+				JSON.stringify({ type: "module", exports: "./index.js" }),
+			);
 		}
-		await fs.writeFile(path.join(oldNodeModules, "external/index.js"), `export { singleton } from "${workspaceName}"; export { singleton as nested } from "nested";`);
-		await fs.writeFile(path.join(oldNodeModules, "external/node_modules/nested/index.js"), `export { singleton } from "${workspaceName}";`);
+		await fs.writeFile(
+			path.join(oldNodeModules, "external/index.js"),
+			`export { singleton } from "${workspaceName}"; export { singleton as nested } from "nested";`,
+		);
+		await fs.writeFile(
+			path.join(oldNodeModules, "external/node_modules/nested/index.js"),
+			`export { singleton } from "${workspaceName}";`,
+		);
 		await fs.symlink(oldNodeModules, path.join(currentCheckout, "node_modules"), "dir");
 		await fs.cp(currentCheckout, workerCheckout, { recursive: true });
 		await fs.mkdir(artifactsDir);

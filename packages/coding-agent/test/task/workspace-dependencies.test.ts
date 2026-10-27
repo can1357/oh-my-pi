@@ -126,7 +126,9 @@ describe("borrowed workspace dependencies", () => {
 		expect(await fs.realpath(path.join(workerCheckout, "node_modules", "@oh-my-pi", "pi-ai"))).toBe(
 			path.join(workerCheckout, "packages", "ai"),
 		);
-		expect(await fs.lstat(path.join(workerCheckout, "node_modules", "safe-cache")).then(stat => stat.isSymbolicLink())).toBe(false);
+		expect(
+			await fs.lstat(path.join(workerCheckout, "node_modules", "safe-cache")).then(stat => stat.isSymbolicLink()),
+		).toBe(false);
 		expect(await fs.realpath(path.join(workerCheckout, "node_modules", "@oh-my-pi", "new-package"))).toBe(
 			path.join(workerCheckout, "packages", "new-package"),
 		);
@@ -190,7 +192,8 @@ describe("borrowed workspace dependencies", () => {
 		const platform = process.platform;
 		const symlink = fs.symlink;
 		const fileSymlink = vi.spyOn(fs, "symlink").mockImplementation(async (target, destination, type) => {
-			if (type === "file") throw Object.assign(new Error("Windows file symlink privilege unavailable"), { code: "EPERM" });
+			if (type === "file")
+				throw Object.assign(new Error("Windows file symlink privilege unavailable"), { code: "EPERM" });
 			return symlink(target, destination, type);
 		});
 		try {
@@ -212,9 +215,18 @@ describe("borrowed workspace dependencies", () => {
 		expect(await Bun.file(ps1Path).text()).toContain(
 			`"${process.execPath}" "$PSScriptRoot\\..\\..\\packages\\ai\\bin\\cli.mjs" @args`,
 		);
-		expect(await fs.lstat(path.join(workerCheckout, "node_modules", ".bin", "ordinary.cmd")).then(stat => stat.isSymbolicLink())).toBe(false);
-		expect(await fs.lstat(path.join(workerCheckout, "node_modules", ".metadata")).then(stat => stat.isSymbolicLink())).toBe(false);
-		const child = Bun.spawn(["sh", path.join(workerCheckout, "node_modules", ".bin", "pi-ai"), "arg with spaces", "--next"], { cwd: workerCheckout, stdout: "pipe", stderr: "pipe" });
+		expect(
+			await fs
+				.lstat(path.join(workerCheckout, "node_modules", ".bin", "ordinary.cmd"))
+				.then(stat => stat.isSymbolicLink()),
+		).toBe(false);
+		expect(
+			await fs.lstat(path.join(workerCheckout, "node_modules", ".metadata")).then(stat => stat.isSymbolicLink()),
+		).toBe(false);
+		const child = Bun.spawn(
+			["sh", path.join(workerCheckout, "node_modules", ".bin", "pi-ai"), "arg with spaces", "--next"],
+			{ cwd: workerCheckout, stdout: "pipe", stderr: "pipe" },
+		);
 		console.error(`generated shell launcher PID=${child.pid}`);
 		const stdout = await new Response(child.stdout).text();
 		const stderr = await new Response(child.stderr).text();
@@ -261,8 +273,14 @@ describe("borrowed workspace dependencies", () => {
 		expect(await fs.realpath(path.join(workerCheckout, "node_modules", "@example", "local"))).toBe(
 			path.join(workerCheckout, "packages", "local"),
 		);
-		expect(await fs.lstat(path.join(workerCheckout, "node_modules", "@example", "legacy")).then(stat => stat.isSymbolicLink())).toBe(false);
-		expect(await fs.readFile(path.join(workerCheckout, "node_modules", "@example", "legacy", "index.js"), "utf8")).toBe("borrowed registry package");
+		expect(
+			await fs
+				.lstat(path.join(workerCheckout, "node_modules", "@example", "legacy"))
+				.then(stat => stat.isSymbolicLink()),
+		).toBe(false);
+		expect(
+			await fs.readFile(path.join(workerCheckout, "node_modules", "@example", "legacy", "index.js"), "utf8"),
+		).toBe("borrowed registry package");
 	});
 	it("shares one worker singleton through direct and nested registry imports in a real process", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-registry-peers-"));
@@ -279,16 +297,32 @@ describe("borrowed workspace dependencies", () => {
 		await fs.symlink(path.join(borrowed, "packages/ai"), path.join(modules, "@oh-my-pi/pi-ai"), "dir");
 		await fs.mkdir(path.join(modules, "external/node_modules/nested"), { recursive: true });
 		await fs.mkdir(path.join(modules, "external/node_modules/@oh-my-pi"));
-		await fs.symlink(path.join(borrowed, "packages/ai"), path.join(modules, "external/node_modules/@oh-my-pi/pi-ai"), "dir");
+		await fs.symlink(
+			path.join(borrowed, "packages/ai"),
+			path.join(modules, "external/node_modules/@oh-my-pi/pi-ai"),
+			"dir",
+		);
 		await fs.symlink(path.join(modules, "external"), path.join(modules, "external/node_modules/self"), "dir");
 		for (const member of ["external", "external/node_modules/nested"]) {
-			await fs.writeFile(path.join(modules, member, "package.json"), JSON.stringify({ name: path.basename(member), type: "module", exports: "./index.js" }));
+			await fs.writeFile(
+				path.join(modules, member, "package.json"),
+				JSON.stringify({ name: path.basename(member), type: "module", exports: "./index.js" }),
+			);
 		}
-		await fs.writeFile(path.join(modules, "external/node_modules/nested/index.js"), 'export { singleton } from "@oh-my-pi/pi-ai";\n');
-		await fs.writeFile(path.join(modules, "external/index.js"), 'export { singleton } from "@oh-my-pi/pi-ai"; export { singleton as nested } from "nested";\n');
+		await fs.writeFile(
+			path.join(modules, "external/node_modules/nested/index.js"),
+			'export { singleton } from "@oh-my-pi/pi-ai";\n',
+		);
+		await fs.writeFile(
+			path.join(modules, "external/index.js"),
+			'export { singleton } from "@oh-my-pi/pi-ai"; export { singleton as nested } from "nested";\n',
+		);
 		await fs.symlink(modules, path.join(worker, "node_modules"), "dir");
 		const entry = path.join(worker, "check.mjs");
-		await fs.writeFile(entry, 'import { singleton, source } from "@oh-my-pi/pi-ai"; import { singleton as peer, nested } from "external"; console.log(JSON.stringify({source, direct:singleton===peer, nested:singleton===nested}));');
+		await fs.writeFile(
+			entry,
+			'import { singleton, source } from "@oh-my-pi/pi-ai"; import { singleton as peer, nested } from "external"; console.log(JSON.stringify({source, direct:singleton===peer, nested:singleton===nested}));',
+		);
 		const run = async () => {
 			const child = Bun.spawn([process.execPath, entry], { cwd: worker, stdout: "pipe", stderr: "pipe" });
 			console.error(`singleton consumer PID=${child.pid}`);
@@ -300,7 +334,9 @@ describe("borrowed workspace dependencies", () => {
 		expect(await run()).toEqual({ source: "old", direct: true, nested: true });
 		await repairBorrowedWorkspaceNodeModules(worker);
 		expect(await run()).toEqual({ source: "worker", direct: true, nested: true });
-		expect(await fs.realpath(path.join(worker, "node_modules/external/node_modules/self"))).toBe(path.join(worker, "node_modules/external"));
+		expect(await fs.realpath(path.join(worker, "node_modules/external/node_modules/self"))).toBe(
+			path.join(worker, "node_modules/external"),
+		);
 		await fs.writeFile(path.join(worker, "node_modules/external/index.js"), "worker edit");
 		expect(await fs.readFile(path.join(modules, "external/index.js"), "utf8")).toContain("singleton");
 	});
@@ -311,7 +347,10 @@ describe("borrowed workspace dependencies", () => {
 		await makeCheckout(root, "worker");
 		await fs.writeFile(path.join(root, "package.json"), JSON.stringify({ workspaces: ["packages/**"] }));
 		await fs.mkdir(path.join(root, "packages/app/node_modules/dep"), { recursive: true });
-		await fs.writeFile(path.join(root, "packages/app/node_modules/dep/package.json"), JSON.stringify({ name: "registry-dep" }));
+		await fs.writeFile(
+			path.join(root, "packages/app/node_modules/dep/package.json"),
+			JSON.stringify({ name: "registry-dep" }),
+		);
 		const names: unknown[] = [];
 		for await (const member of workspaceMembers(root, ["packages/**"])) names.push(member.manifest.name);
 		expect(names).toEqual(["@oh-my-pi/pi-ai"]);
