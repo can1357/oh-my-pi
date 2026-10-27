@@ -119,6 +119,8 @@
 
 - Reduced the per-request work of preparing long transcripts for providers, so requests with many assistant turns start faster ([#17095](https://github.com/can1357/oh-my-pi/pull/17095) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+## [18.13.1] - 2026-10-27
+
 ### Fixed
 
 - Codex accounts whose spend cap is used up are no longer picked through credit overage or from usage cached before the upgrade ([#16973](https://github.com/can1357/oh-my-pi/pull/16973) by [@DusKing1](https://github.com/DusKing1))
