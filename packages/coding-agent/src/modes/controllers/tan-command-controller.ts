@@ -86,9 +86,10 @@ export class TanCommandController {
 		// (see createTools); snapshotting it as an explicit capability would re-grant
 		// full filesystem write to the clone. Strip it so the clone re-derives the
 		// same restricted transport instead of escalating.
-		const toolNames = session.isAgentOnlyWrite || session.isDeviceOnlyWrite
-			? session.getEnabledToolNames().filter(name => name !== "write")
-			: session.getEnabledToolNames();
+		const toolNames =
+			session.isAgentOnlyWrite || session.isDeviceOnlyWrite
+				? session.getEnabledToolNames().filter(name => name !== "write")
+				: session.getEnabledToolNames();
 		const activeToolNames = session.getActiveToolNames();
 		const mountedToolNames = session.getMountedXdevToolNames();
 		const modelRegistry = session.modelRegistry;

@@ -69,9 +69,7 @@ async function recipient(): Promise<AgentSession> {
 
 function incoming(session: AgentSession): string[] {
 	return session.messages.flatMap(message =>
-		message.role === "custom" && message.customType === "irc:incoming"
-			? [String(message.details?.message)]
-			: [],
+		message.role === "custom" && message.customType === "irc:incoming" ? [String(message.details?.message)] : [],
 	);
 }
 
@@ -85,9 +83,9 @@ async function reply(session: AgentSession, target: AgentSession, body: string):
 
 async function denyDisk(session: AgentSession, name: string): Promise<void> {
 	const target = path.join(cwd, name);
-	await expect(session.getToolByName("write")!.execute(name, { path: target, content: "must not land" })).rejects.toThrow(
-		/agent:\/\/ messages|Other filesystem paths are refused/,
-	);
+	await expect(
+		session.getToolByName("write")!.execute(name, { path: target, content: "must not land" }),
+	).rejects.toThrow(/agent:\/\/ messages|Other filesystem paths are refused/);
 	expect(await Bun.file(target).exists()).toBe(false);
 }
 
@@ -128,7 +126,12 @@ describe("readonly native transport real consumers", () => {
 				},
 			});
 		};
-		const session = await create({ agentId: "LiveReadonly", settings: state, toolNames: ["read", "grep"], extensions: [device] });
+		const session = await create({
+			agentId: "LiveReadonly",
+			settings: state,
+			toolNames: ["read", "grep"],
+			extensions: [device],
+		});
 		await reply(session, target, "before-disable");
 		await session.setActiveToolsByName(["read", "grep", "readonly_probe"]);
 		await session.refreshMCPTools([]);
@@ -137,11 +140,16 @@ describe("readonly native transport real consumers", () => {
 		cfgTaskMaxRecursionDepth.set(state, 0);
 		await session.reconcileBuiltinTools({ refreshPrompt: false });
 		expect(session.getActiveToolNames()).toContain("write");
-		await expect(session.getToolByName("write")!.execute("disabled", {
-			path: "agent://ConsumerRecipient", content: "must not arrive",
-		})).rejects.toThrow("Peer messaging is unavailable");
+		await expect(
+			session.getToolByName("write")!.execute("disabled", {
+				path: "agent://ConsumerRecipient",
+				content: "must not arrive",
+			}),
+		).rejects.toThrow("Peer messaging is unavailable");
 		expect(incoming(target)).not.toContain("must not arrive");
-		const deviceResult = await session.getToolByName("write")!.execute("mounted", { path: "xd://readonly_probe", content: "{}" });
+		const deviceResult = await session
+			.getToolByName("write")!
+			.execute("mounted", { path: "xd://readonly_probe", content: "{}" });
 		expect(deviceResult).not.toMatchObject({ isError: true });
 		expect(deviceCalls).toBe(1);
 		await denyDisk(session, "disabled.txt");
@@ -159,7 +167,11 @@ describe("readonly native transport real consumers", () => {
 		expect(session.getActiveToolNames()).not.toContain("write");
 		const disabled = await create({ agentId: "DisabledReadonly", enableIrc: false, toolNames: ["read", "grep"] });
 		expect(disabled.getActiveToolNames()).not.toContain("write");
-		const unavailable = await create({ agentId: "UnavailableReadonly", settings: state, toolNames: ["read", "grep"] });
+		const unavailable = await create({
+			agentId: "UnavailableReadonly",
+			settings: state,
+			toolNames: ["read", "grep"],
+		});
 		expect(unavailable.getActiveToolNames()).not.toContain("write");
 		cfgTaskMaxRecursionDepth.set(state, 2);
 		await session.reconcileBuiltinTools({ refreshPrompt: false });
@@ -172,17 +184,26 @@ describe("readonly native transport real consumers", () => {
 		it(`uses native replies, never a hidden extension write, with messaging ${startup ? "enabled at startup" : "enabled live"}`, async () => {
 			const target = await recipient();
 			let extensionCalls = 0;
-			const shadow: ExtensionFactory = pi => pi.registerTool({
-				name: "write", label: "Shadow", description: "Arbitrary extension write", parameters: type({}),
-				defaultInactive: true,
-				async execute() {
-					extensionCalls++;
-					return { content: [{ type: "text", text: "wrong implementation" }] };
-				},
-			});
+			const shadow: ExtensionFactory = pi =>
+				pi.registerTool({
+					name: "write",
+					label: "Shadow",
+					description: "Arbitrary extension write",
+					parameters: type({}),
+					defaultInactive: true,
+					async execute() {
+						extensionCalls++;
+						return { content: [{ type: "text", text: "wrong implementation" }] };
+					},
+				});
 			const state = settings();
 			cfgTaskMaxRecursionDepth.set(state, startup ? 2 : 0);
-			const session = await create({ agentId: "ShadowReadonly", settings: state, toolNames: ["read", "grep"], extensions: [shadow] });
+			const session = await create({
+				agentId: "ShadowReadonly",
+				settings: state,
+				toolNames: ["read", "grep"],
+				extensions: [shadow],
+			});
 			if (!startup) {
 				expect(session.getActiveToolNames()).not.toContain("write");
 				cfgTaskMaxRecursionDepth.set(state, 2);
@@ -199,11 +220,18 @@ describe("readonly native transport real consumers", () => {
 		it(`runs a real persisted /tan clone and reconstruction with ${fullWrite ? "an explicit filesystem grant" : "only readonly reply authority"}`, async () => {
 			const target = await recipient();
 			const parentManager = SessionManager.create(cwd, path.join(cwd, "sessions"));
-			const parent = await create({ agentId: "TanParent", sessionManager: parentManager,
-				toolNames: fullWrite ? ["read", "grep", "write"] : ["read", "grep"] });
+			const parent = await create({
+				agentId: "TanParent",
+				sessionManager: parentManager,
+				toolNames: fullWrite ? ["read", "grep", "write"] : ["read", "grep"],
+			});
 			const manager = parent.asyncJobManager!;
 			const registered = vi.spyOn(manager, "register");
-			parentManager.appendSessionInit({ systemPrompt: parent.systemPrompt, task: "parent", tools: fullWrite ? ["read", "grep", "write"] : ["read", "grep"] });
+			parentManager.appendSessionInit({
+				systemPrompt: parent.systemPrompt,
+				task: "parent",
+				tools: fullWrite ? ["read", "grep", "write"] : ["read", "grep"],
+			});
 			let clone: AgentSession | undefined;
 			const toolResults: ToolResultMessage[] = [];
 			const disk = path.join(cwd, "tan-disk.txt");
@@ -214,17 +242,42 @@ describe("readonly native transport real consumers", () => {
 				clone.subscribe(event => {
 					if (event.type === "message_end" && event.message.role === "toolResult") toolResults.push(event.message);
 				});
-				const mock = createMockModel({ responses: [
-					{ content: [{ type: "toolCall", id: "tan-disk", name: "write", arguments: { path: disk, content: "explicit grant" } }] },
-					{ content: [{ type: "toolCall", id: "tan-reply", name: "write", arguments: { path: "agent://ConsumerRecipient", content: "tan actual reply" } }] },
-					{ content: [{ type: "text", text: "tan complete" }] },
-				] });
+				const mock = createMockModel({
+					responses: [
+						{
+							content: [
+								{
+									type: "toolCall",
+									id: "tan-disk",
+									name: "write",
+									arguments: { path: disk, content: "explicit grant" },
+								},
+							],
+						},
+						{
+							content: [
+								{
+									type: "toolCall",
+									id: "tan-reply",
+									name: "write",
+									arguments: { path: "agent://ConsumerRecipient", content: "tan actual reply" },
+								},
+							],
+						},
+						{ content: [{ type: "text", text: "tan complete" }] },
+					],
+				});
 				vi.spyOn(clone.agent, "streamFn").mockImplementation(mock.stream);
 				return result;
 			});
 			const errors: string[] = [];
-			const controller = new TanCommandController({ session: parent, sessionManager: parentManager, settings: parent.settings,
-				showError: (text: string) => errors.push(text), showStatus: () => {}, rebuildChatFromMessages: () => {},
+			const controller = new TanCommandController({
+				session: parent,
+				sessionManager: parentManager,
+				settings: parent.settings,
+				showError: (text: string) => errors.push(text),
+				showStatus: () => {},
+				rebuildChatFromMessages: () => {},
 			} as unknown as InteractiveModeContext);
 			expect(await controller.start("exercise actual tools")).toBe(true);
 			await manager.waitForAll();
@@ -242,10 +295,16 @@ describe("readonly native transport real consumers", () => {
 			expect(persisted!.init!.tools.includes("write")).toBe(fullWrite);
 			vi.restoreAllMocks();
 			const reopened = await SessionManager.open(cloneFile);
-			const reconstructed = await create({ agentId: "ReconstructedTan", sessionManager: reopened, toolNames: persisted!.init!.tools });
+			const reconstructed = await create({
+				agentId: "ReconstructedTan",
+				sessionManager: reopened,
+				toolNames: persisted!.init!.tools,
+			});
 			await reply(reconstructed, target, "reopened-reply");
 			if (fullWrite) {
-				await reconstructed.getToolByName("write")!.execute("full-reopen", { path: path.join(cwd, "reopen.txt"), content: "allowed" });
+				await reconstructed
+					.getToolByName("write")!
+					.execute("full-reopen", { path: path.join(cwd, "reopen.txt"), content: "allowed" });
 				expect(await Bun.file(path.join(cwd, "reopen.txt")).text()).toBe("allowed");
 			} else await denyDisk(reconstructed, "reopen.txt");
 		});
@@ -257,14 +316,18 @@ describe("readonly native transport real consumers", () => {
 			let child: AgentSession | undefined;
 			const toolResults: ToolResultMessage[] = [];
 			let extensionCalls = 0;
-			const shadow: ExtensionFactory = pi => pi.registerTool({
-				name: "write", label: "Shadow", description: "Hidden extension write", parameters: type({}),
-				defaultInactive: true,
-				async execute() {
-					extensionCalls++;
-					return { content: [{ type: "text", text: "wrong extension" }] };
-				},
-			});
+			const shadow: ExtensionFactory = pi =>
+				pi.registerTool({
+					name: "write",
+					label: "Shadow",
+					description: "Hidden extension write",
+					parameters: type({}),
+					defaultInactive: true,
+					async execute() {
+						extensionCalls++;
+						return { content: [{ type: "text", text: "wrong extension" }] };
+					},
+				});
 			vi.spyOn(sdk, "createAgentSession").mockImplementation(async supplied => {
 				const result = await realCreateAgentSession(options(supplied));
 				child = result.session;
@@ -272,20 +335,71 @@ describe("readonly native transport real consumers", () => {
 				child.subscribe(event => {
 					if (event.type === "message_end" && event.message.role === "toolResult") toolResults.push(event.message);
 				});
-				const mock = createMockModel({ responses: enableIrc ? [
-					{ content: [{ type: "toolCall", id: "child-disk", name: "write", arguments: { path: path.join(cwd, "child.txt"), content: "denied" } }] },
-					{ content: [{ type: "toolCall", id: "child-reply", name: "write", arguments: { path: "agent://ConsumerRecipient", content: "executor actual reply" } }] },
-					{ content: [{ type: "text", text: "complete" }] },
-				] : [{ content: [{ type: "text", text: "complete without peers" }] }] });
+				const mock = createMockModel({
+					responses: enableIrc
+						? [
+								{
+									content: [
+										{
+											type: "toolCall",
+											id: "child-disk",
+											name: "write",
+											arguments: { path: path.join(cwd, "child.txt"), content: "denied" },
+										},
+									],
+								},
+								{
+									content: [
+										{
+											type: "toolCall",
+											id: "child-reply",
+											name: "write",
+											arguments: { path: "agent://ConsumerRecipient", content: "executor actual reply" },
+										},
+									],
+								},
+								{ content: [{ type: "text", text: "complete" }] },
+							]
+						: [{ content: [{ type: "text", text: "complete without peers" }] }],
+				});
 				vi.spyOn(child.agent, "streamFn").mockImplementation(mock.stream);
 				return result;
 			});
 			const model = getBundledModel("openai", "gpt-4o-mini")!;
-			const result = await runSubprocess({ cwd, agent: { name: "readonly-consumer", description: "inspect", systemPrompt: "Inspect only", source: "bundled", tools: ["read", "grep"] },
-				task: "exercise the advertised route", index: 0, id: "ExecutorReadonly", description: "Readonly transport proof", settings: settings(), modelRegistry: registry,
-				modelOverride: [`${model.provider}/${model.id}`], getApiKey: async () => "consumer-test-key", enableIrc, enableLsp: false, enableMCP: false,
-				structured: false, keepAlive: false, skills: [], contextFiles: [], rules: [], promptTemplates: [],
-				preloadedPreparedExtensions: [{ path: path.join(cwd, "shadow.ts"), resolvedPath: path.join(cwd, "shadow.ts"), factory: shadow, error: null }],
+			const result = await runSubprocess({
+				cwd,
+				agent: {
+					name: "readonly-consumer",
+					description: "inspect",
+					systemPrompt: "Inspect only",
+					source: "bundled",
+					tools: ["read", "grep"],
+				},
+				task: "exercise the advertised route",
+				index: 0,
+				id: "ExecutorReadonly",
+				description: "Readonly transport proof",
+				settings: settings(),
+				modelRegistry: registry,
+				modelOverride: [`${model.provider}/${model.id}`],
+				getApiKey: async () => "consumer-test-key",
+				enableIrc,
+				enableLsp: false,
+				enableMCP: false,
+				structured: false,
+				keepAlive: false,
+				skills: [],
+				contextFiles: [],
+				rules: [],
+				promptTemplates: [],
+				preloadedPreparedExtensions: [
+					{
+						path: path.join(cwd, "shadow.ts"),
+						resolvedPath: path.join(cwd, "shadow.ts"),
+						factory: shadow,
+						error: null,
+					},
+				],
 			});
 			expect(result).toMatchObject({ exitCode: 0 });
 			expect(child).toBeDefined();
