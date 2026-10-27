@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
 
+### Fixed
 - Fixed the streaming `write` preview changing height on every line as the content arrives; the collapsed preview now holds a steady height while a write streams, and the first result clears the tail rows it left in the scrollback ([#16033](https://github.com/can1357/oh-my-pi/issues/16033), [#16099](https://github.com/can1357/oh-my-pi/pull/16099) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
