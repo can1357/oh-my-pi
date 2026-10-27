@@ -68,9 +68,12 @@ async function recipient(): Promise<AgentSession> {
 }
 
 function incoming(session: AgentSession): string[] {
-	return session.messages.flatMap(message =>
-		message.role === "custom" && message.customType === "irc:incoming" ? [String(message.details?.message)] : [],
-	);
+	return session.messages.flatMap(message => {
+		if (message.role !== "custom" || message.customType !== "irc:incoming") return [];
+		const details = message.details;
+		if (typeof details !== "object" || details === null || !("message" in details)) return [];
+		return [String(details.message)];
+	});
 }
 
 async function reply(session: AgentSession, target: AgentSession, body: string): Promise<void> {
@@ -226,7 +229,13 @@ describe("readonly native transport real consumers", () => {
 				toolNames: fullWrite ? ["read", "grep", "write"] : ["read", "grep"],
 			});
 			const manager = parent.asyncJobManager!;
-			const registered = vi.spyOn(manager, "register");
+			const registeredJobIds: string[] = [];
+			const registerJob = manager.register.bind(manager);
+			vi.spyOn(manager, "register").mockImplementation((...args) => {
+				const id = registerJob(...args);
+				registeredJobIds.push(id);
+				return id;
+			});
 			parentManager.appendSessionInit({
 				systemPrompt: parent.systemPrompt,
 				task: "parent",
@@ -282,7 +291,8 @@ describe("readonly native transport real consumers", () => {
 			expect(await controller.start("exercise actual tools")).toBe(true);
 			await manager.waitForAll();
 			expect(errors).toEqual([]);
-			expect(manager.getJob(registered.mock.results[0]!.value)?.errorText).toBeUndefined();
+			expect(registeredJobIds).toHaveLength(1);
+			expect(manager.getJob(registeredJobIds[0]!)?.errorText).toBeUndefined();
 			expect(clone).toBeDefined();
 			const diskResult = toolResults.find(message => message.toolCallId === "tan-disk");
 			expect(diskResult?.isError).toBe(!fullWrite);
