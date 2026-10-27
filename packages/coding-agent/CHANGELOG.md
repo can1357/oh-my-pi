@@ -876,6 +876,10 @@
 - Fixed `/tan` clones ending without a final answer when they call `ask`; the clone now keeps running and the parent receives its final answer instead of an empty result ([#17223](https://github.com/can1357/oh-my-pi/pull/17223) by [@trukhinyuri](https://github.com/trukhinyuri))
 - Fixed GitHub `/review` diff links keeping the snapshot that built the request after the cached diff refreshes in the background, instead of opening whatever file now sits at the same index ([#16310](https://github.com/can1357/oh-my-pi/pull/16310) by [@tkossak](https://github.com/tkossak))
 
+### Fixed
+
+- Fixed terminals that read the OSC 7501 program status record (Tern) still raising their own banner and needs-attention entry for a waiting `ask` question or a finished turn after `ask.notify` or `completion.notify` was turned off: a silenced state is now withdrawn from the record instead of reported, while `working`, `idle` and `error` keep the pane's indicator ([#17227](https://github.com/can1357/oh-my-pi/pull/17227) by [@iacore](https://github.com/iacore))
+
 ## [18.13.2] - 2026-10-27
 
 ### Added

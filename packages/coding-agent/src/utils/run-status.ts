@@ -57,6 +57,8 @@ const runtime: {
 	reported: string | undefined;
 	/** The `working` status a command-line prompt holds from startup until its run reports. */
 	startup: RunFlowStatus | undefined;
+	/** Per-state publication gate; see {@link setProgramStatusFilter}. */
+	filter: ProgramStatusFilter | undefined;
 } = {
 	status: { state: "idle" },
 	dialogs: [],
@@ -64,11 +66,39 @@ const runtime: {
 	disposed: false,
 	reported: undefined,
 	startup: undefined,
+	filter: undefined,
 };
 
 /** What every surface shows: the newest open dialog, else the event flow's status. */
 function shownStatus(): RunStatus {
 	return runtime.dialogs.at(-1) ?? runtime.status;
+}
+
+/**
+ * Whether one run status may be published as an OSC 7501 record.
+ *
+ * A terminal that speaks the protocol turns the record into a notification of
+ * its own: Tern raises a banner and a needs-attention inbox entry when an agent
+ * is `blocked` ("waiting for input") or `done` ("finished"), which is the same
+ * event `ask.notify` and `completion.notify` govern. So a state the user
+ * silenced is withdrawn from the terminal instead of reported, and the record's
+ * own `terminal.programStatus` switch stays the separate, whole-protocol one.
+ */
+export type ProgramStatusFilter = (status: RunStatus) => boolean;
+
+/**
+ * The gate the two notification settings imply: `ask.notify` withdraws a
+ * `blocked` record for a question the `ask` tool put to the user, and
+ * `completion.notify` a `done` one. An approval prompt has no setting of its
+ * own, so its `blocked` record stays whatever `ask.notify` says: silencing the
+ * `ask` tool's toast must not also hide a run waiting on the user's decision.
+ */
+export function programStatusSettingsGate(askNotify: boolean, completionNotify: boolean): ProgramStatusFilter {
+	return status => {
+		if (status.state === "blocked") return status.kind === "permission" || askNotify;
+		if (status.state === "done") return completionNotify;
+		return true;
+	};
 }
 
 function titleState(status: RunStatus): TerminalTitleState {
@@ -101,6 +131,10 @@ function formatReport(status: RunStatus): string {
 function report(): void {
 	if (runtime.disposed || !runtime.enabled) return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
+	if (runtime.filter && !runtime.filter(shownStatus())) {
+		clear();
+		return;
+	}
 	const next = formatReport(shownStatus());
 	if (next === runtime.reported) return;
 	writeTerminalSequence(next);
@@ -151,6 +185,16 @@ export function setProgramStatusEnabled(enabled: boolean): void {
 	runtime.enabled = enabled;
 	if (enabled) report();
 	else clear();
+}
+
+/**
+ * Replace the per-state gate consulted before a record is written, and
+ * re-publish the current status under it: a state the new gate rejects is
+ * withdrawn from the terminal, and one it accepts is reported again.
+ */
+export function setProgramStatusFilter(filter: ProgramStatusFilter | undefined): void {
+	runtime.filter = filter;
+	report();
 }
 
 /**
