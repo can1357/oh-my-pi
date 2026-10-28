@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Changed
+
 - The live transcript reuses its per-block walk list across each frame's readers instead of rebuilding it three times per frame, so settled transcripts cost fewer short-lived allocations per frame ([#17093](https://github.com/can1357/oh-my-pi/pull/17093) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
