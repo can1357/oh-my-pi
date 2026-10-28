@@ -237,7 +237,8 @@ const EMPTY_RESPONSE_PATTERN = /\bthought-only response without final output\b/i
 /** Gemini's MALFORMED_RESPONSE finish is a backend fault: the same request can succeed. Kept narrow so
  *  other "malformed response" errors (e.g. an image API's) stay terminal. */
 const MALFORMED_RESPONSE_FINISH_PATTERN = /\bfinish reason:\s*MALFORMED_RESPONSE\b/i;
-const CONTENT_FILTER_PATTERN = /\b(?:incomplete:\s*)?content_filter\b/i;
+const CONTENT_FILTER_PATTERN =
+	/\b(?:incomplete:\s*)?content_filter(?:ed|ing)?\b|\bcontent filters\b|\bcontent filtering\b/i;
 const ACCOUNT_POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
 export const ANTHROPIC_ACCOUNT_POLICY_PATTERN =
 	/\b(?:oauth_not_allowed_for_organization|permission_error)\b|\bOAuth authentication is currently not allowed for this organization\b/i;
