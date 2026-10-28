@@ -123,9 +123,7 @@ describe("mode command attachments", () => {
 			const harness = createHarness({});
 			harness.editor.setText("saved draft [Image #1]");
 			harness.controller.handleStash();
-			const images: ImageContent[] = withImages
-				? [{ type: "image", data: "bmV3", mimeType: "image/png" }]
-				: [];
+			const images: ImageContent[] = withImages ? [{ type: "image", data: "bmV3", mimeType: "image/png" }] : [];
 			const imageLinks = images.map(() => "file:///attempted.png");
 			const command = withImages ? "/tan inspect [Image #1]" : "/tan";
 			harness.editor.setText(command);
@@ -149,9 +147,7 @@ describe("mode command attachments", () => {
 			harness.editor.clearDraft();
 			harness.controller.handleStash();
 			expect(harness.editor.getText()).toBe("saved draft [Image #1]");
-			expect(harness.editor.pendingImages).toEqual([
-				{ type: "image", data: "b2xk", mimeType: "image/png" },
-			]);
+			expect(harness.editor.pendingImages).toEqual([{ type: "image", data: "b2xk", mimeType: "image/png" }]);
 		});
 	}
 
