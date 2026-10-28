@@ -770,7 +770,7 @@ describe("openai-completions wire-quirk compat detection", () => {
 				id: "muse-spark-1.3",
 				provider: "opencode-zen",
 				name: "Muse Spark 1.3",
-				baseUrl: "https://opencode.ai/inference/openai/v1",
+				baseUrl: "https://opencode.ai/zen/v1",
 				reasoning: true,
 			}),
 		).compat;
