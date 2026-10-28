@@ -60,10 +60,10 @@ let promptZonesEnabled = true;
 
 /**
  * Turn the OSC 133 zone marks on user bubbles on or off; bubbles pick it up on
- * their next render. The host turns them off while it holds an OSC 7501
- * `working` or `blocked` record: `133;A` starts a shell prompt, which makes the
- * terminal drop that record, and a terminal may announce the drop as a finished
- * command (#17307). Every repaint of a bubble would otherwise repeat it.
+ * their next render. The host turns them off while a known OSC 7501 terminal
+ * holds a `working` or `blocked` record: `133;A` starts a shell prompt, which
+ * makes the terminal drop that record. A terminal may announce the drop as a
+ * finished command (#17307), once per repaint of a bubble.
  */
 export function setPromptZonesEnabled(enabled: boolean): void {
 	promptZonesEnabled = enabled;

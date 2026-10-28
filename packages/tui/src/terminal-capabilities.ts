@@ -206,6 +206,15 @@ export function isSshSession(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	return Boolean(env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT);
 }
 
+/**
+ * Whether the current grid is a direct Rex block known to retain OSC 7501
+ * records. Sending a report is not proof of support; nested multiplexers may
+ * swallow the sequence even when Rex supplied the inherited block markers.
+ */
+export function isProgramStatusSupported(env: NodeJS.ProcessEnv = Bun.env): boolean {
+	return Boolean(env.REX_SESSION && env.REX_BLOCK) && !isInsideTerminalMultiplexer(env);
+}
+
 export function isNotificationSuppressed(): boolean {
 	const value = $env.PI_NOTIFICATIONS;
 	if (!value) return false;
