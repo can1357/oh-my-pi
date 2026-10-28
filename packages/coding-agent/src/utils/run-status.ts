@@ -10,6 +10,7 @@
  * send `state=clear` so no stale record outlives the session.
  */
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
+import { setPromptZonesEnabled } from "@oh-my-pi/pi-tui/chat/user-message";
 import { truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { APP_NAME, isTerminalHeadless, sanitizeText } from "@oh-my-pi/pi-utils";
 import { setTerminalTitleState, type TerminalTitleState } from "./title-generator";
@@ -96,6 +97,16 @@ function clear(): void {
 }
 
 /**
+ * Keep OSC 133 prompt marks off the screen while the terminal holds a
+ * `working` or `blocked` record: a prompt mark drops that record, and a
+ * repainted user bubble would drop it on every redraw (#17307).
+ */
+function syncPromptZones(): void {
+	const { state } = runtime.status;
+	setPromptZonesEnabled(runtime.reported === undefined || (state !== "working" && state !== "blocked"));
+}
+
+/**
  * Publish a run status transition from the interactive event flow: the title
  * separator (`tui.titleState`) and, unless `terminal.programStatus` is off, the
  * OSC 7501 root record.
@@ -104,6 +115,7 @@ export function setRunStatus(status: RunStatus): void {
 	runtime.status = status;
 	setTerminalTitleState(titleState(status));
 	report();
+	syncPromptZones();
 }
 
 /** Turn OSC 7501 reporting on or off (`terminal.programStatus`); off removes the record. */
@@ -111,6 +123,7 @@ export function setProgramStatusEnabled(enabled: boolean): void {
 	runtime.enabled = enabled;
 	if (enabled) report();
 	else clear();
+	syncPromptZones();
 }
 
 /**
@@ -140,4 +153,5 @@ export function initProgramStatus(): void {
 export function disposeProgramStatus(): void {
 	clear();
 	runtime.disposed = true;
+	syncPromptZones();
 }

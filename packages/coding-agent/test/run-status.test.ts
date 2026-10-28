@@ -8,6 +8,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 
 // OSC 7501 Program Status Protocol reports, as the terminal parses them:
 // https://mitchellh.com/writing/program-status-osc7501
@@ -122,5 +123,36 @@ describe("run status OSC 7501 reporting", () => {
 			report(`state=blocked:kind=permission:app=omp:msg=${Buffer.from("Approve the command?").toString("base64")}`),
 			report("state=done:app=omp"),
 		]);
+	});
+
+	it("keeps OSC 133 prompt marks off user bubbles only while the terminal holds a working or blocked record", () => {
+		// #17307: a prompt mark drops that record, which Rex announces as a finished command.
+		const bubble = new UserMessageComponent("Run sleep 15");
+		const marked = () => bubble.render(40).join("").includes("\x1b]133;A\x07");
+		const observed: Record<string, boolean> = { idle: marked() };
+
+		setRunStatus({ state: "working" });
+		observed.working = marked();
+		setRunStatus({ state: "blocked", kind: "question" });
+		observed.blocked = marked();
+		setProgramStatusEnabled(false);
+		observed.blockedReportingOff = marked();
+		setProgramStatusEnabled(true);
+		observed.blockedReportingOn = marked();
+		setRunStatus({ state: "done" });
+		observed.done = marked();
+		setRunStatus({ state: "working" });
+		disposeProgramStatus();
+		observed.workingDisposed = marked();
+
+		expect(observed).toEqual({
+			idle: true,
+			working: false,
+			blocked: false,
+			blockedReportingOff: true,
+			blockedReportingOn: false,
+			done: true,
+			workingDisposed: true,
+		});
 	});
 });
