@@ -1,8 +1,15 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 
-import { formatBytes, isRecord, postmortem, Snowflake, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
+import {
+	formatBytes,
+	isRecord,
+	postmortem,
+	Snowflake,
+	tempSubpath,
+	untilAborted,
+	withTimeout,
+} from "@oh-my-pi/pi-utils";
 import type { HTMLElement } from "@oh-my-pi/pi-utils/dom";
 import type {
 	Accessibility,
@@ -3356,7 +3363,7 @@ export class WorkerCore {
 					session.browserScreenshotDir,
 					`screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
 				)
-			: path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.${ext}`);
+			: tempSubpath(`sshots-${Snowflake.next()}.${ext}`);
 		await fs.promises.mkdir(path.dirname(dest), { recursive: true });
 		await Bun.write(dest, savedBuffer);
 		screenshots.push({
@@ -3400,7 +3407,7 @@ export class WorkerCore {
 		const changed = diff.pixelChangeRatio > threshold;
 		const diffPath = opts.output
 			? resolveToCwd(opts.output, session.cwd)
-			: path.join(os.tmpdir(), `omp-screenshot-diff-${Snowflake.next()}.png`);
+			: tempSubpath(`screenshot-diff-${Snowflake.next()}.png`);
 		await fs.promises.mkdir(path.dirname(diffPath), { recursive: true });
 		await Bun.write(diffPath, diff.png);
 		const resized = await resizeImage(
@@ -3423,9 +3430,7 @@ export class WorkerCore {
 	}
 
 	async #pdf(session: SessionSnapshot, signal: AbortSignal | undefined, opts: PdfOptions = {}): Promise<string> {
-		const dest = opts.path
-			? resolveToCwd(opts.path, session.cwd)
-			: path.join(os.tmpdir(), `omp-browser-${Snowflake.next()}.pdf`);
+		const dest = opts.path ? resolveToCwd(opts.path, session.cwd) : tempSubpath(`browser-${Snowflake.next()}.pdf`);
 		await fs.promises.mkdir(path.dirname(dest), { recursive: true });
 		await untilAborted(signal, () =>
 			this.#requirePage().pdf({

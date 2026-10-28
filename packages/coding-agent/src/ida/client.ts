@@ -7,10 +7,9 @@
  * hosts other processes started, and forwards requests over each host's socket.
  */
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
-import { logger, postmortem, ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import { getTempRoot, logger, postmortem, ptree, tempSubpath, untilAborted } from "@oh-my-pi/pi-utils";
 import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -489,8 +488,8 @@ export async function releaseIdaDatabases(): Promise<void> {
 
 /** Exercise worker-host IDA host startup and the ping handshake for distribution smoke tests. */
 export async function smokeTestIdaHost(): Promise<void> {
-	const dir = path.join(os.tmpdir(), `omp-ida-smoke-${process.pid.toString(36)}`);
-	const endpoint = ipcEndpoint(os.tmpdir(), `omp-ida-smoke-${process.pid.toString(36)}`);
+	const dir = tempSubpath(`ida-smoke-${process.pid.toString(36)}`);
+	const endpoint = ipcEndpoint(getTempRoot(), `ida-smoke-${process.pid.toString(36)}`);
 	// A missing source makes the open fail after the host listens; `ping` still answers.
 	const config: IdaHostConfig = {
 		endpoint,

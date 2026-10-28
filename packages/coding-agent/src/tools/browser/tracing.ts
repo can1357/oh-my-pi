@@ -1,8 +1,7 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { Snowflake, tempSubpath } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { CDPSession, Page } from "puppeteer-core";
 import { resolveToCwd } from "../path-utils";
@@ -48,7 +47,7 @@ interface NavigationTiming {
 
 function outputPath(requested: string | undefined, cwd: string, extension: string): string {
 	if (requested) return resolveToCwd(requested, cwd);
-	return path.join(os.tmpdir(), `omp-browser-${Snowflake.next()}.${extension}`);
+	return tempSubpath(`browser-${Snowflake.next()}.${extension}`);
 }
 
 /** Stateful trace and CPU-profile controller for one Puppeteer page. */

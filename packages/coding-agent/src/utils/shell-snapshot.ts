@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getSafeProjectCwd, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { getSafeProjectCwd, logger, postmortem, tempSubpath } from "@oh-my-pi/pi-utils";
 import { quotePosixArgument } from "./shell-quote";
 import fnEnvHelper from "./shell-snapshot-fn-env.sh" with { type: "text" };
 
@@ -246,13 +246,13 @@ async function createSnapshot(
 	rcFile: string,
 	timeoutMs: number,
 ): Promise<string | null> {
-	// Snapshot dir is per-uid. `os.tmpdir()` is shared between accounts on Linux and
+	// Snapshot dir is per-uid. The OS temp dir is shared between accounts on Linux and
 	// this dir is 0700 because the script may inline env-var values referenced by
 	// captured functions (#3470), so a single shared name hands the first account an
 	// exclusive dir and every other account's pre-create write below fails with
 	// EACCES — which used to escape into `executeBash` and break every bash call.
 	const uid = process.getuid?.();
-	const snapshotDir = path.join(os.tmpdir(), uid === undefined ? "omp-shell-snapshots" : `omp-shell-snapshots-${uid}`);
+	const snapshotDir = tempSubpath(uid === undefined ? "shell-snapshots" : `shell-snapshots-${uid}`);
 
 	// Generate unique snapshot path
 	const shellName = shell.includes("zsh") ? "zsh" : shell.includes("bash") ? "bash" : "sh";

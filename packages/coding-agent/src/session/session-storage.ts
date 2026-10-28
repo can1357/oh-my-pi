@@ -1,8 +1,10 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { FileLock as NativeFileLock } from "@oh-my-pi/pi-natives";
-import { getSessionOwnersDir, getTestTempDir } from "@oh-my-pi/pi-utils/dirs";
+import { tempSubpath } from "@oh-my-pi/pi-utils";
+import { getSessionOwnersDir } from "@oh-my-pi/pi-utils/dirs";
 import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import {
 	type FileLockHandle,
@@ -578,7 +580,8 @@ const TEST_SESSION_OWNERS_DIR_ENV = "PI_TEST_SESSION_OWNERS_DIR";
 function testSessionOwnersDir(): string | undefined {
 	const exported = process.env[TEST_SESSION_OWNERS_DIR_ENV];
 	if (exported || !isBunTestRuntime()) return exported;
-	const dir = getTestTempDir("omp-test-session-owners");
+	const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
+	const dir = tempSubpath(`test-session-owners-${uid}`);
 	process.env[TEST_SESSION_OWNERS_DIR_ENV] = dir;
 	return dir;
 }

@@ -58,7 +58,7 @@ describe("ctx.sessionModes in the interactive TUI", () => {
 	afterAll(() => registry.authStorage.close());
 
 	async function createSession(extension: ExtensionFactory, settings: Record<string, unknown> = {}) {
-		const dir = TempDir.createSync("omp-session-modes-");
+		const dir = TempDir.createSync("@omp-session-modes-");
 		cleanups.push(() => dir.removeSync());
 		await Settings.init({ inMemory: true, cwd: dir.path() });
 		const { session } = await createAgentSession({

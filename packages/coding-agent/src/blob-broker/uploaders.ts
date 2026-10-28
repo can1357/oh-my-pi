@@ -1,9 +1,7 @@
 /** Built-in push-mode uploader composition and command uploader support. */
 
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
-import { directoryIsEnterableSync, getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import { directoryIsEnterableSync, getProjectDir, logger, tempSubpath } from "@oh-my-pi/pi-utils";
 import { type BlobDestinationId, type BlobDestinationMetadata, BUILTIN_BLOB_DESTINATIONS } from "./destinations";
 import type { BlobPublication, BlobUploader, BlobUploadRequest } from "./publication";
 import { type DestinationRuntimeConfig, DestinationUnavailableError, optionString } from "./uploader-runtime";
@@ -94,7 +92,7 @@ export function createCommandUploader(template: string): BlobUploader {
 		destination: "command",
 		async upload(request: BlobUploadRequest): Promise<BlobPublication> {
 			const { bytes, mimeType, extension } = request;
-			const file = path.join(os.tmpdir(), `omp-blob-upload-${crypto.randomUUID()}.${extension}`);
+			const file = tempSubpath(`blob-upload-${crypto.randomUUID()}.${extension}`);
 			await Bun.write(file, bytes);
 			try {
 				const argv = argvTemplate.map(arg =>

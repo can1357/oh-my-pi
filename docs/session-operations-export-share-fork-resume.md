@@ -108,14 +108,14 @@ Dump transcript content includes:
 - Tool results and execution blocks (except `excludeFromContext` bash/python entries)
 - Custom/hook/file mention/branch summary/compaction summary entries
 
-The best-effort JSON sidecar is named `omp-llm-request-<id>.json` under the OS temporary directory. It contains the current model, thinking level, service tier, system prompt, wire tool schemas, and LLM-converted messages. It persists after the command and can contain raw context or secrets; protect or remove it accordingly. A sidecar failure does not suppress the transcript (the TUI reports the failure; headless execution silently omits the path).
+The best-effort JSON sidecar is named `llm-request-<id>.json` under `<os temp>/omp-<uid>/`. It contains the current model, thinking level, service tier, system prompt, wire tool schemas, and LLM-converted messages. It persists after the command and can contain raw context or secrets; protect or remove it accordingly. A sidecar failure does not suppress the transcript (the TUI reports the failure; headless execution silently omits the path).
 
 No session persistence entries are appended by dumping.
 
 ### `/dump all` (zip of per-agent dumps)
 
 `/dump all` calls `session.dumpSessionArchiveToTmpDir()`, which writes
-`omp-dump-<id>.zip` under the OS temporary directory with:
+`dump-<id>.zip` under `<os temp>/omp-<uid>/` with:
 
 - `session.md` — the same main transcript `/dump` copies
 - `llm-request.json` — the same payload as the `/dump` sidecar (best-effort; omitted if conversion fails)

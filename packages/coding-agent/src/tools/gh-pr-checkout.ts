@@ -1,10 +1,9 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { IsoBackendKind, VcsGitRepo, VcsWorktreeEntry } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getWorktreeDir, hashPath, isEnoent, logger, slugify } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, hashPath, isEnoent, logger, mkdtempInTempRoot, slugify } from "@oh-my-pi/pi-utils";
 import { github } from "../utils/github";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { withRepoLock } from "../utils/repo-lock";
@@ -643,7 +642,7 @@ export async function executePrCreate(
 			if (body !== undefined && body.length > 0) {
 				// Route through a temp file so multi-KB bodies stay clear of any
 				// argv-length limits and shell-quoting hazards on uncommon platforms.
-				bodyDir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-pr-body-"));
+				bodyDir = await mkdtempInTempRoot("gh-pr-body-");
 				const bodyFile = path.join(bodyDir, "body.md");
 				await Bun.write(bodyFile, body);
 				args.push("--body-file", bodyFile);

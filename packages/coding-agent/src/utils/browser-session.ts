@@ -1,9 +1,6 @@
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
 import { LoginCancelledError } from "@oh-my-pi/pi-ai/error";
 import type { OAuthBrowserSessionRequest } from "@oh-my-pi/pi-ai/oauth/types";
-import { logger, withTimeout } from "@oh-my-pi/pi-utils";
+import { logger, mkdtempInTempRoot, withTimeout } from "@oh-my-pi/pi-utils";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import type { Browser } from "puppeteer-core";
 import { gracefulKillTreeOnce } from "../tools/browser/attach";
@@ -35,7 +32,7 @@ export async function captureBrowserSession(
 		const [puppeteer, executablePath] = await untilAborted(lifetime, () =>
 			Promise.all([loadPuppeteer(), ensureSignInChromiumExecutable()]),
 		);
-		userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-sso-profile-"));
+		userDataDir = await mkdtempInTempRoot("sso-profile-");
 		lifetime.throwIfAborted();
 		// Do not race launch: retain ownership even if cancellation happens before it resolves.
 		// Unlike general browser tooling, authentication keeps sandbox and TLS checks enabled.

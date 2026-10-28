@@ -1,5 +1,4 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { CompactionCancelledError, type CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import {
@@ -22,7 +21,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
-import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, logger, Snowflake, sanitizeText, tempSubpath } from "@oh-my-pi/pi-utils";
 import { getActiveProfile, getConfigDirName } from "@oh-my-pi/pi-utils/dirs";
 import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
@@ -478,7 +477,7 @@ export class CommandController {
 				this.ctx.showError("No messages to dump yet.");
 				return;
 			}
-			const tmpPath = path.join(os.tmpdir(), `${Snowflake.next()}-tmp.txt`);
+			const tmpPath = tempSubpath(`${Snowflake.next()}-tmp.txt`);
 			await Bun.write(tmpPath, `${rendered}\n`);
 			this.ctx.showStatus(`Debug transcript written to:\n${tmpPath}`);
 		} catch (error: unknown) {
@@ -517,7 +516,7 @@ export class CommandController {
 		// Custom share scripts keep their legacy contract: they receive a path
 		// to a standalone HTML export. No fallback to the default flow on error.
 		if (customShare) {
-			const tmpFile = path.join(os.tmpdir(), `${Snowflake.next()}.html`);
+			const tmpFile = tempSubpath(`${Snowflake.next()}.html`);
 			try {
 				await this.ctx.session.exportToHtml(tmpFile);
 				const result = await customShare.fn(tmpFile);

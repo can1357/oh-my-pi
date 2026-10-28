@@ -8,11 +8,10 @@
  * surface to the editor: a query that cannot be answered shows no ghost text.
  */
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import { IpcConnection, ipcEndpoint, type PredictedWord } from "@oh-my-pi/pi-natives";
 import type { WordCompletionEngine, WordPredictionBackend } from "@oh-my-pi/pi-tui/prompt/word-completion";
-import { compareVersions, getAgentDir, logger, ptree, VERSION } from "@oh-my-pi/pi-utils";
+import { compareVersions, getAgentDir, logger, mkdtempInTempRoot, ptree, VERSION } from "@oh-my-pi/pi-utils";
 import { daemonClientForGlobal } from "../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../launch/ensure";
 import { resolveWorkerSpawnCmd, SMOKE_TEST_TIMEOUT_MS, workerEnvFromParent } from "../subprocess/worker-client";
@@ -327,7 +326,7 @@ export function syncTextPrediction(): void {
  * and shut it down.
  */
 export async function smokeTestTextPredictDaemon(): Promise<void> {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-text-predict-smoke-"));
+	const root = await mkdtempInTempRoot("text-predict-smoke-");
 	const endpoint = ipcEndpoint(root, "text-predict");
 	const spawn = resolveWorkerSpawnCmd(TEXT_PREDICT_WORKER_ARG);
 	const proc = ptree.spawn(spawn.cmd, {

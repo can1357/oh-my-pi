@@ -848,6 +848,7 @@
 
 ### Changed
 
+- Every temp path omp creates now lives under `<os temp>/omp/` — `local://` fallbacks in `omp/local/`, shell snapshots in `omp/shell-snapshots-<uid>`, plus screenshots, dumps, recordings, staging folders and test logs — so a shared temp dir gains one entry per user instead of one per run, and `rm -rf "$TMPDIR/omp"` clears all of it ([#17274](https://github.com/can1357/oh-my-pi/pull/17274) by [@iacore](https://github.com/iacore))
 - Updated Bun engine requirement to ≥1.4.4
 
 ### Fixed

@@ -1,11 +1,10 @@
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { type EditStore, type GrepMatch, GrepOutputMode, type GrepResult } from "@oh-my-pi/pi-natives";
-import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { mkdtempInTempRoot, prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
 	type ArchiveReader,
@@ -344,7 +343,7 @@ async function resolveArchiveSearchPaths(
 		}
 
 		if (!tempDir) {
-			tempDir = await mkdtemp(path.join(tmpdir(), "omp-search-archive-"));
+			tempDir = await mkdtempInTempRoot("search-archive-");
 		}
 		// Per-entry filename keeps the scratch path unique even when two selectors
 		// resolve to members with the same basename.

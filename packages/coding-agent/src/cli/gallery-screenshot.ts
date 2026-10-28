@@ -12,9 +12,8 @@
  * rather than degrade to a lossy fallback.
  */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { $which } from "@oh-my-pi/pi-utils";
+import { $which, mkdtempInTempRootSync } from "@oh-my-pi/pi-utils";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { quotePosixArgument } from "../utils/shell-quote";
 import type { GallerySection } from "./gallery-cli";
@@ -76,9 +75,7 @@ export async function captureGalleryScreenshots(
 	const chunks = chunkGallerySections(sections, rowBudget);
 	const themeJson = buildVhsTheme();
 
-	const baseDir = options.out
-		? path.dirname(path.resolve(options.out))
-		: fs.mkdtempSync(path.join(os.tmpdir(), "omp-gallery-"));
+	const baseDir = options.out ? path.dirname(path.resolve(options.out)) : mkdtempInTempRootSync("gallery-");
 	await fs.promises.mkdir(baseDir, { recursive: true });
 
 	const outPaths: string[] = [];

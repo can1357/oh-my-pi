@@ -1,7 +1,6 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
+import { getTempRoot, mkdtempInTempRoot, tempSubpath, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { BunFile } from "bun";
 import type { ElementHandle, Page, Realm } from "puppeteer-core";
@@ -148,10 +147,10 @@ function readFirstPickedFile(picker: PagePicker): Promise<string> | string {
 }
 
 /**
- * Staging folders are `omp-uploads-<pid>-<id>` in the temp directory; the pid names the omp process that owns one. The
+ * Staging folders are `uploads-<pid>-<id>` under omp's temp root; the pid names the omp process that owns one. The
  * route check's own folder shares the prefix, so one a crash left behind is swept the same way.
  */
-const STAGING_FOLDER = /^omp-uploads-(\d+)-/;
+const STAGING_FOLDER = /^uploads-(\d+)-/;
 
 /**
  * How long a staging folder no open tab owns stays after its last upload: a page omp let go of may still be open in the
@@ -161,7 +160,7 @@ const STAGING_KEPT_MS = 24 * 60 * 60 * 1000;
 
 /** The staging folder path for a new tab; it is created on the tab's first upload. */
 export function newUploadStagingDir(): string {
-	return path.join(os.tmpdir(), `omp-uploads-${process.pid}-${crypto.randomUUID().slice(0, 8)}`);
+	return tempSubpath(`uploads-${process.pid}-${crypto.randomUUID().slice(0, 8)}`);
 }
 
 /** Remove a tab's staging folder, once the page that may read its copies is gone. */
@@ -183,7 +182,7 @@ function processAlive(pid: number): boolean {
  * process that made them is this one or gone. Another running omp sweeps its own.
  */
 export async function sweepUploadStaging(live: ReadonlySet<string>, now = Date.now()): Promise<void> {
-	const root = os.tmpdir();
+	const root = getTempRoot();
 	for (const name of await fs.readdir(root).catch(() => [])) {
 		const owner = STAGING_FOLDER.exec(name);
 		const directory = path.join(root, name);
@@ -307,7 +306,7 @@ export class UploadStaging {
 	async #checkRoute(page: Page): Promise<{ route: UploadRoute; decided: boolean }> {
 		const token = crypto.randomUUID();
 		// Its own folder, so a tab that never stages a file leaves no staging folder behind.
-		const checkDirectory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-uploads-${process.pid}-check-`));
+		const checkDirectory = await mkdtempInTempRoot(`uploads-${process.pid}-check-`);
 		try {
 			const tokenPath = path.join(checkDirectory, "route-check");
 			await Bun.write(tokenPath, token);

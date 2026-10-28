@@ -777,7 +777,7 @@ describe("structured subagent primitive", () => {
 			mode: "permissive",
 			data: { ok: true },
 		});
-		expect(path.basename(settled.artifactsDir)).toStartWith("omp-task-");
+		expect(path.basename(settled.artifactsDir)).toStartWith("task-");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 

@@ -9,7 +9,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { enforcePlanModeWrite, resolvePlanPath } from "@oh-my-pi/pi-coding-agent/tools/plan-mode-guard";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, getTempRoot } from "@oh-my-pi/pi-utils";
 
 const ARTIFACTS_DIR = path.join(os.tmpdir(), "agent-artifacts");
 const REPO_ROOT = path.join(os.tmpdir(), "repo");
@@ -45,7 +45,7 @@ describe("resolvePlanPath local:// support", () => {
 	it("falls back to os tmp root when artifacts dir is unavailable", async () => {
 		const session = makeSession({ artifactsDir: null, sessionId: "session-42" });
 		expect(await resolvePlanPath(session, "local://memo.txt")).toBe(
-			path.join(os.tmpdir(), "omp-local", "session-42", "memo.txt"),
+			path.join(getTempRoot(), "local", "session-42", "memo.txt"),
 		);
 	});
 });

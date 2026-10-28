@@ -15,9 +15,8 @@
  * listing, focusing an element that takes no text, element `evaluate`).
  */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { isRecord, logger, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, Snowflake, tempSubpath, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { JsRuntime } from "../../../eval/js/shared/runtime";
 import { formatScreenshot, resizeImage } from "../../../utils/image-resize";
@@ -2695,7 +2694,7 @@ export class TernTab implements InProcessRunTab {
 					context.session.browserScreenshotDir,
 					`screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
 				)
-			: path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.${ext}`);
+			: tempSubpath(`sshots-${Snowflake.next()}.${ext}`);
 		await Bun.write(dest, savedBuffer);
 		context.screenshots.push({
 			dest,
@@ -2729,7 +2728,7 @@ export class TernTab implements InProcessRunTab {
 		const changed = diff.pixelChangeRatio > screenshotThreshold(opts.threshold);
 		const diffPath = opts.output
 			? resolveToCwd(opts.output, context.session.cwd)
-			: path.join(os.tmpdir(), `omp-screenshot-diff-${Snowflake.next()}.png`);
+			: tempSubpath(`screenshot-diff-${Snowflake.next()}.png`);
 		await Bun.write(diffPath, diff.png);
 		const resized = await resizeImage(
 			{ type: "image", data: diff.png.toString("base64"), mimeType: "image/png" },
@@ -2774,7 +2773,7 @@ export class TernTab implements InProcessRunTab {
 		}
 		const dest = opts.path
 			? resolveToCwd(opts.path, context.session.cwd)
-			: path.join(os.tmpdir(), `omp-browser-${Snowflake.next()}.pdf`);
+			: tempSubpath(`browser-${Snowflake.next()}.pdf`);
 		await Bun.write(dest, Buffer.from(answer.data, "base64"));
 		return dest;
 	}
@@ -3146,7 +3145,7 @@ export class TernTab implements InProcessRunTab {
 	}
 
 	async #enableDownloads(dir?: string): Promise<void> {
-		const resolved = path.resolve(dir ?? path.join(os.tmpdir(), `omp-downloads-tern-${this.block}`));
+		const resolved = path.resolve(dir ?? tempSubpath(`downloads-tern-${this.block}`));
 		if (this.#downloadDir === resolved) return;
 		await fs.promises.mkdir(resolved, { recursive: true });
 		await this.#op("downloads", { dir: resolved });
@@ -3321,7 +3320,7 @@ export class TernTab implements InProcessRunTab {
 		const har = await this.#network.harStop(this.loadBody);
 		const destination = options.path
 			? resolveToCwd(options.path, context.session.cwd)
-			: path.join(os.tmpdir(), `omp-browser-${Snowflake.next()}.har`);
+			: tempSubpath(`browser-${Snowflake.next()}.har`);
 		await Bun.write(destination, `${JSON.stringify(har, null, 2)}\n`);
 		return destination;
 	}

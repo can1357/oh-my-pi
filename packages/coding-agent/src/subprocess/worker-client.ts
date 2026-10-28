@@ -1,5 +1,4 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import {
 	$env,
@@ -9,6 +8,7 @@ import {
 	isExecutable,
 	isFullyQualifiedPath,
 	logger,
+	mkdtempInTempRootSync,
 	postmortem,
 	stripWindowsExtendedLengthPathPrefix,
 	WhichCachePolicy,
@@ -397,7 +397,7 @@ interface StderrCapture {
 /** Create a file-backed stderr target that does not pin Bun's event loop. */
 function createStderrCapture(exitLabel: string): StderrCapture {
 	try {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-worker-stderr-"));
+		const dir = mkdtempInTempRootSync("worker-stderr-");
 		const fd = fs.openSync(
 			path.join(dir, "stderr.log"),
 			fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_TRUNC,

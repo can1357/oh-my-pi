@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { expandWindowsLongPath } from "@oh-my-pi/pi-natives/path";
 import { engines, version } from "../package.json" with { type: "json" };
 import { isEnoent, isEnotdir } from "./fs-error";
+import { tempSubpath } from "./temp";
 import { isBunTestRuntime } from "./test-runtime";
 
 /** App name (e.g. "omp") */
@@ -673,13 +674,14 @@ export function getTestTempDir(prefix: string): string {
 
 /**
  * Get the logs directory (~/.omp/logs). `bun test` processes get
- * `<tmpdir>/omp-test-logs-<uid>` instead, so suites never write into the
+ * `<tmpdir>/omp/test-logs-<uid>` instead, so suites never write into the
  * developer's real logs; the uid suffix (as for the test session-owners dir)
  * keeps users of a shared `/tmp` from owning each other's directory.
  */
 export function getLogsDir(): string {
 	if (isBunTestRuntime()) {
-		return getTestTempDir("omp-test-logs");
+		const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
+		return tempSubpath(`test-logs-${uid}`);
 	}
 	return dirs.rootSubdir("logs", "state");
 }
