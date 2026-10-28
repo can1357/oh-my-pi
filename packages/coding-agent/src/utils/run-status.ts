@@ -9,7 +9,7 @@
  * the full status. omp only writes the root record; teardown and opting out
  * send `state=clear` so no stale record outlives the session.
  */
-import { isProgramStatusSupported, writeTerminalSequence } from "@oh-my-pi/pi-tui";
+import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
 import { setPromptZonesEnabled } from "@oh-my-pi/pi-tui/chat/user-message";
 import { truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { APP_NAME, isTerminalHeadless, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -42,6 +42,8 @@ const runtime: {
 	status: RunStatus;
 	/** `terminal.programStatus`; off removes the record and stops reporting. */
 	enabled: boolean;
+	/** True only after a terminal confirms OSC 7501 with a feature-query reply. */
+	supported: boolean;
 	/** Set at teardown so a late transition cannot leave a record in the parent
 	 *  shell's terminal. Released only by {@link initProgramStatus}. */
 	disposed: boolean;
@@ -50,6 +52,7 @@ const runtime: {
 } = {
 	status: { state: "idle" },
 	enabled: true,
+	supported: false,
 	disposed: false,
 	reported: undefined,
 };
@@ -97,14 +100,14 @@ function clear(): void {
 }
 
 /**
- * Keep OSC 133 prompt marks off the screen only while Rex holds a `working`
- * or `blocked` record: a mark would drop it on every redraw (#17307). Other
- * terminals may ignore OSC 7501, so their prompt navigation stays intact.
+ * Keep OSC 133 prompt marks off the screen while a confirmed OSC 7501 receiver
+ * holds a `working` or `blocked` record: a mark drops it on every redraw
+ * (#17307). Unknown terminals keep their prompt navigation.
  */
 function syncPromptZones(): void {
 	const { state } = runtime.status;
 	const hasDroppableRecord =
-		runtime.reported !== undefined && isProgramStatusSupported() && (state === "working" || state === "blocked");
+		runtime.reported !== undefined && runtime.supported && (state === "working" || state === "blocked");
 	setPromptZonesEnabled(!hasDroppableRecord);
 }
 
@@ -128,6 +131,11 @@ export function setProgramStatusEnabled(enabled: boolean): void {
 	syncPromptZones();
 }
 
+/** Update prompt-zone rendering when the terminal's OSC 7501 probe resolves. */
+export function setProgramStatusSupported(supported: boolean): void {
+	runtime.supported = supported;
+	syncPromptZones();
+}
 /**
  * Re-send the record after resuming from a suspend: the shell prompt shown
  * meanwhile made the terminal drop `working` and `blocked` records. `done` and
@@ -145,6 +153,8 @@ export function resendProgramStatus(): void {
  */
 export function initProgramStatus(): void {
 	runtime.disposed = false;
+	runtime.supported = false;
+	syncPromptZones();
 }
 
 /**
@@ -155,5 +165,6 @@ export function initProgramStatus(): void {
 export function disposeProgramStatus(): void {
 	clear();
 	runtime.disposed = true;
+	runtime.supported = false;
 	syncPromptZones();
 }

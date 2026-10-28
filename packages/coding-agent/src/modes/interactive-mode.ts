@@ -237,6 +237,7 @@ import {
 	initProgramStatus,
 	resendProgramStatus,
 	setProgramStatusEnabled,
+	setProgramStatusSupported,
 } from "../utils/run-status";
 import {
 	disposeTerminalTitleState,
@@ -2612,10 +2613,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		initProgramStatus();
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
-		// OSC 133;A starts a shell prompt, which may drop an idle record.
-		// Direct Rex bubbles omit the mark while a working/blocked record is
-		// reported (see run-status `syncPromptZones`), so this re-sends idle
-		// there at most. Only frames that write the mark need a replacement.
+		const unsubscribeProgramStatus = this.ui.terminal.onProgramStatusSupport?.(supported => {
+			setProgramStatusSupported(supported);
+			this.ui.requestRender();
+		});
+		if (unsubscribeProgramStatus) this.#eventBusUnsubscribers.push(unsubscribeProgramStatus);
+		// OSC 133;A starts a shell prompt and may drop the current status
+		// record. Confirmed OSC 7501 receivers omit the mark while working or
+		// blocked; only a frame that writes the mark needs a status replacement.
 		this.#eventBusUnsubscribers.push(
 			this.ui.addFrameWriteListener(frame => {
 				if (frame.includes("\x1b]133;A\x07")) resendProgramStatus();
