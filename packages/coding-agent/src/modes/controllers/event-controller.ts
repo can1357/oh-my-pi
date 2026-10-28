@@ -438,7 +438,11 @@ export class EventController {
 			},
 			user_wait_end: async () => {
 				if (!this.#blockingPrompts.delete(SESSION_USER_WAIT_KEY)) return;
-				setRunStatus(this.#blockingPrompts.values().next().value ?? { state: "working" });
+				// Unlike a tool call's prompt, a session dialog can open with no run
+				// behind it (an MCP re-auth, auto-QA consent), so the run only goes
+				// back to `working` when one is actually in flight.
+				const next = this.#blockingPrompts.values().next().value;
+				setRunStatus(next ?? (this.#runActive ? { state: "working" } : { state: "idle" }));
 				this.ctx.ui.requestRender();
 			},
 			notice: e => this.#handleNotice(e),

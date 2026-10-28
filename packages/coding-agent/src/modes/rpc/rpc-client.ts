@@ -181,6 +181,8 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"model_changed",
 	"goal_updated",
 	"queue_update",
+	"user_wait_start",
+	"user_wait_end",
 ]);
 
 function isRpcResponse(value: unknown): value is RpcResponse {
