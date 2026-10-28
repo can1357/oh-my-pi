@@ -324,7 +324,9 @@ Run `omp <command> --help` for each command's own flags and examples.
 
 ### Worktree clones
 
-Git's `worktree.useRelativePaths` setting controls the links created by `omp worktree add`, `/wt`, and other clone-first worktree callers. When enabled, links are relative where possible, which lets Windows clients resolve WSL worktrees through the same WSL share; OMP records Git's `relativeWorktrees` repository extension. Existing worktree links are not changed.
+Git's `worktree.useRelativePaths` setting controls the links created by `omp worktree add`, `/wt`, and other clone-first worktree callers. When enabled, OMP uses relative links where possible and records Git's `relativeWorktrees` repository extension. Older Git versions and tools that do not support this extension may refuse to open the repository. Existing worktree links are not changed.
+
+`omp worktree clear` preserves entries it cannot inspect, including with `--all`, and exits nonzero when any are skipped.
 
 When `worktree.clone` is enabled, `omp worktree add` and other clone-first
 worktree callers carry relocatable ignored caches such as `node_modules`.

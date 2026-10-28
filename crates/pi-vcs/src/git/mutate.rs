@@ -1999,6 +1999,24 @@ fn worktree_link_path<'a>(path: &'a Path, base: &Path, relative: bool) -> Cow<'a
 fn enable_relative_worktrees(common: &Path) -> Result<()> {
 	let path = gix::path::realpath(common.join("config"))
 		.map_err(|err| Error::backend("git worktree add", err))?;
+	{
+		let config =
+			gix::config::File::from_path_no_includes(path.clone(), gix::config::Source::Local)
+				.map_err(|err| Error::backend("git worktree add", err))?;
+		if config
+			.integer("core.repositoryFormatVersion")
+			.transpose()
+			.map_err(|err| Error::backend("git worktree add", err))?
+			== Some(1)
+			&& config
+				.boolean("extensions.relativeWorktrees")
+				.transpose()
+				.map_err(|err| Error::backend("git worktree add", err))?
+				.unwrap_or(false)
+		{
+			return Ok(());
+		}
+	}
 	let permissions = fs::metadata(&path)?.permissions();
 	let mut lock = gix::lock::File::acquire_to_update_resource_with_permissions(
 		&path,
@@ -2010,6 +2028,9 @@ fn enable_relative_worktrees(common: &Path) -> Result<()> {
 	// Creation permissions are filtered by umask; preserve the shared config's
 	// existing mode before atomically replacing it.
 	lock.with_mut(|file| file.set_permissions(permissions))?;
+	// Another writer may have committed after the unlocked check. Re-read
+	// under the lock so its changes survive and an already-completed upgrade
+	// does not rewrite the config.
 	let mut config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
 		.map_err(|err| Error::backend("git worktree add", err))?;
 	let version = config
@@ -2266,6 +2287,29 @@ mod tests {
 			.unwrap()
 			.trim_end()
 			.to_owned()
+	}
+
+	/// Like the reftable tests, gate only Git's unsupported feature, not the
+	/// native absolute-path or config-lock coverage.
+	fn git_supports_relative_worktrees(dir: &Path) -> bool {
+		let output = Command::new("git")
+			.current_dir(dir)
+			.args(["worktree", "add", "-h"])
+			.env("LC_ALL", "C")
+			.output()
+			.unwrap();
+		let help = format!(
+			"{}\n{}",
+			String::from_utf8_lossy(&output.stdout),
+			String::from_utf8_lossy(&output.stderr)
+		);
+		assert_eq!(output.status.code(), Some(129), "{help}");
+		assert!(help.contains("worktree add"), "{help}");
+		let supported = help.contains("relative-paths");
+		if !supported {
+			eprintln!("skipping relative-worktree Git interoperability: git has no --relative-paths");
+		}
+		supported
 	}
 
 	fn fixture() -> (TempDir, GitRepo) {
@@ -3162,6 +3206,10 @@ mod tests {
 				)
 				.unwrap();
 				let (temp, repo) = fixture();
+				let relative = matches!(setting, "true" | "global" | "include" | "worktree");
+				if relative && !git_supports_relative_worktrees(temp.path()) {
+					continue;
+				}
 				repo.gix().unwrap(); // Cache the original false setting.
 				match setting {
 					"default" | "global" => {
@@ -3207,7 +3255,6 @@ mod tests {
 				} else if clone == WorktreeClone::Off {
 					assert!(result.cloned_with.is_none());
 				}
-				let relative = matches!(setting, "true" | "global" | "include" | "worktree");
 				assert_eq!(
 					repo
 						.config_get("core.repositoryFormatVersion")
@@ -3244,9 +3291,10 @@ mod tests {
 	#[test]
 	fn git_relative_and_absolute_worktrees_survive_native_prune() {
 		let (temp, repo) = fixture();
+		let relative = git_supports_relative_worktrees(temp.path());
 		let targets = tempfile::tempdir().unwrap();
 		let mut admins = Vec::new();
-		for (name, relative) in [("relative", true), ("absolute", false)] {
+		for (name, relative) in [("prunable", relative), ("absolute", false)] {
 			git(temp.path(), &[
 				"config",
 				"worktree.useRelativePaths",
@@ -3271,18 +3319,18 @@ mod tests {
 				.config_get("extensions.relativeWorktrees")
 				.unwrap()
 				.as_deref(),
-			Some("true")
+			relative.then_some("true")
 		);
 		assert_eq!(
 			repo
 				.config_get("core.repositoryFormatVersion")
 				.unwrap()
 				.as_deref(),
-			Some("1")
+			Some(if relative { "1" } else { "0" })
 		);
-		fs::remove_dir_all(targets.path().join("relative")).unwrap();
+		fs::remove_dir_all(targets.path().join("prunable")).unwrap();
 		repo.worktree_prune().unwrap();
-		assert!(!admins[0].exists(), "genuinely missing relative worktrees remain prunable");
+		assert!(!admins[0].exists(), "genuinely missing worktrees remain prunable");
 		assert!(admins[1].join("HEAD").is_file());
 		git(temp.path(), &["worktree", "lock", targets.path().join("absolute").to_str().unwrap()]);
 		fs::remove_dir_all(targets.path().join("absolute")).unwrap();
@@ -3326,6 +3374,9 @@ mod tests {
 	#[test]
 	fn relative_registration_distinguishes_copied_and_owned_worktrees() {
 		let (temp, repo) = fixture();
+		if !git_supports_relative_worktrees(temp.path()) {
+			return;
+		}
 		let targets = tempfile::tempdir().unwrap();
 		let linked = targets.path().join("linked");
 		let copied = targets.path().join("copied");
@@ -3423,14 +3474,29 @@ mod tests {
 	#[test]
 	fn relative_worktree_creation_respects_existing_config_lock() {
 		let (temp, repo) = fixture();
+		let git_relative = git_supports_relative_worktrees(temp.path());
 		git(temp.path(), &["config", "worktree.useRelativePaths", "true"]);
 		let config = repo.info().common_dir.join("config");
 		let before = fs::read(&config).unwrap();
 		let lock = repo.info().common_dir.join("config.lock");
-		fs::write(&lock, b"another writer").unwrap();
+		let mut pending = before.clone();
+		pending.extend_from_slice(b"\n# concurrent writer\n[custom]\n\tmarker = committed\n");
+		fs::write(&lock, &pending).unwrap();
 		let targets = tempfile::tempdir().unwrap();
 		let linked = targets.path().join("linked");
 
+		if git_relative {
+			let output = Command::new("git")
+				.current_dir(temp.path())
+				.args(["worktree", "add", "--detach"])
+				.arg(targets.path().join("git-linked"))
+				.arg("HEAD")
+				.output()
+				.unwrap();
+			assert!(!output.status.success(), "Git must lock the first format upgrade");
+			assert_eq!(fs::read(&config).unwrap(), before);
+			assert_eq!(fs::read(&lock).unwrap(), pending);
+		}
 		assert!(
 			repo
 				.worktree_add(&linked, "main", WorktreeAddOptions {
@@ -3440,9 +3506,100 @@ mod tests {
 				})
 				.is_err()
 		);
-		assert_eq!(fs::read(config).unwrap(), before);
-		assert_eq!(fs::read(lock).unwrap(), b"another writer");
+		assert_eq!(fs::read(&config).unwrap(), before);
+		assert_eq!(fs::read(&lock).unwrap(), pending);
 		assert!(!linked.join(".git").exists());
+
+		// Let the other writer commit, then retry against its new snapshot.
+		fs::rename(&lock, &config).unwrap();
+		repo
+			.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
+		assert!(!lock.exists());
+		assert!(
+			fs::read_to_string(&config)
+				.unwrap()
+				.contains("# concurrent writer")
+		);
+		assert_eq!(repo.config_get("custom.marker").unwrap().as_deref(), Some("committed"));
+		assert_eq!(
+			repo
+				.config_get("extensions.relativeWorktrees")
+				.unwrap()
+				.as_deref(),
+			Some("true")
+		);
+		assert_eq!(
+			repo
+				.config_get("core.repositoryFormatVersion")
+				.unwrap()
+				.as_deref(),
+			Some("1")
+		);
+		assert!(registered_admin(&linked.join(".git")).unwrap().is_some());
+		if git_relative {
+			assert_worktree_links(&repo, &linked, true);
+		}
+	}
+
+	#[test]
+	fn relative_worktree_add_with_enabled_extension_does_not_lock_config() {
+		let (temp, repo) = fixture();
+		let git_relative = git_supports_relative_worktrees(temp.path());
+		git(temp.path(), &["config", "worktree.useRelativePaths", "true"]);
+		let targets = tempfile::tempdir().unwrap();
+		let first = targets.path().join("first");
+		repo
+			.worktree_add(&first, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
+		let config = repo.info().common_dir.join("config");
+		let before = fs::read(&config).unwrap();
+		let lock = repo.info().common_dir.join("config.lock");
+		fs::write(&lock, b"another writer").unwrap();
+
+		if git_relative {
+			let linked = targets.path().join("git-linked");
+			git(temp.path(), &["worktree", "add", "--detach", linked.to_str().unwrap(), "HEAD"]);
+			assert_worktree_links(&repo, &linked, true);
+			assert_eq!(fs::read(&config).unwrap(), before);
+			assert_eq!(fs::read(&lock).unwrap(), b"another writer");
+		}
+		let can_clone = clone_works_on(targets.path());
+		for (name, clone) in
+			[("native-off", WorktreeClone::Off), ("native-auto", WorktreeClone::Auto)]
+		{
+			let linked = targets.path().join(name);
+			let result = repo
+				.worktree_add(&linked, "main", WorktreeAddOptions {
+					detach: true,
+					clone,
+					keep_changes: false,
+				})
+				.unwrap();
+			if clone == WorktreeClone::Auto && can_clone {
+				assert!(result.cloned_with.is_some(), "{:?}", result.clone_error);
+			}
+			let admin = registered_admin(&linked.join(".git")).unwrap().unwrap();
+			let forward = fs::read_to_string(linked.join(".git")).unwrap();
+			let back = fs::read_to_string(admin.join("gitdir")).unwrap();
+			assert!(Path::new(forward.trim_end().strip_prefix("gitdir: ").unwrap()).is_relative());
+			assert!(Path::new(back.trim_end()).is_relative());
+			assert_eq!(fs::read_to_string(linked.join("a")).unwrap(), "one\n");
+			assert_eq!(fs::read(&config).unwrap(), before);
+			assert_eq!(fs::read(&lock).unwrap(), b"another writer");
+			if git_relative {
+				assert_worktree_links(&repo, &linked, true);
+			}
+		}
+		assert!(registered_admin(&first.join(".git")).unwrap().is_some());
 	}
 
 	#[cfg(unix)]
@@ -3483,6 +3640,9 @@ mod tests {
 	#[test]
 	fn relative_worktrees_remain_registered_after_moving_the_repository() {
 		let (original, repo) = fixture();
+		if !git_supports_relative_worktrees(original.path()) {
+			return;
+		}
 		drop(repo);
 		let workspace = tempfile::tempdir().unwrap();
 		let primary = workspace.path().join("primary");
@@ -3510,6 +3670,9 @@ mod tests {
 	#[test]
 	fn linked_worktree_config_overrides_shared_pointer_preference() {
 		let (temp, repo) = fixture();
+		if !git_supports_relative_worktrees(temp.path()) {
+			return;
+		}
 		let targets = tempfile::tempdir().unwrap();
 		let source = targets.path().join("source");
 		git(temp.path(), &["worktree", "add", "--detach", source.to_str().unwrap(), "HEAD"]);
@@ -3538,6 +3701,9 @@ mod tests {
 	#[test]
 	fn relative_worktrees_of_bare_repositories_list_the_common_root() {
 		let (temp, _) = fixture();
+		if !git_supports_relative_worktrees(temp.path()) {
+			return;
+		}
 		let targets = tempfile::tempdir().unwrap();
 		let bare = targets.path().join("bare.git");
 		git(temp.path(), &["clone", "--bare", "--quiet", ".", bare.to_str().unwrap()]);

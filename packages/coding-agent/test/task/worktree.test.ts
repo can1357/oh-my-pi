@@ -628,9 +628,17 @@ describe("detachGitDir", () => {
 		return iso;
 	}
 	it("isolates copied relative worktree links without changing the source registration", async () => {
-		const { main, wt, commonDir, baseSha } = await makeLinkedWorktree();
-		await runGit(main, ["worktree", "repair", "--relative-paths", wt]);
-		const sourcePointer = await Bun.file(path.join(wt, ".git")).text();
+		const { wt, commonDir, baseSha } = await makeLinkedWorktree();
+		const gitDir = path.resolve(await runGit(wt, ["rev-parse", "--absolute-git-dir"]));
+		// Relative gitfiles predate `worktree repair --relative-paths`. Keep the
+		// registration's absolute backlink so this fixture also works on older Git.
+		const relativeGitDir = path
+			.relative(await fs.realpath(wt), gitDir)
+			.split(path.sep)
+			.join("/");
+		const sourcePointer = `gitdir: ${relativeGitDir}\n`;
+		await Bun.write(path.join(wt, ".git"), sourcePointer);
+		const sourceBacklink = await Bun.file(path.join(gitDir, "gitdir")).text();
 		const base = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relative-isolation-"));
 		tempDirs.push(base);
 		const previousBase = process.env.OMP_WORKTREE_DIR;
@@ -654,6 +662,7 @@ describe("detachGitDir", () => {
 				await runGit(handle.mergedDir, ["checkout", "-q", "-b", "task/isolated"]);
 				expect(await runGit(wt, ["branch", "--format=%(refname:short)"])).not.toContain("task/isolated");
 				expect(await Bun.file(path.join(wt, ".git")).text()).toBe(sourcePointer);
+				expect(await Bun.file(path.join(gitDir, "gitdir")).text()).toBe(sourceBacklink);
 				expect(await runGit(wt, ["rev-parse", "HEAD"])).toBe(baseSha);
 			} finally {
 				await cleanupIsolation(handle);

@@ -26,7 +26,9 @@
 //! `--opt=value`, options mixed with operands, and `--`/`--end-of-options`.
 //! The builtin serves `-f`, `-b`, `-B`, `-d`, `--checkout`, `--lock`,
 //! `--reason`, `-q`, `--no-track`, `--[no-]guess-remote`, and
-//! `--no-relative-paths`. Everything else — other subcommands and global
+//! `--no-relative-paths` when `worktree.useRelativePaths` is false or unset.
+//! A true configured preference, including an explicit flag overriding it,
+//! goes to Git. Everything else — other subcommands and global
 //! options, `--orphan`, `--no-checkout`, `--track`, `--relative-paths`, start
 //! points that set up an upstream, bare/reftable/submodule repositories, env
 //! redirection, and any invocation git would reject — runs the git binary with
@@ -320,7 +322,10 @@ impl AddRequest {
 			// new location; git leaves submodules unpopulated instead.
 			|| repo.root().join(".gitmodules").exists()
 			|| config_true(&repo, "core.bare")?
-			|| resolve_flag(&repo, self.relative_paths, "worktree.useRelativePaths")?
+			// pi-vcs reads the configured preference without a flag override.
+			// Git must also handle --no-relative-paths when that preference is true.
+			|| self.relative_paths == Some(true)
+			|| repo.config_boolean("worktree.useRelativePaths")?.unwrap_or(false)
 		{
 			return Ok(None);
 		}
@@ -902,6 +907,64 @@ mod tests {
 			.expect("post-checkout ran");
 		assert_eq!(hook_log.trim(), format!("{} {head} 1 {}", "0".repeat(head.len()), wt.display()));
 		assert_cloned(&wt);
+	}
+
+	/// An explicit absolute-path request must beat a configured relative-path
+	/// preference without unnecessarily upgrading the repository format.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn no_relative_paths_overrides_config_without_enabling_the_extension() {
+		for setting in ["true", "false", "valueless"] {
+			let (_temp, repo) = fixture();
+			let config = repo.join(".git/config");
+			if setting == "valueless" {
+				let mut text = std::fs::read_to_string(&config).expect("read config");
+				text.push_str("\n[worktree]\n\tuseRelativePaths\n");
+				std::fs::write(&config, text).expect("write config");
+			} else {
+				git(&repo, &["config", "worktree.useRelativePaths", setting]);
+			}
+			let before = std::fs::read(&config).expect("read config");
+			let (code, output) =
+				run_with(&repo, "LC_ALL=C git worktree add --no-relative-paths --detach ../plain", &[])
+					.await;
+			if code == Some(129)
+				&& output.contains("unknown option")
+				&& output.contains("relative-paths")
+			{
+				eprintln!("skipping explicit relative-path override: git has no --relative-paths");
+				return;
+			}
+			assert_eq!(code, Some(0), "{output}");
+			assert_eq!(std::fs::read(&config).expect("read config"), before);
+			let (code, output) =
+				run(&repo, "git worktree add --no-relative-paths --detach ../smart").await;
+			assert_eq!(code, Some(0), "{output}");
+			assert_eq!(std::fs::read(&config).expect("read config"), before);
+			assert_eq!(git(&repo, &["config", "--local", "core.repositoryFormatVersion"]).trim(), "0");
+			assert!(
+				!git(&repo, &["config", "--local", "--name-only", "--list"])
+					.lines()
+					.any(|key| key.eq_ignore_ascii_case("extensions.relativeWorktrees"))
+			);
+
+			for name in ["plain", "smart"] {
+				let linked = repo.parent().expect("parent").join(name);
+				let admin = PathBuf::from(git(&linked, &["rev-parse", "--absolute-git-dir"]).trim());
+				let forward = std::fs::read_to_string(linked.join(".git")).expect("forward pointer");
+				let back = std::fs::read_to_string(admin.join("gitdir")).expect("back pointer");
+				let forward = Path::new(forward.trim_end().strip_prefix("gitdir: ").expect("gitdir"));
+				let back = Path::new(back.trim_end());
+				assert!(forward.is_absolute(), "{setting}: {}", forward.display());
+				assert!(back.is_absolute(), "{setting}: {}", back.display());
+				assert_eq!(forward.canonicalize().unwrap(), admin.canonicalize().unwrap());
+				assert_eq!(back.canonicalize().unwrap(), linked.join(".git").canonicalize().unwrap());
+				assert_eq!(git(&linked, &["status", "--porcelain"]), "");
+			}
+			if setting == "false" {
+				assert_cloned(&repo.parent().expect("parent").join("smart"));
+			}
+		}
 	}
 
 	/// Detaching at a tag, checking out an existing branch, resetting one with

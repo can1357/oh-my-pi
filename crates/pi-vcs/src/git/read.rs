@@ -449,6 +449,32 @@ impl GitRepo {
 			.and_then(|v| nonempty(v.to_str_lossy().trim())))
 	}
 
+	/// Read a Git boolean, including valueless keys which Git treats as true.
+	pub fn config_boolean(&self, key: &str) -> Result<Option<bool>> {
+		if self.is_reftable() {
+			let args = ["config", "--type=bool", "--get", key]
+				.into_iter()
+				.map(str::to_owned)
+				.collect::<Vec<_>>();
+			let out = super::cli::run_sync(self.root(), &args, super::cli::SYNC_TIMEOUT)?;
+			if out.exit_code == 1 {
+				return Ok(None);
+			}
+			let value = out.into_checked(&args)?.stdout;
+			return match value.trim() {
+				"true" => Ok(Some(true)),
+				"false" => Ok(Some(false)),
+				_ => Err(Error::backend("git config", "invalid boolean output")),
+			};
+		}
+		self
+			.gix_fresh()?
+			.config_snapshot()
+			.try_boolean(key)
+			.transpose()
+			.map_err(|err| Error::backend("git config", err))
+	}
+
 	/// List configured remote names.
 	pub fn remote_list(&self) -> Result<Vec<String>> {
 		if self.is_reftable() {
@@ -1670,6 +1696,32 @@ mod tests {
 		git(dir.path(), &["config", "custom.value", "  configured  "])?;
 		assert_eq!(repo.config_get("custom.value")?, Some("configured".to_owned()));
 		assert_eq!(repo.config_get("custom.missing")?, None);
+		Ok(())
+	}
+
+	#[test]
+	fn config_boolean_matches_git_for_valueless_and_invalid_entries() -> TestResult {
+		for reftable in [false, true] {
+			let dir = tempfile::tempdir()?;
+			if reftable {
+				if !init_reftable(dir.path())? {
+					continue;
+				}
+			} else {
+				git(dir.path(), &["init", "-q"])?;
+			}
+			let repo = GitRepo::require(dir.path())?;
+			assert_eq!(repo.config_boolean("ompFixture.flag")?, None);
+			git(dir.path(), &["config", "ompFixture.flag", "false"])?;
+			assert_eq!(repo.config_boolean("ompFixture.flag")?, Some(false));
+			let path = dir.path().join(".git/config");
+			let mut config = fs::read_to_string(&path)?;
+			config.push_str("\n[ompFixture]\n\tflag\n");
+			fs::write(path, config)?;
+			assert_eq!(repo.config_boolean("ompFixture.flag")?, Some(true));
+			git(dir.path(), &["config", "--replace-all", "ompFixture.flag", "invalid"])?;
+			assert!(repo.config_boolean("ompFixture.flag").is_err());
+		}
 		Ok(())
 	}
 

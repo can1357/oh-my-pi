@@ -157,7 +157,7 @@ describe("worktree clear linked checkout metadata", () => {
 	let savedEnv: string | undefined;
 
 	beforeEach(async () => {
-		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-linked-"));
+		root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-linked-")));
 		base = path.join(root, "managed");
 		savedEnv = process.env.OMP_WORKTREE_DIR;
 		delete process.env.OMP_WORKTREE_DIR;
@@ -171,6 +171,18 @@ describe("worktree clear linked checkout metadata", () => {
 		vi.restoreAllMocks();
 		await fs.rm(root, { recursive: true, force: true });
 	});
+
+	async function makeRelativeCheckout(repo: string, checkout: string): Promise<string> {
+		await fs.mkdir(checkout, { recursive: true });
+		const gitdir = path.join(repo, ".git", "worktrees", path.basename(checkout));
+		const pointer = path.relative(checkout, gitdir).split(path.sep).join("/");
+		await Bun.write(path.join(gitdir, "HEAD"), "ref: refs/heads/topic\n");
+		await Bun.write(path.join(gitdir, "commondir"), "../..\n");
+		await Bun.write(path.join(gitdir, "gitdir"), `${path.relative(gitdir, path.join(checkout, ".git"))}\n`);
+		await Bun.write(path.join(checkout, ".git"), `gitdir: ${pointer}\n`);
+		await Bun.write(path.join(checkout, "work.txt"), "uncommitted work\n");
+		return gitdir;
+	}
 
 	it.each(["absolute", "relative"] as const)(
 		"lists %s gitdir checkouts as live and keeps their contents during clear",
@@ -207,18 +219,159 @@ describe("worktree clear linked checkout metadata", () => {
 		async () => {
 			const realBase = path.join(root, "real", "managed");
 			const checkout = path.join(realBase, "linked");
-			const gitEntry = path.join(checkout, ".git");
-			const gitdir = path.join(root, "real", "repo", ".git", "worktrees", "linked");
-			await Bun.write(gitEntry, `gitdir: ${path.relative(checkout, gitdir)}\n`);
-			await Bun.write(path.join(gitdir, "HEAD"), "ref: refs/heads/topic\n");
-			await Bun.write(path.join(checkout, "work.txt"), "uncommitted work\n");
+			const repo = path.join(root, "real", "repo");
+			await makeRelativeCheckout(repo, checkout);
 			const alias = path.join(root, "alias");
 			await fs.symlink(realBase, alias, "dir");
 			setWorktreesDir(alias);
-			vi.spyOn(console, "log").mockImplementation(() => {});
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+			await listWorktrees({ json: true });
+
+			expect(JSON.parse(String(log.mock.lastCall?.[0]))).toEqual([
+				{
+					path: path.join(alias, "linked"),
+					kind: "pr-checkout",
+					parentRepo: await fs.realpath(repo),
+					branch: "topic",
+				},
+			]);
 
 			expect(await clearWorktrees({ all: false, dryRun: false, json: true })).toEqual({ removed: 0, failed: 0 });
 			expect(await Bun.file(path.join(checkout, "work.txt")).text()).toBe("uncommitted work\n");
+		},
+	);
+
+	// Windows reports ENOENT, not ENOTDIR, for traversal through a regular file.
+	it.skipIf(process.platform === "win32")(
+		"preserves an ENOTDIR checkout while listing a valid sibling and clearing an orphan",
+		async () => {
+			const invalid = path.join(base, "invalid");
+			const blocker = path.join(root, "not-a-directory");
+			await Bun.write(blocker, "unrelated source data\n");
+			await Bun.write(path.join(invalid, ".git"), `gitdir: ${path.relative(invalid, blocker)}/worktrees/broken\n`);
+			await Bun.write(path.join(invalid, "work.txt"), "inaccessible work\n");
+			const repo = path.join(root, "repo");
+			const checkout = path.join(base, "valid");
+			await makeRelativeCheckout(repo, checkout);
+			const orphan = path.join(base, "orphan");
+			await fs.mkdir(orphan);
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+			await listWorktrees({ json: true });
+
+			expect(JSON.parse(String(log.mock.lastCall?.[0]))).toEqual(
+				expect.arrayContaining([
+					{ path: invalid, kind: "pr-checkout", scanError: expect.stringContaining("ENOTDIR") },
+					{ path: checkout, kind: "pr-checkout", parentRepo: repo, branch: "topic" },
+				]),
+			);
+			await listWorktrees({ json: false });
+			expect(log.mock.calls.map(call => String(call[0])).join("\n")).toContain("1 unknown");
+
+			await clearWorktrees({ all: false, dryRun: true, json: true });
+
+			expect(JSON.parse(String(log.mock.lastCall?.[0]))).toEqual({
+				wouldRemove: [orphan],
+				skipped: [{ path: invalid, error: expect.stringContaining("ENOTDIR") }],
+				failed: 1,
+			});
+			expect(await clearWorktrees({ all: false, dryRun: false, json: true })).toEqual({ removed: 1, failed: 1 });
+			expect(await Bun.file(path.join(invalid, "work.txt")).text()).toBe("inaccessible work\n");
+			expect(await Bun.file(path.join(checkout, "work.txt")).text()).toBe("uncommitted work\n");
+			expect(await Bun.file(blocker).text()).toBe("unrelated source data\n");
+			await expect(fs.stat(orphan)).rejects.toMatchObject({ code: "ENOENT" });
+		},
+	);
+
+	it.skipIf(process.platform === "win32")("preserves cyclic gitdir targets even during clear --all", async () => {
+		const checkout = path.join(base, "cyclic");
+		const target = path.join(root, "cycle");
+		await fs.symlink(target, target, "dir");
+		await Bun.write(path.join(checkout, ".git"), `gitdir: ${path.relative(checkout, target)}\n`);
+		await Bun.write(path.join(checkout, "work.txt"), "inaccessible work\n");
+		const orphan = path.join(base, "orphan");
+		await fs.mkdir(orphan);
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await listWorktrees({ json: true });
+
+		expect(JSON.parse(String(log.mock.lastCall?.[0]))).toEqual(
+			expect.arrayContaining([{ path: checkout, kind: "pr-checkout", scanError: expect.stringContaining("ELOOP") }]),
+		);
+		expect(await clearWorktrees({ all: true, dryRun: false, json: true })).toEqual({ removed: 1, failed: 1 });
+		expect(JSON.parse(String(log.mock.lastCall?.[0]))).toMatchObject({
+			skipped: [{ path: checkout, error: expect.stringContaining("ELOOP") }],
+		});
+		expect(await Bun.file(path.join(checkout, "work.txt")).text()).toBe("inaccessible work\n");
+		expect((await fs.lstat(target)).isSymbolicLink()).toBe(true);
+		await expect(fs.stat(orphan)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it.skipIf(process.platform === "win32")("keeps legacy containers with unreadable checkout metadata", async () => {
+		const checkout = path.join(base, "project", "linked");
+		const gitEntry = path.join(checkout, ".git");
+		await Bun.write(path.join(checkout, "work.txt"), "inaccessible work\n");
+		await fs.symlink(gitEntry, gitEntry, "file");
+		const orphan = path.join(base, "orphan");
+		await fs.mkdir(orphan);
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await listWorktrees({ json: true });
+
+		expect(JSON.parse(String(log.mock.lastCall?.[0]))).toEqual(
+			expect.arrayContaining([{ path: checkout, kind: "unknown", scanError: expect.stringContaining("ELOOP") }]),
+		);
+		expect(await clearWorktrees({ all: false, dryRun: false, json: true })).toEqual({ removed: 1, failed: 1 });
+		expect(await Bun.file(path.join(checkout, "work.txt")).text()).toBe("inaccessible work\n");
+		await expect(fs.stat(orphan)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it.each(["gitfile", "target", "registration"] as const)(
+		"keeps a checkout with inaccessible %s metadata and continues clearing other entries",
+		async inaccessible => {
+			const repo = path.join(root, "repo");
+			const checkout = path.join(base, "linked");
+			const gitdir = await makeRelativeCheckout(repo, checkout);
+			const orphan = path.join(base, "orphan");
+			await fs.mkdir(orphan);
+			const denied = Object.assign(new Error("EACCES: permission denied reading worktree metadata"), {
+				code: "EACCES",
+			});
+			// Inject permission errors so the contract is exercised even as root or
+			// on Windows, where chmod cannot reliably make these paths inaccessible.
+			if (inaccessible === "gitfile") {
+				const readFile = fs.readFile;
+				vi.spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof fs.readFile>) => {
+					if (String(args[0]) === path.join(checkout, ".git")) throw denied;
+					return readFile(...args);
+				}) as typeof fs.readFile);
+			} else if (inaccessible === "target") {
+				const realpath = fs.realpath;
+				vi.spyOn(fs, "realpath").mockImplementation((async (...args: Parameters<typeof fs.realpath>) => {
+					if (path.resolve(String(args[0])) === gitdir) throw denied;
+					return realpath(...args);
+				}) as typeof fs.realpath);
+			} else {
+				const stat = fs.stat;
+				vi.spyOn(fs, "stat").mockImplementation((async (...args: Parameters<typeof fs.stat>) => {
+					if (String(args[0]) === gitdir) throw denied;
+					return stat(...args);
+				}) as typeof fs.stat);
+			}
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+			await listWorktrees({ json: true });
+
+			expect(JSON.parse(String(log.mock.lastCall?.[0]))).toEqual(
+				expect.arrayContaining([
+					{ path: checkout, kind: "pr-checkout", scanError: expect.stringContaining("EACCES") },
+				]),
+			);
+			expect(await clearWorktrees({ all: false, dryRun: false, json: false })).toEqual({ removed: 1, failed: 1 });
+			expect(log.mock.calls.map(call => String(call[0])).join("\n")).toContain("cannot inspect worktree");
+			expect(await Bun.file(path.join(checkout, "work.txt")).text()).toBe("uncommitted work\n");
+			await expect(fs.stat(orphan)).rejects.toMatchObject({ code: "ENOENT" });
 		},
 	);
 
