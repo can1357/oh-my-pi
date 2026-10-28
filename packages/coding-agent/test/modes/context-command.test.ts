@@ -121,6 +121,12 @@ describe("context command viewer", () => {
 			mode.handleToolsCommand();
 			expect(mode.ui.overlayStack).toHaveLength(0);
 			expect(mode.reportContainer.children).toHaveLength(1);
+			mode.handleContextCommand(true);
+			expect(mode.ui.overlayStack).toHaveLength(0);
+			const detailReport = mode.reportContainer.render(100).join("\n");
+			expect(detailReport).toContain("System tools");
+			expect(detailReport).toContain("Skills");
+			expect(detailReport).toContain("None");
 		} finally {
 			release.resolve();
 			await pending;
