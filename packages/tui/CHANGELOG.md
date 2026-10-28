@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Changed
+
 - Changed the TUI to do less work per render while edit previews stream and streamed assistant tables grow, so the terminal stays responsive through long tool output ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
