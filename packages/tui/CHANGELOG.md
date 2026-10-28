@@ -1,9 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-### Changed
-
-- Changed the TUI to do less work per render while edit previews stream and streamed assistant tables grow, so the terminal stays responsive through long tool output ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
 
@@ -83,6 +80,29 @@
 - Removed `ToolExecutionHandle.setToolActivityVisible`; tool-activity visibility is now controlled by transcript components, while reply blocks remain visible by default.
 - Removed the `@oh-my-pi/pi-tui/theme/defaults` export. Bundled palettes are now available through `getBuiltinThemes()` from `theme/defaults.json`.
 
+### Added
+
+- Added `auto` option to `tui.autoGraph` setting with default `auto`
+- Added `ReplyWriteComponent`, `isReplyWrite`, `toolResultReplies`, and `replyDisplayMessage` (`chat/reply-write`): `write` calls to `reply`-scoped URLs (`out://`) and tool-result `details.replies` draw as assistant prose; `createReplyWriteComponent()` builds one wired to the interactive context
+- `InternalUrlSchemeSpec` exposes `write.scope` (`SchemeWriteScope`, now including `reply`) and `InternalUrlSchemeHost` requires `specs()`; `BashToolDetails.replies` carries text a command wrote to `out://`
+- Added file-backed task previews and optional `taskFile` and `taskFileSha256` provenance on `AgentProgress` and `SingleResult` ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal)).
+- Added `Editor.nativeTypeahead` (published as the TSP `typeahead` prop) and `Composer.releaseHeldInput()`: a deferred-input `Composer.start` asks Tern to keep and draw startup typing until the app releases the held input
+- Added `PI_LINK_SCHEME` and `PI_LINK_HOST` for host-qualified file links with optional line and column positions in remote sessions ([#15855](https://github.com/can1357/oh-my-pi/pull/15855) by [@KunoLu](https://github.com/KunoLu)).
+- `AssistantMessageComponent` accepts display-only assistant text renderers and redraws one reply with `rerenderMessage(timestamp)`; `splitAssistantMessageToolTimeline` reports each segment's `contentOffsets` ([#16238](https://github.com/can1357/oh-my-pi/pull/16238) by [@materemias](https://github.com/materemias))
+- `setExtensionLinks()` makes markdown draw links of registered schemes as a dotted-underlined label without URL suffix or terminal hyperlink; `Composer.viewportLinkAt()` and `Composer.startLinkHints()` / `typeLinkHint()` pick them by click or keyboard tag (new `app.links.hint` keybinding, Alt+O) ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
+### Changed
+- Changed the TUI to do less work per render while edit previews stream and streamed assistant tables grow, so the terminal stays responsive through long tool output ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+- Changed TableChartPlanner to allow undefined return, falling back to local guess when no judge is available
+- Rewind selector now automatically skips turns that render no output
+- Improved view placement for JSON trees when output lines are column‑capped
+- On a terminal expected to speak TSP, a `deferInput` start delivers plain typing (printable text, Backspace) to the focused component live; only the first other key and the keys after it wait for `TUI.releaseHeldInput()`
+- In Tern builds that support it, JSON tool results, MCP arguments, eval JSON output and structured subagent results appear in Tern's own interactive JSON viewer: small objects and arrays show whole on one line, larger ones fold to a one-line preview you click to expand
+- JSON trees elsewhere are more compact: objects and arrays that fit about 60 characters show on one row (`0: [[3, "vt"], 98]`), and array indices show as dim, right-aligned numbers instead of `[0]`
+- In Tern, `omp setup` is a native page: a step bar over searchable Sign in and default model sheets (the highlighted model stays in view as you arrow), and it skips the glyph, composer shape and theme steps, which Tern draws itself
+- Signing in during `omp setup` uses the same sign-in dialog as `/login`
+- In Tern, hovering a subagent's row shows its whole assignment as formatted Markdown in a wide card, instead of a narrow tooltip of the flattened text
+- Typing `B)` or `8)` no longer turns into 😎 (so "option B)" and "step 8)" stay as typed); `B-)` and `8-)` still do
 ### Fixed
 
 - Fixed table-chart direction detection so measures are not incorrectly marked as better based on header words; single-measure tables are now sent for judging when local charting is appropriate.
