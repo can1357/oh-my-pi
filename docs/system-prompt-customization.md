@@ -112,6 +112,8 @@ Treat both sides of this boundary as prompt input. Protect template files like o
 
 `SYSTEM.md`, `APPEND_SYSTEM.md`, `--system-prompt`, and `--append-system-prompt` remain plain text. They are values inserted into bundled Handlebars templates; their contents are not recursively compiled as Handlebars.
 
+`@path` imports in `SYSTEM.md`, `APPEND_SYSTEM.md`, and a file passed to `--append-system-prompt` are expanded the same way as in context files, relative to the importing file. Literal `--append-system-prompt` text is used as is.
+
 For example, if `SYSTEM.md` contains:
 
 ```handlebars
