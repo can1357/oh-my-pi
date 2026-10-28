@@ -3078,4 +3078,34 @@ describe("Devin selector parity", () => {
 		const withRaw = [...devinModels, devinModel("claude-mythos-9-high")];
 		expect(resolveProviderModelReference("devin", "claude-mythos-9-high", withRaw)?.id).toBe("claude-mythos-9-high");
 	});
+
+	test("resolves role thinking levels and overrides correctly", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				work: "devin/gemini-3-7-flash:medium",
+			},
+		});
+
+		const directResult = resolveModelRoleValue("@work:low", devinModels, { settings });
+		expect(directResult.model?.provider).toBe("devin");
+		expect(directResult.model?.id).toBe("gemini-3-7-flash");
+		expect(directResult.thinkingLevel).toBe(Effort.Low);
+
+		const patternsWithDefault = resolveAgentModelPatterns({
+			agentModel: "@work",
+			agentThinkingLevel: "low",
+			settings,
+		});
+		const resolvedDefault = resolveModelRoleValue(patternsWithDefault[0], devinModels, { settings });
+		expect(resolvedDefault.thinkingLevel).toBe(Effort.Low);
+
+		const patternsWithOverride = resolveAgentModelPatterns({
+			agentModel: "@work",
+			agentThinkingLevel: "low",
+			settingsOverride: "@work:high",
+			settings,
+		});
+		const resolvedOverride = resolveModelRoleValue(patternsWithOverride[0], devinModels, { settings });
+		expect(resolvedOverride.thinkingLevel).toBe(Effort.High);
+	});
 });

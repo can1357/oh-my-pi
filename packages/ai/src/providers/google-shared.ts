@@ -12,6 +12,7 @@ import type {
 	Api,
 	AssistantMessage,
 	Context,
+	Effort,
 	FetchImpl,
 	ImageContent,
 	Model,
@@ -955,8 +956,16 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 	) {
 		const cfg: ThinkingConfig = { includeThoughts: thinking.enabled && !options.hideThinkingSummary };
 		if (thinking.level !== undefined) {
+			let level: GoogleThinkingLevel = thinking.level;
+			if (
+				model.thinking?.mode === "google-level" &&
+				model.thinking.efforts.length > 0 &&
+				!model.thinking.efforts.includes(level.toLowerCase() as Effort)
+			) {
+				level = model.thinking.efforts[0].toUpperCase() as GoogleThinkingLevel;
+			}
 			// GoogleThinkingLevel mirrors the SDK's ThinkingLevel string enum values 1:1.
-			cfg.thinkingLevel = thinking.level as ThinkingLevel;
+			cfg.thinkingLevel = level as ThinkingLevel;
 		} else if (thinking.budgetTokens !== undefined) {
 			cfg.thinkingBudget = thinking.budgetTokens;
 		}
@@ -1256,3 +1265,5 @@ export function extractGoogleErrorMessage(errorText: string, status: number): st
 		return errorText;
 	}
 }
+
+export { buildGoogleGenerateContentParams as formatGoogleRequestBody };

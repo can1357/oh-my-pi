@@ -34,6 +34,7 @@ import type { GoogleOptions } from "./providers/google";
 import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
+import type { GoogleThinkingLevel } from "./providers/google-shared";
 import { streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
@@ -1698,7 +1699,14 @@ function resolveGoogleThinkingOff<TApi extends Api>(model: Model<TApi>): NonNull
 	if (model.thinking.mode === "budget" && (!model.thinking.requiresEffort || model.thinking.suppressWhenOff)) {
 		thinking.budgetTokens = 0;
 	} else if (model.thinking.mode === "google-level" && model.thinking.suppressWhenOff) {
-		thinking.level = "MINIMAL";
+		let level: GoogleThinkingLevel = "MINIMAL";
+		if (
+			model.thinking.efforts.length > 0 &&
+			!model.thinking.efforts.includes(level.toLowerCase() as Effort)
+		) {
+			level = model.thinking.efforts[0].toUpperCase() as GoogleThinkingLevel;
+		}
+		thinking.level = level;
 	}
 	return thinking;
 }

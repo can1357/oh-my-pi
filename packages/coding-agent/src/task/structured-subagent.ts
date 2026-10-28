@@ -599,6 +599,7 @@ export async function resolveEffectiveSubagentPolicy(
 		requestModel: preparedSeance?.modelPatterns ?? request.model,
 		settingsOverride: hasPreparedSeance ? undefined : agentModelOverrides[agentName],
 		agentModel: hasPreparedSeance ? undefined : effectiveAgent.model,
+		agentThinkingLevel: hasPreparedSeance ? undefined : effectiveAgent.thinkingLevel,
 		settings: request.session.settings,
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: hasPreparedSeance ? undefined : request.session.getModelString?.(),

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
+import { formatGoogleRequestBody } from "@oh-my-pi/pi-ai/providers/google-shared";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -9,6 +10,7 @@ interface CapturedPayload {
 		thinkingConfig?: {
 			includeThoughts?: boolean;
 			thinkingBudget?: number;
+			thinkingLevel?: string;
 		};
 	};
 }
@@ -64,4 +66,45 @@ describe("Google reasoning disablement", () => {
 			});
 		});
 	}
+
+	it("clamps MINIMAL to LOW in formatGoogleRequestBody and streamSimple for google-level models with low/medium/high efforts", async () => {
+		const levelModel: Model<"google-generative-ai"> = buildModel({
+			id: "gemini-3.8-flash",
+			name: "Gemini 3.8 Flash",
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.googleapis.com",
+			reasoning: true,
+			thinking: {
+				mode: "google-level",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				suppressWhenOff: true,
+			},
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 65_536,
+		});
+
+		const directParams = formatGoogleRequestBody(levelModel, context, {
+			thinking: { enabled: true, level: "MINIMAL" },
+		});
+		expect(directParams.config?.thinkingConfig?.thinkingLevel).toBe("LOW");
+
+		let captured: CapturedPayload | undefined;
+		const fetchMock: FetchImpl = async () =>
+			new Response("", { status: 200, headers: { "content-type": "text/event-stream" } });
+
+		await streamSimple(levelModel, context, {
+			apiKey: "test-key",
+			disableReasoning: true,
+			fetch: fetchMock,
+			onPayload: payload => {
+				captured = payload as CapturedPayload;
+			},
+		}).result();
+
+		expect(captured?.config?.thinkingConfig?.thinkingLevel).toBe("LOW");
+	});
 });
+
