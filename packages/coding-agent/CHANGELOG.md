@@ -70,6 +70,7 @@
 - Muted live voice sessions remain visibly muted while the voice model starts work.
 
 ### Fixed
+- Fixed an extension command's failed compaction never reaching `onError`: a compaction rejected because another one is already running now reports through the same once-only reporter as the shared adapter ([#12041](https://github.com/can1357/oh-my-pi/issues/12041), [#16460](https://github.com/can1357/oh-my-pi/pull/16460) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed live configuration reloads missing edits immediately after a symlink switches to another file in the same directory.
 - Fixed auth-gateway model routing after catalog refreshes so bare model IDs select the highest-priority credentialed provider, with wire-format compatibility used as a tie-breaker.
