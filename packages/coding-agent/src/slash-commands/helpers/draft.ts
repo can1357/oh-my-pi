@@ -63,7 +63,8 @@ export async function runWithDetachedDraft(
 		if (submitted !== false) return submitted === true;
 		if (runtime.input?.onAccepted && !editor.getText() && editor.pendingImages.length === 0 && !runtime.draftDetached)
 			editor.setText(command.text);
-		if (!(hasAttachments || options?.restoreText || (runtime.draftDetached && runtime.input?.onAccepted))) return false;
+		if (!(hasAttachments || options?.restoreText || (runtime.draftDetached && runtime.input?.onAccepted)))
+			return false;
 		if (runtime.draftDetached || options?.restoreText) {
 			// Newer typing may already sit in the editor: merge the submission
 			// back beside it so each draft's image markers keep their images.

@@ -9117,7 +9117,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps" | "onAccepted"> & {
+		options?: Pick<
+			PromptOptions,
+			"streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps" | "onAccepted"
+		> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 			onPromptQueued?: PromptOptions["onPromptQueued"];
@@ -9128,7 +9131,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	async #promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps" | "onAccepted"> & {
+		options?: Pick<
+			PromptOptions,
+			"streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps" | "onAccepted"
+		> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 			onPromptQueued?: PromptOptions["onPromptQueued"];
@@ -9179,7 +9185,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #dispatchCustomPrompt<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		options:
-			| (Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps" | "onAccepted"> & {
+			| (Pick<
+					PromptOptions,
+					"streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps" | "onAccepted"
+			  > & {
 					queueChipText?: string;
 					queueOnly?: boolean;
 					onPromptQueued?: PromptOptions["onPromptQueued"];
