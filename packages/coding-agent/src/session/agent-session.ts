@@ -1373,18 +1373,27 @@ export class AgentSession implements SettingsScope {
 	 * computer turn ended, so an unattended Mac sleeps and locks on its own timer rather than showing the pending
 	 * question. Once the last open dialog settles, if a prompt is still in flight, the turn goes on: the run still active
 	 * in it (a dialog can be that run's control confirmation) and later runs hold the display again.
+	 *
+	 * `prompt` names what is being asked. The bracket is published as
+	 * `user_wait_start`/`user_wait_end` so every surface that shows run state —
+	 * the terminal title a tmux pane shows, the OSC 7501 record, an RPC host —
+	 * reports a session waiting for a person instead of one still working.
 	 */
-	async waitForUser<T>(dialog: () => Promise<T>): Promise<T> {
+	async waitForUser<T>(dialog: () => Promise<T>, prompt: string): Promise<T> {
 		if (this.#userWaitCount++ === 0) {
 			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
 			this.#endComputerTurn();
+			this.#emit({ type: "user_wait_start", prompt });
 		}
 		try {
 			return await dialog();
 		} finally {
-			if (--this.#userWaitCount === 0 && this.#promptInFlightCount > 0) {
-				if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
-				else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
+			if (--this.#userWaitCount === 0) {
+				this.#emit({ type: "user_wait_end" });
+				if (this.#promptInFlightCount > 0) {
+					if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
+					else if (this.#agentKind === "main") resumeComputerTurnForOwner(this.#eval.getKernelOwnerId());
+				}
 			}
 		}
 	}
@@ -2418,7 +2427,7 @@ export class AgentSession implements SettingsScope {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			evalPreludes: () => this.getEvalPreludes(),
 			sessionAgents: () => this.getSessionAgents(),
-			waitForUser: dialog => this.waitForUser(dialog),
+			waitForUser: (dialog, prompt) => this.waitForUser(dialog, prompt),
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
@@ -3182,7 +3191,7 @@ export class AgentSession implements SettingsScope {
 
 	/** The handler can ask the user to approve the plan mid-turn (ACP), so it runs as a {@link waitForUser}. */
 	setPlanProposalHandler(handler: PlanProposalHandler | null): void {
-		this.#planProposalHandler = handler ? title => this.waitForUser(() => handler(title)) : undefined;
+		this.#planProposalHandler = handler ? title => this.waitForUser(() => handler(title), "a plan approval") : undefined;
 	}
 
 	#sessionBeforeSwitchReconciler: (() => Promise<void>) | undefined;
@@ -6716,7 +6725,11 @@ export class AgentSession implements SettingsScope {
 	/** Install the interactive decision surface for reserve-triggered model changes; it waits for the user mid-turn. */
 	setUsageFallbackConfirmer(confirmer: UsageFallbackConfirmer | undefined): void {
 		this.#usageFallbackConfirmer = confirmer
-			? (confirmation, signal) => this.waitForUser(() => confirmer(confirmation, signal))
+			? (confirmation, signal) =>
+					this.waitForUser(
+						() => confirmer(confirmation, signal),
+						`whether to leave ${confirmation.from} at its coding-plan reserve`,
+					)
 			: undefined;
 	}
 

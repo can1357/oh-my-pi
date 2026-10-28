@@ -93,6 +93,7 @@ import {
 	cfgRetryEnabled,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
+	cfgRetryUsageReserveConfirmTimeout,
 	cfgRetryUsageReservePct,
 	cfgRetryUsageReservePolicy,
 } from "./settings";
@@ -2130,18 +2131,56 @@ export class TurnRecovery {
 		});
 	}
 
+	/**
+	 * Ask the operator whether to leave the reserve-bound model, and give an
+	 * unattended session the answer `retry.usageReservePolicy = "confirm"`
+	 * already promises it: keep the current model.
+	 *
+	 * The prompt is a real decision — a lane that pins its model pins it on
+	 * purpose — so the deadline never switches models on nobody's authority. It
+	 * aborts the dialog, returns "keep the current plan", and the caller records
+	 * the reserve approval so the turn goes on and the session does not ask again
+	 * for this model. The reserve is then spent down to `depleted`, where the
+	 * fallback no longer needs anyone's confirmation.
+	 */
 	async #confirmUsageFallback(
 		confirmer: UsageFallbackConfirmer,
 		confirmation: UsageFallbackConfirmation,
 		signal: AbortSignal,
 	): Promise<boolean> {
 		if (signal.aborted) return false;
+		const timeoutSeconds = cfgRetryUsageReserveConfirmTimeout.get(this.#host.settings);
+		const unattended = new AbortController();
+		const expired = Promise.withResolvers<boolean>();
+		let timer: NodeJS.Timeout | undefined;
+		if (timeoutSeconds > 0) {
+			timer = setTimeout(() => {
+				// Close the dialog AND stop waiting on it: a confirmer that ignores
+				// its signal must not be able to hold the turn past the deadline.
+				unattended.abort();
+				expired.resolve(false);
+			}, timeoutSeconds * 1000);
+			timer.unref();
+		}
 		const aborted = Promise.withResolvers<boolean>();
 		const onAbort = () => aborted.resolve(false);
 		signal.addEventListener("abort", onAbort, { once: true });
 		try {
-			return await Promise.race([confirmer(confirmation, signal), aborted.promise]);
+			const answer = await Promise.race([
+				confirmer(confirmation, AbortSignal.any([signal, unattended.signal])),
+				aborted.promise,
+				expired.promise,
+			]);
+			if (!unattended.signal.aborted || signal.aborted) return answer;
+			await this.#host.emitSessionEvent({
+				type: "notice",
+				level: "warning",
+				source: "usage",
+				message: `Nobody answered the reserve prompt for ${confirmation.from} in ${timeoutSeconds}s, so it keeps that model. Switch to ${confirmation.to} with /model.`,
+			});
+			return false;
 		} finally {
+			clearTimeout(timer);
 			signal.removeEventListener("abort", onAbort);
 		}
 	}

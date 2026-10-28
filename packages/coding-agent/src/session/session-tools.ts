@@ -136,7 +136,7 @@ export interface SessionToolsHost {
 	/** Live user-tagged model agents; candidates for the next base rebuild's advertised snapshot. */
 	sessionAgents(): readonly AgentDefinition[];
 	/** Runs a wait for the user's answer, such as an ACP client's permission request. */
-	waitForUser<T>(dialog: () => Promise<T>): Promise<T>;
+	waitForUser<T>(dialog: () => Promise<T>, prompt: string): Promise<T>;
 }
 
 /** Registry delta applied by the SDK's settings-gated tool reconcile. */
@@ -1223,7 +1223,7 @@ export class SessionTools {
 								userSteering.signal,
 							).then(outcome => ({ kind: "permission" as const, outcome }));
 							return Promise.race([permissionPromise, abortPromise, steerPromise]);
-						});
+						}, `permission for ${target.name}`);
 					} finally {
 						signal?.removeEventListener("abort", onAbort);
 						steeringSignal.removeEventListener("abort", onLoopSteer);

@@ -106,7 +106,15 @@ export type AgentSessionEvent =
 	// `AgentSession.getQueuedMessages()`; `liveSteered` counts the leading
 	// `steering` entries already sent into the streaming response, which
 	// `remove_queued_message` cannot reach.
-	| { type: "queue_update"; steering: string[]; followUp: string[]; liveSteered: number };
+	| { type: "queue_update"; steering: string[]; followUp: string[]; liveSteered: number }
+	// A dialog the session itself opened mid-turn and that only a person can
+	// answer: the coding-plan reserve prompt, an MCP sign-in, a `cfg://` write,
+	// a plan approval, an ACP permission request. `start` carries what is being
+	// asked and is emitted when the first one opens; `end` when the last one
+	// settles. Without these a surface showing run state cannot tell a session
+	// that is working from one that has been waiting for a person for hours.
+	| { type: "user_wait_start"; prompt: string }
+	| { type: "user_wait_end" };
 
 /** Listener function for agent session events. */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;

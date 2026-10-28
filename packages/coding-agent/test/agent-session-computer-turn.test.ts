@@ -78,7 +78,7 @@ describe("AgentSession computer display hold per turn", () => {
 			const answer = await session!.waitForUser(() => {
 				asked.resolve();
 				return answered.promise;
-			});
+			}, "a test question");
 			return { content: [{ type: "text", text: answer }], details: undefined };
 		},
 	};
@@ -218,8 +218,8 @@ describe("AgentSession computer display hold per turn", () => {
 		await streaming.promise;
 		const first = Promise.withResolvers<void>();
 		const second = Promise.withResolvers<void>();
-		const firstWait = target.waitForUser(() => first.promise);
-		const secondWait = target.waitForUser(() => second.promise);
+		const firstWait = target.waitForUser(() => first.promise, "first");
+		const secondWait = target.waitForUser(() => second.promise, "second");
 		expect(releases).toEqual([1]);
 		first.resolve();
 		await firstWait;
@@ -231,7 +231,7 @@ describe("AgentSession computer display hold per turn", () => {
 
 		// A dialog still open when the user interrupts the turn settles with no prompt in flight.
 		const third = Promise.withResolvers<void>();
-		const thirdWait = target.waitForUser(() => third.promise);
+		const thirdWait = target.waitForUser(() => third.promise, "third");
 		expect(releases).toEqual([1, 2]);
 		await target.abort();
 		await running;
@@ -246,7 +246,7 @@ describe("AgentSession computer display hold per turn", () => {
 		const target = createSession([{ content: ["done"] }, { content: ["slow"], delayMs: 5_000 }]);
 		await target.prompt("first");
 		const open = Promise.withResolvers<void>();
-		const wait = target.waitForUser(() => open.promise);
+		const wait = target.waitForUser(() => open.promise, "open");
 		streaming = Promise.withResolvers<void>();
 		const running = target.prompt("go").catch(() => undefined);
 		await streaming.promise;

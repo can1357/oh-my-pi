@@ -1,8 +1,11 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ExtensionUIContext } from "./types";
 
-/** Runs a dialog that waits for the user's answer, so its session can treat the time as the user's, not the agent's. */
-export type UserWaitTracker = <T>(dialog: () => Promise<T>) => Promise<T>;
+/**
+ * Runs a dialog that waits for the user's answer, so its session can treat the time as the user's, not the agent's.
+ * `prompt` names what is being asked, for the surfaces that report a session waiting on a person.
+ */
+export type UserWaitTracker = <T>(dialog: () => Promise<T>, prompt: string) => Promise<T>;
 
 /** The {@link ExtensionUIContext} methods that wait for the user's answer. */
 const DIALOGS: Record<string, true> = {
@@ -35,7 +38,7 @@ export function trackUserWaits(ui: ExtensionUIContext, track: UserWaitTracker): 
 				? (...args) =>
 						args.some(arg => isRecord(arg) && typeof arg.timeout === "number" && arg.timeout > 0)
 							? value.apply(target, args)
-							: track(() => value.apply(target, args))
+							: track(() => value.apply(target, args), `an extension ${String(property)} dialog`)
 				: value.bind(target);
 			methods.set(property, { value: value as Method, method });
 			return method;

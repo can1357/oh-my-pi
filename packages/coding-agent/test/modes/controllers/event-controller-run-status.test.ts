@@ -130,4 +130,16 @@ describe("EventController run status while prompts wait on the user", () => {
 
 		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
 	});
+
+	it("reports a session dialog nobody has answered as blocked, not as a working run", async () => {
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const controller = new EventController(createInteractiveModeContext());
+		const prompt = "whether to leave openai-codex/gpt-5.6-terra at its coding-plan reserve";
+
+		await controller.handleEvent({ type: "user_wait_start", prompt });
+		expect(report).toHaveBeenLastCalledWith({ state: "blocked", kind: "question", msg: prompt });
+
+		await controller.handleEvent({ type: "user_wait_end" });
+		expect(report).toHaveBeenLastCalledWith({ state: "working" });
+	});
 });
