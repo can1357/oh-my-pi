@@ -3191,7 +3191,9 @@ export class AgentSession implements SettingsScope {
 
 	/** The handler can ask the user to approve the plan mid-turn (ACP), so it runs as a {@link waitForUser}. */
 	setPlanProposalHandler(handler: PlanProposalHandler | null): void {
-		this.#planProposalHandler = handler ? title => this.waitForUser(() => handler(title), "a plan approval") : undefined;
+		this.#planProposalHandler = handler
+			? title => this.waitForUser(() => handler(title), "a plan approval")
+			: undefined;
 	}
 
 	#sessionBeforeSwitchReconciler: (() => Promise<void>) | undefined;

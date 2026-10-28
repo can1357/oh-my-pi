@@ -193,6 +193,14 @@ export const eventDefs = {
 		},
 		"Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.",
 	),
+	UserWaitStartEvent: doc(
+		{ type: "'user_wait_start'", prompt: doc("string", "What the session is asking a person to decide.") },
+		"The session opened a dialog only a person can answer and the turn is held until it settles.",
+	),
+	UserWaitEndEvent: doc(
+		{ type: "'user_wait_end'" },
+		"The last dialog waiting on a person settled; the turn goes on.",
+	),
 
 	RpcAgentEvent: doc(
 		[
@@ -229,6 +237,8 @@ export const eventDefs = {
 			"ThinkingLevelChangedEvent",
 			"GoalUpdatedEvent",
 			"QueueUpdateEvent",
+			"UserWaitStartEvent",
+			"UserWaitEndEvent",
 		].join(" | "),
 		"A session event, discriminated by `type`; `set_event_filter` selects which are sent.",
 	),
