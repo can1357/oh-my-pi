@@ -1,9 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
-
-- Fixed the ACP usage report labelling a saved reset-credit line with an empty account name; it now falls back to the account id and then to a generic account label ([#15305](https://github.com/can1357/oh-my-pi/pull/15305) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
 
@@ -121,6 +118,7 @@
 - Updated Bun engine requirement to ≥1.4.4
 
 ### Fixed
+- Fixed the ACP usage report labelling a saved reset-credit line with an empty account name; it now falls back to the account id and then to a generic account label ([#15305](https://github.com/can1357/oh-my-pi/pull/15305) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - A running job's glance keeps the whole a meter counts instead of the bare numerator: a widget whose headline restated `140` beside a `140/190` bar now draws `140/190` in the job card, the HUD pill and the status line ([#17226](https://github.com/can1357/oh-my-pi/pull/17226) by [@iacore](https://github.com/iacore))
 - Fixed the managed-skills root guard rejecting a symlinked store outright; a root that resolves to a directory now accepts writes inside its target, while a broken link or a link to a non-directory is still refused ([#17201](https://github.com/can1357/oh-my-pi/pull/17201) by [@iacore](https://github.com/iacore))
