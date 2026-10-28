@@ -204,6 +204,10 @@ async function createContext() {
 	const ctx = {
 		editor: editor as unknown as InteractiveModeContext["editor"],
 		syncIdleMaintenanceView: vi.fn(),
+		eventController: {
+			isAwaitingAsyncWork: vi.fn(() => false),
+			stopAwaitingAsyncWork: vi.fn(async () => {}),
+		} as unknown as InteractiveModeContext["eventController"],
 		get focusedAgentId() {
 			return focusedAgentId;
 		},
@@ -1841,6 +1845,7 @@ describe("Ctrl+S prompt stash", () => {
 		};
 		Object.assign(session, { popLastQueuedMessage: () => queued.pop() });
 		let acceptFirstPrompt: (() => void) | undefined;
+		const { promise: firstPromptStarted, resolve: signalFirstPromptStarted } = Promise.withResolvers<void>();
 		let finishFirstTurn!: () => void;
 		const firstTurn = new Promise<void>(resolve => {
 			finishFirstTurn = resolve;
@@ -1848,6 +1853,7 @@ describe("Ctrl+S prompt stash", () => {
 		spies.prompt.mockImplementation(async (text, options) => {
 			if (text === "first prompt") {
 				acceptFirstPrompt = () => options?.onAccepted?.();
+				signalFirstPromptStarted();
 				await firstTurn;
 				return true;
 			}
@@ -1860,7 +1866,7 @@ describe("Ctrl+S prompt stash", () => {
 		editor.clearDraft(); // The editor clears before calling onSubmit.
 		const firstSubmission = editor.onSubmit?.("first prompt");
 		if (!firstSubmission) throw new Error("Expected the first prompt to start");
-		await Promise.resolve();
+		await firstPromptStarted;
 		expect(acceptFirstPrompt).toBeDefined();
 		expect(editor.getText()).toBe("");
 
