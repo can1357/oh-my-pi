@@ -121,7 +121,10 @@ function emptyUsage(): AssistantMessage["usage"] {
 }
 
 function advisorNativeSummary(provider: string) {
-	const compactionItem = { type: "compaction", encrypted_content: "native-advisor-transition-state" };
+	const compactionItem = {
+		type: "compaction",
+		encrypted_content: "native-advisor-transition-state",
+	};
 	const replacementHistory = [
 		{
 			type: "message",
@@ -132,9 +135,15 @@ function advisorNativeSummary(provider: string) {
 	];
 	return {
 		...createCompactionSummaryMessage("Native advisor history", 100_000, new Date().toISOString(), {
-			providerPayload: { type: "openaiResponsesHistory", provider, items: replacementHistory },
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider,
+				items: replacementHistory,
+			},
 		}),
-		preserveData: { openaiRemoteCompaction: { provider, replacementHistory, compactionItem } },
+		preserveData: {
+			openaiRemoteCompaction: { provider, replacementHistory, compactionItem },
+		},
 		advisorUsageAnchorStartIndex: 1,
 	};
 }
@@ -263,17 +272,36 @@ function transportErrorAfterToolCallStream(
 		stream.push({ type: "start", partial });
 		if (thinking) {
 			stream.push({ type: "thinking_start", contentIndex: 0, partial });
-			stream.push({ type: "thinking_delta", contentIndex: 0, delta: thinking.thinking, partial });
-			stream.push({ type: "thinking_end", contentIndex: 0, content: thinking.thinking, partial });
+			stream.push({
+				type: "thinking_delta",
+				contentIndex: 0,
+				delta: thinking.thinking,
+				partial,
+			});
+			stream.push({
+				type: "thinking_end",
+				contentIndex: 0,
+				content: thinking.thinking,
+				partial,
+			});
 		}
-		stream.push({ type: "toolcall_start", contentIndex: toolCallIndex, partial });
+		stream.push({
+			type: "toolcall_start",
+			contentIndex: toolCallIndex,
+			partial,
+		});
 		stream.push({
 			type: "toolcall_delta",
 			contentIndex: toolCallIndex,
 			delta: JSON.stringify(toolCall.arguments),
 			partial,
 		});
-		stream.push({ type: "toolcall_end", contentIndex: toolCallIndex, toolCall, partial });
+		stream.push({
+			type: "toolcall_end",
+			contentIndex: toolCallIndex,
+			toolCall,
+			partial,
+		});
 		stream.push({
 			type: "error",
 			reason: "error",
@@ -562,7 +590,9 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry,
 			toolRegistry: new Map(),
-			rebuildSystemPrompt: async () => ({ systemPrompt: [`edit:${renderEditMode()}`] }),
+			rebuildSystemPrompt: async () => ({
+				systemPrompt: [`edit:${renderEditMode()}`],
+			}),
 		});
 
 		// Baseline: the non-variant primary resolves to the default hashline mode.
@@ -591,7 +621,12 @@ describe("AgentSession retry fallback", () => {
 		const sentPrompts: string[][] = [];
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				sentPrompts.push([...(context.systemPrompt ?? [])]);
 				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
@@ -606,7 +641,9 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
-			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
@@ -654,7 +691,12 @@ describe("AgentSession retry fallback", () => {
 		const mock = createMockModel();
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				mock.push(
 					model.id === primaryModel.id && primaryDown
@@ -668,7 +710,9 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
-			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
 			"retry.fallbackRevertPolicy": "cooldown-expiry",
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
@@ -728,7 +772,9 @@ describe("AgentSession retry fallback", () => {
 				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
 					mock.push({ throw: "overloaded_error: provider returned error 503" });
 				} else if (model.provider === firstFallback.provider && model.id === firstFallback.id) {
-					mock.push({ throw: "503 Hosted inference is temporarily unavailable" });
+					mock.push({
+						throw: "503 Hosted inference is temporarily unavailable",
+					});
 				} else if (model.provider === secondFallback.provider && model.id === secondFallback.id) {
 					mock.push({ content: ["Recovered on the second chain"] });
 				} else {
@@ -960,12 +1006,20 @@ describe("AgentSession retry fallback", () => {
 
 		const sessionManager = SessionManager.inMemory();
 		const runtime = new ExtensionRuntime();
-		const appliedFromExtension: Array<{ from: string; to: string; role: string }> = [];
+		const appliedFromExtension: Array<{
+			from: string;
+			to: string;
+			role: string;
+		}> = [];
 		const succeededFromExtension: Array<{ model: string; role: string }> = [];
 		const extension = await loadExtensionFromFactory(
 			pi => {
 				pi.on("retry_fallback_applied", event => {
-					appliedFromExtension.push({ from: event.from, to: event.to, role: event.role });
+					appliedFromExtension.push({
+						from: event.from,
+						to: event.to,
+						role: event.role,
+					});
 				});
 				pi.on("retry_fallback_succeeded", event => {
 					succeededFromExtension.push({ model: event.model, role: event.role });
@@ -978,7 +1032,13 @@ describe("AgentSession retry fallback", () => {
 		);
 		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
 
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			extensionRunner,
+		});
 
 		const appliedFromSubscribe: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		const succeededFromSubscribe: Array<Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>> = [];
@@ -1003,7 +1063,10 @@ describe("AgentSession retry fallback", () => {
 			},
 		]);
 		expect(succeededFromExtension).toEqual([
-			{ model: `${fallbackModel.provider}/${fallbackModel.id}`, role: "default" },
+			{
+				model: `${fallbackModel.provider}/${fallbackModel.id}`,
+				role: "default",
+			},
 		]);
 		expect(appliedFromExtension).toEqual(appliedFromSubscribe.map(({ from, to, role }) => ({ from, to, role })));
 		expect(succeededFromExtension).toEqual(succeededFromSubscribe.map(({ model, role }) => ({ model, role })));
@@ -1014,10 +1077,17 @@ describe("AgentSession retry fallback", () => {
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled reserve fallback models");
 		const requestedModels: string[] = [];
-		const mock = createMockModel({ responses: [{ content: ["continued with full context"] }] });
+		const mock = createMockModel({
+			responses: [{ content: ["continued with full context"] }],
+		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return mock.stream(model, context, options);
@@ -1084,7 +1154,12 @@ describe("AgentSession retry fallback", () => {
 		const mock = createMockModel({ responses: [{ content: ["continued"] }] });
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: mock.stream,
 		});
 		const settings = Settings.isolated({
@@ -1092,7 +1167,9 @@ describe("AgentSession retry fallback", () => {
 			"retry.usageAwareFallback": true,
 			"retry.usageReservePct": 10,
 			"retry.usageReservePolicy": "confirm",
-			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
@@ -1111,7 +1188,12 @@ describe("AgentSession retry fallback", () => {
 					}
 				: { state: "healthy", accounts: [] },
 		);
-		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
 		const owner = session.getEvalKernelOwnerId();
 		const releases: number[] = [];
 		const unregister = registerComputerController(owner, {
@@ -1145,17 +1227,26 @@ describe("AgentSession retry fallback", () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled reserve fallback models");
-		const mock = createMockModel({ handler: { content: ["stayed on primary"] } });
+		const mock = createMockModel({
+			handler: { content: ["stayed on primary"] },
+		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: mock.stream,
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.usageAwareFallback": true,
 			"retry.usageReservePolicy": "confirm",
-			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 		let health: "reserve" | "unknown" | "healthy" = "reserve";
@@ -1245,10 +1336,17 @@ describe("AgentSession retry fallback", () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled reserve policy models");
-		const mock = createMockModel({ responses: [{ content: ["stayed on primary"] }] });
+		const mock = createMockModel({
+			responses: [{ content: ["stayed on primary"] }],
+		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: mock.stream,
 		});
 		const settings = Settings.isolated({
@@ -1298,10 +1396,17 @@ describe("AgentSession retry fallback", () => {
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled pooled fallback models");
 		const requestedModels: string[] = [];
-		const mock = createMockModel({ responses: [{ content: ["same provider continued"] }] });
+		const mock = createMockModel({
+			responses: [{ content: ["same provider continued"] }],
+		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return mock.stream(model, context, options);
@@ -1325,7 +1430,12 @@ describe("AgentSession retry fallback", () => {
 					state: "reserve",
 					remainingFraction: 0.05,
 				},
-				{ credentialId: 2, credentialType: "oauth", state: "healthy", remainingFraction: 0.8 },
+				{
+					credentialId: 2,
+					credentialType: "oauth",
+					state: "healthy",
+					remainingFraction: 0.8,
+				},
 			],
 		});
 		const release = vi.spyOn(modelRegistry.authStorage.sessions, "release").mockReturnValue(true);
@@ -1349,10 +1459,17 @@ describe("AgentSession retry fallback", () => {
 		const fallbackModel = getBundledModel("anthropic", "claude-haiku-4-5");
 		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled same-provider fallback models");
 		const requestedModels: string[] = [];
-		const mock = createMockModel({ responses: [{ content: ["same-provider fallback continued"] }] });
+		const mock = createMockModel({
+			responses: [{ content: ["same-provider fallback continued"] }],
+		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return mock.stream(model, context, options);
@@ -1421,7 +1538,12 @@ describe("AgentSession retry fallback", () => {
 		const requestedModels: string[] = [];
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return createMockModel().stream(model, context, options);
@@ -1464,7 +1586,12 @@ describe("AgentSession retry fallback", () => {
 		const requestedModels: string[] = [];
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return createMockModel().stream(model, context, options);
@@ -1504,7 +1631,9 @@ describe("AgentSession retry fallback", () => {
 		});
 		session.setUsageFallbackConfirmer(async (_confirmation, signal) => {
 			confirmationStarted.resolve();
-			signal.addEventListener("abort", () => confirmationAborted.resolve(), { once: true });
+			signal.addEventListener("abort", () => confirmationAborted.resolve(), {
+				once: true,
+			});
 			return pendingConfirmation.promise;
 		});
 
@@ -1535,7 +1664,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return mock.stream(model, context, options);
@@ -1610,7 +1744,12 @@ describe("AgentSession retry fallback", () => {
 		const requestedModels: string[] = [];
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return createMockModel().stream(model, context, options);
@@ -1666,7 +1805,12 @@ describe("AgentSession retry fallback", () => {
 		const requestedModels: string[] = [];
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return createMockModel().stream(model, context, options);
@@ -1701,7 +1845,12 @@ describe("AgentSession retry fallback", () => {
 		if (!primaryModel) throw new Error("Expected bundled fail-closed model");
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: createMockModel().stream,
 		});
 		const settings = Settings.isolated({
@@ -1749,7 +1898,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return mock.stream(model, context, options);
@@ -1827,7 +1981,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return mock.stream(model, context, options);
@@ -1891,18 +2050,35 @@ describe("AgentSession retry fallback", () => {
 			parameters: toolSchema,
 			async execute(_toolCallId, params) {
 				useReserve = true;
-				return { content: [{ type: "text", text: params.value }], details: params };
+				return {
+					content: [{ type: "text", text: params.value }],
+					details: params,
+				};
 			},
 		};
 		const mock = createMockModel({
 			responses: [
-				{ content: [{ type: "toolCall", id: "tool-1", name: "consume", arguments: { value: "done" } }] },
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "tool-1",
+							name: "consume",
+							arguments: { value: "done" },
+						},
+					],
+				},
 				{ content: ["must not run"] },
 			],
 		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [tool],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return mock.stream(model, context, options);
@@ -1958,10 +2134,17 @@ describe("AgentSession retry fallback", () => {
 		if (!primaryModel || !setupTarget) throw new Error("Expected bundled setup-handoff models");
 		const requestedModels: string[] = [];
 		const usageChecks: string[] = [];
-		const mock = createMockModel({ responses: [{ content: ["must not run"] }] });
+		const mock = createMockModel({
+			responses: [{ content: ["must not run"] }],
+		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return mock.stream(model, context, options);
@@ -1995,7 +2178,9 @@ describe("AgentSession retry fallback", () => {
 			hasHandlers: vi.fn().mockReturnValue(false),
 			emitBeforeAgentStart: vi.fn(async () => {
 				if (!session) throw new Error("Expected active session");
-				await session.setModelTemporary(setupTarget, undefined, { ephemeral: true });
+				await session.setModelTemporary(setupTarget, undefined, {
+					ephemeral: true,
+				});
 				return undefined;
 			}),
 		} as unknown as ExtensionRunner;
@@ -2022,10 +2207,17 @@ describe("AgentSession retry fallback", () => {
 		const usageChecks: string[] = [];
 		const healthStarted = Promise.withResolvers<void>();
 		const releaseHealth = Promise.withResolvers<void>();
-		const mock = createMockModel({ responses: [{ content: ["must not run"] }] });
+		const mock = createMockModel({
+			responses: [{ content: ["must not run"] }],
+		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return mock.stream(model, context, options);
@@ -2067,7 +2259,9 @@ describe("AgentSession retry fallback", () => {
 
 		const prompting = session.prompt("Change models during preflight");
 		await healthStarted.promise;
-		await session.setModelTemporary(selectedModel, undefined, { ephemeral: true });
+		await session.setModelTemporary(selectedModel, undefined, {
+			ephemeral: true,
+		});
 		releaseHealth.resolve();
 		await expect(prompting).rejects.toThrow(`reserve reached for ${selectedModel.provider}/${selectedModel.id}`);
 
@@ -2079,7 +2273,12 @@ describe("AgentSession retry fallback", () => {
 
 	it("finishes usage preflight when no model is selected", async () => {
 		const agent = new Agent({
-			initialState: { model: undefined, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: undefined,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -2332,7 +2531,10 @@ describe("AgentSession retry fallback", () => {
 		await session.prompt("Complete another primary turn after the advisor cooldown");
 		await session.waitForIdle();
 		expect(getApiKey).toHaveBeenCalledWith(
-			expect.objectContaining({ provider: advisorPrimary.provider, id: advisorPrimary.id }),
+			expect.objectContaining({
+				provider: advisorPrimary.provider,
+				id: advisorPrimary.id,
+			}),
 			expect.any(String),
 			{ signal: expect.any(AbortSignal) },
 		);
@@ -2351,17 +2553,28 @@ describe("AgentSession retry fallback", () => {
 			const compatibleBase = getBundledModel("openai", "gpt-5-mini")!;
 			const compatible =
 				policy === "model-disabled"
-					? { ...compatibleBase, remoteCompaction: { ...compatibleBase.remoteCompaction, enabled: false } }
+					? {
+							...compatibleBase,
+							remoteCompaction: {
+								...compatibleBase.remoteCompaction,
+								enabled: false,
+							},
+						}
 					: compatibleBase;
 			const foreign = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-			const wrongApi: Model = { ...getBundledModel("openai", "gpt-4o")!, api: "openai-completions" };
+			const wrongApi: Model = {
+				...getBundledModel("openai", "gpt-4o")!,
+				api: "openai-completions",
+			};
 			const wrongAnthropicApi: Model = {
 				...getBundledModel("openai", "gpt-4o-mini")!,
 				api: "anthropic-messages",
 				remoteCompaction: { enabled: true, api: "openai-responses" },
 			};
 			const selector = (model: Model) => `${model.provider}/${model.id}`;
-			const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+			const mainMock = createMockModel({
+				responses: [{ content: ["Primary complete"] }],
+			});
 			const advisorMock = createMockModel();
 			const requestedModels: Model[] = [];
 			const recovered = Promise.withResolvers<void>();
@@ -2437,7 +2650,13 @@ describe("AgentSession retry fallback", () => {
 				: getBundledModel("anthropic", "claude-sonnet-4-5")!;
 			const primary =
 				policy === "model-disabled"
-					? { ...primaryBase, remoteCompaction: { ...primaryBase.remoteCompaction, enabled: false } }
+					? {
+							...primaryBase,
+							remoteCompaction: {
+								...primaryBase.remoteCompaction,
+								enabled: false,
+							},
+						}
 					: primaryBase;
 			const fallback = getBundledModel("openai", "gpt-5")!;
 			const primarySelector = `${primary.provider}/${primary.id}`;
@@ -2520,7 +2739,9 @@ describe("AgentSession retry fallback", () => {
 			throw new Error("Expected bundled advisor fallback models to exist");
 		}
 
-		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const mainMock = createMockModel({
+			responses: [{ content: ["Primary complete"] }],
+		});
 		const advisorMock = createMockModel();
 		const requestedAdvisorModels: string[] = [];
 		const fallbackSucceeded = Promise.withResolvers<void>();
@@ -2602,7 +2823,9 @@ describe("AgentSession retry fallback", () => {
 			throw new Error("Expected bundled advisor fallback models to exist");
 		}
 
-		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const mainMock = createMockModel({
+			responses: [{ content: ["Primary complete"] }],
+		});
 		const advisorMock = createMockModel();
 		const requestedAdvisorModels: string[] = [];
 		const advisorFailed = Promise.withResolvers<void>();
@@ -2645,7 +2868,9 @@ describe("AgentSession retry fallback", () => {
 					advisorMock.push({
 						stopReason: "error",
 						errorMessage: "request_too_large: image count exceeds the limit of 20",
-						usage: { input: (advisorPrimary.contextWindow ?? 200_000) + 100_000 },
+						usage: {
+							input: (advisorPrimary.contextWindow ?? 200_000) + 100_000,
+						},
 					});
 				} else {
 					throw new Error(`Unexpected advisor model requested: ${selector}`);
@@ -2679,7 +2904,9 @@ describe("AgentSession retry fallback", () => {
 			throw new Error("Expected bundled advisor fallback models to exist");
 		}
 
-		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const mainMock = createMockModel({
+			responses: [{ content: ["Primary complete"] }],
+		});
 		const advisorMock = createMockModel();
 		const requestedAdvisorModels: string[] = [];
 		const secondAdvisorRequest = Promise.withResolvers<void>();
@@ -2718,7 +2945,10 @@ describe("AgentSession retry fallback", () => {
 			advisorStreamFn: (model, context, options) => {
 				requestedAdvisorModels.push(`${model.provider}/${model.id}`);
 				if (requestedAdvisorModels.length === 1) {
-					advisorMock.push({ stopReason: "error", errorMessage: "503 Service Unavailable" });
+					advisorMock.push({
+						stopReason: "error",
+						errorMessage: "503 Service Unavailable",
+					});
 				} else {
 					advisorMock.push({ content: ["Advisor recovered"] });
 					secondAdvisorRequest.resolve();
@@ -2748,7 +2978,9 @@ describe("AgentSession retry fallback", () => {
 			throw new Error("Expected bundled advisor fallback models to exist");
 		}
 
-		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const mainMock = createMockModel({
+			responses: [{ content: ["Primary complete"] }],
+		});
 		const advisorMock = createMockModel();
 		const requestedAdvisorModels: string[] = [];
 		const advisorYielded = Promise.withResolvers<void>();
@@ -2786,7 +3018,10 @@ describe("AgentSession retry fallback", () => {
 			advisorConfigs: [{ name: "quota-test", model: advisorRoleSelector }],
 			advisorStreamFn: (model, context, options) => {
 				requestedAdvisorModels.push(`${model.provider}/${model.id}`);
-				advisorMock.push({ stopReason: "error", errorMessage: "429 usage_limit_reached" });
+				advisorMock.push({
+					stopReason: "error",
+					errorMessage: "429 usage_limit_reached",
+				});
 				return advisorMock.stream(model, context, options);
 			},
 		});
@@ -2891,8 +3126,15 @@ describe("AgentSession retry fallback", () => {
 
 			const agent = new Agent({
 				getApiKey: model => `${model.provider}-test-key`,
-				initialState: { model: mainModel, systemPrompt: ["Test"], tools: [], messages: [] },
-				streamFn: createMockModel({ responses: [{ content: ["Primary complete"] }] }).stream,
+				initialState: {
+					model: mainModel,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+				streamFn: createMockModel({
+					responses: [{ content: ["Primary complete"] }],
+				}).stream,
 			});
 			const settings = Settings.isolated({
 				"compaction.enabled": false,
@@ -2963,7 +3205,9 @@ describe("AgentSession retry fallback", () => {
 			throw new Error("Expected bundled advisor fallback models to exist");
 		}
 
-		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const mainMock = createMockModel({
+			responses: [{ content: ["Primary complete"] }],
+		});
 		const advisorMock = createMockModel();
 		const requestedAdvisorModels: string[] = [];
 		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
@@ -3008,9 +3252,13 @@ describe("AgentSession retry fallback", () => {
 				const selector = `${model.provider}/${model.id}`;
 				requestedAdvisorModels.push(selector);
 				if (selector === advisorPrimarySelector || selector === advisorFallbackSelector) {
-					advisorMock.push({ throw: "overloaded_error: provider returned error 503" });
+					advisorMock.push({
+						throw: "overloaded_error: provider returned error 503",
+					});
 				} else if (selector === secondFallbackSelector) {
-					advisorMock.push({ content: ["Advisor recovered on the second chain"] });
+					advisorMock.push({
+						content: ["Advisor recovered on the second chain"],
+					});
 				} else {
 					throw new Error(`Unexpected advisor model requested: ${selector}`);
 				}
@@ -3058,7 +3306,9 @@ describe("AgentSession retry fallback", () => {
 			throw new Error("Expected bundled advisor fallback models to exist");
 		}
 
-		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const mainMock = createMockModel({
+			responses: [{ content: ["Primary complete"] }],
+		});
 		const advisorMock = createMockModel({
 			responses: [{ throw: "service unavailable: 503 overloaded" }],
 		});
@@ -3306,7 +3556,10 @@ describe("AgentSession retry fallback", () => {
 		// the message: the first iteration exercises the quota-worded body, the
 		// second an opaque status-only body.
 		for (const errorToThrow of [new Error("HTTP 402 Payment is required"), new Error("HTTP 402")]) {
-			const requestedCalls: Array<{ model: string; apiKey: string | undefined }> = [];
+			const requestedCalls: Array<{
+				model: string;
+				apiKey: string | undefined;
+			}> = [];
 			let currentKey = "key-A";
 			const mock = createMockModel();
 			const agent = new Agent({
@@ -3319,7 +3572,10 @@ describe("AgentSession retry fallback", () => {
 				},
 				streamFn: (model, context, options) => {
 					const apiKey = typeof options?.apiKey === "string" ? options.apiKey : undefined;
-					requestedCalls.push({ model: `${model.provider}/${model.id}`, apiKey });
+					requestedCalls.push({
+						model: `${model.provider}/${model.id}`,
+						apiKey,
+					});
 					if (requestedCalls.length === 1) {
 						mock.push({ throw: errorToThrow });
 					} else {
@@ -3397,7 +3653,11 @@ describe("AgentSession retry fallback", () => {
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
-					mock.push({ throw: Object.assign(new Error("Payment Required"), { status: 402 }) });
+					mock.push({
+						throw: Object.assign(new Error("Payment Required"), {
+							status: 402,
+						}),
+					});
 				} else {
 					mock.push({ content: [`ok:${model.provider}/${model.id}`] });
 				}
@@ -3694,7 +3954,11 @@ describe("AgentSession retry fallback", () => {
 				if (requestCount === 1) {
 					mock.push({
 						content: [
-							{ type: "thinking", thinking: "Signed Sonnet reasoning.", thinkingSignature: "sonnet-signature" },
+							{
+								type: "thinking",
+								thinking: "Signed Sonnet reasoning.",
+								thinkingSignature: "sonnet-signature",
+							},
 							"Seeded turn",
 						],
 					});
@@ -3768,7 +4032,11 @@ describe("AgentSession retry fallback", () => {
 				if (requestCount === 1) {
 					mock.push({
 						content: [
-							{ type: "thinking", thinking: "Signed Sonnet reasoning.", thinkingSignature: "sonnet-signature" },
+							{
+								type: "thinking",
+								thinking: "Signed Sonnet reasoning.",
+								thinkingSignature: "sonnet-signature",
+							},
 							"Seeded turn",
 						],
 					});
@@ -3853,7 +4121,11 @@ describe("AgentSession retry fallback", () => {
 				if (requestCount === 1) {
 					mock.push({
 						content: [
-							{ type: "thinking", thinking: "Signed Sonnet reasoning.", thinkingSignature: "sonnet-signature" },
+							{
+								type: "thinking",
+								thinking: "Signed Sonnet reasoning.",
+								thinkingSignature: "sonnet-signature",
+							},
 							"Seeded turn",
 						],
 					});
@@ -3905,7 +4177,9 @@ describe("AgentSession retry fallback", () => {
 			`${fallbackModel.provider}/${fallbackModel.id}`,
 		]);
 		expect(fallbackAppliedEvents).toEqual([
-			expect.objectContaining({ to: `${fallbackModel.provider}/${fallbackModel.id}` }),
+			expect.objectContaining({
+				to: `${fallbackModel.provider}/${fallbackModel.id}`,
+			}),
 		]);
 		expect(session.model?.id).toBe(fallbackModel.id);
 		expect(getLastAssistantMessage(session).stopReason).toBe("stop");
@@ -3936,7 +4210,11 @@ describe("AgentSession retry fallback", () => {
 				if (requestCount === 1) {
 					mock.push({
 						content: [
-							{ type: "thinking", thinking: "Signed Sonnet reasoning.", thinkingSignature: "sonnet-signature" },
+							{
+								type: "thinking",
+								thinking: "Signed Sonnet reasoning.",
+								thinkingSignature: "sonnet-signature",
+							},
 							"Seeded turn",
 						],
 					});
@@ -3989,7 +4267,9 @@ describe("AgentSession retry fallback", () => {
 			`${fallbackModel.provider}/${fallbackModel.id}`,
 		]);
 		expect(fallbackAppliedEvents).toEqual([
-			expect.objectContaining({ to: `${fallbackModel.provider}/${fallbackModel.id}` }),
+			expect.objectContaining({
+				to: `${fallbackModel.provider}/${fallbackModel.id}`,
+			}),
 		]);
 		expect(session.model?.id).toBe(fallbackModel.id);
 		expect(getLastAssistantMessage(session).stopReason).toBe("stop");
@@ -4055,7 +4335,12 @@ describe("AgentSession retry fallback", () => {
 			let requestCount = 0;
 			const agent = new Agent({
 				getApiKey: model => `${model.provider}-test-key`,
-				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				initialState: {
+					model: primaryModel,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
 				streamFn: (model, context, options) => {
 					requestCount++;
 					requestedModels.push(`${model.provider}/${model.id}`);
@@ -4116,29 +4401,26 @@ describe("AgentSession retry fallback", () => {
 				`${fallbackModel.provider}/${fallbackModel.id}`,
 			]);
 			expect(fallbackAppliedEvents).toEqual([
-				expect.objectContaining({ to: `${fallbackModel.provider}/${fallbackModel.id}` }),
+				expect.objectContaining({
+					to: `${fallbackModel.provider}/${fallbackModel.id}`,
+				}),
 			]);
 			expect(session.model?.id).toBe(fallbackModel.id);
 			expect(getLastAssistantMessage(session).stopReason).toBe("stop");
 		},
 	);
 
-	it.each<{ name: string; failure: MockResponse; settings: Record<string, unknown> }>([
+	it.each<{
+		name: string;
+		failure: MockResponse;
+		settings: Record<string, unknown>;
+	}>([
 		{
 			name: "a rate-limit wait past retry.maxDelayMs",
 			failure: {
 				throw: '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}} retry-after=11180',
 			},
 			settings: { "retry.maxDelayMs": 100 },
-		},
-		{
-			name: "a classifier refusal",
-			failure: {
-				stopReason: "error",
-				stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined." },
-				errorMessage: "Refusal (cyber): Classifier declined this turn.",
-			},
-			settings: {},
 		},
 		{
 			name: "an account-policy denial and no sibling credential to rotate to",
@@ -4169,7 +4451,12 @@ describe("AgentSession retry fallback", () => {
 			let requestCount = 0;
 			const agent = new Agent({
 				getApiKey: model => `${model.provider}-test-key`,
-				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				initialState: {
+					model: primaryModel,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
 				streamFn: (model, context, options) => {
 					requestCount++;
 					requestedModels.push(`${model.provider}/${model.id}`);
@@ -4229,7 +4516,9 @@ describe("AgentSession retry fallback", () => {
 				`${fallbackModel.provider}/${fallbackModel.id}`,
 			]);
 			expect(fallbackAppliedEvents).toEqual([
-				expect.objectContaining({ to: `${fallbackModel.provider}/${fallbackModel.id}` }),
+				expect.objectContaining({
+					to: `${fallbackModel.provider}/${fallbackModel.id}`,
+				}),
 			]);
 			expect(session.model?.id).toBe(fallbackModel.id);
 			expect(getLastAssistantMessage(session).stopReason).toBe("stop");
@@ -4266,7 +4555,10 @@ describe("AgentSession retry fallback", () => {
 				if (requestCount === 1) {
 					return transportErrorAfterToolCallStream(model, toolCall, "sonnet-signature");
 				}
-				const mock = createMockModel({ id: model.id, provider: model.provider });
+				const mock = createMockModel({
+					id: model.id,
+					provider: model.provider,
+				});
 				mock.push({ content: ["Recovered on Sonnet"] });
 				return mock.stream(mock, context, options);
 			},
@@ -4394,11 +4686,18 @@ describe("AgentSession retry fallback", () => {
 			const requestedModels: string[] = [];
 			const agent = new Agent({
 				getApiKey: model => `${model.provider}-test-key`,
-				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				initialState: {
+					model: primaryModel,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
 				streamFn: (model, context, options) => {
 					requestedModels.push(`${model.provider}/${model.id}`);
 					if (model.provider === primaryModel.provider) {
-						mock.push({ throw: "overloaded_error: provider returned error 503" });
+						mock.push({
+							throw: "overloaded_error: provider returned error 503",
+						});
 					} else {
 						mock.push({ content: [`ok:${model.provider}/${model.id}`] });
 					}
@@ -4413,7 +4712,12 @@ describe("AgentSession retry fallback", () => {
 				},
 			});
 			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
 			const { retryEndEvents } = trackRetryEvents(session);
 
 			await session.prompt("Recover past a pool-blocked fallback");
@@ -4437,7 +4741,12 @@ describe("AgentSession retry fallback", () => {
 			const requestedModels: string[] = [];
 			const agent = new Agent({
 				getApiKey: model => `${model.provider}-test-key`,
-				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				initialState: {
+					model: primaryModel,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
 				streamFn: (model, context, options) => {
 					requestedModels.push(`${model.provider}/${model.id}`);
 					mock.push({ throw: "overloaded_error: provider returned error 503" });
@@ -4448,10 +4757,17 @@ describe("AgentSession retry fallback", () => {
 				"compaction.enabled": false,
 				"retry.baseDelayMs": 5,
 				"retry.maxRetries": 1,
-				"retry.fallbackChains": { default: [`${blockedModel.provider}/${blockedModel.id}`] },
+				"retry.fallbackChains": {
+					default: [`${blockedModel.provider}/${blockedModel.id}`],
+				},
 			});
 			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
 			const { retryEndEvents } = trackRetryEvents(session);
 
 			await session.prompt("Fail with only a pool-blocked fallback");
@@ -4684,7 +5000,12 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
-	it("falls back on structured classifier refusals and pins the fallback", async () => {
+	it("hands a structured classifier refusal back without walking the fallback chain", async () => {
+		// A refusal is a content judgment, not a route failure: re-sending the
+		// refused request on every configured entry re-triggers the refusal (or
+		// the next provider's filter) at full price. Without a redeemable fallback
+		// credit the turn must end on the refusal itself — one failed call — so
+		// the agent sees it and can change what it asks for.
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) {
@@ -4693,13 +5014,101 @@ describe("AgentSession retry fallback", () => {
 
 		const requestedModels: string[] = [];
 		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-		const fallbackSucceededEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>> = [];
 		const mock = createMockModel();
-		let primaryAttempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push({
+					content: [
+						{
+							type: "thinking",
+							thinking: "Classifier evaluation before refusal.",
+						},
+					],
+					stopReason: "error",
+					stopDetails: {
+						type: "refusal",
+						category: "cyber",
+						explanation: "Classifier declined this turn.",
+					},
+					errorMessage: "Refusal (cyber): Classifier declined this turn.",
+				});
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
+		});
+
+		await session.prompt("Refused without a fallback credit");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		expect(fallbackAppliedEvents).toEqual([]);
+		expect(session.model?.provider).toBe(primaryModel.provider);
+		expect(session.model?.id).toBe(primaryModel.id);
+		// The refusal is pruned from the active context (session.messages ends on
+		// the user turn) but stays visible to terminal-outcome consumers.
+		expect(session.messages.at(-1)?.role).toBe("user");
+		const settled = session.getLastAssistantMessage();
+		expect(settled?.stopReason).toBe("error");
+		expect(settled?.stopDetails).toEqual({
+			type: "refusal",
+			category: "cyber",
+			explanation: "Classifier declined this turn.",
+		});
+	});
+
+	it("returns a refusal's credit fallback to the primary when the cooldown expires", async () => {
+		// A refusal that redeems its fallback credit lands on the credit target
+		// WITHOUT pinning: the refusal suppresses the primary for the default
+		// cooldown window, and `retry.fallbackRevertPolicy: cooldown-expiry`
+		// restores the primary once that window ends. Before the fix the refusal
+		// pinned the fallback forever, so an unattended session spent its whole
+		// remaining run (12 h, $711) on the fallback.
+		const primaryModel = getBundledModel("anthropic", "claude-fable-5");
+		const fallbackModel = getBundledModel("anthropic", "claude-opus-4-8");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const mock = createMockModel({
+			provider: primaryModel.provider,
+			id: primaryModel.id,
+		});
 		const refusalDetails = {
 			type: "refusal",
 			category: "cyber",
 			explanation: "Classifier declined this turn.",
+			fallback_credit_token: "fct_revert_test",
+			fallback_has_prefill_claim: true,
 		};
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
@@ -4711,20 +5120,33 @@ describe("AgentSession retry fallback", () => {
 			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
-				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
-					primaryAttempts += 1;
+				if (model.id === primaryModel.id) {
 					mock.push({
-						content: [{ type: "thinking", thinking: "Classifier evaluation before refusal." }],
+						content: [
+							{
+								type: "thinking",
+								thinking: "Fable reasoning before refusal.",
+								thinkingSignature: "fable-sig",
+							},
+						],
 						stopReason: "error",
 						stopDetails: refusalDetails,
 						errorMessage: "Refusal (cyber): Classifier declined this turn.",
+						fallbackCreditHandle: {
+							token: "fct_revert_test",
+							prefillClaim: true,
+							params: {
+								model: primaryModel.id,
+								messages: [{ role: "user", content: "Test prompt" }],
+								max_tokens: 1024,
+								stream: true,
+							},
+							betas: ["fallback-credit-2026-06-01"],
+							expiresAt: Date.now() + 60000,
+						},
 					});
-				} else if (model.provider === fallbackModel.provider && model.id === fallbackModel.id) {
-					mock.push({ content: [`ok:${primaryAttempts}`] });
 				} else {
-					throw new Error(
-						`Unexpected model requested during refusal fallback test: ${model.provider}/${model.id}`,
-					);
+					mock.push({ content: ["answered on the credit target"] });
 				}
 				return mock.stream(model, context, options);
 			},
@@ -4748,61 +5170,74 @@ describe("AgentSession retry fallback", () => {
 			modelRegistry,
 		});
 		session.subscribe(event => {
-			if (event.type === "retry_fallback_applied") {
-				fallbackAppliedEvents.push(event);
-			}
-			if (event.type === "retry_fallback_succeeded") {
-				fallbackSucceededEvents.push(event);
-			}
+			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
 		});
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 
-		await session.prompt("Recover from classifier refusal");
+		await session.prompt("Refused with a redeemable credit");
 		await session.waitForIdle();
 
 		expect(requestedModels).toEqual([
 			`${primaryModel.provider}/${primaryModel.id}`,
 			`${fallbackModel.provider}/${fallbackModel.id}`,
 		]);
-		expect(fallbackAppliedEvents).toEqual([
-			{
-				type: "retry_fallback_applied",
-				from: `${primaryModel.provider}/${primaryModel.id}`,
-				to: `${fallbackModel.provider}/${fallbackModel.id}`,
-				role: "default",
-				reason: expect.stringContaining("Classifier declined this turn."),
-			},
+		expect(fallbackAppliedEvents.map(event => `${event.from} -> ${event.to}`)).toEqual([
+			`${primaryModel.provider}/${primaryModel.id} -> ${fallbackModel.provider}/${fallbackModel.id}`,
 		]);
-		expect(fallbackSucceededEvents).toEqual([
-			{
-				type: "retry_fallback_succeeded",
-				model: `${fallbackModel.provider}/${fallbackModel.id}`,
-				role: "default",
-			},
-		]);
-		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
 
-		now += 10 * 60 * 1000;
-		await session.prompt("Next turn stays pinned on fallback");
+		// Inside the refusal's cooldown window the session stays on the credit
+		// target — reverting early would re-ask the model that just refused.
+		const afterFirstPrompt = requestedModels.length;
+		now += 2 * 60 * 1000;
+		await session.prompt("Still inside the refusal cooldown");
 		await session.waitForIdle();
+		expect(requestedModels.slice(afterFirstPrompt)).toEqual([`${fallbackModel.provider}/${fallbackModel.id}`]);
+		expect(session.model?.id).toBe(fallbackModel.id);
 
-		expect(requestedModels).toEqual([
-			`${primaryModel.provider}/${primaryModel.id}`,
-			`${fallbackModel.provider}/${fallbackModel.id}`,
-			`${fallbackModel.provider}/${fallbackModel.id}`,
-		]);
+		// Once the window ends the revert policy restores the primary: the next
+		// prompt's first request goes to the configured model again. (The mock
+		// refuses on the primary every time, so the prompt continues through a
+		// fresh credit hop afterwards — the loop the cooldown bounds.)
+		const beforeExpiry = requestedModels.length;
+		now += 10 * 60 * 1000;
+		await session.prompt("Cooldown expired, back to the primary");
+		await session.waitForIdle();
+		expect(requestedModels[beforeExpiry]).toBe(`${primaryModel.provider}/${primaryModel.id}`);
+		// And within the next window the session is back on the fallback, unpinned,
+		// waiting for the next expiry instead of staying there forever.
+		expect(session.model?.id).toBe(fallbackModel.id);
 	});
 
 	it.each([
 		// Fable → Opus 4.8 and Opus 5.5 → Opus 5 are catalog-permitted fallback-credit target pairs.
-		{ primaryId: "claude-fable-5", fallbackId: "claude-opus-4-8", swapRebuildsPrompt: false, nonTargetFirst: false },
-		{ primaryId: "claude-fable-5", fallbackId: "claude-opus-4-8", swapRebuildsPrompt: true, nonTargetFirst: false },
-		{ primaryId: "claude-opus-5-5", fallbackId: "claude-opus-5", swapRebuildsPrompt: false, nonTargetFirst: false },
+		{
+			primaryId: "claude-fable-5",
+			fallbackId: "claude-opus-4-8",
+			swapRebuildsPrompt: false,
+			nonTargetFirst: false,
+		},
+		{
+			primaryId: "claude-fable-5",
+			fallbackId: "claude-opus-4-8",
+			swapRebuildsPrompt: true,
+			nonTargetFirst: false,
+		},
+		{
+			primaryId: "claude-opus-5-5",
+			fallbackId: "claude-opus-5",
+			swapRebuildsPrompt: false,
+			nonTargetFirst: false,
+		},
 		// A refusal may move to another Claude model, but a chain entry the credit cannot
 		// target (Opus 5.5 for Fable) must not take the hop ahead of one it can and forfeit the credit.
-		{ primaryId: "claude-fable-5", fallbackId: "claude-opus-4-8", swapRebuildsPrompt: false, nonTargetFirst: true },
+		{
+			primaryId: "claude-fable-5",
+			fallbackId: "claude-opus-4-8",
+			swapRebuildsPrompt: false,
+			nonTargetFirst: true,
+		},
 	])(
 		"redeems Anthropic fallback credit across a same-provider refusal fallback with signed thinking unless the swap rebuilt the prompt (%o)",
 		async ({ primaryId, fallbackId, swapRebuildsPrompt, nonTargetFirst }) => {
@@ -4814,7 +5249,10 @@ describe("AgentSession retry fallback", () => {
 
 			const requestedModels: string[] = [];
 			const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-			const mock = createMockModel({ provider: "anthropic", id: primaryModel.id });
+			const mock = createMockModel({
+				provider: "anthropic",
+				id: primaryModel.id,
+			});
 			const refusalDetails = {
 				type: "refusal",
 				category: "cyber",
@@ -4943,6 +5381,75 @@ describe("AgentSession retry fallback", () => {
 		},
 	);
 
+	it("hands a Bedrock content_filtered stop back without retrying or walking the chain", async () => {
+		// Bedrock's `content_filtered` message stop used to classify as a generic
+		// hard error, so each regional route's filtered reply walked to the next
+		// chain entry at full price — one unattended run spent $2.19 on seven
+		// filtered retries of the same content. A provider content filter is the
+		// model's judgment of the request, like a classifier refusal: the turn
+		// ends after the first filtered reply.
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const filteredMessage = "Response filtered by Amazon Bedrock content filters (stop reason: content_filtered).";
+		const mock = createMockModel({
+			provider: "amazon-bedrock",
+			id: "anthropic.claude-sonnet-4-5",
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push({
+					content: [],
+					stopReason: "error",
+					errorMessage: filteredMessage,
+				});
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 3,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
+		});
+
+		await session.prompt("Filtered by Bedrock");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		expect(fallbackAppliedEvents).toEqual([]);
+		const settled = getLastAssistantMessage(session);
+		expect(settled?.stopReason).toBe("error");
+		expect(settled?.errorMessage).toBe(filteredMessage);
+	});
+
 	it("drops classifier refusal messages before later prompts", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!primaryModel) {
@@ -5050,7 +5557,11 @@ describe("AgentSession retry fallback", () => {
 			responses: [
 				{
 					stopReason: "error",
-					stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
+					stopDetails: {
+						type: "refusal",
+						category: "cyber",
+						explanation: "Declined.",
+					},
 					errorMessage: "Refusal (cyber): Declined.",
 				},
 				{ content: ["recovered"] },
@@ -5092,7 +5603,11 @@ describe("AgentSession retry fallback", () => {
 		const settled = session.getLastAssistantMessage();
 		expect(settled?.stopReason).toBe("error");
 		expect(settled?.errorMessage).toBe("Refusal (cyber): Declined.");
-		expect(settled?.stopDetails).toEqual({ type: "refusal", category: "cyber", explanation: "Declined." });
+		expect(settled?.stopDetails).toEqual({
+			type: "refusal",
+			category: "cyber",
+			explanation: "Declined.",
+		});
 
 		await session.prompt("Next prompt supersedes the pruned refusal");
 		await session.waitForIdle();
@@ -5102,7 +5617,7 @@ describe("AgentSession retry fallback", () => {
 		expect(recovered?.content).toEqual([{ type: "text", text: "recovered" }]);
 	});
 
-	it("keeps walking the chain on a refusal after the retry budget is spent, each model once", async () => {
+	it("stops a mid-walk refusal instead of walking the rest of the chain", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
 		const secondFallback = getBundledModel("openai", "gpt-4o");
@@ -5128,16 +5643,6 @@ describe("AgentSession retry fallback", () => {
 				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
 					mock.push({ throw: "overloaded_error: provider returned error 503" });
 				} else if (model.provider === firstFallback.provider && model.id === firstFallback.id) {
-					mock.push({
-						stopReason: "error",
-						stopDetails: {
-							type: "refusal",
-							category: "cyber",
-							explanation: "Classifier declined this fallback turn.",
-						},
-						errorMessage: refusalMessage,
-					});
-				} else if (model.provider === secondFallback.provider && model.id === secondFallback.id) {
 					mock.push({
 						stopReason: "error",
 						stopDetails: {
@@ -5182,20 +5687,18 @@ describe("AgentSession retry fallback", () => {
 			}
 		});
 
-		await session.prompt("Walk the chain once the budget is spent");
+		await session.prompt("Stop at the first refusal");
 		await session.waitForIdle();
 
-		// The budget bounds same-model retries against a failing provider; it does not stop a
-		// refusal from reaching the rest of the chain, which is one request per model and often
-		// answers. The walk is bounded by the chain instead: every model is tried exactly once.
+		// A provider error walks the chain (a different model is a fresh chance),
+		// but the fallback's refusal is a judgment about the same content: the
+		// second entry is never tried, and the turn ends on the refusal.
 		expect(requestedModels).toEqual([
 			`${primaryModel.provider}/${primaryModel.id}`,
 			`${firstFallback.provider}/${firstFallback.id}`,
-			`${secondFallback.provider}/${secondFallback.id}`,
 		]);
 		expect(fallbackAppliedEvents.map(event => `${event.from} -> ${event.to}`)).toEqual([
 			`${primaryModel.provider}/${primaryModel.id} -> ${firstFallback.provider}/${firstFallback.id}`,
-			`${firstFallback.provider}/${firstFallback.id} -> ${secondFallback.provider}/${secondFallback.id}`,
 		]);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({
@@ -5204,10 +5707,9 @@ describe("AgentSession retry fallback", () => {
 			attempt: 1,
 			finalError: refusalMessage,
 		});
-		// Both superseded attempts — the provider error and the first refusal — are aggregated
-		// onto the one terminal event, so the transcript renders a single error rather than a row
-		// per model the walk tried.
-		expect(retryEndEvents[0]?.retryErrors).toHaveLength(2);
+		// The superseded provider error is aggregated onto the one terminal event,
+		// so the transcript renders a single error rather than one row per attempt.
+		expect(retryEndEvents[0]?.retryErrors).toHaveLength(1);
 		for (const retryError of retryEndEvents[0]?.retryErrors ?? []) {
 			expect(retryError.retryRecovery).toMatchObject({
 				kind: "auto-retry",
@@ -5217,32 +5719,58 @@ describe("AgentSession retry fallback", () => {
 		}
 	});
 
-	it("falls back on a classifier refusal even when the retry budget is already spent", async () => {
-		// A turn that spent its retries on transient provider errors used to get no fallback at all
-		// once the classifier declined, ending on the model it started on with the rest of the chain
-		// untried. `retry.maxRetries: 0` is that state on the first failure.
-		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+	it("still redeems a refusal's fallback credit when the retry budget is already spent", async () => {
+		// The credit consult is budget-exempt (a refusal is not a same-model
+		// retry), so `retry.maxRetries: 0` cannot block the one sanctioned,
+		// zero-cost retry Anthropic hands out with the refusal.
+		const primaryModel = getBundledModel("anthropic", "claude-fable-5");
+		const fallbackModel = getBundledModel("anthropic", "claude-opus-4-8");
 		if (!primaryModel || !fallbackModel) {
 			throw new Error("Expected bundled test models to exist");
 		}
 
 		const requestedModels: string[] = [];
-		const mock = createMockModel();
+		const mock = createMockModel({
+			provider: primaryModel.provider,
+			id: primaryModel.id,
+		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
-				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
+				if (model.id === primaryModel.id) {
 					mock.push({
 						content: [],
 						stopReason: "error",
-						stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined this turn." },
+						stopDetails: {
+							type: "refusal",
+							category: "cyber",
+							explanation: "Classifier declined this turn.",
+							fallback_credit_token: "fct_spent_budget",
+							fallback_has_prefill_claim: true,
+						},
 						errorMessage: "Refusal (cyber): Classifier declined this turn.",
+						fallbackCreditHandle: {
+							token: "fct_spent_budget",
+							prefillClaim: true,
+							params: {
+								model: primaryModel.id,
+								messages: [{ role: "user", content: "Test prompt" }],
+								max_tokens: 1024,
+								stream: true,
+							},
+							betas: ["fallback-credit-2026-06-01"],
+							expiresAt: Date.now() + 60000,
+						},
 					});
 				} else {
-					mock.push({ content: ["answered after the budget was spent"] });
+					mock.push({ content: ["recovered with the credit"] });
 				}
 				return mock.stream(model, context, options);
 			},
@@ -5252,7 +5780,9 @@ describe("AgentSession retry fallback", () => {
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 0,
-			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
@@ -5263,7 +5793,7 @@ describe("AgentSession retry fallback", () => {
 			modelRegistry,
 		});
 
-		await session.prompt("Refused with no retries left");
+		await session.prompt("Refused with no retries left but a live credit");
 		await session.waitForIdle();
 
 		expect(requestedModels).toEqual([
@@ -5271,318 +5801,6 @@ describe("AgentSession retry fallback", () => {
 			`${fallbackModel.provider}/${fallbackModel.id}`,
 		]);
 		expect(session.model?.id).toBe(fallbackModel.id);
-	});
-
-	it("terminates a refusal walk across chains that name each other, and starts each later turn's walk fresh", async () => {
-		// The retry budget used to be what stopped this: `retryFallbackChainKeys` consults the
-		// current model's own chain as well as the pinned one, so A -> B and B -> A alternate
-		// rather than loop in place, and every hop spent an attempt. With a refusal no longer
-		// stopped by the budget, the walk is bounded by visiting each model at most once.
-		const modelA = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const modelB = getBundledModel("openai", "gpt-4o-mini");
-		if (!modelA || !modelB) {
-			throw new Error("Expected bundled test models to exist");
-		}
-		const selectorA = `${modelA.provider}/${modelA.id}`;
-		const selectorB = `${modelB.provider}/${modelB.id}`;
-
-		const requestedModels: string[] = [];
-		// What each request answers, in order. Every model declines the first prompt, so nothing but
-		// the walk bound can end that turn; each later turn is declined once and then answered.
-		const script = ["decline", "decline", "decline", "answer", "decline", "answer"];
-		const mock = createMockModel();
-		const agent = new Agent({
-			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: modelA, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: (model, context, options) => {
-				requestedModels.push(`${model.provider}/${model.id}`);
-				const step = script[requestedModels.length - 1];
-				if (step === "answer") {
-					mock.push({ content: [`answered request ${requestedModels.length}`] });
-				} else if (step === "decline") {
-					mock.push({
-						content: [],
-						stopReason: "error",
-						stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
-						errorMessage: "Refusal (cyber): Declined.",
-					});
-				} else {
-					throw new Error(`Unexpected request ${requestedModels.length}: ${model.provider}/${model.id}`);
-				}
-				return mock.stream(model, context, options);
-			},
-		});
-
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxRetries": 0,
-			"retry.fallbackChains": { [selectorA]: [selectorB], [selectorB]: [selectorA] },
-		});
-		settings.setModelRole("default", selectorA);
-
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-
-		await session.prompt("Both chains point at each other");
-		await session.waitForIdle();
-
-		// Each model asked exactly once, and the turn ends rather than alternating forever.
-		expect(requestedModels).toEqual([selectorA, selectorB]);
-
-		const lastReply = (current: AgentSession) => {
-			const message = current.agent.state.messages.at(-1);
-			return message?.role === "assistant" ? message.content : undefined;
-		};
-
-		// The walk belongs to that turn. A turn that ended on the walk's last refusal must not carry
-		// its record into the next prompt: there the model the session is on declines again, and the
-		// other model, which would now answer, has to be asked rather than skipped as already tried.
-		await session.prompt("Ask again");
-		await session.waitForIdle();
-		expect(requestedModels.slice(2)).toEqual([selectorB, selectorA]);
-		expect(lastReply(session)).toEqual([{ type: "text", text: "answered request 4" }]);
-
-		// The same holds for a turn an extension starts, which does not go through prompt()'s
-		// per-prompt reset, after a turn whose walk ended in an answer rather than a refusal.
-		await session.sendCustomMessage(
-			{ customType: "test-nudge", content: "Carry on", display: false },
-			{ triggerTurn: true },
-		);
-		await session.waitForIdle();
-		expect(requestedModels.slice(4)).toEqual([selectorA, selectorB]);
-		expect(lastReply(session)).toEqual([{ type: "text", text: "answered request 6" }]);
-	});
-
-	it("visits each model once in a refusal walk when the session runs at a thinking level", async () => {
-		// The walk records the current selector, which carries the thinking level (`…:high`), while
-		// chain entries name bare models. Both must reduce to the same model, or the walk asks the
-		// model that just refused a second time.
-		const modelA = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const modelB = getBundledModel("openai", "gpt-4o-mini");
-		if (!modelA || !modelB) {
-			throw new Error("Expected bundled test models to exist");
-		}
-		const selectorA = `${modelA.provider}/${modelA.id}`;
-		const selectorB = `${modelB.provider}/${modelB.id}`;
-
-		const requestedModels: string[] = [];
-		const mock = createMockModel();
-		const agent = new Agent({
-			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: modelA, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: (model, context, options) => {
-				requestedModels.push(`${model.provider}/${model.id}`);
-				if (requestedModels.length > 3) {
-					throw new Error(`Unexpected request ${requestedModels.length}: ${model.provider}/${model.id}`);
-				}
-				mock.push({
-					content: [],
-					stopReason: "error",
-					stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
-					errorMessage: "Refusal (cyber): Declined.",
-				});
-				return mock.stream(model, context, options);
-			},
-		});
-
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxRetries": 0,
-			"retry.fallbackChains": { [selectorA]: [selectorB], [selectorB]: [selectorA] },
-		});
-		settings.setModelRole("default", selectorA);
-
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-			thinkingLevel: Effort.High,
-		});
-
-		await session.prompt("Both chains point at each other at a thinking level");
-		await session.waitForIdle();
-
-		expect(requestedModels).toEqual([selectorA, selectorB]);
-	});
-
-	it("walks a refusal on an Anthropic fallback to the next entry of the requested model's chain", async () => {
-		// A session asked for a Codex model runs on its Anthropic fallback, and every turn there signs
-		// its thinking. When that model's classifier refuses, the walk used to skip every remaining
-		// Anthropic entry because the latest turn carried another Anthropic model's signed thinking,
-		// so the run ended on the refusal with the rest of the chain untried. Anthropic's documented
-		// retry resends the history unchanged on the fallback model, which drops the blocks it cannot
-		// read. The walk follows the chain that served the refused model, not that model's own chain.
-		const requested = getBundledModel("openai-codex", "gpt-5.6-terra");
-		const fallback = getBundledModel("anthropic", "claude-opus-5-5");
-		const next = getBundledModel("anthropic", "claude-opus-5");
-		const fallbacksOwnNext = getBundledModel("anthropic", "claude-opus-4-8");
-		if (!requested || !fallback || !next || !fallbacksOwnNext) {
-			throw new Error("Expected bundled test models to exist");
-		}
-		const requestedSelector = `${requested.provider}/${requested.id}`;
-		const fallbackSelector = `${fallback.provider}/${fallback.id}`;
-		const nextSelector = `${next.provider}/${next.id}`;
-
-		const requestedModels: string[] = [];
-		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-		const mock = createMockModel();
-		let fallbackRequests = 0;
-		const agent = new Agent({
-			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: requested, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: (model, context, options) => {
-				const selector = `${model.provider}/${model.id}`;
-				requestedModels.push(selector);
-				if (selector === requestedSelector) {
-					mock.push({ throw: "503 overloaded_error: provider returned error" });
-				} else if (selector === fallbackSelector && ++fallbackRequests === 1) {
-					mock.push({
-						content: [
-							{ type: "thinking", thinking: "Opus 5.5 reasoning.", thinkingSignature: "opus-5-5-signature" },
-							"Answered on the fallback",
-						],
-					});
-				} else if (selector === fallbackSelector) {
-					mock.push({
-						content: [],
-						stopReason: "error",
-						stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
-						errorMessage: "Refusal (cyber): Declined.",
-					});
-				} else if (selector === nextSelector) {
-					mock.push({ content: ["Answered on the next chain entry"] });
-				} else {
-					throw new Error(`Unexpected model requested: ${selector}`);
-				}
-				return mock.stream(model, context, options);
-			},
-		});
-
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxRetries": 1,
-			"retry.fallbackChains": {
-				[requestedSelector]: [fallbackSelector, nextSelector],
-				[fallbackSelector]: [`${fallbacksOwnNext.provider}/${fallbacksOwnNext.id}`],
-			},
-		});
-		const sessionManager = SessionManager.inMemory();
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
-		session.subscribe(event => {
-			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
-		});
-
-		await session.prompt("Fail over to the Anthropic fallback");
-		await session.waitForIdle();
-		// The mock stamps its own identity on replies; give the answered turn the fallback's, as the
-		// Anthropic provider would.
-		const fallbackTurn = agent.state.messages.findLast(
-			(message): message is AssistantMessage => message.role === "assistant",
-		);
-		if (!fallbackTurn) throw new Error("Expected the fallback's answer");
-		fallbackTurn.api = fallback.api;
-		fallbackTurn.provider = fallback.provider;
-		fallbackTurn.model = fallback.id;
-
-		await session.prompt("Declined by the fallback's classifier");
-		await session.waitForIdle();
-
-		expect(requestedModels).toEqual([requestedSelector, fallbackSelector, fallbackSelector, nextSelector]);
-		expect(fallbackAppliedEvents.map(event => `${event.from} -> ${event.to}`)).toEqual([
-			`${requestedSelector} -> ${fallbackSelector}`,
-			`${fallbackSelector} -> ${nextSelector}`,
-		]);
-		expect(session.model?.id).toBe(next.id);
-		expect(getLastAssistantMessage(session).content).toEqual([
-			{ type: "text", text: "Answered on the next chain entry" },
-		]);
-		const modelChanges = sessionManager.getEntries().filter(entry => entry.type === "model_change");
-		expect(modelChanges.at(-1)).toMatchObject({ model: nextSelector, role: "fallback" });
-	});
-
-	it("starts a fresh refusal walk on the next turn after an abort cut the previous one short", async () => {
-		// An abort during the fallback's request ends the turn without closing the retry saga, and a
-		// turn an extension starts skips prompt()'s per-prompt reset, so neither a new saga nor a new
-		// prompt is there to drop the walk. The walk the aborted turn left must still not follow it.
-		const modelA = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const modelB = getBundledModel("openai", "gpt-4o-mini");
-		if (!modelA || !modelB) {
-			throw new Error("Expected bundled test models to exist");
-		}
-		const selectorA = `${modelA.provider}/${modelA.id}`;
-		const selectorB = `${modelB.provider}/${modelB.id}`;
-
-		const requestedModels: string[] = [];
-		// What each request does, in order: the first prompt is declined and its fallback's request
-		// is still waiting when the user aborts; the next prompt is declined once and then answered.
-		const script = ["decline", "wait", "decline", "answer"];
-		const fallbackRequestStarted = Promise.withResolvers<void>();
-		const mock = createMockModel();
-		const agent = new Agent({
-			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: modelA, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: (model, context, options) => {
-				requestedModels.push(`${model.provider}/${model.id}`);
-				const step = script[requestedModels.length - 1];
-				if (step === "wait") {
-					fallbackRequestStarted.resolve();
-					mock.push({ content: ["never delivered"], delayMs: 60_000 });
-				} else if (step === "answer") {
-					mock.push({ content: ["answered after the abort"] });
-				} else if (step === "decline") {
-					mock.push({
-						content: [],
-						stopReason: "error",
-						stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
-						errorMessage: "Refusal (cyber): Declined.",
-					});
-				} else {
-					throw new Error(`Unexpected request ${requestedModels.length}: ${model.provider}/${model.id}`);
-				}
-				return mock.stream(model, context, options);
-			},
-		});
-
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxRetries": 3,
-			"retry.fallbackChains": { [selectorA]: [selectorB], [selectorB]: [selectorA] },
-		});
-		settings.setModelRole("default", selectorA);
-
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-
-		const firstPrompt = session.prompt("Refused, then aborted on the fallback");
-		await fallbackRequestStarted.promise;
-		await session.abort();
-		await firstPrompt;
-		expect(requestedModels).toEqual([selectorA, selectorB]);
-
-		await session.sendCustomMessage(
-			{ customType: "test-nudge", content: "Carry on", display: false },
-			{ triggerTurn: true },
-		);
-		await session.waitForIdle();
-
-		expect(requestedModels.slice(2)).toEqual([selectorB, selectorA]);
-		const reply = session.agent.state.messages.at(-1);
-		expect(reply?.role === "assistant" ? reply.content : undefined).toEqual([
-			{ type: "text", text: "answered after the abort" },
-		]);
 	});
 
 	it("emits auto_retry_end when a mid-saga classifier refusal has no fallback to switch to", async () => {
@@ -5622,7 +5840,11 @@ describe("AgentSession retry fallback", () => {
 				} else if (calls === 2) {
 					mock.push({
 						stopReason: "error",
-						stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined." },
+						stopDetails: {
+							type: "refusal",
+							category: "cyber",
+							explanation: "Classifier declined.",
+						},
 						errorMessage: refusalMessage,
 					});
 				} else {
@@ -5723,7 +5945,10 @@ describe("AgentSession retry fallback", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
 		const lastAssistant = getLastAssistantMessage(session);
 		expect(lastAssistant.stopReason).toBe("stop");
-		expect(lastAssistant.content).toContainEqual({ type: "text", text: "Recovered after Google quota retry" });
+		expect(lastAssistant.content).toContainEqual({
+			type: "text",
+			text: "Recovered after Google quota retry",
+		});
 	});
 
 	it("keeps retry on the primary model when retry model fallback is disabled", async () => {
@@ -5803,7 +6028,10 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(primaryModel.id);
 		const lastAssistant = getLastAssistantMessage(session);
 		expect(lastAssistant.stopReason).toBe("stop");
-		expect(lastAssistant.content).toContainEqual({ type: "text", text: "Recovered on primary retry" });
+		expect(lastAssistant.content).toContainEqual({
+			type: "text",
+			text: "Recovered on primary retry",
+		});
 	});
 
 	it("auto-retries preserved OpenAI first-event timeout errors", async () => {
@@ -5861,7 +6089,10 @@ describe("AgentSession retry fallback", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
 		const lastAssistant = getLastAssistantMessage(session);
 		expect(lastAssistant.stopReason).toBe("stop");
-		expect(lastAssistant.content).toContainEqual({ type: "text", text: "Recovered after OpenAI timeout" });
+		expect(lastAssistant.content).toContainEqual({
+			type: "text",
+			text: "Recovered after OpenAI timeout",
+		});
 	});
 
 	it("auto-retries stream stall errors", async () => {
@@ -5919,7 +6150,10 @@ describe("AgentSession retry fallback", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
 		const lastAssistant = getLastAssistantMessage(session);
 		expect(lastAssistant.stopReason).toBe("stop");
-		expect(lastAssistant.content).toContainEqual({ type: "text", text: "Recovered after stream stall" });
+		expect(lastAssistant.content).toContainEqual({
+			type: "text",
+			text: "Recovered after stream stall",
+		});
 	});
 
 	it("auto-retries OpenAI processing-request transient errors", async () => {
@@ -6136,7 +6370,10 @@ describe("AgentSession retry fallback", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
 		const lastAssistant = getLastAssistantMessage(session);
 		expect(lastAssistant.stopReason).toBe("stop");
-		expect(lastAssistant.content).toContainEqual({ type: "text", text: "Recovered after ZDR reset" });
+		expect(lastAssistant.content).toContainEqual({
+			type: "text",
+			text: "Recovered after ZDR reset",
+		});
 	});
 
 	it("auto-retries Anthropic stream-envelope failures before message_stop", async () => {
@@ -6194,7 +6431,10 @@ describe("AgentSession retry fallback", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
 		const lastAssistant = getLastAssistantMessage(session);
 		expect(lastAssistant.stopReason).toBe("stop");
-		expect(lastAssistant.content).toContainEqual({ type: "text", text: "Recovered after Anthropic envelope retry" });
+		expect(lastAssistant.content).toContainEqual({
+			type: "text",
+			text: "Recovered after Anthropic envelope retry",
+		});
 	});
 
 	it("falls back on mid-stream Anthropic envelope failures without same-model retries", async () => {
@@ -6297,7 +6537,9 @@ describe("AgentSession retry fallback", () => {
 			},
 			streamFn: (requestedModel, context, options) => {
 				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
-				mock.push({ throw: requestedModels.length === 1 ? retryableError : terminalError });
+				mock.push({
+					throw: requestedModels.length === 1 ? retryableError : terminalError,
+				});
 				return mock.stream(requestedModel, context, options);
 			},
 		});
@@ -6321,7 +6563,11 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryEndEvents).toEqual([
-			expect.objectContaining({ success: false, attempt: 1, finalError: terminalError }),
+			expect.objectContaining({
+				success: false,
+				attempt: 1,
+				finalError: terminalError,
+			}),
 		]);
 		expect(session.retryAttempt).toBe(0);
 		expect(getLastAssistantMessage(session).stopReason).toBe("error");
@@ -6485,9 +6731,13 @@ describe("AgentSession retry fallback", () => {
 				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
 				if (requestedModel.provider === primaryModel.provider && primaryAttempts === 0) {
 					primaryAttempts += 1;
-					mock.push({ throw: `rate limit exceeded retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}` });
+					mock.push({
+						throw: `rate limit exceeded retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}`,
+					});
 				} else {
-					mock.push({ content: [`ok:${requestedModel.provider}/${requestedModel.id}`] });
+					mock.push({
+						content: [`ok:${requestedModel.provider}/${requestedModel.id}`],
+					});
 				}
 				return mock.stream(requestedModel, context, options);
 			},
@@ -6526,7 +6776,9 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels, { retryAfterMs: 200 });
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			retryAfterMs: 200,
+		});
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -6598,7 +6850,12 @@ describe("AgentSession retry fallback", () => {
 		const mock = createMockModel();
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				// Only the fallback ever produces anything; the primary rate-limits on
@@ -6618,7 +6875,9 @@ describe("AgentSession retry fallback", () => {
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 2,
-			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
 			"retry.fallbackRevertPolicy": "cooldown-expiry",
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
@@ -6674,7 +6933,12 @@ describe("AgentSession retry fallback", () => {
 		const mock = createMockModel();
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: fastModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: fastModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				// Fast rejects the request; the base model answers it.
@@ -6687,7 +6951,10 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 
-		const settings = Settings.isolated({ "compaction.enabled": false, "retry.baseDelayMs": 5 });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+		});
 		settings.setModelRole("default", `${fastModel.provider}/${fastModel.id}`);
 		session = new AgentSession({
 			agent,
@@ -6739,7 +7006,10 @@ describe("AgentSession retry fallback", () => {
 				providers: {
 					openai: {
 						modelOverrides: {
-							"gpt-4o-mini": { contextWindow: 4000, contextPromotionTarget: "openai/gpt-4o" },
+							"gpt-4o-mini": {
+								contextWindow: 4000,
+								contextPromotionTarget: "openai/gpt-4o",
+							},
 							"gpt-4o": { contextWindow: 1_000_000 },
 						},
 					},
@@ -7006,7 +7276,10 @@ describe("AgentSession retry fallback", () => {
 					},
 					openai: {
 						modelOverrides: {
-							"gpt-4o-mini": { contextWindow: 4000, contextPromotionTarget: "openai/gpt-4o" },
+							"gpt-4o-mini": {
+								contextWindow: 4000,
+								contextPromotionTarget: "openai/gpt-4o",
+							},
 							"gpt-4o": { contextWindow: 1_000_000 },
 						},
 					},
@@ -7220,7 +7493,10 @@ describe("AgentSession retry fallback", () => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				// The first mid-stream drop gets one same-model retry before fallback selection.
 				if (requestCount <= 2) return transportErrorAfterToolCallStream(model, toolCall);
-				const mock = createMockModel({ id: model.id, provider: model.provider });
+				const mock = createMockModel({
+					id: model.id,
+					provider: model.provider,
+				});
 				mock.push({ content: ["Recovered on a fitting fallback"] });
 				return mock.stream(mock, context, options);
 			},
@@ -7346,7 +7622,9 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels, { retryAfterMs: 200 });
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			retryAfterMs: 200,
+		});
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -7574,7 +7852,12 @@ describe("AgentSession retry fallback", () => {
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: () => {
 				throw new Error("Not exercised");
 			},
@@ -7626,7 +7909,12 @@ describe("AgentSession retry fallback", () => {
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: () => {
 				throw new Error("Not exercised");
 			},
@@ -7681,7 +7969,12 @@ describe("AgentSession retry fallback", () => {
 			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 			const agent = new Agent({
 				getApiKey: model => `${model.provider}-test-key`,
-				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				initialState: {
+					model: primaryModel,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
 				streamFn: () => {
 					throw new Error("Not exercised");
 				},
@@ -7736,7 +8029,9 @@ describe("AgentSession retry fallback", () => {
 		const laterPair = copilotLongContextPair("gpt-5.6-sol");
 		auth.keys.setRuntime("github-copilot", "ghp_startup_validation_token");
 		const cacheDbPath = path.join(dir.path(), "models.db");
-		const cacheProviderId = resolveModelCacheProviderId("github-copilot", { apiKey: "ghp_startup_validation_token" });
+		const cacheProviderId = resolveModelCacheProviderId("github-copilot", {
+			apiKey: "ghp_startup_validation_token",
+		});
 		writeModelCache(cacheProviderId, Date.now(), cachedPair, true, "", cacheDbPath, [cachedPair[0]]);
 		const registry = new ModelRegistry(auth, path.join(dir.path(), "models.yml"));
 		await registry.hydrateCredentialScopedModelCaches();
@@ -7764,7 +8059,12 @@ describe("AgentSession retry fallback", () => {
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: () => {
 				throw new Error("Not exercised");
 			},
@@ -7955,7 +8255,12 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({ "compaction.enabled": false });
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: staleModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: staleModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: () => {
 				throw new Error("Not exercised");
 			},
@@ -8013,7 +8318,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: () => {
 				throw new Error("Not exercised");
 			},
@@ -8046,7 +8356,12 @@ describe("AgentSession retry fallback", () => {
 		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: () => {
 				throw new Error("Not exercised");
 			},
@@ -8109,7 +8424,10 @@ describe("AgentSession retry fallback", () => {
 			parameters: toolSchema,
 			async execute(_toolCallId, params) {
 				toolExecutions += 1;
-				return { content: [{ type: "text", text: params.value }], details: params };
+				return {
+					content: [{ type: "text", text: params.value }],
+					details: params,
+				};
 			},
 		};
 
@@ -8178,7 +8496,10 @@ describe("AgentSession retry fallback", () => {
 			throw new Error(`Expected synthetic tool result, got ${syntheticResult.role}`);
 		}
 		expect(syntheticResult.toolCallId).toBe("malformed-call");
-		expect(syntheticResult.details).toMatchObject({ executed: false, source: "assistant_stop_error" });
+		expect(syntheticResult.details).toMatchObject({
+			executed: false,
+			source: "assistant_stop_error",
+		});
 		const recoveredAssistant = messages[3];
 		if (recoveredAssistant.role !== "assistant") {
 			throw new Error(`Expected recovered assistant message, got ${recoveredAssistant.role}`);
@@ -8201,7 +8522,11 @@ describe("AgentSession retry fallback", () => {
 		const requestContexts: Message[][] = [];
 		const mock = createMockModel({
 			responses: [
-				{ content: [transcribedCall], stopReason: "error", errorMessage: malformedError },
+				{
+					content: [transcribedCall],
+					stopReason: "error",
+					errorMessage: malformedError,
+				},
 				{ content: ["Recovered after transcribed function call"] },
 			],
 		});
@@ -8482,12 +8807,21 @@ describe("AgentSession retry fallback", () => {
 			const mock = createMockModel();
 			const agent = new Agent({
 				getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
-				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
 				// The coding-agent converter turns the extension message into model
 				// input, as it does in a real session.
 				convertToLlm,
 				streamFn: (requestedModel, context, options) => {
-					mock.push(scenario.responses[mock.calls.length] ?? { content: ["Woke for the delivery."] });
+					mock.push(
+						scenario.responses[mock.calls.length] ?? {
+							content: ["Woke for the delivery."],
+						},
+					);
 					return mock.stream(requestedModel, context, options);
 				},
 			});
@@ -8498,7 +8832,12 @@ describe("AgentSession retry fallback", () => {
 			});
 			settings.setModelRole("default", `${model.provider}/${model.id}`);
 			const sessionManager = SessionManager.inMemory();
-			session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings,
+				modelRegistry,
+			});
 			const { retryEndEvents } = trackRetryEvents(session);
 
 			let failedWrites = 0;
@@ -8531,7 +8870,12 @@ describe("AgentSession retry fallback", () => {
 
 			const callsBeforeDelivery = mock.calls.length;
 			await session.sendCustomMessage(
-				{ customType: "test-delivery", content: delivery, display: true, attribution: "agent" },
+				{
+					customType: "test-delivery",
+					content: delivery,
+					display: true,
+					attribution: "agent",
+				},
 				{ deliverAs: "steer", triggerTurn: true },
 			);
 			await session.waitForIdle();
@@ -8564,13 +8908,21 @@ describe("AgentSession retry fallback", () => {
 					{ throw: transientError },
 					{
 						stopReason: "error",
-						stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined." },
+						stopDetails: {
+							type: "refusal",
+							category: "cyber",
+							explanation: "Classifier declined.",
+						},
 						errorMessage: "Refusal (cyber): Classifier declined this retried turn.",
 					},
 				],
 				settings: { "retry.maxRetries": 2 },
 				failingWrite: "error-turn-after-first-retry",
-				end: { success: false, attempt: 1, finalError: "Refusal (cyber): Classifier declined this retried turn." },
+				end: {
+					success: false,
+					attempt: 1,
+					finalError: "Refusal (cyber): Classifier declined this retried turn.",
+				},
 			});
 		});
 
@@ -8587,10 +8939,16 @@ describe("AgentSession retry fallback", () => {
 				responses: [{ throw: transientError }, { throw: "unrecoverable model quirk" }],
 				settings: {
 					"retry.maxRetries": 3,
-					"retry.fallbackChains": { "anthropic/*": [`${fallbackModel.provider}/${fallbackModel.id}`] },
+					"retry.fallbackChains": {
+						"anthropic/*": [`${fallbackModel.provider}/${fallbackModel.id}`],
+					},
 				},
 				failingWrite: "error-turn-after-first-retry",
-				end: { success: false, attempt: 1, finalError: "unrecoverable model quirk" },
+				end: {
+					success: false,
+					attempt: 1,
+					finalError: "unrecoverable model quirk",
+				},
 			});
 		});
 
@@ -8635,7 +8993,12 @@ describe("AgentSession retry fallback", () => {
 		const mock = createMockModel();
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				// The primary serves one real turn, then both models fail: the chain
@@ -8653,7 +9016,9 @@ describe("AgentSession retry fallback", () => {
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 1,
-			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
@@ -8716,7 +9081,9 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
-			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
@@ -8758,12 +9125,19 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
-			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+		});
 
 		await session.prompt("Fail over to the fallback");
 		await session.waitForIdle();
@@ -8798,7 +9172,12 @@ describe("AgentSession retry fallback", () => {
 		const mock = createMockModel();
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				// Primary fails, candidate A serves, then everything fails again so
@@ -8881,10 +9260,17 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const requestedModels: string[] = [];
-		const mock = createMockModel({ responses: [{ content: ["served on the fallback"] }] });
+		const mock = createMockModel({
+			responses: [{ content: ["served on the fallback"] }],
+		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return mock.stream(model, context, options);
@@ -8893,7 +9279,9 @@ describe("AgentSession retry fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.usageAwareFallback": true,
-			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
@@ -8956,7 +9344,12 @@ describe("AgentSession retry fallback", () => {
 		const requestedModels: string[] = [];
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: model => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				return requestedModels.length === 1
@@ -9019,7 +9412,12 @@ describe("AgentSession retry fallback", () => {
 		const requestedModels: string[] = [];
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				// A permanent route failure: retrying it can never succeed.
@@ -9068,7 +9466,12 @@ describe("AgentSession retry fallback", () => {
 		const requestedModels: string[] = [];
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
 				mock.push({ throw: "500 upstream is unwell" });
@@ -9083,7 +9486,9 @@ describe("AgentSession retry fallback", () => {
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxRetries": 2,
-			"retry.fallbackChains": { [primarySelector]: ["openrouter/glm-5.2:high"] },
+			"retry.fallbackChains": {
+				[primarySelector]: ["openrouter/glm-5.2:high"],
+			},
 		});
 
 		session = new AgentSession({
@@ -9117,7 +9522,12 @@ describe("AgentSession retry fallback", () => {
 		const requestedModels: string[] = [];
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
-			initialState: { model: routedPrimary, systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: {
+				model: routedPrimary,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
 			streamFn: (requestedModel, context, options) => {
 				const route = (requestedModel.compat as { openRouterRouting?: { only?: string[] } } | undefined)
 					?.openRouterRouting?.only?.[0];

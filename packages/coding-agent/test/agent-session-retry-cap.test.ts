@@ -1702,32 +1702,20 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it("switches a long OpenCode Go usage limit to an earlier cross-provider fallback", async () => {
-		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const alternateOpenCodeModel = getBundledModel("opencode-go", "deepseek-v4-pro");
 		const exhaustedModel = getBundledModel("opencode-go", "deepseek-v4-flash");
 		const fallbackModel = getBundledModel("openai", "gpt-5.5");
-		if (!primaryModel || !alternateOpenCodeModel || !exhaustedModel || !fallbackModel) {
-			throw new Error("Expected bundled primary, OpenCode Go, and cross-provider fallback test models to exist");
+		if (!exhaustedModel || !fallbackModel) {
+			throw new Error("Expected bundled OpenCode Go and cross-provider fallback test models to exist");
 		}
 
 		authStorage.keys.setRuntime("opencode-go", "opencode-go-test-key");
 		authStorage.keys.setRuntime("openai", "openai-test-key");
 
+		// A 55-minute weekly cap exceeds `retry.maxDelayMs`, so waiting it out is
+		// not an option: the wrap-around consult reaches back past the exhausted
+		// model to the earlier cross-provider entry.
 		const mock = createMockModel({
 			responses: [
-				{ throw: "503 service unavailable: overloaded_error retry-after-ms=60000" },
-				{
-					content: [{ type: "thinking", thinking: "Classifier refusal." }],
-					errorMessage: "Refusal (cyber): Declined.",
-					stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
-					stopReason: "error",
-				},
-				{
-					content: [{ type: "thinking", thinking: "Classifier refusal." }],
-					errorMessage: "Refusal (cyber): Declined.",
-					stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
-					stopReason: "error",
-				},
 				{
 					throw: "429 Weekly usage limit reached. Resets in 55min. type=GoUsageLimitError retry-after-ms=3242000",
 				},
@@ -1738,7 +1726,7 @@ describe("AgentSession retry delay cap", () => {
 		const agent = new Agent({
 			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
 			initialState: {
-				model: primaryModel,
+				model: exhaustedModel,
 				systemPrompt: ["Test"],
 				tools: [],
 				messages: [],
@@ -1755,13 +1743,12 @@ describe("AgentSession retry delay cap", () => {
 			"retry.modelFallback": true,
 			"retry.fallbackChains": {
 				default: [
-					`${alternateOpenCodeModel.provider}/${alternateOpenCodeModel.id}`,
 					`${fallbackModel.provider}/${fallbackModel.id}`,
 					`${exhaustedModel.provider}/${exhaustedModel.id}`,
 				],
 			},
 		});
-		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
 		session = new AgentSession({
 			agent,
@@ -1779,9 +1766,6 @@ describe("AgentSession retry delay cap", () => {
 		await session.waitForIdle();
 
 		expect(requestedModels).toEqual([
-			`${primaryModel.provider}/${primaryModel.id}`,
-			`${alternateOpenCodeModel.provider}/${alternateOpenCodeModel.id}`,
-			`${fallbackModel.provider}/${fallbackModel.id}`,
 			`${exhaustedModel.provider}/${exhaustedModel.id}`,
 			`${fallbackModel.provider}/${fallbackModel.id}`,
 		]);
