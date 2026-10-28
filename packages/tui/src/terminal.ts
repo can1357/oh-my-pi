@@ -727,6 +727,11 @@ export interface Terminal {
 	 */
 	onSixelSupport?(callback: (supported: boolean) => void): void;
 	/**
+	 * Subscribe to OSC 7501 feature-query results across terminal restarts.
+	 * A late subscriber receives the current answer; unsubscribe on host teardown.
+	 */
+	onProgramStatusSupport?(callback: (supported: boolean) => void): () => void;
+	/**
 	 * Register a callback fired once the startup Glyph Protocol handshake
 	 * resolves (see {@link GlyphProtocolReportHandler}). A subscriber that
 	 * arrives after the handshake already resolved is called immediately with
@@ -772,6 +777,7 @@ type Da1SentinelOwner =
 	| { kind: "keyboard" }
 	| { kind: "osc11" }
 	| { kind: "privateMode"; mode: number }
+	| { kind: "programStatus" }
 	| { kind: "osc99Probe"; id: string }
 	| { kind: "glyphProtocol"; phase: "support" | "confirm" }
 	| { kind: "tsp" }
@@ -932,6 +938,10 @@ export class ProcessTerminal implements Terminal {
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
+	#programStatusPending = false;
+	#programStatusReplyBuffer = "";
+	#programStatusResult: boolean | undefined;
+	#programStatusCallbacks = new Set<(supported: boolean) => void>();
 	/**
 	 * Handshake phase: `support` awaits the `s` reply, `confirm` awaits the `q`
 	 * coverage reply sent after the bundle was written.
@@ -1071,6 +1081,12 @@ export class ProcessTerminal implements Terminal {
 
 	onPrivateModeReport(callback: PrivateModeReportHandler): void {
 		this.#privateModeCallbacks.push(callback);
+	}
+
+	onProgramStatusSupport(callback: (supported: boolean) => void): () => void {
+		this.#programStatusCallbacks.add(callback);
+		if (this.#programStatusResult !== undefined) callback(this.#programStatusResult);
+		return () => this.#programStatusCallbacks.delete(callback);
 	}
 
 	onGlyphProtocolReport(callback: GlyphProtocolReportHandler): void {
@@ -1249,6 +1265,9 @@ export class ProcessTerminal implements Terminal {
 		// same DA1 sentinel FIFO as OSC 11/DECRQM so unsupported terminals resolve
 		// without leaking probe bytes to application input.
 		this.#queryOsc99Support();
+		// OSC 7501 support requires an actual terminal reply; merely writing a
+		// report does not establish that a status record exists to protect.
+		this.#queryProgramStatusSupport();
 
 		// Glyph Protocol support query (`s` verb), same DA1 sentinel FIFO. A reply
 		// triggers the bundled icon registration so the nerd symbol preset renders
@@ -1403,6 +1422,7 @@ export class ProcessTerminal implements Terminal {
 				this.#inBandResizeBuffer = "";
 				this.#osc11ResponseBuffer = "";
 				this.#osc99ResponseBuffer = "";
+				this.#programStatusReplyBuffer = "";
 				this.#glyphProtocolReplyBuffer = "";
 				this.#tspReplyBuffer = "";
 				for (const key of win32Keys) this.#stdinSequenceHandler?.(key);
@@ -1428,6 +1448,7 @@ export class ProcessTerminal implements Terminal {
 				this.#inBandResizeBuffer.length === 0 &&
 				this.#osc11ResponseBuffer.length === 0 &&
 				this.#osc99ResponseBuffer.length === 0 &&
+				this.#programStatusReplyBuffer.length === 0 &&
 				this.#glyphProtocolReplyBuffer.length === 0 &&
 				this.#tspReplyBuffer.length === 0
 			) {
@@ -1597,6 +1618,10 @@ export class ProcessTerminal implements Terminal {
 						this.#enableModifyOtherKeysFallback();
 						break;
 					}
+					case "programStatus": {
+						this.#resolveProgramStatusSupport(false);
+						break;
+					}
 					case "osc99Probe": {
 						this.#resolveOsc99Support(owner.id, false);
 						break;
@@ -1699,6 +1724,35 @@ export class ProcessTerminal implements Terminal {
 					const [, meta, payload] = osc99Match;
 					this.#osc99ResponseBuffer = "";
 					this.#handleOsc99CapabilityResponse(meta!, payload!);
+					return;
+				}
+			}
+
+			// Swallow OSC 7501 feature replies even after their DA1 sentinel:
+			// a delayed terminal answer must not appear in the composer.
+			if (this.#programStatusReplyBuffer || sequence.startsWith("\x1b]7501;")) {
+				if (this.#programStatusReplyBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
+					this.#programStatusReplyBuffer = "";
+				} else {
+					this.#programStatusReplyBuffer += sequence;
+					const reply = this.#programStatusReplyBuffer;
+					if (reply.length > 4096) {
+						this.#programStatusReplyBuffer = "";
+						return;
+					}
+					if (!reply.endsWith("\x07") && !reply.endsWith("\x1b\\")) return;
+					this.#programStatusReplyBuffer = "";
+					const match = /^\x1b\]7501;\?((?::[^\x07\x1b]*)?)(?:\x07|\x1b\\)$/u.exec(reply);
+					if (match) {
+						let states: string[] | undefined;
+						for (const pair of match[1]!.split(":")) {
+							const [key, value] = pair.trim().split("=", 2);
+							if (key === "states") states = value?.split(",").map(state => state.trim()) ?? [];
+						}
+						this.#resolveProgramStatusSupport(
+							states === undefined || (states.includes("working") && states.includes("blocked")),
+						);
+					}
 					return;
 				}
 			}
@@ -1831,6 +1885,38 @@ export class ProcessTerminal implements Terminal {
 		this.#da1SentinelOwners.push({ kind: "osc11" });
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
+	}
+
+	#queryProgramStatusSupport(): void {
+		this.#programStatusPending = false;
+		this.#programStatusReplyBuffer = "";
+		this.#programStatusResult = undefined;
+		// Multiplexers can consume the query or leak its reply into the pane;
+		// don't assume their outer terminal's support reaches this process.
+		if (this.#dead || isInsideTerminalMultiplexer($env)) return;
+		if (isBunTestRuntime() && $env.PI_TUI_PROGRAM_STATUS_PROBE !== "1") return;
+		this.#programStatusPending = true;
+		this.#da1SentinelOwners.push({ kind: "programStatus" });
+		this.#safeWrite("\x1b]7501;?\x1b\\\x1b[c");
+	}
+
+	#resolveProgramStatusSupport(supported: boolean): void {
+		if (!this.#programStatusPending) return;
+		this.#programStatusPending = false;
+		this.#programStatusReplyBuffer = "";
+		this.#publishProgramStatusSupport(supported);
+	}
+
+	#publishProgramStatusSupport(supported: boolean): void {
+		if (this.#programStatusResult === supported) return;
+		this.#programStatusResult = supported;
+		for (const callback of this.#programStatusCallbacks) {
+			try {
+				callback(supported);
+			} catch {
+				// A subscriber must not interrupt terminal input processing.
+			}
+		}
 	}
 
 	#shouldQueryOsc99Support(): boolean {
@@ -2432,6 +2518,11 @@ export class ProcessTerminal implements Terminal {
 		this.#osc99ResponseBuffer = "";
 		this.#osc99Capabilities.clear();
 		setOsc99Supported(false);
+		this.#programStatusPending = false;
+		this.#programStatusReplyBuffer = "";
+		// A resumed TUI may own a different terminal: keep subscribers, but
+		// release the previous receiver's support until the next probe answers.
+		if (this.#programStatusResult === true) this.#publishProgramStatusSupport(false);
 		this.#glyphProtocolPhase = "idle";
 		this.#glyphProtocolResult = undefined;
 		this.#glyphProtocolReplyBuffer = "";

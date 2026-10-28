@@ -4,11 +4,11 @@ import {
 	initProgramStatus,
 	resendProgramStatus,
 	setProgramStatusEnabled,
+	setProgramStatusSupported,
 	setRunStatus,
 } from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
-import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 
 // OSC 7501 Program Status Protocol reports, as the terminal parses them:
@@ -126,48 +126,33 @@ describe("run status OSC 7501 reporting", () => {
 		]);
 	});
 
-	it("keeps prompt navigation on unsupported terminals and suppresses Rex redraws during a live record", () => {
-		// Agent start reports `working` before the submitted bubble's first paint.
-		// Without a receiver gate, that bubble can scroll away without a prompt mark.
-		const envKeys = [...TERMINAL_MULTIPLEXER_ENV_KEYS, "REX_SESSION", "REX_BLOCK"];
-		const saved: Record<string, string | undefined> = {};
-		for (const key of envKeys) {
-			saved[key] = Bun.env[key];
-			delete Bun.env[key];
-		}
-		const marked = (text: string) => new UserMessageComponent(text).render(40).join("").includes("\x1b]133;A\x07");
-		try {
-			setRunStatus({ state: "working" });
-			expect(marked("first prompt on a terminal without OSC 7501")).toBe(true);
-			setRunStatus({ state: "blocked", kind: "question" });
-			expect(marked("another prompt on an unsupported terminal")).toBe(true);
+	it("keeps prompt navigation before negotiation and suppresses redraws only after confirmation", () => {
+		const bubble = new UserMessageComponent("Run sleep 15");
+		const marked = () => bubble.render(40).join("").includes("\x1b]133;A\x07");
 
-			Bun.env.REX_SESSION = "session:123";
-			Bun.env.REX_BLOCK = "block:456";
-			setRunStatus({ state: "working" });
-			expect(marked("Rex first paint while working")).toBe(false);
-			setRunStatus({ state: "blocked", kind: "question" });
-			expect(marked("Rex redraw while blocked")).toBe(false);
-			setProgramStatusEnabled(false);
-			expect(marked("reporting disabled")).toBe(true);
-			setProgramStatusEnabled(true);
-			expect(marked("reporting restored")).toBe(false);
-			setRunStatus({ state: "done" });
-			expect(marked("completed turn")).toBe(true);
+		// An unknown terminal may ignore OSC 7501; `agent_start` reports
+		// working before this bubble's first paint.
+		setRunStatus({ state: "working" });
+		expect(marked()).toBe(true);
+		setProgramStatusSupported(true);
+		expect(marked()).toBe(false);
+		setRunStatus({ state: "blocked", kind: "question" });
+		expect(marked()).toBe(false);
+		setProgramStatusSupported(false);
+		expect(marked()).toBe(true);
 
-			setRunStatus({ state: "working" });
-			Bun.env.TMUX = "/tmp/tmux/default,1,0";
-			setRunStatus({ state: "working" });
-			expect(marked("nested tmux does not forward OSC 7501")).toBe(true);
-			delete Bun.env.TMUX;
-			setRunStatus({ state: "working" });
-			disposeProgramStatus();
-			expect(marked("UI teardown")).toBe(true);
-		} finally {
-			for (const key of envKeys) {
-				if (saved[key] === undefined) delete Bun.env[key];
-				else Bun.env[key] = saved[key];
-			}
-		}
+		setProgramStatusSupported(true);
+		setProgramStatusEnabled(false);
+		expect(marked()).toBe(true);
+		setProgramStatusEnabled(true);
+		expect(marked()).toBe(false);
+		setRunStatus({ state: "done" });
+		expect(marked()).toBe(true);
+		setRunStatus({ state: "working" });
+		disposeProgramStatus();
+		expect(marked()).toBe(true);
+		initProgramStatus();
+		setRunStatus({ state: "working" });
+		expect(marked()).toBe(true);
 	});
 });
