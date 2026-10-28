@@ -1239,6 +1239,20 @@ class QueueUpdateEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class UserWaitStartEvent:
+    """The session opened a dialog only a person can answer and the turn is held until it settles."""
+    type: Literal["user_wait_start"] = "user_wait_start"
+    prompt: str
+    """What the session is asking a person to decide."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class UserWaitEndEvent:
+    """The last dialog waiting on a person settled; the turn goes on."""
+    type: Literal["user_wait_end"] = "user_wait_end"
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class ReadyEvent:
     """First frame after startup; transport fields are absent on servers without protocol v2."""
     type: Literal["ready"] = "ready"
@@ -1677,7 +1691,7 @@ UsageLimitState: TypeAlias = UsageLimitLowPriority | UsageLimitWrapUp
 """Provider-neutral state of an account past its usage limit, discriminated by `stage`."""
 
 
-RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
+RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent | UserWaitStartEvent | UserWaitEndEvent
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
@@ -2663,6 +2677,21 @@ def parse_queue_update_event(value: object, path: str = "QueueUpdateEvent") -> Q
     )
 
 
+def parse_user_wait_start_event(value: object, path: str = "UserWaitStartEvent") -> UserWaitStartEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["user_wait_start"]]', literal(frozenset({"user_wait_start"}))), path)
+    return UserWaitStartEvent(
+        prompt=required(payload, "prompt", decode_str, path),
+    )
+
+
+def parse_user_wait_end_event(value: object, path: str = "UserWaitEndEvent") -> UserWaitEndEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["user_wait_end"]]', literal(frozenset({"user_wait_end"}))), path)
+    return UserWaitEndEvent(
+    )
+
+
 def parse_ready_event(value: object, path: str = "ReadyEvent") -> ReadyEvent:
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["ready"]]', literal(frozenset({"ready"}))), path)
@@ -3200,6 +3229,8 @@ _RPC_AGENT_EVENT_CASES: Final[dict[str, Decoder[RpcAgentEvent]]] = {
         "thinking_level_changed": parse_thinking_level_changed_event,
         "goal_updated": parse_goal_updated_event,
         "queue_update": parse_queue_update_event,
+        "user_wait_start": parse_user_wait_start_event,
+        "user_wait_end": parse_user_wait_end_event,
 }
 
 
@@ -3259,6 +3290,8 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "thinking_level_changed": parse_rpc_agent_event,
         "goal_updated": parse_rpc_agent_event,
         "queue_update": parse_rpc_agent_event,
+        "user_wait_start": parse_rpc_agent_event,
+        "user_wait_end": parse_rpc_agent_event,
 }
 
 
@@ -3927,6 +3960,14 @@ class WireClient:
         """Subscribe to `queue_update`: Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes."""
         return self._listen("queue_update", listener)
 
+    def on_user_wait_start(self, listener: Callable[[UserWaitStartEvent], None]) -> Callable[[], None]:
+        """Subscribe to `user_wait_start`: The session opened a dialog only a person can answer and the turn is held until it settles."""
+        return self._listen("user_wait_start", listener)
+
+    def on_user_wait_end(self, listener: Callable[[UserWaitEndEvent], None]) -> Callable[[], None]:
+        """Subscribe to `user_wait_end`: The last dialog waiting on a person settled; the turn goes on."""
+        return self._listen("user_wait_end", listener)
+
 
 __all__ = [
     "AbortAndRestoreQueueResult",
@@ -4127,6 +4168,8 @@ __all__ = [
     "UsageLimitWrapUp",
     "UserContent",
     "UserMessage",
+    "UserWaitEndEvent",
+    "UserWaitStartEvent",
     "WidgetPlacement",
     "parse_abort_and_restore_queue_result",
     "parse_advisor_cost_changed_event",
@@ -4294,4 +4337,6 @@ __all__ = [
     "parse_usage_limit_wrap_up",
     "parse_user_content",
     "parse_user_message",
+    "parse_user_wait_end_event",
+    "parse_user_wait_start_event",
 ]
