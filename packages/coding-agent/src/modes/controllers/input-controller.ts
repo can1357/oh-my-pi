@@ -1201,10 +1201,15 @@ export class InputController {
 				this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedImages = inputImages;
-			// Mode handlers own the submitted images. Claim them before an input
-			// hook awaits so later typing starts its own image numbering at #1.
+			// Mode handlers claim their images before an input hook awaits so a
+			// retyped mode draft starts its own numbering at #1. Side/lifecycle
+			// commands keep their upstream post-hook claim and paste renumbering.
 			const originalMode = parseSlashCommand(text)?.name;
-			const submittedDraftDetached = originalMode !== undefined && DETACHED_DRAFT_COMMANDS.has(originalMode);
+			const submittedDraftDetached =
+				originalMode === "plan" ||
+				originalMode === "vibe" ||
+				originalMode === "goal" ||
+				originalMode === "guided-goal";
 			if (submittedDraftDetached) this.#dropSubmittedPending(submittedImages);
 
 			// Input hooks pass in submission order with the follow-up key's (see `#submissionHookOrder`):
