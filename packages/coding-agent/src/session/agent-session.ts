@@ -6724,14 +6724,23 @@ export class AgentSession implements SettingsScope {
 		return this.#recovery.servingModel;
 	}
 
-	/** Install the interactive decision surface for reserve-triggered model changes; it waits for the user mid-turn. */
+	/**
+	 * Install the interactive decision surface for reserve-triggered model changes; it waits for the user mid-turn.
+	 *
+	 * The wait ends when `signal` aborts even if the dialog itself never settles
+	 * — a wedged or signal-deaf UI must not leave the session reported as
+	 * blocked after the turn has stopped waiting for it.
+	 */
 	setUsageFallbackConfirmer(confirmer: UsageFallbackConfirmer | undefined): void {
 		this.#usageFallbackConfirmer = confirmer
-			? (confirmation, signal) =>
-					this.waitForUser(
-						() => confirmer(confirmation, signal),
+			? (confirmation, signal) => {
+					const abandoned = Promise.withResolvers<boolean>();
+					signal.addEventListener("abort", () => abandoned.resolve(false), { once: true });
+					return this.waitForUser(
+						() => Promise.race([confirmer(confirmation, signal), abandoned.promise]),
 						`whether to leave ${confirmation.from} at its coding-plan reserve`,
-					)
+					);
+				}
 			: undefined;
 	}
 
