@@ -1,10 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
-
-- Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed a cursor tool result transform failure being swallowed silently; it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
 
@@ -34,6 +30,8 @@
 - Updated Bun engine requirement to ≥1.4.4
 
 ### Fixed
+- Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed a cursor tool result transform failure being swallowed silently; it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed chat-completions context estimates counting past thinking that the request drops (no reasoning replay), which triggered compaction far below the threshold ([#15797](https://github.com/can1357/oh-my-pi/issues/15797), [#17231](https://github.com/can1357/oh-my-pi/pull/17231) by [@ghisguth](https://github.com/ghisguth))
 
