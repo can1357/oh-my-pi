@@ -1660,6 +1660,42 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 });
 
 describe("Ctrl+S prompt stash", () => {
+	for (const followUp of [false, true]) {
+		for (const accepted of [false, true]) {
+			it(`restores a stash only for an accepted side file command (${followUp ? "follow-up" : "Enter"}, accepted=${accepted})`, async () => {
+				const { ctx, editor, customHandlers } = await createContext();
+				const controller = new InputController(ctx);
+				controller.setupKeyHandlers();
+				controller.setupEditorSubmitHandler();
+				ctx.fileSlashCommands = new Set(["sitrep"]);
+				Object.assign(ctx.session, {
+					slashCommands: [{
+						name: "sitrep",
+						description: "Situation report",
+						content: "Report: $ARGUMENTS",
+						side: true,
+						source: "via OMP User",
+					}],
+				});
+				ctx.handleBtwCommand = vi.fn(async () => accepted);
+				editor.setText("saved draft");
+				customHandlers.get("ctrl+s")?.();
+				editor.setText("/sitrep migration");
+				if (followUp) await controller.handleFollowUp();
+				else {
+					editor.setText("");
+					await editor.onSubmit?.("/sitrep migration");
+				}
+				expect(ctx.handleBtwCommand).toHaveBeenCalledWith("Report: migration", undefined, "/sitrep migration");
+				expect(editor.getText()).toBe(accepted ? "saved draft" : "");
+				if (!accepted) {
+					customHandlers.get("ctrl+s")?.();
+					expect(editor.getText()).toBe("saved draft");
+				}
+			});
+		}
+	}
+
 	it("keeps an empty submit from consuming the stash, then restores after a separate prompt", async () => {
 		const { ctx, editor, customHandlers, spies } = await createContext();
 		const controller = new InputController(ctx);
