@@ -191,6 +191,7 @@ describe("submitInteractiveInput", () => {
 		let stashAvailable = true;
 		const mode = createMode();
 		const session = {
+			...skillPromptBuilder,
 			prompt: vi.fn(async (_text: string, options?: { onAccepted?: () => void }) => {
 				options?.onAccepted?.();
 				return true;
@@ -293,6 +294,7 @@ describe("submitInteractiveInput", () => {
 		const onAccepted = vi.fn();
 		const mode = createMode();
 		const session = {
+			...skillPromptBuilder,
 			prompt: vi.fn(async () => false),
 			promptCustomMessage: vi.fn(async () => true),
 			isStreaming: false,
