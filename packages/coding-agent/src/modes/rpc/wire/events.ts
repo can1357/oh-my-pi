@@ -197,10 +197,7 @@ export const eventDefs = {
 		{ type: "'user_wait_start'", prompt: doc("string", "What the session is asking a person to decide.") },
 		"The session opened a dialog only a person can answer and the turn is held until it settles.",
 	),
-	UserWaitEndEvent: doc(
-		{ type: "'user_wait_end'" },
-		"The last dialog waiting on a person settled; the turn goes on.",
-	),
+	UserWaitEndEvent: doc({ type: "'user_wait_end'" }, "The last dialog waiting on a person settled; the turn goes on."),
 
 	RpcAgentEvent: doc(
 		[
