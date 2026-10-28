@@ -6,6 +6,7 @@ import type {
 	ModeCommandResult,
 	SubmittedUserInput,
 } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 
 type Attachments = Pick<SubmittedUserInput, "images" | "imageLinks">;
 
@@ -105,6 +106,7 @@ function createHarness(
 		await submit?.(text);
 	};
 	return {
+		ctx,
 		controller,
 		editor,
 		showError,
@@ -116,6 +118,43 @@ function createHarness(
 }
 
 describe("mode command attachments", () => {
+	for (const withImages of [false, true]) {
+		it(`restores a rejected non-detached side command once with a stash (images=${withImages})`, async () => {
+			const harness = createHarness({});
+			harness.editor.setText("saved draft [Image #1]");
+			harness.controller.handleStash();
+			const images: ImageContent[] = withImages
+				? [{ type: "image", data: "bmV3", mimeType: "image/png" }]
+				: [];
+			const imageLinks = images.map(() => "file:///attempted.png");
+			const command = withImages ? "/tan inspect [Image #1]" : "/tan";
+			harness.editor.setText(command);
+			harness.editor.pendingImages = [...images];
+			harness.editor.pendingImageLinks = [...imageLinks];
+			const onAccepted = vi.fn();
+			harness.ctx.handleTanCommand = vi.fn(async () => false);
+
+			// Bare-word normalization can route to /tan after Enter has already
+			// decided that this submission is non-detached.
+			await executeBuiltinSlashCommand(command, {
+				ctx: harness.ctx,
+				input: { images, imageLinks, onAccepted },
+				draftDetached: false,
+			});
+
+			expect(harness.editor.getText()).toBe(command);
+			expect(harness.editor.pendingImages).toEqual(images);
+			expect(harness.editor.pendingImageLinks).toEqual(imageLinks);
+			expect(onAccepted).not.toHaveBeenCalled();
+			harness.editor.clearDraft();
+			harness.controller.handleStash();
+			expect(harness.editor.getText()).toBe("saved draft [Image #1]");
+			expect(harness.editor.pendingImages).toEqual([
+				{ type: "image", data: "b2xk", mimeType: "image/png" },
+			]);
+		});
+	}
+
 	it("uses extension-replaced images and regenerated links", async () => {
 		const replacements: ImageContent[] = [{ type: "image", data: "bmV3", mimeType: "image/jpeg" }];
 		const harness = createHarness({ images: replacements });
