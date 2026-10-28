@@ -27,12 +27,15 @@ interface FakeHost {
 	host: PauseScreenHost;
 	shown: Component[];
 	statuses: string[];
+	/** Teardown steps in the order the screen ran them. */
+	order: string[];
 	requestCount(): number;
 	hiddenCount(): number;
 }
 function makeHost(rows = 24): FakeHost {
 	const shown: Component[] = [];
 	const statuses: string[] = [];
+	const order: string[] = [];
 	let hidden = 0;
 	let requests = 0;
 	const host: PauseScreenHost = {
@@ -42,6 +45,7 @@ function makeHost(rows = 24): FakeHost {
 				return {
 					hide: () => {
 						hidden++;
+						order.push("hide");
 					},
 					setHidden() {},
 					isHidden: () => false,
@@ -51,13 +55,16 @@ function makeHost(rows = 24): FakeHost {
 			requestRender() {
 				requests++;
 			},
+			renderNow() {
+				order.push("paint");
+			},
 			terminal: { rows },
 		},
 		showStatus(message) {
 			statuses.push(message);
 		},
 	};
-	return { host, shown, statuses, requestCount: () => requests, hiddenCount: () => hidden };
+	return { host, shown, statuses, order, requestCount: () => requests, hiddenCount: () => hidden };
 }
 
 describe("pause screen", () => {
@@ -553,6 +560,28 @@ describe("pause screen", () => {
 			expect(agentPauseGate.paused).toBe(false);
 			expect(hiddenCount()).toBe(1);
 			expect(statuses.some(message => message.includes("Resumed after"))).toBe(true);
+		});
+
+		it("paints the frame that drops the screen before the gate opens", async () => {
+			// The pane must never show PAUSED for a gate that is already open.
+			// `hide()` alone only schedules a frame, and the loops this resume
+			// wakes run first, so the alternate screen keeps the overlay for as
+			// long as they keep the event loop busy (pane %11, 2026-10-28: 4.4 s
+			// after the key, hold timer frozen, while the session already ran).
+			const { host, shown, order } = makeHost();
+			const unsubscribe = agentPauseGate.onChange(paused => {
+				if (!paused) order.push("gate open");
+			});
+			try {
+				const run = runPauseScreen(host);
+				const component = shown[0]; // showOverlay runs before the first await
+				if (!(component instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+				component.handleInput("\x1b");
+				await run;
+			} finally {
+				unsubscribe();
+			}
+			expect(order).toEqual(["hide", "paint", "gate open"]);
 		});
 
 		it("treats ctrl+c as resume, never as abort-and-stay-paused", async () => {
