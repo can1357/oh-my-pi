@@ -2211,7 +2211,9 @@ export class ModelRegistry {
 		// One cache connection for the whole pass: every provider manager reads
 		// (and may write) its row, which would otherwise reopen the database each time.
 		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
-		const runtimeProviders = [...this.#runtimeModelManagers.keys()];
+		const runtimeSources = new Map(
+			[...this.#runtimeModelManagers].map(([provider, manager]) => [provider, manager.sourceId] as const),
+		);
 		const discoveryStates = new Map<string, ProviderDiscoveryState>();
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		const selectedDiscoverableProviders = (
@@ -2230,16 +2232,20 @@ export class ModelRegistry {
 					);
 		const [configuredDiscoveryResults, builtInDiscovery] = await Promise.all([
 			configuredDiscoveriesPromise,
-			this.#discoverBuiltInProviderModels(strategy, providerFilter, discoveryStates),
+			this.#discoverBuiltInProviderModels(strategy, discoveryStates, providerFilter),
 		]);
-		// A source can be removed while discovery is awaiting I/O; its old manager
-		// must not republish rows for a provider that is no longer registered. A
-		// provider rebound by another session keeps these (fresher) results.
-		const removedProviders = new Set(runtimeProviders.filter(provider => !this.#runtimeModelManagers.has(provider)));
-		if (removedProviders.size > 0) {
-			builtInDiscovery.models = builtInDiscovery.models.filter(model => !removedProviders.has(model.provider));
+		// A provider can be removed, or handed to another source, while discovery is
+		// awaiting I/O; its old manager must not publish rows under the new owner. A
+		// provider re-registered by the same source keeps these (fresher) results.
+		const staleProviders = new Set(
+			[...runtimeSources]
+				.filter(([provider, sourceId]) => this.#runtimeModelManagers.get(provider)?.sourceId !== sourceId)
+				.map(([provider]) => provider),
+		);
+		if (staleProviders.size > 0) {
+			builtInDiscovery.models = builtInDiscovery.models.filter(model => !staleProviders.has(model.provider));
 		}
-		for (const provider of removedProviders) {
+		for (const provider of staleProviders) {
 			builtInDiscovery.authoritativeProviders.delete(provider);
 			builtInDiscovery.replaceRuntimeProviders.delete(provider);
 			discoveryStates.delete(provider);
@@ -2594,8 +2600,8 @@ export class ModelRegistry {
 
 	async #discoverBuiltInProviderModels(
 		strategy: ModelRefreshStrategy,
+		discoveryStates: Map<string, ProviderDiscoveryState>,
 		providerFilter?: ReadonlySet<string>,
-		discoveryStates = this.#providerDiscoveryStates,
 	): Promise<BuiltInDiscoveryResult> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
@@ -2910,7 +2916,7 @@ export class ModelRegistry {
 	async #discoverWithModelManager(
 		options: ModelManagerOptions<Api>,
 		strategy: ModelRefreshStrategy,
-		discoveryStates = this.#providerDiscoveryStates,
+		discoveryStates: Map<string, ProviderDiscoveryState>,
 	): Promise<BuiltInDiscoveryResult> {
 		let failure: string | undefined;
 		try {

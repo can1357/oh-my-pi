@@ -573,6 +573,41 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find("rebound-pending-provider", baseModel.id)).toBeDefined();
 	});
 
+	test("a provider handed to another source drops its old owner's in-flight discovery", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const runtime = {
+			baseUrl: "https://runtime.example.com/v1",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-completions",
+		} satisfies ProviderConfigInput;
+		registry.registerProvider(
+			"handoff-pending-provider",
+			{
+				...runtime,
+				fetchDynamicModels: async () => {
+					started.resolve();
+					await release.promise;
+					return [baseModel];
+				},
+			},
+			"ext://old-owner",
+		);
+		const refresh = registry.refreshRuntimeProviders("online");
+		await started.promise;
+		try {
+			registry.registerProvider(
+				"handoff-pending-provider",
+				{ ...runtime, fetchDynamicModels: async () => [] },
+				"ext://new-owner",
+			);
+		} finally {
+			release.resolve();
+			await refresh;
+		}
+		expect(registry.find("handoff-pending-provider", baseModel.id)).toBeUndefined();
+	});
+
 	test("failed source preparation rejects its caller without rejecting catalog waiters", async () => {
 		registry.registerProvider(
 			"valid-runtime-provider",
