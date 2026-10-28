@@ -34,6 +34,7 @@ import {
 	type AgentToolContext,
 	type AgentToolResult,
 	type AgentTurnEndContext,
+	agentPauseGate,
 	AppendOnlyContextManager,
 	type AsideMessage,
 	type BeforeToolCallContext,
@@ -12626,8 +12627,15 @@ export class AgentSession implements SettingsScope {
 	 * the snapshot + stream pipeline. The snapshot includes any in-flight
 	 * streaming assistant text so the model sees the half-finished response
 	 * rather than missing context.
+	 *
+	 * A side turn runs outside `agentLoop`, so `/pause` — which every agent loop
+	 * polls before a model call — would not otherwise stop it, and a paused
+	 * session kept paying for automatic titles, composer predictions and idle
+	 * recaps. The turn waits for the resume and then snapshots; the gate is
+	 * tested before awaiting so a running session pays no microtask for it.
 	 */
 	async runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
+		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(args.signal);
 		const model = this.model;
 		if (!model) {
 			throw new Error("No active model on session");
