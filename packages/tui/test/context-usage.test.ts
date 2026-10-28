@@ -189,7 +189,6 @@ describe("pruned tool description accounting", () => {
 	});
 });
 
-
 describe("deferred tool schema accounting", () => {
 	it("does not let Cursor's server-side MCP catalog force compaction below provider usage", () => {
 		const spec: ModelSpec<"anthropic-messages"> = {
