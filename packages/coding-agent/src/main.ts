@@ -477,7 +477,10 @@ export async function submitInteractiveInput(
 				display: input.display ?? false,
 				attribution: "agent" as const,
 			};
-			input.dispatched = await session.promptCustomMessage(message, { streamingBehavior, onAccepted: input.onAccepted });
+			input.dispatched = await session.promptCustomMessage(message, {
+				streamingBehavior,
+				onAccepted: input.onAccepted,
+			});
 		} else if (input.resume) {
 			// No queue intent: the streaming queue only carries user messages, so a
 			// continue shortcut while busy is rejected rather than queued as one.

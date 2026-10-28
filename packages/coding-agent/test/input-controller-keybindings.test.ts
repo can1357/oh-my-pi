@@ -1669,13 +1669,15 @@ describe("Ctrl+S prompt stash", () => {
 				controller.setupEditorSubmitHandler();
 				ctx.fileSlashCommands = new Set(["sitrep"]);
 				Object.assign(ctx.session, {
-					slashCommands: [{
-						name: "sitrep",
-						description: "Situation report",
-						content: "Report: $ARGUMENTS",
-						side: true,
-						source: "via OMP User",
-					}],
+					slashCommands: [
+						{
+							name: "sitrep",
+							description: "Situation report",
+							content: "Report: $ARGUMENTS",
+							side: true,
+							source: "via OMP User",
+						},
+					],
 				});
 				ctx.handleBtwCommand = vi.fn(async () => accepted);
 				editor.setText("saved draft");
