@@ -9,7 +9,7 @@
  * the full status. omp only writes the root record; teardown and opting out
  * send `state=clear` so no stale record outlives the session.
  */
-import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
+import { isProgramStatusSupported, writeTerminalSequence } from "@oh-my-pi/pi-tui";
 import { setPromptZonesEnabled } from "@oh-my-pi/pi-tui/chat/user-message";
 import { truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { APP_NAME, isTerminalHeadless, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -97,13 +97,15 @@ function clear(): void {
 }
 
 /**
- * Keep OSC 133 prompt marks off the screen while the terminal holds a
- * `working` or `blocked` record: a prompt mark drops that record, and a
- * repainted user bubble would drop it on every redraw (#17307).
+ * Keep OSC 133 prompt marks off the screen only while Rex holds a `working`
+ * or `blocked` record: a mark would drop it on every redraw (#17307). Other
+ * terminals may ignore OSC 7501, so their prompt navigation stays intact.
  */
 function syncPromptZones(): void {
 	const { state } = runtime.status;
-	setPromptZonesEnabled(runtime.reported === undefined || (state !== "working" && state !== "blocked"));
+	const hasDroppableRecord =
+		runtime.reported !== undefined && isProgramStatusSupported() && (state === "working" || state === "blocked");
+	setPromptZonesEnabled(!hasDroppableRecord);
 }
 
 /**
