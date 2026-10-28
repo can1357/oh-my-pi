@@ -575,5 +575,64 @@ describe("pause screen", () => {
 			expect(shown.length).toBe(0);
 			expect(agentPauseGate.paused).toBe(true); // foreign pause not stolen
 		});
+
+		it("resumes on space and enter encoded by modifyOtherKeys or the Kitty protocol", async () => {
+			// tmux with `extended-keys on` sends the key as an escape sequence,
+			// so a pane there answered only Escape: the operator pressed Space,
+			// nothing happened, and the screen said it should have.
+			for (const key of [
+				"\x1b[27;1;32~", // modifyOtherKeys space
+				"\x1b[27;1;13~", // modifyOtherKeys enter
+				"\x1b[32u", // Kitty space
+				"\x1b[13u", // Kitty enter
+			]) {
+				const { host, shown } = makeHost();
+				const run = runPauseScreen(host);
+				const component = shown[0];
+				if (!(component instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+				component.handleInput(key);
+				await run;
+				expect(agentPauseGate.paused).toBe(false);
+			}
+		});
+
+		it("keeps holding when one pty read coalesces typed text and the enter after it", async () => {
+			// A pty read batches bytes that arrive faster than the TUI drains
+			// them, so a word typed at the pane and its terminator reach
+			// handleInput as one chunk. Matching an encoded key must not start
+			// matching a chunk that merely ends with one.
+			const { host, shown } = makeHost();
+			const run = runPauseScreen(host);
+			const component = shown[0];
+			if (!(component instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+			for (const chunk of [
+				"/pause\r",
+				"/pause\x1b[27;1;13~",
+				"\x1b[27;1;47~\x1b[27;1;112~\x1b[27;1;13~",
+				"\x1b[47u\x1b[112u\x1b[13u",
+			]) {
+				component.handleInput(chunk);
+				expect(agentPauseGate.paused).toBe(true);
+			}
+			component.handleInput("\x1b");
+			await run;
+			expect(agentPauseGate.paused).toBe(false);
+		});
+
+		it("keeps holding for input that is not a resume key", async () => {
+			// An arrow, a mouse report, a paste and a modified space are not
+			// resume keys in any encoding.
+			const { host, shown } = makeHost();
+			const run = runPauseScreen(host);
+			const component = shown[0];
+			if (!(component instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+			for (const chunk of ["\x1b[A", "\x1b[<0;10;5M", "\x1b[200~ \x1b[201~", "\x1b[27;2;32~"]) {
+				component.handleInput(chunk);
+				expect(agentPauseGate.paused).toBe(true);
+			}
+			component.handleInput("\x1b");
+			await run;
+			expect(agentPauseGate.paused).toBe(false);
+		});
 	});
 });

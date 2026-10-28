@@ -531,6 +531,25 @@ function matchesKeypadKey(data: string, keyId: KeyId): boolean | undefined {
 }
 
 /**
+ * Re-encode an xterm `modifyOtherKeys` sequence as the Kitty CSI-u sequence for
+ * the same key and modifiers.
+ *
+ * The two formats carry the same information, but the native matcher only
+ * accepts the Kitty one: `matchesKey` therefore answered false for every key id
+ * on a `CSI 27;mod;code~` chunk, while {@link parseKey} named the key correctly.
+ * tmux emits that format whenever `extended-keys` is on and the application
+ * asked for it, so on such a pane every `matchesKey` caller — the pause
+ * screen's enter and space among them — stopped seeing the key, and only the
+ * paths that go through `parseKey` (the keybinding registry, and so Escape)
+ * still worked.
+ */
+function toKittyEquivalent(data: string): string | undefined {
+	const parsed = parseModifyOtherKeysSequence(data);
+	if (!parsed) return undefined;
+	return `\x1b[${parsed.codepoint};${parsed.modifier + 1}u`;
+}
+
+/**
  * Match input data against a key identifier string.
  *
  * Supported key identifiers:
@@ -548,7 +567,11 @@ function matchesKeypadKey(data: string, keyId: KeyId): boolean | undefined {
  */
 export function matchesKey(data: string, keyId: KeyId): boolean {
 	if (matchesRawBackspace(data, 4)) return keyId === "ctrl+backspace";
-	return matchesKeypadKey(data, keyId) ?? matchesKeyNative(data, keyId, kittyProtocolActive);
+	const keypad = matchesKeypadKey(data, keyId);
+	if (keypad !== undefined) return keypad;
+	if (matchesKeyNative(data, keyId, kittyProtocolActive)) return true;
+	const kittyEquivalent = toKittyEquivalent(data);
+	return kittyEquivalent !== undefined && matchesKeyNative(kittyEquivalent, keyId, kittyProtocolActive);
 }
 
 /**

@@ -96,6 +96,27 @@ describe("matchesKey", () => {
 		setKittyProtocolActive(false);
 	});
 
+	it("matches xterm modifyOtherKeys sequences, as parseKey already named them", () => {
+		// Regression: tmux with `extended-keys on` sends every key of a pane
+		// that asked for modifyOtherKeys as `CSI 27;mod;code~`. The native
+		// matcher only reads the Kitty form, so matchesKey answered false for
+		// every key id while parseKey named the key — the pause screen's space
+		// and enter arms then never fired, and only Escape, which resolves
+		// through the keybinding registry's parseKey, still resumed.
+		for (const kitty of [false, true]) {
+			setKittyProtocolActive(kitty);
+			expect(matchesKey("\x1b[27;1;32~", "space")).toBe(true);
+			expect(matchesKey("\x1b[27;1;13~", "enter")).toBe(true);
+			expect(matchesKey("\x1b[27;1;13~", "return")).toBe(true);
+			expect(matchesKey("\x1b[27;1;27~", "escape")).toBe(true);
+			expect(matchesKey("\x1b[27;5;99~", "ctrl+c")).toBe(true);
+			// Modifiers are still honoured: shift+space is not space.
+			expect(matchesKey("\x1b[27;2;32~", "space")).toBe(false);
+			expect(matchesKey("\x1b[27;1;32~", "enter")).toBe(false);
+		}
+		setKittyProtocolActive(false);
+	});
+
 	it("matches keypad operators as their printable symbols", () => {
 		setKittyProtocolActive(true);
 		expect(matchesKey("\x1b[57410u", "/")).toBe(true);
