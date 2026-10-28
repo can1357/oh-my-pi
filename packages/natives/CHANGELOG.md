@@ -140,6 +140,8 @@
 - Fixed built-in bash commands such as `cat`, `grep`, `head`, `wc`, `read`, and `mapfile` hanging at the end of FIFO input on macOS; `read -t` now returns at EOF.
 - Fixed ANSI text wrapping for styled underlines, background colours, and colon-form RGB colours.
 - Fixed clicking in native audio playback when the queue runs dry mid-waveform by smoothly fading output to silence and back.
+- Fixed `wrapTextWithAnsi` continuing a wrapped styled underline (`4:3`, `4:4`) as a background colour, `4:0` setting background `40`, and colon-form colours (`38:2::r:g:b`) being dropped ([#16239](https://github.com/can1357/oh-my-pi/pull/16239) by [@materemias](https://github.com/materemias))
+- Fixed Git worktree operations to honor relative links and preserve valid worktrees during cleanup.
 
 ## [18.13.3] - 2026-10-28
 

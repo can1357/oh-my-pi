@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
-import { clearWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
+import { clearWorktrees, listWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
 import {
 	ISOLATION_OWNER_FILE,
 	RETAINED_BACKEND_FILE,
@@ -148,5 +148,108 @@ describe("worktree clear task-isolation ownership", () => {
 
 		expect(isoStopSpy).not.toHaveBeenCalled();
 		expect(await Bun.file(path.join(retained, "m", "work.txt")).exists()).toBe(true);
+	});
+});
+
+describe("worktree clear linked checkout metadata", () => {
+	let root: string;
+	let base: string;
+	let savedEnv: string | undefined;
+
+	beforeEach(async () => {
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-linked-"));
+		base = path.join(root, "managed");
+		savedEnv = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(base);
+	});
+
+	afterEach(async () => {
+		setWorktreesDir(undefined);
+		if (savedEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
+		else process.env.OMP_WORKTREE_DIR = savedEnv;
+		vi.restoreAllMocks();
+		await fs.rm(root, { recursive: true, force: true });
+	});
+
+	it.each(["absolute", "relative"] as const)(
+		"lists %s gitdir checkouts as live and keeps their contents during clear",
+		async pointerKind => {
+			const repo = path.join(root, "repo");
+			const checkout = path.join(base, "linked");
+			const gitEntry = path.join(checkout, ".git");
+			const gitdir = path.join(repo, ".git", "worktrees", "linked");
+			const pointer = pointerKind === "relative" ? path.relative(checkout, gitdir) : gitdir;
+			await Bun.write(gitEntry, `gitdir: ${pointer}\n`);
+			await Bun.write(path.join(gitdir, "HEAD"), "ref: refs/heads/topic\n");
+			await Bun.write(path.join(gitdir, "commondir"), "../..\n");
+			await Bun.write(path.join(gitdir, "gitdir"), `${path.relative(gitdir, gitEntry)}\n`);
+			await Bun.write(path.join(checkout, "work.txt"), "uncommitted work\n");
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+			await listWorktrees({ json: true });
+
+			expect(JSON.parse(String(log.mock.lastCall?.[0]))).toEqual([
+				{ path: checkout, kind: "pr-checkout", parentRepo: repo, branch: "topic" },
+			]);
+
+			await clearWorktrees({ all: false, dryRun: true, json: true });
+
+			expect(JSON.parse(String(log.mock.lastCall?.[0]))).toEqual({ removed: 0, kept: 1 });
+
+			expect(await clearWorktrees({ all: false, dryRun: false, json: true })).toEqual({ removed: 0, failed: 0 });
+			expect(await Bun.file(path.join(checkout, "work.txt")).text()).toBe("uncommitted work\n");
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"keeps a relative linked checkout under a symlinked worktree base",
+		async () => {
+			const realBase = path.join(root, "real", "managed");
+			const checkout = path.join(realBase, "linked");
+			const gitEntry = path.join(checkout, ".git");
+			const gitdir = path.join(root, "real", "repo", ".git", "worktrees", "linked");
+			await Bun.write(gitEntry, `gitdir: ${path.relative(checkout, gitdir)}\n`);
+			await Bun.write(path.join(gitdir, "HEAD"), "ref: refs/heads/topic\n");
+			await Bun.write(path.join(checkout, "work.txt"), "uncommitted work\n");
+			const alias = path.join(root, "alias");
+			await fs.symlink(realBase, alias, "dir");
+			setWorktreesDir(alias);
+			vi.spyOn(console, "log").mockImplementation(() => {});
+
+			expect(await clearWorktrees({ all: false, dryRun: false, json: true })).toEqual({ removed: 0, failed: 0 });
+			expect(await Bun.file(path.join(checkout, "work.txt")).text()).toBe("uncommitted work\n");
+		},
+	);
+
+	it("still selects malformed and missing relative gitdir links as orphaned", async () => {
+		const malformed = path.join(base, "malformed");
+		await Bun.write(path.join(malformed, ".git"), "not a gitdir pointer\n");
+		const missing = path.join(base, "missing");
+		const repo = path.join(root, "repo");
+		const gitdir = path.join(repo, ".git", "worktrees", "missing");
+		await fs.mkdir(repo);
+		await Bun.write(path.join(missing, ".git"), `gitdir: ${path.relative(missing, gitdir)}\n`);
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await listWorktrees({ json: true });
+
+		expect(JSON.parse(String(log.mock.lastCall?.[0]))).toEqual(
+			expect.arrayContaining([
+				{ path: malformed, kind: "pr-checkout", orphanReason: "malformed .git file (no gitdir line)" },
+				{
+					path: missing,
+					kind: "pr-checkout",
+					parentRepo: repo,
+					orphanReason: "parent repo no longer tracks this worktree",
+				},
+			]),
+		);
+
+		await clearWorktrees({ all: false, dryRun: true, json: true });
+
+		expect(JSON.parse(String(log.mock.lastCall?.[0]))).toEqual({
+			wouldRemove: expect.arrayContaining([malformed, missing]),
+		});
 	});
 });

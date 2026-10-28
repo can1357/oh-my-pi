@@ -367,10 +367,17 @@ async function classifyPrCheckout(dir: string, gitEntry: string): Promise<Worktr
 		};
 	}
 	const match = /^gitdir:\s*(.+?)\s*$/m.exec(contents);
-	const parentGitDir = match?.[1];
-	if (!parentGitDir) {
+	const gitdir = match?.[1];
+	if (!gitdir) {
 		return { path: dir, kind: "pr-checkout", orphanReason: "malformed .git file (no gitdir line)" };
 	}
+	// Let the filesystem resolve symlinks before `..`, as Git does. Lexical
+	// path.resolve() can point at the wrong repository under a symlinked base.
+	const target = path.isAbsolute(gitdir) ? gitdir : `${path.dirname(gitEntry)}${path.sep}${gitdir}`;
+	const parentGitDir = await fs.realpath(target).catch(error => {
+		if (isEnoent(error)) return path.resolve(path.dirname(gitEntry), gitdir);
+		throw error;
+	});
 	// parentGitDir is `<parent-repo>/.git/worktrees/<name>`; back out the repo root.
 	const parentRepo = path.dirname(path.dirname(path.dirname(parentGitDir)));
 	const branch = await readWorktreeBranch(path.join(parentGitDir, "HEAD"));

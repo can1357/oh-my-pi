@@ -261,6 +261,26 @@ fn parse_gitdir_pointer(content: &str) -> Option<&str> {
 	(!target.is_empty()).then_some(target)
 }
 
+/// Read a linked worktree's back-reference relative to its administration
+/// directory, never the process cwd. Invalid metadata is not evidence that
+/// the checkout disappeared.
+fn read_worktree_gitdir(admin: &Path) -> std::io::Result<PathBuf> {
+	let bytes = std::fs::read(admin.join("gitdir"))?;
+	let value = bytes.trim_ascii_end();
+	let invalid =
+		|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid worktree gitdir pointer");
+	if value.is_empty() || value.contains(&0) {
+		return Err(invalid());
+	}
+	// Gitoxide's plain-file reader assumes valid UTF-8 on Windows. Keep
+	// malformed path bytes fallible here, especially for pruning.
+	let target = gix::path::try_from_byte_slice(value).map_err(|_| invalid())?;
+	if target.file_name() != Some(std::ffi::OsStr::new(".git")) {
+		return Err(invalid());
+	}
+	gix::path::realpath(admin.join(target)).map_err(std::io::Error::other)
+}
+
 fn resolve_common_dir(git_dir: &Path) -> PathBuf {
 	match read_optional(&git_dir.join("commondir")) {
 		Some(content) => {

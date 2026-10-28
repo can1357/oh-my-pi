@@ -627,6 +627,43 @@ describe("detachGitDir", () => {
 		await fs.cp(source, iso, { recursive: true });
 		return iso;
 	}
+	it("isolates copied relative worktree links without changing the source registration", async () => {
+		const { main, wt, commonDir, baseSha } = await makeLinkedWorktree();
+		await runGit(main, ["worktree", "repair", "--relative-paths", wt]);
+		const sourcePointer = await Bun.file(path.join(wt, ".git")).text();
+		const base = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relative-isolation-"));
+		tempDirs.push(base);
+		const previousBase = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(base);
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.LinuxReflink,
+			candidates: [natives.IsoBackendKind.LinuxReflink],
+			fellBack: false,
+			reason: undefined,
+		});
+		vi.spyOn(natives, "isoStart").mockImplementation(async (_kind, source, destination) => {
+			await fs.cp(source, destination, { recursive: true });
+		});
+		vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
+		try {
+			const handle = await ensureIsolation(wt, "relative-copy");
+			try {
+				expect(await runGit(handle.mergedDir, ["rev-parse", "HEAD"])).toBe(baseSha);
+				expect(vcs.requireGit(handle.mergedDir).info().commonDir).not.toBe(commonDir);
+				await runGit(handle.mergedDir, ["checkout", "-q", "-b", "task/isolated"]);
+				expect(await runGit(wt, ["branch", "--format=%(refname:short)"])).not.toContain("task/isolated");
+				expect(await Bun.file(path.join(wt, ".git")).text()).toBe(sourcePointer);
+				expect(await runGit(wt, ["rev-parse", "HEAD"])).toBe(baseSha);
+			} finally {
+				await cleanupIsolation(handle);
+			}
+		} finally {
+			setWorktreesDir(undefined);
+			if (previousBase === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = previousBase;
+		}
+	});
 
 	it("severs a copied linked-worktree from the parent so task git ops stay isolated", async () => {
 		const { wt, commonDir, baseSha } = await makeLinkedWorktree();

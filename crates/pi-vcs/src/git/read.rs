@@ -10,6 +10,7 @@ use gix::bstr::ByteSlice;
 use super::{
 	GitRepo,
 	open::{load_index_or_empty, status_with_fresh_index},
+	read_worktree_gitdir,
 };
 use crate::{
 	error::{Error, Result},
@@ -496,19 +497,7 @@ impl GitRepo {
 				"--porcelain",
 			])?));
 		}
-		let primary_root = self
-			.info()
-			.common_dir
-			.parent()
-			.filter(|_| {
-				self
-					.info()
-					.common_dir
-					.file_name()
-					.is_some_and(|name| name == ".git")
-			})
-			.unwrap_or_else(|| self.root())
-			.to_owned();
+		let primary_root = self.primary_root();
 		let primary_head =
 			parse_head_with_refs(&self.info().common_dir.join("HEAD"), &self.info().common_dir)?;
 		let mut out = vec![entry_from_head(primary_root, &primary_head)];
@@ -520,10 +509,9 @@ impl GitRepo {
 		admins.sort_by_key(std::fs::DirEntry::file_name);
 		for admin in admins {
 			let dir = admin.path();
-			let Ok(pointer) = std::fs::read_to_string(dir.join("gitdir")) else {
+			let Ok(dotgit) = read_worktree_gitdir(&dir) else {
 				continue;
 			};
-			let dotgit = PathBuf::from(pointer.trim());
 			let Some(root) = dotgit.parent().map(Path::to_owned) else {
 				continue;
 			};
