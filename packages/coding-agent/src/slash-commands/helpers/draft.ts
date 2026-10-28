@@ -61,7 +61,13 @@ export async function runWithDetachedDraft(
 			return false;
 		}
 		if (submitted !== false) return submitted === true;
-		if (runtime.input?.onAccepted && !editor.getText() && editor.pendingImages.length === 0 && !runtime.draftDetached)
+		if (
+			runtime.input?.onAccepted &&
+			!options?.restoreText &&
+			!editor.getText() &&
+			editor.pendingImages.length === 0 &&
+			!runtime.draftDetached
+		)
 			editor.setText(command.text);
 		if (!(hasAttachments || options?.restoreText || (runtime.draftDetached && runtime.input?.onAccepted)))
 			return false;
