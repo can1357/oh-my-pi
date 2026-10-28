@@ -584,6 +584,25 @@ describe("pause screen", () => {
 			expect(order).toEqual(["hide", "paint", "gate open"]);
 		});
 
+		it("releases the gate even when the teardown throws", async () => {
+			// A leaked pause freezes every agent in the process with no UI left
+			// to release it, so no teardown step may skip the release.
+			const { host, shown } = makeHost();
+			const show = host.ui.showOverlay.bind(host.ui);
+			host.ui.showOverlay = (component, options) => ({
+				...show(component, options),
+				hide: () => {
+					throw new Error("hide failed");
+				},
+			});
+			const run = runPauseScreen(host);
+			const component = shown[0];
+			if (!(component instanceof PauseScreenComponent)) throw new Error("expected the pause screen");
+			component.handleInput("\x1b");
+			await expect(run).rejects.toThrow("hide failed");
+			expect(agentPauseGate.paused).toBe(false);
+		});
+
 		it("treats ctrl+c as resume, never as abort-and-stay-paused", async () => {
 			const { host, shown } = makeHost();
 			const run = runPauseScreen(host);

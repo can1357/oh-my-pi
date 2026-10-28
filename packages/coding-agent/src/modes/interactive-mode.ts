@@ -2650,7 +2650,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.isInitialized = true;
 		// The startup composer is already visible. Commit the complete runtime
 		// tree before session_start hooks/reconciliation continue; renderNow keeps
-		// TUI's multiplexer, output-backlog, and image safety gates.
+		// TUI's multiplexer and image safety gates. It paints through #doRender
+		// rather than #executeRender, so the output-backlog deferral does not
+		// apply and the frame is written even when the terminal is behind.
 		this.ui.renderNow();
 
 		const streamCwd = this.sessionManager.getCwd();
