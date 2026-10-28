@@ -157,6 +157,7 @@
 - Muted live voice sessions remain visibly muted while the voice model starts work.
 
 ### Fixed
+- Replaying a persisted bash execution now seeds the recorded output as the completed snapshot, so a resumed or rewound block shows every line it recorded instead of just the streaming tail ([#15326](https://github.com/can1357/oh-my-pi/pull/15326) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed live configuration reloads missing edits immediately after a symlink switches to another file in the same directory.
 - Fixed auth-gateway model routing after catalog refreshes so bare model IDs select the highest-priority credentialed provider, with wire-format compatibility used as a tie-breaker.
