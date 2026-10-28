@@ -70,6 +70,7 @@
 - Muted live voice sessions remain visibly muted while the voice model starts work.
 
 ### Fixed
+- Fixed `lsp rename_file` reporting a plain move when no language server could update the references: the preview now names the servers that did not take part and predicts the abort instead of claiming the rename was checked ([#15526](https://github.com/can1357/oh-my-pi/issues/15526), [#16411](https://github.com/can1357/oh-my-pi/pull/16411) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed live configuration reloads missing edits immediately after a symlink switches to another file in the same directory.
 - Fixed auth-gateway model routing after catalog refreshes so bare model IDs select the highest-priority credentialed provider, with wire-format compatibility used as a tie-breaker.
