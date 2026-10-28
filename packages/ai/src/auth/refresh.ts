@@ -932,6 +932,9 @@ export class OAuthRefresher {
 			}
 		}
 		if (Date.now() + OAUTH_REFRESH_SKEW_MS < credential.expires) return credential;
+		// A caller that already left must not own a refresh that later callers join:
+		// they would inherit its cancellation instead of a credential.
+		if (signal?.aborted) throw new AIError.AbortError("credential refresh aborted");
 		if (credentialId === undefined) {
 			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal, reason, rejectedAccess);
 		}
@@ -1115,6 +1118,8 @@ export class OAuthRefresher {
 		if (recent && recent.credential.access !== options?.rejectedAccess) {
 			return snapshotEntry(id, recent.provider, recent.credential);
 		}
+		// A caller that already left must not own a refresh that later callers join.
+		if (signal?.aborted) throw new AIError.AbortError("credential refresh aborted");
 
 		const promise = (async () => {
 			this.#deps.pool.bump("credential-refresh-start");

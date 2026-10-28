@@ -14,6 +14,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	cfgPrewalkEnabled,
@@ -210,6 +211,35 @@ describe("AgentSession prewalk", () => {
 			created.target.id,
 		]);
 		expect(created.nudges[boundary]).not.toContain("prewalk-checklist");
+	});
+
+	it("resumes on the handoff target while retry-role lookup keeps the assigned role", async () => {
+		const created = createLifecycleSession([
+			toolCall("todo", "todo"),
+			toolCall("write", "write"),
+			{ content: ["done"] },
+		]);
+		const manager = created.session.sessionManager;
+		manager.appendModelChange(`${created.primary.provider}/${created.primary.id}`, "slow");
+		await created.session.prompt("task");
+		expect(created.session.model?.id).toBe(created.target.id);
+
+		const context = manager.buildSessionContext();
+		expect(getRestorableSessionModels(context.models, manager.getLastModelChangeRole())[0]).toBe(
+			`${created.target.provider}/${created.target.id}`,
+		);
+		expect(context.configuredThinkingLevel).toBe(Effort.Low);
+		expect(manager.getLastModelChangeRole({ skipEphemeral: true })).toBe("slow");
+	});
+
+	it("keeps the arm when a session with a recorded handoff resumes on a different model", () => {
+		const target = modelOrThrow("claude-sonnet-4-6");
+		const manager = SessionManager.inMemory(tempDir.path());
+		manager.appendModelChange(`${target.provider}/${target.id}`, "prewalk");
+		const created = createLifecycleSession([], { sessionManager: manager, target });
+
+		expect(created.session.model?.id).toBe(created.primary.id);
+		expect(created.session.getPrewalkState()?.target.id).toBe(target.id);
 	});
 
 	it("/new restores the prewalk source and effort after automatic fallback and primary restoration", async () => {

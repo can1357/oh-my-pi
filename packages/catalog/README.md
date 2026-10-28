@@ -36,7 +36,7 @@ Model- or provider-conditional policy (identity, effort ladders, wire quirks, mo
 bun add @oh-my-pi/pi-catalog
 ```
 
-Ships TypeScript source directly (no build step); requires Bun ≥ 1.3.14.
+Ships TypeScript source directly (no build step); requires Bun ≥ 1.4.4.
 
 ## Cost calculation
 

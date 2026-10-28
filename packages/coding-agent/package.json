@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "18.13.2",
+	"version": "18.13.3",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -570,6 +570,6 @@
 		"sherpa-onnx-node": "1.13.2"
 	},
 	"engines": {
-		"bun": ">=1.3.14"
+		"bun": ">=1.4.4"
 	}
 }

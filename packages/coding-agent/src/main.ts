@@ -40,7 +40,7 @@ import {
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
 import { fetchBuild } from "./cli/build-service";
 import { applyStartupCwd } from "./cli/startup-cwd";
@@ -217,15 +217,18 @@ type SessionPicker = (
 ) => Promise<SessionInfo | null>;
 
 /** Resume/import-only graph boundary; ordinary launches never construct a picker. */
-async function loadSessionPicker(): Promise<SessionPicker> {
-	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds }, { FileSessionStorage }] = await Promise.all([
-		import("@oh-my-pi/pi-tui/apps/session-picker"),
-		import("./session/history-storage"),
-		import("./session/session-pins"),
-		import("./session/session-storage"),
-	]);
+async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionPicker> {
+	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds, setSessionPinned }, { FileSessionStorage }] =
+		await Promise.all([
+			import("@oh-my-pi/pi-tui/apps/session-picker"),
+			import("./session/history-storage"),
+			import("./session/session-pins"),
+			import("./session/session-storage"),
+		]);
 	return (sessions, options) => {
 		const storage = new FileSessionStorage();
+		// The picker runs before interactive mode loads the user's keymap, and its pin keys are remappable.
+		KeybindingsManager.create();
 		return selectSession(sessions, options, {
 			loadPinnedIds: loadPinnedSessionIds,
 			loadHistoryMatcher: () => {
@@ -236,6 +239,15 @@ async function loadSessionPicker(): Promise<SessionPicker> {
 				await storage.deleteSessionWithArtifacts(session.path);
 				return true;
 			},
+			// Foreign import pickers list source-owned sessions, so rename and
+			// pins are native pickers only.
+			...(init?.foreign
+				? {}
+				: {
+						renameSession: (session: SessionInfo, title: string) =>
+							SessionManager.renameSessionTitle(session.path, title, { cwd: session.cwd }),
+						setSessionPinned: (session: SessionInfo, pinned: boolean) => setSessionPinned(session.id, pinned),
+					}),
 			loadAllSessions: () => SessionManager.listAllForPicker(storage),
 		});
 	};
@@ -2124,7 +2136,7 @@ export async function runRootCommand(
 				pauseStartupWatchdog();
 				let selected: SessionInfo | null;
 				try {
-					const selectSessionImpl = deps.selectSession ?? (await loadSessionPicker());
+					const selectSessionImpl = deps.selectSession ?? (await loadSessionPicker({ foreign: true }));
 					selected = await logger.time(`select${sourceName}Session`, selectSessionImpl, choices, {
 						title: `Import ${sourceName} Session`,
 						scopeLabel: false,

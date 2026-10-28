@@ -1053,6 +1053,56 @@ describe("AuthStorage OAuth refresh race", () => {
 		});
 	});
 
+	test("a key request cancelled while taking the refresh lease settles without an unhandled rejection", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-abort-during-lease";
+		const exchanges = registerSingleUseProvider(provider);
+		await authStorage.credentials.set(provider, [
+			{ type: "oauth", access: "access-0", refresh: "refresh-0", expires: 0 },
+		]);
+		const controller = new AbortController();
+		const acquire = store.tryAcquireCredentialRefreshLease?.bind(store);
+		if (!acquire) throw new Error("test store does not support refresh leases");
+		// The caller cancels while the refresh it started is still inside its synchronous lease acquisition.
+		vi.spyOn(store, "tryAcquireCredentialRefreshLease").mockImplementation((id, owner, expiresAt) => {
+			controller.abort();
+			return acquire(id, owner, expiresAt);
+		});
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			await expect(
+				authStorage.keys.get(provider, "cancelled-session", { signal: controller.signal }),
+			).resolves.toBeUndefined();
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+			expect(unhandled).toEqual([]);
+			expect(exchanges.exchanges()).toBe(0);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+	});
+
+	test("a caller cancelled before refreshing does not hand its cancellation to a joining caller", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const provider = "unit-oauth-cancelled-owner";
+		const exchanges = registerSingleUseProvider(provider);
+		await authStorage.credentials.set(provider, [
+			{ type: "oauth", access: "access-0", refresh: "refresh-0", expires: 0 },
+		]);
+		const credentialId = store.listAuthCredentials(provider)[0]?.id;
+		if (credentialId === undefined) throw new Error("missing stored credential");
+		const cancelled = authStorage.oauth.refresh(credentialId, AbortSignal.abort());
+		const live = authStorage.oauth.refresh(credentialId);
+		await expect(cancelled).rejects.toThrow("credential refresh aborted");
+		expect((await live).credential).toMatchObject({ type: "oauth", access: "access-1" });
+		expect(exchanges.exchanges()).toBe(1);
+	});
+
 	/** Provider whose refresh tokens are single-use, like Anthropic's; counts exchanges. */
 	function registerSingleUseProvider(id: string): { exchanges: () => number } {
 		let generation = 0;

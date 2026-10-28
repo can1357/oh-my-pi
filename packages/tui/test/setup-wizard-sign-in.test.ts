@@ -1,11 +1,13 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { OAuthLoginCallbacks, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth/types";
+import type { TspPickerProps } from "@oh-my-pi/pi-wire";
 import { providersSetupScene, SignInScene } from "@oh-my-pi/pi-tui/setup/scenes/sign-in";
 import type { SetupHost, SetupSceneHost } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type Component, TUI } from "@oh-my-pi/pi-tui";
 import { Input } from "@oh-my-pi/pi-tui/components/input";
+import type { DescribeContext, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { SetupWizardComponent } from "@oh-my-pi/pi-tui/setup/wizard-overlay";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
@@ -21,234 +23,170 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
+const pickerCx: DescribeContext = {
+	cols: 120,
+	reduceMotion: false,
+	dark: true,
+	supports: () => true,
+	feature: () => true,
+};
+
+type Login = (provider: OAuthProviderId, callbacks: OAuthLoginCallbacks) => Promise<void>;
+
+/** A scene host over a credential store where a finished `login` signs the provider in. */
+function sceneHost(login: Login) {
+	const signedIn = new Set<string>();
+	const state = {
+		focus: undefined as (Component & { pasteText?(text: string): void }) | undefined,
+		finished: [] as string[],
+		refreshed: [] as string[],
+		/** Settles when the scene hands focus back (the login dialog closed). */
+		restored: Promise.withResolvers<void>(),
+	};
+	const authStorage = {
+		credentials: { has: (id: string) => signedIn.has(id) },
+		keys: { source: (id: string) => (signedIn.has(id) ? { kind: "oauth" } : undefined) },
+		oauth: {
+			async login(provider: OAuthProviderId, callbacks: OAuthLoginCallbacks): Promise<void> {
+				await login(provider, callbacks);
+				signedIn.add(provider);
+			},
+		},
+	} as unknown as AuthStorage;
+	const host = {
+		ctx: {
+			authStorage,
+			disabledProviders: [],
+			refreshProvider: async (provider: string) => {
+				state.refreshed.push(provider);
+			},
+			captureBrowserSession: async () => "",
+			openInBrowser(): void {},
+		},
+		requestRender(): void {},
+		finish(result: string): void {
+			state.finished.push(result);
+		},
+		setFocus(component: Component | null): void {
+			state.focus = component ?? undefined;
+		},
+		restoreFocus(): void {
+			state.focus = undefined;
+			state.restored.resolve();
+		},
+	} as unknown as SetupSceneHost;
+	return { host, state };
+}
+
+/** The provider sheet the scene presents, or undefined while the login dialog is up. */
+function providerSheet(scene: SignInScene): { props: TspPickerProps; owner: Component } | undefined {
+	const owner = scene.describe(pickerCx).c?.[0];
+	if (!owner || !("render" in owner) || !owner.describe) return undefined;
+	const picker = (owner.describe(pickerCx)?.c?.[0] as NativeNode | undefined) ?? undefined;
+	if (picker?.k !== "picker") return undefined;
+	return { props: picker.p as TspPickerProps, owner };
+}
+
+function signInTo(scene: SignInScene, provider: string): void {
+	for (const char of provider) scene.handleInput(char);
+	scene.handleInput("\r");
+}
+
 describe("SignInScene", () => {
-	it("masks secret input and keeps the OSC8 login link and manual-code prompt above clipped rows", async () => {
-		const url = `https://example.com/oauth/authorize?client_id=omp&redirect_uri=http%3A%2F%2Flocalhost%3A45454%2Fcallback&state=${"a".repeat(96)}`;
-		const loginGate = Promise.withResolvers<void>();
-		const secretReceived = Promise.withResolvers<string>();
-		const secretValue = crypto.randomUUID();
-		const copySpy = vi.fn(async (_text: string): Promise<void> => {});
-		let focusTarget: Component | undefined;
-		const openedUrls: string[] = [];
-
-		const authStorage = {
-			credentials: { has: (_providerId: string) => false },
-			keys: { source: (_providerId: string) => undefined },
-			oauth: {
-				async login(_provider: OAuthProviderId, ctrl: OAuthLoginCallbacks): Promise<void> {
-					ctrl.onAuth({ url });
-					secretReceived.resolve(
-						await ctrl.onPrompt({ message: "Consumer key", placeholder: "secret value", secret: true }),
-					);
-					const prompt = ctrl.onManualCodeInput?.();
-					await loginGate.promise;
-					await prompt;
-				},
-			},
-		} as unknown as AuthStorage;
-
-		const host = {
-			ctx: {
-				authStorage,
-				disabledProviders: [],
-				copyToClipboard: copySpy,
-				refreshProvider: async () => {},
-				openInBrowser(openedUrl: string): void {
-					openedUrls.push(openedUrl);
-				},
-			},
-			requestRender(): void {},
-			finish(): void {},
-			setFocus(component: Component | null): void {
-				focusTarget = component ?? undefined;
-			},
-			restoreFocus(): void {},
-		} as unknown as SetupSceneHost;
-
-		const tab = new SignInScene(host);
+	it("Enter on a provider starts its login in the focused dialog; paste reaches the masked field", async () => {
+		const secret = `sk-${crypto.randomUUID()}`;
+		const answered = Promise.withResolvers<string>();
+		const providers: string[] = [];
+		const { host, state } = sceneHost(async (provider, callbacks) => {
+			providers.push(provider);
+			callbacks.onAuth({ url: "https://example.com/oauth/authorize?state=paste" });
+			answered.resolve(await callbacks.onPrompt({ message: "Consumer key", secret: true }));
+		});
+		const scene = new SignInScene(host);
 		try {
-			for (const char of "anthropic") {
-				tab.handleInput(char);
+			signInTo(scene, "anthropic");
+			expect(providers).toEqual(["anthropic"]);
+			expect(providerSheet(scene)).toBeUndefined();
+			// Enhanced paste targets the focused component's `pasteText`.
+			state.focus?.pasteText?.(secret);
+			expect(scene.render(120).join("\n")).not.toContain(secret);
+			state.focus?.handleInput?.("\r");
+			await expect(answered.promise).resolves.toBe(secret);
+		} finally {
+			scene.dispose();
+		}
+	});
+
+	it("a successful login refreshes the provider and returns to its now signed-in row", async () => {
+		const { host, state } = sceneHost(async (_provider, callbacks) => {
+			callbacks.onAuth({ url: "https://example.com/oauth/authorize?state=ok" });
+		});
+		const scene = new SignInScene(host);
+		try {
+			expect(providerSheet(scene)?.props.items?.find(item => item.id === "anthropic")?.dot).toBe("muted");
+			signInTo(scene, "anthropic");
+			await state.restored.promise;
+			expect(state.refreshed).toEqual(["anthropic"]);
+			expect(state.focus).toBeUndefined();
+			const sheet = providerSheet(scene)!;
+			expect(sheet.props.selected).toBe("anthropic");
+			expect(sheet.props.items?.find(item => item.id === "anthropic")?.dot).toBe("success");
+		} finally {
+			scene.dispose();
+		}
+	});
+
+	it("Esc in the login dialog aborts the flow and returns to the list without an error", async () => {
+		const aborted = Promise.withResolvers<void>();
+		const { host, state } = sceneHost(async (_provider, callbacks) => {
+			callbacks.onAuth({ url: "https://example.com/oauth/authorize?state=cancel" });
+			const pending = Promise.withResolvers<void>();
+			callbacks.signal?.addEventListener("abort", () => pending.reject(new Error("Login cancelled")));
+			try {
+				await pending.promise;
+			} finally {
+				aborted.resolve();
 			}
-			tab.handleInput("\n");
-
-			expect(focusTarget).toBeDefined();
-			focusTarget?.handleInput?.(secretValue);
-			const masked = tab.render(120).join("\n");
-			expect(masked).not.toContain(secretValue);
-			focusTarget?.handleInput?.("\n");
-			await expect(secretReceived.promise).resolves.toBe(secretValue);
-
-			const rendered = tab.render(36);
-			const compact = rendered.map(line => Bun.stripANSI(line).trim()).join("");
-			expect(compact).toContain(url);
-			expect(compact).not.toContain("…");
-			expect(rendered.join("\n")).toContain(`\x1b]8;;${url}\x07Open login URL\x1b]8;;\x07`);
-			expect(openedUrls).toEqual([url]);
-			expect(focusTarget).toBeDefined();
-			focusTarget?.handleInput?.("\x1bc");
-			expect(copySpy).toHaveBeenCalledTimes(2);
-			expect(copySpy).toHaveBeenLastCalledWith(url);
-
-			// On a ~24-row terminal the wizard body ends up ~8 rows; the OSC8
-			// link, a plain URL row, and the focused input must survive that clip.
-			const clippedBody = rendered.slice(0, 8).map(line => Bun.stripANSI(line).trim());
-			const plainUrlIndex = clippedBody.findIndex(line => line.startsWith("https://example.com/oauth/authorize?"));
-			const inputIndex = clippedBody.findIndex(line => line.startsWith(">"));
-			expect(clippedBody.some(line => line.startsWith("Browser login: Open login URL"))).toBe(true);
-			expect(plainUrlIndex).toBeGreaterThanOrEqual(0);
-			expect(inputIndex).toBeGreaterThanOrEqual(0);
-			expect(plainUrlIndex).toBeLessThan(inputIndex);
+		});
+		const scene = new SignInScene(host);
+		try {
+			signInTo(scene, "anthropic");
+			state.focus?.handleInput?.("\x1b");
+			expect(state.focus).toBeUndefined();
+			// The aborted flow settles after the list is back; drain its rejection before reading the sheet.
+			await aborted.promise;
+			for (let tick = 0; tick < 5; tick++) await Promise.resolve();
+			expect(providerSheet(scene)?.props.strip).toBeUndefined();
+			expect(state.refreshed).toEqual([]);
 		} finally {
-			tab.dispose();
-			loginGate.resolve();
-			await loginGate.promise;
+			scene.dispose();
 		}
 	});
 
-	it("delivers pasted text to the focused credential prompt", async () => {
-		const pasted = "sk-paste-0123456789";
-		const submitted = Promise.withResolvers<string>();
-		let focusTarget: (Component & { pasteText?: (text: string) => void }) | undefined;
-
-		const authStorage = {
-			credentials: { has: (_providerId: string) => false },
-			keys: { source: (_providerId: string) => undefined },
-			oauth: {
-				async login(_provider: OAuthProviderId, ctrl: OAuthLoginCallbacks): Promise<void> {
-					ctrl.onAuth({ url: "https://example.com/oauth/authorize?state=paste" });
-					submitted.resolve(await ctrl.onPrompt({ message: "Paste your API key" }));
-				},
-			},
-		} as unknown as AuthStorage;
-
-		const host = {
-			ctx: {
-				authStorage,
-				disabledProviders: [],
-				copyToClipboard: async () => {},
-				refreshProvider: async () => {},
-				openInBrowser(): void {},
-			},
-			requestRender(): void {},
-			finish(): void {},
-			setFocus(component: Component | null): void {
-				focusTarget = component ?? undefined;
-			},
-			restoreFocus(): void {},
-		} as unknown as SetupSceneHost;
-
-		const tab = new SignInScene(host);
+	it("a failed login returns to the list with the error on the sheet", async () => {
+		const { host, state } = sceneHost(async () => {
+			throw new Error("token exchange failed");
+		});
+		const scene = new SignInScene(host);
 		try {
-			for (const char of "anthropic") tab.handleInput(char);
-			tab.handleInput("\n");
-			await Promise.resolve();
-
-			// The enhanced-paste controller hands terminal paste payloads to the focused
-			// component's `pasteText`, the same hook the modal login prompt exposes.
-			expect(focusTarget).toBeDefined();
-			focusTarget?.pasteText?.(pasted);
-			focusTarget?.handleInput?.("\n");
-
-			await expect(submitted.promise).resolves.toBe(pasted);
+			signInTo(scene, "anthropic");
+			await state.restored.promise;
+			expect(JSON.stringify(providerSheet(scene)?.props.strip?.label)).toContain("token exchange failed");
 		} finally {
-			tab.dispose();
+			scene.dispose();
 		}
 	});
 
-	it("clears manual input after a native callback path settles", async () => {
-		const url = "https://example.com/oauth/authorize?client_id=omp&state=native";
-		const loginCompleted = Promise.withResolvers<void>();
-		const copySpy = vi.fn(async (_text: string): Promise<void> => {});
-		const authStorage = {
-			credentials: { has: (_providerId: string) => false },
-			keys: { source: (_providerId: string) => undefined },
-			oauth: {
-				async login(_provider: OAuthProviderId, ctrl: OAuthLoginCallbacks): Promise<void> {
-					ctrl.onAuth({ url });
-					const settled = new AbortController();
-					const prompt = ctrl.onManualCodeInput?.(settled.signal);
-					settled.abort(new Error("native callback received"));
-					await prompt?.catch(() => {});
-					loginCompleted.resolve();
-				},
-			},
-		} as unknown as AuthStorage;
-		const host = {
-			ctx: {
-				authStorage,
-				disabledProviders: [],
-				copyToClipboard: copySpy,
-				refreshProvider: async () => {},
-				openInBrowser(): void {},
-			},
-			requestRender(): void {},
-			finish(): void {},
-			setFocus(): void {},
-			restoreFocus(): void {},
-		} as unknown as SetupSceneHost;
-
-		const tab = new SignInScene(host);
-		try {
-			for (const char of "anthropic") tab.handleInput(char);
-			tab.handleInput("\n");
-			await loginCompleted.promise;
-			await Promise.resolve();
-
-			expect(tab.render(80).join("\n")).not.toContain("Paste the authorization code");
-		} finally {
-			tab.dispose();
-		}
-	});
-
-	it("copies the active login URL from the keyboard while the setup TUI owns selection", async () => {
-		const url = "https://example.com/oauth/authorize?client_id=omp&state=copy";
-		const loginGate = Promise.withResolvers<void>();
-		const copySpy = vi.fn(async (_text: string): Promise<void> => {});
-
-		const authStorage = {
-			credentials: { has: (_providerId: string) => false },
-			keys: { source: (_providerId: string) => undefined },
-			oauth: {
-				async login(_provider: OAuthProviderId, ctrl: OAuthLoginCallbacks): Promise<void> {
-					ctrl.onAuth({ url });
-					await loginGate.promise;
-				},
-			},
-		} as unknown as AuthStorage;
-
-		const host = {
-			ctx: {
-				authStorage,
-				disabledProviders: [],
-				copyToClipboard: copySpy,
-				refreshProvider: async () => {},
-				openInBrowser(): void {},
-			},
-			requestRender(): void {},
-			finish(): void {},
-			setFocus(): void {},
-			restoreFocus(): void {},
-		} as unknown as SetupSceneHost;
-
-		const tab = new SignInScene(host);
-		try {
-			for (const char of "anthropic") {
-				tab.handleInput(char);
-			}
-			tab.handleInput("\n");
-			await Promise.resolve();
-			expect(copySpy).toHaveBeenCalledTimes(1);
-
-			tab.handleInput("\x1bc");
-			await Promise.resolve();
-			expect(copySpy).toHaveBeenCalledTimes(2);
-			expect(copySpy).toHaveBeenLastCalledWith(url);
-		} finally {
-			tab.dispose();
-			loginGate.resolve();
-			await loginGate.promise;
-		}
+	it("the sheet's skip action and Esc on the list leave the step", () => {
+		const { host, state } = sceneHost(async () => {});
+		const pointer = new SignInScene(host);
+		const sheet = providerSheet(pointer)!;
+		const skip = sheet.props.actions?.find(action => action.keys?.includes("esc"));
+		expect(skip?.id).toBe("skip");
+		sheet.owner.handleNativeEvent?.({ type: "action", key: "^picker", act: skip!.id, mods: [] });
+		const keyboard = new SignInScene(host);
+		keyboard.handleInput("\x1b");
+		expect(state.finished).toEqual(["skipped", "skipped"]);
 	});
 });
 
@@ -301,7 +239,6 @@ describe("fullscreen setup sign-in cursor", () => {
 				ui: tui,
 				authStorage,
 				disabledProviders: [],
-				copyToClipboard: async () => {},
 				refreshProvider: async () => {},
 				openInBrowser(): void {},
 			} as unknown as SetupHost;
@@ -367,7 +304,7 @@ describe("fullscreen setup sign-in cursor", () => {
 				expect(tui.getFocused()).toBe(wizard);
 				expect(terminal.cursorVisible).toBe(false);
 				expect(tui.getDebugPaint()?.cursor).toBeUndefined();
-				expect(terminal.getViewport().join("\n")).toContain("Login cancelled.");
+				expect(terminal.getViewport().join("\n")).not.toContain("Authorization code");
 				overlay.hide();
 				await scheduler.settle(terminal);
 				expect(tui.getFocused()).toBe(base);

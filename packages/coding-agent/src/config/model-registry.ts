@@ -2048,11 +2048,12 @@ export class ModelRegistry {
 			return `${providerConfig.provider}:proxy-v2-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
-			// rich-v6 invalidates rows written before `mode: decisions` groups moved
-			// to the Decisions runner; rich-v5 before discovery filtered known
-			// non-conversational modes. Keep this in lockstep with the catalog
-			// package's `litellm:rich-vN` namespace whenever mapping behavior changes.
-			return `${providerConfig.provider}:litellm-rich-v6`;
+			// rich-v7 invalidates incomplete /v2/model/info rosters cached before
+			// pagination. rich-v6 moved decisions-mode groups to the Decisions
+			// runner; rich-v5 filtered known non-conversational modes. Bump this
+			// namespace alongside the catalog package's `litellm:rich-vN` when
+			// discovery behavior changes.
+			return `${providerConfig.provider}:litellm-rich-v7`;
 		}
 		return providerConfig.provider;
 	}

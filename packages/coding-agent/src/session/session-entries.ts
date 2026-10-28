@@ -35,6 +35,9 @@ export interface SessionTitleSlotEntry {
 
 export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
 
+/** A prewalk or plan-yolo handoff: restored on resume, passed over when looking up the assigned role. */
+export const PREWALK_MODEL_CHANGE_ROLE = "prewalk";
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this

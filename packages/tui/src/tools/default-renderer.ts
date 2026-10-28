@@ -9,7 +9,7 @@ import { renderStatusLine, type StatusLineOptions } from "../render/status-line"
 import { plainToolCard, type ToolCardPhase } from "../render/tool-card";
 import { clipCollapsed } from "../render/render-utils";
 import {
-	describeJsonTree,
+	describeJsonValue,
 	formatArgsInline,
 	JSON_TREE_MAX_DEPTH_COLLAPSED,
 	JSON_TREE_MAX_DEPTH_EXPANDED,
@@ -186,10 +186,12 @@ const NATIVE_ARGS_SUMMARY_CHARS = 160;
 
 /**
  * TSP view of the generic fallback card: the tool label with a one-line args
- * summary as the head target; the result as a JSON tree or raw `ansi` output.
- * The complete output goes over the wire — the card-level disclosure clamp the
- * terminal applies is the only bound, so an expanded card keeps every row. JSON
- * the tree's depth, node or scalar caps would cut keeps the raw path instead.
+ * summary as the head target; the result as JSON (the host's `json` viewer,
+ * else a JSON tree) or raw `ansi` output. The complete output goes over the
+ * wire — the card-level disclosure clamp the terminal applies is the only
+ * bound, so an expanded card keeps every row. The `json` viewer never cuts;
+ * JSON the fallback tree's depth, node or scalar caps would cut keeps the raw
+ * path instead.
  */
 export function describeDefaultToolExecution(input: DefaultToolRenderInput): NativeToolView {
 	const { result } = input;
@@ -212,7 +214,8 @@ export function describeDefaultToolExecution(input: DefaultToolRenderInput): Nat
 		}
 		if (parsed !== undefined) {
 			let truncated = false;
-			const tree = describeJsonTree(parsed, {
+			const tree = describeJsonValue(parsed, {
+				native: input.options.json,
 				// A result's own `i` or `__partialJson` keys are data, not call metadata.
 				hiddenRootKeys: [],
 				onTruncated: () => {

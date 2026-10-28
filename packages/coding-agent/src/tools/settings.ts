@@ -1045,6 +1045,19 @@ export const cfgToolsXdevInlineDevices = register({
 	},
 });
 
+export const cfgToolsXdevNotices = register({
+	id: "tools.xdevNotices",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "xd:// Mount Notices",
+		description:
+			"Show an `xd://: mounted …` notice when MCP or extension tools are mounted or unmounted. The model still learns of the change with its next prompt.",
+	},
+});
+
 export const cfgDevAutoqa = register({
 	id: "dev.autoqa",
 	type: "boolean",

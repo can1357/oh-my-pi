@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -49,7 +49,9 @@ import {
 	type ToolExecutionHandle,
 	toolRenderName,
 } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { TranscriptBlock, TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { noticeRow, TranscriptNotice } from "@oh-my-pi/pi-tui/chrome/transcript-notice";
+import { span } from "@oh-my-pi/pi-tui/native/describe";
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
@@ -239,6 +241,10 @@ export class UiHelpers {
 	#replaysInFlight = 0;
 	/** `initialChatRendered` to restore when the latest replay ends without committing. */
 	#chatRenderedBeforeReplay = false;
+	/** Bumped by {@link restartTranscriptReplay}; a replay pass that saw it move rebuilds again. */
+	#textRendererSetVersion = 0;
+	/** The text renderer set changed while a replay was in flight; the commit retires stale scrollback. */
+	#textRendererSetChangedDuringReplay = false;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -636,12 +642,14 @@ export class UiHelpers {
 				const errorPresentation = resolveAssistantErrorPresentation(message, this.ctx.viewSession.retryAttempt);
 				const hasErrorStop = errorPresentation.kind === "full";
 				const errorMessage = hasErrorStop ? errorPresentation.text : null;
-				const appendAssistantSegment = (segment: AssistantMessage | undefined) => {
+				const appendAssistantSegment = (toolCallId: string) => {
+					const segment = timeline.afterToolCalls.get(toolCallId);
 					if (!segment || !assistantHasVisibleContent(segment)) return;
 					const component = createAssistantMessageComponent(
 						this.ctx,
 						segment,
 						getAssistantMessageLinkTargets(this.ctx),
+						timeline.contentOffsets.get(toolCallId),
 					);
 					this.ctx.chatContainer.addChild(component);
 				};
@@ -653,7 +661,7 @@ export class UiHelpers {
 					}
 					const afterToolSegment = timeline.afterToolCalls.get(content.id);
 					if (options.preservedLiveToolCallIds?.has(content.id)) {
-						appendAssistantSegment(afterToolSegment);
+						appendAssistantSegment(content.id);
 						continue;
 					}
 					const tool = this.ctx.viewSession.getToolByName(content.name);
@@ -698,7 +706,7 @@ export class UiHelpers {
 								readToolCallAssistantComponents.set(content.id, assistantComponent);
 							}
 						}
-						appendAssistantSegment(afterToolSegment);
+						appendAssistantSegment(content.id);
 						continue;
 					}
 
@@ -742,7 +750,7 @@ export class UiHelpers {
 					} else {
 						this.ctx.pendingTools.set(content.id, component);
 					}
-					appendAssistantSegment(afterToolSegment);
+					appendAssistantSegment(content.id);
 				}
 				// Dangling toolCalls (no result on the resolved path — failed or
 				// retried turns, results on sibling branches) were stripped by the
@@ -1068,6 +1076,19 @@ export class UiHelpers {
 		return run;
 	}
 
+	/**
+	 * Make a transcript replay still in flight rebuild its components with the current extension
+	 * text renderers and link schemes before it commits. Components take both when built, so a
+	 * change while a replay yields would otherwise stay on the committed transcript. Returns
+	 * whether a replay was in flight; the caller then leaves the redraw to it.
+	 */
+	restartTranscriptReplay(): boolean {
+		if (this.#replaysInFlight === 0) return false;
+		this.#textRendererSetVersion++;
+		this.#textRendererSetChangedDuringReplay = true;
+		return true;
+	}
+
 	async #renderInitialMessages(options: RenderInitialMessagesOptions, generation: number): Promise<void> {
 		if (generation !== this.#replayGeneration) return;
 		// Collapsed replay keeps in-flight calls so pending tools remain routable during mid-turn rebuilds.
@@ -1113,6 +1134,7 @@ export class UiHelpers {
 			this.ctx.pendingBashComponents = [];
 			this.ctx.pendingPythonComponents = [];
 			while (true) {
+				const passRendererSetVersion = this.#textRendererSetVersion;
 				if (this.ctx.viewSession.isStreaming) {
 					// Live events mutate the same component maps; keep their replay atomic so
 					// a delta cannot land halfway through rebuilding its pending tool block.
@@ -1121,7 +1143,8 @@ export class UiHelpers {
 					await this.ctx.renderSessionContextIncrementally(context, renderOptions);
 				}
 				if (generation !== this.#replayGeneration) return;
-				if (this.ctx.viewSession.sessionManager.getEntries().length === replayEntryCount) {
+				const entriesChanged = this.ctx.viewSession.sessionManager.getEntries().length !== replayEntryCount;
+				if (!entriesChanged && passRendererSetVersion === this.#textRendererSetVersion) {
 					break;
 				}
 				replayAttempts++;
@@ -1136,10 +1159,10 @@ export class UiHelpers {
 					});
 					break;
 				}
-				// An extension persisted a display message while the transcript replay
-				// yielded. The display callback stayed gated by initialChatRendered;
-				// discard the stale partial tree and replay the current session once
-				// more instead of letting a reentrant synchronous rebuild interleave.
+				// An extension persisted a display message, or the extension text renderer set
+				// changed, while the transcript replay yielded. The display callback stayed gated by
+				// initialChatRendered; discard the stale partial tree and replay the current session
+				// once more instead of letting a reentrant synchronous rebuild interleave.
 				context = this.ctx.viewSession.buildTranscriptSessionContext({
 					collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
 					keepInFlightToolCalls: this.ctx.viewSession.isStreaming,
@@ -1187,7 +1210,11 @@ export class UiHelpers {
 				const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
 				this.ctx.showStatus(`Session compacted ${times}`);
 			}
-			if (options.clearTerminalHistory) {
+			// Rows of the previous transcript already in native scrollback were drawn with the old
+			// text renderer set; retire them as the direct renderer-change rebuild does.
+			const staleRendererRows = this.#textRendererSetChangedDuringReplay && this.#chatRenderedBeforeReplay;
+			this.#textRendererSetChangedDuringReplay = false;
+			if (options.clearTerminalHistory || staleRendererRows) {
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
 			} else {
 				this.ctx.ui.requestRender();
@@ -1216,30 +1243,37 @@ export class UiHelpers {
 	}
 
 	showError(errorMessage: string): void {
-		const text = new Text(`Error: ${errorMessage}`, 1, 0).setStyleFn(t => theme.fg("error", t));
-		this.ctx.present([new Spacer(1), text]);
+		this.ctx.present(TranscriptNotice.line("error", errorMessage));
 	}
 
 	showWarning(warningMessage: string, options?: { hideWithToolActivity?: boolean }): void {
-		const text = new Text(`Warning: ${warningMessage}`, 1, 0).setStyleFn(t => theme.fg("warning", t));
-		const content = [new Spacer(1), text];
-		this.ctx.present(options?.hideWithToolActivity ? new ToolActivityContainer(content) : content);
+		const notice = TranscriptNotice.line("warning", warningMessage);
+		this.ctx.present(options?.hideWithToolActivity ? new ToolActivityContainer(notice) : notice);
 	}
 
 	showNewVersionNotification(newVersion: string): void {
-		const block = new TranscriptBlock();
-		block.addChild(new DynamicBorder(text => theme.fg("warning", text)));
 		const title = "Update Available";
 		const prefix = `New version ${newVersion} is available. Run: `;
 		const command = "omp update";
-		block.addChild(
-			new Text(`${title}\n${prefix}${command}`, 1, 0).setStyleFn(
-				() =>
-					`${theme.bold(theme.fg("warning", title))}\n${theme.fg("muted", prefix)}${theme.fg("accent", command)}`,
-			),
+		const native = noticeRow(
+			"info",
+			[
+				span("Update available", "strong"),
+				span(` · New version ${newVersion} is available. Run `),
+				span(command, "code"),
+			],
+			{ icon: "download" },
 		);
-		block.addChild(new DynamicBorder(text => theme.fg("warning", text)));
-		this.ctx.present(block);
+		this.ctx.present(
+			new TranscriptNotice(native, [
+				new DynamicBorder(text => theme.fg("warning", text)),
+				new Text(`${title}\n${prefix}${command}`, 1, 0).setStyleFn(
+					() =>
+						`${theme.bold(theme.fg("warning", title))}\n${theme.fg("muted", prefix)}${theme.fg("accent", command)}`,
+				),
+				new DynamicBorder(text => theme.fg("warning", text)),
+			]),
+		);
 	}
 
 	updatePendingMessagesDisplay(): void {

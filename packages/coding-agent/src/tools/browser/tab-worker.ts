@@ -1536,6 +1536,8 @@ export class WorkerCore {
 	/** Session holding `ignore_https_errors`; Chromium drops the override once it detaches. */
 	#certificateOverride?: CDPSession;
 	readonly #recording = new RecordingController();
+	/** Set once the core stops for good: by {@link terminate}, or by a close. */
+	#stopped = false;
 	/**
 	 * The page asked to navigate its main frame (a link, a submit button, a script setting `location`) and the new
 	 * document has neither committed nor been abandoned. Chromium reports the request before the click that caused it
@@ -1725,6 +1727,11 @@ export class WorkerCore {
 				defaultViewport: null,
 				protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
 			});
+			// Terminated while it connected: nothing will drop this connection later.
+			if (this.#stopped) {
+				void this.#browser.disconnect();
+				return;
+			}
 
 			// Realm setup is done: puppeteer loaded and browser connected. Sent before
 			// page acquisition so the supervisor's cold-start budget bounds only the
@@ -3544,9 +3551,27 @@ export class WorkerCore {
 		}
 	}
 
-	async #close(): Promise<void> {
+	/**
+	 * Inline counterpart of `Worker.terminate()`: stop taking messages, abort the active run, and drop the browser
+	 * connection (a connected core keeps Chrome's debugger attached to the tab), even under a close in progress.
+	 */
+	terminate(): void {
+		this.#stop();
+		this.#active?.ac.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Tab worker terminated")));
+		if (this.#browser?.connected) void this.#browser.disconnect();
+	}
+
+	/** Stop taking messages; false when the core had already stopped. */
+	#stop(): boolean {
+		if (this.#stopped) return false;
+		this.#stopped = true;
 		this.#unsub();
 		this.#uninstallRejectionGuard();
+		return true;
+	}
+
+	async #close(): Promise<void> {
+		if (!this.#stop()) return;
 		this.#clearElementCache();
 		const page = this.#page;
 		await this.#recording.close().catch(error => {

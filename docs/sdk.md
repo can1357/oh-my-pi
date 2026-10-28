@@ -11,7 +11,7 @@ If you need cross-language/process isolation, use RPC mode instead.
 bun add @oh-my-pi/pi-coding-agent
 ```
 
-Requires Bun 1.3.14 or newer. Before the first model-backed prompt, configure
+Requires Bun 1.4.4 or newer. Before the first model-backed prompt, configure
 credentials for a provider or run a keyless local provider; see
 [Providers](./providers.md). Session construction can succeed without an
 available model, but prompting cannot.
@@ -225,6 +225,7 @@ const unsubscribe = session.subscribe((event) => {
 `AgentSessionEvent` includes core `AgentEvent` plus session-level events:
 
 - `auto_compaction_start` / `auto_compaction_end`
+- `manual_compaction_start` / `manual_compaction_end` (`compact()`, `/compact`, extension `ctx.compact()`)
 - `auto_retry_start` / `auto_retry_end`
 - `retry_fallback_applied` / `retry_fallback_succeeded`
 - `model_changed`

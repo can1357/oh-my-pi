@@ -3872,6 +3872,134 @@ describe("AgentSession retry fallback", () => {
 		expect(getLastAssistantMessage(session).stopReason).toBe("stop");
 	});
 
+	it.each<{
+		name: string;
+		failure: MockResponse | (() => Promise<AIError.FinalizeResult>);
+		extraSettings?: Record<string, unknown>;
+		primaryAttempts: number;
+	}>([
+		{
+			// The org-wide input-tokens-per-minute cap, as Anthropic (and a LiteLLM
+			// gateway in front of it) reports it: transient, so the same model is
+			// retryable, but the model itself is the one being throttled. With
+			// retry.rateLimitWalksChain on, the chain is walked at once.
+			name: "a per-minute rate limit with retry.rateLimitWalksChain on",
+			failure: {
+				throw: '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your organization\'s rate limit of 10,000,000 input tokens per minute (org: test-org, model: claude-sonnet-4-5). Reduce the prompt length or the maximum tokens requested, or try again later."}} retry-after-ms=1',
+			},
+			extraSettings: { "retry.rateLimitWalksChain": true },
+			primaryAttempts: 1,
+		},
+		{
+			// A retryable 429 whose text names another cap (here a concurrency cap):
+			// the status alone says the model is throttled.
+			name: "a 429 concurrency cap with retry.rateLimitWalksChain on",
+			failure: () =>
+				AIError.finalize(
+					Object.assign(new Error("concurrent connections limit (retry-after-ms=1)"), { status: 429 }),
+					{
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: "claude-sonnet-4-5",
+					},
+				),
+			extraSettings: { "retry.rateLimitWalksChain": true },
+			primaryAttempts: 1,
+		},
+		{
+			// The default keeps the signed-thinking deferral for rate limits: the
+			// throttled model keeps its whole retry budget before the chain.
+			name: "a per-minute rate limit under the default settings",
+			failure: {
+				throw: '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your organization\'s rate limit of 10,000,000 input tokens per minute (org: test-org, model: claude-sonnet-4-5). Reduce the prompt length or the maximum tokens requested, or try again later."}} retry-after-ms=1',
+			},
+			primaryAttempts: 4,
+		},
+	])(
+		"reaches the Anthropic fallback after $primaryAttempts attempt(s) on the signing model when it fails with $name",
+		async ({ failure, extraSettings, primaryAttempts }) => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("anthropic", "claude-opus-4-5");
+			if (!primaryModel || !fallbackModel) {
+				throw new Error("Expected bundled Anthropic test models to exist");
+			}
+
+			const finalized = typeof failure === "function" ? await failure() : undefined;
+			const scripted = typeof failure === "function" ? undefined : failure;
+			const mock = createMockModel();
+			const requestedModels: string[] = [];
+			const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+			let requestCount = 0;
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestCount++;
+					requestedModels.push(`${model.provider}/${model.id}`);
+					if (requestCount === 1) {
+						mock.push({
+							content: [
+								{
+									type: "thinking",
+									thinking: "Signed Sonnet reasoning.",
+									thinkingSignature: "sonnet-signature",
+								},
+								"Seeded turn",
+							],
+						});
+					} else if (model.id === primaryModel.id) {
+						if (finalized) return finalizedErrorStream(model, finalized);
+						if (scripted) mock.push(scripted);
+					} else {
+						mock.push({ content: ["Recovered on Opus"] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"retry.baseDelayMs": 1,
+					"retry.maxRetries": 3,
+					"retry.fallbackChains": {
+						"anthropic/*": [`${fallbackModel.provider}/${fallbackModel.id}`],
+					},
+					...extraSettings,
+				}),
+				modelRegistry,
+			});
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
+			});
+
+			await session.prompt("Seed signed thinking");
+			await session.waitForIdle();
+			const seededAssistant = agent.state.messages.findLast(
+				(message): message is AssistantMessage => message.role === "assistant",
+			);
+			if (!seededAssistant) throw new Error("Expected seeded assistant message");
+			seededAssistant.api = primaryModel.api;
+			seededAssistant.provider = primaryModel.provider;
+			seededAssistant.model = primaryModel.id;
+			await session.prompt("Hit the rate limit on the signing model");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([
+				`${primaryModel.provider}/${primaryModel.id}`,
+				...Array.from({ length: primaryAttempts }, () => `${primaryModel.provider}/${primaryModel.id}`),
+				`${fallbackModel.provider}/${fallbackModel.id}`,
+			]);
+			expect(fallbackAppliedEvents).toEqual([
+				expect.objectContaining({ to: `${fallbackModel.provider}/${fallbackModel.id}` }),
+			]);
+			expect(session.model?.id).toBe(fallbackModel.id);
+			expect(getLastAssistantMessage(session).stopReason).toBe("stop");
+		},
+	);
+
 	it.each<{ name: string; failure: MockResponse; settings: Record<string, unknown> }>([
 		{
 			name: "a rate-limit wait past retry.maxDelayMs",

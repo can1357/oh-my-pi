@@ -26,6 +26,12 @@ import { isBareMathEnvironment, latexToUnicode } from "../latex-to-unicode";
 import { plainText } from "../native/spans";
 import { md } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
+import {
+	extensionLinkScheme,
+	extensionLinksVersion,
+	formatExtensionLink,
+	stripExtensionLinkMarkers,
+} from "../render/extension-links";
 import type { SymbolTheme } from "../symbols";
 import { TERMINAL } from "../terminal-capabilities";
 import { getSymbolTheme, getThemeEpoch } from "../theme/theme";
@@ -1354,6 +1360,15 @@ function inlineHasOpen(tokens: readonly Token[]): boolean {
 	return false;
 }
 
+/** True when the inline token stream holds a link whose scheme an extension claimed. */
+function hasExtensionLink(tokens: readonly Token[]): boolean {
+	for (const token of tokens) {
+		if (token.type === "link" && typeof token.href === "string" && extensionLinkScheme(token.href)) return true;
+		if ("tokens" in token && Array.isArray(token.tokens) && hasExtensionLink(token.tokens as Token[])) return true;
+	}
+	return false;
+}
+
 /** Isolated inline lex of a same-line delta. A single-line delta has no block
  * structure, so the isolated inline pass equals the full lex's inline pass
  * (marked's paragraph tokens run the same `inlineTokens` entry point). */
@@ -2129,6 +2144,7 @@ interface RenderSignature {
 	defaultTextStyleId: number;
 	imageProtocol: string;
 	hyperlinks: boolean;
+	extensionLinks: number;
 	textSizing: boolean;
 	bgColorProbe: string;
 	headingProbe: string;
@@ -2300,6 +2316,8 @@ export class Markdown implements Component {
 	#cachedText?: string;
 	#cachedWidth?: number;
 	#cachedLines?: readonly string[];
+	// Extension-link routing changes how links draw without changing text or width.
+	#cachedExtensionLinks?: number;
 	#transientRenderCache = false;
 
 	// Streaming-lex cache: the largest blank-line-bounded prefix of #text whose
@@ -2373,6 +2391,9 @@ export class Markdown implements Component {
 	#fastTail?: FastTailRecipe; // undefined = disarmed
 	// B+ capture plumbing: #renderContentLines records the last rendered paragraph row.
 	#lastTailCapture?: { kind: "paragraph"; open: boolean; rowInput: string; rowRaw: string };
+	/** Top-level token index and running count of the extension links drawn in it; see `#renderContentLines`. */
+	#extensionLinkBlock = 0;
+	#extensionLinkOrdinal = 0;
 	#ignoreTight = false;
 	#native?: { text: string; stream: boolean; node: NativeNode };
 	setIgnoreTight(ignore: boolean): this {
@@ -2914,7 +2935,12 @@ export class Markdown implements Component {
 		// instance at the same width (e.g. resize debounce, repeated redraws).
 		// Returning the cached reference is load-bearing: parents memoize their
 		// concatenation on reference equality.
-		if (this.#cachedLines && this.#cachedText === this.#text && this.#cachedWidth === width) {
+		if (
+			this.#cachedLines &&
+			this.#cachedText === this.#text &&
+			this.#cachedWidth === width &&
+			this.#cachedExtensionLinks === extensionLinksVersion()
+		) {
 			return this.#cachedLines;
 		}
 
@@ -2927,6 +2953,7 @@ export class Markdown implements Component {
 			this.#cachedText = this.#text;
 			this.#cachedWidth = width;
 			this.#cachedLines = EMPTY_RENDER_LINES;
+			this.#cachedExtensionLinks = extensionLinksVersion();
 			return EMPTY_RENDER_LINES;
 		}
 
@@ -3011,6 +3038,8 @@ export class Markdown implements Component {
 					// into a table on a marker-free delta (`| --` + `--- | -`).
 					!FAST_TABLE_DELIM_ROW_RE.test(grownLastLine) &&
 					(!markerDelta || (!this.#lastTailCapture?.open && !pairSeamHazard && !inlineHasOpen(deltaTokens!))) &&
+					// Extension link markers are numbered per block; a delta rendered alone can't continue that.
+					!(deltaTokens && hasExtensionLink(deltaTokens)) &&
 					!FAST_URL_ANYWHERE_RE.test(seamWindow) &&
 					// A link or math span the grown row leaves open renders speculatively closed: re-lex.
 					speculativeInlineClose(grownLastLine) === undefined
@@ -3051,6 +3080,7 @@ export class Markdown implements Component {
 					this.#cachedText = this.#text;
 					this.#cachedWidth = width;
 					this.#cachedLines = fastResult;
+					this.#cachedExtensionLinks = signature.extensionLinks;
 					this.#fastTail = {
 						lines: fastResult,
 						source: this.#text,
@@ -3113,6 +3143,7 @@ export class Markdown implements Component {
 				this.#cachedText = this.#text;
 				this.#cachedWidth = width;
 				this.#cachedLines = cached;
+				this.#cachedExtensionLinks = signature.extensionLinks;
 				return cached;
 			}
 		}
@@ -3146,6 +3177,7 @@ export class Markdown implements Component {
 		this.#cachedText = this.#text;
 		this.#cachedWidth = width;
 		this.#cachedLines = result;
+		this.#cachedExtensionLinks = signature.extensionLinks;
 
 		const fastEligible =
 			this.transientRenderCache &&
@@ -3200,6 +3232,7 @@ export class Markdown implements Component {
 			defaultTextStyleId: this.#defaultTextStyle ? objectId(this.#defaultTextStyle) : -1,
 			imageProtocol: TERMINAL.imageProtocol ?? "",
 			hyperlinks: TERMINAL.hyperlinks,
+			extensionLinks: extensionLinksVersion(),
 			textSizing: TERMINAL.textSizing,
 			bgColorProbe,
 			headingProbe,
@@ -3212,7 +3245,7 @@ export class Markdown implements Component {
 	}
 
 	#renderCacheKey(normalizedText: string, signature: RenderSignature): string {
-		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
+		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.extensionLinks}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
 	}
 
 	#renderStreamingContentLines(
@@ -3288,6 +3321,7 @@ export class Markdown implements Component {
 		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return undefined;
 		if (cache.imageProtocol !== signature.imageProtocol) return undefined;
 		if (cache.hyperlinks !== signature.hyperlinks) return undefined;
+		if (cache.extensionLinks !== signature.extensionLinks) return undefined;
 		if (cache.textSizing !== signature.textSizing) return undefined;
 		if (cache.bgColorProbe !== signature.bgColorProbe) return undefined;
 		if (cache.headingProbe !== signature.headingProbe) return undefined;
@@ -3378,6 +3412,7 @@ export class Markdown implements Component {
 		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return start;
 		if (cache.imageProtocol !== signature.imageProtocol) return start;
 		if (cache.hyperlinks !== signature.hyperlinks) return start;
+		if (cache.extensionLinks !== signature.extensionLinks) return start;
 		if (cache.textSizing !== signature.textSizing) return start;
 		if (cache.bgColorProbe !== signature.bgColorProbe) return start;
 		if (cache.headingProbe !== signature.headingProbe) return start;
@@ -3412,6 +3447,10 @@ export class Markdown implements Component {
 			const token = tokens[i];
 			const nextToken = tokens[i + 1];
 			const tokenWrappedRowStart = wrappedLines.length;
+			// Extension links are numbered per top-level block, across its nested inline runs, so
+			// identical links on neighbouring rows draw distinct markers that every render repeats.
+			this.#extensionLinkBlock = i;
+			this.#extensionLinkOrdinal = 0;
 			const renderedTokenLines = this.#renderToken(token, contentWidth, nextToken?.type);
 			for (const renderedRow of renderedTokenLines) {
 				// Lists wrap while their structural prefixes are still available, so
@@ -3864,7 +3903,8 @@ export class Markdown implements Component {
 				const headingText = this.#renderInlineTokens(token.tokens || [], this.#proseFgExemptContext(styleContext));
 				const headingPlainText = plainInlineTokens(token.tokens || []);
 				let styledHeading: string;
-				if (headingLevel === 1 && TERMINAL.textSizing) {
+				// A sized heading draws plain text, which would drop a clickable extension link's marker.
+				if (headingLevel === 1 && TERMINAL.textSizing && stripExtensionLinkMarkers(headingText) === headingText) {
 					const plainWidth = visibleWidth(headingPlainText);
 					if (plainWidth > 0 && 2 * plainWidth <= width) {
 						const sizedHeading = encodeTextSizedHeading(headingPlainText, 2);
@@ -4183,8 +4223,15 @@ export class Markdown implements Component {
 						token.tokens || [],
 						this.#proseFgExemptContext(resolvedStyleContext),
 					);
-					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
 					const href = typeof token.href === "string" ? token.href : "";
+					// An extension owns this link: no suffix, and no hyperlink the terminal could open.
+					// Its label gets its own (dotted) underline instead of the web-link one.
+					if (href && extensionLinkScheme(href)) {
+						const key = `${this.#extensionLinkBlock}\0${this.#extensionLinkOrdinal++}`;
+						result += formatExtensionLink(this.#theme.link(linkText), href, key) + stylePrefix;
+						break;
+					}
+					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
 					const target = (href && this.#theme.resolveLink?.(href)) || href;
 					const clickableLinkText = formatHyperlink(styledLinkText, target);
 					// If link text matches href, only show the link once. A missing

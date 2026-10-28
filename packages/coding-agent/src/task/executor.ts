@@ -3071,7 +3071,13 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 		// back would ping-pong two idle peers forever. A broadcast leg is not one
 		// either: it asks no one in particular, so relaying every woken peer's
 		// turn back would flood the broadcaster with "not for me" replies.
-		if (details && (Reflect.get(details, "wakeRelay") === true || Reflect.get(details, "broadcast") === true))
+		// A progress note promises a later answer and asks nothing back.
+		if (
+			details &&
+			(Reflect.get(details, "wakeRelay") === true ||
+				Reflect.get(details, "broadcast") === true ||
+				Reflect.get(details, "progress") === true)
+		)
 			continue;
 		const messageId = details ? Reflect.get(details, "id") : undefined;
 		sources.push({ from, messageId: typeof messageId === "string" ? messageId : undefined });
@@ -4156,15 +4162,37 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		// dispatch and persisted revival do, never the spawn-time copy.
 		const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(capture.settings.parent));
 		capture.spec.prompt.reviving = true;
+		// A session-local switch since spawn (a prewalk handoff) owns the model and effort: the
+		// transcript restores the effort, and the spawn selection only backs the model up when it is
+		// unavailable. The spawn's prewalk stays configured; the coordinator sees it was spent. A seance
+		// fork's selections belong to its source run, never to the consult.
+		const sessionLocalModel = capture.spec.preparedSession ? undefined : reopened.getSessionLocalModelChange()?.model;
 		try {
 			try {
+				const options = buildSubagentSessionOptions(
+					capture.spec,
+					restoreSubagentSettings(capture.settings),
+					reopened,
+					expectedAgentRef,
+				);
 				({ session: revived } = await createAgentSession({
-					...buildSubagentSessionOptions(
-						capture.spec,
-						restoreSubagentSettings(capture.settings),
-						reopened,
-						expectedAgentRef,
-					),
+					...options,
+					...(sessionLocalModel
+						? {
+								model: undefined,
+								modelPattern: [
+									sessionLocalModel,
+									...(options.model
+										? [formatModelStringWithRouting(options.model)]
+										: options.modelPattern === undefined
+											? []
+											: [options.modelPattern].flat()),
+								],
+								modelPatternFallbackRole: undefined,
+								modelPatternDefaultFallbackChain: undefined,
+								thinkingLevel: undefined,
+							}
+						: undefined),
 					oauthAccountPools: Object.hasOwn(agentAccountPools, capture.agentName)
 						? agentAccountPools[capture.agentName]
 						: undefined,

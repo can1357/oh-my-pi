@@ -177,14 +177,14 @@ export interface InternalResource {
 	size?: number;
 	/** Underlying filesystem path (for debugging, not exposed to agent) */
 	sourcePath?: string;
+	/** First source-file line of an excerpt; selectors remain relative to `content`. */
+	sourceStartLine?: number;
 	/** Additional notes about resolution */
 	notes?: string[];
 	/** Structured snapshots used only for transcript rendering. */
 	details?: {
 		proc?: ProcReadDetails;
 		cfg?: CfgReadDetails;
-		/** Prefix-free text + gutter start for the TUI read card when `content` carries hashline/line prefixes (conflict://). */
-		display?: { text: string; startLine: number; lineNumbers?: Array<number | null> };
 	};
 	/**
 	 * `value` marks a discrete extracted value (agent://<id>/<json-path>) that

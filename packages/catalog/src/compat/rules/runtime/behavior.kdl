@@ -100,8 +100,8 @@ behavior {
 	// (flat rate) or Standard Credits. Unknown ids have no inferred entitlement.
 	quota-tiers provider="factory-droid" {
 		tier "core" "inkling" "mistral-large-4" "mistral-medium-3.5" "glm-5.3-flash" "glm-5.3" "glm-5.2" "glm-5.2-fast" \
-			"kimi-k3" "qwen3.8-max" "nemotron-3-ultra" "deepseek-v4.1-flash" "deepseek-v4-flash-0731" \
-			"deepseek-v4-pro" "minimax-m3" "minimax-m2.7"
+			"kimi-k3" "qwen3.8-max" "nemotron-3-ultra" "deepseek-v4.1-flash" "deepseek-v4.1-flash-1017" \
+			"deepseek-v4-flash-0731" "deepseek-v4-pro" "minimax-m3" "minimax-m2.7"
 		tier "standard" "claude-fable-5.1" "claude-fable-5" "claude-opus-5-5" "claude-opus-5-5-fast" \
 			"claude-opus-5" "claude-opus-5-fast" "claude-opus-4-8" "claude-opus-4-8-fast" "claude-opus-4-7" \
 			"claude-opus-4-6" "claude-opus-4-5-20251101" "claude-sonnet-5-5" "claude-sonnet-5" \
@@ -315,8 +315,8 @@ behavior {
 			exact="gemini-3-flash-preview" exact="gemini-3-pro-image-preview"
 		route "openai-completions" exact="inkling" exact="mistral-large-4" exact="mistral-medium-3.5" exact="glm-5.3-flash" \
 			exact="glm-5.3" exact="glm-5.2" exact="glm-5.2-fast" exact="kimi-k3" exact="qwen3.8-max" \
-			exact="nemotron-3-ultra" exact="deepseek-v4.1-flash" exact="deepseek-v4-flash-0731" \
-			exact="deepseek-v4-pro" exact="minimax-m3"
+			exact="nemotron-3-ultra" exact="deepseek-v4.1-flash" exact="deepseek-v4.1-flash-1017" \
+			exact="deepseek-v4-flash-0731" exact="deepseek-v4-pro" exact="minimax-m3"
 	}
 
 	// Copilot serves these models with tighter effective limits than its

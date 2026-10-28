@@ -70,7 +70,13 @@ import type { SessionManager } from "./session-manager";
 import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "../extensibility/settings";
 import { cfgExternalThinking, cfgIncludeModelInPrompt, cfgInlineToolDescriptors, cfgSkillful } from "./settings";
 import { cfgStartupQuiet } from "../modes/settings";
-import { cfgToolsApproval, cfgToolsApprovalMode, cfgToolsXdevDocs, cfgToolsXdevInlineDevices } from "../tools/settings";
+import {
+	cfgToolsApproval,
+	cfgToolsApprovalMode,
+	cfgToolsXdevDocs,
+	cfgToolsXdevInlineDevices,
+	cfgToolsXdevNotices,
+} from "../tools/settings";
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionToolsHost {
@@ -718,11 +724,24 @@ export class SessionTools {
 		return resolveMCPToolAlias(bareName, candidate => this.#toolRegistry.get(candidate));
 	}
 
-	/** Looks up an enabled tool through the same ACP permission gate as direct calls. */
+	/**
+	 * Looks up an enabled tool through the same ACP permission gate as direct calls.
+	 *
+	 * Accepts the spellings direct dispatch accepts: an `xd://` prefix and the
+	 * Claude Code `mcp__<server>__<tool>` alias. The alias resolves in one
+	 * {@link resolveMCPToolAlias} pass over every enabled tool (top-level plus
+	 * mounted devices), so an alias two enabled tools answer resolves to nothing.
+	 */
 	getToolForEvalBridge(name: string): AgentTool | undefined {
-		const tool = this.#resolveToolWireName(name);
-		if (!tool || !this.getEnabledToolNames().includes(tool.name)) return undefined;
-		return this.#wrapToolForAcpPermission(tool);
+		const bareName = stripXdUrlPrefix(name);
+		const enabled = new Set(this.getEnabledToolNames());
+		const named = this.#resolveToolWireName(bareName);
+		// A registered name never falls through to an alias guess, even when disabled.
+		if (named) return enabled.has(named.name) ? this.#wrapToolForAcpPermission(named) : undefined;
+		const alias = resolveMCPToolAlias(bareName, candidate =>
+			enabled.has(candidate) ? this.#toolRegistry.get(candidate) : undefined,
+		);
+		return alias && this.#wrapToolForAcpPermission(alias);
 	}
 
 	/** Canonical and unambiguous wire names accepted by the eval bridge. */
@@ -1649,15 +1668,12 @@ export class SessionTools {
 		// Coalesce against the unannounced delta: an unmount cancels a pending
 		// mount the model never learned about, and a remount cancels a pending
 		// unmount.
-		const pending = this.#pendingXdevMountDelta ?? { added: new Set<string>(), removed: new Set<string>() };
-		for (const name of addedNames) {
-			if (!pending.removed.delete(name)) pending.added.add(name);
-		}
-		for (const name of removedNames) {
-			if (!pending.added.delete(name)) pending.removed.add(name);
-		}
-		this.#pendingXdevMountDelta = pending.added.size > 0 || pending.removed.size > 0 ? pending : undefined;
-		if (cfgStartupQuiet.get(this.#host.settings)) return;
+		this.#pendingXdevMountDelta = this.#coalesceToolRosterDelta(
+			this.#pendingXdevMountDelta,
+			addedNames,
+			removedNames,
+		);
+		if (cfgStartupQuiet.get(this.#host.settings) || !cfgToolsXdevNotices.get(this.#host.settings)) return;
 		const parts: string[] = [];
 		if (addedNames.length > 0) parts.push(`mounted ${addedNames.join(", ")}`);
 		if (removedNames.length > 0) parts.push(`unmounted ${removedNames.join(", ")}`);

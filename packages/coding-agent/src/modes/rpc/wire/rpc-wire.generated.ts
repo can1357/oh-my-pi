@@ -887,6 +887,25 @@ export interface AutoCompactionEndEvent {
 	skipped?: boolean;
 }
 
+/** A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted. */
+export interface ManualCompactionStartEvent {
+	type: "manual_compaction_start";
+	/** The `/compact <mode>` subcommand, when one was given. */
+	mode?: string;
+}
+
+/** Outcome of the compaction announced by the matching `manual_compaction_start`. */
+export interface ManualCompactionEndEvent {
+	type: "manual_compaction_end";
+	/** The compaction was cancelled (abort, or a `session_before_compact` hook). */
+	aborted: boolean;
+	/** Present when the compaction committed. */
+	result?: CompactionResult;
+	/** There was nothing to compact; `errorMessage` says why. */
+	skipped?: boolean;
+	errorMessage?: string;
+}
+
 export interface AutoRetryStartEvent {
 	type: "auto_retry_start";
 	attempt: number;
@@ -956,6 +975,7 @@ export interface AdvisorYieldedEvent {
 	type: "advisor_yielded";
 }
 
+/** Rule injection: a TTSR rule matched the stream and its text was injected. Each rule carries at least `name`, `path`, and `content`. */
 export interface TtsrTriggeredEvent {
 	type: "ttsr_triggered";
 	rules: Record<string, unknown>[];
@@ -1011,7 +1031,7 @@ export interface QueueUpdateEvent {
 }
 
 /** A session event, discriminated by `type`; `set_event_filter` selects which are sent. */
-export type RpcAgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent;
+export type RpcAgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent;
 
 /** First frame after startup; transport fields are absent on servers without protocol v2. */
 export interface ReadyEvent {
@@ -1653,6 +1673,17 @@ export interface LiveStartResult {
 	voice: string;
 }
 
+export interface LiveConnectParams {
+	sdpOffer: string;
+	voice?: string;
+	instructions?: string;
+}
+
+export interface LiveConnectResult {
+	voice: string;
+	sdpAnswer: string;
+}
+
 export interface LiveMuteParams {
 	muted?: boolean;
 }
@@ -1879,6 +1910,7 @@ export interface RpcWireCommands {
 	cancel_subagent: { params: CancelSubagentParams; result: CancelSubagentResult };
 	steer_subagent: { params: SteerSubagentParams; result: undefined };
 	live_start: { params: LiveStartParams; result: LiveStartResult };
+	live_connect: { params: LiveConnectParams; result: LiveConnectResult };
 	live_stop: { params: undefined; result: undefined };
 	live_mute: { params: LiveMuteParams; result: LiveMuteResult };
 	dictation_start: { params: DictationStartParams; result: undefined };

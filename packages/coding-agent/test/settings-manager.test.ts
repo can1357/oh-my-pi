@@ -1824,7 +1824,7 @@ describe("Settings", () => {
 			"google-antigravity/gemini-2.5-flash",
 			"google/gemini-2.5-flash",
 			"anthropic/claude-haiku-4-5",
-			"openai-codex/gpt-5.6-luna",
+			"openai-codex/gpt-6-luna",
 			"xai/grok-4.5",
 			"web/exa",
 			"web/tavily",

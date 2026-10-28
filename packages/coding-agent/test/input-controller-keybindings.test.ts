@@ -43,6 +43,7 @@ type FakeEditor = {
 	clearCustomKeyHandlers(): void;
 	spaceHold: SpaceHoldGesture;
 	pasteText(text: string): void;
+	handleInput?(data: string): void;
 	imageLinks?: (string | undefined)[];
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
@@ -319,6 +320,23 @@ function dispatchEnhancedImagePaste(listeners: InputListener[], png: Uint8Array)
 	}
 }
 
+/** Replay a kitty OSC 5522 enhanced paste that offers and delivers plain `text`. */
+function dispatchEnhancedTextPaste(listeners: InputListener[], text: string): void {
+	const packet = (metadata: string, payload?: string) =>
+		`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
+	const textMime = Buffer.from("text/plain").toString("base64");
+	for (const input of [
+		packet("type=read:status=OK:pw=secret"),
+		packet(`type=read:status=DATA:mime=${textMime}`),
+		packet("type=read:status=DONE"),
+		packet("type=read:status=OK"),
+		packet(`type=read:status=DATA:mime=${textMime}`, Buffer.from(text).toString("base64")),
+		packet("type=read:status=DONE"),
+	]) {
+		dispatchInput(listeners, input);
+	}
+}
+
 describe("InputController keybinding setup", () => {
 	it("registers model selector and display reset actions separately", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
@@ -468,9 +486,7 @@ describe("InputController keybinding setup", () => {
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
-		const listener = spies.addInputListener.mock.calls[1]?.[0];
-		expect(listener).toBeDefined();
-		const result = listener?.("b");
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "b");
 
 		expect(result).toEqual({ consume: true });
 		expect(spies.handleBtwBranchKey).toHaveBeenCalledTimes(1);
@@ -483,9 +499,7 @@ describe("InputController keybinding setup", () => {
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
-		const listener = spies.addInputListener.mock.calls[1]?.[0];
-		expect(listener).toBeDefined();
-		const result = listener?.("b");
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "b");
 
 		expect(result).toBeUndefined();
 		expect(spies.handleBtwBranchKey).not.toHaveBeenCalled();
@@ -497,9 +511,7 @@ describe("InputController keybinding setup", () => {
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
-		const listener = spies.addInputListener.mock.calls[1]?.[0];
-		expect(listener).toBeDefined();
-		const result = listener?.("b");
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "b");
 
 		expect(result).toBeUndefined();
 		expect(spies.handleBtwBranchKey).not.toHaveBeenCalled();
@@ -536,6 +548,36 @@ describe("InputController keybinding setup", () => {
 		expect(result).toEqual({ consume: true });
 		expect(await pasted).toBe("sk-test-key");
 		expect(focusedPasteText).toHaveBeenCalledWith("sk-test-key");
+	});
+
+	it("delivers an enhanced text paste to a focused dialog without pasteText as a bracketed paste", async () => {
+		const { promise: received, resolve: resolveReceived } = Promise.withResolvers<string>();
+		const handleInput = vi.fn((data: string) => {
+			resolveReceived(data);
+		});
+		const { InputController, ctx, editor, setFocused, spies } = await createContext();
+		setFocused({ handleInput });
+		new InputController(ctx).setupKeyHandlers();
+
+		dispatchEnhancedTextPaste(registeredInputListeners(spies.addInputListener), "sk-test-key");
+
+		expect(await received).toBe("\x1b[200~sk-test-key\x1b[201~");
+		expect(editor.getText()).toBe("");
+	});
+
+	it("delivers an enhanced text paste to the main editor as a bracketed paste so image paths attach", async () => {
+		const { promise: received, resolve: resolveReceived } = Promise.withResolvers<string>();
+		const { InputController, ctx, editor, spies } = await createContext();
+		editor.handleInput = vi.fn((data: string) => {
+			resolveReceived(data);
+		});
+		new InputController(ctx).setupKeyHandlers();
+
+		const path = "/tmp/Screenshot\\ 2026-10-19\\ at\\ 14.25.32.png";
+		dispatchEnhancedTextPaste(registeredInputListeners(spies.addInputListener), path);
+
+		expect(await received).toBe(`\x1b[200~${path}\x1b[201~`);
+		expect(editor.getText()).toBe("");
 	});
 
 	it("rejects image smart-paste while a login input is focused instead of mutating the hidden editor", async () => {

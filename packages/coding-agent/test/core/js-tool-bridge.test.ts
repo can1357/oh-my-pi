@@ -955,7 +955,7 @@ describe("callSessionTool", () => {
 		};
 
 		await expect(callSessionTool("write", { path: "out.txt", content: "data" }, { session })).rejects.toThrow(
-			"Unknown tool from js runtime",
+			"registered but not available in this session",
 		);
 		expect(rawExecute).not.toHaveBeenCalled();
 	});

@@ -3943,6 +3943,68 @@ func (v AutoCompactionEndEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"auto_compaction_end"`, nil)
 }
 
+// A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted.
+type ManualCompactionStartEvent struct {
+	// The `/compact <mode>` subcommand, when one was given.
+	Mode *string `json:"mode,omitempty"`
+}
+
+func (v *ManualCompactionStartEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ManualCompactionStartEvent", v.decodeFrom)
+}
+
+func (v *ManualCompactionStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ManualCompactionStartEvent
+	d := fieldDecoder{raw: raw, owner: "ManualCompactionStartEvent"}
+	d.constant("type", "manual_compaction_start")
+	d.optional("mode", &out.Mode)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v ManualCompactionStartEvent) MarshalJSON() ([]byte, error) {
+	type plain ManualCompactionStartEvent
+	return encodeObject(plain(v), `"type":"manual_compaction_start"`, nil)
+}
+
+// Outcome of the compaction announced by the matching `manual_compaction_start`.
+type ManualCompactionEndEvent struct {
+	// The compaction was cancelled (abort, or a `session_before_compact` hook).
+	Aborted bool `json:"aborted"`
+	// Present when the compaction committed.
+	Result *CompactionResult `json:"result,omitempty"`
+	// There was nothing to compact; `errorMessage` says why.
+	Skipped      *bool   `json:"skipped,omitempty"`
+	ErrorMessage *string `json:"errorMessage,omitempty"`
+}
+
+func (v *ManualCompactionEndEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ManualCompactionEndEvent", v.decodeFrom)
+}
+
+func (v *ManualCompactionEndEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ManualCompactionEndEvent
+	d := fieldDecoder{raw: raw, owner: "ManualCompactionEndEvent"}
+	d.constant("type", "manual_compaction_end")
+	d.required("aborted", &out.Aborted)
+	d.optional("result", &out.Result)
+	d.optional("skipped", &out.Skipped)
+	d.optional("errorMessage", &out.ErrorMessage)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v ManualCompactionEndEvent) MarshalJSON() ([]byte, error) {
+	type plain ManualCompactionEndEvent
+	return encodeObject(plain(v), `"type":"manual_compaction_end"`, nil)
+}
+
 type AutoRetryStartEvent struct {
 	Attempt      int64  `json:"attempt"`
 	MaxAttempts  int64  `json:"maxAttempts"`
@@ -4222,6 +4284,7 @@ func (v AdvisorYieldedEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"advisor_yielded"`, nil)
 }
 
+// Rule injection: a TTSR rule matched the stream and its text was injected. Each rule carries at least `name`, `path`, and `content`.
 type TtsrTriggeredEvent struct {
 	Rules []map[string]json.RawMessage `json:"rules"`
 }
@@ -4468,6 +4531,8 @@ func (ToolStreamUpdateEvent) isRpcAgentEvent()       {}
 func (ToolExecutionEndEvent) isRpcAgentEvent()       {}
 func (AutoCompactionStartEvent) isRpcAgentEvent()    {}
 func (AutoCompactionEndEvent) isRpcAgentEvent()      {}
+func (ManualCompactionStartEvent) isRpcAgentEvent()  {}
+func (ManualCompactionEndEvent) isRpcAgentEvent()    {}
 func (AutoRetryStartEvent) isRpcAgentEvent()         {}
 func (AutoRetryEndEvent) isRpcAgentEvent()           {}
 func (CacheWarmingStartEvent) isRpcAgentEvent()      {}
@@ -4533,6 +4598,10 @@ func (v *RpcAgentEvent) decodeFrom(raw map[string]json.RawMessage) error {
 		value, err = decodeVariant[AutoCompactionStartEvent](raw)
 	case "auto_compaction_end":
 		value, err = decodeVariant[AutoCompactionEndEvent](raw)
+	case "manual_compaction_start":
+		value, err = decodeVariant[ManualCompactionStartEvent](raw)
+	case "manual_compaction_end":
+		value, err = decodeVariant[ManualCompactionEndEvent](raw)
 	case "auto_retry_start":
 		value, err = decodeVariant[AutoRetryStartEvent](raw)
 	case "auto_retry_end":
@@ -6638,6 +6707,8 @@ func (ToolStreamUpdateEvent) isRpcNotification()        {}
 func (ToolExecutionEndEvent) isRpcNotification()        {}
 func (AutoCompactionStartEvent) isRpcNotification()     {}
 func (AutoCompactionEndEvent) isRpcNotification()       {}
+func (ManualCompactionStartEvent) isRpcNotification()   {}
+func (ManualCompactionEndEvent) isRpcNotification()     {}
 func (AutoRetryStartEvent) isRpcNotification()          {}
 func (AutoRetryEndEvent) isRpcNotification()            {}
 func (CacheWarmingStartEvent) isRpcNotification()       {}
@@ -6740,6 +6811,10 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[AutoCompactionStartEvent](raw)
 	case "auto_compaction_end":
 		value, err = decodeVariant[AutoCompactionEndEvent](raw)
+	case "manual_compaction_start":
+		value, err = decodeVariant[ManualCompactionStartEvent](raw)
+	case "manual_compaction_end":
+		value, err = decodeVariant[ManualCompactionEndEvent](raw)
 	case "auto_retry_start":
 		value, err = decodeVariant[AutoRetryStartEvent](raw)
 	case "auto_retry_end":
@@ -6837,6 +6912,8 @@ func (ToolStreamUpdateEvent) isRpcServerFrame()        {}
 func (ToolExecutionEndEvent) isRpcServerFrame()        {}
 func (AutoCompactionStartEvent) isRpcServerFrame()     {}
 func (AutoCompactionEndEvent) isRpcServerFrame()       {}
+func (ManualCompactionStartEvent) isRpcServerFrame()   {}
+func (ManualCompactionEndEvent) isRpcServerFrame()     {}
 func (AutoRetryStartEvent) isRpcServerFrame()          {}
 func (AutoRetryEndEvent) isRpcServerFrame()            {}
 func (CacheWarmingStartEvent) isRpcServerFrame()       {}
@@ -6949,6 +7026,10 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[AutoCompactionStartEvent](raw)
 	case "auto_compaction_end":
 		value, err = decodeVariant[AutoCompactionEndEvent](raw)
+	case "manual_compaction_start":
+		value, err = decodeVariant[ManualCompactionStartEvent](raw)
+	case "manual_compaction_end":
+		value, err = decodeVariant[ManualCompactionEndEvent](raw)
 	case "auto_retry_start":
 		value, err = decodeVariant[AutoRetryStartEvent](raw)
 	case "auto_retry_end":
@@ -7218,6 +7299,27 @@ func (v *LiveStartResult) decodeFrom(raw map[string]json.RawMessage) error {
 	var out LiveStartResult
 	d := fieldDecoder{raw: raw, owner: "LiveStartResult"}
 	d.required("voice", &out.Voice)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type LiveConnectResult struct {
+	Voice     string `json:"voice"`
+	SdpAnswer string `json:"sdpAnswer"`
+}
+
+func (v *LiveConnectResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "LiveConnectResult", v.decodeFrom)
+}
+
+func (v *LiveConnectResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out LiveConnectResult
+	d := fieldDecoder{raw: raw, owner: "LiveConnectResult"}
+	d.required("voice", &out.Voice)
+	d.required("sdpAnswer", &out.SdpAnswer)
 	if d.err != nil {
 		return d.err
 	}
@@ -7874,6 +7976,20 @@ func (c Commands) LiveStart(ctx context.Context, p LiveStartCommand) (string, er
 	var out LiveStartResult
 	err := c.call(ctx, "live_start", p, 0, &out)
 	return out.Voice, err
+}
+
+// LiveConnectCommand holds the parameters of "live_connect".
+type LiveConnectCommand struct {
+	SdpOffer     string  `json:"sdpOffer"`
+	Voice        *string `json:"voice,omitempty"`
+	Instructions *string `json:"instructions,omitempty"`
+}
+
+// LiveConnect sends "live_connect": Start a live voice session whose audio runs on a caller-owned WebRTC peer: send its SDP offer, apply the returned answer.
+func (c Commands) LiveConnect(ctx context.Context, p LiveConnectCommand) (LiveConnectResult, error) {
+	var out LiveConnectResult
+	err := c.call(ctx, "live_connect", p, 0, &out)
+	return out, err
 }
 
 // LiveStop sends "live_stop": Stop the live voice session, if any.

@@ -64,7 +64,9 @@ function urlPlace(url: string): string {
 export class LoginDialogComponent extends OverlayPanel {
 	#contentContainer: Container;
 	#input: TextFormField;
-	#tui: TUI;
+	#tui: Pick<TUI, "requestRender">;
+	#focused = false;
+	#useTerminalCursor = false;
 	#onComplete: (success: boolean, message?: string) => void;
 	#openUrl: (url: string) => void;
 	#abortController = new AbortController();
@@ -78,7 +80,7 @@ export class LoginDialogComponent extends OverlayPanel {
 	#nativeRoot: NativeNode | undefined;
 
 	constructor(
-		tui: TUI,
+		tui: Pick<TUI, "requestRender">,
 		providerId: string,
 		onComplete: (success: boolean, message?: string) => void,
 		openUrl: (url: string) => void,
@@ -98,8 +100,29 @@ export class LoginDialogComponent extends OverlayPanel {
 		this.#input = this.#createInput();
 	}
 
+	/** Focus reaches the live field: it draws the caret (the hardware cursor when the terminal's is on). */
+	get focused(): boolean {
+		return this.#focused;
+	}
+
+	set focused(value: boolean) {
+		this.#focused = value;
+		this.#input.focused = value;
+	}
+
+	setUseTerminalCursor(useTerminalCursor: boolean): void {
+		this.#useTerminalCursor = useTerminalCursor;
+		this.#input.input.setUseTerminalCursor(useTerminalCursor);
+	}
+
+	/** A fresh field for the next answer; the previous one stops drawing a caret. */
+	#replaceInput(secret = false): void {
+		this.#input.focused = false;
+		this.#input = this.#createInput(secret);
+	}
+
 	#createInput(secret = false): TextFormField {
-		return new TextFormField({
+		const field = new TextFormField({
 			theme: formTheme,
 			secret,
 			empty: "submit",
@@ -116,6 +139,9 @@ export class LoginDialogComponent extends OverlayPanel {
 			},
 			requestRender: () => this.#tui.requestRender(),
 		});
+		field.focused = this.#focused;
+		field.input.setUseTerminalCursor(this.#useTerminalCursor);
+		return field;
 	}
 
 	get signal(): AbortSignal {
@@ -194,7 +220,7 @@ export class LoginDialogComponent extends OverlayPanel {
 		// Keep retry chrome in place, but discard prior prompt undo/kill history.
 		const mounted = this.#contentContainer.children.indexOf(this.#input);
 		const previousInput = this.#input;
-		this.#input = this.#createInput();
+		this.#replaceInput();
 		const nativeMounted = this.#nativeSteps.find(step => step.kind === "input" && step.field === previousInput);
 		if (mounted !== -1) {
 			// The flow asks again only when the last paste carried no usable code.
@@ -247,7 +273,7 @@ export class LoginDialogComponent extends OverlayPanel {
 			if (answered?.kind === "input") answered.answer = value;
 		}
 		// A new prompt must not recover a previous secret through undo or yank.
-		this.#input = this.#createInput(prompt.secret === true);
+		this.#replaceInput(prompt.secret === true);
 		if (prompt.placeholder) this.#input.input.placeholder = plainText(prompt.placeholder);
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text(theme.fg("text", prompt.message), 0, 0));

@@ -10,6 +10,9 @@
  * eliminates the much-worse "issue shows OPEN for up to softTtlSec after
  * `gh issue close`" failure mode reported by users.
  *
+ * Plain `git push` calls are handled after the command exits 0 instead, once
+ * their destination repository can be resolved (`invalidateGithubCacheForBashResult`).
+ *
  * Detector scope: ops that change visible issue/PR state — `close`,
  * `reopen`, `merge`, `delete`, `ready`, `lock`, `unlock`, `pin`, `unpin`,
  * `transfer`, plus the comment/review/edit ops that change the rendered
@@ -17,8 +20,12 @@
  * number, all auth_keys) because the upside of staleness elimination
  * dwarfs the cost of one cache miss.
  */
+import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { logger } from "@oh-my-pi/pi-utils";
+import { parseGitUrl } from "../extensibility/plugins/git-url";
 import { formatRepoRef } from "./gh-common";
-import { invalidateAllForNumber, invalidateAllForRepo } from "./github-cache";
+import { invalidateAllForNumber, invalidateAllForRepo, invalidatePullRequestsForRepo } from "./github-cache";
 import { tokenizeShellSegments } from "./shell-tokenize";
 
 const PR_URL_PATTERN = /^https:\/\/([^/\s]+)\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/i;
@@ -171,6 +178,85 @@ export function invalidateGithubCacheForBashCommand(command: string): void {
 			invalidateAllForNumber(hit.number, hit.repo);
 		} else {
 			invalidateAllForRepo(hit.repo);
+		}
+	}
+}
+
+/** Options of `git push` that consume the next argv token. */
+const PUSH_VALUE_FLAGS: Record<string, true> = {
+	"--receive-pack": true,
+	"--exec": true,
+	"-o": true,
+	"--push-option": true,
+};
+
+/** A redirection word (`2>&1` lexes as `2>`, `>/dev/null`) ends the argv. */
+const REDIRECT = /^\d*[<>]/;
+
+/** Repository a `git push` argv sends to, or undefined for dry runs and non-push commands. */
+async function pushedRepo(tokens: readonly string[], cwd: string): Promise<string | undefined> {
+	if (path.basename(tokens[0]) !== "git") return undefined;
+	let i = 1;
+	for (; i < tokens.length; i++) {
+		const token = tokens[i];
+		if (token === "-C") cwd = path.resolve(cwd, tokens[++i] ?? "");
+		else if (token.startsWith("-C")) cwd = path.resolve(cwd, token.slice(2));
+		else if (token !== "--no-pager" && token !== "--paginate") break;
+	}
+	if (tokens[i] !== "push") return undefined;
+	let positional: string | undefined;
+	let repoFlag: string | undefined;
+	for (i++; i < tokens.length && !REDIRECT.test(tokens[i]); i++) {
+		const token = tokens[i];
+		if (token === "--dry-run" || /^-[^-]*n/.test(token)) return undefined;
+		if (token === "--repo") repoFlag = tokens[++i];
+		else if (token.startsWith("--repo=")) repoFlag = token.slice("--repo=".length);
+		else if (PUSH_VALUE_FLAGS[token]) i++;
+		else if (token === "--") {
+			positional ??= tokens[i + 1];
+			break;
+		} else if (!token.startsWith("-")) positional ??= token;
+	}
+	// Git's precedence: the positional repository wins over `--repo`.
+	let remote = positional ?? repoFlag;
+	const repository = vcs.git(cwd);
+	if (!remote) {
+		if (!repository) return undefined;
+		const branch = await repository.currentBranch();
+		remote =
+			(branch && (await repository.configGet(`branch.${branch}.pushRemote`))) ||
+			(await repository.configGet("remote.pushDefault")) ||
+			(branch && (await repository.configGet(`branch.${branch}.remote`))) ||
+			undefined;
+		if (!remote) {
+			const remotes = await repository.remoteList();
+			remote = remotes.length === 1 ? remotes[0] : "origin";
+		}
+	}
+	const url =
+		(await repository?.configGet(`remote.${remote}.pushurl`)) ?? (await repository?.remoteUrl(remote)) ?? remote;
+	const source = parseGitUrl(url);
+	return source ? formatRepoRef(source.host, source.path) : undefined;
+}
+
+/**
+ * After a bash command exits 0, drop live PR metadata/diff rows for every
+ * repository a `git push` in it sent to. Like the `gh` detector this
+ * over-invalidates (a push hidden behind `|| true` still clears): a spurious
+ * clear costs one refetch, a missed one serves the old head until the TTL.
+ */
+export async function invalidateGithubCacheForBashResult(
+	command: string,
+	cwd: string,
+	result: { exitCode?: number },
+): Promise<void> {
+	if (result.exitCode !== 0 || !command.includes("push")) return;
+	for (const tokens of tokenizeShellSegments(command)) {
+		try {
+			const repo = await pushedRepo(tokens, cwd);
+			if (repo) invalidatePullRequestsForRepo(repo);
+		} catch (err) {
+			logger.debug("github cache: push destination lookup failed", { err: String(err) });
 		}
 	}
 }

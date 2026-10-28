@@ -38,8 +38,12 @@ class ChromeBackedExtension {
 	readonly #inFlight = new Map<number, number>();
 	/** Resolved by the next forwarded command each one matches. */
 	readonly #sendWaiters = new Set<{ method: string; match: (params: unknown) => boolean; resolve: () => void }>();
+	/** Settled by the relay's next `detach` once Chrome has ended the tab's "chrome.debugger" attachment. */
+	readonly #detachWaiters = new Set<{ resolve: () => void; reject: (error: Error) => void }>();
 	/** Answer attaches with Chrome's refusal, as while a foreign extension frame is in the tab. */
 	refuseAttach = false;
+	/** Commands answered with Chrome's refusal, as a foreign extension frame in the tab makes some of them fail. */
+	readonly refuseMethods = new Set<string>();
 
 	private constructor(
 		relay: WebSocket,
@@ -148,7 +152,16 @@ class ChromeBackedExtension {
 			case "detach": {
 				const root = this.#root;
 				this.#root = undefined;
-				if (root) await this.#chromeSend("Target.detachFromTarget", { sessionId: root }).promise;
+				const detached = root
+					? await this.#chromeSend("Target.detachFromTarget", { sessionId: root }).promise
+					: { result: {} };
+				// Waiters learn of the detach only once Chrome has ended the attachment.
+				const failure = isRecord(detached.error) ? new Error(String(detached.error.message)) : undefined;
+				for (const waiter of this.#detachWaiters) {
+					if (failure) waiter.reject(failure);
+					else waiter.resolve();
+				}
+				this.#detachWaiters.clear();
 				this.#relay.send(
 					JSON.stringify({ t: "detached", tabId: TAB_ID, reason: "target_closed", relayInitiated: true }),
 				);
@@ -158,6 +171,7 @@ class ChromeBackedExtension {
 				const root = this.#root;
 				if (!root) return this.#reply(id, { error: "Debugger is not attached to the tab with id: 1." });
 				const method = String(message.method);
+				if (this.refuseMethods.has(method)) return this.#reply(id, { error: FOREIGN_FRAME_REFUSAL });
 				const sent = this.#chromeSend(
 					method,
 					isRecord(message.params) ? message.params : {},
@@ -184,6 +198,13 @@ class ChromeBackedExtension {
 	nextSend(method: string, match: (params: unknown) => boolean = () => true): Promise<void> {
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#sendWaiters.add({ method, match, resolve });
+		return promise;
+	}
+
+	/** Resolves once the relay has detached "chrome.debugger" and Chrome confirmed it, which ends the debugging bar. */
+	nextDetach(): Promise<void> {
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		this.#detachWaiters.add({ resolve, reject });
 		return promise;
 	}
 
@@ -330,15 +351,23 @@ describe("relay tabs Chrome detaches omp from", () => {
 	 * puts a tab on one; it cannot be re-adopted, so a detach releases the tab.
 	 */
 	async function openInlineRelayTab(): Promise<ChromeBackedExtension> {
+		try {
+			return await withoutWorkerThreads(openRelayTab);
+		} finally {
+			expect(getTab(name)).toMatchObject({ worker: { mode: "inline" } });
+		}
+	}
+
+	/** Runs `fn` while worker threads cannot start, so every tab worker it spawns falls back to an inline one. */
+	async function withoutWorkerThreads<T>(fn: () => Promise<T>): Promise<T> {
 		// `Worker` is typed as a constructor, which a throwing mock implementation does not satisfy.
 		const unavailable = spyOn(globalThis, "Worker").mockImplementation((() => {
 			throw new Error("Worker threads unavailable");
 		}) as never);
 		try {
-			return await openRelayTab();
+			return await fn();
 		} finally {
 			unavailable.mockRestore();
-			expect(getTab(name)).toMatchObject({ worker: { mode: "inline" } });
 		}
 	}
 
@@ -518,6 +547,44 @@ describe("relay tabs Chrome detaches omp from", () => {
 			} finally {
 				unsubscribe();
 			}
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"drops the relay connection of an inline worker it kills, so Chrome's debugger is released",
+		async () => {
+			const ext = await openInlineRelayTab();
+			const detached = ext.nextDetach();
+			// The call times out, and a timed-out inline tab is killed rather than recycled.
+			const failure = String(await invoke({ action: "run", ...HANG, timeout: 1 }).catch((error: unknown) => error));
+			expect(failure).toContain("timed out");
+			expect(getTab(name)).toBeUndefined();
+			// A killed core that kept its relay connection would hold its session on the tab, and the relay
+			// would never detach: this await would then run into the test's timeout.
+			await detached;
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"drops the relay connection of an inline fallback whose init failed while recycling a timed-out tab",
+		async () => {
+			const ext = await openRelayTab();
+			const detached = ext.nextDetach();
+			// The recycle's worker thread cannot start, and the inline fallback's init then fails the way it does
+			// while another extension's frame is in the tab.
+			ext.refuseMethods.add("Network.enable");
+			const failure = String(
+				await withoutWorkerThreads(() => invoke({ action: "run", ...HANG, timeout: 1 })).catch(
+					(error: unknown) => error,
+				),
+			);
+			expect(failure).toContain("timed out");
+			expect(getTab(name)).toBeUndefined();
+			// The failed inline core connected to the relay before its init failed; left connected, it holds its
+			// session on the tab and the relay never detaches.
+			await detached;
 		},
 		60_000,
 	);

@@ -944,7 +944,8 @@ export function normalizeMessagesForProvider(
 	});
 }
 
-const INTENT_FIELD_DESCRIPTION = "concise intent";
+/** Schema description of the injected `i` field; `PI_INTENT_DESC` replaces it. */
+const DEFAULT_INTENT_FIELD_DESCRIPTION = "concise intent";
 const INTENT_SCHEMA_UNION_KEYS = ["anyOf", "oneOf"] as const;
 
 // Memoize injection per input schema identity: normalizeTools runs on every
@@ -1021,7 +1022,7 @@ function injectIntentIntoSchema(
 		...schemaRecord,
 		properties: {
 			[INTENT_FIELD]: describeIntent
-				? { type: "string", description: INTENT_FIELD_DESCRIPTION }
+				? { type: "string", description: Bun.env.PI_INTENT_DESC || DEFAULT_INTENT_FIELD_DESCRIPTION }
 				: { type: "string" },
 			...properties,
 		},
@@ -1072,9 +1073,8 @@ function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" 
 }
 
 /**
- * Longest `i` value accepted as an intent. The injected field is described as
- * a "concise intent" (INTENT_FIELD_DESCRIPTION); anything past this is a tool
- * payload the model put in the wrong field, not a label.
+ * Longest `i` value accepted as an intent; anything past this is a tool
+ * payload the model put in the wrong field, not an intent.
  */
 const MAX_INTENT_LENGTH = 200;
 

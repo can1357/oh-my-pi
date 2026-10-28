@@ -20,6 +20,7 @@ import {
 	BINARY_SNIFF_BYTES,
 	type ImageMetadata,
 	IMAGE_METADATA_HEADER_BYTES,
+	hasFsCode,
 	isProbablyBinary,
 	isProbablyBinaryHeader,
 	isEnoent,
@@ -39,13 +40,7 @@ import {
 } from "../ida";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
-import {
-	extractUriScheme,
-	type InternalResource,
-	InternalUrlRouter,
-	type SchemeSpec,
-	sessionResolveContext,
-} from "../internal-urls";
+import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -1029,9 +1024,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const rawPath = args && typeof args === "object" && "path" in args ? String(args.path ?? "") : "";
 		if (rawPath.length === 0) return undefined;
 		const withoutImageQuestion = splitImageQuestionTarget(rawPath).path;
+		const router = InternalUrlRouter.instance();
 		// Authorization must key what execution reads: an existing literal file like `notes:1` is
 		// read literally, so its grant belongs to `notes:1`, not to `notes`.
-		const { path: selectorless, sel } = splitPathAndSelPreferringLiteralSync(withoutImageQuestion, this.session.cwd);
+		const { path: selectorless, sel } = router.canHandle(withoutImageQuestion)
+			? router.split(withoutImageQuestion)
+			: splitPathAndSelPreferringLiteralSync(withoutImageQuestion, this.session.cwd);
 		if (isReadableUrlPath(selectorless) && !(sel === undefined && splitPdfImageReadPath(withoutImageQuestion))) {
 			// Nobody needs permission to read a public page, so those stay ungated. A private host —
 			// loopback, a private or link-local address, a single-label intranet name — is reachable
@@ -2031,19 +2029,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			isDirectory = stat.isDirectory();
 			specialKind = specialFileKind(stat);
 		} catch (error) {
+			// An explicit list can exceed NAME_MAX while each member is valid.
+			// Only list admission treats that error as recoverable, after the
+			// literal/archive/SQLite paths above; a single filename keeps its error.
+			if (!located && readPath.includes(";") && (isNotFoundError(error) || hasFsCode(error, "ENAMETOOLONG"))) {
+				const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal, toolContext);
+				if (delimitedResult) return delimitedResult;
+			}
 			// A located file vanished after routing: the handler owns the canonical not-found error.
 			if (located && isNotFoundError(error)) {
 				return this.#handleInternalUrl(located.url, located.spec, parsed, question, signal);
 			}
 			if (isNotFoundError(error)) {
-				// A documented semicolon list is explicit user scope, while suffix
-				// matching is only fuzzy recovery. Fan the list out before a broad
-				// workspace scan, but only after literal/archive/sqlite resolution so
-				// real resources containing semicolons retain precedence.
-				if (readPath.includes(";")) {
-					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal, toolContext);
-					if (delimitedResult) return delimitedResult;
-				}
 				// Attempt unique suffix resolution before falling back to the approved-plan
 				// alias or fuzzy suggestions. Existing workspace files retain precedence.
 				if (!isRemoteMountPath(absolutePath)) {
@@ -2931,6 +2928,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const scan = await scanFileForConflicts(absolutePath);
 		const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 		const history = getConflictHistory(this.session);
+		history.reconcilePath(absolutePath, scan);
 		const entries = scan.blocks.map(block =>
 			history.register({
 				absolutePath,
@@ -2981,13 +2979,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 		const resource = await InternalUrlRouter.instance().resolve(url, sessionResolveContext(this.session, { signal }));
 		if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
-		const resourceDetails: NonNullable<InternalResource["details"]> = resource.details ?? {};
-		const { display, ...render } = resourceDetails;
 		const details: ReadToolDetails = {
 			resolvedPath: resource.sourcePath,
 			contentType: resource.contentType,
-			...render,
-			...(display ? { displayContent: display } : {}),
+			...resource.details,
 		};
 
 		if (resource.shape === "value") {
@@ -3001,6 +2996,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		return buildInMemorySelectorResult(this.session, resource.content, parsedSel, {
 			details,
 			sourcePath: resource.sourcePath,
+			sourceStartLine: resource.sourceStartLine,
 			sourceInternal: url,
 			entityLabel: "resource",
 			ignoreResultLimits: resource.unbounded ?? spec.unbounded === true,

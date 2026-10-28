@@ -93,7 +93,7 @@ irm https://omp.sh/install.ps1 | iex
 mise use -g github:can1357/oh-my-pi
 ```
 
-macOS · Linux · Windows · bun ≥ 1.3.14
+macOS · Linux · Windows · bun ≥ 1.4.4
 
 ### Shell completions
 

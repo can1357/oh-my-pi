@@ -180,6 +180,12 @@ function formatAsyncWaitLabel(jobIds: readonly string[]): string {
 	return `Waiting for ${jobIds.length} background jobs: ${listed}${more}`;
 }
 
+/** Render args for a live card: the harness strips `i` from executed args, but the stored block keeps it. */
+function renderArgsWithIntent(args: unknown, intent: string | undefined): unknown {
+	if (intent === undefined || !isRecord(args) || INTENT_FIELD in args) return args;
+	return { ...args, [INTENT_FIELD]: intent };
+}
+
 export class EventController {
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
 	/** Timestamp of the current turn's user prompt; drives the usage row's prompt→yield delta. */
@@ -359,7 +365,11 @@ export class EventController {
 				: null,
 		);
 		this.#streamingReveal = new StreamingRevealController({
-			getSmoothStreaming: () => cfgDisplaySmoothStreaming.get(this.ctx.settings),
+			// Extension text renderers get the full text so far on each drawn update (deltas within one
+			// frame are coalesced), never a partly revealed prefix from the typing reveal.
+			getSmoothStreaming: () =>
+				cfgDisplaySmoothStreaming.get(this.ctx.settings) &&
+				!this.ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.().length,
 			getHideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			getProseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			requestRender: component => this.ctx.ui.requestComponentRender(component),
@@ -390,6 +400,9 @@ export class EventController {
 			tool_execution_end: e => this.#handleToolExecutionEnd(e),
 			auto_compaction_start: e => this.#handleAutoCompactionStart(e),
 			auto_compaction_end: e => this.#handleAutoCompactionEnd(e),
+			// `/compact` drives its own loader (command-controller); these exist for RPC hosts.
+			manual_compaction_start: async () => {},
+			manual_compaction_end: async () => {},
 			auto_retry_start: e => this.#handleAutoRetryStart(e),
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
 			cache_warming_start: async () => {},
@@ -444,11 +457,13 @@ export class EventController {
 				this.ctx.ui.requestRender(true);
 			},
 			goal_updated: async () => {},
-			// The TUI already refreshes the pending-messages bar at every queue
-			// mutation call site (`updatePendingMessagesDisplay()` in ui-helpers.ts);
-			// this event exists for RPC/ACP clients that have no equivalent local
-			// call site to hook, so there is nothing additional to do here.
-			queue_update: async () => {},
+			// The pending-messages bar mirrors the queue snapshot this event carries.
+			// Refreshing only at the TUI's own call sites left pills of messages the
+			// agent drained by itself (live steering, a queued batch it delivered)
+			// standing above the prompt after they were sent.
+			queue_update: async () => {
+				this.ctx.updatePendingMessagesDisplay();
+			},
 		} satisfies AgentSessionEventHandlers;
 	}
 
@@ -519,6 +534,34 @@ export class EventController {
 		for (const component of this.#postToolAssistantComponents.values()) {
 			component.markTranscriptBlockFinalized();
 		}
+	}
+
+	/**
+	 * Post-tool text segments of the reply still streaming. The reply is not in the session's
+	 * committed messages until `message_end`, so a transcript rebuild must carry these over itself;
+	 * segments of replies already committed are replayed instead.
+	 */
+	liveAssistantSegments(): AssistantMessageComponent[] {
+		const live = this.ctx.viewSession.agent.state.streamMessage;
+		if (live?.role !== "assistant") return [];
+		const segments: AssistantMessageComponent[] = [];
+		for (const block of live.content) {
+			if (block.type !== "toolCall") continue;
+			const segment = this.#postToolAssistantComponents.get(block.id);
+			if (segment) segments.push(segment);
+		}
+		return segments;
+	}
+
+	/**
+	 * Hand the streaming reply's components the current extension text renderers (the setting enabling
+	 * them changed). Renderers take the full text, so a running typing reveal is dropped first.
+	 */
+	applyAssistantTextRenderers(): void {
+		this.#streamingReveal.resyncSmoothStreaming();
+		const renderers = this.ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.() ?? [];
+		this.ctx.streamingComponent?.setTextRenderers(renderers);
+		for (const segment of this.liveAssistantSegments()) segment.setTextRenderers(renderers);
 	}
 	#approvalPreviewGate(toolCallId: string): ApprovalPreviewGate {
 		let gate = this.#approvalPreviewGates.get(toolCallId);
@@ -742,6 +785,7 @@ export class EventController {
 	#upsertPostToolAssistantSegment(
 		toolCallId: string,
 		segment: AssistantMessage | undefined,
+		contentOffset: number | undefined,
 		linkTargets?: ReadonlyMap<string, string>,
 		opts?: { transient?: boolean },
 	): AssistantMessageComponent | undefined {
@@ -754,7 +798,7 @@ export class EventController {
 			existing.updateContent(segment, opts);
 			return existing;
 		}
-		const component = createAssistantMessageComponent(this.ctx, undefined, linkTargets);
+		const component = createAssistantMessageComponent(this.ctx, undefined, linkTargets, contentOffset);
 		component.updateContent(segment, opts);
 		this.#postToolAssistantComponents.set(toolCallId, component);
 		if (!this.#insertAfterTranscriptComponent(this.#toolTimelineComponents.get(toolCallId), component)) {
@@ -1631,6 +1675,7 @@ export class EventController {
 				const component = this.#upsertPostToolAssistantSegment(
 					toolCallId,
 					segment,
+					timeline.contentOffsets.get(toolCallId),
 					linkTargets ? assistantMessageLinkTargets(segment, linkTargets) : undefined,
 					closed ? undefined : { transient: true },
 				);
@@ -1813,6 +1858,7 @@ export class EventController {
 				const component = this.#upsertPostToolAssistantSegment(
 					toolCallId,
 					segment,
+					displayTimeline.contentOffsets.get(toolCallId),
 					assistantMessageLinkTargets(segment, linkTargets),
 				);
 				component?.markTranscriptBlockFinalized();
@@ -1914,7 +1960,7 @@ export class EventController {
 			this.#resetReadGroup();
 			const component = new ToolExecutionComponent(
 				renderToolName,
-				event.args,
+				renderArgsWithIntent(event.args, event.intent),
 				{
 					useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
 					showImages: cfgTerminalShowImages.get(settings),
@@ -1952,7 +1998,7 @@ export class EventController {
 			this.#toolArgsReveal.finish(event.toolCallId);
 			const component = this.ctx.pendingTools.get(event.toolCallId);
 			if (component && typeof component.updateArgs === "function") {
-				component.updateArgs(event.args, event.toolCallId);
+				component.updateArgs(renderArgsWithIntent(event.args, event.intent), event.toolCallId);
 				if (typeof component.setArgsComplete === "function") {
 					component.setArgsComplete(event.toolCallId);
 				}
@@ -2421,6 +2467,9 @@ export class EventController {
 		this.#settleWatchEpoch = undefined;
 		const session = this.ctx.session;
 		try {
+			// Ending this wait means "stay quiet until I prompt"; latch before awaiting the
+			// abort so a job finishing in between cannot start a turn.
+			session.suppressAutoResumeUntilPrompt();
 			await session.abort({ reason: USER_INTERRUPT_LABEL });
 			await this.#runSerialized(async () => {
 				if (this.ctx.session !== session || session.isStreaming) return;

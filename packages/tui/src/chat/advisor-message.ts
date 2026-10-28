@@ -2,6 +2,7 @@ import { type Component } from "../tui";
 import { Disclosure } from "../components/disclosure";
 import { visibleWidth } from "../utils";
 import type { AdvisorMessageDetails, AdvisorNote, AdvisorSeverity } from "./messages";
+import { chatTranscriptDisplayPreferences } from "./display-preferences";
 import { formatBadge, replaceTabs, type ToolUIColor, wrapTextWithAnsi } from "../render/render-utils";
 import { Ellipsis, truncateToWidth } from "../render";
 import type { Theme } from "../theme";
@@ -274,6 +275,7 @@ export function createAdvisorMessageCard(
 		body: () => new AdvisorNotes(notes, 0, uiTheme),
 		expanded: getExpanded(),
 		paddingX: 1,
+		maxCollapsedRows: chatTranscriptDisplayPreferences.advisorCollapsedLines || undefined,
 	});
 	// The tool-output toggle owns expansion state; synchronize the controlled
 	// disclosure from the callback on every render.

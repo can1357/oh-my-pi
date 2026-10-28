@@ -16,6 +16,7 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type {
 	ClientBridge,
@@ -248,6 +249,54 @@ it("eval applies direct-only restrictions to the resolved tool rather than its w
 	expect(session.getEvalBridgeToolNames()).toEqual(["savepoint", "checkpoint"]);
 	await callSessionTool("checkpoint", {}, { session: toolSession });
 	expect(tool.executeCalls).toBe(1);
+});
+
+it("eval resolves xd:// and Claude Code MCP spellings over enabled tools only", async () => {
+	const tools = ["read", "mcp__srv_active", "mcp__srv_idle", "lsp", "ast_grep"].map(makeFakeTool);
+	const xdev: XdevState = {
+		tools: new Map(tools.map(tool => [tool.name, tool])),
+		mountedNames: new Set(),
+		builtInNames: new Set(),
+		isActive: name => session?.getActiveToolNames().includes(name) ?? false,
+	};
+	session = await createSession(tools, undefined, {}, { xdev });
+	await session.setActiveToolsByName(["read", "mcp__srv_active"]);
+	xdev.mountedNames.add("lsp");
+	const toolSession = makeToolSession(makeBridge({ outcome: "cancelled" }));
+	toolSession.getToolForEvalBridge = name => session!.getToolForEvalBridge(name);
+	toolSession.getToolByName = name => session!.getToolByName(name);
+
+	await callSessionTool("mcp__srv__active", {}, { session: toolSession });
+	await callSessionTool("xd://lsp", {}, { session: toolSession });
+	await callSessionTool("xd://read", {}, { session: toolSession });
+	expect(tools.map(tool => tool.executeCalls)).toEqual([1, 1, 0, 1, 0]);
+
+	await expect(callSessionTool("mcp__srv__idle", {}, { session: toolSession })).rejects.toThrow(
+		"registered but not available",
+	);
+	await expect(callSessionTool("xd://ast_grep", {}, { session: toolSession })).rejects.toThrow(
+		"registered but not available",
+	);
+	await expect(callSessionTool("nope", {}, { session: toolSession })).rejects.toThrow("Unknown tool");
+});
+
+it("eval leaves a Claude Code MCP spelling unresolved when mounted and active tools both answer it", async () => {
+	const emitted = "mcp__foo__bar__foo_bar_baz";
+	const active = makeFakeTool(createMCPToolName("foo__bar", "foo_bar_baz"));
+	const mounted = makeFakeTool(createMCPToolName("foo", "bar__foo_bar_baz"));
+	const xdev: XdevState = {
+		tools: new Map([active, mounted].map(tool => [tool.name, tool])),
+		mountedNames: new Set(),
+		builtInNames: new Set(),
+		isActive: name => name === active.name,
+	};
+	session = await createSession([active, mounted], undefined, {}, { xdev });
+	await session.setActiveToolsByName([active.name]);
+	xdev.mountedNames.add(mounted.name);
+
+	expect(session.getToolForEvalBridge(emitted)).toBeUndefined();
+	xdev.mountedNames.delete(mounted.name);
+	expect(session.getToolForEvalBridge(emitted)?.name).toBe(active.name);
 });
 
 it("explicit yolo approval mode skips the ACP permission gate", async () => {

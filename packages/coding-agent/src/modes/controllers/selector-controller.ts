@@ -75,7 +75,7 @@ import { isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import { findSessionContinuation, readSessionInfo, type SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
-import { loadPinnedSessionIds } from "../../session/session-pins";
+import { loadPinnedSessionIds, setSessionPinned } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
@@ -1849,6 +1849,40 @@ export class SelectorController {
 									);
 								}
 							},
+							onRename: async (session: SessionInfo, title: string): Promise<string | null> => {
+								if (this.ctx.sessionManager.getSessionFile() === session.path) {
+									// A session that has only been read does not hold
+									// its ownership lease, so another omp process can
+									// claim it; the live rename would then fork onto
+									// a sibling and still report success, leaving the
+									// row here pointing at the old path. Claim the
+									// lease up front and refuse while it is held by
+									// someone else.
+									const claim = new FileSessionStorage().claimSession(session.id, session.path);
+									if (!claim) {
+										throw new Error(
+											"Failed to rename session: it is currently in use by another omp process",
+										);
+									}
+									try {
+										const renamed = await this.ctx.sessionManager.setSessionName(title, "user");
+										return renamed ? (this.ctx.sessionManager.getSessionName() ?? null) : null;
+									} finally {
+										claim();
+									}
+								}
+								const renamed = await SessionManager.renameSessionTitle(session.path, title, {
+									cwd: session.cwd,
+								});
+								// The picker renders the failure itself; throwing
+								// hands it the reason so it can show one message
+								// instead of two.
+								if (!renamed) {
+									throw new Error("Failed to rename session: it is currently in use or no longer available");
+								}
+								return renamed;
+							},
+							onSetPinned: (session: SessionInfo, pinned: boolean) => setSessionPinned(session.id, pinned),
 						}
 					: {
 							title: "Select a Session to Consult",

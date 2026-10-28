@@ -96,6 +96,16 @@ test("cursor cache scope survives access-token refresh for the same account", ()
 	expect(scope(jwt({ sub: "auth0|user_b", exp: 1_900_000_000, iat: 1_800_000_000 }))).not.toBe(before);
 });
 
+test("Kimi Code cache scope survives access-token refresh for the same account", () => {
+	const jwt = (claims: Record<string, unknown>): string =>
+		`${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.sig`;
+	const scope = (apiKey: string): string => resolveModelCacheProviderId("kimi-code", { apiKey });
+	const before = scope(jwt({ sub: "user-a", jti: "token-1", exp: 1_900_000_000, iat: 1_800_000_000 }));
+	expect(scope(jwt({ sub: "user-a", jti: "token-2", exp: 1_900_086_400, iat: 1_800_086_400 }))).toBe(before);
+	expect(scope(jwt({ sub: "user-b", jti: "token-1", exp: 1_900_000_000, iat: 1_800_000_000 }))).not.toBe(before);
+	expect(before).not.toContain("user-a");
+});
+
 test("Codex cache scope follows a gateway baseUrl but keeps the official namespace (#13830)", () => {
 	const official = resolveModelCacheProviderId("openai-codex");
 	// Pre-existing official caches stay readable whether or not the registry passes the bundled baseUrl.

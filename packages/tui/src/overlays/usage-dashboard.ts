@@ -435,22 +435,15 @@ function clockTime(date: Date): string {
 }
 
 /**
- * When a window resets, relative to `nowMs`: `resets 18:00` today, `resets
- * Tue 18:00` within the week, `resets 3 Oct` beyond; the title carries the
- * absolute date and the countdown.
+ * When a window resets, `resetMs` from `nowMs`: the countdown (`resets in
+ * 2h30m`), which reads the same in every time zone; the title carries the
+ * local date and time.
  */
 function resetLabel(nowMs: number, resetMs: number): { text: string; title: string } {
 	const at = new Date(nowMs + resetMs);
-	const now = new Date(nowMs);
-	const sameDay = at.toDateString() === now.toDateString();
-	const text = sameDay
-		? `resets ${clockTime(at)}`
-		: resetMs < 6 * 86_400_000
-			? `resets ${WEEKDAY_NAMES[at.getDay()]} ${clockTime(at)}`
-			: `resets ${at.getDate()} ${MONTH_NAMES[at.getMonth()]}`;
 	return {
-		text,
-		title: `Resets ${shortDate(at)} ${at.getFullYear()}, ${clockTime(at)} (in ${formatDuration(resetMs)})`,
+		text: `resets in ${formatDuration(resetMs)}`,
+		title: `Resets ${shortDate(at)} ${at.getFullYear()}, ${clockTime(at)}`,
 	};
 }
 

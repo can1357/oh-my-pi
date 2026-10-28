@@ -770,6 +770,42 @@ describe("Codex model discovery", () => {
 		}
 	});
 
+	it("lists Codex Terra from a healthy account when other accounts return 402", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-payment-"));
+		const fetchFn: typeof fetch = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				const accountId = new Headers(init?.headers).get("chatgpt-account-id");
+				if (accountId !== "entitled") return new Response("payment required", { status: 402 });
+				return Response.json({
+					models: [{ slug: "gpt-6.1-terra", visibility: "list", minimal_client_version: "0.153.0" }],
+				});
+			},
+			{ preconnect() {} },
+		);
+		try {
+			const result = await resolveProviderModels(
+				{
+					...openaiCodexModelManagerOptions({
+						resolveAccounts: async () => [
+							{ accessToken: "token-limited-1", accountId: "limited-1" },
+							{ accessToken: "token-entitled", accountId: "entitled" },
+							{ accessToken: "token-limited-2", accountId: "limited-2" },
+						],
+						fetch: fetchFn,
+					}),
+					cacheDbPath: path.join(tempDir, "models.db"),
+				},
+				"online",
+			);
+
+			expect(result.models.find(model => model.id === "gpt-6.1-terra")?.accountAccess).toEqual({
+				entitled: {},
+			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps bundled Codex models when every account credential is rejected", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-union-all-revoked-"));
 		const bundled: ModelSpec<"openai-codex-responses"> = {

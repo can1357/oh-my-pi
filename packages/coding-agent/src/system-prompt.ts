@@ -994,6 +994,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		personality: personalityBlock,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
+		// `PI_INTENT_PROMPT` replaces the default intent-field guidance line.
+		intentGuidance: $env.PI_INTENT_PROMPT ?? "",
 		eagerTasks,
 		eagerTasksAlways,
 		// Restrained bias yields to an explicit eager-tasks mode.

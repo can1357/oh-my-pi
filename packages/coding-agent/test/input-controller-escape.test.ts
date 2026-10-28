@@ -214,6 +214,7 @@ function createContext(): {
 		} as unknown as InteractiveModeContext["sessionManager"],
 		keybindings: {
 			getKeys: () => [],
+			matches: () => false,
 		} as unknown as InteractiveModeContext["keybindings"],
 		compactionQueuedMessages: [],
 		mcpTestEscapeHandlers: new Set(),
@@ -960,9 +961,17 @@ describe("InputController escape behavior", () => {
 
 		controller.setupKeyHandlers();
 		now.mockReturnValue(2_000);
-		const first = inputListeners[0]("\x1b[D");
+		// Dispatch like the TUI: listeners in registration order until one handles the input.
+		const dispatch = (data: string) => {
+			for (const listener of inputListeners) {
+				const result = listener(data);
+				if (result) return result;
+			}
+			return undefined;
+		};
+		const first = dispatch("\x1b[D");
 		now.mockReturnValue(2_200); // 200ms later — a deliberate second tap
-		const second = inputListeners[0]("\x1b[D");
+		const second = dispatch("\x1b[D");
 
 		// Both taps are consumed; only the second completes the gesture.
 		expect(first).toEqual({ consume: true });

@@ -164,6 +164,8 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	...agentEventTypes,
 	"auto_compaction_start",
 	"auto_compaction_end",
+	"manual_compaction_start",
+	"manual_compaction_end",
 	"auto_retry_start",
 	"auto_retry_end",
 	"cache_warming_start",
@@ -882,6 +884,25 @@ export class RpcClient {
 	async liveStart(options?: { voice?: string; instructions?: string }): Promise<{ voice: string }> {
 		const response = await this.#send({
 			type: "live_start",
+			voice: options?.voice,
+			instructions: options?.instructions,
+		});
+		return this.#getData(response);
+	}
+
+	/**
+	 * Start a GPT live voice session whose audio runs on the caller's own WebRTC peer
+	 * (one Opus audio track plus an `oai-events` data channel). Send the peer's SDP offer and
+	 * apply the returned answer; omp keeps signaling, delegation and transcripts, and opens
+	 * no host microphone or speaker. Frames arrive through {@link onLive}; `live_levels` are not sent.
+	 */
+	async liveConnect(
+		sdpOffer: string,
+		options?: { voice?: string; instructions?: string },
+	): Promise<{ voice: string; sdpAnswer: string }> {
+		const response = await this.#send({
+			type: "live_connect",
+			sdpOffer,
 			voice: options?.voice,
 			instructions: options?.instructions,
 		});

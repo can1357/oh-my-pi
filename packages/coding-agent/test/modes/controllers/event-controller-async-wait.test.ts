@@ -73,6 +73,7 @@ function makeWaitingContext(jobIds: string[]) {
 	const running = [...jobIds];
 	const settled = Promise.withResolvers<void>();
 	const abort = vi.fn(async (_options?: { reason?: string }) => {});
+	const suppressAutoResumeUntilPrompt = vi.fn(() => {});
 	const ctx = createInteractiveModeContext({
 		sessionManager: { getSessionName: () => "test-session" },
 		session: {
@@ -81,6 +82,7 @@ function makeWaitingContext(jobIds: string[]) {
 			settleAsyncWork: () => settled.promise,
 			getAsyncJobSnapshot: () => runningJobs(pending ? running : []),
 			abort,
+			suppressAutoResumeUntilPrompt,
 		},
 	});
 	const drain = () => {
@@ -90,7 +92,7 @@ function makeWaitingContext(jobIds: string[]) {
 	const cancel = (id: string) => {
 		running.splice(running.indexOf(id), 1);
 	};
-	return { ctx, drain, abort, cancel };
+	return { ctx, drain, abort, cancel, suppressAutoResumeUntilPrompt };
 }
 
 /** What the working row shows now, as the loader reads it on a tick. */
@@ -147,7 +149,7 @@ describe("EventController — run waiting only on background jobs", () => {
 	});
 
 	it("ends the wait with a user interrupt and tears the run down while its jobs keep running", async () => {
-		const { ctx, drain, abort } = makeWaitingContext(["bg_1"]);
+		const { ctx, drain, abort, suppressAutoResumeUntilPrompt } = makeWaitingContext(["bg_1"]);
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const notify = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
 		const controller = new EventController(ctx);
@@ -157,6 +159,9 @@ describe("EventController — run waiting only on background jobs", () => {
 		await controller.stopAwaitingAsyncWork();
 
 		expect(abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		// The abort stops no run here, so it suppresses nothing by itself: ending the
+		// wait is what keeps the job results from starting a turn.
+		expect(suppressAutoResumeUntilPrompt).toHaveBeenCalledTimes(1);
 		// Torn down now, with the job still pending — not when it finishes.
 		expect(markActivityEnd).toHaveBeenCalledTimes(1);
 		expect(controller.isAwaitingAsyncWork()).toBe(false);

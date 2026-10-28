@@ -21,7 +21,7 @@ import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import type { TspFrame, TspNode, TspText } from "@oh-my-pi/pi-wire";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
-import { isKeyRelease, matchesKey } from "./keys";
+import { extractPrintableText, isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
 import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
@@ -52,6 +52,7 @@ import {
 } from "./terminal-capabilities";
 import { onTerminalBackgroundFallbackChange } from "./theme/theme";
 import { compositeLineAt } from "./render/composite";
+import { stripExtensionLinkMarkers } from "./render/extension-links";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
 import {
 	Ellipsis,
@@ -211,7 +212,9 @@ export interface TUIStartOptions {
 	 * switches to raw input and replays the kernel-buffered keystrokes.
 	 *
 	 * A terminal expected to speak TSP needs raw input from the start, so it
-	 * gets it; its keystrokes are held instead (TSP events and the cell-size
+	 * gets it. Plain typing (printable text, Backspace) still edits the focused
+	 * component live, as the kernel echo shows it elsewhere; the first other key
+	 * and every key after it are held instead (TSP events and the cell-size
 	 * reply still apply) until {@link TUI.releaseHeldInput} replays them.
 	 */
 	deferInput?: boolean;
@@ -1026,7 +1029,8 @@ export class TUI extends Container {
 	#inputDeferred = false;
 	/**
 	 * Keystrokes held since a TSP `deferInput` start, replayed by
-	 * releaseHeldInput(); undefined when not holding.
+	 * releaseHeldInput(); undefined when not holding, empty while plain typing
+	 * still goes through live.
 	 */
 	#heldInput: string[] | undefined;
 	/**
@@ -2450,8 +2454,13 @@ export class TUI extends Container {
 		}
 	}
 
-	addInputListener(listener: InputListener): () => void {
-		this.#inputListeners.add(listener);
+	/** Registers a key listener; `prepend` gives a foreground input owner first refusal over global shortcuts. */
+	addInputListener(listener: InputListener, options?: { prepend?: boolean }): () => void {
+		if (options?.prepend) {
+			this.#inputListeners = new Set([listener, ...this.#inputListeners]);
+		} else {
+			this.#inputListeners.add(listener);
+		}
 		return () => {
 			this.#inputListeners.delete(listener);
 		};
@@ -2970,7 +2979,11 @@ export class TUI extends Container {
 		}
 		if (data.length === 0) return;
 
-		if (this.#heldInput !== undefined && this.#focusedComponent === this.#heldFocus) {
+		if (
+			this.#heldInput !== undefined &&
+			this.#focusedComponent === this.#heldFocus &&
+			!this.#typesThroughHold(data)
+		) {
 			this.#holdInput(data);
 			return;
 		}
@@ -3058,6 +3071,18 @@ export class TUI extends Container {
 		if (focused?.handleInput) return focused;
 		const holder = this.#getKeyHolderOverlay();
 		return holder?.component === focused ? holder.preFocus : null;
+	}
+
+	/**
+	 * Whether a keystroke typed during a TSP startup hold edits the focused
+	 * component now: plain typing (printable text, Backspace) and key releases,
+	 * while nothing is queued ahead of them. The draft then grows as it is typed,
+	 * like a cooked tty's echo; a shortcut waits for the handlers that act on it,
+	 * and whatever follows it waits behind it to keep typing order.
+	 */
+	#typesThroughHold(data: string): boolean {
+		if (this.#heldInput!.length > 0) return false;
+		return extractPrintableText(data) !== undefined || matchesKey(data, "backspace") || isKeyRelease(data);
 	}
 
 	/**
@@ -4098,45 +4123,48 @@ export class TUI extends Container {
 			LINE_FIT_MAX_SOURCE_CODE_UNITS,
 			Math.max(LINE_FIT_MIN_SOURCE_CODE_UNITS, safeWidth * LINE_FIT_SOURCE_WIDTH_MULTIPLIER),
 		);
+		// Extension link markers exist only for hit-testing; the terminal must never get an openable
+		// hyperlink. Strip before fitting (so a cut cannot split one) and before classifying.
+		const output = stripExtensionLinkMarkers(raw);
 
 		let source: string;
 		let classification: LineClassification;
-		if (raw.length <= maxSourceLength) {
+		if (output.length <= maxSourceLength) {
 			// The overwhelmingly common path classifies image markers, OSC 8,
 			// ANSI validity, OSC 66, non-ASCII, and exact ASCII width together.
-			classification = this.#classifyLine(raw, safeWidth);
+			classification = this.#classifyLine(output, safeWidth);
 			if (classification.isImage) {
 				return {
 					raw,
 					width,
 					widthEpoch,
 					imageProtocol,
-					line: raw,
-					terminalContent: raw,
+					line: output,
+					terminalContent: output,
 					asciiWidth: undefined,
 					isImage: true,
 					hasOsc8: false,
 				};
 			}
-			source = raw;
+			source = output;
 		} else {
 			// Fitting a giant source can discard everything after the visible
 			// prefix. Preserve image rows verbatim first, but do not scan the
 			// entire source for width/OSC metadata that will immediately vanish.
-			if (TERMINAL.isImageLine(raw)) {
+			if (TERMINAL.isImageLine(output)) {
 				return {
 					raw,
 					width,
 					widthEpoch,
 					imageProtocol,
-					line: raw,
-					terminalContent: raw,
+					line: output,
+					terminalContent: output,
 					asciiWidth: undefined,
 					isImage: true,
 					hasOsc8: false,
 				};
 			}
-			source = this.#lineFitSource(raw, safeWidth, maxSourceLength);
+			source = this.#lineFitSource(output, safeWidth, maxSourceLength);
 			// Preserve the former lineRewriteSequence classification: fitting can
 			// move a marker from outside the raw scan window into the prepared
 			// line's window, at which point terminal image dispatch owns it.

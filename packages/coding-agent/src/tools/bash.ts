@@ -42,7 +42,7 @@ import { checkBashInterception } from "./bash-interceptor";
 import { rewriteGitWorktreeAdd } from "./bash-worktree-rewrite";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { resolveEvalBackends } from "./eval-backends";
-import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
+import { invalidateGithubCacheForBashCommand, invalidateGithubCacheForBashResult } from "./gh-cache-invalidation";
 import { serviceLogs, startService, type ServiceReady } from "../launch/services";
 import { isFindEnabled } from "./jfind";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -714,10 +714,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		result: BashResult | BashInteractiveResult,
 		timeoutSec: number | undefined,
 		options: {
+			command: string;
+			cwd: string;
 			requestedTimeoutSec?: number;
 			notices?: readonly string[];
 			wallTimeMs?: number;
-		} = {},
+		},
 	): Promise<AgentToolResult<BashToolDetails>> {
 		const exitCode = result.exitCode;
 		const failedExit = exitCode !== undefined && exitCode !== 0;
@@ -794,6 +796,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		// Non-timeout cancellations and missing exit status still propagate as thrown errors.
 		this.#throwIfUnfinished(result, timeoutSec, outputText);
+		await invalidateGithubCacheForBashResult(options.command, options.cwd, result);
 
 		// No-op for already-bounded output; see `inlineCap` above.
 		const cappedOutputText = await enforceInlineByteCap(outputText, inlineCap);
@@ -936,6 +939,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					if (result.artifactError) latestProgressDetails = { meta: { artifactError: result.artifactError } };
 					const wallTimeMs = performance.now() - wallTimeStart;
 					const finalResult = await this.#buildCompletedResult(result, options.timeoutSec, {
+						command: options.command,
+						cwd: options.commandCwd,
 						requestedTimeoutSec: options.requestedTimeoutSec,
 						notices,
 						wallTimeMs,
@@ -1415,6 +1420,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						outputBytes: 0,
 					};
 					return this.#buildCompletedResult(timedOutResult, timeoutSec, {
+						command,
+						cwd: commandCwd,
 						requestedTimeoutSec,
 						notices: pendingNotices,
 						wallTimeMs: performance.now() - bridgeWallTimeStart,
@@ -1499,6 +1506,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							...(decoded.images.length > 0 ? { images: decoded.images } : {}),
 						};
 						return this.#buildCompletedResult(timedOutResult, timeoutSec, {
+							command,
+							cwd: commandCwd,
 							requestedTimeoutSec,
 							notices: pendingNotices,
 							wallTimeMs: performance.now() - bridgeWallTimeStart,
@@ -1569,6 +1578,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				for (const notice of pendingNotices) bridgeNotices.push(notice);
 
 				return this.#buildCompletedResult(bridgeResult, timeoutSec, {
+					command,
+					cwd: commandCwd,
 					requestedTimeoutSec,
 					notices: bridgeNotices,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
@@ -1655,6 +1666,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			}
 		}
 		return this.#buildCompletedResult(result, timeoutSec, {
+			command,
+			cwd: commandCwd,
 			requestedTimeoutSec,
 			notices: pendingNotices,
 			wallTimeMs,

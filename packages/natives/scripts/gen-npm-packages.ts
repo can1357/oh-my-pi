@@ -104,7 +104,7 @@ export function buildLeafManifest({ tag, os, cpu, files, version }: BuildLeafMan
 			directory: "packages/natives",
 		},
 		engines: {
-			bun: ">=1.3.14",
+			bun: ">=1.4.4",
 		},
 	};
 }

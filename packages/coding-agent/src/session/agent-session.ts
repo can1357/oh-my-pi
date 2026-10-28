@@ -682,6 +682,8 @@ const noOpUIContext: ExtensionUIContext = {
 	input: async (_title, _placeholder, _dialogOptions) => undefined,
 	notify: () => {},
 	onTerminalInput: () => () => {},
+	rerenderMessage: () => {},
+	getLinkClicksAvailable: () => false,
 	setStatus: () => {},
 	setWorkingMessage: () => {},
 	setWidget: () => {},
@@ -995,6 +997,10 @@ export class AgentSession implements SettingsScope {
 	 *  (`clearQueue({ forInterrupt: true })`). The abort that follows takes them out of the
 	 *  queues and records them in the transcript without starting a turn. */
 	#interruptWithdrawnMessages = new WeakSet<AgentMessage>();
+	/** A turn ended on its own since the last run-stopping user interrupt, so background
+	 *  completions may wake the session again. Separate from the suppression latch, which
+	 *  still holds the user's own queued follow-up until they resume deliberately. */
+	#turnSettledSinceUserInterrupt = false;
 	#queuedMessageDrainScheduled = false;
 	/** A single model-only notebook reminder queued for the current prompt generation. */
 	#experimentalContextNotesReminder: { prompt: string; generation: number } | undefined;
@@ -2016,8 +2022,8 @@ export class AgentSession implements SettingsScope {
 					},
 				),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
-			setModelTemporary: (model, thinkingLevel, options) =>
-				this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
+			setModelTemporary: (model, thinkingLevel) =>
+				this.#models.setModelTemporary(model, thinkingLevel, { prewalk: true }, "automatic"),
 			setActiveToolsByName: names => this.setActiveToolsByName(names),
 			restoreNonMCPToolPresentation: (nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames) =>
 				this.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames),
@@ -2281,8 +2287,13 @@ export class AgentSession implements SettingsScope {
 				// A user interrupt is still in effect: background completions (async job
 				// results, launch completions, MCP/LSP/advisor asides) must not restart
 				// the run the user stopped. Fold them into context so the next deliberate
-				// prompt sees them — same policy as #resumeStrandedIrcAsides.
-				if (this.#advisors.autoResumeSuppressed) {
+				// prompt sees them — same policy as #resumeStrandedIrcAsides — until a later
+				// turn has ended on its own.
+				if (this.#advisors.autoResumeSuppressed && !this.#turnSettledSinceUserInterrupt) {
+					logger.debug("Background delivery folded into context without a turn", {
+						count: messages.length,
+						customTypes: messages.map(message => (message.role === "custom" ? message.customType : message.role)),
+					});
 					this.#recordWithoutTurn(messages);
 					return;
 				}
@@ -4835,6 +4846,8 @@ export class AgentSession implements SettingsScope {
 				await emitAgentEndNotification();
 				return;
 			}
+			// A turn that ended on its own (not the interrupt's aborted message) closes the stopped run.
+			if (!isUserInterruptAbort(msg)) this.#turnSettledSinceUserInterrupt = true;
 
 			const yieldOnThisMessage = this.#assistantEndedWithSuccessfulYield(msg);
 			const successfulYieldMessage = yieldOnThisMessage
@@ -6795,6 +6808,16 @@ export class AgentSession implements SettingsScope {
 	/** Whether agent is currently streaming a response */
 	get isStreaming(): boolean {
 		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
+	}
+
+	/**
+	 * Fold background results into context until the next deliberate prompt instead of
+	 * waking on them. Used when the user ends a background-job wait; a plain `abort` stops
+	 * a run, not a wait, so unattended sessions still wake on their own jobs.
+	 */
+	suppressAutoResumeUntilPrompt(): void {
+		this.#advisors.autoResumeSuppressed = true;
+		this.#turnSettledSinceUserInterrupt = false;
 	}
 
 	/**
@@ -10326,14 +10349,20 @@ export class AgentSession implements SettingsScope {
 		return { steering, followUp };
 	}
 
-	/** Number of pending displayable messages (includes steering, follow-up, and next-turn messages).
-	 *  Reflects actual queued work (advisor cards included) — feeds hasPendingMessages()/RPC and the
-	 *  empty-submit abort gate. The user-restorable subset is surfaced by getQueuedMessages()/clearQueue(). */
+	/** Number of messages that can wake a session, plus advisor cards parked for abort replay.
+	 *  Untriggered hidden next-turn context rides with the next prompt, so it is not queued work for
+	 *  hasPendingMessages()/RPC or the empty-submit abort gate. */
 	get queuedMessageCount(): number {
+		// A scheduled hidden turn runs every pending message; otherwise only advisor cards count.
+		let pendingNextTurnCount = this.#pendingNextTurnMessages.length;
+		if (this.#scheduledHiddenNextTurnGeneration === undefined) {
+			pendingNextTurnCount = 0;
+			for (const message of this.#pendingNextTurnMessages) if (isAdvisorCard(message)) pendingNextTurnCount++;
+		}
 		return (
 			this.agent.peekSteeringQueue().filter(isDisplayableQueuedMessage).length +
 			this.agent.peekFollowUpQueue().filter(isDisplayableQueuedMessage).length +
-			this.#pendingNextTurnMessages.length
+			pendingNextTurnCount
 		);
 	}
 
@@ -11075,7 +11104,15 @@ export class AgentSession implements SettingsScope {
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
-		if (userInterrupt) this.#advisors.autoResumeSuppressed = true;
+		// Latch only when the interrupt stops something; an idle Esc would otherwise fold
+		// every later background completion for the rest of the session.
+		if (userInterrupt && (this.isStreaming || this.agent.hasQueuedMessages())) {
+			this.#advisors.autoResumeSuppressed = true;
+			// The post-turn unwind (`isStreaming` without a live loop) already settled its turn.
+			if (this.agent.state.isStreaming || this.agent.hasQueuedMessages()) {
+				this.#turnSettledSinceUserInterrupt = false;
+			}
+		}
 		// Pull the agent work an editor-restoring interrupt withdrew (clearQueue({ forInterrupt:
 		// true })), and on a user interrupt advisor concerns, out of the steer/follow-up queues
 		// before any await so the post-abort stranded-message drain can't auto-resume the run on

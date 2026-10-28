@@ -21,7 +21,11 @@ import { logger } from "@oh-my-pi/pi-utils";
 
 import { cfgSkillful } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import { cfgToolsXdevDocs, cfgToolsXdevInlineDevices } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import {
+	cfgToolsXdevDocs,
+	cfgToolsXdevInlineDevices,
+	cfgToolsXdevNotices,
+} from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 // Cache-stability invariant: when MCP servers reconnect with byte-identical tool
 // definitions, `refreshMCPTools` must not rebuild the system prompt. A rebuild
@@ -1458,28 +1462,34 @@ These tools became available:
 		expect(text).toContain("xd://mcp__nucleus_search");
 	});
 
-	it("keeps xd:// mount deltas model-visible without rendering them during quiet startup", async () => {
-		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
-			xdev: createTestXdevState(),
-			responses: [{ content: ["ok"] }],
-		});
-		cfgStartupQuiet.set(session.settings, true);
-		cfgToolsXdevDocs.set(session.settings, "builtins");
-		cfgToolsXdevInlineDevices.set(session.settings, ["mcp__nucleus_*"]);
-		const notices: string[] = [];
-		session.subscribe(event => {
-			if (event.type === "notice" && event.source === "xdev") notices.push(event.message);
-		});
+	it.each([
+		["quiet startup", cfgStartupQuiet, true],
+		["tools.xdevNotices off", cfgToolsXdevNotices, false],
+	] as const)(
+		"keeps xd:// mount deltas model-visible without rendering them under %s",
+		async (_label, setting, value) => {
+			const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+				xdev: createTestXdevState(),
+				responses: [{ content: ["ok"] }],
+			});
+			setting.set(session.settings, value);
+			cfgToolsXdevDocs.set(session.settings, "builtins");
+			cfgToolsXdevInlineDevices.set(session.settings, ["mcp__nucleus_*"]);
+			const notices: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "notice" && event.source === "xdev") notices.push(event.message);
+			});
 
-		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
-		await session.refreshMCPTools([search]);
+			const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+			await session.refreshMCPTools([search]);
 
-		expect(notices).toEqual([]);
-		await session.prompt("hello");
-		const delivered = mountNoticesIn(contexts[0]);
-		expect(delivered).toHaveLength(1);
-		expect(delivered[0]).toContain("xd://mcp__nucleus_search");
-	});
+			expect(notices).toEqual([]);
+			await session.prompt("hello");
+			const delivered = mountNoticesIn(contexts[0]);
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toContain("xd://mcp__nucleus_search");
+		},
+	);
 	it("keeps device-only write access until a full-write activation commits", async () => {
 		let blockRebuild = false;
 		const rebuildStarted = Promise.withResolvers<void>();

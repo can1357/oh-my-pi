@@ -121,7 +121,7 @@ import {
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
-import { transformMessages } from "./transform-messages";
+import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
@@ -273,6 +273,13 @@ function getLiteLLMThinkingBlocksDelta(delta: object): unknown[] | undefined {
 	return Array.isArray(mirrored) && mirrored.length > 0 ? mirrored : undefined;
 }
 
+/** Whether a thinking block's signature is a raw LiteLLM (Anthropic) one, not a reasoning field name. */
+export function isLiteLLMThinkingSignature(signature: string | undefined): signature is string {
+	return (
+		!!signature && signature !== "reasoning_content" && signature !== "reasoning" && signature !== "reasoning_text"
+	);
+}
+
 /**
  * Rebuilds LiteLLM `thinking_blocks` from a stored assistant turn. Thinking
  * blocks parsed from `thinking_blocks` keep the raw Anthropic signature as
@@ -286,14 +293,7 @@ function encodeLiteLLMThinkingBlocks(content: AssistantMessage["content"]): Lite
 	for (const block of content) {
 		if (block.type === "thinking") {
 			const signature = block.thinkingSignature;
-			if (
-				!signature ||
-				signature === "reasoning_content" ||
-				signature === "reasoning" ||
-				signature === "reasoning_text"
-			) {
-				continue;
-			}
+			if (!isLiteLLMThinkingSignature(signature)) continue;
 			blocks.push({ type: "thinking", thinking: block.thinking, signature });
 		} else if (block.type === "redactedThinking") {
 			blocks.push({ type: "redacted_thinking", data: block.data });
@@ -2364,6 +2364,25 @@ function maybeAddAnthropicCacheControl(compat: ResolvedOpenAICompat, messages: C
 			}
 		}
 	}
+}
+
+/**
+ * Whether every chat-completions request to `model` drops the thinking text of
+ * its own prior turns: neither the base compat nor its `whenThinking` view
+ * sends it. Blocks with a raw LiteLLM signature ({@link isLiteLLMThinkingSignature})
+ * still replay in `thinking_blocks`.
+ */
+export function completionsDropsOwnThinking(
+	model: { api?: string; reasoning?: boolean; compat?: Model["compat"] } | null | undefined,
+): boolean {
+	if (model?.api !== "openai-completions" || !model.compat) return false;
+	const compat = model.compat as ResolvedOpenAICompat;
+	// A row without a resolved replay flag can't tell; counting the thinking never undercounts.
+	if (!("replayReasoningContent" in compat)) return false;
+	return (
+		!completionsSendsOwnThinking(model, compat) &&
+		(compat.whenThinking === undefined || !completionsSendsOwnThinking(model, compat.whenThinking))
+	);
 }
 
 export function convertMessages(

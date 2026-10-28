@@ -5765,7 +5765,8 @@ function resolveCursorRecordReplays(
  * Cursor AgentService reconstructs the model prompt from `requestContext.rules`,
  * not from the client-supplied `rootPromptMessagesJson` system blobs. Map each
  * OMP system-prompt entry to a global CursorRule so always-apply rules survive
- * that reconstruction.
+ * that reconstruction. The server only does this while the root carries no
+ * history; later turns rely on {@link buildCursorRulesEntryJson}.
  */
 export function buildCursorRequestContextRules(systemPrompt: readonly string[] | undefined): CursorRule[] {
 	return normalizeSystemPrompts(systemPrompt).map((content, index) =>
@@ -6068,6 +6069,19 @@ export function buildCursorSystemPromptJsons(systemPrompt: readonly string[] | u
 		return [JSON.stringify({ role: "system", content: "You are a helpful assistant." })];
 	}
 	return systemPrompts.map(content => JSON.stringify({ role: "system", content }));
+}
+
+/**
+ * The `<rules>` user entry Cursor's server builds from `requestContext.rules` on a
+ * history-less root. On a history-bearing root the server replaces the system
+ * entries with its own prompt and keeps the client's history verbatim without
+ * rebuilding this entry, so the client carries it (as the native CLI does) right
+ * after the system entries. Undefined when there is no system prompt (#17059).
+ */
+function buildCursorRulesEntryJson(systemPrompt: readonly string[] | undefined): string | undefined {
+	const systemPrompts = normalizeSystemPrompts(systemPrompt);
+	if (systemPrompts.length === 0) return undefined;
+	return JSON.stringify({ role: "user", content: `<rules>\n${systemPrompts.join("\n\n")}\n</rules>` });
 }
 
 /** Tool results before the history end by call id, and the ids of calls the history issued. */
@@ -6821,6 +6835,18 @@ function buildCursorConversationState(
 		replays,
 		toolHistory,
 	);
+	// The server builds its `<rules>` entry from `requestContext.rules` only for a
+	// history-less root; with history it would drop the system prompt entirely.
+	if (rootPromptMessagesJson.length > systemPromptIds.length) {
+		const rulesEntry = buildCursorRulesEntryJson(context.systemPrompt);
+		if (rulesEntry) {
+			rootPromptMessagesJson.splice(
+				systemPromptIds.length,
+				0,
+				storeCursorBlob(blobStore, new TextEncoder().encode(rulesEntry)),
+			);
+		}
+	}
 
 	// Preserve cached non-history state fields (todos, file states, summaries, etc.)
 	// when the system prompt is unchanged; otherwise start fresh.

@@ -63,7 +63,11 @@ interface RowLike {
  */
 function keepsExplicitThinking(row: RowLike): boolean {
 	if (isCollapsedVariantSpec(row as unknown as ModelSpec<Api>)) return true;
-	if (row.compatConfig?.thinkingFormat === "chat-template" && row.thinking) return true;
+	if (
+		(row.compatConfig?.thinkingFormat === "chat-template" || row.compatConfig?.thinkingFormat === "kimi") &&
+		row.thinking
+	)
+		return true;
 	if (
 		row.provider === "alibaba-token-plan" &&
 		(row.id === "qwen3.8-max-preview" || row.id === "qwen3.8-max") &&

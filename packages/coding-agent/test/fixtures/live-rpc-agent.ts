@@ -88,6 +88,10 @@ class FakeLiveSession implements RpcLiveSession {
 	#stopped: Promise<void> | undefined;
 	constructor(readonly options: LiveSessionControllerOptions) {}
 
+	get sdpAnswer(): string | undefined {
+		return this.options.sdpOffer === undefined ? undefined : `answer to ${this.options.sdpOffer}`;
+	}
+
 	async start(): Promise<void> {
 		const { callbacks } = this.options;
 		callbacks.onPhase("connecting");

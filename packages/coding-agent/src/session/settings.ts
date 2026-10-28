@@ -784,6 +784,19 @@ export const cfgRetryFallbackOn = register({
 	},
 });
 
+export const cfgRetryRateLimitWalksChain = register({
+	id: "retry.rateLimitWalksChain",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Rate Limit Walks Chain",
+		description:
+			"On a rate limit, do not hold the retry.fallbackChains walk for a turn whose thinking is signed by the failing model. Off (the default), such a turn keeps retrying the rate-limited model until retry.maxRetries is spent before the chain is reached.",
+	},
+});
+
 export const cfgRetryUsageAwareFallback = register({
 	id: "retry.usageAwareFallback",
 	type: "boolean",
@@ -892,6 +905,7 @@ export const cfgRetry = combine({
 	waitForUsageReset: cfgRetryWaitForUsageReset,
 	modelFallback: cfgRetryModelFallback,
 	fallbackOn: cfgRetryFallbackOn,
+	rateLimitWalksChain: cfgRetryRateLimitWalksChain,
 	usageAwareFallback: cfgRetryUsageAwareFallback,
 	usageReservePct: cfgRetryUsageReservePct,
 	usageReservePolicy: cfgRetryUsageReservePolicy,

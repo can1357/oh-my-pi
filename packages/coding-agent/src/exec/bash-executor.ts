@@ -112,6 +112,11 @@ export interface BashPtyOptions {
 	rows: number;
 	/** Receives raw PTY bytes (ANSI intact) for virtual-terminal rendering. */
 	onChunk: (chunk: string) => void;
+	/**
+	 * Receives a writer for the PTY's stdin once the command starts, so the user
+	 * can answer prompts (`read`, shell-startup questions). Writes after exit are dropped.
+	 */
+	onStdin?: (write: (data: string) => void) => void;
 }
 
 export interface BashResult {
@@ -510,6 +515,16 @@ async function executeUserShellPty(run: {
 			// before the transcript sink sanitizes or truncates the clean text.
 			const clean = run.graphics.push(chunk);
 			if (clean) run.sink.push(clean.replace(/\r\n?/gu, "\n"));
+		},
+		err => {
+			if (err) return;
+			run.pty.onStdin?.(data => {
+				try {
+					session.write(data);
+				} catch {
+					// The command exited between the keystroke and the write.
+				}
+			});
 		},
 	);
 	if (result.timedOut) {

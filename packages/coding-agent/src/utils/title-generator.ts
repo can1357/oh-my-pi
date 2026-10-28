@@ -851,6 +851,14 @@ const terminalTitleRuntime: {
 	 *  While latched the working separator stays `:` and no interval is
 	 *  scheduled. */
 	nativeTitleFailed: boolean;
+	/** The console title `initTerminalTitleState()` read on a Windows console.
+	 *  The console has no title stack, so teardown puts it back through
+	 *  `SetConsoleTitleW`. */
+	initialWindowsConsoleTitle: string | undefined;
+	/** Set when teardown restored `initialWindowsConsoleTitle` natively. ConPTY
+	 *  turns OSC 0 into a console-title set, so `popTerminalTitle()` must then
+	 *  skip its clear or it blanks the title just restored. */
+	nativeTitleRestored: boolean;
 } = {
 	label: undefined,
 	sessionName: undefined,
@@ -864,6 +872,8 @@ const terminalTitleRuntime: {
 	extensionOverride: undefined,
 	disposed: false,
 	nativeTitleFailed: false,
+	initialWindowsConsoleTitle: undefined,
+	nativeTitleRestored: false,
 };
 
 /**
@@ -1026,6 +1036,14 @@ export function initTerminalTitleState(): void {
 	// stale failure-shaped binding would otherwise survive the reset.
 	disposeWindowsConsoleTitleApi();
 	terminalTitleRuntime.nativeTitleFailed = false;
+	terminalTitleRuntime.nativeTitleRestored = false;
+	// `??=` keeps the shell's title across a repeat claim, which would otherwise
+	// read omp's own title back.
+	try {
+		terminalTitleRuntime.initialWindowsConsoleTitle ??= getWindowsConsoleTitleApi()?.get();
+	} catch {
+		// Unreadable: teardown falls back to the OSC clear in `popTerminalTitle()`.
+	}
 	// A fresh claim starts from the shell's title, not whatever the previous
 	// session last emitted: the dedupe cache must not swallow the first write.
 	// Releasing the latch alone would leave a stopped timer behind a `working`
@@ -1058,6 +1076,11 @@ export function disposeTerminalTitleState(): void {
 	// longer knows what is on screen: the stale dedupe cache (`lastTerminalTitle`,
 	// cleared below) must not swallow the first write after the latch releases.
 	stopTerminalTitleSpinner();
+	const initialTitle = terminalTitleRuntime.initialWindowsConsoleTitle;
+	if (initialTitle !== undefined) {
+		terminalTitleRuntime.nativeTitleRestored = setWindowsConsoleTitle(initialTitle);
+		terminalTitleRuntime.initialWindowsConsoleTitle = undefined;
+	}
 	disposeWindowsConsoleTitleApi();
 	lastTerminalTitle = undefined;
 }
@@ -1071,9 +1094,20 @@ export function pushTerminalTitle(): void {
 }
 
 /**
- * Restore the previously saved terminal title on terminals that support xterm window ops.
+ * Hand the terminal title back to the shell on teardown, after
+ * {@link disposeTerminalTitleState}.
+ *
+ * Clears the title (OSC 0) before popping the one {@link pushTerminalTitle} saved
+ * (CSI 23;2t): a terminal with a title stack (xterm, iTerm2, VTE, mintty) restores
+ * the saved title over the clear, and one without a stack ignores the pop and
+ * keeps the clear instead of omp's title. Writes nothing when teardown already
+ * restored a Windows console title natively.
  */
 export function popTerminalTitle(): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	writeTerminalSequence("\x1b[23;2t");
+	if (terminalTitleRuntime.nativeTitleRestored) {
+		terminalTitleRuntime.nativeTitleRestored = false;
+		return;
+	}
+	writeTerminalSequence("\x1b]0;\x07\x1b[23;2t");
 }

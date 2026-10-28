@@ -314,6 +314,19 @@ export class AsyncJobManager {
 	#disposed = false;
 	/** Live widgets of this root's jobs; set by the root session when widgets are available. */
 	widgets: JobWidgetRegistry | undefined;
+	readonly #settleListeners = new Set<() => void>();
+
+	/**
+	 * Calls `listener` whenever a job settles (completed, failed or cancelled), so
+	 * views counting running jobs repaint even when no result delivery follows.
+	 * Returns the unsubscribe.
+	 */
+	onJobSettled(listener: () => void): () => void {
+		this.#settleListeners.add(listener);
+		return () => {
+			this.#settleListeners.delete(listener);
+		};
+	}
 
 	#filterJobs(jobs: Iterable<AsyncJob>, filter?: AsyncJobFilter): AsyncJob[] {
 		if (!filter) return Array.from(jobs);
@@ -464,6 +477,16 @@ export class AsyncJobManager {
 			}
 			if (this.#releasedForegroundJobs.has(id)) this.#discardForegroundJob(id);
 			else this.#scheduleEviction(id);
+			for (const listener of this.#settleListeners) {
+				try {
+					listener();
+				} catch (error) {
+					logger.warn("Async job settle listener failed", {
+						jobId: id,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
 		})();
 
 		this.#jobs.set(id, job);

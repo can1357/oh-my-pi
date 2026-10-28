@@ -38,7 +38,7 @@ Sources: [`packages/stats/README.md`](../packages/stats/README.md), [`packages/s
 
 Sources: [`packages/omptype/README.md`](../packages/omptype/README.md), [`packages/omptype/package.json`](../packages/omptype/package.json), and the repository [omptype authoring guide](./omptype-guide.md).
 
-- Package: public `@oh-my-pi/omptype`; install with `bun add @oh-my-pi/omptype`. Its manifest declares Node 20 or newer and Bun 1.3.14 or newer.
+- Package: public `@oh-my-pi/omptype`; install with `bun add @oh-my-pi/omptype`. Its manifest declares Node 20 or newer and Bun 1.4.4 or newer.
 - Feature: callable ArkType-compatible schemas with cheap interpreted startup, lazy hot-path compilation, validation errors, defaults and morphs, and JSON Schema emission.
 - Public surfaces: `@oh-my-pi/omptype` for native authoring, `/typebox` and `/zod` for compatibility builders, and `/ark` for the alias-free ArkType compatibility facade.
 - Runtime behavior: schema calls return the validated value or `type.errors`; `.assert()` returns the value or throws; `.allows()` performs a boolean check.
@@ -102,7 +102,7 @@ Sources: [`packages/collab-web/README.md`](../packages/collab-web/README.md), [`
 Sources: [`packages/snapcompact/README.md`](../packages/snapcompact/README.md), [`packages/snapcompact/package.json`](../packages/snapcompact/package.json), [`packages/snapcompact/src/index.ts`](../packages/snapcompact/src/index.ts).
 
 - Package: public `@oh-my-pi/snapcompact`; install with `bun add @oh-my-pi/snapcompact`; requires
-  Bun 1.3.14 or newer.
+  Bun 1.4.4 or newer.
 - Feature: deterministic local serialization and PNG rendering of discarded conversation history
   for vision-model context compaction; no model call or API key is required.
 - Public entrypoint includes `compact`, `render`, `renderMany`, `frames`, shape selection, text
@@ -113,7 +113,7 @@ Sources: [`packages/snapcompact/README.md`](../packages/snapcompact/README.md), 
 
 Sources: [`packages/mnemopi/README.md`](../packages/mnemopi/README.md), [`packages/mnemopi/package.json`](../packages/mnemopi/package.json), [`packages/mnemopi/src/cli.ts`](../packages/mnemopi/src/cli.ts), and the coding-agent [Mnemopi memory backend guide](./mnemosyne-memory-backend.md).
 
-- Package: public `@oh-my-pi/pi-mnemopi`; bin: `mnemopi`; requires Bun 1.3.14 or newer. Install globally with `bun add --global @oh-my-pi/pi-mnemopi`, then run `mnemopi <command>`. From a source checkout, `bun packages/mnemopi/src/cli.ts <command>` runs the same entrypoint.
+- Package: public `@oh-my-pi/pi-mnemopi`; bin: `mnemopi`; requires Bun 1.4.4 or newer. Install globally with `bun add --global @oh-my-pi/pi-mnemopi`, then run `mnemopi <command>`. From a source checkout, `bun packages/mnemopi/src/cli.ts <command>` runs the same entrypoint.
 - Store and search: `store`/`remember`, `recall`/`search`, `update`/`edit`, and `delete`/`forget`.
 - Inspect and maintain: `stats`, `sleep`/`consolidate`, `diagnose`/`doctor`, JSON `export` and `import`, `scratchpad`/`sp` with `read`, `write`, or `clear`, and `bank` with `list`, `create`, or `delete`.
 - Storage: standalone commands use `~/.hermes/mnemopi/data/mnemopi.db` by default; `MNEMOPI_DATA_DIR` selects a different data directory. This default is separate from OMP's session-managed memory location.

@@ -76,10 +76,12 @@ function toolResultHasError(result: AgentToolResult): boolean {
 
 function getTool(session: ToolSession, name: string): AgentTool {
 	const tool = session.getToolForEvalBridge ? session.getToolForEvalBridge(name) : session.getToolByName?.(name);
-	if (!tool) {
-		throw new ToolError(`Unknown tool from js runtime: ${name}`);
+	if (tool) return tool;
+	// A registry hit means the tool exists, but the session does not expose it here.
+	if (session.getToolForEvalBridge && session.getToolByName?.(name)) {
+		throw new ToolError(`Tool is registered but not available in this session: ${name}`);
 	}
-	return tool;
+	throw new ToolError(`Unknown tool from js runtime: ${name}`);
 }
 
 function parsePreludeRequest(args: unknown): { name: string; parameters: unknown } {

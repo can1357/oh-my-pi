@@ -776,6 +776,14 @@ export class Editor implements Component, Focusable {
 	describeDecorations: ((lines: readonly string[]) => readonly TspEditorDecoration[]) | undefined;
 	/** TSP code language of the buffer (`python`, `bash`): the terminal highlights it in the mono face. */
 	describeLanguage: (() => string | undefined) | undefined;
+	/** Label the TSP field to disable host-side editing while another input owner handles raw keys. */
+	nativeKeyPassthrough = false;
+	/**
+	 * Ask the TSP terminal to keep what is typed into this field and draw it at
+	 * the caret until this clears, then send it: set while startup cannot read
+	 * input yet (the prompt composer's deferred-input start).
+	 */
+	nativeTypeahead = false;
 	/**
 	 * TSP chrome around the `editor` node (the prompt composer's chips, mode
 	 * chip, send/stop): the root role, the children with `input` placed where
@@ -1894,9 +1902,10 @@ export class Editor implements Component, Focusable {
 			decor: decor.decor,
 			ghost: ghost ? plainText(ghost) : undefined,
 			placeholder: nativePlaceholder || undefined,
-			mode: vim ? VIM_MODE_LABELS[vim.mode] : undefined,
+			mode: this.nativeKeyPassthrough ? "PTY" : vim ? VIM_MODE_LABELS[vim.mode] : undefined,
 			lang: this.describeLanguage?.(),
 			maxLines: this.#maxHeight,
+			typeahead: this.nativeTypeahead || undefined,
 		};
 		let editor = this.#nativeEditor;
 		if (!editor || !sameProps(editor.props, props)) {
