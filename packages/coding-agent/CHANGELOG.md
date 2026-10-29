@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
 
+### Fixed
 - Fixed saved sessions losing or replaying stale content when a message carries an accessor-shaped image block, a signature or reasoning item the session cannot read, an array payload, a compaction archive, or a serializer hook, and when an entry's own metadata or payload is changed in place, or a value that changes on every read is stored a revision ahead of the write ([#15222](https://github.com/can1357/oh-my-pi/pull/15222) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
