@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- `matchesKey` now accepts the xterm `modifyOtherKeys` encoding (`CSI 27;mod;code~`) that `parseKey` already decodes, so the two agree on the same bytes. Two forms tmux does not emit still read differently in the two matchers: a shifted letter written with its shifted codepoint (`CSI 27;2;65~`), and wire modifiers carrying hyper or meta ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
-- The `/pause` screen now paints the frame that drops it before it opens the gate, and releases the gate however the teardown ends. Hiding the overlay only *schedules* a frame, while resuming wakes every parked agent loop in the same tick, so the terminal could keep the full-screen PAUSED frame while the resumed session was already working ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
+- Space and Enter now dismiss the `/pause` screen on terminals that send keys as xterm `modifyOtherKeys` sequences, such as tmux with extended keys on ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
+- The `/pause` screen now leaves the terminal as soon as you resume, and a failed teardown no longer leaves the session paused with no screen to release it ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 
