@@ -6,9 +6,15 @@
 
 - `AIError.Flag.Connection` marks a failure that died on the wire with no HTTP status and no capacity signal — a cut stream, a closed socket, a truncated chunked transfer — so callers can tell it apart from a 429, a 529 or an overload ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
 
+### Changed
+
+- Cursor runs served through `omp auth-gateway` are limited to the client's own tools, all advertised as MCP; Cursor's built-in tools (file, shell, edit, todo, web fetch, SCM) are no longer offered on that path ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
+
 ### Fixed
 
 - A wire failure a runtime reports only as an errno on `err.code` (`ECONNRESET`, `EPIPE`, `ECONNABORTED`, undici's `UND_ERR_SOCKET`) while leaving the message generic is now classified as a connection failure instead of going unrecognised ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Fixed Cursor models served through `omp auth-gateway` being told their file and shell tools were unavailable while the client ran the calls anyway, in Cursor's own argument shape (edits failed validation); each call now reaches the client as one of its own tools and the turn stops with `toolUse` until the result comes back ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
+- Fixed Cursor models served through `omp auth-gateway` being told each tool call was handed off, which left Composer issuing calls blind and answering their results with empty stops; the gateway now keeps the Cursor run open while the client runs a step's calls and answers them in-band with the client's results on its next request (up to 30 minutes; otherwise the turn is rebuilt from history as before) ([#17382](https://github.com/can1357/oh-my-pi/pull/17382) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.14.0] - 2026-10-29
 

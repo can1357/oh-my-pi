@@ -5,6 +5,7 @@
 ### Fixed
 
 - A cut stream, closed socket or truncated chunked transfer now gets up to two more tries on the same model before `retry.fallbackChains` moves the session to another one; a 429, a 529, an overload, a usage limit, a timeout and a refusal still move at once ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
 
 ## [18.14.0] - 2026-10-29
 

@@ -1642,28 +1642,24 @@ export async function buildSessionOptions(
 			: !restoringSession && cfgPrewalkEnabled.get(activeSettings);
 	if (prewalkEnabled) {
 		const target = parsed.prewalkInto ?? cfgPrewalkInto.get(activeSettings);
-		let targetPatterns: string[];
+		// `--model` mutates only the session default role. Resolve an explicit
+		// `--prewalk-into` against the pre-mutation default while leaving all
+		// other role lookups live; the configured `prewalk.into` keeps resolving
+		// against the live settings.
+		const roleLookup =
+			parsed.prewalkInto === undefined
+				? activeSettings
+				: {
+						getModelRole: (role: string) =>
+							role === "default" ? preModelOverrideDefaultRole : activeSettings.getModelRole(role),
+					};
 
-		if (parsed.prewalkInto === undefined) {
-			// Preserve the existing default-prewalk behavior; only an explicit
-			// target needs pre-override role semantics.
-			targetPatterns = [expandRoleAlias(target, activeSettings)];
-		} else {
-			// `--model` mutates only the session default role. Resolve explicit
-			// prewalk aliases against the pre-mutation default while leaving all
-			// other role lookups live.
-			const preModelOverrideRoleLookup = {
-				getModelRole: (role: string) =>
-					role === "default" ? preModelOverrideDefaultRole : activeSettings.getModelRole(role),
-			};
-
-			// Bare `default` is a backwards-compatible special selector handled
-			// by expandRoleAlias rather than the prefixed role-alias grammar.
-			const targetSelector =
-				target.trim() === "default" ? expandRoleAlias(target, preModelOverrideRoleLookup) : target;
-			const configuredPatterns = resolveConfiguredModelPatterns(targetSelector, preModelOverrideRoleLookup);
-			targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
-		}
+		// Bare `default` is a backwards-compatible special selector handled
+		// by expandRoleAlias rather than the prefixed role-alias grammar.
+		const targetSelector = target.trim() === "default" ? expandRoleAlias(target, roleLookup) : target;
+		// Keep every role candidate so a later authenticated fallback can still arm prewalk.
+		const configuredPatterns = resolveConfiguredModelPatterns(targetSelector, roleLookup);
+		const targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
 
 		const selection = await resolvePrewalkTarget(
 			targetPatterns,
