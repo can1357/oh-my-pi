@@ -1598,4 +1598,50 @@ describe("AgentSession triggerTurn aside", () => {
 		// be the last one: a subscriber that stopped waiting there would miss the turn.
 		expect(agentEnds).toEqual([false, true]);
 	});
+
+	it("gets its turn when a rolled-back switch restores the record that was already queued behind the run", async () => {
+		const { session, mock } = await createHarness();
+		// Plan mode proves the restored record still carries its turn request: an aside without one
+		// folds into context here instead of waking.
+		session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+		const streamReached = Promise.withResolvers<void>();
+		const releaseStream = Promise.withResolvers<void>();
+		mock.push(async () => {
+			streamReached.resolve();
+			await releaseStream.promise;
+			return { content: ["Interrupted."] };
+		});
+		const setSessionFileSpy = spyOn(SessionManager.prototype, "setSessionFile").mockImplementation(async () => {
+			throw new Error("forced switch failure");
+		});
+		let switched: Promise<boolean> | undefined;
+		let run: Promise<unknown> | undefined;
+		try {
+			run = session.prompt("LIVE_RUN");
+			await streamReached.promise;
+			// Queued behind the live run. The switch's internal abort below skips the loop's final
+			// aside poll, so the record is still in the bridge when the switch snapshots it.
+			expect(
+				await session.sendCustomMessage(card("CARD_QUEUED_BEHIND_RUN"), {
+					deliverAs: "aside",
+					triggerTurn: true,
+				}),
+			).toBe(false);
+			switched = session.switchSession(path.join(tempDir.path(), "target.jsonl"));
+			releaseStream.resolve();
+			await expect(switched).rejects.toThrow("forced switch failure");
+			await run.catch(() => {});
+			await settle(session);
+		} finally {
+			releaseStream.resolve();
+			setSessionFileSpy.mockRestore();
+			await switched?.catch(() => {});
+			await run?.catch(() => {});
+		}
+
+		// The rollback put the record back into the live session, so the turn it was promised runs
+		// there; without the resume it would only ride the next unrelated prompt as context.
+		expect(mock.calls).toHaveLength(2);
+		expect(requestsContaining(mock, "CARD_QUEUED_BEHIND_RUN")).toBe(1);
+	});
 });

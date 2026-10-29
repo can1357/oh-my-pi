@@ -13649,6 +13649,13 @@ export class AgentSession implements SettingsScope {
 			this.#sessionGeneration = previousSessionGeneration;
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
+			// The records are back in the live session, but the abort above ran while the agent was
+			// disconnected, so its own stranded-aside drain refused them and nothing else resumes
+			// them: they would ride the next unrelated prompt into context, and a record promised a
+			// turn would never get one. Hand them to this transition's settle, exactly as a parked
+			// aside is handed over (#parkAsideForSessionTransition) — the restored generation tells
+			// the resume that the rollback, not a commit, owns them.
+			this.#resumeIrcRecordsAfterSessionTransition(previousSessionGeneration);
 			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
 			this.#scheduledHiddenNextTurnGeneration = previousScheduledHiddenNextTurnGeneration;
 			this.#queuedMessageDrainBlocked = previousQueuedMessageDrainBlocked;
