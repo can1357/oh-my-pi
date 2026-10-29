@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Fixed
+
 - Fixed the ACP usage report labelling a saved reset-credit line with an empty account name; it now falls back to the account id and then to a generic account label ([#15305](https://github.com/can1357/oh-my-pi/pull/15305) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
@@ -157,7 +157,6 @@
 - Muted live voice sessions remain visibly muted while the voice model starts work.
 
 ### Fixed
-- Fixed the ACP usage report labelling a saved reset-credit line with an empty account name; it now falls back to the account id and then to a generic account label ([#15305](https://github.com/can1357/oh-my-pi/pull/15305) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed live configuration reloads missing edits immediately after a symlink switches to another file in the same directory.
 - Fixed auth-gateway model routing after catalog refreshes so bare model IDs select the highest-priority credentialed provider, with wire-format compatibility used as a tie-breaker.
