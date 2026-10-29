@@ -273,6 +273,7 @@ function insertFactRows(
 	context: string,
 	importance: number,
 	sourceMemoryId: string | null,
+	scope = "global",
 ): void {
 	const timestamp = isoNow();
 	beam.db.run(
@@ -283,15 +284,16 @@ function insertFactRows(
 	);
 
 	const factId = stableMemoryId(`${sourceSession(beam)}\0${factType}\0${key}\0${value}`, sourceMemoryId ?? "");
-	// Extracted durable facts are the long-lived tier: they are stored with
-	// scope='global' so they stay recallable across sessions. Session-scoped
-	// conversation already lives in working_memory, and pre-existing fact rows
-	// keep the column's 'session' default (no retroactive widening).
+	// Extracted durable facts inherit the scope of the memory they were
+	// extracted from (default 'global'), so bank-level extraction stays
+	// recallable across sessions while session-scoped consolidations keep
+	// their facts private. Pre-existing fact rows keep the column's 'session'
+	// default (no retroactive widening).
 	beam.db.run(
 		`INSERT OR IGNORE INTO facts
 		 (fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence, scope)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'global')`,
-		[factId, sourceSession(beam), key, factType, value, timestamp, sourceMemoryId, importance],
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		[factId, sourceSession(beam), key, factType, value, timestamp, sourceMemoryId, importance, scope],
 	);
 }
 
@@ -525,7 +527,9 @@ export function consolidateToEpisodic(
 			timestamp,
 		],
 	);
-	extractAndStoreFacts(beam, summary, 0, memoryId);
+	// Facts inherit the episode's scope: a session-scoped summary keeps its
+	// extracted facts session-scoped (no silent cross-session widening).
+	extractAndStoreFacts(beam, summary, 0, memoryId, scope);
 	ingestIntoEpisodicGraph(beam, memoryId, summary);
 	scheduleEmbedding(beam, [{ memoryId, content: summary }]);
 	emitEvent(beam, "MEMORY_CONSOLIDATED", memoryId, summary, source, importance, {
@@ -594,6 +598,7 @@ export function detectLanguage(_beam: BeamMemoryState, text: string): string {
 }
 type StoreFactStringOptions = {
 	routeHeuristicCategories?: boolean;
+	scope?: string;
 };
 
 export function storeFactStrings(
@@ -605,9 +610,10 @@ export function storeFactStrings(
 	options: StoreFactStringOptions = {},
 ): number {
 	const routeHeuristicCategories = options.routeHeuristicCategories ?? true;
+	const scope = options.scope ?? "global";
 	let stored = 0;
 	for (const fact of facts) {
-		insertFactRows(beam, messageIdx, "entity", "fact", fact, fact, importance, sourceMemoryId);
+		insertFactRows(beam, messageIdx, "entity", "fact", fact, fact, importance, sourceMemoryId, scope);
 		stored++;
 		if (!routeHeuristicCategories) continue;
 		const pref = /^The user (prefers|dislikes) (.+)$/i.exec(fact);
@@ -629,16 +635,20 @@ export function storeExtractedFactCategories(
 	messageIdx = 0,
 	sourceMemoryId: string | null = null,
 	importance = 0.7,
+	scope = "global",
 ): number {
-	let stored = storeFactStrings(beam, extracted.facts, messageIdx, sourceMemoryId, importance);
+	let stored = storeFactStrings(beam, extracted.facts, messageIdx, sourceMemoryId, importance, { scope });
 	stored += storeFactStrings(beam, extracted.instructions, messageIdx, sourceMemoryId, importance, {
 		routeHeuristicCategories: false,
+		scope,
 	});
 	stored += storeFactStrings(beam, extracted.preferences, messageIdx, sourceMemoryId, importance, {
 		routeHeuristicCategories: false,
+		scope,
 	});
 	stored += storeFactStrings(beam, extracted.timelines, messageIdx, sourceMemoryId, importance, {
 		routeHeuristicCategories: false,
+		scope,
 	});
 	for (const instruction of extracted.instructions) {
 		insertInstruction(beam, messageIdx, instruction, instruction, sourceMemoryId);
@@ -659,6 +669,7 @@ export function extractAndStoreFacts(
 	content: string,
 	messageIdx = 0,
 	sourceMemoryId: string | null = null,
+	scope = "global",
 ): FactCounts {
 	const counts: FactCounts = {
 		metric: 0,
@@ -716,6 +727,7 @@ export function extractAndStoreFacts(
 			contextSnippet(text, match.index ?? 0),
 			0.65,
 			sourceMemoryId,
+			scope,
 		);
 		counts.metric++;
 		if (counts.metric >= 10) break;
@@ -724,7 +736,7 @@ export function extractAndStoreFacts(
 	for (const match of text.matchAll(/\b(\d{4}-\d{2}-\d{2})\b/g)) {
 		const date = match[1] ?? "";
 		const ctx = contextSnippet(text, match.index ?? 0, 100);
-		insertFactRows(beam, messageIdx, "date", "iso_date", date, ctx, 0.5, sourceMemoryId);
+		insertFactRows(beam, messageIdx, "date", "iso_date", date, ctx, 0.5, sourceMemoryId, scope);
 		counts.date++;
 		if (/\b(release|deadline|meeting|launch|ship|shipped|due|start|started|finish|finished)\b/i.test(ctx)) {
 			insertTimeline(beam, messageIdx, date, ctx, sourceMemoryId);
@@ -744,11 +756,12 @@ export function extractAndStoreFacts(
 			contextSnippet(text, match.index ?? 0),
 			0.6,
 			sourceMemoryId,
+			scope,
 		);
 		counts.version++;
 	}
 
-	counts.entity += storeFactStrings(beam, heuristicExtractFacts(text), messageIdx, sourceMemoryId);
+	counts.entity += storeFactStrings(beam, heuristicExtractFacts(text), messageIdx, sourceMemoryId, 0.7, { scope });
 
 	for (const match of text.matchAll(
 		/\b([A-Z][A-Za-z0-9_-]{2,})\s+(?:is|uses|runs|owns|depends on)\s+([^.!?;]{2,80})/g,

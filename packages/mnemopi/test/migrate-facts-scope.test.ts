@@ -4,10 +4,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
-import { storeFactStrings } from "@oh-my-pi/pi-mnemopi/core/beam/consolidate";
+import { consolidateToEpisodic, storeFactStrings } from "@oh-my-pi/pi-mnemopi/core/beam/consolidate";
 import { factRecall } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
 import { hasPendingMigration, migrate } from "@oh-my-pi/pi-mnemopi/core/migrations/e7-facts-scope";
+// The exports map exposes the barrel file via its explicit path ("./*" -> "./src/*.ts");
+// the directory shorthand is not a valid subpath, so import the index file directly.
+import * as migrationsBarrel from "@oh-my-pi/pi-mnemopi/core/migrations/index";
 import { closeQuietly, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
 
 const roots: string[] = [];
@@ -78,6 +81,15 @@ function factColumns(dbPath: string): string[] {
 	try {
 		const rows = db.query("PRAGMA table_info(facts)").all() as { name: string }[];
 		return rows.map(row => row.name);
+	} finally {
+		closeQuietly(db);
+	}
+}
+
+function journalMode(dbPath: string): string {
+	const db = openDatabase(dbPath, { create: false, readwrite: false, pragmas: false });
+	try {
+		return (db.query("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode;
 	} finally {
 		closeQuietly(db);
 	}
@@ -188,6 +200,53 @@ describe("E7 facts scope migration", () => {
 			expect(hasPendingMigration(old)).toBe(false);
 		} finally {
 			closeQuietly(old);
+		}
+	});
+
+	it("dry run leaves the bank file untouched (no journal-mode change, no column)", () => {
+		const dbPath = tempDb();
+		seedOldShapeFacts(dbPath, [["fact-1", "session-a", "relay", "requires", "quorum tokens"]]);
+		const before = journalMode(dbPath);
+		expect(migrate({ dbPath, dryRun: true, backup: false, logFn: () => undefined })).toBe(1);
+		expect(journalMode(dbPath)).toBe(before);
+		expect(factColumns(dbPath)).not.toContain("scope");
+	});
+
+	it("throws for a missing database and for :memory:", () => {
+		expect(() => migrate("/nonexistent/mnemopi-e7-missing.db", false, false, () => undefined)).toThrow(
+			/database not found/,
+		);
+		expect(() => migrate(":memory:", false, false, () => undefined)).toThrow(/database not found/);
+	});
+
+	it("keeps e6's migrate and hasPendingMigration importable from the migrations barrel", () => {
+		const core = migrationsBarrel as Record<string, unknown>;
+		expect(typeof core.migrate).toBe("function");
+		expect(typeof core.hasPendingMigration).toBe("function");
+		expect(typeof core.migrateFactsScope).toBe("function");
+		expect(typeof core.hasPendingFactsScopeMigration).toBe("function");
+	});
+
+	it("consolidated episodes scope their extracted facts like the episode", () => {
+		const dbPath = tempDb();
+		const beamA = new BeamMemory({ sessionId: "session-a", dbPath });
+		try {
+			const memoryId = consolidateToEpisodic(
+				beamA,
+				"Upgraded the relay to v3.2.1 and the cron to 2026-01-05",
+				["wm-1"],
+				"test",
+				0.6,
+				{ scope: "session" },
+			);
+			const rows = beamA.db
+				.query("SELECT scope FROM facts WHERE source_msg_id = ?")
+				.all(memoryId) as { scope: string }[];
+			expect(rows.length).toBeGreaterThan(0);
+			for (const row of rows) expect(row.scope).toBe("session");
+		}
+		finally {
+			beamA.close();
 		}
 	});
 });

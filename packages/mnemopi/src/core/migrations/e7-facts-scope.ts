@@ -14,8 +14,9 @@ import { closeQuietly, type DatabasePath, openDatabase } from "../../db";
  *
  * Policy:
  * - The column is added as `TEXT DEFAULT 'session'`. Pre-existing rows keep
- *   the default, i.e. they are NOT retroactively widened to 'global' — that
- *   widening is deliberately left to fresh extraction writes.
+ *   the default, i.e. they are NOT retroactively widened to 'global' — fresh
+ *   extraction writes choose the scope ('global' by default; consolidations
+ *   inherit their episode's scope), and re-stored facts keep their scope.
  * - No FTS-side action is needed: `fts_facts` is an FTS5 external-content
  *   table over (subject, predicate, object) and its triggers reference only
  *   those columns, exactly like the many column adds on `episodic_memory`
@@ -82,7 +83,9 @@ export function migrate(
 		throw new Error(`database not found: ${dbPath}`);
 	}
 
-	let db = openDatabase(dbPath);
+	// Read-only, pragma-free probe: a dry run must not modify the file
+	// (enablePragmas would otherwise persistently flip journal_mode to WAL).
+	let db = openDatabase(dbPath, { create: false, readwrite: false, pragmas: false });
 	let pending = false;
 	let columns: string[] = [];
 	try {

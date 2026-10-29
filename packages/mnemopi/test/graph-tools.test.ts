@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { EpisodicGraph, type GraphEdge } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
+import { EpisodicGraph, type Fact, type GraphEdge } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
 import { closeQuietly, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
 
 function withGraph<T>(fn: (graph: EpisodicGraph) => T): T {
@@ -187,5 +187,61 @@ describe("EpisodicGraph scoring and proactive links", () => {
 			expect(toAlice.some(item => item.edgeType === "related_to")).toBe(false);
 			expect(toAlice.find(item => item.edgeType === "ctx")?.weight).toBe(references?.weight);
 		});
+	});
+});
+
+describe("EpisodicGraph fact scope (e7)", () => {
+	const fact = (id: string): Fact => ({
+		id,
+		subject: "Alice",
+		predicate: "is",
+		object: "engineer",
+		timestamp: "2026-01-01T00:00:00.000Z",
+		confidence: 0.7,
+	});
+
+	it("stores fresh facts with global scope and keeps the scope of re-stored facts", () => {
+		withGraph(graph => {
+			graph.storeFact(fact("fact_scope_new"), "mem_scope_1", "test");
+			const first = graph.db.query("SELECT scope FROM facts WHERE fact_id = 'fact_scope_new'").get() as { scope: string };
+			expect(first.scope).toBe("global");
+
+			graph.db.run("UPDATE facts SET scope = 'session' WHERE fact_id = 'fact_scope_new'");
+			graph.storeFact(fact("fact_scope_new"), "mem_scope_1", "test");
+			const row = graph.db
+				.query("SELECT scope, object FROM facts WHERE fact_id = 'fact_scope_new'")
+				.get() as { scope: string; object: string };
+			expect(row.scope).toBe("session");
+			expect(row.object).toBe("engineer");
+		});
+	});
+
+	it("adds the scope column to a graph-created old-shape facts table", () => {
+		const db = openDatabase(":memory:");
+		try {
+			db.run(
+				`
+					CREATE TABLE facts (
+						fact_id TEXT PRIMARY KEY,
+						session_id TEXT DEFAULT 'default',
+						subject TEXT NOT NULL,
+						predicate TEXT NOT NULL,
+						object TEXT NOT NULL,
+						timestamp TEXT,
+						source_msg_id TEXT,
+						confidence REAL DEFAULT 0.5,
+						created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+					)
+				`,
+			);
+			const graph = new EpisodicGraph({ db });
+			const cols = (db.query("PRAGMA table_info(facts)").all() as { name: string }[]).map(row => row.name);
+			expect(cols).toContain("scope");
+			graph.storeFact(fact("fact_scope_ddl"), "mem_scope_2", "test");
+			const row = db.query("SELECT scope FROM facts WHERE fact_id = 'fact_scope_ddl'").get() as { scope: string };
+			expect(row.scope).toBe("global");
+		} finally {
+			closeQuietly(db);
+		}
 	});
 });

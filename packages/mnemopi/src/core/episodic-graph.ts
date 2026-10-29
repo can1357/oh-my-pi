@@ -410,12 +410,22 @@ export class EpisodicGraph {
 		return row === null ? null : rowToGist(row);
 	}
 	storeFact(fact: Fact, memoryId: string, sessionId = "default"): void {
-		// Extracted durable facts are stored with scope='global' so they stay
-		// recallable across sessions; pre-existing rows keep the 'session' default.
+		// Fresh facts are stored with scope='global' so they stay recallable
+		// across sessions. Re-stored facts refresh their data but KEEP their
+		// existing scope — replacing the row with a forced 'global' would
+		// retroactively widen pre-existing session-scoped rows.
 		this.db.run(
-			`INSERT OR REPLACE INTO facts
+			`INSERT INTO facts
 				(fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence, scope)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'global')`,
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'global')
+				ON CONFLICT(fact_id) DO UPDATE SET
+					session_id = excluded.session_id,
+					subject = excluded.subject,
+					predicate = excluded.predicate,
+					object = excluded.object,
+					timestamp = excluded.timestamp,
+					source_msg_id = excluded.source_msg_id,
+					confidence = excluded.confidence`,
 			[fact.id, sessionId, fact.subject, fact.predicate, fact.object, fact.timestamp, memoryId, fact.confidence],
 		);
 	}
