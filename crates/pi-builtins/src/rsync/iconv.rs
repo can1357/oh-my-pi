@@ -421,9 +421,11 @@ mod tests {
 		assert_eq!(c, ascii_codeset());
 	}
 
-	/// `setlocale` picks `LC_ALL` over `LANG`, and a name the system cannot
-	/// load leaves the C locale active — the charset is ASCII either way, so a
-	/// `LC_ALL=xx_YY.UTF-8` shell escapes high-bit bytes like rsync 3.5.1 does.
+	/// `setlocale` picks `LC_ALL` over `LANG`. What a name the system has no
+	/// data for yields is platform-specific: on Unix `setlocale` fails and
+	/// leaves the C locale, so the charset is ASCII and a `LC_ALL=xx_YY.UTF-8`
+	/// shell escapes high-bit bytes like rsync 3.5.1 does; Windows has no
+	/// locale object to ask, so the name's own codeset is all there is.
 	#[test]
 	fn locale_charset_from_env() {
 		let env = |pairs: &'static [(&'static str, &'static str)]| {
@@ -432,7 +434,11 @@ mod tests {
 		assert_eq!(locale_charset(&env(&[])), ascii_codeset());
 		assert_eq!(locale_charset(&env(&[("LANG", "C")])), ascii_codeset());
 		assert_eq!(locale_charset(&env(&[("LC_ALL", "C"), ("LANG", "en_US.UTF-8")])), ascii_codeset());
-		assert_eq!(locale_charset(&env(&[("LC_ALL", "xx_YY.UTF-8")])), ascii_codeset());
+		let unknown = locale_charset(&env(&[("LC_ALL", "xx_YY.UTF-8")]));
+		#[cfg(unix)]
+		assert_eq!(unknown, ascii_codeset());
+		#[cfg(not(unix))]
+		assert_eq!(unknown, "UTF-8");
 		if let Some(installed) = utf8_locale_name() {
 			let charset = locale_charset(&|k: &str| (k == "LC_CTYPE").then(|| installed.to_owned()));
 			assert!(matches!(MsgCharset::for_locale(&charset), MsgCharset::Utf8), "{charset}");
