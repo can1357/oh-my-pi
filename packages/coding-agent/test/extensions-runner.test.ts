@@ -11,6 +11,7 @@ import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -4839,7 +4840,7 @@ describe("ExtensionRunner", () => {
 			const transformed = await runner.emitContext(messages);
 			let body: MessageCreateParams | undefined;
 			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
-				body = JSON.parse(String(init?.body ?? "{}")) as MessageCreateParams;
+				body = JSON.parse(requestBodyText(init) ?? "{}") as MessageCreateParams;
 				return new Response(
 					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
 					{ status: 400, headers: { "Content-Type": "application/json" } },
