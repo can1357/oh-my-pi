@@ -80,6 +80,7 @@
 - Added mTLS support for Anthropic connections through the `CLAUDE_CODE_CLIENT_CERT` and `CLAUDE_CODE_CLIENT_KEY` environment variables.
 
 ### Changed
+- Reduced the per-request work of preparing long transcripts for providers, so requests with many assistant turns start faster ([#17095](https://github.com/can1357/oh-my-pi/pull/17095) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Provider implementations are now loaded on demand, reducing startup and memory overhead while preserving existing stream timeouts, cancellation, and host overrides.
 - Account policy `priority` now takes precedence when usage information is temporarily unavailable, keeping new sessions on the preferred account.
