@@ -165,6 +165,7 @@ import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
+import autolearnCaptureRefused from "./prompts/system/autolearn-capture-refused.md" with { type: "text" };
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -1635,6 +1636,84 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 	return commands;
 }
 
+/**
+ * `AgentTool` keys a capture turn advertises unchanged: everything that shapes the request's tool list. A capture
+ * request whose tools differ from the primary turn's diverges from it at the top of the prompt, so every provider
+ * prompt cache (and every local server's prefix cache) misses on the whole conversation.
+ */
+const CAPTURE_ADVERTISED_KEYS = [
+	"name",
+	"description",
+	"parameters",
+	"strict",
+	"deferLoading",
+	"customFormat",
+	"customWireName",
+	"native",
+	"examples",
+	"label",
+	"hidden",
+	"loadMode",
+	"summary",
+	"intent",
+	"readsSkillUris",
+	"deferrable",
+	"delegationGuidance",
+	"lenientArgValidation",
+] as const satisfies readonly (keyof AgentTool)[];
+
+/** `AgentTool` keys that run code or let a call reach an effect; a refused copy has none of them. */
+const CAPTURE_DROPPED_KEYS = [
+	"execute",
+	"openArgStream",
+	"docTopics",
+	"concurrency",
+	"speculation",
+	"interruptible",
+	"handlesToolInterrupt",
+	"matcherDigest",
+	"matcherPaths",
+	"matcherEntries",
+	"approval",
+	"formatApprovalDetails",
+	"approvalCacheTargets",
+	"approvalRestrictionPaths",
+	"renderCall",
+	"renderResult",
+] as const satisfies readonly (keyof AgentTool)[];
+
+// A new `AgentTool` key must be sorted into one of the lists above before this compiles.
+type UnsortedCaptureToolKey = Exclude<
+	keyof AgentTool,
+	(typeof CAPTURE_ADVERTISED_KEYS)[number] | (typeof CAPTURE_DROPPED_KEYS)[number]
+>;
+const captureToolKeysSorted: [UnsortedCaptureToolKey] extends [never] ? true : UnsortedCaptureToolKey = true;
+void captureToolKeysSorted;
+
+const CAPTURE_REFUSED = autolearnCaptureRefused.trim();
+
+/** `tool` as the capture turn advertises it: the same request shape, and a call that runs nothing. */
+function refusedCaptureTool(tool: AgentTool): AgentTool {
+	const advertised: Record<string, unknown> = {};
+	for (const key of CAPTURE_ADVERTISED_KEYS) if (tool[key] !== undefined) advertised[key] = tool[key];
+	return {
+		...(advertised as Pick<AgentTool, (typeof CAPTURE_ADVERTISED_KEYS)[number]>),
+		execute: async () => ({ content: [{ type: "text", text: CAPTURE_REFUSED }], isError: true }),
+	};
+}
+
+/**
+ * The capture turn's tools: the primary turn's list in its order, so the request keeps the primary prompt's cache
+ * prefix, with every tool but the capture tools refused; capture tools the primary list lacks go last.
+ */
+export function captureToolList(primary: readonly AgentTool[], capture: readonly AgentTool[]): AgentTool[] {
+	const allowed = new Map(capture.map(tool => [tool.name, tool]));
+	const tools = primary.map(tool => allowed.get(tool.name) ?? refusedCaptureTool(tool));
+	const advertised = new Set(primary.map(tool => tool.name));
+	for (const tool of capture) if (!advertised.has(tool.name)) tools.push(tool);
+	return tools;
+}
+
 /** Dependencies used to construct an isolated auto-learn capture agent. */
 export interface AutoLearnCaptureRunnerOptions {
 	sourceAgent: Agent;
@@ -1692,7 +1771,7 @@ export function createAutoLearnCaptureRunner(
 				model: captureModel,
 				thinkingLevel: options.sourceAgent.state.thinkingLevel,
 				disableReasoning: options.sourceAgent.state.disableReasoning,
-				tools: captureTools,
+				tools: captureToolList(options.sourceAgent.state.tools, captureTools),
 				messages: captureMessages,
 			},
 			sessionId: captureSessionId,
