@@ -215,6 +215,8 @@ class TabState {
 	ompGroupId: number | undefined;
 	/** User pulled the tab out of the omp group — never re-group it. */
 	groupOptOut = false;
+	/** The app in front of the user when omp's input last reached this tab, and when; a window the tab opens uses it once. */
+	frontAtInput: { app: FrontApp; at: number } | null = null;
 	/**
 	 * Real Chrome sessions (OOPIF/worker children) under this tab's attachment: the child session
 	 * that reported each (none for the root) and its `Target.attachedToTarget` params.
@@ -274,6 +276,35 @@ const AFFINE_RECONNECT_WAIT_MS = 12_000;
 const DETACHED_COMMAND_ERROR = /Detached while handling command/;
 /** How long such a failure waits for the extension to report the detach itself. */
 const CHROME_DETACH_REPORT_MS = 1_000;
+/** A window a tab opens this long after omp's input reached it is still taken to be that input's doing. */
+const POPUP_AFTER_INPUT_MS = 1_000;
+/** How long the user's app is held in front after omp's input opened a window; Chrome activates within milliseconds. */
+const KEEP_FRONT_MS = 500;
+/**
+ * omp's CDP inputs a page can open a window on, by method and event `type`: those that give the page user activation
+ * (a button or key going down, a release, a tap). Moves, wheels, key-ups and inserted text never do, so they read no
+ * front app. `true`: every event of that method.
+ */
+const WINDOW_OPENING_INPUT: Record<string, Record<string, true> | true> = {
+	"Input.dispatchMouseEvent": { mousePressed: true, mouseReleased: true },
+	"Input.emulateTouchFromMouseEvent": { mousePressed: true, mouseReleased: true },
+	"Input.dispatchKeyEvent": { keyDown: true, rawKeyDown: true },
+	"Input.dispatchTouchEvent": { touchStart: true, touchEnd: true },
+	"Input.synthesizeTapGesture": true,
+};
+
+function canOpenWindow(method: string, params: Record<string, unknown> | undefined): boolean {
+	if (!Object.hasOwn(WINDOW_OPENING_INPUT, method)) return false;
+	const types = WINDOW_OPENING_INPUT[method];
+	const type = params?.type;
+	return types === true || (typeof type === "string" && Object.hasOwn(types, type));
+}
+
+/** The app in front of the user, as `macOSFrontApp` from `@oh-my-pi/pi-natives` reads it. */
+export interface FrontApp {
+	/** Puts the app back in front each time the app that took the front takes it again within `durationMs`, until the user picks an app; resolves how many times. */
+	keepInFront(durationMs: number): Promise<number>;
+}
 
 /**
  * Multiplexing CDP bridge between downstream puppeteer connections and the
@@ -326,6 +357,14 @@ export class RelayBridge {
 	#groupDraining = false;
 	/** Each tab's last file chooser interception transition; see {@link #serializeInterception}. */
 	#interceptionTransitions = new Map<string, Promise<void>>();
+	/** Reads the app in front of the user; set by {@link keepFrontAppWith} where the relay can put it back (macOS). */
+	#readFrontApp: (() => FrontApp | null) | undefined;
+	/**
+	 * When the running hold on the user's app ends (`Date.now()` ms), at its deadline or once it settles, whichever is
+	 * first; 0 with none. A window opened meanwhile shares it, and omp's input reads no front app then: the browser may
+	 * be in front, and a later hold would keep it there.
+	 */
+	#keepingFrontUntil = 0;
 
 	constructor(
 		opts: {
@@ -1068,6 +1107,9 @@ export class RelayBridge {
 			await this.#handleBrowserCommand(conn, msg, tab);
 			return true;
 		}
+		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
+			tab.frontAtInput = Date.now() < this.#keepingFrontUntil ? null : this.#readFrontAtInput(this.#readFrontApp);
+		}
 		try {
 			const result = await this.#rpc(
 				{
@@ -1092,6 +1134,58 @@ export class RelayBridge {
 			this.#replyError(conn, msg, message);
 			return false;
 		}
+	}
+
+	/**
+	 * Read the app in front of the user with `read` as omp's input reaches a tab, to put it back when that input opens a
+	 * window and Chrome brings itself forward to show it. Only where the relay can put it back (macOS).
+	 */
+	keepFrontAppWith(read: () => FrontApp | null): void {
+		this.#readFrontApp = read;
+	}
+
+	/**
+	 * The app in front of the user now, for omp's input to a tab. A read that throws (a stale native addon without
+	 * `macOSFrontApp`) turns the reads off for good, so the input itself still goes out.
+	 */
+	#readFrontAtInput(read: () => FrontApp | null): { app: FrontApp; at: number } | null {
+		try {
+			const app = read();
+			return app && { app, at: Date.now() };
+		} catch (err) {
+			this.#readFrontApp = undefined;
+			this.#log("could not read the app in front; not holding it in front", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+			return null;
+		}
+	}
+
+	/**
+	 * Hold the app that was in front at omp's last input to `tab`, if that input can have opened the window the tab's
+	 * page is opening: Chrome makes itself the active app to show it.
+	 */
+	#keepFrontApp(tab: TabState): void {
+		const front = tab.frontAtInput;
+		tab.frontAtInput = null;
+		if (!front || Date.now() < this.#keepingFrontUntil || Date.now() - front.at > POPUP_AFTER_INPUT_MS) return;
+		const until = Date.now() + KEEP_FRONT_MS;
+		this.#keepingFrontUntil = until;
+		front.app
+			.keepInFront(KEEP_FRONT_MS)
+			.then(
+				times => {
+					if (times > 0) this.#log("put the user's app back in front", { times });
+				},
+				err => {
+					this.#log("could not keep the user's app in front", {
+						error: err instanceof Error ? err.message : String(err),
+					});
+				},
+			)
+			.finally(() => {
+				if (this.#keepingFrontUntil === until) this.#keepingFrontUntil = 0;
+			});
 	}
 
 	/**
@@ -1369,6 +1463,9 @@ export class RelayBridge {
 	): void {
 		const tab = this.#tabs.get(tabKey);
 		if (!tab) return;
+		// The page (or a frame in it, on a child session) is opening a tab or window; Chrome brings itself forward
+		// to show it.
+		if (method === "Page.windowOpen") this.#keepFrontApp(tab);
 		// Track real child sessions so downstream commands can route back.
 		if (method === "Target.attachedToTarget") {
 			const child = params?.sessionId;

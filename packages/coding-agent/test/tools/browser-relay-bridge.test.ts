@@ -1,7 +1,7 @@
 import { describe, expect, it, jest } from "bun:test";
 import { createHash } from "node:crypto";
 import { closeRelayTarget } from "@oh-my-pi/pi-coding-agent/tools/browser/orphan-registry";
-import { RelayBridge, type RelaySocket } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
+import { type FrontApp, RelayBridge, type RelaySocket } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
 import type {
 	RelayRpcRequest,
 	RelayToExtMessage,
@@ -2160,6 +2160,234 @@ describe("RelayBridge auto-attach gating", () => {
 		ack(bridge, replacement, "attach");
 		await flush();
 		expect(attachedIds(cdp)).toContain(`TAB${ANON}.1`);
+	});
+});
+
+describe("RelayBridge front app on a window omp's input opens", () => {
+	/** A relay reading the front app as `n` (the read count), recording each app it holds in front and for how long. */
+	function frontAppRecorder(): { holds: Array<{ app: number; ms: number }>; frontApp: () => FrontApp } {
+		const holds: Array<{ app: number; ms: number }> = [];
+		let reads = 0;
+		return {
+			holds,
+			frontApp: () => {
+				const app = ++reads;
+				return {
+					keepInFront: async ms => {
+						holds.push({ app, ms });
+						return 1;
+					},
+				};
+			},
+		};
+	}
+
+	async function sendInput(bridge: RelayBridge, ext: FakeExtSocket, connId: number, sessionId: string): Promise<void> {
+		for (const type of ["mousePressed", "mouseReleased"]) {
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: ++msgSeq,
+					sessionId,
+					method: "Input.dispatchMouseEvent",
+					params: { type, x: 5, y: 5 },
+				}),
+			);
+		}
+		ack(bridge, ext, "send");
+		await flush();
+	}
+
+	/** The tab's page (or, with `sessionId`, a frame of it on a child session) opening a window. */
+	function windowOpen(bridge: RelayBridge, ext: FakeExtSocket, tabId: number, sessionId?: string): void {
+		const params = { url: "https://example.com/", windowName: "", windowFeatures: [], userGesture: true };
+		bridge.extMessage(ext, JSON.stringify({ t: "cdpEvent", tabId, sessionId, method: "Page.windowOpen", params }));
+	}
+
+	it("holds the app that was in front at omp's input to a tab in front once that tab's page opens a window", async () => {
+		const { holds, frontApp } = frontAppRecorder();
+		const bridge = new RelayBridge();
+		bridge.keepFrontAppWith(frontApp);
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 }), tab({ tabId: 9, active: true })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const first = await attachPage(bridge, ext, cdp, connId, 1);
+		const second = await attachPage(bridge, ext, cdp, connId, 2);
+		// Reading the page reads no front app; only input can make Chrome open and show a window.
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, sessionId: first, method: "Runtime.evaluate", params: {} }),
+		);
+		ack(bridge, ext, "send");
+		// Reads 1 and 2 for tab 1, then 3 and 4 for omp's other tab.
+		await sendInput(bridge, ext, connId, first);
+		await sendInput(bridge, ext, connId, second);
+
+		// The click opens two windows; the user's own tab opens one of its own.
+		windowOpen(bridge, ext, 1);
+		windowOpen(bridge, ext, 1);
+		windowOpen(bridge, ext, 9);
+		await flush();
+		expect(holds).toEqual([{ app: 2, ms: 500 }]);
+		// A frame of omp's other tab opens one, reported on the frame's own session.
+		windowOpen(bridge, ext, 2, "CHILD1");
+		await flush();
+		expect(holds).toEqual([
+			{ app: 2, ms: 500 },
+			{ app: 4, ms: 500 },
+		]);
+		// Once that hold is over, a later window does not bring back the app read for the same input.
+		windowOpen(bridge, ext, 1);
+		await flush();
+		expect(holds).toHaveLength(2);
+	});
+
+	it.each([
+		{ case: "no input of omp's came before it", inputTab: null, after: 0 },
+		{ case: "omp's last input to its tab was over a second before it", inputTab: 1, after: 1_001 },
+		{ case: "omp's input went to another of its tabs", inputTab: 2, after: 0 },
+	])("holds no app in front for a window when $case", async ({ inputTab, after }) => {
+		jest.useFakeTimers();
+		try {
+			const { holds, frontApp } = frontAppRecorder();
+			const bridge = new RelayBridge();
+			bridge.keepFrontAppWith(frontApp);
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })]);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const opener = await attachPage(bridge, ext, cdp, connId, 1);
+			const other = await attachPage(bridge, ext, cdp, connId, 2);
+			if (inputTab !== null) await sendInput(bridge, ext, connId, inputTab === 1 ? opener : other);
+			jest.advanceTimersByTime(after);
+			windowOpen(bridge, ext, 1);
+			await flush();
+			expect(holds).toEqual([]);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	it("reads the front app only on omp's inputs that can open a window, not on moves, key-ups or inserted text", async () => {
+		const { holds, frontApp } = frontAppRecorder();
+		const bridge = new RelayBridge();
+		bridge.keepFrontAppWith(frontApp);
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		const send = async (method: string, params: Record<string, unknown>): Promise<void> => {
+			bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method, params }));
+			ack(bridge, ext, "send");
+			await flush();
+		};
+		await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 });
+		await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: 5, y: 5, deltaX: 0, deltaY: 10 });
+		await send("Input.dispatchKeyEvent", { type: "keyUp", key: "a" });
+		await send("Input.insertText", { text: "a" });
+		windowOpen(bridge, ext, 1);
+		await flush();
+		expect(holds).toEqual([]);
+		// The first read, at the key going down.
+		await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter" });
+		windowOpen(bridge, ext, 1);
+		await flush();
+		expect(holds).toEqual([{ app: 1, ms: 500 }]);
+	});
+
+	it("still forwards omp's input when reading the front app throws, and stops reading it", async () => {
+		let reads = 0;
+		const bridge = new RelayBridge();
+		bridge.keepFrontAppWith(() => {
+			reads++;
+			throw new Error("macOSFrontApp is missing from this native addon");
+		});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		const sent = ext.rpcs("send").length;
+		await sendInput(bridge, ext, connId, sessionId);
+		const inputs = ext.rpcs("send").slice(sent);
+		expect(inputs.map(rpc => rpc.method)).toEqual(["Input.dispatchMouseEvent", "Input.dispatchMouseEvent"]);
+		const replies = cdp.messages.filter(m => typeof m.id === "number" && m.id > msgSeq - 2);
+		expect(replies.every(m => "result" in m && !("error" in m))).toBe(true);
+		expect(reads).toBe(1);
+	});
+
+	it("reads no front app while a hold runs, so a window opened after it never holds the browser in front", async () => {
+		let reads = 0;
+		const holds: number[] = [];
+		const ends: Array<() => void> = [];
+		const bridge = new RelayBridge();
+		bridge.keepFrontAppWith(() => {
+			const app = ++reads;
+			return {
+				keepInFront: () => {
+					holds.push(app);
+					const { promise, resolve } = Promise.withResolvers<number>();
+					ends.push(() => resolve(1));
+					return promise;
+				},
+			};
+		});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		await sendInput(bridge, ext, connId, sessionId);
+		windowOpen(bridge, ext, 1);
+		await flush();
+		expect(holds).toEqual([2]);
+		// The browser is in front while the hold runs; omp clicks again, and that click's window comes during the
+		// hold and once more after it.
+		await sendInput(bridge, ext, connId, sessionId);
+		windowOpen(bridge, ext, 1);
+		for (const end of ends) end();
+		await flush();
+		windowOpen(bridge, ext, 1);
+		await flush();
+		expect(reads).toBe(2);
+		expect(holds).toEqual([2]);
+	});
+
+	it("ends a hold at its deadline even while the native hold has not settled", async () => {
+		jest.useFakeTimers();
+		try {
+			let reads = 0;
+			const holds: number[] = [];
+			const bridge = new RelayBridge();
+			// The native hold is still queued behind other native work: it never settles here.
+			bridge.keepFrontAppWith(() => {
+				const app = ++reads;
+				return {
+					keepInFront: () => {
+						holds.push(app);
+						return Promise.withResolvers<number>().promise;
+					},
+				};
+			});
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })]);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+			await sendInput(bridge, ext, connId, sessionId);
+			windowOpen(bridge, ext, 1);
+			await flush();
+			jest.advanceTimersByTime(500);
+			// The next click's window, after the first hold's 500 ms.
+			await sendInput(bridge, ext, connId, sessionId);
+			windowOpen(bridge, ext, 1);
+			await flush();
+			expect(holds).toEqual([2, 4]);
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 });
 
