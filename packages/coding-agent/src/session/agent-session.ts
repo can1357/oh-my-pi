@@ -719,6 +719,14 @@ type AgentEndSettleOptions = { willContinue?: boolean; awaitingAsyncWork?: boole
 
 type PostPromptSkipReason = "aborted" | "stale-generation";
 
+/** How {@link AgentSession.sendCustomMessage} asks for a message to be delivered. */
+type CustomMessageDeliveryOptions = {
+	triggerTurn?: boolean;
+	deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
+	queueChipText?: string;
+	acceptTerminalEmptyStop?: boolean;
+};
+
 type AgentContinueSkipReason =
 	| PostPromptSkipReason
 	| "session-unavailable"
@@ -1094,6 +1102,8 @@ export class AgentSession implements SettingsScope {
 	#ircWakeHolds = 0;
 	/** IRC wakes waiting out a running idle compaction (see {@link #wakeForIrc}). */
 	#ircWakesAwaitingIdleCompaction = 0;
+	/** Sends parked on a running session transition (see {@link #deliverAfterSessionTransition}). */
+	#deliveriesAwaitingSessionTransition = 0;
 	/** The observation whose monitor is attached; at most one at a time. */
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
@@ -8796,7 +8806,6 @@ export class AgentSession implements SettingsScope {
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
 			this.#eval.flushPending();
-			this.#irc.flushPending();
 
 			this.#todo.resetCycle();
 			this.#resetPromptMaintenanceState();
@@ -9002,6 +9011,16 @@ export class AgentSession implements SettingsScope {
 				nonMessageTokens,
 				cutoffCount: this.messages.length + messages.length,
 			});
+			// Fold IRC records that missed their step-boundary injection into the transcript
+			// only now, for the same reason as the plan-reference flag below: every setup step
+			// above can return or throw, and a prompt that never runs must not consume them.
+			// They hold their run's `agent_end` open (#flushPendingAgentEnd), and once folded
+			// nothing is left to wake a turn or settle that end, so a bail used to leave it
+			// non-terminal for good. Left queued, the stranded-aside resume still delivers them.
+			// They therefore land after pre-prompt maintenance rather than before it: they
+			// survive a summary that would otherwise have absorbed them, and they are not
+			// weighed by this turn's compaction decision or pending-token snapshot above.
+			this.#irc.flushPending();
 			// Commit the plan-reference delivery flag only now that the message is
 			// actually handed to agent.prompt. Every pre-send setup step above can
 			// return (generation-bail) or throw (@-mention reads, before_agent_start
@@ -10030,29 +10049,21 @@ export class AgentSession implements SettingsScope {
 	 * @returns true iff this call synchronously started a new turn (awaited
 	 * `agent.prompt`); false when the message was queued/appended without a turn
 	 * — including when `triggerTurn` is downgraded because the client defers
-	 * agent-initiated turns. Callers that must mirror the resulting `agent_end`
-	 * use this to avoid acting on a turn that never ran.
+	 * agent-initiated turns, and when a running session transition takes the
+	 * delivery over (it is dispatched once the transition settles). Callers that
+	 * must mirror the resulting `agent_end` use this to avoid acting on a turn
+	 * that never ran.
 	 */
 	async sendCustomMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options?: {
-			triggerTurn?: boolean;
-			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
-			queueChipText?: string;
-			acceptTerminalEmptyStop?: boolean;
-		},
+		options?: CustomMessageDeliveryOptions,
 	): Promise<boolean> {
 		return this.#admitSubmission(() => this.#sendCustomMessage(message, options));
 	}
 
 	async #sendCustomMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options?: {
-			triggerTurn?: boolean;
-			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
-			queueChipText?: string;
-			acceptTerminalEmptyStop?: boolean;
-		},
+		options?: CustomMessageDeliveryOptions,
 	): Promise<boolean> {
 		// An extension command parked on a manual compaction may fire this
 		// (`pi.sendMessage(..., { triggerTurn: true })`) and return without awaiting
@@ -10072,14 +10083,7 @@ export class AgentSession implements SettingsScope {
 
 	async #dispatchCustomMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options:
-			| {
-					triggerTurn?: boolean;
-					deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
-					queueChipText?: string;
-					acceptTerminalEmptyStop?: boolean;
-			  }
-			| undefined,
+		options: CustomMessageDeliveryOptions | undefined,
 		outcome: PromptDispatchOutcome,
 	): Promise<boolean> {
 		// Captured before the awaits below — see #sessionGeneration's doc comment.
@@ -10090,9 +10094,15 @@ export class AgentSession implements SettingsScope {
 		if (idleCompaction) {
 			const promptGeneration = this.#promptGeneration;
 			await idleCompaction;
-			// A transition (/new, /clear, a switch) aborts long before it replaces the transcript, so let it
-			// settle first: only then does the session generation tell an abort from a session change.
-			if (this.isSessionTransitioning) await this.waitForSessionTransition();
+			// A transition (/new, /clear, a switch) aborts long before it replaces the transcript, so only
+			// once it settles does the session generation tell an abort from a session change. Waiting for
+			// it here would deadlock a sender inside it — a transition awaits its own session_switch hook,
+			// and an extension may send from that hook — so the delivery is handed to the settle instead
+			// and this call answers now, having started no turn.
+			if (this.isSessionTransitioning) {
+				this.#deliverAfterSessionTransition(message, options, sessionGeneration, promptGeneration);
+				return false;
+			}
 			// A session change or disposal during the wait drops the message with the transcript it was sent to.
 			if (
 				this.#isDisposed ||
@@ -10249,6 +10259,46 @@ export class AgentSession implements SettingsScope {
 			);
 		}
 		return false;
+	}
+
+	/** Re-dispatches a message that arrived while a session/transcript transition was still running,
+	 *  once that transition settles. The sender is never parked on the transition: its own hooks run
+	 *  inside it, so an extension sending from one (`pi.sendMessage` in a `session_switch` handler)
+	 *  would wait for the handler it is running in. The record is kept, not dropped — only the
+	 *  transcript it was sent to can still claim it, so a committed session change discards it the
+	 *  same way the inline path did. Counted in {@link ircWakesPending} for the same reason
+	 *  #wakeForIrc counts its own compaction wait: while the record lives only in this closure,
+	 *  the lifecycle must not park the session out from under it. */
+	#deliverAfterSessionTransition<T>(
+		message: CustomMessagePayload<T>,
+		options: CustomMessageDeliveryOptions | undefined,
+		sessionGeneration: number,
+		promptGeneration: number,
+	): void {
+		this.#deliveriesAwaitingSessionTransition++;
+		void this.waitForSessionTransition()
+			.then(async () => {
+				if (this.#isDisposed) return;
+				if (
+					this.#sessionGeneration !== sessionGeneration &&
+					(await this.#sessionGenerationChanged(sessionGeneration))
+				) {
+					return;
+				}
+				// An abort supersedes only the turn, exactly as on the inline path: the message stays in
+				// this session's transcript and is delivered like one that triggers none.
+				const delivery =
+					this.#promptGeneration !== promptGeneration
+						? { ...options, triggerTurn: false, deliverAs: undefined }
+						: options;
+				await this.#dispatchCustomMessage(message, delivery, { sessionClaimed: false });
+			})
+			.catch(error =>
+				logger.warn("Custom message delivery after a session transition failed", { error: String(error) }),
+			)
+			.finally(() => {
+				this.#deliveriesAwaitingSessionTransition--;
+			});
 	}
 
 	/**
@@ -12587,12 +12637,17 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Whether IRC messages still wait here for a turn: under a {@link holdIrcWakes}
-	 * hold, behind a running idle compaction, or queued (e.g. behind a pooled yield
-	 * contract). The lifecycle must not park this session yet, since parking would
-	 * drop them.
+	 * hold, behind a running idle compaction, behind a running session transition, or
+	 * queued (e.g. behind a pooled yield contract). The lifecycle must not park this
+	 * session yet, since parking would drop them.
 	 */
 	get ircWakesPending(): boolean {
-		return this.#ircWakeHolds > 0 || this.#ircWakesAwaitingIdleCompaction > 0 || this.#irc.hasPending();
+		return (
+			this.#ircWakeHolds > 0 ||
+			this.#ircWakesAwaitingIdleCompaction > 0 ||
+			this.#deliveriesAwaitingSessionTransition > 0 ||
+			this.#irc.hasPending()
+		);
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */

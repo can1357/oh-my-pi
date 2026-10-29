@@ -9,6 +9,8 @@
 ### Fixed
 
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
+- Fixed a session change (`/new`, `/clear`, `/resume`, `/fork`, branching a `/btw` answer) hanging for 30 seconds when a hook it runs awaits a message sent to the same session; the send now answers at once and the message is delivered once the change finishes ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a prompt that cannot run — no model selected, no API key, or an interrupt during setup — swallowing queued extension and peer messages, which left the previous run showing as still working with no turn left to finish it ([#17402](https://github.com/can1357/oh-my-pi/pull/17402) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 
