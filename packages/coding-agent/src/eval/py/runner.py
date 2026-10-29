@@ -1331,10 +1331,16 @@ def _has_pip() -> bool:
 
 def _procfs_usable() -> bool:
     # /proc can be missing, unreadable or an empty unmounted directory (some
-    # containers and chroots); a mounted procfs lists this process.
+    # containers and chroots); a mounted procfs lists this process. One
+    # inherited from a parent PID namespace lists outer pids, which can collide
+    # with ours (init is 1 in both) but never match its parents to our children:
+    # its /proc/self is this process under another pid.
     try:
-        return str(os.getpid()) in os.listdir("/proc")
-    except OSError:
+        if str(os.getpid()) not in os.listdir("/proc"):
+            return False
+        with open("/proc/self/stat", "rb") as stat:
+            return int(stat.read().split(b" ", 1)[0]) == os.getpid()
+    except (OSError, ValueError):
         return False
 
 
