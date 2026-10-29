@@ -10,9 +10,6 @@
 ### Changed
 
 - Improved `omp stats` session synchronization performance by approximately 2–5× on large histories. The first sync after upgrading may take up to a minute while the stats database is optimized.
-- Optimized database schema with new composite indexes and ingestion pragmas, significantly reducing sync times
-- Minimized database update operations by integrating tool results directly into initial call ingestion
-- Sped up `omp stats` session sync about 2–5× on large histories; the first run after upgrading spends up to a minute rebuilding the stats database indexes
 
 ### Fixed
 
