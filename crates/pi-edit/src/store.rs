@@ -118,6 +118,7 @@ pub fn seen_lines_from_body(body: &str) -> Vec<u32> {
 	seen
 }
 
+#[derive(Clone)]
 struct StoredSnapshot {
 	snapshot: Snapshot,
 }
@@ -141,6 +142,7 @@ impl StoredSnapshot {
 	}
 }
 
+#[derive(Clone)]
 struct PathHistory {
 	versions: Vec<StoredSnapshot>,
 	touched:  u64,
@@ -158,6 +160,7 @@ impl PathHistory {
 	}
 }
 
+#[derive(Clone)]
 struct StoreState {
 	histories:       HashMap<PathBuf, PathHistory>,
 	clipboard:       Clipboard,
@@ -200,6 +203,15 @@ impl EditStore {
 	pub fn with_limits(max_paths: usize, max_versions: usize, max_total_bytes: usize) -> Self {
 		let state = StoreState { max_paths, max_versions, max_total_bytes, ..StoreState::default() };
 		Self { inner: Arc::new(Mutex::new(state)) }
+	}
+
+	/// Independent copy of the current state (snapshot texts are shared, not
+	/// copied). A dry-run staging pass works against a fork: staging records
+	/// reveals, reply provenance, and clipboard registers, and none of that may
+	/// outlive a probe — a consumed unseen-lines reveal would let the real
+	/// apply through.
+	pub fn fork(&self) -> Self {
+		Self { inner: Arc::new(Mutex::new(self.inner.lock().clone())) }
 	}
 
 	/// Record normalized text under a canonical path and return its tag.

@@ -27,6 +27,7 @@ import { $env, isRecord, parseImageMetadata } from "@oh-my-pi/pi-utils";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
 import { validateImageInput } from "../images/shared";
+import { withInferenceUserAgent } from "../providers/inference-headers";
 import type { ImageContent, Model, Usage } from "../types";
 import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { openaiDecisionsWire } from "./openai-decisions";
@@ -511,12 +512,15 @@ export class NativeJudge implements Judge {
 			const timeout = AbortSignal.timeout(this.#timeoutMs);
 			let response: Response;
 			try {
-				response = await this.#fetch(target.url, {
-					method: "POST",
-					headers,
-					body,
-					signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-				});
+				response = await this.#fetch(
+					target.url,
+					withInferenceUserAgent(target.url, {
+						method: "POST",
+						headers,
+						body,
+						signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+					}),
+				);
 			} catch (error) {
 				if (signal?.aborted || attempt + 1 >= MAX_ATTEMPTS) throw error;
 				await Bun.sleep(backoffMs(attempt, undefined));

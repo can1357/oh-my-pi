@@ -2,15 +2,15 @@
 
 ## [Unreleased]
 
+## [18.14.0] - 2026-10-29
+
 ### Changed
 
-- Optimized database schema with new composite indexes and ingestion pragmas, significantly reducing sync times
-- Minimized database update operations by integrating tool results directly into initial call ingestion
-- Sped up `omp stats` session sync about 2–5× on large histories; the first run after upgrading spends up to a minute rebuilding the stats database indexes
+- Improved `omp stats` session synchronization performance by approximately 2–5× on large histories. The first sync after upgrading may take up to a minute while the stats database is optimized.
 
 ### Fixed
 
-- Fixed `/stats` and `omp stats` failing with "not identifiable as an omp stats dashboard" while another dashboard was busy syncing sessions: a busy dashboard is now reused, and when anything else holds the port the dashboard starts on a free port instead of failing or stopping that process
+- Fixed `/stats` and `omp stats` failing when another dashboard was syncing sessions or the configured port was already in use; busy dashboards are now reused, and a free port is selected when necessary.
 
 ## [18.13.3] - 2026-10-28
 

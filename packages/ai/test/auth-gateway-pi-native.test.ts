@@ -36,7 +36,8 @@ async function collectSse(stream: ReadableStream<Uint8Array>): Promise<string[]>
 		buf += decoder.decode(value, { stream: true });
 	}
 	buf += decoder.decode();
-	return buf.split("\n\n").filter(s => s.length > 0);
+	// SSE comment frames (`: keepalive`) carry no event; spec-compliant clients skip them.
+	return buf.split("\n\n").filter(s => s.length > 0 && !s.startsWith(":"));
 }
 
 function parseSseLine(line: string): unknown {
@@ -534,6 +535,33 @@ describe("pi-native encodeStream", () => {
 		expect((parsed[0] as { type: string }).type).toBe("start");
 		expect(parsed[1]).toEqual({ type: "error", reason: "error", errorMessage: "connection reset" });
 		expect(parsed[2]).toBe("[DONE]");
+	});
+
+	it("puts a keepalive on the wire before a silent source yields its first event", async () => {
+		// A model thinking for minutes must not leave the connection byte-less:
+		// Bun fetch and proxies cut silent responses at ~300 s (issue #17363).
+		const { promise: firstEvent, resolve: releaseFirstEvent } = Promise.withResolvers<void>();
+		const final = baseAssistant();
+		const silent = (async function* () {
+			await firstEvent;
+			yield { type: "done", reason: "stop", message: final } satisfies AssistantMessageEvent;
+		})() as unknown as AssistantMessageEventStream;
+		(silent as { result(): Promise<AssistantMessage> }).result = async () => final;
+
+		const reader = encodeStream(silent).getReader();
+		const first = await reader.read();
+		expect(new TextDecoder().decode(first.value)).toBe(": keepalive\n\n");
+
+		releaseFirstEvent();
+		const rest: string[] = [];
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			rest.push(new TextDecoder().decode(value));
+		}
+		expect(rest.join("")).toBe(
+			`data: ${JSON.stringify({ type: "done", reason: "stop", message: final })}\n\ndata: [DONE]\n\n`,
+		);
 	});
 });
 

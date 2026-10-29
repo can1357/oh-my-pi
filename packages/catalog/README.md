@@ -21,7 +21,7 @@ Import from subpaths (`@oh-my-pi/pi-catalog/<module>`) or the root barrel.
 
 ## models.json and rules.json are generated
 
-Never edit `src/models.json` or `src/compat/rules.json` by hand. `models.json` is produced from upstream sources (stencil.so, provider catalog discovery, OpenCode docs) by `scripts/generate-models.ts`; `rules.json` is compiled from the KDL tree in `src/compat/rules/`. Regenerate with:
+Never edit `src/models.json` or `src/compat/rules.json` by hand. `models.json` is a compact generated catalog; use `getBundledProviders()` and `getBundledModels()` instead of reading its internal format. It is produced from upstream sources (stencil.so, provider catalog discovery, OpenCode docs) by `scripts/generate-models.ts`; `rules.json` is compiled from the KDL tree in `src/compat/rules/`. Regenerate with:
 
 ```sh
 bun run gen:compat   # src/compat/rules/**/*.kdl -> src/compat/rules.json

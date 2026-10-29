@@ -392,7 +392,7 @@ export class OAuthRefresher {
 	async #drainRefreshes(): Promise<void> {
 		this.#shuttingDown = true;
 		// Work tracked while draining (a lease hand-back a returning caller left behind) is waited for too.
-		while (this.#pendingRefreshes.size > 0) await Promise.allSettled([...this.#pendingRefreshes]);
+		while (this.#pendingRefreshes.size > 0) await Promise.allSettled(this.#pendingRefreshes);
 	}
 
 	async #refreshStored<T extends OAuthCredential = OAuthCredential>(

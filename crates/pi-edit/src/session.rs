@@ -247,7 +247,12 @@ impl Session {
 		if !snapshot.complete {
 			return Vec::new();
 		}
-		let _ = self.engine.stage(&snapshot, &mut self.files, &self.store);
+		// A probe: staging into the live store would record what a rejection
+		// reveals (unseen lines become seen, so the real apply passes the
+		// guard) and move clipboard registers.
+		let _ = self
+			.engine
+			.stage(&snapshot, &mut self.files, &self.store.fork());
 		self.files.take_recovery_misses()
 	}
 

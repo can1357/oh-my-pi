@@ -2444,6 +2444,10 @@ function confirmationContext(confirm: NonNullable<AgentToolContext["ui"]>["confi
 	return { hasUI: true, ui: { confirm } } as AgentToolContext;
 }
 
+function policySession(settings: Record<string, unknown>): ToolSession {
+	return { ...toolSession(), settings: Settings.isolated({ "computer.enabled": true, ...settings }) };
+}
+
 describe("expanded computer APIs", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -2538,6 +2542,72 @@ describe("expanded computer APIs", () => {
 			await expect(pending).rejects.toThrow();
 			expect(native.acquireCount).toBe(0);
 			expect(native.controlActive).toBe(false);
+		} finally {
+			await supervisor.close();
+		}
+	});
+
+	it.each([
+		["allow", "without a UI", { active: true }],
+		["allow", "with a UI", { active: true }],
+		["deny", "without a UI", { active: false, reason: "denied" }],
+		["deny", "with a UI", { active: false, reason: "denied" }],
+	] as const)(
+		'answers control.acquire from a "computer.control" %s policy %s, without asking',
+		async (policy, ui, expected) => {
+			const native = new FakeNativeSession();
+			const session = policySession({ "tools.approval": { "computer.control": policy } });
+			const supervisor = new ComputerSupervisor(
+				session,
+				() => liveWorker(native),
+				undefined,
+				undefined,
+				NO_ESCAPE_STOPS,
+			);
+			const confirm = vi.fn(async () => true);
+			try {
+				const result = await supervisor.run(
+					'return await desktop.control.acquire({ reason: "Policy" })',
+					2_000,
+					snapshot(),
+					undefined,
+					ui === "with a UI"
+						? { ...confirmationContext(confirm), settings: session.settings }
+						: ({ hasUI: false, settings: session.settings } as AgentToolContext),
+				);
+				expect(result.returnValue).toEqual(expected);
+				expect(confirm).not.toHaveBeenCalled();
+				expect(native.controlActive).toBe(policy === "allow");
+			} finally {
+				await supervisor.close();
+			}
+		},
+	);
+
+	// Neither the approval mode nor the computer policy grants foreground control.
+	it.each([
+		["yolo mode", false],
+		["--auto-approve", true],
+	])("answers headless control.acquire no-ui under %s with a computer allow", async (_label, autoApprove) => {
+		const native = new FakeNativeSession();
+		const session = policySession({ "tools.approvalMode": "yolo", "tools.approval": { computer: "allow" } });
+		const supervisor = new ComputerSupervisor(
+			session,
+			() => liveWorker(native),
+			undefined,
+			undefined,
+			NO_ESCAPE_STOPS,
+		);
+		try {
+			const result = await supervisor.run(
+				'return await desktop.control.acquire({ reason: "Headless" })',
+				2_000,
+				snapshot(),
+				undefined,
+				{ hasUI: false, autoApprove, settings: session.settings } as AgentToolContext,
+			);
+			expect(result.returnValue).toEqual({ active: false, reason: "no-ui" });
+			expect(native.acquireCount).toBe(0);
 		} finally {
 			await supervisor.close();
 		}
