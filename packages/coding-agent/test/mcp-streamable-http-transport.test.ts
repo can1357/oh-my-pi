@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { callTool, connectToServer, listTools } from "@oh-my-pi/pi-coding-agent/mcp/client";
+import type { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 
 const GUARD_TIMEOUT_MS = 2_000;
 const MODERN_VERSION = "2026-07-28";
@@ -30,8 +31,11 @@ function envelopeOf(body: Record<string, unknown>): Record<string, unknown> | un
  * A modern-only endpoint: `server/discover` instead of `initialize`, no
  * session id, per-request envelopes. Records every request for assertions.
  */
-function startModernServer(options: { toolName?: string } = {}): RecordedRequest[] {
+function startModernServer(
+	options: { toolName?: string; listAuthFailures?: number; wrongListResponseId?: boolean } = {},
+): RecordedRequest[] {
 	const recorded: RecordedRequest[] = [];
+	let listAttempts = 0;
 	server = Bun.serve({
 		port: 0,
 		async fetch(req) {
@@ -50,8 +54,23 @@ function startModernServer(options: { toolName?: string } = {}): RecordedRequest
 						capabilities: { tools: {} },
 						_meta: { "io.modelcontextprotocol/serverInfo": { name: "modern-server", version: "4.2.0" } },
 					});
-				case "tools/list":
-					return reply({ tools: [{ name: options.toolName ?? "echo", inputSchema: { type: "object" } }] });
+				case "tools/list": {
+					const attempt = listAttempts++;
+					if (attempt < (options.listAuthFailures ?? 0)) {
+						return new Response(
+							JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message: "expired token" } }),
+							{ status: 401, headers: { "Content-Type": "application/json" } },
+						);
+					}
+					return new Response(
+						JSON.stringify({
+							jsonrpc: "2.0",
+							id: options.wrongListResponseId ? "wrong-id" : id,
+							result: { tools: [{ name: options.toolName ?? "echo", inputSchema: { type: "object" } }] },
+						}),
+						{ headers: { "Content-Type": "application/json" } },
+					);
+				}
 				case "tools/call": {
 					const params = body.params as { arguments?: { message?: string } };
 					return reply({ content: [{ type: "text", text: params.arguments?.message ?? "ok" }] });
@@ -177,6 +196,112 @@ describe("MCP streamable-http modern era", () => {
 		await connection.transport.close();
 	});
 
+	it("strips configured headers reserved by the stateless modern protocol", async () => {
+		const recorded = startModernServer();
+		const connection = await connectToServer("modern-reserved-headers", {
+			type: "streamable-http",
+			url: `http://127.0.0.1:${server!.port}/mcp-new`,
+			headers: {
+				"Mcp-Session-Id": "stale",
+				"Mcp-Name": "unexpected",
+				"Mcp-Method": "unexpected",
+				"MCP-Protocol-Version": "1999-01-01",
+			},
+			timeout: GUARD_TIMEOUT_MS,
+		});
+		await listTools(connection);
+
+		for (const request of recorded) {
+			expect(request.headers.get("Mcp-Session-Id")).toBeNull();
+			expect(request.headers.get("Mcp-Name")).toBeNull();
+			expect(request.headers.get("Mcp-Method")).toBe(request.method);
+			expect(request.headers.get("MCP-Protocol-Version")).toBe(MODERN_VERSION);
+		}
+		await connection.transport.close();
+	});
+
+	it("refreshes auth when a modern JSON-RPC error arrives with HTTP 401", async () => {
+		const recorded = startModernServer({ listAuthFailures: 1 });
+		const connection = await connectToServer("modern-auth-retry", {
+			type: "streamable-http",
+			url: `http://127.0.0.1:${server!.port}/mcp-new`,
+			headers: { Authorization: "Bearer stale" },
+			timeout: GUARD_TIMEOUT_MS,
+		});
+		let refreshes = 0;
+		(connection.transport as HttpTransport).onAuthError = async () => {
+			refreshes++;
+			return { Authorization: "Bearer fresh" };
+		};
+
+		const tools = await listTools(connection);
+		expect(tools.map(tool => tool.name)).toEqual(["echo"]);
+		expect(refreshes).toBe(1);
+		const lists = recorded.filter(request => request.method === "tools/list");
+		expect(lists).toHaveLength(2);
+		expect(lists[0]?.headers.get("Authorization")).toBe("Bearer stale");
+		expect(lists[1]?.headers.get("Authorization")).toBe("Bearer fresh");
+		await connection.transport.close();
+	});
+
+	it("rejects a JSON response whose id does not match the request", async () => {
+		startModernServer({ wrongListResponseId: true });
+		const connection = await connectToServer("modern-wrong-id", {
+			type: "streamable-http",
+			url: `http://127.0.0.1:${server!.port}/mcp-new`,
+			timeout: GUARD_TIMEOUT_MS,
+		});
+
+		await expect(listTools(connection)).rejects.toThrow("Mismatched response ID for tools/list");
+		await connection.transport.close();
+	});
+
+	it("does not accept a discovery result with a mismatched id", async () => {
+		const methods: string[] = [];
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method !== "POST") return new Response(null, { status: 405 });
+				const body = (await req.json()) as { id: string | number; method: string };
+				methods.push(body.method);
+				if (body.method === "server/discover") {
+					return new Response(
+						JSON.stringify({
+							jsonrpc: "2.0",
+							id: "wrong-id",
+							result: { supportedVersions: [MODERN_VERSION], capabilities: { tools: {} } },
+						}),
+						{ headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (body.method === "initialize") {
+					return new Response(
+						JSON.stringify({
+							jsonrpc: "2.0",
+							id: body.id,
+							result: {
+								protocolVersion: "2025-11-25",
+								capabilities: { tools: {} },
+								serverInfo: { name: "legacy-after-wrong-id", version: "1.0.0" },
+							},
+						}),
+						{ headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response(null, { status: 202 });
+			},
+		});
+
+		const connection = await connectToServer("discover-wrong-id", {
+			type: "streamable-http",
+			url: `http://127.0.0.1:${server.port}/mcp-new`,
+			timeout: GUARD_TIMEOUT_MS,
+		});
+		expect(connection.serverInfo.name).toBe("legacy-after-wrong-id");
+		expect(methods).toEqual(["server/discover", "initialize", "notifications/initialized"]);
+		await connection.transport.close();
+	});
+
 	it("downgrades to the 2025 handshake when the probe answers UnsupportedProtocolVersion", async () => {
 		const recorded = startLegacyServer({ status: 400, code: -32022 });
 		const connection = await connectToServer("legacy", {
@@ -240,6 +365,33 @@ describe("MCP streamable-http modern era", () => {
 		});
 		expect(connection.serverInfo.name).toBe("legacy-200");
 		await connection.transport.close();
+	});
+
+	it("preserves a discovery auth challenge instead of downgrading to initialize", async () => {
+		const methods: string[] = [];
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				const body = (await req.json()) as { id: string | number; method: string };
+				methods.push(body.method);
+				if (body.method === "server/discover") {
+					return new Response(
+						JSON.stringify({ jsonrpc: "2.0", id: body.id, error: { code: -32000, message: "unauthorized" } }),
+						{ status: 401, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response(null, { status: 404 });
+			},
+		});
+
+		await expect(
+			connectToServer("modern-auth-probe", {
+				type: "streamable-http",
+				url: `http://127.0.0.1:${server.port}/mcp-new`,
+				timeout: GUARD_TIMEOUT_MS,
+			}),
+		).rejects.toThrow("HTTP 401");
+		expect(methods).toEqual(["server/discover"]);
 	});
 
 	it("downgrades when the probe itself fails with an HTTP error", async () => {
@@ -309,6 +461,64 @@ describe("MCP streamable-http SSE-framed responses", () => {
 		});
 		const result = await callTool(connection, "s", {});
 		expect(result.content[0]).toMatchObject({ text: "right" });
+		await connection.transport.close();
+	});
+
+	it("answers a server request received before the result on a modern SSE response", async () => {
+		const encoder = new TextEncoder();
+		const frame = (payload: unknown) => encoder.encode(`event: message\ndata: ${JSON.stringify(payload)}\n\n`);
+		let pendingCall: { id: string | number; controller: ReadableStreamDefaultController<Uint8Array> } | undefined;
+		let rootsResponses = 0;
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method !== "POST") return new Response(null, { status: 405 });
+				const body = (await req.json()) as { id?: string | number; method?: string };
+				if (body.method === "server/discover") {
+					return new Response(
+						JSON.stringify({
+							jsonrpc: "2.0",
+							id: body.id,
+							result: { supportedVersions: [MODERN_VERSION], capabilities: { tools: {} } },
+						}),
+						{ headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (body.method === "tools/call") {
+					return new Response(
+						new ReadableStream<Uint8Array>({
+							start(controller) {
+								pendingCall = { id: body.id!, controller };
+								controller.enqueue(frame({ jsonrpc: "2.0", id: "roots-1", method: "roots/list", params: {} }));
+							},
+						}),
+						{ headers: { "Content-Type": "text/event-stream" } },
+					);
+				}
+				if (body.method === undefined && body.id === "roots-1" && pendingCall) {
+					rootsResponses++;
+					pendingCall.controller.enqueue(
+						frame({
+							jsonrpc: "2.0",
+							id: pendingCall.id,
+							result: { content: [{ type: "text", text: "roots answered" }] },
+						}),
+					);
+					pendingCall.controller.close();
+					pendingCall = undefined;
+				}
+				return new Response(null, { status: 202 });
+			},
+		});
+		const connection = await connectToServer("sse-server-request", {
+			type: "streamable-http",
+			url: `http://127.0.0.1:${server.port}/mcp-new`,
+			timeout: GUARD_TIMEOUT_MS,
+		});
+
+		const result = await callTool(connection, "s", {});
+		expect(result.content[0]).toMatchObject({ text: "roots answered" });
+		expect(rootsResponses).toBe(1);
 		await connection.transport.close();
 	});
 });

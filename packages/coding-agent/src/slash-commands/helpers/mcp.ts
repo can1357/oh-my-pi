@@ -48,7 +48,7 @@ interface ParsedMcpSearchArgs {
 type McpAddOptionParser = (parsed: ParsedMcpAddArgs, value: string | undefined) => string | undefined;
 
 const MCP_ADD_USAGE =
-	"Usage: /mcp add <name> [--scope project|user] [--url <url> --transport http|sse] [--token <token>] [-- <command...>]";
+	"Usage: /mcp add <name> [--scope project|user] [--url <url> --transport http|sse|streamable-http] [--token <token>] [-- <command...>]";
 
 const MCP_ADD_OPTION_PARSERS = new Map<string, McpAddOptionParser>([
 	[
@@ -112,7 +112,7 @@ function validateParsedMcpAddArgs(parsed: ParsedMcpAddArgs): ParsedMcpAddArgs {
 	if (!hasCommand && !hasUrl) {
 		return {
 			...parsed,
-			error: "Provide --url or -- <command...> for non-interactive add. Usage: /mcp add <name> [--scope project|user] [--url <url> --transport http|sse] [--token <token>] [-- <command...>]",
+			error: "Provide --url or -- <command...> for non-interactive add. Usage: /mcp add <name> [--scope project|user] [--url <url> --transport http|sse|streamable-http] [--token <token>] [-- <command...>]",
 		};
 	}
 	if (!parsed.name) return { ...parsed, error: "Server name required. Usage: /mcp add <name> ..." };

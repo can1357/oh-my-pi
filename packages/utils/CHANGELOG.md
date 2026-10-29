@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ACP support for `streamable-http` MCP servers using the 2026-07-28 protocol revision ([#14172](https://github.com/can1357/oh-my-pi/pull/14172) by [@spgsroot](https://github.com/spgsroot))
+
 ## [18.14.0] - 2026-10-29
 
 ### Added

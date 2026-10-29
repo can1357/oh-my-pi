@@ -185,16 +185,24 @@ export class HttpTransport implements MCPTransport {
 	 * configured headers so a user's `mcp.json` can never inject it, and added
 	 * only once a version is negotiated (required by the MCP Streamable HTTP spec
 	 * after `initialize`). Before negotiation — the `initialize` request itself —
-	 * no protocol-version header is sent from either source.
+	 * no protocol-version header is sent from either source. On the stateless
+	 * 2026 transport, configured session and routing headers are stripped too.
 	 */
 	#fetch(init: MCPFetchInit, generated: Record<string, string>): Promise<Response> {
-		const configured = withoutHeader(this.config.headers, "MCP-Protocol-Version");
+		const configured =
+			this.config.type === "streamable-http"
+				? withoutHeader(
+						withoutHeader(withoutHeader(this.config.headers, "Mcp-Session-Id"), "Mcp-Method"),
+						"Mcp-Name",
+					)
+				: this.config.headers;
+		const withoutProtocolVersion = withoutHeader(configured, "MCP-Protocol-Version");
 		const withVersion =
 			this.#protocolVersion === null ? generated : { "MCP-Protocol-Version": this.#protocolVersion, ...generated };
 		const request = mcpFetch(
 			this.config.url,
 			init,
-			{ generated: withVersion, configured },
+			{ generated: withVersion, configured: withoutProtocolVersion },
 			this.config.headerPolicy === "origin-locked",
 		);
 		this.#activeFetches.add(request);
@@ -281,7 +289,7 @@ export class HttpTransport implements MCPTransport {
 				},
 				this.#modernHeaders("server/discover"),
 			);
-			const payload = await this.#readJsonRpcPayload(response, "server/discover");
+			const payload = await this.#readJsonRpcPayload(response, "server/discover", id);
 			if (payload.error !== undefined) {
 				logger.debug("MCP server/discover probe returned a JSON-RPC error; using the legacy handshake", {
 					url: this.config.url,
@@ -314,6 +322,8 @@ export class HttpTransport implements MCPTransport {
 			this.#protocolVersion = MCP_MODERN_PROTOCOL_VERSION;
 			this.#era = "modern";
 		} catch (error) {
+			const status = error instanceof Error ? AIError.status(error) : undefined;
+			if (status === 401 || status === 403) throw error;
 			if (options?.signal?.aborted) throw error;
 			if (error instanceof Error && error.name === "AbortError" && this.#lifecycleController.signal.aborted) {
 				throw error;
@@ -393,18 +403,32 @@ export class HttpTransport implements MCPTransport {
 	): Promise<{ result?: unknown; error?: JsonRpcError }> {
 		const contentType = response.headers.get("Content-Type") ?? "";
 		if (!response.ok) {
-			if (contentType.includes("application/json")) {
-				const payload: unknown = await response.json().catch(() => undefined);
-				if (
-					isRecord(payload) &&
-					isRecord(payload.error) &&
-					typeof payload.error.code === "number" &&
-					typeof payload.error.message === "string"
-				) {
-					return { error: payload.error as unknown as JsonRpcError };
-				}
+			const text = await response.text().catch(() => "");
+			if (response.status === 401 || response.status === 403 || !contentType.includes("application/json")) {
+				throw new MCPTransportError({
+					transport: "http",
+					stage: "receive",
+					failure: "http_status",
+					message: `HTTP ${response.status}${label === "server/discover" ? " probing server/discover" : ""}: ${text}`,
+					retryable: response.status === 404 || response.status === 502 || response.status === 503,
+					code: response.status,
+					traceId: mcpTraceIdFromHeaders(response.headers),
+				});
 			}
-			const text = contentType.includes("application/json") ? "" : await response.text().catch(() => "");
+			let payload: unknown;
+			try {
+				payload = JSON.parse(text);
+			} catch {
+				payload = undefined;
+			}
+			if (
+				isRecord(payload) &&
+				isRecord(payload.error) &&
+				typeof payload.error.code === "number" &&
+				typeof payload.error.message === "string"
+			) {
+				return { error: payload.error as unknown as JsonRpcError };
+			}
 			throw new MCPTransportError({
 				transport: "http",
 				stage: "receive",
@@ -417,9 +441,14 @@ export class HttpTransport implements MCPTransport {
 		}
 		if (contentType.includes("text/event-stream") && response.body) {
 			for await (const event of readSseJson<JsonRpcMessage>(response.body, this.#operationSignal())) {
-				if (Array.isArray(event)) continue;
-				if ("method" in event && !("id" in event)) {
-					this.onNotification?.(event.method, event.params);
+				if (Array.isArray(event)) {
+					for (const message of event) {
+						if ("method" in message) this.#dispatchSSEMessage(message);
+					}
+					continue;
+				}
+				if ("method" in event) {
+					this.#dispatchSSEMessage(event);
 					continue;
 				}
 				if ("result" in event || "error" in event) {
@@ -437,6 +466,16 @@ export class HttpTransport implements MCPTransport {
 		}
 		const payload: unknown = await response.json();
 		if (!isRecord(payload) || payload.jsonrpc !== "2.0") throw new SyntaxError("Malformed JSON-RPC response");
+		if (expectedId !== undefined && payload.id !== expectedId) {
+			throw new MCPTransportError({
+				transport: "http",
+				stage: "decode",
+				failure: "malformed_response",
+				message: `Mismatched response ID for ${label}`,
+				retryable: false,
+				traceId: mcpTraceIdFromHeaders(response.headers),
+			});
+		}
 		return payload as { result?: unknown; error?: JsonRpcError };
 	}
 
