@@ -2285,6 +2285,7 @@ export class InputController {
 	restoreCompactionQueueToEditor(status = "Conversation changed: queued input returned to the editor"): void {
 		const request = this.ctx.yieldCompaction;
 		const held = this.ctx.compactionQueuedMessages;
+		this.ctx.compactionQueueOrigin = undefined;
 		if (!request && held.length === 0) return;
 		this.ctx.yieldCompaction = undefined;
 		this.ctx.compactionQueuedMessages = [];

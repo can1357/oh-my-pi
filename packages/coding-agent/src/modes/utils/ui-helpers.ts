@@ -11,6 +11,7 @@ import type { AdvisorMessageDetails } from "../../advisor";
 import { InternalUrlRouter } from "../../internal-urls";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
+import { continuesConversation } from "./conversation-position";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { readMediaPath } from "@oh-my-pi/pi-tui/native/blobs";
@@ -1402,7 +1403,14 @@ export class UiHelpers {
 
 	async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
 		// Follow-ups queued behind a yield compaction wait for it, not for a pass that lands first.
-		if (this.ctx.compactionQueuedMessages.length === 0 || this.ctx.yieldCompaction) {
+		if (this.ctx.yieldCompaction) return;
+		const origin = this.ctx.compactionQueueOrigin;
+		this.ctx.compactionQueueOrigin = undefined;
+		if (this.ctx.compactionQueuedMessages.length === 0) return;
+		// Held behind the queued compaction that just ran: a switch or tree move while it summarized
+		// means they belong to a conversation that is no longer live, so they go back to the editor.
+		if (origin && !continuesConversation(this.ctx.sessionManager, origin)) {
+			this.ctx.restoreCompactionQueueToEditor();
 			return;
 		}
 

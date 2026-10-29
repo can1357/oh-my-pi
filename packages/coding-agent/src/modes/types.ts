@@ -300,6 +300,9 @@ export interface InteractiveModeContext {
 	compactionQueuedMessages: CompactionQueuedMessage[];
 	/** Compaction queued for the next yield; follow-ups sent after it wait in `compactionQueuedMessages`. */
 	yieldCompaction: YieldCompaction | undefined;
+	/** While a queued compaction runs, the conversation the input it held in `compactionQueuedMessages`
+	 *  belongs to; checked when that input is flushed. */
+	compactionQueueOrigin: ConversationPosition | undefined;
 	/** Settled user/assistant components reusable across post-compaction transcript rebuilds. */
 	transcriptMessageComponents: WeakMap<AgentMessage, Component>;
 	pendingTools: Map<string, ToolExecutionHandle>;

@@ -364,6 +364,7 @@ import type {
 	YieldCompaction,
 } from "./types";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { ConversationPosition } from "./utils/conversation-position";
 import { materializeImageChipLinks, UiHelpers } from "./utils/ui-helpers";
 
 import {
@@ -1466,6 +1467,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	expandThinkingBlocks = false;
 	compactionQueuedMessages: CompactionQueuedMessage[] = [];
 	yieldCompaction: YieldCompaction | undefined = undefined;
+	compactionQueueOrigin: ConversationPosition | undefined = undefined;
 	pendingTools = new Map<string, ToolExecutionHandle>();
 	transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 	pendingBashComponents: BashExecutionComponent[] = [];

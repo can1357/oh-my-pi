@@ -2128,6 +2128,8 @@ export class CommandController {
 			return;
 		}
 		this.ctx.yieldCompaction = undefined;
+		// The request leaves; its position stays with the follow-ups it held until they flush.
+		this.ctx.compactionQueueOrigin = { sessionId: request.sessionId, leafId: request.leafId };
 		this.ctx.updatePendingMessagesDisplay();
 		if (session.isCompacting) {
 			// Another pass (auto, or an extension's `ctx.compact()`) already compacts.
