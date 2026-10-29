@@ -47,6 +47,7 @@ import {
 	isUserTurnInitiator,
 	readQueueChipText,
 	resolveAbortLabel,
+	isUserInterruptAbort,
 	USER_INTERRUPT_LABEL,
 } from "../../session/messages";
 import {
@@ -2587,6 +2588,15 @@ export class EventController {
 		// torn-down "Working…" row with the "F5 to Retry" affordance.
 		this.ctx.syncRetryHintRow();
 		this.ctx.ui.requestRender();
+		// The run yielded: a `/compact` queued behind it runs now. A run the user stopped (Esc, including
+		// the loop-mode pause) did not yield: the request goes back to the editor like other queued input.
+		if (this.ctx.yieldCompaction) {
+			const last = event.messages.findLast((message): message is AssistantMessage => message.role === "assistant");
+			const userStopped = options?.interrupted || (last?.stopReason === "aborted" && isUserInterruptAbort(last));
+			if (userStopped)
+				this.ctx.restoreCompactionQueueToEditor("Run stopped: queued compaction returned to the editor");
+			else this.ctx.runYieldCompaction();
+		}
 		// The user stopped the run themselves: no prediction or toast for it.
 		if (options?.interrupted) return;
 		if (this.#settledRunStatus(event).state === "done") this.composerPrediction.request();
