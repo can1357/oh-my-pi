@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- When several Codex or Claude accounts are blocked, auto-redeem now spends the saved reset that buys the most time instead of always the session's own: for Claude and for Codex weekly walls the account with the longest wait; for a Codex 5h wall, whose reset restarts the weekly window, the weekly time it brings forward less the weekly allowance it discards. The session's account still wins within an hour of the best ([#15128](https://github.com/can1357/oh-my-pi/pull/15128) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- When two sessions on different accounts planned the same blocked-account reset (both waiting for consent, say), the one that asked second now shares the reset the first spent instead of failing on its old limit ([#15128](https://github.com/can1357/oh-my-pi/pull/15128) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.14.0] - 2026-10-29
 
 ### Breaking Changes

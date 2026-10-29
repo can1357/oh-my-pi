@@ -10,7 +10,9 @@
  *   which base limit slot carries them; a banked reset also clears a 5h-only
  *   block (openai/codex#28525). The natural unblock is the LATEST reset among
  *   the exhausted windows.
- *   Candidates span ALL accounts, active first.
+ *   Candidates span ALL accounts; a reset restarts both windows, so the one
+ *   that brings the weekly refill furthest forward (less the weekly allowance
+ *   it discards) wins, and the active account wins near-ties.
  * - `expiring-credit` (any trigger): use-it-or-lose-it salvage of credits
  *   whose `expiresAt` falls inside the horizon, gated by meaningful usage
  *   outside the last five minutes — never by the reserve. Imminent expiry
@@ -18,16 +20,19 @@
  *   consent, live credit eligibility, terminal dedupe, and account cooldown.
  */
 import { describe, expect, it } from "bun:test";
-import type { ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
+import type { ResetCreditAccountStatus, ResetCreditTarget, StoredAuthCredential, UsageReport } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ATTEMPT_COOLDOWN_MS,
 	blockedAttemptKey,
 	type CodexResetPlanInput,
+	enforcedAccountAllowlist,
 	headlessApprovedResetActions,
 	IMMINENT_RESET_EXPIRY_MS,
 	isTerminalRedeemOutcome,
+	overlayLiveResetCredits,
 	planCodexResetRedemptions,
+	RESTORE_WAIT_TOLERANCE_MS,
 	SALVAGE_MIN_USED_FRACTION,
 	salvageAttemptKey,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
@@ -75,6 +80,8 @@ interface AccountOpts {
 	credentialId?: number;
 	limitReached?: boolean;
 	fetchedAgoMs?: number;
+	/** `metadata.planType` (e.g. `plus`, `free`); omitted when undefined. */
+	planType?: string;
 }
 
 /** Build a synthetic openai-codex `UsageReport` for one account. */
@@ -132,6 +139,7 @@ function report(opts: AccountOpts = {}): UsageReport {
 			email,
 			resetCreditCredentialId: opts.credentialId ?? CREDENTIAL_ID_BY_ACCOUNT[accountId ?? ""] ?? 100,
 			limitReached: opts.limitReached ?? true,
+			...(opts.planType === undefined ? {} : { planType: opts.planType }),
 		},
 	};
 }
@@ -548,6 +556,213 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const teammate = report({ email: "teammate@example.com", credentialId: 2, creditExpiries: [2 * DAY] });
 		const plan = planCodexResetRedemptions(input([active, teammate]));
 		expect(plan.actions[0]).toMatchObject({ accountKey: ACCOUNT_KEY, active: true });
+	});
+
+	it("spends the reset that skips the longest wait instead of the active account's short one", () => {
+		const active = report({ weeklyResetInMs: 4 * HOUR });
+		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });
+		const plan = planCodexResetRedemptions(input([active, sibling]));
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", accountKey: "openai-codex|-|2", remainingMs: 6 * DAY, active: false },
+		]);
+	});
+
+	it("never restores a longer-blocked sibling whose plan cannot serve the blocked turn's model", () => {
+		const active = report({ weeklyResetInMs: 4 * HOUR, planType: "plus" });
+		const freeSibling = report({
+			accountId: "acct-sib",
+			email: "sib@example.com",
+			weeklyResetInMs: 6 * DAY,
+			planType: "free",
+		});
+		// gpt-5.6-sol needs a paid plan: routing would never send the retry to the Free sibling.
+		const plan = planCodexResetRedemptions(input([active, freeSibling], { modelId: "gpt-5.6-sol" }));
+		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: ACCOUNT_KEY, active: true }]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|2",
+			rule: "blocked-account",
+			reason: "plan-ineligible",
+		});
+	});
+
+	it("never restores a longer-blocked sibling of unknown plan while another account is confirmed eligible", () => {
+		// Routing enforces the plan once one account is confirmed eligible and then skips unknown plans.
+		const active = report({ weeklyResetInMs: 4 * HOUR, planType: "plus" });
+		const unknownSibling = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });
+		const plan = planCodexResetRedemptions(input([active, unknownSibling], { modelId: "gpt-5.6-sol" }));
+		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: ACCOUNT_KEY, active: true }]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|2",
+			rule: "blocked-account",
+			reason: "plan-ineligible",
+		});
+	});
+
+	it("restores the longest wait when no account is confirmed eligible for the model", () => {
+		// With no confirmed-eligible account routing tries them all (trial or grandfathered access).
+		const active = report({ weeklyResetInMs: 4 * HOUR, planType: "free" });
+		const sibling = report({
+			accountId: "acct-sib",
+			email: "sib@example.com",
+			weeklyResetInMs: 6 * DAY,
+			planType: "free",
+		});
+		const plan = planCodexResetRedemptions(input([active, sibling], { modelId: "gpt-5.6-sol" }));
+		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: "openai-codex|-|2" }]);
+	});
+
+	it("keeps enforcing the model's plan when the eligible account's reset listing failed", () => {
+		// Usage reports carry no credential id until the live listing overlays one.
+		const usageOnly = (opts: AccountOpts): UsageReport => {
+			const { resetCreditCredentialId: _, ...metadata } = report(opts).metadata ?? {};
+			return { ...report(opts), metadata };
+		};
+		const paid = usageOnly({ weeklyResetInMs: 4 * HOUR, planType: "plus" });
+		const freeSibling = usageOnly({
+			accountId: "acct-sib",
+			email: "sib@example.com",
+			weeklyResetInMs: 6 * DAY,
+			planType: "free",
+		});
+		const statuses: ResetCreditAccountStatus[] = [
+			{
+				provider: "openai-codex",
+				credentialId: CREDENTIAL_ID,
+				accountId: ACCOUNT_ID,
+				email: EMAIL,
+				active: true,
+				availableCount: 0,
+				credits: [],
+				error: "list failed",
+			},
+			{
+				provider: "openai-codex",
+				credentialId: 2,
+				accountId: "acct-sib",
+				email: "sib@example.com",
+				active: false,
+				availableCount: 1,
+				credits: [],
+			},
+		];
+		const plan = planCodexResetRedemptions(
+			input(overlayLiveResetCredits([paid, freeSibling], statuses), { modelId: "gpt-5.6-sol" }),
+		);
+		expect(plan.actions).toEqual([]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|2",
+			rule: "blocked-account",
+			reason: "plan-ineligible",
+		});
+	});
+
+	it("never restores a longer-blocked sibling outside the model's discovered account allowlist", () => {
+		const active = report({ weeklyResetInMs: 4 * HOUR });
+		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });
+		const plan = planCodexResetRedemptions(input([active, sibling], { accountAllowlist: new Set([ACCOUNT_ID]) }));
+		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: ACCOUNT_KEY, active: true }]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|2",
+			rule: "blocked-account",
+			reason: "model-account-access",
+		});
+	});
+
+	describe("enforcedAccountAllowlist", () => {
+		const stored = (id: number, accountId: string): StoredAuthCredential => ({
+			id,
+			provider: "openai-codex",
+			credential: { type: "oauth", access: "a", refresh: "r", expires: NOW + HOUR, accountId },
+			disabledCause: null,
+		});
+		const credentials = [stored(CREDENTIAL_ID, ACCOUNT_ID), stored(2, "acct-sib")];
+
+		it("enforces the allowlist from stored credentials even when the allowlisted account has no usage report", () => {
+			// Routing derives enforcement from stored credentials, so the retry stays on the allowlisted account.
+			const accountAllowlist = enforcedAccountAllowlist([ACCOUNT_ID], credentials, () => true);
+			expect(accountAllowlist).toEqual(new Set([ACCOUNT_ID]));
+			const sibling = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });
+			const plan = planCodexResetRedemptions(input([sibling], { accountAllowlist }));
+			expect(plan.actions).toEqual([]);
+			expect(plan.skipped).toContainEqual({
+				accountKey: "openai-codex|-|2",
+				rule: "blocked-account",
+				reason: "model-account-access",
+			});
+		});
+
+		it("does not enforce an allowlist naming no stored account the session may use", () => {
+			expect(enforcedAccountAllowlist(["acct-elsewhere"], credentials, () => true)).toBeUndefined();
+			expect(enforcedAccountAllowlist([ACCOUNT_ID], credentials, id => id !== CREDENTIAL_ID)).toBeUndefined();
+			expect(enforcedAccountAllowlist(undefined, credentials, () => true)).toBeUndefined();
+		});
+	});
+
+	it("keeps the active account until a sibling skips more than the tolerance longer", () => {
+		const restoredFor = (siblingWaitMs: number) =>
+			planCodexResetRedemptions(
+				input([
+					report({ weeklyResetInMs: 3 * DAY }),
+					report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: siblingWaitMs }),
+				]),
+			).actions[0]?.accountKey;
+		expect(restoredFor(3 * DAY + RESTORE_WAIT_TOLERANCE_MS)).toBe(ACCOUNT_KEY);
+		expect(restoredFor(3 * DAY + RESTORE_WAIT_TOLERANCE_MS + 60_000)).toBe("openai-codex|-|2");
+	});
+
+	it("restores a 5h wall over a longer weekly wall when its nearly spent weekly window restarts a week out", () => {
+		const fiveHourWall = report({
+			primaryUsed: 1,
+			primaryResetInMs: 3 * HOUR,
+			weeklyUsed: 0.98,
+			weeklyResetInMs: 6.9 * DAY,
+		});
+		const weeklyWall = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });
+		const plan = planCodexResetRedemptions(input([fiveHourWall, weeklyWall]));
+		expect(plan.actions[0]).toMatchObject({ accountKey: ACCOUNT_KEY, remainingMs: 3 * HOUR, blockedWindows: ["5h"] });
+	});
+
+	it("passes over a 5h wall whose restart would discard most of a weekly window due in a day", () => {
+		const fresh = report({ primaryUsed: 1, primaryResetInMs: 3 * HOUR, weeklyUsed: 0.3, weeklyResetInMs: DAY });
+		const spent = report({
+			accountId: "acct-sib",
+			email: "sib@example.com",
+			primaryUsed: 1,
+			primaryResetInMs: 2 * HOUR,
+			weeklyUsed: 0.95,
+			weeklyResetInMs: 6 * DAY,
+		});
+		const plan = planCodexResetRedemptions(input([fresh, spent]));
+		expect(plan.actions[0]).toMatchObject({ accountKey: "openai-codex|-|2", remainingMs: 2 * HOUR });
+	});
+
+	it("still salvages the passed-over account's expiring credit in the same pass", () => {
+		const active = report({ weeklyResetInMs: 4 * HOUR, creditExpiries: [2 * HOUR] });
+		const sibling = report({
+			accountId: "acct-sib",
+			email: "sib@example.com",
+			weeklyResetInMs: 6 * DAY,
+			creditExpiries: [5 * DAY],
+		});
+		const plan = planCodexResetRedemptions(input([active, sibling]));
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", accountKey: "openai-codex|-|2" },
+			{ reason: "expiring-credit", accountKey: ACCOUNT_KEY, expiresInMs: 2 * HOUR },
+		]);
+	});
+
+	it("never restores an account outside the session's account pool, however long its wait", () => {
+		const active = report({ weeklyResetInMs: 4 * HOUR });
+		const excluded = report({ accountId: "acct-sib", email: "sib@example.com", weeklyResetInMs: 6 * DAY });
+		const plan = planCodexResetRedemptions(
+			input([active, excluded], { permitsCredential: credentialId => credentialId === CREDENTIAL_ID }),
+		);
+		expect(plan.actions).toMatchObject([{ reason: "blocked-account", accountKey: ACCOUNT_KEY, active: true }]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|2",
+			rule: "blocked-account",
+			reason: "outside-account-pool",
+		});
 	});
 
 	it("breaks sibling ties by soonest credit expiry", () => {

@@ -35,9 +35,14 @@
  *   reset among the exhausted windows (the account stays blocked until every
  *   one rolls over) and must be far enough away to justify the spend, with
  *   credits above the reserve, on an account the session may use (its account
- *   pool). One candidate is redeemed — active account first, then the account
- *   whose credit dies soonest — and the redeem clears its credential blocks so
- *   the retry's re-rank picks it up.
+ *   pool). A Codex reset restarts both windows: the account gets a full
+ *   weekly allowance now and its next weekly refill moves a full week out.
+ *   One candidate is redeemed: the one whose reset brings the weekly refill
+ *   furthest forward, less the weekly allowance the restart discards (see
+ *   {@link codexRestoreValueMs}); for a weekly wall that is its wait. Among
+ *   candidates within {@link RESTORE_WAIT_TOLERANCE_MS} of the best the
+ *   active account wins, then the account whose credit dies soonest. The
+ *   redeem clears its credential blocks so the retry's re-rank picks it up.
  *
  * TRIGGERS: `blocked` runs from the usage-limit branch of the retry pipeline
  * after sibling switch fails, on force-refreshed reports (the cached snapshot
@@ -68,6 +73,8 @@ import type {
 	UsageReport,
 	UsageResetCreditDetail,
 } from "@oh-my-pi/pi-ai";
+import { oauthAccountKey, type StoredAuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
+import { codexRankingStrategy } from "@oh-my-pi/pi-ai/usage/openai-codex";
 import type { ResetAutoRedeemMode } from "./settings";
 import { reportMatchesActiveAccount } from "../slash-commands/helpers/active-oauth-account";
 
@@ -92,6 +99,8 @@ export const ATTEMPT_COOLDOWN_MS = 60_000;
 export const DEBOUNCE_BUCKET_MS = 60_000;
 /** Floor between salvage sweeps; dedupe keys make sweeps idempotent, this just avoids useless re-planning. */
 export const SWEEP_MIN_INTERVAL_MS = 60_000;
+/** Restore candidates whose value (time bought) differs by at most this buy about the same; the active account wins among them. */
+export const RESTORE_WAIT_TOLERANCE_MS = 60 * 60_000;
 
 export function shouldEvaluateCodexAutoRedeem(mode: ResetAutoRedeemMode): boolean {
 	return mode !== "no";
@@ -144,6 +153,8 @@ export type CodexResetSkipReason =
 	| "no-identity"
 	| "stale-report"
 	| "outside-account-pool"
+	| "plan-ineligible"
+	| "model-account-access"
 	| "not-limit-reached"
 	| "no-exhausted-window"
 	| "deferred"
@@ -178,6 +189,8 @@ export interface CodexResetPlanInput {
 	identity: OAuthAccountIdentity | undefined;
 	/** `blocked-account`: whether a stored credential may serve the blocked session; absent allows every account. */
 	permitsCredential?: (credentialId: number) => boolean;
+	/** `blocked-account`: the accounts the blocked model may route to, when routing enforces its allowlist ({@link enforcedAccountAllowlist}). */
+	accountAllowlist?: ReadonlySet<string>;
 	/** Usage reports for ALL stored accounts (one per account for Codex). */
 	reports: UsageReport[] | null;
 	attemptedKeys: ReadonlySet<string>;
@@ -271,6 +284,8 @@ interface AccountSnapshot {
 	limitReached: boolean;
 	creditExpiresAtMs: number | undefined;
 	creditId: string | undefined;
+	/** The model's plan gate verdict for this account: undefined when ungated or the plan is unknown. */
+	planEligible: boolean | undefined;
 }
 
 function classifyChatWindow(limit: UsageLimit, fallback: CodexChatWindow): CodexChatWindow {
@@ -322,6 +337,28 @@ function fullestChatWindow(windows: readonly CodexChatWindowSnapshot[]): CodexCh
 	return fullest;
 }
 
+/**
+ * What restoring a blocked account is worth, in weekly-refill time. The reset
+ * restarts both windows, so the weekly refill that was due arrives now and
+ * the next one a full week out: the account gains the time until its weekly
+ * refill and loses the weekly allowance it still had. A weekly wall has no
+ * allowance left, so it is worth its wait; a 5h-only wall is worth little or
+ * less than nothing when its weekly window is fresh or nearly due.
+ */
+function codexRestoreValueMs(
+	windows: readonly CodexChatWindowSnapshot[],
+	blockedWindows: readonly ("5h" | "weekly")[],
+	remainingMs: number,
+	nowMs: number,
+): number {
+	if (blockedWindows.includes("weekly")) return remainingMs;
+	const weekly = windows.find(window => window.window === "weekly");
+	if (weekly?.resetsAt === undefined || weekly.usedFraction === undefined) return remainingMs;
+	const weekMs = 7 * 24 * 3_600_000;
+	const untilRefillMs = Math.min(Math.max(0, weekly.resetsAt - nowMs), weekMs);
+	return untilRefillMs - (1 - Math.min(1, Math.max(0, weekly.usedFraction))) * weekMs;
+}
+
 /** The chat window the `expiring-credit` rule measures for one Codex usage report. */
 export function fullestCodexChatWindow(report: UsageReport): CodexChatWindowSnapshot | undefined {
 	return fullestChatWindow(codexChatWindows(report));
@@ -358,6 +395,22 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		blockedRuleActive = false;
 		skipped.push({ accountKey: "*", rule: "blocked-account", reason: "spark-model" });
 	}
+	// Credential routing enforces a model's plan once any account the session may
+	// use is confirmed eligible, and then skips every account not confirmed
+	// eligible; otherwise (trial or grandfathered access) it tries them all. A
+	// restore routing would skip cannot unblock the retry.
+	const planGate = codexRankingStrategy.planGate?.({ modelId: input.modelId });
+	const enforcePlan =
+		planGate !== undefined &&
+		(input.reports ?? []).some(report => {
+			const credentialId = report.metadata?.resetCreditCredentialId;
+			return (
+				report.provider === "openai-codex" &&
+				typeof credentialId === "number" &&
+				(input.permitsCredential?.(credentialId) ?? true) &&
+				planGate(report) === true
+			);
+		});
 
 	const snapshots: AccountSnapshot[] = [];
 	for (const report of input.reports ?? []) {
@@ -412,6 +465,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			limitReached: report.metadata?.limitReached === true,
 			creditExpiresAtMs: soonestCredit?.expiresAtMs,
 			creditId: soonestCredit?.id,
+			planEligible: planGate?.(report),
 		});
 	}
 
@@ -427,6 +481,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		interface RestoreCandidate {
 			snapshot: AccountSnapshot;
 			remainingMs: number;
+			valueMs: number;
 			unblockAtMs: number;
 			blockedWindows: ("5h" | "weekly")[];
 		}
@@ -437,6 +492,14 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			// Restoring an account the session may not use cannot unblock it.
 			if (input.permitsCredential && !input.permitsCredential(snapshot.target.credentialId)) {
 				skip("outside-account-pool");
+				continue;
+			}
+			if (enforcePlan && snapshot.planEligible !== true) {
+				skip("plan-ineligible");
+				continue;
+			}
+			if (input.accountAllowlist && !input.accountAllowlist.has(oauthAccountKey(snapshot.target) ?? "")) {
+				skip("model-account-access");
 				continue;
 			}
 			// Live evidence: the 429 that triggered this pass names the active
@@ -520,7 +583,13 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				skip("cooldown");
 				continue;
 			}
-			candidates.push({ snapshot, remainingMs, unblockAtMs, blockedWindows });
+			candidates.push({
+				snapshot,
+				remainingMs,
+				valueMs: codexRestoreValueMs(snapshot.windows, blockedWindows, remainingMs, nowMs),
+				unblockAtMs,
+				blockedWindows,
+			});
 		}
 		candidates.sort((a, b) => {
 			// Active account first: the sticky session credential stays usable.
@@ -537,7 +606,10 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			}
 			return b.remainingMs - a.remainingMs;
 		});
-		const best = candidates[0];
+		// That order only breaks near-ties: only candidates within the tolerance
+		// of the most valuable restore qualify.
+		const bestValueMs = Math.max(...candidates.map(candidate => candidate.valueMs));
+		const best = candidates.find(candidate => candidate.valueMs >= bestValueMs - RESTORE_WAIT_TOLERANCE_MS);
 		if (best) {
 			restore = {
 				reason: "blocked-account",
@@ -632,6 +704,27 @@ export function resetAccountLockKey(identity: {
 	return `${identity.provider}|${identity.orgId?.trim().toLowerCase() ?? "-"}|${account}`;
 }
 
+/**
+ * A model's discovered account allowlist (`Model.accountAccess` keys) as
+ * credential routing enforces it: only once a stored OAuth account the session
+ * may use is on it, whatever that account's usage report says. Otherwise
+ * routing tries every account, so the result is undefined.
+ */
+export function enforcedAccountAllowlist(
+	accountIds: readonly string[] | undefined,
+	credentials: readonly StoredAuthCredential[],
+	permitsCredential: (credentialId: number) => boolean,
+): ReadonlySet<string> | undefined {
+	if (!accountIds?.length) return undefined;
+	const allowlist = new Set(accountIds);
+	const enforced = credentials.some(row => {
+		if (row.credential.type !== "oauth" || !permitsCredential(row.id)) return false;
+		const accountKey = oauthAccountKey(row.credential);
+		return accountKey !== undefined && allowlist.has(accountKey);
+	});
+	return enforced ? allowlist : undefined;
+}
+
 /** One attempt per (account, weekly-reset-minute) block episode. */
 export function blockedAttemptKey(accountKey: string, weeklyResetsAtMs: number): string {
 	return `block|${accountKey}|${Math.round(weeklyResetsAtMs / DEBOUNCE_BUCKET_MS)}`;
@@ -672,7 +765,16 @@ export function overlayLiveResetCredits(
 			}
 			return !!s.email && s.email === report.metadata?.email;
 		});
-		if (!status || status.error) return { ...report, resetCredits: undefined };
+		if (!status) return { ...report, resetCredits: undefined };
+		// A failed listing proves no credits but still names the account's
+		// credential: the planner needs it to apply the model's plan gate.
+		if (status.error) {
+			return {
+				...report,
+				metadata: { ...report.metadata, resetCreditCredentialId: status.credentialId },
+				resetCredits: undefined,
+			};
+		}
 		return {
 			...report,
 			metadata: { ...report.metadata, resetCreditCredentialId: status.credentialId },
@@ -787,6 +889,12 @@ export interface CodexAutoRedeemCoordinator {
 	/** Alternate lock root for isolated sessions (production uses the shared agent database path). */
 	resetLockPath?: string;
 	inFlightByAccount: Map<string, Promise<ResetRecoveryResult>>;
+	/**
+	 * Each blocked restore this process spent or is spending, by attempt key,
+	 * resolving to whether it reset: a session that planned the same restore
+	 * before the spend began shares its outcome.
+	 */
+	restoreSpends: Map<string, Promise<boolean>>;
 	sweepInFlight: boolean;
 	lastSweepAt: number;
 	/** Settlement of the most recently scheduled sweep (never rejects). */
@@ -801,6 +909,7 @@ export function createCodexAutoRedeemCoordinator(): CodexAutoRedeemCoordinator {
 		deferredUntilByKey: new Map(),
 		lastAttemptAtByAccount: new Map(),
 		inFlightByAccount: new Map(),
+		restoreSpends: new Map(),
 		sweepInFlight: false,
 		lastSweepAt: 0,
 		sweepPromise: undefined,
