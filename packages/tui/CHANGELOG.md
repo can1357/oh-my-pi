@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed the Agent Hub footer losing its tail to truncation when the symbol preset spelled the key hints out; the footer variant is now chosen on the rendered width ([#12432](https://github.com/can1357/oh-my-pi/issues/12432), [#16469](https://github.com/can1357/oh-my-pi/pull/16469) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.14.1] - 2026-10-31
 
@@ -24,7 +27,6 @@
 - Removed the `@oh-my-pi/pi-tui/theme/defaults` export. Bundled palettes are now available through `getBuiltinThemes()` from `theme/defaults.json`.
 
 ### Fixed
-- Fixed the Agent Hub footer losing its tail to truncation when the symbol preset spelled the key hints out; the footer variant is now chosen on the rendered width ([#12432](https://github.com/can1357/oh-my-pi/issues/12432), [#16469](https://github.com/can1357/oh-my-pi/pull/16469) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed table-chart direction detection so measures are not incorrectly marked as better based on header words; single-measure tables are now sent for judging when local charting is appropriate.
 - Fixed LSP diagnostics that incorrectly showed “No issues” before a language server had reported; such files are now shown as unverified. ([#17293](https://github.com/can1357/oh-my-pi/pull/17293) by [@JustasMasiulis](https://github.com/JustasMasiulis))
