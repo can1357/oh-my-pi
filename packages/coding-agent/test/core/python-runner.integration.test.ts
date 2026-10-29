@@ -360,12 +360,30 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		30_000,
 	);
 
-	for (const [procfs, listing] of [
-		["cannot be listed", "raise PermissionError(13, 'Permission denied', '/proc')"],
-		["is an empty, unmounted directory", "return []"],
+	// A procfs inherited from a parent PID namespace: every pid and parent pid it reports is the outer one.
+	const outerNamespaceStat = [
+		"import builtins, io, re",
+		"_open = builtins.open",
+		"def _open_outer(file, mode='r', *args, **kwargs):",
+		"    handle = _open(file, mode, *args, **kwargs)",
+		"    if isinstance(file, str) and re.fullmatch(r'/proc/(self|\\d+)/stat', file) and 'b' in mode:",
+		"        pid, rest = handle.read().split(b' ', 1)",
+		"        handle.close()",
+		"        name, fields = rest.rsplit(b')', 1)",
+		"        fields = fields.split()",
+		"        fields[1] = str(int(fields[1]) + 100000).encode()",
+		"        return io.BytesIO(str(int(pid) + 100000).encode() + b' ' + name + b') ' + b' '.join(fields))",
+		"    return handle",
+		"builtins.open = _open_outer",
+	];
+	for (const [procfs, listing, extra] of [
+		["cannot be listed", "raise PermissionError(13, 'Permission denied', '/proc')", []],
+		["is an empty, unmounted directory", "return []", []],
+		["belongs to a parent PID namespace", "return _listdir(path)", outerNamespaceStat],
 	] as const) {
-		// What a kernel sees without procfs (some containers and chroots): /proc
-		// lists nothing, and Linux `ps` reads /proc too, so it is hidden as well.
+		// What a kernel sees without a procfs of its own (some containers and
+		// chroots, nested PID namespaces): /proc lists nothing, or nothing it can
+		// match, and Linux `ps` reads /proc too, so it is hidden as well.
 		const noProcfs = [
 			"import os",
 			"_listdir = os.listdir",
@@ -376,6 +394,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			"os.listdir = _listdir_without_procfs",
 			"_exists = os.path.exists",
 			"os.path.exists = lambda path: os.fspath(path) != '/bin/ps' and _exists(path)",
+			...extra,
 		].join("\n");
 
 		it.skipIf(process.platform !== "linux")(
