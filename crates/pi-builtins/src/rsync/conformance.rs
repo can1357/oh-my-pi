@@ -80,9 +80,15 @@ const fn c(name: &'static str, exit: i32, tweaks: &'static str, args: &'static [
 	Case { name, exit, tweaks, args, locale: UTF8_LOCALE, unordered: false }
 }
 
-/// A table row run in the C locale instead of [`UTF8_LOCALE`].
-const fn cc(name: &'static str, exit: i32, tweaks: &'static str, args: &'static [&'static str]) -> Case {
-	Case { name, exit, tweaks, args, locale: C_LOCALE, unordered: false }
+/// A table row run under `locale` instead of [`UTF8_LOCALE`].
+const fn cl(
+	name: &'static str,
+	locale: &'static str,
+	exit: i32,
+	tweaks: &'static str,
+	args: &'static [&'static str],
+) -> Case {
+	Case { name, exit, tweaks, args, locale, unordered: false }
 }
 
 /// A table row whose stdout order is racy in the reference.
@@ -130,6 +136,12 @@ const UTF8_LOCALE: &str = if cfg!(target_os = "macos") { "UTF-8" } else { "C.UTF
 /// can compare. The builtin reads `LC_ALL`/`LC_CTYPE`/`LANG` in one other
 /// place, the default charset of `--iconv` (`iconv::locale_charset`).
 const C_LOCALE: &str = "C";
+
+/// A locale name no system has: `setlocale` fails on it and leaves the C
+/// locale in place, so both clients escape exactly as they do under
+/// [`C_LOCALE`] — a name's `.UTF-8` suffix alone must not be read as a
+/// charset.
+const UNKNOWN_LOCALE: &str = "xx_YY.UTF-8";
 
 /// The reference rsync 3.5.1 binary, when one is installed. Other versions
 /// are skipped: the builtin's output is byte-for-byte 3.5.1's.
