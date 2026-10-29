@@ -2635,6 +2635,71 @@ mod tests {
 		(result, output)
 	}
 
+	/// Legacy CP949 output whose byte pairs overlap UTF-8 must stay intact.
+	#[cfg(windows)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cmd_echo_korean_sentence_decodes_from_system_acp() {
+		// SAFETY: GetACP has no preconditions.
+		if unsafe { windows_sys::Win32::Globalization::GetACP() } != 949 {
+			return;
+		}
+		let (result, output) =
+			execute_captured("cmd.exe /c echo 한글 중국 볼륨에는 이름이 없습니다".to_string()).await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output.trim_end(), "한글 중국 볼륨에는 이름이 없습니다");
+	}
+
+	/// Invalid bytes from a builtin must become U+FFFD without corrupting the
+	/// valid UTF-8 after them. On a CP949 Windows host the lone `0xEB` is a
+	/// DBCS lead byte, which used to switch the whole stream to CP949.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn invalid_byte_keeps_following_utf8() {
+		#[cfg(windows)]
+		{
+			// SAFETY: GetACP has no preconditions.
+			if unsafe { windows_sys::Win32::Globalization::GetACP() } != 949 {
+				return;
+			}
+		}
+		let (result, output) = execute_captured("printf 'ok\\n\\xeb\\n한글\\n'".to_string()).await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "ok\n\u{FFFD}\n한글\n");
+	}
+
+	/// `cut -c` is a byte-wise builtin and splits 한글 mid-character.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn byte_cut_through_utf8_keeps_following_lines() {
+		#[cfg(windows)]
+		{
+			// SAFETY: GetACP has no preconditions.
+			if unsafe { windows_sys::Win32::Globalization::GetACP() } != 949 {
+				return;
+			}
+		}
+		let (result, output) =
+			execute_captured("printf '가나다라\\n한글 테스트\\n' | cut -c1-4".to_string()).await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "가\u{FFFD}\n한\u{FFFD}\n");
+	}
+
+	/// A two-byte remnant of a cut Hangul (`EA B0`) is a valid ANSI character
+	/// on CP949, but a cut UTF-8 prefix is not code-page evidence.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn byte_cut_remnant_does_not_switch_stream() {
+		#[cfg(windows)]
+		{
+			// SAFETY: GetACP has no preconditions.
+			if unsafe { windows_sys::Win32::Globalization::GetACP() } != 949 {
+				return;
+			}
+		}
+		let (result, output) =
+			execute_captured("printf '가나다라\\n' | cut -c1-2; printf '다음 줄\\n'".to_string())
+				.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "\u{FFFD}\n다음 줄\n");
+	}
+
 	/// Shell initialization must recover when a long-running host's inherited
 	/// working directory is deleted. This runs in a child process because cwd is
 	/// process-global.
