@@ -15,12 +15,21 @@ import puppeteer, { type Dialog, type Page, type WaitForOptions } from "puppetee
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
+// The page in the omp-launched print test waits on `/print-gate` to print, then reports through `/printed`: the test
+// opens the gate between two calls and waits for the report.
+const printGate = Promise.withResolvers<void>();
+const pagePrinted = Promise.withResolvers<void>();
 const server = Bun.serve({
 	port: 0,
 	// `/never-ends` must outlive the run budget instead of Bun's 10s idle cut.
 	idleTimeout: 0,
 	fetch(request) {
 		const { pathname } = new URL(request.url);
+		if (pathname === "/print-gate") return printGate.promise.then(() => new Response("open"));
+		if (pathname === "/printed") {
+			pagePrinted.resolve();
+			return new Response("ok");
+		}
 		if (pathname === "/never-ends") {
 			// A frame document whose body never closes, like an ad or chat widget that keeps streaming.
 			return new Response(
@@ -167,6 +176,8 @@ async function withUserBrowser(use: (cdpUrl: string) => Promise<void>): Promise<
 			"--no-sandbox",
 			"--no-first-run",
 			"--use-mock-keychain",
+			// Linux Chrome otherwise waits about 25 s on the desktop keyring before its first navigation.
+			"--password-store=basic",
 			`--user-data-dir=${root}`,
 			`--remote-debugging-port=${port}`,
 		],
@@ -188,6 +199,30 @@ async function observe(invoke: (parameters: unknown) => Promise<{ details?: unkn
 		await invoke({ action: "call", name, chain: [{ method: "observe", args: [options] }] }),
 	) as { elements: Array<{ id: number; role: string; name: string }> };
 	return { elements, names: elements.map(entry => `${entry.role}:${entry.name}`) };
+}
+
+/** The clock the print hold reads in a page, which the page's own scripts never touch. */
+const PRINT_HOLD_CLOCK = 'globalThis[Symbol.for("omp.printHold.clock")]';
+
+/** Sets the print hold's clock in the page `ms` ahead of the page's real one, as if that much time had passed. */
+async function advancePrintClock(page: Page, ms: number): Promise<void> {
+	await page
+		.mainFrame()
+		.mainRealm()
+		.evaluate(`{ const real = Date.now; ${PRINT_HOLD_CLOCK} = () => real() + ${ms}; }`);
+}
+
+/** Waits until the end of omp's call reached the page: every print hold in it ends within the 1.5 s release. */
+async function untilCallEnded(page: Page): Promise<void> {
+	await page
+		.mainFrame()
+		.mainRealm()
+		.waitForFunction(
+			`Object.getOwnPropertySymbols(globalThis)
+				.filter(key => key.description?.endsWith(".until"))
+				.every(key => globalThis[key] - ${PRINT_HOLD_CLOCK}() <= 1_500)`,
+			{ timeout: 0, polling: 50 },
+		);
 }
 
 afterAll(async () => {
@@ -450,14 +485,15 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 		expect(textOf(clicked)).toContain("The page called window.print()");
 		expect(textOf(clicked)).toContain("tab.pdf()");
 
-		// A page that prints a moment after the call returns: nobody but omp drives this browser, so it stays held.
-		// The print has to land between two calls, which only the real clock in the page can arrange.
+		// A page that prints after the call returned: nobody but omp drives this browser, so it stays held. The page
+		// waits on the test's gate, opened only once the call has returned.
 		await invoke({
 			action: "run",
 			name: "print",
-			code: 'await tab.evaluate(() => { setTimeout(() => document.querySelector("#print").click(), 100); });',
+			code: 'await tab.evaluate(() => { void fetch("/print-gate").then(() => { document.querySelector("#print").click(); return fetch("/printed"); }); });',
 		});
-		await Bun.sleep(500);
+		printGate.resolve();
+		await pagePrinted.promise;
 		const later = await invoke({
 			action: "run",
 			name: "print",
@@ -465,7 +501,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 		});
 		expect(valueOf(later)).toEqual(["afterprint", "print returned", "afterprint", "print returned"]);
 		expect(textOf(later)).toContain("The page called window.print()");
-	}, 30_000);
+	});
 
 	test("reports a print the page makes while the open navigates to it", async () => {
 		const invoke = createHost();
@@ -477,7 +513,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 			code: "return await tab.evaluate(() => globalThis.log);",
 		});
 		expect(valueOf(log)).toEqual(["afterprint", "load print returned"]);
-	}, 30_000);
+	});
 
 	test("holds print() in the user's own browser only around omp's calls", async () => {
 		await withUserBrowser(async cdpUrl => {
@@ -493,12 +529,13 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 				expect(valueOf(loaded)).toEqual(["afterprint", "load print returned"]);
 				expect(textOf(loaded)).toContain("The page called window.print()");
 
-				// The hold ends 1.5 s after the call on the tab worker's real clock; then the user's own click prints.
-				await Bun.sleep(2_000);
+				// The hold ends 1.5 s after the call on the page's clock; past it, the user's own click prints.
 				const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
 				try {
 					const page = (await user.pages()).find(candidate => candidate.url().endsWith("/print-on-load"));
 					if (!page) throw new Error("Expected the print page in the user's browser");
+					await untilCallEnded(page);
+					await advancePrintClock(page, 1_500);
 					await page.evaluate('document.querySelector("#print").click()');
 				} finally {
 					await user.disconnect();
@@ -521,12 +558,13 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 			const invoke = createHost();
 			try {
 				await invoke({ action: "open", name: "user-bfcache", url: `${baseUrl}/print`, app: { cdp_url: cdpUrl } });
-				// Past the release on the tab worker's real clock, the user leaves the page; it is cached released.
-				await Bun.sleep(2_000);
+				// Past the release on the page's clock, the user leaves the page; it is cached released.
 				const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
 				try {
 					const page = (await user.pages()).find(candidate => candidate.url().endsWith("/print"));
 					if (!page) throw new Error("Expected the print page in the user's browser");
+					await untilCallEnded(page);
+					await advancePrintClock(page, 1_500);
 					await page.goto(`${baseUrl}/print-on-load`);
 				} finally {
 					await user.disconnect();
@@ -564,8 +602,8 @@ return await tab.evaluate(() => {
 				const page = (await user.pages()).find(candidate => candidate.url().endsWith("/print-on-load"));
 				if (!page) throw new Error("Expected the print page in the user's browser");
 				await page.goBack();
-				// The restored page holds for 1.5 s on its own real clock, which nothing outside the page can advance.
-				await Bun.sleep(2_000);
+				// The restored page holds for 1.5 s on its own clock, not for the rest of the call it was cached in.
+				await advancePrintClock(page, 1_500);
 				const clicked = await page
 					.mainFrame()
 					.mainRealm()
@@ -610,9 +648,9 @@ return await tab.evaluate(() => {
 					// A second attachment that finishes its setup and lets go must not release the first one's call.
 					const second = await PrintHold.install(page, "calls");
 					try {
-						second.endCall();
-						// Real time, past the second one's 1.5 s release on the page's own clock.
-						await Bun.sleep(1_700);
+						await second.endCall();
+						// Past the second one's 1.5 s release on the page's clock; the first one's call holds for 30 s.
+						await advancePrintClock(page, 1_500);
 						const clicked = await page
 							.mainFrame()
 							.mainRealm()
@@ -643,12 +681,9 @@ return await tab.evaluate(() => {
 					await page.evaluate(text => void setTimeout(() => confirm(text)), message);
 					return await promise;
 				};
-				// A real deadline: what would hang is Chrome's stopped renderer, which fake timers cannot reach.
-				const within3s = (work: Promise<void>): Promise<string> =>
-					Promise.race([work.then(() => "done"), Bun.sleep(3_000).then(() => "still waiting")]);
 				const stay = await confirmOpened("Stay?");
 				// A call's start used to wait on the stopped page until someone answered the dialog.
-				expect(await within3s(hold.beginCall(30_000))).toBe("done");
+				await hold.beginCall(30_000);
 				await stay.dismiss();
 				// Once the dialog closes, the page gets the call's hold: a Print click comes back held.
 				await page
@@ -656,11 +691,11 @@ return await tab.evaluate(() => {
 					.mainRealm()
 					.waitForFunction(
 						'log.length = 0, document.querySelector("#print").click(), log.includes("afterprint")',
-						{ timeout: 3_000, polling: 50 },
+						{ timeout: 0, polling: 50 },
 					);
 				const close = await confirmOpened("Close?");
 				// Closing the tab used to wait here until the tab worker was killed.
-				expect(await within3s(hold.dispose())).toBe("done");
+				await hold.dispose();
 				await close.dismiss();
 			} finally {
 				await user.disconnect();
@@ -673,10 +708,14 @@ return await tab.evaluate(() => {
 			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
 			try {
 				const page = await user.newPage();
+				// The confirm answers after 60 s on the page's clock, well past the call's hold.
+				await page.evaluateOnNewDocument(
+					`{ const real = Date.now; let waited = 0; ${PRINT_HOLD_CLOCK} = () => real() + waited; const ask = confirm; confirm = (...args) => { const answer = ask(...args); waited += 60_000; return answer; }; }`,
+				);
 				await page.goto(`${baseUrl}/print`);
 				const hold = await PrintHold.install(page, "calls");
 				try {
-					await hold.beginCall(0);
+					await hold.beginCall(30_000);
 					const { promise, resolve } = Promise.withResolvers<Dialog>();
 					page.once("dialog", resolve);
 					await page
@@ -684,9 +723,7 @@ return await tab.evaluate(() => {
 						.mainRealm()
 						.evaluate('void setTimeout(() => document.querySelector("#confirm-print").click())');
 					const asked = await promise;
-					hold.endCall();
-					// Real time, past the 1.5 s release on the page's own clock, which fake timers cannot reach.
-					await Bun.sleep(1_700);
+					await hold.endCall();
 					// The page went on to print() before omp could hold it again, and the print preview opened.
 					await asked.accept();
 					expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
@@ -741,7 +778,7 @@ return await tab.evaluate(() => {
 					await page
 						.mainFrame()
 						.mainRealm()
-						.waitForFunction('log.includes("receipt print returned")', { timeout: 5_000, polling: 50 });
+						.waitForFunction('log.includes("receipt print returned")', { timeout: 0, polling: 50 });
 					expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
 						"receipt afterprint",
 						"receipt print returned",
@@ -791,9 +828,9 @@ return await tab.evaluate(() => {
 				try {
 					const click = 'log.length = 0; document.querySelector("#print").click(); globalThis.log';
 					expect(await page.mainFrame().mainRealm().evaluate(click)).toEqual(["afterprint", "print returned"]);
-					hold.endCall();
-					// Real time, past the 1.5 s release on the page's own clock, which fake timers cannot reach.
-					await Bun.sleep(1_700);
+					await hold.endCall();
+					// Past the 1.5 s release on the page's clock.
+					await advancePrintClock(page, 1_500);
 					expect(await page.mainFrame().mainRealm().evaluate(click)).toEqual(["print returned"]);
 				} finally {
 					await hold.dispose();
@@ -815,10 +852,9 @@ return await tab.evaluate(() => {
 					app: { cdp_url: cdpUrl },
 				});
 				const read = 'return await tab.text("button");';
-				expect(valueOf(await invoke({ action: "run", name: "user-stuck", code: read, timeout: 5 }))).toBe("Main");
-				// Past the 1.5 s release on the tab worker's real clock, the next call arms the hold again.
-				await Bun.sleep(2_000);
-				expect(valueOf(await invoke({ action: "run", name: "user-stuck", code: read, timeout: 5 }))).toBe("Main");
+				expect(valueOf(await invoke({ action: "run", name: "user-stuck", code: read }))).toBe("Main");
+				// The next call arms the hold again.
+				expect(valueOf(await invoke({ action: "run", name: "user-stuck", code: read }))).toBe("Main");
 			} finally {
 				await invoke({ action: "close", name: "user-stuck" }).catch(() => {});
 			}

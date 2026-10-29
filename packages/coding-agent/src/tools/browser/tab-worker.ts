@@ -1850,7 +1850,7 @@ export class WorkerCore {
 			}
 			const info = await this.#currentReadyInfo();
 			this.#started = true;
-			this.#printHold.endCall();
+			void this.#printHold.endCall();
 			this.#transport.send({ type: "ready", info });
 		} catch (error) {
 			// A page this attempt created would be orphaned (the supervisor retries
@@ -2171,7 +2171,7 @@ export class WorkerCore {
 			}
 			failure = this.#foldFloatingRejections(active, failure);
 			if (this.#active?.id === msg.id) this.#active = null;
-			this.#printHold?.endCall();
+			void this.#printHold?.endCall();
 		}
 		// A renderer crash or a debugger detach answers the run itself.
 		if (this.#unanswered !== active) return;
