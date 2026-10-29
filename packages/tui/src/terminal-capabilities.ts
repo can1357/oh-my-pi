@@ -565,10 +565,15 @@ export function resolveImageProtocol(
 	) {
 		return null;
 	}
-	// Kitty graphics reach a tmux client only through the DCS passthrough
-	// envelope, which tmux drops unless `allow-passthrough` is enabled. A Kitty
-	// client identity alone would otherwise send images into the void.
-	if (imageProtocol === ImageProtocol.Kitty && env.TMUX && !tmuxPaneAllowsPassthrough(env)) {
+	// Kitty graphics and iTerm2 inline images reach a tmux client only through
+	// the DCS passthrough envelope, which tmux drops unless `allow-passthrough`
+	// is enabled. A Kitty/iTerm2 client identity alone would otherwise send
+	// images into the void.
+	if (
+		(imageProtocol === ImageProtocol.Kitty || imageProtocol === ImageProtocol.Iterm2) &&
+		env.TMUX &&
+		!tmuxPaneAllowsPassthrough(env)
+	) {
 		return null;
 	}
 	return imageProtocol;
@@ -1116,7 +1121,7 @@ export function encodeITerm2(
 		params.push("preserveAspectRatio=0");
 	}
 
-	return `\x1b]1337;File=${params.join(";")}:${base64Data}\x07`;
+	return wrapTmuxPassthroughIfNeeded(`\x1b]1337;File=${params.join(";")}:${base64Data}\x07`);
 }
 
 /**

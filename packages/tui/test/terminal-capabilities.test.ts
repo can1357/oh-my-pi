@@ -642,6 +642,27 @@ describe("tmux image protocol selection", () => {
 		});
 	}
 
+	// Same gate covers iTerm2 inline images: the payload only reaches the
+	// client through the same `Ptmux;` envelope.
+	for (const [name, socket, passthrough, expected] of [
+		["keeps a known iTerm2 client when tmux forwards passthrough", "5104", "on", ImageProtocol.Iterm2],
+		["drops a known iTerm2 client when tmux blocks passthrough", "5105", "off", null],
+		["keeps a known iTerm2 client on tmux without the passthrough option", "5106", "", ImageProtocol.Iterm2],
+	] as const) {
+		it.skipIf(process.platform === "win32")(name, async () => {
+			const replies = { "show-options -Apqv -t %7 allow-passthrough": passthrough };
+			await withFakeTmux(replies, async binDir => {
+				const env = {
+					PATH: `${binDir}:${Bun.env.PATH ?? ""}`,
+					TMUX: `/tmp/tmux-1000/default,${socket},0`,
+					TMUX_PANE: "%7",
+					TERM: "tmux-256color",
+				};
+				expect(resolveImageProtocol("iterm2", env, true)).toBe(expected);
+			});
+		});
+	}
+
 	it("keeps the GNU screen Kitty fallback", () => {
 		expect(resolveImageProtocol("base", { TERM: "screen-256color" }, true)).toBe(ImageProtocol.Kitty);
 	});
