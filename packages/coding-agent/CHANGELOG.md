@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- `/pause` now stops automatic session titles, composer predictions and idle recaps as well. The gate is polled inside the agent loop, and those requests run outside it, so a paused session still called the provider. They now wait for the resume instead of declining, so a paused session is still named once it resumes.
+- `/pause` now stops automatic session titles, composer predictions and idle recaps as well. The gate is polled inside the agent loop, and those requests run outside it, so a paused session still called the provider. They now wait for the resume instead of declining, so a paused session is still named once it resumes ([#17399](https://github.com/can1357/oh-my-pi/pull/17399) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.0] - 2026-10-29
 
