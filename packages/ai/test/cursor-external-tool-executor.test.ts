@@ -874,7 +874,7 @@ describe("Cursor runs relayed across an external executor's requests", () => {
 				return {
 					states,
 					giveUp: () => {
-						vi.advanceTimersByTime(119_999);
+						vi.advanceTimersByTime(30 * 60_000 - 1);
 						expect(states.size).toBe(1);
 						vi.advanceTimersByTime(1);
 					},

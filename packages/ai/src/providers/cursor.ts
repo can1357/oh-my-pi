@@ -354,9 +354,12 @@ const CURSOR_EXTERNAL_EXECUTOR_ALLOWED_TOOLS = "mcp_tool_call,get_mcp_tools_tool
  * How long a run that handed an external executor its calls stays parked,
  * stream open and exec frames unanswered, for the client's next request to
  * bring the results (`CursorParkedRun`). Past it the run is cancelled; a late
- * request rebuilds the turn from its history like any other.
+ * request rebuilds the turn from its history like any other. Long enough for
+ * a test suite, build or subagent to finish: a request that does not continue
+ * the run, the session's eviction and the transport ending all release it
+ * sooner, so only an abandoned session waits this out.
  */
-const CURSOR_RELAY_IDLE_TIMEOUT_MS = 120_000;
+const CURSOR_RELAY_IDLE_TIMEOUT_MS = 30 * 60_000;
 
 /** `providerSessionState` entry holding the session's parked run. */
 const CURSOR_RELAY_SESSION_STATE_KEY = "cursor-agent-relay";
