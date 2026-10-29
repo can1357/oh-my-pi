@@ -4124,12 +4124,12 @@ describe("computer background fallback", () => {
 			{ code: 'await (await desktop.window("42")).raise()', call: "raise:42", route: "no raise is needed" },
 			{
 				code: 'await (await desktop.ref("e1")).perform("AXRaise")',
-				call: "perform:AXRaise",
+				call: "perform:axraise",
 				route: "no raise is needed",
 			},
 			{
 				code: 'await (await desktop.ref("e1")).perform(" Raise ")',
-				call: "perform: Raise ",
+				call: "perform:axraise",
 				route: "no raise is needed",
 			},
 			{
@@ -4199,7 +4199,7 @@ describe("computer background fallback", () => {
 				'await desktop.apps.open("test.editor");',
 			].join("\n");
 			expect((await run(native, code, "refuse")).ok).toBe(true);
-			expect(native.calls).toEqual(["press:42:-", "press:42:false", "perform:press", "open:test.editor:-"]);
+			expect(native.calls).toEqual(["press:42:-", "press:42:false", "perform:axpress", "open:test.editor:-"]);
 		});
 
 		it("checks and sends the same option value when a getter changes between reads", async () => {
@@ -4317,8 +4317,9 @@ describe("computer background fallback", () => {
 				expect(refused.error.message, action).toContain("Use press() on a button that does the same");
 				expect(mac.calls, action).toEqual([]);
 
+				// Native is sent the spelling the refusal checked.
 				expect((await run(mac, code, "takeover")).ok, action).toBe(true);
-				expect(mac.calls, action).toEqual([`perform:${action}`]);
+				expect(mac.calls, action).toEqual(["perform:axopen"]);
 			}
 
 			// Names native runs as other actions still go through ("AX Open" names `AX Open`; U+FEFF is
@@ -4329,11 +4330,16 @@ describe("computer background fallback", () => {
 				action => `await (await desktop.ref("e1")).perform(${JSON.stringify(action)});`,
 			);
 			expect((await run(other, others.join("\n"), "refuse")).ok).toBe(true);
-			expect(other.calls).toEqual(otherActions.map(action => `perform:${action}`));
+			expect(other.calls).toEqual([
+				"perform:ax open",
+				"perform:axopener",
+				"perform:ax\ufeffopen",
+				"perform:axopen\ufeff",
+			]);
 
 			const elsewhere = new ForegroundSession();
 			expect((await run(elsewhere, 'await (await desktop.ref("e1")).perform("AXOpen")', "refuse")).ok).toBe(true);
-			expect(elsewhere.calls).toEqual(["perform:AXOpen"]);
+			expect(elsewhere.calls).toEqual(["perform:axopen"]);
 		});
 
 		describe("macOS calls that open a menu", () => {
@@ -4360,17 +4366,17 @@ describe("computer background fallback", () => {
 			const menus: Array<{ code: string; call: string; named: string }> = [
 				{
 					code: `${el}.perform("AXShowMenu")`,
-					call: "perform:AXShowMenu",
+					call: "perform:axshowmenu",
 					named: 'perform("AXShowMenu") would open a context menu',
 				},
 				{
 					code: `${el}.perform(" showMenu ")`,
-					call: "perform: showMenu ",
+					call: "perform:axshowmenu",
 					named: 'perform(" showMenu ") would open a context menu',
 				},
 				{
 					code: `${el}.perform("show_menu")`,
-					call: "perform:show_menu",
+					call: "perform:axshowmenu",
 					named: 'perform("show_menu") would open a context menu',
 				},
 				{
@@ -4380,17 +4386,17 @@ describe("computer background fallback", () => {
 				},
 				{
 					code: `${el}.perform("AxShowMenu")`,
-					call: "perform:AxShowMenu",
+					call: "perform:axshowmenu",
 					named: 'perform("AxShowMenu") would open a context menu',
 				},
 				{
 					code: `${el}.perform("AXShowMenu", { menu: ["Copy"] })`,
-					call: "perform:AXShowMenu",
+					call: "perform:axshowmenu",
 					named: "would open a context menu",
 				},
 				{
 					code: `${el}.perform("press", { menu: ["New Folder"] })`,
-					call: "perform:press",
+					call: "perform:axpress",
 					named: "perform with menu would open a menu",
 				},
 				{
@@ -4504,7 +4510,7 @@ describe("computer background fallback", () => {
 					"click:42:-",
 					"drag:42:-",
 					"perform:press",
-					"perform:AXIncrement",
+					"perform:axincrement",
 					"axClick:-",
 				]);
 
@@ -4515,7 +4521,7 @@ describe("computer background fallback", () => {
 					`${el}.press({ menu: ["New Folder"] });`,
 				].join("\n");
 				expect((await run(elsewhere, menu, "refuse")).ok).toBe(true);
-				expect(elsewhere.calls).toEqual(["click:42:-", "perform:AXShowMenu", "perform:press"]);
+				expect(elsewhere.calls).toEqual(["click:42:-", "perform:axshowmenu", "perform:press"]);
 			});
 
 			describe("popup buttons and menu buttons", () => {
@@ -4581,13 +4587,13 @@ describe("computer background fallback", () => {
 					{
 						role: "AXPopUpButton",
 						code: `${el}.perform("AXPress")`,
-						call: "perform:AXPress",
+						call: "perform:axpress",
 						named: 'perform("AXPress") on an AXPopUpButton',
 					},
 					{
 						role: "AXMenuButton",
 						code: `${el}.perform(" Press ")`,
-						call: "perform: Press ",
+						call: "perform:axpress",
 						named: 'perform(" Press ") on an AXMenuButton',
 					},
 					{
@@ -4644,13 +4650,13 @@ describe("computer background fallback", () => {
 						`${el}.click();`,
 					].join("\n");
 					expect((await run(button, code, "refuse")).ok).toBe(true);
-					expect(button.calls).toEqual(["perform:press", "perform:AXPress", "setValue:x", "axClick:true"]);
+					expect(button.calls).toEqual(["perform:press", "perform:axpress", "setValue:x", "axClick:true"]);
 
 					// A menu button's menu is a pull-down, so setValue and other actions do not open it.
 					const menuButton = new ControlSession("AXMenuButton");
 					const other = [`${el}.setValue("x");`, `${el}.perform("AXShowDefaultUI");`].join("\n");
 					expect((await run(menuButton, other, "refuse")).ok).toBe(true);
-					expect(menuButton.calls).toEqual(["setValue:x", "perform:AXShowDefaultUI"]);
+					expect(menuButton.calls).toEqual(["setValue:x", "perform:axshowdefaultui"]);
 
 					class ElsewhereSession extends ForegroundSession {
 						override async axNode(ref: string): Promise<AxNode> {

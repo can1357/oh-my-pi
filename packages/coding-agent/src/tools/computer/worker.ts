@@ -358,11 +358,12 @@ const RAISE_ROUTE = "Background input and screenshots reach a covered window, so
 const OPEN_ROUTE = "Use press() on a button that does the same, or tell the user the step needs their screen.";
 
 /**
- * The native action `perform(action)` runs, as a key that compares equal exactly when native's
- * comparison does: native `native_action_name` trims Unicode White_Space (unlike JS `trim`, it
- * drops U+0085 and keeps U+FEFF), maps `press`, `raise` and `showmenu`/`show_menu` to `AXPress`,
- * `AXRaise` and `AXShowMenu`, prefixes `AX` to any other name without one, and runs whichever of
- * the element's actions matches with only ASCII letters folded.
+ * The native action `perform(action)` runs, as the key the refusals check and the name native is
+ * sent, so the two cannot disagree: native `native_action_name` trims Unicode White_Space (unlike
+ * JS `trim`, it drops U+0085 and keeps U+FEFF), maps `press`, `raise` and `showmenu`/`show_menu`
+ * to `AXPress`, `AXRaise` and `AXShowMenu`, prefixes `AX` to any other name without one, and runs
+ * whichever of the element's actions matches with only ASCII letters folded; on this key the
+ * steps before the match only uppercase the `AX` prefix.
  */
 function nativeActionKey(action: string): string {
 	const name = action
@@ -796,7 +797,7 @@ class El {
 				`element ${this.ref}`,
 			);
 		}
-		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, action, menu));
+		await nativeCall(context.signal, () => this.#session.axPerform(this.ref, native, menu));
 	}
 
 	/**
