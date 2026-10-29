@@ -1694,12 +1694,15 @@ const CAPTURE_REFUSED = autolearnCaptureRefused.trim();
 
 /** `tool` as the capture turn advertises it: the same request shape, and a call that runs nothing. */
 function refusedCaptureTool(tool: AgentTool): AgentTool {
-	const advertised: Record<string, unknown> = {};
-	for (const key of CAPTURE_ADVERTISED_KEYS) if (tool[key] !== undefined) advertised[key] = tool[key];
-	return {
-		...(advertised as Pick<AgentTool, (typeof CAPTURE_ADVERTISED_KEYS)[number]>),
+	const refused: AgentTool = {
+		name: tool.name,
+		label: tool.label,
+		description: tool.description,
+		parameters: tool.parameters,
 		execute: async () => ({ content: [{ type: "text", text: CAPTURE_REFUSED }], isError: true }),
 	};
+	for (const key of CAPTURE_ADVERTISED_KEYS) if (tool[key] !== undefined) Object.assign(refused, { [key]: tool[key] });
+	return refused;
 }
 
 /**
@@ -1775,7 +1778,9 @@ export function createAutoLearnCaptureRunner(
 				messages: captureMessages,
 			},
 			sessionId: captureSessionId,
-			promptCacheKey: captureSessionId,
+			// The primary's cache key, so a provider that routes by it (OpenAI `prompt_cache_key`) serves the capture from
+			// the primary prompt's cache. The provider session id above stays the capture's own (#10869).
+			promptCacheKey: options.sourceAgent.promptCacheKey,
 			providerSessionState: captureProviderSessionState,
 			getApiKey: requestModel => options.sourceAgent.getApiKey?.(requestModel),
 			onPayload: options.onPayload,
@@ -5623,14 +5628,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
 					streamFn: primaryStreamFn,
 					transformToolCallArguments,
-					// No fallback resolver. The capture agent advertises only
-					// `learn`/`manage_skill`, both of which stay top-level and never
-					// mount as devices, so it has nothing legitimate to recover — while
-					// the primary session's resolver is bound to the primary agent's
-					// tools and would have let a capture response reach a main-session
-					// MCP tool, side effects included. A hallucinated call from here
-					// correctly stays `not found`, and suggesting session devices it
-					// cannot call would only mislead it.
+					// No fallback resolver. The capture agent advertises the primary's
+					// tool list (so the request keeps the primary prompt's cache), but
+					// only `learn`/`manage_skill` execute: every other tool is a refused
+					// copy that runs nothing (`captureToolList`). Both capture tools stay
+					// top-level and never mount as devices, so there is nothing legitimate
+					// to recover — while the primary session's resolver is bound to the
+					// primary agent's tools and would let a capture response reach a
+					// main-session MCP tool, side effects included. A hallucinated call
+					// from here correctly stays `not found`.
 					intentTracing: agent.intentTracing,
 					pruneToolDescriptions: agent.pruneToolDescriptions,
 					dialect: resolveDialect(cfgToolsFormat.get(settings), captureModel),

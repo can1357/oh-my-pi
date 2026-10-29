@@ -380,6 +380,8 @@ describe("isolated auto-learn capture", () => {
 			},
 			convertToLlm,
 			streamFn: mock.stream,
+			sessionId: "primary-session",
+			promptCacheKey: "primary-cache",
 		});
 		await sourceAgent.prompt("Earlier task");
 		const runCapture = createAutoLearnCaptureRunner({
@@ -394,6 +396,10 @@ describe("isolated auto-learn capture", () => {
 		const [primary, capture] = mock.calls;
 		expect(wireView(capture?.context.tools)).toBe(wireView(primary?.context.tools));
 		expect(capture?.context.tools?.map(t => t.name)).toEqual(["read", "learn", "manage_skill"]);
+		// Routed to the primary prompt's cache, under its own provider session (#10869).
+		expect(primary?.options?.promptCacheKey).toBe("primary-cache");
+		expect(capture?.options?.promptCacheKey).toBe("primary-cache");
+		expect(capture?.options?.sessionId).not.toBe("primary-session");
 	});
 
 	it("refuses a call to a non-capture tool without running any of its code", async () => {
