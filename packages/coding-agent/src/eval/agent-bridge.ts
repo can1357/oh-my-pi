@@ -3,7 +3,7 @@
  */
 import { type } from "@oh-my-pi/omptype";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
+import { borrowEvalToolKernels, createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import {
 	buildStructuredSubagentRecoveryHint,
 	reserveStructuredSubagentId,
@@ -186,9 +186,13 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 					...(parsed.apply !== undefined ? { apply: parsed.apply } : {}),
 				}
 			: undefined;
-	const customTools = parsed.tools?.length
-		? createEvalCustomTools(options.session, await describeEvalTools(options.session, parsed.tools, options.signal))
+	const descriptors = parsed.tools?.length
+		? await describeEvalTools(options.session, parsed.tools, options.signal)
 		: undefined;
+	const customTools = descriptors ? createEvalCustomTools(options.session, descriptors) : undefined;
+	// Held until the subagent can no longer call these tools, so the parent's
+	// next cell elsewhere cannot reclaim the kernel they run on.
+	const releaseKernels = descriptors ? borrowEvalToolKernels(options.session, descriptors) : () => {};
 
 	try {
 		const policy = await resolveEffectiveSubagentPolicy({
@@ -241,12 +245,15 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 				} catch (error) {
 					if (error instanceof StructuredSubagentError) throw new ToolError(error.message);
 					throw error;
+				} finally {
+					releaseKernels();
 				}
 			},
 			{ id, agentId: id, ownerId },
 		);
 		return { id, agent: policy.agentName };
 	} catch (error) {
+		releaseKernels();
 		if (error instanceof StructuredSubagentError) throw new ToolError(error.message);
 		throw error;
 	}

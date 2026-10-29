@@ -58,7 +58,7 @@ import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
-import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
+import { borrowEvalToolKernels, createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
@@ -1863,6 +1863,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			params.taskFile !== undefined ? { taskFile: params.taskFile, taskFileSha256: params.taskFileSha256 } : {};
 		const context = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
 		let latestProgress: AgentProgress | undefined;
+		const evalToolDescriptors = params.tools?.length
+			? await describeEvalTools(this.session, params.tools, signal)
+			: undefined;
+		// Held for the child's whole run: it calls these tools on this session's
+		// kernel, which a later cell of ours in another directory would reclaim.
+		const releaseEvalToolKernels = evalToolDescriptors
+			? borrowEvalToolKernels(this.session, evalToolDescriptors)
+			: () => {};
 		try {
 			const execution = await runStructuredSubagent({
 				session: this.session,
@@ -1875,14 +1883,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...this.#resultParams(params),
 				...this.#effortParams(params),
 				solutionSpace: params.solutionSpace,
-				...(params.tools?.length
-					? {
-							customTools: createEvalCustomTools(
-								this.session,
-								await describeEvalTools(this.session, params.tools, signal),
-							),
-						}
-					: {}),
+				...(evalToolDescriptors ? { customTools: createEvalCustomTools(this.session, evalToolDescriptors) } : {}),
 				// `name` is the spawn handle: keep it for id allocation when this
 				// path did not pre-reserve one. Do not treat it as a HUD description.
 				identity: { id: preAllocatedId, label: params.name },
@@ -1950,6 +1951,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					...(latestProgress ? { progress: [latestProgress] } : {}),
 				},
 			};
+		} finally {
+			releaseEvalToolKernels();
 		}
 	}
 

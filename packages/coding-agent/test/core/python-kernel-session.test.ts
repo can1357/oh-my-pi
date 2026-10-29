@@ -12,6 +12,7 @@ class FakeKernel {
 	executeCalls = 0;
 	shutdownCalls = 0;
 	alive = true;
+	pendingWork = false;
 	readonly id: string;
 
 	constructor(id: string) {
@@ -32,6 +33,10 @@ class FakeKernel {
 
 	isAlive(): boolean {
 		return this.alive;
+	}
+
+	hasPendingWork(): boolean {
+		return this.pendingWork;
 	}
 
 	async ping(): Promise<boolean> {

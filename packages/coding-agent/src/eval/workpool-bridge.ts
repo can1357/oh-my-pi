@@ -1,7 +1,7 @@
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
+import { borrowEvalToolKernels, createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import { resolveEffectiveSubagentPolicy } from "../task/structured-subagent";
-import { type WorkPoolPeekResult, type WorkPoolStatus, WorkPoolRegistry } from "../task/workpool";
+import { type WorkPool, type WorkPoolPeekResult, type WorkPoolStatus, WorkPoolRegistry } from "../task/workpool";
 import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { JsStatusEvent } from "./js/shared/types";
@@ -82,9 +82,8 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 			assignment: `Create workpool ${requestedName ?? agent ?? "worker"}`,
 			...(agent ? { agent } : {}),
 		});
-		const customTools = tools?.length
-			? createEvalCustomTools(options.session, await describeEvalTools(options.session, tools, options.signal))
-			: [];
+		const descriptors = tools?.length ? await describeEvalTools(options.session, tools, options.signal) : [];
+		const customTools = descriptors.length > 0 ? createEvalCustomTools(options.session, descriptors) : [];
 		const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
 		const registry = WorkPoolRegistry.global();
 		let name = requestedName ?? `${policy.agentName}-pool`;
@@ -95,12 +94,22 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 				name = `${base}-${suffix++}`;
 			}
 		}
-		const pool = registry.create(options.session, {
-			name,
-			policy,
-			...(context ? { context } : {}),
-			customTools,
-		});
+		// Workers call these tools on the creating session's kernel long after
+		// this cell ends; hold it until the pool can no longer start a turn.
+		const releaseKernels = borrowEvalToolKernels(options.session, descriptors);
+		let pool: WorkPool;
+		try {
+			pool = registry.create(options.session, {
+				name,
+				policy,
+				...(context ? { context } : {}),
+				customTools,
+				onRelease: releaseKernels,
+			});
+		} catch (error) {
+			releaseKernels();
+			throw error;
+		}
 		options.emitStatus?.({ op: "workpool", action: "create", pool: name, count: pool.limit() });
 		return { name, agent: policy.agentName, limit: pool.limit() };
 	}

@@ -32,6 +32,10 @@ class FakeKernel {
 	isAlive(): boolean {
 		return this.alive;
 	}
+
+	hasPendingWork(): boolean {
+		return false;
+	}
 }
 
 async function flushMicrotasks(turns = 6): Promise<void> {

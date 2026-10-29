@@ -35,6 +35,10 @@ class FakeKernel {
 		return this.alive;
 	}
 
+	hasPendingWork(): boolean {
+		return false;
+	}
+
 	whenDead(): Promise<void> {
 		return this.#death.promise;
 	}
