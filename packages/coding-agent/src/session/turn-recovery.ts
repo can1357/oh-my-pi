@@ -1788,40 +1788,29 @@ export class TurnRecovery {
 	 *   EPIPE`, `upstream closed the connection` — was made once and never
 	 *   replayed, whether or not anything streamed.
 	 *
-	 * The converse is what keeps this from multiplying their work: a
-	 * contentless failure a provider loop *does* retry has already cost eleven
-	 * requests on `anthropic-messages`, twelve on `openai-completions`, or six
-	 * on `openai-codex-responses`, and holding the chain for it would run those
-	 * loops again. The loops differ in what they read, which is why the second
-	 * reading above has two parts: `anthropic-messages` and the OpenAI
-	 * pre-output retry (`openai-completions` and `azure-openai-responses` only)
-	 * decide from `isProviderRetryableError` on the text, while
-	 * `openai-codex-responses` decides from its event's code, which the
-	 * `(code=…)` marker on the persisted message betrays. `cursor` resumes a
-	 * stream it judges incomplete, and that error never carries this flag.
-	 * On `openai-responses`, `google-gemini-cli`, `amazon-bedrock` and `ollama`
-	 * nothing below replays a provider error at all.
+	 * A hold only applies where no lower retry layer has already replayed the
+	 * request, so it does not multiply provider retry work.
 	 *
 	 * The stand-in is close, not exact. A provider loop can spend its whole
 	 * budget on contentless failures and then fail *with* content, so the held
-	 * attempts land on top of a loop that did run; that costs one further loop
-	 * and needs the wire to alternate failure modes, which the gateway's own
-	 * failure log does not show.
+	 * attempts can land on top of a loop that ran; that costs one further loop
+	 * and requires alternating wire failure modes.
 	 *
 	 * Marking the message "retries spent" at each provider instead was the
 	 * alternative: it is more direct but needs a new field threaded through
-	 * every retrying layer, and `fetchWithRetry` builds no message, so its six
-	 * attempts would stay invisible and the signal would be wrong in exactly
-	 * the case that matters. Streamed content is one observable fact that every
+	 * every retrying layer, and `fetchWithRetry` builds no message, so its retry
+	 * attempts would stay invisible and the signal would be wrong in exactly the
+	 * case that matters. Streamed content is one observable fact that every
 	 * layer below already agrees on.
 	 *
 	 * Held for the first {@link CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS} retry
 	 * attempts, so the failing model is asked three times in all. Each held
-	 * retry waits a full-jitter backoff (`[0, min(base × 2^(n-1), 8s))`), so a
-	 * fleet that fails together does not re-request together; worst case ~1.5s
-	 * of added wait at the 500ms default. Past the hold the failure walks the
-	 * chain exactly as a capacity failure does from its first occurrence, so a
-	 * route that stays dead still reaches the chain and then the retry budget.
+	 * retry waits a full-jitter backoff (`[0, min(base × 2^(n-1), 8s))`), so
+	 * clients sharing a failed upstream do not re-request together; worst case
+	 * ~1.5s of added wait at the 500ms default. Past the hold the failure walks
+	 * the chain exactly as a capacity failure does from its first occurrence, so
+	 * an upstream that stays unavailable still reaches the chain and then the
+	 * retry budget.
 	 *
 	 * Excluded on purpose:
 	 * - capacity (429, 529, overloaded, a usage limit) — the replay re-hits the
@@ -2767,10 +2756,9 @@ export class TurnRecovery {
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
-		// A held wire failure takes full jitter, not the narrow band: every
-		// session streaming through one gateway loses its stream in the same
-		// millisecond when that gateway restarts, and they must not all replay
-		// in the same quarter-window.
+		// A held wire failure takes full jitter, not the narrow band: a shared upstream
+		// failure can make many clients retry at once, so they must not replay in the
+		// same quarter-window.
 		const connectionHold = this.#holdsChainForConnectionRetry(message, id, retryBudgetExhausted);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0

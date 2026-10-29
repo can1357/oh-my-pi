@@ -620,9 +620,10 @@ function isTransientErrorText(text: string): boolean {
  * Capacity wording the rate-limit parsers do not already name: a far side that
  * answered and declined to serve for load. The parsers own every throttle with
  * a recognised reason or usage-limit phrasing, so this covers only the plain
- * English and the bare status codes they leave, including the spellings a
- * gateway emits beside its own transport diagnostic (`TooManyRequests`,
- * `slow down`, `model is busy`).
+ * English and bare status codes they leave (`TooManyRequests`, `slow down`,
+ * `model is busy`). Capacity signals can ride alongside a wire failure; a
+ * request carrying one must walk the fallback chain rather than be held on the
+ * model.
  */
 const CAPACITY_PRESSURE_PATTERN =
 	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|\bbusy\b|rate.?limit|too[ _-]?many[ _-]?requests|service.?unavailable|temporar(?:y|ily)[ _-]?unavailable|slow down|\b(?:429|503|529)\b/i;
@@ -664,10 +665,9 @@ const UNDICI_TERMINATED_PATTERN = /^(?:TypeError:\s*)?terminated\.?$/i;
  * message generic. `UND_ERR_SOCKET` is undici's own code for a socket that
  * died mid-response.
  *
- * Not handled, and deliberately: an HTTP/2 GOAWAY. Every route in use here is
- * HTTP/1.1, the frame surfaces differently in each runtime, and widening the
- * flag on wording nobody has observed would be a guess. Revisit when a route
- * actually speaks HTTP/2.
+ * Not handled, deliberately: an HTTP/2 GOAWAY. No diagnostic wording for it
+ * has been observed, and its frame surfaces differently in each runtime, so
+ * widening the flag would be a guess. Add a concrete diagnostic when observed.
  *
  * Errnos only, never a provider's own error code: the branch that reads this
  * does not look at the message, so a code copied verbatim from an upstream
