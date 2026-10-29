@@ -7,6 +7,8 @@ authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "Mermaid to ASCII/Unicode terminal diagram renderer"
+# Option/Result::map_or_default; the `pi_mermaid_msrv` CI job holds this.
+rust-version = "1.98"
 
 [lints]
 workspace = true
@@ -18,8 +20,8 @@ xutf = ["dep:xutf"]
 
 [dependencies]
 html-escape.workspace = true
-unicode-segmentation = { version = "1.13", optional = true }
-unicode-width = { version = "0.2", optional = true }
+unicode-segmentation = { workspace = true, optional = true }
+unicode-width = { workspace = true, optional = true }
 xutf = { workspace = true, optional = true }
 
 [dev-dependencies]

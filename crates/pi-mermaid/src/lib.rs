@@ -15,6 +15,11 @@
 //! let art = pi_mermaid::render("graph LR\n  A --> B", &RenderOptions::default())?;
 //! ```
 
+#[cfg(not(any(feature = "unicode", feature = "xutf")))]
+compile_error!(
+	"pi-mermaid needs a text-width backend: enable the `unicode` (default) or `xutf` feature"
+);
+
 pub mod ansi;
 pub mod canvas;
 pub mod class;
@@ -70,6 +75,85 @@ impl Default for RenderOptions {
 			color_mode:         None,
 			theme:              Theme::default(),
 		}
+	}
+}
+
+/// [`Theme`] overrides as JSON or JavaScript callers give them: hex color
+/// strings, `None` keeps the default.
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(test, derive(serde::Deserialize))]
+pub struct ThemeSpec {
+	pub fg:       Option<String>,
+	pub border:   Option<String>,
+	pub line:     Option<String>,
+	pub arrow:    Option<String>,
+	pub accent:   Option<String>,
+	pub bg:       Option<String>,
+	pub corner:   Option<String>,
+	pub junction: Option<String>,
+}
+
+/// [`RenderOptions`] as JSON or JavaScript callers give them: `direction`
+/// and `color_mode` as strings, `None` keeps the default.
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(test, derive(serde::Deserialize), serde(rename_all = "camelCase"))]
+pub struct RenderOptionsSpec {
+	pub use_ascii:          Option<bool>,
+	pub padding_x:          Option<i32>,
+	pub padding_y:          Option<i32>,
+	pub box_border_padding: Option<i32>,
+	/// `TD`, `TB`, `LR`, `BT` or `RL`.
+	pub direction:          Option<String>,
+	/// `auto` (or `None`), `none`, `ansi16`, `ansi256`, `truecolor` or `html`.
+	pub color_mode:         Option<String>,
+	pub theme:              Option<ThemeSpec>,
+}
+
+impl RenderOptionsSpec {
+	/// Apply the given fields over [`RenderOptions::default`].
+	///
+	/// # Errors
+	/// An unknown `direction` or `color_mode` token.
+	pub fn resolve(self) -> Result<RenderOptions, String> {
+		let defaults = RenderOptions::default();
+		let direction = match self.direction.as_deref() {
+			None => None,
+			Some(token) => {
+				Some(Direction::parse(token).ok_or_else(|| format!("unknown direction: {token}"))?)
+			},
+		};
+		let color_mode = match self.color_mode.as_deref() {
+			None | Some("auto") => None,
+			Some("none") => Some(ColorMode::None),
+			Some("ansi16") => Some(ColorMode::Ansi16),
+			Some("ansi256") => Some(ColorMode::Ansi256),
+			Some("truecolor") => Some(ColorMode::Truecolor),
+			Some("html") => Some(ColorMode::Html),
+			Some(other) => return Err(format!("unknown color mode: {other}")),
+		};
+		let mut theme = defaults.theme;
+		if let Some(overrides) = self.theme {
+			let ThemeSpec { fg, border, line, arrow, accent, bg, corner, junction } = overrides;
+			theme.fg = fg.unwrap_or(theme.fg);
+			theme.border = border.unwrap_or(theme.border);
+			theme.line = line.unwrap_or(theme.line);
+			theme.arrow = arrow.unwrap_or(theme.arrow);
+			theme.accent = accent.or(theme.accent);
+			theme.bg = bg.or(theme.bg);
+			theme.corner = corner.or(theme.corner);
+			theme.junction = junction.or(theme.junction);
+		}
+		Ok(RenderOptions {
+			use_ascii: self.use_ascii.unwrap_or(defaults.use_ascii),
+			padding_x: self.padding_x.unwrap_or(defaults.padding_x),
+			padding_y: self.padding_y.unwrap_or(defaults.padding_y),
+			box_border_padding: self
+				.box_border_padding
+				.unwrap_or(defaults.box_border_padding),
+			direction,
+			color_mode,
+			theme,
+		})
 	}
 }
 
@@ -209,75 +293,6 @@ mod tests {
 		);
 	}
 
-	#[derive(Debug, Default, serde::Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	struct FixtureTheme {
-		fg:       Option<String>,
-		border:   Option<String>,
-		line:     Option<String>,
-		arrow:    Option<String>,
-		accent:   Option<String>,
-		bg:       Option<String>,
-		corner:   Option<String>,
-		junction: Option<String>,
-	}
-
-	#[derive(Debug, Default, serde::Deserialize)]
-	#[serde(rename_all = "camelCase")]
-	struct FixtureOptions {
-		use_ascii:          Option<bool>,
-		padding_x:          Option<i32>,
-		padding_y:          Option<i32>,
-		box_border_padding: Option<i32>,
-		direction:          Option<String>,
-		color_mode:         Option<String>,
-		theme:              Option<FixtureTheme>,
-	}
-
-	impl FixtureOptions {
-		fn resolve(self) -> Result<RenderOptions, String> {
-			let defaults = RenderOptions::default();
-			let direction = match self.direction.as_deref() {
-				None => None,
-				Some(token) => {
-					Some(Direction::parse(token).ok_or_else(|| format!("unknown direction: {token}"))?)
-				},
-			};
-			let color_mode = match self.color_mode.as_deref() {
-				None | Some("auto") => None,
-				Some("none") => Some(ColorMode::None),
-				Some("ansi16") => Some(ColorMode::Ansi16),
-				Some("ansi256") => Some(ColorMode::Ansi256),
-				Some("truecolor") => Some(ColorMode::Truecolor),
-				Some("html") => Some(ColorMode::Html),
-				Some(other) => return Err(format!("unknown color mode: {other}")),
-			};
-			let mut theme = defaults.theme;
-			if let Some(overrides) = self.theme {
-				let FixtureTheme { fg, border, line, arrow, accent, bg, corner, junction } = overrides;
-				theme.fg = fg.unwrap_or(theme.fg);
-				theme.border = border.unwrap_or(theme.border);
-				theme.line = line.unwrap_or(theme.line);
-				theme.arrow = arrow.unwrap_or(theme.arrow);
-				theme.accent = accent.or(theme.accent);
-				theme.bg = bg.or(theme.bg);
-				theme.corner = corner.or(theme.corner);
-				theme.junction = junction.or(theme.junction);
-			}
-			Ok(RenderOptions {
-				use_ascii: self.use_ascii.unwrap_or(defaults.use_ascii),
-				padding_x: self.padding_x.unwrap_or(defaults.padding_x),
-				padding_y: self.padding_y.unwrap_or(defaults.padding_y),
-				box_border_padding: self
-					.box_border_padding
-					.unwrap_or(defaults.box_border_padding),
-				direction,
-				color_mode,
-				theme,
-			})
-		}
-	}
-
 	/// #16773: a rerouted parallel edge keeps clear of the other edges at both
 	/// of its nodes, whatever the declaration order and layout direction.
 	#[test]
@@ -358,7 +373,7 @@ mod tests {
 	struct Fixture {
 		name:    String,
 		source:  String,
-		options: FixtureOptions,
+		options: RenderOptionsSpec,
 		output:  Option<String>,
 		error:   Option<String>,
 	}

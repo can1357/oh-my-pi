@@ -223,6 +223,22 @@ jobs:
               name: MODULE.bazel.lock
               path: MODULE.bazel.lock
 
+   # pi-mermaid is published for crates outside this workspace (bat), which
+   # build its default `unicode` backend on stable Rust. Everything else here
+   # builds it with `xutf` on nightly, so a nightly-only API or a broken
+   # `unicode` path would only surface downstream. Runs on PRs: it is one
+   # small crate.
+   pi_mermaid_msrv:
+      name: pi-mermaid on its rust-version
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@v4
+         - name: Test the default backend on the declared rust-version
+           run: |
+              msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' crates/pi-mermaid/Cargo.toml)
+              rustup toolchain install "$msrv" --profile minimal
+              cargo "+$msrv" test --locked -p pi-mermaid
+
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
    # Native-changing PRs are rare enough that they do not warrant PR-side
    # Rust validation or a PR-side addon build (see native_addons): Rust is
