@@ -30,7 +30,7 @@
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
+import { type InputModality, type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../error/gateway";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
@@ -814,7 +814,7 @@ interface ModelListRow {
 	display_name: string;
 	context_length?: number;
 	max_output_tokens?: number;
-	input_modalities: ("text" | "image")[];
+	input_modalities: InputModality[];
 	supports_tools?: boolean;
 }
 

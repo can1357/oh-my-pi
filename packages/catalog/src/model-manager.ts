@@ -7,6 +7,9 @@ import { type GeneratedProvider, getBundledModels } from "./models";
 import { isTimeBasedCost } from "./pricing";
 import {
 	type Api,
+	INPUT_MODALITIES,
+	type InputModality,
+	isInputModality,
 	type Model,
 	type ModelCost,
 	modelKind,
@@ -674,9 +677,12 @@ function mergeDynamicModel<TApi extends Api>(
 	// images to a now text-only route.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
 	const dynamicInputAuthoritative = endpointChanged || authority.input;
-	const supportsImage = dynamicInputAuthoritative
-		? dynamicModel.input.includes("image")
-		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
+	const input = INPUT_MODALITIES.filter(
+		modality =>
+			modality === "text" ||
+			dynamicModel.input.includes(modality) ||
+			(!dynamicInputAuthoritative && existingModel.input.includes(modality)),
+	);
 	// Providers with authoritative reasoning metadata must not regain a
 	// stale bundled dial after explicitly reporting no reasoning. Others
 	// retain the additive fallback for discovery that omits capabilities.
@@ -717,7 +723,7 @@ function mergeDynamicModel<TApi extends Api>(
 			preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
 		...(trustsOwnThinking ? { thinking: dynamicModel.thinking } : {}),
-		input: supportsImage ? ["text", "image"] : ["text"],
+		input,
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input, authority.cost),
 			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output, authority.cost),
@@ -862,13 +868,12 @@ function isModelLike(value: unknown): value is ModelSpec<Api> {
 	return true;
 }
 
-function isModelInputArray(value: unknown): value is ("text" | "image")[] {
+function isModelInputArray(value: unknown): value is InputModality[] {
 	if (!Array.isArray(value) || value.length === 0) {
 		return false;
 	}
 	for (let i = 0; i < value.length; i++) {
-		const item = value[i];
-		if (item !== "text" && item !== "image") {
+		if (!isInputModality(value[i])) {
 			return false;
 		}
 	}

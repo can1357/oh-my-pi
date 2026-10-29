@@ -2791,6 +2791,8 @@ export interface ResponseInputAudio {
 	 * The type of the input item. Always `input_audio`.
 	 */
 	type: "input_audio";
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 export declare namespace ResponseInputAudio {
 	interface InputAudio {
@@ -2807,7 +2809,7 @@ export declare namespace ResponseInputAudio {
 /**
  * A text input to the model.
  */
-export type ResponseInputContent = ResponseInputText | ResponseInputImage | ResponseInputFile;
+export type ResponseInputContent = ResponseInputText | ResponseInputImage | ResponseInputAudio | ResponseInputFile;
 /**
  * A file input to the model.
  */

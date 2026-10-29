@@ -6,7 +6,7 @@ import type { Database } from "bun:sqlite";
 import * as path from "node:path";
 import { getModelDbPath, isSqliteCorruptionError, logger, openSqliteDatabaseSync, VERSION } from "@oh-my-pi/pi-utils";
 import RULES from "./compat/rules.json" with { type: "json" };
-import type { Api, Model } from "./types";
+import { type Api, isInputModality, type Model } from "./types";
 
 // Rows persist fully materialized Models so compatible warm-cache reads do not
 // rerun the compat cascade. Request headers are intentionally omitted:
@@ -462,7 +462,7 @@ function isMaterializedModel(value: unknown): value is PersistedModel<Api> {
 		typeof model.reasoning !== "boolean" ||
 		!Array.isArray(model.input) ||
 		model.input.length === 0 ||
-		model.input.some(input => input !== "text" && input !== "image") ||
+		!model.input.every(isInputModality) ||
 		model.headers !== undefined ||
 		!Object.hasOwn(model, "supportsComputerUseConfig") ||
 		(model.supportsComputerUseConfig !== null && typeof model.supportsComputerUseConfig !== "boolean")

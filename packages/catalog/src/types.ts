@@ -43,6 +43,13 @@ export type ModelKind = (typeof MODEL_KINDS)[number];
 /** Kinds a provider maps to a runner transport through `kind-apis` in its KDL; discovery drops rows of these kinds when the provider declares no API. */
 export const KIND_API_KINDS = ["image", "tts", "stt", "embedding", "rerank", "video"] as const;
 export type KindApiKind = (typeof KIND_API_KINDS)[number];
+/** What a chat model takes in a user message. `audio` means the model hears speech in inline audio. */
+export const INPUT_MODALITIES = ["text", "image", "audio"] as const;
+export type InputModality = (typeof INPUT_MODALITIES)[number];
+/** Whether `value` names an input modality. */
+export function isInputModality(value: unknown): value is InputModality {
+	return (INPUT_MODALITIES as readonly unknown[]).includes(value);
+}
 /** Grounding transport available to chat models selected by the web role. */
 export type WebSearchGrounding = "gemini" | "anthropic" | "codex" | "xai" | "openrouter" | "openai";
 /** Non-chat runner protocols accepted by catalog seeds, outside the chat dispatch union. */
@@ -1628,7 +1635,7 @@ export interface Model<TApi extends Api = Api> {
 	 * the consumer's fallback policy.
 	 */
 	tokenizer?: ModelTokenizer;
-	input: ("text" | "image")[];
+	input: InputModality[];
 	/**
 	 * Decoder family used for image inputs when it has narrower format support
 	 * than OMP's general image pipeline. `stb` local backends reject WebP.

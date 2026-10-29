@@ -69,6 +69,7 @@ import type {
 	ChatCompletionChunk,
 	ChatCompletionContentPart,
 	ChatCompletionContentPartImage,
+	ChatCompletionContentPartInputAudio,
 	ChatCompletionContentPartText,
 	ChatCompletionMessageFunctionToolCall,
 	ChatCompletionMessageParam,
@@ -123,8 +124,11 @@ import {
 } from "./openai-shared";
 import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
 import {
+	inputAudioFormat,
+	isAudioContent,
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
+	NON_AUDIO_PLACEHOLDER,
 	NON_VISION_IMAGE_PLACEHOLDER,
 } from "./vision-guard";
 
@@ -2519,6 +2523,7 @@ export function convertMessages(
 				const supportsImages = isOpenAICompletionsVisionSupported(model);
 				const content: ChatCompletionContentPart[] = [];
 				let omittedImages = false;
+				let omittedAudio = false;
 				for (const item of msg.content) {
 					if (item.type === "text") {
 						const text = item.text.toWellFormed();
@@ -2527,6 +2532,15 @@ export function convertMessages(
 							type: "text",
 							text,
 						} satisfies ChatCompletionContentPartText);
+					} else if (isAudioContent(item)) {
+						if (model.input.includes("audio")) {
+							content.push({
+								type: "input_audio",
+								input_audio: { data: item.data, format: inputAudioFormat(item) },
+							} satisfies ChatCompletionContentPartInputAudio);
+						} else {
+							omittedAudio = true;
+						}
 					} else if (supportsImages) {
 						content.push({
 							type: "image_url",
@@ -2545,6 +2559,9 @@ export function convertMessages(
 						type: "text",
 						text: NON_VISION_IMAGE_PLACEHOLDER,
 					} satisfies ChatCompletionContentPartText);
+				}
+				if (omittedAudio) {
+					content.push({ type: "text", text: NON_AUDIO_PLACEHOLDER } satisfies ChatCompletionContentPartText);
 				}
 				if (content.length === 0) continue;
 				params.push({

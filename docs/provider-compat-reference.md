@@ -232,7 +232,7 @@ All providers start from the same neutral wire schema — `toolWireSchema(tool)`
 
 - **Schemas**: `convertTools` + `adaptSchemaForStrict`; strictness from `toolStrictMode` (`all_strict` / `mixed` / `none`) gated by `supportsStrictMode` and per-tool `strict`. `toolSchemaFlavor` selects Moonshot MFJS normalization or local grammar sanitization. Schemas with impossible enum/const values or forbidden residual root unions are quarantined. Wire: `{ type: "function", function: { name, description, parameters, strict? } }`.
 - **Streaming**: `choice.delta.tool_calls` (`index`, `id`, `function.name`, `function.arguments` fragments). MiniMax streams arguments as a raw JSON **object** instead of a string — both shapes are merged (`mergeStreamingArgumentObjects`). Leaked DeepSeek template tokens are stripped per `stripDeepseekSpecialTokens`. `finish_reason: "stop"` is promoted to `"tool_calls"` when structured calls were seen.
-- **Results**: `{ role: "tool", tool_call_id, content }`; Mistral ids normalized; assistant replay sets `tool_calls` array and content `""` (or `"."` under `requiresAssistantContentForToolCalls`). Non-vision models get image placeholders via `partitionVisionContent`.
+- **Results**: `{ role: "tool", tool_call_id, content }`; Mistral ids normalized; assistant replay sets `tool_calls` array and content `""` (or `"."` under `requiresAssistantContentForToolCalls`). Non-vision models get image placeholders via `partitionVisionContent`; `audio/*` blocks go out as `input_audio` parts to a model whose `input` has `audio`, whatever its image support, and as an audio placeholder otherwise.
 
 ### OpenAI Responses (`providers/openai-responses.ts`)
 

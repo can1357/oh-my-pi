@@ -10,7 +10,7 @@
  * one of the axis's declared records.
  */
 import type { Effort } from "../effort";
-import { MODEL_KINDS, type ThinkingControlMode } from "../types";
+import { INPUT_MODALITIES, MODEL_KINDS, type ThinkingControlMode } from "../types";
 import { FACTORY_DROID_UPSTREAMS } from "../wire/factory-droid";
 
 /** Value shape a directive accepts (see `rules/README.md`). */
@@ -460,7 +460,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"discovery-api": { key: "discoveryApi", set: "catalog", shape: "scalar" },
 	"edit-prompt-variant": { key: "editPromptVariant", set: "catalog", shape: "scalar", values: ["full", "compact"] },
 	"edit-revision": { key: "editRevision", set: "catalog", shape: "scalar" },
-	"input-modalities": { key: "inputModalities", set: "catalog", shape: "array", values: ["text", "image"] },
+	"input-modalities": { key: "inputModalities", set: "catalog", shape: "array", values: INPUT_MODALITIES },
 	kind: { key: "kind", set: "catalog", shape: "scalar", values: MODEL_KINDS },
 	"web-search": {
 		key: "webSearch",

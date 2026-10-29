@@ -34,6 +34,7 @@ import {
 	MODEL_KINDS,
 	type Api,
 	type FetchImpl,
+	type InputModality,
 	type Model,
 	type ModelKind,
 	type ModelSpec,
@@ -1867,7 +1868,7 @@ function mapCoralbricksModel(
 			compat = { ...compat, reasoningDisableMode: "none-effort" };
 		}
 	}
-	const input: ("text" | "image")[] =
+	const input: InputModality[] =
 		entry.supports_image_input === true
 			? ["text", "image"]
 			: entry.supports_image_input === false
@@ -3607,11 +3608,17 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 								: [];
 							const thinking = mapOpenRouterThinking(entry);
 							const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
-							const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
-								? toInputCapabilities(architecture.input_modalities)
+							const reportedInput = Array.isArray(architecture?.input_modalities)
+								? architecture.input_modalities
+								: undefined;
+							const input: InputModality[] = reportedInput
+								? toInputCapabilities(reportedInput)
 								: String(architecture?.modality ?? "").includes("image")
 									? ["text", "image"]
 									: ["text"];
+							// OpenRouter carries `input_audio` parts on Chat Completions and Responses
+							// alike, so audio it reports is audio the model hears through it.
+							if (reportedInput?.includes("audio")) input.push("audio");
 							const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
 
 							const supportsToolChoice = params.includes("tool_choice");
