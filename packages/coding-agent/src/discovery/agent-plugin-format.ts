@@ -11,11 +11,16 @@
  * {@link classifyAgentPluginRoot} so roots governed by the standard are not
  * double-loaded through legacy conventions.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { readFile } from "../capability/fs";
-import { isContainedResolved, realpathIfExists, resolveContainedPath } from "./contained-path";
-import { registerPluginCacheInvalidator } from "./helpers";
+import { readFile, readFileSync } from "../capability/fs";
+import {
+	isContainedResolved,
+	realpathIfExists,
+	resolveContainedPath,
+	resolveContainedPathSync,
+} from "./contained-path";
 
 /** Canonical `plugin.json` `$schema` identifier for Agent Plugins 1.0.0 (spec §5.2). */
 export const AGENT_PLUGIN_MANIFEST_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
@@ -488,20 +493,32 @@ export async function parseAgentPluginMcp(raw: string, options: AgentPluginMcpOp
  * - `invalid` — the root claims Agent Plugins conformance but its manifest is
  *   fatally invalid; no component may be discovered or executed (spec §11.3).
  */
-type AgentPluginRootStatus =
+export type AgentPluginRootStatus =
 	| { kind: "none" }
 	| { kind: "standard"; manifest: AgentPluginManifest; warnings: string[]; realRoot: string }
 	| { kind: "invalid"; reason: string };
 
 const rootStatusCache = new Map<string, Promise<AgentPluginRootStatus>>();
-registerPluginCacheInvalidator(() => rootStatusCache.clear());
 
-/** Drop cached classifications (tests, or after plugin installs outside the shared registry flow). */
+/** Drop cached classifications; runs with every plugin roots cache clear (`clearClaudePluginRootsCache`). */
 export function clearAgentPluginRootCache(): void {
 	rootStatusCache.clear();
 }
 
-async function classifyUncached(rootPath: string): Promise<AgentPluginRootStatus> {
+function classifyManifest(raw: string | null, realRoot: string): AgentPluginRootStatus {
+	if (raw === null) return { kind: "none" };
+	const parsed = parseAgentPluginManifest(raw);
+	if (parsed.status === "none") return { kind: "none" };
+	if (parsed.status === "invalid") return { kind: "invalid", reason: parsed.reason };
+	return { kind: "standard", manifest: parsed.manifest, warnings: parsed.warnings, realRoot };
+}
+
+/**
+ * Read a plugin root straight from disk, preserving the shared reader's
+ * regular-file guard. Also used on classification cache misses: two independent
+ * cache lifetimes would retain stale manifest contents after a root refresh.
+ */
+export async function readAgentPluginRootStatus(rootPath: string): Promise<AgentPluginRootStatus> {
 	const realRoot = await realpathIfExists(rootPath);
 	if (realRoot === null) return { kind: "none" };
 
@@ -514,12 +531,7 @@ async function classifyUncached(rootPath: string): Promise<AgentPluginRootStatus
 		return { kind: "invalid", reason: "plugin.json resolves outside the plugin root" };
 	}
 
-	const raw = await readFile(manifest.realPath);
-	if (raw === null) return { kind: "none" };
-	const parsed = parseAgentPluginManifest(raw);
-	if (parsed.status === "none") return { kind: "none" };
-	if (parsed.status === "invalid") return { kind: "invalid", reason: parsed.reason };
-	return { kind: "standard", manifest: parsed.manifest, warnings: parsed.warnings, realRoot };
+	return classifyManifest(await readFile(manifest.realPath, { cache: false }), realRoot);
 }
 
 /**
@@ -530,10 +542,29 @@ async function classifyUncached(rootPath: string): Promise<AgentPluginRootStatus
 export function classifyAgentPluginRoot(rootPath: string): Promise<AgentPluginRootStatus> {
 	let cached = rootStatusCache.get(rootPath);
 	if (!cached) {
-		cached = classifyUncached(rootPath);
+		cached = readAgentPluginRootStatus(rootPath);
 		rootStatusCache.set(rootPath, cached);
 	}
 	return cached;
+}
+
+/**
+ * Revalidate explicit plugin roots before synchronous LSP/DAP configuration
+ * readers run. Never reuse admission recorded at injection time.
+ */
+export function readAgentPluginRootStatusSync(rootPath: string): AgentPluginRootStatus {
+	let realRoot: string;
+	try {
+		realRoot = fs.realpathSync(rootPath);
+	} catch {
+		return { kind: "none" };
+	}
+	const manifest = resolveContainedPathSync(realRoot, path.join(realRoot, "plugin.json"));
+	if (manifest.status === "missing") return { kind: "none" };
+	if (manifest.status === "outside") {
+		return { kind: "invalid", reason: "plugin.json resolves outside the plugin root" };
+	}
+	return classifyManifest(readFileSync(manifest.realPath), realRoot);
 }
 
 /**

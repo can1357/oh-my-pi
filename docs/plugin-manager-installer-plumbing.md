@@ -214,6 +214,14 @@ Manifest entries may point to a file. Tool/hook/command directories require a di
 - Manifest hook/command path resolvers remain exported, but runtime hook/slash discovery uses the conventional capability-provider scans rather than `getAllPluginHookPaths()` or `getAllPluginCommandPaths()`.
 - Direct custom-tool and extension path lists are de-duplicated by resolved absolute path (`seen`, first path wins).
 
+Agent Plugins admission is shared by installed module/tool discovery, configured extension directories, task-agent discovery, and preloaded LSP/DAP config sources:
+
+- Resolve `plugin.json` inside the package root before reading it, then use a regular-file-only reader. FIFOs, sockets, and devices are not read.
+- Cache the classification result, not a second copy of the manifest contents. After `clearPluginRootsAndCaches()`, the next classification reads the current file even when a forced reinstall reused the same cache directory. Marketplace version resolution reads fresh without using the classification cache.
+- Synchronous LSP/DAP readers cannot await a preload. On refresh, revalidate injected `--plugin-dir` roots synchronously: keep still-valid roots available, drop newly invalid ones, and restore repaired ones. Then asynchronously reload registry-backed roots. Only the latest preload may publish its result, so an older in-flight preload cannot restore a rejected root.
+
+These checks govern subsequent discovery and configuration reads; they do not unload already-imported modules or terminate already-running servers.
+
 ## Lock/state management details
 
 `PluginManager` caches runtime config in memory per instance (`#runtimeConfig`) and lazily loads once.

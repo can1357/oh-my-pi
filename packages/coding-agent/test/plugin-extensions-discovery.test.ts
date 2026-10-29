@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { clearPluginRootsAndCaches } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { discoverAndLoadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { getAllPluginToolPaths } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/loader";
 import { __closeExtensionParseCacheForTests } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { getAgentDir, getPluginsDir, removeSyncWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -95,6 +97,69 @@ describe("plugin extension discovery", () => {
 		expect(result.errors).toHaveLength(0);
 		expect(extension).toBeDefined();
 		expect(extension?.commands.has("plugin-ext")).toBe(true);
+	});
+
+	it("refreshes module and tool admission when an installed AP manifest changes at the same path", async () => {
+		const pluginDir = path.join(getPluginsDir(), "node_modules", "@demo", "plugin");
+		const toolPath = path.join(pluginDir, "dist", "tool.ts");
+		fs.writeFileSync(toolPath, "export default () => [];\n");
+		fs.writeFileSync(
+			path.join(pluginDir, "package.json"),
+			JSON.stringify({
+				name: "@demo/plugin",
+				version: "1.0.0",
+				omp: { extensions: ["./dist/extension.ts"], tools: "./dist/tool.ts" },
+			}),
+		);
+		const manifestPath = path.join(pluginDir, "plugin.json");
+		const validManifest = JSON.stringify({
+			$schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+			name: "demo-plugin",
+		});
+		await Bun.write(manifestPath, validManifest);
+		const initial = await discoverAndLoadExtensions([], projectDir.path());
+		expect(initial.extensions.some(ext => ext.commands.has("plugin-ext"))).toBe(true);
+		expect(await getAllPluginToolPaths(projectDir.path())).toContain(toolPath);
+
+		fs.writeFileSync(
+			path.join(pluginDir, "plugin.json"),
+			JSON.stringify({ $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", name: "Bad--Name" }),
+		);
+		clearPluginRootsAndCaches();
+
+		const result = await discoverAndLoadExtensions([], projectDir.path());
+
+		expect(result.extensions.find(ext => ext.path.endsWith(path.join("dist", "extension.ts")))).toBeUndefined();
+		expect(await getAllPluginToolPaths(projectDir.path())).not.toContain(toolPath);
+
+		await Bun.write(manifestPath, validManifest);
+		clearPluginRootsAndCaches();
+		const repaired = await discoverAndLoadExtensions([], projectDir.path());
+		expect(repaired.extensions.some(ext => ext.commands.has("plugin-ext"))).toBe(true);
+		expect(await getAllPluginToolPaths(projectDir.path())).toContain(toolPath);
+	});
+
+	it("loads a configured extension directory only when its Agent Plugins manifest is valid (§5.2)", async () => {
+		const writePackage = (dirName: string, pluginName: string, command: string): string => {
+			const dir = path.join(projectDir.path(), dirName);
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(
+				path.join(dir, "plugin.json"),
+				JSON.stringify({ $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", name: pluginName }),
+			);
+			fs.writeFileSync(
+				path.join(dir, "index.ts"),
+				`export default function(pi) { pi.registerCommand("${command}", { handler: async () => {} }); }\n`,
+			);
+			return dir;
+		};
+		const valid = writePackage("valid-pkg", "valid-pkg", "valid-ext");
+		const invalid = writePackage("invalid-pkg", "Bad--Name", "invalid-ext");
+
+		const result = await discoverAndLoadExtensions([valid, invalid], projectDir.path());
+
+		expect(result.extensions.some(ext => ext.commands.has("valid-ext"))).toBe(true);
+		expect(result.extensions.some(ext => ext.commands.has("invalid-ext"))).toBe(false);
 	});
 
 	it("loads installed plugin extensions that detach API methods", async () => {
