@@ -275,6 +275,29 @@ await runRpcMode(session);
 		expect({ exitCode, signal: child.signalCode }, await stderr).toEqual({ exitCode: 0, signal: null });
 	}, 30_000);
 
+	it("reports the wait bracket for a dialog session_start awaits", async () => {
+		// `user_wait_start` is published once, when the dialog opens — here while
+		// startup is still inside extension initialization. A client that never
+		// receives it reports the session as idle for as long as the dialog stands.
+		await using temp = await TempDir.create("@rpc-startup-dialog-wait-");
+		const child = await spawnStartupDialogRuntime(temp);
+		const stderr = new Response(child.stderr).text();
+		const seen: string[] = [];
+		for await (const frame of readJsonl<unknown>(child.stdout)) {
+			if (!isRecord(frame)) continue;
+			if (frame.type === "user_wait_start") seen.push(`start:${String(frame.prompt)}`);
+			if (frame.type === "user_wait_end") seen.push("end");
+			if (frame.type === "extension_ui_request" && frame.method === "confirm") {
+				seen.push("confirm");
+				child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: frame.id, confirmed: true })}\n`);
+				await child.stdin.flush();
+			}
+			if (frame.type === "extension_ui_request" && frame.method === "notify") child.stdin.end();
+		}
+		await child.exited;
+		expect(seen, await stderr).toEqual(["start:an extension confirm dialog", "confirm", "end"]);
+	}, 30_000);
+
 	it("keeps the label-only wire shape for bare options", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
