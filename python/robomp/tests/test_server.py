@@ -37,6 +37,9 @@ class _PausedPool:
     def wake(self) -> None:
         pass
 
+    def is_ready(self) -> bool:
+        return self.started and not self.stopped
+
     async def cancel_event(self, delivery_id: str) -> bool:
         return False
 
