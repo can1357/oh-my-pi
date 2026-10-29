@@ -2714,8 +2714,9 @@ export class SessionMaintenance {
 		);
 		// The live summary, not one rebuilt from the entry: a resumed session's
 		// archive frames are blob references only the session manager resolves.
-		const standingSummary = this.#host.messages()[0];
-		if (standingSummary?.role === "compactionSummary") tokens += this.#tokenizer.countMessage(standingSummary);
+		// Context notes can precede it.
+		const standingSummary = this.#host.messages().find(message => message.role === "compactionSummary");
+		if (standingSummary) tokens += this.#tokenizer.countMessage(standingSummary);
 		tokens += this.#tokenizer.countMessages(preparation.messagesToSummarize, opts);
 		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages, opts);
 		tokens += this.#tokenizer.countMessages(preparation.recentMessages, opts);

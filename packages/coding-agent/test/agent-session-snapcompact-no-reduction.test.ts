@@ -30,6 +30,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { rejectionOf } from "./helpers/rejection";
 
 describe("AgentSession snapcompact no-reduction guard", () => {
 	let session: AgentSession;
@@ -420,10 +421,11 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 	 * A resumed session whose live context opens with a 10-frame snapcompact
 	 * archive (its frames blob references until read), followed by a few short
 	 * turns. A new archive of `frames` frames replaces that archive and the turns.
+	 * `contextNotes` puts persisted context notes ahead of the archive.
 	 */
 	async function createArchivedSession(
 		frames: number,
-		settings: Record<string, unknown> = {},
+		{ settings = {}, contextNotes }: { settings?: Record<string, unknown>; contextNotes?: string } = {},
 	): Promise<{ session: AgentSession; previousId: string }> {
 		tempDir = TempDir.createSync("@pi-snapcompact-resumed-archive-");
 		setAgentDir(path.join(tempDir.path(), "agent"));
@@ -436,6 +438,7 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 
 		const sessionDir = path.join(tempDir.path(), "sessions");
 		const writer = SessionManager.create(tempDir.path(), sessionDir);
+		if (contextNotes) writer.appendCustomEntry("experimental_context_notes", { version: 1, text: contextNotes });
 		writer.appendMessage(text("user", "first question", 1));
 		writer.appendMessage(text("assistant", "first answer", 2));
 		const keptId = writer.appendMessage(text("user", "second question", 3));
@@ -508,18 +511,26 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 		expect(latestArchiveFrames(session, previousId)).toBe(6);
 	});
 
+	it("commits a manual /compact snapcompact when context notes precede the archive", async () => {
+		const { session, previousId } = await createArchivedSession(6, { contextNotes: "Keep the rollback decision." });
+		expect(session.agent.state.messages[0]?.role).toBe("custom");
+
+		await session.compact(undefined, { mode: "snapcompact" });
+
+		expect(latestArchiveFrames(session, previousId)).toBe(6);
+	});
+
 	it("rejects a manual /compact snapcompact whose archive outgrows the one it replaces", async () => {
 		const { session, previousId } = await createArchivedSession(PREVIOUS_FRAMES + 2);
 
-		await expect(session.compact(undefined, { mode: "snapcompact" })).rejects.toThrow(
-			"snapcompact would not reduce context",
-		);
+		const error = await rejectionOf(session.compact(undefined, { mode: "snapcompact" }));
+		expect(String(error)).toContain("snapcompact would not reduce context");
 		expect(latestArchiveFrames(session, previousId)).toBeUndefined();
 	});
 
 	it("names snapcompact's refusal when plain /compact falls back to the next method", async () => {
 		const { session } = await createArchivedSession(PREVIOUS_FRAMES + 2, {
-			"compaction.methodOrder": ["snapcompact", "soft"],
+			settings: { "compaction.methodOrder": ["snapcompact", "soft"] },
 		});
 		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
 			summary: "llm summary",
@@ -551,8 +562,7 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 	it("commits a pre-prompt snapcompact whose archive is smaller than the one it replaces", async () => {
 		// The standing 10-frame archive alone puts the context over this trigger.
 		const { session, previousId } = await createArchivedSession(6, {
-			"compaction.thresholdTokens": 2_000,
-			"contextPromotion.enabled": false,
+			settings: { "compaction.thresholdTokens": 2_000, "contextPromotion.enabled": false },
 		});
 		const ends: { reason?: string; committed: boolean }[] = [];
 		let reason: string | undefined;
