@@ -61,6 +61,7 @@ import {
 } from "./messages";
 import {
 	type ActiveRetryFallbackState,
+	calculateFullJitterRetryDelayMs,
 	calculateRetryBackoffDelayMs,
 	findRetryFallbackCandidates,
 	formatRetryFallbackBaseSelector,
@@ -107,6 +108,10 @@ const UNEXPECTED_STOP_TIMEOUT_MS = 15_000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
+/** Retry attempts a statusless wire failure keeps on the same model before the fallback chain is consulted. */
+const CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS = 2;
+/** Marker a provider's formatted failure event leaves on the persisted message, e.g. `(code=model_error)`. */
+const PROVIDER_FAILURE_EVENT_CODE_RE = /\(code=[^)]+\)/;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -1762,27 +1767,107 @@ export class TurnRecovery {
 		);
 	}
 	/**
-	 * First-attempt mid-stream socket drop with streamed progress: the transport
-	 * died after the model had already emitted reasoning or tool calls, so the
-	 * failure says nothing about model health — retry the same model once before
-	 * consulting the fallback chain. A drop with no streamed content keeps the
-	 * immediate fallback (a different route may genuinely help), as do later
-	 * attempts. Never applies once the retry budget is spent (e.g.
-	 * `retry.maxRetries: 0`): there is no same-model retry left, so the
-	 * fallback-chain consult is the only recovery. Mirrors the stall handler's
-	 * socket check, extended to turns with tool calls.
+	 * Statusless wire failure the fallback chain waits behind: the socket, the
+	 * SSE stream or the chunked transfer died ({@link AIError.Flag.Connection})
+	 * on a request no layer below turn recovery has replayed. Nothing the model
+	 * produced caused it, so an identical replay is worth making before the
+	 * chain moves the session to a weaker model.
+	 *
+	 * "No layer below replayed it" is read two ways, because the layers below
+	 * stop for two different reasons.
+	 *
+	 * - **The model had begun streaming.** Each lower retry ends exactly there:
+	 *   the Anthropic provider loop retries only while `firstTokenTime ===
+	 *   undefined` and nothing replay-unsafe has streamed (`anthropic.ts`,
+	 *   `canRetryProviderFailure`), the OpenAI pre-output retry only while
+	 *   `!committed` (`empty-completion-retry.ts`), and `fetchWithRetry` only
+	 *   before a response body exists at all.
+	 * - **The wording is one no provider loop retries.** Their gate is
+	 *   `AIError.isProviderRetryableError`; a diagnostic it rejects — an in-band
+	 *   `TransferEncodingError`, `premature close`, `read ECONNRESET`, `write
+	 *   EPIPE`, `upstream closed the connection` — was made once and never
+	 *   replayed, whether or not anything streamed.
+	 *
+	 * The converse is what keeps this from multiplying their work: a
+	 * contentless failure a provider loop *does* retry has already cost eleven
+	 * requests on `anthropic-messages`, twelve on `openai-completions`, or six
+	 * on `openai-codex-responses`, and holding the chain for it would run those
+	 * loops again. The loops differ in what they read, which is why the second
+	 * reading above has two parts: `anthropic-messages` and the OpenAI
+	 * pre-output retry (`openai-completions` and `azure-openai-responses` only)
+	 * decide from `isProviderRetryableError` on the text, while
+	 * `openai-codex-responses` decides from its event's code, which the
+	 * `(code=…)` marker on the persisted message betrays. `cursor` resumes a
+	 * stream it judges incomplete, and that error never carries this flag.
+	 * On `openai-responses`, `google-gemini-cli`, `amazon-bedrock` and `ollama`
+	 * nothing below replays a provider error at all.
+	 *
+	 * The stand-in is close, not exact. A provider loop can spend its whole
+	 * budget on contentless failures and then fail *with* content, so the held
+	 * attempts land on top of a loop that did run; that costs one further loop
+	 * and needs the wire to alternate failure modes, which the gateway's own
+	 * failure log does not show.
+	 *
+	 * Marking the message "retries spent" at each provider instead was the
+	 * alternative: it is more direct but needs a new field threaded through
+	 * every retrying layer, and `fetchWithRetry` builds no message, so its six
+	 * attempts would stay invisible and the signal would be wrong in exactly
+	 * the case that matters. Streamed content is one observable fact that every
+	 * layer below already agrees on.
+	 *
+	 * Held for the first {@link CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS} retry
+	 * attempts, so the failing model is asked three times in all. Each held
+	 * retry waits a full-jitter backoff (`[0, min(base × 2^(n-1), 8s))`), so a
+	 * fleet that fails together does not re-request together; worst case ~1.5s
+	 * of added wait at the 500ms default. Past the hold the failure walks the
+	 * chain exactly as a capacity failure does from its first occurrence, so a
+	 * route that stays dead still reaches the chain and then the retry budget.
+	 *
+	 * Excluded on purpose:
+	 * - capacity (429, 529, overloaded, a usage limit) — the replay re-hits the
+	 *   same cap while a chain entry may sit under a different one;
+	 * - a classifier refusal and an account-policy denial, which reproduce;
+	 * - a timeout ({@link AIError.Flag.Timeout}) — each held replay costs a
+	 *   whole first-event window, minutes against a wedged route, for evidence
+	 *   that already points at the route rather than at the wire.
+	 *
+	 * Never applies once the retry budget is spent (e.g. `retry.maxRetries: 0`):
+	 * there is no same-model retry left, so the fallback-chain consult is the
+	 * only recovery.
 	 */
-	#isFirstAttemptMidStreamSocketDrop(message: AssistantMessage, id: number, retryBudgetExhausted: boolean): boolean {
-		if (this.#retryAttempt !== 1 || retryBudgetExhausted) return false;
+	#holdsChainForConnectionRetry(message: AssistantMessage, id: number, retryBudgetExhausted: boolean): boolean {
+		if (retryBudgetExhausted || this.#retryAttempt > CONNECTION_FAILURE_CHAIN_HOLD_ATTEMPTS) return false;
 		if (message.stopReason !== "error" || !AIError.retriable(id)) return false;
 		if (this.#host.streamingEditAbortTriggered()) return false;
-		if (!isUnexpectedSocketCloseMessage(message.errorMessage ?? "")) return false;
-		return message.content.some(
-			block =>
-				(block.type === "thinking" && block.thinking.trim().length > 0) ||
-				block.type === "toolCall" ||
-				(block.type === "text" && block.text.trim().length > 0),
-		);
+		if (AIError.is(id, AIError.Flag.Timeout)) return false;
+		if (AIError.is(id, AIError.Flag.AccountPolicy) || this.isClassifierRefusal(message)) return false;
+		if (!AIError.is(id, AIError.Flag.Connection)) return false;
+		if (
+			message.content.some(
+				block =>
+					(block.type === "thinking" && block.thinking.trim().length > 0) ||
+					block.type === "redactedThinking" ||
+					block.type === "toolCall" ||
+					(block.type === "text" && block.text.trim().length > 0),
+			)
+		) {
+			return true;
+		}
+		// Nothing streamed, so the hold rests on the wording naming a failure no
+		// provider loop would have replayed. Two things have to be true.
+		//
+		// A provider that emits a structured failure event decides its own
+		// replay from that event's code, not from the text
+		// (`openai-codex-responses` keys on `CODEX_RETRYABLE_EVENT_CODES` and
+		// retries up to five times while nothing has streamed), so a message
+		// carrying a `(code=…)` marker has already been through such a loop
+		// whatever the prose around it says.
+		if (PROVIDER_FAILURE_EVENT_CODE_RE.test(message.errorMessage ?? "")) return false;
+		// Otherwise the text is all there is, and every loop that reads text
+		// gates on `AIError.isProviderRetryableError`: a diagnostic it rejects
+		// (an in-band `TransferEncodingError`, `premature close`, `read
+		// ECONNRESET`) reached here on its first and only request.
+		return !AIError.isProviderRetryableError(new Error(message.errorMessage ?? ""));
 	}
 
 	/** Checks whether a provider error represents a classifier refusal. */
@@ -2682,9 +2767,16 @@ export class TurnRecovery {
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+		// A held wire failure takes full jitter, not the narrow band: every
+		// session streaming through one gateway loses its stream in the same
+		// millisecond when that gateway restarts, and they must not all replay
+		// in the same quarter-window.
+		const connectionHold = this.#holdsChainForConnectionRetry(message, id, retryBudgetExhausted);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
-			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+			: connectionHold
+				? calculateFullJitterRetryDelayMs(retrySettings.baseDelayMs, this.#retryAttempt)
+				: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
 		// Transient rate/concurrency caps stay on the same credential, but must
 		// honor their reason-specific windows. The default exponential base
 		// (≈500ms, capped at 8s) otherwise re-hits the cap and burns the retry
@@ -2943,7 +3035,7 @@ export class TurnRecovery {
 				!sameModelSteerReplay &&
 				!waitForSiblingCredential &&
 				!refusalWalkRepeats &&
-				!this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted)
+				!connectionHold
 			) {
 				if (classifierRefusal) {
 					this.#refusalWalkTried.add(refusalWalkKey);

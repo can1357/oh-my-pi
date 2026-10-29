@@ -32,6 +32,23 @@ const SOCKET_CLOSE_MID_STREAM =
 const RETRIABLE_SERVER_ERROR = "503 service unavailable: overloaded_error";
 const CODEX_STEER_REJECTION =
 	"Codex error event: The experimental native turn lane cannot accept stateful WebSocket messages while a native turn is running. Start a new independent response.create turn instead. (code=unsupported_native_inflight_message)";
+/** A gateway's own chunked-transfer diagnostic for a cut SSE body — no HTTP status. */
+const TRANSFER_ENCODING_CUT = "TransferEncodingError: the chunked response body ended before its terminating chunk";
+/** A gateway 5xx raised before the request ever reached a model. */
+const GATEWAY_KEY_LOOKUP_500 = "500 Internal Server Error: key lookup did not answer within 10s";
+const RATE_LIMIT_429 = "429 Too Many Requests: rate limit exceeded";
+const OVERLOADED_529 = "529 Overloaded";
+/** A gateway naming its upstream's throttle beside its own wire diagnostic — no HTTP status. */
+const THROTTLE_WITH_WIRE_WORDING = "TooManyRequests: upstream closed the connection";
+/** What the Anthropic client reports once its own provider retries are spent. */
+const PROVIDER_CONNECTION_ERROR = "Connection error.";
+/**
+ * Envoy's own diagnostic for an upstream that never answered. It reads as both
+ * a wire failure and a timeout, which is what makes it test the timeout
+ * exclusion rather than pass because no flag was set at all.
+ */
+const ENVOY_CONNECTION_TIMEOUT =
+	"upstream connect error or disconnect/reset before headers. reset reason: connection timeout";
 
 function emptyUsage(): Usage {
 	return {
@@ -568,6 +585,7 @@ describe("AgentSession retry recovery", () => {
 		requestedModels: string[];
 		fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>>;
 		sessionManager: SessionManager;
+		retryStartDelaysMs: number[];
 	}> {
 		const { primary: model, fallback: fallbackModel } = models;
 		if (!model || !fallbackModel) {
@@ -604,14 +622,16 @@ describe("AgentSession retry recovery", () => {
 		sessions.push(session);
 		mockSchedulerWaitWithClock();
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const retryStartDelaysMs: number[] = [];
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
+			if (event.type === "auto_retry_start") retryStartDelaysMs.push(event.delayMs);
 		});
 
 		await session.prompt("Trigger a socket drop");
 		await session.waitForIdle();
 		await sessionManager.flush();
-		return { primary, fallback, requestedModels, fallbackEvents, sessionManager };
+		return { primary, fallback, requestedModels, fallbackEvents, sessionManager, retryStartDelaysMs };
 	}
 
 	const droppedAfterThinking: MockResponse = {
@@ -637,16 +657,17 @@ describe("AgentSession retry recovery", () => {
 		expect(errors[0].message.retryRecovery).toMatchObject({ recovery: "plain", note: "error; retried" });
 	});
 
-	it("retries the same model only once, then consults the fallback chain", async () => {
-		// The same-model retry is bounded to the first attempt: a second drop must
-		// fall through to the chain rather than keep retrying the primary.
+	it("keeps a repeated wire failure on the same model for two retries, then consults the fallback chain", async () => {
+		// The same-model hold is bounded: a third drop falls through to the chain
+		// rather than keep retrying the primary for ever.
 		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			droppedAfterThinking,
 			droppedAfterThinking,
 			droppedAfterThinking,
 			{ content: ["recovered on fallback"], stopReason: "stop" },
 		]);
 
-		expect(requestedModels).toEqual([primary, primary, fallback]);
+		expect(requestedModels).toEqual([primary, primary, primary, fallback]);
 		expect(fallbackEvents).toHaveLength(1);
 	});
 
@@ -662,9 +683,11 @@ describe("AgentSession retry recovery", () => {
 		expect(fallbackEvents).toHaveLength(1);
 	});
 
-	it("keeps the immediate fallback for a socket drop with no streamed content", async () => {
-		// No progress streamed before the drop, so a different route may genuinely
-		// help: the first attempt still switches to the fallback chain.
+	it("keeps the immediate fallback for a wire failure that streamed nothing", async () => {
+		// Nothing streamed means the layers below turn recovery have already
+		// replayed this request on their own budgets — up to eleven times on the
+		// Anthropic route. Holding the chain here would run those loops again,
+		// so the first attempt still switches.
 		const { primary, fallback, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery([
 			{ stopReason: "error", errorMessage: SOCKET_CLOSE_MID_STREAM },
 			{ content: ["recovered on fallback"], stopReason: "stop" },
@@ -673,9 +696,168 @@ describe("AgentSession retry recovery", () => {
 		expect(requestedModels).toEqual([primary, fallback]);
 		expect(fallbackEvents).toHaveLength(1);
 		successfulAssistantEntry(sessionManager, "recovered on fallback");
-		const errors = assistantEntries(sessionManager).filter(candidate => candidate.message.stopReason === "error");
-		expect(errors).toHaveLength(1);
-		expect(errors[0].message.retryRecovery).toMatchObject({ recovery: "model" });
+	});
+
+	it("keeps the immediate fallback for a provider connection error wrapping a wire cause", async () => {
+		// `Connection error.` is what the Anthropic client reports once its own
+		// ten provider retries are spent; the wire wording rides in on the
+		// cause. The chain must not wait behind a request already replayed.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{ stopReason: "error", errorMessage: PROVIDER_CONNECTION_ERROR },
+			{ content: ["recovered on fallback"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+	});
+
+	it("retries a cut chunked transfer on the same model instead of advancing the chain", async () => {
+		// A gateway relaying SSE reports its own transfer-encoding diagnostic
+		// rather than the runtime's socket wording. Before this was classified
+		// the wording matched no transport pattern, so the turn advanced the
+		// chain on the first failure instead of replaying a route that works.
+		const { primary, requestedModels, fallbackEvents, sessionManager } = await runFallbackChainRecovery([
+			{
+				content: [{ type: "thinking", thinking: "partial plan for the edit" }],
+				stopReason: "error",
+				errorMessage: TRANSFER_ENCODING_CUT,
+			},
+			{ content: ["recovered on the same model"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, primary]);
+		expect(fallbackEvents).toEqual([]);
+		successfulAssistantEntry(sessionManager, "recovered on the same model");
+	});
+
+	it("advances the fallback chain at once for a timeout that streamed reasoning", async () => {
+		// A held replay of a timeout costs a whole first-event window each, so
+		// the timeout exclusion must hold even where every other condition of
+		// the hold is met.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{
+				content: [{ type: "thinking", thinking: "partial plan for the edit" }],
+				stopReason: "error",
+				errorMessage: ENVOY_CONNECTION_TIMEOUT,
+			},
+			{ content: ["recovered on fallback"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+	});
+
+	it("waits a full-jitter backoff on a held retry, not the narrow band", async () => {
+		// With `Math.random()` pinned at 0, full jitter is 0ms while the usual
+		// 0.75-1.0 band is the whole capped delay. A fleet cut together must be
+		// able to land anywhere in the window, not only in its last quarter.
+		vi.spyOn(Math, "random").mockReturnValue(0);
+		const { requestedModels, primary, retryStartDelaysMs } = await runFallbackChainRecovery([
+			droppedAfterThinking,
+			{ content: ["recovered on the same model"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, primary]);
+		expect(retryStartDelaysMs).toEqual([0]);
+	});
+
+	it("advances the fallback chain at once for an account-policy denial worded as a wire failure", async () => {
+		// The denial is account-scoped and reproduces on replay; another
+		// credential or another model is the recovery, not a third try here.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{
+				content: [{ type: "thinking", thinking: "partial plan for the edit" }],
+				stopReason: "error",
+				errorMessage: "permission_error: socket is closed",
+			},
+			{ content: ["recovered on fallback"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+	});
+
+	it("advances the fallback chain at once for a refusal worded as a wire failure", async () => {
+		// A refusal reproduces on the same model however the stream then died.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{
+				content: [{ type: "thinking", thinking: "partial plan for the edit" }],
+				stopReason: "error",
+				stopDetails: { type: "refusal" },
+				errorMessage: "socket is closed",
+			},
+			{ content: ["recovered on fallback"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+	});
+
+	it("retries a cut that streamed nothing when no provider loop would have replayed it", async () => {
+		// `premature close` matches no transient transport pattern, so every
+		// provider loop declined it and this is its first and only request.
+		const { primary, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{ stopReason: "error", errorMessage: "premature close" },
+			{ content: ["recovered on the same model"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, primary]);
+		expect(fallbackEvents).toEqual([]);
+	});
+
+	it("keeps the immediate fallback for a provider failure event its own loop retries", async () => {
+		// Codex decides its replay from the event's code, not the prose, and
+		// retries up to five times while nothing has streamed; holding the chain
+		// on the wording would run that loop again.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{ stopReason: "error", errorMessage: "Codex error event: upstream closed the connection (code=model_error)" },
+			{ content: ["recovered on fallback"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+	});
+
+	it.each([
+		["a gateway 5xx raised before any model output", GATEWAY_KEY_LOOKUP_500],
+		["a rate limit", RATE_LIMIT_429],
+		["an overload", OVERLOADED_529],
+		["a statusless throttle reported as the wire died", THROTTLE_WITH_WIRE_WORDING],
+	])("advances the fallback chain on the first failure for %s", async (_label, errorMessage) => {
+		// The first three carry a status, so the transport retry and the
+		// provider's pre-output retry have already replayed the same model many
+		// times. The fourth carries none, but names a cap the replay re-hits
+		// while a chain entry may sit under a different one. None may hold the
+		// chain.
+		const { primary, fallback, requestedModels, fallbackEvents } = await runFallbackChainRecovery([
+			{ stopReason: "error", errorMessage },
+			{ content: ["recovered on fallback"], stopReason: "stop" },
+		]);
+
+		expect(requestedModels).toEqual([primary, fallback]);
+		expect(fallbackEvents).toHaveLength(1);
+	});
+
+	it("ends on the retry budget when the wire keeps failing past the chain", async () => {
+		// The hold delays the chain, it does not replace the budget: once the
+		// chain entry fails the same way the turn must terminate, not loop.
+		const { primary, fallback, requestedModels } = await runFallbackChainRecovery(
+			[
+				droppedAfterThinking,
+				droppedAfterThinking,
+				droppedAfterThinking,
+				droppedAfterThinking,
+				droppedAfterThinking,
+				droppedAfterThinking,
+				droppedAfterThinking,
+				droppedAfterThinking,
+			],
+			2,
+		);
+
+		// Three tries on the primary, the chain's one entry, its own held retry,
+		// then the spent budget ends the turn — eight scripted failures, five requests.
+		expect(requestedModels).toEqual([primary, primary, primary, fallback, fallback]);
 	});
 
 	const codexModels = {

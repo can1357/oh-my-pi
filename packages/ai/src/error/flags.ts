@@ -15,6 +15,7 @@ import {
 	isUsageLimitStatus,
 	matchesUsageLimitText,
 	parseRateLimitReason,
+	type RateLimitReason,
 } from "./rate-limit";
 
 export const Flag = {
@@ -51,6 +52,25 @@ export const Flag = {
 	 * status value, so no raw status id can set it.
 	 */
 	CacheControlUnsupported: 0x0000_0800,
+	/**
+	 * The request died on the wire with no HTTP status: a socket or stream
+	 * closed, a chunked transfer was cut mid-body, an SSE stream ended before
+	 * its terminal event. Nothing the model produced caused it, and no lower
+	 * retry budget covers it — `fetchWithRetry` and the provider's pre-output
+	 * retry both end once a status line has arrived.
+	 *
+	 * Deliberately exclusive of capacity signals (429, 529, overloaded, quota):
+	 * those say the host declined to serve, which another model can serve now.
+	 * Also exclusive of any failure carrying a status, including a gateway's
+	 * own 5xx — that one the transport already replayed on its own budget.
+	 * Turn recovery uses the distinction to decide whether an identical replay
+	 * is worth trying before the fallback chain advances.
+	 *
+	 * Claims a low bit for the reason {@link Flag.CacheControlUnsupported}
+	 * documents: 0x400 is 1024, above every HTTP status, so no raw status id
+	 * can set it.
+	 */
+	Connection: 0x0000_0400,
 	/** HTTP 413 byte/media rejection — token compaction cannot shrink bytes or media budgets (#9235). */
 	PayloadRejected: 0x8000_0000,
 } as const;
@@ -77,6 +97,7 @@ const KIND_MASK =
 	Flag.Grammar |
 	Flag.FastModeUnsupported |
 	Flag.CacheControlUnsupported |
+	Flag.Connection |
 	Flag.OAuthExpiry;
 
 const RETRIABLE_KINDS =
@@ -465,6 +486,7 @@ export function isOAuthExpiry(errorMessage: string): boolean {
 const ERROR_KIND_LABELS: readonly [Flag, string][] = [
 	[Flag.ThinkingLoop, "thinking-loop"],
 	[Flag.Transient, "transient"],
+	[Flag.Connection, "connection"],
 	[Flag.Timeout, "timeout"],
 	[Flag.UsageLimit, "usage-limit"],
 	[Flag.StaleResponsesItem, "stale-responses-item"],
@@ -594,6 +616,107 @@ function isTransientErrorText(text: string): boolean {
 	);
 }
 
+/**
+ * Capacity wording the rate-limit parsers do not already name: a far side that
+ * answered and declined to serve for load. The parsers own every throttle with
+ * a recognised reason or usage-limit phrasing, so this covers only the plain
+ * English and the bare status codes they leave, including the spellings a
+ * gateway emits beside its own transport diagnostic (`TooManyRequests`,
+ * `slow down`, `model is busy`).
+ */
+const CAPACITY_PRESSURE_PATTERN =
+	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|\bbusy\b|rate.?limit|too[ _-]?many[ _-]?requests|service.?unavailable|temporar(?:y|ily)[ _-]?unavailable|slow down|\b(?:429|503|529)\b/i;
+
+/**
+ * Whether the far side declined to serve for load or quota, so an identical
+ * replay re-hits the same cap. Defers to the rate-limit parsers first; the
+ * regex only covers what they leave.
+ */
+function isCapacityPressure(text: string, reason: RateLimitReason): boolean {
+	if (reason !== "UNKNOWN") return true;
+	if (matchesUsageLimitText(text)) return true;
+	return CAPACITY_PRESSURE_PATTERN.test(text);
+}
+
+/**
+ * Transport diagnostics for a wire that died after the request was accepted:
+ * the socket, the SSE stream or the chunked transfer failed partway. Two kinds
+ * of wording are deliberately absent. Connect-phase (`unable to connect`,
+ * `fetch failed`, `ECONNREFUSED`, `EAI_AGAIN`, `ETIMEDOUT`) is already
+ * replayed by `fetchWithRetry` on its own budget. A bare mention of the
+ * transfer-encoding header is a request fault, not a cut body, so only the
+ * error spelling matches.
+ */
+const CONNECTION_FAILURE_PATTERN =
+	/connection (?:closed|reset|aborted)|closed the connection|socket hang up|socket is closed|other side closed|use of closed network connection|reset before headers|premature close|incomplete chunked|transfer[ _-]?encoding\s*error|\bECONNRESET\b|\bEPIPE\b|HTTP2(?:StreamReset|RefusedStream)/i;
+
+/**
+ * undici's whole diagnostic for a response body that ended early is the bare
+ * word `terminated`. Anchored, because the word on its own inside a sentence
+ * means something else entirely — a killed process ("Process terminated by
+ * signal SIGKILL"), a policy stop ("terminated: content policy") — neither of
+ * which an identical replay recovers.
+ */
+const UNDICI_TERMINATED_PATTERN = /^(?:TypeError:\s*)?terminated\.?$/i;
+
+/**
+ * Wire failures a runtime reports only as an errno on `err.code`, leaving the
+ * message generic. `UND_ERR_SOCKET` is undici's own code for a socket that
+ * died mid-response.
+ *
+ * Not handled, and deliberately: an HTTP/2 GOAWAY. Every route in use here is
+ * HTTP/1.1, the frame surfaces differently in each runtime, and widening the
+ * flag on wording nobody has observed would be a guess. Revisit when a route
+ * actually speaks HTTP/2.
+ *
+ * Errnos only, never a provider's own error code: the branch that reads this
+ * does not look at the message, so a code copied verbatim from an upstream
+ * payload must never be matched here, or a terminal failure becomes retriable.
+ */
+const WIRE_FAILURE_CODE_PATTERN = /^(?:ECONNRESET|EPIPE|ECONNABORTED|UND_ERR_SOCKET)$/;
+
+/**
+ * Whether a failure happened on the wire rather than at the model — see
+ * {@link Flag.Connection}.
+ *
+ * Restricted to failures carrying no HTTP status. A status means the request
+ * reached a status line, which `fetchWithRetry` and the provider's pre-output
+ * retry already replay on their own budgets; by the time such an error reaches
+ * turn recovery the same model has been asked many times. A statusless wire
+ * failure — the stream cut mid-body, the socket closed, the chunked transfer
+ * truncated — is past the point either of those budgets covers, so it arrives
+ * with almost no replay spent on it.
+ */
+function isConnectionFailure(text: string, status: number | undefined, reason: RateLimitReason): boolean {
+	if (status !== undefined) return false;
+	if (isCapacityPressure(text, reason)) return false;
+	return (
+		isUnexpectedSocketCloseMessage(text) ||
+		isStreamReadErrorText(text) ||
+		PYTHON_HTTP2_STREAM_RESET_PATTERN.test(text) ||
+		PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(text) ||
+		isStreamEnvelopeTruncationText(text) ||
+		isTransientStreamDropError(text) ||
+		isTransientStreamParseError(text) ||
+		CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(text) ||
+		UNDICI_TERMINATED_PATTERN.test(text.trim()) ||
+		CONNECTION_FAILURE_PATTERN.test(text)
+	);
+}
+
+/**
+ * `Flag.Connection` means "no status, no capacity signal", but both assembly
+ * points OR per-link kinds together: a statusless connection-worded cause
+ * under a 429 or 5xx wrapper, or beside a proven usage limit, would otherwise
+ * carry the bit past its own guard and hold the fallback chain for a throttled
+ * route. Strip it when the assembled picture contradicts it.
+ */
+function withoutContradictedConnection(kinds: number, status: number | undefined): number {
+	if ((kinds & Flag.Connection) === 0) return kinds;
+	if (status !== undefined || (kinds & Flag.UsageLimit) !== 0) return kinds & ~Flag.Connection;
+	return kinds;
+}
+
 function isTimeoutText(text: string): boolean {
 	return TIMEOUT_PATTERN.test(text);
 }
@@ -713,6 +836,13 @@ function classifyText(
 			) {
 				kinds |= Flag.Transient;
 			}
+			// Connection-level within the same non-terminal-4xx window: the wire or
+			// a gateway in front of the model failed, so an identical replay is
+			// worth one cheap try before the fallback chain advances. A usage limit
+			// already proven above is a cap the replay re-hits, never that.
+			if ((kinds & Flag.UsageLimit) === 0 && isConnectionFailure(errorMessage, statusClean, reason)) {
+				kinds |= Flag.Connection | Flag.Transient;
+			}
 		}
 		// A concurrency cap (e.g. Vertex "Online prediction concurrent requests
 		// quota exceeded") is transient — shed-and-backoff. The bare wording need
@@ -778,6 +908,13 @@ export function classify(error: unknown, api?: Api): number {
 					kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
 				} else if (ANTHROPIC_ACCOUNT_POLICY_PATTERN.test(link.code)) {
 					kinds |= Flag.AccountPolicy;
+				}
+				// A runtime that reports the wire failure as an errno puts it in
+				// `code` and leaves the message generic ("fetch failed"), so the
+				// text predicates never see it. The status gate still applies, via
+				// `withoutContradictedConnection` below.
+				if (WIRE_FAILURE_CODE_PATTERN.test(link.code)) {
+					kinds |= Flag.Connection | Flag.Transient;
 				}
 			}
 		}
@@ -859,7 +996,7 @@ export function classify(error: unknown, api?: Api): number {
 		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
 	}
 
-	return kinds !== 0 ? create(kinds) : (status(error) ?? 0);
+	return kinds !== 0 ? create(withoutContradictedConnection(kinds, status(error))) : (status(error) ?? 0);
 }
 
 /**
@@ -1028,6 +1165,7 @@ export function classifyMessage(message: {
 		// auto-retry would loop. Strip Transient so the recovery message surfaces immediately.
 		kinds &= ~Flag.Transient;
 	}
+	kinds = withoutContradictedConnection(kinds, currentStatus);
 	const id = kinds !== 0 ? create(kinds) : (statusFromId(textId) ?? statusFromId(existingId) ?? currentStatus ?? 0);
 
 	message.errorId = id;
