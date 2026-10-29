@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-### Changed
 
+### Changed
 - Reduced the work done while a response streams, so long streaming replies no longer stutter as chunks arrive ([#15207](https://github.com/can1357/oh-my-pi/pull/15207) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
