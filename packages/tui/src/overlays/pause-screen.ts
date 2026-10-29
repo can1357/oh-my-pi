@@ -44,8 +44,12 @@ export interface PauseScreenHost {
 		showOverlay(component: Component, options?: OverlayOptions): OverlayHandle;
 		setFocus(component: Component): void;
 		requestRender(): void;
-		/** Paint one frame synchronously, without the scheduler's hop and cadence. */
-		renderNow(): void;
+		/**
+		 * Paint one frame without the scheduler's hop and cadence, and resolve
+		 * once the terminal holds it. Bounded: a terminal that answers nothing
+		 * delays the resolution by the native backend's stall span at most.
+		 */
+		renderNowAccepted(): Promise<void>;
 		readonly terminal: { readonly rows: number };
 	};
 	showStatus(message: string, options?: { dim?: boolean }): void;
@@ -442,11 +446,15 @@ export async function runPauseScreen(host: PauseScreenHost, options?: PauseScree
 				// holding a focused, full-screen PAUSED frame over a running
 				// session — the very defect the paint below exists to prevent.
 				overlay.hide();
-				// `overlay.hide()` only schedules a frame, while `resume()` wakes every
-				// parked agent loop in the same tick. Paint synchronously before opening
-				// the gate so the terminal cannot retain the PAUSED frame while resumed
-				// work runs.
-				host.ui.renderNow();
+				// `overlay.hide()` only schedules a frame, `resume()` wakes every
+				// parked agent loop in the same tick, and a native (TSP) surface
+				// keeps a frame back while the terminal owes acknowledgements —
+				// the PAUSED sheet is one of its overlays, so the terminal would
+				// go on showing it. Paint, then wait for the terminal to take
+				// the dismissal, before the gate opens: no agent may touch the
+				// repo while the screen still says PAUSED. The wait is bounded,
+				// so it cannot strand the pause either.
+				await host.ui.renderNowAccepted();
 			}
 		}
 	} finally {

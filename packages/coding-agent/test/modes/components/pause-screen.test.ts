@@ -55,8 +55,9 @@ function makeHost(rows = 24): FakeHost {
 			requestRender() {
 				requests++;
 			},
-			renderNow() {
+			renderNowAccepted() {
 				order.push("paint");
+				return Promise.resolve();
 			},
 			terminal: { rows },
 		},

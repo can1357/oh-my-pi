@@ -2807,6 +2807,23 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Paint one frame now and resolve once the terminal holds it.
+	 *
+	 * The row renderer writes its frame during the paint, so the wait is over
+	 * when it returns. A native (TSP) surface instead keeps a frame back while
+	 * the terminal owes acknowledgements, leaving the previous one on screen,
+	 * so the wait ends there when the terminal has acknowledged what this
+	 * paint described — and after the backend's stall span whatever the
+	 * terminal does, so a silent terminal can delay a caller but never park
+	 * it. For a caller whose next step must not run behind a stale frame, such
+	 * as the `/pause` screen opening the agent gate.
+	 */
+	async renderNowAccepted(): Promise<void> {
+		this.renderNow();
+		if (this.#nativeLive) await this.#native!.acknowledged();
+	}
+
+	/**
 	 * Schedule a render on behalf of `component` after a self-contained change
 	 * (spinner frame, blink). Frames always compose the bounded viewport from
 	 * scratch — retired blocks no longer render — so a scoped request is simply
