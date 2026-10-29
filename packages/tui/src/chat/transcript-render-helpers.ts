@@ -13,7 +13,12 @@ import type { JobSnapshot } from "../tools/wait";
 import type { DaemonSnapshot } from "../tools/daemon";
 import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldRenderAbortReason } from "./messages";
 import { createIrcMessageCard } from "../tools/wait";
-import { formatArtifactErrorNotice, type OutputMeta } from "../tools/output-meta";
+import {
+	formatArtifactErrorNotice,
+	formatMinimizedMeta,
+	type MinimizedMeta,
+	type OutputMeta,
+} from "../tools/output-meta";
 import type { OutputArtifactError } from "../tools/streaming-output";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { canonicalizeMessage } from "./thinking-display";
@@ -76,6 +81,7 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 			},
 		});
 		if (job.meta?.artifactError) rows.push(artifactErrorRow(job.meta.artifactError));
+		if (job.meta?.minimized) rows.push(minimizedRow(job.meta.minimized));
 	}
 	if (details?.meta?.artifactError) rows.push(artifactErrorRow(details.meta.artifactError));
 	return new ToolActivityContainer(new TranscriptStatusBlock(rows));
@@ -85,6 +91,12 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 function artifactErrorRow(error: OutputArtifactError): TranscriptStatusRow {
 	const notice = formatArtifactErrorNotice(error);
 	return { parts: [{ text: notice, color: "warning" }], native: { tone: "warning", message: [span(notice)] } };
+}
+
+/** The dim row under a background job whose output the minimizer shortened. */
+function minimizedRow(minimized: MinimizedMeta): TranscriptStatusRow {
+	const fact = `Minimized: ${formatMinimizedMeta(minimized)}`;
+	return { parts: [{ text: fact, color: "dim" }], native: { tone: "info", message: [span(fact, "dim")] } };
 }
 
 /**

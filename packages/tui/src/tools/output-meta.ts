@@ -1,5 +1,6 @@
 import type { Theme } from "../theme/theme";
-import { formatBytes, wrapBrackets } from "../render/render-utils";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatBytes, TRUNCATE_LENGTHS, truncateToWidth, wrapBrackets } from "../render/render-utils";
 import type { OutputArtifactError } from "./streaming-output";
 import { formatGroupedFiles } from "./grouped-file-output";
 
@@ -80,6 +81,18 @@ export interface LimitsMeta {
 }
 
 /**
+ * The bash minimizer rewrote this output: `filter` is the native filter label
+ * (`chain` for a minimized `&&`/`;` chain), the byte counts are the raw capture
+ * and the minimized text, and `artifactId` holds the raw capture.
+ */
+export interface MinimizedMeta {
+	filter: string;
+	inputBytes: number;
+	outputBytes: number;
+	artifactId: string;
+}
+
+/**
  * Structured metadata for tool outputs.
  */
 export interface OutputMeta {
@@ -91,6 +104,7 @@ export interface OutputMeta {
 	pagedSource?: true;
 	diagnostics?: DiagnosticMeta;
 	limits?: LimitsMeta;
+	minimized?: MinimizedMeta;
 }
 
 // Regex: split on the first `:digits:digits` boundary to separate path from the rest
@@ -295,6 +309,17 @@ export function formatStyledArtifactReference(artifactId: string, theme: Theme):
 /** Describe an incomplete artifact capture. */
 export function formatArtifactErrorNotice(error: OutputArtifactError): string {
 	return `Full output was not saved completely (artifact ${error} failed)`;
+}
+
+/**
+ * `git 120.4KB → 3.2KB`: the minimizer filter that ran and the bytes it took the output from and to.
+ * Native labels are short words; a rehydrated session or extension may carry any text, so the label
+ * is sanitized to one plain line and width-bounded.
+ */
+export function formatMinimizedMeta(minimized: MinimizedMeta): string {
+	const label = sanitizeText(minimized.filter).replace(/\s+/gu, " ").trim();
+	const filter = truncateToWidth(label, TRUNCATE_LENGTHS.SHORT);
+	return `${filter} ${formatBytes(minimized.inputBytes)} → ${formatBytes(minimized.outputBytes)}`;
 }
 
 /**

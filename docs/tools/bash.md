@@ -55,6 +55,7 @@ The tool returns a `text` content block plus optional `details` and image blocks
    - `details.exitCode`: present when the command completed with a non-zero exit code.
    - `details.timedOut: true`: present on local, PTY, and client-terminal timeout results.
    - `details.meta.truncation`: present when output was truncated in memory; includes `artifactId` when full output spilled to an artifact.
+   - `details.meta.minimized`: present when the shell minimizer's text replaced the output; `{ filter, inputBytes, outputBytes, artifactId }` names the native filter (`chain` for a minimized `&&`/`;` chain), the raw and minimized byte counts, and the `bash-original` artifact holding the raw capture.
    - non-zero exits and timeouts return a tool result marked `isError`; definite non-zero output ends with `Command exited with code <n>`.
 - Success, background start (`async: true` or auto-background):
    - `content[0].text`: optional preview tail and notices, followed by `Backgrounded as job <id> (killed once it has run <n>s in total; …)` — or `(no deadline)` under `timeout: 0` — and the no-polling instruction (`formatBackgroundNotice` in `packages/tui/src/tools/bash.ts`), so the model sees the job's deadline before it waits on the result. The deadline counts from job start, so an auto-backgrounded command has already spent its foreground wait.

@@ -486,3 +486,19 @@ describe("native transcript", () => {
 		expect(h.errors).toEqual([]);
 	});
 });
+
+describe("background job completion rows", () => {
+	it("show a job's minimizer filter and byte counts", () => {
+		const minimized = { filter: "git", inputBytes: 28_213, outputBytes: 9_720, artifactId: "2" };
+		const block = buildAsyncResultBlock(
+			createCustomMessage(
+				"async-result",
+				"done",
+				true,
+				{ jobs: [{ jobId: "bg_1", type: "bash", durationMs: 1200, meta: { minimized } }] },
+				"2026",
+			),
+		);
+		expect(Bun.stripANSI(block.render(120).join("\n"))).toContain("Minimized: git 27.6KB → 9.5KB");
+	});
+});
