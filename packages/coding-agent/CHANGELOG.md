@@ -7,6 +7,7 @@
 - Added queueable compaction: `/compact` sent with the follow-up key (Ctrl+Q) while the agent works now runs when it yields instead of interrupting it ([#17397](https://github.com/can1357/oh-my-pi/pull/17397) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
+- A plugin entry or directory the process may not read no longer vanishes silently; the skip now warns with the entry path, while a missing entry stays quiet ([#13484](https://github.com/can1357/oh-my-pi/issues/13484)).
 
 - Startup prewalk now arms a later fallback candidate of the role named by prewalk.into when its first candidate is unavailable, matching /prewalk and /new ([#17373](https://github.com/can1357/oh-my-pi/pull/17373)).
 
