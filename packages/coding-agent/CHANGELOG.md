@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-
 ### Fixed
+
 - Fixed a resumed session rebuilding its memory block from disk, so a `learn` call or a consolidation in another session no longer makes the next turn rewrite the whole prompt cache ([#15704](https://github.com/can1357/oh-my-pi/issues/15704), [#16465](https://github.com/can1357/oh-my-pi/pull/16465) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
@@ -157,7 +157,6 @@
 - Muted live voice sessions remain visibly muted while the voice model starts work.
 
 ### Fixed
-- Fixed a resumed session rebuilding its memory block from disk, so a `learn` call or a consolidation in another session no longer makes the next turn rewrite the whole prompt cache ([#15704](https://github.com/can1357/oh-my-pi/issues/15704), [#16465](https://github.com/can1357/oh-my-pi/pull/16465) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Fixed live configuration reloads missing edits immediately after a symlink switches to another file in the same directory.
 - Fixed auth-gateway model routing after catalog refreshes so bare model IDs select the highest-priority credentialed provider, with wire-format compatibility used as a tie-breaker.
