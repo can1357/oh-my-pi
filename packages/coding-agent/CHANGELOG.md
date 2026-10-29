@@ -1,8 +1,8 @@
 # Changelog
 
 ## [Unreleased]
-### Fixed
 
+### Fixed
 - Fixed the ACP usage report labelling a saved reset-credit line with an empty account name; it now falls back to the account id and then to a generic account label ([#15305](https://github.com/can1357/oh-my-pi/pull/15305) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Added
