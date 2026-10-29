@@ -81,6 +81,20 @@ RUN bun install --frozen-lockfile --ignore-scripts
 # is preserved across this COPY because it's never in the build context.
 COPY . /pi/
 
+# Hash the exact input trees in the build context before generated files change.
+# Extra untracked inputs change the key and safely result in a cache miss.
+RUN set -eux; \
+    git init --bare /tmp/native-key.git; \
+    export GIT_DIR=/tmp/native-key.git GIT_WORK_TREE=/pi; \
+    git add -f -- crates Cargo.lock Cargo.toml rust-toolchain.toml packages/natives \
+      ':(exclude)**/node_modules/**' ':(exclude)packages/natives/native/.build/**'; \
+    tree="$(git write-tree)"; \
+    mkdir -p /out/natives-seed; \
+    printf '%s\n' "$tree:crates" "$tree:Cargo.lock" "$tree:Cargo.toml" \
+      "$tree:rust-toolchain.toml" "$tree:packages/natives" \
+      | git cat-file --batch-check > /out/natives-seed/trees.txt; \
+    rm -rf /tmp/native-key.git
+
 # Layer 4 — compile pi-natives to a Linux N-API addon. Persistent caches keep
 # repeat builds incremental: cargo's package index + git-deps (CARGO_HOME is
 # /usr/local/cargo in the rust image, not ~/.cargo) + the workspace target dir.
@@ -90,7 +104,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     set -eux; \
     bun --cwd=packages/natives run build; \
     mkdir -p /out; \
-    cp packages/natives/native/pi_natives.linux-*.node /out/
+    cp packages/natives/native/pi_natives.linux-*.node /out/; \
+    cp packages/natives/native/pi_natives.linux-*.node \
+       packages/natives/native/index.d.ts packages/natives/native/index.js \
+       packages/natives/native/embedded-addon.js /out/natives-seed/
 
 ############################
 # 2) wheel-builder — omp-rpc wheel
@@ -158,6 +175,7 @@ RUN curl -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh \
 
 # pi-natives addon: pi's loader probes /opt/bun/bin as a fallback path.
 COPY --from=natives-builder /out/pi_natives.linux-*.node /opt/bun/bin/
+COPY --from=natives-builder /out/natives-seed/ /opt/pi-natives-seed/
 
 # omp-rpc Python wheel.
 COPY --from=wheel-builder /out/*.whl /tmp/wheels/

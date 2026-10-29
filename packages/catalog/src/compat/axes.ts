@@ -469,6 +469,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		values: ["gemini", "anthropic", "codex", "xai", "openrouter", "openai"],
 	},
 	"web-search-model": { key: "webSearchModel", set: "catalog", shape: "scalar" },
+	/**
+	 * Revision suffix the host appends to the model's id (Vertex `@default`): a
+	 * `provider/id` selector written without it names this model exactly.
+	 * Unassigned: the id has no implied revision and must be written in full.
+	 */
+	"selector-revision-suffix": { key: "selectorRevisionSuffix", set: "catalog", shape: "scalar" },
 	"hosted-image": { key: "hostedImage", set: "catalog", shape: "scalar", values: [true, false] },
 	/** How the model line bills an input image; shape and formulas in `./image-tokenization`. */
 	"image-tokenization": { key: "imageTokenization", set: "catalog", shape: "object" },

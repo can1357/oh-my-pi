@@ -21,7 +21,7 @@ import {
 } from "../tiny/dtype";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
-import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -98,6 +98,31 @@ export const cfgPrewalkEnabled = register({
 		label: "Enable Prewalk",
 		description:
 			"Start on the active model, then switch to a fast/cheap model (default the 'smol' role) at the first edit/write after the plan nudge's todo list exists — the strong model plans, commits the todos, and starts the implementation before handing off. Overridable per session with --prewalk / --no-prewalk.",
+	},
+});
+
+export const cfgPrewalkFrom = register({
+	id: "prewalk.from",
+	type: "string",
+	default: "@default",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Prewalk planning model",
+		description: "Model or role (default '@default') that /prewalk restart returns to for planning.",
+	},
+});
+
+export const cfgPrewalkInto = register({
+	id: "prewalk.into",
+	type: "string",
+	default: "@smol",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Prewalk target",
+		description:
+			"Model or role (default '@smol') that prewalk hands off to at the first edit/write: /prewalk, /prewalk restart, Enable Prewalk, and --prewalk. Auto-prewalk uses its own target.",
 	},
 });
 

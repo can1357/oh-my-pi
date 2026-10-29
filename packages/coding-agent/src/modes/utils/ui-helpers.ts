@@ -1285,6 +1285,7 @@ export class UiHelpers {
 		const steeringMessages = [...queuedMessages.steering];
 		const followUpMessages = [...queuedMessages.followUp];
 		if (!this.ctx.focusedAgentId) {
+			if (this.ctx.yieldCompaction) followUpMessages.push(this.ctx.yieldCompaction.text);
 			for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
 				if (entry.mode === "steer") steeringMessages.push(entry.text);
 				else followUpMessages.push(entry.text);
@@ -1400,7 +1401,8 @@ export class UiHelpers {
 	}
 
 	async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
-		if (this.ctx.compactionQueuedMessages.length === 0) {
+		// Follow-ups queued behind a yield compaction wait for it, not for a pass that lands first.
+		if (this.ctx.compactionQueuedMessages.length === 0 || this.ctx.yieldCompaction) {
 			return;
 		}
 

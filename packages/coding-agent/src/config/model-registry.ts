@@ -3123,6 +3123,15 @@ export class ModelRegistry {
 				provider => requested.has(provider.toLowerCase()) && isProviderAvailable(provider),
 			),
 		);
+		// Reuse the same provider snapshot as find()/getProviderModels(). The
+		// availability gate above stays live, while catalog invalidation remains
+		// owned by refresh, discovery and runtime provider registration. Whole-
+		// catalog modifiers can inspect live credentials, so keep reprojecting
+		// those rather than extending the lifetime of their output.
+		if (availableProviders.size === 1 && this.#runtimeModelModifiers.size === 0) {
+			const models = this.#modelsForProviderLookup(availableProviders.values().next().value!);
+			return kind === "all" ? models.slice() : models.filter(model => modelKind(model) === kind);
+		}
 		const models = this.#composeStaticModels(availableProviders);
 		return kind === "all" ? models : models.filter(model => modelKind(model) === kind);
 	}

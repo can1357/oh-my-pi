@@ -228,7 +228,7 @@ This is the load-bearing isolation change. Reuse the entire worktree machinery; 
    Detached HEAD (never a pushable branch — review is read-only). Set
    `workspace.branch = f"review/pr-{pr_head}"` for bookkeeping/logging only. Everything after
    (slot chown, `_share_git_metadata_with_slots`, `_provision_runtime_dirs`, natives-cache
-   hardlink, identity config) runs unchanged, so the review worktree gets the **same isolation
+   population, identity config) runs unchanged, so the review worktree gets the **same isolation
    and the warm native cache** as a fix worktree (`bun check`/lsp stay fast).
 
 Result: the agent's cwd is the PR head, fully isolated, read-only. No credentialed push remote

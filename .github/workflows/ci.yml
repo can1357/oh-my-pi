@@ -226,7 +226,7 @@ jobs:
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
    # Native-changing PRs are rare enough that they do not warrant PR-side
    # Rust validation or a PR-side addon build (see native_addons): Rust is
-   # validated post-merge on main (vmon, shared remote cache) and again at
+   # validated post-merge on main (vmon, node Bazel cache) and again at
    # release. A skipped required check still satisfies branch protection.
    rust_validate:
       name: Validate Rust workspace (bazel)
@@ -237,10 +237,6 @@ jobs:
          - uses: ./.github/actions/bun-install
          - id: cache
            uses: ./.github/actions/bazel-cache
-           with:
-              remote-url: ${{ secrets.BAZEL_REMOTE_URL }}
-              remote-user: ${{ secrets.BAZEL_REMOTE_USER }}
-              remote-password: ${{ secrets.BAZEL_REMOTE_PASSWORD }}
          - name: Rust tests
            # The ulimit guard runs in the step that launches the bazel server
            # (limits are per-process and the server persists across steps).
@@ -283,7 +279,7 @@ jobs:
    # (a merged grep fix plus its TS test failed 75 PR runs against the
    # 18.3.1 addon). Only main saves; see the save step for why.
    #
-   # Main (vmon, shared remote cache) builds only the pair here so the TS
+   # Main (vmon, node Bazel cache) builds only the pair here so the TS
    # fan-out starts as soon as it links; native_addons_cross builds every
    # other target in parallel. Job name says "bazel" for continuity
    # with required checks.
@@ -353,10 +349,6 @@ jobs:
          - id: cache
            if: github.event_name != 'pull_request'
            uses: ./.github/actions/bazel-cache
-           with:
-              remote-url: ${{ secrets.BAZEL_REMOTE_URL }}
-              remote-user: ${{ secrets.BAZEL_REMOTE_USER }}
-              remote-password: ${{ secrets.BAZEL_REMOTE_PASSWORD }}
          - name: Build linux-x64 native addons
            if: github.event_name != 'pull_request'
            run: |
@@ -422,11 +414,24 @@ jobs:
          # The three steps below run only on main (never exercised by PR or
          # branch runs) and are pure optimization for later PRs: a failure
          # must never fail native_addons and with it every test job.
+         # PR runs restore this entry on GitHub-hosted runners, which read
+         # GitHub's cache; on vmon runners actions/cache goes to the node's
+         # local cache. The vmon runner hands GitHub's results URL to node
+         # actions (not run steps) as ACTIONS_RESULTS_ORL, so a script action
+         # looks it up and the probe and save below talk to GitHub.
+         - name: Locate GitHub's cache service
+           id: gh-results
+           if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+           uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+           with:
+              script: core.setOutput("url", process.env.ACTIONS_RESULTS_ORL || process.env.ACTIONS_RESULTS_URL)
          - name: Probe native addon cache entry
            id: natives-cache-probe
            if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
            continue-on-error: true
            uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           env:
+              ACTIONS_RESULTS_URL: ${{ steps.gh-results.outputs.url }}
            with:
               path: ci-natives
               key: ${{ steps.natives-key.outputs.key }}
@@ -435,6 +440,8 @@ jobs:
            if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.natives-cache-probe.outputs.cache-hit != 'true'
            continue-on-error: true
            uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           env:
+              ACTIONS_RESULTS_URL: ${{ steps.gh-results.outputs.url }}
            with:
               path: ci-natives
               key: ${{ steps.natives-key.outputs.key }}
@@ -474,10 +481,6 @@ jobs:
          - uses: actions/checkout@v4
          - id: cache
            uses: ./.github/actions/bazel-cache
-           with:
-              remote-url: ${{ secrets.BAZEL_REMOTE_URL }}
-              remote-user: ${{ secrets.BAZEL_REMOTE_USER }}
-              remote-password: ${{ secrets.BAZEL_REMOTE_PASSWORD }}
          - name: Build cross-target native addons
            run: |
               set -eo pipefail

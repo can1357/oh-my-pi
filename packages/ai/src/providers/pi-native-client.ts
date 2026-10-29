@@ -29,7 +29,12 @@ import type {
 } from "../types";
 import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import {
+	armPreResponseTimeout,
+	getStreamFirstEventTimeoutMs,
+	getStreamIdleTimeoutMs,
+	iterateWithIdleTimeout,
+} from "../utils/idle-iterator";
 import { notifyProviderResponse } from "../utils/provider-response";
 
 /**
@@ -188,10 +193,30 @@ export function streamPiNative<TApi extends Api>(
 				stream: true,
 			});
 
-			response = await fetchImpl(url, { method: "POST", headers, body, signal: abortTracker.requestSignal });
-			if (!response.ok) {
-				stream.fail(await decodeGatewayError(response));
-				return;
+			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
+			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
+			// Bun's native fetch ceiling (~300 s of silence) is disabled so the
+			// configurable first-event watchdog governs slow-prefill turns: a gateway
+			// may legitimately hold headers while the upstream model thinks
+			// (issue #17363). The pre-response guard bounds time-to-headers and stays
+			// armed across the error-body read.
+			const watchdog = armPreResponseTimeout(abortTracker.requestSignal, firstEventTimeoutMs);
+			// `timeout` is a Bun fetch extension absent from the DOM `RequestInit`.
+			const init: RequestInit & { timeout: false } = {
+				method: "POST",
+				headers,
+				body,
+				signal: watchdog.signal,
+				timeout: false,
+			};
+			try {
+				response = await fetchImpl(url, init);
+				if (!response.ok) {
+					stream.fail(await decodeGatewayError(response));
+					return;
+				}
+			} finally {
+				watchdog.clear();
 			}
 			// Callers can truthfully inspect the gateway HTTP response, but its
 			// request body is opaque here; callbacks themselves never cross the wire.
@@ -208,9 +233,7 @@ export function streamPiNative<TApi extends Api>(
 				return;
 			}
 
-			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
-			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
-			const source = readSseJson<AssistantMessageEvent>(
+			const source = readSseJson<PiNativeWireEvent>(
 				response.body as ReadableStream<Uint8Array>,
 				abortTracker.requestSignal,
 			);
@@ -226,7 +249,8 @@ export function streamPiNative<TApi extends Api>(
 				isProgressItem: isPiNativeProgressEvent,
 			});
 			let sawTerminal = false;
-			for await (const event of watchedSource) {
+			for await (const frame of watchedSource) {
+				const event = isGatewayFailureFrame(frame) ? gatewayFailureEvent(model as Model<Api>, frame) : frame;
 				if (event.type === "done" || event.type === "error") sawTerminal = true;
 				stream.push(event);
 				// `stream.push` resolves `.result()` on `done`/`error`; subsequent
@@ -264,6 +288,33 @@ export function streamPiNative<TApi extends Api>(
 	})();
 
 	return stream;
+}
+
+/**
+ * `encodeStream`'s transport-failure envelope (`pi-native-server.ts`): an
+ * `error` event carrying only `errorMessage`, because the gateway had no
+ * `AssistantMessage` to attach when the upstream iterator threw.
+ */
+interface GatewayFailureFrame {
+	type: "error";
+	reason: "error";
+	errorMessage?: string;
+	error?: undefined;
+}
+
+/** Frames a gateway can put on the `/v1/pi/stream` wire. */
+type PiNativeWireEvent = AssistantMessageEvent | GatewayFailureFrame;
+
+function isGatewayFailureFrame(frame: PiNativeWireEvent): frame is GatewayFailureFrame {
+	return frame.type === "error" && frame.error === undefined;
+}
+
+/** Canonical `error` event for a {@link GatewayFailureFrame}, attributed to the requested model. */
+function gatewayFailureEvent(model: Model<Api>, frame: GatewayFailureFrame): AssistantMessageEvent {
+	const error = makeSyntheticAssistant(model);
+	error.stopReason = "error";
+	error.errorMessage = frame.errorMessage || "auth-gateway stream failed";
+	return { type: "error", reason: "error", error };
 }
 
 function makeSyntheticAssistant(model: Model<Api>): AssistantMessage {

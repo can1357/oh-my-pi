@@ -33,7 +33,6 @@ import {
 	isNumber,
 	type NumberCell,
 	parseCell,
-	plainCell,
 	type Status,
 	type TableAnalysis,
 	type TableColumn,

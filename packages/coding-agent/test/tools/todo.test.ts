@@ -466,6 +466,27 @@ describe("TodoTool lenient init shapes", () => {
 		expect(result.details?.phases[0]?.tasks.map(task => task.content)).toEqual(["Remove dead code"]);
 	});
 
+	it("uses flat items when list is an empty placeholder array (#17346)", async () => {
+		const tool = new TodoTool(createSession([{ name: "Old", tasks: [{ content: "Stale", status: "pending" }] }]));
+		const result = await tool.execute("call-1", { op: "init", list: [], items: ["First", "Second"] });
+
+		expect(result.isError).toBeUndefined();
+		expect(result.details?.phases.map(phase => phase.name)).toEqual(["Tasks"]);
+		expect(result.details?.phases[0]?.tasks.map(task => task.content)).toEqual(["First", "Second"]);
+	});
+
+	it("prefers a non-empty list over flat items", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("call-1", {
+			op: "init",
+			list: [{ phase: "Work", items: ["From list"] }],
+			items: ["From items"],
+		});
+
+		expect(result.details?.phases.map(phase => phase.name)).toEqual(["Work"]);
+		expect(result.details?.phases[0]?.tasks.map(task => task.content)).toEqual(["From list"]);
+	});
+
 	it("still errors when init has neither list nor items", async () => {
 		const tool = new TodoTool(createSession());
 		const result = await tool.execute("call-1", { op: "init" });

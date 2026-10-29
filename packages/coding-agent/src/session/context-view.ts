@@ -129,7 +129,10 @@ function appendToolDefinitionEntries(session: AgentSession, state: SnapshotBuild
 	for (const [index, tool] of session.agent.state.tools.entries()) {
 		const categoryId = session.hasBuiltInTool(tool.name) ? "built-in-tools" : "custom-tools";
 		// Count the compact wire text; show the same fragments with an indented schema.
-		const { fragments, display, schemaError } = toolSchemaFragments(tool, 2);
+		const { fragments, display, schemaError } = toolSchemaFragments(tool, {
+			displayIndent: 2,
+			pruneDescriptions: session.agent.prunesToolDescriptions(session.model),
+		});
 		const tokens = session.model?.toolSchemasInContext === false ? 0 : session.agent.tokenizer.countTokens(fragments);
 		const shown = display ?? fragments;
 		if (schemaError !== undefined) shown.push(`Schema unavailable: ${schemaError}`);
